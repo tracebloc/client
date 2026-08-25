@@ -213,3 +213,39 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].name
           value: tracebloc-resource-monitor
+
+  # ── the preflight cannot lock an operator out (client#2469) ───────────────
+  # `lookup` has THREE outcomes, not two: sees the cluster, returns empty, or
+  # RAISES on forbidden. APIService is cluster-scoped and the built-in `admin`
+  # ClusterRole excludes it, so the old unconditional lookup meant a namespace
+  # admin could not `helm upgrade` the chart at all -- and the error blamed
+  # metrics-server. helm-unittest renders offline, where `lookup` is always empty,
+  # so these assert the properties that hold WITHOUT a cluster: the outcome is
+  # always recorded, and a skip is never silent.
+  - it: records which preflight path decided, so a skip is not mistaken for a pass
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - exists:
+          path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
+
+  - it: renders offline rather than failing, and says the check was not run
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
+          value: skipped-offline
+
+  # NOTE: there is deliberately no "opted out" chart test here. helm-unittest
+  # renders offline, where `lookup` is always empty, so `$probe` is false and the
+  # opt-out branch is unreachable -- the assertion would pass on the offline
+  # default and prove nothing. Bugbot caught exactly that. The branch is asserted
+  # on the template source in scripts/tests/preflight-not-privilege-gated.sh, which
+  # strips comments first so the flag's mention in prose cannot satisfy it.
+  - it: keeps the DaemonSet itself unchanged by the preflight rework
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - isKind:
+          of: DaemonSet
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents

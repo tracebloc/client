@@ -103,6 +103,15 @@ Describe "Installer parity (client#772)" {
       if ($gotUnsched -ne [bool]$row.expect.unschedulable) {
         $failures += "  $($row.label): unschedulable want '$($row.expect.unschedulable)' got '$gotUnsched'"
       }
+      # schema_version 2 (backend#2418): the limits half is a SECOND shared
+      # contract, and the twins already diverged on it once -- bash matched
+      # `cpu=*` WITHOUT trimming, so `cpu=7, memory=29Gi` kept the cpu limit
+      # there while this side's .Trim() dropped it. Asserting it per-row against
+      # the same fixture is what makes that class fail instead of shipping.
+      $gotLimits = Get-TrainingLimits $gotSize
+      if ($gotLimits -ne $row.expect.limits) {
+        $failures += "  $($row.label): limits want '$($row.expect.limits)' got '$gotLimits'"
+      }
     }
 
     if ($failures.Count -gt 0) {

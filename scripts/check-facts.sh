@@ -66,9 +66,11 @@ FACT_NAMES=(
   "common.sh:K3D_VERSION"
   "common.sh:HELM_VERSION"
   "common.sh:K8S_VERSION"
+  "common.sh:K8S_VERSION-help"
   "install-k8s.ps1:K3dVersion"
   "install-k8s.ps1:HelmVersion"
   "install-k8s.ps1:K8S_VERSION"
+  "install-k8s.ps1:K8S_VERSION-help"
   "summary.sh:READY_TIMEOUT"
   "install-k8s.ps1:ReadyTimeout"
   "install-client-helm.sh:METRICS_WAIT_TIMEOUT"
@@ -81,15 +83,17 @@ FACT_NAMES=(
   "k3s-cuda/build.sh:CUDA_TAG"
   "build-k3s-cuda.yaml:cuda_tag"
 )
-FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$HELM_LIB" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" )
-FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT METRICS_WAIT_TIMEOUT METRICS_WAIT_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG )
+FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$HELM_LIB" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" )
+FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT METRICS_WAIT_TIMEOUT METRICS_WAIT_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG )
 FACT_EXTRACT=(
   's/^K3D_VERSION="\${K3D_VERSION:-\(.*\)}".*/\1/p'
   's/^HELM_VERSION="\${HELM_VERSION:-\(.*\)}".*/\1/p'
   's/^K8S_VERSION="\${K8S_VERSION:-\(.*\)}".*/\1/p'
+  's/^ *K8S_VERSION *k3s image tag *(default: \(.*\))$/\1/p'
   's/.*\$script:K3dVersion .*else { "\([^"]*\)" }.*/\1/p'
   's/.*\$script:HelmVersion .*else { "\([^"]*\)" }.*/\1/p'
   's/.*\$K8S_VERSION .*else { "\([^"]*\)" }.*/\1/p'
+  's/^ *K8S_VERSION *k3s image tag *(default: \(.*\))$/\1/p'
   's/^READY_TIMEOUT="\${READY_TIMEOUT:-\(.*\)}".*/\1/p'
   's/.*\$ReadyTimeout .*else { "\([^"]*\)" }.*/\1/p'
   's/^METRICS_WAIT_TIMEOUT=\([0-9]*\)$/\1/p'
@@ -109,9 +113,11 @@ FACT_REWRITE=(
   's|^\(K3D_VERSION="${K3D_VERSION:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|^\(HELM_VERSION="${HELM_VERSION:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|^\(K8S_VERSION="${K8S_VERSION:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
+  's|^\( *K8S_VERSION *k3s image tag *(default: \)[^)]*\()\)|\1@@VAL@@\2|'
   's|\(\$script:K3dVersion .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
   's|\(\$script:HelmVersion .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
   's|\(\$K8S_VERSION .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
+  's|^\( *K8S_VERSION *k3s image tag *(default: \)[^)]*\()\)|\1@@VAL@@\2|'
   's|^\(READY_TIMEOUT="${READY_TIMEOUT:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(\$ReadyTimeout .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
   's|^\(METRICS_WAIT_TIMEOUT=\)[0-9]*$|\1@@VAL@@|'

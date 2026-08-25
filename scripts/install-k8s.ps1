@@ -17,7 +17,7 @@
 #    $env:CLUSTER_NAME  = "myapp"          default: tracebloc
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
-#    $env:K8S_VERSION   = "v1.29.4-k3s1"  default: v1.29.4-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
+#    $env:K8S_VERSION   = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
 #    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
@@ -285,6 +285,43 @@ function RefreshPath {
 $script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
 
 # Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
+# Utilization Ladder L0.2). Twin of `_training_limits` in
+# scripts/lib/install-client-helm.sh -- the two are pinned to agree by
+# scripts/tests/fixtures/installer_parity.json.
+#
+# WHY THE TWO HALVES DIFFER. CPU is time-shared: `requests` with NO `limits`
+# becomes a cgroup `cpu.weight`, a share under contention and the whole machine
+# when nobody else wants it, whereas `requests == limits` becomes a `cpu.max`
+# QUOTA that throttles at its ceiling even on a completely idle box. Memory is
+# NOT time-shared -- exceeding the limit is an OOM kill, not a slowdown -- so
+# `requests == limits` remains the load-bearing safety property and does not
+# move. Guaranteed QoS is given up deliberately; the memory guarantee is what
+# mattered, and CPU burstability is what lets a second job exist at all.
+#
+# ORDERING CONSTRAINT: needs a jobs-manager that treats RESOURCE_LIMITS as the
+# COMPLETE limits envelope (client-runtime#388). An older image MERGES onto its
+# built-in cpu=2,memory=8Gi literal, so an omitted `cpu` returns as a 2-core
+# LIMIT under a 7-core REQUEST -- rejected by Kubernetes, pod never schedules.
+function Get-TrainingLimits {
+  param([string]$Size)
+  $kept = @()
+  foreach ($pair in ($Size -split ',')) {
+    $trimmed = $pair.Trim()
+    if ($trimmed -eq '') { continue }
+    if ($trimmed -like 'cpu=*') { continue }
+    $kept += $trimmed
+  }
+  # Nothing survived -- a cpu-only envelope, which is not something to guess at.
+  # Return the INPUT UNCHANGED rather than an empty string: an empty
+  # RESOURCE_LIMITS reads to jobs-manager as "unset", which since
+  # client-runtime#388 mirrors the requests side back and resurrects the very
+  # cpu limit this function exists to drop. `$Size` is never empty on a
+  # reachable path -- Get-TrainingResources' fallback chain always yields one.
+  if ($kept.Count -eq 0) { return $Size }
+  return ($kept -join ',')
+}
+
 # `k3d cluster create --wait` has no timeout of its own, so a stalled image
 # pull would otherwise spin forever. Returns $true when the process exited on
 # its own, $false on deadline expiry (the process is killed best-effort).
@@ -690,7 +727,7 @@ function Get-ChartVersion {
 $CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "tracebloc" }
 $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
-$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.29.4-k3s1" }
+$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.36.3-k3s1" }
 $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
 # backend#743: optional separate dir for the big dataset volume. Empty (default)
 # keeps datasets under HOST_DATA_DIR. When set, it is bind-mounted at
@@ -716,6 +753,132 @@ function Ensure-ReleaseDirs($release) {
     # "connected". Stop matches bash's `mkdir -p` under `set -e` (Bugbot, #653).
     New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
   }
+}
+
+# Prove the k3d nodes can actually SEE the host tree, before helm writes anything.
+# Mirrors bash _verify_nodes_see_host_data (scripts/lib/cluster.sh) -- keep the two
+# in lockstep.
+#
+# /tracebloc is the k3d bind mount of HOST_DATA_DIR. When it is not in effect
+# NOTHING fails: kubelet's DirectoryOrCreate fabricates the dirs inside the node,
+# the PVC Binds, the pod Runs, MySQL initialises an empty datadir and the dataset
+# dir reads as zero rows -- no event, no warning, and the data goes with the node
+# on the next `cluster delete`. This is the Windows/Docker-Desktop path's problem
+# specifically: a HOST_DATA_DIR outside the shared drives yields exactly that.
+#
+# The chart-side fix is NOT available: setting the PVs to `type: Directory` so
+# kubelet refuses is rejected by the API server on any existing release
+# ("spec.persistentvolumesource is immutable after creation"), failing the helm
+# upgrade of every install that already has PVs. Measured on k3s v1.36.3.
+#
+# Fails CLOSED -- an unreadable marker, a node that cannot be exec'd, or an
+# unobtainable node list all stop the install. "Cannot tell" is a finding.
+function Assert-NodesSeeHostData {
+  $marker = ".tracebloc-mount-probe"
+  # Content, not presence: a mount pointed at the WRONG directory still shows a
+  # file of this name from an earlier run. Only a token minted now proves it.
+  # NEVER [double]::Parse a `Get-Date -UFormat %s` string: that string uses a
+  # PERIOD decimal separator while Parse uses the CURRENT CULTURE, so on de-DE /
+  # fr-FR and friends it throws FormatException before the probe even runs -- the
+  # cluster is already up and the operator gets a cryptic .NET parse error instead
+  # of a mount check (Bugbot, High). ToUnixTimeSeconds returns an integer, so
+  # nothing is parsed and no culture is involved. Same shape as the bash twin's
+  # $$-$RANDOM-$(date +%s).
+  $token  = "$PID-$(Get-Random)-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+  $hostMarker = Join-Path $script:HOST_DATA_DIR $marker
+  try { Set-Content -Path $hostMarker -Value $token -NoNewline -ErrorAction Stop }
+  catch { throw "Can't write to $($script:HOST_DATA_DIR) -- check the directory exists and you own it, then re-run." }
+
+  try {
+    # Selected by k3d's own LABELS, not by node name.
+    #
+    #   * `label=k3d.cluster=<name>` is an EXACT value match, so a same-prefixed
+    #     sibling cluster cannot leak in. `name=k3d-<name>-` is an unanchored
+    #     SUBSTRING match and would also list `k3d-<name>-dev-server-0`; if that
+    #     sibling was created against a different HOST_DATA_DIR its nodes cannot
+    #     see this token, and the probe would refuse THIS install while naming a
+    #     node that is not ours -- a false refusal, the one failure mode a
+    #     fail-closed guard most has to avoid (@saqlainsyed007 on #817).
+    #   * `k3d.role` says what each container IS, so the load balancer is excluded
+    #     because it is a `loadbalancer`, not because its name ends in `-serverlb`.
+    #
+    # Invoke-DockerCli, not a bare `docker`: a WEDGED (not stopped) daemon never
+    # returns, which would freeze a headless install right here with no further
+    # output -- the exact failure this guard exists to replace with a clear
+    # refusal (Bugbot). `docker ps` lists RUNNING containers only, so a
+    # created-but-stopped node cannot be mistaken for one that passed.
+    # ONE QUERY PER ROLE, and NO ARGUMENT CONTAINS A SPACE OR A QUOTE. That is a
+    # hard requirement on this platform, not a style choice: $psi.Arguments joins
+    # the args into a single command line and quotes any whitespace-bearing value as
+    # '"' + $_ + '"' with NO escaping of inner quotes (see its note). The obvious
+    # single query -- `--format "{{.Names}} {{.Label `"k3d.role`"}}"` -- has both a
+    # space AND quotes, so it went out as
+    #     --format "{{.Names}} {{.Label "k3d.role"}}"
+    # and CommandLineToArgvW toggles in and out of quoting to yield ONE token with
+    # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. docker then gets
+    # an intact --format whose Go template has lost the quoting on its string
+    # literal, text/template cannot parse k3d.role as an identifier, docker exits
+    # non-zero, $nodes stays empty and the probe throws "Couldn't list the nodes" --
+    # a FALSE REFUSAL on every Windows hostpath install, after the cluster is up.
+    # (@saadqbal / Bugbot on #817; the bash twin passes an array and never re-joins,
+    # so it was never exposed.)
+    #
+    # Asking docker to AND two label filters removes the need for a quoted format
+    # entirely: `{{.Names}}` alone has no space, and `label=k3d.role=server` has
+    # neither. It also drops the role parsing, and the load balancer is excluded by
+    # construction -- its role is `loadbalancer`, which is simply never queried.
+    #
+    # -StdoutOnly for the same reason as the exec call below.
+    $nodes = @()
+    foreach ($role in @("server", "agent")) {
+      $psr = Invoke-DockerCli -DockerArgs @(
+        "ps", "--filter", "label=k3d.cluster=$($script:CLUSTER_NAME)",
+        "--filter", "label=k3d.role=$role",
+        "--format", "{{.Names}}") -TimeoutSec 10 -StdoutOnly
+      # Fail closed per role: an empty list is legitimate (AGENTS=0 has no agent),
+      # but a docker that ERRORED tells us nothing and must not read as "none".
+      if ($psr.Code -ne 0) {
+        throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+      }
+      $nodes += @($psr.Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    if ($nodes.Count -eq 0) {
+      throw "Couldn't list the nodes of cluster '$($script:CLUSTER_NAME)' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+    }
+
+    foreach ($node in $nodes) {
+      # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+      # an agent -- every node is checked, not just the server (the same @all-vs-
+      # @server trap as the cgroup v1 flag, #806).
+      # -StdoutOnly is REQUIRED here, not tidiness: the marker is written -NoNewline,
+      # so `cat` emits the token with no trailing newline and any docker stderr
+      # chatter glues onto the token INSIDE THE SAME LINE. That is why "take the first
+      # non-empty line" does not fix this -- the first line is already
+      # "<token>WARNING: ..." (@saadqbal on #817). Isolating stdout removes the
+      # possibility rather than trying to parse around it, and matches the bash twin's
+      # 2>/dev/null. A false refusal here is the single worst outcome for this guard:
+      # it would abort a perfectly good install after the cluster is up.
+      $r = Invoke-DockerCli -DockerArgs @("exec", $node, "cat", "/tracebloc/$marker") -TimeoutSec 10 -StdoutOnly
+      $seen = if ($r.Code -eq 0) { ($r.Output -join "").Trim() } else { "" }
+      if ($seen -ne $token) {
+        throw @"
+Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
+
+  Everything would appear to install, but the secure environment would store your
+  data INSIDE the node instead of on this machine -- and lose it when the cluster is
+  recreated. Refusing to continue.
+
+  Most likely causes:
+    * Docker Desktop is not sharing this path. Add it under
+      Settings -> Resources -> File sharing, then re-run.
+    * The cluster was created without the data mount. Recreate it:
+      'k3d cluster delete $($script:CLUSTER_NAME)' then re-run this installer.
+    * HOST_DATA_DIR changed since the cluster was created.
+"@
+      }
+    }
+  }
+  finally { Remove-Item -Path $hostMarker -Force -ErrorAction SilentlyContinue }
 }
 $CLIENT_ENV    = $env:CLIENT_ENV
 
@@ -791,7 +954,7 @@ Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag                   (default: v1.29.4-k3s1)
+  K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   -Resume        Continue an install interrupted by a reboot (set automatically
                  by the registered RunOnce continuation; rarely needed by hand)
@@ -1877,11 +2040,26 @@ echo "NCT installed successfully."
 # (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
 # @{ Code = <int>; Output = <string> } with Code=124 on timeout.
 function Invoke-BoundedProcess {
+  # -StdoutOnly: return ONLY stdout in .Output on the success path, instead of the
+  # usual stdout+stderr concatenation.
+  #
+  # OPT-IN on purpose. The merged .Output is load-bearing for most callers -- e.g.
+  # Get-GpuBuildFailureReason classifies a docker build by matching stderr text -- so
+  # isolating it globally would break the diagnosis those callers exist to produce.
+  # But a caller that COMPARES output to an expected value cannot tolerate the merge:
+  # any client-side docker warning lands in the same string and the comparison fails.
+  # Assert-NodesSeeHostData is exactly that, and there the failure is a FALSE REFUSAL
+  # after the cluster is already up (@saadqbal / Bugbot on #817).
+  #
+  # Only the success path is isolated. The failure/timeout paths keep their merged or
+  # synthetic text, which is pure diagnostics -- and every caller checks .Code before
+  # reading .Output for a value.
   param(
     [Parameter(Mandatory)][string]$FileName,
     [Parameter(Mandatory)][string[]]$Arguments,
     [int]$TimeoutSec = 120,
-    [string]$Stdin = ""
+    [string]$Stdin = "",
+    [switch]$StdoutOnly
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FileName
@@ -1918,13 +2096,40 @@ function Invoke-BoundedProcess {
   #
   # Found on 2026-08-16: it took down `Pester (ubuntu-latest)` on client's `main` tip
   # right after a prod promotion, on a test whose assertion never ran.
-  if ($Stdin) {
-    try { $proc.StandardInput.Write($Stdin); $proc.StandardInput.Close() } catch { }
-  }
+  #
+  # DRAIN BEFORE YOU WRITE. The readers start ahead of the stdin write, not after it.
+  # With the order reversed, a child that BOTH reads stdin and writes output deadlocks
+  # whenever the payload exceeds the OS pipe buffer (~64 KiB): the child fills its
+  # stdout pipe, blocks because nobody is draining it yet, therefore stops reading
+  # stdin, therefore our Write() blocks -- and WaitForExit() below is never reached, so
+  # the HARD timeout this function exists to provide does not fire at all. Not 124:
+  # no return, ever. Measured on backend#2246 -- `/bin/cat` with a 200 KB payload and
+  # -TimeoutSec 20 ran past a 60s outer watchdog, while the same call with the readers
+  # started first returns the child's real verdict. Starting a ReadToEndAsync() before
+  # the write costs nothing and is the documented way out of the classic redirect
+  # deadlock, so the ordering is load-bearing: do not "tidy" the readers back down.
   $outTask = $proc.StandardOutput.ReadToEndAsync()
   $errTask = $proc.StandardError.ReadToEndAsync()
+  if ($Stdin) {
+    # Close() in `finally`, NOT chained after Write() in the same try. Chained, a throw
+    # from Write() skipped the Close(), so the child never got its EOF and our write
+    # handle stayed open -- and the ONE exception we actually observe here (broken pipe)
+    # is swallowed, which means the skip was silent. The swallow itself stays: see the
+    # paragraphs above for why a pipe error must not replace the child's verdict. The
+    # inner try is because Close() flushes, so it can raise the same broken pipe.
+    try { $proc.StandardInput.Write($Stdin) } catch { }
+    finally { try { $proc.StandardInput.Close() } catch { } }
+  }
   if ($proc.WaitForExit($TimeoutSec * 1000)) {
-    return [pscustomobject]@{ Code = $proc.ExitCode; Output = ($outTask.Result + $errTask.Result) }
+    # -StdoutOnly isolates stdout ONLY when the child SUCCEEDED (exit 0), per the
+    # contract documented above. On a NON-ZERO exit the merged stdout+stderr is
+    # returned regardless of -StdoutOnly, so a failing caller keeps the child's
+    # stderr diagnostics -- gating on $StdoutOnly alone silently discarded them,
+    # and the child then looked like it produced nothing rather than like we threw
+    # its stderr away (client#828). The timeout arm below is the other failure path
+    # and keeps its synthetic text for the same reason.
+    $isolate = $StdoutOnly -and $proc.ExitCode -eq 0
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = $(if ($isolate) { $outTask.Result } else { $outTask.Result + $errTask.Result }) }
   }
   # timed out -> kill the child so it can't keep running after we've moved on
   try { $proc.Kill() } catch {}
@@ -1936,9 +2141,10 @@ function Invoke-DockerCli {
   param(
     [Parameter(Mandatory)][string[]]$DockerArgs,
     [int]$TimeoutSec = 120,
-    [string]$Stdin = ""
+    [string]$Stdin = "",
+    [switch]$StdoutOnly
   )
-  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin
+  return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin -StdoutOnly:$StdoutOnly
 }
 
 function Confirm-DockerGpu {
@@ -2041,7 +2247,7 @@ function Confirm-GpuImagePullable {
 # docker/k3s-cuda/* (the CI build source of truth). Base64 (not raw here-strings) so the
 # installer stays self-contained AND ASCII-only with no bare-curl token; a Pester drift
 # test decodes each and fails if it diverges from docker/k3s-cuda/*. Decode to read.
-$script:K3S_CUDA_DOCKERFILE_B64 = 'IyBzeW50YXg9ZG9ja2VyL2RvY2tlcmZpbGU6MS43LWxhYnMKIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBDdXN0b20gazNzIG5vZGUgaW1hZ2Ugd2l0aCBOVklESUEgR1BVIHN1cHBvcnQgICh0cmFjZWJsb2MvY2xpZW50ICM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBXSFkgdGhpcyBleGlzdHM6IHRoZSBzdG9jayBgcmFuY2hlci9rM3NgIGltYWdlIGlzIEFscGluZS1iYXNlZCBhbmQgc2hpcHMgTk8KIyBOVklESUEgY29udGFpbmVyIHJ1bnRpbWUsIHNvIEdQVSBwb2RzIGNhbiBuZXZlciBzY2hlZHVsZSBvbiBpdCDigJQgdGhlIG5vZGUKIyBhZHZlcnRpc2VzIDAgbnZpZGlhLmNvbS9ncHUuIFRoaXMgaW1hZ2UgcmVidWlsZHMgdGhlIFNBTUUgcGlubmVkIGszcyBvbiBhbgojIE5WSURJQSBDVURBIFVidW50dSBiYXNlLCBpbnN0YWxscyB0aGUgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCBjb25maWd1cmVzCiMgY29udGFpbmVyZCBmb3IgdGhlIGBudmlkaWFgIHJ1bnRpbWUgKGluIENESSBtb2RlKSwgYW5kIGJha2VzIGluIHRoZSBgbnZpZGlhYAojIFJ1bnRpbWVDbGFzcyBwbHVzIGEgazNkIGVudHJ5cG9pbnQgZHJvcC1pbiB0aGF0IGdlbmVyYXRlcyB0aGUgV1NMIENESSBzcGVjIG9uCiMgZXZlcnkgbm9kZSBzdGFydC4gR1BVIGNhcGFjaXR5IGlzIGFkdmVydGlzZWQgYnkgdGhlIGluc3RhbGxlciArIHRoYXQgZHJvcC1pbiAtLQojIE5PVCBieSB0aGUgTlZNTCBkZXZpY2UgcGx1Z2luLCB3aGljaCBjYW5ub3Qgd29yayBvbiBXU0wyIChzZWUgUkVBRE1FKS4KIyBCYXNlZCBvbiB0aGUgb2ZmaWNpYWwgazNkIENVREEgcmVjaXBlIChodHRwczovL2szZC5pby8uLi4vdXNhZ2UvYWR2YW5jZWQvY3VkYS8pLgojCiMgSU1QT1JUQU5UOiBLM1NfVEFHIE1VU1QgbWF0Y2ggdGhlIGluc3RhbGxlcidzIEs4U19WRVJTSU9OIHBpbgojIChzY3JpcHRzL3NwZWMvZmFjdHMuZW52IC8gc2NyaXB0cy9saWIvY29tbW9uLnNoKSBzbyBhIEdQVSBub2RlIHJ1bnMgdGhlIGV4YWN0CiMgc2FtZSB2YWxpZGF0ZWQgazNzIGFzIGEgbm9ybWFsIENQVSBub2RlLiBzY3JpcHRzL2NoZWNrLWZhY3RzLnNoIGVuZm9yY2VzIHRoaXM6CiMgdGhpcyBBUkcsIGJ1aWxkLnNoLCBhbmQgdGhlIHdvcmtmbG93IGlucHV0IGRlZmF1bHQgYXJlIGFsbCBjaGVja2VkIGFnYWluc3QKIyBmYWN0cy5lbnYncyBLOFNfVkVSU0lPTiwgc28gYSBidW1wIGNhbid0IGxlYXZlIHRoZSBHUFUgaW1hZ2UgdGFnIHN0YWxlICgjNTQ3KS4KQVJHIEszU19UQUc9InYxLjI5LjQtazNzMSIKQVJHIENVREFfVEFHPSIxMi40LjEtYmFzZS11YnVudHUyMi4wNCIKIyBOVklESUEgQ29udGFpbmVyIFRvb2xraXQgdmVyc2lvbi4gUElOTkVEIHRvIHRoZSBidWlsZCB2YWxpZGF0ZWQgb24gcmVhbCBoYXJkd2FyZSAoYW4gUlRYIDQwNTAKIyBsYXB0b3AsIGRyaXZlciA1MzIuMTApIGJlY2F1c2UgdGhlIHdob2xlIFdTTDIgR1BVIHBhdGggZGVwZW5kcyBvbiB2ZXJzaW9uLXNlbnNpdGl2ZSBzdXJmYWNlczoKIyBgY2RpIGdlbmVyYXRlIC0tbW9kZT13c2xgLCBgY29uZmlnIC0tc2V0IG52aWRpYS1jb250YWluZXItcnVudGltZS5tb2RlPWNkaWAsIGFuZCB0aGUgZXhhY3QgWUFNTAojIHRoZSBnZW5lcmF0b3IgZW1pdHMgKG91ciBsaWJkeGNvcmUgaW5qZWN0aW9uIHBhcnNlcyBpdCkuIFVucGlubmVkLCB0d28gbWFjaGluZXMgYnVpbHQgd2Vla3MKIyBhcGFydCBjb3VsZCBnZXQgZGlmZmVyZW50IHRvb2xraXQgYnVpbGRzIGFuZCBiZWhhdmUgZGlmZmVyZW50bHkgLS0gYW5kIGEgZnV0dXJlIHJlbGVhc2UgY2hhbmdpbmcKIyB0aGUgc3BlYyBzaGFwZSB3b3VsZCBicmVhayBHUFUgb24gbmV3IGluc3RhbGxzIHdoaWxlIGV4aXN0aW5nIG9uZXMga2VwdCB3b3JraW5nLgojIFRoZSBpbnN0YWxsIGJlbG93IEZBTExTIEJBQ0sgdG8gdGhlIGxhdGVzdCBpZiB0aGlzIHZlcnNpb24gaGFzIGFnZWQgb3V0IG9mIHRoZSBhcHQgcmVwbywgc28gYQojIHN0YWxlIHBpbiBkZWdyYWRlcyB0byAidW5waW5uZWQiIHJhdGhlciB0aGFuIGZhaWxpbmcgdGhlIGJ1aWxkICh3aGljaCB3b3VsZCBjb3N0IEdQVSBlbnRpcmVseSkuCkFSRyBOQ1RfVkVSU0lPTj0iMS4xOS4xLTEiCgpGUk9NIHJhbmNoZXIvazNzOiR7SzNTX1RBR30gQVMgazNzCgpGUk9NIG52Y3IuaW8vbnZpZGlhL2N1ZGE6JHtDVURBX1RBR30KCiMgVGhlIENVREEgYmFzZSBiYWtlcyBpbiBOVklESUFfUkVRVUlSRV9DVURBIChlLmcuIGN1ZGE+PTEyLjQpOyB3aXRoIC0tZ3B1cyB0aGUgY29udGFpbmVyIHJ1bnRpbWUKIyB0aGVuIFJFRlVTRVMgdG8gc3RhcnQgdGhpcyBub2RlIG9uIGFueSBkcml2ZXIgb2xkZXIgdGhhbiB0aGF0IGJhc2UgKCJ1bnNhdGlzZmllZCBjb25kaXRpb246CiMgY3VkYT49MTIuNCIpLCBzbyBhIHZhbGlkIEdQVSBvbiBhIHNsaWdodGx5IG9sZGVyIGRyaXZlciAoZS5nLiA1MzIueCA9IENVREEgMTIuMSkgY2FuJ3QgcnVuIHRoZQojIGNsdXN0ZXIgYXQgYWxsLiBUaGlzIG5vZGUgcnVucyBrM3MsIG5vdCBDVURBIHdvcmtsb2FkcyAtLSB0aGUgcmVhbCBDVURBL2RyaXZlciBjb21wYXRpYmlsaXR5IGlzCiMgZW5mb3JjZWQgcGVyLXBvZCBieSBlYWNoIFRSQUlOSU5HIGltYWdlIC0tIHNvIGRpc2FibGUgdGhlIHJlcXVpcmVtZW50IGdhdGUgaGVyZSAoIzYxNikuCkVOViBOVklESUFfRElTQUJMRV9SRVFVSVJFPTEKCiMgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCB0aGVuIHBvaW50IGNvbnRhaW5lcmQgYXQgdGhlIGBudmlkaWFgIHJ1bnRpbWUuIFRoZQojIGdwZyBrZXkgKyBhcHQgbGlzdCBhcmUgcGlubmVkIHZpYSB0aGUga2V5cmluZyB0aGUgc2FtZSB3YXkgdGhlIGluLVdTTCB0b29sa2l0CiMgaW5zdGFsbCBkb2VzIChzY3JpcHRzL2luc3RhbGwtazhzLnBzMSkgc28gYSByZXN0cmljdGVkLW5ldHdvcmsgbWlycm9yIGNhbgojIHJlLWhvbWUgdGhlbSBjb25zaXN0ZW50bHkuIGN1cmwgY2FycmllcyB0aGUgVExTIGZsb29yICsgYm91bmRlZCB0aW1lb3V0cyBpbmxpbmUKIyAoYSBEb2NrZXJmaWxlIGNhbid0IHNvdXJjZSBjb21tb24uc2gncyBjdXJsX3NlY3VyZSgpKSBzbyBhIHN0YWxsZWQgb3IgZG93bmdyYWRlZAojIGNvbm5lY3Rpb24gdG8gbnZpZGlhLmdpdGh1Yi5pbyBmYWlscyBmYXN0IGluc3RlYWQgb2YgaGFuZ2luZyB0aGUgYnVpbGQgKGhvdXNlIHJ1bGUpLgpSVU4gZXhwb3J0IERFQklBTl9GUk9OVEVORD1ub25pbnRlcmFjdGl2ZSBcCiAgICAmJiBhcHQtZ2V0IHVwZGF0ZSBcCiAgICAmJiBhcHQtZ2V0IGluc3RhbGwgLXkgLS1uby1pbnN0YWxsLXJlY29tbWVuZHMgY3VybCBjYS1jZXJ0aWZpY2F0ZXMgZ251cGcgXAogICAgJiYgY3VybCAtZnNTTCAtLXRsc3YxLjIgLS1jb25uZWN0LXRpbWVvdXQgMzAgLS1tYXgtdGltZSA2MCBodHRwczovL252aWRpYS5naXRodWIuaW8vbGlibnZpZGlhLWNvbnRhaW5lci9ncGdrZXkgXAogICAgICAgICB8IGdwZyAtLWRlYXJtb3IgLW8gL3Vzci9zaGFyZS9rZXlyaW5ncy9udmlkaWEtY29udGFpbmVyLXRvb2xraXQta2V5cmluZy5ncGcgXAogICAgJiYgY3VybCAtZnNTTCAtLXRsc3YxLjIgLS1jb25uZWN0LXRpbWVvdXQgMzAgLS1tYXgtdGltZSA2MCBodHRwczovL252aWRpYS5naXRodWIuaW8vbGlibnZpZGlhLWNvbnRhaW5lci9zdGFibGUvZGViL252aWRpYS1jb250YWluZXItdG9vbGtpdC5saXN0IFwKICAgICAgICAgfCBzZWQgJ3MjZGViIGh0dHBzOi8vI2RlYiBbc2lnbmVkLWJ5PS91c3Ivc2hhcmUva2V5cmluZ3MvbnZpZGlhLWNvbnRhaW5lci10b29sa2l0LWtleXJpbmcuZ3BnXSBodHRwczovLyNnJyBcCiAgICAgICAgIHwgdGVlIC9ldGMvYXB0L3NvdXJjZXMubGlzdC5kL252aWRpYS1jb250YWluZXItdG9vbGtpdC5saXN0IFwKICAgICYmIGFwdC1nZXQgdXBkYXRlIFwKICAgICYmICggYXB0LWdldCBpbnN0YWxsIC15IC0tbm8taW5zdGFsbC1yZWNvbW1lbmRzICJudmlkaWEtY29udGFpbmVyLXRvb2xraXQ9JHtOQ1RfVkVSU0lPTn0iIFwKICAgICAgICAgfHwgeyBlY2hvICJOQ1QgJHtOQ1RfVkVSU0lPTn0gdW5hdmFpbGFibGUgaW4gdGhlIHJlcG8gLS0gZmFsbGluZyBiYWNrIHRvIGxhdGVzdCI7IFwKICAgICAgICAgICAgICBhcHQtZ2V0IGluc3RhbGwgLXkgLS1uby1pbnN0YWxsLXJlY29tbWVuZHMgbnZpZGlhLWNvbnRhaW5lci10b29sa2l0OyB9ICkgXAogICAgJiYgbnZpZGlhLWN0ayAtLXZlcnNpb24gXAogICAgJiYgbnZpZGlhLWN0ayBydW50aW1lIGNvbmZpZ3VyZSAtLXJ1bnRpbWU9Y29udGFpbmVyZCBcCiAgICAmJiBudmlkaWEtY3RrIGNvbmZpZyAtLWluLXBsYWNlIC0tc2V0IG52aWRpYS1jb250YWluZXItcnVudGltZS5tb2RlPWNkaSBcCiAgICAmJiBhcHQtZ2V0IGNsZWFuIFwKICAgICYmIHJtIC1yZiAvdmFyL2xpYi9hcHQvbGlzdHMvKgoKIyBDb3B5IHRoZSBwaW5uZWQgazNzIHJvb3RmcyBvdmVyIHRoZSBDVURBIGJhc2UsIHRoZW4gYnJpbmcgaW4gazNzJ3Mgb3duIC9iaW4gZXhwbGljaXRseS4KIyAtLWV4Y2x1ZGUgTVVTVCBjb21lIEJFRk9SRSB0aGUgc3JjL2Rlc3Q6IGEgVFJBSUxJTkcgYC0tZXhjbHVkZWAgaXMgcGFyc2VkIGFzIHRoZQojIGRlc3RpbmF0aW9uLCBzbyB0aGUgcm9vdGZzIHNpbGVudGx5IGNvcGllcyB0byAvLS1leGNsdWRlPS4uLiBpbnN0ZWFkIG9mIC8g4oCUIHRoZSBidWlsZAojICJwYXNzZXMiIGJ1dCB0aGUgaW1hZ2UgaXMgYnJva2VuIChCdWdib3QpLiBQYXRocyBhcmUgUkVMQVRJVkUgdG8gdGhlIHNvdXJjZSAoYGJpbmAsIG5vdAojIGAvYmluYCkuIFVidW50dSAyMi4wNCBpcyBtZXJnZWQtL3Vzciwgc28gL2JpbiAvc2JpbiAvbGliIC9saWI2NCBhcmUgU1lNTElOS1MgdG8gL3Vzci8qLAojIHdoaWxlIHRoZSBBbHBpbmUgazNzIGltYWdlIHNoaXBzIHRoZW0gYXMgcmVhbCBkaXJzIOKAlCBjb3B5aW5nIHRob3NlIG92ZXIgdGhlIHN5bWxpbmtzIGVycm9ycwojICJjYW5ub3QgY29weSB0byBub24tZGlyZWN0b3J5Ii4gazNzIGlzIGEgU1RBVElDIGJpbmFyeSAobmVlZHMgbm8gc2hhcmVkIGxpYnMpLCBzbyB3ZSBleGNsdWRlCiMgYWxsIGZvdXIgKGtlZXBpbmcgVWJ1bnR1J3MgZ2xpYmMgdXNlcmxhbmQ6IGN1cmwvYXB0L252aWRpYS1jdGspIGFuZCBvdmVybGF5IG9ubHkgazNzJ3Mgb3duCiMgL2JpbiAodGhlIHN0YXRpYyBrM3MgKyAvYmluL2F1eCkgaW50byAvdXNyL2JpbiB2aWEgdGhlIGtlcHQgL2JpbiBzeW1saW5rLiBidWlsZC5zaCB2ZXJpZmllcwojIHRoZSBvdmVybGF5IGxhbmRlZCBjb3JyZWN0bHkgYWZ0ZXIgdGhlIGJ1aWxkLCBzbyBhIG1pcy1wYXJzZSBjYW4gbmV2ZXIgcHVibGlzaCBhIGJyb2tlbiBpbWFnZS4KQ09QWSAtLWZyb209azNzIFwKICAgICAtLWV4Y2x1ZGU9YmluIC0tZXhjbHVkZT1zYmluIC0tZXhjbHVkZT1saWIgLS1leGNsdWRlPWxpYjMyIC0tZXhjbHVkZT1saWI2NCAtLWV4Y2x1ZGU9bGlieDMyIFwKICAgICAtLWV4Y2x1ZGU9dmFyL3J1biAtLWV4Y2x1ZGU9dmFyL2xvY2sgXAogICAgIC8gLwpDT1BZIC0tZnJvbT1rM3MgL2JpbiAvYmluCgojIEF1dG8tZGVwbG95IE9OTFkgdGhlIGBudmlkaWFgIFJ1bnRpbWVDbGFzcyBvbiBmaXJzdCBzZXJ2ZXIgYm9vdCAoazNzIGF1dG8tYXBwbGllcwojIG1hbmlmZXN0cyBkcm9wcGVkIGhlcmUpLiBXZSBkZWxpYmVyYXRlbHkgZG8gTk9UIHNoaXAgdGhlIE5WTUwgZGV2aWNlLXBsdWdpbiBEYWVtb25TZXQ6CiMgb24gRG9ja2VyIERlc2t0b3AvV1NMMiBpdCBjYW4ndCBpbml0IE5WTUwsIHdvdWxkIHJlZ2lzdGVyIDAgR1BVcywgYW5kIChvd25pbmcgdGhlCiMgbnZpZGlhLmNvbS9ncHUgZXh0ZW5kZWQgcmVzb3VyY2UpIHdvdWxkIG92ZXJ3cml0ZSB0aGUgaW5zdGFsbGVyJ3Mgbm9kZS1yZXNvdXJjZSBwYXRjaAojIHdpdGggMCAtLSBzdHJhbmRpbmcgam9icy4gR1BVIGNhcGFjaXR5IGlzIGFkdmVydGlzZWQgYnkgdGhlIGluc3RhbGxlciB2aWEgYSBub2RlIHBhdGNoLAojIGFuZCBwb2RzIGdldCB0aGUgcmVhbCBHUFUgdGhyb3VnaCB0aGUgQ0RJIHNwZWMgZ2VuZXJhdGVkIGF0IGJvb3QgKHNlZSBrM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoKS4KQ09QWSBudmlkaWEtcnVudGltZWNsYXNzLnlhbWwgL3Zhci9saWIvcmFuY2hlci9rM3Mvc2VydmVyL21hbmlmZXN0cy9udmlkaWEtcnVudGltZWNsYXNzLnlhbWwKCiMgTm9kZSBHUFUgc2V0dXA6IGdlbmVyYXRlIHRoZSBXU0wgQ0RJIHNwZWMgKCsgbGliZHhjb3JlKSBhbmQga2VlcCBudmlkaWEuY29tL2dwdQojIGFkdmVydGlzZWQsIHNvIHBvZHMgY2FuIHVzZSB0aGUgR1BVIG9uIERvY2tlciBEZXNrdG9wL1dTTDIuIE5vLW9wIG9uIG5vbi1XU0wyIG5vZGVzLgojCiMgSXQgTVVTVCBiZSBpbnN0YWxsZWQgYXMgYSAvYmluL2szZC1lbnRyeXBvaW50LSouc2ggRFJPUC1JTiwgbm90IGFzIHRoZSBpbWFnZSBFTlRSWVBPSU5UOgojIGszZCByZXBsYWNlcyB0aGUgaW1hZ2UgZW50cnlwb2ludCB3aXRoIGl0cyBvd24gL2Jpbi9rM2QtZW50cnlwb2ludC5zaCwgd2hpY2ggcnVucyB0aGVzZQojIGRyb3AtaW5zIGFuZCB0aGVuIGV4ZWNzIGszcy4gQW4gRU5UUllQT0lOVCB3cmFwcGVyIGhlcmUgaXMgc2lsZW50bHkgbmV2ZXIgcnVuICgjNjE2KS4KQ09QWSBrM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoIC9iaW4vazNkLWVudHJ5cG9pbnQtdHJhY2VibG9jLWNkaS5zaApSVU4gY2htb2QgK3ggL2Jpbi9rM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoCgpWT0xVTUUgL3Zhci9saWIva3ViZWxldApWT0xVTUUgL3Zhci9saWIvcmFuY2hlci9rM3MKVk9MVU1FIC92YXIvbGliL2NuaQpWT0xVTUUgL3Zhci9sb2cKCkVOViBQQVRIPSIkUEFUSDovYmluL2F1eCIKCiMgU3RvY2sgazNzIGVudHJ5cG9pbnQgKHNhbWUgYXMgcmFuY2hlci9rM3MpLiBrM2Qgb3ZlcnJpZGVzIGl0IHdpdGggaXRzIG93bgojIC9iaW4vazNkLWVudHJ5cG9pbnQuc2gsIHdoaWNoIHJ1bnMgb3VyIGRyb3AtaW4gYWJvdmUgYmVmb3JlIGV4ZWMnaW5nIGszczsga2VlcGluZyB0aGUKIyBzdG9jayB2YWx1ZSBtZWFucyB0aGUgaW1hZ2UgYWxzbyBiZWhhdmVzIG5vcm1hbGx5IG91dHNpZGUgazNkLgpFTlRSWVBPSU5UIFsiL2Jpbi9rM3MiXQpDTUQgWyJhZ2VudCJdCg=='
+$script:K3S_CUDA_DOCKERFILE_B64 = 'IyBzeW50YXg9ZG9ja2VyL2RvY2tlcmZpbGU6MS43LWxhYnMKIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBDdXN0b20gazNzIG5vZGUgaW1hZ2Ugd2l0aCBOVklESUEgR1BVIHN1cHBvcnQgICh0cmFjZWJsb2MvY2xpZW50ICM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBXSFkgdGhpcyBleGlzdHM6IHRoZSBzdG9jayBgcmFuY2hlci9rM3NgIGltYWdlIGlzIEFscGluZS1iYXNlZCBhbmQgc2hpcHMgTk8KIyBOVklESUEgY29udGFpbmVyIHJ1bnRpbWUsIHNvIEdQVSBwb2RzIGNhbiBuZXZlciBzY2hlZHVsZSBvbiBpdCDigJQgdGhlIG5vZGUKIyBhZHZlcnRpc2VzIDAgbnZpZGlhLmNvbS9ncHUuIFRoaXMgaW1hZ2UgcmVidWlsZHMgdGhlIFNBTUUgcGlubmVkIGszcyBvbiBhbgojIE5WSURJQSBDVURBIFVidW50dSBiYXNlLCBpbnN0YWxscyB0aGUgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCBjb25maWd1cmVzCiMgY29udGFpbmVyZCBmb3IgdGhlIGBudmlkaWFgIHJ1bnRpbWUgKGluIENESSBtb2RlKSwgYW5kIGJha2VzIGluIHRoZSBgbnZpZGlhYAojIFJ1bnRpbWVDbGFzcyBwbHVzIGEgazNkIGVudHJ5cG9pbnQgZHJvcC1pbiB0aGF0IGdlbmVyYXRlcyB0aGUgV1NMIENESSBzcGVjIG9uCiMgZXZlcnkgbm9kZSBzdGFydC4gR1BVIGNhcGFjaXR5IGlzIGFkdmVydGlzZWQgYnkgdGhlIGluc3RhbGxlciArIHRoYXQgZHJvcC1pbiAtLQojIE5PVCBieSB0aGUgTlZNTCBkZXZpY2UgcGx1Z2luLCB3aGljaCBjYW5ub3Qgd29yayBvbiBXU0wyIChzZWUgUkVBRE1FKS4KIyBCYXNlZCBvbiB0aGUgb2ZmaWNpYWwgazNkIENVREEgcmVjaXBlIChodHRwczovL2szZC5pby8uLi4vdXNhZ2UvYWR2YW5jZWQvY3VkYS8pLgojCiMgSU1QT1JUQU5UOiBLM1NfVEFHIE1VU1QgbWF0Y2ggdGhlIGluc3RhbGxlcidzIEs4U19WRVJTSU9OIHBpbgojIChzY3JpcHRzL3NwZWMvZmFjdHMuZW52IC8gc2NyaXB0cy9saWIvY29tbW9uLnNoKSBzbyBhIEdQVSBub2RlIHJ1bnMgdGhlIGV4YWN0CiMgc2FtZSB2YWxpZGF0ZWQgazNzIGFzIGEgbm9ybWFsIENQVSBub2RlLiBzY3JpcHRzL2NoZWNrLWZhY3RzLnNoIGVuZm9yY2VzIHRoaXM6CiMgdGhpcyBBUkcsIGJ1aWxkLnNoLCBhbmQgdGhlIHdvcmtmbG93IGlucHV0IGRlZmF1bHQgYXJlIGFsbCBjaGVja2VkIGFnYWluc3QKIyBmYWN0cy5lbnYncyBLOFNfVkVSU0lPTiwgc28gYSBidW1wIGNhbid0IGxlYXZlIHRoZSBHUFUgaW1hZ2UgdGFnIHN0YWxlICgjNTQ3KS4KQVJHIEszU19UQUc9InYxLjM2LjMtazNzMSIKQVJHIENVREFfVEFHPSIxMi40LjEtYmFzZS11YnVudHUyMi4wNCIKIyBOVklESUEgQ29udGFpbmVyIFRvb2xraXQgdmVyc2lvbi4gUElOTkVEIHRvIHRoZSBidWlsZCB2YWxpZGF0ZWQgb24gcmVhbCBoYXJkd2FyZSAoYW4gUlRYIDQwNTAKIyBsYXB0b3AsIGRyaXZlciA1MzIuMTApIGJlY2F1c2UgdGhlIHdob2xlIFdTTDIgR1BVIHBhdGggZGVwZW5kcyBvbiB2ZXJzaW9uLXNlbnNpdGl2ZSBzdXJmYWNlczoKIyBgY2RpIGdlbmVyYXRlIC0tbW9kZT13c2xgLCBgY29uZmlnIC0tc2V0IG52aWRpYS1jb250YWluZXItcnVudGltZS5tb2RlPWNkaWAsIGFuZCB0aGUgZXhhY3QgWUFNTAojIHRoZSBnZW5lcmF0b3IgZW1pdHMgKG91ciBsaWJkeGNvcmUgaW5qZWN0aW9uIHBhcnNlcyBpdCkuIFVucGlubmVkLCB0d28gbWFjaGluZXMgYnVpbHQgd2Vla3MKIyBhcGFydCBjb3VsZCBnZXQgZGlmZmVyZW50IHRvb2xraXQgYnVpbGRzIGFuZCBiZWhhdmUgZGlmZmVyZW50bHkgLS0gYW5kIGEgZnV0dXJlIHJlbGVhc2UgY2hhbmdpbmcKIyB0aGUgc3BlYyBzaGFwZSB3b3VsZCBicmVhayBHUFUgb24gbmV3IGluc3RhbGxzIHdoaWxlIGV4aXN0aW5nIG9uZXMga2VwdCB3b3JraW5nLgojIFRoZSBpbnN0YWxsIGJlbG93IEZBTExTIEJBQ0sgdG8gdGhlIGxhdGVzdCBpZiB0aGlzIHZlcnNpb24gaGFzIGFnZWQgb3V0IG9mIHRoZSBhcHQgcmVwbywgc28gYQojIHN0YWxlIHBpbiBkZWdyYWRlcyB0byAidW5waW5uZWQiIHJhdGhlciB0aGFuIGZhaWxpbmcgdGhlIGJ1aWxkICh3aGljaCB3b3VsZCBjb3N0IEdQVSBlbnRpcmVseSkuCkFSRyBOQ1RfVkVSU0lPTj0iMS4xOS4xLTEiCgpGUk9NIHJhbmNoZXIvazNzOiR7SzNTX1RBR30gQVMgazNzCgpGUk9NIG52Y3IuaW8vbnZpZGlhL2N1ZGE6JHtDVURBX1RBR30KCiMgVGhlIENVREEgYmFzZSBiYWtlcyBpbiBOVklESUFfUkVRVUlSRV9DVURBIChlLmcuIGN1ZGE+PTEyLjQpOyB3aXRoIC0tZ3B1cyB0aGUgY29udGFpbmVyIHJ1bnRpbWUKIyB0aGVuIFJFRlVTRVMgdG8gc3RhcnQgdGhpcyBub2RlIG9uIGFueSBkcml2ZXIgb2xkZXIgdGhhbiB0aGF0IGJhc2UgKCJ1bnNhdGlzZmllZCBjb25kaXRpb246CiMgY3VkYT49MTIuNCIpLCBzbyBhIHZhbGlkIEdQVSBvbiBhIHNsaWdodGx5IG9sZGVyIGRyaXZlciAoZS5nLiA1MzIueCA9IENVREEgMTIuMSkgY2FuJ3QgcnVuIHRoZQojIGNsdXN0ZXIgYXQgYWxsLiBUaGlzIG5vZGUgcnVucyBrM3MsIG5vdCBDVURBIHdvcmtsb2FkcyAtLSB0aGUgcmVhbCBDVURBL2RyaXZlciBjb21wYXRpYmlsaXR5IGlzCiMgZW5mb3JjZWQgcGVyLXBvZCBieSBlYWNoIFRSQUlOSU5HIGltYWdlIC0tIHNvIGRpc2FibGUgdGhlIHJlcXVpcmVtZW50IGdhdGUgaGVyZSAoIzYxNikuCkVOViBOVklESUFfRElTQUJMRV9SRVFVSVJFPTEKCiMgTlZJRElBIENvbnRhaW5lciBUb29sa2l0LCB0aGVuIHBvaW50IGNvbnRhaW5lcmQgYXQgdGhlIGBudmlkaWFgIHJ1bnRpbWUuIFRoZQojIGdwZyBrZXkgKyBhcHQgbGlzdCBhcmUgcGlubmVkIHZpYSB0aGUga2V5cmluZyB0aGUgc2FtZSB3YXkgdGhlIGluLVdTTCB0b29sa2l0CiMgaW5zdGFsbCBkb2VzIChzY3JpcHRzL2luc3RhbGwtazhzLnBzMSkgc28gYSByZXN0cmljdGVkLW5ldHdvcmsgbWlycm9yIGNhbgojIHJlLWhvbWUgdGhlbSBjb25zaXN0ZW50bHkuIGN1cmwgY2FycmllcyB0aGUgVExTIGZsb29yICsgYm91bmRlZCB0aW1lb3V0cyBpbmxpbmUKIyAoYSBEb2NrZXJmaWxlIGNhbid0IHNvdXJjZSBjb21tb24uc2gncyBjdXJsX3NlY3VyZSgpKSBzbyBhIHN0YWxsZWQgb3IgZG93bmdyYWRlZAojIGNvbm5lY3Rpb24gdG8gbnZpZGlhLmdpdGh1Yi5pbyBmYWlscyBmYXN0IGluc3RlYWQgb2YgaGFuZ2luZyB0aGUgYnVpbGQgKGhvdXNlIHJ1bGUpLgpSVU4gZXhwb3J0IERFQklBTl9GUk9OVEVORD1ub25pbnRlcmFjdGl2ZSBcCiAgICAmJiBhcHQtZ2V0IHVwZGF0ZSBcCiAgICAmJiBhcHQtZ2V0IGluc3RhbGwgLXkgLS1uby1pbnN0YWxsLXJlY29tbWVuZHMgY3VybCBjYS1jZXJ0aWZpY2F0ZXMgZ251cGcgXAogICAgJiYgY3VybCAtZnNTTCAtLXRsc3YxLjIgLS1jb25uZWN0LXRpbWVvdXQgMzAgLS1tYXgtdGltZSA2MCBodHRwczovL252aWRpYS5naXRodWIuaW8vbGlibnZpZGlhLWNvbnRhaW5lci9ncGdrZXkgXAogICAgICAgICB8IGdwZyAtLWRlYXJtb3IgLW8gL3Vzci9zaGFyZS9rZXlyaW5ncy9udmlkaWEtY29udGFpbmVyLXRvb2xraXQta2V5cmluZy5ncGcgXAogICAgJiYgY3VybCAtZnNTTCAtLXRsc3YxLjIgLS1jb25uZWN0LXRpbWVvdXQgMzAgLS1tYXgtdGltZSA2MCBodHRwczovL252aWRpYS5naXRodWIuaW8vbGlibnZpZGlhLWNvbnRhaW5lci9zdGFibGUvZGViL252aWRpYS1jb250YWluZXItdG9vbGtpdC5saXN0IFwKICAgICAgICAgfCBzZWQgJ3MjZGViIGh0dHBzOi8vI2RlYiBbc2lnbmVkLWJ5PS91c3Ivc2hhcmUva2V5cmluZ3MvbnZpZGlhLWNvbnRhaW5lci10b29sa2l0LWtleXJpbmcuZ3BnXSBodHRwczovLyNnJyBcCiAgICAgICAgIHwgdGVlIC9ldGMvYXB0L3NvdXJjZXMubGlzdC5kL252aWRpYS1jb250YWluZXItdG9vbGtpdC5saXN0IFwKICAgICYmIGFwdC1nZXQgdXBkYXRlIFwKICAgICYmICggYXB0LWdldCBpbnN0YWxsIC15IC0tbm8taW5zdGFsbC1yZWNvbW1lbmRzICJudmlkaWEtY29udGFpbmVyLXRvb2xraXQ9JHtOQ1RfVkVSU0lPTn0iIFwKICAgICAgICAgfHwgeyBlY2hvICJOQ1QgJHtOQ1RfVkVSU0lPTn0gdW5hdmFpbGFibGUgaW4gdGhlIHJlcG8gLS0gZmFsbGluZyBiYWNrIHRvIGxhdGVzdCI7IFwKICAgICAgICAgICAgICBhcHQtZ2V0IGluc3RhbGwgLXkgLS1uby1pbnN0YWxsLXJlY29tbWVuZHMgbnZpZGlhLWNvbnRhaW5lci10b29sa2l0OyB9ICkgXAogICAgJiYgbnZpZGlhLWN0ayAtLXZlcnNpb24gXAogICAgJiYgbnZpZGlhLWN0ayBydW50aW1lIGNvbmZpZ3VyZSAtLXJ1bnRpbWU9Y29udGFpbmVyZCBcCiAgICAmJiBudmlkaWEtY3RrIGNvbmZpZyAtLWluLXBsYWNlIC0tc2V0IG52aWRpYS1jb250YWluZXItcnVudGltZS5tb2RlPWNkaSBcCiAgICAmJiBhcHQtZ2V0IGNsZWFuIFwKICAgICYmIHJtIC1yZiAvdmFyL2xpYi9hcHQvbGlzdHMvKgoKIyBDb3B5IHRoZSBwaW5uZWQgazNzIHJvb3RmcyBvdmVyIHRoZSBDVURBIGJhc2UsIHRoZW4gYnJpbmcgaW4gazNzJ3Mgb3duIC9iaW4gZXhwbGljaXRseS4KIyAtLWV4Y2x1ZGUgTVVTVCBjb21lIEJFRk9SRSB0aGUgc3JjL2Rlc3Q6IGEgVFJBSUxJTkcgYC0tZXhjbHVkZWAgaXMgcGFyc2VkIGFzIHRoZQojIGRlc3RpbmF0aW9uLCBzbyB0aGUgcm9vdGZzIHNpbGVudGx5IGNvcGllcyB0byAvLS1leGNsdWRlPS4uLiBpbnN0ZWFkIG9mIC8g4oCUIHRoZSBidWlsZAojICJwYXNzZXMiIGJ1dCB0aGUgaW1hZ2UgaXMgYnJva2VuIChCdWdib3QpLiBQYXRocyBhcmUgUkVMQVRJVkUgdG8gdGhlIHNvdXJjZSAoYGJpbmAsIG5vdAojIGAvYmluYCkuIFVidW50dSAyMi4wNCBpcyBtZXJnZWQtL3Vzciwgc28gL2JpbiAvc2JpbiAvbGliIC9saWI2NCBhcmUgU1lNTElOS1MgdG8gL3Vzci8qLAojIHdoaWxlIHRoZSBBbHBpbmUgazNzIGltYWdlIHNoaXBzIHRoZW0gYXMgcmVhbCBkaXJzIOKAlCBjb3B5aW5nIHRob3NlIG92ZXIgdGhlIHN5bWxpbmtzIGVycm9ycwojICJjYW5ub3QgY29weSB0byBub24tZGlyZWN0b3J5Ii4gazNzIGlzIGEgU1RBVElDIGJpbmFyeSAobmVlZHMgbm8gc2hhcmVkIGxpYnMpLCBzbyB3ZSBleGNsdWRlCiMgYWxsIGZvdXIgKGtlZXBpbmcgVWJ1bnR1J3MgZ2xpYmMgdXNlcmxhbmQ6IGN1cmwvYXB0L252aWRpYS1jdGspIGFuZCBvdmVybGF5IG9ubHkgazNzJ3Mgb3duCiMgL2JpbiAodGhlIHN0YXRpYyBrM3MgKyAvYmluL2F1eCkgaW50byAvdXNyL2JpbiB2aWEgdGhlIGtlcHQgL2JpbiBzeW1saW5rLiBidWlsZC5zaCB2ZXJpZmllcwojIHRoZSBvdmVybGF5IGxhbmRlZCBjb3JyZWN0bHkgYWZ0ZXIgdGhlIGJ1aWxkLCBzbyBhIG1pcy1wYXJzZSBjYW4gbmV2ZXIgcHVibGlzaCBhIGJyb2tlbiBpbWFnZS4KQ09QWSAtLWZyb209azNzIFwKICAgICAtLWV4Y2x1ZGU9YmluIC0tZXhjbHVkZT1zYmluIC0tZXhjbHVkZT1saWIgLS1leGNsdWRlPWxpYjMyIC0tZXhjbHVkZT1saWI2NCAtLWV4Y2x1ZGU9bGlieDMyIFwKICAgICAtLWV4Y2x1ZGU9dmFyL3J1biAtLWV4Y2x1ZGU9dmFyL2xvY2sgXAogICAgIC8gLwpDT1BZIC0tZnJvbT1rM3MgL2JpbiAvYmluCgojIEF1dG8tZGVwbG95IE9OTFkgdGhlIGBudmlkaWFgIFJ1bnRpbWVDbGFzcyBvbiBmaXJzdCBzZXJ2ZXIgYm9vdCAoazNzIGF1dG8tYXBwbGllcwojIG1hbmlmZXN0cyBkcm9wcGVkIGhlcmUpLiBXZSBkZWxpYmVyYXRlbHkgZG8gTk9UIHNoaXAgdGhlIE5WTUwgZGV2aWNlLXBsdWdpbiBEYWVtb25TZXQ6CiMgb24gRG9ja2VyIERlc2t0b3AvV1NMMiBpdCBjYW4ndCBpbml0IE5WTUwsIHdvdWxkIHJlZ2lzdGVyIDAgR1BVcywgYW5kIChvd25pbmcgdGhlCiMgbnZpZGlhLmNvbS9ncHUgZXh0ZW5kZWQgcmVzb3VyY2UpIHdvdWxkIG92ZXJ3cml0ZSB0aGUgaW5zdGFsbGVyJ3Mgbm9kZS1yZXNvdXJjZSBwYXRjaAojIHdpdGggMCAtLSBzdHJhbmRpbmcgam9icy4gR1BVIGNhcGFjaXR5IGlzIGFkdmVydGlzZWQgYnkgdGhlIGluc3RhbGxlciB2aWEgYSBub2RlIHBhdGNoLAojIGFuZCBwb2RzIGdldCB0aGUgcmVhbCBHUFUgdGhyb3VnaCB0aGUgQ0RJIHNwZWMgZ2VuZXJhdGVkIGF0IGJvb3QgKHNlZSBrM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoKS4KQ09QWSBudmlkaWEtcnVudGltZWNsYXNzLnlhbWwgL3Zhci9saWIvcmFuY2hlci9rM3Mvc2VydmVyL21hbmlmZXN0cy9udmlkaWEtcnVudGltZWNsYXNzLnlhbWwKCiMgTm9kZSBHUFUgc2V0dXA6IGdlbmVyYXRlIHRoZSBXU0wgQ0RJIHNwZWMgKCsgbGliZHhjb3JlKSBhbmQga2VlcCBudmlkaWEuY29tL2dwdQojIGFkdmVydGlzZWQsIHNvIHBvZHMgY2FuIHVzZSB0aGUgR1BVIG9uIERvY2tlciBEZXNrdG9wL1dTTDIuIE5vLW9wIG9uIG5vbi1XU0wyIG5vZGVzLgojCiMgSXQgTVVTVCBiZSBpbnN0YWxsZWQgYXMgYSAvYmluL2szZC1lbnRyeXBvaW50LSouc2ggRFJPUC1JTiwgbm90IGFzIHRoZSBpbWFnZSBFTlRSWVBPSU5UOgojIGszZCByZXBsYWNlcyB0aGUgaW1hZ2UgZW50cnlwb2ludCB3aXRoIGl0cyBvd24gL2Jpbi9rM2QtZW50cnlwb2ludC5zaCwgd2hpY2ggcnVucyB0aGVzZQojIGRyb3AtaW5zIGFuZCB0aGVuIGV4ZWNzIGszcy4gQW4gRU5UUllQT0lOVCB3cmFwcGVyIGhlcmUgaXMgc2lsZW50bHkgbmV2ZXIgcnVuICgjNjE2KS4KQ09QWSBrM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoIC9iaW4vazNkLWVudHJ5cG9pbnQtdHJhY2VibG9jLWNkaS5zaApSVU4gY2htb2QgK3ggL2Jpbi9rM2QtZW50cnlwb2ludC10cmFjZWJsb2MtY2RpLnNoCgpWT0xVTUUgL3Zhci9saWIva3ViZWxldApWT0xVTUUgL3Zhci9saWIvcmFuY2hlci9rM3MKVk9MVU1FIC92YXIvbGliL2NuaQpWT0xVTUUgL3Zhci9sb2cKCkVOViBQQVRIPSIkUEFUSDovYmluL2F1eCIKCiMgU3RvY2sgazNzIGVudHJ5cG9pbnQgKHNhbWUgYXMgcmFuY2hlci9rM3MpLiBrM2Qgb3ZlcnJpZGVzIGl0IHdpdGggaXRzIG93bgojIC9iaW4vazNkLWVudHJ5cG9pbnQuc2gsIHdoaWNoIHJ1bnMgb3VyIGRyb3AtaW4gYWJvdmUgYmVmb3JlIGV4ZWMnaW5nIGszczsga2VlcGluZyB0aGUKIyBzdG9jayB2YWx1ZSBtZWFucyB0aGUgaW1hZ2UgYWxzbyBiZWhhdmVzIG5vcm1hbGx5IG91dHNpZGUgazNkLgpFTlRSWVBPSU5UIFsiL2Jpbi9rM3MiXQpDTUQgWyJhZ2VudCJdCg=='
 
 $script:K3S_CUDA_RUNTIMECLASS_B64 = 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojICBgbnZpZGlhYCBSdW50aW1lQ2xhc3MgICh0cmFjZWJsb2MvY2xpZW50ICM2MTYpCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBCYWtlZCBpbnRvIHRoZSBjdXN0b20gazNzLUNVREEgaW1hZ2UgYXQgL3Zhci9saWIvcmFuY2hlci9rM3Mvc2VydmVyL21hbmlmZXN0cy8KIyBzbyBrM3MgYXV0by1hcHBsaWVzIGl0IG9uIGZpcnN0IHNlcnZlciBib290LiBUcmFpbmluZyBwb2RzIHJlZmVyZW5jZSBpdCB2aWEKIyBydW50aW1lQ2xhc3NOYW1lOiBudmlkaWEgKHRoZSBpbnN0YWxsZXIgc2V0cyBSVU5USU1FX0NMQVNTX05BTUU9bnZpZGlhIHdoZW4gR1BVCiMgaXMgZW5hYmxlZCwgd2hpY2ggam9icy1tYW5hZ2VyIHRocmVhZHMgaW50byBldmVyeSBzcGF3bmVkIHBvZCksIHNvIHRoZSBub2RlJ3MKIyBjb250YWluZXJkIGludm9rZXMgdGhlIG52aWRpYSBjb250YWluZXIgcnVudGltZSAtLSB3aGljaCwgaW4gQ0RJIG1vZGUgKHNlZQojIGszZC1lbnRyeXBvaW50LXRyYWNlYmxvYy1jZGkuc2gpLCBpbmplY3RzIHRoZSBHUFUgaW50byB0aGUgcG9kIGZyb20gdGhlIFdTTCBDREkgc3BlYy4KIwojIE5PVEU6IHdlIGludGVudGlvbmFsbHkgZG8gTk9UIHNoaXAgdGhlIE5WTUwgZGV2aWNlLXBsdWdpbiBEYWVtb25TZXQgaGVyZS4gT24KIyBEb2NrZXIgRGVza3RvcC9XU0wyIGl0IGNhbid0IGluaXRpYWxpc2UgTlZNTCAoRVJST1JfTk9UX1NVUFBPUlRFRCksIHdvdWxkCiMgcmVnaXN0ZXIgMCBHUFVzLCBhbmQgLS0gb3duaW5nIHRoZSBudmlkaWEuY29tL2dwdSBleHRlbmRlZCByZXNvdXJjZSAtLSB3b3VsZAojIG92ZXJ3cml0ZSB0aGUgaW5zdGFsbGVyJ3Mgbm9kZS1yZXNvdXJjZSBwYXRjaCB3aXRoIDAsIHN0cmFuZGluZyBqb2JzLiBHUFUKIyBjYXBhY2l0eSBpcyBhZHZlcnRpc2VkIGJ5IHRoZSBpbnN0YWxsZXIgdmlhIGEgbm9kZS1zdGF0dXMgcGF0Y2ggaW5zdGVhZC4KLS0tCmFwaVZlcnNpb246IG5vZGUuazhzLmlvL3YxCmtpbmQ6IFJ1bnRpbWVDbGFzcwptZXRhZGF0YToKICBuYW1lOiBudmlkaWEKaGFuZGxlcjogbnZpZGlhCg=='
 
@@ -2849,8 +3055,9 @@ function Set-DailyUserProvisioning {
 #  guard_leftover_data (scripts/lib/cluster.sh). A NEW install must never
 #  silently adopt data an earlier install left under HOST_DATA_DIR. Windows is
 #  hostpath-only (New-K3dCluster always bind-mounts HOST_DATA_DIR -> /tracebloc);
-#  node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows path,
-#  so this is intentionally scoped to hostpath. Non-interactive knobs mirror the
+#  node-local (RFC-0003 Option C) is the Linux/k3s default since the D15 flip
+#  (client#456) but still has no Windows path, so this is intentionally scoped to
+#  hostpath. Non-interactive knobs mirror the
 #  bash env contract: $env:TB_LEFTOVER_ACTION (reuse|wipe), $env:HOST_DATA_DIR
 #  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
 # =============================================================================
@@ -3128,10 +3335,20 @@ function Test-K3sVersionDrift {
     $cudaTag = $Matches[1]
     if ($cudaTag -match '^(.+?)-cuda-') { $runningK3s = $Matches[1] } else { $runningK3s = $cudaTag }
   }
+  # The wording below names "predates the current pin" FIRST on purpose. backend#2448
+  # made drift the COMMON case rather than the exception: moving the pin 1.29.4 ->
+  # 1.36.3 marks every pre-existing cluster as drifted, and for those operators
+  # neither original cause -- an unpinned installer, or K8S_VERSION=latest -- is what
+  # happened. Keep in step with the bash twin.
+  #
+  # Comments stay OUT of the Warn..Write-RecreateClusterHint run: the backend#2077
+  # source guard asserts the remedy follows "not the validated pin" within 600
+  # characters, and a comment block wedged between them pushed it past that and
+  # reddened a guard this change never touched.
   if ($runningK3s -ne "" -and $runningK3s -ne $K8S_VERSION) {
     Warn "The existing '$CLUSTER_NAME' cluster runs k3s '$runningK3s', not the validated pin '$K8S_VERSION'."
     Hint "k3s version is fixed when the cluster is created -- it can't be changed on a running cluster."
-    Hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+    Hint "Either this cluster predates the current pin, or it was created by an unpinned installer / with K8S_VERSION=latest (#547). To move"
     Hint "onto the validated version, recreate it:"
     Write-RecreateClusterHint
     Hint "  (data under HOST_DATA_DIR is kept; recreate rebinds it.)"
@@ -3616,8 +3833,12 @@ function New-K3dCluster {
     #
     # local-storage is disabled UNCONDITIONALLY here, where cluster.sh gates it on
     # TB_STORAGE_MODE. That is correct only because Windows is hostpath-only:
-    # node-local (RFC-0003 Option C) is a Linux/k3s prototype with no Windows
-    # path, the same reason Invoke-LeftoverDataGuard above is hostpath-scoped. If
+    # node-local (RFC-0003 Option C) is the Linux/k3s default since the D15 flip
+    # (client#456) but has no Windows path, the same reason Invoke-LeftoverDataGuard
+    # above is hostpath-scoped -- and the same reason Assert-NodesSeeHostData runs
+    # unconditionally at the end of New-K3dCluster, where the bash twin gates it on
+    # TB_STORAGE_MODE (a node-local cluster has NO host mount, so probing one there
+    # would refuse every install). If
     # you add a Windows node-local path, this flag has to become conditional too
     # or every dataset PVC stays Pending against a StorageClass that does not
     # exist. scripts/tests/k3s-components-agreement.sh trips the moment this file
@@ -3644,7 +3865,7 @@ function New-K3dCluster {
     # proactively; on a cgroup v2 host it is a no-op.
     #
     # GATED, and the gate is load-bearing: --fail-cgroupv1 was ADDED in kubelet
-    # 1.31, so passing it to the 1.29.4 kubelet we pin today would be an unknown
+    # 1.31, so passing it to a pre-1.31 kubelet would be an unknown
     # flag and the kubelet would fail to start. Keep this in lockstep with the
     # bash twin in scripts/lib/cluster.sh.
     # NEVER cast an unvalidated string with [version] -- it THROWS, and this runs
@@ -3899,6 +4120,13 @@ function New-K3dCluster {
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
 
   Set-ClusterAutostart
+
+  # Last thing cluster setup does, and the first point where the question can be
+  # answered: the nodes are up and the bind mount (if any) is in effect, and it is
+  # still before helm writes anything (backend#2422). Mirrors the bash twin, which
+  # calls _verify_nodes_see_host_data at the end of its own cluster path -- NOT
+  # from the helm install function, which is a different layer.
+  Assert-NodesSeeHostData
 }
 
 # =============================================================================
@@ -4265,7 +4493,18 @@ function Get-CarriedTrainingValues {
     $valsJson = (helm get values $TB_NAMESPACE -n $TB_NAMESPACE -o json 2>$null) | Out-String
     if ($LASTEXITCODE -ne 0 -or -not $valsJson.Trim()) { return $null }
     $vals = $valsJson | ConvertFrom-Json
-    $prev = $vals.env.RESOURCE_LIMITS
+    # READ RESOURCE_REQUESTS, FALL BACK TO RESOURCE_LIMITS (backend#2418, Bugbot
+    # High on client#820). This read RESOURCE_LIMITS only, which was fine while
+    # both fields held the same string. Since L0.2 the limits half is
+    # memory-only, so reading it here breaks a REINSTALL two ways: the carried
+    # "size" comes back as `memory=29Gi` and is written into RESOURCE_REQUESTS,
+    # DROPPING the cpu request; and the historic-literal gate below no longer
+    # matches, so the post-filter default is mistaken for a deliberate choice
+    # and the machine is never re-sized. RESOURCE_REQUESTS still carries the
+    # whole envelope; LIMITS stays the fallback for a release installed before
+    # requests was written, or a chart-direct install that set only that key.
+    $prev = $vals.env.RESOURCE_REQUESTS
+    if (-not $prev) { $prev = $vals.env.RESOURCE_LIMITS }
     # The historic static default was the ABSENCE of a choice -- carrying it
     # would keep the unschedulable 8Gi on exactly the machines this sizing
     # exists to fix (Bugbot). Only a differing value survives re-install.
@@ -5331,7 +5570,7 @@ function Install-ClientHelm {
   }
   Log "Training size: $trainingSize"
   $envBlock += @"
-  RESOURCE_LIMITS: "$trainingSize"
+  RESOURCE_LIMITS: "$(Get-TrainingLimits $trainingSize)"
   RESOURCE_REQUESTS: "$trainingSize"
   # Who chose the pair above (backend#2220). Bookkeeping only -- it never changes
   # the envelope. "unknown" means the value was carried forward from before this

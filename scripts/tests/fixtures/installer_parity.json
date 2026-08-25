@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "issue": "tracebloc/client#772",
   "purpose": [
     "One table of CLUSTER STATES, driven through BOTH installers, asserting identical",
@@ -32,7 +32,8 @@
     "size": "what the installer writes to RESOURCE_LIMITS / RESOURCE_REQUESTS",
     "provenance": "installer | user | unknown -- who chose that size",
     "undersized": "machine measured, below the training floor, honest remainder written",
-    "unschedulable": "machine measured, cannot host even a 1-core/1-GiB run"
+    "unschedulable": "machine measured, cannot host even a 1-core/1-GiB run",
+    "limits": "what the installer writes to RESOURCE_LIMITS -- the size MINUS its cpu dimension (backend#2418 L0.2: cpu is a share weight with no ceiling, memory stays requests == limits). A SECOND shared contract, so it belongs here: a real divergence was found in it during development -- the bash twin matched `cpu=*` without trimming, so `cpu=7, memory=29Gi` kept the cpu limit on Linux/macOS while PowerShell's .Trim() dropped it."
   },
   "excluded_from_parity": [
     {
@@ -46,91 +47,169 @@
       "why": "the ordinary field case -- an 8c/32Gi box",
       "nodes": "8 32Gi",
       "carried": "none",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     },
     {
       "label": "viable-large-node",
       "why": "guards the ps1 Int32 overload (divergence 2): 61 GiB in bytes exceeds 2^31",
       "nodes": "16 64Gi",
       "carried": "none",
-      "expect": { "size": "cpu=15,memory=61Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=15,memory=61Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=61Gi"
+      }
     },
     {
       "label": "heterogeneous-incomparable",
       "why": "the anchor tie-break (divergence 1). bash ranked (memory,cpu) and would pick 4c/32Gi; the contract's order is (cpu,memory) so 8c/16Gi wins.",
       "nodes": "8 16Gi;4 32Gi",
       "carried": "none",
-      "expect": { "size": "cpu=7,memory=13Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=13Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=13Gi"
+      }
     },
     {
       "label": "node-order-reversed",
       "why": "the anchor must not depend on the order the API returned nodes in",
       "nodes": "4 32Gi;8 16Gi",
       "carried": "none",
-      "expect": { "size": "cpu=7,memory=13Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=13Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=13Gi"
+      }
     },
     {
       "label": "one-unparseable-one-valid",
       "why": "divergence 3. ps1 coerced the bad node to 0 and ranked it, so 16 cores with a memory unit we do not speak took the anchor and dropped the whole machine to the literal.",
       "nodes": "16 64GB;8 32Gi",
       "carried": "none",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     },
     {
       "label": "unparseable-cpu-one-valid",
       "why": "same as above on the CPU dimension",
       "nodes": "sixteen 64Gi;8 32Gi",
       "carried": "none",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     },
     {
       "label": "all-nodes-unparseable",
       "why": "divergence 5. Nothing was measured, so the literal is right and any claim about machine SIZE is a fabrication -- unschedulable must stay false.",
       "nodes": "sixteen 64GB;eight lots",
       "carried": "none",
-      "expect": { "size": "cpu=2,memory=8Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=2,memory=8Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=8Gi"
+      }
     },
     {
       "label": "below-floor-but-requestable",
       "why": "4 GiB - 3 GiB = 1 GiB, under the 2 GiB floor but still a requestable shape. The honest remainder FITS; the 8 GiB literal would not.",
       "nodes": "2 4Gi",
       "carried": "none",
-      "expect": { "size": "cpu=1,memory=1Gi", "provenance": "installer", "undersized": true, "unschedulable": false }
+      "expect": {
+        "size": "cpu=1,memory=1Gi",
+        "provenance": "installer",
+        "undersized": true,
+        "unschedulable": false,
+        "limits": "memory=1Gi"
+      }
     },
     {
       "label": "too-small-to-request",
       "why": "cpu=0 is not a training request, so there is no honest number -- keep the literal and say so. Measured, unlike all-nodes-unparseable.",
       "nodes": "500m 512Mi",
       "carried": "none",
-      "expect": { "size": "cpu=2,memory=8Gi", "provenance": "installer", "undersized": false, "unschedulable": true }
+      "expect": {
+        "size": "cpu=2,memory=8Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": true,
+        "limits": "memory=8Gi"
+      }
     },
     {
       "label": "exact-floor",
       "why": "5 GiB - 3 GiB = exactly the 2 GiB floor: viable, not undersized. The off-by-one that decides whether an edge can train.",
       "nodes": "2 5Gi",
       "carried": "none",
-      "expect": { "size": "cpu=1,memory=2Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=1,memory=2Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=2Gi"
+      }
     },
     {
       "label": "carried-read-fails",
       "why": "divergence 4, the fail-unsafe one. Nothing is carried, so the machine is sized and `installer` is the TRUE answer. ps1 used to say installer for a CARRIED size; bash used to say unknown.",
       "nodes": "8 32Gi",
       "carried": "read-fails",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     },
     {
       "label": "carried-read-empty",
       "why": "the read succeeded but said nothing -- same verdict as a failure, and not `unknown`",
       "nodes": "8 32Gi",
       "carried": "read-empty",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     },
     {
       "label": "carried-size-no-marker",
       "why": "a pre-#768 release. `unknown` is correct HERE because the read SUCCEEDED and there is genuinely no marker -- and consumers must treat it as a human choice.",
       "nodes": "8 32Gi",
       "carried": "cpu=4,memory=12Gi",
-      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "unknown", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=4,memory=12Gi",
+        "provenance": "unknown",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=12Gi"
+      }
     },
     {
       "label": "carried-size-user-marker",
@@ -138,7 +217,13 @@
       "nodes": "8 32Gi",
       "carried": "cpu=4,memory=12Gi",
       "carried_provenance": "user",
-      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "user", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=4,memory=12Gi",
+        "provenance": "user",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=12Gi"
+      }
     },
     {
       "label": "carried-size-installer-marker",
@@ -146,7 +231,13 @@
       "nodes": "8 32Gi",
       "carried": "cpu=4,memory=12Gi",
       "carried_provenance": "installer",
-      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=4,memory=12Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=12Gi"
+      }
     },
     {
       "label": "carried-size-junk-marker",
@@ -154,7 +245,13 @@
       "nodes": "8 32Gi",
       "carried": "cpu=4,memory=12Gi",
       "carried_provenance": "banana",
-      "expect": { "size": "cpu=4,memory=12Gi", "provenance": "unknown", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=4,memory=12Gi",
+        "provenance": "unknown",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=12Gi"
+      }
     },
     {
       "label": "carried-historic-literal",
@@ -162,7 +259,13 @@
       "nodes": "8 32Gi",
       "carried": "cpu=2,memory=8Gi",
       "carried_provenance": "user",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     },
     {
       "label": "install-time-override",
@@ -170,35 +273,65 @@
       "nodes": "8 32Gi",
       "carried": "none",
       "override": "cpu=4,memory=16Gi",
-      "expect": { "size": "cpu=4,memory=16Gi", "provenance": "user", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=4,memory=16Gi",
+        "provenance": "user",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=16Gi"
+      }
     },
     {
       "label": "cordoned-large-node-skipped",
       "why": "backend#2237, the defect itself. The contract's skipped_nodes has always said `spec.unschedulable (cordoned)` is skipped, but NEITHER installer asked the API for the field, so neither could honour it -- and the golden generator pre-filtered cordoned nodes, so the contract's own one-cordoned-out vector never handed a cordoned node to the code under test. A cordoned 16c/64Gi node beside a live 4c/16Gi one took the anchor, and the installer wrote an envelope that cannot schedule: training pods sit Pending with no obvious cause. The live node must win.",
       "nodes": "16 64Gi true;4 16Gi",
       "carried": "none",
-      "expect": { "size": "cpu=3,memory=13Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=3,memory=13Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=13Gi"
+      }
     },
     {
       "label": "cordoned-small-node-ignored",
       "why": "the mirror of the row above, and the reason it is not enough on its own: a filter that always dropped the LARGEST node would satisfy cordoned-large-node-skipped while being completely wrong. Here the cordoned node is the small one, so the 16c/64Gi anchor must survive.",
       "nodes": "16 64Gi;4 16Gi true",
       "carried": "none",
-      "expect": { "size": "cpu=15,memory=61Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=15,memory=61Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=61Gi"
+      }
     },
     {
       "label": "all-nodes-cordoned",
       "why": "every node cordoned means the machine was never MEASURED, which is not the same as measured-and-too-small. It takes the unreadable-cluster branch and keeps the literal, exactly as all-nodes-unparseable does -- and critically it must NOT set the undersized/unschedulable warnings, which would tell an operator their hardware is too small when the real cause is a cordon they can undo.",
       "nodes": "16 64Gi true;8 32Gi true",
       "carried": "none",
-      "expect": { "size": "cpu=2,memory=8Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=2,memory=8Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=8Gi"
+      }
     },
     {
       "label": "explicit-unschedulable-false-is-schedulable",
       "why": "the third field's value domain, tested rather than assumed (backend#1729 rule 6). Kubernetes declares Unschedulable with `omitempty`, so in practice the field is either ABSENT or the literal `true` -- but both readers must key on `true`, never on non-emptiness, or an API server that ever serialises `false` would read as cordoned and the node would vanish from sizing. Cheap to pin, silent and total if wrong.",
       "nodes": "8 32Gi false",
       "carried": "none",
-      "expect": { "size": "cpu=7,memory=29Gi", "provenance": "installer", "undersized": false, "unschedulable": false }
+      "expect": {
+        "size": "cpu=7,memory=29Gi",
+        "provenance": "installer",
+        "undersized": false,
+        "unschedulable": false,
+        "limits": "memory=29Gi"
+      }
     }
   ]
 }

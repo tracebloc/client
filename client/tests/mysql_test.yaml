@@ -371,3 +371,27 @@ tests:
           value: false
       - notExists:
           path: spec.template.spec.serviceAccountName
+
+  # backend#947 Phase 0: MYSQL_ROOT_PASSWORD env is gated on rotateMysqlRoot so a
+  # default install relies on the image's baked default (byte-identical).
+  - it: no chart-managed root password env by default (byte-for-byte off)
+    template: templates/mysql-deployment.yaml
+    asserts:
+      # The mysql-client container has no env block at all by default — relying
+      # on the image's baked MYSQL_ROOT_PASSWORD — so the whole key is absent.
+      - notExists:
+          path: spec.template.spec.containers[0].env
+
+  - it: injects MYSQL_ROOT_PASSWORD from the Secret when rotateMysqlRoot is on
+    template: templates/mysql-deployment.yaml
+    set:
+      rotateMysqlRoot: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MYSQL_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-secrets
+                key: MYSQL_ROOT_PASSWORD

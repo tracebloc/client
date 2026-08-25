@@ -49,7 +49,7 @@ wired up, the installer falls back to the stock image and CPU (see #616 Layer 1)
 
 ```bash
 # local build (no push)
-K3S_TAG=v1.29.4-k3s1 ./build.sh
+K3S_TAG=v1.36.3-k3s1 ./build.sh
 
 # build + push to ghcr.io/tracebloc/k3s-cuda:<k3s>-cuda-<cuda>
 PUSH=true ./build.sh
@@ -62,5 +62,5 @@ Or run the **build-k3s-cuda** GitHub workflow (manual `workflow_dispatch`; set
 
 `K3S_TAG` **must** equal the installer's `K8S_VERSION`
 (`scripts/lib/common.sh`). The image tag encodes both the k3s pin and the CUDA
-base — e.g. `v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04` — so a new k8s pin can
+base — e.g. `v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04` — so a new k8s pin can
 never silently reuse a stale GPU image. Bump both together.

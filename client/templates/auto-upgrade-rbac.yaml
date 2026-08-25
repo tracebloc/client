@@ -132,12 +132,28 @@ rules:
     resources: ["clusterroles", "clusterrolebindings"]
     verbs:
       ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
-  # resource-monitor-daemonset.yaml pre-flights metrics-server with a helm
-  # `lookup` of the v1beta1.metrics.k8s.io APIService. After the cluster-admin
-  # cutover the scoped SA runs that lookup during `helm upgrade`; a 403 makes
-  # `lookup` return empty, which the template's `fail` misreads as
-  # "metrics-server missing" and aborts every subsequent auto-upgrade tick.
-  # Read-only access to apiservices lets the lookup resolve (backend#953 Bugbot).
+  # resource-monitor-daemonset.yaml pre-flights metrics-server during
+  # `helm upgrade`, and after the cluster-admin cutover this scoped SA is what
+  # runs it. BOTH reads below are load-bearing; missing either aborts every
+  # subsequent auto-upgrade tick.
+  #
+  # CORRECTION (backend#2469): this comment used to say a 403 makes `lookup`
+  # "return empty, which the template's `fail` misreads as metrics-server
+  # missing". That is WRONG, and the difference matters. A forbidden `lookup`
+  # RAISES -- helm aborts the render with `error calling lookup: ... is
+  # forbidden` and never reaches the `fail`, so the whole release dies rather
+  # than producing a misleading message. Measured, with the error text, while
+  # enabling the edge Collector on tb-client-dev-templates. `lookup` has three
+  # outcomes, not two: sees the cluster, returns empty (offline), or raises.
+  #
+  # NO NEW READS HERE. backend#2469 briefly added a `deployments` get so the
+  # preflight could probe a metrics-server Deployment first. That is a fleet-wide
+  # lockout: the tick that would APPLY the grant is the tick that needs it, so the
+  # first auto-upgrade onto such a chart 403s, --atomic rolls back, and the grant
+  # can never arrive. Any new `lookup` of a resource this SA cannot ALREADY read
+  # has the same shape. The preflight's escape hatch is a values flag instead.
+  # (Bugbot High on client#823.)
+  # The preflight's only privileged call (backend#953 Bugbot).
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
     verbs: ["get", "list", "watch"]
