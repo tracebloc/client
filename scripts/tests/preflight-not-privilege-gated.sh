@@ -1,88 +1,96 @@
 #!/usr/bin/env bash
-# The metrics-server preflight must not require cluster-scope RBAC to RENDER.
+# The metrics-server preflight must not lock anyone out -- operator or cron.
 #
-# client#2469. `lookup` has three outcomes, not two: it sees the cluster, it
+# backend#2469. `lookup` has three outcomes, not two: it sees the cluster, it
 # returns empty (offline), or it RAISES on forbidden -- and helm cannot catch the
-# third. `APIService` is cluster-scoped and Kubernetes' built-in `admin`
-# ClusterRole excludes it, so an unconditional lookup meant a namespace admin
-# could not `helm upgrade` this chart AT ALL -- the whole release, not just this
-# DaemonSet -- with an error that blamed metrics-server.
+# third. Two distinct lockouts follow from that, and this guard exists because a
+# fix for one of them created the other:
 #
-# WHY A SOURCE CHECK AND NOT A CHART TEST. helm-unittest renders offline, where
-# every `lookup` returns empty, so it never reaches the privileged call and cannot
-# tell a guarded lookup from an unguarded one. Mutation-proved: disabling the guard
-# leaves all 566 chart tests green. The ordering is only observable in the template
-# text, which is what this parses.
+#   1. `APIService` is cluster-scoped and the built-in `admin` ClusterRole excludes
+#      it, so an operator with only namespace-scoped admin could not `helm upgrade`
+#      the chart AT ALL. The escape hatch is nodeAgents.metricsServerPreflight.
+#
+#   2. The first attempt at (1) probed a `metrics-server` Deployment first and
+#      granted the auto-upgrade SA a matching read. THE TICK THAT WOULD APPLY THE
+#      GRANT IS THE TICK THAT NEEDS IT -- the scoped SA renders before the
+#      ClusterRole lands, 403s, `--atomic` rolls back, and every later hourly tick
+#      fails identically. A permanent fleet-wide lockout. (Bugbot High.)
+#
+# So the invariant is: THE PREFLIGHT MAKES NO PRIVILEGED CALL THE CURRENT
+# ServiceAccount CANNOT ALREADY MAKE, and its one privileged call is gated by a
+# values flag.
+#
+# WHY A SOURCE CHECK. helm-unittest renders offline, where every `lookup` returns
+# empty, so it never reaches any of these branches and cannot tell a gated lookup
+# from an ungated one -- mutation-proved: removing the gate leaves the chart suite
+# green. The structure is only observable in the template text.
 #
 # FAILS CLOSED: a missing file, or a guard shape it cannot recognise, is an ERROR.
-# "Could not tell" is a finding, not a pass.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 tpl="$repo_root/client/templates/resource-monitor-daemonset.yaml"
+rbac="$repo_root/client/templates/auto-upgrade-rbac.yaml"
 
 fail() { echo "[ERROR] $*" >&2; exit 1; }
 
-[ -f "$tpl" ] || fail "$tpl is missing -- cannot check, which is a finding"
+[ -f "$tpl" ]  || fail "$tpl is missing -- cannot check, which is a finding"
+[ -f "$rbac" ] || fail "$rbac is missing -- cannot check, which is a finding"
 
-echo "== preflight is not privilege-gated =="
+echo "== preflight locks nobody out =="
 
-# Capture-then-slice, not `grep ... | head -1`: piping into an early-closing
-# reader under this file's `set -euo pipefail` aborts the guard on SIGPIPE, which
-# scripts/tests/pipefail-early-close.bats forbids tree-wide. Same idiom as
-# node-jsonpath-agreement.sh.
-first_line_of() {
-  local all=""
-  all="$(grep -n "$1" "$2")" || true
-  all="${all%%$'\n'*}"
-  printf '%s' "${all%%:*}"
-}
+# STRIP COMMENTS FIRST. The previous version grepped the whole file for
+# `metricsServerPreflight`, and that string also appears in the explanatory
+# comment -- so deleting the real `else if` still went green. A guard that a
+# comment can satisfy is not a guard. (Bugbot Medium on client#823.)
+code="$(sed -e 's/{{\/\*.*\*\/}}//g' "$tpl" | awk '
+  /\{\{\/\*/ { inc=1 }
+  !inc       { print }
+  /\*\/\}\}/ { inc=0 }
+')"
 
-priv_line="$(first_line_of 'lookup "apiregistration.k8s.io/v1" "APIService"' "$tpl")"
-[ -n "$priv_line" ] || fail \
-"no APIService lookup found in $(basename "$tpl"). Either the preflight was removed -- then delete this check too, deliberately -- or it changed shape and this check can no longer see it. Not knowing is a finding."
+# 1. The ONLY privileged lookup is the already-granted APIService one.
+priv_kinds="$(grep -oE 'lookup "[^"]+" "[^"]+"' <<<"$code" | sort -u || true)"
+while IFS= read -r call; do
+  [ -n "$call" ] || continue
+  case "$call" in
+    'lookup "v1" "Namespace"') ;;                                  # any reader can
+    'lookup "apiregistration.k8s.io/v1" "APIService"') ;;           # granted by backend#953
+    *) fail "the preflight makes a lookup this guard does not recognise as safe: $call
+   Any lookup of a resource the auto-upgrade ServiceAccount cannot ALREADY read is
+   a permanent fleet-wide lockout -- the tick that would grant it is the tick that
+   needs it. If this call is genuinely safe, grant it in auto-upgrade-rbac.yaml in
+   an EARLIER release and add it here deliberately (backend#2469)." ;;
+  esac
+done <<<"$priv_kinds"
 
-cheap_line="$(first_line_of 'lookup "apps/v1" "Deployment" "kube-system" "metrics-server"' "$tpl")"
-[ -n "$cheap_line" ] || fail \
-"the APIService lookup at line $priv_line is not preceded by a metrics-server Deployment probe. A caller with only namespace-scoped admin cannot read APIServices, so helm RAISES and the entire upgrade dies. Probe something the caller can read first (client#2469)."
+# 2. That one call is gated by the values flag -- asserted on CODE, not comments.
+grep -qE '^\s*\{\{-?\s*if .*metricsServerPreflight' <<<"$code" || fail \
+"no values gate on the APIService lookup. nodeAgents.metricsServerPreflight is the
+   only escape hatch for a caller who cannot read APIServices; without a real
+   \`if\` on it the flag is inert while looking present."
 
-if [ "$cheap_line" -ge "$priv_line" ]; then
-  fail "the metrics-server Deployment probe (line $cheap_line) must come BEFORE the APIService lookup (line $priv_line), or the privileged call is still reached first and the ordering buys nothing."
-fi
+# 3. A skipped check must not look like a passed one.
+grep -q 'tracebloc.io/metrics-server-preflight' <<<"$code" || fail \
+"the render does not record which preflight path decided. A skip indistinguishable
+   from a pass is the failure this guard exists to prevent."
 
-grep -q 'metricsServerPreflight' "$tpl" || fail \
-"no nodeAgents.metricsServerPreflight opt-out in $(basename "$tpl"). Without it, a caller who can neither read APIServices nor match the Deployment probe cannot render the chart at all."
-
-grep -q 'tracebloc.io/metrics-server-preflight' "$tpl" || fail \
-"the render does not record which preflight path decided. A skip indistinguishable from a pass is the failure this check exists to prevent."
-
-echo "  ok: metrics-server Deployment probe (line $cheap_line) precedes the APIService lookup (line $priv_line)"
-echo "  ok: nodeAgents.metricsServerPreflight opt-out present"
-# The probe is only cheap if the caller that actually renders on every tick can
-# READ it. After the cluster-admin cutover that caller is the auto-upgrade
-# ServiceAccount, so a probe outside its scoped role is a 403 -> helm raises ->
-# `--atomic` rolls the tick back: a lockout on the UNATTENDED path, strictly worse
-# than the human-hits-it-once lockout the probe exists to fix. (@saadqbal, client#823.)
-rbac="$repo_root/client/templates/auto-upgrade-rbac.yaml"
-[ -f "$rbac" ] || fail "$rbac is missing -- cannot check the caller's reads, which is a finding"
-
-grep -q 'resources: \["deployments"\]' "$rbac" || fail \
-"the auto-upgrade scoped role does not grant 'deployments', but the preflight probes a metrics-server Deployment FIRST. Every hourly auto-upgrade tick would 403 on that probe and roll back under --atomic. Grant it in auto-upgrade-rbac.yaml (client#823)."
-
-# ...but NARROWLY. The preflight reads one named object; a cluster-wide
-# list/watch on every Deployment reopens the blast radius backend#953 closed.
-grep -q 'resourceNames: \["metrics-server"\]' "$rbac" || fail \
-"the deployments grant is not restricted with resourceNames: [\"metrics-server\"]. The preflight reads exactly one object, so a cluster-wide Deployment read buys nothing and reopens the workload-read blast radius backend#953 removed (Bugbot on client#823)."
-
-deployments_rule="$(grep -A3 'resources: \["deployments"\]' "$rbac")" || true
-if grep -qE 'verbs:.*"(list|watch)"' <<<"$deployments_rule"; then
-  fail "the deployments grant includes list or watch. resourceNames does not restrict collection verbs -- Kubernetes ignores it for list/watch -- so those would grant enumeration of every Deployment in the cluster. A named get is all the preflight needs."
-fi
-
+# 4. The auto-upgrade SA keeps the read the one privileged call needs.
 grep -q 'resources: \["apiservices"\]' "$rbac" || fail \
-"the auto-upgrade scoped role does not grant 'apiservices', so the preflight's authoritative fallback would 403 on any cluster where the Deployment probe finds nothing (backend#953)."
+"the auto-upgrade scoped role does not grant 'apiservices', so the preflight's one
+   privileged call would 403 on every hourly tick (backend#953)."
 
+# 5. ...and gained no NEW reads, which is how lockout (2) happened.
+if grep -qE '^\s*resources: \["deployments"\]' "$rbac"; then
+  fail "auto-upgrade-rbac.yaml grants 'deployments'. That was added to support a
+   Deployment probe in the preflight and is a fleet-wide lockout: the first tick
+   onto such a chart renders BEFORE the grant lands, 403s, and --atomic rolls it
+   back forever. Remove both the probe and the grant (Bugbot High on client#823)."
+fi
+
+echo "  ok: the only privileged lookup is the already-granted APIService one"
+echo "  ok: it is gated by nodeAgents.metricsServerPreflight (asserted on code, not comments)"
 echo "  ok: the deciding path is recorded on the object"
-echo "  ok: the auto-upgrade role grants BOTH reads the preflight can make"
-echo "preflight not privilege-gated: green"
+echo "  ok: auto-upgrade keeps 'apiservices' and gained no new reads"
+echo "preflight locks nobody out: green"

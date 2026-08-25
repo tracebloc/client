@@ -235,15 +235,12 @@ tests:
           path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
           value: skipped-offline
 
-  - it: still renders with the preflight opted out
-    template: templates/resource-monitor-daemonset.yaml
-    set:
-      nodeAgents:
-        metricsServerPreflight: false
-    asserts:
-      - exists:
-          path: metadata.annotations["tracebloc.io/metrics-server-preflight"]
-
+  # NOTE: there is deliberately no "opted out" chart test here. helm-unittest
+  # renders offline, where `lookup` is always empty, so `$probe` is false and the
+  # opt-out branch is unreachable -- the assertion would pass on the offline
+  # default and prove nothing. Bugbot caught exactly that. The branch is asserted
+  # on the template source in scripts/tests/preflight-not-privilege-gated.sh, which
+  # strips comments first so the flag's mention in prose cannot satisfy it.
   - it: keeps the DaemonSet itself unchanged by the preflight rework
     template: templates/resource-monitor-daemonset.yaml
     asserts:

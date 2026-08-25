@@ -146,31 +146,14 @@ rules:
   # enabling the edge Collector on tb-client-dev-templates. `lookup` has three
   # outcomes, not two: sees the cluster, returns empty (offline), or raises.
   #
-  # `deployments` is the CHEAP probe the preflight tries first, precisely so a
-  # caller holding only namespace-scoped admin -- who cannot read apiservices at
-  # all -- can still render the chart. It must be granted here or this SA 403s on
-  # that probe and `--atomic` rolls back every hourly tick: a lockout on the
-  # UNATTENDED path, strictly worse than the human-hits-it-once lockout
-  # backend#2469 set out to fix. (@saadqbal on client#823.)
-  #
-  # NAMED get, not cluster-wide list/watch. The preflight reads exactly one
-  # object -- the metrics-server Deployment -- so `list`/`watch` on every
-  # Deployment in every namespace would reopen the workload-read blast radius
-  # backend#953 closed, to buy nothing. resourceNames restricts this to a GET of
-  # a resource with that name. (Bugbot Medium on client#823.)
-  #
-  # WHY NOT a namespaced Role in kube-system, which would be narrower still: the
-  # scoped SA can only create Roles there via the gpu-device-plugin block below,
-  # which is gated on `$dp.enabled`. An unconditional kube-system Role would
-  # therefore 403 on upgrade for every install with the device plugin off --
-  # trading this grant for a new lockout on the unattended path, which is the
-  # exact mistake this PR already made once.
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    resourceNames: ["metrics-server"]
-    verbs: ["get"]
-  # The AUTHORITATIVE fallback, used only when the Deployment probe finds
-  # nothing (backend#953 Bugbot).
+  # NO NEW READS HERE. backend#2469 briefly added a `deployments` get so the
+  # preflight could probe a metrics-server Deployment first. That is a fleet-wide
+  # lockout: the tick that would APPLY the grant is the tick that needs it, so the
+  # first auto-upgrade onto such a chart 403s, --atomic rolls back, and the grant
+  # can never arrive. Any new `lookup` of a resource this SA cannot ALREADY read
+  # has the same shape. The preflight's escape hatch is a values flag instead.
+  # (Bugbot High on client#823.)
+  # The preflight's only privileged call (backend#953 Bugbot).
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
     verbs: ["get", "list", "watch"]
