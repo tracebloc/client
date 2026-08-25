@@ -45,6 +45,39 @@
 #  needs a cluster, a proxy or a network.
 # =============================================================================
 
+# Only the manifest-landing test parses the rendered pod YAML with python3 +
+# PyYAML; the five curl-probe tests use POSIX sh/awk/sed/grep only. Call this at
+# the TOP of the YAML test so a box that lacks either tool gets a clear skip
+# naming what is missing, rather than an opaque
+# `ModuleNotFoundError: No module named 'yaml'` from deep inside the assertion
+# (client#827). Guarding here rather than in setup() keeps the curl-probe
+# regression tests — the reason this file exists — running when only PyYAML is
+# absent, which is the faithful analogue of chart-pull-secret.bats's require_tool
+# (there EVERY test renders a chart, so it guards in setup(); here only one test
+# needs the tool). That file's require_tool also only covers the python3 *binary*
+# and not the PyYAML *module*, so its missing-PyYAML case is still opaque; the
+# elif below closes that gap for this suite.
+#
+# `CI=true` (set by GitHub Actions on every runner) turns a missing tool into a
+# hard failure instead of a skip: in a required gate a silent skip is
+# indistinguishable from a pass, which is the inert-verification trap #751 hit.
+require_yaml_tooling() {
+  local missing=""
+  if ! command -v python3 >/dev/null 2>&1; then
+    missing="python3"
+  elif ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    missing="python3 module 'yaml' (PyYAML)"
+  fi
+  [ -z "$missing" ] && return 0
+  if [ "${CI:-}" = "true" ]; then
+    echo "::error::$missing is missing in CI, so the rendered-YAML assertion in" >&2
+    echo "::error::$(basename "$BATS_TEST_FILENAME") would be skipped rather than run." >&2
+    echo "::error::Install it in the job instead of accepting a green skip." >&2
+    return 1
+  fi
+  skip "$missing not installed (local run)"
+}
+
 setup() {
   # shellcheck source=/dev/null
   source "${BATS_TEST_DIRNAME}/lib/e2e-common.sh"
@@ -148,6 +181,7 @@ _run_probe() {   # <deadline_s> <delay_s>
 }
 
 @test "the probe lands INSIDE the pod manifest's args — the rendered YAML parses and carries it" {
+  require_yaml_tooling
   # Renders the REAL egress-app manifest out of e2e-proxy.sh, using the script's
   # OWN interpolation line, and parses it. The snippet is spliced into a YAML
   # literal block scalar, so an indent that stops agreeing with the block either
