@@ -93,11 +93,11 @@ _drive_row() {
 
 @test "installer parity: every cluster state produces the declared verdict" {
   local failures=""
-  local row label nodes carried carried_prov override want_size want_prov want_under want_unsched
+  local row label nodes carried carried_prov override want_size want_prov want_under want_unsched want_limits
 
   for row in "${TB_PARITY_ROWS[@]}"; do
     IFS='|' read -r label nodes carried carried_prov override \
-                    want_size want_prov want_under want_unsched <<< "$row"
+                    want_size want_prov want_under want_unsched want_limits <<< "$row"
 
     _TB_ROW_NODES="$nodes"
     _TB_ROW_CARRIED="$carried"
@@ -113,6 +113,15 @@ _drive_row() {
       || failures+="  ${label}: undersized want '${want_under}' got '${_TB_TRAINING_UNDERSIZED:-0}'"$'\n'
     [ "${_TB_TRAINING_UNSCHEDULABLE:-0}" = "$want_unsched" ] \
       || failures+="  ${label}: unschedulable want '${want_unsched}' got '${_TB_TRAINING_UNSCHEDULABLE:-0}'"$'\n'
+    # schema_version 2 (backend#2418): the limits half is a SECOND shared
+    # contract, and the twins already diverged on it once -- bash matched
+    # `cpu=*` without trimming, so `cpu=7, memory=29Gi` kept the cpu limit here
+    # while PowerShell's .Trim() dropped it. Asserting it per-row is what makes
+    # that class of divergence fail rather than ship.
+    local got_limits
+    got_limits="$(_training_limits "$_TB_TRAINING_SIZE")"
+    [ "$got_limits" = "$want_limits" ] \
+      || failures+="  ${label}: limits want '${want_limits}' got '${got_limits}'"$'\n'
   done
 
   if [ -n "$failures" ]; then
