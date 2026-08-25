@@ -1500,9 +1500,13 @@ rotateMysqlRootByEnv:
 
 # Optional operator pin for the root password (3-tier resolution, mirrors
 # credmgrPassword). Leave "" to generate-and-persist on first install. Set for
-# DR, or to match a root account you rotated out-of-band. NOT constrained to
-# alphanumeric — it is only ever a connection parameter, never interpolated into
-# DDL.
+# DR, or to match a root account you rotated out-of-band. Must be alphanumeric
+# ([A-Za-z0-9]+): the backend#947 rotation runbook embeds this value in an
+# `ALTER USER ... IDENTIFIED BY '...'` statement, so a quote or metacharacter
+# would break the one-time rotation (generated randAlphaNum values already
+# satisfy this). This is why it is constrained where bootstrapDbPassword is not
+# — that one is only ever a mysql-connector connection parameter, this one also
+# lands in DDL.
 mysqlRootPassword: ""
 
 # ============================================================

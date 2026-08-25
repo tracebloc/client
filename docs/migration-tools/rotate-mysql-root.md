@@ -39,8 +39,9 @@ show in the node's `ps`). Instead every secret travels only over the `exec` stdi
 stream (encrypted): the auth password via a mode-600 `--defaults-extra-file`
 written and deleted inside the pod, and the new password via `mysql`'s own stdin.
 
-Both values here are alphanumeric (the chart generates `randAlphaNum`; keep any
-`mysqlRootPassword` pin alphanumeric too), so the single-quoted SQL below is safe.
+`NEWPW` is alphanumeric — the chart generates `randAlphaNum` and **enforces**
+`[A-Za-z0-9]+` on any `mysqlRootPassword` pin precisely because it lands in the
+`ALTER USER … IDENTIFIED BY '…'` below — so the single-quoted SQL is safe.
 
 ```bash
 NS=<ns>; REL=<release>

@@ -492,7 +492,7 @@
     },
     "mysqlRootPassword": {
       "type": "string",
-      "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. NOT constrained to alphanumeric — only ever a connection parameter, never interpolated into DDL."
+      "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. Must be alphanumeric ([A-Za-z0-9]+) — the rotation runbook embeds it in an ALTER USER ... IDENTIFIED BY '...' statement, so metacharacters would break the one-time rotation (generated randAlphaNum already satisfies this). Constrained where bootstrapDbPassword is not: that is only a connection parameter, this also lands in DDL."
     },
     "perIngestionTables": {
       "type": "boolean",
