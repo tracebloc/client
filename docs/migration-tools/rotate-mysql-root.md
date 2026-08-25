@@ -51,6 +51,15 @@ POD=$(kubectl -n "$NS" get pod -l app=mysql-client -o name | head -1); POD=${POD
 #         from the S0 snapshot / secret manager). Export both; never commit them.
 NEWPW=$(kubectl -n "$NS" get secret "$REL"-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
 
+# Refuse an empty password before we build any ALTER. An empty NEWPW (wrong
+# NS/REL, or rotateMysqlRoot is not actually on so the Secret has no
+# MYSQL_ROOT_PASSWORD key) would rotate root to an EMPTY password; an empty CURPW
+# can't authenticate. `${var:?msg}` aborts THIS command with msg — safe to paste
+# interactively, it won't exit your shell — the same fail-fast intent as
+# migrate-tenant.sh's MYSQL_ROOT_PW guard.
+: "${CURPW:?export CURPW — the fleet's current root password — before rotating}"
+: "${NEWPW:?empty: check NS/REL and that rotateMysqlRoot is enabled on this fleet (the Secret must carry MYSQL_ROOT_PASSWORD); refusing to rotate root to an empty password}"
+
 # `sh -s` reads the script from stdin; CURPW/NEWPW are expanded LOCALLY into that
 # stdin stream, so they reach the pod over the exec channel — never in any argv.
 kubectl -n "$NS" exec -i "$POD" -- sh -s <<SCRIPT
