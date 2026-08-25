@@ -463,3 +463,34 @@ _tier0_mocks() {
   _install_macos_autostart no-sudo >/dev/null 2>&1 || true
   [ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" = "0" ] || return 1
 }
+
+# ── the VM-memory offer must reach Tier 0 (backend#2221, Bugbot High on #832) ──
+# An already-running Colima VM IS Tier 0, and this branch returns before
+# install_docker_desktop — where the offer originally lived exclusively. So the
+# feature never fired on the only machines it exists for: an existing, under-sized
+# VM got nothing but the preflight warning it already had.
+@test "install_macos: tier 0 still makes the VM-memory offer" {
+  INSTALL_TIER=0
+  _tier0_mocks
+  _offer_colima_memory_raise() { record "_offer_colima_memory_raise"; }
+  run install_macos
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  grep -q "_offer_colima_memory_raise" <<<"$output" || return 1
+}
+
+@test "install_macos: tier 0 offers BEFORE installing the CLI tools" {
+  # Consent before a long download, not after it — otherwise the user waits
+  # through the tool install and is then asked to restart Docker.
+  INSTALL_TIER=0
+  _tier0_mocks
+  _offer_colima_memory_raise() { record "_offer_colima_memory_raise"; }
+  run install_macos
+  run mock_calls
+  local offer_line tools_line
+  offer_line="$(grep -n '_offer_colima_memory_raise' <<<"$output" | head -1 | cut -d: -f1)"
+  tools_line="$(grep -n 'install_macos_cli_tools' <<<"$output" | head -1 | cut -d: -f1)"
+  [ -n "$offer_line" ] || return 1
+  [ -n "$tools_line" ] || return 1
+  [ "$offer_line" -lt "$tools_line" ] || return 1
+}
