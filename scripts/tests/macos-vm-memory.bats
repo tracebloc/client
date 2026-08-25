@@ -266,3 +266,38 @@ calls() { cat "$MOCK_CALLS"; }
   [[ "$output" == *"colima start"* ]] || return 1
   [[ "$output" == *"Docker is down"* ]] || return 1
 }
+
+# ── a host too small to reach the floor (@LukasWodka on #832) ──────────────
+
+@test "REGRESSION: no offer when the best achievable target is still under the floor" {
+  # `_macos_vm_mem_gb` applies the host cap AFTER the safe floor
+  # (preflight.sh:189-192), so a 6 GB Mac yields a target of 4 against a floor of
+  # 5. Offering that would prompt for a restart that cannot fix the problem — and
+  # re-prompt every run, because the machine is the constraint, not the setting.
+  REPLY_IN="y" MEM_KB=$((3 * 1024 * 1024)) TARGET_GB=4 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "the too-small machine is named as the cause, not the setting" {
+  REPLY_IN="y" MEM_KB=$((3 * 1024 * 1024)) TARGET_GB=4 run _offer_colima_memory_raise
+  [[ "$output" == *"cannot spare 5 GB"* ]] || return 1
+  [[ "$output" == *"larger machine"* ]] || return 1
+}
+
+@test "a target that DOES clear the floor still offers" {
+  # The guard must not have closed the case the feature exists for.
+  REPLY_IN="y" MEM_KB=$((3 * 1024 * 1024)) TARGET_GB=8 \
+    MEM_KB_AFTER=$((8 * 1024 * 1024)) run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima start --memory 8$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+@test "a target exactly AT the floor offers" {
+  # >= not >: a VM at the floor is what the floor means.
+  REPLY_IN="y" MEM_KB=$((3 * 1024 * 1024)) TARGET_GB=5 \
+    MEM_KB_AFTER=$((5 * 1024 * 1024)) run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima start --memory 5$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}

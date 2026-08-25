@@ -234,6 +234,17 @@ _offer_colima_memory_raise() {
   (( current_gb < PF_MIN_MEM_GB )) || return 0
   (( target_gb > current_gb )) || return 0
 
+  # AND ONLY WHEN THE RAISE WOULD ACTUALLY CLEAR THE FLOOR (@LukasWodka on #832).
+  # `_macos_vm_mem_gb` applies the host cap AFTER the safe floor
+  # (preflight.sh:189-192), so on a small host the "target" comes back BELOW the
+  # floor -- a 6 GB Mac yields 4 against a floor of 5. Offering that would prompt
+  # for a restart that cannot fix the problem, and re-prompt on every run, because
+  # the machine is the constraint rather than the setting. Say so once instead.
+  if (( target_gb < PF_MIN_MEM_GB )); then
+    hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+    return 0
+  fi
+
   local cmd="colima stop && colima start --memory ${target_gb}"
   warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
 
