@@ -128,7 +128,7 @@ jobs:
         # contents:read only -- this job reads one JSON file and one .py.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          client-id: ${{ secrets.RELEASE_TRAIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: client-runtime
