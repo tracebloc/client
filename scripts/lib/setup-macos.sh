@@ -1011,6 +1011,18 @@ install_macos() {
     info "Using the container runtime already on this machine — no administrator rights needed."
     log "step b: tier 0 — skipping admin, sudo, Homebrew and Docker Desktop"
     assert_amd64_emulation    # Docker is up by definition here (#433)
+    # THE TIER 0 CALL IS THE ONE THAT MATTERS (Cursor Bugbot High on #832). An
+    # already-running Colima VM is exactly what Tier 0 classifies
+    # (PROBE_RUNTIME_USABLE=1), and this branch RETURNS before
+    # install_docker_desktop -- where the offer used to live exclusively. So the
+    # feature never fired on the only machines it is for: an existing, under-sized
+    # VM still got nothing but the preflight warning. The "already-running headless"
+    # branch in install_docker_desktop was dead in practice, because Tier 0 catches
+    # that machine first.
+    #
+    # Placed BEFORE the tool install so the consent prompt comes early, rather than
+    # after a long download the user then has to sit through twice.
+    _offer_colima_memory_raise
     install_macos_cli_tools
     log "step b: cli tools ready (tier 0)"
     # Autostart stays best-effort here AND must make NO sudo call (client#704):
