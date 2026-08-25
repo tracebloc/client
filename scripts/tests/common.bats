@@ -90,9 +90,12 @@ setup() {
 # Resolve HOME to its physical path so the HOST_DATA_DIR under-$HOME check (which
 # uses cd -P) is not tripped by macOS's /var -> /private/var symlink (Linux/CI
 # has none). The dataset dir itself MAY live outside $HOME — that's the point.
+# HOST_DATASET_DIR is a hostpath-only feature (rejected under node-local), and
+# node-local is now the default (client#456), so these pin hostpath explicitly.
 @test "validate_config: HOST_DATASET_DIR outside HOME but existing+writable -> passes" {
   HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=hostpath
   HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
   run validate_config
   [ "$status" -eq 0 ] || return 1
@@ -101,6 +104,7 @@ setup() {
 @test "validate_config: HOST_DATASET_DIR does not exist -> error (never mkdir a share root)" {
   HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=hostpath
   HOST_DATASET_DIR="$HOME/nope-$$"
   run validate_config
   [ "$status" -ne 0 ] || return 1
@@ -111,6 +115,7 @@ setup() {
   [[ "$(id -u)" -eq 0 ]] && skip "root bypasses filesystem permission bits"
   HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="$HOME/.tracebloc"
+  TB_STORAGE_MODE=hostpath
   HOST_DATASET_DIR="$HOME/ro-mount"; mkdir -p "$HOST_DATASET_DIR"; chmod 555 "$HOST_DATASET_DIR"
   run validate_config
   chmod 755 "$HOST_DATASET_DIR"   # restore so bats can clean up the tmpdir
@@ -121,6 +126,7 @@ setup() {
 @test "validate_config: HOST_DATA_DIR still rejected outside HOME when dataset dir is set" {
   HOME="$(cd -P "$BATS_TEST_TMPDIR" && pwd)"; USER=tester
   CLUSTER_NAME=ok; SERVERS=1; AGENTS=1; HOST_DATA_DIR="/tmp/not-under-home-$$"
+  TB_STORAGE_MODE=hostpath
   HOST_DATASET_DIR="$HOME/dataset-mount"; mkdir -p "$HOST_DATASET_DIR"
   run validate_config
   [ "$status" -ne 0 ] || return 1
@@ -148,11 +154,21 @@ setup() {
   [ "$output" = "0 1" ] || return 1
 }
 
-@test "C1: hostpath (default) leaves AGENTS/SERVERS untouched" {
+@test "C1: hostpath (explicit opt-out) leaves AGENTS/SERVERS untouched" {
   run env TB_STORAGE_MODE=hostpath AGENTS=4 SERVERS=3 \
     bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
   [ "$status" -eq 0 ] || return 1
   [ "$output" = "4 3" ] || return 1
+}
+
+# D15 flip (client#456): node-local is the default, so an unset TB_STORAGE_MODE
+# must trigger the same single-node clamp as an explicit node-local. Unset it in
+# the child env (env -u) so the parent's value can't leak in.
+@test "C1: DEFAULT (TB_STORAGE_MODE unset) forces single-node — AGENTS=0 AND SERVERS=1" {
+  run env -u TB_STORAGE_MODE AGENTS=4 SERVERS=3 \
+    bash -c "source '${LIB_DIR}/common.sh' >/dev/null 2>&1; echo \"\$AGENTS \$SERVERS\""
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "0 1" ] || return 1
 }
 
 # ── install_cleanup: the CLIENT_STATE guard (#716) ─────────────────────────

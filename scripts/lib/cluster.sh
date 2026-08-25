@@ -53,6 +53,131 @@ _ensure_tracebloc_dirs() {
   chmod -R 777 "$data_base/data" 2>/dev/null || true
 }
 
+# Prove the nodes can actually SEE the host tree before anything writes to it.
+#
+# In hostpath mode every chart PV is a hostPath onto /tracebloc/<release>/…, and
+# /tracebloc is the k3d bind mount of HOST_DATA_DIR. When that mount is not in
+# effect, nothing fails: kubelet's `DirectoryOrCreate` fabricates the directory
+# inside the node's own filesystem, the PVC Binds, the pod Runs, MySQL initialises
+# a brand-new empty datadir and the dataset dir reads as zero rows. There is no
+# event, no warning and no failed probe anywhere — the operator sees a healthy
+# install that has quietly stopped using their data. On the next `cluster delete`
+# it goes with the node.
+#
+# The obvious chart-side fix does not work: flipping the PVs to `type: Directory`
+# so kubelet refuses is REJECTED BY THE API SERVER on any existing release —
+# `spec.persistentvolumesource is immutable after creation` — so it fails the
+# `helm upgrade` of every install that already has PVs (measured on k3s v1.36.3,
+# release left in `failed`). Hence a probe here, before helm runs, where being
+# wrong costs an error message instead of a broken upgrade.
+#
+# Fails CLOSED. "Cannot tell" is a finding, not a pass: an unreadable marker, a
+# node we cannot exec into, or a node list we cannot obtain all block the install.
+# Silently proceeding is precisely the failure this exists to end.
+_verify_nodes_see_host_data() {
+  [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && return 0
+
+  local marker=".tracebloc-mount-probe"
+  # Content, not just presence: a bind mount pointed at the WRONG host directory
+  # still shows a file called .tracebloc-mount-probe from an earlier run. Only a
+  # token this invocation minted proves we are looking at this host tree now.
+  local token stamp
+  stamp="$(date +%s 2>/dev/null || echo 0)"
+  token="$$-${RANDOM}-${stamp}"
+  printf '%s' "$token" > "${HOST_DATA_DIR}/${marker}" 2>/dev/null \
+    || error "Can't write to ${HOST_DATA_DIR} — check the directory exists and you own it, then re-run."
+
+  local nodes node seen
+  # Selected by k3d's own LABELS, not by node name.
+  #
+  #   * `label=k3d.cluster=<name>` is an EXACT value match, so a same-prefixed
+  #     sibling cluster cannot leak in. `name=k3d-<name>-` is an unanchored
+  #     SUBSTRING match and would also list `k3d-<name>-dev-server-0`; if that
+  #     sibling was created against a different HOST_DATA_DIR its nodes cannot see
+  #     this token, and the probe would refuse THIS install while naming a node
+  #     that is not ours. A false refusal is the one failure mode a fail-closed
+  #     guard most has to avoid (@saqlainsyed007 on #817).
+  #   * `k3d.role` says what each container IS, so the load balancer is excluded
+  #     because it is a `loadbalancer` — not because its name happens to end in
+  #     `-serverlb`. Role is k3d's declaration; the name suffix is our guess at it.
+  #
+  # Bounded: a WEDGED (as opposed to stopped) daemon never returns from a bare
+  # `docker`, which would freeze a headless install right here with no further
+  # output — the exact failure this guard exists to replace with a clear refusal
+  # (Bugbot; same reason _docker_answers is bounded).
+  #
+  # `docker ps` lists RUNNING containers only: a created-but-stopped node cannot be
+  # exec'd and must not be mistaken for one that passed.
+  #
+  # ONE QUERY PER ROLE, letting docker AND the two label filters, rather than one
+  # query with `--format '{{.Names}} {{.Label "k3d.role"}}'` and an awk split. Bash
+  # could use the quoted format safely — it passes an array and never re-joins —
+  # but the PowerShell twin CANNOT: its $psi.Arguments joins the args and quotes any
+  # whitespace-bearing value without escaping inner quotes, so that format arrives
+  # with its quotes consumed and docker's Go template fails to parse, throwing a
+  # FALSE REFUSAL on every Windows hostpath install (#817). Keeping both halves on
+  # the shape the constrained one requires is what makes them diffable by eye; a
+  # divergence here would be a twin gap nobody notices until Windows breaks.
+  #
+  # Bonus: no role parsing, and the load balancer is excluded by construction —
+  # its role is `loadbalancer`, which is simply never queried.
+  local role out st
+  nodes=""
+  for role in server agent; do
+    # `|| st=$?` IS LOAD-BEARING, not a style choice. install-k8s.sh runs under
+    # `set -euo pipefail` and shell options are global to the sourcing shell, so a
+    # bare `out=$(...)` is a simple command whose status is the substitution's: when
+    # docker errors, set -e exits AT THE ASSIGNMENT and everything below it —
+    # including the fail-closed branch and the `rm -f` of the probe marker — is dead
+    # code. The previous shape survived only because it ended in `|| true`.
+    #
+    # The operator would then get the ERR trap's generic record naming `docker ps`
+    # instead of the refusal, and the marker left behind in HOST_DATA_DIR: precisely
+    # the opaque failure this guard exists to replace. (@saadqbal on #817, measured
+    # both call shapes; production calls this bare from create_cluster.)
+    #
+    # `st=0` first, because `|| st=$?` leaves st untouched on success.
+    st=0
+    out=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
+            --filter "label=k3d.cluster=${CLUSTER_NAME}" \
+            --filter "label=k3d.role=${role}" \
+            --format '{{.Names}}' 2>/dev/null) || st=$?
+    # Fail closed per role: an EMPTY list is legitimate (AGENTS=0 has no agent), but
+    # a docker that ERRORED tells us nothing and must not read as "none".
+    if (( st != 0 )); then
+      rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+      error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+    fi
+    [[ -n "$out" ]] && nodes+="${out}"$'\n'
+  done
+  if [[ -z "${nodes//[[:space:]]/}" ]]; then
+    rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+    error "Couldn't list the nodes of cluster '${CLUSTER_NAME}' to check your data directory is visible inside it. Check 'docker ps' works, then re-run."
+  fi
+
+  for node in $nodes; do
+    seen=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker exec "$node" cat "/tracebloc/${marker}" 2>/dev/null || true)
+    if [[ "$seen" != "$token" ]]; then
+      rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+      error "Node '${node}' cannot see your data directory (${HOST_DATA_DIR}).
+
+  Everything would appear to install, but the secure environment would store your
+  data INSIDE the node instead of on this machine — and lose it when the cluster is
+  recreated. Refusing to continue.
+
+  Most likely causes:
+    * Docker Desktop is not sharing this path. Add it under
+      Settings -> Resources -> File sharing, then re-run.
+    * The cluster was created without the data mount. Recreate it:
+      'k3d cluster delete ${CLUSTER_NAME}' then re-run this installer.
+    * HOST_DATA_DIR changed since the cluster was created (currently ${HOST_DATA_DIR})."
+    fi
+  done
+
+  rm -f "${HOST_DATA_DIR}/${marker}" 2>/dev/null || true
+  log "Verified all ${CLUSTER_NAME} nodes see ${HOST_DATA_DIR} at /tracebloc."
+}
+
 # Modes the two SHARED hostPath dirs must end up with. Named constants because the
 # same pair is spelled out in two other places — the Windows installer's
 # $TB_SHARED_DIR_MODE/$TB_LOGS_DIR_MODE (scripts/install-k8s.ps1) and the chart's
@@ -438,16 +563,21 @@ guard_leftover_data() {
 
   warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
   for d in "${found[@]}"; do hint "  • ${d}"; done
-  hint "A fresh install would silently adopt it, so it would not really be fresh."
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
-    hint "node-local storage keeps data inside the cluster node — this ~/.tracebloc data would be stranded, not used."
+  # The "silently adopt" warning is true ONLY for hostpath. Under node-local (the
+  # default since D15, client#456) a fresh install does NOT adopt this data — the
+  # cluster starts empty in-node and the host data is stranded. Leading with the
+  # adopt claim there would contradict the very next line (client#456 Bugbot).
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+    hint "node-local storage keeps data inside the cluster node — a fresh install does NOT adopt this ~/.tracebloc data; it would be stranded, not used."
+  else
+    hint "A fresh install would silently adopt it, so it would not really be fresh."
   fi
 
   local action="${TB_LEFTOVER_ACTION:-}"
   if [[ -z "$action" ]]; then
     if _tty_usable; then
       prompt_header "How should the installer handle it?"
-      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local can't adopt the host data (no /tracebloc bind-mount) — the
         # cluster starts empty in-node — so don't offer "reuse = adopt" here (#367).
         hint "  [r] keep  — leave the existing data on disk, unused (node-local starts empty; it is NOT adopted)"
@@ -476,7 +606,7 @@ guard_leftover_data() {
       # does NOT adopt it (the cluster starts empty in-node), matching the
       # interactive reuse branch below (Bugbot).
       local reuse_desc="adopt the existing data"
-      [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]] && \
+      [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && \
         reuse_desc="keep the data on disk, NOT adopted (node-local starts empty in-node)"
       error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
   --reuse-data                    ${reuse_desc}
@@ -488,7 +618,7 @@ guard_leftover_data() {
 
   case "$action" in
     reuse)
-      if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local starts empty in-node — the host data is NOT adopted (RFC-0003
         # §4 / #367). Keep the files on disk but say so plainly, so "reuse" never
         # silently claims an adoption that node-local can't actually do.
@@ -552,7 +682,7 @@ create_cluster() {
   # node-local (RFC-0003 Option C): no host data dirs, no bind-mount, no chmod —
   # data lives on k3s local-path inside the node. Only the hostpath model needs
   # the pre-created world-writable ~/.tracebloc dirs.
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     log "Storage mode: node-local — datasets live inside the cluster node (k3s local-path), not ~/.tracebloc; they are wiped on 'cluster delete'."
   else
     _ensure_tracebloc_dirs
@@ -573,6 +703,13 @@ create_cluster() {
   _merge_kubeconfig
   _export_host_no_proxy
   _wait_for_api
+
+  # Both branches above are done, so every node container is up and the bind
+  # mount (if any) is in effect — this is the first point where the question can
+  # be answered, and it is still before helm writes anything. Deliberately AFTER
+  # _handle_existing_cluster too: an adopted cluster is exactly the one that may
+  # have been created without the mount.
+  _verify_nodes_see_host_data
 }
 
 # Guarantee the cluster returns after a host reboot. On Linux this already works
@@ -776,7 +913,13 @@ _check_existing_cluster_k8s_version() {
     echo ""
     warn "The existing '$CLUSTER_NAME' cluster runs k3s '$running', not the validated pin '$K8S_VERSION'."
     hint "k3s version is fixed when the cluster is created — it can't be changed on a running cluster."
-    hint "This cluster was created by an older/unpinned installer or with K8S_VERSION=latest (#547). To move"
+    # backend#2448 made this the COMMON case rather than the exception: moving the
+    # pin 1.29.4 -> 1.36.3 marks every pre-existing cluster as drifted, and for
+    # those operators neither "older/unpinned installer" nor "K8S_VERSION=latest"
+    # is what happened — their cluster simply predates the pin move. Naming only
+    # the two original causes would tell most readers something untrue about
+    # their own machine.
+    hint "Either this cluster predates the current pin, or it was created by an unpinned installer / with K8S_VERSION=latest (#547). To move"
     hint "onto the validated version, recreate it:"
     _recreate_cluster_hint
     hint "  (hostpath mode keeps your data under ${HOST_DATA_DIR:-your data dir}; node-local mode loses in-cluster data on recreate.)"
@@ -948,19 +1091,29 @@ _check_existing_cluster_storage_mode() {
 
   local cluster_is_hostpath=false
   grep -qx '/tracebloc' <<<"$mounts" && cluster_is_hostpath=true
-  local want="${TB_STORAGE_MODE:-hostpath}"
+  local want="${TB_STORAGE_MODE:-node-local}"
 
   if [[ "$want" == "node-local" && "$cluster_is_hostpath" == true ]]; then
     echo ""
-    warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
-    hint "That cluster disabled k3s local-storage, so the requested 'local-path' StorageClass does not exist —"
-    hint "PVCs would stay Pending. Storage topology is fixed at create time; recreate the cluster for node-local:"
+    # After the D15 flip (client#456) this branch fires on an unmodified re-run of
+    # every pre-existing hostpath install, not just someone who asked for
+    # node-local — so name the source and lead with the keep-your-cluster remedy
+    # (set hostpath), not a recreate they never asked for (Bugbot High + review).
+    if [[ "${TB_STORAGE_MODE_SOURCE:-default}" == "explicit" ]]; then
+      warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+    else
+      warn "node-local is the default now (RFC-0003 D15), but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+    fi
+    hint "That cluster disabled k3s local-storage, so the 'local-path' StorageClass node-local needs does not exist — PVCs would stay Pending."
+    hint "To keep using your existing hostpath cluster, just re-run with the old mode — no recreate needed:"
+    hint "  TB_STORAGE_MODE=hostpath  re-run this installer."
+    hint "Or, to move this cluster to node-local (storage topology is fixed at create time), recreate it:"
     _recreate_cluster_hint "TB_STORAGE_MODE=node-local  "
     echo ""
-    error "Existing cluster's storage topology (hostpath) does not match TB_STORAGE_MODE=node-local — refusing to install onto a cluster with no matching StorageClass."
+    error "Existing cluster's storage topology (hostpath) does not match node-local — set TB_STORAGE_MODE=hostpath to keep it, or recreate for node-local."
   elif [[ "$want" == "hostpath" && "$cluster_is_hostpath" == false ]]; then
     echo ""
-    warn "TB_STORAGE_MODE=hostpath (default), but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
+    warn "TB_STORAGE_MODE=hostpath, but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
     hint "That cluster has no /tracebloc bind mount, so hostPath volumes would land on ephemeral in-node storage"
     hint "(lost on 'cluster delete'), not ~/.tracebloc. Storage topology is fixed at create time; recreate to switch:"
     _recreate_cluster_hint
@@ -1027,7 +1180,7 @@ _create_new_cluster() {
   # hostPath PVs). node-local model (RFC-0003 Option C): no host bind-mount, and
   # KEEP k3s local-storage so its `local-path` StorageClass provisions the
   # dataset volumes inside the node — data then dies with the cluster.
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     K3D_ARGS+=(
       --k3s-arg "--disable=traefik@server:*"
       --k3s-arg "--disable=servicelb@server:*"
@@ -1055,7 +1208,7 @@ _create_new_cluster() {
   # On a cgroup v2 host — every current install — it is a no-op.
   #
   # GATED, and the gate is load-bearing: `--fail-cgroupv1` was ADDED in kubelet
-  # 1.31. Passing it to the 1.29.4 kubelet we pin today would be an unknown flag
+  # 1.31. Passing it to a pre-1.31 kubelet is an unknown flag
   # and the kubelet would fail to start — i.e. an ungated version of this line
   # breaks every install. Note the `#v` strip: _version_lt reads a leading "v" as
   # 0 and would invert the comparison (see common.sh).

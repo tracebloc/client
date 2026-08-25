@@ -17,7 +17,7 @@
 # same validated k3s as a normal CPU node. scripts/check-facts.sh enforces this:
 # this ARG, build.sh, and the workflow input default are all checked against
 # facts.env's K8S_VERSION, so a bump can't leave the GPU image tag stale (#547).
-ARG K3S_TAG="v1.29.4-k3s1"
+ARG K3S_TAG="v1.36.3-k3s1"
 ARG CUDA_TAG="12.4.1-base-ubuntu22.04"
 # NVIDIA Container Toolkit version. PINNED to the build validated on real hardware (an RTX 4050
 # laptop, driver 532.10) because the whole WSL2 GPU path depends on version-sensitive surfaces:

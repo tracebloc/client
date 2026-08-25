@@ -97,10 +97,34 @@ _existing_training_values() {
   kubectl get namespace "$ns" --request-timeout=5s >/dev/null 2>&1 || return 0
   out="$(helm get values "$ns" -n "$ns" 2>/dev/null)" || return 0
   [[ -n "$out" ]] || return 0
+  # READ RESOURCE_REQUESTS, FALL BACK TO RESOURCE_LIMITS (backend#2418, Bugbot
+  # High on client#820).
+  #
+  # This used to read RESOURCE_LIMITS only, which was fine while both fields
+  # held the same string. Since L0.2 the limits half is memory-only, so reading
+  # it here breaks a REINSTALL two ways:
+  #
+  #   * the carried "size" comes back as `memory=29Gi`, and the caller writes
+  #     that into RESOURCE_REQUESTS — silently DROPPING the cpu request, so the
+  #     pod asks for no CPU share at all;
+  #   * the historic-literal gate below compares against `cpu=2,memory=8Gi`, so
+  #     a carried `memory=8Gi` no longer matches. The post-filter default is
+  #     then mistaken for a deliberate human choice and the machine is never
+  #     re-sized.
+  #
+  # RESOURCE_REQUESTS still carries the WHOLE envelope, so it is the field to
+  # read. LIMITS remains the fallback for a release installed before requests
+  # was written, or a chart-direct install that set only that key.
   size="$(printf '%s\n' "$out" | awk '
-    /^[[:space:]]*RESOURCE_LIMITS:/ {
+    /^[[:space:]]*RESOURCE_REQUESTS:/ {
       sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
     }')"
+  if [[ -z "$size" ]]; then
+    size="$(printf '%s\n' "$out" | awk '
+      /^[[:space:]]*RESOURCE_LIMITS:/ {
+        sub(/^[^:]*:[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+      }')"
+  fi
   # No carried size means nothing to attribute; the caller sizes the machine.
   [[ -n "$size" ]] || return 0
   prov="$(printf '%s\n' "$out" | awk '
@@ -114,8 +138,9 @@ _existing_training_values() {
   printf '%s|%s' "$size" "$prov"
 }
 
-# The installed release's RESOURCE_LIMITS, or nothing. Thin reader over the one
-# shared lookup, kept because it is the tested, readable entry point.
+# The installed release's carried ENVELOPE (RESOURCE_REQUESTS, or LIMITS when
+# that is absent), or nothing. Thin reader over the one shared lookup, kept
+# because it is the tested, readable entry point.
 _existing_training_resources() {
   local v
   v="$(_existing_training_values)"
@@ -256,6 +281,73 @@ _machine_training_resources() {
   { (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); } || return 0
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
+}
+
+# The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
+# Utilization Ladder L0.2).
+#
+# WHY THE TWO HALVES DIFFER. CPU and memory are not the same kind of resource:
+#
+#   * CPU is time-shared. A `requests` with NO `limits` becomes a cgroup
+#     `cpu.weight` -- a share of the machine under contention, and the whole
+#     machine when nobody else wants it. With `requests == limits` it becomes a
+#     `cpu.max` QUOTA instead, which throttles at the ceiling even on a
+#     completely idle box. On an 8-core machine a run sized to 7 cores was
+#     capped at 7 while the 8th sat idle, for no benefit to anyone.
+#   * Memory is NOT time-shared. There is no "borrow it back": exceeding the
+#     limit is an OOM kill. So `requests == limits` is the load-bearing safety
+#     property and it does NOT move.
+#
+# Guaranteed QoS is lost by design -- a pod is Guaranteed only when every
+# container has limits for both dimensions. That is the trade L0.2 makes: the
+# memory guarantee is what mattered, and CPU burstability is what lets a second
+# job exist at all.
+#
+# ORDERING CONSTRAINT, not optional: this requires a jobs-manager that treats
+# RESOURCE_LIMITS as the COMPLETE limits envelope (client-runtime#388). An older
+# image MERGES the parsed pairs onto its built-in cpu=2,memory=8Gi literal, so
+# an omitted `cpu` comes back as a 2-core LIMIT under a 7-core REQUEST -- which
+# Kubernetes rejects outright, and the pod never schedules. Do not ship this
+# chart to an edge whose client-runtime predates #388.
+_training_limits() {
+  local size="$1" out="" pair
+  local IFS=,
+  for pair in $size; do
+    # TRIM FIRST. `case " cpu=7 " in cpu=*)` does NOT match, so an operator who
+    # wrote `TRACEBLOC_TRAINING_RESOURCES="cpu=7, memory=29Gi"` would keep the
+    # cpu limit -- silently, and in the dangerous direction. The PowerShell twin
+    # trims via `.Trim()`, so skipping it here is also a twin DIVERGENCE: the
+    # same shared contract, two different control flows, which is the exact bug
+    # class backend#2220 found five of. jobs-manager's own parser strips too, so
+    # trimmed output is what it would have read anyway.
+    pair="${pair#"${pair%%[![:space:]]*}"}"
+    pair="${pair%"${pair##*[![:space:]]}"}"
+    [[ -n "$pair" ]] || continue
+    # CASE-INSENSITIVE, via character classes rather than `${pair,,}` — this
+    # bootstrap has to run under macOS's bash 3.2, which has no case conversion.
+    #
+    # A twin DIVERGENCE otherwise (review on client#820): PowerShell's
+    # `-like 'cpu=*'` is case-insensitive, so `CPU=7,memory=29Gi` dropped the
+    # cpu limit on Windows and kept it on Linux/macOS. Same class as the
+    # whitespace-trim divergence, and every parity fixture row is lowercase, so
+    # nothing pinned it.
+    case "$pair" in
+      [Cc][Pp][Uu]=*) continue ;;
+    esac
+    out="${out:+$out,}$pair"
+  done
+  # Nothing survived the filter -- a cpu-only envelope, which is not something
+  # to guess at. Return the INPUT UNCHANGED rather than an empty string: an
+  # empty RESOURCE_LIMITS reads to jobs-manager as "unset", which since
+  # client-runtime#388 mirrors the requests side back and resurrects the very
+  # cpu limit this function exists to drop.
+  #
+  # `$size` itself is never empty on any reachable path: _training_resources'
+  # four-way fallback chain (env override -> installed release -> machine sizing
+  # -> the cpu=2,memory=8Gi literal) always yields a value. An empty input would
+  # return empty here, and that is the honest answer -- there is nothing to say
+  # about an envelope that does not exist.
+  printf '%s' "${out:-$size}"
 }
 
 # Echo "<size>|viable" or "<size>|undersized" for the largest node, or NOTHING
@@ -1007,7 +1099,7 @@ _reconcile_adopted_client() {
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
-  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$_ns"
+  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
   # #554: clear any pending-* wedge left by a previously killed helm op before we
   # upgrade — otherwise this reconcile just fails with "another operation is in
@@ -1505,7 +1597,7 @@ install_client_helm() {
   # node-local (RFC-0003 Option C): data lives inside the node, so skip the
   # world-writable ~/.tracebloc/{data,logs,mysql} dirs; just ensure the base dir
   # exists for values.yaml + the install log.
-  if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     mkdir -p "$HOST_DATA_DIR"
   else
     _ensure_tracebloc_dirs
@@ -1797,12 +1889,18 @@ install_client_helm() {
 
 env:
 $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$CLIENT_ENV")")${proxy_env_yaml}
-  # Training size: how much CPU/RAM each training run gets. One knob sets
-  # requests == limits (Guaranteed QoS; client-runtime keeps them in lockstep).
-  # Sized to this machine at install — largest node minus ~1 CPU / 3 GiB
-  # platform overhead — unless TRACEBLOC_TRAINING_RESOURCES is set or the
-  # installed release already carries a choice (backend#1236, option A).
-  RESOURCE_LIMITS: "${training_size}"
+  # Training size: how much CPU/RAM each training run gets. Sized to this
+  # machine at install — largest node minus ~1 CPU / 3 GiB platform overhead —
+  # unless TRACEBLOC_TRAINING_RESOURCES is set or the installed release already
+  # carries a choice (backend#1236, option A).
+  #
+  # THE TWO HALVES ARE NOT THE SAME STRING any more (backend#2418, L0.2):
+  # requests carries cpu AND memory, limits carries memory ONLY. CPU is
+  # time-shared, so a request with no limit is a share weight rather than a
+  # quota that throttles on an idle machine; memory is not time-shared, so
+  # requests == limits stays. See _training_limits for the full reasoning and
+  # for the client-runtime#388 ordering constraint.
+  RESOURCE_LIMITS: "$(_training_limits "${training_size}")"
   RESOURCE_REQUESTS: "${training_size}"
   # Who chose the pair above (backend#2220). Bookkeeping only — it never changes
   # the envelope. "unknown" means the value was carried forward from before this
@@ -1817,7 +1915,7 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   # that will never arrive.
   SINGLE_NODE: "true"
 $([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n' "$(id -u)" "$(id -g)")
-$(if [[ "${TB_STORAGE_MODE:-hostpath}" == "node-local" ]]; then
+$(if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
 cat <<'STORAGE'
 # RFC-0003 Option C — node-local: use k3s's built-in local-path StorageClass.
 # No hostPath PVs, so dataset volumes are provisioned inside the k3d node and
@@ -1901,7 +1999,7 @@ EOF
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
-  [[ "${TB_STORAGE_MODE:-hostpath}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
+  [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$TB_NAMESPACE"
 
   # #553: wait out the metrics-server APIService registration race before helm
   # renders the resource-monitor DaemonSet (whose template hard-fails if the

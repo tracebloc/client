@@ -19,12 +19,57 @@
   That is the whole argument for the `fail` below: this is the last point where
   the problem is loud.
 */}}
+{{/*
+  THREE OUTCOMES, NOT TWO (backend#2469). The comment above used to say `lookup`
+  "returns empty during `helm template`", which is true, and then treated
+  connected-and-permitted as the only other case. There is a third: connected and
+  FORBIDDEN, which RAISES rather than returning empty, and helm cannot catch it.
+
+  `APIService` is cluster-scoped, and Kubernetes' built-in `admin` ClusterRole does
+  not include it. So an operator whose EKS access entry is AmazonEKSAdminPolicy
+  rather than AmazonEKSClusterAdminPolicy could not `helm upgrade` this chart AT
+  ALL -- not this DaemonSet, the whole release -- and the error named
+  resource-monitor and metrics-server, so the obvious first reading was
+  "metrics-server is broken" when metrics-server was fine and the caller's RBAC was
+  the problem.
+
+  WHY THE FIX IS A FLAG AND NOT A CHEAPER PROBE. The first version of this change
+  probed the `metrics-server` Deployment first -- namespaced, readable by any
+  namespace admin -- and granted the auto-upgrade SA a matching read. That is a
+  FLEET-WIDE LOCKOUT, and the reason is worth writing down because it is not
+  obvious: THE TICK THAT WOULD APPLY THE GRANT IS THE TICK THAT NEEDS IT. On the
+  first auto-upgrade onto such a chart the scoped SA renders before the ClusterRole
+  lands, the new `lookup` 403s, helm aborts, `--atomic` rolls back, and every later
+  hourly tick fails identically. The grant can never arrive.
+
+  The general rule: ANY new `lookup` of a resource the CURRENT ServiceAccount
+  cannot already read locks the unattended path permanently. `apiservices` is
+  already granted (backend#953), so keeping that as the only privileged call is
+  what makes this safe. (Bugbot High on client#823.)
+
+  `nodeAgents.metricsServerPreflight: false` is therefore the whole escape hatch,
+  and it gates the ONLY privileged call rather than a fallback. It does not skip
+  silently -- the annotation below records which path decided, so a skipped check
+  is never mistaken for a passed one.
+*/}}
 {{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- $preflight := "skipped-offline" -}}
 {{- if $probe -}}
-{{- $metrics := lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io" -}}
-{{- if not $metrics -}}
-{{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor: false. See SECURITY.md." -}}
-{{- end -}}
+  {{/*
+    hasKey, NOT `default`. Sprig's `default` treats boolean FALSE as empty, so
+    `default true false` returns TRUE -- metricsServerPreflight: false would never
+    have taken this branch and the opt-out would have been inert while looking
+    present. Exactly the "mechanism that appears to verify something but is not
+    connected to it" shape backend#1729 is about. (Bugbot Medium on client#823.)
+  */}}
+  {{- if and (hasKey (default dict .Values.nodeAgents) "metricsServerPreflight") (not .Values.nodeAgents.metricsServerPreflight) -}}
+    {{- $preflight = "skipped-by-values" -}}
+  {{- else -}}
+    {{- if not (lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io") -}}
+      {{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor: false. See SECURITY.md.\n\nIf THIS line was instead an `apiservices ... is forbidden` error, the problem is the caller's RBAC, not metrics-server: APIService is cluster-scoped and the built-in `admin` ClusterRole excludes it. Set nodeAgents.metricsServerPreflight: false to skip this check, or run the upgrade with cluster-scope read on apiservices (backend#2469)." -}}
+    {{- end -}}
+    {{- $preflight = "satisfied-by-apiservice" -}}
+  {{- end -}}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -34,6 +79,9 @@ metadata:
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    # WHICH check decided this render. A skipped preflight must not be
+    # indistinguishable from a passed one (client#2469).
+    tracebloc.io/metrics-server-preflight: {{ $preflight | quote }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app: {{ include "tracebloc.resourceMonitorName" . }}

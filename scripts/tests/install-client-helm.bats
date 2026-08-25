@@ -389,6 +389,7 @@ setup() {
 # the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
 # runs spawned ingestion pods as the owning user (NFS writes).
 @test "install_client_helm: HOST_DATASET_DIR set -> values carry datasetPath + host uid/gid" {
+  TB_STORAGE_MODE=hostpath   # datasetPath only renders in hostpath; node-local is the default (client#456)
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   HOST_DATASET_DIR="$BATS_TEST_TMPDIR/ds"; mkdir -p "$HOST_DATASET_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -415,6 +416,26 @@ setup() {
   [ "$status" -eq 0 ] || return 1
   ! grep -q 'datasetPath:' "$HOST_DATA_DIR/values.yaml" || return 1
   ! grep -q 'HOST_UID:' "$HOST_DATA_DIR/values.yaml" || return 1
+}
+
+# D15 flip (client#456): with TB_STORAGE_MODE unset the default is node-local, so
+# the rendered values.yaml must carry the local-path storage block (no hostPath
+# PVs), not the hostpath client-storage-class. Locks the flip in at the values
+# layer — this goes red if the default is ever reverted to hostpath.
+@test "install_client_helm: DEFAULT (TB_STORAGE_MODE unset) -> node-local values block (local-path, hostPath disabled)" {
+  unset TB_STORAGE_MODE HOST_DATASET_DIR
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'name: local-path' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -qE 'hostPath:[[:space:]]*$' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -qE 'enabled: false' "$HOST_DATA_DIR/values.yaml" || return 1
+  ! grep -q 'client-storage-class' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
 @test "install_client_helm: TRACEBLOC_CLIENT_* env -> non-interactive (no prompt), writes values.yaml + helm" {
@@ -928,8 +949,12 @@ setup() {
   export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  grep -q 'RESOURCE_LIMITS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
-  grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml"
+  # backend#2418 (L0.2): requests keeps cpu, limits drops it. The two halves
+  # are no longer the same string.
+  grep -q 'RESOURCE_LIMITS: "memory=16Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  # And no cpu limit anywhere in the rendered pair.
+  ! grep -q 'RESOURCE_LIMITS: "cpu' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
 @test "install_client_helm: undeterminable machine falls back to cpu=2,memory=8Gi" {
@@ -943,7 +968,9 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  grep -q 'RESOURCE_LIMITS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+  # The literal is still the fallback ENVELOPE; only the limits half loses cpu
+  # (backend#2418).
+  grep -q 'RESOURCE_LIMITS: "memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
   grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
 }
 
@@ -2794,4 +2821,195 @@ _arch_gate_ctx() {
   grep -q 'singleNode: true' "$lib" || return 1
   # ...and it must live in the node-local (local-path) values block.
   awk '/name: local-path/{f=1} f && /singleNode: true/{found=1} END{exit !found}' "$lib" || return 1
+}
+
+
+# ── _training_limits (backend#2418, Utilization Ladder L0.2) ─────────────────
+#
+# CPU is time-shared, so a request with NO limit is a cgroup share weight -- a
+# fraction under contention, the whole machine when idle. requests == limits
+# makes it a cpu.max QUOTA that throttles at its ceiling on a completely idle
+# box: a run sized to 7 of 8 cores was capped at 7 while the 8th sat unused.
+# Memory is not time-shared -- over the limit is an OOM kill, not a slowdown --
+# so requests == limits stays there and only cpu is dropped.
+#
+# Pinned to agree with install-k8s.ps1's Get-TrainingLimits through
+# scripts/tests/fixtures/installer_parity.json.
+
+@test "_training_limits: drops cpu and keeps memory" {
+  [ "$(_training_limits 'cpu=7,memory=29Gi')" = "memory=29Gi" ] || return 1
+}
+
+@test "_training_limits: keeps every non-cpu dimension, not just memory" {
+  # backend#2223 added ephemeral-storage; a hardcoded "memory only" filter would
+  # silently drop a disk limit and let a pod fill the node's disk.
+  [ "$(_training_limits 'cpu=7,memory=29Gi,ephemeral-storage=26Gi')" = "memory=29Gi,ephemeral-storage=26Gi" ] || return 1
+}
+
+@test "_training_limits: a size with no cpu is unchanged" {
+  [ "$(_training_limits 'memory=16Gi')" = "memory=16Gi" ] || return 1
+}
+
+@test "_training_limits: a cpu-ONLY size returns the input, never empty" {
+  # An empty RESOURCE_LIMITS reads to jobs-manager as UNSET, which since
+  # client-runtime#388 mirrors the requests side back -- resurrecting the very
+  # cpu limit this function exists to drop.
+  [ "$(_training_limits 'cpu=4')" = "cpu=4" ] || return 1
+}
+
+@test "_training_limits: trims each pair BEFORE matching cpu=" {
+  # THE TWIN DIVERGENCE THIS TEST CAUGHT. `case " cpu=7 " in cpu=*)` does not
+  # match, so without the trim an operator writing
+  # TRACEBLOC_TRAINING_RESOURCES="cpu=7, memory=29Gi" kept the cpu limit --
+  # silently, and in the dangerous direction -- while install-k8s.ps1's
+  # `.Trim()` dropped it. Same contract, two control flows: the bug class
+  # backend#2220 found five of.
+  [ "$(_training_limits ' cpu=7 , memory=29Gi ')" = "memory=29Gi" ] || return 1
+  [ "$(_training_limits 'cpu=7,,memory=29Gi')" = "memory=29Gi" ] || return 1
+}
+
+@test "_training_limits: does not eat a dimension that merely starts with cpu" {
+  # `cpu=` is matched as a prefix, so a future `cpuset=...` must survive.
+  [ "$(_training_limits 'cpu=7,cpuset=0-3,memory=29Gi')" = "cpuset=0-3,memory=29Gi" ] || return 1
+}
+
+
+# ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
+#
+# `RESOURCE_LIMITS` stopped being the whole envelope, so a reader that took the
+# carried size from it broke REINSTALL two ways:
+#   * the carried size came back as `memory=29Gi` and was written into
+#     RESOURCE_REQUESTS -- silently dropping the cpu request;
+#   * the historic-literal gate compares against `cpu=2,memory=8Gi`, so a
+#     carried `memory=8Gi` stopped matching and the post-filter default was
+#     mistaken for a deliberate human choice, never re-sized.
+# The reader now prefers RESOURCE_REQUESTS and falls back to LIMITS.
+
+@test "_existing_training_values: carries REQUESTS, not the memory-only LIMITS" {
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: "memory=29Gi"\n  RESOURCE_REQUESTS: "cpu=7,memory=29Gi"\n  RESOURCE_PROVENANCE: user\n'
+  }
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  # MUTATION: read RESOURCE_LIMITS here and this reddens with 'memory=29Gi',
+  # i.e. an envelope with no cpu request at all.
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+}
+
+@test "_existing_training_values: falls back to LIMITS when REQUESTS is absent" {
+  # A release installed before requests was written, or a chart-direct install
+  # that set only the one key.
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() { printf 'env:\n  RESOURCE_LIMITS: "cpu=4,memory=12Gi"\n'; }
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "cpu=4,memory=12Gi" ] || return 1
+}
+
+@test "_existing_training_values: the historic literal is still not carried" {
+  # The gate that keeps an unschedulable 8Gi off the machines this sizing exists
+  # to fix. It compares the FULL envelope, which only works because the reader
+  # takes RESOURCE_REQUESTS.
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() {
+    printf 'env:\n  RESOURCE_LIMITS: "memory=8Gi"\n  RESOURCE_REQUESTS: "cpu=2,memory=8Gi"\n'
+  }
+  _resolve_training_size
+  # Not carried at all -- the machine is re-sized, so the result still names a
+  # cpu dimension. Asserting `!= cpu=2,memory=8Gi` alone would pass vacuously
+  # under the very mutation this test exists to catch, because reading the
+  # memory-only LIMITS yields `memory=8Gi`, which is also != the literal.
+  [[ "$_TB_TRAINING_SIZE" == cpu=* ]] || return 1
+  [ "$_TB_TRAINING_SIZE" != "memory=8Gi" ] || return 1
+}
+
+
+@test "_training_limits: matches cpu= case-INSENSITIVELY, like the ps1 twin" {
+  # Twin divergence caught in review on client#820: PowerShell's
+  # `-like 'cpu=*'` is case-insensitive, so `CPU=7,...` dropped the cpu limit on
+  # Windows and KEPT it on Linux/macOS. Character classes rather than
+  # `${pair,,}` because macOS ships bash 3.2, which has no case conversion.
+  [ "$(_training_limits 'CPU=7,memory=29Gi')" = "memory=29Gi" ] || return 1
+  [ "$(_training_limits 'Cpu=7,memory=29Gi')" = "memory=29Gi" ] || return 1
+  # ...and a differently-cased NON-cpu dimension still survives.
+  [ "$(_training_limits 'CPU=7,CPUSET=0-3,memory=29Gi')" = "CPUSET=0-3,memory=29Gi" ] || return 1
+}
+
+# ── the ROUND TRIP: write values, read them back, carry (review on client#820) ─
+#
+# The reviewer's point, and it is the right one: `_training_limits` was well
+# covered in isolation and the round trip is what broke. Every test wrote OR
+# read; none did both, so a writer change that poisoned the reader passed
+# everything. This test installs, feeds the generated values file back through
+# the carry reader, and asserts the envelope survives with its cpu request.
+
+@test "round trip: install, re-read, and the carried envelope still has cpu" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_TRAINING_RESOURCES="cpu=7,memory=29Gi"
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+
+  # What the FIRST install wrote: the two halves now differ.
+  grep -q 'RESOURCE_LIMITS: "memory=29Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=7,memory=29Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+
+  # Now the REINSTALL: hand that very file back as the installed release's
+  # values, exactly as `helm get values` would.
+  unset TRACEBLOC_TRAINING_RESOURCES
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() { cat "$HOST_DATA_DIR/values.yaml"; }
+
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  # MUTATION: read RESOURCE_LIMITS in _existing_training_values and this
+  # reddens with 'memory=29Gi' -- an envelope carrying no cpu request at all.
+  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+  [[ "$output" == cpu=* ]] || return 1
+}
+
+@test "round trip: a default install re-reads as the literal, so it re-sizes" {
+  # The second half of the same bug. A default install writes
+  # RESOURCE_LIMITS: "memory=8Gi", and the historic-default gate compares
+  # against `cpu=2,memory=8Gi`. Reading the limits half would make the default
+  # look like a deliberate choice and machine sizing would never run again --
+  # keeping an unschedulable 8Gi on exactly the machines this sizing exists to
+  # fix.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  kubectl() { return 1; }   # cluster unreadable -> the static literal
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_TRAINING_RESOURCES
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+
+  TB_NAMESPACE=tracebloc
+  kubectl() { return 0; }
+  helm() { cat "$HOST_DATA_DIR/values.yaml"; }
+
+  # The reader returns the FULL literal — cpu included. That is the whole point:
+  # reading the memory-only limits half would yield `memory=8Gi`, which the gate
+  # at :546 compares against `cpu=2,memory=8Gi`, fails to match, and then treats
+  # as a deliberate human choice.
+  run _existing_training_resources
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+
+  # And the gate therefore still refuses it: the size is machine-derived, so the
+  # provenance is `installer` rather than a carried `unknown`/`user`.
+  _resolve_training_size
+  [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
 }

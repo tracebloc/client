@@ -651,6 +651,26 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end -}}
 {{- end }}
 
+{{/*
+  Whether the chart manages the mysql-client root password from a generated
+  Secret instead of the image's baked default (backend#947 / backend#1528 Phase
+  0). Resolves identically to tracebloc.serviceDbAccounts / bootstrapDbReparent —
+  operator override first, else the per-environment default. Only takes effect
+  for a FRESH datadir (the mysql entrypoint reads MYSQL_ROOT_PASSWORD at init and
+  ignores it thereafter); an existing datadir is rotated by the one-time
+  `ALTER USER 'root'` step that reads the same Secret. Default false everywhere.
+*/}}
+{{- define "tracebloc.rotateMysqlRoot" -}}
+{{- $override := (default dict .Values).rotateMysqlRoot -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.rotateMysqlRootByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientEnv" -}}
 {{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}

@@ -5304,8 +5304,85 @@ Describe "Bounded process survives a child that closes stdin first (broken pipe)
   It "the stdin write is guarded, like Start and Kill already were (source guard)" {
     # Belt and braces to the behavioural case above: if someone unwraps the try/catch,
     # this fails even on a machine where the race happens not to fire.
+    #
+    # Matches the WRITE GUARD ONLY. It deliberately does not pin the statement that
+    # follows Write() inside the try: the previous version of this assertion was one
+    # literal blob covering `Write(...); Close()` together, so it spoke for two
+    # independent properties at once and had to be rewritten to change either. The
+    # Close() placement is asserted on its own, below.
     $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'try \{ \$proc\.StandardInput\.Write\(\$Stdin\); \$proc\.StandardInput\.Close\(\) \} catch'
+    $fn | Should -Match '\$proc\.StandardInput\.Write\(\$Stdin\)'
+    $fn | Should -Match 'try \{ \$proc\.StandardInput\.Write\(\$Stdin\) \} catch'
+  }
+
+  It "stdin is closed even when the write throws -- Close() is in a finally (backend#2246)" {
+    # Chained as `try { Write(...); Close() } catch { }`, a throw from Write() skipped
+    # Close() entirely: the child never received EOF and our write handle stayed open.
+    # Because the one exception actually seen here (broken pipe) is swallowed by design,
+    # the skip was silent. Asserting the `finally` is what makes it non-silent.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $fn | Should -Match 'finally \{ try \{ \$proc\.StandardInput\.Close\(\) \} catch \{ \} \}'
+    # ...and NOT back inside the same try as the write, which is the shape that regressed.
+    $fn | Should -Not -Match 'Write\(\$Stdin\); \$proc\.StandardInput\.Close\(\)'
+  }
+
+  It "stdout is drained BEFORE the stdin write, so a chatty child cannot deadlock (backend#2246)" {
+    # ORDERING GUARD, derived by position from the real function body rather than from a
+    # transcription of it: the ReadToEndAsync() that drains stdout must appear ahead of
+    # the stdin write. Reversed -- which is how this shipped -- a child that both reads
+    # stdin and writes output wedges: it fills its stdout pipe, stops reading stdin, our
+    # Write() blocks, and WaitForExit() is never reached, so -TimeoutSec never fires at
+    # all. The behavioural proof is the case below; this catches a reorder on any
+    # platform, including one where the deadlock case is skipped.
+    $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+    $drain = $fn.IndexOf('$proc.StandardOutput.ReadToEndAsync()')
+    $write = $fn.IndexOf('$proc.StandardInput.Write($Stdin)')
+    # Fail closed: if either anchor is gone this function has been restructured, and an
+    # index of -1 must read as "cannot tell", never as agreement (a bare -lt would let
+    # two missing anchors compare equal and pass).
+    $drain | Should -BeGreaterThan -1 -Because 'the stdout drain anchor must exist to be ordered'
+    $write | Should -BeGreaterThan -1 -Because 'the stdin write anchor must exist to be ordered'
+    $drain | Should -BeLessThan $write -Because 'draining stdout after the stdin write is the deadlock'
+  }
+
+  # Skip condition is the ACTUAL precondition -- "is there a /bin/cat to run" -- not a
+  # platform guess. `-Skip:$IsWindows` would have been wrong twice: $IsWindows does not
+  # exist under Windows PowerShell 5.1 (the version install.ps1 pins), so it evaluates
+  # $null there, the test would run, /bin/cat would not exist, and a missing binary would
+  # be reported as this deadlock regressing.
+  It "a chatty child that reads stdin returns its real verdict, not a hang (backend#2246)" -Skip:(-not (Test-Path '/bin/cat')) {
+    # THE DEADLOCK, REPRODUCED. `cat` reads stdin AND echoes every byte to stdout, and
+    # stdout is redirected -- the exact shape of the caller Bugbot named, `docker exec -i
+    # <node> sh`, where the shell consumes a script on stdin and the script prints.
+    #
+    # 200 KB deliberately exceeds the ~64 KiB OS pipe buffer. A payload that FITS the
+    # buffer cannot deadlock and would pass with the bug present, which is why the
+    # existing broken-pipe case above does not cover this one despite also being 200 KB:
+    # `/usr/bin/true` produces no output, so there is no stdout backpressure.
+    #
+    # Run in a JOB with an OUTER watchdog because the failure is an unbounded HANG, not a
+    # 124 -- a direct call would hang the whole Pester run rather than fail this test.
+    # Measured before the fix: past 60s with -TimeoutSec 20. After: ~0.2s.
+    $job = Start-Job -ScriptBlock {
+      param($src)
+      $fn = (($src -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
+      Invoke-Expression "function Invoke-BoundedProcess $fn"
+      $r = Invoke-BoundedProcess -FileName "/bin/cat" -Arguments @("-") -Stdin ("x" * 200000) -TimeoutSec 20
+      [pscustomobject]@{ Code = $r.Code; OutLen = "$($r.Output)".Length }
+    } -ArgumentList $script:BPSRC
+    $finished = Wait-Job $job -Timeout 60
+    $res = if ($finished) { Receive-Job $job } else { $null }
+    Stop-Job $job -ErrorAction SilentlyContinue
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+    # Name the specific failure. "It hung" and "it returned 124" are different defects and
+    # this must not report one as the other.
+    $finished | Should -Not -BeNullOrEmpty -Because 'the call deadlocked: it outlived a 60s watchdog despite -TimeoutSec 20'
+    $res.Code | Should -Not -Be 124 -Because 'a bounded write should not have to be killed by the timeout'
+    $res.Code | Should -Be 0 -Because "cat should exit 0; got $($res.Code)"
+    # And the payload really round-tripped -- proof the child was drained, not merely that
+    # something returned quickly.
+    $res.OutLen | Should -Be 200000 -Because "the full payload must come back; got $($res.OutLen) bytes"
   }
 }
 
@@ -6284,5 +6361,411 @@ Describe "Wait-MetricsApiService (client#553 -- the Windows installer had no wai
       $psFn | Should -Match '\$script:MetricsWaitTimeout'
       $psFn | Should -Not -Match '\$Default = \d'
     }
+  }
+}
+
+Describe "Assert-NodesSeeHostData (backend#2422)" {
+  # /tracebloc is the k3d bind mount of HOST_DATA_DIR. If it is not in effect,
+  # DirectoryOrCreate fabricates the dirs inside the node and the install looks
+  # healthy while storing nothing on this machine. The chart-side fix is
+  # unavailable (spec.persistentvolumesource is immutable, so `type: Directory`
+  # fails the helm upgrade of any existing release), so this probe is the guard —
+  # and it has to fail closed. Keep in step with bash _verify_nodes_see_host_data.
+  #
+  # Mocks Invoke-DockerCli, not `docker`: the probe routes through the bounded
+  # wrapper so a WEDGED daemon cannot hang a headless install (#817 Bugbot).
+  BeforeEach {
+    $script:HOST_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) "tb2422-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $script:HOST_DATA_DIR | Out-Null
+    $script:CLUSTER_NAME = "tracebloc"
+  }
+  AfterEach {
+    Remove-Item -Recurse -Force -Path $script:HOST_DATA_DIR -ErrorAction SilentlyContinue
+  }
+
+  # The {Code,Output} shape Invoke-DockerCli returns is written out inline in each
+  # Mock: a helper function defined here is NOT visible inside a Mock scriptblock
+  # (different scope), which fails every test with "term not recognized".
+  #
+  # Output is ONE STRING with embedded newlines, never an array -- that is what
+  # Invoke-BoundedProcess actually builds ($outTask.Result + $errTask.Result). A
+  # mock returning an array would pass while production parsed a different shape,
+  # which is testing a copy of the code instead of the code.
+  It "passes when every node sees the host tree, and leaves no probe file behind" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "k3d-tracebloc-agent-0`n" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    Test-Path (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") | Should -BeFalse
+  }
+
+  It "REFUSES when a node cannot see the host tree, and names Docker Desktop file sharing" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = "" })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+    $err = $null
+    try { Assert-NodesSeeHostData } catch { $err = $_.Exception.Message }
+    $err | Should -BeLike "*File sharing*"
+  }
+
+  It "compares the token, not just the file's presence" {
+    # A mount pointed at the WRONG host directory still shows a file of this name
+    # from an earlier run. Presence alone would pass; content must not.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = "a-token-from-some-other-run" })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+  }
+
+  It "fails closed when no nodes can be listed" {
+    Mock Invoke-DockerCli { return ([pscustomobject]@{ Code = 0; Output = "" }) }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "fails closed when docker ps itself fails or times out" {
+    # Code 124 is Invoke-BoundedProcess's timeout. A wedged daemon must refuse,
+    # not be read as "no nodes, carry on" — and certainly not hang (#817 Bugbot).
+    Mock Invoke-DockerCli { return ([pscustomobject]@{ Code = 124; Output = "docker ps timed out after 10s" }) }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "fails closed when a node's docker exec fails" {
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 1; Output = "Error response from daemon" })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*cannot see your data directory*"
+  }
+
+  It "fails closed when ONE role's query errors (#817)" {
+    # One query per role means a per-role FAILURE is its own fail-closed decision.
+    # `server` answers, `agent` errors: we cannot tell whether there are agents to
+    # probe, so refusing is the only safe answer. An EMPTY agent list is different
+    # and legitimate (AGENTS=0), which is why the branch keys on .Code and not on
+    # emptiness — a distinction the empty-list test cannot see, since both reach the
+    # same final error (measured: a fail-open mutation stayed green without this).
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        if ($DockerArgs -contains "label=k3d.role=agent") { return ([pscustomobject]@{ Code = 1; Output = "Cannot connect to the Docker daemon" }) }
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*Couldn't list the nodes*"
+  }
+
+  It "accepts an EMPTY agent list, since AGENTS=0 is legitimate (#817)" {
+    # The opposite direction: a single-node cluster genuinely has no agent and must
+    # not be refused.
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        if ($DockerArgs -contains "label=k3d.role=agent") { return ([pscustomobject]@{ Code = 0; Output = "" }) }
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+  }
+
+  It "checks EVERY node, not just the server" {
+    # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
+    # an agent — the same @all-vs-@server trap as the cgroup v1 flag (#806).
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "k3d-tracebloc-agent-0`n" }) }) }
+      if ($DockerArgs[1] -like "*server-0") { return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) }) }
+      return ([pscustomobject]@{ Code = 0; Output = "" })   # the AGENT is blind
+    }
+    { Assert-NodesSeeHostData } | Should -Throw -ExpectedMessage "*agent-0*"
+  }
+
+  It "ignores the load balancer by ROLE, not by name suffix" {
+    # k3d's own k3d.role label says what each container IS. The lb is excluded
+    # because it is a `loadbalancer`, not because its name ends in -serverlb.
+    Mock Invoke-DockerCli {
+      # docker HONOURS the role filters, so a `loadbalancer` is never returned for
+      # role=server or role=agent -- excluded by construction, not by a name suffix.
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+  }
+
+  It "selects nodes by the EXACT k3d.cluster label, never a name substring (#817 review)" {
+    # `name=k3d-<cluster>-` is an unanchored SUBSTRING match, so a same-prefixed
+    # sibling (k3d-tracebloc-dev-*) would be probed too; created against a
+    # different HOST_DATA_DIR it cannot see this token and the probe would refuse
+    # THIS install while naming a node that is not ours — a false refusal
+    # (@saqlainsyed007).
+    $script:capturedArgs = $null
+    Mock Invoke-DockerCli {
+      if ($DockerArgs[0] -eq "ps") {
+        $script:capturedArgs = ($DockerArgs -join " ")
+        return ([pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0 server`n" })
+      }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:capturedArgs | Should -BeLike "*label=k3d.cluster=tracebloc*"
+    $script:capturedArgs | Should -Not -BeLike "*name=k3d-*"
+    $script:capturedArgs | Should -BeLike "*k3d.role*"
+  }
+
+  It "bounds every docker call with a positive timeout (#817 Bugbot)" {
+    # A wedged daemon never returns from a bare `docker`, freezing a headless
+    # install with no output. Every call must carry a deadline.
+    $script:timeouts = @()
+    Mock Invoke-DockerCli {
+      $script:timeouts += $TimeoutSec
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:timeouts.Count | Should -BeGreaterOrEqual 2      # ps + one exec
+    ($script:timeouts | Where-Object { $_ -le 0 }).Count | Should -Be 0
+  }
+
+  It "isolates stdout so docker stderr cannot forge a miss (#817 @saadqbal / Bugbot)" {
+    # THE REAL BUG: Invoke-BoundedProcess returns Output = stdout + stderr concatenated
+    # (a plain string join), and the marker is written -NoNewline. So `cat` emits the
+    # token with no trailing newline and a docker warning glues onto it INSIDE THE SAME
+    # LINE -- "<token>WARNING: ..." -- which is why "take the first non-empty line" does
+    # not fix it either. The result is a FALSE REFUSAL after the cluster is already up.
+    #
+    # Tested against a REAL process, not a mock of Invoke-DockerCli: mocking the very
+    # call whose output shape is the bug would assert nothing about the fix. This runs
+    # a child that writes to BOTH streams and checks the switch actually separates them.
+    $sh = (Get-Command sh -ErrorAction SilentlyContinue)
+    if (-not $sh) { Set-ItResult -Skipped -Because "needs a POSIX sh to write both streams"; return }
+    # No spaces or quotes inside the stderr payload: Invoke-BoundedProcess quotes any
+    # argument containing whitespace, and a nested quoted string inside this -c script
+    # gets mangled by that (which is what made the first version of this test fail with
+    # a truncated payload rather than a real verdict).
+    $script = 'printf tok; printf WARNING:chatter >&2'
+
+    $merged = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20
+    $merged.Code | Should -Be 0
+    $merged.Output | Should -BeLike "*WARNING*" -Because "the default must keep merging, or callers that classify stderr break"
+    # and it glues on with NO separator -- the precise mechanism of the bug, and the
+    # reason a first-non-empty-line fix cannot work
+    $merged.Output | Should -Be "tokWARNING:chatter"
+
+    $isolated = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20 -StdoutOnly
+    $isolated.Code | Should -Be 0
+    $isolated.Output | Should -Be "tok"
+    $isolated.Output | Should -Not -BeLike "*WARNING*"
+  }
+
+  It "keeps merged stderr on a NON-ZERO exit even under -StdoutOnly (client#828)" {
+    # THE CONTRACT: -StdoutOnly isolates stdout ONLY on the success path (exit 0).
+    # A non-zero exit is a failure path and must return the merged stdout+stderr so
+    # the caller still has the child's diagnostics -- gating isolation on the switch
+    # alone silently discarded stderr, making a failed child look like it produced
+    # nothing rather than like the helper threw its stderr away (client#828).
+    #
+    # Real child, not a mock: the return-shape on failure IS the fix, so a mock of
+    # Invoke-DockerCli would assert nothing. The child exits 3 after writing to BOTH
+    # streams; the stderr payload has no space/quote for the same quoting reason as
+    # the success-path test above.
+    $sh = (Get-Command sh -ErrorAction SilentlyContinue)
+    if (-not $sh) { Set-ItResult -Skipped -Because "needs a POSIX sh to write both streams"; return }
+    $script = 'printf tok; printf WARNING:boom >&2; exit 3'
+
+    $failed = Invoke-BoundedProcess -FileName $sh.Source -Arguments @("-c", $script) -TimeoutSec 20 -StdoutOnly
+    $failed.Code | Should -Be 3
+    # stderr SURVIVES the failure despite -StdoutOnly -- the whole point of #828
+    $failed.Output | Should -BeLike "*WARNING*" -Because "a failing -StdoutOnly caller still needs the child's stderr diagnostics (client#828)"
+    # and it is the same merged string a non-isolated failing call would return
+    $failed.Output | Should -Be "tokWARNING:boom"
+  }
+
+  It "passes -StdoutOnly on BOTH docker calls, so the isolation cannot regress (#817)" {
+    # The switch above only helps if this function actually asks for it. Capture what
+    # the probe requests rather than trusting the wiring.
+    $script:sawStdoutOnly = @()
+    Mock Invoke-DockerCli {
+      $script:sawStdoutOnly += [bool]$StdoutOnly
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+    $script:sawStdoutOnly.Count | Should -BeGreaterOrEqual 2          # ps + one exec
+    ($script:sawStdoutOnly | Where-Object { -not $_ }).Count | Should -Be 0
+  }
+
+  It "passes no argument carrying a space or a quote (#817 Bugbot, High)" {
+    # THE BUG THIS EXISTS FOR. $psi.Arguments joins the args into ONE command line
+    # and quotes any whitespace-bearing value as '"' + $_ + '"' with NO escaping of
+    # inner quotes. The obvious single query --
+    #   --format "{{.Names}} {{.Label `"k3d.role`"}}"
+    # -- has both a space and quotes, so it went out with its own quotes intact and
+    # CommandLineToArgvW toggled in and out of quoting to hand docker ONE token with
+    # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. text/template then
+    # cannot parse k3d.role as an identifier, docker exits non-zero, and the probe
+    # throws "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
+    # install, after the cluster is already up.
+    #
+    # Why no earlier test caught it: every case here mocks Invoke-DockerCli, so the
+    # quoting lives BELOW the mock and is unreachable from Pester. The property is
+    # therefore asserted at the mock boundary instead -- on the ARGUMENTS, which is
+    # the layer this suite can actually see.
+    $script:allArgs = @()
+    Mock Invoke-DockerCli {
+      $script:allArgs += ,@($DockerArgs)
+      if ($DockerArgs[0] -eq "ps") { return ([pscustomobject]@{ Code = 0; Output = $(if ($DockerArgs -contains "label=k3d.role=server") { "k3d-tracebloc-server-0`n" } else { "" }) }) }
+      return ([pscustomobject]@{ Code = 0; Output = (Get-Content (Join-Path $script:HOST_DATA_DIR ".tracebloc-mount-probe") -Raw) })
+    }
+    { Assert-NodesSeeHostData } | Should -Not -Throw
+
+    $flat = @($script:allArgs | ForEach-Object { $_ })
+    $flat.Count | Should -BeGreaterThan 0
+    # A quote in ANY argument is unsafe here, whether or not it also has a space:
+    # the quoting branch only triggers on whitespace, so a quoted value silently
+    # passes through un-escaped either way.
+    @($flat | Where-Object { $_ -like '*"*' }).Count | Should -Be 0 -Because "an inner quote is passed through unescaped"
+    @($flat | Where-Object { $_ -match '\s' }).Count  | Should -Be 0 -Because "a whitespace-bearing arg hits the unescaped quoting branch"
+    # and the scoping must still be real: both roles queried, exact cluster label
+    ($flat -contains "label=k3d.role=server") | Should -BeTrue
+    ($flat -contains "label=k3d.role=agent")  | Should -BeTrue
+    ($flat -contains "label=k3d.cluster=tracebloc") | Should -BeTrue
+  }
+
+  It "mints the token without culture-sensitive parsing (#817 Bugbot, High)" {
+    # THE FUNCTIONAL TEST CANNOT PROVE THIS HERE, and pretending otherwise was the
+    # first version of this test: on PowerShell 7 `Get-Date -UFormat %s` emits a
+    # bare integer ("1787575411"), which [double]::Parse accepts in every culture
+    # -- measured across en-US / de-DE / fr-FR, all three fine. So a de-DE
+    # round-trip passes with the bug still in place (confirmed by mutation).
+    #
+    # The bug is real on the platform this installer actually targets. It declares
+    # `#Requires -Version 5.1` and is invoked via powershell.exe (see the note at
+    # install-k8s.ps1:1896), and Windows PowerShell 5.1 emits %s WITH a fractional
+    # part. In de-DE "." is the GROUP separator, so that string either throws
+    # FormatException or -- worse -- parses to a wildly wrong number. Either way
+    # the operator gets a cryptic .NET error on an already-created cluster instead
+    # of a mount check.
+    #
+    # So this is a source guard: assert the mint does no culture-sensitive parsing
+    # at all. That is the property, it is checkable here, and it reddens under the
+    # mutation that a de-DE round-trip cannot see.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $fn  = [regex]::Match($src, 'function Assert-NodesSeeHostData \{.*?\n\}', 'Singleline').Value
+    $fn | Should -Not -BeNullOrEmpty
+    # COMMENT LINES STRIPPED, or the guard trips on the comment that EXPLAINS the
+    # ban -- it names both banned constructs, so the first version of this test
+    # failed on its own documentation. Same reason scripts/tests/
+    # k3s-components-agreement.sh reads the installer with comments removed.
+    $code = ($fn -split "`r?`n" | Where-Object { $_.Trim() -notmatch '^#' }) -join "`n"
+    $code | Should -Not -Match '\[double\]::Parse'
+    $code | Should -Not -Match 'UFormat'
+    # and it must still mint SOMETHING unique per run
+    $code | Should -Match 'Get-Random'
+  }
+}
+
+
+# ── Get-TrainingLimits (backend#2418, Utilization Ladder L0.2) ───────────────
+#
+# CPU is time-shared: `requests` with NO `limits` is a cgroup share weight,
+# whereas requests == limits is a cpu.max QUOTA that throttles at its ceiling on
+# a completely idle box. Memory is not time-shared -- over the limit is an OOM
+# kill -- so requests == limits stays there and only cpu is dropped.
+#
+# The bash twin is `_training_limits` in scripts/lib/install-client-helm.sh; the
+# two are pinned to agree by scripts/tests/fixtures/installer_parity.json. The
+# whitespace case below is a real divergence the bash side had and this side did
+# not: `case " cpu=7 " in cpu=*)` does not match, so an untrimmed pair kept the
+# cpu limit on Linux/macOS while `.Trim()` dropped it on Windows.
+Describe "Get-TrainingLimits" {
+  It "drops cpu and keeps memory" {
+    Get-TrainingLimits "cpu=7,memory=29Gi" | Should -Be "memory=29Gi"
+  }
+  It "keeps every non-cpu dimension, not just memory" {
+    # backend#2223 added ephemeral-storage; a "memory only" filter would silently
+    # drop a disk limit and let a pod fill the node's disk.
+    Get-TrainingLimits "cpu=7,memory=29Gi,ephemeral-storage=26Gi" |
+      Should -Be "memory=29Gi,ephemeral-storage=26Gi"
+  }
+  It "leaves a size with no cpu unchanged" {
+    Get-TrainingLimits "memory=16Gi" | Should -Be "memory=16Gi"
+  }
+  It "returns the input for a cpu-ONLY size, never empty" {
+    # An empty RESOURCE_LIMITS reads to jobs-manager as UNSET, which since
+    # client-runtime#388 mirrors the requests side back -- resurrecting the very
+    # cpu limit this function exists to drop.
+    Get-TrainingLimits "cpu=4" | Should -Be "cpu=4"
+  }
+  It "matches cpu= case-insensitively, and the bash twin now agrees" {
+    # Divergence caught in review on client#820: this side's `-like` was
+    # already case-insensitive while bash's `case cpu=*)` was not, so
+    # `CPU=7,...` kept the cpu limit on Linux/macOS and dropped it here. Bash
+    # now uses [Cc][Pp][Uu] character classes (macOS ships bash 3.2, which has
+    # no `${var,,}`).
+    Get-TrainingLimits "CPU=7,memory=29Gi" | Should -Be "memory=29Gi"
+    Get-TrainingLimits "Cpu=7,memory=29Gi" | Should -Be "memory=29Gi"
+    Get-TrainingLimits "CPU=7,CPUSET=0-3,memory=29Gi" |
+      Should -Be "CPUSET=0-3,memory=29Gi"
+  }
+  It "trims each pair before matching cpu=" {
+    Get-TrainingLimits " cpu=7 , memory=29Gi " | Should -Be "memory=29Gi"
+  }
+  It "skips empty pairs" {
+    Get-TrainingLimits "cpu=7,,memory=29Gi" | Should -Be "memory=29Gi"
+  }
+  It "does not eat a dimension that merely starts with cpu" {
+    Get-TrainingLimits "cpu=7,cpuset=0-3,memory=29Gi" |
+      Should -Be "cpuset=0-3,memory=29Gi"
+  }
+}
+
+
+# ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
+#
+# `RESOURCE_LIMITS` stopped being the whole envelope, so a reader taking the
+# carried size from it broke REINSTALL two ways: the size came back as
+# `memory=29Gi` and was written into RESOURCE_REQUESTS (dropping the cpu
+# request), and the historic-literal gate stopped matching so the post-filter
+# default was mistaken for a deliberate choice. The reader now prefers
+# RESOURCE_REQUESTS and falls back to LIMITS. Bash twin:
+# `_existing_training_values`.
+Describe "Get-TrainingResources carry path (backend#2418)" {
+  BeforeEach { $env:TRACEBLOC_TRAINING_RESOURCES = $null; $script:TB_NAMESPACE = "tracebloc" }
+  AfterEach { $script:TB_NAMESPACE = $null }
+
+  It "carries RESOURCE_REQUESTS, not the memory-only RESOURCE_LIMITS" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"memory=29Gi","RESOURCE_REQUESTS":"cpu=7,memory=29Gi","RESOURCE_PROVENANCE":"user"}}'
+    }
+    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+  }
+
+  It "falls back to RESOURCE_LIMITS when REQUESTS is absent" {
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"cpu=4,memory=12Gi"}}'
+    }
+    Get-TrainingResources | Should -Be "cpu=4,memory=12Gi"
+  }
+
+  It "still refuses to carry the historic literal" {
+    # The gate that keeps an unschedulable 8Gi off the machines this sizing
+    # exists to fix. It compares the FULL envelope, which only works because
+    # the reader takes RESOURCE_REQUESTS.
+    Mock kubectl { $global:LASTEXITCODE = 0 }
+    Mock helm {
+      $global:LASTEXITCODE = 0
+      '{"env":{"RESOURCE_LIMITS":"memory=8Gi","RESOURCE_REQUESTS":"cpu=2,memory=8Gi"}}'
+    }
+    # Not carried: the answer is machine-derived, so it still names a cpu
+    # dimension. Asserting only "not the literal" would pass vacuously under
+    # the mutation this test exists to catch.
+    Get-TrainingResources | Should -Not -Be "memory=8Gi"
+    Get-TrainingResources | Should -Match '^cpu='
   }
 }
