@@ -2121,7 +2121,15 @@ function Invoke-BoundedProcess {
     finally { try { $proc.StandardInput.Close() } catch { } }
   }
   if ($proc.WaitForExit($TimeoutSec * 1000)) {
-    return [pscustomobject]@{ Code = $proc.ExitCode; Output = $(if ($StdoutOnly) { $outTask.Result } else { $outTask.Result + $errTask.Result }) }
+    # -StdoutOnly isolates stdout ONLY when the child SUCCEEDED (exit 0), per the
+    # contract documented above. On a NON-ZERO exit the merged stdout+stderr is
+    # returned regardless of -StdoutOnly, so a failing caller keeps the child's
+    # stderr diagnostics -- gating on $StdoutOnly alone silently discarded them,
+    # and the child then looked like it produced nothing rather than like we threw
+    # its stderr away (client#828). The timeout arm below is the other failure path
+    # and keeps its synthetic text for the same reason.
+    $isolate = $StdoutOnly -and $proc.ExitCode -eq 0
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = $(if ($isolate) { $outTask.Result } else { $outTask.Result + $errTask.Result }) }
   }
   # timed out -> kill the child so it can't keep running after we've moved on
   try { $proc.Kill() } catch {}
