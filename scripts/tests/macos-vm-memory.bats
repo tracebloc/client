@@ -66,6 +66,7 @@ setup() {
   error() { record "error $*"; return 1; }
   _read_sanitized() { printf -v "$2" '%s' "${REPLY_IN:-}"; }
   PF_MIN_MEM_GB=5
+  PF_VM_MEM_GRACE_MIB=512
   unset COLIMA_MEMORY TRACEBLOC_ASSUME_YES
 }
 
@@ -332,4 +333,69 @@ calls() { cat "$MOCK_CALLS"; }
     MEM_KB_AFTER=$((5 * 1024 * 1024)) run _offer_colima_memory_raise
   run bash -c "grep -c '^colima start --memory 5$' '$MOCK_CALLS' || true"
   [ "$output" = "1" ] || return 1
+}
+
+
+# ── the guest-MemTotal grace (Bugbot High) ────────────────────────────────
+
+@test "REGRESSION: a VM set to exactly the floor is NOT prompted about" {
+  # preflight.sh says it in its own words: "a VM configured to exactly the
+  # documented floor reports a few hundred MiB less as guest MemTotal, and rounding
+  # that to whole GB first would misgrade it as sub-floor". I rounded first — so a
+  # 5 GB VM reporting ~4.8 GiB truncated to 4, and this path offered to "fix" a
+  # healthy runtime. Under TRACEBLOC_ASSUME_YES=1 it would have restarted one
+  # unasked, which is the part that makes this High rather than cosmetic.
+  REPLY_IN="y" MEM_KB=$(( (5 * 1024 - 300) * 1024 )) TARGET_GB=8 \
+    run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  run bash -c "grep -c '^colima ' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "a VM genuinely below the floor is still prompted about" {
+  # The grace must not have swallowed the case the feature exists for: 3 GiB is
+  # short by far more than the grace can explain.
+  REPLY_IN="y" MEM_KB=$(( 3 * 1024 * 1024 )) TARGET_GB=8 \
+    MEM_KB_AFTER=$(( 8 * 1024 * 1024 )) run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima start --memory 8$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+@test "a VM just OUTSIDE the grace is prompted about" {
+  # The boundary: 5 GB minus 700 MiB is more than the 512 MiB grace explains.
+  REPLY_IN="y" MEM_KB=$(( (5 * 1024 - 700) * 1024 )) TARGET_GB=8 \
+    MEM_KB_AFTER=$(( 8 * 1024 * 1024 )) run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima stop$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+}
+
+@test "the recovery restores the CONFIGURED size, not the guest's short report" {
+  # @LukasWodka's round-down wrinkle, closed rather than accepted: a VM configured
+  # to 8 GB reports ~7.8 GiB, and restoring at 7 would quietly shrink it. Grading
+  # through _pf_display_gb_from_mib recovers the 8.
+  colima() {
+    record "colima $*"
+    if [[ "$1" == "start" && "$3" == "16" ]]; then return 1; fi
+    [[ "$1" == "start" ]] && RESTARTED=1
+    return 0
+  }
+  # A VM configured to 4 GB reporting ~3.7 GiB: below the floor (so the offer
+  # fires) and short of its own configured size (so the round-down would show).
+  # My first version used an 8 GB VM, which is ABOVE the floor — the function
+  # returned early and the test proved nothing about recovery at all.
+  REPLY_IN="y" MEM_KB=$(( (4 * 1024 - 300) * 1024 )) TARGET_GB=16 \
+    run _offer_colima_memory_raise
+  run bash -c "grep -c '^colima start --memory 4$' '$MOCK_CALLS' || true"
+  [ "$output" = "1" ] || return 1
+  run bash -c "grep -c '^colima start --memory 3$' '$MOCK_CALLS' || true"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "the named-profile hint is not mangled by quote escaping" {
+  # The '"'"'\'"'"''"'"' idiom is for a SINGLE-quoted string; in double quotes it emits a
+  # literal backslash, muddying the one message that tells an operator what to run.
+  DOCKER_CTX="colima-profile2" REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 \
+    run _offer_colima_memory_raise
+  [[ "$output" == *"profile 'profile2'"* ]] || return 1
+  [[ "$output" != *"\\'"* ]] || return 1
 }

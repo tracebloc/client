@@ -245,21 +245,38 @@ _offer_colima_memory_raise() {
     _ctx="$(docker context show 2>/dev/null)" || _ctx=""
     case "$_ctx" in
       colima-*)
-        hint "Docker is using the Colima profile '\''${_ctx#colima-}'\''. Raise it yourself with: colima stop --profile ${_ctx#colima-} && colima start --profile ${_ctx#colima-} --memory <GB>"
+        # Plain single quotes: the '\'' concatenation idiom is for a SINGLE-quoted
+        # string, and inside double quotes it emits a literal backslash (Bugbot).
+        hint "Docker is using the Colima profile '${_ctx#colima-}'. Raise it yourself with: colima stop --profile ${_ctx#colima-} && colima start --profile ${_ctx#colima-} --memory <GB>"
         ;;
     esac
     return 0
   fi
 
-  local current_kb target_gb current_gb
+  local current_kb current_mib target_gb current_gb
   current_kb="$(_pf_runtime_mem_kb)"
   [[ "$current_kb" =~ ^[0-9]+$ && "$current_kb" -gt 0 ]] || return 0
-  current_gb=$(( current_kb / 1024 / 1024 ))
+  current_mib=$(( current_kb / 1024 ))
+  # GRADED IN MiB WITH THE GRACE, never rounded to whole GB first (Cursor Bugbot
+  # High on #832). preflight.sh says why in its own words: "a VM configured to
+  # exactly the documented floor reports a few hundred MiB less as guest MemTotal,
+  # and rounding that to whole GB first would misgrade it as sub-floor". I did
+  # exactly that -- so a Colima VM set to the documented 5 GB floor reported ~4.7
+  # GiB, truncated to 4, and this path prompted to "fix" a healthy runtime. Under
+  # TRACEBLOC_ASSUME_YES=1 it would have restarted one unasked.
+  #
+  # `_pf_display_gb_from_mib` adds the grace back before dividing, so `current_gb`
+  # is the CONFIGURED size rather than the guest's short report. That also settles
+  # @LukasWodka's round-down wrinkle on the recovery path for free: restoring at
+  # this figure restores what the VM was actually set to, so the accepted
+  # "restores slightly smaller" trade is no longer being made at all.
+  current_gb="$(_pf_display_gb_from_mib "$current_mib")"
   target_gb="${COLIMA_MEMORY:-$(_macos_vm_mem_gb)}"
   [[ "$target_gb" =~ ^[0-9]+$ && "$target_gb" -gt 0 ]] || return 0
 
   # Only when it is actually short, and only when the raise is worth a restart.
-  (( current_gb < PF_MIN_MEM_GB )) || return 0
+  # The same comparison preflight.sh:291 makes, for the same reason.
+  (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) || return 0
   (( target_gb > current_gb )) || return 0
 
   # AND ONLY WHEN THE RAISE WOULD ACTUALLY CLEAR THE FLOOR (@LukasWodka on #832).
@@ -335,8 +352,11 @@ _offer_colima_memory_raise() {
   # different facts, and only the second is worth a success line.
   local new_kb new_gb
   new_kb="$(_pf_runtime_mem_kb)"
-  if [[ "$new_kb" =~ ^[0-9]+$ ]] && (( new_kb / 1024 / 1024 > current_gb )); then
-    new_gb=$(( new_kb / 1024 / 1024 ))
+  # Same grace-aware arithmetic as the grading above: truncating here would let a
+  # raise that landed exactly ON the floor report that nothing grew.
+  if [[ "$new_kb" =~ ^[0-9]+$ ]] &&
+     (( $(_pf_display_gb_from_mib "$(( new_kb / 1024 ))") > current_gb )); then
+    new_gb="$(_pf_display_gb_from_mib "$(( new_kb / 1024 ))")"
     success "Colima VM raised to ${new_gb} GB."
   else
     warn "Colima restarted but still reports ${current_gb} GB. Check 'colima status' and raise it manually: ${cmd}"
