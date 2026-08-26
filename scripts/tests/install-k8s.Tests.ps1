@@ -2010,6 +2010,83 @@ Describe "Envelope contract golden vectors (backend#2220)" {
   }
 }
 
+Describe "Sizing-probe failures reach the install log (client#771)" {
+  # The bare `catch {}` on the sizing path swallowed two real defects into a
+  # plausible-looking default -- the Int32 [math]::Max overload throw
+  # (client#766: EVERY machine over ~2 GiB of headroom silently got the
+  # literal) and a provenance read landing a wrong verdict (client#768). The
+  # bounded degradation is deliberate and stays; these pin that it can no
+  # longer be SILENT. Expected absence -- no namespace, no release, an
+  # unreadable cluster -- must stay quiet, because it happens on every fresh
+  # install and a warning there would be noise that trains people to ignore
+  # the real one.
+  BeforeEach {
+    $script:TB_NAMESPACE = "tracebloc"
+    $env:TRACEBLOC_TRAINING_RESOURCES = $null
+    Mock Log { }
+  }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+
+  It "a sizing probe that throws logs the exception AND still returns the bounded default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { throw "kubectl exploded mid-probe" }
+      $global:LASTEXITCODE = 1; ""
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Should -Invoke Log -Times 1 -Exactly -ParameterFilter {
+      $m -match 'Get-TrainingResources' -and $m -match 'kubectl exploded mid-probe'
+    }
+  }
+
+  It "a carried-values read that throws logs the exception AND still carries nothing" {
+    # The client#768 shape: helm answers, the parse chokes. The $null return is
+    # asserted elsewhere ("a failing values read can never report 'installer'");
+    # this pins that the choke is no longer invisible.
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm { $global:LASTEXITCODE = 0; "{ this is : not json" }
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+    Should -Invoke Log -Times 1 -Exactly -ParameterFilter {
+      $m -match 'Get-CarriedTrainingValues'
+    }
+  }
+
+  It "EXPECTED absence stays quiet: an unreadable namespace logs nothing" {
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Should -Not -Invoke Log
+  }
+
+  It "EXPECTED absence stays quiet: unparseable node quantities log nothing" {
+    # Unparseable allocatable is contract-SKIPPED (`continue`), not an
+    # exception -- the fall-through to the literal here is the code working as
+    # specified, so it must not cry wolf in the install log.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64GB")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Should -Not -Invoke Log
+  }
+
+  It "the logged degradation still returns the size the values generation needs" {
+    # The whole-path guarantee client#766's replay relies on: even with BOTH
+    # probes throwing, values generation gets a usable size string -- logged
+    # loudly, degraded boundedly, never $null and never a hang.
+    Mock kubectl { throw "everything is on fire" }
+    Mock helm { throw "helm too" }
+    $carried = Get-CarriedTrainingValues
+    $carried | Should -BeNullOrEmpty
+    Get-TrainingResources -Carried $carried -CarriedResolved | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingProvenance -Carried $carried -CarriedResolved | Should -Be "installer"
+    Should -Invoke Log -ParameterFilter { $m -match 'WARN' }
+  }
+}
+
 Describe "Topology contract golden vectors (backend#2221)" {
   # The PowerShell half of the topology parity. scripts/tests/
   # install-client-helm.bats replays the SAME contract rows through the bash
