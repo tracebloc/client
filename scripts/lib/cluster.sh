@@ -710,6 +710,12 @@ create_cluster() {
   # _handle_existing_cluster too: an adopted cluster is exactly the one that may
   # have been created without the mount.
   _verify_nodes_see_host_data
+
+  # GPU nodes are up now (fresh from the GPU image, or a reused GPU-capable one),
+  # so generate the native NVIDIA CDI spec inside them before helm rolls out the
+  # device plugin (client#835). No-op unless GPU is wired; may fall back to CPU if
+  # no node can produce a usable spec.
+  _generate_node_cdi_specs
 }
 
 # Guarantee the cluster returns after a host reboot. On Linux this already works
@@ -842,6 +848,9 @@ _handle_existing_cluster() {
   _check_existing_cluster_dataset_mount
   _check_existing_cluster_storage_mode
   _check_existing_cluster_k8s_version
+  # GPU capability is fixed at create time: a reused CPU-only node can't run GPU
+  # pods, so drop the GPU request here rather than strand jobs Pending (client#835).
+  _check_existing_cluster_gpu
 }
 
 # The recreate remedy, printed from ONE place (backend#2077).
@@ -902,12 +911,27 @@ _check_existing_cluster_k8s_version() {
   # → the `|| return 0` makes it a silent no-op, same as an inspect failure.
   image=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{.Config.Image}}' 2>/dev/null) || return 0
   [[ -z "$image" ]] && return 0
+  local running=""
   case "$image" in
-    *rancher/k3s:*) : ;;
+    *rancher/k3s:*)
+      running="${image##*rancher/k3s:}"   # strip up to the tag
+      running="${running%%@*}"            # drop any @sha256:... digest suffix
+      ;;
+    *k3s-cuda:*)
+      # GPU node image (client#835): its tag encodes the k3s pin as
+      # <k3s>-cuda-<cuda-base>, so extract the k3s part and drift-check it too —
+      # else a GPU cluster silently escapes this check and keeps a stale k3s across
+      # a pin bump. An override tag lacking the -cuda- marker isn't parseable, so
+      # don't guess. Mirrors the Windows twin's Test-K3sVersionDrift.
+      local _cudatag="${image##*k3s-cuda:}"
+      _cudatag="${_cudatag%%@*}"
+      case "$_cudatag" in
+        *-cuda-*) running="${_cudatag%%-cuda-*}" ;;
+        *) return 0 ;;
+      esac
+      ;;
     *) return 0 ;;   # unexpected image ref — don't guess
   esac
-  local running="${image##*rancher/k3s:}"   # strip up to the tag
-  running="${running%%@*}"                   # drop any @sha256:... digest suffix
   [[ -z "$running" ]] && return 0
   if [[ "$running" != "$K8S_VERSION" ]]; then
     echo ""
@@ -1122,6 +1146,126 @@ _check_existing_cluster_storage_mode() {
   fi
 }
 
+# ── GPU node image (client#835) ──────────────────────────────────────────────
+# The stock rancher/k3s node image is Alpine-based and ships NO NVIDIA container
+# runtime, so GPU pods can never schedule on it — the node advertises 0
+# nvidia.com/gpu even after the host Docker runtime is set and the device plugin
+# is deployed. docker/k3s-cuda rebuilds the SAME pinned k3s on a CUDA base with the
+# NVIDIA Container Toolkit + the `nvidia` RuntimeClass baked in, published to
+# ghcr.io/tracebloc/k3s-cuda by .github/workflows/build-k3s-cuda.yaml. This is the
+# Linux twin of the resolution the Windows installer already does
+# (install-k8s.ps1's $K3S_CUDA_IMAGE): a full override wins, else derive the tag —
+# which encodes BOTH the k3s pin and the CUDA base so a K8S_VERSION bump can never
+# reuse a stale image (check-facts.sh enforces the sync) — re-homed onto a private
+# mirror when one is configured (#585) or ghcr.io otherwise.
+_gpu_node_image() {
+  if [[ -n "${TRACEBLOC_K3S_CUDA_IMAGE:-}" ]]; then
+    printf '%s' "$TRACEBLOC_K3S_CUDA_IMAGE"; return 0
+  fi
+  local repo="tracebloc/k3s-cuda:${K8S_VERSION}-cuda-${TB_CUDA_BASE_TAG}"
+  # BARE host prefix: strip a pasted scheme exactly like _image_mirror_yaml does,
+  # so a mirror given as https://mirror.corp still yields <host>/repo.
+  local mirror="${TRACEBLOC_IMAGE_REGISTRY:-}"
+  if [[ -n "$mirror" ]]; then
+    printf '%s/%s' "${mirror#*://}" "$repo"
+  else
+    printf 'ghcr.io/%s' "$repo"
+  fi
+}
+
+# Can a node running $1 (a `docker inspect …Config.Image` value) schedule GPU pods?
+# The default GPU image name carries `k3s-cuda:`, BUT an operator can override it
+# (TRACEBLOC_K3S_CUDA_IMAGE) to a renamed / digest-only mirror ref that doesn't —
+# so also accept an EXACT match against the image this run is configured to use.
+# A stock rancher/k3s image — or an unreadable/empty one — is not GPU-capable and
+# must fail safe to CPU rather than strand jobs Pending. Pure (string in, status
+# out) so it is unit-testable without a live cluster. Mirrors the Windows twin's
+# Test-NodeImageGpuCapable.
+_node_image_gpu_capable() {
+  local image="$1"
+  [[ -n "$image" ]] || return 1
+  case "$image" in *k3s-cuda:*) return 0 ;; esac
+  [[ "$image" == "$(_gpu_node_image)" ]]
+}
+
+# Reconcile the GPU decision against a REUSED cluster (client#835). The GPU gate
+# populates K3D_GPU_FLAGS (=--gpus=all) and the chart requests a GPU BEFORE we know
+# whether this run creates the cluster or reuses one. GPU capability is fixed at
+# create time (baked into the node image); it cannot be bolted onto a running
+# cluster. A cluster first built in CPU mode — or by an installer predating #835 —
+# has a stock rancher/k3s node (no NVIDIA runtime, no `nvidia` RuntimeClass), so
+# writing GPU values against it strands every job Pending on a node that advertises
+# 0 GPUs: exactly the failure #835 removes. So when GPU was requested but the reused
+# node isn't GPU-capable, DISABLE GPU for this run (CPU fallback stays safe) and
+# tell the user to recreate the cluster to get GPU. Bounded docker inspect
+# (installer rule). No-op when GPU wasn't requested or the node can't be inspected
+# (don't guess CPU on a transient probe failure — leave the request as-is).
+_check_existing_cluster_gpu() {
+  _gpu_wired || return 0
+  local server_container="k3d-${CLUSTER_NAME}-server-0"
+  local image
+  image=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{.Config.Image}}' 2>/dev/null) || return 0
+  [[ -z "$image" ]] && return 0
+  _node_image_gpu_capable "$image" && return 0
+  # CPU-only node → drop the GPU request so the chart writes CPU values.
+  K3D_GPU_FLAGS=()
+  echo ""
+  warn "GPU detected, but the existing '$CLUSTER_NAME' cluster runs a CPU-only node — running CPU mode so jobs aren't stranded Pending."
+  hint "The k3s node image (and thus GPU capability) is fixed when the cluster is created; it can't be added to a running cluster."
+  hint "To enable GPU on this machine, recreate the cluster:"
+  _recreate_cluster_hint
+  hint "  (hostpath mode keeps your data under ${HOST_DATA_DIR:-your data dir}; node-local mode loses in-cluster data on recreate.)"
+  echo ""
+}
+
+# Generate the native NVIDIA CDI spec INSIDE each GPU node (client#835). The
+# docker/k3s-cuda image sets nvidia-container-runtime to CDI mode, so in-node
+# containerd injects a GPU into a pod only from a CDI spec — and the image's boot
+# drop-in generates one only on WSL2 (/dev/dxg). On native Linux no spec exists, so
+# even with the runtime present a GPU pod gets nothing and the NVML device plugin
+# (which runs under the `nvidia` RuntimeClass) can't enumerate GPUs → the node never
+# advertises nvidia.com/gpu. We generate it here, from the host, right after the
+# nodes are up (their /dev/nvidia* are present via --gpus=all): `nvidia-ctk cdi
+# generate` in its default (auto→nvml) mode writes /etc/cdi/nvidia.yaml, which
+# persists in the node's writable layer across restarts and is regenerated on any
+# recreate. If NO node ends up with a usable spec, fall CLOSED to CPU (clear
+# K3D_GPU_FLAGS) so the chart doesn't advertise a GPU pods can't actually use —
+# the same standard the Windows CDI path already applies. Bounded; best-effort per
+# node so a missing spec on one node never aborts the (optional) GPU step.
+_generate_node_cdi_specs() {
+  _gpu_wired || return 0
+  local role out st node any_ok=0
+  local nodes=""
+  for role in server agent; do
+    st=0
+    out=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps \
+            --filter "label=k3d.cluster=${CLUSTER_NAME}" \
+            --filter "label=k3d.role=${role}" \
+            --format '{{.Names}}' 2>/dev/null) || st=$?
+    (( st == 0 )) && [[ -n "$out" ]] && nodes+="${out}"$'\n'
+  done
+  for node in $nodes; do
+    # `nvidia-ctk cdi generate` needs the toolkit (baked into the GPU image) and a
+    # visible GPU (--gpus=all). /etc/cdi is where containerd's nvidia runtime reads
+    # specs; create it first (the CUDA base may not ship it). Then confirm the spec
+    # is non-empty before counting the node.
+    if _bounded "${TB_GPU_CDI_TIMEOUT:-60}" docker exec "$node" \
+         sh -c 'mkdir -p /etc/cdi && nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' >>"${LOG_FILE:-/dev/null}" 2>&1 \
+       && _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker exec "$node" \
+            test -s /etc/cdi/nvidia.yaml 2>/dev/null; then
+      any_ok=1
+      log "Generated the NVIDIA CDI spec on node '${node}' (/etc/cdi/nvidia.yaml)."
+    else
+      warn "Couldn't generate the NVIDIA CDI spec on node '${node}' — pods on it won't be able to use the GPU."
+    fi
+  done
+  if (( ! any_ok )); then
+    K3D_GPU_FLAGS=()
+    warn "No cluster node could generate a usable NVIDIA CDI spec — running CPU mode so GPU jobs aren't stranded Pending."
+    hint "Check the NVIDIA driver + 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG} nvidia-smi' works on this host, then re-run."
+  fi
+}
+
 _create_new_cluster() {
   # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial out
   # to the platform, and every in-cluster Service is ClusterIP — mysql-client,
@@ -1255,10 +1399,27 @@ _create_new_cluster() {
   # drift that stranded a client on v1.35.5 while the pin was v1.29.4 (#547) — so
   # honour it but warn loudly. (Empty only happens when cluster.sh is sourced
   # without common.sh, e.g. the unit harness; leave it a no-op there.)
+  #
+  # The GPU path swaps the stock rancher/k3s node for the GPU-capable k3s-cuda
+  # image (client#835): same pinned k3s, plus the NVIDIA runtime + `nvidia`
+  # RuntimeClass, because GPU capability is baked into the node at create time and
+  # can't be bolted onto a running cluster. Gated on _gpu_wired so a CPU install is
+  # byte-for-byte unchanged. Mirrors the Windows twin (install-k8s.ps1).
   if [[ "$K8S_VERSION" == "latest" ]]; then
     warn "K8S_VERSION=latest runs an UNVALIDATED k3s (k3d's bundled default), not the tested pin."
     hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
     hint "Unset K8S_VERSION (or pin it to a validated tag) to use the tested version."
+    # 'latest' has no matching pinned k3s-cuda image to derive, and a stock k3s node
+    # can't schedule GPU pods — so drop the request (it would otherwise strand every
+    # job Pending on a node that advertises 0 GPUs).
+    if _gpu_wired; then
+      K3D_GPU_FLAGS=()
+      warn "GPU disabled: K8S_VERSION=latest has no matching GPU node image — pin K8S_VERSION to enable GPU."
+    fi
+  elif _gpu_wired && [[ -n "$K8S_VERSION" ]]; then
+    local _gpu_image; _gpu_image="$(_gpu_node_image)"
+    K3D_ARGS+=(--image "$_gpu_image")
+    log "GPU node image: ${_gpu_image} (NVIDIA Container Toolkit + 'nvidia' RuntimeClass baked in)."
   elif [[ -n "$K8S_VERSION" ]]; then
     K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
   fi

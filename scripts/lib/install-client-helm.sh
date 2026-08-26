@@ -1813,13 +1813,24 @@ install_client_helm() {
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
-  # ── GPU limits ──────────────────────────────────────────────────────────
-  local gpu_val
-  if [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
+  # ── GPU request + runtime class (client#835) ──────────────────────────────
+  # Request a GPU for training jobs ONLY when a GPU was actually WIRED into the
+  # cluster (_gpu_wired: NVIDIA detected AND the k3d node was created from the
+  # GPU-capable image with --gpus=all, and the reuse guard didn't drop it).
+  # Requesting nvidia.com/gpu while the node advertises 0 GPUs strands every job
+  # Pending — so gate on the condition that PROVISIONS the GPU, not on bare
+  # detection (the pre-#835 bug on Linux). Training pods then run under the
+  # `nvidia` RuntimeClass (baked into the GPU node image) so the node's containerd
+  # invokes the NVIDIA runtime. Mirrors the Windows twin, which gates the same
+  # values on $K3D_GPU_FLAG.
+  local gpu_val="" runtime_class=""
+  if _gpu_wired; then
     gpu_val="nvidia.com/gpu=1"
-    log "NVIDIA GPU detected — setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+    runtime_class="nvidia"
+    log "NVIDIA GPU wired — GPU_LIMITS/GPU_REQUESTS=nvidia.com/gpu=1, RUNTIME_CLASS_NAME=nvidia"
+  elif [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
+    warn "NVIDIA GPU detected but not wired into this cluster — running CPU-only (GPU_LIMITS/GPU_REQUESTS left empty)."
   else
-    gpu_val=""
     log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
@@ -1830,10 +1841,20 @@ install_client_helm() {
   # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
   # instead of lingering. CPU-only installs emit nothing → the chart default
   # (disabled) stands. The GPU *request* (gpu_val) remains NVIDIA-only, as before.
+  #
+  # NVIDIA (client#835): the plugin must run under the `nvidia` RuntimeClass so it
+  # can init NVML on native Linux — the plugin pod otherwise runs under the default
+  # runtime, sees no GPU, and registers 0. So it is enabled only when the GPU is
+  # actually wired (a stock CPU node has no `nvidia` RuntimeClass, which would leave
+  # the pod unschedulable). AMD is unchanged: its plugin needs no k3d flag or
+  # RuntimeClass, so it stays gated on bare detection.
   local gpu_block=""
-  if [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]]; then
-    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: %s\n' "$GPU_VENDOR")"
-    log "Helm-managed GPU device plugin enabled (vendor=${GPU_VENDOR})"
+  if _gpu_wired; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: nvidia\n    nvidia:\n      runtimeClassName: nvidia\n')"
+    log "Helm-managed GPU device plugin enabled (vendor=nvidia, runtimeClassName=nvidia)"
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: amd\n')"
+    log "Helm-managed GPU device plugin enabled (vendor=amd)"
   fi
 
   # backend#723 A2: pick the MySQL engine for this install (before the heredoc
@@ -1908,7 +1929,9 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   RESOURCE_PROVENANCE: "${training_provenance}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
-  RUNTIME_CLASS_NAME: ""
+  # nvidia when the GPU is wired (client#835): jobs-manager threads it into every
+  # spawned pod so the node's containerd invokes the NVIDIA runtime; "" on CPU.
+  RUNTIME_CLASS_NAME: "$runtime_class"
   # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster
   # that cannot autoscale, so jobs-manager applies the hard CPU-or-GPU rule —
   # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node

@@ -909,6 +909,15 @@ fi
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
 K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
+# CUDA base tag for the GPU-capable k3d node image (client#616/#835). The custom
+# docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
+# base, and its published tag encodes both (…/k3s-cuda:<K8S_VERSION>-cuda-<this>),
+# so cluster.sh::_gpu_node_image can derive the pull ref deterministically.
+# TRACEBLOC_CUDA_BASE_TAG overrides it (mirrors the Windows twin's $CUDA_BASE_TAG).
+# check-facts.sh keeps this in lockstep with facts.env's CUDA_TAG and the four
+# other consumers, so a bump can't derive a GPU image tag that was never built.
+# shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
+TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
 # release at install time instead (an empty value falls back to this pin, like
 # K8S_VERSION above). The binary is fetched directly from the release and
@@ -1032,6 +1041,24 @@ NVIDIA_DRIVER_OK=false
 K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
 PM_INSTALL=""
 PM_UPDATE=""
+
+# True when an NVIDIA GPU has been WIRED INTO THIS CLUSTER — not merely detected.
+# K3D_GPU_FLAGS is populated (--gpus=all) only once the container runtime is ready
+# to expose the GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d
+# node is then created from the GPU-capable image (cluster.sh), and the reuse
+# guard CLEARS it when an existing cluster turns out to be a CPU-only node. So this
+# is the one honest gate for "should we request a GPU for jobs" — the same role the
+# Windows twin's `$K3D_GPU_FLAG -ne ""` plays. Requesting nvidia.com/gpu on a node
+# that advertises 0 GPUs strands every job Pending (client#835), so the GPU chart
+# values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
+# set -u safe: K3D_GPU_FLAGS is declared above, but a unit test that sources only a
+# single lib may not have it, so default the length probe.
+_gpu_wired() {
+  [[ "${GPU_VENDOR:-}" == "nvidia" ]] || return 1
+  local n=0
+  [[ "${K3D_GPU_FLAGS+set}" == set ]] && n="${#K3D_GPU_FLAGS[@]}"
+  (( n > 0 ))
+}
 
 # ── Failure diagnostics (client#681) ─────────────────────────────────────────
 #  Under `set -euo pipefail` a command that fails outside an if/&&/|| context

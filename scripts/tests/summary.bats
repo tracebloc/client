@@ -106,6 +106,26 @@ setup() {
   [[ "$output" == *"1.4.4"* ]] || return 1
 }
 
+# ── GPU mode is HONEST: wired, not merely detected (client#835) ─────────────
+# A detected-but-not-wired NVIDIA GPU runs CPU-only, so the summary must say CPU —
+# printing "NVIDIA GPU" there is exactly the false claim #835 removes.
+@test "print_summary: NVIDIA detected but NOT wired -> Mode: CPU (no false GPU claim)" {
+  CLIENT_STATE=connected
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()          # detected, cluster is CPU-only
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  run print_summary
+  [[ "$output" == *"CPU"* ]] || return 1
+  [[ "$output" != *"NVIDIA GPU"* ]] || return 1
+}
+
+@test "print_summary: NVIDIA wired -> Mode: NVIDIA GPU" {
+  CLIENT_STATE=connected
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")
+  helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }
+  run print_summary
+  [[ "$output" == *"NVIDIA GPU"* ]] || return 1
+}
+
 @test "print_summary starting: 'still starting', no trust claim" {
   CLIENT_STATE=starting
   run print_summary

@@ -385,6 +385,47 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+# ── GPU chart values gated on "GPU wired", not bare detection (client#835) ────
+# Requesting nvidia.com/gpu on a node that advertises 0 GPUs strands every job
+# Pending — the pre-#835 Linux bug — so the request, the RuntimeClass, and the
+# device plugin all ride _gpu_wired (NVIDIA detected AND --gpus=all set), mirroring
+# the Windows twin's $K3D_GPU_FLAG gate.
+@test "install_client_helm: NVIDIA wired -> values carry the GPU request, RuntimeClass, and device plugin" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")   # detected AND wired
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$vf"
+  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$vf"
+  grep -q 'RUNTIME_CLASS_NAME: "nvidia"' "$vf"
+  grep -q 'enabled: true' "$vf"
+  grep -q 'vendor: nvidia' "$vf"
+  grep -q 'runtimeClassName: nvidia' "$vf"
+}
+
+@test "install_client_helm: NVIDIA detected but NOT wired -> CPU values (no GPU request / plugin)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()               # detected, but the cluster is CPU-only
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || return 1
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: ""' "$vf"
+  grep -q 'GPU_REQUESTS: ""' "$vf"
+  grep -q 'RUNTIME_CLASS_NAME: ""' "$vf"
+  ! grep -q 'devicePlugin' "$vf" || return 1        # no plugin against a CPU node
+}
+
 # backend#743: when a dataset mount is provided, the generated values must point
 # the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
 # runs spawned ingestion pods as the owning user (NFS writes).

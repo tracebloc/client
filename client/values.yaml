@@ -133,6 +133,14 @@ gpu:
       repository: nvidia/k8s-device-plugin
       tag: v0.14.5
       digest: ""
+      # RuntimeClass for the plugin pod (client#835). On native Linux the k3s-cuda
+      # node runs the NVIDIA runtime in CDI mode, and the plugin can only enumerate
+      # GPUs (init NVML) if its own pod runs under that runtime — so the Linux
+      # installer sets this to "nvidia" (the RuntimeClass baked into the node image)
+      # whenever the GPU is wired. Empty = plugin runs under the default runtime
+      # (the correct choice for CPU clusters and the Windows/WSL2 path, which does
+      # not run this plugin at all).
+      runtimeClassName: ""
     amd:
       # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin). Set a digest
       # for air-gapped / reproducible installs.

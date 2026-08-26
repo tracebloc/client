@@ -162,9 +162,16 @@ _cli_runnable_now() {
 }
 
 print_summary() {
+  # NVIDIA "GPU mode" only when the GPU was actually WIRED into the cluster
+  # (_gpu_wired) — a detected-but-not-wired GPU runs CPU-only, and printing
+  # "NVIDIA GPU" there is exactly the false claim client#835 removes. AMD keys on
+  # detection (it has no k3d wiring step).
   local mode="CPU"
-  [[ "$GPU_VENDOR" == "nvidia" ]] && mode="NVIDIA GPU"
-  [[ "$GPU_VENDOR" == "amd" ]] && mode="AMD GPU"
+  if _gpu_wired; then
+    mode="NVIDIA GPU"
+  elif [[ "$GPU_VENDOR" == "amd" ]]; then
+    mode="AMD GPU"
+  fi
   local ns="${TB_NAMESPACE:-default}"
   local cver; cver="$(_chart_version "$ns")"
   # Footer log path: HOST_DATA_DIR with $HOME collapsed to ~ (e.g. ~/.tracebloc).
@@ -275,8 +282,10 @@ _log_advanced_info() {
   log "  k3d cluster stop $CLUSTER_NAME"
   log "  k3d cluster start $CLUSTER_NAME"
   log "  k3d cluster delete $CLUSTER_NAME"
-  if [[ "$GPU_VENDOR" == "nvidia" ]]; then
-    log "  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --limits='nvidia.com/gpu=1' -- nvidia-smi"
+  if _gpu_wired; then
+    # runtimeClassName: nvidia is REQUIRED — the GPU node's containerd invokes the
+    # NVIDIA runtime only for that class (client#835); a plain pod gets no GPU.
+    log "  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --overrides='{\"spec\":{\"runtimeClassName\":\"nvidia\"}}' --limits='nvidia.com/gpu=1' -- nvidia-smi"
   fi
   if [[ "$GPU_VENDOR" == "amd" ]]; then
     log "  GPU test: kubectl run gpu-test --rm -it --image=rocm/rocm-terminal --limits='amd.com/gpu=1' -- rocm-smi"

@@ -53,6 +53,7 @@ the nil, so no evaluation order matters.
      exactly like every other chart image; nil-safe for reuse-values. */ -}}
 {{- $g := .Values.global | default dict }}
 {{- if eq $vendor "nvidia" }}
+{{- $nv := $dp.nvidia | default dict }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -83,6 +84,15 @@ spec:
              same reason — client#564 / Bugbot). */ -}}
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
     spec:
+      {{- with $nv.runtimeClassName }}
+      # client#835: run the plugin under the `nvidia` RuntimeClass so its pod gets
+      # the GPU (the node's containerd invokes the NVIDIA runtime) and NVML can
+      # enumerate GPUs — otherwise the pod runs under the default runtime, sees no
+      # device, and registers 0. The Linux installer sets this to "nvidia" only when
+      # the GPU is wired; the RuntimeClass is baked into the k3s-cuda node image.
+      # Left unset on Windows/WSL2 (that path doesn't run this plugin) and CPU.
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
       # NOT NEEDED, and no ServiceAccount is named — so without this the pod
       # would mount the namespace's `default` SA token. The upstream device
       # plugin talks to the kubelet over the device-plugin socket mounted
@@ -101,7 +111,6 @@ spec:
         - name: {{ include "tracebloc.registrySecretName" . }}
       {{- end }}
       containers:
-        {{- $nv := $dp.nvidia | default dict }}
         - name: nvidia-device-plugin-ctr
           image: {{ include "tracebloc.image" (dict "repository" ($nv.repository | default "nvidia/k8s-device-plugin") "tag" ($nv.tag | default "v0.14.5") "digest" ($nv.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($nv.registry | default "nvcr.io"))) | quote }}
           env:
