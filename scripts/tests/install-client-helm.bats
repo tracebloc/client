@@ -2348,6 +2348,208 @@ _arch_gate_ctx() {
   grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
 }
 
+# ── backend#2146: the arch gate now covers the adopt and dev-mode paths too ────
+# Both reach a Helm deploy WITHOUT the normal values-generation path's
+# _resolve_mysql_engine, so each learns the engine that will actually run from ITS
+# OWN source of truth — the live release (adopt, via `helm get values`) or the
+# supplied file (TRACEBLOC_VALUES_FILE) — then calls the SAME
+# _assert_engine_runs_on_this_arch. Before this, an arm64 host with no amd64
+# emulation reported success and then CrashLooped on the amd64-only 5.7 image,
+# because preflight had classified it as fresh-8.4 and its early gate waved it
+# through (adopt keeps the release's 5.7 via --reuse-values; dev-mode installs the
+# file's 5.7 as-is). The backstop only worked on the third path.
+
+@test "_values_pin_mysql_84: matches the quoted heredoc form AND the unquoted helm form" {
+  # Our generated values write tag: "8.4"; `helm get values` re-serializes it as
+  # tag: 8.4 (quotes stripped — the #200 lesson). Both must read as 8.4, or the
+  # adopt gate misreads a live 8.4 release as 5.7 and wrongly refuses it.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""'
+  [ "$status" -eq 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    digest: ""\n    tag: 8.4'
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: no mysqlClient block, or a 5.7 pin, reads as NOT 8.4" {
+  run _values_pin_mysql_84 <<< $'clientId: "x"\nclientPassword: '"'"'y'"'"
+  [ "$status" -ne 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "5.7"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: a tag 8.4 on a SIBLING image is not read as the mysqlClient pin (block-scoped)" {
+  # The reader is scoped to the indent-delimited mysqlClient block, so a
+  # coincidental 8.4 tag on another image cannot flip the engine verdict.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "5.7"\n    digest: ""\n  someOther:\n    repo: x\n    tag: "8.4"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: a look-alike tag (8.40 / 8.4.1) is NOT 8.4 (exact value, not prefix)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.40"'
+  [ "$status" -ne 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: 8.4.1'
+  [ "$status" -ne 0 ] || return 1
+}
+
+# THE REGRESSION Asad caught on client#833: the reader must be checked against the
+# REAL chart values, not compact snippets. The chart's mysqlClient block carries
+# the 8.4 opt-in as a COMMENT (`#   tag: "8.4"`) many lines below the real `tag:`,
+# so a fixed line window is wrong in both directions (see _values_pin_mysql_84).
+@test "_values_pin_mysql_84: the real client/values.yaml default (tag prod + the 8.4 DECOY comment) reads as NOT 8.4" {
+  # Fail-OPEN guard: the decoy comment must never be read as the pin — otherwise a
+  # 5.7 default would skip the arch gate and CrashLoop on arm64.
+  local vf="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$vf" ] || skip "chart values.yaml not present in this checkout"
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: the real client/values.yaml with the documented 8.4 opt-in applied reads as 8.4" {
+  # False-REFUSAL guard: an operator who follows the chart's own opt-in — set
+  # tag: "8.4" AND clear the digest (`tag: "8.4"` + `digest: ""`, exactly as the
+  # block documents), keeping every comment — must be read as 8.4. The real tag
+  # sits well outside any 3-line window, which is what wrongly refused it before.
+  local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
+  local vf="$BATS_TEST_TMPDIR/optin.yaml"
+  sed -E 's/tag: "prod"/tag: "8.4"/; s/^([[:space:]]*)digest: "sha256:[0-9a-f]+"/\1digest: ""/' "$src" > "$vf"
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -eq 0 ] || return 1
+}
+
+# DIGEST WINS OVER TAG (Bugbot, client#833). tracebloc.image renders
+# repository@<digest> when a digest is set and ignores the tag, and the default pin
+# is the amd64-only 5.7 image — so tag: "8.4" with a NON-empty digest actually runs
+# that digest, not 8.4. Reading tag alone would skip the gate and CrashLoop on arm64.
+@test "_values_pin_mysql_84: tag 8.4 with a NON-empty digest is NOT 8.4 (digest wins -> fail closed)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: "sha256:deadbeef"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: the real client/values.yaml with ONLY the tag flipped to 8.4 (5.7 digest kept) is NOT 8.4" {
+  # The partial misconfiguration Bugbot flagged: an operator sets tag: "8.4" but
+  # leaves the chart's 5.7 digest in place. The digest wins, so 5.7 runs — the
+  # reader must fail closed (5.7 gate), not skip the gate on the misread tag.
+  local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
+  local vf="$BATS_TEST_TMPDIR/partial.yaml"
+  sed 's/tag: "prod"/tag: "8.4"/' "$src" > "$vf"   # tag flipped, digest untouched
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {
+  # `helm get values` has no request timeout, so a wedged API must degrade to the
+  # 5.7 gate — never hang, and never be assumed 8.4 (backend#2146 fail-closed).
+  kubectl() { return 1; }                                  # namespace probe fails
+  helm() { printf 'images:\n  mysqlClient:\n    tag: 8.4\n'; }  # would say 8.4 if reached
+  run _release_pins_mysql_84 rel ns
+  [ "$status" -ne 0 ] || return 1                          # not 8.4 -> the 5.7 arch gate runs
+}
+
+@test "install_client_helm: adopt on arm64 with a 5.7 release + no emulation -> refuses BEFORE reconcile (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then return 0; fi        # 5.7 default: no mysqlClient block
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo VERIFY_CALLED; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"existing tracebloc release is installed"* ]] || return 1  # the existing-release reason
+  [[ "$output" != *"VERIFY_CALLED"* ]] || return 1                            # aborted in adopt, not the fallback
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1                            # never deployed
+}
+
+@test "install_client_helm: adopt on arm64 with an 8.4 release + no emulation -> reconciles (backend#2146)" {
+  # The live release runs the native 8.4 engine — `helm get values` emits the
+  # quote-stripped tag: 8.4 — so this host needs no emulation and the gate must
+  # let the reconcile through (it also proves the unquoted read end to end).
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then printf 'images:\n  mysqlClient:\n    digest: ""\n    tag: 8.4\n'; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo VERIFY_CALLED; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"tracebloc installed"* ]] || return 1
+  mock_calls | grep -q "helm upgrade munich"
+}
+
+@test "install_client_helm: adopt on arm64 with a 5.7 release BUT emulation present -> reconciles (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 0; }                 # binfmt present -> 5.7 is runnable
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm upgrade munich"
+}
+
+@test "install_client_helm: dev-mode values file pinning 5.7 on arm64 + no emulation -> refuses BEFORE helm (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  vf="$BATS_TEST_TMPDIR/v.yaml"; printf 'clientId: "x"\n' > "$vf"   # no mysqlClient block -> 5.7
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  TRACEBLOC_VALUES_FILE="$vf"; TB_NAMESPACE=devns
+  run install_client_helm
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"MySQL 5.7 engine (values-file)"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+@test "install_client_helm: dev-mode values file pinning 8.4 on arm64 + no emulation -> installs (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  vf="$BATS_TEST_TMPDIR/v.yaml"
+  printf 'clientId: "x"\nimages:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$vf"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  TRACEBLOC_VALUES_FILE="$vf"; TB_NAMESPACE=devns
+  run install_client_helm
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"helm upgrade --install devns"* ]] || return 1
+}
+
 # ── _recover_pending_helm_release (#554) ─────────────────────────────────────
 # A helm process killed mid-operation leaves the release in a pending-* state;
 # the next `helm upgrade --install` then fails forever with "another operation
