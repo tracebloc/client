@@ -3279,8 +3279,21 @@ PY
   grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
 
   TB_NAMESPACE=tracebloc
-  kubectl() { return 0; }
+  # Re-read with a LARGE node visible, not an empty/failing cluster. This is the
+  # gap Bugbot flagged: if the re-read cluster is unreadable, a (wrongly)
+  # re-derived value ALSO falls through to the floor, so carry and re-derive are
+  # indistinguishable. A viable 8c/32Gi node makes them differ — a re-derive
+  # would yield cpu=7,memory=29Gi — so asserting the size stays the floor proves
+  # it was CARRIED, not re-sized.
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
   helm() { cat "$HOST_DATA_DIR/values.yaml"; }
+  has() { return 0; }
 
   # The reader returns the FULL envelope — cpu included. Reading the memory-only
   # limits half would yield `memory=2Gi`, dropping the cpu request (backend#2418).
@@ -3290,7 +3303,35 @@ PY
 
   # The floor carries forward with the `installer` provenance it was written
   # with: the gate refuses only the historic 8Gi literal, so a schedulable floor
-  # is preserved rather than re-derived, and its marker survives.
+  # is preserved rather than re-derived on a machine that could host more.
   _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT the node's cpu=7,memory=29Gi
   [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
+}
+
+@test "training size: a user-pinned floor survives re-install (gate matches only the historic literal)" {
+  # Precedence rule 2: a deliberate `tracebloc resources set` must survive a
+  # re-install, never be clobbered back to a default. Since backend#2254 the
+  # installer's OWN no-choice default IS the contract floor, so the carry gate
+  # must compare against the FROZEN historic literal (_TRAINING_DEFAULT_HISTORIC),
+  # never against _TRAINING_DEFAULT. This is the mutation guard for that split
+  # (Bugbot on client#847): point the gate at _TRAINING_DEFAULT and a human's
+  # floor is re-derived to the node size and its `user` marker downgraded to
+  # `installer` — exactly what must not happen.
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  # A human pinned the floor; the machine is large, so a re-derive would give
+  # cpu=7,memory=29Gi — that gap is what makes carry vs re-derive observable.
+  helm() { printf 'env:\n  RESOURCE_REQUESTS: "cpu=1,memory=2Gi"\n  RESOURCE_PROVENANCE: "user"\n'; }
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT re-derived to cpu=7,memory=29Gi
+  [ "$_TB_TRAINING_PROVENANCE" = "user" ] || return 1          # marker preserved, not downgraded to installer
 }
