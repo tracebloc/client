@@ -385,6 +385,65 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+# backend#2033: an AMD GPU host must actually REQUEST the device. The amd device
+# plugin advertises amd.com/gpu, but GPU_LIMITS/GPU_REQUESTS used to be wired for
+# nvidia only, so AMD training pods requested no GPU and silently ran on CPU while
+# the installer still reported the GPU "verified". Lock the amd.com/gpu request in.
+@test "install_client_helm: AMD host -> values request amd.com/gpu + enable the amd device plugin" {
+  GPU_VENDOR=amd
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for
+  # a pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
+  # and the chart-managed device plugin is enabled for the amd vendor.
+  grep -q 'vendor: amd' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
+# Parity guard for the sibling branch backend#2033 edits: an NVIDIA host still
+# requests nvidia.com/gpu. Nothing else asserts the request at the values layer,
+# so this pins both arms of the vendor conditional against a future regression.
+@test "install_client_helm: NVIDIA host -> values request nvidia.com/gpu" {
+  GPU_VENDOR=nvidia
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'vendor: nvidia' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
+# Third arm of the same conditional: a non-GPU host must emit EMPTY GPU_LIMITS/
+# GPU_REQUESTS (client-runtime#80 reads an explicit empty as "no GPU here"), and
+# must NOT enable the device plugin. GPU_VENDOR=none is the setup() default.
+@test "install_client_helm: non-GPU host -> empty GPU_LIMITS/GPU_REQUESTS, no device plugin" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: ""' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: ""' "$HOST_DATA_DIR/values.yaml" || return 1
+  ! grep -q 'devicePlugin:' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
 # backend#743: when a dataset mount is provided, the generated values must point
 # the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
 # runs spawned ingestion pods as the owning user (NFS writes).
@@ -486,6 +545,36 @@ setup() {
   mock_calls | grep -q -- "--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"
   run mock_calls
   [[ "$output" != *"helm upgrade --install"* ]] || return 1
+}
+
+# backend#2033: the adopt/reconcile path reuses the release's stored values, so
+# without forcing the GPU request an already-installed AMD edge that re-runs would
+# keep the empty request written before this fix and train on CPU. The reconcile
+# upgrade must force env.GPU_REQUESTS/GPU_LIMITS to THIS run's vendor value
+# (mirrors the PowerShell twin), overriding whatever the release stored.
+@test "install_client_helm: adopt on an AMD host forces the GPU request onto the reconcile (backend#2033)" {
+  GPU_VENDOR=amd
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"reconciling"* ]] || return 1
+  # Reconciled in place (reuse-values) AND forced the AMD request over the stored
+  # values, so the re-run heals the GPU request the same way a fresh install wires it.
+  mock_calls | grep -q "helm upgrade munich"
+  mock_calls | grep -q -- "--reset-then-reuse-values"
+  mock_calls | grep -q -- "--set-string env.GPU_REQUESTS=amd.com/gpu=1"
+  mock_calls | grep -q -- "--set-string env.GPU_LIMITS=amd.com/gpu=1"
 }
 
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
