@@ -17,11 +17,58 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
 
 ## Preconditions (per fleet, do in order)
 
-1. **client#822 is released and `rotateMysqlRoot` is on for this fleet**, deployed,
-   so the release Secret carries a `MYSQL_ROOT_PASSWORD` key. Confirm:
+0. **You can actually reach the fleet, with the permissions these steps need.**
+   If the edge sits on a cluster whose API server is not reachable directly (a
+   private endpoint behind a bastion/tunnel), both `kubectl` **and** `helm` must
+   point at the tunnelled kubeconfig. Exporting it in one shell does not cover a
+   `helm` command run in another: with a default `~/.kube/config` helm dials the
+   private endpoint and fails after ~30s with
+   `kubernetes cluster unreachable: … dial tcp …:443: i/o timeout`, which reads
+   like a cluster outage but is only a missing `KUBECONFIG`.
+
+   Then confirm the three permissions the rotation needs. Use the **per-verb**
+   form: on EKS, `kubectl auth can-i --list` under-reports against access-entry
+   RBAC and lists neither `secrets` nor `pods/exec` even when both are permitted,
+   so `--list` will talk you out of a rotation you can actually perform.
+   ```bash
+   kubectl -n <ns> auth can-i list secrets     # -> yes
+   kubectl -n <ns> auth can-i update secrets   # -> yes
+   kubectl -n <ns> auth can-i create pods/exec # -> yes
+   ```
+
+1. **`rotateMysqlRoot` is on for this fleet**, deployed, so the release Secret
+   carries a `MYSQL_ROOT_PASSWORD` key. Confirm:
    ```bash
    kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | wc -c   # non-zero
    ```
+   If it is zero, enable the gate first — `rotateMysqlRootByEnv` defaults to
+   `false` for dev/stg/prod. On an unrotated fleet the mysql-client container has
+   **no `env:` block at all**, so an empty read there is the correct "gate off"
+   signal, not a broken query. `--set` persists across the fleet's hourly
+   auto-upgrade, which uses `--reset-then-reuse-values`
+   (`templates/auto-upgrade-cronjob.yaml`) and re-applies user-supplied values
+   after resetting to chart defaults. This rolls the mysql pod once, so do it in
+   a window. It does **not** rotate root — it only generates the new value.
+   ```bash
+   helm repo add tracebloc https://tracebloc.github.io/client && helm repo update tracebloc
+   helm upgrade <release> tracebloc/client --version <chart> -n <ns> \
+     --reset-then-reuse-values --set rotateMysqlRoot=true
+   ```
+   **If that fails with `apiservices … is forbidden`, it is not a real failure.**
+   `resource-monitor-daemonset.yaml` preflights metrics-server via `lookup` on
+   cluster-scoped `apiservices`, which Kubernetes' built-in `admin` ClusterRole
+   excludes — so an operator whose EKS access entry is `AmazonEKSAdminPolicy`
+   (namespace-scoped admin) **cannot render this chart at all**, for any change,
+   related or not. That is **backend#2469**, and the escape hatch is its fix:
+   ```bash
+   helm upgrade ... --set rotateMysqlRoot=true --set nodeAgents.metricsServerPreflight=false
+   ```
+   Add that flag **only** after actually hitting the forbidden error — an
+   operator with cluster scope should keep the check. It **persists** by the same
+   `--reset-then-reuse-values` mechanism, so it quietly becomes a standing fleet
+   setting; the render records
+   `tracebloc.io/metrics-server-preflight: "skipped-by-values"` so a skipped
+   check cannot be mistaken for a passed one. Restore it when the rotation is done.
 2. **Every root consumer is ready to take the new value** (rotation breaks anything
    still using the literal). The known set (backend#947 inventory):
    - `migrate-tenant.sh` operators — `MYSQL_ROOT_PW` (tenant-config.env) → the Secret value.
@@ -133,14 +180,23 @@ SCRIPT
 
 ## Rollback
 
-Re-run the `ALTER` with the previous password (you have it as `CURPW`, and the
-S0 snapshot records it). Root rotation is reversible; unlike the eventual
-`DROP USER edgeuser`, nothing here is one-way.
+Re-run the `ALTER` with the two passwords swapped: authenticate with the
+generated value (still in `<release>-secrets`) and set root back to `CURPW`.
+Root rotation is reversible; unlike the eventual `DROP USER edgeuser`, nothing
+here is one-way.
+
+**The S0 snapshot is not a rollback source for the password.** `SHOW GRANTS`
+emits privileges and account names only — no password and no password hash — so
+a snapshot taken per the steps above cannot give `CURPW` back. Keep `CURPW`
+yourself until the fleet is confirmed healthy; once the `ALTER` has run and
+`CURPW` is lost, the only remaining path is a datadir-level root reset
+(`--skip-grant-tables`), which is a different and much more disruptive
+operation.
 
 ## Notes
 
-- **prod** (`tracebloc-templates-prod`) needs `pods/exec` on that namespace — not
-  everyone's token has it. Whoever runs the prod leg needs that access.
+- The **prod** leg needs `pods/exec` on the release namespace — not everyone's
+  token has it. Whoever runs it needs the access checked in precondition 0.
 - After all fleets are rotated, the `Dockerfile.mysql_client` ENV can drop the
   baked literal on the next image rebuild (gated on the client#454 freeze); the
   runtime override makes fresh installs correct in the meantime.
