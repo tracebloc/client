@@ -9,6 +9,14 @@ setup() {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/tb"
   CLUSTER_NAME=tracebloc
   mkdir -p "$HOST_DATA_DIR"
+  # The bundle's `docker info` is now bounded via _bounded, which runs
+  # `timeout … docker info` as an EXTERNAL process when timeout is present — and
+  # the collection test sets has(){ return 0; }. An external timeout can't see the
+  # docker() shell-function mock, so shadow timeout/gtimeout with a passthrough
+  # that drops the duration and still invokes the mock (the #741 trap; same fix as
+  # probe.bats). Tests that need the real deadline can override these locally.
+  timeout()  { shift; "$@"; }
+  gtimeout() { shift; "$@"; }
 }
 
 # ── _redact_file (security) ─────────────────────────────────────────────────
