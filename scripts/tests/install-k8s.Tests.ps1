@@ -5460,8 +5460,12 @@ public static extern System.IntPtr LocalFree(System.IntPtr hMem);
       # through Select-Object -Skip 1 lost a trailing empty arg (backend#2455).
       $full = realArgv ("prog.exe " + $line)
       $got  = if ($full.Count -gt 1) { @($full[1..($full.Count - 1)]) } else { @() }
-      $got.Count | Should -Be $argv.Count
-      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] }
+      # Diagnostic (backend#2455): surface exactly what real shell32 returned so a
+      # Windows-only discrepancy is debuggable from the CI log, not just "got a".
+      $diag = "arg=[$($argv -join '|')] encoded=[$line] shell32=[$($full -join '|')] (n=$($full.Count))"
+      Write-Host "  [shell32 xcheck] $diag"
+      $got.Count | Should -Be $argv.Count -Because $diag
+      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] -Because $diag }
     }
   }
 }
