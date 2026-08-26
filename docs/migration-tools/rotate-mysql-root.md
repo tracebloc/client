@@ -54,21 +54,40 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
    helm upgrade <release> tracebloc/client --version <chart> -n <ns> \
      --reset-then-reuse-values --set rotateMysqlRoot=true
    ```
-   **If that fails with `apiservices … is forbidden`, it is not a real failure.**
-   `resource-monitor-daemonset.yaml` preflights metrics-server via `lookup` on
-   cluster-scoped `apiservices`, which Kubernetes' built-in `admin` ClusterRole
-   excludes — so an operator whose EKS access entry is `AmazonEKSAdminPolicy`
-   (namespace-scoped admin) **cannot render this chart at all**, for any change,
-   related or not. That is **backend#2469**, and the escape hatch is its fix:
-   ```bash
-   helm upgrade ... --set rotateMysqlRoot=true --set nodeAgents.metricsServerPreflight=false
+   **This upgrade needs an identity with cluster scope. Plain `admin` is not
+   enough, and no combination of `--set` flags substitutes for it.** The chart
+   templates seven cluster-scoped kinds — Namespace, PersistentVolume,
+   StorageClass, PriorityClass, ClusterRole, ClusterRoleBinding and the OpenShift
+   SecurityContextConstraints — and helm must at minimum *read* each one to diff
+   a release. Kubernetes' built-in `admin` ClusterRole contains no cluster-scoped
+   rules at all, so an operator holding only `admin` fails on the first such kind
+   and then on the next. Two of those failures look like this:
    ```
-   Add that flag **only** after actually hitting the forbidden error — an
-   operator with cluster scope should keep the check. It **persists** by the same
-   `--reset-then-reuse-values` mechanism, so it quietly becomes a standing fleet
-   setting; the render records
-   `tracebloc.io/metrics-server-preflight: "skipped-by-values"` so a skipped
-   check cannot be mistaken for a passed one. Restore it when the rotation is done.
+   apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" is forbidden:
+     User "..." cannot get resource "apiservices" ... at the cluster scope
+   priorityclasses.scheduling.k8s.io "tracebloc-data-plane" is forbidden:
+     User "..." cannot get resource "priorityclasses" ... at the cluster scope
+   ```
+   The first has a values-level opt-out (`nodeAgents.metricsServerPreflight=false`,
+   the fix shipped for **backend#2469**) because it is only a template `lookup`.
+   **Do not read that as a general escape hatch** — it clears exactly one wall of
+   several, and the ClusterRole/ClusterRoleBinding the chart's own RBAC depends on
+   have no opt-out at all. Chasing them with flags trades a blocked upgrade for
+   permanent, unaudited config drift and still does not finish.
+
+   In-cluster, the auto-upgrade CronJob's ServiceAccount holds a ClusterRole
+   enumerating precisely those kinds (plus `escalate`/`bind`, without which
+   Kubernetes' privilege-escalation prevention blocks re-applying the chart's own
+   RBAC) — see `templates/auto-upgrade-rbac.yaml`. That is why the hourly upgrade
+   succeeds where a human `admin` cannot. For a manual upgrade, use an identity
+   with equivalent cluster scope (on EKS: `AmazonEKSClusterAdminPolicy`, not
+   `AmazonEKSAdminPolicy`), and drop back afterwards.
+
+   Note that on EKS an access-scope of `type=cluster` does **not** mean
+   "cluster-scoped resources" — it means the policy applies across all
+   namespaces. `AmazonEKSAdminPolicy` at `type=cluster` is still namespace-level
+   admin everywhere, with zero access to the kinds above. The two readings are
+   easy to confuse and the symptom is exactly the errors printed above.
 2. **Every root consumer is ready to take the new value** (rotation breaks anything
    still using the literal). The known set (backend#947 inventory):
    - `migrate-tenant.sh` operators — `MYSQL_ROOT_PW` (tenant-config.env) → the Secret value.
