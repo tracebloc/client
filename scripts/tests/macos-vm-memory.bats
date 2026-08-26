@@ -62,10 +62,16 @@ setup() {
     fi
     return 0
   }
-  # The bounded docker probe the stop-failure handler uses. Stubbed separately
-  # from `docker` so a test can say "the daemon is wedged/down" without also
-  # breaking `docker context show`, which the runtime guard needs.
-  _docker_answers() { record "_docker_answers"; return "${DOCKER_UP_RC:-0}"; }
+  # The docker "is it up?" probes, stubbed separately from `docker` so a test can
+  # say "the daemon is wedged/down" (DOCKER_UP_RC) without also breaking `docker
+  # context show`, which the runtime guard needs — and without spawning spin or a
+  # real docker. The stop-failure handler moved from _docker_answers to
+  # _docker_answers_bounded (backend#2521): the real bounded probe uses spin's
+  # kill-deadline because _bounded (what _docker_answers uses) is a no-op on stock
+  # macOS. Both are stubbed so the branch logic here stays fast and deterministic;
+  # _docker_answers_bounded's actual boundedness is proven in common.bats.
+  _docker_answers()         { record "_docker_answers";         return "${DOCKER_UP_RC:-0}"; }
+  _docker_answers_bounded() { record "_docker_answers_bounded"; return "${DOCKER_UP_RC:-0}"; }
   # error() EXITS in production; this records and returns so a hard-fail is
   # assertable. The divergence matters: after a stubbed error the function keeps
   # running, so tests must assert on the message they expect rather than on how

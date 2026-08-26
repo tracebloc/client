@@ -338,13 +338,19 @@ _offer_colima_memory_raise() {
     # half-down, so claiming the VM is untouched and returning 0 lets the install
     # continue against a dead runtime -- the same failure the start path already
     # owns, one branch over.
-    # BOUNDED, via the house helper (Cursor Bugbot High on #832). A bare `docker
-    # info` here is the worst possible place for an unbounded probe: this branch
-    # is reached precisely when a timed-out stop may have left the VM half-down,
-    # which is also when the daemon is most likely wedged. `_docker_answers`
-    # (common.sh) wraps it in `_bounded`, and assess.sh's header already states
-    # the rule -- "a wedged daemon cannot hang assess". Same applies here.
-    if _docker_answers; then
+    # BOUNDED WITHOUT coreutils (backend#2521). A bare `docker info` here is the
+    # worst possible place for an unbounded probe: this branch is reached exactly
+    # when a timed-out stop may have left the VM half-down, which is also when the
+    # daemon is most likely wedged. The earlier version probed via `_docker_answers`,
+    # believing it bounded — but `_docker_answers` bounds through `_bounded`, which
+    # runs the bare command when neither timeout(1) nor gtimeout(1) is present, and
+    # NEITHER ships on stock macOS: the one platform this Darwin-only path runs on.
+    # So the bound silently vanished and a headless install froze here with no
+    # spinner, never reaching the restore below (Cursor Bugbot High, PR #838).
+    # `_docker_answers_bounded` bounds via spin's own background-pid + kill
+    # deadline, which needs no coreutils, so a wedged daemon (no answer in time)
+    # now falls through to the restore instead of hanging.
+    if _docker_answers_bounded "Checking whether Docker is still up…" "${TB_DOCKER_PROBE_TIMEOUT:-10}"; then
       warn "Could not stop Colima; the VM is still running. Raise it manually: ${cmd}"
       return 0
     fi
