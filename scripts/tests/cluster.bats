@@ -2113,13 +2113,25 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
   }
 }
 
-@test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises none -> warns recreate" {
+@test "_check_healthy_cluster_gpu_consistent: requests GPU, no advertise, STOCK node -> warns recreate" {
   _hcgc_helm_lists_gpu_release
   kubectl() { printf '' ; }                            # node advertises no nvidia.com/gpu
+  docker() { [[ "$1" == inspect ]] && printf 'rancher/k3s:v1.36.3-k3s1\n'; return 0; }   # stock node
   run _check_healthy_cluster_gpu_consistent
   [ "$status" -eq 0 ] || return 1                      # non-fatal
-  [[ "$output" == *"requests a GPU for jobs, but its node advertises none"* ]] || return 1
+  [[ "$output" == *"stock CPU-only image"* ]] || return 1
   [[ "$output" == *"recreate"* || "$output" == *"Recreate"* ]] || return 1
+}
+
+# Bugbot: a GPU-CAPABLE node advertising 0 is a device-plugin/CDI issue — recreate
+# would not help, so the recreate advice must NOT fire.
+@test "_check_healthy_cluster_gpu_consistent: requests GPU, no advertise, CUDA node -> no recreate advice" {
+  _hcgc_helm_lists_gpu_release
+  kubectl() { printf '' ; }                            # node advertises none (dead plugin)
+  docker() { [[ "$1" == inspect ]] && printf 'ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04\n'; return 0; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Recreate"* && "$output" != *"recreate"* ]] || return 1   # not a recreate case
 }
 
 @test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises one -> silent" {

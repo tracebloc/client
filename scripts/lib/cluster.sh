@@ -1253,21 +1253,22 @@ _check_existing_cluster_gpu() {
 # helm/kubectl, or nothing requests a GPU).
 _check_healthy_cluster_gpu_consistent() {
   has helm && has kubectl || return 0
-  local list rel ns vf found_req=0
+  local list rel ns vals found_req=0
   # NAME + NAMESPACE are the first two columns (jq-free, mirrors detect_installed_client).
   # Release name == namespace for a tracebloc install (helm upgrade --install "$TB_NAMESPACE").
   list="$(_bounded "${TB_HELM_LIST_TIMEOUT:-20}" helm list -A --deployed --failed 2>/dev/null)" || return 0
   [[ -z "$list" ]] && return 0
-  vf="$(mktemp 2>/dev/null)" || return 0
+  # Capture values IN-MEMORY (no temp file): a mktemp failure must not silently skip
+  # the only place this mismatch is surfaced (Bugbot). here-string, not a pipe, so
+  # grep -q closing early can't SIGPIPE a producer.
   while read -r rel ns _; do
     [[ -z "$rel" || "$rel" == "NAME" ]] && continue
-    if _bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" >"$vf" 2>/dev/null; then
+    if vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>/dev/null)"; then
       # A NON-EMPTY GPU_REQUESTS: means this release asks for a GPU (GPU_REQUESTS: ""
       # is CPU and must not match — the char after the optional quote must be real).
-      if grep -Eq '^[[:space:]]*GPU_REQUESTS:[[:space:]]*"?[^"[:space:]]' "$vf"; then found_req=1; break; fi
+      if grep -Eq '^[[:space:]]*GPU_REQUESTS:[[:space:]]*"?[^"[:space:]]' <<<"$vals"; then found_req=1; break; fi
     fi
   done <<<"$list"
-  rm -f "$vf"
   (( found_req )) || return 0   # nothing requests a GPU → consistent, nothing to warn
 
   # It requests a GPU. Does the node ACTUALLY advertise one? A CUDA node with a dead
@@ -1279,9 +1280,21 @@ _check_healthy_cluster_gpu_consistent() {
             --request-timeout=5s 2>/dev/null || true)"
   [[ "$alloc" =~ [1-9] ]] && return 0   # a GPU is live → consistent
 
+  # No GPU advertised — but the REMEDY depends on WHY (Bugbot). A stock (pre-#835)
+  # node image is fixed at create time, so recreate IS the fix. A GPU-CAPABLE node
+  # advertising 0 is a device-plugin/CDI problem — recreate would NOT help — so don't
+  # give recreate advice there; leave it to the plugin rollout (mirrors the Windows
+  # twin, which checks the node image). Only warn recreate when the image is CONFIRMED
+  # stock; stay quiet when it's capable OR unreadable (don't guess).
+  local image
+  image="$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" --format '{{.Config.Image}}' 2>/dev/null)" || image=""
+  if [[ -z "$image" ]] || _node_image_gpu_capable "$image"; then
+    log "Healthy cluster requests a GPU but the node advertises none; node image is ${image:-unreadable} — a device-plugin/CDI issue, not a recreate case; leaving it to the plugin rollout."
+    return 0
+  fi
   echo ""
-  warn "The '$CLUSTER_NAME' cluster requests a GPU for jobs, but its node advertises none — GPU jobs will sit Pending."
-  hint "This usually means the cluster was built before GPU support (a stock CPU node); GPU capability is fixed at create time and can't be added to a running cluster. Recreate it to enable GPU:"
+  warn "The '$CLUSTER_NAME' cluster requests a GPU for jobs, but its node is a stock CPU-only image (${image}) — GPU jobs will sit Pending."
+  hint "GPU capability is fixed at create time and can't be added to a running cluster. Recreate it to enable GPU:"
   _recreate_cluster_hint
   hint "  (hostpath mode keeps your data under ${HOST_DATA_DIR:-your data dir}; node-local mode loses in-cluster data on recreate.)"
   echo ""
