@@ -5438,7 +5438,19 @@ public static extern System.IntPtr LocalFree(System.IntPtr hMem);
         return ,@($r)
       } finally { [void][TbWin32.Argv]::LocalFree($p) }   # documented: the caller frees with LocalFree
     }
-    foreach ($argv in @((,@('a b"c')), (,@('a\"b')), (,@('C:\a b\')), (,@('')), (,@('x')))) {
+    # Newline-separated ,@(...) so each $argv iterates as a FLAT [string[]] — the
+    # comma-separated @((,@(...)), ...) form nests each case one level deeper, so
+    # ConvertTo-Win32Arg was handed an Object[] and threw before a single comparison
+    # ran, leaving this real-API cross-check inert on Windows while macOS skipped it
+    # (Bugbot / LukasWodka on #845). Mirrors the round-trip test's $cases shape.
+    $cases = @(
+      ,@('a b"c')
+      ,@('a\"b')
+      ,@('C:\a b\')
+      ,@('')
+      ,@('x')
+    )
+    foreach ($argv in $cases) {
       $line = (($argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
       $real = @(realArgv ("prog.exe " + $line) | Select-Object -Skip 1)
       $real.Count | Should -Be $argv.Count
