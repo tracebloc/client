@@ -2404,15 +2404,37 @@ _arch_gate_ctx() {
 }
 
 @test "_values_pin_mysql_84: the real client/values.yaml with the documented 8.4 opt-in applied reads as 8.4" {
-  # False-REFUSAL guard: an operator who follows the chart's own opt-in (set
-  # tag: "8.4" inline, keeping every comment) must be read as 8.4 — the real tag
+  # False-REFUSAL guard: an operator who follows the chart's own opt-in — set
+  # tag: "8.4" AND clear the digest (`tag: "8.4"` + `digest: ""`, exactly as the
+  # block documents), keeping every comment — must be read as 8.4. The real tag
   # sits well outside any 3-line window, which is what wrongly refused it before.
   local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
   [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
   local vf="$BATS_TEST_TMPDIR/optin.yaml"
-  sed 's/tag: "prod"/tag: "8.4"/' "$src" > "$vf"
+  sed -E 's/tag: "prod"/tag: "8.4"/; s/^([[:space:]]*)digest: "sha256:[0-9a-f]+"/\1digest: ""/' "$src" > "$vf"
   run _values_pin_mysql_84 < "$vf"
   [ "$status" -eq 0 ] || return 1
+}
+
+# DIGEST WINS OVER TAG (Bugbot, client#833). tracebloc.image renders
+# repository@<digest> when a digest is set and ignores the tag, and the default pin
+# is the amd64-only 5.7 image — so tag: "8.4" with a NON-empty digest actually runs
+# that digest, not 8.4. Reading tag alone would skip the gate and CrashLoop on arm64.
+@test "_values_pin_mysql_84: tag 8.4 with a NON-empty digest is NOT 8.4 (digest wins -> fail closed)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: "sha256:deadbeef"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: the real client/values.yaml with ONLY the tag flipped to 8.4 (5.7 digest kept) is NOT 8.4" {
+  # The partial misconfiguration Bugbot flagged: an operator sets tag: "8.4" but
+  # leaves the chart's 5.7 digest in place. The digest wins, so 5.7 runs — the
+  # reader must fail closed (5.7 gate), not skip the gate on the misread tag.
+  local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
+  local vf="$BATS_TEST_TMPDIR/partial.yaml"
+  sed 's/tag: "prod"/tag: "8.4"/' "$src" > "$vf"   # tag flipped, digest untouched
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -ne 0 ] || return 1
 }
 
 @test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {

@@ -1349,12 +1349,12 @@ _client_values_file() { echo "${TRACEBLOC_VALUES_FILE:-${HOST_DATA_DIR}/values.y
 # HOST_DATA_DIR/<namespace>/mysql.
 _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}"; }
 
-# Whether the values on STDIN pin the MySQL 8.4 engine — images.mysqlClient.tag is
-# exactly 8.4. Reads STDIN so a caller streams a file (`< values.yaml`) rather than
-# slurping it (the 60k-line fixture behind backend#1778). The ONE reader three
-# callers share so they cannot drift on what "pins 8.4" means: the sticky rule
-# below, the dev-mode TRACEBLOC_VALUES_FILE arch gate, and the adopt-reconcile arch
-# gate (both backend#2146).
+# Whether the values on STDIN pin the MySQL 8.4 engine — i.e. the engine that will
+# ACTUALLY run is 8.4. Reads STDIN so a caller streams a file (`< values.yaml`)
+# rather than slurping it (the 60k-line fixture behind backend#1778). The ONE
+# reader three callers share so they cannot drift on what "pins 8.4" means: the
+# sticky rule below, the dev-mode TRACEBLOC_VALUES_FILE arch gate, and the
+# adopt-reconcile arch gate (both backend#2146).
 #
 # STRUCTURAL, not a fixed line window (Asad, client#833 review). The chart's own
 # client/values.yaml documents the 8.4 opt-in in a COMMENT several lines below the
@@ -1362,39 +1362,57 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # directions: too narrow misses the real tag and refuses a legitimate 8.4 opt-in on
 # arm64; too wide reads that DECOY comment as the pin and skips the gate on a 5.7
 # default (fail OPEN). So walk the indent-delimited mysqlClient block, drop comment
-# and blank lines (the decoy goes with them), and match the real `tag:` by its
+# and blank lines (the decoy goes with them), and read the real `tag:`/`digest:` by
 # EXACT value — "8.40"/"8.4.1" are not 8.4. Handles the quoted form our heredoc
 # writes (tag: "8.4") and the unquoted form `helm get values` re-serializes
 # (tag: 8.4 — the #200 quote-stripping lesson).
+#
+# DIGEST WINS OVER TAG (Bugbot, client#833). tracebloc.image renders
+# repository@<digest> when a digest is set and ignores the tag entirely, and the
+# default pin is the amd64-only 5.7 image. So `tag: "8.4"` with a NON-empty digest
+# actually runs whatever that (opaque sha256) digest is — which we cannot decode —
+# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is empty/absent (the
+# documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
+# heredoc writes it). A set digest is treated as "not provably 8.4" so the 5.7 arch
+# gate runs — fail closed, refuse rather than CrashLoop.
 #
 # Reads to EOF and decides in END — it never exits on first match, so a producer
 # piping in (helm get values) is never SIGPIPE'd (backend#1778; the trap an early
 # `exit`/`grep -q` would spring).
 _values_pin_mysql_84() {
   awk '
+    function flush() { if (inblk && tag == "8.4" && digest == "") found = 1 }
     /^[[:space:]]*#/ { next }                      # comment line — drops the decoy
     /^[[:space:]]*$/ { next }                      # blank line
     { match($0, /^[[:space:]]*/); indent = RLENGTH }
     !inblk {
-      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk = 1; base = indent }
+      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk=1; base=indent; tag=""; digest="" }
       next
     }
     {
       if (indent <= base) {                        # dedented out of the block
+        flush()                                    # decide this block before leaving it
         inblk = ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/)
-        if (inblk) base = indent
+        if (inblk) { base=indent; tag=""; digest="" }
         next
       }
       if ($0 ~ /^[[:space:]]*tag:[[:space:]]*/) {
-        val = $0
-        sub(/^[[:space:]]*tag:[[:space:]]*/, "", val)
-        sub(/[[:space:]]+#.*$/, "", val)           # strip an inline comment
-        gsub(/"/, "", val)                         # strip quotes (quoted or not)
-        sub(/[[:space:]]+$/, "", val)
-        if (val == "8.4") found = 1
+        v = $0
+        sub(/^[[:space:]]*tag:[[:space:]]*/, "", v)
+        sub(/[[:space:]]+#.*$/, "", v)             # strip an inline comment
+        gsub(/"/, "", v)                           # strip quotes (quoted or not)
+        sub(/[[:space:]]+$/, "", v)
+        tag = v
+      } else if ($0 ~ /^[[:space:]]*digest:[[:space:]]*/) {
+        v = $0
+        sub(/^[[:space:]]*digest:[[:space:]]*/, "", v)
+        sub(/[[:space:]]+#.*$/, "", v)
+        gsub(/"/, "", v)
+        sub(/[[:space:]]+$/, "", v)
+        digest = v
       }
     }
-    END { exit(found ? 0 : 1) }
+    END { flush(); exit(found ? 0 : 1) }
   '
 }
 
