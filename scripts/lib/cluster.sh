@@ -1228,13 +1228,18 @@ _check_existing_cluster_gpu() {
 # nodes are up (their /dev/nvidia* are present via --gpus=all): `nvidia-ctk cdi
 # generate` in its default (auto→nvml) mode writes /etc/cdi/nvidia.yaml, which
 # persists in the node's writable layer across restarts and is regenerated on any
-# recreate. If NO node ends up with a usable spec, fall CLOSED to CPU (clear
-# K3D_GPU_FLAGS) so the chart doesn't advertise a GPU pods can't actually use —
-# the same standard the Windows CDI path already applies. Bounded; best-effort per
-# node so a missing spec on one node never aborts the (optional) GPU step.
+# recreate. The SPEC'S PRESENCE is the authority, never the generate exit code:
+# `nvidia-ctk` can exit 0 having written nothing, and on a REUSED cluster a prior
+# install's /etc/cdi/nvidia.yaml already makes the node GPU-capable — so a transient
+# regeneration failure must not tear that down (Bugbot High). Only when NO node has
+# a usable spec do we fall CLOSED to CPU (clear K3D_GPU_FLAGS) so the chart doesn't
+# advertise a GPU pods can't use — the same standard the Windows CDI path applies.
+# And a docker-ps that can't LIST the nodes is "cannot tell", not "no GPU": leave
+# the request as-is rather than guess CPU on a probe failure (mirrors
+# _check_existing_cluster_gpu). Bounded; best-effort per node.
 _generate_node_cdi_specs() {
   _gpu_wired || return 0
-  local role out st node any_ok=0
+  local role out st node any_ok=0 listed_ok=0
   local nodes=""
   for role in server agent; do
     st=0
@@ -1242,26 +1247,35 @@ _generate_node_cdi_specs() {
             --filter "label=k3d.cluster=${CLUSTER_NAME}" \
             --filter "label=k3d.role=${role}" \
             --format '{{.Names}}' 2>/dev/null) || st=$?
-    (( st == 0 )) && [[ -n "$out" ]] && nodes+="${out}"$'\n'
+    if (( st == 0 )); then
+      listed_ok=1
+      [[ -n "$out" ]] && nodes+="${out}"$'\n'
+    fi
   done
+  # Couldn't enumerate nodes at all (docker wedged/errored for every role) → don't
+  # guess CPU; a pre-existing spec may well be in place. Leave the request untouched.
+  if (( ! listed_ok )); then
+    warn "Couldn't list cluster nodes to set up the GPU CDI spec — leaving the GPU request as-is; if GPU pods stay Pending, re-run."
+    return 0
+  fi
   for node in $nodes; do
-    # `nvidia-ctk cdi generate` needs the toolkit (baked into the GPU image) and a
-    # visible GPU (--gpus=all). /etc/cdi is where containerd's nvidia runtime reads
-    # specs; create it first (the CUDA base may not ship it). Then confirm the spec
-    # is non-empty before counting the node.
-    if _bounded "${TB_GPU_CDI_TIMEOUT:-60}" docker exec "$node" \
-         sh -c 'mkdir -p /etc/cdi && nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' >>"${LOG_FILE:-/dev/null}" 2>&1 \
-       && _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker exec "$node" \
-            test -s /etc/cdi/nvidia.yaml 2>/dev/null; then
+    # (Re)generate best-effort — a tool that exits 0 having written nothing, or a
+    # transient failure, must NOT decide the outcome. /etc/cdi is where containerd's
+    # nvidia runtime reads specs; create it first (the CUDA base may not ship it).
+    _bounded "${TB_GPU_CDI_TIMEOUT:-60}" docker exec "$node" \
+      sh -c 'mkdir -p /etc/cdi && nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+    # Presence is the authority: a spec written now OR by a prior install counts.
+    if _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker exec "$node" \
+         test -s /etc/cdi/nvidia.yaml 2>/dev/null; then
       any_ok=1
-      log "Generated the NVIDIA CDI spec on node '${node}' (/etc/cdi/nvidia.yaml)."
+      log "NVIDIA CDI spec present on node '${node}' (/etc/cdi/nvidia.yaml)."
     else
-      warn "Couldn't generate the NVIDIA CDI spec on node '${node}' — pods on it won't be able to use the GPU."
+      warn "No usable NVIDIA CDI spec on node '${node}' — pods on it won't be able to use the GPU."
     fi
   done
   if (( ! any_ok )); then
     K3D_GPU_FLAGS=()
-    warn "No cluster node could generate a usable NVIDIA CDI spec — running CPU mode so GPU jobs aren't stranded Pending."
+    warn "No cluster node has a usable NVIDIA CDI spec — running CPU mode so GPU jobs aren't stranded Pending."
     hint "Check the NVIDIA driver + 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG} nvidia-smi' works on this host, then re-run."
   fi
 }

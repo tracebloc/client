@@ -2053,6 +2053,32 @@ k3d-tracebloc-agent-0 agent" passthrough
   [[ "$output" != *"nvidia-ctk"* ]] || return 1
 }
 
+# Bugbot High: a transient generate failure must NOT tear down a node that ALREADY
+# has a spec from a prior install — presence of /etc/cdi/nvidia.yaml is the authority.
+@test "_generate_node_cdi_specs: generate fails but a prior spec exists -> stays wired" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
+  docker() {
+    record "docker $*"
+    [[ "$1" == ps && "$*" == *"role=server"* ]] && printf '%s\n' "k3d-${CLUSTER_NAME}-server-0"
+    [[ "$*" == *"nvidia-ctk"* ]] && return 1          # regeneration fails
+    [[ "$*" == *"test -s"* ]] && return 0             # but the spec is already there
+    return 0
+  }
+  _generate_node_cdi_specs
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1        # NOT downgraded to CPU
+}
+
+# A docker-ps that can't LIST the nodes is "cannot tell", not "no GPU": don't guess
+# CPU on a probe failure (a pre-existing spec may well be in place).
+@test "_generate_node_cdi_specs: node listing fails -> leaves the GPU request as-is" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
+  docker() { record "docker $*"; [[ "$1" == ps ]] && return 1; return 0; }
+  run _generate_node_cdi_specs
+  [[ "$output" == *"leaving the GPU request as-is"* ]] || return 1
+  _generate_node_cdi_specs
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1        # not cleared
+}
+
 @test "_check_existing_cluster_k8s_version: recognises the k3s-cuda tag (GPU cluster not skipped)" {
   K8S_VERSION="v1.36.3-k3s1"
   # A GPU node on the CURRENT pin -> no drift warning.
