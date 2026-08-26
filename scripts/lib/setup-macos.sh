@@ -27,7 +27,11 @@ install_homebrew() {
 }
 
 _kill_lingering_docker() {
-  if ! docker info &>/dev/null 2>&1 && pgrep -xq "Docker Desktop"; then
+  # _docker_answers_bounded, not _docker_answers: this is the wedged-Docker cleanup
+  # path, and _docker_answers bounds through _bounded, which is a no-op on a stock
+  # Mac (no coreutils) — so a bare, unbounded `docker info` would hang exactly here
+  # (Bugbot #744). The background-PID bound needs no coreutils.
+  if ! _docker_answers_bounded "Checking for a running Docker…" "${TB_DOCKER_PROBE_TIMEOUT:-10}" && pgrep -xq "Docker Desktop"; then
     log "Lingering Docker Desktop process detected — cleaning up…"
     osascript -e 'quit app "Docker"' 2>/dev/null || true
     sleep 2
@@ -124,7 +128,7 @@ _install_docker_colima() {
     spin_cmd_bounded 900 "Installing container runtime…" brew install colima
   fi
 
-  if docker info &>/dev/null 2>&1; then
+  if _docker_answers_bounded "Checking Docker…" "${TB_DOCKER_PROBE_TIMEOUT:-10}"; then
     success "Docker running."
     return
   fi
@@ -156,7 +160,7 @@ _install_docker_colima() {
   # #561: bounded so a hung colima start (stale VZ VM) can't hang forever.
   spin_cmd_bounded 900 "Starting Docker runtime…" colima "${_colima_args[@]}"
 
-  if ! docker info &>/dev/null 2>&1; then
+  if ! _docker_answers_bounded "Verifying Docker started…" "${TB_DOCKER_PROBE_TIMEOUT:-10}"; then
     error "Docker did not start. Try running 'colima status' to investigate."
   fi
 
@@ -462,7 +466,7 @@ install_docker_desktop() {
 
   # On headless Macs (EC2, CI runners), Docker Desktop can't launch.
   # If Docker is already running (e.g. started via VNC earlier), skip detection.
-  if ! _has_gui_session && ! docker info &>/dev/null 2>&1; then
+  if ! _has_gui_session && ! _docker_answers_bounded "Checking Docker…" "${TB_DOCKER_PROBE_TIMEOUT:-10}"; then
     _install_docker_colima
     # AFTER the runtime is up, so `docker info` can be read (backend#2221). A
     # fresh VM is already sized from physical RAM (#428) and this is a no-op on

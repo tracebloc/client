@@ -23,7 +23,9 @@ setup() {
   systemctl() { return 0; }
   usermod()   { return 0; }
   docker()    { return 0; }   # `docker info` succeeds → skip the sg-docker re-exec
-  id()        { echo "testuser docker"; }
+  # `id -u` must be numeric: _bounded_root (#744) branches on `[ "$(id -u)" -eq 0 ]`,
+  # so a non-numeric answer would error into the wrong branch. Default: non-root.
+  id()        { [ "${1:-}" = "-u" ] && echo 1000 || echo "testuser docker"; }
   curl()      { record "curl $*"; return 0; }
 
   # The execute-gate (#411) runs `<tool> version` after install, so the tool mocks
@@ -199,7 +201,7 @@ setup() {
   docker() { return 1; }                          # admin's non-root socket: unreachable
   sudo()   { record "sudo $*"; return 0; }        # sudo docker info succeeds
   sg()     { record "sg $*"; exit 97; }           # the escape this test forbids
-  id()     { echo "admin docker"; }               # even WITH membership visible…
+  id()     { [ "${1:-}" = "-u" ] && echo 1000 || echo "admin docker"; }  # non-root admin, WITH membership visible…
   run install_docker_engine
   [ "$status" -eq 0 ] || return 1
   run mock_calls

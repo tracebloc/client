@@ -43,6 +43,17 @@ for *what the operator sees and can act on*, not code elegance.
   needs no coreutils: `spin_cmd_bounded` / `_docker_answers_bounded` (common.sh),
   which kill on a deadline via a background PID. `docker info` against a WEDGED
   daemon (as opposed to a cleanly stopped one) is the canonical thing that hangs.
+  On Linux (coreutils present) `docker` daemon probes route through
+  `_docker_answers()` (yes/no) or `_bounded()` (needs output); `check-style.sh`
+  rule 5 fails CI on any unbounded `docker info` under `scripts/lib/`, so the class
+  is a gate, not a repeated review comment (#744). Two edges when you bound one:
+  (a) the #741 **test trap** — `_bounded` runs the command through `timeout` as an
+  *external* process, so a `docker() { … }` shell-function stub stops intercepting;
+  stub at `_docker_answers`/`_bounded`, or shadow `timeout`/`gtimeout` with a
+  passthrough (see `probe.bats`/`preflight.bats` setup). (b) `_bounded … sudo …`
+  execs the **real** `sudo` binary, bypassing the root-aware `sudo()` shadow — bound
+  the root/sudo case with `_bounded_root` (id-0 → no sudo binary needed) so a
+  root-run `--prepare-host` on a host without sudo isn't misread as a dead daemon.
 
 - **A version/tag/ref interpolated into a URL without validation.** There is no shared
   validator — each path adds its own gate: `scripts/install.sh:184,193,214-219` (ref

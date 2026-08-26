@@ -1004,3 +1004,25 @@ EOF
   [ "$status" -ne 0 ] || return 1
   [ "$elapsed" -lt 10 ] || return 1
 }
+
+# ── _bounded_root — the root-aware bounded sudo probe (#744) ──────────────────
+# `_bounded` execs `timeout`, a BINARY, which resolves `sudo` from PATH and so
+# bypasses the root-aware `sudo()` shadow. As root (the normal `--prepare-host`
+# path, where RFC 0001 often has no sudo binary) `_bounded … sudo …` then fails to
+# find sudo and a live daemon reads as dead (Bugbot/LukasWodka #744). _bounded_root
+# fixes that: root runs bare, non-root prefixes the real sudo. These capture what it
+# hands to _bounded, so the branch is asserted directly (mutating the id-0 test flips
+# both). Same shape as probe.bats's "shadow defined but no real sudo" scenario (#372).
+@test "_bounded_root: as root runs the command with NO sudo prefix (#744)" {
+  _bounded() { printf '%s\n' "$*"; }               # echo exactly what _bounded_root forwards
+  id() { [ "${1:-}" = "-u" ] && echo 0 || echo root; }
+  run _bounded_root 10 docker info
+  [ "$output" = "10 docker info" ] || return 1     # bare: root needs no sudo binary at all
+}
+
+@test "_bounded_root: as non-root prefixes the real sudo binary (#744)" {
+  _bounded() { printf '%s\n' "$*"; }
+  id() { [ "${1:-}" = "-u" ] && echo 1000 || echo user; }
+  run _bounded_root 10 docker info
+  [ "$output" = "10 sudo docker info" ] || return 1
+}

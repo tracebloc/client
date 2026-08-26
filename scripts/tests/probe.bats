@@ -252,26 +252,27 @@ setup() {
 }
 
 # The default-path daemon check must be bounded so a wedged Docker can't hang a
-# headless install (Bugbot r3655543152).
-@test "_probe_runtime_usable: bounds 'docker info' with a timeout cap" {
-  has() { case "$1" in docker|timeout) return 0 ;; *) return 1 ;; esac; }
-  timeout() { record "timeout $*"; shift; "$@"; }
-  docker()  { record "docker $*"; case "$1" in info) return 0 ;; *) return 0 ;; esac; }
+# headless install (Bugbot r3655543152) — and bounded WITHOUT coreutils, since
+# host_audit runs this on macOS too where timeout/gtimeout don't ship (#744).
+@test "_probe_runtime_usable: bounds via _docker_answers_bounded with the 5s TB_PROBE_TIMEOUT cap" {
+  has() { case "$1" in docker) return 0 ;; *) return 1 ;; esac; }
+  _docker_answers_bounded() { record "dab $*"; }   # capture what the probe forwards (record survives >/dev/null)
   _probe_runtime_usable
-  assert_has "timeout 5 docker info" "$(mock_calls)"   # 5s-bounded, not a bare call
+  assert_has "dab checking container runtime 5" "$(mock_calls)"   # coreutils-free bound, 5s cap
 }
 
-@test "_probe_runtime_usable: no timeout/gtimeout binary -> falls back to bare docker info" {
+@test "_probe_runtime_usable: usable when docker answers, bounded even with no timeout/gtimeout" {
+  # The whole point of _docker_answers_bounded: the bound holds on a stock Mac with
+  # no coreutils. So the probe must still work end-to-end when neither is present.
   has() { case "$1" in docker) return 0 ;; timeout|gtimeout) return 1 ;; *) return 1 ;; esac; }
-  docker() { record "docker $*"; return 0; }
-  _probe_runtime_usable
-  assert_has "docker info" "$(mock_calls)"
-  refute_has "timeout" "$(mock_calls)"
+  docker() { case "$1" in info) return 0 ;; *) return 0 ;; esac; }   # daemon answers
+  run _probe_runtime_usable
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "_probe_runtime_usable: docker info non-zero (wedged/timed out) -> not usable, never fatal" {
   has() { case "$1" in docker) return 0 ;; timeout|gtimeout) return 1 ;; *) return 1 ;; esac; }
-  docker() { return 1; }              # daemon unreachable, or timeout killed it (124)
+  docker() { return 1; }              # daemon unreachable, or the deadline killed it
   run _probe_runtime_usable
   [ "$status" -ne 0 ] || return 1                 # "not usable" — no error thrown
 }
