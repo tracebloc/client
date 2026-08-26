@@ -313,13 +313,13 @@ install_docker_engine() {
   # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
   if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
     # Bound the daemon probe: a wedged daemon makes `docker info` hang forever, and
-    # this runs on the admin's host-prep path (#744). `timeout` wraps `sudo`, not the
-    # reverse — modern sudo forwards SIGTERM to its child, and even where it does not
-    # the installer is still unblocked at the deadline (a wedged read at worst
-    # reparents to init as a harmless read-only orphan). `sudo timeout …` would clean
-    # the child up itself but bypass _bounded's timeout/gtimeout selection, which is
-    # the seam this change consolidates on.
-    if _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" sudo docker info &>/dev/null; then
+    # this runs on the admin's host-prep path (#744). Use `_bounded_root`, not
+    # `_bounded … sudo …`: `_bounded` execs `timeout` (a binary) which resolves `sudo`
+    # from PATH and bypasses the root-aware `sudo()` shadow — and this path is normally
+    # run AS ROOT, where RFC 0001 often has no sudo binary, so `timeout sudo docker info`
+    # would fail to find sudo and misreport a live daemon as dead (Bugbot #744, LukasWodka).
+    # `_bounded_root` runs bare when root, real `sudo` otherwise.
+    if _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then
       # Running NOW isn't enough for host-prep: after a reboot the Tier-0
       # researcher can't start the daemon themselves, so make sure it's also
       # enabled on boot (best-effort — non-systemd hosts manage this their own
@@ -341,7 +341,7 @@ install_docker_engine() {
     # prevent (Bugbot r3).
     log "Docker daemon not active (prepare-host) — starting it."
     sudo systemctl enable --now docker 2>/dev/null || true
-    if _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" sudo docker info &>/dev/null; then   # bounded as above (#744)
+    if _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then   # root-aware bound, as above (#744)
       log "Docker daemon started (prepare-host mode)."
       return 0
     fi

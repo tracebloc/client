@@ -317,6 +317,19 @@ _bounded() {
   else "$@"; fi
 }
 
+# _bounded_root SECONDS CMD… — like _bounded, but for a command that would
+# otherwise be prefixed with `sudo`. `_bounded` execs `timeout`, a BINARY, which
+# resolves `sudo` from PATH and so bypasses the root-aware `sudo()` shadow below —
+# and as root (the normal `--prepare-host` path, where RFC 0001 often has no sudo
+# binary at all) `timeout sudo CMD` then fails to find sudo and the caller misreads
+# a live daemon as dead (Bugbot, #744). Mirror the shadow's one rule: root needs no
+# sudo; non-root uses the real sudo binary (preflight_sudo has guaranteed it by now).
+_bounded_root() {
+  local t="$1"; shift
+  if [ "$(id -u)" -eq 0 ]; then _bounded "$t" "$@"
+  else                          _bounded "$t" sudo "$@"; fi
+}
+
 # _docker_answers — `docker info`, bounded and silent. The single probe every
 # "is the runtime up?" check should route through.
 #
@@ -626,6 +639,38 @@ spin_cmd_bounded() {
     tail -10 "$logfile" >&2
     return $rc
   fi
+}
+
+# _docker_answers_bounded MSG [SECONDS] — "is the daemon up?", bounded on EVERY
+# platform and shown behind a spinner. The bound comes from spin's own
+# background-pid + kill deadline (#426), NOT from _bounded.
+#
+# WHY A SECOND PROBE EXISTS ALONGSIDE _docker_answers (backend#2521). Both answer
+# the same question, but _docker_answers bounds through _bounded, which runs the
+# BARE command when neither timeout(1) nor gtimeout(1) is on PATH -- and NEITHER
+# ships on stock macOS (both are GNU coreutils). So on a Mac with no coreutils,
+# `_docker_answers` degrades to an unbounded `docker info`, and a bare `docker
+# info` does not return against a WEDGED daemon (as opposed to a cleanly stopped
+# one — the same distinction _docker_answers' own header draws). The colima-stop
+# recovery path in setup-macos.sh is reached precisely when a timed-out `colima
+# stop` may have left the VZ VM half-down — exactly the wedged state — so a
+# headless macOS install froze there with no spinner and never reached its
+# restore. spin backgrounds the probe and kills it on the deadline with no
+# coreutils dependency, so the bound holds on a stock Mac too.
+#
+# SILENT on a non-answer (no ✖ / log tail, unlike spin_cmd_bounded): a daemon
+# that does not answer is the expected result on a recovery path, not an error to
+# shout about — the caller decides what to say. Returns 0 iff docker answered
+# within SECONDS; non-zero otherwise (124 when the deadline fired).
+_docker_answers_bounded() {
+  local msg="$1" secs="${2:-${TB_DOCKER_PROBE_TIMEOUT:-10}}" _pid
+  # This IS the coreutils-free bound: the probe runs in the background and `spin`
+  # kills it on the deadline via its PID — so it is bounded without timeout(1). The
+  # check-style rule-5 grep only recognises the lexical _bounded/timeout forms, so
+  # exempt this line explicitly (it is the one legitimate background-PID probe).
+  docker info >/dev/null 2>&1 &   # style-guard: allow
+  _pid=$!
+  spin "$_pid" "$msg" "$secs"
 }
 
 # ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────

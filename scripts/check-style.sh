@@ -140,14 +140,17 @@ report "capital-T 'Tracebloc' in user-facing text — the product name is lowerc
 #    so this rule stays on docker info rather than redden those other, differently-bounded
 #    call sites.
 #
-#    Match an INVOCATION: `docker info` followed by whitespace-then-flag/redirection/pipe
-#    ([-&>|;12]), a closing paren, or end of line. That skips string mentions ("## docker
-#    info", 'sudo docker info', "docker info OK") whose next char is a quote/letter, and
-#    comments are dropped by the same filter the other rules use. A line counts as bounded
-#    only when _bounded / timeout / gtimeout appears BEFORE the probe on it (`…[^#]*docker
-#    …info`), so a stray "timeout" in a trailing comment can't mask an unbounded call;
+#    Match an INVOCATION: `docker info` followed by whitespace-then-flag/redirection/pipe/
+#    comment ([-&>|;12#]), a closing paren, or end of line. The `#` catches the bare
+#    `docker info   # note` spelling, which otherwise matched none of the alternatives and
+#    slipped the gate (Bugbot/LukasWodka, #744). It does NOT loosen the discriminator:
+#    whole-line comments are dropped by the `^…:[[:space:]]*#` filter below, and every
+#    string mention we exempt ("## docker info", 'sudo docker info', "docker info OK") has a
+#    quote or letter as its next char, not `#`. A line counts as bounded only when
+#    _bounded / timeout / gtimeout appears BEFORE the probe on it (`…[^#]*docker …info`), so
+#    a stray "timeout" in a trailing comment can't mask an unbounded call;
 #    `# style-guard: allow` opts out a genuine edge.
-docker_probe='docker[[:space:]]+info([[:space:]]+[-&>|;12]|[[:space:]]*[)]|[[:space:]]*$)'
+docker_probe='docker[[:space:]]+info([[:space:]]+[-&>|;12#]|[[:space:]]*[)]|[[:space:]]*$)'
 scan "$docker_probe" '' 'scripts/lib/'
 report "unbounded 'docker info' in scripts/lib/ — route it through _docker_answers (yes/no) or _bounded (needs output) from ${ENGINE} so a wedged daemon can't hang the installer (#744)" \
   "$(printf '%s' "$hits" \

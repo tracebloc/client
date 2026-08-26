@@ -292,6 +292,15 @@ _brand_rgbs() {
   [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
 }
 
+@test "rule 5: a bare 'docker info' followed ONLY by a comment is caught (#744, Bugbot/LukasWodka)" {
+  # No redirect/flag/pipe — just a trailing comment. Before the '#' follow-set the
+  # regex matched none of its alternatives here, so this spelling slipped the gate.
+  fixture '  docker info   # check the daemon'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+}
+
 # ── the opt-out marker ───────────────────────────────────────────────────────
 # The header promises it works on ANY check. Tested per rule, because the marker
 # is applied in one shared place (scan) and a regression would silently un-exempt
