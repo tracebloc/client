@@ -563,6 +563,12 @@ _adopt_gpu_setup() {
   [ "$status" -eq 0 ] || return 1
   run mock_calls
   [[ "$output" == *"gpu.devicePlugin.enabled=false"* ]] || return 1
+  # The force-EMPTY clears must be PRESENT (deleting them would let --reuse-values
+  # keep a prior GPU request — the adopt gap this closes). Asserting the flag is
+  # present AND not set to a GPU value proves it's forced empty (mutation-resistant).
+  [[ "$output" == *"--set-string env.GPU_REQUESTS="* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS="* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME="* ]] || return 1
   [[ "$output" != *"env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
   [[ "$output" != *"env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
 }
