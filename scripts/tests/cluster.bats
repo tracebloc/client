@@ -2150,6 +2150,23 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
 # No release requests a GPU -> nothing to reconcile: must RETURN before the node
 # probe. Assert kubectl genuinely never ran (the mock records; silence is inert
 # because the alloc call CAPTURES kubectl output into $alloc — LukasWodka review).
+# Bugbot: a healthy AMD install requests amd.com/gpu on a stock rancher/k3s node —
+# this NVIDIA-only guard must NOT fire (no false "recreate" on a working cluster).
+@test "_check_healthy_cluster_gpu_consistent: AMD release (amd.com/gpu) -> no node probe, no warn" {
+  helm() {
+    case "$1" in
+      list) printf 'NAME\tNAMESPACE\tSTATUS\tCHART\ntbns\ttbns\tdeployed\tclient-1.9.73\n' ;;
+      get)  printf 'env:\n  GPU_REQUESTS: "amd.com/gpu=1"\n' ;;
+    esac
+  }
+  kubectl() { record "kubectl $*"; printf ''; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"recreate"* && "$output" != *"Recreate"* ]] || return 1   # no false recreate
+  run mock_calls
+  [[ "$output" != *"kubectl"* ]] || return 1            # NVIDIA-only guard: no node probe for AMD
+}
+
 @test "_check_healthy_cluster_gpu_consistent: release does NOT request a GPU -> no node probe" {
   helm() {
     case "$1" in

@@ -1246,8 +1246,9 @@ _check_existing_cluster_gpu() {
 # advertises NONE — a pre-#835 install that wrote GPU chart values onto a stock
 # rancher/k3s node, or a k3s-cuda node whose device plugin died — would keep every
 # GPU job Pending while the control plane looks healthy, with no signal. GPU_VENDOR
-# isn't known on this path, so ask the LIVE cluster instead: does it request a GPU
-# it can't schedule? Warn with the recreate remedy (non-fatal; the client is up).
+# isn't known on this path, so ask the LIVE cluster instead: does it request an
+# NVIDIA GPU (the k3s-cuda node image is NVIDIA-only; AMD runs on stock rancher/k3s)
+# its node can't schedule? Warn with the recreate remedy (non-fatal; the client is up).
 # Mirrors the Windows twin's Test-HealthyClusterGpuConsistent. Self-contained + jq-
 # free so it needs no other lib. Bounded; silent no-op when it can't tell (no
 # helm/kubectl, or nothing requests a GPU).
@@ -1267,12 +1268,15 @@ _check_healthy_cluster_gpu_consistent() {
   while read -r rel ns _; do
     [[ -z "$rel" || "$rel" == "NAME" ]] && continue
     if vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>/dev/null)"; then
-      # A NON-EMPTY GPU_REQUESTS: means this release asks for a GPU (GPU_REQUESTS: ""
-      # is CPU and must not match — the char after the optional quote must be real).
-      if grep -Eq '^[[:space:]]*GPU_REQUESTS:[[:space:]]*"?[^"[:space:]]' <<<"$vals"; then found_req=1; break; fi
+      # Specifically an NVIDIA request (GPU_REQUESTS: "nvidia.com/gpu…"). This guard is
+      # about the k3s-cuda node image, which ONLY NVIDIA uses — a healthy AMD install
+      # legitimately requests amd.com/gpu on a stock rancher/k3s node, so matching any
+      # non-empty request here would falsely warn every AMD re-run to recreate a
+      # working cluster (Bugbot). amd.com/gpu and "" both correctly don't match.
+      if grep -Eq '^[[:space:]]*GPU_REQUESTS:[[:space:]]*"?nvidia\.com/gpu' <<<"$vals"; then found_req=1; break; fi
     fi
   done <<<"$list"
-  (( found_req )) || return 0   # nothing requests a GPU → consistent, nothing to warn
+  (( found_req )) || return 0   # no NVIDIA GPU request → not this guard's concern
 
   # It requests a GPU. Does the node ACTUALLY advertise one? A CUDA node with a dead
   # device plugin still advertises 0, so check allocatable directly — the same
