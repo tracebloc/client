@@ -529,6 +529,44 @@ setup() {
   [[ "$output" != *"helm upgrade --install"* ]] || return 1
 }
 
+# client#835: the adopt path uses --reuse-values, which carries forward a prior
+# release's GPU keys — so it must FORCE them to this run's decision, or a downgraded
+# cluster keeps stranding jobs (and an upgraded one never gets the GPU request).
+_adopt_gpu_setup() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }; _ensure_release_dirs() { :; }; _ensure_helm_runnable() { :; }
+  kubectl() { return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+}
+
+@test "install_client_helm: adopt + GPU wired -> forces GPU request/RuntimeClass/plugin on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.nvidia.runtimeClassName=nvidia"* ]] || return 1
+}
+
+@test "install_client_helm: adopt + NVIDIA detected but NOT wired -> forces CPU keys on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()          # detected, cluster is CPU-only
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"gpu.devicePlugin.enabled=false"* ]] || return 1
+  [[ "$output" != *"env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" != *"env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+}
+
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

@@ -1116,6 +1116,33 @@ _reconcile_adopted_client() {
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
+  # GPU keys are NOT --reuse-values-safe (client#835). --reuse-values carries forward
+  # a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME and its
+  # gpu.devicePlugin block, so an adopted release keeps requesting a GPU even after
+  # the reuse guard / CDI setup dropped this run to CPU (K3D_GPU_FLAGS cleared) —
+  # jobs then sit Pending on the live release while the summary says CPU. FORCE the
+  # GPU keys to THIS run's decision, exactly as the fresh values write does, mirroring
+  # the Windows twin's adopt-path --set-string. AMD is left to --reuse-values here
+  # (this PR doesn't change AMD), except that the device-plugin block is reconciled to
+  # match the fresh write so a stale one can't linger.
+  if _gpu_wired; then
+    _args+=(--set-string "env.GPU_REQUESTS=nvidia.com/gpu=1"
+            --set-string "env.GPU_LIMITS=nvidia.com/gpu=1"
+            --set-string "env.RUNTIME_CLASS_NAME=nvidia"
+            --set "gpu.devicePlugin.enabled=true"
+            --set "gpu.devicePlugin.vendor=nvidia"
+            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=nvidia")
+  else
+    _args+=(--set-string "env.GPU_REQUESTS="
+            --set-string "env.GPU_LIMITS="
+            --set-string "env.RUNTIME_CLASS_NAME=")
+    if [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+      _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
+    else
+      _args+=(--set "gpu.devicePlugin.enabled=false")
+    fi
+  fi
+
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
 
