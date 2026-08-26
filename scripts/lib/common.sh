@@ -628,6 +628,34 @@ spin_cmd_bounded() {
   fi
 }
 
+# _docker_answers_bounded MSG [SECONDS] — "is the daemon up?", bounded on EVERY
+# platform and shown behind a spinner. The bound comes from spin's own
+# background-pid + kill deadline (#426), NOT from _bounded.
+#
+# WHY A SECOND PROBE EXISTS ALONGSIDE _docker_answers (backend#2521). Both answer
+# the same question, but _docker_answers bounds through _bounded, which runs the
+# BARE command when neither timeout(1) nor gtimeout(1) is on PATH -- and NEITHER
+# ships on stock macOS (both are GNU coreutils). So on a Mac with no coreutils,
+# `_docker_answers` degrades to an unbounded `docker info`, and a bare `docker
+# info` does not return against a WEDGED daemon (as opposed to a cleanly stopped
+# one — the same distinction _docker_answers' own header draws). The colima-stop
+# recovery path in setup-macos.sh is reached precisely when a timed-out `colima
+# stop` may have left the VZ VM half-down — exactly the wedged state — so a
+# headless macOS install froze there with no spinner and never reached its
+# restore. spin backgrounds the probe and kills it on the deadline with no
+# coreutils dependency, so the bound holds on a stock Mac too.
+#
+# SILENT on a non-answer (no ✖ / log tail, unlike spin_cmd_bounded): a daemon
+# that does not answer is the expected result on a recovery path, not an error to
+# shout about — the caller decides what to say. Returns 0 iff docker answered
+# within SECONDS; non-zero otherwise (124 when the deadline fired).
+_docker_answers_bounded() {
+  local msg="$1" secs="${2:-${TB_DOCKER_PROBE_TIMEOUT:-10}}" _pid
+  docker info >/dev/null 2>&1 &
+  _pid=$!
+  spin "$_pid" "$msg" "$secs"
+}
+
 # ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────
 #  The installer's privileged steps are written as `sudo <cmd>`. Two gaps that
 #  needlessly excluded real users — a shared-cluster researcher, a root
