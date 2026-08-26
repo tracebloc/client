@@ -2409,7 +2409,12 @@ function Build-GpuNodeImage {
     )
     $dExe = (Get-Command docker -ErrorAction SilentlyContinue).Source
     if (-not $dExe) { $dExe = "docker" }
-    $argStr = ($buildArgs | ForEach-Object { if ($_ -match '[\s]') { "`"$_`"" } else { $_ } }) -join " "
+    # Escape+escape-quote each arg per the exact CommandLineToArgvW rules (ConvertTo-Win32Arg,
+    # backend#2545), NOT the naive wrap-if-it-has-a-space: -ArgumentList <one string> is handed to
+    # the child's command line verbatim, just like $psi.Arguments, so an arg carrying BOTH a space
+    # and a `"` (e.g. a `--label`/`--build-arg` value) had its inner quotes silently consumed by
+    # the re-split. The helper leaves a safe arg untouched and quotes the rest correctly.
+    $argStr = ($buildArgs | ForEach-Object { ConvertTo-Win32Arg $_ }) -join " "
 
     $proc = $null
     try {
@@ -4002,9 +4007,13 @@ function New-K3dCluster {
 
     $k3dExe = (Get-Command k3d -ErrorAction SilentlyContinue).Source
     if (-not $k3dExe) { $k3dExe = "k3d" }
-    $k3dArgString = ($k3dArgs | ForEach-Object {
-      if ($_ -match '[\s@]') { "`"$_`"" } else { $_ }
-    }) -join " "
+    # Escape+escape-quote each arg per the exact CommandLineToArgvW rules (ConvertTo-Win32Arg,
+    # backend#2545), NOT the naive wrap-if-it-has-a-space-or-`@`: -ArgumentList <one string> reaches
+    # the child's command line verbatim like $psi.Arguments, so an arg with BOTH a space and a `"`
+    # had its inner quotes silently consumed. `@` is not special to CommandLineToArgvW -- a bare
+    # `-v host:node@all` needs no quoting and re-splits to the identical single token either way, so
+    # dropping its quote branch is a no-op; the fix is escaping the quote the old branch ignored.
+    $k3dArgString = ($k3dArgs | ForEach-Object { ConvertTo-Win32Arg $_ }) -join " "
     $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
     $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
