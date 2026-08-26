@@ -441,6 +441,11 @@ assess_existing_install() {
       # reuse-path drift check never runs; surface the warning here too so a
       # healthy-but-drifted client still sees the recreate guidance (Bugbot #565).
       declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
+      # Same rationale for GPU (client#835): this fast path exits before the
+      # create/reuse GPU reconcile, so a cluster that requests a GPU its node can't
+      # schedule (a pre-#835 install on a stock node) would strand every GPU job
+      # Pending with no signal. Surface the recreate guidance here too.
+      declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
       _assess_handoff        # prints the "already set up" line, runs `tracebloc`, exit 0
       ;;
     degraded)

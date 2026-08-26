@@ -2101,6 +2101,48 @@ k3d-tracebloc-agent-0 agent" passthrough
   [ -z "$output" ] || return 1                        # silent — nothing to reconcile
 }
 
+# ── _check_healthy_cluster_gpu_consistent: the HEALTHY fast-path guard (client#835)
+# The healthy re-run exits before the create/reuse reconcile, so a live release that
+# requests a GPU its node can't schedule must still be flagged here.
+_hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that requests a GPU
+  helm() {
+    case "$1" in
+      list) printf 'NAME\tNAMESPACE\tREVISION\tUPDATED\tSTATUS\tCHART\tAPP\ntbns\ttbns\t1\tnow\tdeployed\tclient-1.9.72\t1.9.72\n' ;;
+      get)  printf 'env:\n  GPU_REQUESTS: "nvidia.com/gpu=1"\n' ;;
+    esac
+  }
+}
+
+@test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises none -> warns recreate" {
+  _hcgc_helm_lists_gpu_release
+  kubectl() { printf '' ; }                            # node advertises no nvidia.com/gpu
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1                      # non-fatal
+  [[ "$output" == *"requests a GPU for jobs, but its node advertises none"* ]] || return 1
+  [[ "$output" == *"recreate"* || "$output" == *"Recreate"* ]] || return 1
+}
+
+@test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises one -> silent" {
+  _hcgc_helm_lists_gpu_release
+  kubectl() { printf '1' ; }                           # node advertises a GPU
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
+@test "_check_healthy_cluster_gpu_consistent: release does NOT request a GPU -> silent (no node probe)" {
+  helm() {
+    case "$1" in
+      list) printf 'NAME\tNAMESPACE\tSTATUS\tCHART\ntbns\ttbns\tdeployed\tclient-1.9.72\n' ;;
+      get)  printf 'env:\n  GPU_REQUESTS: ""\n' ;;      # CPU release
+    esac
+  }
+  kubectl() { echo "SHOULD-NOT-BE-CALLED"; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1
+}
+
 @test "_generate_node_cdi_specs: generates the CDI spec on the node(s)" {
   GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
   docker() {
