@@ -5431,11 +5431,15 @@ public static extern System.IntPtr LocalFree(System.IntPtr hMem);
     function realArgv([string]$cl) {
       $n = 0; $p = [TbWin32.Argv]::CommandLineToArgvW($cl, [ref]$n)
       try {
-        $r = for ($j = 0; $j -lt $n; $j++) {
-          [System.Runtime.InteropServices.Marshal]::PtrToStringUni(
-            [System.Runtime.InteropServices.Marshal]::ReadIntPtr($p, $j * [System.IntPtr]::Size))
+        # Collect into a typed List and return via the ,$arr idiom: the array then
+        # survives assignment at 0/1 elements AND keeps empty-string elements. The
+        # old `,@($r) | Select-Object -Skip 1` dropped a trailing "" (backend#2455).
+        $out = [System.Collections.Generic.List[string]]::new()
+        for ($j = 0; $j -lt $n; $j++) {
+          $out.Add([System.Runtime.InteropServices.Marshal]::PtrToStringUni(
+            [System.Runtime.InteropServices.Marshal]::ReadIntPtr($p, $j * [System.IntPtr]::Size)))
         }
-        return ,@($r)
+        return ,$out.ToArray()
       } finally { [void][TbWin32.Argv]::LocalFree($p) }   # documented: the caller frees with LocalFree
     }
     # Newline-separated ,@(...) so each $argv iterates as a FLAT [string[]] — the
@@ -5452,9 +5456,12 @@ public static extern System.IntPtr LocalFree(System.IntPtr hMem);
     )
     foreach ($argv in $cases) {
       $line = (($argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
-      $real = @(realArgv ("prog.exe " + $line) | Select-Object -Skip 1)
-      $real.Count | Should -Be $argv.Count
-      for ($k = 0; $k -lt $argv.Count; $k++) { $real[$k] | Should -BeExactly $argv[$k] }
+      # Assign (don't pipe) and slice off the prog.exe argv[0] by index — piping
+      # through Select-Object -Skip 1 lost a trailing empty arg (backend#2455).
+      $full = realArgv ("prog.exe " + $line)
+      $got  = if ($full.Count -gt 1) { @($full[1..($full.Count - 1)]) } else { @() }
+      $got.Count | Should -Be $argv.Count
+      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] }
     }
   }
 }
