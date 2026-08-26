@@ -35,6 +35,7 @@ setup() {
     || { echo "could not derive facts from the copied spec"; return 1; }
   cat > "$REPO/scripts/lib/common.sh" <<'SH'
 K8S_VERSION="${K8S_VERSION:-@@K8S@@}"
+TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-@@CUDA@@}"
 K3D_VERSION="${K3D_VERSION:-@@K3D@@}"
 HELM_VERSION="${HELM_VERSION:-@@HELM@@}"
   K8S_VERSION    k3s image tag                   (default: @@K8S@@)
@@ -47,6 +48,7 @@ $CUDA_BASE_TAG  = if ($env:TRACEBLOC_CUDA_BASE_TAG) { $env:TRACEBLOC_CUDA_BASE_T
 $ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "@@READY@@" }
 $script:MetricsWaitTimeout = @@METRICS@@
 $k3dArgs += @("--image", "rancher/k3s:$K8S_VERSION")
+$cudaRepo = "tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG"
   K8S_VERSION    k3s image tag                   (default: @@K8S@@)
 PS
   cat > "$REPO/scripts/lib/summary.sh" <<'SH'
@@ -62,9 +64,11 @@ SH
   # restate check-facts could not see (the pin moved in code while `--help` went on
   # advertising the old version). Seeded here so those rows have something to read.
   #
-  # cluster.sh carries the create-time k3s --image pin the #547 wiring guard checks.
+  # cluster.sh carries the create-time k3s --image pin the #547 wiring guard checks,
+  # and (client#835) the GPU node-image derivation the #835 wiring guard checks.
   cat > "$REPO/scripts/lib/cluster.sh" <<'SH'
 K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
+local repo="tracebloc/k3s-cuda:${K8S_VERSION}-cuda-${TB_CUDA_BASE_TAG}"
 SH
   # #616: the GPU node image's k3s pin lives in the Dockerfile ARG, build.sh, and the
   # workflow input default — all check-facts consumers of K8S_VERSION. Seed them to
@@ -254,7 +258,9 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   # must name it as a wiring gap with the hand-fix
   printf '%s\n' "$output" | grep -qF "WIRING gap"
   printf '%s\n' "$output" | grep -qF "cannot fix it"
-  # the hand-fix hint must name BOTH shell forms — PS uses no braces (#565 Bugbot)
-  printf '%s\n' "$output" | grep -qF 'rancher/k3s:${K8S_VERSION}'
-  printf '%s\n' "$output" | grep -qF 'rancher/k3s:$K8S_VERSION'
+  # the hand-fix hint must name BOTH shell forms — PS uses no braces (#565 Bugbot).
+  # The message covers the k3s pin AND the GPU node image (#835), so it names the
+  # shared ${K8S_VERSION} token rather than the rancher/k3s: literal specifically.
+  printf '%s\n' "$output" | grep -qF '${K8S_VERSION}'
+  printf '%s\n' "$output" | grep -qF '$K8S_VERSION'
 }
