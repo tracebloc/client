@@ -5376,7 +5376,10 @@ Describe "Bounded process argument quoting round-trips through CommandLineToArgv
 
   It "Invoke-BoundedProcess delegates to ConvertTo-Win32Arg and drops the unescaped escape hatch (source guard)" {
     $fn = (($script:QSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'ConvertTo-Win32Arg'
+    # Match the actual CALL, not just the name: a comment in the body also mentions
+    # ConvertTo-Win32Arg, so a bare-name match would still pass if the call were
+    # deleted -- a guard that can't detect its own removal (Bugbot #845).
+    $fn | Should -Match 'ForEach-Object \{ ConvertTo-Win32Arg \$_'
     $fn | Should -Not -Match 'notmatch'          # the old `^".*"$` already-quoted escape hatch is gone
   }
 
