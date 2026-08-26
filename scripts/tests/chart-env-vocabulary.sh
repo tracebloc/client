@@ -188,6 +188,13 @@ for key in RESOURCE_REQUESTS RESOURCE_LIMITS; do
   expect_resource_render "$key cpu+memory (installer's value)" "$key" "cpu=1,memory=2Gi"
   expect_resource_render "$key with ephemeral-storage"         "$key" "cpu=1,memory=2Gi,ephemeral-storage=20Gi"
   expect_resource_render "$key disk only"                      "$key" "ephemeral-storage=20Gi"
+  # memory-only is the shape the L0.2 limits half emits (backend#2418): cpu is
+  # dropped so the request can burst, leaving RESOURCE_LIMITS=memory=<X>. This
+  # is the exact value the VM-ceiling sizing produced in client#836, where a
+  # PRE-backend#2223 chart schema (`^(cpu=\S+,memory=\S+)?$`) rejected it at
+  # `helm install`. Rendered here through the REAL schema so a re-tightening
+  # that forbids the subset fails against helm itself, not just a proxy regex.
+  expect_resource_render "$key memory only (L0.2 limits, client#836)"  "$key" "memory=12Gi"
   expect_resource_render "$key reordered"                      "$key" "memory=2Gi,cpu=1"
   expect_resource_render "$key empty (unset)"                  "$key" ""
 

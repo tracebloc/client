@@ -201,6 +201,52 @@ helm upgrade my-tracebloc ./tracebloc-2.0.1.tgz -n tracebloc -f my-values.yaml
 helm rollback my-tracebloc -n tracebloc
 ```
 
+### Upgrading by hand needs cluster scope, not just namespace admin
+
+**Namespace admin is not sufficient to upgrade this chart**, even for a change that
+touches nothing cluster-wide. The chart templates cluster-scoped objects — Namespace,
+PersistentVolume, StorageClass, PriorityClass, ClusterRole, ClusterRoleBinding and
+(on OpenShift) SecurityContextConstraints — and Helm must **read every one of them to
+diff a release**. Kubernetes' built-in `admin` ClusterRole contains no rules for
+cluster-scoped resources, so an operator holding only `admin` fails on the first such
+object, and then on the next:
+
+```
+Error: UPGRADE FAILED: could not get information about the resource:
+  priorityclasses.scheduling.k8s.io "..." is forbidden: User "..."
+  cannot get resource "priorityclasses" ... at the cluster scope
+```
+
+Some of these objects have a `create: false` gate (see `priorityClass.create`, for a
+PriorityClass your platform manages out-of-band). **Do not use those gates to work
+around a permissions error.** `ClusterRole` and `ClusterRoleBinding` have no gate — the
+chart's own RBAC depends on them, and re-applying them additionally requires the
+`escalate`/`bind` verbs, which Kubernetes withholds regardless of read access. So the
+sequence cannot be completed by switching objects off one at a time, and every flag
+added along the way **persists into the stored release values**, quietly becoming a
+standing configuration change. Grant the access instead.
+
+**On EKS specifically:** an access-scope of `type=cluster` means *"this policy applies in
+all namespaces"*, **not** *"this policy grants cluster-scoped resources"*. So
+`AmazonEKSAdminPolicy` at `type=cluster` reads as fully privileged while conferring none
+of the objects above — you need `AmazonEKSClusterAdminPolicy`. The two readings are easy
+to conflate, and the denial shown above (*"forbidden … at the cluster scope"*) sounds
+like it contradicts the policy attached to you. It does not; they are different axes.
+
+If your platform grants elevated access temporarily, elevate, upgrade, then drop back —
+and **verify you actually dropped back**, since the revert names a policy and a mismatch
+leaves the elevation standing while appearing to have reverted.
+
+> **On fleets with `autoUpgrade` enabled.** The in-cluster auto-upgrade CronJob already
+> holds a ClusterRole enumerating exactly these kinds, which is why the unattended
+> upgrade succeeds where a human `admin` cannot. It runs
+> `helm upgrade --reset-then-reuse-values`, so **`--set` values you pass by hand persist**
+> across later unattended ticks — they are stored user-supplied values and get replayed
+> after the reset. That is deliberate, and it is how an operator override survives; but it
+> means a value set as a one-off does not stay a one-off. Note also that the CronJob
+> **skips entirely** when the installed chart already matches the latest published
+> version, so an hourly schedule is not an hourly `helm upgrade`.
+
 ---
 
 ## Uninstall

@@ -4525,7 +4525,18 @@ function Get-CarriedTrainingValues {
     $prevProv = $vals.env.RESOURCE_PROVENANCE
     $prov = if ($prevProv -eq "installer" -or $prevProv -eq "user") { $prevProv } else { "unknown" }
     return @{ Size = $prev; Provenance = $prov }
-  } catch { return $null }
+  } catch {
+    # UNEXPECTED failure only. EXPECTED absence -- no namespace, no release, no
+    # carried value -- returns $null through the explicit branches above and
+    # never lands here; whatever does land here is a defect surfacing (a
+    # ConvertFrom-Json choke, a shape change in helm's output). Degrading to
+    # $null is still right -- a wedged read must not block values generation,
+    # and a failed read means "carry nothing" so the machine gets re-sized --
+    # but degrading SILENTLY is how client#766 and client#768 stayed invisible
+    # (client#771). Log so the install log names the probe and the exception.
+    Log "WARN: Get-CarriedTrainingValues: unexpected failure reading the installed release's training values; carrying nothing: $($_.Exception.Message)"
+    return $null
+  }
 }
 
 # Who chose the training size Get-TrainingResources reports: installer | user |
@@ -4656,7 +4667,19 @@ function Get-TrainingResources {
         $script:TbTrainingUnschedulable = $true
       }
     }
-  } catch {}
+  } catch {
+    # UNEXPECTED failure only. EXPECTED absence -- an unreachable API, no
+    # nodes, unparseable quantities -- degrades through the non-throwing
+    # branches above ($LASTEXITCODE gates, `continue` skips) and never lands
+    # here. What does land here is a defect surfacing: this exact catch
+    # swallowed the Int32 [math]::Max overload throw, so every machine with
+    # more than ~2 GiB of headroom silently got the literal below and machine
+    # sizing simply wasn't working, with no diagnostic anywhere (client#766).
+    # The bounded fall-through to the static default is deliberate and stays --
+    # a wedged probe must not hang values generation -- but it must leave a
+    # trace (client#771). Log so support can tell degraded from sized.
+    Log "WARN: Get-TrainingResources: unexpected failure while sizing to the cluster; falling back to the static default: $($_.Exception.Message)"
+  }
   # The fallback envelope: the contract FLOOR, from the embedded floor constants
   # (mirrors _TRAINING_DEFAULT in lib/install-client-helm.sh). Was
   # cpu=2,memory=8Gi, which exceeded a default Docker Desktop and sat Pending

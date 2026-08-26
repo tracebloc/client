@@ -17,11 +17,77 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
 
 ## Preconditions (per fleet, do in order)
 
-1. **client#822 is released and `rotateMysqlRoot` is on for this fleet**, deployed,
-   so the release Secret carries a `MYSQL_ROOT_PASSWORD` key. Confirm:
+0. **You can actually reach the fleet, with the permissions these steps need.**
+   If the edge sits on a cluster whose API server is not reachable directly (a
+   private endpoint behind a bastion/tunnel), both `kubectl` **and** `helm` must
+   point at the tunnelled kubeconfig. Exporting it in one shell does not cover a
+   `helm` command run in another: with a default `~/.kube/config` helm dials the
+   private endpoint and fails after ~30s with
+   `kubernetes cluster unreachable: … dial tcp …:443: i/o timeout`, which reads
+   like a cluster outage but is only a missing `KUBECONFIG`.
+
+   Then confirm the three permissions the rotation needs. Use the **per-verb**
+   form: on EKS, `kubectl auth can-i --list` under-reports against access-entry
+   RBAC and lists neither `secrets` nor `pods/exec` even when both are permitted,
+   so `--list` will talk you out of a rotation you can actually perform.
+   ```bash
+   kubectl -n <ns> auth can-i list secrets     # -> yes
+   kubectl -n <ns> auth can-i update secrets   # -> yes
+   kubectl -n <ns> auth can-i create pods/exec # -> yes
+   ```
+
+1. **`rotateMysqlRoot` is on for this fleet**, deployed, so the release Secret
+   carries a `MYSQL_ROOT_PASSWORD` key. Confirm:
    ```bash
    kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | wc -c   # non-zero
    ```
+   If it is zero, enable the gate first — `rotateMysqlRootByEnv` defaults to
+   `false` for dev/stg/prod. On an unrotated fleet the mysql-client container has
+   **no `env:` block at all**, so an empty read there is the correct "gate off"
+   signal, not a broken query. `--set` persists across the fleet's hourly
+   auto-upgrade, which uses `--reset-then-reuse-values`
+   (`templates/auto-upgrade-cronjob.yaml`) and re-applies user-supplied values
+   after resetting to chart defaults. This rolls the mysql pod once, so do it in
+   a window. It does **not** rotate root — it only generates the new value.
+   ```bash
+   helm repo add tracebloc https://tracebloc.github.io/client && helm repo update tracebloc
+   helm upgrade <release> tracebloc/client --version <chart> -n <ns> \
+     --reset-then-reuse-values --set rotateMysqlRoot=true
+   ```
+   **This upgrade needs an identity with cluster scope. Plain `admin` is not
+   enough, and no combination of `--set` flags substitutes for it.** The chart
+   templates seven cluster-scoped kinds — Namespace, PersistentVolume,
+   StorageClass, PriorityClass, ClusterRole, ClusterRoleBinding and the OpenShift
+   SecurityContextConstraints — and helm must at minimum *read* each one to diff
+   a release. Kubernetes' built-in `admin` ClusterRole contains no cluster-scoped
+   rules at all, so an operator holding only `admin` fails on the first such kind
+   and then on the next. Two of those failures look like this:
+   ```
+   apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" is forbidden:
+     User "..." cannot get resource "apiservices" ... at the cluster scope
+   priorityclasses.scheduling.k8s.io "tracebloc-data-plane" is forbidden:
+     User "..." cannot get resource "priorityclasses" ... at the cluster scope
+   ```
+   The first has a values-level opt-out (`nodeAgents.metricsServerPreflight=false`,
+   the fix shipped for **backend#2469**) because it is only a template `lookup`.
+   **Do not read that as a general escape hatch** — it clears exactly one wall of
+   several, and the ClusterRole/ClusterRoleBinding the chart's own RBAC depends on
+   have no opt-out at all. Chasing them with flags trades a blocked upgrade for
+   permanent, unaudited config drift and still does not finish.
+
+   In-cluster, the auto-upgrade CronJob's ServiceAccount holds a ClusterRole
+   enumerating precisely those kinds (plus `escalate`/`bind`, without which
+   Kubernetes' privilege-escalation prevention blocks re-applying the chart's own
+   RBAC) — see `templates/auto-upgrade-rbac.yaml`. That is why the hourly upgrade
+   succeeds where a human `admin` cannot. For a manual upgrade, use an identity
+   with equivalent cluster scope (on EKS: `AmazonEKSClusterAdminPolicy`, not
+   `AmazonEKSAdminPolicy`), and drop back afterwards.
+
+   Note that on EKS an access-scope of `type=cluster` does **not** mean
+   "cluster-scoped resources" — it means the policy applies across all
+   namespaces. `AmazonEKSAdminPolicy` at `type=cluster` is still namespace-level
+   admin everywhere, with zero access to the kinds above. The two readings are
+   easy to confuse and the symptom is exactly the errors printed above.
 2. **Every root consumer is ready to take the new value** (rotation breaks anything
    still using the literal). The known set (backend#947 inventory):
    - `migrate-tenant.sh` operators — `MYSQL_ROOT_PW` (tenant-config.env) → the Secret value.
@@ -133,14 +199,23 @@ SCRIPT
 
 ## Rollback
 
-Re-run the `ALTER` with the previous password (you have it as `CURPW`, and the
-S0 snapshot records it). Root rotation is reversible; unlike the eventual
-`DROP USER edgeuser`, nothing here is one-way.
+Re-run the `ALTER` with the two passwords swapped: authenticate with the
+generated value (still in `<release>-secrets`) and set root back to `CURPW`.
+Root rotation is reversible; unlike the eventual `DROP USER edgeuser`, nothing
+here is one-way.
+
+**The S0 snapshot is not a rollback source for the password.** `SHOW GRANTS`
+emits privileges and account names only — no password and no password hash — so
+a snapshot taken per the steps above cannot give `CURPW` back. Keep `CURPW`
+yourself until the fleet is confirmed healthy; once the `ALTER` has run and
+`CURPW` is lost, the only remaining path is a datadir-level root reset
+(`--skip-grant-tables`), which is a different and much more disruptive
+operation.
 
 ## Notes
 
-- **prod** (`tracebloc-templates-prod`) needs `pods/exec` on that namespace — not
-  everyone's token has it. Whoever runs the prod leg needs that access.
+- The **prod** leg needs `pods/exec` on the release namespace — not everyone's
+  token has it. Whoever runs it needs the access checked in precondition 0.
 - After all fleets are rotated, the `Dockerfile.mysql_client` ENV can drop the
   baked literal on the next image rebuild (gated on the client#454 freeze); the
   runtime override makes fresh installs correct in the meantime.
