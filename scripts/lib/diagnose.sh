@@ -99,11 +99,15 @@ run_diagnose() {
     # block the whole bundle on an unresponsive NFS/overlay mount. No marker
     # needed: the guard reads `set +e` and does not flag this region.
     df -h 2>/dev/null | head -20
-    if has docker; then
+    # Gate on a coreutils-free bounded liveness probe (#744): --diagnose is a
+    # Darwin-reachable path, and `_bounded` is a no-op bound on a stock Mac (no
+    # timeout/gtimeout) — so a bare `docker info` against a wedged daemon would hang
+    # the whole bundle from a machine that is by definition already broken. The guard
+    # is silenced (>/dev/null) so its spinner doesn't land in the bundle file; once it
+    # confirms the daemon answers, the read below can't hang. `set +e` (run_diagnose
+    # top) keeps the intentional pipe from tripping pipefail (backend#1778).
+    if has docker && _docker_answers_bounded "collecting docker info" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
       echo; echo "## docker info"
-      # Bounded (#744): a wedged daemon would otherwise hang the bundle forever, from
-      # a machine that is by definition already broken. `set +e` (run_diagnose top)
-      # keeps the intentional pipe from tripping pipefail (backend#1778).
       _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
     fi
     # RFC 0001 install-tier readout (set by host_audit above; plain for the bundle).
