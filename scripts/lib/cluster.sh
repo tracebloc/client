@@ -1256,7 +1256,10 @@ _check_healthy_cluster_gpu_consistent() {
   local list rel ns vals found_req=0
   # NAME + NAMESPACE are the first two columns (jq-free, mirrors detect_installed_client).
   # Release name == namespace for a tracebloc install (helm upgrade --install "$TB_NAMESPACE").
-  list="$(_bounded "${TB_HELM_LIST_TIMEOUT:-20}" helm list -A --deployed --failed 2>/dev/null)" || return 0
+  # Full status set (#554 house rule): --deployed --failed --pending --uninstalling,
+  # so a release wedged in a pending-*/uninstalling state (which may still request a
+  # GPU) is never invisible to this check — same enumeration detect_installed_client uses.
+  list="$(_bounded "${TB_HELM_LIST_TIMEOUT:-20}" helm list -A --deployed --failed --pending --uninstalling 2>/dev/null)" || return 0
   [[ -z "$list" ]] && return 0
   # Capture values IN-MEMORY (no temp file): a mktemp failure must not silently skip
   # the only place this mismatch is surfaced (Bugbot). here-string, not a pipe, so
