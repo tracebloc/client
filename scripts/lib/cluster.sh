@@ -1163,11 +1163,15 @@ _gpu_node_image() {
     printf '%s' "$TRACEBLOC_K3S_CUDA_IMAGE"; return 0
   fi
   local repo="tracebloc/k3s-cuda:${K8S_VERSION}-cuda-${TB_CUDA_BASE_TAG}"
-  # BARE host prefix: strip a pasted scheme exactly like _image_mirror_yaml does,
-  # so a mirror given as https://mirror.corp still yields <host>/repo.
+  # BARE host prefix: strip a pasted scheme AND any trailing slash(es), so a mirror
+  # given as https://mirror.corp/ yields <host>/repo, not <host>//repo — the double
+  # slash makes the host pre-pull (docker pull) fail and drops a credentialed GPU
+  # install to CPU (Bugbot). Matches the Windows twin's `-replace '/+$',''`.
   local mirror="${TRACEBLOC_IMAGE_REGISTRY:-}"
   if [[ -n "$mirror" ]]; then
-    printf '%s/%s' "${mirror#*://}" "$repo"
+    local host="${mirror#*://}"
+    while [[ "$host" == */ ]]; do host="${host%/}"; done
+    printf '%s/%s' "$host" "$repo"
   else
     printf 'ghcr.io/%s' "$repo"
   fi

@@ -1947,6 +1947,27 @@ k3d-tracebloc-agent-0 agent" passthrough
   [ "$output" = "mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
 }
 
+# Bugbot: a mirror with a trailing slash must not yield host//repo (breaks the pull).
+@test "_gpu_node_image: mirror trailing slash is stripped (no double slash)" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  unset TRACEBLOC_K3S_CUDA_IMAGE
+  TRACEBLOC_IMAGE_REGISTRY="https://mirror.corp.example/"
+  run _gpu_node_image
+  [ "$output" = "mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
+  [[ "$output" != *"//"* ]] || return 1
+}
+
+# _registry_host_for: Docker treats the first segment as a registry only when it has
+# a dot/colon or is localhost; a bare owner/name ref logs into docker.io, NOT the
+# owner (else creds go to a nonexistent endpoint). Covers all four, incl. the
+# docker.io branch a mirror-only test never exercises (LukasWodka review).
+@test "_registry_host_for: derives the docker login host for every ref shape" {
+  run _registry_host_for "ghcr.io/tracebloc/k3s-cuda:tag";        [ "$output" = "ghcr.io" ] || return 1
+  run _registry_host_for "mirror.corp/tracebloc/k3s-cuda:tag";    [ "$output" = "mirror.corp" ] || return 1
+  run _registry_host_for "localhost:5000/gpu-node:tag";           [ "$output" = "localhost:5000" ] || return 1
+  run _registry_host_for "owner/private-image:tag";               [ "$output" = "docker.io" ] || return 1
+}
+
 @test "_node_image_gpu_capable: k3s-cuda tag -> capable; stock rancher/k3s -> not; empty -> not" {
   K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
   unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
