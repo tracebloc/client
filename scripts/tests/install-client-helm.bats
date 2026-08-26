@@ -2873,6 +2873,69 @@ _arch_gate_ctx() {
   [ "$(_training_limits 'cpu=7,cpuset=0-3,memory=29Gi')" = "cpuset=0-3,memory=29Gi" ] || return 1
 }
 
+# The VM-ceiling derivation drops cpu from the LIMITS half (above), so
+# RESOURCE_LIMITS goes out memory-only -- e.g. `memory=12Gi`. client#836: that
+# is exactly the value a Linux host's VM-ceiling sizing (backend#2221 / #804)
+# produced, and it must satisfy the SHIPPED chart's own values.schema.json, or
+# `helm install` rejects the values file the installer just wrote:
+#   at '/env/RESOURCE_LIMITS': 'memory=12Gi' does not match pattern ...
+# The schema was loosened to admit any subset in backend#2223 (#812) precisely
+# so backend#2418's (#820) memory-only limit is expressible; this test pins the
+# two together. The pattern is READ FROM THE SCHEMA, never restated here, so a
+# re-tightening back to the pre-#812 `^(cpu=\S+,memory=\S+)?$` -- which forbids
+# the memory-only value -- reddens here instead of only at a customer's helm
+# step. Drives the real derivation (`_resolve_training_size` then
+# `_training_limits`, byte-for-byte what values generation runs when it renders
+# the RESOURCE_LIMITS line) rather than restating the derived string, so this
+# pins the DERIVATION -> schema link. The pattern is matched with python re here
+# because helm is stubbed in this suite; scripts/tests/chart-env-vocabulary.sh
+# renders the same `memory=12Gi` through the REAL chart schema (`helm template`)
+# as its authoritative half.
+@test "training size: VM-ceiling RESOURCE_LIMITS validates against the chart schema (client#836)" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }            # no carried release -> machine sizing runs
+  has() { return 0; }
+  # 10 cores / 15Gi allocatable, minus the 1c/3Gi platform overhead, is a viable
+  # ceiling of cpu=9,memory=12Gi -- the shape that reproduced client#836.
+  kubectl() { printf '10 15Gi\n'; }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=9,memory=12Gi" ] || return 1
+  # RESOURCE_LIMITS is derived exactly as values generation derives it.
+  local limits; limits="$(_training_limits "$_TB_TRAINING_SIZE")"
+  [ "$limits" = "memory=12Gi" ] || return 1   # the value from the issue
+  local root="${BATS_TEST_DIRNAME}/../.."
+  run python3 - "$root/client/values.schema.json" "$limits" <<'PY'
+import json, re, sys
+schema_path, value = sys.argv[1], sys.argv[2]
+with open(schema_path) as handle:
+    schema = json.load(handle)
+def pattern_for(node, key):
+    if isinstance(node, dict):
+        target = node.get(key)
+        if isinstance(target, dict) and "pattern" in target:
+            return target["pattern"]
+        for child in node.values():
+            found = pattern_for(child, key)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for child in node:
+            found = pattern_for(child, key)
+            if found:
+                return found
+    return None
+pattern = pattern_for(schema, "RESOURCE_LIMITS")
+if not pattern:
+    sys.exit("RESOURCE_LIMITS pattern not found in schema")
+sys.exit(0 if re.match(pattern, value) else 1)
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
 
 # ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
 #
