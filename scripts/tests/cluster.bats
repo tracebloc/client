@@ -2134,25 +2134,33 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
   [[ "$output" != *"Recreate"* && "$output" != *"recreate"* ]] || return 1   # not a recreate case
 }
 
-@test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises one -> silent" {
+# Node advertises a GPU -> consistent: it must RETURN at the alloc check, before the
+# node-image inspect. Assert docker inspect never ran (silence alone is inert — the
+# fall-through log/inspect wouldn't reach $output either; LukasWodka review).
+@test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises one -> no image inspect" {
   _hcgc_helm_lists_gpu_release
-  kubectl() { printf '1' ; }                           # node advertises a GPU
-  run _check_healthy_cluster_gpu_consistent
-  [ "$status" -eq 0 ] || return 1
-  [ -z "$output" ] || return 1
+  kubectl() { record "kubectl $*"; printf '1'; }        # node advertises a GPU
+  docker()  { record "docker $*"; return 0; }
+  _check_healthy_cluster_gpu_consistent
+  run mock_calls
+  [[ "$output" == *"kubectl"* ]] || return 1            # the alloc probe DID run
+  [[ "$output" != *"docker inspect"* ]] || return 1     # returned before the image inspect
 }
 
-@test "_check_healthy_cluster_gpu_consistent: release does NOT request a GPU -> silent (no node probe)" {
+# No release requests a GPU -> nothing to reconcile: must RETURN before the node
+# probe. Assert kubectl genuinely never ran (the mock records; silence is inert
+# because the alloc call CAPTURES kubectl output into $alloc — LukasWodka review).
+@test "_check_healthy_cluster_gpu_consistent: release does NOT request a GPU -> no node probe" {
   helm() {
     case "$1" in
       list) printf 'NAME\tNAMESPACE\tSTATUS\tCHART\ntbns\ttbns\tdeployed\tclient-1.9.72\n' ;;
       get)  printf 'env:\n  GPU_REQUESTS: ""\n' ;;      # CPU release
     esac
   }
-  kubectl() { echo "SHOULD-NOT-BE-CALLED"; }
-  run _check_healthy_cluster_gpu_consistent
-  [ "$status" -eq 0 ] || return 1
-  [ -z "$output" ] || return 1
+  kubectl() { record "kubectl $*"; printf ''; }
+  _check_healthy_cluster_gpu_consistent
+  run mock_calls
+  [[ "$output" != *"kubectl"* ]] || return 1            # the node probe never ran
 }
 
 @test "_generate_node_cdi_specs: generates the CDI spec on the node(s)" {
