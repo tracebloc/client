@@ -5316,31 +5316,163 @@ Describe "Get-GpuBuildFailureReason (#616: every GPU failure names an actionable
   }
 }
 
-Describe "Bounded process quotes whitespace arguments (#616 Bugbot)" {
-  BeforeAll { $script:QSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
-  It "the joiner quotes-on-whitespace and skips already-quoted values (source guard)" {
-    # The args are joined into ONE command line, so an unquoted value with a space -- a registry
-    # username, or a temp path under a profile like C:\Users\First Last\... -- would silently
-    # become two arguments and corrupt the command.
+Describe "Bounded process argument quoting round-trips through CommandLineToArgvW (backend#2455)" {
+  # #616 quoted whitespace-bearing args but left INNER QUOTES unescaped, so any arg carrying both a
+  # space and a `"` (and even a quote with no space, which took the pass-through branch) reached the
+  # child with its quotes silently consumed by CommandLineToArgvW -- the #817 false-refusal. The fix
+  # escapes per the real CommandLineToArgvW/MSVCRT rules in ConvertTo-Win32Arg. These tests pin the
+  # encoding and prove the round-trip: encode(argv) then re-split == argv, as SINGLE tokens.
+  BeforeAll {
+    $script:QSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+
+    # A from-spec reimplementation of how CommandLineToArgvW (and the CRT every well-behaved Windows
+    # program links) re-splits a command line, MINUS the special argv[0] rules -- $psi.Arguments is
+    # argv[1..] only ($psi.FileName is passed separately). Pure PowerShell so the round-trip runs on
+    # this suite's Linux/macOS CI, where shell32!CommandLineToArgvW does not exist; the Windows-only
+    # test below cross-checks the SAME encoder against the real API.
+    function script:Split-LikeArgvW {
+      param([string]$CommandLine)
+      $out = [System.Collections.Generic.List[string]]::new()
+      $cur = [System.Text.StringBuilder]::new()
+      $inQuotes = $false; $has = $false; $i = 0; $n = $CommandLine.Length
+      while ($i -lt $n) {
+        $c = $CommandLine[$i]
+        if ($c -eq '\') {
+          $nb = 0
+          while ($i -lt $n -and $CommandLine[$i] -eq '\') { $nb++; $i++ }
+          if ($i -lt $n -and $CommandLine[$i] -eq '"') {
+            [void]$cur.Append('\' * [int][math]::Floor($nb / 2))
+            if ($nb % 2 -eq 0) { $inQuotes = -not $inQuotes } else { [void]$cur.Append('"') }
+            $has = $true; $i++
+          } else {
+            [void]$cur.Append('\' * $nb); $has = $true
+          }
+        } elseif ($c -eq '"') {
+          if ($inQuotes -and ($i + 1) -lt $n -and $CommandLine[$i + 1] -eq '"') {
+            [void]$cur.Append('"'); $i += 2                 # "" inside a quoted range -> literal " (CRT 2008+)
+          } else {
+            $inQuotes = -not $inQuotes; $has = $true; $i++
+          }
+        } elseif (($c -eq ' ' -or $c -eq "`t") -and -not $inQuotes) {
+          if ($has) { $out.Add($cur.ToString()); [void]$cur.Clear(); $has = $false }
+          $i++
+        } else {
+          [void]$cur.Append($c); $has = $true; $i++
+        }
+      }
+      if ($has) { $out.Add($cur.ToString()) }
+      return $out.ToArray()
+    }
+
+    # Build the line EXACTLY as Invoke-BoundedProcess does (ConvertTo-Win32Arg is the single source
+    # of truth; the join is the one line the helper wraps around it), then recover it. A throwaway
+    # program token absorbs the argv[0] rules, mirroring how the OS prepends $psi.FileName.
+    function script:Roundtrip { param([string[]]$Argv)
+      $line = (($Argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+      $recovered = @(script:Split-LikeArgvW ("prog.exe " + $line))
+      [pscustomobject]@{ Line = $line; Argv = @($recovered | Select-Object -Skip 1) }
+    }
+  }
+
+  It "Invoke-BoundedProcess delegates to ConvertTo-Win32Arg and drops the unescaped escape hatch (source guard)" {
     $fn = (($script:QSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'ForEach-Object'
-    $fn | Should -Match 'notmatch'                 # the already-quoted escape hatch
-    $fn | Should -Match 'Quote any argument containing whitespace'
+    # Match the actual CALL, not just the name: a comment in the body also mentions
+    # ConvertTo-Win32Arg, so a bare-name match would still pass if the call were
+    # deleted -- a guard that can't detect its own removal (Bugbot #845).
+    $fn | Should -Match 'ForEach-Object \{ ConvertTo-Win32Arg \$_'
+    $fn | Should -Not -Match 'notmatch'          # the old `^".*"$` already-quoted escape hatch is gone
   }
-  It "behavioural: a username with a space survives as ONE argument" {
-    # exercises the same expression the function uses
-    $parts = @("login", "ghcr.io", "-u", "First Last", "--password-stdin")
-    $joined = (($parts | ForEach-Object {
-      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
-    }) -join ' ')
-    $joined | Should -Be 'login ghcr.io -u "First Last" --password-stdin'
+
+  It "callers pass RAW args -- Set-NodeGpuCapacity no longer pre-quotes the patch file (source guard)" {
+    $sn = [regex]::Match($script:QSRC, 'function Set-NodeGpuCapacity \{.*?\n\}', 'Singleline').Value
+    $sn | Should -Match '"--patch-file", \$patchFile,'
+    $sn | Should -Not -Match 'patchFile`"'       # the old `"$patchFile`" wrapping
   }
-  It "behavioural: an already-quoted path is not double-quoted, and empty survives" {
-    $parts = @('"C:\Temp\a b\p.json"', "", "plain")
-    $joined = (($parts | ForEach-Object {
-      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
-    }) -join ' ')
-    $joined | Should -Be '"C:\Temp\a b\p.json" "" plain'
+
+  It "ConvertTo-Win32Arg emits the exact CommandLineToArgvW encoding (golden)" {
+    ConvertTo-Win32Arg ''             | Should -BeExactly '""'          # empty survives as a present arg
+    ConvertTo-Win32Arg 'plain'        | Should -BeExactly 'plain'       # nothing to escape -> untouched
+    ConvertTo-Win32Arg '--format=csv' | Should -BeExactly '--format=csv'
+    ConvertTo-Win32Arg 'a b'          | Should -BeExactly '"a b"'       # whitespace
+    ConvertTo-Win32Arg 'a"b'          | Should -BeExactly '"a\"b"'      # quote, no space -> still must quote
+    ConvertTo-Win32Arg 'a b"c'        | Should -BeExactly '"a b\"c"'    # whitespace + quote (the #817 bug)
+    ConvertTo-Win32Arg 'a\b'          | Should -BeExactly 'a\b'         # lone backslash is literal
+    ConvertTo-Win32Arg 'C:\a b\'      | Should -BeExactly '"C:\a b\\"'  # trailing \ doubled before close quote
+    ConvertTo-Win32Arg 'a\"b'         | Should -BeExactly '"a\\\"b"'    # backslashes before a quote
+  }
+
+  It "round-trips representative args back to the ORIGINAL single tokens" {
+    $cases = @(
+      ,@('plain')
+      ,@('a b')                                  # whitespace
+      ,@('has"quote')                            # embedded quote
+      ,@('a b"c')                                # whitespace + quote
+      ,@('')                                     # empty string
+      ,@('a\"b')                                 # backslashes before a quote
+      ,@('C:\Users\First Last\tb.json')          # spaced temp path (Set-NodeGpuCapacity's --patch-file)
+      ,@('ends\with\backslash\')                 # trailing backslash, unquoted fast path
+      ,@('login','ghcr.io','-u','First "Q" Last','--password-stdin')  # registry user w/ space+quote
+      ,@('--format','{{.Names}} {{.Label "k3d.role"}}')              # the #817 shape, now safe
+    )
+    foreach ($argv in $cases) {
+      $rt = script:Roundtrip -Argv $argv
+      $rt.Argv.Count | Should -Be $argv.Count -Because "the line was: $($rt.Line)"
+      for ($k = 0; $k -lt $argv.Count; $k++) {
+        $rt.Argv[$k] | Should -BeExactly $argv[$k] -Because "token $k of the line: $($rt.Line)"
+      }
+    }
+  }
+
+  It "the encoder agrees with the real shell32!CommandLineToArgvW (Windows only)" -Skip:(-not $IsWindows) {
+    $sig = @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr LocalFree(System.IntPtr hMem);
+'@
+    Add-Type -Namespace TbWin32 -Name Argv -MemberDefinition $sig
+    function realArgv([string]$cl) {
+      $n = 0; $p = [TbWin32.Argv]::CommandLineToArgvW($cl, [ref]$n)
+      try {
+        # Collect into a typed List and return via the ,$arr idiom: the array then
+        # survives assignment at 0/1 elements AND keeps empty-string elements. The
+        # old `,@($r) | Select-Object -Skip 1` dropped a trailing "" (backend#2455).
+        $out = [System.Collections.Generic.List[string]]::new()
+        for ($j = 0; $j -lt $n; $j++) {
+          $out.Add([System.Runtime.InteropServices.Marshal]::PtrToStringUni(
+            [System.Runtime.InteropServices.Marshal]::ReadIntPtr($p, $j * [System.IntPtr]::Size)))
+        }
+        return ,$out.ToArray()
+      } finally { [void][TbWin32.Argv]::LocalFree($p) }   # documented: the caller frees with LocalFree
+    }
+    # Newline-separated ,@(...) so each $argv iterates as a FLAT [string[]] — the
+    # comma-separated @((,@(...)), ...) form nests each case one level deeper, so
+    # ConvertTo-Win32Arg was handed an Object[] and threw before a single comparison
+    # ran, leaving this real-API cross-check inert on Windows while macOS skipped it
+    # (Bugbot / LukasWodka on #845). Mirrors the round-trip test's $cases shape.
+    $cases = @(
+      ,@('a b"c')
+      ,@('a\"b')
+      ,@('C:\a b\')
+      ,@('')
+      ,@('x')
+    )
+    foreach ($argv in $cases) {
+      $line = (($argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+      # Assign (don't pipe) and slice off the prog.exe argv[0] by index — piping
+      # through Select-Object -Skip 1 lost a trailing empty arg (backend#2455).
+      $full = realArgv ("prog.exe " + $line)
+      # Drop the prog.exe argv[0] with an explicit index loop, NOT a range slice:
+      # $full[1..($full.Count-1)] collapses to a SCALAR string under Windows
+      # PowerShell when it selects one element, so $got[$k] then indexed into the
+      # string's characters ("got a" for "a b\"c") even though shell32 returned the
+      # arg intact. The loop keeps $got a real array on every host (backend#2455).
+      $got = @()
+      for ($m = 1; $m -lt $full.Count; $m++) { $got += $full[$m] }
+      $because = "arg=[$($argv -join '|')] encoded=[$line] shell32=[$($full -join '|')]"
+      $got.Count | Should -Be $argv.Count -Because $because
+      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] -Because $because }
+    }
   }
 }
 
@@ -5349,6 +5481,10 @@ Describe "Bounded process survives a child that closes stdin first (broken pipe)
     $script:BPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
     # Load the REAL function rather than a copy of it, so this cannot pass while the
     # shipped one throws -- the whole failure mode being tested is an unguarded call.
+    # Pull in its arg-quoting dependency too (backend#2455), so the redefined copy
+    # doesn't fall back to a missing ConvertTo-Win32Arg.
+    $cw = (($script:BPSRC -split 'function ConvertTo-Win32Arg')[1] -split '\nfunction ')[0]
+    Invoke-Expression "function ConvertTo-Win32Arg $cw"
     $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
     Invoke-Expression "function Invoke-BoundedProcess $fn"
   }
@@ -5442,6 +5578,10 @@ Describe "Bounded process survives a child that closes stdin first (broken pipe)
     # Measured before the fix: past 60s with -TimeoutSec 20. After: ~0.2s.
     $job = Start-Job -ScriptBlock {
       param($src)
+      # This runspace is isolated, so Invoke-BoundedProcess's dependency must come along too:
+      # it now delegates arg-quoting to ConvertTo-Win32Arg (backend#2455).
+      $cw = (($src -split 'function ConvertTo-Win32Arg')[1] -split '\nfunction ')[0]
+      Invoke-Expression "function ConvertTo-Win32Arg $cw"
       $fn = (($src -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
       Invoke-Expression "function Invoke-BoundedProcess $fn"
       $r = Invoke-BoundedProcess -FileName "/bin/cat" -Arguments @("-") -Stdin ("x" * 200000) -TimeoutSec 20
@@ -6674,15 +6814,17 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
   }
 
   It "passes no argument carrying a space or a quote (#817 Bugbot, High)" {
-    # THE BUG THIS EXISTS FOR. $psi.Arguments joins the args into ONE command line
-    # and quotes any whitespace-bearing value as '"' + $_ + '"' with NO escaping of
-    # inner quotes. The obvious single query --
+    # DEFENSE IN DEPTH. Invoke-BoundedProcess now escapes inner quotes correctly
+    # (ConvertTo-Win32Arg, backend#2455), so this shape is no longer corrupted at the
+    # helper -- but the probe still keeps its args space/quote-free so it never depends
+    # on that. Historically the joiner quoted any whitespace-bearing value as
+    # '"' + $_ + '"' with NO escaping of inner quotes, so the obvious single query --
     #   --format "{{.Names}} {{.Label `"k3d.role`"}}"
     # -- has both a space and quotes, so it went out with its own quotes intact and
     # CommandLineToArgvW toggled in and out of quoting to hand docker ONE token with
     # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. text/template then
     # cannot parse k3d.role as an identifier, docker exits non-zero, and the probe
-    # throws "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
+    # threw "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
     # install, after the cluster is already up.
     #
     # Why no earlier test caught it: every case here mocks Invoke-DockerCli, so the
