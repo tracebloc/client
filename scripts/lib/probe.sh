@@ -48,18 +48,18 @@
 # running rootless daemon). That is exactly the Tier-0 condition. No image pull.
 _probe_runtime_usable() {
   has docker || return 1
-  # Bound the daemon call through the shared seam (_bounded, common.sh): a bare
-  # `docker info` against a WEDGED daemon hangs forever, and run_host_probes runs
-  # this on EVERY install — so a headless SSH install would hang indefinitely
-  # (unbounded-external-call). _bounded caps it with timeout(1)/gtimeout(1) when
-  # either is present and falls back to the bare call only when neither is (rare
-  # on the Linux hosts this targets). This used to hand-roll that same three-way
-  # fallback inline; one copy now, so a fix to the seam reaches here too (#744).
-  # Read-only and never fatal: a timeout (exit 124) or any failure just reads as
-  # "not usable" (non-zero), it never errors the probe (Bugbot). The 5s cap is
-  # probe-specific (TB_PROBE_TIMEOUT) — deliberately shorter than _docker_answers'
-  # 10s, since this fires on every install and only needs a fast liveness verdict.
-  _bounded "${TB_PROBE_TIMEOUT:-5}" docker info >/dev/null 2>&1
+  # Bound coreutils-free (#744): a bare `docker info` against a WEDGED daemon hangs
+  # forever, and host_audit runs run_host_probes on EVERY install — macOS included —
+  # so this is the FIRST thing that freezes at "Checking your machine" on a wedged
+  # Docker Desktop, before _kill_lingering_docker ever gets a chance. `_bounded` is a
+  # no-op bound on a stock Mac (no timeout(1)/gtimeout(1)), so it can't be the seam
+  # here; `_docker_answers_bounded` kills on a deadline via a background PID instead,
+  # and takes the cap as an argument. Silenced (>/dev/null): the rc is the verdict and
+  # the host-audit panel says the rest. Keeps the probe-specific 5s (TB_PROBE_TIMEOUT,
+  # deliberately shorter than the 10s default — this fires on every install and only
+  # needs a fast liveness read). Read-only and never fatal: a timeout or any failure
+  # just reads as "not usable" (non-zero), it never errors the probe (Bugbot).
+  _docker_answers_bounded "checking container runtime" "${TB_PROBE_TIMEOUT:-5}" >/dev/null 2>&1
 }
 
 # _probe_verify_runtime — opt-in (--verify / TB_PROBE_VERIFY=1): actually run a
