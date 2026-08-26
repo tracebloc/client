@@ -5596,6 +5596,65 @@ Describe "docker-buildx and k3d-create command lines escape inner quotes via Con
     $rt.Line.Contains(' /host:/node@all ') | Should -BeTrue  -Because "bare @ arg is a standalone unquoted token: $($rt.Line)"
     $rt.Line.Contains('"/host:/node@all"') | Should -BeFalse -Because "the old builder wrapped it in quotes: $($rt.Line)"
   }
+
+  It "Split-Cmdline2545 (this block's decoder/oracle) agrees with the real shell32!CommandLineToArgvW (Windows only)" -Skip:(-not $IsWindows) {
+    # LukasWodka on #858: this block's re-splitter is the ORACLE the builder tests above trust, and --
+    # unlike the backend#2455 one -- it was only asserted (in a comment) to "mirror" the real API, not
+    # checked against it. If the two from-spec decoders ever drift, every encoder test here would be
+    # validating ConvertTo-Win32Arg against a decoder that no longer matches Windows, and the
+    # cross-check on the OTHER copy would say nothing about this one. So pin THIS decoder to shell32
+    # directly, with the same Windows-gated P/Invoke #845 uses (a distinct namespace so both blocks'
+    # Add-Type calls can coexist in one session). shell32 is why the check is Windows-only -- it does
+    # not exist off-Windows, exactly as #845's is gated.
+    $sig = @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr LocalFree(System.IntPtr hMem);
+'@
+    Add-Type -Namespace TbWin32b -Name Argv -MemberDefinition $sig
+    function realArgv2545([string]$cl) {
+      $n = 0; $p = [TbWin32b.Argv]::CommandLineToArgvW($cl, [ref]$n)
+      try {
+        # Typed List + the ,$arr return idiom: survives 0/1 elements and keeps a trailing "" (the
+        # `| Select-Object -Skip 1` form dropped it -- backend#2455). Caller frees with LocalFree.
+        $out = [System.Collections.Generic.List[string]]::new()
+        for ($j = 0; $j -lt $n; $j++) {
+          $out.Add([System.Runtime.InteropServices.Marshal]::PtrToStringUni(
+            [System.Runtime.InteropServices.Marshal]::ReadIntPtr($p, $j * [System.IntPtr]::Size)))
+        }
+        return ,$out.ToArray()
+      } finally { [void][TbWin32b.Argv]::LocalFree($p) }
+    }
+    # Flat [string[]] per case (the ,@(...) idiom), exercising each branch of the re-splitter:
+    # whitespace+quote, backslashes-before-quote, trailing backslash, empty, the two @-bearing k3d
+    # shapes, and a plain token. Mirrors the #2455 cross-check's $cases shape.
+    $cases = @(
+      ,@('a b"c')
+      ,@('a\"b')
+      ,@('C:\a b\')
+      ,@('')
+      ,@('/host:/node@all')
+      ,@('note=a "b" c@server:*')
+      ,@('x')
+    )
+    foreach ($argv in $cases) {
+      $line = "prog.exe " + (($argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+      # Drop the prog.exe argv[0] with an INDEX loop, not a range slice: $full[1..($full.Count-1)]
+      # collapses to a scalar string at one element under Windows PowerShell 5.1 (backend#2455).
+      $realFull = realArgv2545 $line
+      $real = @(); for ($m = 1; $m -lt $realFull.Count; $m++) { $real += $realFull[$m] }
+      $mineFull = @(script:Split-Cmdline2545 $line)
+      $mine = @(); for ($m = 1; $m -lt $mineFull.Count; $m++) { $mine += $mineFull[$m] }
+      $because = "arg=[$($argv -join '|')] line=[$line] shell32=[$($realFull -join '|')] mine=[$($mineFull -join '|')]"
+      # This block's decoder must match the real API token-for-token...
+      $mine.Count | Should -Be $real.Count -Because $because
+      for ($k = 0; $k -lt $real.Count; $k++) { $mine[$k] | Should -BeExactly $real[$k] -Because $because }
+      # ...and the real API must recover the ORIGINAL args (round-trip completeness of the encoder).
+      $real.Count | Should -Be $argv.Count -Because $because
+      for ($k = 0; $k -lt $argv.Count; $k++) { $real[$k] | Should -BeExactly $argv[$k] -Because $because }
+    }
+  }
 }
 
 Describe "Bounded process survives a child that closes stdin first (broken pipe)" {
