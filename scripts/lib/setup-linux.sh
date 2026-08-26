@@ -312,7 +312,14 @@ install_docker_engine() {
   # provision as the admin; and a non-root admin without socket access must not
   # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
   if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
-    if sudo docker info &>/dev/null; then
+    # Bound the daemon probe: a wedged daemon makes `docker info` hang forever, and
+    # this runs on the admin's host-prep path (#744). `timeout` wraps `sudo`, not the
+    # reverse — modern sudo forwards SIGTERM to its child, and even where it does not
+    # the installer is still unblocked at the deadline (a wedged read at worst
+    # reparents to init as a harmless read-only orphan). `sudo timeout …` would clean
+    # the child up itself but bypass _bounded's timeout/gtimeout selection, which is
+    # the seam this change consolidates on.
+    if _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" sudo docker info &>/dev/null; then
       # Running NOW isn't enough for host-prep: after a reboot the Tier-0
       # researcher can't start the daemon themselves, so make sure it's also
       # enabled on boot (best-effort — non-systemd hosts manage this their own
@@ -334,7 +341,7 @@ install_docker_engine() {
     # prevent (Bugbot r3).
     log "Docker daemon not active (prepare-host) — starting it."
     sudo systemctl enable --now docker 2>/dev/null || true
-    if sudo docker info &>/dev/null; then
+    if _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" sudo docker info &>/dev/null; then   # bounded as above (#744)
       log "Docker daemon started (prepare-host mode)."
       return 0
     fi
@@ -348,7 +355,7 @@ install_docker_engine() {
     { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /' || true
     error "Fix the Docker error above, then re-run prepare-host."
   fi
-  if ! docker info &>/dev/null 2>&1; then
+  if ! _docker_answers; then
     # (a) Group not active in THIS shell yet → re-exec under the docker group. Key
     # off $_grant_user (not bare $USER) so the USER-unset edge the grant handled
     # still triggers the in-session re-exec instead of dead-ending (#427 reviewer).
@@ -916,7 +923,7 @@ _tier0_gpu_flags() {
   # which the `if` reads as "no nvidia runtime", handing a Tier-0 GPU host a
   # CPU-only cluster even though the toolkit is already configured.
   local _runtimes
-  _runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  _runtimes="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
   case "$_runtimes" in
     *'"nvidia"'*)
       K3D_GPU_FLAGS=("--gpus=all")

@@ -34,7 +34,16 @@ for *what the operator sees and can act on*, not code elegance.
   `kubectl cluster-info --request-timeout=5s` probe (`scripts/lib/diagnose.sh:149-152`).
   `curl` takes `--connect-timeout` plus `-m`/`--max-time`, or the
   `--speed-limit`/`--speed-time` stall pair. Against a wedged API server an unbounded
-  call hangs a headless install forever, with no output to interpret.
+  call hangs a headless install forever, with no output to interpret. **`docker`
+  daemon probes route through `_docker_answers()` (yes/no) or `_bounded()` (needs
+  output) from `common.sh`** — a bare `docker info` never returns against a *wedged*
+  daemon, which is exactly the state that lands a machine in the probes that check for
+  it (#741, #744). `check-style.sh` rule 5 fails CI on any unbounded `docker info`
+  under `scripts/lib/`, so this class is now a gate, not a repeated review comment.
+  When you bound a probe, remember the #741 test trap: `_bounded` runs the command
+  through `timeout` as an *external* process, so a `docker() { … }` shell-function
+  stub stops intercepting — stub at `_docker_answers`/`_bounded`, or shadow
+  `timeout`/`gtimeout` with a passthrough (see `probe.bats`/`preflight.bats` setup).
 
 - **A version/tag/ref interpolated into a URL without validation.** There is no shared
   validator — each path adds its own gate: `scripts/install.sh:184,193,214-219` (ref

@@ -9,7 +9,7 @@
 #  so until 2026-08-19 a violation here printed red and merged anyway.
 #  Exit 0 = clean, 1 = violations found, 2 = the guard itself errored (fail-closed).
 #
-#  Four mechanical checks (semantic calls — role misuse, judgement-y wording —
+#  Five mechanical checks (semantic calls — role misuse, judgement-y wording —
 #  stay with CODEOWNERS review + STYLE.md; a grep can't police those). Emoji are
 #  intentionally NOT policed — they're welcome (see STYLE.md):
 #    1. No hardcoded brand colour outside the colour engine (scripts/lib/common.sh).
@@ -19,6 +19,9 @@
 #       see the note on the check itself.
 #    4. No capital-T 'Tracebloc' in user-facing text — the product name is
 #       lowercase. Comments and PascalCase identifiers are exempt.
+#    5. No unbounded 'docker info' in scripts/lib/ — every daemon probe routes
+#       through _docker_answers / _bounded (common.sh) so a wedged daemon can't
+#       hang the installer (#741, #744).
 #
 #  This count is asserted by scripts/tests/check-style.bats: it said "Three" while
 #  four rules were live (backend#1924). A gate whose own description undercounts
@@ -43,12 +46,14 @@ hits=''
 # and the fail-closed exit below is reachable. Sets `hits` to the matches (this
 # guard + opt-out lines removed). grep exit 2+ (bad regex/flags/tree) → fail closed.
 scan() {
-  local re="$1" flags="${2:-}" out rc
+  local re="$1" flags="${2:-}" root="${3:-scripts/}" out rc
   # No 2>/dev/null: let a real grep error surface on stderr — rc>=2 below turns
   # it into a fail-closed exit, so the error is visible AND fatal, never a silent pass.
+  # A narrower root (e.g. scripts/lib/) scopes a rule to one subtree; default is the
+  # whole scripts/ tree so existing callers are unchanged.
   # shellcheck disable=SC2086
   out="$(grep -rnE $flags --include='*.sh' --include='*.ps1' --exclude='check-style.sh' \
-    --exclude-dir='tests' "$re" scripts/)"
+    --exclude-dir='tests' "$re" "$root")"
   rc=$?
   if [[ "$rc" -ge 2 ]]; then
     echo "check-style: grep errored (rc=$rc) on /$re/ — failing closed" >&2
@@ -122,6 +127,32 @@ report "capital-T 'Tracebloc' in user-facing text — the product name is lowerc
       | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
       | grep -vE 'Tracebloc[A-Z]' \
       | grep -vE '[-]Tracebloc' || true)"
+
+# 5) Unbounded `docker info` in scripts/lib/ — every daemon probe must route through
+#    _docker_answers() (yes/no) or _bounded() (needs output) from ${ENGINE}. A bare
+#    `docker info` does NOT return against a WEDGED daemon, which is exactly the state
+#    that reaches these probes — so it froze the installer with no output (#741, #744).
+#    This encodes Bugbot's learned rule ("installer probes must be bounded") as a gate,
+#    so it stops recurring in review (.cursor/BUGBOT.md).
+#
+#    Scope: scripts/lib/ only (the shell installer libs). install-k8s.ps1 bounds its own
+#    probes in PowerShell, and kubectl/helm carry their own --request-timeout / --timeout,
+#    so this rule stays on docker info rather than redden those other, differently-bounded
+#    call sites.
+#
+#    Match an INVOCATION: `docker info` followed by whitespace-then-flag/redirection/pipe
+#    ([-&>|;12]), a closing paren, or end of line. That skips string mentions ("## docker
+#    info", 'sudo docker info', "docker info OK") whose next char is a quote/letter, and
+#    comments are dropped by the same filter the other rules use. A line counts as bounded
+#    only when _bounded / timeout / gtimeout appears BEFORE the probe on it (`…[^#]*docker
+#    …info`), so a stray "timeout" in a trailing comment can't mask an unbounded call;
+#    `# style-guard: allow` opts out a genuine edge.
+docker_probe='docker[[:space:]]+info([[:space:]]+[-&>|;12]|[[:space:]]*[)]|[[:space:]]*$)'
+scan "$docker_probe" '' 'scripts/lib/'
+report "unbounded 'docker info' in scripts/lib/ — route it through _docker_answers (yes/no) or _bounded (needs output) from ${ENGINE} so a wedged daemon can't hang the installer (#744)" \
+  "$(printf '%s' "$hits" \
+      | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+      | grep -vE '(_bounded|timeout|gtimeout)[^#]*docker[[:space:]]+info' || true)"
 
 if [[ "$guard_error" -ne 0 ]]; then
   echo "  [!] the guard hit an internal error — failing closed (exit 2)" >&2

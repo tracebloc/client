@@ -237,6 +237,61 @@ _brand_rgbs() {
   [ "$status" -eq 0 ] || return 1
 }
 
+# ── rule 5: unbounded 'docker info' in scripts/lib/ (#741, #744) ──────────────
+# BOTH ways, like the others: it fires on a real invocation and passes on the
+# bounded equivalents. The trap this rule must survive is a *string mention* of
+# 'docker info' vs an actual call — the regex matches an invocation (a
+# flag/redirection/pipe or end-of-line after `info`), so the clean-side test
+# below deliberately feeds the mentions that must NOT trip it. A one-sided "it
+# fires" test would pass just as well against a rule that flagged those too, and
+# such a rule would be unsatisfiable without littering the tree with markers.
+
+@test "rule 5: an unbounded 'docker info' invocation is caught" {
+  fixture '  if docker info >/dev/null 2>&1; then :; fi'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+}
+
+@test "rule 5: a bare 'docker info' at end of line is caught (the next silent footgun)" {
+  fixture '  docker info'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+}
+
+@test "rule 5: routed through _bounded / _docker_answers is clean" {
+  fixture \
+    '  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>&1' \
+    '  _bounded 10 sudo docker info &>/dev/null' \
+    '  b="$(_bounded 10 docker info --format "{{.NCPU}}")"' \
+    '  _docker_answers'
+  run run_style
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "rule 5: string mentions and comments are NOT invocations (the discriminator)" {
+  # Each line contains the literal 'docker info' but none is a call: a section
+  # label, an audit-row string, an error hint (comma, not a space, follows), a
+  # comment. The rule must leave all four alone.
+  fixture \
+    '  echo "## docker info"' \
+    '  _audit_row "Container runtime" "Docker 27 — docker info OK" ok' \
+    "  error \"daemon not answering — check 'sudo docker info', then re-run\"" \
+    '  # a bare docker info against a wedged daemon hangs; that is why we bound it'
+  run run_style
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "rule 5: 'timeout' in a trailing comment does NOT excuse an unbounded probe" {
+  # The bound must PRECEDE the probe on the line. A probe whose only 'timeout' is
+  # in a trailing comment is still unbounded and must be caught.
+  fixture '  docker info >/dev/null 2>&1   # TODO: add a timeout later'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+}
+
 # ── the opt-out marker ───────────────────────────────────────────────────────
 # The header promises it works on ANY check. Tested per rule, because the marker
 # is applied in one shared place (scan) and a regression would silently un-exempt
@@ -247,7 +302,8 @@ _brand_rgbs() {
     '  local c="#01a5cc"   # style-guard: allow' \
     '  echo "your workspace"   # style-guard: allow' \
     '  curl -fsSL "$url"   # style-guard: allow' \
-    '  echo "Tracebloc"   # style-guard: allow'
+    '  echo "Tracebloc"   # style-guard: allow' \
+    '  docker info >/dev/null 2>&1   # style-guard: allow'
   run run_style
   [ "$status" -eq 0 ] || return 1
 }

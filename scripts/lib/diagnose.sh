@@ -101,7 +101,10 @@ run_diagnose() {
     df -h 2>/dev/null | head -20
     if has docker; then
       echo; echo "## docker info"
-      docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
+      # Bounded (#744): a wedged daemon would otherwise hang the bundle forever, from
+      # a machine that is by definition already broken. `set +e` (run_diagnose top)
+      # keeps the intentional pipe from tripping pipefail (backend#1778).
+      _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
     fi
     # RFC 0001 install-tier readout (set by host_audit above; plain for the bundle).
     if declare -F run_host_probes >/dev/null 2>&1; then

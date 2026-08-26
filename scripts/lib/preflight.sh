@@ -129,14 +129,14 @@ _pf_fstype() {
 # a single integer, or nothing if the daemon is down / the value is junk — callers
 # then fall back to the host reader. (docker info precedent: _pf_docker_root above.)
 _pf_runtime_mem_kb() {
-  has docker && docker info >/dev/null 2>&1 || return 0
-  local b; b="$(docker info --format '{{.MemTotal}}' 2>/dev/null)"
+  has docker && _docker_answers || return 0
+  local b; b="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.MemTotal}}' 2>/dev/null)"
   [[ "$b" =~ ^[0-9]+$ && "$b" -gt 0 ]] && echo $(( b / 1024 ))
   return 0
 }
 _pf_runtime_ncpu() {
-  has docker && docker info >/dev/null 2>&1 || return 0
-  local n; n="$(docker info --format '{{.NCPU}}' 2>/dev/null)"
+  has docker && _docker_answers || return 0
+  local n; n="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.NCPU}}' 2>/dev/null)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && echo "$n"
   return 0
 }
@@ -334,8 +334,8 @@ _pf_runtime_mem_status() {
 
 # Docker data root if the daemon is up; else where it will live / a host proxy.
 _pf_docker_root() {
-  if has docker && docker info >/dev/null 2>&1; then
-    docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "/var/lib/docker"
+  if has docker && _docker_answers; then
+    _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "/var/lib/docker"
   elif [[ "$OS" == "Linux" ]]; then
     echo "/var/lib/docker"
   else
