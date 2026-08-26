@@ -385,6 +385,65 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+# backend#2033: an AMD GPU host must actually REQUEST the device. The amd device
+# plugin advertises amd.com/gpu, but GPU_LIMITS/GPU_REQUESTS used to be wired for
+# nvidia only, so AMD training pods requested no GPU and silently ran on CPU while
+# the installer still reported the GPU "verified". Lock the amd.com/gpu request in.
+@test "install_client_helm: AMD host -> values request amd.com/gpu + enable the amd device plugin" {
+  GPU_VENDOR=amd
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for
+  # a pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
+  # and the chart-managed device plugin is enabled for the amd vendor.
+  grep -q 'vendor: amd' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
+# Parity guard for the sibling branch backend#2033 edits: an NVIDIA host still
+# requests nvidia.com/gpu. Nothing else asserts the request at the values layer,
+# so this pins both arms of the vendor conditional against a future regression.
+@test "install_client_helm: NVIDIA host -> values request nvidia.com/gpu" {
+  GPU_VENDOR=nvidia
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'vendor: nvidia' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
+# Third arm of the same conditional: a non-GPU host must emit EMPTY GPU_LIMITS/
+# GPU_REQUESTS (client-runtime#80 reads an explicit empty as "no GPU here"), and
+# must NOT enable the device plugin. GPU_VENDOR=none is the setup() default.
+@test "install_client_helm: non-GPU host -> empty GPU_LIMITS/GPU_REQUESTS, no device plugin" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: ""' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: ""' "$HOST_DATA_DIR/values.yaml" || return 1
+  ! grep -q 'devicePlugin:' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
 # backend#743: when a dataset mount is provided, the generated values must point
 # the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
 # runs spawned ingestion pods as the owning user (NFS writes).

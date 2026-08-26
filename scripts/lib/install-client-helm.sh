@@ -1921,14 +1921,27 @@ install_client_helm() {
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
-  # ── GPU limits ──────────────────────────────────────────────────────────
+  # ── GPU limits (backend#2033) ─────────────────────────────────────────────
+  # Request one GPU for training pods on a GPU host so the pod lands on the device
+  # the node advertises. Each supported vendor exposes its card as a DIFFERENT
+  # scheduler resource via the chart-managed device plugin below — NVIDIA as
+  # nvidia.com/gpu, AMD as amd.com/gpu — so the request key must match the vendor.
+  # Wiring nvidia ONLY (the pre-#2033 bug) left AMD pods with an empty request:
+  # they ran CPU-only even though the amd device plugin was enabled and verify_gpu
+  # reported the node's GPU "available" — a "verified" GPU no job could use.
+  # A request this fixed single-node cluster can't actually satisfy is safe:
+  # SINGLE_NODE below tells jobs-manager to downgrade a Pending GPU pod to CPU
+  # rather than strand it (client-runtime#92).
   local gpu_val
   if [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
     gpu_val="nvidia.com/gpu=1"
     log "NVIDIA GPU detected — setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    gpu_val="amd.com/gpu=1"
+    log "AMD GPU detected — setting GPU_LIMITS and GPU_REQUESTS to amd.com/gpu=1"
   else
     gpu_val=""
-    log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
+    log "No GPU wired for training jobs — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
   # ── GPU device plugin (client#564) ────────────────────────────────────────
@@ -1937,7 +1950,8 @@ install_client_helm() {
   # apply the upstream manifest imperatively (bash: gpu-plugins.sh). The chart
   # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
   # instead of lingering. CPU-only installs emit nothing → the chart default
-  # (disabled) stands. The GPU *request* (gpu_val) remains NVIDIA-only, as before.
+  # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
+  # above — nvidia.com/gpu or amd.com/gpu (backend#2033).
   local gpu_block=""
   if [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]]; then
     gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: %s\n' "$GPU_VENDOR")"
