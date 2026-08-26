@@ -1173,6 +1173,19 @@ _gpu_node_image() {
   fi
 }
 
+# Which host does `docker login` target for an image ref? Docker treats the first
+# path segment as a REGISTRY only when it has a '.'/':' or is 'localhost'; otherwise
+# the ref is a Docker Hub repo (owner/name) and login must target docker.io, not the
+# owner segment — else creds for a private image go to the wrong endpoint (client#835).
+# Mirrors the Windows twin's Get-RegistryHost.
+_registry_host_for() {
+  local first="${1%%/*}"
+  case "$first" in
+    *.*|*:*|localhost) printf '%s' "$first" ;;
+    *)                 printf 'docker.io' ;;
+  esac
+}
+
 # Can a node running $1 (a `docker inspect …Config.Image` value) schedule GPU pods?
 # The default GPU image name carries `k3s-cuda:`, BUT an operator can override it
 # (TRACEBLOC_K3S_CUDA_IMAGE) to a renamed / digest-only mirror ref that doesn't —
@@ -1407,23 +1420,50 @@ _create_new_cluster() {
   [[ -n "${HOST_DATASET_DIR:-}" ]] && K3D_ARGS+=(-v "${HOST_DATASET_DIR}:/tracebloc-data@all")
 
   # GPU image pullability → CPU fallback (client#835, Bugbot High). Handing k3d a
-  # k3s-cuda --image it can't pull (ghcr.io blocked, the tag not yet published for
-  # this pin, or a private TRACEBLOC_IMAGE_REGISTRY with no docker login) would make
-  # `k3d cluster create` HARD-FAIL — regressing a host that could still run CPU-only
-  # into a failed install. So pre-pull with the HOST daemon first; on failure, drop
-  # the GPU request (CPU fallback) with an actionable reason instead of aborting.
-  # k3d reuses the now-cached image, so this is not wasted work. Mirrors the Windows
-  # twin's Confirm-GpuImagePullable. Skipped for 'latest' (handled below) and in the
-  # unit harness (empty K8S_VERSION). TB_SKIP_GPU_IMAGE_PREPULL bypasses it.
+  # k3s-cuda --image it can't pull or that doesn't run k3s (ghcr.io blocked, the tag
+  # not yet published for this pin, a private registry needing auth, or a broken
+  # override/mirror copy) would make `k3d cluster create` HARD-FAIL — regressing a
+  # host that could still run CPU-only into a failed install. So on the HOST daemon:
+  # log into a private registry (creds the operator set apply HERE — the node image
+  # is pulled by the host daemon, not the kubelet, so a chart imagePullSecret can't
+  # help), pre-pull, then verify the image actually runs k3s; on any failure drop the
+  # GPU request (CPU fallback) with an actionable reason instead of aborting. k3d
+  # reuses the cached image, so it is not wasted work. Mirrors the Windows twin's
+  # Connect-GpuRegistry + Confirm-GpuImagePullable + Test-GpuImageRunsK3s. Skipped
+  # for 'latest' (handled below) and the unit harness (empty K8S_VERSION);
+  # TB_SKIP_GPU_IMAGE_PREPULL bypasses it.
   if _gpu_wired && [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" && -z "${TB_SKIP_GPU_IMAGE_PREPULL:-}" ]]; then
-    local _prepull_image _prepull_min
+    local _prepull_image _prepull_min _gpu_ok=1
     _prepull_image="$(_gpu_node_image)"
     _prepull_min="$(tb_minutes_or "${TB_GPU_PULL_TIMEOUT_MIN:-}" 15)"
+    # Authenticate the host daemon to the image's registry first (mirrors
+    # Connect-GpuRegistry): --password-stdin so the secret never lands in argv/ps.
+    # Best-effort — a public image needs no login, and a failed login still tries an
+    # unauthenticated pull before the CPU fallback below.
+    if [[ -n "${TRACEBLOC_REGISTRY_USERNAME:-}" && -n "${TRACEBLOC_REGISTRY_PASSWORD:-}" ]]; then
+      local _reg_host; _reg_host="$(_registry_host_for "$_prepull_image")"
+      printf '%s' "${TRACEBLOC_REGISTRY_PASSWORD}" \
+        | _bounded "${TB_DOCKER_LOGIN_TIMEOUT:-30}" docker login "$_reg_host" \
+            --username "${TRACEBLOC_REGISTRY_USERNAME}" --password-stdin >>"${LOG_FILE:-/dev/null}" 2>&1 \
+        || warn "docker login to ${_reg_host} for the GPU image didn't succeed — trying an unauthenticated pull."
+    fi
     ( docker pull "$_prepull_image" >>"${LOG_FILE:-/dev/null}" 2>&1 ) &
-    if ! spin "$!" "Fetching the GPU-capable runtime (${_prepull_image##*/})…" "$(( _prepull_min * 60 ))"; then
+    spin "$!" "Fetching the GPU-capable runtime (${_prepull_image##*/})…" "$(( _prepull_min * 60 ))" || _gpu_ok=0
+    # Verify the pulled image actually runs k3s (mirrors Test-GpuImageRunsK3s): a
+    # mis-tagged/broken override or mirror copy passes the pull but then hard-fails
+    # cluster-create. Run WITH --gpus so it exercises the exact create path (our image
+    # bakes NVIDIA_DISABLE_REQUIRE, so it passes on any driver). Capture-then-match,
+    # never `docker run | grep -q` — grep closing the pipe would SIGPIPE the run under
+    # pipefail and read as a spurious failure.
+    if (( _gpu_ok )); then
+      local _ver_out
+      _ver_out="$(_bounded "${TB_GPU_VERIFY_TIMEOUT:-90}" docker run --rm --gpus all "$_prepull_image" --version 2>/dev/null)" || _ver_out=""
+      grep -qi k3s <<<"$_ver_out" || _gpu_ok=0
+    fi
+    if (( ! _gpu_ok )); then
       K3D_GPU_FLAGS=()
-      warn "Couldn't pull the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
-      hint "To enable GPU: make sure this host can pull ${_prepull_image}, or set TRACEBLOC_IMAGE_REGISTRY (with TRACEBLOC_REGISTRY_USERNAME/PASSWORD for a private mirror) to one that hosts tracebloc/k3s-cuda, then re-run."
+      warn "Couldn't pull or validate the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
+      hint "To enable GPU, make sure this host can pull AND run ${_prepull_image} (for a private registry set TRACEBLOC_IMAGE_REGISTRY + TRACEBLOC_REGISTRY_USERNAME/PASSWORD), then re-run."
     fi
   fi
 

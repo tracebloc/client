@@ -17,6 +17,7 @@ setup() {
   SERVERS=1; AGENTS=0; K8S_VERSION=""; K3D_GPU_FLAGS=()
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
   unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY TRACEBLOC_REGISTRY_USERNAME TRACEBLOC_REGISTRY_PASSWORD TB_SKIP_GPU_IMAGE_PREPULL
 
   # k3d mock: record argv; if a --config <path> is present, snapshot the file so
   # a test can assert its contents (cluster.sh deletes the temp dir after create).
@@ -29,7 +30,14 @@ setup() {
     done
     return 0
   }
-  docker() { record "docker $*"; return 0; }
+  # Default docker mock: records argv, and for the GPU image verify
+  # (`docker run … --version`, client#835) prints a k3s version so the pre-pull
+  # verify passes. Tests that need a different outcome redefine docker() locally.
+  docker() {
+    record "docker $*"
+    case " $* " in *" run "*" --version"*) printf 'k3s version v1.36.3+k3s1 (deadbeef)\n' ;; esac
+    return 0
+  }
   # _bounded wraps probes in timeout(1), which can't exec a `docker` shell-function
   # mock — on Linux CI (where `timeout` exists) that would bypass the mock. Run the
   # command directly so mocks work everywhere; the timeout wrapper is common.sh's
@@ -2008,6 +2016,37 @@ k3d-tracebloc-agent-0 agent" passthrough
   [ "$status" -eq 0 ] || return 1
   run mock_calls
   [[ "$output" == *"docker pull ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+}
+
+# Bugbot Medium: a pulled image that doesn't run k3s (mis-tagged/broken mirror copy)
+# must fall back to CPU, not hard-fail k3d create.
+@test "_create_new_cluster: GPU image pulls but doesn't run k3s -> CPU fallback" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() {
+    record "docker $*"
+    case " $* " in *" run "*" --version"*) printf 'busybox v1.36.1\n' ;; esac   # pull ok, but not a k3s image
+    return 0
+  }
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"CPU-only"* ]] || return 1
+  run mock_calls
+  [[ "$output" == *"--image rancher/k3s:v1.36.3-k3s1"* ]] || return 1
+  [[ "$output" != *"--gpus=all"* ]] || return 1
+}
+
+# Bugbot High: a private registry must be authenticated on the HOST daemon before
+# the pull (the node image is host-pulled, not kubelet-pulled), or set credentials
+# go unused. Mirrors Connect-GpuRegistry.
+@test "_create_new_cluster: GPU + private mirror creds -> docker login the mirror host before pull" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  TRACEBLOC_IMAGE_REGISTRY="mirror.corp.example"
+  TRACEBLOC_REGISTRY_USERNAME="u"; TRACEBLOC_REGISTRY_PASSWORD="p"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"docker login mirror.corp.example --username u --password-stdin"* ]] || return 1
+  [[ "$output" == *"--image mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
 }
 
 @test "_check_existing_cluster_gpu: reused GPU-capable node -> keeps the GPU request" {
