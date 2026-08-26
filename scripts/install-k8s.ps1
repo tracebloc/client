@@ -2062,7 +2062,11 @@ function ConvertTo-Win32Arg {
       [void]$sb.Append('\' * ($nBackslash * 2 + 1)); [void]$sb.Append('"')
       $i++
     } else {
-      [void]$sb.Append('\' * $nBackslash); [void]$sb.Append($Arg[$i])
+      # [string] cast, not the bare [char] from string indexing: under Windows
+      # PowerShell 5.1 (the installer's relaunch host) the StringBuilder.Append
+      # binder can bind a [char] to a numeric overload and write the code point
+      # instead of the character; Append([string]) is unambiguous (Bugbot #845).
+      [void]$sb.Append('\' * $nBackslash); [void]$sb.Append([string]$Arg[$i])
       $i++
     }
   }
