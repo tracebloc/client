@@ -547,6 +547,36 @@ setup() {
   [[ "$output" != *"helm upgrade --install"* ]] || return 1
 }
 
+# backend#2033: the adopt/reconcile path reuses the release's stored values, so
+# without forcing the GPU request an already-installed AMD edge that re-runs would
+# keep the empty request written before this fix and train on CPU. The reconcile
+# upgrade must force env.GPU_REQUESTS/GPU_LIMITS to THIS run's vendor value
+# (mirrors the PowerShell twin), overriding whatever the release stored.
+@test "install_client_helm: adopt on an AMD host forces the GPU request onto the reconcile (backend#2033)" {
+  GPU_VENDOR=amd
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"reconciling"* ]] || return 1
+  # Reconciled in place (reuse-values) AND forced the AMD request over the stored
+  # values, so the re-run heals the GPU request the same way a fresh install wires it.
+  mock_calls | grep -q "helm upgrade munich"
+  mock_calls | grep -q -- "--reset-then-reuse-values"
+  mock_calls | grep -q -- "--set-string env.GPU_REQUESTS=amd.com/gpu=1"
+  mock_calls | grep -q -- "--set-string env.GPU_LIMITS=amd.com/gpu=1"
+}
+
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
