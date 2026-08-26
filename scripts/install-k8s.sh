@@ -42,7 +42,8 @@
 #    TRACEBLOC_SKIP_LEFTOVER_GUARD=1  bypass the leftover-data guard entirely
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
 #    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
-#                                may use (default cpu=2,memory=8Gi; sets requests==limits)
+#                                may use (sized to the machine, else the contract
+#                                floor cpu=1,memory=2Gi; sets requests==limits)
 # =============================================================================
 
 set -euo pipefail
