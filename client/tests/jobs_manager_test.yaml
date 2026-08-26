@@ -299,9 +299,10 @@ tests:
   # backend#664 (Utilization Ladder L0, supersedes the backend#745 pin): with
   # no operator value the chart must NOT inject RESOURCE_REQUESTS /
   # RESOURCE_LIMITS. Omitting them is what lets jobs-manager choose — which
-  # today means its built-in cpu=2,memory=8Gi literal (the exact literal the
-  # chart used to inject, so omission is behavior-identical on any pre-#664
-  # image), and means the node-allocatable derivation only where the operator
+  # today means its built-in fallback literal (the contract floor cpu=1,memory=2Gi
+  # since backend#2254; a pre-#2254 image still uses cpu=2,memory=8Gi, so the
+  # default drops when the runtime image crosses that version — the intended
+  # #2254 fix), and means the node-allocatable derivation only where the operator
   # has also opted in via DERIVE_JOB_ENVELOPE (backend#2167, backend#2250).
   # This block asserts the omission; the DERIVE_JOB_ENVELOPE cases below assert
   # the gate that decides what the omission resolves to.

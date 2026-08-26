@@ -1579,10 +1579,10 @@ Describe "Get-TrainingResources" {
     Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
     Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
   }
-  It "unreadable cluster falls back to the static default" {
+  It "unreadable cluster falls back to the contract floor" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
   }
 }
 
@@ -1654,15 +1654,20 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       $rendered = if ($null -ne $v.expected) {
         "cpu=$($v.expected.render_gi.cpu),memory=$($v.expected.render_gi.memory)"
       } else { $null }
+      # The fallback for an unreadable/sub-requestable vector is the contract
+      # FLOOR since backend#2254 (was cpu=2,memory=8Gi). Derived from the vendored
+      # contract, not hardcoded, so it cannot drift from the floor the installer
+      # actually writes.
+      $floor = "cpu=$([math]::Floor($script:Contract.floor.cpu_millicores / 1000)),memory=$([math]::Floor($script:Contract.floor.memory_bytes / 1GB))Gi"
       $want = if ($null -eq $v.expected) {
-        "cpu=2,memory=8Gi"
+        $floor
       } elseif ($v.expected.viable) {
         $rendered
       } elseif ([int]$v.expected.render_gi.cpu -ge 1 -and
                 [int]($v.expected.render_gi.memory -replace 'Gi$','') -ge 1) {
         $rendered
       } else {
-        "cpu=2,memory=8Gi"
+        $floor
       }
       $line = "$($v.allocatable_cpu) $($v.allocatable_memory)"
       Mock kubectl {
@@ -1758,7 +1763,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("16 64Gi true", "8 32Gi true")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
     [bool]$script:TbTrainingUndersized    | Should -BeFalse
     [bool]$script:TbTrainingUnschedulable | Should -BeFalse
   }
@@ -1922,7 +1927,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
   It "provenance: the static-default fallback is still the installer's choice" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
-    Get-TrainingResources  | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources  | Should -Be "cpu=1,memory=2Gi"
     Get-TrainingProvenance | Should -Be "installer"
   }
 
@@ -1950,7 +1955,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("500m 512Mi") }
       else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
     $script:TbTrainingUnschedulable | Should -BeTrue
     $script:TbTrainingUndersized | Should -BeFalse
   }
@@ -1961,7 +1966,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     # warning about machine size would be a fabrication.
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
     $script:TbTrainingUndersized | Should -BeFalse
     $script:TbTrainingUnschedulable | Should -BeFalse
   }
@@ -2006,7 +2011,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("sixteen 64GB", "eight lots")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
   }
 }
 

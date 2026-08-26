@@ -957,7 +957,7 @@ setup() {
   ! grep -q 'RESOURCE_LIMITS: "cpu' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
-@test "install_client_helm: undeterminable machine falls back to cpu=2,memory=8Gi" {
+@test "install_client_helm: undeterminable machine falls back to the contract floor" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
@@ -968,10 +968,11 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  # The literal is still the fallback ENVELOPE; only the limits half loses cpu
+  # The fallback is the contract floor since backend#2254 (was cpu=2,memory=8Gi,
+  # which exceeded a default Docker Desktop); only the limits half loses cpu
   # (backend#2418).
-  grep -q 'RESOURCE_LIMITS: "memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
-  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'RESOURCE_LIMITS: "memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml"
 }
 
 # ── _training_resources (backend#1236, option A) ─────────────────────────────
@@ -1106,7 +1107,7 @@ setup() {
     esac
   }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1
   [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
   [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
 }
@@ -1135,12 +1136,12 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
-  kubectl() { return 1; }   # nodes unreadable — we cannot do better than history
+  kubectl() { return 1; }   # nodes unreadable — we cannot do better than the floor
   run _training_resources
-  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$output" = "cpu=1,memory=2Gi" ] || return 1
 }
 
-@test "training size: a machine too small for even a 1c/1Gi run keeps the literal and flags it" {
+@test "training size: a machine too small for even a 1c/1Gi run keeps the fallback and flags it" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
@@ -1150,7 +1151,7 @@ setup() {
   # preflight warns instead of failing (macOS/Windows).
   kubectl() { printf '500m 512Mi\n'; }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1
   [ "$_TB_TRAINING_UNSCHEDULABLE" = "1" ] || return 1
   [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
 }
@@ -1200,6 +1201,20 @@ setup() {
     printf '  scripts/gen-envelope-embed.sh\n' >&2
     return 1
   fi
+}
+
+# The unschedulable/unreadable fallback is the contract FLOOR, pinned to the
+# embedded floor constants so it cannot drift from envelope_contract.json
+# (backend#2254). This is the client-installer end of "the two copies must not
+# be able to disagree": _TRAINING_DEFAULT here, client-runtime's
+# DEFAULT_JOB_RESOURCES, and cli's resources.DefaultTraining all derive from the
+# same floor. A hand-edit that unfloors this reddens here AND diverges from the
+# floor the golden-vector replay above already pins to the contract.
+@test "training size: the fallback default is exactly the contract floor" {
+  local want_cpu=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 ))
+  local want_mem=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / 1024 / 1024 / 1024 ))
+  [ "$_TRAINING_DEFAULT" = "cpu=${want_cpu},memory=${want_mem}Gi" ] || return 1
+  [ "$_TRAINING_DEFAULT" = "cpu=1,memory=2Gi" ] || return 1
 }
 
 @test "envelope contract: ANCHOR_LARGEST picks the same node the contract says" {
@@ -1789,7 +1804,7 @@ PY
   kubectl() { return 1; }   # the probe also fails -> carry skipped hermetically
   has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
   run _training_resources
-  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$output" = "cpu=1,memory=2Gi" ] || return 1
 }
 
 # ── _download_services_progress (step-e count bar; must never hang/fail) ─────
@@ -2977,39 +2992,40 @@ _arch_gate_ctx() {
   [[ "$output" == cpu=* ]] || return 1
 }
 
-@test "round trip: a default install re-reads as the literal, so it re-sizes" {
-  # The second half of the same bug. A default install writes
-  # RESOURCE_LIMITS: "memory=8Gi", and the historic-default gate compares
-  # against `cpu=2,memory=8Gi`. Reading the limits half would make the default
-  # look like a deliberate choice and machine sizing would never run again --
-  # keeping an unschedulable 8Gi on exactly the machines this sizing exists to
-  # fix.
+@test "round trip: a default install re-reads with its cpu request intact" {
+  # The second half of the backend#2418 reader bug. A default install writes
+  # RESOURCE_REQUESTS: "cpu=1,memory=2Gi" (the contract floor since backend#2254)
+  # and a memory-only RESOURCE_LIMITS: "memory=2Gi". The carry reader must take
+  # REQUESTS, not the memory-only LIMITS — reading LIMITS would yield
+  # `memory=2Gi`, an envelope with no cpu request at all, and write that back on
+  # re-install. The gate's recognition of the historic 8Gi literal is covered by
+  # the dedicated historic-literal tests; here the fallback is the schedulable
+  # floor, so it is carried forward as the installer's own choice, not re-sized.
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
-  kubectl() { return 1; }   # cluster unreadable -> the static literal
+  kubectl() { return 1; }   # cluster unreadable -> the fallback floor
   verify_credentials() { printf valid; }
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
 
   TB_NAMESPACE=tracebloc
   kubectl() { return 0; }
   helm() { cat "$HOST_DATA_DIR/values.yaml"; }
 
-  # The reader returns the FULL literal — cpu included. That is the whole point:
-  # reading the memory-only limits half would yield `memory=8Gi`, which the gate
-  # at :546 compares against `cpu=2,memory=8Gi`, fails to match, and then treats
-  # as a deliberate human choice.
+  # The reader returns the FULL envelope — cpu included. Reading the memory-only
+  # limits half would yield `memory=2Gi`, dropping the cpu request (backend#2418).
   run _existing_training_resources
   [ "$status" -eq 0 ] || return 1
-  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$output" = "cpu=1,memory=2Gi" ] || return 1
 
-  # And the gate therefore still refuses it: the size is machine-derived, so the
-  # provenance is `installer` rather than a carried `unknown`/`user`.
+  # The floor carries forward with the `installer` provenance it was written
+  # with: the gate refuses only the historic 8Gi literal, so a schedulable floor
+  # is preserved rather than re-derived, and its marker survives.
   _resolve_training_size
   [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
 }

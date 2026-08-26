@@ -126,11 +126,11 @@
       "nodes": "sixteen 64GB;eight lots",
       "carried": "none",
       "expect": {
-        "size": "cpu=2,memory=8Gi",
+        "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=8Gi"
+        "limits": "memory=2Gi"
       }
     },
     {
@@ -152,11 +152,11 @@
       "nodes": "500m 512Mi",
       "carried": "none",
       "expect": {
-        "size": "cpu=2,memory=8Gi",
+        "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": true,
-        "limits": "memory=8Gi"
+        "limits": "memory=2Gi"
       }
     },
     {
@@ -313,11 +313,11 @@
       "nodes": "16 64Gi true;8 32Gi true",
       "carried": "none",
       "expect": {
-        "size": "cpu=2,memory=8Gi",
+        "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=8Gi"
+        "limits": "memory=2Gi"
       }
     },
     {

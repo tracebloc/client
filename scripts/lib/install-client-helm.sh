@@ -34,19 +34,22 @@ _ensure_helm_runnable() {
   error "Installation tools could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
 }
 
-# ── Training-size default (backend#1236, option A) ──────────────────────────
+# ── Training-size default (backend#1236, option A; floored backend#2254) ─────
 # One knob, requests == limits (Guaranteed QoS). The old static default
 # ("cpu=2,memory=8Gi") was wrong at both ends: dead on arrival on nodes under
-# 8 GiB (the WSL2 field case — nothing could ever schedule) and ~12% of a
-# 64 GiB box. Precedence:
+# 8 GiB (the WSL2 field case, and a default Docker Desktop VM — nothing could
+# ever schedule, backend#2254) and ~12% of a 64 GiB box. Precedence:
 #   1. TRACEBLOC_TRAINING_RESOURCES  (explicit install-time override, client#308)
 #   2. the installed release's current value — a `tracebloc resources set`
 #      choice must survive re-install, never be clobbered back to a default
 #   3. sized to this machine: LARGEST node allocatable − platform overhead
 #      (~1 CPU / 3 GiB, the cli's constants; a pod schedules onto ONE node, and
 #      k3d's server+agent are the same machine — summing would double-count)
-#   4. the historic static default (tiny or undeterminable machines)
-_TRAINING_DEFAULT="cpu=2,memory=8Gi"
+#   4. the contract FLOOR (tiny or undeterminable machines) — the fallback the
+#      installer writes when it cannot do better. Was the 8Gi literal above,
+#      which exceeded a default Docker Desktop and sat Pending forever, so
+#      backend#2254 floored it. _TRAINING_DEFAULT is DERIVED from the embedded
+#      floor constants (below, so it cannot drift from the contract).
 
 # k8s cpu quantity -> millicores ("12" -> 12000, "11500m" -> 11500); empty on junk.
 _cpu_to_milli() {
@@ -181,6 +184,24 @@ _TB_ENVELOPE_NODE_MIN_CPU_MILLI=2000
 _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
+# ── the fallback training envelope (precedence step 4) ──────────────────────
+# The contract FLOOR — cpu=1,memory=2Gi — DERIVED from the embedded floor
+# constants so it cannot drift from envelope_contract.json. Written when the
+# machine is unschedulable or unreadable. Was cpu=2,memory=8Gi, which exceeded a
+# default Docker Desktop VM and left a fresh install Pending forever; the floor
+# is the largest fallback that still fits the smallest host we support
+# (backend#2254). The bats suite pins it to the embedded floor.
+_TRAINING_DEFAULT="cpu=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 )),memory=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / 1024 / 1024 / 1024 ))Gi"
+
+# The historic fallback literal (pre-backend#2254). FROZEN — NOT the current
+# default — kept only so the carry gate in _resolve_training_size still
+# RECOGNISES it: existing field installs carry cpu=2,memory=8Gi as their
+# absence-of-a-choice default and must re-derive on re-install rather than
+# freeze an unschedulable 8Gi. The current floor default is deliberately NOT
+# matched by that gate — a human may legitimately `tracebloc resources set` the
+# floor, and precedence step 2 says that choice must survive.
+_TRAINING_DEFAULT_HISTORIC="cpu=2,memory=8Gi"
+
 # The node line contract, in ONE place (backend#2237).
 #
 # Three whitespace-separated fields per node: allocatable cpu, allocatable
@@ -276,8 +297,10 @@ _machine_training_resources() {
   (( run_cpu_m < 0 )) && run_cpu_m=0
   (( run_mem_b < 0 )) && run_mem_b=0
   # Below the contract floor the machine is NOT VIABLE. Emit nothing and let
-  # the caller fall back — see _training_resources for why that fallback is
-  # itself a known bug (backend#2220, fixed separately so it stays revertable).
+  # the caller fall back to _TRAINING_DEFAULT. That fallback used to be the 8Gi
+  # literal — larger than such a machine, a known bug (backend#2220); since
+  # backend#2254 it is the contract floor, which fits. The fallback structure is
+  # deliberately kept revertable — only the value it writes changed.
   { (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); } || return 0
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
@@ -344,7 +367,7 @@ _training_limits() {
   #
   # `$size` itself is never empty on any reachable path: _training_resources'
   # four-way fallback chain (env override -> installed release -> machine sizing
-  # -> the cpu=2,memory=8Gi literal) always yields a value. An empty input would
+  # -> the contract-floor literal) always yields a value. An empty input would
   # return empty here, and that is the honest answer -- there is nothing to say
   # about an envelope that does not exist.
   printf '%s' "${out:-$size}"
@@ -355,16 +378,17 @@ _training_limits() {
 #
 # The distinction this adds is the whole point: "I cannot see the machine" and
 # "I can see it and it is too small" used to collapse into the same empty
-# answer, so both fell through to the cpu=2,memory=8Gi literal. On a machine
-# with ~4 GiB allocatable that literal is LARGER THAN THE MACHINE, so every
-# training pod stays Pending forever -- and preflight lets exactly those
-# machines install: it hard-fails below 5 GB on Linux and only WARNS on
-# macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's limit is
-# ~8 GiB+. So the permitted band and the unschedulable band overlap.
+# answer, so both fell through to the fallback literal. When that literal was
+# cpu=2,memory=8Gi, on a machine with ~4 GiB allocatable it was LARGER THAN THE
+# MACHINE, so every training pod stayed Pending forever -- and preflight lets
+# exactly those machines install: it hard-fails below 5 GB on Linux and only
+# WARNS on macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's
+# limit is ~8 GiB+. So the permitted band and the unschedulable band overlapped.
 #
-# Unreadable is still unreadable and still gets the literal -- we genuinely
-# cannot do better than the historical default there. Only the "read it, it is
-# small" case changes, and it changes to a number that FITS.
+# Unreadable is still unreadable and still gets the fallback -- we genuinely
+# cannot do better without measuring. Since backend#2254 that fallback is the
+# contract floor, not the 8Gi literal, so it now FITS; the "read it, it is
+# small" case likewise gets the honest remainder, which fits too.
 #
 # Node selection is the SAME _anchor_largest_schedulable the sizing path uses,
 # so the warning the caller prints can never describe a different node than the
@@ -543,7 +567,12 @@ _resolve_training_size() {
   # The historic static default was the ABSENCE of a choice, not a choice —
   # carrying it would keep the unschedulable 8Gi on exactly the machines this
   # sizing exists to fix (Bugbot). Only a value that differs from it survives.
-  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
+  # Matched against the FROZEN historic literal, NOT _TRAINING_DEFAULT: since
+  # backend#2254 the latter is the contract floor, which a human may deliberately
+  # pin — and precedence step 2 says that choice must survive re-install, so the
+  # gate must not re-derive it. A field install predating #2254 still carries the
+  # 8Gi literal; that is what this recognises as a non-choice and re-sizes.
+  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT_HISTORIC" ]]; then
     _TB_TRAINING_SIZE="$prev"
     prev_prov="${carried##*|}"
     case "$prev_prov" in
