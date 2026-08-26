@@ -1039,6 +1039,22 @@ _recover_pending_helm_release() {
   return 0
 }
 
+# _gpu_request_value — the GPU resource a spawned training pod should request,
+# keyed to the DETECTED vendor (backend#2033). Each vendor advertises its card as
+# a different Kubernetes resource, so the request key must match: nvidia.com/gpu
+# for nvidia, amd.com/gpu for amd, empty (→ CPU) otherwise. Single source of truth
+# so the values-write path (install_client_helm) and the adopt/reconcile path
+# (_reconcile_adopted_client) can never disagree — the reconcile path reused the
+# release's stored values and kept an AMD edge on an empty request, training on
+# CPU while the node's GPU read "verified".
+_gpu_request_value() {
+  case "${GPU_VENDOR:-}" in
+    nvidia) printf 'nvidia.com/gpu=1' ;;
+    amd)    printf 'amd.com/gpu=1' ;;
+    *)      printf '' ;;
+  esac
+}
+
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
 # sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
 # to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
@@ -1115,6 +1131,19 @@ _reconcile_adopted_client() {
   local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse" --cleanup-on-fail)
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
+
+  # backend#2033: reconcile reuses the release's stored values, so a GPU edge
+  # installed before per-vendor GPU wiring (or one whose GPU vendor changed) keeps
+  # its stale GPU request and trains on the wrong resource — an AMD host kept the
+  # empty request written before this fix and ran on CPU while its node's GPU read
+  # "verified". Force the request to THIS run's per-vendor decision, the same value
+  # the values-write path writes and exactly as the PowerShell twin --set-strings
+  # these keys on adopt. --set-string: the value carries '=' and '/', so helm must
+  # not type-infer it or read the dots as key navigation, and it overrides the
+  # reused value. Empty on a CPU host deliberately clears any stale request
+  # (client-runtime#80: an explicit "" means "no GPU here").
+  local _gpu_val; _gpu_val="$(_gpu_request_value)"
+  _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val" --set-string "env.GPU_LIMITS=$_gpu_val")
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
@@ -1921,14 +1950,23 @@ install_client_helm() {
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
-  # ── GPU limits ──────────────────────────────────────────────────────────
-  local gpu_val
-  if [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
-    gpu_val="nvidia.com/gpu=1"
-    log "NVIDIA GPU detected — setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+  # ── GPU limits (backend#2033) ─────────────────────────────────────────────
+  # Request one GPU for training pods on a GPU host so the pod lands on the device
+  # the node advertises. Each supported vendor exposes its card as a DIFFERENT
+  # scheduler resource via the chart-managed device plugin below — NVIDIA as
+  # nvidia.com/gpu, AMD as amd.com/gpu — so the request key must match the vendor
+  # (see _gpu_request_value, shared with the adopt/reconcile path). Wiring nvidia
+  # ONLY (the pre-#2033 bug) left AMD pods with an empty request: they ran CPU-only
+  # even though the amd device plugin was enabled and verify_gpu reported the
+  # node's GPU "available" — a "verified" GPU no job could use.
+  # A request this fixed single-node cluster can't actually satisfy is safe:
+  # SINGLE_NODE below tells jobs-manager to downgrade a Pending GPU pod to CPU
+  # rather than strand it (client-runtime#92).
+  local gpu_val; gpu_val="$(_gpu_request_value)"
+  if [[ -n "$gpu_val" ]]; then
+    log "${GPU_VENDOR} GPU detected — setting GPU_LIMITS and GPU_REQUESTS to ${gpu_val}"
   else
-    gpu_val=""
-    log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
+    log "No GPU wired for training jobs — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
   # ── GPU device plugin (client#564) ────────────────────────────────────────
@@ -1937,7 +1975,8 @@ install_client_helm() {
   # apply the upstream manifest imperatively (bash: gpu-plugins.sh). The chart
   # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
   # instead of lingering. CPU-only installs emit nothing → the chart default
-  # (disabled) stands. The GPU *request* (gpu_val) remains NVIDIA-only, as before.
+  # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
+  # above — nvidia.com/gpu or amd.com/gpu (backend#2033).
   local gpu_block=""
   if [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]]; then
     gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: %s\n' "$GPU_VENDOR")"
