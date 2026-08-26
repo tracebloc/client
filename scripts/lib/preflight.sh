@@ -129,13 +129,19 @@ _pf_fstype() {
 # a single integer, or nothing if the daemon is down / the value is junk — callers
 # then fall back to the host reader. (docker info precedent: _pf_docker_root above.)
 _pf_runtime_mem_kb() {
-  has docker && _docker_answers || return 0
+  # Bounded liveness, coreutils-free (#744): _docker_answers bounds through _bounded,
+  # which is a no-op on a stock Mac (no timeout/gtimeout); _docker_answers_bounded
+  # kills on a deadline via a background PID instead. Silenced (>/dev/null) — this
+  # reader's stdout is captured by the caller, and once the daemon is proven
+  # responsive here the --format read below cannot hang.
+  has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
   local b; b="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.MemTotal}}' 2>/dev/null)"
   [[ "$b" =~ ^[0-9]+$ && "$b" -gt 0 ]] && echo $(( b / 1024 ))
   return 0
 }
 _pf_runtime_ncpu() {
-  has docker && _docker_answers || return 0
+  # Coreutils-free bounded liveness, silenced — see _pf_runtime_mem_kb (#744).
+  has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
   local n; n="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.NCPU}}' 2>/dev/null)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && echo "$n"
   return 0
@@ -334,7 +340,7 @@ _pf_runtime_mem_status() {
 
 # Docker data root if the daemon is up; else where it will live / a host proxy.
 _pf_docker_root() {
-  if has docker && _docker_answers; then
+  if has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then   # coreutils-free bounded liveness, silenced (#744)
     _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "/var/lib/docker"
   elif [[ "$OS" == "Linux" ]]; then
     echo "/var/lib/docker"
