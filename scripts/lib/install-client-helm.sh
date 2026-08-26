@@ -1039,6 +1039,29 @@ _recover_pending_helm_release() {
   return 0
 }
 
+# _gpu_request_value — the GPU resource a spawned training pod should request,
+# keyed to the vendor (backend#2033). Each vendor advertises its card as a different
+# Kubernetes resource, so the request key must match: nvidia.com/gpu for nvidia,
+# amd.com/gpu for amd, empty (→ CPU) otherwise. Single source of truth so the
+# values-write path (install_client_helm) and the adopt/reconcile path
+# (_reconcile_adopted_client) can never disagree — the reconcile path reused the
+# release's stored values and kept an AMD edge on an empty request, training on
+# CPU while the node's GPU read "verified".
+#
+# NVIDIA is additionally gated on the GPU being WIRED into the cluster (client#835,
+# _gpu_wired): requesting nvidia.com/gpu on a node that advertises 0 GPUs strands
+# every job Pending, so a detected-but-not-wired NVIDIA host requests nothing (CPU).
+# AMD has no k3d wiring step (it uses the device plugin only), so it stays keyed on
+# detection.
+_gpu_request_value() {
+  case "${GPU_VENDOR:-}" in
+    nvidia) if _gpu_wired; then printf 'nvidia.com/gpu=1'; fi ;;
+    amd)    printf 'amd.com/gpu=1' ;;
+    *)      printf '' ;;
+  esac
+  return 0
+}
+
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
 # sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
 # to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
@@ -1116,31 +1139,34 @@ _reconcile_adopted_client() {
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
-  # GPU keys are NOT --reuse-values-safe (client#835). --reuse-values carries forward
-  # a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME and its
-  # gpu.devicePlugin block, so an adopted release keeps requesting a GPU even after
-  # the reuse guard / CDI setup dropped this run to CPU (K3D_GPU_FLAGS cleared) —
-  # jobs then sit Pending on the live release while the summary says CPU. FORCE the
-  # GPU keys to THIS run's decision, exactly as the fresh values write does, mirroring
-  # the Windows twin's adopt-path --set-string. AMD is left to --reuse-values here
-  # (this PR doesn't change AMD), except that the device-plugin block is reconciled to
-  # match the fresh write so a stale one can't linger.
+  # GPU keys are NOT --reuse-values-safe (backend#2033 + client#835). --reuse-values
+  # carries forward a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME
+  # and its gpu.devicePlugin block, so an adopted release keeps a STALE GPU decision:
+  # a vendor-changed edge trains on the wrong resource, and an NVIDIA edge dropped to
+  # CPU (reuse guard / CDI setup cleared K3D_GPU_FLAGS) keeps requesting a GPU and
+  # strands jobs Pending while the summary says CPU. FORCE the GPU keys to THIS run's
+  # decision — the SAME values the fresh write chooses (_gpu_request_value +
+  # runtime_class) — mirroring the Windows twin's adopt-path --set-string. --set-string
+  # so helm doesn't type-infer the value's '='/'/' or read dots as key navigation, and
+  # it overrides the reused value; empty deliberately clears a stale request
+  # (client-runtime#80: an explicit "" means "no GPU here").
+  local _gpu_val _rtc=""
+  _gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then _rtc="nvidia"; fi
+  _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val"
+          --set-string "env.GPU_LIMITS=$_gpu_val"
+          --set-string "env.RUNTIME_CLASS_NAME=$_rtc")
+  # Reconcile the device-plugin block too, matching the fresh write, so a stale one
+  # can't linger: nvidia only when wired (needs the baked RuntimeClass), amd on
+  # detection, else disabled.
   if _gpu_wired; then
-    _args+=(--set-string "env.GPU_REQUESTS=nvidia.com/gpu=1"
-            --set-string "env.GPU_LIMITS=nvidia.com/gpu=1"
-            --set-string "env.RUNTIME_CLASS_NAME=nvidia"
-            --set "gpu.devicePlugin.enabled=true"
+    _args+=(--set "gpu.devicePlugin.enabled=true"
             --set "gpu.devicePlugin.vendor=nvidia"
             --set-string "gpu.devicePlugin.nvidia.runtimeClassName=nvidia")
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
   else
-    _args+=(--set-string "env.GPU_REQUESTS="
-            --set-string "env.GPU_LIMITS="
-            --set-string "env.RUNTIME_CLASS_NAME=")
-    if [[ "${GPU_VENDOR:-}" == "amd" ]]; then
-      _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
-    else
-      _args+=(--set "gpu.devicePlugin.enabled=false")
-    fi
+    _args+=(--set "gpu.devicePlugin.enabled=false")
   fi
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
@@ -1948,25 +1974,27 @@ install_client_helm() {
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
-  # ── GPU request + runtime class (client#835) ──────────────────────────────
-  # Request a GPU for training jobs ONLY when a GPU was actually WIRED into the
-  # cluster (_gpu_wired: NVIDIA detected AND the k3d node was created from the
-  # GPU-capable image with --gpus=all, and the reuse guard didn't drop it).
-  # Requesting nvidia.com/gpu while the node advertises 0 GPUs strands every job
-  # Pending — so gate on the condition that PROVISIONS the GPU, not on bare
-  # detection (the pre-#835 bug on Linux). Training pods then run under the
-  # `nvidia` RuntimeClass (baked into the GPU node image) so the node's containerd
-  # invokes the NVIDIA runtime. Mirrors the Windows twin, which gates the same
-  # values on $K3D_GPU_FLAG.
-  local gpu_val="" runtime_class=""
-  if _gpu_wired; then
-    gpu_val="nvidia.com/gpu=1"
-    runtime_class="nvidia"
-    log "NVIDIA GPU wired — GPU_LIMITS/GPU_REQUESTS=nvidia.com/gpu=1, RUNTIME_CLASS_NAME=nvidia"
+  # ── GPU request + runtime class (backend#2033 + client#835) ───────────────
+  # Request a GPU for training jobs, keyed to the vendor's scheduler resource
+  # (_gpu_request_value → nvidia.com/gpu / amd.com/gpu; empty = CPU). For NVIDIA
+  # that value is gated on the GPU being WIRED into the cluster (inside
+  # _gpu_request_value): requesting nvidia.com/gpu on a node that advertises 0
+  # strands every job Pending (the pre-#835 Linux bug), so gate on what PROVISIONS
+  # the GPU, not bare detection. NVIDIA training pods also run under the `nvidia`
+  # RuntimeClass (baked into the GPU node image) so the node's containerd invokes
+  # the NVIDIA runtime; AMD needs no RuntimeClass. A request this fixed single-node
+  # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
+  # a Pending GPU pod to CPU rather than strand it (client-runtime#92). Mirrors the
+  # Windows twin.
+  local gpu_val runtime_class=""
+  gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then runtime_class="nvidia"; fi
+  if [[ -n "$gpu_val" ]]; then
+    log "${GPU_VENDOR} GPU wired — GPU_LIMITS/GPU_REQUESTS=${gpu_val}${runtime_class:+, RUNTIME_CLASS_NAME=${runtime_class}}"
   elif [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
     warn "NVIDIA GPU detected but not wired into this cluster — running CPU-only (GPU_LIMITS/GPU_REQUESTS left empty)."
   else
-    log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
+    log "No GPU wired for training jobs — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
   # ── GPU device plugin (client#564) ────────────────────────────────────────
@@ -1975,7 +2003,8 @@ install_client_helm() {
   # apply the upstream manifest imperatively (bash: gpu-plugins.sh). The chart
   # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
   # instead of lingering. CPU-only installs emit nothing → the chart default
-  # (disabled) stands. The GPU *request* (gpu_val) remains NVIDIA-only, as before.
+  # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
+  # above — nvidia.com/gpu or amd.com/gpu (backend#2033).
   #
   # NVIDIA (client#835): the plugin must run under the `nvidia` RuntimeClass so it
   # can init NVML on native Linux — the plugin pod otherwise runs under the default
