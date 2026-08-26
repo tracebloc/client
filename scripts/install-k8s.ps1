@@ -4408,14 +4408,17 @@ $TRACEBLOC_CHART_NAME = "client"
 # ── Training-size default (backend#1236, option A; mirrors install-client-helm.sh) ──
 # One knob, requests == limits (Guaranteed QoS). The old static "cpu=2,memory=8Gi"
 # was wrong at both ends: dead on arrival on nodes under 8 GiB (the WSL2 field
-# case — nothing could ever schedule) and ~12% of a 64 GiB box. Precedence:
+# case, and a default Docker Desktop VM — nothing could ever schedule,
+# backend#2254) and ~12% of a 64 GiB box. Precedence:
 #   1. TRACEBLOC_TRAINING_RESOURCES (explicit install-time override)
 #   2. the installed release's current value (a `tracebloc resources set` choice
 #      must survive re-install, never be clobbered back to a default)
 #   3. sized to this machine: LARGEST node allocatable - ~1 CPU / 3 GiB platform
 #      overhead (a pod schedules onto ONE node; k3d's server+agent are the same
 #      machine, so summing would double-count)
-#   4. the historic static default (tiny or undeterminable machines)
+#   4. the contract FLOOR (tiny or undeterminable machines) — the fallback,
+#      cpu=1,memory=2Gi, from the embedded floor constants. Was the 8Gi literal,
+#      which exceeded a default Docker Desktop and sat Pending forever (#2254).
 # Get-ImageMirrorYaml — top-level chart values that re-home every image the chart
 # pulls onto a private registry mirror (#585 / restricted-network + air-gapped
 # installs). Bash parity: lib/install-client-helm.sh::_image_mirror_yaml.
@@ -4557,6 +4560,12 @@ function Get-CarriedTrainingValues {
     # The historic static default was the ABSENCE of a choice -- carrying it
     # would keep the unschedulable 8Gi on exactly the machines this sizing
     # exists to fix (Bugbot). Only a differing value survives re-install.
+    # This is the FROZEN historic literal, NOT the current fallback: since
+    # backend#2254 the fallback is the contract floor (cpu=1,memory=2Gi), which
+    # a human may deliberately pin, so precedence rule 2 says it must survive and
+    # the gate must not re-derive it. A field install predating #2254 still
+    # carries the 8Gi literal; that is the non-choice this recognises. Bash twin:
+    # _TRAINING_DEFAULT_HISTORIC in lib/install-client-helm.sh.
     if (-not $prev -or $prev -eq "cpu=2,memory=8Gi") { return $null }
     # A marker already on the release is authoritative -- preserve it, or a
     # re-install would quietly downgrade a `user` choice to `unknown`. Anything
@@ -4676,8 +4685,10 @@ function Get-TrainingResources {
       $runCpuM = [long][math]::Max([long]0, $bestCpuM - $script:TbEnvelopeOverheadCpuMilli)
       $runMemB = [long][math]::Max([long]0, $bestMemB - $script:TbEnvelopeOverheadMemBytes)
       # Below the contract floor the machine is NOT VIABLE — fall through to the
-      # literal, which is itself a known bug on such machines (backend#2220,
-      # fixed separately so it stays revertable).
+      # fallback literal. That literal used to be the 8Gi default, a known bug on
+      # such machines (backend#2220); since backend#2254 it is the contract floor,
+      # which fits. The fallback structure is kept revertable — only its value
+      # changed.
       if ($runCpuM -ge $script:TbEnvelopeFloorCpuMilli -and $runMemB -ge $script:TbEnvelopeFloorMemBytes) {
         return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
       }
@@ -4701,7 +4712,7 @@ function Get-TrainingResources {
           return "cpu=$cores,memory=${gib}Gi"
         }
         # Not even a requestable shape (cpu=0 is not a training request), so
-        # there is no honest number to write. Keep the literal; the caller warns.
+        # there is no honest number to write. Keep the fallback; the caller warns.
         $script:TbTrainingUnschedulable = $true
       }
     }
@@ -4718,7 +4729,12 @@ function Get-TrainingResources {
     # trace (client#771). Log so support can tell degraded from sized.
     Log "WARN: Get-TrainingResources: unexpected failure while sizing to the cluster; falling back to the static default: $($_.Exception.Message)"
   }
-  return "cpu=2,memory=8Gi"
+  # The fallback envelope: the contract FLOOR, from the embedded floor constants
+  # (mirrors _TRAINING_DEFAULT in lib/install-client-helm.sh). Was
+  # cpu=2,memory=8Gi, which exceeded a default Docker Desktop and sat Pending
+  # forever, so backend#2254 floored it. Rendered the same way as the sized
+  # branch above so the two cannot drift.
+  return "cpu=$([math]::Floor($script:TbEnvelopeFloorCpuMilli / 1000)),memory=$([math]::Floor($script:TbEnvelopeFloorMemBytes / 1GB))Gi"
 }
 
 # ── the VM beneath the node containers (backend#2221) ────────────────────────
