@@ -5459,13 +5459,16 @@ public static extern System.IntPtr LocalFree(System.IntPtr hMem);
       # Assign (don't pipe) and slice off the prog.exe argv[0] by index — piping
       # through Select-Object -Skip 1 lost a trailing empty arg (backend#2455).
       $full = realArgv ("prog.exe " + $line)
-      $got  = if ($full.Count -gt 1) { @($full[1..($full.Count - 1)]) } else { @() }
-      # Diagnostic (backend#2455): surface exactly what real shell32 returned so a
-      # Windows-only discrepancy is debuggable from the CI log, not just "got a".
-      $diag = "arg=[$($argv -join '|')] encoded=[$line] shell32=[$($full -join '|')] (n=$($full.Count))"
-      Write-Host "  [shell32 xcheck] $diag"
-      $got.Count | Should -Be $argv.Count -Because $diag
-      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] -Because $diag }
+      # Drop the prog.exe argv[0] with an explicit index loop, NOT a range slice:
+      # $full[1..($full.Count-1)] collapses to a SCALAR string under Windows
+      # PowerShell when it selects one element, so $got[$k] then indexed into the
+      # string's characters ("got a" for "a b\"c") even though shell32 returned the
+      # arg intact. The loop keeps $got a real array on every host (backend#2455).
+      $got = @()
+      for ($m = 1; $m -lt $full.Count; $m++) { $got += $full[$m] }
+      $because = "arg=[$($argv -join '|')] encoded=[$line] shell32=[$($full -join '|')]"
+      $got.Count | Should -Be $argv.Count -Because $because
+      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] -Because $because }
     }
   }
 }
