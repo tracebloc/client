@@ -2376,11 +2376,43 @@ _arch_gate_ctx() {
   [ "$status" -ne 0 ] || return 1
 }
 
-@test "_values_pin_mysql_84: a tag 8.4 on some OTHER image far from mysqlClient does not match (-A 3 window)" {
-  # The proximity window is why a coincidental 8.4 tag elsewhere in a big values
-  # file cannot flip the engine verdict (mirrors the sticky rule it replaces).
+@test "_values_pin_mysql_84: a tag 8.4 on a SIBLING image is not read as the mysqlClient pin (block-scoped)" {
+  # The reader is scoped to the indent-delimited mysqlClient block, so a
+  # coincidental 8.4 tag on another image cannot flip the engine verdict.
   run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "5.7"\n    digest: ""\n  someOther:\n    repo: x\n    tag: "8.4"'
   [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: a look-alike tag (8.40 / 8.4.1) is NOT 8.4 (exact value, not prefix)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.40"'
+  [ "$status" -ne 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: 8.4.1'
+  [ "$status" -ne 0 ] || return 1
+}
+
+# THE REGRESSION Asad caught on client#833: the reader must be checked against the
+# REAL chart values, not compact snippets. The chart's mysqlClient block carries
+# the 8.4 opt-in as a COMMENT (`#   tag: "8.4"`) many lines below the real `tag:`,
+# so a fixed line window is wrong in both directions (see _values_pin_mysql_84).
+@test "_values_pin_mysql_84: the real client/values.yaml default (tag prod + the 8.4 DECOY comment) reads as NOT 8.4" {
+  # Fail-OPEN guard: the decoy comment must never be read as the pin — otherwise a
+  # 5.7 default would skip the arch gate and CrashLoop on arm64.
+  local vf="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$vf" ] || skip "chart values.yaml not present in this checkout"
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: the real client/values.yaml with the documented 8.4 opt-in applied reads as 8.4" {
+  # False-REFUSAL guard: an operator who follows the chart's own opt-in (set
+  # tag: "8.4" inline, keeping every comment) must be read as 8.4 — the real tag
+  # sits well outside any 3-line window, which is what wrongly refused it before.
+  local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
+  local vf="$BATS_TEST_TMPDIR/optin.yaml"
+  sed 's/tag: "prod"/tag: "8.4"/' "$src" > "$vf"
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {
