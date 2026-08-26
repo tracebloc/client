@@ -2021,6 +2021,55 @@ echo "NCT installed successfully."
   }
 }
 
+# Quote ONE argument for a native Windows command line so CommandLineToArgvW (what the CRT and
+# every well-behaved Windows program use to re-split $psi.Arguments) recovers it byte-for-byte as a
+# SINGLE token. $psi.Arguments is one flat string, so each arg has to survive that re-parse.
+#
+# The naive "wrap anything with a space in quotes" is WRONG the moment an arg contains BOTH a space
+# and a `"`: `'"' + $_ + '"'` leaves the inner quote unescaped, CommandLineToArgvW toggles in and
+# out of quoting on it, and the arg comes back as ONE token with the inner quotes SILENTLY CONSUMED
+# -- e.g. `--format "{{.Names}} {{.Label "k3d.role"}}"` reaches the program as
+# `--format {{.Names}} {{.Label k3d.role}}` and its Go template no longer parses (backend#2455;
+# #817 dodged this by never passing a quoted arg, this fixes the general helper). It also mangles a
+# quote WITHOUT a space -- `a"b` has no whitespace, so the old code passed it through raw and the
+# bare `"` was read as a quoting toggle.
+#
+# So this follows the actual CommandLineToArgvW / MSVCRT rules exactly:
+#   * a non-empty arg with no whitespace and no `"` needs no quoting -- pass it through untouched
+#   * otherwise wrap in `"`, and inside the quotes:
+#       - `"`               -> `\"`
+#       - a run of N `\` immediately before a `"`  -> 2N+1 `\` then `"`  (backslashes escape each
+#         other, and the last one escapes the quote)
+#       - a run of N `\` at the very END of the arg -> 2N `\`  (doubled so the CLOSING quote we add
+#         is not itself escaped; a raw trailing `\` before the close would eat it)
+#       - `\` anywhere else is literal and left as-is
+#   * the empty string becomes `""` so it survives as a present-but-empty argument
+# Callers therefore pass RAW args and never pre-quote (the old code left `^".*"$` alone; that
+# self-quoting contract is gone -- see Set-NodeGpuCapacity, which now passes $patchFile unquoted).
+function ConvertTo-Win32Arg {
+  param([Parameter(Mandatory)][AllowEmptyString()][string]$Arg)
+  if ($Arg -ne "" -and $Arg -notmatch '[\s"]') { return $Arg }
+  $sb = [System.Text.StringBuilder]::new()
+  [void]$sb.Append('"')
+  $i = 0
+  while ($i -lt $Arg.Length) {
+    $nBackslash = 0
+    while ($i -lt $Arg.Length -and $Arg[$i] -eq '\') { $i++; $nBackslash++ }
+    if ($i -eq $Arg.Length) {
+      [void]$sb.Append('\' * ($nBackslash * 2))   # trailing run: double so the close quote survives
+      break
+    } elseif ($Arg[$i] -eq '"') {
+      [void]$sb.Append('\' * ($nBackslash * 2 + 1)); [void]$sb.Append('"')
+      $i++
+    } else {
+      [void]$sb.Append('\' * $nBackslash); [void]$sb.Append($Arg[$i])
+      $i++
+    }
+  }
+  [void]$sb.Append('"')
+  return $sb.ToString()
+}
+
 # #616: the AUTHORITATIVE GPU gate. Install-NvidiaContainerToolkit configures the user's own
 # WSL distro, but k3d talks to Docker Desktop's OWN daemon (the `docker-desktop` distro), so
 # toolkit-in-Ubuntu success is not a reliable signal that a GPU can reach a container. The only
@@ -2036,8 +2085,9 @@ echo "NCT installed successfully."
 # Run ANY external command as a real child PROCESS with a HARD timeout (installer external-call
 # timeout rule). NOT a Start-Job: Stop-Job stops the PS job but can orphan the native child it
 # spawned (Bugbot), so a timed-out call would keep running; a direct Process handle lets us Kill()
-# the child on timeout. Args are joined with spaces (callers pass space-free tokens); any stdin
-# (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
+# the child on timeout. Args are quoted+escaped per ConvertTo-Win32Arg so a value carrying spaces
+# and/or quotes survives the join into $psi.Arguments intact; any stdin (e.g. a login token) is
+# written in-memory, never to disk/argv/logs. 5.1-safe. Returns
 # @{ Code = <int>; Output = <string> } with Code=124 on timeout.
 function Invoke-BoundedProcess {
   # -StdoutOnly: return ONLY stdout in .Output on the success path, instead of the
@@ -2063,16 +2113,11 @@ function Invoke-BoundedProcess {
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FileName
-  # Quote any argument containing whitespace (Bugbot): the args are joined into a single command
-  # line, so an unquoted value with a space -- a registry username, a temp path under a profile
-  # like "C:\Users\First Last\..." -- would be split into two arguments and silently corrupt the
-  # command. Already-quoted values are left alone so call sites that quote themselves don't get
-  # double-quoted. Empty strings are quoted too, so they survive as a present-but-empty argument.
-  $psi.Arguments = (($Arguments | ForEach-Object {
-    if ($_ -eq "") { '""' }
-    elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' }
-    else { $_ }
-  }) -join ' ')
+  # Quote+escape each arg (Bugbot): the args are joined into a single command line, so a value with
+  # a space -- a registry username, a temp path under a profile like "C:\Users\First Last\..." --
+  # would be split into two, and a value with a `"` would corrupt the parse. ConvertTo-Win32Arg
+  # applies the exact CommandLineToArgvW rules so both survive as one token; callers pass raw args.
+  $psi.Arguments = (($Arguments | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardOutput = $true
@@ -4169,7 +4214,7 @@ function Set-NodeGpuCapacity {
     for ($i = 1; $i -le 6; $i++) {
       $r = Invoke-BoundedProcess -FileName "kubectl" -Arguments @(
         "patch", "node", $nodeName, "--subresource=status", "--type=json",
-        "--patch-file", "`"$patchFile`"", "--request-timeout=15s") -TimeoutSec 30
+        "--patch-file", $patchFile, "--request-timeout=15s") -TimeoutSec 30
       Log "kubectl patch node (gpu capacity, attempt ${i}): exit=$($r.Code) $($r.Output)"
       if ($r.Code -eq 0) { return $true }
       Start-Sleep -Seconds 5
