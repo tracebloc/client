@@ -983,10 +983,29 @@ podDisruptionBudget:
   jobsManager:
     create: null
 
-# -- Secrets
-# These MUST be set via --set, a values file, or an external secret manager.
-# The defaults are intentionally empty; deployment fails fast if they are not
-# overridden. Do NOT commit real credentials to version control.
+# -- Platform client credentials. Issued by the backend; the chart never
+# generates them. Resolved in three tiers, like every other credential in
+# templates/secrets.yaml:
+#   1. these values, else
+#   2. the CLIENT_ID / CLIENT_PASSWORD keys already in the release Secret, else
+#   3. a hard failure naming both options.
+#
+# PREFERRED — pre-create the Secret and leave these empty. Anything passed as a
+# value is stored by Helm in the release's user-supplied values IN CLEARTEXT, in
+# every retained revision (10 by default), so it outlives any rotation and is
+# readable by anyone with `get secret` in the namespace. Tier 2 exists so the
+# credential need never enter release values at all (backend#2571):
+#
+#   kubectl -n <ns> create secret generic <release>-secrets \
+#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=...
+#
+# Or install once with these set, then drop them from your values on the next
+# upgrade — tier 2 reads them from the Secret from then on.
+#
+# AVOID `--set clientPassword=...`: that puts the credential in your shell
+# history AND in the `helm` process's argv, where anyone who can run `ps` sees
+# it. A values file, or the Secret above, are both better. And do not commit
+# real credentials to version control.
 clientId: ""
 clientPassword: ""
 
