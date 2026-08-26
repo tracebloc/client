@@ -62,10 +62,16 @@ setup() {
     fi
     return 0
   }
-  # The bounded docker probe the stop-failure handler uses. Stubbed separately
-  # from `docker` so a test can say "the daemon is wedged/down" without also
-  # breaking `docker context show`, which the runtime guard needs.
-  _docker_answers() { record "_docker_answers"; return "${DOCKER_UP_RC:-0}"; }
+  # The docker "is it up?" probes, stubbed separately from `docker` so a test can
+  # say "the daemon is wedged/down" (DOCKER_UP_RC) without also breaking `docker
+  # context show`, which the runtime guard needs — and without spawning spin or a
+  # real docker. The stop-failure handler moved from _docker_answers to
+  # _docker_answers_bounded (backend#2521): the real bounded probe uses spin's
+  # kill-deadline because _bounded (what _docker_answers uses) is a no-op on stock
+  # macOS. Both are stubbed so the branch logic here stays fast and deterministic;
+  # _docker_answers_bounded's actual boundedness is proven in common.bats.
+  _docker_answers()         { record "_docker_answers";         return "${DOCKER_UP_RC:-0}"; }
+  _docker_answers_bounded() { record "_docker_answers_bounded"; return "${DOCKER_UP_RC:-0}"; }
   # error() EXITS in production; this records and returns so a hard-fail is
   # assertable. The divergence matters: after a stubbed error the function keeps
   # running, so tests must assert on the message they expect rather than on how
@@ -486,4 +492,19 @@ calls() { cat "$MOCK_CALLS"; }
   # rather than the behaviour; the stop-failure text is the behaviour.
   run bash -c "grep -c 'did not stop cleanly and would not restart' '$MOCK_CALLS' || true"
   [ "$output" = "1" ] || return 1
+}
+
+@test "REGRESSION: the stop-failure probe is wired to the BOUNDED helper, not _docker_answers (backend#2521)" {
+  # PINS THE WIRING, not just the helper (Cursor Bugbot Medium on #843). Both
+  # probes are stubbed to the same DOCKER_UP_RC, so the branch-logic tests above
+  # pass whichever one the call site uses — reverting it to the coreutils-
+  # dependent `_docker_answers` would keep them green while restoring the exact
+  # stock-macOS hang this PR fixes, and common.bats (which tests the helper in
+  # isolation) would not catch that either. So assert on WHICH probe ran.
+  colima() { record "colima $*"; [[ "$1" == "stop" ]] && return 1; [[ "$1" == "start" ]] && RESTARTED=1; return 0; }
+  DOCKER_UP_RC=1
+  REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  grep -q '^_docker_answers_bounded$' "$MOCK_CALLS" || return 1   # the bounded probe ran
+  ! grep -q '^_docker_answers$'       "$MOCK_CALLS" || return 1   # the unbounded one did NOT
 }

@@ -960,3 +960,47 @@ EOF
   # cannot tell this apart from the no-sudo-installed branch above.
   printf '%s\n' "$output" | grep -qF "Could not obtain administrator privileges"
 }
+
+# ── _docker_answers_bounded — the coreutils-free docker probe (backend#2521) ──
+# The colima-stop recovery path (setup-macos.sh) used to probe the daemon through
+# _docker_answers, which bounds via _bounded — a no-op when neither timeout(1) nor
+# gtimeout(1) is on PATH, i.e. on stock macOS. Against a WEDGED daemon that bare
+# `docker info` never returned, freezing a headless install. These tests pin the
+# property that fixes it: the bound holds with NO coreutils, from spin's kill.
+
+@test "_docker_answers_bounded: a wedged daemon is bounded even with no timeout/gtimeout (backend#2521)" {
+  # The exact stock-macOS condition — neither coreutils binary present — so this
+  # would regress to a bare, unbounded `docker info` under the old probe. `docker`
+  # is a daemon that never answers; the sleep is self-limiting so a regression
+  # FAILS this test fast instead of hanging the whole suite.
+  has() { case "$1" in timeout|gtimeout) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+  docker() { sleep 10; }
+  local start=$SECONDS
+  run _docker_answers_bounded "probe" 2
+  local elapsed=$(( SECONDS - start ))
+  [ "$status" -ne 0 ] || return 1     # a non-answer, never a false "it's up"
+  # Killed near the 2s deadline. The ceiling is generous (8, not 3) on purpose: a
+  # loaded runner stretches spin's 0.12s-per-tick loop, and a false FAIL here is
+  # worse than a loose bound — docker's 10s sleep still puts a real unbounded
+  # regression well the wrong side of 8.
+  [ "$elapsed" -lt 8 ] || return 1
+}
+
+@test "_docker_answers_bounded: a daemon that answers returns 0" {
+  # The narrowing must not have closed the healthy case: a quick success is a 0.
+  docker() { return 0; }
+  run _docker_answers_bounded "probe" 5
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_docker_answers_bounded: a cleanly-down daemon returns non-zero without waiting out the deadline" {
+  # "down" and "wedged" are different: a daemon that answers "no" immediately must
+  # return at once, not sit on the deadline. Proves the probe reacts to the answer,
+  # not just the clock.
+  docker() { return 1; }
+  local start=$SECONDS
+  run _docker_answers_bounded "probe" 30
+  local elapsed=$(( SECONDS - start ))
+  [ "$status" -ne 0 ] || return 1
+  [ "$elapsed" -lt 10 ] || return 1
+}
