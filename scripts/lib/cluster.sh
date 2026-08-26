@@ -1406,6 +1406,27 @@ _create_new_cluster() {
   # while mysql + logs stay on the local /tracebloc tree. No-op when unset.
   [[ -n "${HOST_DATASET_DIR:-}" ]] && K3D_ARGS+=(-v "${HOST_DATASET_DIR}:/tracebloc-data@all")
 
+  # GPU image pullability → CPU fallback (client#835, Bugbot High). Handing k3d a
+  # k3s-cuda --image it can't pull (ghcr.io blocked, the tag not yet published for
+  # this pin, or a private TRACEBLOC_IMAGE_REGISTRY with no docker login) would make
+  # `k3d cluster create` HARD-FAIL — regressing a host that could still run CPU-only
+  # into a failed install. So pre-pull with the HOST daemon first; on failure, drop
+  # the GPU request (CPU fallback) with an actionable reason instead of aborting.
+  # k3d reuses the now-cached image, so this is not wasted work. Mirrors the Windows
+  # twin's Confirm-GpuImagePullable. Skipped for 'latest' (handled below) and in the
+  # unit harness (empty K8S_VERSION). TB_SKIP_GPU_IMAGE_PREPULL bypasses it.
+  if _gpu_wired && [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" && -z "${TB_SKIP_GPU_IMAGE_PREPULL:-}" ]]; then
+    local _prepull_image _prepull_min
+    _prepull_image="$(_gpu_node_image)"
+    _prepull_min="$(tb_minutes_or "${TB_GPU_PULL_TIMEOUT_MIN:-}" 15)"
+    ( docker pull "$_prepull_image" >>"${LOG_FILE:-/dev/null}" 2>&1 ) &
+    if ! spin "$!" "Fetching the GPU-capable runtime (${_prepull_image##*/})…" "$(( _prepull_min * 60 ))"; then
+      K3D_GPU_FLAGS=()
+      warn "Couldn't pull the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
+      hint "To enable GPU: make sure this host can pull ${_prepull_image}, or set TRACEBLOC_IMAGE_REGISTRY (with TRACEBLOC_REGISTRY_USERNAME/PASSWORD for a private mirror) to one that hosts tracebloc/k3s-cuda, then re-run."
+    fi
+  fi
+
   # Pin k3s at create time. common.sh defaults K8S_VERSION to the validated pin,
   # so a normal install ALWAYS passes --image; the version is fixed into the node
   # image and can't be changed later. An explicit K8S_VERSION=latest is an

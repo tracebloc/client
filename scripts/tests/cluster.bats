@@ -1987,6 +1987,29 @@ k3d-tracebloc-agent-0 agent" passthrough
   [[ "$output" != *"--gpus=all"* ]] || return 1                   # GPU request dropped
 }
 
+# Bugbot High: an unpullable GPU image (blocked/unpublished ghcr, private mirror
+# with no login) must degrade to a CPU install, not hard-fail cluster-create.
+@test "_create_new_cluster: GPU image pull fails -> CPU fallback (stock image, no --gpus)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() { record "docker $*"; [[ "$1" == pull ]] && return 1; return 0; }   # pull blocked
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1                                 # install still succeeds
+  [[ "$output" == *"CPU-only"* ]] || return 1                     # fallback announced
+  run mock_calls
+  [[ "$output" == *"--image rancher/k3s:v1.36.3-k3s1"* ]] || return 1   # stock, not GPU
+  [[ "$output" != *"--image ghcr.io/tracebloc/k3s-cuda"* ]] || return 1
+  [[ "$output" != *"--gpus=all"* ]] || return 1                   # GPU passthrough dropped
+}
+
+# The successful pre-pull caches the image for k3d; TB_SKIP_GPU_IMAGE_PREPULL bypasses it.
+@test "_create_new_cluster: GPU wired -> pre-pulls the GPU image before create" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"docker pull ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+}
+
 @test "_check_existing_cluster_gpu: reused GPU-capable node -> keeps the GPU request" {
   GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
   docker() { record "docker $*"; [[ "$1" == inspect ]] && printf '%s\n' "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"; return 0; }
