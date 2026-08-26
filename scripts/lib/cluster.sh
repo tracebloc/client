@@ -1194,6 +1194,11 @@ _registry_host_for() {
 # must fail safe to CPU rather than strand jobs Pending. Pure (string in, status
 # out) so it is unit-testable without a live cluster. Mirrors the Windows twin's
 # Test-NodeImageGpuCapable.
+#
+# NO fail-open on empty (the promise above): an empty/unreadable image returns 1 at
+# the `-n` guard, before the exact-match tail — and even if it didn't, _gpu_node_image
+# ALWAYS prints a non-empty host+repo (ghcr.io/… even with the pins unset), so the
+# tail can never degrade into an empty==empty match (Asad review, client#835).
 _node_image_gpu_capable() {
   local image="$1"
   [[ -n "$image" ]] || return 1
