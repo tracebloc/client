@@ -493,3 +493,18 @@ calls() { cat "$MOCK_CALLS"; }
   run bash -c "grep -c 'did not stop cleanly and would not restart' '$MOCK_CALLS' || true"
   [ "$output" = "1" ] || return 1
 }
+
+@test "REGRESSION: the stop-failure probe is wired to the BOUNDED helper, not _docker_answers (backend#2521)" {
+  # PINS THE WIRING, not just the helper (Cursor Bugbot Medium on #843). Both
+  # probes are stubbed to the same DOCKER_UP_RC, so the branch-logic tests above
+  # pass whichever one the call site uses — reverting it to the coreutils-
+  # dependent `_docker_answers` would keep them green while restoring the exact
+  # stock-macOS hang this PR fixes, and common.bats (which tests the helper in
+  # isolation) would not catch that either. So assert on WHICH probe ran.
+  colima() { record "colima $*"; [[ "$1" == "stop" ]] && return 1; [[ "$1" == "start" ]] && RESTARTED=1; return 0; }
+  DOCKER_UP_RC=1
+  REPLY_IN="y" MEM_KB=$(( 2 * 1024 * 1024 )) TARGET_GB=8 run _offer_colima_memory_raise
+  [ "$status" -eq 0 ] || return 1
+  grep -q '^_docker_answers_bounded$' "$MOCK_CALLS" || return 1   # the bounded probe ran
+  ! grep -q '^_docker_answers$'       "$MOCK_CALLS" || return 1   # the unbounded one did NOT
+}
