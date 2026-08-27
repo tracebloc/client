@@ -444,6 +444,75 @@ EOF
   [[ "$output" != *"ACKNOWLEDGED"* ]] || return 1
 }
 
+@test "ACK binds to prodDigest, not the block: a populated sibling digest: that drifts still REDS (Saqlain #877 #1)" {
+  # Under the old block-scoped ack, the sibling `digest:` inherited the ack and
+  # its genuine drift printed ACKNOWLEDGED -> exit 0 (silent false-green). The ack
+  # must attach to prodDigest ONLY; the sibling digest must red.
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  ingestor:
+    repository: "ghcr.io/tracebloc/ingestor"
+    tag: "0.8"
+    channelTags:
+      prod: "0.8"
+    ackDrift:
+      line: "0.8"
+      reason: "held back on purpose"
+    prodDigest: "$D_TRUST"
+    digest: "$D_TRUST"
+EOF
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1   # prodDigest, healthy
+  [[ "$output" == *"DRIFT: images.ingestor"* ]] || return 1   # the sibling digest, NOT acked
+}
+
+@test "ACK is order-independent: ackDrift AFTER prodDigest still ACKNOWLEDGES (Saqlain #877 #2)" {
+  # Old emit-at-pin-line read the ack pair AFTER the prodDigest was emitted with
+  # it still empty -> plain DRIFT -> spurious permanent red. Deferred emission
+  # reads the whole block first, so key order does not matter.
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  ingestor:
+    repository: "ghcr.io/tracebloc/ingestor"
+    tag: ""
+    channelTags:
+      prod: "0.8"
+    prodDigest: "$D_TRUST"
+    ackDrift:
+      line: "0.8"
+      reason: "held back on purpose"
+EOF
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1
+  [[ "$output" != *"DRIFT"* ]] || return 1
+}
+
+@test "ACK pin health: a buildx attestation (unknown/unknown) is filtered from the platform set (Saqlain #877 #5)" {
+  # The stub path now runs the SAME unknown/-drop + dedup as the registry path,
+  # so the seam faithfully exercises the attestation filter: the acked pin is
+  # multi-arch and the reported set must not contain the attestation entry.
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%sunknown/unknown,linux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1
+  [[ "$output" != *"unknown/unknown"* ]] || return 1
+  [[ "$output" == *"(linux/amd64 linux/arm64)"* ]] || return 1
+}
+
 @test "ACK: an UNQUOTED reason is still read (the fallback), not dropped to empty" {
   # YAML permits a plain unquoted scalar; the reason reader tries between-quotes
   # first and falls back to a trim. A distinctive word proves the fallback ran.

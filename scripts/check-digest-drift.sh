@@ -128,21 +128,28 @@ resolve_index_digest() {
 #
 # Test seam: under DRIFT_RESOLVE_STUB a `repo@digest` line maps to a
 # comma-separated platform list (e.g. `linux/amd64,linux/arm64`); an absent line
-# means "does not resolve", mirroring the real path.
+# means "does not resolve", mirroring the real path. The stub value runs through
+# the SAME normalization as the registry output (drop `unknown/*` attestation
+# entries, dedup), so the seam can exercise an `unknown/unknown` miscount the
+# real path would filter (Saqlain, client#877 review).
 pin_platforms() {
   # Separate declarations on purpose: a single `local a=$1 b="$a…"` expands the
   # later reference before the earlier assignment is visible, so under the
   # `set -u` above `b` sees an UNBOUND `a` and the subshell dies -- which read as
   # the pin failing to resolve. Assign, then compose.
   local repo="$1" digest="$2"
-  local ref="${repo}@${digest}" out=""
+  local ref="${repo}@${digest}" raw=""
   if [[ -n "${DRIFT_RESOLVE_STUB:-}" ]]; then
     [[ -r "$DRIFT_RESOLVE_STUB" ]] || { echo "ERROR: DRIFT_RESOLVE_STUB is set but unreadable: $DRIFT_RESOLVE_STUB" >&2; exit 2; }
-    awk -F"$(printf '\037')" -v want="$ref" '$1 == want { print $2; exit }' "$DRIFT_RESOLVE_STUB" | tr ',' ' '
-    return 0
+    # One platform per line so the shared filter below runs identically.
+    raw="$(awk -F"$(printf '\037')" -v want="$ref" '$1 == want { print $2; exit }' "$DRIFT_RESOLVE_STUB" | tr ',' '\n')"
+  else
+    raw="$(_tmout 30 docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/Platform:/ {print $2}' || true)"
   fi
-  out="$(_tmout 30 docker buildx imagetools inspect "$ref" 2>/dev/null || true)"
-  awk '/Platform:/ {print $2}' <<<"$out" | grep -v '^unknown' | sort -u | tr '\n' ' '
+  # Shared normalization: drop attestation manifests (buildx lists them as
+  # `unknown/unknown`), drop blanks, dedup, and re-join space-separated. Empty
+  # output is the caller's "did not resolve to any real platform" signal.
+  printf '%s\n' "$raw" | grep -v '^unknown' | grep -v '^[[:space:]]*$' | sort -u | tr '\n' ' '
 }
 
 # discover_pins <file>
@@ -158,8 +165,10 @@ pin_platforms() {
 # repository and float. Enrolment is automatic and cannot be missed -- a pin is
 # either watched or REPORTED, never skipped.
 #
-# Emits one TSV record per pin: path <TAB> repository <TAB> float <TAB> pin
-# with an empty field where the file does not say.
+# Emits one record per pin, 0x1f-separated:
+#   path <sep> repository <sep> float <sep> pin <sep> ackLine <sep> ackReason
+# with an empty field where the file does not say. The ack pair is non-empty
+# ONLY on a prodDigest pin that its block acknowledges (backend#2673).
 discover_pins() {
   awk -v SEP="$(printf '\037')" '
     function trim(v) {
@@ -168,12 +177,32 @@ discover_pins() {
       gsub(/^"|"$/, "", v); gsub(/^\047|\047$/, "", v)
       return v
     }
+    # flush_prod — emit the block s deferred prodDigest pin (backend#2673 review,
+    # Saqlain, client#877). prodDigest emission is deferred to the block boundary
+    # so the acknowledgement binds to the prodDigest LEAF, not the whole block:
+    #   1. a populated sibling digest: in the same block never inherits the ack,
+    #      so its genuine drift still reddens rather than printing ACKNOWLEDGED;
+    #   2. ackDrift: may sit either side of prodDigest: -- the ack pair, and the
+    #      block repo/float, are all read in full before the pin is emitted, so a
+    #      values.yaml reorder cannot silently empty the ack (which would turn the
+    #      acknowledged drift back into a spurious permanent red).
+    # Runs at every block boundary and at END, BEFORE the block state it reads is
+    # reset, so top/mid/blk_repo/ch_prod/ack_* still describe the closing block.
+    function flush_prod() {
+      if (pend_prod) {
+        name = (mid == "") ? top : top "." mid
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, ch_prod, SEP, pend_pin, SEP, ack_line, SEP, ack_reason
+        pend_prod = 0; pend_pin = ""
+      }
+    }
     # Track the innermost 0-space and 2-space keys so a pin can be named.
     /^[A-Za-z_][A-Za-z0-9_]*:/ {
+      flush_prod()
       top = $0; sub(/:.*$/, "", top); mid = ""; blk_repo = ""; blk_tag = ""
       ack_line = ""; ack_reason = ""; in_ack = 0
     }
     /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
+      flush_prod()
       mid = $0; sub(/^  /, "", mid); sub(/:[[:space:]]*$/, "", mid)
       blk_repo = ""; blk_tag = ""; ch_prod = ""
       ack_line = ""; ack_reason = ""; in_ack = 0
@@ -213,11 +242,22 @@ discover_pins() {
       kind = $0; sub(/^[[:space:]]*/, "", kind); sub(/:.*$/, "", kind)
       v = $0; sub(/^[[:space:]]*(digest|prodDigest):[[:space:]]*/, "", v); pin = trim(v)
       if ($0 ~ /^    (digest|prodDigest):/) {
-        flt = (kind == "prodDigest") ? ch_prod : blk_tag
-        name = (mid == "") ? top : top "." mid
-        # Six fields: path, repo, float, pin, ackLine, ackReason. The ack pair is
-        # empty for every pin that declares no ackDrift block (backend#2673).
-        printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, flt, SEP, pin, SEP, ack_line, SEP, ack_reason
+        if (kind == "prodDigest") {
+          # DEFER (backend#2673 review). Do not emit here: stash the digest and
+          # let flush_prod() emit it at the block boundary, by which point the
+          # ack pair and the block repo/float are complete regardless of the
+          # order ackDrift:/channelTags:/repository: appear in. The ack binds to
+          # THIS leaf only. A second prodDigest in one block (malformed) flushes
+          # the first rather than clobbering it.
+          flush_prod()
+          pend_prod = 1; pend_pin = pin
+        } else {
+          # A canonical digest: pin. Emits inline and NEVER carries the ack --
+          # the acknowledgement binds to prodDigest, so a populated sibling
+          # digest: that drifts still reddens (Saqlain, client#877 review).
+          name = (mid == "") ? top : top "." mid
+          printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, blk_tag, SEP, pin, SEP, "", SEP, ""
+        }
       } else {
         # Off the canonical structure: name it as best we can, emit empty
         # repo+float (and empty ack pair) so the main loop reports UNWATCHABLE
@@ -226,6 +266,9 @@ discover_pins() {
         printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, "", SEP, "", SEP, pin, SEP, "", SEP, ""
       }
     }
+    # Close the final block: a deferred prodDigest in the last block has no
+    # trailing key to trigger flush_prod, so END is its boundary.
+    END { flush_prod() }
   ' "$1"
 }
 
