@@ -85,13 +85,14 @@ kubectl create ns "$REL_NS"   >/dev/null
 # is off so its own metrics-API `fail` cannot pre-empt the render before this one.
 GUARD_SIG='token Secret does not exist'   # the guard's own message; the subject here
 guard_refused() {   # 0 = the telemetry pre-flight refused the render; 1 = it did not
-  # Captured to a variable, not piped: under `pipefail` a failing `helm` (dry-run
-  # trips on unrelated live checks routinely) would mask `grep`'s answer.
+  # Capture-then-match with a here-string, never a pipe into `grep -q`: under
+  # `pipefail` a failing `helm` (dry-run trips on unrelated live checks routinely)
+  # would mask grep's answer, and an early-closing reader would SIGPIPE the producer.
   local out
   out="$(helm install "$REL" "$CHART" --dry-run=server -n "$REL_NS" "${NA[@]}" \
     --set clientId=x --set clientPassword=y --set storageClass.create=false \
     --set resourceMonitor=false --set telemetryCollector.enabled=true 2>&1 || true)"
-  printf '%s\n' "$out" | grep -q "$GUARD_SIG"
+  grep -q "$GUARD_SIG" <<<"$out"
 }
 
 put()  { kubectl create secret generic "$1" -n "$TOKEN_NS" --from-literal=token=x >/dev/null; }
