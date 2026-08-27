@@ -33,6 +33,10 @@ setup() {
   # A clean slate: no force flag, and INSTALL_STATE unset so a test can't pass on
   # a value left by an earlier one.
   unset TB_FORCE_REINSTALL TRACEBLOC_FORCE_REINSTALL INSTALL_STATE INSTALL_STATE_REASON
+  # backend#2253 explicit-upgrade signals — cleared so a leak from the caller's
+  # shell (or an earlier test) can't turn an ordinary classify test into an
+  # upgrade one, and vice-versa.
+  unset TB_UPGRADE_CLI TB_CLI_LATEST
   # Leaf probe added in client#682, forced here for the same reason as the other
   # leaf probes: the classify tests below exercise cluster/release/workload
   # decision logic and must not depend on whether a real docker answers on the
@@ -227,6 +231,71 @@ _depname() {
   [ "$status" -ne 0 ] || return 1
 }
 
+# ── CLI behind latest, for an explicit `tracebloc upgrade` (backend#2253) ────
+# Distinct from the floor above: the floor is "below this we cannot support you"
+# (mandatory reinstall), this is "something newer exists" (the nudge's meaning).
+# It is INERT unless TB_UPGRADE_CLI=1, so an ordinary installer run never pays a
+# "what is latest?" cost and is never reclassified by it.
+@test "_assess_cli_behind_latest: inert without TB_UPGRADE_CLI (ordinary run)" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.5 (darwin/arm64)"; }
+  TB_CLI_LATEST=0.10.8                       # newer exists, but no upgrade intent
+  run _assess_cli_behind_latest
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_assess_cli_behind_latest: upgrade intent + behind latest -> behind (0)" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.5 (darwin/arm64)"; }
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=0.10.8
+  run _assess_cli_behind_latest
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_assess_cli_behind_latest: upgrade intent + already latest -> not behind (1)" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.8 (darwin/arm64)"; }
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=0.10.8
+  run _assess_cli_behind_latest
+  [ "$status" -ne 0 ] || return 1           # nothing to do; healthy handoff owns it
+}
+
+@test "_assess_cli_behind_latest: the 2-vs-10 trap is a numeric compare, not string" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.8 (darwin/arm64)"; }
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=0.2.0       # 0.10.8 is NEWER than 0.2.0
+  run _assess_cli_behind_latest
+  [ "$status" -ne 0 ] || return 1           # not behind: a string compare would say 10<2
+}
+
+# Fail SAFE toward updating under an explicit upgrade: if we can't prove the CLI
+# is current (no latest passed, or an unparseable one), do the update the user
+# asked for rather than silently declining it — the opposite of the floor's
+# fail-open, and correct here because this only runs on an explicit upgrade.
+@test "_assess_cli_behind_latest: upgrade intent + latest unknown -> behind (update anyway)" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.5 (darwin/arm64)"; }
+  TB_UPGRADE_CLI=1                           # no TB_CLI_LATEST (manual paste / offline)
+  run _assess_cli_behind_latest
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_assess_cli_behind_latest: upgrade intent + unparseable latest -> behind (update anyway)" {
+  has() { [ "$1" = tracebloc ]; }
+  tracebloc() { echo "tracebloc 0.10.5 (darwin/arm64)"; }
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=latest      # not a version we can compare
+  run _assess_cli_behind_latest
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_assess_cli_behind_latest: no CLI at all -> not behind (cli-missing owns that)" {
+  has() { return 1; }
+  HOME="$BATS_TEST_TMPDIR/empty"; mkdir -p "$HOME"
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=0.10.8
+  run _assess_cli_behind_latest
+  [ "$status" -ne 0 ] || return 1
+}
+
 # The regression guard: mutation-real against the pre-fix classify, which went
 # straight to healthy on any CLI that merely existed.
 @test "_assess_classify: a stale CLI is degraded/cli-outdated, NEVER healthy" {
@@ -254,6 +323,65 @@ _depname() {
   _assess_cli_outdated() { return 1; }
   _assess_classify
   [ "$INSTALL_STATE" = healthy ] || return 1
+}
+
+# backend#2253, the classify half of the fix. Everything is healthy EXCEPT the
+# CLI is above the floor but behind latest, under an explicit `tracebloc upgrade`.
+# Before the fix this went straight to healthy (the no-op the ticket is about);
+# now it is a DISTINCT degraded reason main() can act on. Mutation-real: drop the
+# _assess_cli_behind_latest branch and this classifies healthy again.
+@test "_assess_classify: upgrade intent + CLI behind latest -> degraded (cli-behind-latest)" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 1; }
+  detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_release_pending() { return 1; }
+  _assess_workload_ready() { return 0; }
+  _assess_cli_present() { return 0; }
+  _assess_cli_outdated() { return 1; }         # above the floor
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=0.10.8
+  tracebloc() { echo "tracebloc 0.10.5 (darwin/arm64)"; }   # behind latest
+  _assess_cli_bin() { printf 'tracebloc'; }
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = cli-behind-latest ] || return 1
+}
+
+# The regression guard: the SAME machine on an ORDINARY run (no upgrade intent)
+# must still reach healthy — the new branch is inert off the explicit-upgrade
+# path, so a routine re-run is unchanged and pays no "what is latest?" cost.
+@test "_assess_classify: NO upgrade intent + CLI behind latest -> still healthy (branch inert)" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 1; }
+  detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_release_pending() { return 1; }
+  _assess_workload_ready() { return 0; }
+  _assess_cli_present() { return 0; }
+  _assess_cli_outdated() { return 1; }
+  TB_CLI_LATEST=0.10.8                          # newer exists, but TB_UPGRADE_CLI unset
+  tracebloc() { echo "tracebloc 0.10.5 (darwin/arm64)"; }
+  _assess_cli_bin() { printf 'tracebloc'; }
+  _assess_classify
+  [ "$INSTALL_STATE" = healthy ] || return 1
+}
+
+# The floor keeps its stricter meaning: a BELOW-floor CLI is cli-outdated (a
+# mandatory full reinstall) even under an explicit upgrade — cli-behind-latest is
+# ordered after the floor check, so it never masks it.
+@test "_assess_classify: upgrade intent + BELOW-floor CLI -> cli-outdated (floor still wins)" {
+  has() { return 0; }
+  _cluster_exists() { return 0; }
+  _assess_cluster_servers_running() { echo 1; }
+  detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_release_pending() { return 1; }
+  _assess_workload_ready() { return 0; }
+  _assess_cli_present() { return 0; }
+  _assess_cli_outdated() { return 0; }          # below the floor
+  TB_UPGRADE_CLI=1 TB_CLI_LATEST=0.10.8
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || return 1
+  [ "$INSTALL_STATE_REASON" = cli-outdated ] || return 1
 }
 
 @test "assess_existing_install: cli-outdated says so, continues, and does NOT hand off" {
@@ -552,6 +680,21 @@ _use_real_runtime_probe() {
   [ "$status" -eq 0 ] || return 1
   assert_has "Already set up on this machine" "$output"
   assert_has "HOME_SCREEN" "$(cat "$TB_TTY")"
+}
+
+# backend#2253: an explicit `tracebloc upgrade` on an otherwise-healthy box whose
+# CLI is behind latest must NOT hand off (the no-op that could never clear the
+# nag) and must NOT run the degraded ceremony — it returns 0 so main() runs the
+# CLI-only update. This file itself performs no install (stays a read-only
+# classifier); the update mutation lives in main().
+@test "assess_existing_install: cli-behind-latest returns 0 without handing off or ceremony" {
+  _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=cli-behind-latest; }
+  tracebloc() { echo "HOME_SCREEN"; }          # must NOT be launched
+  run assess_existing_install
+  [ "$status" -eq 0 ] || return 1
+  refute_has "HOME_SCREEN" "$output"           # no healthy hand-off
+  refute_has "Already set up" "$output"        # nor the healthy "already set up" line
+  refute_has "partly set up" "$output"         # nor the generic degraded ceremony
 }
 
 # Mutation guard for the short-circuit: if the healthy branch stops handing off
