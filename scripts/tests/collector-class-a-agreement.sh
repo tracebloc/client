@@ -163,7 +163,8 @@ refuses() { # DESCRIPTION  EXPECT_IN_STDERR  EXTRA_ARGS...
        # HERE-STRING, not `printf | head`: under `set -euo pipefail` head closes
        # the pipe, the producer takes SIGPIPE, and the pipeline returns 141 —
        # aborting this script from inside its own error path. The house idiom,
-       # and scripts/tests/pipefail-early-close.sh enforces it (backend#1778).
+       # and the shared `early-close` gate in tracebloc/.github's code-quality.yml
+       # enforces it (backend#1778).
        echo "        got: $(head -2 <<<"$out")" >&2
        return 1 ;;
   esac
@@ -191,9 +192,9 @@ refuses "schema rejects a null classANodeAgentContainers" "$SCHEMA_REFUSAL" \
 # version string, because the flag's introduction is what matters, not the number.
 # Captured then matched with `case`, NOT `helm ... | grep -q`: grep -q closes the
 # pipe on its first hit, helm takes SIGPIPE, and the pipeline returns 141 under
-# `set -euo pipefail`. Same class as the `head` above, and this guard's own
-# enforcement (scripts/tests/pipefail-early-close.sh) catches it — it caught this
-# very line.
+# `set -euo pipefail`. Same class as the `head` above, and the shared
+# `early-close` gate in tracebloc/.github's code-quality.yml catches it — it
+# caught this very line.
 helm_help="$(helm template --help 2>&1 || true)"
 case "$helm_help" in
   *--skip-schema-validation*)

@@ -55,9 +55,9 @@ done
 #
 # Capture-then-slice rather than `grep ... | head -1`: piping into an
 # early-closing reader under this file's `set -euo pipefail` aborts the guard on
-# SIGPIPE, which scripts/tests/pipefail-early-close.bats forbids tree-wide. (It
-# caught this line on the first full run -- the house idiom is the pure-bash
-# first-line slice below.)
+# SIGPIPE, which the shared `early-close` gate in tracebloc/.github's
+# code-quality.yml forbids tree-wide. (It caught this line on the first full run
+# -- the house idiom is the pure-bash first-line slice below.)
 _extract() {
   local all=""
   all="$(grep -oE "\{range \.items\[\*\]\}\{\.status\.allocatable\.cpu\}[^']*" "$1")" || true
