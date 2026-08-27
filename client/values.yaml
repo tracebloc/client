@@ -572,8 +572,16 @@ telemetryCollector:
   # Read through `bearertokenauth`'s `filename`, which watches the projected file
   # (credentialsfile.ValueResolver + WithOnChange upstream), so a rotated token is
   # picked up without restarting the Collector.
+  #
+  # `name` IS DELIBERATELY UNSET (backend#2625). The effective default is
+  # release-scoped — `<release>-telemetry-token` — computed in
+  # tracebloc.telemetryTokenSecretName, because the node-agents namespace is SHARED:
+  # a fixed name let two edges on one cluster overwrite each other's credential, and
+  # the loser's Collector then authenticated as the wrong tenant. Setting it here
+  # would re-pin the fixed name and reintroduce the collision. Set it ONLY to a
+  # genuinely custom per-release name; the helper treats the old fixed
+  # `tracebloc-telemetry-token` as "migrate me", not as a chosen override.
   tokenSecret:
-    name: tracebloc-telemetry-token
     key: token
 
   # `Token`, NOT `Bearer`. The edge authenticates to the backend with a DRF user

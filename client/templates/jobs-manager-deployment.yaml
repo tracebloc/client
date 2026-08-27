@@ -344,7 +344,11 @@ spec:
         - name: TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
         - name: TELEMETRY_TOKEN_SECRET_NAME
-          value: {{ $tokEnv.name | default "tracebloc-telemetry-token" | quote }}
+          # Release-scoped, resolved through the one helper the reader and RBAC also
+          # use, so the WRITER cannot end up naming a different Secret than they read
+          # (backend#2625). jobs-manager writes THIS name; the daemonset's pre-flight
+          # additionally tolerates the legacy fixed name until every edge has one.
+          value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
         - name: TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
         - name: CLIENT_ID

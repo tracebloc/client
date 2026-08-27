@@ -1,6 +1,7 @@
-{{- $tcTok := default (dict) .Values.telemetryCollector -}}
-{{- $tokSecret := default (dict) $tcTok.tokenSecret -}}
-{{- $tokName := $tokSecret.name | default "tracebloc-telemetry-token" -}}
+{{- /* Release-scoped, via the one resolver the writer and reader also use, so the
+       name-scoped `get`/`patch` grant below pins the SAME Secret jobs-manager
+       writes and the Collector reads (backend#2625). */ -}}
+{{- $tokName := include "tracebloc.telemetryTokenSecretName" . -}}
 {{- /*
   Lets jobs-manager write and REFRESH the edge Collector's ingest token
   (backend#2274). The Collector reads its credential through `bearertokenauth`'s
