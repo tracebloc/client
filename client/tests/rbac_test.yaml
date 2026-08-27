@@ -179,9 +179,12 @@ tests:
             resources: ["nodes"]
             verbs: ["list"]
 
-  # RFC-0003 D10 (backend#1181): the Secret-delete verb the jobs-manager
-  # revoke/sweep path needs must be flag-gated + secrets-only (Saqlain review).
-  - it: default-off grants no delete on configmaps/secrets (byte-for-byte)
+  # RFC-0003 D10 (backend#1181): the jobs-manager revoke/sweep path's secrets
+  # grant must be flag-gated + secrets-only (Saqlain review). backend#2692: the
+  # orphan reaper LISTs cred Secrets before deleting them, so the grant is
+  # `list` + `delete` — a delete-only rule 403s on the enumeration and can
+  # never reap an orphan.
+  - it: default-off grants nothing extra on configmaps/secrets (byte-for-byte)
     set:
       clusterScope: true
     documentIndex: 1
@@ -192,6 +195,13 @@ tests:
             apiGroups: [""]
             resources: ["configmaps", "secrets"]
             verbs: ["create", "get"]
+      # No secrets-only rule of either shape when the flag is off.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete"]
       - notContains:
           path: rules
           content:
@@ -199,18 +209,28 @@ tests:
             resources: ["secrets"]
             verbs: ["delete"]
 
-  - it: perExperimentDbCreds adds delete on secrets only (ClusterRole)
+  - it: perExperimentDbCreds adds list+delete on secrets only (ClusterRole)
     set:
       clusterScope: true
       perExperimentDbCreds: true
     documentIndex: 1
     asserts:
+      # backend#2692: the reaper enumerates orphans (list) before deleting them,
+      # so both verbs must be present — a delete-only rule can never reap.
       - contains:
           path: rules
           content:
             apiGroups: [""]
             resources: ["secrets"]
+            verbs: ["list", "delete"]
+      # ...and never the old delete-only shape (guards the regression).
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
             verbs: ["delete"]
+      # the pre-existing create/get rule is untouched by the flag.
       - contains:
           path: rules
           content:
@@ -218,13 +238,41 @@ tests:
             resources: ["configmaps", "secrets"]
             verbs: ["create", "get"]
 
-  - it: perExperimentDbCreds adds delete on secrets only (Role)
+  - it: perExperimentDbCreds adds list+delete on secrets only (Role)
     set:
       clusterScope: false
       perExperimentDbCreds: true
     documentIndex: 1
     asserts:
+      # backend#2692: the reaper runs regardless of clusterScope, so the
+      # namespaced Role branch needs the same list+delete grant.
       - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["delete"]
+
+  - it: default-off (Role branch) grants nothing extra on secrets (byte-for-byte)
+    set:
+      clusterScope: false
+    documentIndex: 1
+    asserts:
+      # The flag guards the namespaced Role branch too, so a default install
+      # renders no secrets-only rule of either shape here either.
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete"]
+      - notContains:
           path: rules
           content:
             apiGroups: [""]
