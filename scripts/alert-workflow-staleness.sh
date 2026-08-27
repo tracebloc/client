@@ -27,10 +27,13 @@
 # workflow therefore yields exactly one live card until a human closes it; the
 # daily run does not re-file.
 #
-# FAILS LOUD. If a create cannot be done (e.g. the App lacks issues:write on the
-# alert repo), this exits non-zero so the watcher job goes RED — a broken alerter
-# is the one thing that must not be quiet, and GitHub emails a scheduled-run
-# failure to the repo.
+# FAILS LOUD, AND FAILS CLOSED. If a create cannot be done (e.g. the App lacks
+# issues:write on the alert repo), or the dedup existence-check cannot COMPLETE
+# (a `gh search` / `gh issue view` error), this exits non-zero so the watcher job
+# goes RED — a broken alerter is the one thing that must not be quiet, and GitHub
+# emails a scheduled-run failure to the repo. A dedup check that could not run is
+# never read as "nothing filed yet": doing so files a fresh duplicate on every
+# daily run until search recovers (backend#2702, same class as backend#2631).
 #
 # CONFIG (env)
 #   ALERT_REPO      owner/name to file into. Required.
@@ -114,10 +117,27 @@ EOF
   # marker is in the candidate body (search tokenises punctuation, so a match is
   # a candidate, not proof). Search indexing lag is irrelevant at a daily cadence
   # and we file at most one per workflow per run, so no intra-run duplicate.
+  #
+  # FAIL CLOSED (backend#2702): the errors here must NOT be swallowed into an
+  # empty result and read as "not yet tracked" — that files a fresh duplicate
+  # every daily run until search recovers. A failed `gh search` leaves stdout
+  # empty, indistinguishable from a genuine zero-result unless we also check its
+  # exit status, so capture the status and abort loud rather than create when the
+  # search — or a candidate read — could not complete. Same class as backend#2631.
+  if ! candidates="$(gh search issues --repo "$ALERT_REPO" --state open \
+                       --match body "$marker" --json number --jq '.[].number')"; then
+    echo "ERROR: dedup search failed for ${wf} in ${ALERT_REPO}; not filing (would risk a duplicate)" >&2
+    rm -f "$bodyfile"
+    exit 2
+  fi
   existing=""
-  for num in $(gh search issues --repo "$ALERT_REPO" --state open --match body "$marker" \
-                 --json number --jq '.[].number' 2>/dev/null); do
-    if gh issue view "$num" --repo "$ALERT_REPO" --json body --jq '.body' 2>/dev/null | grep -qF "$marker"; then
+  for num in $candidates; do
+    if ! cand_body="$(gh issue view "$num" --repo "$ALERT_REPO" --json body --jq '.body')"; then
+      echo "ERROR: dedup read of ${ALERT_REPO}#${num} failed for ${wf}; not filing (would risk a duplicate)" >&2
+      rm -f "$bodyfile"
+      exit 2
+    fi
+    if grep -qF "$marker" <<<"$cand_body"; then
       existing="$num"; break
     fi
   done

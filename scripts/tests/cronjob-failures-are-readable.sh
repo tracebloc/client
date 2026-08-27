@@ -63,7 +63,12 @@ EXPECTED="$(grep -rlE '^kind: CronJob$' --include='*.yaml' \
 CHK="$(mktemp -t cronjobpolicy.XXXXXX)"
 trap 'rm -f "$CHK"' EXIT
 cat >"$CHK" <<'PY'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 expected = {l.strip() for l in open(sys.argv[1]) if l.strip()}
 

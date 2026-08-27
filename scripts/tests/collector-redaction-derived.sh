@@ -147,7 +147,10 @@ import pathlib
 import re
 import sys
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 declaration = json.loads(
     pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
