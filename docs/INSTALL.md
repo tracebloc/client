@@ -111,6 +111,38 @@ dockerRegistry:
 
 ---
 
+## Naming: the release name equals the namespace
+
+**Use the same string for the Helm release and the namespace.** The bundled
+installer already does this — `scripts/lib/install-client-helm.sh` runs
+`helm upgrade --install "$TB_NAMESPACE" … --namespace "$TB_NAMESPACE"`, defaulting
+both to `tracebloc` — so a self-service install is consistent without anyone
+choosing. Match it when installing by hand.
+
+```bash
+# good — one name, used twice
+helm install tracebloc tracebloc/client --namespace tracebloc --create-namespace
+
+# on a multi-tenant cluster, the tenant namespace is the release name
+helm install acme-prod tracebloc/client --namespace acme-prod --create-namespace
+```
+
+**Why it matters more than it looks.** Every resource the chart renders is
+prefixed with the release name — `<release>-jobs-manager`,
+`<release>-auto-upgrade`, `<release>-resource-monitor` — and **Helm cannot rename
+a release.** Correcting a release name means uninstall + reinstall, with the
+downtime and PV re-binding that implies. A name chosen in thirty seconds is one
+you keep.
+
+So, concretely:
+
+- **Do not use a person's name.** It ends up in every resource name on the
+  cluster, visible to whoever runs `kubectl` there, permanently.
+- **Do not use the environment alone** (`prod`, `stg`) on a cluster that hosts
+  more than one tenant — the names collide in shared namespaces.
+- **Do keep it DNS-1123 safe and short.** Kubernetes truncates names at 63
+  characters, and the chart appends up to ~30 characters of component suffix.
+
 ## 1. Add the Helm repository (recommended for production)
 
 The chart repository is hosted at [tracebloc/client](https://github.com/tracebloc/client). After the chart is published (see [Publishing the chart](#publishing-the-chart)), add the repo and install from it so you get versioning and `helm upgrade` support.
