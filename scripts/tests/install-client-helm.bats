@@ -385,10 +385,15 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
-# backend#2033: an AMD GPU host must actually REQUEST the device. The amd device
-# plugin advertises amd.com/gpu, but GPU_LIMITS/GPU_REQUESTS used to be wired for
-# nvidia only, so AMD training pods requested no GPU and silently ran on CPU while
-# the installer still reported the GPU "verified". Lock the amd.com/gpu request in.
+# ── GPU chart values: per-vendor request (backend#2033) gated on GPU actually
+# WIRED for NVIDIA (client#835) ───────────────────────────────────────────────
+# The request key must match the vendor (nvidia.com/gpu vs amd.com/gpu), and for
+# NVIDIA it is written only when the GPU is wired (--gpus=all) — requesting it on a
+# node that advertises 0 strands jobs Pending. RuntimeClass + device plugin ride the
+# same NVIDIA-wired gate; AMD keys on detection. Mirrors the Windows twin.
+
+# backend#2033: an AMD GPU host must actually REQUEST the device (amd.com/gpu), or
+# training pods run CPU-only while the installer reports the GPU "verified".
 @test "install_client_helm: AMD host -> values request amd.com/gpu + enable the amd device plugin" {
   GPU_VENDOR=amd
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
@@ -397,23 +402,19 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
-  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for
-  # a pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
+  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for a
+  # pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
   kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q 'GPU_LIMITS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
   grep -q 'GPU_REQUESTS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
-  # and the chart-managed device plugin is enabled for the amd vendor.
   grep -q 'vendor: amd' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
 }
 
-# Parity guard for the sibling branch backend#2033 edits: an NVIDIA host still
-# requests nvidia.com/gpu. Nothing else asserts the request at the values layer,
-# so this pins both arms of the vendor conditional against a future regression.
-@test "install_client_helm: NVIDIA host -> values request nvidia.com/gpu" {
-  GPU_VENDOR=nvidia
+@test "install_client_helm: NVIDIA wired -> values carry the GPU request, RuntimeClass, and device plugin" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")   # detected AND wired
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
@@ -422,14 +423,34 @@ setup() {
   kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
-  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
-  grep -q 'vendor: nvidia' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$vf" || { cat "$vf"; return 1; }
+  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$vf" || return 1
+  grep -q 'RUNTIME_CLASS_NAME: "nvidia"' "$vf" || return 1
+  grep -q 'vendor: nvidia' "$vf" || return 1
+  grep -q 'runtimeClassName: nvidia' "$vf" || return 1
 }
 
-# Third arm of the same conditional: a non-GPU host must emit EMPTY GPU_LIMITS/
-# GPU_REQUESTS (client-runtime#80 reads an explicit empty as "no GPU here"), and
-# must NOT enable the device plugin. GPU_VENDOR=none is the setup() default.
+# client#835: NVIDIA detected but NOT wired (stock/CPU node) must write CPU values —
+# requesting nvidia.com/gpu there would strand every job Pending.
+@test "install_client_helm: NVIDIA detected but NOT wired -> CPU values (no GPU request / plugin)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()               # detected, but the cluster is CPU-only
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: ""' "$vf" || { cat "$vf"; return 1; }
+  grep -q 'GPU_REQUESTS: ""' "$vf" || return 1
+  grep -q 'RUNTIME_CLASS_NAME: ""' "$vf" || return 1
+  ! grep -q 'devicePlugin:' "$vf" || { cat "$vf"; return 1; }   # no plugin against a CPU node
+}
+
+# Third arm: a non-GPU host emits EMPTY GPU_LIMITS/GPU_REQUESTS and no device plugin.
 @test "install_client_helm: non-GPU host -> empty GPU_LIMITS/GPU_REQUESTS, no device plugin" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -547,34 +568,63 @@ setup() {
   [[ "$output" != *"helm upgrade --install"* ]] || return 1
 }
 
-# backend#2033: the adopt/reconcile path reuses the release's stored values, so
-# without forcing the GPU request an already-installed AMD edge that re-runs would
-# keep the empty request written before this fix and train on CPU. The reconcile
-# upgrade must force env.GPU_REQUESTS/GPU_LIMITS to THIS run's vendor value
-# (mirrors the PowerShell twin), overriding whatever the release stored.
-@test "install_client_helm: adopt on an AMD host forces the GPU request onto the reconcile (backend#2033)" {
-  GPU_VENDOR=amd
+# The adopt/reconcile path uses --reuse-values, so it must FORCE the GPU keys to
+# THIS run's decision or a stale request survives (backend#2033 + client#835): an
+# AMD edge trains on the wrong/empty resource, and an NVIDIA edge dropped to CPU
+# keeps requesting a GPU and strands jobs Pending.
+_adopt_gpu_setup() {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
-  _ensure_tracebloc_dirs() { :; }
-  _ensure_release_dirs() { :; }
-  _ensure_helm_runnable() { :; }
-  kubectl() { record "kubectl $*"; return 0; }
+  _ensure_tracebloc_dirs() { :; }; _ensure_release_dirs() { :; }; _ensure_helm_runnable() { :; }
+  kubectl() { return 0; }
   helm() {
     if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
     if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
     record "helm $*"; return 0
   }
-  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  verify_credentials() { printf valid; }
   export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+}
+
+@test "install_client_helm: adopt + GPU wired -> forces GPU request/RuntimeClass/plugin on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.nvidia.runtimeClassName=nvidia"* ]] || return 1
+}
+
+@test "install_client_helm: adopt + NVIDIA detected but NOT wired -> forces CPU keys on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()          # detected, cluster is CPU-only
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"gpu.devicePlugin.enabled=false"* ]] || return 1
+  # The force-EMPTY clears must be PRESENT (deleting them would let --reuse-values
+  # keep a prior GPU request). Flag present AND not a GPU value ⇒ forced empty.
+  [[ "$output" == *"--set-string env.GPU_REQUESTS="* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS="* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME="* ]] || return 1
+  [[ "$output" != *"env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" != *"env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+}
+
+# backend#2033: an already-installed AMD edge that re-runs must have its request
+# healed onto the reconcile (--set-string amd.com/gpu=1), overriding stored values.
+@test "install_client_helm: adopt on an AMD host forces the amd.com/gpu request onto the reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=amd
   run install_client_helm </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"reconciling"* ]] || return 1
-  # Reconciled in place (reuse-values) AND forced the AMD request over the stored
-  # values, so the re-run heals the GPU request the same way a fresh install wires it.
-  mock_calls | grep -q "helm upgrade munich"
-  mock_calls | grep -q -- "--reset-then-reuse-values"
-  mock_calls | grep -q -- "--set-string env.GPU_REQUESTS=amd.com/gpu=1"
-  mock_calls | grep -q -- "--set-string env.GPU_LIMITS=amd.com/gpu=1"
+  run mock_calls
+  [[ "$output" == *"helm upgrade munich"* ]] || return 1
+  [[ "$output" == *"--reset-then-reuse-values"* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=amd.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS=amd.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.vendor=amd"* ]] || return 1
 }
 
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
@@ -839,6 +889,93 @@ setup() {
   run install_client_helm <<< $'newclient\nmypw'
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"Couldn't determine which tracebloc client"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+# ── backend#2571: the id can live in the SECRET, not just in release values ──
+# Bugbot #859. clientId stopped being `required` and the chart now RECOMMENDS
+# dropping it from release values once the Secret carries it. Before these, a
+# client installed that way had no clientId in `helm get values`, the scan read
+# it as "not a client", and the one-client guard waved through an install that
+# re-points the machine. detect_installed_client's own scanning loop had no test
+# at all — every other test in this file stubs the function out — so nothing
+# would have caught it.
+#
+# `has kubectl` gates the Secret read, so each case declares whether kubectl
+# exists rather than inheriting the developer's PATH.
+_no_clientid_release_ctx() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.72 1.9.72'
+      return 0
+    fi
+    # Values READ FINE and simply carry no clientId — the #2571 shape. Not the
+    # unreadable-values case above, which is a different branch.
+    if [ "$1" = get ] && [ "$2" = values ]; then printf 'storageClass: {}\n'; return 0; fi
+    return 0
+  }
+}
+
+@test "detect_installed_client: no clientId in values -> reads it from the release Secret (backend#2571)" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() {
+    # jsonpath of .data.CLIENT_ID, base64 of "uuid-from-secret".
+    [ "$1" = -n ] && [ "$2" = munich ] || return 1
+    [ "$5" = "liverel-secrets" ] || return 1
+    printf 'dXVpZC1mcm9tLXNlY3JldA=='
+  }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "uuid-from-secret" ] || return 1
+  [ "$INSTALLED_CLIENT_NS" = "munich" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 0 ] || return 1
+}
+
+@test "detect_installed_client: no clientId in values AND no readable Secret -> UNKNOWN, never 'no client'" {
+  _no_clientid_release_ctx
+  # kubectl absent: the id cannot be read from either place. The release still
+  # EXISTS, so this is a client we cannot NAME — the guards must fail closed.
+  has() { [ "$1" = helm ]; }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 1 ] || return 1
+}
+
+@test "detect_installed_client: an EMPTY CLIENT_ID in the Secret is not an id -> UNKNOWN" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() { printf ''; }                 # key present but blank
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 1 ] || return 1
+}
+
+@test "install_client_helm: a client with its id only in the Secret still blocks a DIFFERENT client" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # THE REGRESSION THIS PR WOULD OTHERWISE HAVE SHIPPED: the live client is
+  # 'otherclient', named only in its Secret. The operator installs 'newclient'.
+  # The guard must refuse, exactly as it does when the id is in values.
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.72 1.9.72'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then printf 'storageClass: {}\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() { printf 'b3RoZXJjbGllbnQ='; }        # base64 of "otherclient"
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
   run mock_calls
   [[ "$output" != *"helm upgrade"* ]] || return 1
 }
@@ -2223,7 +2360,7 @@ _engine_fixture() {
       existing-datadir) touch "$HOST_DATA_DIR/mysql/ibdata1" ;;
       explicit)         TB_MYSQL_ENGINE=5.7 ;;
       invalid)          TB_MYSQL_ENGINE=9.0 ;;
-      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n' > "$values_file" ;;
+      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file" ;;  # explicit empty digest = a real sticky 8.4 pin (backend#2638)
     esac
     # `run` would swallow the global anyway (subshell), so assert on both: the
     # captured output must carry no log line, and the global must stay unset in
@@ -2541,11 +2678,27 @@ _arch_gate_ctx() {
   [ "$status" -ne 0 ] || return 1
 }
 
+# AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838). The
+# reader is fed partial views — `helm get values` without `--all`, a dev-mode overlay
+# — where the chart-default 5.7 digest is what actually renders but its line is nowhere
+# on STDIN. Reading a missing digest as `digest: ""` reported a real 8.4 pin, skipped
+# the arch gate, and CrashLooped the amd64-only image on arm64. The digest key must be
+# present-and-empty to count; a digest we never saw fails closed to the 5.7 gate.
+@test "_values_pin_mysql_84: tag 8.4 with NO digest line (partial overlay / helm get values) is NOT 8.4 (fail closed)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"'
+  [ "$status" -ne 0 ] || return 1
+  # The unquoted `helm get values` re-serialization of the same partial view.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    repository: tracebloc/mysql-client\n    tag: 8.4'
+  [ "$status" -ne 0 ] || return 1
+}
+
 @test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {
   # `helm get values` has no request timeout, so a wedged API must degrade to the
   # 5.7 gate — never hang, and never be assumed 8.4 (backend#2146 fail-closed).
   kubectl() { return 1; }                                  # namespace probe fails
-  helm() { printf 'images:\n  mysqlClient:\n    tag: 8.4\n'; }  # would say 8.4 if reached
+  # An explicit empty digest — so this genuinely "would say 8.4 if reached", proving
+  # it is the PROBE that fail-closes, not the reader (an absent digest would too).
+  helm() { printf 'images:\n  mysqlClient:\n    tag: 8.4\n    digest: ""\n'; }
   run _release_pins_mysql_84 rel ns
   [ "$status" -ne 0 ] || return 1                          # not 8.4 -> the 5.7 arch gate runs
 }
@@ -2991,7 +3144,10 @@ _arch_gate_ctx() {
   # MySQL 5.7 will not open an 8.4 datadir.
   values_file="$BATS_TEST_TMPDIR/values.yaml"
   {
-    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n'   # match LEADS
+    # tag "8.4" + an explicit empty digest — exactly what the 8.4 heredoc writes and
+    # what a real sticky file carries. The digest must APPEAR and be empty to count
+    # as an 8.4 pin (backend#2638: an absent digest may be a non-empty chart default).
+    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n    digest: ""\n'   # match LEADS
     # More mysqlClient: blocks so `grep -A 3` keeps producing long after the
     # second grep has already matched and closed the pipe.
     seq 1 60000 | sed 's/^/mysqlClient:\

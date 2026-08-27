@@ -224,3 +224,104 @@ setup() {
   install_tracebloc_cli >/dev/null 2>&1 || true
   [ "$TB_CLI_USABLE_NOW" = "0" ] || return 1
 }
+
+# ── upgrade_cli_only (backend#2253) ─────────────────────────────────────────
+# The CLI-only path for an explicit `tracebloc upgrade` on an otherwise-healthy
+# machine (INSTALL_STATE_REASON=cli-behind-latest): update JUST the CLI and exit
+# 0, with no cluster/Helm work. This is what makes `tracebloc upgrade` finally
+# able to clear the update nag — the healthy fast-path used to update nothing.
+@test "upgrade_cli_only: runs the CLI install step and exits 0" {
+  install_tracebloc_cli() { echo "INSTALL_RAN"; }
+  _cli_version_short() { echo "0.10.8"; }   # deterministic post-install probe
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"INSTALL_RAN"* ]] || return 1
+}
+
+# The ticket's acceptance criterion at the installer seam: after `upgrade` on a
+# healthy machine whose CLI is behind latest, the reported version is latest.
+# Before backend#2253 the healthy fast-path updated nothing, so this could not
+# hold; upgrade_cli_only is the step that makes it true — model the released
+# installer by advancing the version the post-install probe reports to latest.
+@test "upgrade_cli_only: after upgrade the reported CLI version equals latest (backend#2253)" {
+  VERFILE="$BATS_TEST_TMPDIR/ver"; echo "0.10.5" > "$VERFILE"    # behind latest
+  TB_CLI_LATEST="0.10.8"
+  install_tracebloc_cli() { echo "$TB_CLI_LATEST" > "$VERFILE"; }  # installer drops latest
+  _cli_version_short() { cat "$VERFILE"; }                          # reflects the install
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  [ "$(cat "$VERFILE")" = "$TB_CLI_LATEST" ] || return 1
+}
+
+# Bugbot: a FAILED update on THIS path must not exit 0 — that would leave the nag
+# in place while `tracebloc upgrade` looked like it worked. When the CLI is
+# verifiably still behind a known latest, exit non-zero and say so.
+@test "upgrade_cli_only: a failed update (still behind latest) exits non-zero, not a false success" {
+  TB_CLI_LATEST="0.10.8"
+  install_tracebloc_cli() { :; }              # download/install hiccup: nothing changes
+  _cli_version_short() { echo "0.10.5"; }     # still behind latest afterward
+  run upgrade_cli_only
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Couldn't update the tracebloc CLI"* ]] || return 1
+}
+
+# Fail SAFE toward success: when we can't PROVE a failure (latest unknown), the
+# explicit upgrade must not be reported as failed on a false negative.
+@test "upgrade_cli_only: latest unknown -> exits 0 (can't prove a failure)" {
+  unset TB_CLI_LATEST
+  install_tracebloc_cli() { :; }
+  _cli_version_short() { echo "0.10.5"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+}
+
+# Non-fatal by inheritance: install_tracebloc_cli never aborts, and a stale
+# bootstrap without it must not crash this path either (the declare -F guard).
+# Driven under `set -e` for the same reason as the wire_ca_trust guard test below:
+# main() runs this under errexit, and bats `run` disables it — so strip the
+# declare -F guard and this must go 127, not stay green (Bugbot, backend#2679).
+@test "upgrade_cli_only: install step absent (stale bootstrap) still exits 0 under set -e" {
+  unset TB_CLI_LATEST
+  unset -f install_tracebloc_cli 2>/dev/null || true
+  _cli_version_short() { echo ""; }           # nothing to compare -> can't prove failure
+  local status
+  ( set -e; upgrade_cli_only ) >/dev/null 2>&1; status=$?
+  [ "$status" -eq 0 ] || return 1
+}
+
+# backend#2679: this path downloads + cosign-verifies the CLI, then EXITS — before
+# main()'s wire_ca_trust runs. Behind a TLS-inspecting proxy the download/signature
+# check fails x509 on the very machine where a normal install (CA wired first, #583)
+# succeeds. So upgrade_cli_only must wire the corporate CA ITSELF, and BEFORE the
+# download — order is the whole point, so assert it, not merely that both ran.
+@test "upgrade_cli_only: wires CA trust BEFORE the CLI download (backend#2679)" {
+  unset TB_CLI_LATEST                          # can't prove a failure -> exit 0
+  ORDER="$BATS_TEST_TMPDIR/order"; : > "$ORDER"
+  wire_ca_trust()         { echo "wire" >> "$ORDER"; }
+  install_tracebloc_cli() { echo "download" >> "$ORDER"; }
+  _cli_version_short()    { echo "0.10.8"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  # CA trust wired, and wired ahead of the download.
+  [ "$(cat "$ORDER")" = "$(printf 'wire\ndownload')" ] || return 1
+}
+
+# The declare -F guard degrades gracefully: a stale bootstrap without cluster.sh
+# (wire_ca_trust undefined) must not crash the upgrade — it downloads as before.
+#
+# main() runs upgrade_cli_only under `set -e`, so drive it under errexit HERE too.
+# bats `run` turns errexit OFF, which would let an UNGUARDED call to a missing
+# wire_ca_trust be a mere command-not-found the function walks past — the guard
+# could be deleted and this test would still pass while production crashed before
+# the download (Bugbot). An explicit `set -e` subshell exercises the real seam:
+# strip the declare -F guard and this goes 127, not green.
+@test "upgrade_cli_only: no cluster.sh (wire_ca_trust absent) still exits 0 under set -e (backend#2679)" {
+  unset TB_CLI_LATEST
+  unset -f wire_ca_trust 2>/dev/null || true
+  install_tracebloc_cli() { echo "INSTALL_RAN"; }
+  _cli_version_short()    { echo "0.10.8"; }
+  local status output
+  output="$( set -e; upgrade_cli_only )"; status=$?
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"INSTALL_RAN"* ]] || return 1
+}

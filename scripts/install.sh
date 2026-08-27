@@ -69,6 +69,13 @@ _tb_force=0
 [[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && { _tb_bail_ok=0; _tb_force=1; }
+# `tracebloc upgrade` (TB_UPGRADE_CLI=1): the user explicitly asked to bring the
+# CLI to the latest release. Skip the healthy bailout so we reach install-k8s.sh's
+# stop-and-check gate, which — seeing the same flag — updates just the CLI when it
+# is behind latest (backend#2253). NOT a reinstall: leave _tb_force at 0 so this
+# does not force the full flow. A below-floor CLI still forces a full reinstall
+# there via the gate's cli-outdated path, so the floor keeps its stricter meaning.
+[[ "${TB_UPGRADE_CLI:-0}" == "1" ]] && _tb_bail_ok=0
 for _a in "$@"; do
   case "$_a" in
     --force|--reinstall) _tb_bail_ok=0; _tb_force=1 ;;

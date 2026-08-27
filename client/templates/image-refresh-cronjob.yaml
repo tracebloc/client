@@ -738,7 +738,27 @@ spec:
           # NEEDED. image-refresh-rbac.yaml binds this SA to Roles that patch
           # Deployments and DaemonSets — the rollout it exists to trigger.
           automountServiceAccountToken: true
-          restartPolicy: OnFailure
+          # `Never`, NOT `OnFailure` (backend#2620). Kubernetes DELETES the Pod
+          # of an `OnFailure` Job once `backoffLimit` is exhausted, so a
+          # repeatedly-failing CronJob leaves its Jobs behind and **no logs** —
+          # `failedJobsHistoryLimit` retains the Job object and cannot retain a
+          # Pod that no longer exists. The upstream docs say so outright: "your
+          # Pod running the Job will be terminated once the job backoff limit
+          # has been reached. This can make debugging the Job's executable more
+          # difficult. We suggest setting restartPolicy = 'Never'".
+          #
+          # MEASURED, not theoretical. A customer prod edge's auto-upgrade had
+          # been failing hourly for 2.7 days; five `Failed` Jobs were retained
+          # and every one of their Pods was gone, so the reason was
+          # unrecoverable from the cluster and the namespace event window had
+          # rolled past it. `lastSuccessfulTime` was the only surviving
+          # evidence that anything was wrong.
+          #
+          # Under `Never` each attempt is its own Pod (backoffLimit+1 at most),
+          # and they persist with the Job — so the next failure is readable.
+          # That is the whole point: a scheduled job whose failures leave no
+          # evidence is unobservable by construction.
+          restartPolicy: Never
           {{- if include "tracebloc.useImagePullSecrets" . }}
           imagePullSecrets:
             - name: {{ include "tracebloc.registrySecretName" . }}

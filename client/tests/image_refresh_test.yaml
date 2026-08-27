@@ -352,9 +352,15 @@ tests:
       - equal:
           path: spec.jobTemplate.spec.template.spec.serviceAccountName
           value: stg-image-refresh
+      # `Never`, CHANGED FROM `OnFailure` (backend#2620). Kubernetes deletes an
+      # OnFailure Job's Pod once backoffLimit is exhausted, so a failing tick
+      # left retained Jobs and no logs — measured on a customer prod edge that
+      # had been failing hourly for 2.7 days with the reason unrecoverable.
+      # `scripts/tests/cronjob-failures-are-readable.sh` sweeps every rendered
+      # CronJob for the same property, so a third one is covered on arrival.
       - equal:
           path: spec.jobTemplate.spec.template.spec.restartPolicy
-          value: OnFailure
+          value: Never
 
   - it: CronJob env carries release identity and tag to the script
     template: templates/image-refresh-cronjob.yaml
@@ -395,8 +401,19 @@ tests:
         ingestor:
           tag: "latest"
     asserts:
-      - failedTemplate:
-          errorPattern: "must not be valid against schema"
+      # BARE, deliberately. values.schema.json rejects this at CHART LOAD,
+      # before any template renders, so helm-unittest 0.5.2 reports an "errored"
+      # test and no message assertion can match a template render error that
+      # never happened. This assertion therefore proves the configuration IS
+      # REFUSED, not which refusal fired -- and says so instead of pretending
+      # otherwise. Do NOT "strengthen" it with `errorPattern`: that key is
+      # SILENTLY IGNORED by this plugin version (a pattern appearing nowhere in
+      # the output still passes, so any failure satisfies it), which is the
+      # defect backend#2606 removed. scripts/tests/helm-unittest-error-assertions.sh
+      # fails if it reappears. To pin the specific schema text, assert it from
+      # OUTSIDE the plugin (`helm template` + grep stderr), the way
+      # scripts/tests/chart-env-vocabulary.sh already does.
+      - failedTemplate: {}
 
   - it: CronJob pod satisfies PSA restricted (runAsNonRoot, dropped caps, RO root, seccomp)
     template: templates/image-refresh-cronjob.yaml
@@ -499,8 +516,19 @@ tests:
         image:
           tag: "latest"
     asserts:
-      - failedTemplate:
-          errorPattern: "must not be valid against schema"
+      # BARE, deliberately. values.schema.json rejects this at CHART LOAD,
+      # before any template renders, so helm-unittest 0.5.2 reports an "errored"
+      # test and no message assertion can match a template render error that
+      # never happened. This assertion therefore proves the configuration IS
+      # REFUSED, not which refusal fired -- and says so instead of pretending
+      # otherwise. Do NOT "strengthen" it with `errorPattern`: that key is
+      # SILENTLY IGNORED by this plugin version (a pattern appearing nowhere in
+      # the output still passes, so any failure satisfies it), which is the
+      # defect backend#2606 removed. scripts/tests/helm-unittest-error-assertions.sh
+      # fails if it reappears. To pin the specific schema text, assert it from
+      # OUTSIDE the plugin (`helm template` + grep stderr), the way
+      # scripts/tests/chart-env-vocabulary.sh already does.
+      - failedTemplate: {}
 
   - it: cronjob template renders nothing (no crash) when imageRefresh key is entirely absent
     # Regression guard for the --reuse-values upgrade path. Customers

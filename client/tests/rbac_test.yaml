@@ -275,5 +275,13 @@ tests:
       clusterScope: false
       perDatasetPvcs: true
     asserts:
+      # `errorMessage` (EXACT match), never `errorPattern`: helm-unittest 0.5.2
+      # SILENTLY IGNORES errorPattern under failedTemplate — a pattern appearing
+      # nowhere in the output still passes, so the assertion degrades to a bare
+      # `failedTemplate: {}` while reading like a precise one (backend#2606).
+      # The string below is the whole `fail` message from templates/rbac.yaml;
+      # rewording the template without rewording this reddens the test, which is
+      # the point. Guarded against reintroduction by
+      # scripts/tests/helm-unittest-error-assertions.sh.
       - failedTemplate:
-          errorPattern: "perDatasetPvcs requires clusterScope"
+          errorMessage: 'perDatasetPvcs requires clusterScope: PersistentVolumes are cluster-scoped, so the namespaced Role cannot grant the PV provisioning/GC verbs jobs-manager needs — Job spawns would 403 at runtime. Set clusterScope: true (the default) or disable perDatasetPvcs.'

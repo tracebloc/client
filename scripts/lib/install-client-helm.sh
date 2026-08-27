@@ -699,6 +699,42 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
+# _client_id_from_secret — CLIENT_ID out of release $1's chart-managed Secret in
+# namespace $2, or empty. THE SECOND PLACE THE ID CAN LIVE: backend#2571 lets
+# clientId resolve from the Secret instead of release values, and the chart now
+# recommends dropping it from values once it is there — so "no clientId in
+# values" stopped meaning "not a client" and detect_installed_client has to look
+# here before it may conclude anything.
+# CONTRACT: echoes the id or nothing, and ALWAYS returns 0. Callers assign it
+# inside `$( )`; a non-zero rc there would abort the installer under `set -e`
+# (the same trap _extract_yaml_value documents above), and "couldn't read it" is
+# a state the caller handles, not an error it should die on.
+_client_id_from_secret() {
+  local rel="$1" ns="$2" b64 out=""
+  # kubectl is not guaranteed this early (the pre-provision pre-flight runs
+  # before the cluster exists), and its absence is "couldn't read", not "absent".
+  has kubectl || return 0
+  # BOUNDED, because this call is now on the COMMON path (Bugbot, #859). Once
+  # clientId is dropped from release values — which this chart recommends — every
+  # scanned release reaches here, so an unbounded read against a wedged API would
+  # hang a headless install or assess with no further output. kubectl's default
+  # is no timeout at all; 5s matches the other existence probes in this repo
+  # (install-k8s.ps1's namespace/daemonset/allocatable reads). A timeout exits
+  # non-zero and is handled by the same `|| return 0` as any other unreadable
+  # Secret: "couldn't read it" is a state the caller already knows how to treat,
+  # and the caller's fail-closed path turns it into an unidentifiable client
+  # rather than an absent one.
+  b64="$(kubectl -n "$ns" get secret "${rel}-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>/dev/null)" || return 0
+  [[ -n "$b64" ]] || return 0
+  # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling. Same
+  # both-spellings idiom as scripts/tests/gpu-embed-drift.bats.
+  out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
+    || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
+    || out=""
+  printf '%s' "$out"
+  return 0
+}
+
 # detect_installed_client — report the tracebloc client already installed on this
 # cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
 # (both empty when none is found). Enumerate client-chart releases across ALL
@@ -709,7 +745,10 @@ _extract_yaml_value() {
 # the two can never disagree on "what already runs here". Always returns 0. A
 # missing helm just yields the empty (no-client) result — but a helm/API FAILURE
 # is reported as INSTALLED_CLIENT_UNKNOWN=1 (not "no client"), so guards can fail
-# CLOSED instead of silently overwriting a client they couldn't see.
+# CLOSED instead of silently overwriting a client they couldn't see. The id is
+# read from release values first and from the release Secret second
+# (_client_id_from_secret): since backend#2571 either place is legitimate, and a
+# client-chart release that names an id in NEITHER is UNKNOWN, not absent.
 detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
@@ -739,9 +778,19 @@ detect_installed_client() {
     [[ -z "$_rel" ]] && continue
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
       _id="$(_extract_yaml_value "$_gvf" clientId)"
+      # VALUES READABLE BUT NO clientId IS NO LONGER "not a client" (backend#2571,
+      # Bugbot #859). clientId stopped being `required` and the chart now tells
+      # operators to drop it from release values once the Secret carries it — so
+      # under the new contract a perfectly live client legitimately has no
+      # clientId in its values, and reading that as "not a match" let the
+      # one-client guard wave through an install that re-points the machine.
+      # Fall back to where the id now lives.
+      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
-      # Values readable but no clientId -> parsed fine, just not a match; keep
-      # scanning (mirrors the PowerShell peer's null-clientId `continue`).
+      # A client-chart release with no id in EITHER place is a client we cannot
+      # NAME, not an absent one. Record it and keep scanning; if nothing else
+      # names one, the fail-closed check below reports UNKNOWN.
+      _unreadable=1
     else
       # Couldn't read THIS client release's values -> an UNIDENTIFIABLE client.
       # Record it and keep scanning (a later release may give a definitive id);
@@ -1069,19 +1118,26 @@ _recover_pending_helm_release() {
 }
 
 # _gpu_request_value — the GPU resource a spawned training pod should request,
-# keyed to the DETECTED vendor (backend#2033). Each vendor advertises its card as
-# a different Kubernetes resource, so the request key must match: nvidia.com/gpu
-# for nvidia, amd.com/gpu for amd, empty (→ CPU) otherwise. Single source of truth
-# so the values-write path (install_client_helm) and the adopt/reconcile path
+# keyed to the vendor (backend#2033). Each vendor advertises its card as a different
+# Kubernetes resource, so the request key must match: nvidia.com/gpu for nvidia,
+# amd.com/gpu for amd, empty (→ CPU) otherwise. Single source of truth so the
+# values-write path (install_client_helm) and the adopt/reconcile path
 # (_reconcile_adopted_client) can never disagree — the reconcile path reused the
 # release's stored values and kept an AMD edge on an empty request, training on
 # CPU while the node's GPU read "verified".
+#
+# NVIDIA is additionally gated on the GPU being WIRED into the cluster (client#835,
+# _gpu_wired): requesting nvidia.com/gpu on a node that advertises 0 GPUs strands
+# every job Pending, so a detected-but-not-wired NVIDIA host requests nothing (CPU).
+# AMD has no k3d wiring step (it uses the device plugin only), so it stays keyed on
+# detection.
 _gpu_request_value() {
   case "${GPU_VENDOR:-}" in
-    nvidia) printf 'nvidia.com/gpu=1' ;;
+    nvidia) if _gpu_wired; then printf 'nvidia.com/gpu=1'; fi ;;
     amd)    printf 'amd.com/gpu=1' ;;
     *)      printf '' ;;
   esac
+  return 0
 }
 
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
@@ -1161,18 +1217,35 @@ _reconcile_adopted_client() {
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
-  # backend#2033: reconcile reuses the release's stored values, so a GPU edge
-  # installed before per-vendor GPU wiring (or one whose GPU vendor changed) keeps
-  # its stale GPU request and trains on the wrong resource — an AMD host kept the
-  # empty request written before this fix and ran on CPU while its node's GPU read
-  # "verified". Force the request to THIS run's per-vendor decision, the same value
-  # the values-write path writes and exactly as the PowerShell twin --set-strings
-  # these keys on adopt. --set-string: the value carries '=' and '/', so helm must
-  # not type-infer it or read the dots as key navigation, and it overrides the
-  # reused value. Empty on a CPU host deliberately clears any stale request
+  # GPU keys are NOT --reuse-values-safe (backend#2033 + client#835). --reuse-values
+  # carries forward a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME
+  # and its gpu.devicePlugin block, so an adopted release keeps a STALE GPU decision:
+  # a vendor-changed edge trains on the wrong resource, and an NVIDIA edge dropped to
+  # CPU (reuse guard / CDI setup cleared K3D_GPU_FLAGS) keeps requesting a GPU and
+  # strands jobs Pending while the summary says CPU. FORCE the GPU keys to THIS run's
+  # decision — the SAME values the fresh write chooses (_gpu_request_value +
+  # runtime_class) — mirroring the Windows twin's adopt-path --set-string. --set-string
+  # so helm doesn't type-infer the value's '='/'/' or read dots as key navigation, and
+  # it overrides the reused value; empty deliberately clears a stale request
   # (client-runtime#80: an explicit "" means "no GPU here").
-  local _gpu_val; _gpu_val="$(_gpu_request_value)"
-  _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val" --set-string "env.GPU_LIMITS=$_gpu_val")
+  local _gpu_val _rtc=""
+  _gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then _rtc="nvidia"; fi
+  _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val"
+          --set-string "env.GPU_LIMITS=$_gpu_val"
+          --set-string "env.RUNTIME_CLASS_NAME=$_rtc")
+  # Reconcile the device-plugin block too, matching the fresh write, so a stale one
+  # can't linger: nvidia only when wired (needs the baked RuntimeClass), amd on
+  # detection, else disabled.
+  if _gpu_wired; then
+    _args+=(--set "gpu.devicePlugin.enabled=true"
+            --set "gpu.devicePlugin.vendor=nvidia"
+            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=nvidia")
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
+  else
+    _args+=(--set "gpu.devicePlugin.enabled=false")
+  fi
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
@@ -1429,29 +1502,47 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # repository@<digest> when a digest is set and ignores the tag entirely, and the
 # default pin is the amd64-only 5.7 image. So `tag: "8.4"` with a NON-empty digest
 # actually runs whatever that (opaque sha256) digest is — which we cannot decode —
-# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is empty/absent (the
-# documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
-# heredoc writes it). A set digest is treated as "not provably 8.4" so the 5.7 arch
+# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is AFFIRMATIVELY empty:
+# the documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
+# heredoc writes it. A set digest is treated as "not provably 8.4" so the 5.7 arch
 # gate runs — fail closed, refuse rather than CrashLoop.
+#
+# AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838).
+# This reader is fed PARTIAL views: `_release_pins_mysql_84` reads `helm get values`
+# WITHOUT `--all`, which omits chart defaults, and a dev-mode overlay can carry only
+# `mysqlClient.tag`. In both, the chart-default `digest` (the amd64-only 5.7 pin) is
+# still what renders — `tracebloc.image` makes it win over the tag — yet the digest
+# line is nowhere on STDIN. Treating that missing line as `digest: ""` reported a
+# real 8.4 pin, skipped the 5.7 arch gate, and CrashLooped the amd64-only image on
+# arm64. So we require the digest key to actually APPEAR and be empty (`sawdigest`);
+# a digest we never saw is "not provably cleared" → not 8.4 → the 5.7 gate runs.
+# (We deliberately do NOT switch the caller to `helm get values --all`: coalescing
+# can re-default an operator's explicit `digest: ""` back to the chart's 5.7 pin,
+# which would false-REFUSE a genuine 8.4 reconcile. Reading only supplied values and
+# demanding an explicit empty digest is the fail-closed direction that costs nothing
+# real — our heredoc always writes the explicit `digest: ""`.)
 #
 # Reads to EOF and decides in END — it never exits on first match, so a producer
 # piping in (helm get values) is never SIGPIPE'd (backend#1778; the trap an early
 # `exit`/`grep -q` would spring).
 _values_pin_mysql_84() {
   awk '
-    function flush() { if (inblk && tag == "8.4" && digest == "") found = 1 }
+    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty. sawdigest guards the
+    # "absent digest is not an empty one" rule (backend#2638): a digest we never saw
+    # on STDIN may still be a non-empty chart default that wins over the tag.
+    function flush() { if (inblk && tag == "8.4" && sawdigest && digest == "") found = 1 }
     /^[[:space:]]*#/ { next }                      # comment line — drops the decoy
     /^[[:space:]]*$/ { next }                      # blank line
     { match($0, /^[[:space:]]*/); indent = RLENGTH }
     !inblk {
-      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk=1; base=indent; tag=""; digest="" }
+      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk=1; base=indent; tag=""; digest=""; sawdigest=0 }
       next
     }
     {
       if (indent <= base) {                        # dedented out of the block
         flush()                                    # decide this block before leaving it
         inblk = ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/)
-        if (inblk) { base=indent; tag=""; digest="" }
+        if (inblk) { base=indent; tag=""; digest=""; sawdigest=0 }
         next
       }
       if ($0 ~ /^[[:space:]]*tag:[[:space:]]*/) {
@@ -1468,6 +1559,7 @@ _values_pin_mysql_84() {
         gsub(/"/, "", v)
         sub(/[[:space:]]+$/, "", v)
         digest = v
+        sawdigest = 1                              # the key is present (empty or not)
       }
     }
     END { flush(); exit(found ? 0 : 1) }
@@ -1979,21 +2071,25 @@ install_client_helm() {
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
-  # ── GPU limits (backend#2033) ─────────────────────────────────────────────
-  # Request one GPU for training pods on a GPU host so the pod lands on the device
-  # the node advertises. Each supported vendor exposes its card as a DIFFERENT
-  # scheduler resource via the chart-managed device plugin below — NVIDIA as
-  # nvidia.com/gpu, AMD as amd.com/gpu — so the request key must match the vendor
-  # (see _gpu_request_value, shared with the adopt/reconcile path). Wiring nvidia
-  # ONLY (the pre-#2033 bug) left AMD pods with an empty request: they ran CPU-only
-  # even though the amd device plugin was enabled and verify_gpu reported the
-  # node's GPU "available" — a "verified" GPU no job could use.
-  # A request this fixed single-node cluster can't actually satisfy is safe:
-  # SINGLE_NODE below tells jobs-manager to downgrade a Pending GPU pod to CPU
-  # rather than strand it (client-runtime#92).
-  local gpu_val; gpu_val="$(_gpu_request_value)"
+  # ── GPU request + runtime class (backend#2033 + client#835) ───────────────
+  # Request a GPU for training jobs, keyed to the vendor's scheduler resource
+  # (_gpu_request_value → nvidia.com/gpu / amd.com/gpu; empty = CPU). For NVIDIA
+  # that value is gated on the GPU being WIRED into the cluster (inside
+  # _gpu_request_value): requesting nvidia.com/gpu on a node that advertises 0
+  # strands every job Pending (the pre-#835 Linux bug), so gate on what PROVISIONS
+  # the GPU, not bare detection. NVIDIA training pods also run under the `nvidia`
+  # RuntimeClass (baked into the GPU node image) so the node's containerd invokes
+  # the NVIDIA runtime; AMD needs no RuntimeClass. A request this fixed single-node
+  # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
+  # a Pending GPU pod to CPU rather than strand it (client-runtime#92). Mirrors the
+  # Windows twin.
+  local gpu_val runtime_class=""
+  gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then runtime_class="nvidia"; fi
   if [[ -n "$gpu_val" ]]; then
-    log "${GPU_VENDOR} GPU detected — setting GPU_LIMITS and GPU_REQUESTS to ${gpu_val}"
+    log "${GPU_VENDOR} GPU wired — GPU_LIMITS/GPU_REQUESTS=${gpu_val}${runtime_class:+, RUNTIME_CLASS_NAME=${runtime_class}}"
+  elif [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
+    warn "NVIDIA GPU detected but not wired into this cluster — running CPU-only (GPU_LIMITS/GPU_REQUESTS left empty)."
   else
     log "No GPU wired for training jobs — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
@@ -2006,10 +2102,20 @@ install_client_helm() {
   # instead of lingering. CPU-only installs emit nothing → the chart default
   # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
   # above — nvidia.com/gpu or amd.com/gpu (backend#2033).
+  #
+  # NVIDIA (client#835): the plugin must run under the `nvidia` RuntimeClass so it
+  # can init NVML on native Linux — the plugin pod otherwise runs under the default
+  # runtime, sees no GPU, and registers 0. So it is enabled only when the GPU is
+  # actually wired (a stock CPU node has no `nvidia` RuntimeClass, which would leave
+  # the pod unschedulable). AMD is unchanged: its plugin needs no k3d flag or
+  # RuntimeClass, so it stays gated on bare detection.
   local gpu_block=""
-  if [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]]; then
-    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: %s\n' "$GPU_VENDOR")"
-    log "Helm-managed GPU device plugin enabled (vendor=${GPU_VENDOR})"
+  if _gpu_wired; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: nvidia\n    nvidia:\n      runtimeClassName: nvidia\n')"
+    log "Helm-managed GPU device plugin enabled (vendor=nvidia, runtimeClassName=nvidia)"
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: amd\n')"
+    log "Helm-managed GPU device plugin enabled (vendor=amd)"
   fi
 
   # backend#723 A2: pick the MySQL engine for this install (before the heredoc
@@ -2084,7 +2190,9 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   RESOURCE_PROVENANCE: "${training_provenance}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
-  RUNTIME_CLASS_NAME: ""
+  # nvidia when the GPU is wired (client#835): jobs-manager threads it into every
+  # spawned pod so the node's containerd invokes the NVIDIA runtime; "" on CPU.
+  RUNTIME_CLASS_NAME: "$runtime_class"
   # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster
   # that cannot autoscale, so jobs-manager applies the hard CPU-or-GPU rule —
   # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node

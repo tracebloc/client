@@ -227,6 +227,19 @@ main() {
     assess_existing_install
   fi
 
+  # backend#2253: an explicit `tracebloc upgrade` (TB_UPGRADE_CLI) on a machine
+  # healthy on every axis EXCEPT that its CLI is behind latest. The gate classified
+  # cli-behind-latest and RETURNED instead of handing off, so update ONLY the CLI
+  # here — a small, isolated download — then exit, skipping the full reconcile.
+  # Below-floor is cli-outdated (a mandatory full reinstall), which does NOT reach
+  # this branch and falls through to the normal flow below. Guarded like the other
+  # cross-file steps: a stale bootstrap without install-cli.sh falls through and
+  # the full (idempotent) flow updates the CLI anyway.
+  if [[ "${INSTALL_STATE:-}" == "degraded" && "${INSTALL_STATE_REASON:-}" == "cli-behind-latest" ]] \
+     && declare -F upgrade_cli_only >/dev/null 2>&1; then
+    upgrade_cli_only     # updates just the CLI and exits 0
+  fi
+
   print_roadmap
 
   # Trust an explicit corporate CA across every host tool (cosign/helm/git/curl)

@@ -142,6 +142,17 @@ for *what the operator sees and can act on*, not code elegance.
     anchor resolves perfectly and the log is indistinguishable from real coverage. Only a
     surviving mutation reveals it.
 
+- **An assertion key the test runner never reads.** A fourth shape of the above, and the
+  worst to spot: the fixture reaches the code, the mutation is live, the assertion is
+  spelled correctly — and the runner ignores the key. `failedTemplate: {errorPattern: ...}`
+  in a helm-unittest suite is exactly this: helm-unittest 0.5.2 reads only `errorMessage`,
+  so `errorPattern` degrades the assertion to a bare `failedTemplate: {}` while reading in
+  review like a pinned refusal. Measured — a pattern appearing nowhere in the output passed,
+  and `--strict` did not catch it or an invented key either (backend#2606, 7 occurrences here plus 2 already fixed in client#859).
+  `scripts/tests/helm-unittest-error-assertions.sh` now gates it, so flag any *new*
+  assertion key on a plugin/tool whose honoured set was not checked: spelling is not
+  evidence that anything reads it.
+
 - **A surviving mutation treated as a nuisance.** It is a defect in the test, or in the
   mutation — never something to annotate and move past. The converse matters too: a green
   mutation log is evidence only if the run also asserts the mutation *applied*

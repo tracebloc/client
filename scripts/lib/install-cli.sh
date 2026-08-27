@@ -263,3 +263,66 @@ install_tracebloc_cli() {
   rm -f "$installer"
   return 0
 }
+
+# upgrade_cli_only — the CLI-only path for an explicit `tracebloc upgrade` on an
+# otherwise-healthy machine (INSTALL_STATE_REASON=cli-behind-latest, backend#2253).
+#
+# The environment is already healthy BY CONSTRUCTION — that is what cli-behind-
+# latest means — so there is nothing to reconcile: update ONLY the tracebloc CLI
+# (a small, isolated download) and finish. This is the difference between the
+# healthy fast-path's old "already set up — no need to run the installer again"
+# no-op (which left a below-latest CLI nagging forever) and actually doing the one
+# thing the user asked for.
+#
+# It EXITS the installer (0). Unlike _assess_handoff it does NOT mark the run
+# `skipped`: a newer CLI was installed, so this is a real, succeeded install and
+# telemetry (already `started` in main) records it as such on the 0 exit.
+upgrade_cli_only() {
+  info "Your tracebloc environment is healthy — updating just the CLI to the latest release."
+  echo ""
+
+  # backend#2679: this path DOWNLOADS + cosign-verifies the CLI (install_tracebloc_cli
+  # curl_secure's the installer) and then EXITS — before main()'s own wire_ca_trust
+  # (install-k8s.sh) ever runs. Behind a TLS-inspecting proxy that leaves the download
+  # or signature check failing x509 on the exact machine where a normal install
+  # SUCCEEDS, because the full flow wires CA trust before any tool download (#583). So
+  # wire the corporate CA HERE too, before the download — same reason this path already
+  # re-surfaces the hand-off's advisories below (it exits before the step that would
+  # otherwise do it). Idempotent and a no-op when no CA is configured; guarded like
+  # main()'s call so a stale bootstrap without cluster.sh falls through (the download
+  # then behaves exactly as it did before this branch existed).
+  if declare -F wire_ca_trust >/dev/null 2>&1; then
+    wire_ca_trust
+  fi
+
+  # install_tracebloc_cli owns the ✔/✖ line and is non-fatal by contract; it also
+  # prints the vX -> vY update verdict. Guarded like main()'s own call so a stale
+  # bootstrap that didn't fetch this file can't reach an undefined function.
+  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
+    install_tracebloc_cli
+  fi
+
+  # This path exits before _handle_existing_cluster, exactly like the healthy
+  # hand-off — so surface the same advisories the hand-off does, or a
+  # healthy-but-drifted k3s (#547/#565) or an unschedulable-GPU cluster
+  # (client#835) gets no signal on `tracebloc upgrade`. Advisory + guarded.
+  declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
+  declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
+
+  # The CLI update is the ENTIRE point of this path, so — unlike the full flow,
+  # where a CLI hiccup is non-fatal because the client is already connected — a
+  # FAILED update here must NOT report success: it would leave the update nag in
+  # place while `tracebloc upgrade` looked like it worked (Bugbot). When we know
+  # the target (TB_CLI_LATEST) and the CLI is verifiably STILL behind it, exit
+  # non-zero (install_tracebloc_cli has already printed how to retry). Otherwise
+  # — updated, or target/version unreadable so we can't PROVE a failure — exit 0.
+  local latest now
+  latest="${TB_CLI_LATEST:-}"; latest="${latest#v}"
+  now="$(_cli_version_short 2>/dev/null || true)"; now="${now#v}"
+  if [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [[ "$now" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+     && _version_lt "$now" "$latest"; then
+    warn "Couldn't update the tracebloc CLI to ${latest} — still on ${now}. The update reminder will keep showing until it succeeds."
+    exit 1
+  fi
+  exit 0
+}
