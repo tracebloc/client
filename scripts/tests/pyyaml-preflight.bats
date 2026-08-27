@@ -85,7 +85,7 @@ if offenders:
 print(f"  [OK] all {len(guards)} yaml-importing guard(s) preflight PyYAML")
 PY
   echo "$output"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
 }
 
 @test "missing PyYAML yields a named refusal, not a traceback (real guard)" {
@@ -96,10 +96,10 @@ PY
   PYTHONPATH="$noyaml" run bash "${TESTS_DIR}/helm-unittest-error-assertions.sh"
   echo "status=$status"
   echo "$output"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"PyYAML required"* ]]
-  [[ "$output" != *"Traceback"* ]]
-  [[ "$output" != *"ModuleNotFoundError"* ]]
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"PyYAML required"* ]] || return 1
+  [[ "$output" != *"Traceback"* ]] || return 1
+  [[ "$output" != *"ModuleNotFoundError"* ]] || return 1
 }
 
 @test "PyYAML present leaves the guard transparent (real guard)" {
@@ -107,6 +107,6 @@ PY
   run bash "${TESTS_DIR}/helm-unittest-error-assertions.sh"
   echo "status=$status"
   echo "$output"
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"PyYAML required"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"PyYAML required"* ]] || return 1
 }
