@@ -2,6 +2,48 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.71 — the `rotateMysqlRoot` gate, and one new object outside the release namespace
+
+Two things matter when you cross this version from anything below it.
+
+**1. The MySQL root-rotation gate now exists.** `rotateMysqlRoot` /
+`rotateMysqlRootByEnv` were added in `1.9.71`; they are `false` for `dev`, `stg`
+and `prod`, so an upgrade changes nothing on its own. The gate is a
+*precondition* for the rotation runbook
+(`docs/migration-tools/rotate-mysql-root.md`), not the rotation itself.
+
+Below `1.9.71` the key does not exist and `values.schema.json` does not close
+`additionalProperties`, so `--set rotateMysqlRoot=true` on an older chart is
+**accepted, exits 0, and renders nothing**. Enable the gate only once the edge is
+actually on `>= 1.9.71`; the runbook's precondition 1 has the version check.
+
+**2. The Collector's token `Role`/`RoleBinding` render unconditionally, in the
+node-agents namespace.** In `1.9.63` all of
+`templates/telemetry-token-rbac.yaml` sat behind the Collector's own `enabled`
+flag; in `1.9.71` the file carries no `if` at all, so the two objects render on
+every install. With default
+values that namespace is `tracebloc-node-agents` — **not** the release namespace
+— so the identity running the upgrade needs write reach there too. This is the
+same cluster-scope requirement documented in `docs/INSTALL.md`: namespace `admin`
+on the release namespace is not sufficient, and no `--set` flag substitutes for
+it.
+
+Measured, rendering `1.9.63` and `1.9.71` offline with `CLIENT_ENV: prod` and
+otherwise-default values: the object set gains exactly the two objects from
+`templates/telemetry-token-rbac.yaml`, and nothing is removed.
+
+**What this upgrade does not do.** It does not enable per-database service
+identities — `serviceDbAccountsByEnv` is still `dev: true`, `stg: true`,
+`prod: false`. On an edge where that flag resolves false, `requests-proxy`
+renders byte-for-byte identically across these versions apart from the chart
+labels, so its metadata-bootstrap behaviour is unchanged by the upgrade. Flipping
+that flag is a separate, windowed decision with its own ordering constraint —
+read the note on `images.ingestor.prodDigest` in `values.yaml` before you do.
+
+New values keys, all off or empty by default: `bootstrapDbPassword`,
+`bootstrapDbReparent`, `bootstrapDbReparentByEnv`, `mysqlRootPassword`,
+`rotateMysqlRoot`, `rotateMysqlRootByEnv`.
+
 ## Upgrading to 1.9.49 — `RESOURCE_PROVENANCE`: who chose the training envelope
 
 **Nothing to do.** This adds a bookkeeping key. It never changes the training
