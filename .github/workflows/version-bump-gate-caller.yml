@@ -8,8 +8,15 @@ name: Version bump gate
 on:
   pull_request:
     branches: [develop]
-    # labeled/unlabeled so the skip-version-gate override actually re-runs the gate (Bugbot)
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    # labeled/unlabeled so the skip-version-gate override actually re-runs the gate (Bugbot).
+    # `edited` is the ONLY event GitHub fires on a BASE-branch change (a retarget).
+    # This gate hard-fails develop PRs (soft-fail: false) and has no `paths:`, so
+    # without `edited` a PR opened against a non-develop base and retargeted onto
+    # develop never re-runs it -- `synchronize` needs a push and a retarget has
+    # nothing to push. Same base-change rationale fr-gate-caller.yml documents
+    # (backend#1945/.github#237); the required, non-path-filtered gates fixed in
+    # backend#2701 close the identical gap.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
 
 permissions:
   contents: read

@@ -32,6 +32,14 @@ on:
     branches: [main, develop, openshift]
   pull_request:
     branches: [main, develop, openshift]
+    # `edited` so a RETARGET re-evaluates these required checks. The default
+    # types [opened, synchronize, reopened] omit it, so a PR retargeted onto a
+    # gated base from a base these jobs never ran on would leave `Lint` /
+    # `Unit tests` permanently pending -- the same "report on EVERY PR" reason
+    # this workflow is not path-filtered, reached via the base-change event
+    # (backend#2701). Listing types replaces the defaults, so they are spelled
+    # out too.
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 permissions:
