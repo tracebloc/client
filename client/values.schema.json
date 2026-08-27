@@ -2,10 +2,6 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "Tracebloc Helm Chart Values",
   "type": "object",
-  "required": [
-    "clientId",
-    "clientPassword"
-  ],
   "properties": {
     "env": {
       "type": "object",
@@ -1038,19 +1034,17 @@
     },
     "clientId": {
       "type": "string",
-      "minLength": 1,
       "not": {
         "pattern": "^<.*>$"
       },
-      "description": "Client ID for authentication. Must be a real value, not a placeholder like <CLIENT_ID>."
+      "description": "Client ID for authentication. Issued by the backend. May be left empty when the release Secret already carries a CLIENT_ID key -- templates/secrets.yaml resolves values first, then the existing Secret, then fails (backend#2571). `minLength` and the top-level `required` entry were removed for exactly that reason: schema validation runs BEFORE rendering, so either one made the Secret path unreachable. A genuinely missing credential is still refused, by the template, which is the only layer that can see the Secret. Placeholders are still rejected here."
     },
     "clientPassword": {
       "type": "string",
-      "minLength": 1,
       "not": {
         "pattern": "^<.*>$"
       },
-      "description": "Client authentication password. Must be a real value, not a placeholder like <CLIENT_PASSWORD>."
+      "description": "Client authentication password. Issued by the backend. May be left empty when the release Secret already carries a CLIENT_PASSWORD key -- see clientId above for why `minLength` and `required` were removed. Prefer pre-creating the Secret: a value passed here is stored in the Helm release's user-supplied values in cleartext, in every retained revision."
     },
     "autoUpgrade": {
       "type": "object",

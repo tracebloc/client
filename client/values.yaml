@@ -991,10 +991,59 @@ podDisruptionBudget:
   jobsManager:
     create: null
 
-# -- Secrets
-# These MUST be set via --set, a values file, or an external secret manager.
-# The defaults are intentionally empty; deployment fails fast if they are not
-# overridden. Do NOT commit real credentials to version control.
+# -- Platform client credentials. Issued by the backend; the chart never
+# generates them. Resolved in three tiers, like every other credential in
+# templates/secrets.yaml:
+#   1. these values, else
+#   2. the CLIENT_ID / CLIENT_PASSWORD keys already in the release Secret, else
+#   3. a hard failure naming both options.
+#
+# WHY YOU WOULD BOTHER: anything passed as a value is stored by Helm in the
+# release's user-supplied values IN CLEARTEXT, in every retained revision (10 by
+# default), so it outlives any rotation and is readable by anyone with
+# `get secret` in the namespace. Tier 2 exists so the credential need never
+# enter release values at all (backend#2571).
+#
+# SIMPLEST — install once with these set, then drop them from your values on the
+# next upgrade. Tier 2 reads them from the Secret from then on, and the Secret is
+# already Helm-managed, so there is nothing else to do.
+#
+# BEFORE THE FIRST INSTALL, the Secret has to be adopted, not just created. This
+# chart ALWAYS emits `<release>-secrets`, so a plain `kubectl create secret`
+# leaves an object Helm does not own and `helm install` aborts with
+# `invalid ownership metadata` rather than reading it (Bugbot, #859). Helm adopts
+# a pre-existing object that already carries its three ownership fields, so add
+# them in the same breath:
+#
+#   kubectl -n <ns> create secret generic <release>-secrets \
+#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=...
+#   kubectl -n <ns> label secret <release>-secrets \
+#     app.kubernetes.io/managed-by=Helm
+#   kubectl -n <ns> annotate secret <release>-secrets \
+#     meta.helm.sh/release-name=<release> \
+#     meta.helm.sh/release-namespace=<ns>
+#
+# `<release>` and `<ns>` must match the install exactly — Helm compares all
+# three fields and refuses the adoption if any of them disagrees. Both keys must
+# be NON-EMPTY: an empty key reads as absent and falls through to the hard
+# failure, because the chart is the only layer left that can see it (the schema
+# cannot, it runs before render).
+#
+# NOT AVAILABLE UNDER A CLIENT-SIDE RENDERER, and worth knowing before you plan
+# around it. Tier 2 is a `lookup`, which needs a live cluster — so it is inert
+# under `helm template`, `--dry-run`, ArgoCD's default renderer and Flux
+# post-render alike. The chart's other five credentials degrade gracefully there
+# (their tier 3 generates a value); these two cannot, because the backend issues
+# them, so tier 3 is a hard failure and the render simply stops. A GitOps install
+# rendering without cluster access must therefore KEEP these two in its values,
+# and for it the cleartext-in-revisions problem above is not solved. Rendering
+# against a live cluster (server-side apply, or `helm upgrade` from CI) is what
+# makes the value-free path reachable.
+#
+# AVOID `--set clientPassword=...`: that puts the credential in your shell
+# history AND in the `helm` process's argv, where anyone who can run `ps` sees
+# it. A values file, or the Secret above, are both better. And do not commit
+# real credentials to version control.
 clientId: ""
 clientPassword: ""
 
