@@ -1250,10 +1250,23 @@ _check_existing_cluster_gpu() {
 # NVIDIA GPU (the k3s-cuda node image is NVIDIA-only; AMD runs on stock rancher/k3s)
 # its node can't schedule? Warn with the recreate remedy (non-fatal; the client is up).
 # Mirrors the Windows twin's Test-HealthyClusterGpuConsistent. Self-contained + jq-
-# free so it needs no other lib. Bounded; silent no-op when it can't tell (no
-# helm/kubectl, or nothing requests a GPU).
+# free so it needs no other lib. Bounded (macOS-safe via the cluster-info gate
+# below); silent no-op when it can't tell (no helm/kubectl, API unreachable, or
+# nothing requests a GPU).
 _check_healthy_cluster_gpu_consistent() {
   has helm && has kubectl || return 0
+  # macOS bound (backend#2685). helm has NO --request-timeout, and `_bounded` runs the
+  # BARE command on a stock Mac — neither timeout(1) nor gtimeout(1) ships there (both
+  # are GNU coreutils) — so the `helm list`/`helm get values` below are UNBOUNDED and
+  # would hang a healthy re-run against a wedged kube-apiserver. Gate them on a SELF-
+  # bounding kubectl reachability probe (--request-timeout=5s is client-side and
+  # coreutils-free); an unreachable API just means we can't tell, which is already this
+  # guard's silent no-op. Same cluster-info gate diagnose.sh puts in front of its own
+  # unbounded helm calls. (The kubectl get nodes + docker inspect further down both
+  # carry their own bound — --request-timeout=5s, and _bounded matching detect_gpu's
+  # sibling inspect at ~L912 — and are reached only after this probe proves the docker-
+  # hosted API answers, so the daemon is live by the time the inspect runs.)
+  kubectl cluster-info --request-timeout=5s >/dev/null 2>&1 || return 0
   local list rel ns vals found_req=0
   # NAME + NAMESPACE are the first two columns (jq-free, mirrors detect_installed_client).
   # Release name == namespace for a tracebloc install (helm upgrade --install "$TB_NAMESPACE").
