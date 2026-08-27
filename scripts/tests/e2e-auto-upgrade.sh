@@ -267,6 +267,59 @@ netpol_has_external_443 && fail "auto-upgrade after the flip re-opened the exter
   || fail "auto-upgrade re-pinned an edge the operator had opted out with prodPin=false (override lost)"
 echo "   OK: the operator's lockdown and canary opt-out persist across auto-upgrades"
 
+echo "── path 5: client credentials resolve from the existing Secret (backend#2571) ──"
+#  THE ONLY PLACE THIS MECHANISM CAN BE TESTED. secrets.yaml resolves
+#  clientId/clientPassword as: values -> the live Secret via `lookup` -> fail.
+#  `lookup` is INERT under helm-unittest, so the unit suite cannot observe tier 2
+#  at all: deleting the entire tier-2 branch leaves all 30 unit tests green
+#  (measured). Without this path, the central mechanism of #2571 ships unverified.
+#
+#  `--reset-values` discards every user-supplied value, so clientId/clientPassword
+#  are genuinely ABSENT on this upgrade. If they still appear in the Secret
+#  afterwards, the lookup is the only thing that could have supplied them — helm
+#  has nothing left to replay. That is what makes this an assertion about tier 2
+#  rather than about --reuse-values.
+secret_key() {   # $1 = key name -> decoded value from the release Secret
+  kubectl -n "$NS" get secret "${NS}-secrets" -o "jsonpath={.data.$1}" 2>/dev/null | base64 -d
+}
+[ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] \
+  || fail "baseline Secret has no/unexpected CLIENT_ID — cannot meaningfully test tier 2"
+
+helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+  --set storageClass.provisioner=rancher.io/local-path \
+  || fail "upgrade with clientId/clientPassword ABSENT failed — tier 2 (existing-Secret resolution) is broken (backend#2571)"
+
+[ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] \
+  || fail "CLIENT_ID changed or vanished after an upgrade that omitted it — tier 2 must preserve it, not regenerate or drop it"
+[ "$(secret_key CLIENT_PASSWORD)" = "ci-e2e-upgrade" ] \
+  || fail "CLIENT_PASSWORD changed or vanished after an upgrade that omitted it — tier 2 must preserve it"
+echo "   OK: credentials recovered from the live Secret with no values supplied"
+
+#  AN EMPTY KEY MUST READ AS ABSENT, not as resolved (Bugbot, #859). `minLength: 1`
+#  had to leave values.schema.json so lookup could run, so the template is the only
+#  layer left that can refuse a blank credential -- and `hasKey` alone would have
+#  accepted one and shipped it into the pods. Blank the key in the live Secret, then
+#  upgrade with no values: this must FAIL, and it must fail naming clientId.
+kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
+  -p '{"data":{"CLIENT_ID":""}}' >/dev/null \
+  || fail "could not blank CLIENT_ID to test the empty-key path"
+_empty_key_err="$(mktemp)"
+if helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+     --set storageClass.provisioner=rancher.io/local-path >/dev/null 2>"$_empty_key_err"; then
+  fail "an EMPTY CLIENT_ID in the Secret was accepted as resolved -- blank credentials would ship to the pods (#859)"
+fi
+grep -q "clientId is required and could not be resolved" "$_empty_key_err" \
+  || fail "the empty-key upgrade failed for the WRONG reason: $(tr -d '\n' < "$_empty_key_err")"
+rm -f "$_empty_key_err"
+echo "   OK: an empty Secret key reads as absent and is refused, naming clientId"
+
+#  Restore the credential so anything after this point sees a healthy release.
+kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
+  -p "{\"data\":{\"CLIENT_ID\":\"$(printf '%s' ci-e2e-upgrade | base64 | tr -d '\n')\"}}" >/dev/null \
+  || fail "could not restore CLIENT_ID after the empty-key check"
+[ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] || fail "CLIENT_ID not restored after the empty-key check"
+
 echo ""
 echo "E2E PASS: ${PREV} -> ${LOCAL_VERSION} upgrades safe on both flag paths; #102 flip engages and persists;"
-echo "          prod ingestor pin propagates to an installed edge and honours the prodPin opt-out."
+echo "          prod ingestor pin propagates to an installed edge and honours the prodPin opt-out;"
+echo "          client credentials resolve from the existing Secret with no values supplied (#2571)."
