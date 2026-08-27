@@ -40,46 +40,51 @@ setup() {
         TB_UPGRADE_CLI TB_CLI_LATEST
 }
 
-# _advisories_in FUNC FILE — the advisory functions FUNC runs, DERIVED from the
-# `declare -F X >/dev/null 2>&1 && X` guard idiom the early-exit paths use to call
-# them (X named twice on one line). NOT a hardcoded list: a restated advisory pair
-# would let a NEW advisory be added to one early-exit and silently skipped on
-# another — the same class this suite exists to stop, one axis over (Bugbot). The
-# idiom is specific to the advisories: install_tracebloc_cli uses an `if … then`
-# block and _assess_handoff is called bare, so neither is matched.
+# _advisories_in FUNC FILE — the drift/GPU advisory functions FUNC guards, DERIVED
+# from `declare -F <name>` guards on names matching the advisory convention
+# (_check_*). NOT a hardcoded list: a restated pair would let a NEW advisory be
+# added to one early-exit and silently skipped on another — the same class this
+# suite stops, one axis over (Bugbot). Keys on `declare -F <name>` so it catches
+# BOTH guard idioms — the one-liner `declare -F X … && X` AND the block
+# `if declare -F X …; then X; fi` (both spell the guard the same way); the _check_
+# convention is what separates an advisory from other guarded calls
+# (install_tracebloc_cli, which the hand-off legitimately does not run). Comment
+# lines are skipped so a commented-out guard can't pad the set (Bugbot).
 _advisories_in() {
   awk -v want="$1" '
     /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{/  { fn=$0; sub(/\(\).*/,"",fn) }
     /^function[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*/ { fn=$2; sub(/\(\).*/,"",fn) }
-    fn==want && /declare -F [A-Za-z_][A-Za-z0-9_]* .*&& [A-Za-z_]/ {
-      l=$0; sub(/.*declare -F /,"",l); n1=l; sub(/[^A-Za-z0-9_].*/,"",n1)
-      sub(/.*&& /,"",l);              n2=l; sub(/[^A-Za-z0-9_].*/,"",n2)
-      if (n1==n2) print n1
+    fn==want {
+      l=$0
+      if (l ~ /^[[:space:]]*#/) next     # full-line comment
+      sub(/[[:space:]]#.*/,"",l)         # strip trailing inline comment
+      if (l ~ /declare -F _check_[A-Za-z0-9_]/) {
+        sub(/.*declare -F /,"",l); sub(/[^A-Za-z0-9_].*/,"",l); print l
+      }
     }
   ' "$2" | sort -u
 }
 
-# _funcs_with_exit FILE — function names whose body contains an `exit` statement,
+# _funcs_with_exit FILE — function names whose body contains an `exit` COMMAND,
 # i.e. the installer-TERMINATING functions in FILE. These libs are sourced (no
 # top-level code), so an `exit` is always inside the last-opened function.
-# Recognises BOTH `name() {` and `function name {` definition styles, so a new
-# early-exit written the other way can't slip attribution to a prior function.
+# Recognises both `name() {` and `function name {` definitions, and `exit` in ANY
+# position — leading, `… && exit`, `…; exit`, `then exit` — matched as a word so
+# `exitcode`/`_exit` don't false-positive; full-line comments are skipped and
+# trailing inline comments stripped, so prose mentioning exit can't (Bugbot).
 _funcs_with_exit() {
   awk '
+    BEGIN { sq = sprintf("%c", 39) }        # a literal single quote, no escaping games
     /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{/  { fn=$0; sub(/\(\).*/,"",fn) }
     /^function[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*/ { fn=$2; sub(/\(\).*/,"",fn) }
-    /^[[:space:]]*exit([[:space:]]|$)/           { if (fn!="") print fn }
-  ' "$1" | sort -u
-}
-
-# _funcs_calling FILE SYMBOL — function names whose body calls SYMBOL (ignoring
-# comment-only lines). Used to prove each advisory is called from each early-exit
-# decision function. Same dual definition-style recognition as _funcs_with_exit.
-_funcs_calling() {
-  awk -v sym="$2" '
-    /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{/  { fn=$0; sub(/\(\).*/,"",fn) }
-    /^function[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*/ { fn=$2; sub(/\(\).*/,"",fn) }
-    $0 !~ /^[[:space:]]*#/ && index($0, sym)     { if (fn!="") print fn }
+    {
+      l=$0
+      if (l ~ /^[[:space:]]*#/) next        # full-line comment
+      gsub(sq "[^" sq "]*" sq, "", l)       # strip single-quoted spans (e.g. an embedded awk program: awk '"'"'… exit }'"'"')
+      gsub(/"[^"]*"/, "", l)                # strip double-quoted spans
+      sub(/[[:space:]]#.*/,"",l)            # then strip a real trailing comment
+      if (fn!="" && l ~ /(^|[^A-Za-z0-9_])exit([^A-Za-z0-9_]|$)/) print fn
+    }
   ' "$1" | sort -u
 }
 
@@ -173,28 +178,53 @@ _funcs_calling() {
   }
 }
 
-# ── The enumeration itself works: it DETECTS an unguarded early-exit ─────────
-# Proves the guard would fire on the very shape it exists to catch, rather than
-# passing vacuously — a fixture lib with a new exit-bearing function that skips
-# the advisories, which _funcs_with_exit must surface.
-@test "the enumeration catches a new unguarded early-exit (fixture)" {
+# ── The enumeration itself works: it DETECTS unguarded early-exits ───────────
+# Proves the guard fires on the very shapes it exists to catch, rather than
+# passing vacuously. Plants new exit-bearing functions in EVERY exit spelling
+# (leading, `&& exit`, `; exit`, `then exit`) — the compound forms a first-token-
+# only scan would miss (Bugbot) — plus a `#`-commented exit that must NOT count.
+@test "the enumeration catches new unguarded early-exits, in every exit spelling (fixture)" {
   local fix="$BATS_TEST_TMPDIR/newpath.sh"
   cat > "$fix" <<'EOF'
 existing_terminal() {
-  _check_existing_cluster_k8s_version
-  _check_healthy_cluster_gpu_consistent
   exit 0
 }
-sneaky_new_only() {          # a new early-exit that FORGOT the advisories
-  info "doing just one thing"
-  exit 0
+sneaky_and_only() {          # && exit
+  probe && exit 0
+}
+sneaky_semi_only() {         # ; exit
+  probe; exit 1
+}
+sneaky_then_only() {         # then exit
+  if probe; then exit 0; fi
+}
+just_a_comment() {           # mentions exit 0 in prose only — must NOT count
+  info "nothing terminal here"
+}
+awk_string_only() {          # `exit` only inside an embedded awk program — must NOT count
+  probe | awk '$1 == n { print; exit }'
 }
 EOF
   local got; got="$(_funcs_with_exit "$fix")"
-  printf '%s\n' "$got" | grep -qx "sneaky_new_only" || {
-    echo "enumeration missed a new exit-bearing function; saw: [$got]"; return 1; }
-  # And the per-symbol check would flag it: sneaky_new_only calls neither advisory.
-  _funcs_calling "$fix" "_check_healthy_cluster_gpu_consistent" | grep -qx "sneaky_new_only" && {
-    echo "fixture wrongly reports the unguarded fn as calling the advisory"; return 1; }
+  local want
+  for want in existing_terminal sneaky_and_only sneaky_semi_only sneaky_then_only; do
+    printf '%s\n' "$got" | grep -qx "$want" || {
+      echo "enumeration missed exit-bearing fn '$want'; saw: [$got]"; return 1; }
+  done
+  printf '%s\n' "$got" | grep -qx "just_a_comment" && {
+    echo "a prose-only 'exit' mention was wrongly counted as a terminal"; return 1; }
+  printf '%s\n' "$got" | grep -qx "awk_string_only" && {
+    echo "an 'exit' inside a quoted awk program was wrongly counted as a terminal"; return 1; }
+
+  # And the advisory derivation ignores a commented-out guard (no false parity):
+  # a function whose only _check_ guard is commented out derives an EMPTY set.
+  cat > "$fix" <<'EOF'
+commented_guard_only() {
+  # declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
+  exit 0
+}
+EOF
+  [ -z "$(_advisories_in commented_guard_only "$fix")" ] || {
+    echo "a commented-out advisory guard was counted"; return 1; }
   return 0
 }
