@@ -447,3 +447,36 @@ EOF
   [ -f "$SBX/k8s-ran" ] || return 1
   [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=unset" ]] || return 1
 }
+
+# backend#2253: `tracebloc upgrade` sets TB_UPGRADE_CLI=1. Like prepare-host it
+# must skip the healthy bailout so install-k8s.sh's gate can update a CLI that is
+# behind latest — but it is NOT a reinstall, so TB_FORCE_REINSTALL must stay
+# unset (forcing it would drag a healthy box through a full re-provision instead
+# of the small CLI-only download). And the flag itself must reach install-k8s.sh,
+# whose gate keys on it. Records BOTH vars so a regression in either direction is
+# caught. Stamp DEFAULT_REF like a release build (can't pass REF — env REF forces).
+_capture_k8s_env() {
+  cat > "$SERVE/scripts/install-k8s.sh" <<EOF
+#!/usr/bin/env bash
+echo "TB_FORCE_REINSTALL=\${TB_FORCE_REINSTALL:-unset} TB_UPGRADE_CLI=\${TB_UPGRADE_CLI:-unset}" > "$SBX/k8s-ran"
+EOF
+  local newsha; newsha="$(_real_sha "$SERVE/scripts/install-k8s.sh")"
+  awk -v s="$newsha" '$2 == "scripts/install-k8s.sh" { $1 = s } { print }' \
+    "$SERVE_REL/manifest.sha256" > "$SERVE_REL/m.tmp"
+  mv "$SERVE_REL/m.tmp" "$SERVE_REL/manifest.sha256"
+}
+
+@test "TB_UPGRADE_CLI skips the healthy bailout, propagates the flag, and does NOT force a reinstall (backend#2253)" {
+  _capture_k8s_env
+  cat > "$BIN/tracebloc" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "doctor" ] && exit 0    # healthy — the bailout would otherwise fire
+EOF
+  chmod +x "$BIN/tracebloc"
+  sed 's/^DEFAULT_REF=.*/DEFAULT_REF="v9.9.9"/' "$BOOT" > "$SBX/boot.stamped"
+  TB_UPGRADE_CLI=1 PATH="$BIN:$PATH" run bash "$SBX/boot.stamped"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Already set up and healthy"* ]] || return 1   # bailout skipped
+  [ -f "$SBX/k8s-ran" ] || return 1                                # reached install-k8s.sh
+  [[ "$(cat "$SBX/k8s-ran")" == "TB_FORCE_REINSTALL=unset TB_UPGRADE_CLI=1" ]] || return 1
+}
