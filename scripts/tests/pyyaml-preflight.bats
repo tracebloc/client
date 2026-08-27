@@ -39,29 +39,93 @@ _make_noyaml_dir() {
 
 @test "every yaml-importing guard preflights the PyYAML module (class rule, fails closed)" {
   run python3 - "$TESTS_DIR" "$(basename "$BATS_TEST_FILENAME")" <<'PY'
-import os, re, sys
+import ast, os, re, sys
 
 tests_dir, self_name = sys.argv[1], sys.argv[2]
 
-# A line that pulls in the yaml MODULE, in either idiom (reviewer PR#880: the
-# `from yaml import ...` form must count too, or a guard using it would be
-# enumerated as a non-guard and silently skipped):
-#   import yaml / import sys, yaml / import sys, yaml, posixpath   AND   from yaml import X
-import_yaml = re.compile(r'^[ \t]*(?:import\b[^\n]*\byaml\b|from[ \t]+yaml\b)')
-# A shell/bats-level preflight that gates the WHOLE file before any python runs:
-#   require_pymodule yaml / require_yaml_tooling / a one-line `python3 -c 'import yaml'`.
-shell_preflight = re.compile(
-    r"""require_pymodule[ \t]+yaml|require_yaml_tooling|python3[ \t]+-c[ \t]+['"]import yaml""")
-# The python-level idiom, checked STRUCTURALLY, not by substring (reviewer PR#880:
-# a stray "PyYAML required" in a comment must not satisfy the rule). The import
-# must sit inside a `try:` whose `except` names ImportError/ModuleNotFoundError.
-try_open = re.compile(r'^[ \t]*try[ \t]*:')
-except_import = re.compile(r'^[ \t]*except\b[^\n]*\b(?:ImportError|ModuleNotFoundError)\b')
+# A source line that pulls in the yaml MODULE, in either idiom. `from yaml
+# import ...` must count too, or a guard using it would be enumerated as a
+# non-guard and silently skipped (reviewer PR#880).
+IMPORT_YAML = re.compile(r'^[ \t]*(?:import\b[^\n]*\byaml\b|from[ \t]+yaml\b)', re.M)
+# A file-level shell/bats gate that refuses before any python runs. Matched on
+# COMMENT-STRIPPED lines so a mention inside a comment cannot exempt the file
+# (Bugbot PR#880: a whole-file substring fails open).
+SHELL_GATE = re.compile(
+    r"require_pymodule[ \t]+yaml\b|require_yaml_tooling\b|python3[ \t]+-c[ \t]+'import yaml'")
+HEREDOC = re.compile(r"<<-?[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'")
 
-def guarded_by_try(lines, i):
-    up = any(try_open.match(lines[j]) for j in range(max(0, i - 5), i))
-    down = any(except_import.match(lines[j]) for j in range(i + 1, min(len(lines), i + 6)))
-    return up and down
+def has_shell_gate(lines):
+    return any(SHELL_GATE.search(l.split("#", 1)[0]) for l in lines)
+
+def extract_python(lines):
+    # Best-effort: python embedded in quoted heredocs and single-quoted
+    # `python3 -c '...'` strings. Only snippets that import yaml get checked.
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        # Detect openers on the COMMENT-STRIPPED line so a `<<'PY'` or `python3
+        # -c '` that lives inside a comment (several guards quote one in their
+        # header prose) does not open a bogus block (cf. bats-hygiene.bats).
+        code = lines[i].split("#", 1)[0]
+        h = HEREDOC.search(code)
+        if h:
+            delim, body, i = h.group(1), [], i + 1
+            while i < n and lines[i].strip() != delim:
+                body.append(lines[i]); i += 1
+            out.append("\n".join(body)); i += 1; continue
+        c = re.search(r"python3[ \t]+-c[ \t]+'", code)
+        if c:
+            rest = lines[i][c.end():]
+            if "'" in rest:
+                out.append(rest[:rest.index("'")]); i += 1; continue
+            body, i = [rest], i + 1
+            while i < n:
+                if "'" in lines[i]:
+                    body.append(lines[i][:lines[i].index("'")]); i += 1; break
+                body.append(lines[i]); i += 1
+            out.append("\n".join(body)); continue
+        i += 1
+    return out
+
+def _catches_import(handler):
+    t = handler.type
+    if t is None:
+        return True  # bare `except:` catches ImportError too
+    names = ([t.id] if isinstance(t, ast.Name)
+             else [e.id for e in t.elts if isinstance(e, ast.Name)] if isinstance(t, ast.Tuple)
+             else [])
+    return any(nm in ("ImportError", "ModuleNotFoundError") for nm in names)
+
+def _yaml_imports(tree):
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "yaml" for a in node.names):
+            found.add(node)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "yaml":
+            found.add(node)
+    return found
+
+def snippet_ok(src):
+    # True  = no yaml import here, OR every yaml import sits (lexically) inside a
+    #         try whose except names ImportError/ModuleNotFoundError.
+    # False = an unguarded yaml import, or yaml-bearing source we cannot parse
+    #         (fail closed rather than guess).
+    if not IMPORT_YAML.search(src):
+        return True
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return False
+    imports = _yaml_imports(tree)
+    if not imports:
+        return True
+    guarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try) and any(_catches_import(h) for h in node.handlers):
+            for stmt in node.body:
+                for sub in ast.walk(stmt):
+                    if sub in imports:
+                        guarded.add(sub)
+    return imports <= guarded
 
 guards, offenders = [], []
 for name in sorted(os.listdir(tests_dir)):
@@ -70,13 +134,16 @@ for name in sorted(os.listdir(tests_dir)):
     if name == self_name:          # this enforcer is not itself a guard-under-test
         continue
     lines = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read().splitlines()
-    hits = [i for i, l in enumerate(lines) if import_yaml.match(l)]
-    if not hits:
+    yaml_snips = [s for s in extract_python(lines) if IMPORT_YAML.search(s)]
+    raw_import = any(IMPORT_YAML.match(l) for l in lines)
+    if not (raw_import or yaml_snips):     # not a yaml-importing guard
         continue
     guards.append(name)
-    if shell_preflight.search("\n".join(lines)):   # gated once, before python
+    if has_shell_gate(lines):      # refused at the shell level, before python — accept
         continue
-    if all(guarded_by_try(lines, i) for i in hits):  # EVERY import wrapped
+    if not yaml_snips:             # import present in the file but not captured — cannot verify
+        offenders.append(name); continue
+    if all(snippet_ok(s) for s in yaml_snips):
         continue
     offenders.append(name)
 
@@ -85,8 +152,8 @@ if not guards:
              "enumeration is broken and a guard that checks nothing passes. Refusing.")
 
 for o in offenders:
-    print(f"  [FAIL] {o} imports the yaml module but never preflights it — a "
-          f"missing PyYAML would surface as a ModuleNotFoundError traceback")
+    print(f"  [FAIL] {o} imports the yaml module but does not guard it — a missing "
+          f"PyYAML would surface as a ModuleNotFoundError traceback")
 
 if offenders:
     sys.exit(f"\n[ERROR] {len(offenders)} of {len(guards)} yaml-importing guard(s) "
