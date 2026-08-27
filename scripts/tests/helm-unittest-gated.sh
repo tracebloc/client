@@ -99,6 +99,20 @@ if not isinstance(triggers, dict):
     )
     triggers = {}
 
+#: GitHub's TWO path-filter keys, written down once because the guard and its
+#: own error message must not disagree about which ones it looked at.
+#:
+#: `paths` and `paths-ignore` are siblings and they skip a workflow the SAME
+#: way -- a PR that falls outside either filter never gets a check run, so a
+#: required context sits at "Expected - waiting for status to be reported"
+#: forever. The first version of this guard checked only `paths`, so a later
+#: `paths-ignore:` would have reopened the exact trap the guard exists to
+#: close, while the guard stayed green (Bugbot, #872).
+#:
+#: Two entries, not a pattern match on `paths*`: the set is closed and short,
+#: and a prefix rule would also catch a future key that does something else.
+PATH_FILTER_KEYS = ("paths", "paths-ignore")
+
 # ---- (1) the paths trap -------------------------------------------------
 if "pull_request" not in triggers:
     problems.append(
@@ -107,9 +121,13 @@ if "pull_request" not in triggers:
     )
 else:
     pr = triggers["pull_request"] or {}
-    if isinstance(pr, dict) and "paths" in pr:
+    found = (
+        [k for k in PATH_FILTER_KEYS if k in pr] if isinstance(pr, dict) else []
+    )
+    if found:
+        keys = " and ".join(f"`{k}:`" for k in found)
         problems.append(
-            f"{WORKFLOW}: `pull_request` has a `paths:` filter. {CONTEXT!r} is "
+            f"{WORKFLOW}: `pull_request` has a {keys} filter. {CONTEXT!r} is "
             "a required check, and a path-filtered job never reports on a PR "
             "outside those paths — GitHub leaves it at 'Expected - waiting for "
             "status to be reported' and the PR is unmergeable forever "
@@ -118,8 +136,16 @@ else:
         )
 
 # `push` SHOULD keep its filter — pushes are not gated, so scoping is free.
+# EITHER key counts as filtered here, for the same reason it counts as a trap
+# above: a `paths-ignore:` on push scopes the run just as well, and reporting
+# "lost its filter" for a workflow that plainly has one would be a false
+# positive in the one place this guard is meant to be trusted.
 push = triggers.get("push") or {}
-if isinstance(push, dict) and push and "paths" not in push:
+if (
+    isinstance(push, dict)
+    and push
+    and not any(k in push for k in PATH_FILTER_KEYS)
+):
     problems.append(
         f"{WORKFLOW}: `push` lost its `paths:` filter. Not a correctness "
         "problem, but it was deliberate: pushes are not gated by required "
