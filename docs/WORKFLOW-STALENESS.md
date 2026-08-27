@@ -37,7 +37,7 @@ Known limitations:
 
 ## Exit-code contract (deliberately unlike `check-digest-drift.sh`)
 
-`check-workflow-staleness.sh` exits **0** whether or not it finds stale workflows — the alert is the filed issue, not the exit code, because a red watcher would itself become an ignored red. It exits non-zero **only** when the watcher cannot do its job (missing tool, unreadable input, API error). Green = "the watcher ran"; red = "the watcher is broken". `alert-workflow-staleness.sh` exits non-zero if a create fails (e.g. the App lacks `issues:write`) so a broken alerter is loud.
+`check-workflow-staleness.sh` exits **0** whether or not it finds stale workflows — the alert is the filed issue, not the exit code, because a red watcher would itself become an ignored red. It exits non-zero **only** when the watcher cannot do its job (missing tool, unreadable input, API error). Green = "the watcher ran"; red = "the watcher is broken". `alert-workflow-staleness.sh` exits non-zero if a create fails (e.g. the App lacks `issues:write`), and equally if the dedup existence-check cannot *complete* (a `gh search` / `gh issue view` error) — because reading a failed dedup check as "nothing filed yet" files a fresh duplicate on every daily run until search recovers (backend#2702). It fails closed: a check it could not run never green-lights a create.
 
 ## Local / manual use
 
