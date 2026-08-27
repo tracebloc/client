@@ -55,16 +55,21 @@
 #  TRACEBLOC_TASK_REPOS may hold a newline- or space-separated task-repo list to
 #  bypass the registry call (used by the test suite; also an escape hatch on a
 #  host that cannot reach the registry at all).
+#
+#  TRACEBLOC_REGISTRY_URL overrides the repository-list endpoint (a private
+#  mirror of it, or a fixture in the test suite). TRACEBLOC_REGISTRY_NAMESPACE
+#  overrides the namespace the task repos live under.
 
 set -euo pipefail
 
-ENV_TAG="prod"
+ENV_TAG=""          # empty => derive from the render's CLIENT_ENV
+ENV_TAG_EXPLICIT=0  # set when the operator passed --env
 CHART=""
 HELM_ARGS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env)   ENV_TAG="${2:?--env needs a value}"; shift 2 ;;
+    --env)   ENV_TAG="${2:?--env needs a value}"; ENV_TAG_EXPLICIT=1; shift 2 ;;
     --chart) CHART="${2:?--chart needs a value}"; shift 2 ;;
     --)      shift; HELM_ARGS=("$@"); break ;;
     -h|--help) sed -n '2,50p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
@@ -72,10 +77,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$ENV_TAG" in
-  prod|stg|dev) ;;
-  *) echo "list-images: --env must be prod, stg or dev (got '$ENV_TAG')" >&2; exit 2 ;;
-esac
+if [ "$ENV_TAG_EXPLICIT" -eq 1 ]; then
+  case "$ENV_TAG" in
+    prod|stg|dev) ;;
+    *) echo "list-images: --env must be prod, stg or dev (got '$ENV_TAG')" >&2; exit 2 ;;
+  esac
+fi
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [ -n "$CHART" ] || CHART="$ROOT/client"
@@ -154,6 +161,44 @@ ing_digest=$(first_env_value INGESTOR_IMAGE_DIGEST)
 [ -n "$ing_repo" ] || { echo "list-images: INGESTOR_IMAGE_REPOSITORY is absent from the render." >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# The training-image TAG comes from the render, not from a default.
+#
+# Bugbot, High, and correct: the first version defaulted --env to prod and
+# stamped that onto the task images while every other line in the output came
+# from the render. A values file selecting `stg` therefore produced `:prod` task
+# images beside `:stg` control-plane images -- the operator mirrors the wrong
+# training set and the first non-prod experiment ImagePullBackOffs. That is the
+# exact failure this tool exists to prevent, reintroduced by the one value that
+# was not derived (rule 1).
+#
+# CLIENT_ENV is what jobs-manager stamps as the tag, so it is the authority.
+# --env stays as an explicit override for enumerating a DIFFERENT environment
+# than the values describe, but a disagreement is reported rather than silently
+# resolved: a mismatch is far more likely a mistake than an intention.
+# ---------------------------------------------------------------------------
+rendered_env=$(first_env_value CLIENT_ENV)
+
+if [ -z "$ENV_TAG" ]; then
+  if [ -z "$rendered_env" ]; then
+    echo "list-images: CLIENT_ENV is absent from the render, so the training-image tag is UNKNOWN." >&2
+    echo "  Refusing to guess: a wrong tag mirrors the wrong training set, which is the" >&2
+    echo "  failure this tool exists to prevent. Pass --env prod|stg|dev to state it." >&2
+    exit 1
+  fi
+  ENV_TAG="$rendered_env"
+elif [ -n "$rendered_env" ] && [ "$rendered_env" != "$ENV_TAG" ]; then
+  echo "list-images: --env says '$ENV_TAG' but the render's CLIENT_ENV says '$rendered_env'." >&2
+  echo "  Those produce different training images. Drop --env to follow the values" >&2
+  echo "  (the usual case), or fix the values if '$ENV_TAG' is what you meant." >&2
+  exit 2
+fi
+
+case "$ENV_TAG" in
+  prod|stg|dev) ;;
+  *) echo "list-images: resolved environment '$ENV_TAG' is not one of prod|stg|dev." >&2; exit 1 ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 2. The run-time-spawned training images.
 #
 # The task list lives in NEITHER the chart nor this repo -- jobs-manager builds
@@ -177,16 +222,60 @@ if [ -n "${TRACEBLOC_TASK_REPOS:-}" ]; then
   task_repos=$(printf '%s\n' "$TRACEBLOC_TASK_REPOS" | tr ' ' '\n' | sed '/^$/d' | sort -u)
 else
   command -v curl >/dev/null 2>&1 || { echo "list-images: curl is required to enumerate task images (or set TRACEBLOC_TASK_REPOS)" >&2; exit 1; }
-  page="https://hub.docker.com/v2/repositories/${REGISTRY_NAMESPACE}/?page_size=100"
+  # Preflighted rather than discovered mid-loop: an absent interpreter used to be
+  # indistinguishable from "the registry returned no more pages".
+  command -v python3 >/dev/null 2>&1 || { echo "list-images: python3 is required to parse the registry response (or set TRACEBLOC_TASK_REPOS)" >&2; exit 1; }
+  page_n=1
+  # Overridable so the fail-closed path below is TESTABLE, and so a site with a
+  # private mirror of the repository list can point at it. Without a knob here the
+  # refusal could only be reasoned about, never exercised -- and an unexercised
+  # guard is indistinguishable from one that does not work (rule 5). Note that
+  # common.sh prepends the system PATH, so stubbing `curl` is not an option.
+  page="${TRACEBLOC_REGISTRY_URL:-https://hub.docker.com/v2/repositories/${REGISTRY_NAMESPACE}/?page_size=100}"
   while [ -n "$page" ]; do
     body=$(curl_secure -fsS "$page" 2>/dev/null) || {
       echo "list-images: could not read the registry repository list, so the training-image set is UNKNOWN." >&2
       echo "  Refusing to print a list that omits them (backend#2633). Set TRACEBLOC_TASK_REPOS to override." >&2
       exit 1
     }
-    page=$(printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("next") or "")' 2>/dev/null || echo "")
-    names=$(printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(r["name"]) for r in d.get("results",[])]' 2>/dev/null || true)
+    # FAILS CLOSED (rule 3). Bugbot, High, and correct: the first version wrote
+    # `2>/dev/null || echo ""` and `|| true` here, and never preflighted python3.
+    # A missing interpreter, a truncated body, or a later page that failed to
+    # parse all read as "no more names" -- so after ONE successful page the
+    # script printed a PARTIAL training list and exited 0. A partial list is
+    # worse than no list: it looks complete and mirrors the wrong set.
+    #
+    # One interpreter call now emits the next-page URL and the names together,
+    # so a parse failure cannot half-succeed, and its exit status is checked.
+    parsed=$(printf '%s' "$body" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d.get("next") or "")
+for r in d.get("results", []):
+    print(r["name"])
+' 2>/dev/null) || {
+      echo "list-images: could not parse the registry response for page ${page_n}, so the" >&2
+      echo "  training-image set is INCOMPLETE and therefore UNKNOWN. Refusing to print a" >&2
+      echo "  partial list -- that is exactly the failure backend#2633 is about." >&2
+      echo "  Set TRACEBLOC_TASK_REPOS to bypass the registry entirely." >&2
+      # The interpreter's own traceback is suppressed in favour of this: the
+      # first bytes of what actually came back are the useful diagnostic (an
+      # HTML error page, a rate-limit notice, an empty body). Suppressing
+      # STDERR is safe precisely because the EXIT STATUS is checked -- the
+      # original defect was `|| echo ""`, which discarded the status.
+      printf '  first 200 bytes of the response: %s\n' "$(printf '%s' "${body:0:200}")" >&2
+      exit 1
+    }
+    page="${parsed%%$'\n'*}"
+    names="${parsed#*$'\n'}"
+    [ "$names" = "$parsed" ] && names=""   # single-line response: no names at all
     task_repos=$(printf '%s\n%s\n' "$task_repos" "$names" | sed '/^$/d' | grep -E '^client-' | sort -u || true)
+    page_n=$((page_n + 1))
+    if [ "$page_n" -gt 50 ]; then
+      echo "list-images: registry pagination did not terminate after 50 pages. Refusing to" >&2
+      echo "  loop forever or to print whatever was collected so far." >&2
+      exit 1
+    fi
   done
 fi
 

@@ -37,6 +37,15 @@ ok()   { checks=$((checks + 1)); }
 [ -r "$DOC" ]    || { echo "FAIL: $DOC unreadable -- cannot tell, which is a finding (rule 3)" >&2; exit 1; }
 [ -x "$SCRIPT" ] || { echo "FAIL: $SCRIPT missing or not executable" >&2; exit 1; }
 
+# NOTE on the matching style below: every test is `grep ... <<<"$var"`, never
+# a printf piped into a quiet grep. Under `set -euo pipefail` a reader that
+# closes early sends SIGPIPE upstream and the pipeline exits 141, which
+# kills the whole script -- a guard that dies mid-run reports nothing at all
+# rather than reporting a finding. This repo has a dedicated
+# `quality / pipefail early-close` check for the class (backend#2264); it caught
+# six occurrences in the first version of THIS file, having already caught four
+# in list-images.sh.
+
 # ---------------------------------------------------------------------------
 # A. The doc's own enumeration command.
 #
@@ -61,12 +70,12 @@ else
   # matched prose in a comment instead of a declaration (backend#2632).
   doc_code=$(printf '%s\n' "$doc_cmd" | grep -vE '^[[:space:]]*#' || true)
 
-  printf '%s\n' "$doc_code" | grep -q 'list-images\.sh' \
+  grep -q 'list-images\.sh' <<<"$doc_code" \
     || fail "$DOC's enumeration block does not invoke list-images.sh. Whatever it
       does invoke cannot see run-time-spawned images, which is the whole defect."
   ok
 
-  if printf '%s\n' "$doc_code" | grep -qE 'helm template.*\|.*grep'; then
+  if grep -qE 'helm template.*\|.*grep' <<<"$doc_code"; then
     fail "$DOC still enumerates with 'helm template | grep'. That command errors on
       default values, and even with values it reports ZERO of the training images
       and ZERO ingestor -- an operator following it mirrors an incomplete set."
@@ -97,10 +106,17 @@ if ! "$SCRIPT" --env prod >"$OUT" 2>"$ERR"; then
 else
   ok
   # Every header the doc promises must actually appear in the output.
+  # Compared on the STABLE PREFIX -- everything before the first " (" -- because
+  # one header is parameterised by design: the training-image tag comes from the
+  # render's CLIENT_ENV, so the doc cannot name a fixed value without being wrong
+  # for every non-prod install. The prefix still pins the section's identity, so
+  # renaming a section is caught while a differing tag is not a false failure.
   while IFS= read -r h; do
     [ -n "$h" ] || continue
-    grep -qF -- "$h" "$OUT" \
-      || fail "$DOC advertises the section '$h' but $SCRIPT never emits it"
+    prefix="${h%% (*}"
+    grep -qF -- "$prefix" "$OUT" \
+      || fail "$DOC advertises the section '$h' but $SCRIPT never emits anything
+      starting '$prefix'"
     ok
   done <<< "$doc_headers"
 
@@ -111,7 +127,7 @@ else
   # first version of this script did.
   ing=$(awk '/^# --- spawned at run time: ingestor/{f=1;next} f&&/^# ---/{exit} f&&NF{print}' "$OUT")
   [ -n "$ing" ] || fail "$SCRIPT emits an EMPTY ingestor section"
-  printf '%s\n' "$ing" | grep -qE '^[a-z0-9.:_/-]+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]+)$' \
+  grep -qE '^[a-z0-9.:_/-]+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]+)$' <<<"$ing" \
     || fail "the ingestor entry is not a well-formed image reference (prose leaking
       from a rendered comment?): '$ing'"
   ok
@@ -122,9 +138,9 @@ else
   train=$(awk '/^# --- spawned at run time: training images/{f=1;next} f&&NF{print}' "$OUT")
   [ -n "$train" ] || fail "$SCRIPT emits an EMPTY training-images section -- the exact
       under-report backend#2633 is about"
-  printf '%s\n' "$train" | grep -qE '/client-image_classification-cpu:prod$' \
-    || fail "training images are not emitted as <host>/<namespace>/<repo>:<env>: got '$(printf '%s' "$train" | head -1)'"
-  printf '%s\n' "$train" | grep -qE '^[^/]+/[^/]+/client-' \
+  grep -qE '/client-image_classification-cpu:prod$' <<<"$train" \
+    || fail "training images are not emitted as <host>/<namespace>/<repo>:<env>: got '${train%%$'\n'*}'"
+  grep -qE '^[^/]+/[^/]+/client-' <<<"$train" \
     || fail "training image path is missing the registry namespace segment;
       '<host>/client-<task>-<arch>' is not a repository that exists"
   ok
@@ -147,6 +163,46 @@ refuses() {   # $1 = human label; rest = argv/env-prefixed command
   ok
 }
 
+# Both of the refusals below were Bugbot HIGH findings on the first version of
+# list-images.sh, and both were the fail-open shape its own header claimed to
+# avoid -- so they get permanent coverage rather than a fix and a promise.
+BADJSON=$(mktemp -t badbody.XXXXXX); printf 'not json at all\n' >"$BADJSON"
+trap 'rm -f "$OUT" "$ERR" "$BADJSON"' EXIT INT TERM HUP
+
+# A registry page that does not parse must not read as "no more pages". The
+# original discarded the interpreter's exit status with `|| echo ""`, so after
+# one good page it printed a PARTIAL list and exited 0 -- worse than no list,
+# because it looks complete.
+# `env -u TRACEBLOC_TASK_REPOS` is load-bearing: this file exports that variable
+# globally to keep the rest of the checks offline, and with it set the registry
+# branch is never entered at all -- so the refusal under test is unreachable and
+# the script exits 0. The guard caught exactly that in its own setup.
+refuses "unparseable registry response" \
+  env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file://$BADJSON" "$SCRIPT"
+
+# The training tag must come from the render's CLIENT_ENV, not from a default.
+# The original defaulted to prod and stamped that onto the task images while
+# every other line came from the render, so a `stg` values file produced :prod
+# task images beside :stg control-plane images.
+prod_render_env=$(env TRACEBLOC_TASK_REPOS="client-x-cpu" "$SCRIPT" 2>/dev/null \
+                   | sed -n 's/^# --- spawned at run time: training images (tag :\([a-z]*\)).*/\1/p')
+if [ -z "$prod_render_env" ]; then
+  fail "could not read the derived environment out of the output, so the
+      derive-from-CLIENT_ENV behaviour is unverified"
+else
+  ok
+  # Ask for a DIFFERENT environment than the render describes: that must be
+  # refused, not silently resolved one way or the other.
+  other="stg"; [ "$prod_render_env" = "stg" ] && other="dev"
+  refuses "--env disagreeing with the render's CLIENT_ENV" \
+    env TRACEBLOC_TASK_REPOS="client-x-cpu" "$SCRIPT" --env "$other"
+  # Agreeing is fine, and must still work.
+  if ! env TRACEBLOC_TASK_REPOS="client-x-cpu" "$SCRIPT" --env "$prod_render_env" >/dev/null 2>&1; then
+    fail "--env agreeing with the render's CLIENT_ENV ('$prod_render_env') was refused"
+  fi
+  ok
+fi
+
 refuses "unrenderable chart"      "$SCRIPT" --chart "$ROOT/does-not-exist"
 refuses "zero task repositories"  env TRACEBLOC_TASK_REPOS=" " "$SCRIPT"
 refuses "invalid --env"           "$SCRIPT" --env nonsense
@@ -156,8 +212,8 @@ if [ "$fails" -ne 0 ]; then
   exit 1
 fi
 # A guard that ran zero assertions is not a green guard (rule 3).
-if [ "$checks" -lt 8 ]; then
-  echo "mirror-enumeration-complete: only $checks assertion(s) ran; expected 8+.
+if [ "$checks" -lt 12 ]; then
+  echo "mirror-enumeration-complete: only $checks assertion(s) ran; expected 12+.
   A collapsed run must not report success." >&2
   exit 1
 fi
