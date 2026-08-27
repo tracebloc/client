@@ -40,11 +40,24 @@ setup() {
         TB_UPGRADE_CLI TB_CLI_LATEST
 }
 
-# The two advisories, by name — DERIVED, not restated: whatever the healthy
-# hand-off calls before _assess_handoff is what every early-exit owes. Sourcing
-# assess.sh means a rename that misses a call site is caught by the behavioral
-# tests below; this list only names what the enumeration greps for.
-ADVISORIES=(_check_existing_cluster_k8s_version _check_healthy_cluster_gpu_consistent)
+# _advisories_in FUNC FILE — the advisory functions FUNC runs, DERIVED from the
+# `declare -F X >/dev/null 2>&1 && X` guard idiom the early-exit paths use to call
+# them (X named twice on one line). NOT a hardcoded list: a restated advisory pair
+# would let a NEW advisory be added to one early-exit and silently skipped on
+# another — the same class this suite exists to stop, one axis over (Bugbot). The
+# idiom is specific to the advisories: install_tracebloc_cli uses an `if … then`
+# block and _assess_handoff is called bare, so neither is matched.
+_advisories_in() {
+  awk -v want="$1" '
+    /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{/  { fn=$0; sub(/\(\).*/,"",fn) }
+    /^function[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*/ { fn=$2; sub(/\(\).*/,"",fn) }
+    fn==want && /declare -F [A-Za-z_][A-Za-z0-9_]* .*&& [A-Za-z_]/ {
+      l=$0; sub(/.*declare -F /,"",l); n1=l; sub(/[^A-Za-z0-9_].*/,"",n1)
+      sub(/.*&& /,"",l);              n2=l; sub(/[^A-Za-z0-9_].*/,"",n2)
+      if (n1==n2) print n1
+    }
+  ' "$2" | sort -u
+}
 
 # _funcs_with_exit FILE — function names whose body contains an `exit` statement,
 # i.e. the installer-TERMINATING functions in FILE. These libs are sourced (no
@@ -139,17 +152,25 @@ _funcs_calling() {
   }
 }
 
-# Each early-exit DECISION function must call BOTH advisories. Derived per-symbol
-# so dropping either one from either path is caught here (in addition to the
-# behavioral tests) — the static half survives even if someone deletes a test.
-@test "every early-exit decision calls BOTH advisories (source-level)" {
-  local sym
-  for sym in "${ADVISORIES[@]}"; do
-    _funcs_calling "$ASSESS" "$sym" | grep -qx "assess_existing_install" || {
-      echo "$sym is not called in assess_existing_install (healthy hand-off)"; return 1; }
-    _funcs_calling "$INSTALL_CLI" "$sym" | grep -qx "upgrade_cli_only" || {
-      echo "$sym is not called in upgrade_cli_only (cli-behind-latest path)"; return 1; }
-  done
+# The SAME advisory set must run on every early-exit — DERIVED from the healthy
+# hand-off (the reference path) and asserted equal on upgrade_cli_only. This is
+# the advisory-axis class-catcher (Bugbot): dropping an advisory from one path,
+# OR adding a new advisory to one path but not the other, makes the sets diverge
+# and fails here — no hardcoded pair to keep in sync.
+@test "every early-exit runs the SAME derived advisory set (parity)" {
+  local ref other
+  ref="$(_advisories_in assess_existing_install "$ASSESS")"
+  other="$(_advisories_in upgrade_cli_only "$INSTALL_CLI")"
+  # Fail closed: the reference path must actually name advisories, or the
+  # derivation (or the hand-off) changed shape and this guard would pass vacuously.
+  [ -n "$ref" ] || { echo "derived NO advisories from the healthy hand-off — derivation or hand-off changed shape"; return 1; }
+  [ "$ref" = "$other" ] || {
+    echo "advisory sets diverge — a drift/GPU check runs on one early-exit but not the other:"
+    echo "  healthy hand-off : $(echo $ref)"
+    echo "  upgrade_cli_only : $(echo $other)"
+    echo "Add the missing advisory to the other path too (backend#2674, advisory axis)."
+    return 1
+  }
 }
 
 # ── The enumeration itself works: it DETECTS an unguarded early-exit ─────────
