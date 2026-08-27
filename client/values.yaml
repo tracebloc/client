@@ -1481,7 +1481,38 @@ perDatasetPvcs: false
 # behavior, byte-for-byte. Retiring edgeuser is a later step once this is
 # universally on. Needs no per-edge action — the tb_credmgr password is a
 # generated, upgrade-stable Secret value.
-perExperimentDbCreds: false
+# LEFT NULL ON PURPOSE, matching serviceDbAccounts. The helper distinguishes
+# "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
+# `false` here is an OPERATOR OVERRIDE that wins over every fleet default and
+# makes the map below dead. Measured: with `perExperimentDbCreds: false` left in
+# place, `dev` still rendered the gate off.
+perExperimentDbCreds:
+
+# -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#1528).
+#
+# An operator `--set perExperimentDbCreds` still wins; with it unset, the fleet
+# default below applies, resolved through the same CLIENT_ENV normalization as
+# serviceDbAccountsByEnv (so `staging` maps to `stg` and cannot miss its entry).
+#
+# WHY THIS EXISTS. Every other gate in this rollout had a `…ByEnv` map; this one
+# did not, so the flag backend#1528's LAST step is gated on was the one whose
+# fleet posture the chart could not record. A fleet taken to the per-experiment
+# shape held that fact only in its stored release values — and a values-resetting
+# upgrade or a fresh-datadir reinstall drops it, which puts the account mint back
+# on edgeuser: the account the ticket exists to retire, silently restored.
+#
+# `dev: true` records a posture already achieved: dev was fully retired on
+# 2026-08-26 (edgeuser DROPped and verified under a driven experiment). Safe to
+# default on, because `credmgrPassword` generates-and-persists when unset —
+# measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
+# companion secret renders clean.
+#
+# `stg: false` still, deliberately. Staging is at REVOKE, not DROP — the soak is
+# not finished, so its posture is not yet a thing to bake.
+perExperimentDbCredsByEnv:
+  dev: true
+  stg: false
+  prod: false
 
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist

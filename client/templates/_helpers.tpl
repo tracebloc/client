@@ -632,6 +632,36 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end }}
 
 {{/*
+  Whether jobs-manager mints a throwaway MySQL account per experiment
+  (backend#1528 D10) for THIS edge.
+
+  Resolves identically to tracebloc.serviceDbAccounts / bootstrapDbReparent /
+  tracebloc.rotateMysqlRoot -- operator override first, else the
+  per-environment default -- and shares the CLIENT_ENV normalization
+  (backend#1723) so a documented alias like `staging` cannot silently miss its
+  entry.
+
+  WHY IT WAS THE ODD ONE OUT, AND WHY THAT MATTERED. Every other gate in this
+  rollout resolved through a helper with a `…ByEnv` map; this one was read as a
+  bare `.Values.perExperimentDbCreds` in five templates. So the flag that
+  backend#1528's LAST step is gated on was the one flag whose fleet posture the
+  chart could not record. A fleet that had been taken to the per-experiment
+  credential shape held that fact only in its stored release values, where a
+  values-resetting upgrade drops it -- and dropping it puts the account mint
+  back on edgeuser, the account the whole ticket exists to retire.
+*/}}
+{{- define "tracebloc.perExperimentDbCreds" -}}
+{{- $override := (default dict .Values).perExperimentDbCreds -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.perExperimentDbCredsByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether to re-parent the account-minting bootstrap off edgeuser onto MySQL
   root (backend#1528 S3). Resolves identically to tracebloc.serviceDbAccounts —
   operator override first, else the per-environment default — so the fleet's S3
