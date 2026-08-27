@@ -2360,7 +2360,7 @@ _engine_fixture() {
       existing-datadir) touch "$HOST_DATA_DIR/mysql/ibdata1" ;;
       explicit)         TB_MYSQL_ENGINE=5.7 ;;
       invalid)          TB_MYSQL_ENGINE=9.0 ;;
-      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n' > "$values_file" ;;
+      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file" ;;  # explicit empty digest = a real sticky 8.4 pin (backend#2638)
     esac
     # `run` would swallow the global anyway (subshell), so assert on both: the
     # captured output must carry no log line, and the global must stay unset in
@@ -2678,11 +2678,27 @@ _arch_gate_ctx() {
   [ "$status" -ne 0 ] || return 1
 }
 
+# AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838). The
+# reader is fed partial views — `helm get values` without `--all`, a dev-mode overlay
+# — where the chart-default 5.7 digest is what actually renders but its line is nowhere
+# on STDIN. Reading a missing digest as `digest: ""` reported a real 8.4 pin, skipped
+# the arch gate, and CrashLooped the amd64-only image on arm64. The digest key must be
+# present-and-empty to count; a digest we never saw fails closed to the 5.7 gate.
+@test "_values_pin_mysql_84: tag 8.4 with NO digest line (partial overlay / helm get values) is NOT 8.4 (fail closed)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"'
+  [ "$status" -ne 0 ] || return 1
+  # The unquoted `helm get values` re-serialization of the same partial view.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    repository: tracebloc/mysql-client\n    tag: 8.4'
+  [ "$status" -ne 0 ] || return 1
+}
+
 @test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {
   # `helm get values` has no request timeout, so a wedged API must degrade to the
   # 5.7 gate — never hang, and never be assumed 8.4 (backend#2146 fail-closed).
   kubectl() { return 1; }                                  # namespace probe fails
-  helm() { printf 'images:\n  mysqlClient:\n    tag: 8.4\n'; }  # would say 8.4 if reached
+  # An explicit empty digest — so this genuinely "would say 8.4 if reached", proving
+  # it is the PROBE that fail-closes, not the reader (an absent digest would too).
+  helm() { printf 'images:\n  mysqlClient:\n    tag: 8.4\n    digest: ""\n'; }
   run _release_pins_mysql_84 rel ns
   [ "$status" -ne 0 ] || return 1                          # not 8.4 -> the 5.7 arch gate runs
 }
@@ -3128,7 +3144,10 @@ _arch_gate_ctx() {
   # MySQL 5.7 will not open an 8.4 datadir.
   values_file="$BATS_TEST_TMPDIR/values.yaml"
   {
-    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n'   # match LEADS
+    # tag "8.4" + an explicit empty digest — exactly what the 8.4 heredoc writes and
+    # what a real sticky file carries. The digest must APPEAR and be empty to count
+    # as an 8.4 pin (backend#2638: an absent digest may be a non-empty chart default).
+    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n    digest: ""\n'   # match LEADS
     # More mysqlClient: blocks so `grep -A 3` keeps producing long after the
     # second grep has already matched and closed the pipe.
     seq 1 60000 | sed 's/^/mysqlClient:\
