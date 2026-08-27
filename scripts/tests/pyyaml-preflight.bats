@@ -38,33 +38,45 @@ _make_noyaml_dir() {
 }
 
 @test "every yaml-importing guard preflights the PyYAML module (class rule, fails closed)" {
-  run python3 - "$TESTS_DIR" <<'PY'
+  run python3 - "$TESTS_DIR" "$(basename "$BATS_TEST_FILENAME")" <<'PY'
 import os, re, sys
 
-tests_dir = sys.argv[1]
-# Anything that pulls in the yaml module — `import yaml`, `import sys, yaml`,
-# `import sys, yaml, posixpath`, or an inline `python3 -c '... import yaml'`.
-imports_yaml = re.compile(r'\bimport\b[^\n]*\byaml\b')
-# The accepted preflights, one per idiom in this tree:
-#   - python-level: sys.exit("[ERROR] PyYAML required ...") after `except ImportError`
-#   - .bats helper: require_pymodule yaml / require_yaml_tooling
-#   - one-line shell probe: python3 -c 'import yaml'
-preflight_signals = (
-    "PyYAML required",
-    "require_pymodule yaml",
-    "require_yaml_tooling",
-)
-inline_probe = re.compile(r"""python3\s+-c\s+['"]import yaml""")
+tests_dir, self_name = sys.argv[1], sys.argv[2]
+
+# A line that pulls in the yaml MODULE, in either idiom (reviewer PR#880: the
+# `from yaml import ...` form must count too, or a guard using it would be
+# enumerated as a non-guard and silently skipped):
+#   import yaml / import sys, yaml / import sys, yaml, posixpath   AND   from yaml import X
+import_yaml = re.compile(r'^[ \t]*(?:import\b[^\n]*\byaml\b|from[ \t]+yaml\b)')
+# A shell/bats-level preflight that gates the WHOLE file before any python runs:
+#   require_pymodule yaml / require_yaml_tooling / a one-line `python3 -c 'import yaml'`.
+shell_preflight = re.compile(
+    r"""require_pymodule[ \t]+yaml|require_yaml_tooling|python3[ \t]+-c[ \t]+['"]import yaml""")
+# The python-level idiom, checked STRUCTURALLY, not by substring (reviewer PR#880:
+# a stray "PyYAML required" in a comment must not satisfy the rule). The import
+# must sit inside a `try:` whose `except` names ImportError/ModuleNotFoundError.
+try_open = re.compile(r'^[ \t]*try[ \t]*:')
+except_import = re.compile(r'^[ \t]*except\b[^\n]*\b(?:ImportError|ModuleNotFoundError)\b')
+
+def guarded_by_try(lines, i):
+    up = any(try_open.match(lines[j]) for j in range(max(0, i - 5), i))
+    down = any(except_import.match(lines[j]) for j in range(i + 1, min(len(lines), i + 6)))
+    return up and down
 
 guards, offenders = [], []
 for name in sorted(os.listdir(tests_dir)):
     if not (name.endswith(".sh") or name.endswith(".bats")):
         continue
-    text = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read()
-    if not imports_yaml.search(text):
+    if name == self_name:          # this enforcer is not itself a guard-under-test
+        continue
+    lines = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read().splitlines()
+    hits = [i for i, l in enumerate(lines) if import_yaml.match(l)]
+    if not hits:
         continue
     guards.append(name)
-    if any(s in text for s in preflight_signals) or inline_probe.search(text):
+    if shell_preflight.search("\n".join(lines)):   # gated once, before python
+        continue
+    if all(guarded_by_try(lines, i) for i in hits):  # EVERY import wrapped
         continue
     offenders.append(name)
 
@@ -78,9 +90,9 @@ for o in offenders:
 
 if offenders:
     sys.exit(f"\n[ERROR] {len(offenders)} of {len(guards)} yaml-importing guard(s) "
-             "skip the PyYAML preflight (backend#2686). Add the interpreter-then-"
-             "module check the siblings use: import sys; try: import yaml; except "
-             'ImportError: sys.exit("[ERROR] PyYAML required (pip install pyyaml)").')
+             "skip the PyYAML preflight (backend#2686). Wrap the import: import sys; "
+             "try: import yaml; except ImportError: "
+             'sys.exit("[ERROR] PyYAML required (pip install pyyaml)").')
 
 print(f"  [OK] all {len(guards)} yaml-importing guard(s) preflight PyYAML")
 PY
@@ -107,6 +119,8 @@ PY
   run bash "${TESTS_DIR}/helm-unittest-error-assertions.sh"
   echo "status=$status"
   echo "$output"
-  [ "$status" -eq 0 ] || return 1
+  # Assert ONLY that the preflight does not fire when PyYAML is importable — NOT
+  # the guard's full repo-wide verdict, so an unrelated helm-unittest defect in
+  # the tree cannot turn this PyYAML-preflight test red (reviewer PR#880).
   [[ "$output" != *"PyYAML required"* ]] || return 1
 }
