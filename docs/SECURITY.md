@@ -125,7 +125,7 @@ The target model is least-privilege, one identity per job, with `edgeuser` retir
 
 | Identity | Scope | Used by | Status |
 |---|---|---|---|
-| **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped, opt-in `perExperimentDbCreds` (RFC-0003 D10, backend#1181) |
+| **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped (RFC-0003 D10, backend#1181). On for `dev` via `perExperimentDbCredsByEnv`, off for `stg`/`prod` — `stg` deliberately, its REVOKE soak is unfinished (backend#1528) |
 | **`tb_credmgr`** | `CREATE USER` + `SELECT … WITH GRANT OPTION` on `training_test_datasets.*` — mints the per-experiment users, nothing else | jobs-manager | Shipped with `perExperimentDbCreds` |
 | **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager + requests-proxy metadata work | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg` via `serviceDbAccountsByEnv`, off for `prod` (backend#1752) |
 | **`tb_ingest`** | `ALL PRIVILEGES` on `training_test_datasets.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager dataset work + spawned ingestion Jobs | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg` via `serviceDbAccountsByEnv`, off for `prod` (backend#1752) |
