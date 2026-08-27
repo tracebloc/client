@@ -843,6 +843,93 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
+# ── backend#2571: the id can live in the SECRET, not just in release values ──
+# Bugbot #859. clientId stopped being `required` and the chart now RECOMMENDS
+# dropping it from release values once the Secret carries it. Before these, a
+# client installed that way had no clientId in `helm get values`, the scan read
+# it as "not a client", and the one-client guard waved through an install that
+# re-points the machine. detect_installed_client's own scanning loop had no test
+# at all — every other test in this file stubs the function out — so nothing
+# would have caught it.
+#
+# `has kubectl` gates the Secret read, so each case declares whether kubectl
+# exists rather than inheriting the developer's PATH.
+_no_clientid_release_ctx() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.72 1.9.72'
+      return 0
+    fi
+    # Values READ FINE and simply carry no clientId — the #2571 shape. Not the
+    # unreadable-values case above, which is a different branch.
+    if [ "$1" = get ] && [ "$2" = values ]; then printf 'storageClass: {}\n'; return 0; fi
+    return 0
+  }
+}
+
+@test "detect_installed_client: no clientId in values -> reads it from the release Secret (backend#2571)" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() {
+    # jsonpath of .data.CLIENT_ID, base64 of "uuid-from-secret".
+    [ "$1" = -n ] && [ "$2" = munich ] || return 1
+    [ "$5" = "liverel-secrets" ] || return 1
+    printf 'dXVpZC1mcm9tLXNlY3JldA=='
+  }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "uuid-from-secret" ] || return 1
+  [ "$INSTALLED_CLIENT_NS" = "munich" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 0 ] || return 1
+}
+
+@test "detect_installed_client: no clientId in values AND no readable Secret -> UNKNOWN, never 'no client'" {
+  _no_clientid_release_ctx
+  # kubectl absent: the id cannot be read from either place. The release still
+  # EXISTS, so this is a client we cannot NAME — the guards must fail closed.
+  has() { [ "$1" = helm ]; }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 1 ] || return 1
+}
+
+@test "detect_installed_client: an EMPTY CLIENT_ID in the Secret is not an id -> UNKNOWN" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() { printf ''; }                 # key present but blank
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 1 ] || return 1
+}
+
+@test "install_client_helm: a client with its id only in the Secret still blocks a DIFFERENT client" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # THE REGRESSION THIS PR WOULD OTHERWISE HAVE SHIPPED: the live client is
+  # 'otherclient', named only in its Secret. The operator installs 'newclient'.
+  # The guard must refuse, exactly as it does when the id is in values.
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.72 1.9.72'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then printf 'storageClass: {}\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() { printf 'b3RoZXJjbGllbnQ='; }        # base64 of "otherclient"
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
 @test "install_client_helm: unreadable client values -> fails CLOSED (refuses, no upgrade)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }

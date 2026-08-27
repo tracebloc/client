@@ -295,6 +295,30 @@ helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
   || fail "CLIENT_PASSWORD changed or vanished after an upgrade that omitted it — tier 2 must preserve it"
 echo "   OK: credentials recovered from the live Secret with no values supplied"
 
+#  AN EMPTY KEY MUST READ AS ABSENT, not as resolved (Bugbot, #859). `minLength: 1`
+#  had to leave values.schema.json so lookup could run, so the template is the only
+#  layer left that can refuse a blank credential -- and `hasKey` alone would have
+#  accepted one and shipped it into the pods. Blank the key in the live Secret, then
+#  upgrade with no values: this must FAIL, and it must fail naming clientId.
+kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
+  -p '{"data":{"CLIENT_ID":""}}' >/dev/null \
+  || fail "could not blank CLIENT_ID to test the empty-key path"
+_empty_key_err="$(mktemp)"
+if helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+     --set storageClass.provisioner=rancher.io/local-path >/dev/null 2>"$_empty_key_err"; then
+  fail "an EMPTY CLIENT_ID in the Secret was accepted as resolved -- blank credentials would ship to the pods (#859)"
+fi
+grep -q "clientId is required and could not be resolved" "$_empty_key_err" \
+  || fail "the empty-key upgrade failed for the WRONG reason: $(tr -d '\n' < "$_empty_key_err")"
+rm -f "$_empty_key_err"
+echo "   OK: an empty Secret key reads as absent and is refused, naming clientId"
+
+#  Restore the credential so anything after this point sees a healthy release.
+kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
+  -p "{\"data\":{\"CLIENT_ID\":\"$(printf '%s' ci-e2e-upgrade | base64 | tr -d '\n')\"}}" >/dev/null \
+  || fail "could not restore CLIENT_ID after the empty-key check"
+[ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] || fail "CLIENT_ID not restored after the empty-key check"
+
 echo ""
 echo "E2E PASS: ${PREV} -> ${LOCAL_VERSION} upgrades safe on both flag paths; #102 flip engages and persists;"
 echo "          prod ingestor pin propagates to an installed edge and honours the prodPin opt-out;"

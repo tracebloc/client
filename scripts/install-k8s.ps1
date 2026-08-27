@@ -5140,6 +5140,23 @@ function Wait-MetricsApiService {
   return $false
 }
 
+# Get-ClientIdFromSecret — CLIENT_ID out of a release's chart-managed Secret, or
+# "". THE SECOND PLACE THE ID CAN LIVE: backend#2571 lets clientId resolve from
+# the Secret instead of release values, and the chart now recommends dropping it
+# from values once it is there — so "no clientId in values" stopped meaning "not
+# a client". Returns "" on any failure; the caller treats a client it cannot name
+# as unidentifiable (fail closed), never as absent. Bash peer:
+# _client_id_from_secret in scripts/lib/install-client-helm.sh.
+function Get-ClientIdFromSecret {
+  param([string]$Release, [string]$Namespace)
+  if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return "" }
+  $b64 = (kubectl -n $Namespace get secret "$Release-secrets" -o "jsonpath={.data.CLIENT_ID}" 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { return "" }
+  $b64 = $b64.Trim()
+  if (-not $b64) { return "" }
+  try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)).Trim() } catch { return "" }
+}
+
 # Enumerate what client (if any) is already installed on this cluster — the
 # shared source for the provisioning pre-flight AND the Helm-step guard, so the
 # two can never drift. Values are read with `-o json`, not YAML: helm
@@ -5184,9 +5201,20 @@ function Get-InstalledClientInfo {
             if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
             continue
           }
-          if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
-          $id = "$($vals.clientId)".Trim()
+          # NO clientId IN VALUES IS NO LONGER "not a client" (backend#2571,
+          # Bugbot #859). clientId stopped being `required` and the chart now
+          # tells operators to drop it from release values once the Secret
+          # carries it, so a live client legitimately has none here. Fall back
+          # to the Secret; a client-chart release naming an id in NEITHER place
+          # is a client we cannot NAME -> unidentifiable, so the guard fails
+          # closed rather than waving through an install that re-points the
+          # machine. Bash parity: detect_installed_client / _client_id_from_secret.
+          $id = ""
+          if ($null -ne $vals -and $null -ne $vals.clientId) { $id = "$($vals.clientId)".Trim() }
+          if (-not $id) { $id = Get-ClientIdFromSecret -Release $rel.name -Namespace $rel.namespace }
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
+          if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
+          continue
         }
       }
     } catch {
