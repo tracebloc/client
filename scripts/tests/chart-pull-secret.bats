@@ -41,6 +41,21 @@ require_tool() {
   skip "$1 not installed (local run)"
 }
 
+# require_tool proves only that the python3 BINARY exists; the render-parsing
+# helpers below also need the PyYAML module, and a missing module would surface
+# as a ModuleNotFoundError traceback rather than the same skip-or-CI-error
+# (Bugbot on client#869 / backend#2686). Preflight the module the same way.
+require_pymodule() {
+  python3 -c "import $1" >/dev/null 2>&1 && return 0
+  if [ "${CI:-}" = "true" ]; then
+    echo "::error::python3 module '$1' ($2) is missing in CI, so these chart-render" >&2
+    echo "::error::assertions would be skipped rather than run. Install it (pip install" >&2
+    echo "::error::$2) in the job instead of accepting a green skip." >&2
+    return 1
+  fi
+  skip "python3 module '$1' ($2) not installed (local run)"
+}
+
 setup() {
   # Set here rather than in setup_file: exports from setup_file do not reach the
   # test body in every bats version, and an empty $CHART makes helm fail with
@@ -49,6 +64,7 @@ setup() {
   VALUES="${CHART}/ci/bm-values.yaml"
   require_tool helm || return 1
   require_tool python3 || return 1
+  require_pymodule yaml PyYAML || return 1
   [ -d "$CHART" ] || {
     echo "chart directory not found at $CHART" >&2
     return 1
