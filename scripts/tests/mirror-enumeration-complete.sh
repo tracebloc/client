@@ -167,7 +167,23 @@ refuses() {   # $1 = human label; rest = argv/env-prefixed command
 # list-images.sh, and both were the fail-open shape its own header claimed to
 # avoid -- so they get permanent coverage rather than a fix and a promise.
 BADJSON=$(mktemp -t badbody.XXXXXX); printf 'not json at all\n' >"$BADJSON"
-trap 'rm -f "$OUT" "$ERR" "$BADJSON"' EXIT INT TERM HUP
+
+# A GOOD page whose `next` points at the bad one. This is the fixture the
+# regression actually needs, and the single-bad-page case below does NOT
+# substitute for it (Bugbot, client#881): with only one unparseable page the
+# script collects zero names, so the LATER zero-repos check produces the same
+# observables `refuses` asserts -- non-zero exit, empty stdout -- and deleting
+# the parser's `exit 1` leaves this suite green.
+#
+# One good page then a bad one is the shape list-images.sh's own comment
+# describes: "after ONE successful page the script printed a PARTIAL training
+# list and exited 0". Here `task_repos` is non-empty when page 2 fails, so the
+# zero-repos check cannot mask the difference -- without the parser's exit
+# status the loop just ends and section 3 prints the partial list at exit 0.
+GOODTHENBAD=$(mktemp -t goodpage.XXXXXX)
+printf '{"next": "file://%s", "results": [{"name": "client-a-cpu"}]}\n' "$BADJSON" >"$GOODTHENBAD"
+
+trap 'rm -f "$OUT" "$ERR" "$BADJSON" "$GOODTHENBAD"' EXIT INT TERM HUP
 
 # A registry page that does not parse must not read as "no more pages". The
 # original discarded the interpreter's exit status with `|| echo ""`, so after
@@ -179,6 +195,11 @@ trap 'rm -f "$OUT" "$ERR" "$BADJSON"' EXIT INT TERM HUP
 # the script exits 0. The guard caught exactly that in its own setup.
 refuses "unparseable registry response" \
   env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file://$BADJSON" "$SCRIPT"
+
+# THE ONE THAT PINS THE PARSER. Mutation-checked: replacing the parser's
+# `exit 1` with `:` leaves the case above passing and reddens only this one.
+refuses "a good page followed by an unparseable one (no partial list, no exit 0)" \
+  env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file://$GOODTHENBAD" "$SCRIPT"
 
 # The training tag must come from the render's CLIENT_ENV, not from a default.
 # The original defaulted to prod and stamped that onto the task images while
