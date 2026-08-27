@@ -57,8 +57,17 @@ BLOCK="$(awk '
   exit 1
 }
 
-RELEASE="$(printf '%s\n' "$BLOCK" | sed -nE 's/.*helm upgrade --install[[:space:]]+("?[^"[:space:]]+"?).*/\1/p' | head -1)"
-NAMESPACE="$(printf '%s\n' "$BLOCK" | sed -nE 's/.*--namespace[[:space:]]+("?[^"[:space:]]+"?).*/\1/p' | head -1)"
+# CAPTURE-THEN-SLICE, not `| head -1`. Piping into `head` under `errexit` +
+# `pipefail` makes the whole assignment inherit `head`'s SIGPIPE kill once it
+# closes early, so a *successful* parse can abort the script — the repo's
+# `pipefail early-close` check flags exactly this. Collect every match, then take
+# the first line with parameter expansion; no pipe, so no early-closing reader.
+# Still fails closed: no match leaves the variable empty and the `-n` guards below
+# turn that into a finding.
+RELEASE_MATCHES="$(sed -nE 's/.*helm upgrade --install[[:space:]]+("?[^"[:space:]]+"?).*/\1/p' <<<"$BLOCK")"
+NAMESPACE_MATCHES="$(sed -nE 's/.*--namespace[[:space:]]+("?[^"[:space:]]+"?).*/\1/p' <<<"$BLOCK")"
+RELEASE="${RELEASE_MATCHES%%$'\n'*}"
+NAMESPACE="${NAMESPACE_MATCHES%%$'\n'*}"
 
 [ -n "$RELEASE" ]   || { echo "[ERROR] could not parse the release-name argument from: $BLOCK" >&2; exit 1; }
 [ -n "$NAMESPACE" ] || { echo "[ERROR] could not parse the --namespace argument from: $BLOCK" >&2; exit 1; }
