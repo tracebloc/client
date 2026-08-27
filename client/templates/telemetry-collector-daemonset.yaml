@@ -58,9 +58,28 @@
 {{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
 {{- if $probe -}}
 {{- $tokenNs := .Values.nodeAgents.namespace.name -}}
-{{- $tokenName := (default (dict) $tc.tokenSecret).name | default "tracebloc-telemetry-token" -}}
-{{- if not (lookup "v1" "Secret" $tokenNs $tokenName) -}}
-{{- fail (printf "telemetryCollector.enabled is true but Secret %q does not exist in namespace %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." $tokenName $tokenNs) -}}
+{{- $tokenName := include "tracebloc.telemetryTokenSecretName" . -}}
+{{- /*
+  ACCEPT THE LEGACY FIXED NAME TOO, while it still exists (backend#2625). jobs-
+  manager writes the release-scoped $tokenName from now on, but an edge already
+  collecting was authenticated under the old fixed name and, at upgrade time, holds
+  ONLY that Secret — the release-scoped one is not written until jobs-manager next
+  re-authenticates. Refusing unless the release-scoped name is already present would
+  wedge exactly that edge: the backend#2400 deadlock in a new costume, aimed at the
+  one edge currently collecting. So the pre-flight passes when EITHER name resolves.
+
+  REMOVAL CONDITION (acceptance c) — delete this $legacyName acceptance, and the
+  tracebloc.telemetryTokenLegacyName helper it reads, together, once no edge still
+  holds a Secret under the legacy name: every collecting edge has upgraded past this
+  change and jobs-manager has written the release-scoped Secret at least once on
+  each, observable as no `tracebloc-telemetry-token` Secret remaining across the
+  fleet's node-agents namespaces. Until then this acceptance is load-bearing, not
+  permanent — removing it early re-creates the wedge above.
+*/}}
+{{- $legacyName := include "tracebloc.telemetryTokenLegacyName" . -}}
+{{- $found := or (lookup "v1" "Secret" $tokenNs $tokenName) (lookup "v1" "Secret" $tokenNs $legacyName) -}}
+{{- if not $found -}}
+{{- fail (printf "telemetryCollector.enabled is true but its token Secret does not exist in namespace %q — looked for %q, and during migration the legacy %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." $tokenNs $tokenName $legacyName) -}}
 {{- end -}}
 {{- end }}
 apiVersion: apps/v1
@@ -190,7 +209,14 @@ spec:
             name: {{ include "tracebloc.telemetryCollectorName" . }}
         - name: token
           secret:
-            secretName: {{ (default (dict) $tc.tokenSecret).name | default "tracebloc-telemetry-token" }}
+            # The release-scoped name jobs-manager writes (backend#2625). Mounting
+            # the WRITER's target — not "whichever name exists at render time" —
+            # matters during migration: on an edge still holding only the legacy
+            # Secret this renders before the release-scoped one exists, but `optional`
+            # below tolerates that, and jobs-manager fills it on its next re-auth.
+            # Freezing this to the legacy name instead would strand the Collector on
+            # a Secret jobs-manager no longer refreshes, stale on the next rotation.
+            secretName: {{ include "tracebloc.telemetryTokenSecretName" . }}
             # OPTIONAL, and this is the difference between "buffers until the token
             # arrives" and "CrashLoopBackOff on every node". jobs-manager writes
             # this Secret; a Collector deployed before it exists must wait, not

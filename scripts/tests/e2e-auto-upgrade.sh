@@ -319,7 +319,21 @@ kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
   || fail "could not restore CLIENT_ID after the empty-key check"
 [ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] || fail "CLIENT_ID not restored after the empty-key check"
 
+# ── acceptance (b): the token rename does not wedge an edge already collecting ──
+#  backend#2625. The published chart wrote the Collector's ingest token under the
+#  fixed `tracebloc-telemetry-token`; this working tree writes a release-scoped name.
+#  An edge already collecting holds ONLY the legacy Secret at upgrade time, so the
+#  daemonset pre-flight has to accept it or it refuses the upgrade — the backend#2400
+#  deadlock in a new costume. That guard is a `lookup`-backed `fail`, invisible to
+#  `helm template` (telemetry_collector_test.yaml says as much), so it can only be
+#  exercised against a live cluster — here. The check is namespace-isolated and reaps
+#  itself, so it rides this cluster without touching the ${NS} release above.
+echo "── acceptance (b): legacy token name still satisfies the Collector pre-flight ──"
+bash "$HERE/telemetry-token-migration.sh" \
+  || fail "the telemetry token pre-flight rejected the legacy Secret name — renaming to a release-scoped token would wedge an edge already collecting (backend#2625)"
+
 echo ""
 echo "E2E PASS: ${PREV} -> ${LOCAL_VERSION} upgrades safe on both flag paths; #102 flip engages and persists;"
 echo "          prod ingestor pin propagates to an installed edge and honours the prodPin opt-out;"
-echo "          client credentials resolve from the existing Secret with no values supplied (#2571)."
+echo "          client credentials resolve from the existing Secret with no values supplied (#2571);"
+echo "          the release-scoped token rename accepts the legacy name mid-migration (#2625)."

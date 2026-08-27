@@ -866,6 +866,63 @@ can be kept above the configured helm timeout.
 {{- end -}}
 
 {{/*
+  tracebloc.telemetryTokenLegacyName — the pre-backend#2625 fixed Secret name.
+
+  It has TWO temporary jobs, and it is the single source for both so they cannot
+  drift apart: it is the sentinel that tracebloc.telemetryTokenSecretName rewrites
+  to a release-scoped name (below), and it is the name the daemonset's pre-flight
+  ALSO accepts while an edge is mid-migration and jobs-manager has not yet written
+  the release-scoped Secret (telemetry-collector-daemonset.yaml).
+
+  REMOVAL CONDITION — this helper AND the daemonset's legacy acceptance are deleted
+  together, once no edge still holds a Secret under this name: every collecting edge
+  has upgraded past the chart that introduced the release-scoped write (backend#2625)
+  AND jobs-manager has re-authenticated at least once on each, populating the
+  release-scoped Secret. That state is observable as the absence of any
+  `tracebloc-telemetry-token` Secret across the fleet's node-agents namespaces
+  (`kubectl get secret -A --field-selector metadata.name=tracebloc-telemetry-token`).
+  Deleting it before then re-wedges exactly the edge acceptance (b) protects — the
+  backend#2400 deadlock in a new costume: the pre-flight would look only for the
+  release-scoped name, find nothing (jobs-manager has not written it yet), and
+  refuse the upgrade on the one edge already collecting.
+*/}}
+{{- define "tracebloc.telemetryTokenLegacyName" -}}
+tracebloc-telemetry-token
+{{- end -}}
+
+{{/*
+  tracebloc.telemetryTokenSecretName — the name of the Secret jobs-manager writes
+  the edge Collector's ingest token into, and that the Collector then mounts and
+  reads (backend#2274). The one resolver behind all four consumers — the writer's
+  env, the reader's guard and volume, and the RBAC resourceName — so they cannot
+  disagree about which Secret they mean (scripts/tests/telemetry-token-agreement.sh).
+
+  RELEASE-SCOPED (backend#2625). The name used to be a fixed
+  `tracebloc-telemetry-token` in the SHARED node-agents namespace, so two releases
+  on one cluster wrote one Secret — last writer wins, and the loser's Collector
+  authenticated as the wrong tenant. Scoping the name to the release makes each
+  edge's Secret distinct, exactly as tracebloc.telemetryCollectorName scopes the
+  DaemonSet that reads it.
+
+  THE LEGACY FIXED NAME IS "MIGRATE ME", not an operator override. Nobody chose
+  `tracebloc-telemetry-token`; it was the chart default, and `helm upgrade
+  --reuse-values` bakes that default into every existing release's stored values —
+  the same replay the daemonset's reuse-values nil-guard is about. So defaulting
+  only an ABSENT name would leave every already-installed edge on the colliding
+  fixed name forever; rewriting the legacy sentinel to the release-scoped name is
+  what actually migrates them. A DIFFERENT explicit name is a real choice, honoured.
+*/}}
+{{- define "tracebloc.telemetryTokenSecretName" -}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- $name := (default (dict) $tc.tokenSecret).name | default "" -}}
+{{- if or (eq $name "") (eq $name (include "tracebloc.telemetryTokenLegacyName" .)) -}}
+{{- printf "%s-telemetry-token" .Release.Name -}}
+{{- else -}}
+{{- $name -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   tracebloc.backendUrl — the tracebloc API base URL for this CLIENT_ENV, with a
   trailing slash.
 

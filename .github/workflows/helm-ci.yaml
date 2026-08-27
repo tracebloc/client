@@ -7,6 +7,8 @@ on:
       - 'client/**'
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
+      # Invoked by e2e-auto-upgrade.sh's live-cluster job (acceptance b, backend#2625).
+      - 'scripts/tests/telemetry-token-migration.sh'
       - 'scripts/tests/e2e-seal-check.sh'
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
@@ -23,6 +25,8 @@ on:
       - 'client/**'
       - 'ingestor/**'
       - 'scripts/tests/e2e-auto-upgrade.sh'
+      # Invoked by e2e-auto-upgrade.sh's live-cluster job (acceptance b, backend#2625).
+      - 'scripts/tests/telemetry-token-migration.sh'
       - 'scripts/tests/e2e-seal-check.sh'
       - 'scripts/tests/e2e-full-seal.sh'
       - 'scripts/tests/lib/e2e-common.sh'
