@@ -120,6 +120,11 @@ e2e_install_prereqs
 echo "── create_cluster() — the installer's real cluster-bring-up path ──"
 create_cluster
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
+# Same race the seal-check harnesses guard (client#863): the published chart
+# installed just below ALSO carries the resource-monitor preflight (client#823),
+# so a fast runner can helm-install before k3s registers the metrics.k8s.io
+# APIService and the preflight false-fails the release. Wait for it here too.
+e2e_wait_for_metrics_apiservice
 
 echo "── install the LAST PUBLISHED chart (what the fleet runs today) ──"
 helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null

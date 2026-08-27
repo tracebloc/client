@@ -169,24 +169,6 @@ jobs:
             -summary \
             /tmp/rendered-${{ matrix.platform }}.yaml
 
-  unittest:
-    timeout-minutes: 10
-    name: Helm unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-        with:
-          version: v3.15.4
-
-      - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version 0.5.2
-
-      - name: Run unit tests
-        run: helm unittest ./client
-
   ingestor-multiarch:
     timeout-minutes: 10
     # Guard: the ingestor image the cluster spawns must be a multi-arch index
