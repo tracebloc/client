@@ -267,8 +267,8 @@ _anchor_largest_schedulable() {
     # Cordoned: skipped BEFORE ranking, so it can never win the anchor.
     # Written `!= ... || continue`, not `== ... && continue`: the latter
     # evaluates to 1 for every SCHEDULABLE node, which under the installer's
-    # `set -euo pipefail` aborts the whole run (the shape scripts/tests/
-    # pipefail-early-close.bats exists to catch).
+    # `set -euo pipefail` aborts the whole run (the shape the shared
+    # `early-close` gate in tracebloc/.github's code-quality.yml catches).
     [[ "$unsched" != "true" ]] || continue
     cpu_m="$(_cpu_to_milli "$cpu")"
     mem_b="$(_mem_to_bytes "$mem")"
