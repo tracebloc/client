@@ -1502,29 +1502,47 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # repository@<digest> when a digest is set and ignores the tag entirely, and the
 # default pin is the amd64-only 5.7 image. So `tag: "8.4"` with a NON-empty digest
 # actually runs whatever that (opaque sha256) digest is — which we cannot decode —
-# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is empty/absent (the
-# documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
-# heredoc writes it). A set digest is treated as "not provably 8.4" so the 5.7 arch
+# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is AFFIRMATIVELY empty:
+# the documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
+# heredoc writes it. A set digest is treated as "not provably 8.4" so the 5.7 arch
 # gate runs — fail closed, refuse rather than CrashLoop.
+#
+# AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838).
+# This reader is fed PARTIAL views: `_release_pins_mysql_84` reads `helm get values`
+# WITHOUT `--all`, which omits chart defaults, and a dev-mode overlay can carry only
+# `mysqlClient.tag`. In both, the chart-default `digest` (the amd64-only 5.7 pin) is
+# still what renders — `tracebloc.image` makes it win over the tag — yet the digest
+# line is nowhere on STDIN. Treating that missing line as `digest: ""` reported a
+# real 8.4 pin, skipped the 5.7 arch gate, and CrashLooped the amd64-only image on
+# arm64. So we require the digest key to actually APPEAR and be empty (`sawdigest`);
+# a digest we never saw is "not provably cleared" → not 8.4 → the 5.7 gate runs.
+# (We deliberately do NOT switch the caller to `helm get values --all`: coalescing
+# can re-default an operator's explicit `digest: ""` back to the chart's 5.7 pin,
+# which would false-REFUSE a genuine 8.4 reconcile. Reading only supplied values and
+# demanding an explicit empty digest is the fail-closed direction that costs nothing
+# real — our heredoc always writes the explicit `digest: ""`.)
 #
 # Reads to EOF and decides in END — it never exits on first match, so a producer
 # piping in (helm get values) is never SIGPIPE'd (backend#1778; the trap an early
 # `exit`/`grep -q` would spring).
 _values_pin_mysql_84() {
   awk '
-    function flush() { if (inblk && tag == "8.4" && digest == "") found = 1 }
+    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty. sawdigest guards the
+    # "absent digest is not an empty one" rule (backend#2638): a digest we never saw
+    # on STDIN may still be a non-empty chart default that wins over the tag.
+    function flush() { if (inblk && tag == "8.4" && sawdigest && digest == "") found = 1 }
     /^[[:space:]]*#/ { next }                      # comment line — drops the decoy
     /^[[:space:]]*$/ { next }                      # blank line
     { match($0, /^[[:space:]]*/); indent = RLENGTH }
     !inblk {
-      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk=1; base=indent; tag=""; digest="" }
+      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk=1; base=indent; tag=""; digest=""; sawdigest=0 }
       next
     }
     {
       if (indent <= base) {                        # dedented out of the block
         flush()                                    # decide this block before leaving it
         inblk = ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/)
-        if (inblk) { base=indent; tag=""; digest="" }
+        if (inblk) { base=indent; tag=""; digest=""; sawdigest=0 }
         next
       }
       if ($0 ~ /^[[:space:]]*tag:[[:space:]]*/) {
@@ -1541,6 +1559,7 @@ _values_pin_mysql_84() {
         gsub(/"/, "", v)
         sub(/[[:space:]]+$/, "", v)
         digest = v
+        sawdigest = 1                              # the key is present (empty or not)
       }
     }
     END { flush(); exit(found ? 0 : 1) }
