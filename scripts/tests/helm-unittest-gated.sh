@@ -9,8 +9,8 @@
 #  advisory, including the ones #2606 had just repaired. backend#1729 rule 2: a
 #  guard in a non-required CI job is advice, not a gate.
 #
-#  Making it required is only half the job. Two ways it silently stops gating
-#  again, and this guard exists for both:
+#  Making it required is only half the job. Three ways it silently stops gating
+#  again, and this guard exists for all three:
 #
 #  1. A `paths:` FILTER ON `pull_request`. A path-filtered job never creates its
 #     check run on a PR outside those paths, so GitHub leaves the required check
@@ -24,6 +24,16 @@
 #     job's `name:` string. Rename the job and protection keeps waiting for a
 #     context nothing produces — the same permanent-pending state as (1). A
 #     near-miss (`Helm unit test`) is indistinguishable from a typo in review.
+#
+#  3. A `pull_request` WITHOUT `edited` IN ITS TYPES. GitHub's default types are
+#     [opened, synchronize, reopened]; a base-branch change (a RETARGET) fires
+#     only `edited`. A PR opened against a base this workflow does not run on,
+#     then retargeted onto develop/main, produces NO check run and lands in the
+#     same "Expected - waiting for status to be reported" limbo as (1) — reached
+#     via the trigger rather than the paths filter (Bugbot, backend#2701). And
+#     because declaring `types:` REPLACES the defaults, a list that drops
+#     opened/synchronize/reopened stops the check running on ordinary PRs, so
+#     this guard requires all four names, not just `edited`.
 #
 #  WHAT THIS GUARD DOES NOT VERIFY, stated plainly rather than implied. It does
 #  NOT read the live branch-protection list, so it cannot prove the context is
@@ -113,6 +123,15 @@ if not isinstance(triggers, dict):
 #: and a prefix rule would also catch a future key that does something else.
 PATH_FILTER_KEYS = ("paths", "paths-ignore")
 
+#: The `pull_request` activity types the required check must fire on. `edited`
+#: is the load-bearing one -- a retarget (base-branch change) fires ONLY
+#: `edited`, and GitHub's defaults omit it (backend#2701). The other three are
+#: the defaults, listed because declaring `types:` REPLACES the default set:
+#: drop `synchronize` and the check stops re-running on new commits; drop
+#: `opened` and it never runs on a fresh PR. A required check must fire on all
+#: four, so the guard requires the full set rather than just `edited`.
+REQUIRED_PR_TYPES = ("opened", "synchronize", "reopened", "edited")
+
 # ---- (1) the paths trap -------------------------------------------------
 if "pull_request" not in triggers:
     problems.append(
@@ -134,6 +153,33 @@ else:
             "(client#651/#657/#660, 2026-08-11). Remove the filter; the suite "
             "is ~4s."
         )
+
+    # ---- (1b) the retarget trap: types must include `edited` -------------
+    # A base-branch change fires only `edited`; the defaults omit it, so a
+    # retarget onto a gated base from a base this workflow never ran on never
+    # produces the check and the PR is stuck (backend#2701). Declaring `types:`
+    # replaces the defaults, so all four names must be present, not just
+    # `edited`.
+    types = pr.get("types") if isinstance(pr, dict) else None
+    if not isinstance(types, list):
+        problems.append(
+            f"{WORKFLOW}: `pull_request` declares no `types:`, so it uses "
+            "GitHub's defaults [opened, synchronize, reopened] — which omit "
+            f"`edited`. A PR RETARGETED onto a gated base fires only `edited`, so "
+            f"{CONTEXT!r} is never produced and the PR sits at 'Expected - "
+            "waiting for status to be reported' forever (backend#2701). Declare "
+            f"types: {list(REQUIRED_PR_TYPES)}."
+        )
+    else:
+        missing = [t for t in REQUIRED_PR_TYPES if t not in types]
+        if missing:
+            problems.append(
+                f"{WORKFLOW}: `pull_request` types {types} is missing {missing}. "
+                "Declaring `types:` REPLACES the defaults, so it must list "
+                "opened/synchronize/reopened (or the check stops running on "
+                "ordinary PRs) AND `edited` (or a retarget onto a gated base "
+                f"never produces {CONTEXT!r}) — backend#2701."
+            )
 
 # `push` SHOULD keep its filter — pushes are not gated, so scoping is free.
 # EITHER key counts as filtered here, for the same reason it counts as a trap
@@ -217,6 +263,7 @@ if problems:
 
 print(
     f"helm-unittest-gated: {CONTEXT!r} is produced by exactly one job, runs "
-    f"{MUST_RUN!r}, and is not path-filtered on pull_request."
+    f"{MUST_RUN!r}, is not path-filtered on pull_request, and fires on retargets "
+    "(pull_request types include `edited`)."
 )
 PY
