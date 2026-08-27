@@ -55,6 +55,11 @@ e2e_install_prereqs
 echo "── create_cluster() — real k3d bring-up (k3s enforces egress NetworkPolicy) ──"
 create_cluster
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
+# Node-Ready is only a proxy: k3s registers the metrics.k8s.io APIService that the
+# resource-monitor preflight looks up AFTER nodes go Ready, so a fast runner can
+# helm-install into the gap and the preflight false-fails the release (client#863).
+# Wait for the real precondition before installing. Contract + rationale in the helper.
+e2e_wait_for_metrics_apiservice
 
 # The probe host — the SINGLE source shared by the enforcement probe and the
 # positive control below. Pin it explicitly on the install (rather than leaning

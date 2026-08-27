@@ -50,6 +50,55 @@ e2e_install_prereqs() {
   install_helm
 }
 
+# ── e2e_wait_for_metrics_apiservice [existence_timeout_s] [available_timeout_s] ─
+# Block until k3s has registered its bundled metrics-server before a helm install
+# that renders the resource-monitor DaemonSet.
+#
+# WHY THIS EXISTS. k3s applies its packaged metrics-server addon — and the
+# v1beta1.metrics.k8s.io APIService the resource-monitor preflight looks up
+# (client#823) — asynchronously, AFTER nodes report Ready. `create_cluster` +
+# `kubectl wait --for=condition=Ready nodes` only proves node readiness, which is
+# merely a PROXY for the addon being reconciled. On a fast runner the helm install
+# can beat that reconcile: the preflight's live `lookup` finds no APIService and
+# `fail`s the WHOLE release with "the metrics.k8s.io/v1beta1 API is not registered"
+# — a harness race, not a chart defect (client#863; #862 false-failed at 26s while
+# #861 passed at 51s, neither touching the chart or these scripts). Disabling the
+# preflight / resourceMonitor would only mask it by deleting the #823 coverage the
+# seal-checks exist to exercise on a REAL cluster, so instead we wait for the real
+# precondition here.
+#
+# WHY POLL FOR EXISTENCE, not just `kubectl wait`. The object itself appears late,
+# not merely its condition, and `kubectl wait` on a not-yet-CREATED named object
+# errors out immediately ("NotFound") rather than waiting for it — so a bare
+# `kubectl wait --for=condition=Available apiservice/...` would just swap one red
+# for another in exactly the window that fails today. Poll for the APIService to
+# exist first (the chart's actual render-time precondition — the preflight only
+# checks presence), then best-effort wait for it to report Available so the
+# resource-monitor pod's own metrics.k8s.io reads work from the first tick. This
+# mirrors the production installer's _wait_for_metrics_apiservice
+# (lib/install-client-helm.sh, client#553), which faces the identical race.
+#
+# Contract: the caller defines fail() (every e2e-*.sh does) and has already
+# installed kubectl + brought up the cluster.
+e2e_wait_for_metrics_apiservice() {
+  local timeout_s="${1:-180}" available_s="${2:-60}"
+  echo "── wait for the metrics.k8s.io APIService to register (the real install precondition) ──"
+  local deadline=$(( SECONDS + timeout_s ))
+  until kubectl get apiservice v1beta1.metrics.k8s.io --request-timeout=10s >/dev/null 2>&1; do
+    (( SECONDS < deadline )) ||
+      fail "metrics.k8s.io APIService never registered within ${timeout_s}s of nodes going Ready — k3s did not reconcile its bundled metrics-server addon. This is a cluster bring-up problem, not a chart defect: the resource-monitor preflight (client#823) does a live lookup for this APIService and would abort the helm install below with 'the metrics.k8s.io/v1beta1 API is not registered'. Failing here with the real reason instead of a buried render error."
+    sleep 3
+  done
+  # Registered. Give metrics-server a moment to also report Available so the
+  # resource-monitor DaemonSet's metrics.k8s.io reads work from its first tick,
+  # but do NOT fail on a merely-slow-to-serve addon — the chart's preflight only
+  # needs the APIService PRESENT at render time (same stance as the installer's
+  # _wait_for_metrics_apiservice).
+  kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io \
+    --timeout="${available_s}s" >/dev/null 2>&1 || true
+  echo "metrics.k8s.io APIService registered — proceeding with helm install."
+}
+
 # ── e2e_egress_positive_control <host> ──────────────────────────────────────
 # Positive control for the egress seal-checks (Saqlain review on #541): before
 # trusting a BLOCKED probe result, prove the cluster can actually REACH the

@@ -75,6 +75,10 @@ e2e_install_prereqs
 echo "── create_cluster() — real k3d bring-up ──"
 create_cluster
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
+# Same race the sibling e2e-seal-check.sh guards: k3s registers the metrics.k8s.io
+# APIService the resource-monitor preflight looks up only AFTER nodes go Ready, so
+# wait for that real precondition before the full-chart install below (client#863).
+e2e_wait_for_metrics_apiservice
 
 # The probe host — pinned on the install so the enforcement probe and the
 # positive control can never target different hosts (same stance as the
