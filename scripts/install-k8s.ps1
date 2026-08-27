@@ -5213,8 +5213,12 @@ function Get-InstalledClientInfo {
           if ($null -ne $vals -and $null -ne $vals.clientId) { $id = "$($vals.clientId)".Trim() }
           if (-not $id) { $id = Get-ClientIdFromSecret -Release $rel.name -Namespace $rel.namespace }
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
+          # No trailing `continue` here. It is the last statement of the loop
+          # body, so it buys nothing -- and PowerShell reported it escaping as an
+          # unmatched loop label under Pester (pester/Pester#2669), which aborts
+          # the run rather than failing one test. The two `continue`s above are
+          # real: they skip the rest of the body.
           if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
-          continue
         }
       }
     } catch {
