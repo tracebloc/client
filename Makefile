@@ -251,7 +251,7 @@ parse:
 	  echo "parse: found ZERO shell scripts under scripts/ -- refusing to report green"; \
 	  rm -f "$$files"; exit 1; \
 	fi; \
-	tr "\n" "\0" < "$$files" | xargs -0 -r -n1 bash -n; \
+	tr "\n" "\0" < "$$files" | xargs -0 -n1 bash -n; \
 	rc=$$?; rm -f "$$files"; \
 	if [ "$$rc" -eq 0 ]; then echo "all $$n shell scripts parse"; fi; \
 	exit $$rc
@@ -286,7 +286,7 @@ shellcheck:
 	if ! $(SH_FILES) > "$$files"; then rm -f "$$files"; exit 1; fi; \
 	n=$$(wc -l < "$$files" | tr -d " "); \
 	echo "shellcheck: $$n file(s), severity=error"; \
-	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=error --exclude=SC1091; \
+	tr "\n" "\0" < "$$files" | xargs -0 shellcheck --severity=error --exclude=SC1091; \
 	rc=$$?; rm -f "$$files"; exit $$rc
 
 # lint-warnings: the advisory `--severity=warning` sweep, over the SAME derived
@@ -310,7 +310,7 @@ lint-warnings:
 	if ! $(SH_FILES) > "$$files"; then rm -f "$$files"; exit 1; fi; \
 	n=$$(wc -l < "$$files" | tr -d " "); \
 	echo "lint-warnings: $$n file(s), severity=warning (advisory)"; \
-	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=warning --exclude=SC1091 || true; \
+	tr "\n" "\0" < "$$files" | xargs -0 shellcheck --severity=warning --exclude=SC1091 || true; \
 	rm -f "$$files"
 
 # drift: the repo's duplicated-declaration guards, and the ONLY declaration of
