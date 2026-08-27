@@ -1418,8 +1418,25 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
-  It "values without a clientId key do not trip the guard" {
+  # THE CONTRACT HERE INVERTED, DELIBERATELY (backend#2571, Bugbot #859), and
+  # this test used to assert the old one. It read: "values without a clientId
+  # key do not trip the guard" -- a readable client release carrying no
+  # `clientId` was NOT a client, so the installer proceeded to upgrade over it.
+  #
+  # That was true only while `clientId` was `required`, which made a clientId-free
+  # client release impossible. This chart drops that requirement and tells
+  # operators to remove clientId from release values once the Secret holds it, so
+  # a live client legitimately has none in values -- and reading it as "not a
+  # client" fails OPEN: the one-client guard waves through an install that
+  # re-points a machine already running someone else's client.
+  #
+  # So a client-chart release naming an id in NEITHER values NOR the Secret is
+  # now a client that cannot be NAMED, and the guard refuses. `kubectl` is absent
+  # (or has no cluster) under Pester, so Get-ClientIdFromSecret returns "" and
+  # this exercises the both-places-empty path specifically.
+  It "fails CLOSED on a readable client release with no clientId in values or Secret" {
     $HOST_DATA_DIR = "$TestDrive/d5-nokey"
+    Mock Err { throw "err" }
     Mock Read-Host {
       param([string]$Prompt, [switch]$AsSecureString)
       if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
@@ -1431,8 +1448,13 @@ Describe "Install-ClientHelm" {
       if ($args -contains "get") { '{"env":{"CLIENT_ENV":"dev"}}'; $global:LASTEXITCODE = 0; return }
       $global:LASTEXITCODE = 0
     }
-    Install-ClientHelm
-    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    { Install-ClientHelm } | Should -Throw
+    # NAME THE REFUSAL, don't just count one (CLAUDE.md rule 10). Every other
+    # fail-closed path in this Describe also throws, so a bare `Should -Throw`
+    # would pass on the WRONG refusal -- an unreadable-values or garbage-list
+    # abort would look identical to the one this test is named for.
+    Should -Invoke Err -ParameterFilter { $m -match 'unidentifiable existing client' }
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
   It "same client re-run is allowed (upgrade in place)" {
     $HOST_DATA_DIR = "$TestDrive/d6"

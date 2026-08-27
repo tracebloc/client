@@ -699,6 +699,42 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
+# _client_id_from_secret — CLIENT_ID out of release $1's chart-managed Secret in
+# namespace $2, or empty. THE SECOND PLACE THE ID CAN LIVE: backend#2571 lets
+# clientId resolve from the Secret instead of release values, and the chart now
+# recommends dropping it from values once it is there — so "no clientId in
+# values" stopped meaning "not a client" and detect_installed_client has to look
+# here before it may conclude anything.
+# CONTRACT: echoes the id or nothing, and ALWAYS returns 0. Callers assign it
+# inside `$( )`; a non-zero rc there would abort the installer under `set -e`
+# (the same trap _extract_yaml_value documents above), and "couldn't read it" is
+# a state the caller handles, not an error it should die on.
+_client_id_from_secret() {
+  local rel="$1" ns="$2" b64 out=""
+  # kubectl is not guaranteed this early (the pre-provision pre-flight runs
+  # before the cluster exists), and its absence is "couldn't read", not "absent".
+  has kubectl || return 0
+  # BOUNDED, because this call is now on the COMMON path (Bugbot, #859). Once
+  # clientId is dropped from release values — which this chart recommends — every
+  # scanned release reaches here, so an unbounded read against a wedged API would
+  # hang a headless install or assess with no further output. kubectl's default
+  # is no timeout at all; 5s matches the other existence probes in this repo
+  # (install-k8s.ps1's namespace/daemonset/allocatable reads). A timeout exits
+  # non-zero and is handled by the same `|| return 0` as any other unreadable
+  # Secret: "couldn't read it" is a state the caller already knows how to treat,
+  # and the caller's fail-closed path turns it into an unidentifiable client
+  # rather than an absent one.
+  b64="$(kubectl -n "$ns" get secret "${rel}-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>/dev/null)" || return 0
+  [[ -n "$b64" ]] || return 0
+  # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling. Same
+  # both-spellings idiom as scripts/tests/gpu-embed-drift.bats.
+  out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
+    || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
+    || out=""
+  printf '%s' "$out"
+  return 0
+}
+
 # detect_installed_client — report the tracebloc client already installed on this
 # cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
 # (both empty when none is found). Enumerate client-chart releases across ALL
@@ -709,7 +745,10 @@ _extract_yaml_value() {
 # the two can never disagree on "what already runs here". Always returns 0. A
 # missing helm just yields the empty (no-client) result — but a helm/API FAILURE
 # is reported as INSTALLED_CLIENT_UNKNOWN=1 (not "no client"), so guards can fail
-# CLOSED instead of silently overwriting a client they couldn't see.
+# CLOSED instead of silently overwriting a client they couldn't see. The id is
+# read from release values first and from the release Secret second
+# (_client_id_from_secret): since backend#2571 either place is legitimate, and a
+# client-chart release that names an id in NEITHER is UNKNOWN, not absent.
 detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
@@ -739,9 +778,19 @@ detect_installed_client() {
     [[ -z "$_rel" ]] && continue
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
       _id="$(_extract_yaml_value "$_gvf" clientId)"
+      # VALUES READABLE BUT NO clientId IS NO LONGER "not a client" (backend#2571,
+      # Bugbot #859). clientId stopped being `required` and the chart now tells
+      # operators to drop it from release values once the Secret carries it — so
+      # under the new contract a perfectly live client legitimately has no
+      # clientId in its values, and reading that as "not a match" let the
+      # one-client guard wave through an install that re-points the machine.
+      # Fall back to where the id now lives.
+      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
-      # Values readable but no clientId -> parsed fine, just not a match; keep
-      # scanning (mirrors the PowerShell peer's null-clientId `continue`).
+      # A client-chart release with no id in EITHER place is a client we cannot
+      # NAME, not an absent one. Record it and keep scanning; if nothing else
+      # names one, the fail-closed check below reports UNKNOWN.
+      _unreadable=1
     else
       # Couldn't read THIS client release's values -> an UNIDENTIFIABLE client.
       # Record it and keep scanning (a later release may give a definitive id);
