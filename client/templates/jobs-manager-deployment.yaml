@@ -397,7 +397,7 @@ spec:
         - name: PER_DATASET_PVCS
           value: "1"
         {{- end }}
-        {{- if .Values.perExperimentDbCreds }}
+        {{- if (include "tracebloc.perExperimentDbCreds" .) }}
         # RFC-0003 D10 (backend#1181): per-experiment MySQL credentials. When
         # on, jobs-manager mints a short-lived MySQL user per experiment scoped
         # to only its own table(s) and injects it into the training pod via a

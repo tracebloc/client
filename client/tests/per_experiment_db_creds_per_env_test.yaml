@@ -1,0 +1,95 @@
+suite: perExperimentDbCreds resolves per environment (backend#1528)
+# WHY THIS SUITE EXISTS
+#
+# Every other gate in the backend#1528 rollout resolved through a helper with a
+# `…ByEnv` map. This one was read as a bare `.Values.perExperimentDbCreds` in
+# five templates — so the flag the ticket's LAST step is gated on was the only
+# one whose fleet posture the chart could not record.
+#
+# That is not cosmetic. A fleet taken to the per-experiment credential shape
+# held that fact solely in its stored release values. A values-resetting upgrade
+# or a fresh-datadir reinstall drops it, the account mint goes back to running
+# as `edgeuser`, and the mysql-client image's fresh-datadir init script re-grants
+# that account `CREATE USER … WITH GRANT OPTION` plus `ALL PRIVILEGES` on both
+# databases. The retirement undoes itself, and nothing says so.
+#
+# `dev: true` here records a posture already achieved — dev was fully retired on
+# 2026-08-26, edgeuser DROPped and verified under a driven experiment. `stg` is
+# deliberately still false: staging is at REVOKE, not DROP, so there is no
+# settled posture to bake yet.
+templates:
+  - templates/jobs-manager-deployment.yaml
+release:
+  name: pedc
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+
+tests:
+  - it: "dev edges mint per-experiment credentials — the retired fleet's posture"
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+
+  - it: "the documented alias `development` resolves — it must not miss its entry"
+    # The backend#1723 class, one env-name spelling away: a lookup on the RAW
+    # value would find nothing and silently leave a retired fleet off.
+    set:
+      env.CLIENT_ENV: development
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+
+  - it: "stg is NOT flipped by this change — staging is at REVOKE, not DROP"
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+
+  - it: "prod is untouched"
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+
+  - it: "an operator can still hold a dev edge back — override beats the fleet default"
+    set:
+      env.CLIENT_ENV: dev
+      perExperimentDbCreds: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
+
+  - it: "an operator can still switch one prod edge on — the override wins both ways"
+    # Both directions, because an override that only ever turns things ON would
+    # leave "false means unset" indistinguishable from "false means off", which
+    # is precisely the bug the null default exists to avoid.
+    set:
+      env.CLIENT_ENV: prod
+      perExperimentDbCreds: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PER_EXPERIMENT_DB_CREDS
+            value: "1"
