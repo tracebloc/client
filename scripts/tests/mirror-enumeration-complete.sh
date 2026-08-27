@@ -196,6 +196,28 @@ trap 'rm -f "$OUT" "$ERR" "$BADJSON" "$GOODTHENBAD"' EXIT INT TERM HUP
 refuses "unparseable registry response" \
   env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file://$BADJSON" "$SCRIPT"
 
+# A FETCH failure AFTER a good page, which is a different path from a fetch
+# failure on the FIRST page and was the one case not pinned (Bugbot, medium).
+#
+# Why the distinction matters: a first-page miss is already caught downstream by
+# the zero-repositories check, so replacing the fetch's `exit 1` with a loop
+# `break` left both existing refusals green while the script printed a PARTIAL
+# training list and exited 0. The guard proved the parse path and merely looked
+# like it proved the fetch path.
+#
+# Page 1 resolves and yields one repo; its `next` points at a file that does not
+# exist, so page 2's fetch fails with a non-empty accumulator. Nothing may be
+# printed and the exit must be non-zero.
+PAGE1=$(mktemp -t page1.XXXXXX)
+MISSING="${PAGE1}.absent-on-purpose"
+rm -f "$MISSING"
+printf '{"next":"file://%s","results":[{"name":"client-image_classification-cpu"}]}\n' \
+  "$MISSING" >"$PAGE1"
+trap 'rm -f "$OUT" "$ERR" "$BADJSON" "$PAGE1"' EXIT INT TERM HUP
+
+refuses "registry fetch failing AFTER a good page" \
+  env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file://$PAGE1" "$SCRIPT"
+
 # THE ONE THAT PINS THE PARSER. Mutation-checked: replacing the parser's
 # `exit 1` with `:` leaves the case above passing and reddens only this one.
 refuses "a good page followed by an unparseable one (no partial list, no exit 0)" \
@@ -233,8 +255,8 @@ if [ "$fails" -ne 0 ]; then
   exit 1
 fi
 # A guard that ran zero assertions is not a green guard (rule 3).
-if [ "$checks" -lt 12 ]; then
-  echo "mirror-enumeration-complete: only $checks assertion(s) ran; expected 12+.
+if [ "$checks" -lt 13 ]; then
+  echo "mirror-enumeration-complete: only $checks assertion(s) ran; expected 13+.
   A collapsed run must not report success." >&2
   exit 1
 fi
