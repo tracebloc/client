@@ -49,10 +49,18 @@ tests_dir, self_name = sys.argv[1], sys.argv[2]
 IMPORT_YAML = re.compile(r'^[ \t]*(?:import\b[^\n]*\byaml\b|from[ \t]+yaml\b)', re.M)
 # A file-level shell/bats gate that refuses before any python runs. Matched on
 # COMMENT-STRIPPED lines so a mention inside a comment cannot exempt the file
-# (Bugbot PR#880: a whole-file substring fails open).
+# (Bugbot PR#880: a whole-file substring fails open). require_yaml_tooling must
+# be a CALL, not the `require_yaml_tooling() {` definition (Bugbot PR#880: the
+# helper carries no argument, so def and call look alike without the `(?!…\()`).
 SHELL_GATE = re.compile(
-    r"require_pymodule[ \t]+yaml\b|require_yaml_tooling\b|python3[ \t]+-c[ \t]+'import yaml'")
-HEREDOC = re.compile(r"<<-?[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'")
+    r"""require_pymodule[ \t]+yaml\b"""
+    r"""|require_yaml_tooling\b(?![ \t]*\()"""
+    r"""|python3[ \t]+-c[ \t]+['"]import yaml['"]""")
+# Heredoc opener in any spelling — quoted, double-quoted, or bare, with an
+# optional `-` (Bugbot PR#880: a future guard must not slip through on the
+# spelling). A bare delimiter still yields a snippet; if it is not python it
+# simply carries no yaml import and is ignored.
+HEREDOC = re.compile(r"""<<-?[ \t]*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?""")
 
 def has_shell_gate(lines):
     return any(SHELL_GATE.search(l.split("#", 1)[0]) for l in lines)
@@ -72,15 +80,16 @@ def extract_python(lines):
             while i < n and lines[i].strip() != delim:
                 body.append(lines[i]); i += 1
             out.append("\n".join(body)); i += 1; continue
-        c = re.search(r"python3[ \t]+-c[ \t]+'", code)
+        c = re.search(r"""python3[ \t]+-c[ \t]+(['"])""", code)
         if c:
+            q = c.group(1)   # match the SAME quote that opened the -c string
             rest = lines[i][c.end():]
-            if "'" in rest:
-                out.append(rest[:rest.index("'")]); i += 1; continue
+            if q in rest:
+                out.append(rest[:rest.index(q)]); i += 1; continue
             body, i = [rest], i + 1
             while i < n:
-                if "'" in lines[i]:
-                    body.append(lines[i][:lines[i].index("'")]); i += 1; break
+                if q in lines[i]:
+                    body.append(lines[i][:lines[i].index(q)]); i += 1; break
                 body.append(lines[i]); i += 1
             out.append("\n".join(body)); continue
         i += 1
