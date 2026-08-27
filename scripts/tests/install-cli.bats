@@ -283,3 +283,32 @@ setup() {
   run upgrade_cli_only
   [ "$status" -eq 0 ] || return 1
 }
+
+# backend#2679: this path downloads + cosign-verifies the CLI, then EXITS — before
+# main()'s wire_ca_trust runs. Behind a TLS-inspecting proxy the download/signature
+# check fails x509 on the very machine where a normal install (CA wired first, #583)
+# succeeds. So upgrade_cli_only must wire the corporate CA ITSELF, and BEFORE the
+# download — order is the whole point, so assert it, not merely that both ran.
+@test "upgrade_cli_only: wires CA trust BEFORE the CLI download (backend#2679)" {
+  unset TB_CLI_LATEST                          # can't prove a failure -> exit 0
+  ORDER="$BATS_TEST_TMPDIR/order"; : > "$ORDER"
+  wire_ca_trust()         { echo "wire" >> "$ORDER"; }
+  install_tracebloc_cli() { echo "download" >> "$ORDER"; }
+  _cli_version_short()    { echo "0.10.8"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  # CA trust wired, and wired ahead of the download.
+  [ "$(cat "$ORDER")" = "$(printf 'wire\ndownload')" ] || return 1
+}
+
+# The declare -F guard degrades gracefully: a stale bootstrap without cluster.sh
+# (wire_ca_trust undefined) must not crash the upgrade — it downloads as before.
+@test "upgrade_cli_only: no cluster.sh (wire_ca_trust absent) still exits 0 (backend#2679)" {
+  unset TB_CLI_LATEST
+  unset -f wire_ca_trust 2>/dev/null || true
+  install_tracebloc_cli() { echo "INSTALL_RAN"; }
+  _cli_version_short()    { echo "0.10.8"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"INSTALL_RAN"* ]] || return 1
+}
