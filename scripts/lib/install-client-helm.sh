@@ -714,7 +714,17 @@ _client_id_from_secret() {
   # kubectl is not guaranteed this early (the pre-provision pre-flight runs
   # before the cluster exists), and its absence is "couldn't read", not "absent".
   has kubectl || return 0
-  b64="$(kubectl -n "$ns" get secret "${rel}-secrets" -o "jsonpath={.data.CLIENT_ID}" 2>/dev/null)" || return 0
+  # BOUNDED, because this call is now on the COMMON path (Bugbot, #859). Once
+  # clientId is dropped from release values — which this chart recommends — every
+  # scanned release reaches here, so an unbounded read against a wedged API would
+  # hang a headless install or assess with no further output. kubectl's default
+  # is no timeout at all; 5s matches the other existence probes in this repo
+  # (install-k8s.ps1's namespace/daemonset/allocatable reads). A timeout exits
+  # non-zero and is handled by the same `|| return 0` as any other unreadable
+  # Secret: "couldn't read it" is a state the caller already knows how to treat,
+  # and the caller's fail-closed path turns it into an unidentifiable client
+  # rather than an absent one.
+  b64="$(kubectl -n "$ns" get secret "${rel}-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>/dev/null)" || return 0
   [[ -n "$b64" ]] || return 0
   # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling. Same
   # both-spellings idiom as scripts/tests/gpu-embed-drift.bats.

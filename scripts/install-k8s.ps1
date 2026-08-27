@@ -5150,7 +5150,15 @@ function Wait-MetricsApiService {
 function Get-ClientIdFromSecret {
   param([string]$Release, [string]$Namespace)
   if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return "" }
-  $b64 = (kubectl -n $Namespace get secret "$Release-secrets" -o "jsonpath={.data.CLIENT_ID}" 2>$null) | Out-String
+  # BOUNDED, because this call is now on the COMMON path (Bugbot, #859). Once
+  # clientId is dropped from release values — which this chart recommends — every
+  # scanned release reaches here, so an unbounded read against a wedged API would
+  # hang a headless install with no further output. kubectl's default is no
+  # timeout at all; 5s matches this file's other existence probes. A timeout
+  # exits non-zero and falls into the same `return ""` as any unreadable Secret,
+  # which the caller turns into an unidentifiable client (fail closed), never an
+  # absent one. Bash peer: _client_id_from_secret.
+  $b64 = (kubectl -n $Namespace get secret "$Release-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) { return "" }
   $b64 = $b64.Trim()
   if (-not $b64) { return "" }
