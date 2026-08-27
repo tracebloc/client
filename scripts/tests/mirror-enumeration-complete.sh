@@ -148,6 +148,95 @@ else
   grep -qE '^# [0-9]+ chart image\(s\), [0-9]+ training image\(s\)' "$OUT" \
     || fail "$SCRIPT does not report the counts the doc tells operators to trust"
   ok
+
+  # -------------------------------------------------------------------------
+  # THE CHART SECTION MUST BE COMPLETE, judged STRUCTURALLY.
+  #
+  # Why this is not "assert tracebloc/mysql-client is present": the defect was a
+  # YAML FORM the extractor could not see (`- image:`, dash and key on one line),
+  # not a missing image. Pinning the one image that happened to use that form
+  # would go green again the day a fourth form appears -- and a test that
+  # re-implements the extractor's own regex is a copy agreeing with itself
+  # (CLAUDE.md rule 9).
+  #
+  # So the expected set is derived by PARSING the render: PyYAML walks every
+  # mapping in every document and collects every `image` key, wherever it sits.
+  # That has no notion of indentation, dashes or line shape, so it cannot share
+  # the blind spot. Any image the chart renders and the script does not print is
+  # an image an operator will not mirror.
+  # -------------------------------------------------------------------------
+  RENDER_T=$(mktemp -t mirrorrender.XXXXXX)
+  if ! helm template "$ROOT/client" \
+        --set storageClass.create=false \
+        --set clientId=enumerate-only \
+        --set clientPassword=enumerate-only >"$RENDER_T" 2>/dev/null; then
+    fail "could not render the chart here, so completeness is UNVERIFIED. That is a
+      finding, not a skip (rule 3): this assertion is the one that proves the
+      extractor sees every YAML form the chart actually emits."
+  else
+    ok
+    # VACUITY GUARD. If the chart no longer emits a one-line list item, this
+    # whole assertion still passes -- but it would no longer be covering the
+    # regression it was written for, and nobody would know. Say so loudly.
+    if ! grep -qE '^[[:space:]]*-[[:space:]]+image:' "$RENDER_T"; then
+      fail "the render contains no '- image:' list item any more. The extractor
+      regression this pins (tracebloc/mysql-client silently dropped) is no longer
+      reachable from the real chart, so this assertion has gone vacuous. Re-point
+      it at a fixture rather than leaving a green check that proves nothing."
+    fi
+    ok
+
+    rendered_images=$(python3 - "$RENDER_T" <<'PYEOF'
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
+
+found = set()
+
+def walk(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "image" and isinstance(value, str) and value.strip():
+                found.add(value.strip())
+            walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            walk(item)
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for doc in yaml.safe_load_all(handle):
+        walk(doc)
+
+print("\n".join(sorted(found)))
+PYEOF
+    ) || fail "could not parse the render with PyYAML, so completeness is UNVERIFIED"
+
+    if [ -z "$rendered_images" ]; then
+      fail "PyYAML found no image keys in the render at all, which cannot be right
+      for this chart -- an empty expectation would compare equal to an empty
+      answer and pass for ever (rule 3)"
+    else
+      ok
+      emitted=$(awk '/^# --- rendered by the chart ---/{f=1;next} f&&/^# ---/{exit} f&&NF{print}' "$OUT")
+      missing=""
+      while IFS= read -r img; do
+        [ -n "$img" ] || continue
+        # Compare on the bare reference: the script strips surrounding quotes,
+        # PyYAML strips them too, so both sides are plain strings here.
+        grep -qxF -- "$img" <<<"$emitted" || missing="${missing}${img}"$'\n'
+      done <<< "$rendered_images"
+      if [ -n "$missing" ]; then
+        fail "$SCRIPT omits image(s) the chart actually renders. An operator following
+      this list mirrors an incomplete set and the pod ImagePullBackOffs -- the
+      backend#2633 failure, produced by the tool meant to prevent it:
+$(sed 's/^/        /' <<<"$missing")"
+      fi
+      ok
+    fi
+  fi
+  rm -f "$RENDER_T"
 fi
 
 # --- the refusals. Each must be non-zero AND must not print a partial list. ---
@@ -249,6 +338,43 @@ diagnoses "fetch failure shows curl's own error" '^  curl: ' \
 
 diagnoses "fetch failure names a usable remedy" 'TRACEBLOC_REGISTRY_URL|TRACEBLOC_CA_BUNDLE|CURL_CA_BUNDLE' \
   env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file:///nonexistent/tb-registry.json" "$SCRIPT"
+
+# EVERY KNOB THE REFUSAL NAMES MUST BE ONE THIS SCRIPT ACTUALLY READS.
+#
+# The bug (Bugbot medium x2, @aptracebloc on #881): the TLS arm told operators to
+# export TRACEBLOC_CA_BUNDLE -- the variable docs/INSTALL.md documents -- while
+# curl_secure() reads only CURL_CA_BUNDLE / SSL_CERT_FILE and wire_ca_trust()
+# lives in a lib this script never sources. A site that had already set the
+# documented variable was pointed at a knob that was on and inert, and still got
+# an x509 failure. "Advice naming a lever that is not wired to anything" is the
+# same shape as a guard not wired to what it claims to check.
+#
+# BOTH SIDES DERIVED, neither restated: the variable names come out of the
+# refusal messages themselves, and the answer to "is it read?" comes from the
+# script's own non-message code. Add a fourth remedy naming a fourth variable and
+# this covers it with no edit here.
+remedy_vars=$(sed -n '/^ *case "\$(tr -d/,/^ *esac/p' "$SCRIPT" \
+              | grep -oE 'TRACEBLOC_[A-Z_]+' | sort -u || true)
+if [ -z "$remedy_vars" ]; then
+  fail "could not extract any TRACEBLOC_* variable from $SCRIPT's fetch-failure
+      remedies. Either the refusal stopped naming a remedy -- which would leave a
+      blocked-registry operator with nothing to do -- or this extraction drifted.
+      Both are findings (rule 3)."
+else
+  ok
+  # Code that CONSUMES a variable, as opposed to code that prints its name:
+  # comments and the message lines themselves are removed, so what is left is
+  # expansion, assignment and tests.
+  script_code=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -vE '^[[:space:]]*(echo|printf)[[:space:]]' || true)
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    grep -qF -- "$v" <<<"$script_code" \
+      || fail "$SCRIPT's refusal tells the operator to set $v, but no code in the
+      script ever reads it. That is advice pointing at an inert knob: the operator
+      sets it, nothing changes, and the diagnostic still blames the wrong thing."
+    ok
+  done <<< "$remedy_vars"
+fi
 
 # THE ONE THAT PINS THE PARSER. Mutation-checked: replacing the parser's
 # `exit 1` with `:` leaves the case above passing and reddens only this one.

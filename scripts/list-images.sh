@@ -93,6 +93,19 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=scripts/lib/common.sh
 . "$ROOT/scripts/lib/common.sh"
 
+# docs/INSTALL.md tells TLS-inspecting sites to export TRACEBLOC_CA_BUNDLE, and
+# the fetch-failure remedy below names it -- but curl_secure() reads only curl's
+# own CURL_CA_BUNDLE / SSL_CERT_FILE, and the installer's wire_ca_trust() lives
+# in lib/cluster.sh, which this script does not source. So an operator who had
+# already set the documented variable still got an x509 failure and was pointed
+# at a knob that was on and inert (Bugbot, medium; @aptracebloc on #881).
+#
+# ONLY IF UNSET. These vars REPLACE the trust store rather than adding to it, so
+# an explicit CURL_CA_BUNDLE is the operator's deliberate choice and must win.
+if [ -n "${TRACEBLOC_CA_BUNDLE:-}" ] && [ -z "${CURL_CA_BUNDLE:-}" ]; then
+  export CURL_CA_BUNDLE="$TRACEBLOC_CA_BUNDLE"
+fi
+
 command -v helm >/dev/null 2>&1 || { echo "list-images: helm is required" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -103,8 +116,11 @@ command -v helm >/dev/null 2>&1 || { echo "list-images: helm is required" >&2; e
 # image names do not depend on them -- and the operator's own `-- -f values.yaml`
 # overrides them. Passing them is what turns the doc's error into a list.
 # ---------------------------------------------------------------------------
-RENDER=$(mktemp); ERRLOG=$(mktemp)
-trap 'rm -f "$RENDER" "$ERRLOG"' EXIT INT TERM HUP
+RENDER=$(mktemp); ERRLOG=$(mktemp); CURLERR=$(mktemp)
+# CURLERR is created here, with the other scratch files, so the ONE trap covers
+# it. It was previously mktemp'd inside the paging loop and removed by explicit
+# `rm -f`, which a SIGINT mid-fetch skipped (@aptracebloc on #881, nit).
+trap 'rm -f "$RENDER" "$ERRLOG" "$CURLERR"' EXIT INT TERM HUP
 
 if ! helm template "$CHART" \
       --set storageClass.create=false \
@@ -118,8 +134,19 @@ if ! helm template "$CHART" \
   exit 1
 fi
 
-chart_images=$(grep -hoE '^[[:space:]]*image:[[:space:]]*"?[^"[:space:]]+' "$RENDER" \
-               | sed -E 's/^[[:space:]]*image:[[:space:]]*"?//' | sort -u)
+# `- image:` COUNTS. A container written as a one-line list item puts the dash
+# and the key on the same line, and an anchor that allows only whitespace before
+# `image:` drops it silently -- which is this tool's own completeness claim
+# failing. client/templates/mysql-deployment.yaml renders the mysql pod's main
+# container exactly that way, so `tracebloc/mysql-client` -- a control-plane
+# image -- was missing from every mirror set this script produced, and the mysql
+# pod ImagePullBackOffs on a blocked-registry install: precisely the backend#2633
+# failure (Bugbot High, independently confirmed by @aptracebloc on #881).
+# scripts/tests/mirror-enumeration-complete.sh now compares this extraction
+# against a PyYAML walk of the same render, so a third YAML form cannot slip
+# past the way this one did.
+chart_images=$(grep -hoE '^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?[^"[:space:]]+' "$RENDER" \
+               | sed -E 's/^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?//' | sort -u)
 
 if [ -z "$chart_images" ]; then
   echo "list-images: the render produced no image: lines at all, which cannot be" >&2
@@ -247,12 +274,12 @@ else
     # diagnostic that names the tool trips the rule that exists to stop calling
     # the tool directly. The documented opt-out is the right lever; rewording the
     # messages to dodge the grep would make them worse for the operator.
-    curlerr=$(mktemp)
-    if ! body=$(curl_secure -fsS "$page" 2>"$curlerr"); then
+    : >"$CURLERR"   # reused across pages; truncate rather than re-mktemp
+    if ! body=$(curl_secure -fsS "$page" 2>"$CURLERR"); then
       echo "list-images: could not read the registry repository list, so the training-image set is UNKNOWN." >&2
       echo "  Refusing to print a list that omits them (backend#2633)." >&2
-      if [ -s "$curlerr" ]; then
-        sed 's/^/  curl: /' "$curlerr" >&2   # style-guard: allow
+      if [ -s "$CURLERR" ]; then
+        sed 's/^/  curl: /' "$CURLERR" >&2   # style-guard: allow
       else
         echo "  curl produced no diagnostic (exit status only)." >&2   # style-guard: allow
       fi
@@ -260,7 +287,7 @@ else
       # rather than left to the operator to infer: docs/INSTALL.md documents
       # TRACEBLOC_CA_BUNDLE for exactly the x509 case, and an operator reading
       # "set TRACEBLOC_TASK_REPOS" would never reach it.
-      case "$(tr -d '\n' <"$curlerr")" in
+      case "$(tr -d '\n' <"$CURLERR")" in
         *certificate*|*x509*|*"SSL"*|*"TLS"*)
           echo "  This looks like a TLS trust failure rather than a blocked registry." >&2
           echo "  Point curl at your corporate CA bundle and retry:" >&2   # style-guard: allow
@@ -275,10 +302,8 @@ else
           echo "  TRACEBLOC_REGISTRY_URL to a mirror of the repository list, or" >&2
           echo "  TRACEBLOC_TASK_REPOS to the task-repo list itself." >&2 ;;
       esac
-      rm -f "$curlerr"
       exit 1
     fi
-    rm -f "$curlerr"
     # FAILS CLOSED (rule 3). Bugbot, High, and correct: the first version wrote
     # `2>/dev/null || echo ""` and `|| true` here, and never preflighted python3.
     # A missing interpreter, a truncated body, or a later page that failed to
