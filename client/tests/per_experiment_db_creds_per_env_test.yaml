@@ -17,8 +17,22 @@ suite: perExperimentDbCreds resolves per environment (backend#1528)
 # 2026-08-26, edgeuser DROPped and verified under a driven experiment. `stg` is
 # deliberately still false: staging is at REVOKE, not DROP, so there is no
 # settled posture to bake yet.
+# ALL THREE CALL SITES, not just the one that sets the env var.
+#
+# The first version of this suite listed `jobs-manager-deployment.yaml` alone.
+# Reverting `secrets.yaml` and `rbac.yaml` to the raw `.Values` lookup then
+# changed no assertion here, passed all 592 helm-unittest cases, and passed
+# `scripts/tests/gate-byenv-resolution.sh` too -- because the existing Secret and
+# RBAC cases set an explicit override, and a whole-render diff is satisfied by
+# the jobs-manager env var alone (Bugbot, client#888).
+#
+# The result would be a `dev` edge with PER_EXPERIMENT_DB_CREDS=1 and no
+# TB_CREDMGR_PASSWORD and no RBAC to reap the Secrets: a gate honoured by SOME
+# of its call sites, which is worse than one honoured by none.
 templates:
   - templates/jobs-manager-deployment.yaml
+  - templates/secrets.yaml
+  - templates/rbac.yaml
 release:
   name: pedc
   namespace: tracebloc
@@ -28,6 +42,7 @@ set:
 
 tests:
   - it: "dev edges mint per-experiment credentials — the retired fleet's posture"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: dev
     asserts:
@@ -40,6 +55,7 @@ tests:
   - it: "the documented alias `development` resolves — it must not miss its entry"
     # The backend#1723 class, one env-name spelling away: a lookup on the RAW
     # value would find nothing and silently leave a retired fleet off.
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: development
     asserts:
@@ -50,6 +66,7 @@ tests:
             value: "1"
 
   - it: "stg is NOT flipped by this change — staging is at REVOKE, not DROP"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: stg
     asserts:
@@ -60,6 +77,7 @@ tests:
             value: "1"
 
   - it: "prod is untouched"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
@@ -70,6 +88,7 @@ tests:
             value: "1"
 
   - it: "an operator can still hold a dev edge back — override beats the fleet default"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: dev
       perExperimentDbCreds: false
@@ -84,6 +103,7 @@ tests:
     # Both directions, because an override that only ever turns things ON would
     # leave "false means unset" indistinguishable from "false means off", which
     # is precisely the bug the null default exists to avoid.
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       perExperimentDbCreds: true
@@ -93,3 +113,53 @@ tests:
           content:
             name: PER_EXPERIMENT_DB_CREDS
             value: "1"
+
+  # ── the other two call sites, per environment ──────────────────────────────
+
+  - it: "dev edges get the tb_credmgr password Secret, from the fleet default"
+    template: templates/secrets.yaml
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - isNotEmpty:
+          path: data.TB_CREDMGR_PASSWORD
+        documentIndex: 0
+
+  - it: "prod does not — the Secret follows the same map"
+    template: templates/secrets.yaml
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - isNull:
+          path: data.TB_CREDMGR_PASSWORD
+        documentIndex: 0
+
+  - it: "dev edges get the Secret-reaping RBAC, from the fleet default"
+    # Without this rule the minted per-experiment Secrets are never reaped, so a
+    # dev edge would mint credentials it cannot clean up (backend#2692).
+    template: templates/rbac.yaml
+    set:
+      env.CLIENT_ENV: dev
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete"]
+
+  - it: "prod does not get it — the RBAC follows the same map"
+    template: templates/rbac.yaml
+    set:
+      env.CLIENT_ENV: prod
+      clusterScope: true
+    documentIndex: 1
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete"]

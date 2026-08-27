@@ -49,6 +49,21 @@
 #  of observables would be a second copy of the templates, and would go stale
 #  the first time a gate grew a new effect.
 #
+#  "THE RENDER CHANGED" IS TOO WEAK ON ITS OWN, and that was a real hole: a gate
+#  read at SEVERAL call sites is satisfied by ONE of them still being wired.
+#  Measured on perExperimentDbCreds -- reverting only `secrets.yaml` and
+#  `rbac.yaml` to the raw value, leaving `jobs-manager-deployment.yaml` correct,
+#  passed this guard, the gate's own per-environment suite, and all 592
+#  helm-unittest cases. A `dev` edge would then get `PER_EXPERIMENT_DB_CREDS=1`
+#  with no `TB_CREDMGR_PASSWORD` Secret and no RBAC, and crash-loop (Bugbot,
+#  client#888).
+#
+#  So the assertion is per-TEMPLATE. The templates that must react are discovered
+#  by grepping the templates directory for the gate's helper -- not listed here --
+#  and the render is split on helm's own `# Source:` markers to attribute each
+#  difference. Every referencing template must change; one that does not is a
+#  call site the map no longer reaches.
+#
 #  THE RENDER IS NONDETERMINISTIC, AND IGNORING THAT MADE THIS FILE VACUOUS.
 #  `POD_TOKEN_SIGNING_SECRET`, `TB_META_PASSWORD` and `TB_INGEST_PASSWORD` are
 #  generated per render, so two renders of the SAME inputs already differ by six
@@ -143,6 +158,51 @@ COMPANIONS=(--set bootstrapDbPassword=placeholderplaceholder
             --set mysqlRootPassword=placeholderplaceholder
             --set credmgrPassword=placeholderplaceholder)
 
+# Which templates READ this gate, from the templates directory rather than a list
+# here. A gate whose helper is referenced nowhere is a finding, not an empty set.
+#
+# RESTRICTED TO TEMPLATES THAT ACTUALLY RENDER. `_helpers.tpl` DEFINES every one
+# of these helpers, so it matches the grep and emits no manifest -- asserting it
+# reacts is asserting a partial produces output, which it never does. The first
+# version did exactly that and reported 24 failures across the two known-good
+# gates: a broken instrument accusing working code. Membership is decided by
+# helm's own `# Source:` markers rather than by a filename convention, so a
+# partial named anything is excluded for the right reason.
+templates_reading() {  # $1 = gate name; $2 = a render to take the source list from
+  local rendered
+  rendered=$(awk '/^# Source: /{print $3}' "$2" | sed 's#^[^/]*/templates/##' | sort -u)
+  # EITHER SPELLING COUNTS, and that is load-bearing rather than tidy. Matching
+  # only `tracebloc.<gate>` made this self-defeating: the defect being hunted
+  # REPLACES that reference with `.Values.<gate>`, so discovery stopped looking
+  # at precisely the call sites that had broken. Measured -- reverting
+  # `secrets.yaml` and `rbac.yaml` dropped the assertion count from 87 to 75 and
+  # still reported OK. That is CLAUDE.md rule 9's corollary: a matcher that
+  # sources its own input set agrees with itself.
+  #
+  # A template naming the gate in ANY form is a call site, and must react.
+  grep -rlE "(tracebloc\.$1\b|\.Values\.$1\b)" "$CHART/templates" 2>/dev/null \
+    | sed "s#^$CHART/templates/##" | sort -u \
+    | grep -Fxf <(printf '%s\n' "$rendered") || true
+}
+
+# A call site that reads the RAW value bypasses the fleet default entirely.
+# Structural, and deliberately separate from the render assertion: this one names
+# the file and the fix, where the render comparison can only say "did not react".
+raw_readers() {  # $1 = gate name
+  grep -rlE "\.Values\.$1\b" "$CHART/templates" 2>/dev/null \
+    | sed "s#^$CHART/templates/##" | grep -v '^_' | sort -u || true
+}
+
+# The render, split on helm's own provenance markers: one line per
+# "<template>\t<sha of that template's rendered bytes>".
+by_template() {  # $1 = render file
+  awk -v OFS='\t' '
+    /^# Source: /   { src = $3; next }
+    src != ""       { body[src] = body[src] $0 "\n" }
+    END { for (s in body) { print s, length(body[s]) "|" body[s] } }
+  ' "$1" | sed 's#^[^/]*/templates/##'
+}
+
 render_to() {  # $1 = out file; rest = extra helm args. Non-zero on helm failure.
   local out="$1"; shift
   helm template gate "$CHART" \
@@ -151,7 +211,7 @@ render_to() {  # $1 = out file; rest = extra helm args. Non-zero on helm failure
 }
 
 TRUE_OUT=$(mktemp); FALSE_OUT=$(mktemp); NOISE_A=$(mktemp); NOISE_B=$(mktemp); NOISE=$(mktemp)
-trap 'rm -f "$TRUE_OUT" "$FALSE_OUT" "$NOISE_A" "$NOISE_B" "$NOISE"' EXIT INT TERM HUP
+trap 'rm -f "$TRUE_OUT" "$FALSE_OUT" "$NOISE_A" "$NOISE_B" "$NOISE" "$NOISE.raw" "$TRUE_OUT.by" "$FALSE_OUT.by"' EXIT INT TERM HUP
 
 # The keys that differ between two renders of IDENTICAL inputs: generated
 # secrets. Measured, not listed.
@@ -168,6 +228,21 @@ ok
 
 while IFS= read -r gate; do
   [ -n "$gate" ] || continue
+  # Once per gate, before the per-environment sweep: a raw read is a defect on
+  # every environment at once, so reporting it six times would be noise.
+  raw=$(raw_readers "$gate")
+  if [ -n "$raw" ]; then
+    fail "$gate is read as \`.Values.$gate\` -- the RAW value -- in:
+$(printf '%s\n' "$raw" | sed 's/^/        /')
+      That bypasses \`${gate}ByEnv\` entirely: the fleet default cannot reach
+      those call sites, and with the override key null they are permanently off.
+      A gate honoured by SOME of its call sites is worse than one honoured by
+      none -- the half that flips turns the feature on while the half that does
+      not withholds what the feature needs. Route them through
+      \`include \"tracebloc.$gate\" .\`."
+  fi
+  ok
+
   while IFS=' ' read -r spelling canonical; do
     [ -n "$spelling" ] || continue
 
@@ -190,8 +265,38 @@ $(sed 's/^/        /' "$FALSE_OUT" | tail -4)"
       every render anyway. The map is present and inert -- the templates read
       the raw value, or the override key is a literal instead of null, or no
       helper resolves it. That is a fleet posture the chart cannot record."
+      ok
+      continue
     fi
     ok
+
+    # EVERY REFERENCING TEMPLATE MUST REACT, not just one of them.
+    # Sourced from the ON render: a template that only renders when the gate is
+    # on (a Secret, an RBAC rule) is absent from the OFF one by design.
+    readers=$(templates_reading "$gate" "$TRUE_OUT")
+    if [ -z "$readers" ]; then
+      fail "$gate: no template references \`tracebloc.$gate\`, so nothing above
+      could have been testing this gate. A helper nobody calls is the same
+      as no helper (rule 3)."
+      ok
+      continue
+    fi
+    by_template "$TRUE_OUT"  | sort > "$TRUE_OUT.by"
+    by_template "$FALSE_OUT" | sort > "$FALSE_OUT.by"
+    while IFS= read -r tpl; do
+      [ -n "$tpl" ] || continue
+      a=$(grep -F "$tpl	" "$TRUE_OUT.by"  || true)
+      b=$(grep -F "$tpl	" "$FALSE_OUT.by" || true)
+      if [ "$a" = "$b" ]; then
+        fail "$gate / CLIENT_ENV=$spelling: \`$tpl\` reads
+      \`tracebloc.$gate\` but its rendered output is IDENTICAL either way. That
+      call site no longer follows the fleet default -- it reads the raw value, or
+      the reference is dead. A gate honoured by SOME of its call sites is worse
+      than one honoured by none: the half that flips turns the feature on while
+      the half that does not withholds what the feature needs."
+      fi
+      ok
+    done <<< "$readers"
   done <<< "$ENVS"
 done <<< "$GATES"
 
