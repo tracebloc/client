@@ -280,6 +280,21 @@ install_tracebloc_cli() {
 upgrade_cli_only() {
   info "Your tracebloc environment is healthy — updating just the CLI to the latest release."
   echo ""
+
+  # backend#2679: this path DOWNLOADS + cosign-verifies the CLI (install_tracebloc_cli
+  # curl_secure's the installer) and then EXITS — before main()'s own wire_ca_trust
+  # (install-k8s.sh) ever runs. Behind a TLS-inspecting proxy that leaves the download
+  # or signature check failing x509 on the exact machine where a normal install
+  # SUCCEEDS, because the full flow wires CA trust before any tool download (#583). So
+  # wire the corporate CA HERE too, before the download — same reason this path already
+  # re-surfaces the hand-off's advisories below (it exits before the step that would
+  # otherwise do it). Idempotent and a no-op when no CA is configured; guarded like
+  # main()'s call so a stale bootstrap without cluster.sh falls through (the download
+  # then behaves exactly as it did before this branch existed).
+  if declare -F wire_ca_trust >/dev/null 2>&1; then
+    wire_ca_trust
+  fi
+
   # install_tracebloc_cli owns the ✔/✖ line and is non-fatal by contract; it also
   # prints the vX -> vY update verdict. Guarded like main()'s own call so a stale
   # bootstrap that didn't fetch this file can't reach an undefined function.
