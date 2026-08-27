@@ -1021,6 +1021,17 @@ podDisruptionBudget:
 # failure, because the chart is the only layer left that can see it (the schema
 # cannot, it runs before render).
 #
+# NOT AVAILABLE UNDER A CLIENT-SIDE RENDERER, and worth knowing before you plan
+# around it. Tier 2 is a `lookup`, which needs a live cluster — so it is inert
+# under `helm template`, `--dry-run`, ArgoCD's default renderer and Flux
+# post-render alike. The chart's other five credentials degrade gracefully there
+# (their tier 3 generates a value); these two cannot, because the backend issues
+# them, so tier 3 is a hard failure and the render simply stops. A GitOps install
+# rendering without cluster access must therefore KEEP these two in its values,
+# and for it the cleartext-in-revisions problem above is not solved. Rendering
+# against a live cluster (server-side apply, or `helm upgrade` from CI) is what
+# makes the value-free path reachable.
+#
 # AVOID `--set clientPassword=...`: that puts the credential in your shell
 # history AND in the `helm` process's argv, where anyone who can run `ps` sees
 # it. A values file, or the Secret above, are both better. And do not commit
