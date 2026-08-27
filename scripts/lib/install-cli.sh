@@ -263,3 +263,28 @@ install_tracebloc_cli() {
   rm -f "$installer"
   return 0
 }
+
+# upgrade_cli_only — the CLI-only path for an explicit `tracebloc upgrade` on an
+# otherwise-healthy machine (INSTALL_STATE_REASON=cli-behind-latest, backend#2253).
+#
+# The environment is already healthy BY CONSTRUCTION — that is what cli-behind-
+# latest means — so there is nothing to reconcile: update ONLY the tracebloc CLI
+# (a small, isolated download) and finish. This is the difference between the
+# healthy fast-path's old "already set up — no need to run the installer again"
+# no-op (which left a below-latest CLI nagging forever) and actually doing the one
+# thing the user asked for.
+#
+# It EXITS the installer (0). Unlike _assess_handoff it does NOT mark the run
+# `skipped`: a newer CLI was installed, so this is a real, succeeded install and
+# telemetry (already `started` in main) records it as such on the 0 exit.
+upgrade_cli_only() {
+  info "Your tracebloc environment is healthy — updating just the CLI to the latest release."
+  echo ""
+  # install_tracebloc_cli owns the ✔/✖ line and is non-fatal by contract; it also
+  # prints the vX -> vY update verdict. Guarded like main()'s own call so a stale
+  # bootstrap that didn't fetch this file can't reach an undefined function.
+  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
+    install_tracebloc_cli
+  fi
+  exit 0
+}

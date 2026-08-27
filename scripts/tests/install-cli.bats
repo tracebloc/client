@@ -224,3 +224,39 @@ setup() {
   install_tracebloc_cli >/dev/null 2>&1 || true
   [ "$TB_CLI_USABLE_NOW" = "0" ] || return 1
 }
+
+# ── upgrade_cli_only (backend#2253) ─────────────────────────────────────────
+# The CLI-only path for an explicit `tracebloc upgrade` on an otherwise-healthy
+# machine (INSTALL_STATE_REASON=cli-behind-latest): update JUST the CLI and exit
+# 0, with no cluster/Helm work. This is what makes `tracebloc upgrade` finally
+# able to clear the update nag — the healthy fast-path used to update nothing.
+@test "upgrade_cli_only: runs the CLI install step and exits 0" {
+  install_tracebloc_cli() { echo "INSTALL_RAN"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"INSTALL_RAN"* ]] || return 1
+}
+
+# The ticket's acceptance criterion at the installer seam: after `upgrade` on a
+# healthy machine whose CLI is behind latest, the reported version is latest.
+# Before backend#2253 the healthy fast-path updated nothing, so this could not
+# hold; upgrade_cli_only is the step that makes it true — if it stopped calling
+# install_tracebloc_cli, VERFILE would stay at the old version and this fails.
+@test "upgrade_cli_only: after upgrade the reported CLI version equals latest (backend#2253)" {
+  VERFILE="$BATS_TEST_TMPDIR/ver"; echo "0.10.5" > "$VERFILE"    # behind latest
+  TB_CLI_LATEST="0.10.8"
+  # The released installer this step runs drops the latest build; model that as
+  # advancing the reported version to latest.
+  install_tracebloc_cli() { echo "$TB_CLI_LATEST" > "$VERFILE"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+  [ "$(cat "$VERFILE")" = "$TB_CLI_LATEST" ] || return 1
+}
+
+# Non-fatal by inheritance: install_tracebloc_cli never aborts, and a stale
+# bootstrap without it must not crash this path either (the declare -F guard).
+@test "upgrade_cli_only: install step absent (stale bootstrap) still exits 0" {
+  unset -f install_tracebloc_cli 2>/dev/null || true
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
+}
