@@ -60,11 +60,37 @@ The chart follows the **`global.imageRegistry`** convention: set it once and **e
 First mirror the images into it. List exactly what to copy (tags/digests stay authoritative across chart versions) with:
 
 ```bash
-# Every image this chart pulls, at the version you're installing:
-helm template tracebloc/client | grep -oE 'image: "[^"]+"' | sort -u
+# Every image this install pulls, at the version you're installing:
+./scripts/list-images.sh -- -f my-values.yaml
 ```
 
-Copy each into your registry under the **same repository path and tag/digest** (e.g. `mirror.corp.example/tracebloc/jobs-manager:<tag>`, `mirror.corp.example/library/busybox:1.35`). The spawned **ingestor** (`ghcr.io/tracebloc/ingestor`) and its floating tag also need mirroring — jobs-manager pulls it at run time.
+`list-images.sh` prints the **complete** pull set, because `helm template` on its
+own cannot: it renders only the chart's own manifests, and the training-job
+images and the ingestor are spawned by jobs-manager **at run time**, so they
+appear in no rendered manifest. An enumeration built from the render alone comes
+up clean and then fails with `ImagePullBackOff` on the first experiment. The
+script adds those two run-time sets to the rendered ones and **fails loudly**
+rather than printing a partial list. Its output is grouped:
+
+```
+# --- rendered by the chart ---
+# --- spawned at run time: ingestor ---
+# --- spawned at run time: training images (tag :<CLIENT_ENV>) ---
+```
+
+The header line above those sections reports how many images each holds; treat
+that as the count to mirror, rather than any number written down here — the task
+set grows, and a count in prose would be wrong the first time it does.
+
+Pass anything after `--` straight through to Helm, so the list reflects the
+values you are actually installing with. **The training-image tag is taken from
+your values' `CLIENT_ENV`**, not from a default — pass your values file and the
+tags follow it. `--env dev|stg|prod` exists to enumerate a *different*
+environment than the values describe; if it disagrees with the rendered
+`CLIENT_ENV`, the script stops and says so rather than picking one, because a
+mismatch mirrors the wrong training set.
+
+Copy each into your registry under the **same repository path and tag/digest** (e.g. `mirror.corp.example/tracebloc/jobs-manager:<tag>`, `mirror.corp.example/library/busybox:1.35`). That includes the two run-time sets the script lists separately — the **ingestor** (`ghcr.io/tracebloc/ingestor`, digest-pinned) and the **training images** (`tracebloc/client-<task>-<cpu|gpu>:<CLIENT_ENV>`, one per task x arch), both pulled by jobs-manager only once an experiment starts. Miss them and the install itself is clean; the first experiment is not.
 
 Then point the install at the mirror. **With the standalone installer**, one environment variable does it:
 
