@@ -545,12 +545,13 @@ spec:
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
         # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi
-        # floors, requests == limits / Guaranteed QoS). Older client-runtime
-        # images fall back to their built-in cpu=2,memory=8Gi literal — the same
-        # value this template used to inject — so chart and image can upgrade in
-        # either order without a behavior flip. The standalone installer writes
-        # explicit values (backend#1236), so the derivation path applies to
-        # chart-direct installs only.
+        # floors, requests == limits / Guaranteed QoS). With derivation off (the
+        # default), jobs-manager instead uses its built-in fallback — the
+        # contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254 image
+        # used cpu=2,memory=8Gi, the value this template used to inject), so the
+        # spawned-job default drops when the runtime image crosses that version.
+        # The standalone installer writes explicit values (backend#1236), so the
+        # derivation path applies to chart-direct installs only.
         #
         # EACH VAR IS EMITTED ONLY IF SET (backend#2418). This block used to fill
         # the missing one with "cpu=2,memory=8Gi" so a half-set config never

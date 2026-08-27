@@ -26,15 +26,17 @@ env: {
   # HTTP_PROXY_USERNAME: ""
   # HTTP_PROXY_PASSWORD: ""
   # Optional: explicit resource requests/limits for spawned training jobs.
-  # UNSET (the default): jobs-manager uses its built-in "cpu=2,memory=8Gi"
-  # literal. SET: pins the envelope to exactly what you write here.
+  # UNSET (the default): jobs-manager uses its built-in "cpu=1,memory=2Gi"
+  # literal — the contract floor since backend#2254 (was "cpu=2,memory=8Gi",
+  # which exceeded a default Docker Desktop VM and left a fresh install
+  # unschedulable). SET: pins the envelope to exactly what you write here.
   #
   # This comment used to say that leaving the pair unset made jobs-manager size
   # the envelope from node allocatable (75% of the node). It does not: that
   # path is real but GATED OFF behind DERIVE_JOB_ENVELOPE (documented below).
   # Unset means the literal (backend#664 L0, backend#2167, backend#2250).
-  # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
-  # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
+  # RESOURCE_REQUESTS: "cpu=1,memory=2Gi"
+  # RESOURCE_LIMITS: "cpu=1,memory=2Gi"
   # Bookkeeping only (backend#2220): WHO chose the two values above.
   #   installer - sized to this machine at install time
   #   user      - an explicit `tracebloc resources set`
