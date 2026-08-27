@@ -218,6 +218,38 @@ trap 'rm -f "$OUT" "$ERR" "$BADJSON" "$PAGE1"' EXIT INT TERM HUP
 refuses "registry fetch failing AFTER a good page" \
   env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file://$PAGE1" "$SCRIPT"
 
+# A fetch failure must SHOW curl's own diagnostic and name the remedy that fits
+# it. Bugbot, medium: this branch discarded curl's stderr and suggested
+# TRACEBLOC_TASK_REPOS unconditionally, so a TLS-inspecting site -- one of the two
+# audiences this whole tool exists for -- was shown the one remedy that cannot
+# help, and never pointed at TRACEBLOC_CA_BUNDLE which docs/INSTALL.md documents
+# for exactly that case. Same "clean symptom, wrong cause" shape as the defect
+# this PR fixes.
+#
+# `file://` to a missing path is used rather than a network failure: it is
+# deterministic and offline, and it exercises the same branch. The TLS and DNS
+# arms are matched on curl's message, which needs a real endpoint, so those are
+# not asserted here -- stated rather than implied.
+diagnoses() {   # $1 = human label; $2 = a regex the stderr must match; rest = cmd
+  local label="$1" want="$2"; shift 2
+  local err rc
+  err=$("$@" 2>&1 >/dev/null) && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fail "$label: exited 0 where a refusal was expected"
+  elif ! grep -qE "$want" <<<"$err"; then
+    fail "$label: stderr does not match /$want/. An operator sees only this, so a
+      missing diagnostic is a wrong remedy. Got:
+$(sed 's/^/        /' <<<"$err")"
+  fi
+  ok
+}
+
+diagnoses "fetch failure shows curl's own error" '^  curl: ' \
+  env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file:///nonexistent/tb-registry.json" "$SCRIPT"
+
+diagnoses "fetch failure names a usable remedy" 'TRACEBLOC_REGISTRY_URL|TRACEBLOC_CA_BUNDLE|CURL_CA_BUNDLE' \
+  env -u TRACEBLOC_TASK_REPOS TRACEBLOC_REGISTRY_URL="file:///nonexistent/tb-registry.json" "$SCRIPT"
+
 # THE ONE THAT PINS THE PARSER. Mutation-checked: replacing the parser's
 # `exit 1` with `:` leaves the case above passing and reddens only this one.
 refuses "a good page followed by an unparseable one (no partial list, no exit 0)" \
@@ -255,8 +287,8 @@ if [ "$fails" -ne 0 ]; then
   exit 1
 fi
 # A guard that ran zero assertions is not a green guard (rule 3).
-if [ "$checks" -lt 13 ]; then
-  echo "mirror-enumeration-complete: only $checks assertion(s) ran; expected 13+.
+if [ "$checks" -lt 15 ]; then
+  echo "mirror-enumeration-complete: only $checks assertion(s) ran; expected 15+.
   A collapsed run must not report success." >&2
   exit 1
 fi

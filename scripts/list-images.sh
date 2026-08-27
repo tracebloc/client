@@ -233,11 +233,52 @@ else
   # common.sh prepends the system PATH, so stubbing `curl` is not an option.
   page="${TRACEBLOC_REGISTRY_URL:-https://hub.docker.com/v2/repositories/${REGISTRY_NAMESPACE}/?page_size=100}"
   while [ -n "$page" ]; do
-    body=$(curl_secure -fsS "$page" 2>/dev/null) || {
+    # curl's OWN stderr is kept and shown. Bugbot, medium, and it matters here
+    # more than usual: this script exists for blocked-registry and TLS-inspecting
+    # sites, and behind a break-and-inspect proxy the real failure is the CA
+    # trust path, not a missing task list. Discarding the diagnostic and
+    # suggesting TRACEBLOC_TASK_REPOS showed the operator the ONE remedy that
+    # cannot help -- the same "clean symptom, wrong cause" shape backend#2633 is
+    # about. The parse branch below already printed the response body; this one
+    # printed nothing.
+    # The three `# style-guard: allow` markers below are on lines where `curl`
+    # appears inside a MESSAGE, not as a command. check-style.sh's rule 3 greps
+    # `\bcurl\b` and exempts comment lines but not string literals, so a
+    # diagnostic that names the tool trips the rule that exists to stop calling
+    # the tool directly. The documented opt-out is the right lever; rewording the
+    # messages to dodge the grep would make them worse for the operator.
+    curlerr=$(mktemp)
+    if ! body=$(curl_secure -fsS "$page" 2>"$curlerr"); then
       echo "list-images: could not read the registry repository list, so the training-image set is UNKNOWN." >&2
-      echo "  Refusing to print a list that omits them (backend#2633). Set TRACEBLOC_TASK_REPOS to override." >&2
+      echo "  Refusing to print a list that omits them (backend#2633)." >&2
+      if [ -s "$curlerr" ]; then
+        sed 's/^/  curl: /' "$curlerr" >&2   # style-guard: allow
+      else
+        echo "  curl produced no diagnostic (exit status only)." >&2   # style-guard: allow
+      fi
+      # The remedies, most-likely first for the sites this tool serves. Named
+      # rather than left to the operator to infer: docs/INSTALL.md documents
+      # TRACEBLOC_CA_BUNDLE for exactly the x509 case, and an operator reading
+      # "set TRACEBLOC_TASK_REPOS" would never reach it.
+      case "$(tr -d '\n' <"$curlerr")" in
+        *certificate*|*x509*|*"SSL"*|*"TLS"*)
+          echo "  This looks like a TLS trust failure rather than a blocked registry." >&2
+          echo "  Point curl at your corporate CA bundle and retry:" >&2   # style-guard: allow
+          echo "    export CURL_CA_BUNDLE=/path/to/corporate-ca.pem   # or TRACEBLOC_CA_BUNDLE" >&2
+          echo "  See the TLS-inspecting network notes in docs/INSTALL.md." >&2 ;;
+        *"Could not resolve"*|*"resolve host"*)
+          echo "  DNS did not resolve the registry host. If this site blocks it outright," >&2
+          echo "  set TRACEBLOC_REGISTRY_URL to a reachable mirror of the repository list," >&2
+          echo "  or TRACEBLOC_TASK_REPOS to the task-repo list itself." >&2 ;;
+        *)
+          echo "  If the registry is unreachable from this host by design, set" >&2
+          echo "  TRACEBLOC_REGISTRY_URL to a mirror of the repository list, or" >&2
+          echo "  TRACEBLOC_TASK_REPOS to the task-repo list itself." >&2 ;;
+      esac
+      rm -f "$curlerr"
       exit 1
-    }
+    fi
+    rm -f "$curlerr"
     # FAILS CLOSED (rule 3). Bugbot, High, and correct: the first version wrote
     # `2>/dev/null || echo ""` and `|| true` here, and never preflighted python3.
     # A missing interpreter, a truncated body, or a later page that failed to
