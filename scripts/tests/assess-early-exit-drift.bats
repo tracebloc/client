@@ -88,6 +88,27 @@ _funcs_with_exit() {
   ' "$1" | sort -u
 }
 
+# _count_calls SYMBOL FILE — number of INVOCATIONS of SYMBOL, matched as a word in
+# ANY position (leading, a `case`-arm one-liner `state) … SYMBOL ;;`, `&& SYMBOL`,
+# `then SYMBOL`, `SYMBOL;`), excluding the definition `SYMBOL(` and comments/quoted
+# spans. A first-token-only count would miss the file's own case-arm hand-off style
+# — the exact new early-exit this suite exists to catch (Bugbot).
+_count_calls() {
+  awk -v sym="$1" '
+    BEGIN { sq = sprintf("%c", 39); n=0 }
+    {
+      l=$0
+      if (l ~ /^[[:space:]]*#/) next
+      gsub(sq "[^" sq "]*" sq, "", l)        # strip single-quoted spans
+      gsub(/"[^"]*"/, "", l)                 # strip double-quoted spans
+      sub(/[[:space:]]#.*/,"",l)             # strip trailing comment
+      gsub(sym "\\(", "", l)                 # drop the definition token SYMBOL(
+      n += gsub("(^|[^A-Za-z0-9_])" sym "([^A-Za-z0-9_]|$)", "\\&", l)
+    }
+    END { print n }
+  ' "$2"
+}
+
 # ── Behavioral: each known early-exit terminal runs BOTH advisories ──────────
 # The healthy hand-off exits before _handle_existing_cluster, so assess_existing_
 # install must run both advisories itself, before handing off.
@@ -146,12 +167,14 @@ _funcs_with_exit() {
   }
 }
 
-@test "_assess_handoff has exactly ONE call site (the healthy branch)" {
+@test "_assess_handoff has exactly ONE invocation (the healthy branch)" {
   # A second invocation is a new early-exit routing through the hand-off; it must
   # run the advisories before handing off and be added to the behavioral coverage.
-  local n; n="$(grep -cE '^[[:space:]]*_assess_handoff([[:space:]]|$)' "$ASSESS")"
+  # Counted in any spelling (case-arm one-liner, `&&`/`then` call, `;`-joined), not
+  # just line-leading, so an inline second hand-off can't slip the pin (Bugbot).
+  local n; n="$(_count_calls _assess_handoff "$ASSESS")"
   [ "$n" -eq 1 ] || {
-    echo "Expected 1 _assess_handoff call site in assess.sh, found $n."
+    echo "Expected 1 _assess_handoff invocation in assess.sh, found $n."
     echo "A new hand-off path must run both drift/GPU advisories first (backend#2674)."
     return 1
   }
@@ -226,5 +249,21 @@ commented_guard_only() {
 EOF
   [ -z "$(_advisories_in commented_guard_only "$fix")" ] || {
     echo "a commented-out advisory guard was counted"; return 1; }
+
+  # And _count_calls sees hand-offs in the file's OWN case-arm style, not just
+  # line-leading: two real invocations (one inline case-arm), the definition, and
+  # a prose mention → count is 2.
+  cat > "$fix" <<'EOF'
+_assess_handoff() { exit 0; }        # the definition — must NOT count
+first() {
+  _assess_handoff                    # a plain invocation
+}
+second() {
+  healthy) do_checks && _assess_handoff ;;   # a case-arm one-liner invocation
+}
+# a prose mention of _assess_handoff in a comment must NOT count
+EOF
+  [ "$(_count_calls _assess_handoff "$fix")" -eq 2 ] || {
+    echo "call count wrong; want 2, got $(_count_calls _assess_handoff "$fix")"; return 1; }
   return 0
 }
