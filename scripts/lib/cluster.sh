@@ -1365,7 +1365,11 @@ _generate_node_cdi_specs() {
   if (( ! any_ok )); then
     K3D_GPU_FLAGS=()
     warn "No cluster node has a usable NVIDIA CDI spec — running CPU mode so GPU jobs aren't stranded Pending."
-    hint "Check the NVIDIA driver + 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG} nvidia-smi' works on this host, then re-run."
+    hint "Check the NVIDIA driver + 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG} nvidia-smi' works on this host."
+    # GPU wiring is fixed at create time and this CPU cluster now looks healthy, so a
+    # plain re-run fast-paths and can't retry GPU (Bugbot) — recreate to enable it.
+    hint "Then recreate the cluster to enable GPU (a plain re-run won't retry it):"
+    _recreate_cluster_hint
   fi
 }
 
@@ -1539,7 +1543,11 @@ _create_new_cluster() {
     if (( ! _gpu_ok )); then
       K3D_GPU_FLAGS=()
       warn "Couldn't pull or validate the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
-      hint "To enable GPU, make sure this host can pull AND run ${_prepull_image} (for a private registry set TRACEBLOC_IMAGE_REGISTRY + TRACEBLOC_REGISTRY_USERNAME/PASSWORD), then re-run."
+      hint "Make sure this host can pull AND run ${_prepull_image} (for a private registry set TRACEBLOC_IMAGE_REGISTRY + TRACEBLOC_REGISTRY_USERNAME/PASSWORD)."
+      # The node image is fixed at create time and this CPU cluster now looks healthy,
+      # so a plain re-run fast-paths and can't retry GPU (Bugbot) — recreate to enable it.
+      hint "Then recreate the cluster to enable GPU (a plain re-run won't retry it):"
+      _recreate_cluster_hint
     fi
   fi
 
