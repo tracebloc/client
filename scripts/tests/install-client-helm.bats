@@ -385,10 +385,15 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
-# backend#2033: an AMD GPU host must actually REQUEST the device. The amd device
-# plugin advertises amd.com/gpu, but GPU_LIMITS/GPU_REQUESTS used to be wired for
-# nvidia only, so AMD training pods requested no GPU and silently ran on CPU while
-# the installer still reported the GPU "verified". Lock the amd.com/gpu request in.
+# ── GPU chart values: per-vendor request (backend#2033) gated on GPU actually
+# WIRED for NVIDIA (client#835) ───────────────────────────────────────────────
+# The request key must match the vendor (nvidia.com/gpu vs amd.com/gpu), and for
+# NVIDIA it is written only when the GPU is wired (--gpus=all) — requesting it on a
+# node that advertises 0 strands jobs Pending. RuntimeClass + device plugin ride the
+# same NVIDIA-wired gate; AMD keys on detection. Mirrors the Windows twin.
+
+# backend#2033: an AMD GPU host must actually REQUEST the device (amd.com/gpu), or
+# training pods run CPU-only while the installer reports the GPU "verified".
 @test "install_client_helm: AMD host -> values request amd.com/gpu + enable the amd device plugin" {
   GPU_VENDOR=amd
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
@@ -397,23 +402,19 @@ setup() {
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
   verify_credentials() { printf valid; }
-  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for
-  # a pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
+  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for a
+  # pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
   kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q 'GPU_LIMITS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
   grep -q 'GPU_REQUESTS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
-  # and the chart-managed device plugin is enabled for the amd vendor.
   grep -q 'vendor: amd' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
 }
 
-# Parity guard for the sibling branch backend#2033 edits: an NVIDIA host still
-# requests nvidia.com/gpu. Nothing else asserts the request at the values layer,
-# so this pins both arms of the vendor conditional against a future regression.
-@test "install_client_helm: NVIDIA host -> values request nvidia.com/gpu" {
-  GPU_VENDOR=nvidia
+@test "install_client_helm: NVIDIA wired -> values carry the GPU request, RuntimeClass, and device plugin" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")   # detected AND wired
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
@@ -422,14 +423,34 @@ setup() {
   kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
-  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
-  grep -q 'vendor: nvidia' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$vf" || { cat "$vf"; return 1; }
+  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$vf" || return 1
+  grep -q 'RUNTIME_CLASS_NAME: "nvidia"' "$vf" || return 1
+  grep -q 'vendor: nvidia' "$vf" || return 1
+  grep -q 'runtimeClassName: nvidia' "$vf" || return 1
 }
 
-# Third arm of the same conditional: a non-GPU host must emit EMPTY GPU_LIMITS/
-# GPU_REQUESTS (client-runtime#80 reads an explicit empty as "no GPU here"), and
-# must NOT enable the device plugin. GPU_VENDOR=none is the setup() default.
+# client#835: NVIDIA detected but NOT wired (stock/CPU node) must write CPU values —
+# requesting nvidia.com/gpu there would strand every job Pending.
+@test "install_client_helm: NVIDIA detected but NOT wired -> CPU values (no GPU request / plugin)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()               # detected, but the cluster is CPU-only
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: ""' "$vf" || { cat "$vf"; return 1; }
+  grep -q 'GPU_REQUESTS: ""' "$vf" || return 1
+  grep -q 'RUNTIME_CLASS_NAME: ""' "$vf" || return 1
+  ! grep -q 'devicePlugin:' "$vf" || { cat "$vf"; return 1; }   # no plugin against a CPU node
+}
+
+# Third arm: a non-GPU host emits EMPTY GPU_LIMITS/GPU_REQUESTS and no device plugin.
 @test "install_client_helm: non-GPU host -> empty GPU_LIMITS/GPU_REQUESTS, no device plugin" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -547,34 +568,63 @@ setup() {
   [[ "$output" != *"helm upgrade --install"* ]] || return 1
 }
 
-# backend#2033: the adopt/reconcile path reuses the release's stored values, so
-# without forcing the GPU request an already-installed AMD edge that re-runs would
-# keep the empty request written before this fix and train on CPU. The reconcile
-# upgrade must force env.GPU_REQUESTS/GPU_LIMITS to THIS run's vendor value
-# (mirrors the PowerShell twin), overriding whatever the release stored.
-@test "install_client_helm: adopt on an AMD host forces the GPU request onto the reconcile (backend#2033)" {
-  GPU_VENDOR=amd
+# The adopt/reconcile path uses --reuse-values, so it must FORCE the GPU keys to
+# THIS run's decision or a stale request survives (backend#2033 + client#835): an
+# AMD edge trains on the wrong/empty resource, and an NVIDIA edge dropped to CPU
+# keeps requesting a GPU and strands jobs Pending.
+_adopt_gpu_setup() {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
-  _ensure_tracebloc_dirs() { :; }
-  _ensure_release_dirs() { :; }
-  _ensure_helm_runnable() { :; }
-  kubectl() { record "kubectl $*"; return 0; }
+  _ensure_tracebloc_dirs() { :; }; _ensure_release_dirs() { :; }; _ensure_helm_runnable() { :; }
+  kubectl() { return 0; }
   helm() {
     if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
     if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
     record "helm $*"; return 0
   }
-  verify_credentials() { echo "VERIFY_CALLED"; printf invalid; }
+  verify_credentials() { printf valid; }
   export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+}
+
+@test "install_client_helm: adopt + GPU wired -> forces GPU request/RuntimeClass/plugin on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.nvidia.runtimeClassName=nvidia"* ]] || return 1
+}
+
+@test "install_client_helm: adopt + NVIDIA detected but NOT wired -> forces CPU keys on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()          # detected, cluster is CPU-only
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"gpu.devicePlugin.enabled=false"* ]] || return 1
+  # The force-EMPTY clears must be PRESENT (deleting them would let --reuse-values
+  # keep a prior GPU request). Flag present AND not a GPU value ⇒ forced empty.
+  [[ "$output" == *"--set-string env.GPU_REQUESTS="* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS="* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME="* ]] || return 1
+  [[ "$output" != *"env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" != *"env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+}
+
+# backend#2033: an already-installed AMD edge that re-runs must have its request
+# healed onto the reconcile (--set-string amd.com/gpu=1), overriding stored values.
+@test "install_client_helm: adopt on an AMD host forces the amd.com/gpu request onto the reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=amd
   run install_client_helm </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"reconciling"* ]] || return 1
-  # Reconciled in place (reuse-values) AND forced the AMD request over the stored
-  # values, so the re-run heals the GPU request the same way a fresh install wires it.
-  mock_calls | grep -q "helm upgrade munich"
-  mock_calls | grep -q -- "--reset-then-reuse-values"
-  mock_calls | grep -q -- "--set-string env.GPU_REQUESTS=amd.com/gpu=1"
-  mock_calls | grep -q -- "--set-string env.GPU_LIMITS=amd.com/gpu=1"
+  run mock_calls
+  [[ "$output" == *"helm upgrade munich"* ]] || return 1
+  [[ "$output" == *"--reset-then-reuse-values"* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=amd.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS=amd.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.vendor=amd"* ]] || return 1
 }
 
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {

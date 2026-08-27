@@ -18,6 +18,18 @@
 verify_gpu() {
   [[ "$GPU_VENDOR" != "nvidia" && "$GPU_VENDOR" != "amd" ]] && return
 
+  # nvidia CPU-fallback (client#835): a reused CPU-only cluster or a failed node
+  # CDI-gen leaves GPU_VENDOR=nvidia but no GPU wired in. There is then nothing for
+  # the 18×5s node poll below to find, and running it would just stall the finish
+  # with a misleading "GPU may still be initializing". Skip it when we know the GPU
+  # wasn't wired. Guarded with `declare -F` so gpu-plugins.sh can still be sourced
+  # standalone (its bats suite does) without common.sh's _gpu_wired. amd has no
+  # wiring flag, so it keeps verifying on detection as before.
+  if [[ "$GPU_VENDOR" == "nvidia" ]] && declare -F _gpu_wired >/dev/null 2>&1 && ! _gpu_wired; then
+    log "NVIDIA GPU detected but not wired into the cluster — skipping node GPU verification (CPU mode)."
+    return
+  fi
+
   log "Verifying GPU on node..."
 
   # The device plugin now rolls out with the Helm release, and `helm upgrade
