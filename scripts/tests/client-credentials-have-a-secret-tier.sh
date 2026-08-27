@@ -62,6 +62,21 @@ checks=0
 fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 ok() { checks=$((checks + 1)); }
 
+# 0. THE LOOKUP ITSELF (Bugbot, client#891). Every per-credential check below
+#    reads the DECODED value out of $existingSecret, and none of them requires
+#    $existingSecret to have come from a live cluster read. Replacing the
+#    `lookup` with `dict` -- or any empty stand-in -- left all 12 assertions
+#    green and helm-unittest unchanged, because `lookup` is already empty under
+#    `helm template`. That returns every install to values-only, which is the
+#    one defect this whole guard exists to catch.
+if ! grep -qE '\$existingSecret[[:space:]]*:?=[[:space:]]*\(?[[:space:]]*lookup "v1" "Secret"' <<<"$code"; then
+  fail "\$existingSecret is no longer assigned from (lookup \"v1\" \"Secret\" ...),
+    so the Secret tier reads out of something that is never populated from the
+    cluster and every install silently falls back to values-only. No chart test
+    can see this: \`lookup\` returns empty under \`helm template\` either way."
+fi
+ok
+
 for cred in clientId clientPassword; do
   case "$cred" in
     clientId)       key="CLIENT_ID";       var='\$secretClientId' ;;
@@ -84,8 +99,16 @@ for cred in clientId clientPassword; do
   ok
 
   # 2. values first, Secret second -- order matters, so compare positions
-  values_line=$(grep -nE "if \.Values\.$cred" <<<"$code" | head -1 | cut -d: -f1 || true)
-  secret_line=$(grep -nE "else if $var" <<<"$code" | head -1 | cut -d: -f1 || true)
+  # CAPTURE THEN SLICE, never `| head -1 | cut` (Bugbot, client#891). Under
+  # `set -euo pipefail` an early-closing `head` SIGPIPEs `grep`, and the `|| true`
+  # that suppresses the 141 collapses it into the same empty string a real
+  # no-match produces -- so the order check below either aborts the gate or
+  # fail-closes on a live match, indistinguishably. The shared `early-close` job
+  # forbids this shape tree-wide; the sibling guards already capture-then-slice.
+  values_hits=$(grep -nE "if \.Values\.$cred" <<<"$code" || true)
+  secret_hits=$(grep -nE "else if $var" <<<"$code" || true)
+  values_line=${values_hits%%:*}
+  secret_line=${secret_hits%%:*}
   if [ -z "$values_line" ] || [ -z "$secret_line" ]; then
     fail "$cred: could not locate both tiers (values at '${values_line:-none}',
       Secret at '${secret_line:-none}') -- refusing to assume the order is right"
@@ -106,7 +129,13 @@ for cred in clientId clientPassword; do
     fail "$cred no longer fails when unresolvable"
   fi
   ok
-  if grep -qE "\\\$${cred}[[:space:]]*=[[:space:]]*(randAlphaNum|randAlpha|randNumeric|randAscii|uuidv4|derivePassword)" <<<"$code"; then
+  # BOTH ASSIGNMENT FORMS, AND A PARENTHESISED RHS (Bugbot, client#891). This
+  # file declares with `:=` two lines above and assigns with `=`, and other
+  # assignments in secrets.yaml wrap the right-hand side in parentheses -- so a
+  # bare `=` with an unparenthesised RHS was blind to `$clientId := randAlphaNum 16`
+  # and to `$clientId = (randAlphaNum 16)`, which is the exact evasion this rule
+  # was rewritten to catch.
+  if grep -qE "\\\$${cred}[[:space:]]*:?=[[:space:]]*\\(?[[:space:]]*(randAlphaNum|randAlpha|randNumeric|randAscii|uuidv4|derivePassword)" <<<"$code"; then
     fail "$cred is assigned a GENERATED value somewhere. These are
       BACKEND-ISSUED: a value the platform was never told to expect authenticates
       as nobody and locks the minter out -- which is why this is the one
@@ -129,8 +158,8 @@ if [ "$fails" -ne 0 ]; then
   echo "client-credentials-have-a-secret-tier: $fails failure(s) across $checks assertion(s)" >&2
   exit 1
 fi
-if [ "$checks" -lt 12 ]; then
-  echo "client-credentials-have-a-secret-tier: only $checks assertion(s) ran; expected 12+.
+if [ "$checks" -lt 13 ]; then
+  echo "client-credentials-have-a-secret-tier: only $checks assertion(s) ran; expected 13+.
   A collapsed run must not report success (rule 3)." >&2
   exit 1
 fi
