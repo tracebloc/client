@@ -2143,7 +2143,7 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
   docker()  { record "docker $*"; return 0; }
   _check_healthy_cluster_gpu_consistent
   run mock_calls
-  [[ "$output" == *"kubectl"* ]] || return 1            # the alloc probe DID run
+  [[ "$output" == *"get nodes"* ]] || return 1          # the alloc probe DID run
   [[ "$output" != *"docker inspect"* ]] || return 1     # returned before the image inspect
 }
 
@@ -2164,7 +2164,8 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
   [ "$status" -eq 0 ] || return 1
   [[ "$output" != *"recreate"* && "$output" != *"Recreate"* ]] || return 1   # no false recreate
   run mock_calls
-  [[ "$output" != *"kubectl"* ]] || return 1            # NVIDIA-only guard: no node probe for AMD
+  [[ "$output" == *"cluster-info"* ]] || return 1       # the macOS bound (backend#2685) ran
+  [[ "$output" != *"get nodes"* ]] || return 1          # NVIDIA-only guard: no node probe for AMD
 }
 
 @test "_check_healthy_cluster_gpu_consistent: release does NOT request a GPU -> no node probe" {
@@ -2177,7 +2178,24 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
   kubectl() { record "kubectl $*"; printf ''; }
   _check_healthy_cluster_gpu_consistent
   run mock_calls
-  [[ "$output" != *"kubectl"* ]] || return 1            # the node probe never ran
+  [[ "$output" == *"cluster-info"* ]] || return 1       # the macOS bound (backend#2685) ran
+  [[ "$output" != *"get nodes"* ]] || return 1          # the node probe never ran
+}
+
+# backend#2685: helm has no --request-timeout and `_bounded` is a NO-OP on a stock
+# Mac (neither timeout(1) nor gtimeout(1) ships), so the unbounded `helm list`/
+# `helm get values` must be gated on a self-bounding kubectl reachability probe.
+# When the API is unreachable the guard must RETURN 0 without ever shelling out to
+# helm — otherwise a healthy re-run hangs on a wedged apiserver with no coreutils.
+@test "_check_healthy_cluster_gpu_consistent: API unreachable -> no helm calls, silent no-op" {
+  kubectl() { record "kubectl $*"; [[ "$1" == cluster-info ]] && return 1; printf ''; }
+  helm() { record "helm $*"; printf 'should-not-run\n'; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1                        # non-fatal, silent no-op
+  [ -z "$output" ] || return 1                           # nothing surfaced
+  run mock_calls
+  [[ "$output" == *"cluster-info"* ]] || return 1        # the gate probe ran
+  [[ "$output" != *"helm"* ]] || return 1                # ...and kept the unbounded helm calls off a dead API
 }
 
 @test "_generate_node_cdi_specs: generates the CDI spec on the node(s)" {
