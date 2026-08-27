@@ -1,13 +1,25 @@
 name: Windows e2e (self-hosted)
 
-# Real end-to-end exercise of the Windows installer (install-k8s.ps1) on a self-hosted
-# runner with NESTED VIRTUALIZATION — the coverage GitHub's windows-latest runners can't
-# give (they can't nest virt, so the PS installer otherwise has only mocked Pester). This
-# is decision D5 of RFC-CLIENT-0003 (#436).
+# ██ DORMANT — nightly schedule REMOVED 2026-08-27 (backend#2627) ███████████████████████
+# This job has NEVER once succeeded. It ran nightly for 22 days and every run was recorded
+# `cancelled` — GitHub's 24h queue-timeout, because no `self-hosted, windows, nested-virt`
+# runner is registered to pick it up. A `cancelled` conclusion is not a red check and raises
+# no alert, so a job with zero successful runs read for weeks as "the Windows path is covered
+# nightly". It never was. The nightly `schedule:` trigger is removed so it stops producing a
+# phantom daily cancel that implies coverage it does not provide (backend#2627).
 #
-# SCHEDULE-ONLY (nightly) + manual dispatch — NOT per-PR: the run provisions a real k3d
-# cluster inside WSL2/Docker on a shared, persistent box, so it must not contend with every
-# push. Cost is bounded by being schedule-only + tearing the cluster down every run.
+# COVERAGE, meanwhile, is the credentialed EC2 Windows journey (backend#2619): the e2e-agent
+# now boots an m7i.xlarge with `--cpu-options NestedVirtualization=enabled` (ordinary EC2, no
+# metal, no surcharge) that can actually run WSL2, so `install-client-windows` exercises the
+# real installer end-to-end there. Once that journey is reliably green, this file can be
+# deleted outright; it is kept (manual-dispatch only) so the job can be revived the moment a
+# nested-virt runner IS registered — nothing about the driver or the setup below has to change.
+#
+# TO REVIVE: register a runner per docs/WINDOWS-E2E.md, then restore the `schedule:` trigger.
+# A manual `workflow_dispatch` will queue-timeout until such a runner exists — that is expected
+# while dormant, and unlike the old nightly cron it is an explicit, visible action, not a
+# silent phantom. The staleness watch (workflow-staleness-watch.yml) only tracks SCHEDULED
+# workflows, so while this stays dispatch-only it is correctly out of scope.
 #
 # ── Runner prerequisites (one-time; see docs/WINDOWS-E2E.md) ───────────────────────────
 #   • a self-hosted Windows runner registered with the labels:  self-hosted, windows, nested-virt
@@ -15,11 +27,11 @@ name: Windows e2e (self-hosted)
 #   • Docker Desktop installed and running (WSL2 backend)
 #   • the runner service account may install user-space tools (kubectl/k3d/helm) + create k3d clusters
 # The e2e VERIFIES Docker is up (it does not reinstall Docker Desktop per run — a persistent
-# runner must not reboot itself nightly).
+# runner must not reboot itself nightly). This is decision D5 of RFC-CLIENT-0003 (#436).
 
 on:
-  schedule:
-    - cron: '0 4 * * *'      # nightly 04:00 UTC
+  # No `schedule:` — see the DORMANT banner above (backend#2627). Manual dispatch only, so a
+  # run happens exactly when a human asks for one against a real nested-virt runner.
   workflow_dispatch:
 
 permissions:

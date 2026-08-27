@@ -17,6 +17,7 @@ setup() {
   SERVERS=1; AGENTS=0; K8S_VERSION=""; K3D_GPU_FLAGS=()
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
   unset TRACEBLOC_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE GIT_SSL_CAINFO
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY TRACEBLOC_REGISTRY_USERNAME TRACEBLOC_REGISTRY_PASSWORD TB_SKIP_GPU_IMAGE_PREPULL
 
   # k3d mock: record argv; if a --config <path> is present, snapshot the file so
   # a test can assert its contents (cluster.sh deletes the temp dir after create).
@@ -29,7 +30,14 @@ setup() {
     done
     return 0
   }
-  docker() { record "docker $*"; return 0; }
+  # Default docker mock: records argv, and for the GPU image verify
+  # (`docker run … --version`, client#835) prints a k3s version so the pre-pull
+  # verify passes. Tests that need a different outcome redefine docker() locally.
+  docker() {
+    record "docker $*"
+    case " $* " in *" run "*" --version"*) printf 'k3s version v1.36.3+k3s1 (deadbeef)\n' ;; esac
+    return 0
+  }
   # _bounded wraps probes in timeout(1), which can't exec a `docker` shell-function
   # mock — on Linux CI (where `timeout` exists) that would bypass the mock. Run the
   # command directly so mocks work everywhere; the timeout wrapper is common.sh's
@@ -1908,4 +1916,358 @@ k3d-tracebloc-agent-0 agent" passthrough
   [[ -n "$k3d_line" ]] || { echo "README never mentions the k3d delete"; return 1; }
   (( rel_line < k3d_line )) \
     || { echo "README puts the k3d delete (line $k3d_line) before the release (line $rel_line)"; return 1; }
+}
+
+# ── GPU node image + end-to-end wiring (client#835) ─────────────────────────
+# The stock rancher/k3s node has no NVIDIA runtime, so a GPU pod can never
+# schedule on it. When GPU is wired, _create_new_cluster must swap in the
+# GPU-capable k3s-cuda image; the reuse guard must fall back to CPU on a stock
+# node so jobs aren't stranded; and the native CDI spec must be generated in-node.
+
+@test "_gpu_node_image: default -> ghcr.io/tracebloc/k3s-cuda:<k8s>-cuda-<cuda>" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
+  run _gpu_node_image
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
+}
+
+@test "_gpu_node_image: TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  TRACEBLOC_K3S_CUDA_IMAGE="registry.internal/team/k3s-gpu@sha256:dead"
+  run _gpu_node_image
+  [ "$output" = "registry.internal/team/k3s-gpu@sha256:dead" ] || return 1
+}
+
+@test "_gpu_node_image: TRACEBLOC_IMAGE_REGISTRY re-homes onto the mirror, scheme stripped" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  unset TRACEBLOC_K3S_CUDA_IMAGE
+  TRACEBLOC_IMAGE_REGISTRY="https://mirror.corp.example"
+  run _gpu_node_image
+  [ "$output" = "mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
+}
+
+# Bugbot: a mirror with a trailing slash must not yield host//repo (breaks the pull).
+@test "_gpu_node_image: mirror trailing slash is stripped (no double slash)" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  unset TRACEBLOC_K3S_CUDA_IMAGE
+  TRACEBLOC_IMAGE_REGISTRY="https://mirror.corp.example/"
+  run _gpu_node_image
+  [ "$output" = "mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
+  [[ "$output" != *"//"* ]] || return 1
+}
+
+# _registry_host_for: Docker treats the first segment as a registry only when it has
+# a dot/colon or is localhost; a bare owner/name ref logs into docker.io, NOT the
+# owner (else creds go to a nonexistent endpoint). Covers all four, incl. the
+# docker.io branch a mirror-only test never exercises (LukasWodka review).
+@test "_registry_host_for: derives the docker login host for every ref shape" {
+  run _registry_host_for "ghcr.io/tracebloc/k3s-cuda:tag";        [ "$output" = "ghcr.io" ] || return 1
+  run _registry_host_for "mirror.corp/tracebloc/k3s-cuda:tag";    [ "$output" = "mirror.corp" ] || return 1
+  run _registry_host_for "localhost:5000/gpu-node:tag";           [ "$output" = "localhost:5000" ] || return 1
+  run _registry_host_for "owner/private-image:tag";               [ "$output" = "docker.io" ] || return 1
+}
+
+@test "_node_image_gpu_capable: k3s-cuda tag -> capable; stock rancher/k3s -> not; empty -> not" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
+  run _node_image_gpu_capable "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"
+  [ "$status" -eq 0 ] || return 1
+  run _node_image_gpu_capable "rancher/k3s:v1.36.3-k3s1"
+  [ "$status" -ne 0 ] || return 1
+  run _node_image_gpu_capable ""
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_node_image_gpu_capable: a renamed override image (no k3s-cuda:) matches by exact configured ref" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  TRACEBLOC_K3S_CUDA_IMAGE="registry.internal/team/k3s-gpu:pinned"
+  run _node_image_gpu_capable "registry.internal/team/k3s-gpu:pinned"
+  [ "$status" -eq 0 ] || return 1                 # exact match against $Configured
+  run _node_image_gpu_capable "registry.internal/team/OTHER:pinned"
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_create_new_cluster: GPU wired -> uses the k3s-cuda image, NOT stock rancher/k3s" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--image ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+  [[ "$output" != *"rancher/k3s:"* ]] || return 1                 # never the stock image
+  [[ "$output" == *"--gpus=all"* ]] || return 1                   # GPU passthrough still appended
+}
+
+@test "_create_new_cluster: CPU (no GPU flags) -> stock rancher/k3s image, no GPU image" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=(); K8S_VERSION="v1.36.3-k3s1"   # detected but not wired
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--image rancher/k3s:v1.36.3-k3s1"* ]] || return 1
+  [[ "$output" != *"k3s-cuda"* ]] || return 1
+}
+
+@test "_create_new_cluster: K8S_VERSION=latest + GPU -> GPU disabled, no image pinned (CPU)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="latest"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"--image"* ]] || return 1                      # latest floats to k3d default
+  [[ "$output" != *"--gpus=all"* ]] || return 1                   # GPU request dropped
+}
+
+# Bugbot High: an unpullable GPU image (blocked/unpublished ghcr, private mirror
+# with no login) must degrade to a CPU install, not hard-fail cluster-create.
+@test "_create_new_cluster: GPU image pull fails -> CPU fallback (stock image, no --gpus)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() { record "docker $*"; [[ "$1" == pull ]] && return 1; return 0; }   # pull blocked
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1                                 # install still succeeds
+  [[ "$output" == *"CPU-only"* ]] || return 1                     # fallback announced
+  run mock_calls
+  [[ "$output" == *"--image rancher/k3s:v1.36.3-k3s1"* ]] || return 1   # stock, not GPU
+  [[ "$output" != *"--image ghcr.io/tracebloc/k3s-cuda"* ]] || return 1
+  [[ "$output" != *"--gpus=all"* ]] || return 1                   # GPU passthrough dropped
+}
+
+# The successful pre-pull caches the image for k3d; TB_SKIP_GPU_IMAGE_PREPULL bypasses it.
+@test "_create_new_cluster: GPU wired -> pre-pulls the GPU image before create" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"docker pull ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+}
+
+# Bugbot Medium: a pulled image that doesn't run k3s (mis-tagged/broken mirror copy)
+# must fall back to CPU, not hard-fail k3d create.
+@test "_create_new_cluster: GPU image pulls but doesn't run k3s -> CPU fallback" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() {
+    record "docker $*"
+    case " $* " in *" run "*" --version"*) printf 'busybox v1.36.1\n' ;; esac   # pull ok, but not a k3s image
+    return 0
+  }
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"CPU-only"* ]] || return 1
+  run mock_calls
+  [[ "$output" == *"--image rancher/k3s:v1.36.3-k3s1"* ]] || return 1
+  [[ "$output" != *"--gpus=all"* ]] || return 1
+}
+
+# Bugbot High: a private registry must be authenticated on the HOST daemon before
+# the pull (the node image is host-pulled, not kubelet-pulled), or set credentials
+# go unused. Mirrors Connect-GpuRegistry.
+@test "_create_new_cluster: GPU + private mirror creds -> docker login the mirror host before pull" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  TRACEBLOC_IMAGE_REGISTRY="mirror.corp.example"
+  TRACEBLOC_REGISTRY_USERNAME="u"; TRACEBLOC_REGISTRY_PASSWORD="p"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"docker login mirror.corp.example --username u --password-stdin"* ]] || return 1
+  [[ "$output" == *"--image mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+}
+
+@test "_check_existing_cluster_gpu: reused GPU-capable node -> keeps the GPU request" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() { record "docker $*"; [[ "$1" == inspect ]] && printf '%s\n' "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"; return 0; }
+  _check_existing_cluster_gpu
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1
+}
+
+@test "_check_existing_cluster_gpu: reused CPU-only node -> drops the GPU request + warns" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() { record "docker $*"; [[ "$1" == inspect ]] && printf '%s\n' "rancher/k3s:v1.36.3-k3s1"; return 0; }
+  run _check_existing_cluster_gpu
+  [[ "$output" == *"CPU-only node"* ]] || return 1
+  _check_existing_cluster_gpu   # run again unwrapped to observe the array mutation
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ] || return 1
+}
+
+@test "_check_existing_cluster_gpu: inspect fails -> no-op, keeps the request (no guessing)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  docker() { record "docker $*"; return 1; }         # inspect errors → empty
+  _check_existing_cluster_gpu
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1
+}
+
+@test "_check_existing_cluster_gpu: GPU not requested -> no-op even on a CPU node" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=()              # not wired
+  docker() { record "docker $*"; [[ "$1" == inspect ]] && printf '%s\n' "rancher/k3s:v1.36.3-k3s1"; return 0; }
+  run _check_existing_cluster_gpu
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || return 1                        # silent — nothing to reconcile
+}
+
+# ── _check_healthy_cluster_gpu_consistent: the HEALTHY fast-path guard (client#835)
+# The healthy re-run exits before the create/reuse reconcile, so a live release that
+# requests a GPU its node can't schedule must still be flagged here.
+_hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that requests a GPU
+  helm() {
+    case "$1" in
+      list) printf 'NAME\tNAMESPACE\tREVISION\tUPDATED\tSTATUS\tCHART\tAPP\ntbns\ttbns\t1\tnow\tdeployed\tclient-1.9.72\t1.9.72\n' ;;
+      get)  printf 'env:\n  GPU_REQUESTS: "nvidia.com/gpu=1"\n' ;;
+    esac
+  }
+}
+
+@test "_check_healthy_cluster_gpu_consistent: requests GPU, no advertise, STOCK node -> warns recreate" {
+  _hcgc_helm_lists_gpu_release
+  kubectl() { printf '' ; }                            # node advertises no nvidia.com/gpu
+  docker() { [[ "$1" == inspect ]] && printf 'rancher/k3s:v1.36.3-k3s1\n'; return 0; }   # stock node
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1                      # non-fatal
+  [[ "$output" == *"stock CPU-only image"* ]] || return 1
+  [[ "$output" == *"recreate"* || "$output" == *"Recreate"* ]] || return 1
+}
+
+# Bugbot: a GPU-CAPABLE node advertising 0 is a device-plugin/CDI issue — recreate
+# would not help, so the recreate advice must NOT fire.
+@test "_check_healthy_cluster_gpu_consistent: requests GPU, no advertise, CUDA node -> no recreate advice" {
+  _hcgc_helm_lists_gpu_release
+  kubectl() { printf '' ; }                            # node advertises none (dead plugin)
+  docker() { [[ "$1" == inspect ]] && printf 'ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04\n'; return 0; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"Recreate"* && "$output" != *"recreate"* ]] || return 1   # not a recreate case
+}
+
+# Node advertises a GPU -> consistent: it must RETURN at the alloc check, before the
+# node-image inspect. Assert docker inspect never ran (silence alone is inert — the
+# fall-through log/inspect wouldn't reach $output either; LukasWodka review).
+@test "_check_healthy_cluster_gpu_consistent: release requests GPU, node advertises one -> no image inspect" {
+  _hcgc_helm_lists_gpu_release
+  kubectl() { record "kubectl $*"; printf '1'; }        # node advertises a GPU
+  docker()  { record "docker $*"; return 0; }
+  _check_healthy_cluster_gpu_consistent
+  run mock_calls
+  [[ "$output" == *"get nodes"* ]] || return 1          # the alloc probe DID run
+  [[ "$output" != *"docker inspect"* ]] || return 1     # returned before the image inspect
+}
+
+# No release requests a GPU -> nothing to reconcile: must RETURN before the node
+# probe. Assert kubectl genuinely never ran (the mock records; silence is inert
+# because the alloc call CAPTURES kubectl output into $alloc — LukasWodka review).
+# Bugbot: a healthy AMD install requests amd.com/gpu on a stock rancher/k3s node —
+# this NVIDIA-only guard must NOT fire (no false "recreate" on a working cluster).
+@test "_check_healthy_cluster_gpu_consistent: AMD release (amd.com/gpu) -> no node probe, no warn" {
+  helm() {
+    case "$1" in
+      list) printf 'NAME\tNAMESPACE\tSTATUS\tCHART\ntbns\ttbns\tdeployed\tclient-1.9.73\n' ;;
+      get)  printf 'env:\n  GPU_REQUESTS: "amd.com/gpu=1"\n' ;;
+    esac
+  }
+  kubectl() { record "kubectl $*"; printf ''; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"recreate"* && "$output" != *"Recreate"* ]] || return 1   # no false recreate
+  run mock_calls
+  [[ "$output" == *"cluster-info"* ]] || return 1       # the macOS bound (backend#2685) ran
+  [[ "$output" != *"get nodes"* ]] || return 1          # NVIDIA-only guard: no node probe for AMD
+}
+
+@test "_check_healthy_cluster_gpu_consistent: release does NOT request a GPU -> no node probe" {
+  helm() {
+    case "$1" in
+      list) printf 'NAME\tNAMESPACE\tSTATUS\tCHART\ntbns\ttbns\tdeployed\tclient-1.9.72\n' ;;
+      get)  printf 'env:\n  GPU_REQUESTS: ""\n' ;;      # CPU release
+    esac
+  }
+  kubectl() { record "kubectl $*"; printf ''; }
+  _check_healthy_cluster_gpu_consistent
+  run mock_calls
+  [[ "$output" == *"cluster-info"* ]] || return 1       # the macOS bound (backend#2685) ran
+  [[ "$output" != *"get nodes"* ]] || return 1          # the node probe never ran
+}
+
+# backend#2685: helm has no --request-timeout and `_bounded` is a NO-OP on a stock
+# Mac (neither timeout(1) nor gtimeout(1) ships), so the unbounded `helm list`/
+# `helm get values` must be gated on a self-bounding kubectl reachability probe.
+# When the API is unreachable the guard must RETURN 0 without ever shelling out to
+# helm — otherwise a healthy re-run hangs on a wedged apiserver with no coreutils.
+@test "_check_healthy_cluster_gpu_consistent: API unreachable -> no helm calls, silent no-op" {
+  kubectl() { record "kubectl $*"; [[ "$1" == cluster-info ]] && return 1; printf ''; }
+  helm() { record "helm $*"; printf 'should-not-run\n'; }
+  run _check_healthy_cluster_gpu_consistent
+  [ "$status" -eq 0 ] || return 1                        # non-fatal, silent no-op
+  [ -z "$output" ] || return 1                           # nothing surfaced
+  run mock_calls
+  [[ "$output" == *"cluster-info"* ]] || return 1        # the gate probe ran
+  [[ "$output" != *"helm"* ]] || return 1                # ...and kept the unbounded helm calls off a dead API
+}
+
+@test "_generate_node_cdi_specs: generates the CDI spec on the node(s)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
+  docker() {
+    record "docker $*"
+    [[ "$1" == ps && "$*" == *"role=server"* ]] && printf '%s\n' "k3d-${CLUSTER_NAME}-server-0"
+    return 0
+  }
+  _generate_node_cdi_specs
+  run mock_calls
+  [[ "$output" == *"nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"* ]] || return 1
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1        # still wired
+}
+
+@test "_generate_node_cdi_specs: no node can produce a spec -> falls back to CPU" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
+  docker() {
+    record "docker $*"
+    [[ "$1" == ps && "$*" == *"role=server"* ]] && printf '%s\n' "k3d-${CLUSTER_NAME}-server-0"
+    [[ "$1" == exec ]] && return 1                    # generation fails on every node
+    return 0
+  }
+  run _generate_node_cdi_specs
+  [[ "$output" == *"CPU mode"* ]] || return 1
+  _generate_node_cdi_specs
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 0 ] || return 1        # dropped to CPU
+}
+
+@test "_generate_node_cdi_specs: GPU not wired -> no-op (no docker exec)" {
+  GPU_VENDOR="none"; K3D_GPU_FLAGS=()
+  docker() { record "docker $*"; return 0; }
+  _generate_node_cdi_specs
+  run mock_calls
+  [[ "$output" != *"nvidia-ctk"* ]] || return 1
+}
+
+# Bugbot High: a transient generate failure must NOT tear down a node that ALREADY
+# has a spec from a prior install — presence of /etc/cdi/nvidia.yaml is the authority.
+@test "_generate_node_cdi_specs: generate fails but a prior spec exists -> stays wired" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
+  docker() {
+    record "docker $*"
+    [[ "$1" == ps && "$*" == *"role=server"* ]] && printf '%s\n' "k3d-${CLUSTER_NAME}-server-0"
+    [[ "$*" == *"nvidia-ctk"* ]] && return 1          # regeneration fails
+    [[ "$*" == *"test -s"* ]] && return 0             # but the spec is already there
+    return 0
+  }
+  _generate_node_cdi_specs
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1        # NOT downgraded to CPU
+}
+
+# A docker-ps that can't LIST the nodes is "cannot tell", not "no GPU": don't guess
+# CPU on a probe failure (a pre-existing spec may well be in place).
+@test "_generate_node_cdi_specs: node listing fails -> leaves the GPU request as-is" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all")
+  docker() { record "docker $*"; [[ "$1" == ps ]] && return 1; return 0; }
+  run _generate_node_cdi_specs
+  [[ "$output" == *"leaving the GPU request as-is"* ]] || return 1
+  _generate_node_cdi_specs
+  [ "${#K3D_GPU_FLAGS[@]}" -eq 1 ] || return 1        # not cleared
+}
+
+@test "_check_existing_cluster_k8s_version: recognises the k3s-cuda tag (GPU cluster not skipped)" {
+  K8S_VERSION="v1.36.3-k3s1"
+  # A GPU node on the CURRENT pin -> no drift warning.
+  docker() { record "docker $*"; [[ "$1" == inspect ]] && printf '%s\n' "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"; return 0; }
+  run _check_existing_cluster_k8s_version
+  [ -z "$output" ] || return 1
+  # A GPU node on an OLD pin -> drift warning naming the stale k3s.
+  docker() { record "docker $*"; [[ "$1" == inspect ]] && printf '%s\n' "ghcr.io/tracebloc/k3s-cuda:v1.29.4-k3s1-cuda-12.4.1-base-ubuntu22.04"; return 0; }
+  run _check_existing_cluster_k8s_version
+  [[ "$output" == *"v1.29.4-k3s1"* ]] || return 1
+  [[ "$output" == *"not the validated pin"* ]] || return 1
 }

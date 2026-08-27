@@ -794,9 +794,14 @@ tests:
       # `patch` is the whole reason this Role exists: the cluster-wide rule in
       # rbac.yaml grants create+get and NOT patch, so without it the Collector
       # works until the first token rotation and then 401s on every export.
+      #
+      # RELEASE-SCOPED (`edge-`, the suite's release name), backend#2625. Pinning the
+      # `get`/`patch` grant to the SAME name jobs-manager writes and the Collector
+      # reads is the property; a bare fixed name here would grant one release the
+      # refresh of another release's Secret in the shared node-agents namespace.
       - contains:
           path: rules[1].resourceNames
-          content: tracebloc-telemetry-token
+          content: edge-telemetry-token
 
   # THE GATE THAT WAS HERE IS THE HALF THAT MADE THE FIX FAIL SOFT (backend#2400).
   # `{{- if $tcTok.enabled }}` meant jobs-manager could hold the Secret's
@@ -828,7 +833,7 @@ tests:
           content: create
       - contains:
           path: rules[1].resourceNames
-          content: tracebloc-telemetry-token
+          content: edge-telemetry-token
       - contains:
           path: rules[1].verbs
           content: patch
@@ -879,11 +884,14 @@ tests:
           content:
             name: TELEMETRY_TOKEN_SECRET_NAMESPACE
             value: tracebloc-node-agents
+      # RELEASE-SCOPED, backend#2625: the WRITER is told `edge-telemetry-token`, the
+      # same name the reader mounts and the RBAC pins. A fixed name here let two
+      # edges on one cluster write one Secret and misattribute each other's telemetry.
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TELEMETRY_TOKEN_SECRET_NAME
-            value: tracebloc-telemetry-token
+            value: edge-telemetry-token
       - contains:
           path: spec.template.spec.containers[0].env
           content:
@@ -893,7 +901,7 @@ tests:
           path: spec.template.spec.containers[1].env
           content:
             name: TELEMETRY_TOKEN_SECRET_NAME
-            value: tracebloc-telemetry-token
+            value: edge-telemetry-token
 
   # The Secret is the daemonset's PRECONDITION, so it cannot be conditional on the
   # daemonset (backend#2400). Asserted on all three variables rather than one: the
@@ -911,7 +919,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: TELEMETRY_TOKEN_SECRET_NAME
-            value: tracebloc-telemetry-token
+            value: edge-telemetry-token
       - contains:
           path: spec.template.spec.containers[0].env
           content:
@@ -924,7 +932,113 @@ tests:
           path: spec.template.spec.containers[1].env
           content:
             name: TELEMETRY_TOKEN_SECRET_NAME
-            value: tracebloc-telemetry-token
+            value: edge-telemetry-token
+
+  # ── the token Secret name is release-scoped (backend#2625) ─────────────────
+  # The node-agents namespace is SHARED across releases, so a FIXED Secret name let
+  # two edges on one cluster write one Secret — last writer wins, and the loser's
+  # Collector authenticated as the wrong tenant. The name now follows the release.
+  #
+  # helm-unittest renders one release per job, so the two-release DISTINCTNESS the
+  # acceptance names is asserted here as "release A → name A" and "release B → a
+  # different name", and end-to-end across a single render pair in
+  # scripts/tests/telemetry-token-agreement.sh.
+  - it: scopes the token Secret to release A across writer, reader and RBAC
+    release:
+      name: tenant-a
+      namespace: tracebloc
+    set:
+      telemetryCollector.enabled: true
+    templates:
+      - templates/jobs-manager-deployment.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-token-rbac.yaml
+    asserts:
+      - template: templates/jobs-manager-deployment.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tenant-a-telemetry-token
+      - template: templates/telemetry-collector-daemonset.yaml
+        equal:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: tenant-a-telemetry-token
+      - template: templates/telemetry-token-rbac.yaml
+        documentIndex: 0
+        contains:
+          path: rules[1].resourceNames
+          content: tenant-a-telemetry-token
+
+  - it: scopes the token Secret to release B, a DIFFERENT name than release A
+    release:
+      name: tenant-b
+      namespace: tracebloc
+    set:
+      telemetryCollector.enabled: true
+    templates:
+      - templates/jobs-manager-deployment.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-token-rbac.yaml
+    asserts:
+      - template: templates/jobs-manager-deployment.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_TOKEN_SECRET_NAME
+            value: tenant-b-telemetry-token
+      - template: templates/telemetry-collector-daemonset.yaml
+        equal:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: tenant-b-telemetry-token
+      # The negative half: release B must NOT resolve to release A's name. Without
+      # release-scoping both would be the fixed `tracebloc-telemetry-token` and this
+      # would still pass — so pin that A's specific name is not what B renders.
+      - template: templates/telemetry-collector-daemonset.yaml
+        notEqual:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: tenant-a-telemetry-token
+
+  # THE reuse-values MIGRATION, and the subtlety the naive rename misses. The old
+  # default `tracebloc-telemetry-token` is an EXPLICIT value baked into every
+  # existing release's stored values, so `helm upgrade --reuse-values` replays it —
+  # a resolver that only defaulted an ABSENT name would leave every installed edge on
+  # the colliding fixed name forever. Resolving the legacy sentinel to the release-
+  # scoped name is what actually migrates them; --set here stands in for that replay.
+  - it: treats the legacy fixed name as "migrate me", not as an override
+    set:
+      telemetryCollector.enabled: true
+      telemetryCollector.tokenSecret.name: tracebloc-telemetry-token
+    template: templates/telemetry-collector-daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: edge-telemetry-token
+      - notEqual:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: tracebloc-telemetry-token
+
+  # A GENUINELY custom name is a real operator choice, honoured verbatim — the
+  # migration reinterprets only the one legacy sentinel, nothing else. Asserted on
+  # reader AND RBAC so an override that moved the mount without the grant (or vice
+  # versa) reddens.
+  - it: honours a genuinely custom tokenSecret.name verbatim
+    set:
+      telemetryCollector.enabled: true
+      telemetryCollector.tokenSecret.name: acme-ingest-token
+    templates:
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-token-rbac.yaml
+    asserts:
+      - template: templates/telemetry-collector-daemonset.yaml
+        equal:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: acme-ingest-token
+      - template: templates/telemetry-token-rbac.yaml
+        documentIndex: 0
+        contains:
+          path: rules[1].resourceNames
+          content: acme-ingest-token
 
   # The bootstrap wiring is ungated; the WORKLOAD is not. If these ever stop being
   # different questions, a default install puts a DaemonSet on every customer node.

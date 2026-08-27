@@ -79,12 +79,13 @@ FACT_NAMES=(
   "k3s-cuda/build.sh:K3S_TAG"
   "build-k3s-cuda.yaml:k3s_tag"
   "install-k8s.ps1:CUDA_BASE_TAG"
+  "common.sh:CUDA_BASE_TAG"
   "k3s-cuda/Dockerfile:CUDA_TAG"
   "k3s-cuda/build.sh:CUDA_TAG"
   "build-k3s-cuda.yaml:cuda_tag"
 )
-FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$HELM_LIB" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" )
-FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT METRICS_WAIT_TIMEOUT METRICS_WAIT_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG )
+FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$HELM_LIB" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$COMMON" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" )
+FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT METRICS_WAIT_TIMEOUT METRICS_WAIT_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG )
 FACT_EXTRACT=(
   's/^K3D_VERSION="\${K3D_VERSION:-\(.*\)}".*/\1/p'
   's/^HELM_VERSION="\${HELM_VERSION:-\(.*\)}".*/\1/p'
@@ -102,6 +103,7 @@ FACT_EXTRACT=(
   's/^K3S_TAG="\${K3S_TAG:-\(.*\)}".*/\1/p'
   's/^ *default: "\(v[0-9][^"]*\)".*/\1/p'
   's/.*\$CUDA_BASE_TAG .*else { "\([^"]*\)" }.*/\1/p'
+  's/^TB_CUDA_BASE_TAG="\${TRACEBLOC_CUDA_BASE_TAG:-\(.*\)}".*/\1/p'
   's/^ARG CUDA_TAG="\(.*\)".*/\1/p'
   's/^CUDA_TAG="\${CUDA_TAG:-\(.*\)}".*/\1/p'
   's/^ *default: "\([0-9][^"]*ubuntu[^"]*\)".*/\1/p'
@@ -126,6 +128,7 @@ FACT_REWRITE=(
   's|^\(K3S_TAG="${K3S_TAG:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(default: "\)v[0-9][^"]*\("\)|\1@@VAL@@\2|'
   's|\(\$CUDA_BASE_TAG .*else { "\)[^"]*\(" }\)|\1@@VAL@@\2|'
+  's|^\(TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|^\(ARG CUDA_TAG="\)[^"]*\("\)|\1@@VAL@@\2|'
   's|^\(CUDA_TAG="${CUDA_TAG:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(default: "\)[0-9][^"]*ubuntu[^"]*\("\)|\1@@VAL@@\2|'
@@ -189,6 +192,11 @@ wiring_fail=0
 if [[ "$MODE" == "check" ]]; then
   _check_wiring "cluster.sh:k3s-image-pin"      "$CLUSTER" 'rancher/k3s:${K8S_VERSION}' || wiring_fail=$(( wiring_fail + 1 ))
   _check_wiring "install-k8s.ps1:k3s-image-pin" "$PS1"     'rancher/k3s:$K8S_VERSION'    || wiring_fail=$(( wiring_fail + 1 ))
+  # GPU node image (client#835): the create path must derive the k3s-cuda tag from
+  # BOTH pins, or a GPU cluster would pull a stale/never-built image after a bump.
+  # Each shell spells the derivation its own way (braces vs none).
+  _check_wiring "cluster.sh:gpu-image-pin"      "$CLUSTER" 'tracebloc/k3s-cuda:${K8S_VERSION}-cuda-${TB_CUDA_BASE_TAG}' || wiring_fail=$(( wiring_fail + 1 ))
+  _check_wiring "install-k8s.ps1:gpu-image-pin" "$PS1"     'tracebloc/k3s-cuda:$K8S_VERSION-cuda-$CUDA_BASE_TAG'        || wiring_fail=$(( wiring_fail + 1 ))
 fi
 
 if [[ "$MODE" == "check" ]]; then
@@ -200,11 +208,11 @@ if [[ "$MODE" == "check" ]]; then
   fi
   if [[ "$wiring_fail" -ne 0 ]]; then
     echo "" >&2
-    echo "check-facts: the k3s --image pin is missing from the create path in ${wiring_fail} file(s) (see ✖ above)." >&2
+    echo "check-facts: the k3s / GPU --image pin is missing from the create path in ${wiring_fail} file(s) (see ✖ above)." >&2
     echo "check-facts: this is a WIRING gap, not a version bump — '--write' cannot fix it. Restore the create-time" >&2
-    echo "             --image k3s pin by hand using the EXACT literal each ✖ line above shows — the two shells differ:" >&2
-    echo "             bash cluster.sh uses 'rancher/k3s:\${K8S_VERSION}' (braces); PowerShell install-k8s.ps1 uses" >&2
-    echo "             'rancher/k3s:\$K8S_VERSION' (no braces). So k3s can't float (#547)." >&2
+    echo "             --image pin by hand using the EXACT literal each ✖ line above shows — the two shells differ:" >&2
+    echo "             bash cluster.sh uses '\${K8S_VERSION}' (braces); PowerShell install-k8s.ps1 uses" >&2
+    echo "             '\$K8S_VERSION' (no braces). So k3s (and the GPU node image) can't float (#547/#835)." >&2
     rc=1
   fi
   [[ "$rc" -eq 0 ]] || exit 1

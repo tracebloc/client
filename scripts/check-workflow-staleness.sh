@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# check-workflow-staleness.sh — detect SCHEDULED workflows that have quietly
+# stopped succeeding (backend#2627).
+#
+# WHY THIS EXISTS
+# ---------------
+# `Windows e2e (self-hosted)` in this repo produced one nightly run per day for
+# 22 days and every one was recorded `cancelled` — GitHub's 24h queue-timeout,
+# because no `self-hosted, windows, nested-virt` runner ever picked it up. A
+# `cancelled` conclusion is not a red check and raises no alert, so a workflow
+# that had NEVER once succeeded read, for three weeks, as "the Windows path is
+# covered nightly" (backend#2627). The sibling failure is a job that IS red and
+# is simply ignored: `digest-drift.yml` here has failed on schedule ~13 days
+# running with nobody noticing (compare backend#2386, where red runs masked an
+# 18-day EC2 leak).
+#
+# Both are the same disease: a SCHEDULED workflow that stops producing a
+# `success`, with no signal loud enough to be acted on. This script is the
+# watcher for that class. It answers ONE property-agnostic question per
+# scheduled workflow:
+#
+#     when did its scheduled runs last SUCCEED, and is that longer ago than we
+#     tolerate?
+#
+# It asserts nothing about WHY a workflow stopped succeeding (broken check, dead
+# runner, real unaddressed finding) — the alarm is "this has not been green in a
+# while", and a human re-verifies. A watcher that instead asserted a specific
+# cause would go green the next time a DIFFERENT cause stopped the same job,
+# which is the failure this script exists to prevent, not a variant of it.
+#
+# EXIT CODE PHILOSOPHY — deliberately UNLIKE check-digest-drift.sh
+# ----------------------------------------------------------------
+# check-digest-drift.sh exits non-zero on a finding: its job going red IS its
+# alert. This script does the OPPOSITE and exits 0 when it finds stale
+# workflows, because the whole point of #2627 is that a red (or cancelled)
+# scheduled check is exactly the signal that gets ignored. So the ALERT here is
+# not this script's exit code and not this job's colour — it is the deduplicated
+# issue the CALLING workflow files from the findings this script prints. This
+# script exits non-zero ONLY when the watcher itself could not do its job
+# (missing tool, unreadable input, API failure). That keeps the invariant the
+# right way round: green = "the watcher ran"; red = "the watcher is broken" —
+# never "a watched workflow is stale". The one thing that must stay loud is a
+# BROKEN watcher, and GitHub emails a scheduled-workflow failure to the repo,
+# which is the accepted root of trust (something has to be; this is it).
+#
+# READ-ONLY. It lists workflow runs and prints findings. It never files an
+# issue, writes a file, or mutates anything — the filing (and the cross-repo
+# token it needs) lives in the workflow, so this stays testable with no network
+# and no credentials.
+#
+# OUTPUT CONTRACT
+#   stdout : a JSON array of finding objects (possibly empty `[]`). Machine-
+#            readable; the workflow parses it. NOTHING else goes to stdout.
+#   stderr : a human-readable per-workflow line and a summary.
+#   exit 0 : ran to completion (with or without findings).
+#   exit 2 : usage / internal error (bad config, unreadable stub, API failure).
+#   exit 3 : a required tool (gh, jq) is missing.
+#
+# CONFIG (env)
+#   STALENESS_MAX_DAYS      integer, default 7. A scheduled workflow is stale if
+#                           its most recent COMPLETED scheduled run did not
+#                           succeed AND its last success is >= this many days
+#                           old (or it has never succeeded within the window).
+#                           Must exceed the SLOWEST watched cron period, or a
+#                           healthy-but-infrequent job trips it on its first
+#                           miss — see docs/WORKFLOW-STALENESS.md.
+#   STALENESS_REPO          owner/name to inspect. Default: $GITHUB_REPOSITORY,
+#                           else derived from `git remote get-url origin`.
+#   STALENESS_WORKFLOW_DIR  default .github/workflows.
+#   STALENESS_RUNS_STUB     TEST SEAM. A directory. For workflow file `foo.yml`
+#                           the script reads `<dir>/foo.yml.json` (the shape
+#                           `gh api .../runs` returns: {workflow_runs:[...]}) and
+#                           makes NO network call. A stubbed run prints STUBBED
+#                           on stderr so a log can never be mistaken for a real
+#                           audit.
+#   STALENESS_NOW           TEST SEAM. Epoch seconds used as "now" for the age
+#                           math, so tests are deterministic. Default: date +%s.
+set -uo pipefail
+
+MAX_DAYS="${STALENESS_MAX_DAYS:-7}"
+WF_DIR="${STALENESS_WORKFLOW_DIR:-.github/workflows}"
+NOW="${STALENESS_NOW:-$(date +%s)}"
+
+die() { echo "ERROR: $*" >&2; exit 2; }
+
+# --- preconditions ---------------------------------------------------------
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required" >&2; exit 3; }
+[[ "$MAX_DAYS" =~ ^[0-9]+$ && "$MAX_DAYS" -ge 1 ]] || die "STALENESS_MAX_DAYS must be a positive integer (got '$MAX_DAYS')"
+[[ "$NOW" =~ ^[0-9]+$ ]] || die "STALENESS_NOW must be epoch seconds (got '$NOW')"
+[[ -d "$WF_DIR" ]] || die "workflow dir not found: $WF_DIR (run from the repo root)"
+
+STUB="${STALENESS_RUNS_STUB:-}"
+if [[ -n "$STUB" ]]; then
+  [[ -d "$STUB" ]] || die "STALENESS_RUNS_STUB is set but is not a directory: $STUB"
+  echo "check-workflow-staleness: STUBBED (reading $STUB, no network)" >&2
+else
+  command -v gh >/dev/null 2>&1 || { echo "ERROR: gh is required (or set STALENESS_RUNS_STUB)" >&2; exit 3; }
+fi
+
+# --- repo resolution -------------------------------------------------------
+REPO="${STALENESS_REPO:-${GITHUB_REPOSITORY:-}}"
+if [[ -z "$REPO" ]]; then
+  # `owner/name` out of the origin URL, ssh or https, with or without .git.
+  origin="$(git remote get-url origin 2>/dev/null || true)"
+  REPO="$(printf '%s\n' "$origin" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
+fi
+[[ "$REPO" == */* ]] || die "could not resolve owner/name (set STALENESS_REPO); got '$REPO'"
+
+# runs_for <workflow-file> -> prints the `.workflow_runs` array as JSON.
+# Real path fetches the last 100 scheduled runs (`event=schedule`): we judge a
+# workflow's SCHEDULED cadence health, deliberately blind to its PR/push runs —
+# a job whose PRs are green but whose nightly cron has been cancelling for weeks
+# is exactly what we must still catch. 100 (the API max per page) covers >3
+# months of a daily cron, far more than any sane MAX_DAYS. A sub-daily cron
+# (many runs/day) whose failing streak fits inside 100 runs but spans fewer than
+# MAX_DAYS of wall-clock could be under-flagged — see docs/WORKFLOW-STALENESS.md;
+# no such cron exists in this org (slowest cadence here is daily).
+#
+# On any failure this RETURNS non-zero (it does NOT call die). runs_for is
+# invoked from `$(...)`, i.e. a subshell; a `die`/`exit` there would only kill
+# the subshell, and with `set -uo pipefail` (no `-e`) the parent would sail on
+# with an empty result and report the workflow `ok` — a broken watcher looking
+# healthy, the exact fail-OPEN this script exists to prevent (Bugbot, #868). So
+# the caller checks the status and dies in the PARENT shell, where exit works.
+# PROJECT_JQ keeps ONLY the four fields classify_one reads. A raw run object is
+# large (nested repository/head_repository/actor/…), and 100 of them is hundreds
+# of KiB; classify_one would otherwise choke on it — see there. Projecting at the
+# source also means the bats stubs (four-field objects) are the real shape, not a
+# lie that passes while the code cannot (Bugbot, #868).
+PROJECT_JQ='[ (.workflow_runs // [])[] | {status, conclusion, created_at, html_url} ]'
+runs_for() {
+  local wf="$1"
+  if [[ -n "$STUB" ]]; then
+    local f="$STUB/$wf.json"
+    if [[ -r "$f" ]]; then
+      jq -c "$PROJECT_JQ" "$f" || { echo "ERROR: stub is not valid JSON: $f" >&2; return 1; }
+    else
+      echo '[]'
+    fi
+    return 0
+  fi
+  local out err
+  err="$(mktemp)"
+  if out="$(gh api -H "Accept: application/vnd.github+json" \
+        "/repos/$REPO/actions/workflows/$wf/runs?event=schedule&per_page=100" \
+        --jq "$PROJECT_JQ" 2>"$err")"; then
+    rm -f "$err"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  # A 404 means the workflow file exists in the checkout but GitHub has no
+  # registered workflow / no runs for it yet (a just-added scheduled workflow, or
+  # registration lag). That is the "idle / brand-new" case — no scheduled runs to
+  # judge — so treat it as an empty history and skip, NOT as a broken watcher.
+  # Everything else (401/403 auth, 5xx, network) is a real malfunction and must
+  # fail CLOSED: a swallowed error must never read as "no stale workflows".
+  if grep -qiE 'HTTP 404|not found' "$err"; then
+    rm -f "$err"
+    echo '[]'
+    return 0
+  fi
+  cat "$err" >&2
+  rm -f "$err"
+  echo "ERROR: gh api failed listing runs for $wf in $REPO (auth? actions:read?)" >&2
+  return 1
+}
+
+# classify_one <workflow-file> <runs-json> -> emits a finding object, or nothing.
+# All age math is done in jq via fromdateiso8601 (portable — no date -d/-j fork),
+# with `now` injected so tests are deterministic.
+#
+# The runs array is fed on STDIN (`.`), NOT via `--argjson runs`: a single argv
+# string is capped at 128 KiB on Linux (MAX_ARG_STRLEN), and a full run history
+# would blow past that, killing the watcher on ubuntu (never on macOS — the cap
+# is Linux-only, which is why a local run wouldn't catch it). stdin has no such
+# limit. runs_for already projects to four small fields, so this is belt-and-
+# suspenders — together they keep the payload tiny AND uncapped (Bugbot, #868).
+classify_one() {
+  local wf="$1" runs="$2"
+  jq -c \
+    --arg wf "$wf" --arg repo "$REPO" \
+    --argjson max_days "$MAX_DAYS" --argjson now "$NOW" '
+    ( [ .[] | select(.status=="completed") ] ) as $completed
+    | if ($completed | length) == 0 then empty          # no completed scheduled run: idle or brand-new, not rot
+      else
+        ( $completed | sort_by(.created_at) | reverse ) as $c
+        | $c[0] as $newest
+        | ( [ $c[] | select(.conclusion=="success") ] ) as $succ
+        | ( if ($succ|length) > 0 then $succ[0] else null end ) as $lastok
+        | ( if $lastok != null
+              then ( ($now - ($lastok.created_at | fromdateiso8601)) / 86400 )
+              else ( ($now - ($c[-1].created_at   | fromdateiso8601)) / 86400 )   # no success in window: floor = age of oldest run seen
+            end ) as $age
+        # Stale iff it has RUN and NOT succeeded recently. Gating on the newest
+        # completed run being non-success is what makes a healthy-but-infrequent
+        # workflow (whose newest scheduled run IS a success) immune regardless of
+        # cadence — only a job that ran and did not go green can be flagged.
+        | if ($newest.conclusion != "success") and ($age >= $max_days)
+          then {
+            workflow: $wf, repo: $repo, max_days: $max_days,
+            days_since_success: ($age | floor),
+            last_success: ( if $lastok != null then $lastok.created_at else "never" end ),
+            last_success_known: ($lastok != null),
+            last_run: $newest.created_at,
+            last_conclusion: $newest.conclusion,
+            runs_examined: ($completed | length),
+            html_url: ($newest.html_url // "")
+          }
+          else empty end
+      end' <<<"$runs"
+}
+
+# --- scan ------------------------------------------------------------------
+# In scope: a workflow file that declares a schedule trigger. Require BOTH a
+# `schedule:` key and a `cron:` line so a stray "schedule" elsewhere in the file
+# can't pull an event-driven workflow into scope.
+findings='[]'
+scanned=0
+stale=0
+shopt -s nullglob
+for path in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do
+  grep -qE '^[[:space:]]*schedule:' "$path" || continue
+  grep -qE '^[[:space:]]*-?[[:space:]]*cron:' "$path" || continue
+  wf="$(basename "$path")"
+  scanned=$((scanned + 1))
+  # Check each subshell's status in the PARENT shell so a fetch/parse failure
+  # dies loudly here (exit works) instead of silently yielding a false 'ok' — a
+  # `die` inside runs_for/classify_one would only kill its own subshell (Bugbot,
+  # #868). classify_one exits 0 with empty output when there is simply no finding,
+  # so its non-zero means a real jq/parse error, not "not stale".
+  if ! runs="$(runs_for "$wf")"; then
+    die "could not fetch scheduled runs for $wf in $REPO — failing loudly rather than reporting a false 'not stale'"
+  fi
+  if ! finding="$(classify_one "$wf" "$runs")"; then
+    die "could not classify $wf (invalid runs payload?) — failing loudly rather than reporting a false 'not stale'"
+  fi
+  if [[ -n "$finding" ]]; then
+    stale=$((stale + 1))
+    days="$(jq -r '.days_since_success' <<<"$finding")"
+    lastok="$(jq -r '.last_success' <<<"$finding")"
+    concl="$(jq -r '.last_conclusion' <<<"$finding")"
+    echo "STALE  $wf — last success: $lastok; newest scheduled run: $concl; ~${days}d without a green scheduled run (threshold ${MAX_DAYS}d)" >&2
+    findings="$(jq -c --argjson f "$finding" '. + [$f]' <<<"$findings")"
+  else
+    echo "ok     $wf" >&2
+  fi
+done
+
+echo "check-workflow-staleness: scanned $scanned scheduled workflow(s) in $REPO; $stale stale (threshold ${MAX_DAYS}d)" >&2
+printf '%s\n' "$findings"

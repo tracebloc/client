@@ -111,6 +111,38 @@ dockerRegistry:
 
 ---
 
+## Naming: the release name equals the namespace
+
+**Use the same string for the Helm release and the namespace.** The bundled
+installer already does this — `scripts/lib/install-client-helm.sh` runs
+`helm upgrade --install "$TB_NAMESPACE" … --namespace "$TB_NAMESPACE"`, defaulting
+both to `tracebloc` — so a self-service install is consistent without anyone
+choosing. Match it when installing by hand.
+
+```bash
+# good — one name, used twice
+helm install tracebloc tracebloc/client --namespace tracebloc --create-namespace
+
+# on a multi-tenant cluster, the tenant namespace is the release name
+helm install acme-prod tracebloc/client --namespace acme-prod --create-namespace
+```
+
+**Why it matters more than it looks.** Every resource the chart renders is
+prefixed with the release name — `<release>-jobs-manager`,
+`<release>-auto-upgrade`, `<release>-resource-monitor` — and **Helm cannot rename
+a release.** Correcting a release name means uninstall + reinstall, with the
+downtime and PV re-binding that implies. A name chosen in thirty seconds is one
+you keep.
+
+So, concretely:
+
+- **Do not use a person's name.** It ends up in every resource name on the
+  cluster, visible to whoever runs `kubectl` there, permanently.
+- **Do not use the environment alone** (`prod`, `stg`) on a cluster that hosts
+  more than one tenant — the names collide in shared namespaces.
+- **Do keep it DNS-1123 safe and short.** Kubernetes truncates names at 63
+  characters, and the chart appends up to ~30 characters of component suffix.
+
 ## 1. Add the Helm repository (recommended for production)
 
 The chart repository is hosted at [tracebloc/client](https://github.com/tracebloc/client). After the chart is published (see [Publishing the chart](#publishing-the-chart)), add the repo and install from it so you get versioning and `helm upgrade` support.
@@ -200,6 +232,52 @@ helm upgrade my-tracebloc ./tracebloc-2.0.1.tgz -n tracebloc -f my-values.yaml
 # Rollback one revision
 helm rollback my-tracebloc -n tracebloc
 ```
+
+### Upgrading by hand needs cluster scope, not just namespace admin
+
+**Namespace admin is not sufficient to upgrade this chart**, even for a change that
+touches nothing cluster-wide. The chart templates cluster-scoped objects — Namespace,
+PersistentVolume, StorageClass, PriorityClass, ClusterRole, ClusterRoleBinding and
+(on OpenShift) SecurityContextConstraints — and Helm must **read every one of them to
+diff a release**. Kubernetes' built-in `admin` ClusterRole contains no rules for
+cluster-scoped resources, so an operator holding only `admin` fails on the first such
+object, and then on the next:
+
+```
+Error: UPGRADE FAILED: could not get information about the resource:
+  priorityclasses.scheduling.k8s.io "..." is forbidden: User "..."
+  cannot get resource "priorityclasses" ... at the cluster scope
+```
+
+Some of these objects have a `create: false` gate (see `priorityClass.create`, for a
+PriorityClass your platform manages out-of-band). **Do not use those gates to work
+around a permissions error.** `ClusterRole` and `ClusterRoleBinding` have no gate — the
+chart's own RBAC depends on them, and re-applying them additionally requires the
+`escalate`/`bind` verbs, which Kubernetes withholds regardless of read access. So the
+sequence cannot be completed by switching objects off one at a time, and every flag
+added along the way **persists into the stored release values**, quietly becoming a
+standing configuration change. Grant the access instead.
+
+**On EKS specifically:** an access-scope of `type=cluster` means *"this policy applies in
+all namespaces"*, **not** *"this policy grants cluster-scoped resources"*. So
+`AmazonEKSAdminPolicy` at `type=cluster` reads as fully privileged while conferring none
+of the objects above — you need `AmazonEKSClusterAdminPolicy`. The two readings are easy
+to conflate, and the denial shown above (*"forbidden … at the cluster scope"*) sounds
+like it contradicts the policy attached to you. It does not; they are different axes.
+
+If your platform grants elevated access temporarily, elevate, upgrade, then drop back —
+and **verify you actually dropped back**, since the revert names a policy and a mismatch
+leaves the elevation standing while appearing to have reverted.
+
+> **On fleets with `autoUpgrade` enabled.** The in-cluster auto-upgrade CronJob already
+> holds a ClusterRole enumerating exactly these kinds, which is why the unattended
+> upgrade succeeds where a human `admin` cannot. It runs
+> `helm upgrade --reset-then-reuse-values`, so **`--set` values you pass by hand persist**
+> across later unattended ticks — they are stored user-supplied values and get replayed
+> after the reset. That is deliberate, and it is how an operator override survives; but it
+> means a value set as a one-off does not stay a one-off. Note also that the CronJob
+> **skips entirely** when the installed chart already matches the latest published
+> version, so an hourly schedule is not an hourly `helm upgrade`.
 
 ---
 

@@ -63,6 +63,34 @@ tests:
           path: spec.template.spec.containers[0].env[0].value
           value: "false"
 
+  # client#835: on native Linux the plugin can only enumerate GPUs (init NVML) if
+  # its own pod runs under the `nvidia` RuntimeClass baked into the k3s-cuda node
+  # image, so the Linux installer sets gpu.devicePlugin.nvidia.runtimeClassName
+  # when the GPU is wired. Default is unset (correct for the Windows/WSL2 path,
+  # which doesn't run this plugin, and any future non-CDI node).
+  - it: sets no runtimeClassName by default (unset value)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - notExists:
+          path: spec.template.spec.runtimeClassName
+
+  - it: sets runtimeClassName on the NVIDIA plugin pod when configured (client#835)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          nvidia:
+            runtimeClassName: nvidia
+    asserts:
+      - equal:
+          path: spec.template.spec.runtimeClassName
+          value: nvidia
+
   - it: honours an overridden namespace and image registry/repository/tag/digest
     set:
       gpu:
@@ -155,6 +183,9 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].securityContext.privileged
           value: true
+      # runtimeClassName is NVIDIA-only (client#835); the AMD path never emits it.
+      - notExists:
+          path: spec.template.spec.runtimeClassName
 
   - it: carries the standard tracebloc labels so Helm owns and can remove it
     set:

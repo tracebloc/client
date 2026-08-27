@@ -1418,8 +1418,25 @@ Describe "Install-ClientHelm" {
     { Install-ClientHelm } | Should -Throw
     Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
-  It "values without a clientId key do not trip the guard" {
+  # THE CONTRACT HERE INVERTED, DELIBERATELY (backend#2571, Bugbot #859), and
+  # this test used to assert the old one. It read: "values without a clientId
+  # key do not trip the guard" -- a readable client release carrying no
+  # `clientId` was NOT a client, so the installer proceeded to upgrade over it.
+  #
+  # That was true only while `clientId` was `required`, which made a clientId-free
+  # client release impossible. This chart drops that requirement and tells
+  # operators to remove clientId from release values once the Secret holds it, so
+  # a live client legitimately has none in values -- and reading it as "not a
+  # client" fails OPEN: the one-client guard waves through an install that
+  # re-points a machine already running someone else's client.
+  #
+  # So a client-chart release naming an id in NEITHER values NOR the Secret is
+  # now a client that cannot be NAMED, and the guard refuses. `kubectl` is absent
+  # (or has no cluster) under Pester, so Get-ClientIdFromSecret returns "" and
+  # this exercises the both-places-empty path specifically.
+  It "fails CLOSED on a readable client release with no clientId in values or Secret" {
     $HOST_DATA_DIR = "$TestDrive/d5-nokey"
+    Mock Err { throw "err" }
     Mock Read-Host {
       param([string]$Prompt, [switch]$AsSecureString)
       if ($Prompt -match 'password') { return (ConvertTo-SecureString "pw" -AsPlainText -Force) }
@@ -1431,8 +1448,13 @@ Describe "Install-ClientHelm" {
       if ($args -contains "get") { '{"env":{"CLIENT_ENV":"dev"}}'; $global:LASTEXITCODE = 0; return }
       $global:LASTEXITCODE = 0
     }
-    Install-ClientHelm
-    Should -Invoke helm -ParameterFilter { $args -contains "upgrade" }
+    { Install-ClientHelm } | Should -Throw
+    # NAME THE REFUSAL, don't just count one (CLAUDE.md rule 10). Every other
+    # fail-closed path in this Describe also throws, so a bare `Should -Throw`
+    # would pass on the WRONG refusal -- an unreadable-values or garbage-list
+    # abort would look identical to the one this test is named for.
+    Should -Invoke Err -ParameterFilter { $m -match 'unidentifiable existing client' }
+    Should -Not -Invoke helm -ParameterFilter { $args -contains "upgrade" }
   }
   It "same client re-run is allowed (upgrade in place)" {
     $HOST_DATA_DIR = "$TestDrive/d6"
@@ -1579,10 +1601,10 @@ Describe "Get-TrainingResources" {
     Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
     Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
   }
-  It "unreadable cluster falls back to the static default" {
+  It "unreadable cluster falls back to the contract floor" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
   }
 }
 
@@ -1654,15 +1676,20 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       $rendered = if ($null -ne $v.expected) {
         "cpu=$($v.expected.render_gi.cpu),memory=$($v.expected.render_gi.memory)"
       } else { $null }
+      # The fallback for an unreadable/sub-requestable vector is the contract
+      # FLOOR since backend#2254 (was cpu=2,memory=8Gi). Derived from the vendored
+      # contract, not hardcoded, so it cannot drift from the floor the installer
+      # actually writes.
+      $floor = "cpu=$([math]::Floor($script:Contract.floor.cpu_millicores / 1000)),memory=$([math]::Floor($script:Contract.floor.memory_bytes / 1GB))Gi"
       $want = if ($null -eq $v.expected) {
-        "cpu=2,memory=8Gi"
+        $floor
       } elseif ($v.expected.viable) {
         $rendered
       } elseif ([int]$v.expected.render_gi.cpu -ge 1 -and
                 [int]($v.expected.render_gi.memory -replace 'Gi$','') -ge 1) {
         $rendered
       } else {
-        "cpu=2,memory=8Gi"
+        $floor
       }
       $line = "$($v.allocatable_cpu) $($v.allocatable_memory)"
       Mock kubectl {
@@ -1758,7 +1785,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("16 64Gi true", "8 32Gi true")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
     [bool]$script:TbTrainingUndersized    | Should -BeFalse
     [bool]$script:TbTrainingUnschedulable | Should -BeFalse
   }
@@ -1922,7 +1949,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
   It "provenance: the static-default fallback is still the installer's choice" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
-    Get-TrainingResources  | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources  | Should -Be "cpu=1,memory=2Gi"
     Get-TrainingProvenance | Should -Be "installer"
   }
 
@@ -1950,7 +1977,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("500m 512Mi") }
       else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
     $script:TbTrainingUnschedulable | Should -BeTrue
     $script:TbTrainingUndersized | Should -BeFalse
   }
@@ -1961,7 +1988,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
     # warning about machine size would be a fabrication.
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl { $global:LASTEXITCODE = 1; "" }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
     $script:TbTrainingUndersized | Should -BeFalse
     $script:TbTrainingUnschedulable | Should -BeFalse
   }
@@ -2006,7 +2033,84 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("sixteen 64GB", "eight lots")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=2,memory=8Gi"
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
+  }
+}
+
+Describe "Sizing-probe failures reach the install log (client#771)" {
+  # The bare `catch {}` on the sizing path swallowed two real defects into a
+  # plausible-looking default -- the Int32 [math]::Max overload throw
+  # (client#766: EVERY machine over ~2 GiB of headroom silently got the
+  # literal) and a provenance read landing a wrong verdict (client#768). The
+  # bounded degradation is deliberate and stays; these pin that it can no
+  # longer be SILENT. Expected absence -- no namespace, no release, an
+  # unreadable cluster -- must stay quiet, because it happens on every fresh
+  # install and a warning there would be noise that trains people to ignore
+  # the real one.
+  BeforeEach {
+    $script:TB_NAMESPACE = "tracebloc"
+    $env:TRACEBLOC_TRAINING_RESOURCES = $null
+    Mock Log { }
+  }
+  AfterEach  { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+
+  It "a sizing probe that throws logs the exception AND still returns the bounded default" {
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") { throw "kubectl exploded mid-probe" }
+      $global:LASTEXITCODE = 1; ""
+    }
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
+    Should -Invoke Log -Times 1 -Exactly -ParameterFilter {
+      $m -match 'Get-TrainingResources' -and $m -match 'kubectl exploded mid-probe'
+    }
+  }
+
+  It "a carried-values read that throws logs the exception AND still carries nothing" {
+    # The client#768 shape: helm answers, the parse chokes. The $null return is
+    # asserted elsewhere ("a failing values read can never report 'installer'");
+    # this pins that the choke is no longer invisible.
+    Mock kubectl { $global:LASTEXITCODE = 0; "" }
+    Mock helm { $global:LASTEXITCODE = 0; "{ this is : not json" }
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+    Should -Invoke Log -Times 1 -Exactly -ParameterFilter {
+      $m -match 'Get-CarriedTrainingValues'
+    }
+  }
+
+  It "EXPECTED absence stays quiet: an unreadable namespace logs nothing" {
+    Mock kubectl { $global:LASTEXITCODE = 1; "" }
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Get-CarriedTrainingValues | Should -BeNullOrEmpty
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
+    Should -Not -Invoke Log
+  }
+
+  It "EXPECTED absence stays quiet: unparseable node quantities log nothing" {
+    # Unparseable allocatable is contract-SKIPPED (`continue`), not an
+    # exception -- the fall-through to the literal here is the code working as
+    # specified, so it must not cry wolf in the install log.
+    Mock helm { $global:LASTEXITCODE = 1; "" }
+    Mock kubectl {
+      if ($args -contains "--request-timeout=10s") {
+        $global:LASTEXITCODE = 0; @("sixteen 64GB")
+      } else { $global:LASTEXITCODE = 1; "" }
+    }
+    Get-TrainingResources | Should -Be "cpu=1,memory=2Gi"
+    Should -Not -Invoke Log
+  }
+
+  It "the logged degradation still returns the size the values generation needs" {
+    # The whole-path guarantee client#766's replay relies on: even with BOTH
+    # probes throwing, values generation gets a usable size string -- logged
+    # loudly, degraded boundedly, never $null and never a hang.
+    Mock kubectl { throw "everything is on fire" }
+    Mock helm { throw "helm too" }
+    $carried = Get-CarriedTrainingValues
+    $carried | Should -BeNullOrEmpty
+    Get-TrainingResources -Carried $carried -CarriedResolved | Should -Be "cpu=1,memory=2Gi"
+    Get-TrainingProvenance -Carried $carried -CarriedResolved | Should -Be "installer"
+    Should -Invoke Log -ParameterFilter { $m -match 'WARN' }
   }
 }
 
@@ -5239,31 +5343,339 @@ Describe "Get-GpuBuildFailureReason (#616: every GPU failure names an actionable
   }
 }
 
-Describe "Bounded process quotes whitespace arguments (#616 Bugbot)" {
-  BeforeAll { $script:QSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
-  It "the joiner quotes-on-whitespace and skips already-quoted values (source guard)" {
-    # The args are joined into ONE command line, so an unquoted value with a space -- a registry
-    # username, or a temp path under a profile like C:\Users\First Last\... -- would silently
-    # become two arguments and corrupt the command.
+Describe "Bounded process argument quoting round-trips through CommandLineToArgvW (backend#2455)" {
+  # #616 quoted whitespace-bearing args but left INNER QUOTES unescaped, so any arg carrying both a
+  # space and a `"` (and even a quote with no space, which took the pass-through branch) reached the
+  # child with its quotes silently consumed by CommandLineToArgvW -- the #817 false-refusal. The fix
+  # escapes per the real CommandLineToArgvW/MSVCRT rules in ConvertTo-Win32Arg. These tests pin the
+  # encoding and prove the round-trip: encode(argv) then re-split == argv, as SINGLE tokens.
+  BeforeAll {
+    $script:QSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+
+    # A from-spec reimplementation of how CommandLineToArgvW (and the CRT every well-behaved Windows
+    # program links) re-splits a command line, MINUS the special argv[0] rules -- $psi.Arguments is
+    # argv[1..] only ($psi.FileName is passed separately). Pure PowerShell so the round-trip runs on
+    # this suite's Linux/macOS CI, where shell32!CommandLineToArgvW does not exist; the Windows-only
+    # test below cross-checks the SAME encoder against the real API.
+    function script:Split-LikeArgvW {
+      param([string]$CommandLine)
+      $out = [System.Collections.Generic.List[string]]::new()
+      $cur = [System.Text.StringBuilder]::new()
+      $inQuotes = $false; $has = $false; $i = 0; $n = $CommandLine.Length
+      while ($i -lt $n) {
+        $c = $CommandLine[$i]
+        if ($c -eq '\') {
+          $nb = 0
+          while ($i -lt $n -and $CommandLine[$i] -eq '\') { $nb++; $i++ }
+          if ($i -lt $n -and $CommandLine[$i] -eq '"') {
+            [void]$cur.Append('\' * [int][math]::Floor($nb / 2))
+            if ($nb % 2 -eq 0) { $inQuotes = -not $inQuotes } else { [void]$cur.Append('"') }
+            $has = $true; $i++
+          } else {
+            [void]$cur.Append('\' * $nb); $has = $true
+          }
+        } elseif ($c -eq '"') {
+          if ($inQuotes -and ($i + 1) -lt $n -and $CommandLine[$i + 1] -eq '"') {
+            [void]$cur.Append('"'); $i += 2                 # "" inside a quoted range -> literal " (CRT 2008+)
+          } else {
+            $inQuotes = -not $inQuotes; $has = $true; $i++
+          }
+        } elseif (($c -eq ' ' -or $c -eq "`t") -and -not $inQuotes) {
+          if ($has) { $out.Add($cur.ToString()); [void]$cur.Clear(); $has = $false }
+          $i++
+        } else {
+          [void]$cur.Append($c); $has = $true; $i++
+        }
+      }
+      if ($has) { $out.Add($cur.ToString()) }
+      return $out.ToArray()
+    }
+
+    # Build the line EXACTLY as Invoke-BoundedProcess does (ConvertTo-Win32Arg is the single source
+    # of truth; the join is the one line the helper wraps around it), then recover it. A throwaway
+    # program token absorbs the argv[0] rules, mirroring how the OS prepends $psi.FileName.
+    function script:Roundtrip { param([string[]]$Argv)
+      $line = (($Argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+      $recovered = @(script:Split-LikeArgvW ("prog.exe " + $line))
+      [pscustomobject]@{ Line = $line; Argv = @($recovered | Select-Object -Skip 1) }
+    }
+  }
+
+  It "Invoke-BoundedProcess delegates to ConvertTo-Win32Arg and drops the unescaped escape hatch (source guard)" {
     $fn = (($script:QSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
-    $fn | Should -Match 'ForEach-Object'
-    $fn | Should -Match 'notmatch'                 # the already-quoted escape hatch
-    $fn | Should -Match 'Quote any argument containing whitespace'
+    # Match the actual CALL, not just the name: a comment in the body also mentions
+    # ConvertTo-Win32Arg, so a bare-name match would still pass if the call were
+    # deleted -- a guard that can't detect its own removal (Bugbot #845).
+    $fn | Should -Match 'ForEach-Object \{ ConvertTo-Win32Arg \$_'
+    $fn | Should -Not -Match 'notmatch'          # the old `^".*"$` already-quoted escape hatch is gone
   }
-  It "behavioural: a username with a space survives as ONE argument" {
-    # exercises the same expression the function uses
-    $parts = @("login", "ghcr.io", "-u", "First Last", "--password-stdin")
-    $joined = (($parts | ForEach-Object {
-      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
-    }) -join ' ')
-    $joined | Should -Be 'login ghcr.io -u "First Last" --password-stdin'
+
+  It "callers pass RAW args -- Set-NodeGpuCapacity no longer pre-quotes the patch file (source guard)" {
+    $sn = [regex]::Match($script:QSRC, 'function Set-NodeGpuCapacity \{.*?\n\}', 'Singleline').Value
+    $sn | Should -Match '"--patch-file", \$patchFile,'
+    $sn | Should -Not -Match 'patchFile`"'       # the old `"$patchFile`" wrapping
   }
-  It "behavioural: an already-quoted path is not double-quoted, and empty survives" {
-    $parts = @('"C:\Temp\a b\p.json"', "", "plain")
-    $joined = (($parts | ForEach-Object {
-      if ($_ -eq "") { '""' } elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ }
-    }) -join ' ')
-    $joined | Should -Be '"C:\Temp\a b\p.json" "" plain'
+
+  It "ConvertTo-Win32Arg emits the exact CommandLineToArgvW encoding (golden)" {
+    ConvertTo-Win32Arg ''             | Should -BeExactly '""'          # empty survives as a present arg
+    ConvertTo-Win32Arg 'plain'        | Should -BeExactly 'plain'       # nothing to escape -> untouched
+    ConvertTo-Win32Arg '--format=csv' | Should -BeExactly '--format=csv'
+    ConvertTo-Win32Arg 'a b'          | Should -BeExactly '"a b"'       # whitespace
+    ConvertTo-Win32Arg 'a"b'          | Should -BeExactly '"a\"b"'      # quote, no space -> still must quote
+    ConvertTo-Win32Arg 'a b"c'        | Should -BeExactly '"a b\"c"'    # whitespace + quote (the #817 bug)
+    ConvertTo-Win32Arg 'a\b'          | Should -BeExactly 'a\b'         # lone backslash is literal
+    ConvertTo-Win32Arg 'C:\a b\'      | Should -BeExactly '"C:\a b\\"'  # trailing \ doubled before close quote
+    ConvertTo-Win32Arg 'a\"b'         | Should -BeExactly '"a\\\"b"'    # backslashes before a quote
+  }
+
+  It "round-trips representative args back to the ORIGINAL single tokens" {
+    $cases = @(
+      ,@('plain')
+      ,@('a b')                                  # whitespace
+      ,@('has"quote')                            # embedded quote
+      ,@('a b"c')                                # whitespace + quote
+      ,@('')                                     # empty string
+      ,@('a\"b')                                 # backslashes before a quote
+      ,@('C:\Users\First Last\tb.json')          # spaced temp path (Set-NodeGpuCapacity's --patch-file)
+      ,@('ends\with\backslash\')                 # trailing backslash, unquoted fast path
+      ,@('login','ghcr.io','-u','First "Q" Last','--password-stdin')  # registry user w/ space+quote
+      ,@('--format','{{.Names}} {{.Label "k3d.role"}}')              # the #817 shape, now safe
+    )
+    foreach ($argv in $cases) {
+      $rt = script:Roundtrip -Argv $argv
+      $rt.Argv.Count | Should -Be $argv.Count -Because "the line was: $($rt.Line)"
+      for ($k = 0; $k -lt $argv.Count; $k++) {
+        $rt.Argv[$k] | Should -BeExactly $argv[$k] -Because "token $k of the line: $($rt.Line)"
+      }
+    }
+  }
+
+  It "the encoder agrees with the real shell32!CommandLineToArgvW (Windows only)" -Skip:(-not $IsWindows) {
+    $sig = @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr LocalFree(System.IntPtr hMem);
+'@
+    Add-Type -Namespace TbWin32 -Name Argv -MemberDefinition $sig
+    function realArgv([string]$cl) {
+      $n = 0; $p = [TbWin32.Argv]::CommandLineToArgvW($cl, [ref]$n)
+      try {
+        # Collect into a typed List and return via the ,$arr idiom: the array then
+        # survives assignment at 0/1 elements AND keeps empty-string elements. The
+        # old `,@($r) | Select-Object -Skip 1` dropped a trailing "" (backend#2455).
+        $out = [System.Collections.Generic.List[string]]::new()
+        for ($j = 0; $j -lt $n; $j++) {
+          $out.Add([System.Runtime.InteropServices.Marshal]::PtrToStringUni(
+            [System.Runtime.InteropServices.Marshal]::ReadIntPtr($p, $j * [System.IntPtr]::Size)))
+        }
+        return ,$out.ToArray()
+      } finally { [void][TbWin32.Argv]::LocalFree($p) }   # documented: the caller frees with LocalFree
+    }
+    # Newline-separated ,@(...) so each $argv iterates as a FLAT [string[]] — the
+    # comma-separated @((,@(...)), ...) form nests each case one level deeper, so
+    # ConvertTo-Win32Arg was handed an Object[] and threw before a single comparison
+    # ran, leaving this real-API cross-check inert on Windows while macOS skipped it
+    # (Bugbot / LukasWodka on #845). Mirrors the round-trip test's $cases shape.
+    $cases = @(
+      ,@('a b"c')
+      ,@('a\"b')
+      ,@('C:\a b\')
+      ,@('')
+      ,@('x')
+    )
+    foreach ($argv in $cases) {
+      $line = (($argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+      # Assign (don't pipe) and slice off the prog.exe argv[0] by index — piping
+      # through Select-Object -Skip 1 lost a trailing empty arg (backend#2455).
+      $full = realArgv ("prog.exe " + $line)
+      # Drop the prog.exe argv[0] with an explicit index loop, NOT a range slice:
+      # $full[1..($full.Count-1)] collapses to a SCALAR string under Windows
+      # PowerShell when it selects one element, so $got[$k] then indexed into the
+      # string's characters ("got a" for "a b\"c") even though shell32 returned the
+      # arg intact. The loop keeps $got a real array on every host (backend#2455).
+      $got = @()
+      for ($m = 1; $m -lt $full.Count; $m++) { $got += $full[$m] }
+      $because = "arg=[$($argv -join '|')] encoded=[$line] shell32=[$($full -join '|')]"
+      $got.Count | Should -Be $argv.Count -Because $because
+      for ($k = 0; $k -lt $argv.Count; $k++) { $got[$k] | Should -BeExactly $argv[$k] -Because $because }
+    }
+  }
+}
+
+Describe "docker-buildx and k3d-create command lines escape inner quotes via ConvertTo-Win32Arg (backend#2545)" {
+  # backend#2455 (#845) fixed the SHARED Invoke-BoundedProcess joiner, but two Start-Process command
+  # lines built inline elsewhere kept the naive `wrap-only-if-it-has-a-space` quoting with the inner
+  # `"` UNescaped: `docker buildx build` (Build-GpuNodeImage) and `k3d cluster create` (New-K3dCluster).
+  # -ArgumentList <one string> is handed to the child verbatim, exactly like $psi.Arguments, so an arg
+  # carrying BOTH a space and a `"` had its quotes silently consumed by CommandLineToArgvW's re-split --
+  # the #817 corruption, in two more places. These tests exercise the EXACT shipped builder expressions
+  # (pulled from source, never transcribed) and prove such an arg survives the round-trip as ONE token.
+  BeforeAll {
+    $script:B2545SRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+
+    # A from-spec CommandLineToArgvW re-splitter, MINUS the argv[0] special-casing (a throwaway program
+    # token below absorbs those). Mirrors the parser the backend#2455 block uses -- whose Windows-only
+    # test cross-checks it against the real shell32!CommandLineToArgvW -- duplicated here so this block
+    # stands alone and does not depend on another Describe's BeforeAll having run first.
+    function script:Split-Cmdline2545 {
+      param([string]$CommandLine)
+      $out = [System.Collections.Generic.List[string]]::new()
+      $cur = [System.Text.StringBuilder]::new()
+      $inQuotes = $false; $has = $false; $i = 0; $n = $CommandLine.Length
+      while ($i -lt $n) {
+        $c = $CommandLine[$i]
+        if ($c -eq '\') {
+          $nb = 0
+          while ($i -lt $n -and $CommandLine[$i] -eq '\') { $nb++; $i++ }
+          if ($i -lt $n -and $CommandLine[$i] -eq '"') {
+            [void]$cur.Append('\' * [int][math]::Floor($nb / 2))
+            if ($nb % 2 -eq 0) { $inQuotes = -not $inQuotes } else { [void]$cur.Append('"') }
+            $has = $true; $i++
+          } else {
+            [void]$cur.Append('\' * $nb); $has = $true
+          }
+        } elseif ($c -eq '"') {
+          if ($inQuotes -and ($i + 1) -lt $n -and $CommandLine[$i + 1] -eq '"') {
+            [void]$cur.Append('"'); $i += 2
+          } else {
+            $inQuotes = -not $inQuotes; $has = $true; $i++
+          }
+        } elseif (($c -eq ' ' -or $c -eq "`t") -and -not $inQuotes) {
+          if ($has) { $out.Add($cur.ToString()); [void]$cur.Clear(); $has = $false }
+          $i++
+        } else {
+          [void]$cur.Append($c); $has = $true; $i++
+        }
+      }
+      if ($has) { $out.Add($cur.ToString()) }
+      return $out.ToArray()
+    }
+
+    # Pull the RHS of a builder's `$x = (...) -join " "` assignment straight out of the shipped source,
+    # so these tests can never pass against a transcription that has drifted from the line the installer
+    # actually runs. Non-greedy to the FIRST `-join <sep>`; the separator char class tolerates either
+    # quote style (`-join " "` or `-join ' '`) so a benign requote does not turn into a false failure.
+    function script:Get-BuilderRhs {
+      param([Parameter(Mandatory)][string]$Lhs)
+      $sep = '["' + "'" + ']'   # a character class matching a single or double quote
+      $m = [regex]::Match($script:B2545SRC, [regex]::Escape($Lhs) + '\s*=\s*([\s\S]*?-join\s+' + $sep + ' ' + $sep + ')')
+      if (-not $m.Success) { throw "could not find the builder assignment for $Lhs in install-k8s.ps1" }
+      return $m.Groups[1].Value
+    }
+
+    # Encode $BuilderArgs through the shipped RHS, re-split, and drop the throwaway argv[0] by INDEX
+    # (a range slice collapses to a scalar string at one element under Windows PowerShell 5.1; the loop
+    # keeps $got a real array on every host, the lesson from backend#2455).
+    function script:ThroughBuilder {
+      param([Parameter(Mandatory)][string]$Lhs, [Parameter(Mandatory)][string[]]$BuilderArgs)
+      # The shipped RHS names either $buildArgs (buildx) or $k3dArgs (k3d); bind both so whichever the
+      # extracted expression references evaluates against the crafted list.
+      $buildArgs = $BuilderArgs
+      $k3dArgs   = $BuilderArgs
+      $line = Invoke-Expression (script:Get-BuilderRhs $Lhs)
+      $full = @(script:Split-Cmdline2545 ("prog.exe " + $line))
+      $got = @(); for ($m = 1; $m -lt $full.Count; $m++) { $got += $full[$m] }
+      [pscustomobject]@{ Line = $line; Argv = $got }
+    }
+  }
+
+  It "the docker-buildx builder delegates to ConvertTo-Win32Arg, not the naive space-only quoting (source guard)" {
+    $rhs = script:Get-BuilderRhs '$argStr'
+    $rhs | Should -Match 'ConvertTo-Win32Arg \$_'
+    $rhs | Should -Not -Match '-match'          # the old `if ($_ -match '[\s]') { ... }` quote branch is gone
+  }
+
+  It "the k3d-create builder delegates to ConvertTo-Win32Arg, not the naive space/@ quoting (source guard)" {
+    $rhs = script:Get-BuilderRhs '$k3dArgString'
+    $rhs | Should -Match 'ConvertTo-Win32Arg \$_'
+    $rhs | Should -Not -Match '-match'          # the old `if ($_ -match '[\s@]') { ... }` quote branch is gone
+  }
+
+  It "an arg with whitespace AND a quote survives the docker-buildx builder as ONE token" {
+    # A --label value carrying both a space and a `"` -- the exact class the old builder mangled: its
+    # inner quotes were consumed by the re-split and it merged with the adjacent token.
+    $buildArgs = @('build', '--label', 'tracebloc.title=k3s "cuda" node', '-t', 'img:tag', 'C:\Users\First Last\ctx')
+    $rt = script:ThroughBuilder -Lhs '$argStr' -BuilderArgs $buildArgs
+    $rt.Argv.Count | Should -Be $buildArgs.Count -Because "line: $($rt.Line)"
+    for ($k = 0; $k -lt $buildArgs.Count; $k++) {
+      $rt.Argv[$k] | Should -BeExactly $buildArgs[$k] -Because "token $k of: $($rt.Line)"
+    }
+  }
+
+  It "an arg with whitespace AND a quote survives the k3d-create builder as ONE token; a bare @ arg still round-trips unquoted" {
+    # `note=...` carries both a space and a `"` (the fix); `/host:/node@all` carries an `@` but no space
+    # or quote, so the old `@` branch used to wrap it. `@` is not special to CommandLineToArgvW, so
+    # dropping that branch is a no-op: the bare token re-splits to the identical single token.
+    $k3dArgs = @('cluster', 'create', 'tb', '-v', '/host:/node@all', '--k3s-node-label', 'note=a "b" c@server:*')
+    $rt = script:ThroughBuilder -Lhs '$k3dArgString' -BuilderArgs $k3dArgs
+    $rt.Argv.Count | Should -Be $k3dArgs.Count -Because "line: $($rt.Line)"
+    for ($k = 0; $k -lt $k3dArgs.Count; $k++) {
+      $rt.Argv[$k] | Should -BeExactly $k3dArgs[$k] -Because "token $k of: $($rt.Line)"
+    }
+    # The intentional behaviour change: the bare `@` arg is now emitted WITHOUT wrapping quotes, and
+    # still recovers as one token above -- proving dropping the `@` quote branch changed nothing.
+    $rt.Line.Contains(' /host:/node@all ') | Should -BeTrue  -Because "bare @ arg is a standalone unquoted token: $($rt.Line)"
+    $rt.Line.Contains('"/host:/node@all"') | Should -BeFalse -Because "the old builder wrapped it in quotes: $($rt.Line)"
+  }
+
+  It "Split-Cmdline2545 (this block's decoder/oracle) agrees with the real shell32!CommandLineToArgvW (Windows only)" -Skip:(-not $IsWindows) {
+    # LukasWodka on #858: this block's re-splitter is the ORACLE the builder tests above trust, and --
+    # unlike the backend#2455 one -- it was only asserted (in a comment) to "mirror" the real API, not
+    # checked against it. If the two from-spec decoders ever drift, every encoder test here would be
+    # validating ConvertTo-Win32Arg against a decoder that no longer matches Windows, and the
+    # cross-check on the OTHER copy would say nothing about this one. So pin THIS decoder to shell32
+    # directly, with the same Windows-gated P/Invoke #845 uses (a distinct namespace so both blocks'
+    # Add-Type calls can coexist in one session). shell32 is why the check is Windows-only -- it does
+    # not exist off-Windows, exactly as #845's is gated.
+    $sig = @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr LocalFree(System.IntPtr hMem);
+'@
+    Add-Type -Namespace TbWin32b -Name Argv -MemberDefinition $sig
+    function realArgv2545([string]$cl) {
+      $n = 0; $p = [TbWin32b.Argv]::CommandLineToArgvW($cl, [ref]$n)
+      try {
+        # Typed List + the ,$arr return idiom: survives 0/1 elements and keeps a trailing "" (the
+        # `| Select-Object -Skip 1` form dropped it -- backend#2455). Caller frees with LocalFree.
+        $out = [System.Collections.Generic.List[string]]::new()
+        for ($j = 0; $j -lt $n; $j++) {
+          $out.Add([System.Runtime.InteropServices.Marshal]::PtrToStringUni(
+            [System.Runtime.InteropServices.Marshal]::ReadIntPtr($p, $j * [System.IntPtr]::Size)))
+        }
+        return ,$out.ToArray()
+      } finally { [void][TbWin32b.Argv]::LocalFree($p) }
+    }
+    # Flat [string[]] per case (the ,@(...) idiom), exercising each branch of the re-splitter:
+    # whitespace+quote, backslashes-before-quote, trailing backslash, empty, the two @-bearing k3d
+    # shapes, and a plain token. Mirrors the #2455 cross-check's $cases shape.
+    $cases = @(
+      ,@('a b"c')
+      ,@('a\"b')
+      ,@('C:\a b\')
+      ,@('')
+      ,@('/host:/node@all')
+      ,@('note=a "b" c@server:*')
+      ,@('x')
+    )
+    foreach ($argv in $cases) {
+      $line = "prog.exe " + (($argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+      # Drop the prog.exe argv[0] with an INDEX loop, not a range slice: $full[1..($full.Count-1)]
+      # collapses to a scalar string at one element under Windows PowerShell 5.1 (backend#2455).
+      $realFull = realArgv2545 $line
+      $real = @(); for ($m = 1; $m -lt $realFull.Count; $m++) { $real += $realFull[$m] }
+      $mineFull = @(script:Split-Cmdline2545 $line)
+      $mine = @(); for ($m = 1; $m -lt $mineFull.Count; $m++) { $mine += $mineFull[$m] }
+      $because = "arg=[$($argv -join '|')] line=[$line] shell32=[$($realFull -join '|')] mine=[$($mineFull -join '|')]"
+      # This block's decoder must match the real API token-for-token...
+      $mine.Count | Should -Be $real.Count -Because $because
+      for ($k = 0; $k -lt $real.Count; $k++) { $mine[$k] | Should -BeExactly $real[$k] -Because $because }
+      # ...and the real API must recover the ORIGINAL args (round-trip completeness of the encoder).
+      $real.Count | Should -Be $argv.Count -Because $because
+      for ($k = 0; $k -lt $argv.Count; $k++) { $real[$k] | Should -BeExactly $argv[$k] -Because $because }
+    }
   }
 }
 
@@ -5272,6 +5684,10 @@ Describe "Bounded process survives a child that closes stdin first (broken pipe)
     $script:BPSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
     # Load the REAL function rather than a copy of it, so this cannot pass while the
     # shipped one throws -- the whole failure mode being tested is an unguarded call.
+    # Pull in its arg-quoting dependency too (backend#2455), so the redefined copy
+    # doesn't fall back to a missing ConvertTo-Win32Arg.
+    $cw = (($script:BPSRC -split 'function ConvertTo-Win32Arg')[1] -split '\nfunction ')[0]
+    Invoke-Expression "function ConvertTo-Win32Arg $cw"
     $fn = (($script:BPSRC -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
     Invoke-Expression "function Invoke-BoundedProcess $fn"
   }
@@ -5365,6 +5781,10 @@ Describe "Bounded process survives a child that closes stdin first (broken pipe)
     # Measured before the fix: past 60s with -TimeoutSec 20. After: ~0.2s.
     $job = Start-Job -ScriptBlock {
       param($src)
+      # This runspace is isolated, so Invoke-BoundedProcess's dependency must come along too:
+      # it now delegates arg-quoting to ConvertTo-Win32Arg (backend#2455).
+      $cw = (($src -split 'function ConvertTo-Win32Arg')[1] -split '\nfunction ')[0]
+      Invoke-Expression "function ConvertTo-Win32Arg $cw"
       $fn = (($src -split 'function Invoke-BoundedProcess')[1] -split '\nfunction ')[0]
       Invoke-Expression "function Invoke-BoundedProcess $fn"
       $r = Invoke-BoundedProcess -FileName "/bin/cat" -Arguments @("-") -Stdin ("x" * 200000) -TimeoutSec 20
@@ -6597,15 +7017,17 @@ Describe "Assert-NodesSeeHostData (backend#2422)" {
   }
 
   It "passes no argument carrying a space or a quote (#817 Bugbot, High)" {
-    # THE BUG THIS EXISTS FOR. $psi.Arguments joins the args into ONE command line
-    # and quotes any whitespace-bearing value as '"' + $_ + '"' with NO escaping of
-    # inner quotes. The obvious single query --
+    # DEFENSE IN DEPTH. Invoke-BoundedProcess now escapes inner quotes correctly
+    # (ConvertTo-Win32Arg, backend#2455), so this shape is no longer corrupted at the
+    # helper -- but the probe still keeps its args space/quote-free so it never depends
+    # on that. Historically the joiner quoted any whitespace-bearing value as
+    # '"' + $_ + '"' with NO escaping of inner quotes, so the obvious single query --
     #   --format "{{.Names}} {{.Label `"k3d.role`"}}"
     # -- has both a space and quotes, so it went out with its own quotes intact and
     # CommandLineToArgvW toggled in and out of quoting to hand docker ONE token with
     # the inner quotes CONSUMED: `{{.Names}} {{.Label k3d.role}}`. text/template then
     # cannot parse k3d.role as an identifier, docker exits non-zero, and the probe
-    # throws "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
+    # threw "Couldn't list the nodes" -- a FALSE REFUSAL on every Windows hostpath
     # install, after the cluster is already up.
     #
     # Why no earlier test caught it: every case here mocks Invoke-DockerCli, so the

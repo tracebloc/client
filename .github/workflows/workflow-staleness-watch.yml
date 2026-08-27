@@ -1,0 +1,110 @@
+name: Workflow staleness watch
+
+# Watch this repo's SCHEDULED workflows for the failure class in backend#2627: a
+# scheduled job that quietly stops producing a `success`. `Windows e2e
+# (self-hosted)` ran nightly for 22 days and every run was `cancelled` (GitHub's
+# 24h queue-timeout, no matching runner) — never a red check, never an alert, so
+# a job that had NEVER once succeeded read as "covered nightly". The sibling is a
+# job that IS red and simply ignored (this repo's own `digest-drift.yml` had ~13
+# days of failures nobody acted on; compare backend#2386's 18-day masked leak).
+#
+# This watch runs on a GitHub-hosted runner (so it always actually runs), asks
+# `scripts/check-workflow-staleness.sh` which scheduled workflows have no
+# successful scheduled run within the threshold, and files ONE deduplicated
+# tracking issue per stale workflow. The alert is an ISSUE on the engineer
+# kanban, NOT another check colour — because #2627's whole point is that a
+# red/cancelled scheduled check is exactly the signal that gets ignored.
+#
+# GENERIC BY DESIGN. It reads whatever scheduled workflows exist in
+# .github/workflows, so the next self-hosted or otherwise-rotting scheduled job
+# is covered with no change here. The org class sweep (backend#2627) found
+# `windows-e2e.yaml` is currently the only self-hosted-targeting workflow in the
+# org; this exists so the next one can't rot silently. Portable to other repos:
+# copy this file + the two scripts, keep ALERT_REPO pointing at the private
+# catch-all. See docs/WORKFLOW-STALENESS.md.
+
+on:
+  schedule:
+    # Daily 08:00 UTC — after the other nightly crons here (04:00 windows-e2e,
+    # 06:30 digest-drift) have completed, so it reads fresh results.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Detect and print what would be filed, but file no issues"
+        type: boolean
+        default: false
+      max-days:
+        description: "Days without a successful scheduled run before alerting"
+        type: string
+        default: '7'
+
+# Only the detector's read of this repo's run history. The cross-repo,
+# issues:write credential is minted per-run as a scoped App token below — the
+# workflow's own GITHUB_TOKEN deliberately cannot write issues anywhere.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: workflow-staleness-watch
+  cancel-in-progress: false
+
+env:
+  # Where alerts are filed. CI-health / runner work is internal, so per CLAUDE.md
+  # it goes to the PRIVATE catch-all `backend`, not the public repo the workflows
+  # live in. ALERT_REPO and the App token's `repositories:` below must name the
+  # SAME repo — both say backend.
+  ALERT_REPO: tracebloc/backend
+
+jobs:
+  watch:
+    name: Scheduled-workflow staleness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Detect stale scheduled workflows
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALENESS_MAX_DAYS: ${{ inputs.max-days || '7' }}
+        run: |
+          # A broken detector (bad auth, API error) exits non-zero here and the
+          # step fails RED — a broken watcher is the one thing that must stay
+          # loud. Findings (possibly empty) go to findings.json for the steps
+          # below; `count` drives whether they run at all.
+          scripts/check-workflow-staleness.sh > findings.json
+          count="$(jq 'length' findings.json)"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "stale scheduled workflow(s): $count"
+
+      - name: Preview (dry-run) — file nothing
+        if: ${{ steps.detect.outputs.count != '0' && inputs.dry-run == true }}
+        env:
+          ALERT_DRY_RUN: '1'
+        run: scripts/alert-workflow-staleness.sh findings.json
+
+      - name: Mint an issues:write token for the alert repo
+        id: alert-token
+        if: ${{ steps.detect.outputs.count != '0' && inputs.dry-run != true }}
+        # GITHUB_TOKEN is scoped to THIS repo and cannot open an issue in the
+        # private backend, so mint a tracebloc-release-train App installation
+        # token — same App and pin as add-to-kanban.yml / envelope-contract-drift.yml.
+        # Least privilege: scoped to the single `backend` repo, issues:write only.
+        # If the App lacks issues:write on backend, the file step below 403s and
+        # the job goes RED (loud) — grant the scope, don't silence the watcher.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: backend
+          permission-issues: write
+
+      - name: File / update deduplicated staleness issues
+        if: ${{ steps.detect.outputs.count != '0' && inputs.dry-run != true }}
+        env:
+          GH_TOKEN: ${{ steps.alert-token.outputs.token }}
+        run: scripts/alert-workflow-staleness.sh findings.json

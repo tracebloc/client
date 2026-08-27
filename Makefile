@@ -251,7 +251,7 @@ parse:
 	  echo "parse: found ZERO shell scripts under scripts/ -- refusing to report green"; \
 	  rm -f "$$files"; exit 1; \
 	fi; \
-	tr "\n" "\0" < "$$files" | xargs -0 -r -n1 bash -n; \
+	tr "\n" "\0" < "$$files" | xargs -0 -n1 bash -n; \
 	rc=$$?; rm -f "$$files"; \
 	if [ "$$rc" -eq 0 ]; then echo "all $$n shell scripts parse"; fi; \
 	exit $$rc
@@ -286,7 +286,7 @@ shellcheck:
 	if ! $(SH_FILES) > "$$files"; then rm -f "$$files"; exit 1; fi; \
 	n=$$(wc -l < "$$files" | tr -d " "); \
 	echo "shellcheck: $$n file(s), severity=error"; \
-	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=error --exclude=SC1091; \
+	tr "\n" "\0" < "$$files" | xargs -0 shellcheck --severity=error --exclude=SC1091; \
 	rc=$$?; rm -f "$$files"; exit $$rc
 
 # lint-warnings: the advisory `--severity=warning` sweep, over the SAME derived
@@ -310,11 +310,19 @@ lint-warnings:
 	if ! $(SH_FILES) > "$$files"; then rm -f "$$files"; exit 1; fi; \
 	n=$$(wc -l < "$$files" | tr -d " "); \
 	echo "lint-warnings: $$n file(s), severity=warning (advisory)"; \
-	tr "\n" "\0" < "$$files" | xargs -0 -r shellcheck --severity=warning --exclude=SC1091 || true; \
+	tr "\n" "\0" < "$$files" | xargs -0 shellcheck --severity=warning --exclude=SC1091 || true; \
 	rm -f "$$files"
 
 # drift: the repo's duplicated-declaration guards, and the ONLY declaration of
-# that set. drift-checks.yaml's `Source-of-truth drift` job -- the one that is a
+# that set. "Duplicated-declaration" has been the loose sense for a while --
+# the R8 manifest check, the cross-OS facts check and
+# helm-unittest-error-assertions.sh are all house RULES rather than two copies of
+# one value. What actually qualifies a guard for this list is that it must BLOCK:
+# `Source-of-truth drift` is required on develop and main and runs this target,
+# `Helm unit tests` used to be required on neither, which is what made the whole
+# 585-test chart tier advisory; backend#2651 split it into its own workflow so it
+# could be required too, and helm-unittest-gated.sh (in this list) is what keeps
+# it reportable. drift-checks.yaml's `Source-of-truth drift` job -- the one that is a
 # REQUIRED check on develop and on main -- runs `make drift` and lists nothing
 # itself, so a guard added here gates automatically and the pre-push hook and
 # the merge gate cannot disagree about what "the drift guards" are.
@@ -342,7 +350,7 @@ lint-warnings:
 #
 # `|`-separated because each guard is a multi-word command. One entry per guard,
 # and this is the only place they are written down.
-DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh|bash scripts/tests/collector-offsets-persisted.sh|bash scripts/tests/node-agents-tenancy.sh|bash scripts/tests/telemetry-token-agreement.sh|bash scripts/tests/node-agents-namespace-safety.sh|bash scripts/tests/automount-token-explicit.sh|bash scripts/tests/collector-redaction-floor.sh|bash scripts/tests/collector-redaction-derived.sh|bash scripts/tests/telemetry-token-bootstrap.sh|bash scripts/tests/node-jsonpath-agreement.sh|bash scripts/tests/preflight-not-privilege-gated.sh
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh|bash scripts/tests/collector-offsets-persisted.sh|bash scripts/tests/node-agents-tenancy.sh|bash scripts/tests/telemetry-token-agreement.sh|bash scripts/tests/node-agents-namespace-safety.sh|bash scripts/tests/automount-token-explicit.sh|bash scripts/tests/collector-redaction-floor.sh|bash scripts/tests/collector-redaction-derived.sh|bash scripts/tests/telemetry-token-bootstrap.sh|bash scripts/tests/node-jsonpath-agreement.sh|bash scripts/tests/preflight-not-privilege-gated.sh|bash scripts/tests/kubelet-arg-map-safety.sh|bash scripts/tests/cronjob-failures-are-readable.sh|bash scripts/tests/release-name-equals-namespace.sh|bash scripts/tests/helm-unittest-error-assertions.sh|bash scripts/tests/helm-unittest-gated.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
 # environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands
@@ -450,7 +458,8 @@ helm-template:
 	@command -v kubeconform >/dev/null 2>&1 \
 	  || echo "note: kubeconform not on PATH — rendered only. CI also validates the manifests."
 
-# helm-unittest: helm-ci.yaml `unittest`. Needs the plugin; the install
+# helm-unittest: helm-unit.yaml `unittest` (moved out of helm-ci.yaml by
+# backend#2651 so the tier could become a required check). Needs the plugin; the install
 # command is the one CI uses, pinned to the same version.
 .PHONY: helm-unittest
 helm-unittest:

@@ -49,6 +49,11 @@
 #               A down container runtime is degraded/runtime-down: nothing below
 #               it can be determined, so the machine must NOT be called fresh
 #               (client#682).
+#               cli-behind-latest is the ONE degraded reason where the
+#               environment is fully healthy: it fires ONLY under an explicit
+#               `tracebloc upgrade` (TB_UPGRADE_CLI) when the CLI is above the
+#               floor but behind the latest release, so main() updates just the
+#               CLI instead of handing off to a no-op (backend#2253).
 # =============================================================================
 
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
@@ -208,6 +213,41 @@ _assess_cli_outdated() {
   _version_lt "$ver" "$TB_CLI_MIN_VERSION"
 }
 
+# _assess_cli_behind_latest — for an EXPLICIT `tracebloc upgrade` only, is the
+# installed CLI behind the LATEST release (as opposed to below the mandatory-
+# reinstall floor)? This is the gap backend#2253 closed: the floor above stops at
+# 0.10.0, but the CLI's own update nudge fires against latest, so a CLI at e.g.
+# 0.10.5 with latest 0.10.8 was nagged on every command while `tracebloc upgrade`
+# — which re-runs this installer — found the machine "healthy" and changed
+# nothing. The nag named a command that could not carry it out.
+#
+# GATED on TB_UPGRADE_CLI so it is INERT on every ordinary installer run. That
+# matters twice over: it keeps this classifier free (no "what is latest?" lookup
+# on a normal run — the property _assess_cli_outdated's floor was chosen to
+# preserve), and it means a routine re-run is never reclassified by it. The
+# comparison itself does NO network: `tracebloc upgrade` already resolved latest
+# and passed it as TB_CLI_LATEST, so this is a pure version compare.
+#
+# Fail SAFE toward updating: under an explicit upgrade an unknown/unparseable
+# latest (a copy-pasted manual retry carries the flag but not the version) or an
+# unreadable installed version means "we cannot prove you are current" -> update,
+# which is exactly what the user asked for. Only a latest we can read AND that the
+# installed CLI already meets returns "not behind".
+_assess_cli_behind_latest() {
+  [[ "${TB_UPGRADE_CLI:-0}" == 1 ]] || return 1
+  local bin ver latest
+  bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
+  ver="$("$bin" version 2>/dev/null || true)"
+  ver="${ver%%$'\n'*}"                     # first line
+  ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
+  ver="${ver#v}"
+  latest="${TB_CLI_LATEST:-}"; latest="${latest#v}"
+  # Can't prove current (missing/unparseable latest, or unreadable version) -> update.
+  [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
+  [[ "$ver"    =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
+  _version_lt "$ver" "$latest"
+}
+
 # _assess_release_pending NS — true when a release in NS is wedged (pending-* or
 # uninstalling: a killed helm op, #554). Names both states so it doesn't depend on
 # the pinned helm's default listing. `helm list -q` is jq-free; bounded per the
@@ -311,6 +351,18 @@ _assess_classify() {
   # and silently — the ONE thing on the machine that no auto-upgrade reaches.
   if _assess_cli_outdated; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-outdated"
+    return 0
+  fi
+
+  # Above the floor, but an explicit `tracebloc upgrade` and behind the latest
+  # release (backend#2253). A DISTINCT reason from cli-outdated so main() updates
+  # ONLY the CLI — a small, isolated download — instead of either doing nothing
+  # (the old healthy no-op) or dragging a healthy box through a full reinstall.
+  # Ordered AFTER the floor check so a below-floor CLI stays cli-outdated (a
+  # mandatory full reinstall), and inert on ordinary runs because
+  # _assess_cli_behind_latest gates itself on TB_UPGRADE_CLI.
+  if _assess_cli_behind_latest; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-behind-latest"
     return 0
   fi
 
@@ -432,6 +484,17 @@ assess_existing_install() {
   _assess_classify
   log "assess: INSTALL_STATE=${INSTALL_STATE} reason=${INSTALL_STATE_REASON:-}"
 
+  # backend#2253: an explicit `tracebloc upgrade` on a box that is healthy on
+  # every axis EXCEPT that its CLI is behind latest. Do NOT hand off (that no-op
+  # is the bug) and do NOT run the degraded ceremony below — RETURN so main()
+  # updates just the CLI. Kept out of the case switch on purpose: this file stays
+  # a read-only classifier, and the CLI-install mutation lives in main() (next to
+  # create_cluster / install_client_helm), not behind assess.sh's non-mutating
+  # contract.
+  if [[ "$INSTALL_STATE" == "degraded" && "${INSTALL_STATE_REASON:-}" == "cli-behind-latest" ]]; then
+    return 0
+  fi
+
   case "$INSTALL_STATE" in
     healthy)
       echo ""
@@ -441,6 +504,11 @@ assess_existing_install() {
       # reuse-path drift check never runs; surface the warning here too so a
       # healthy-but-drifted client still sees the recreate guidance (Bugbot #565).
       declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
+      # Same rationale for GPU (client#835): this fast path exits before the
+      # create/reuse GPU reconcile, so a cluster that requests a GPU its node can't
+      # schedule (a pre-#835 install on a stock node) would strand every GPU job
+      # Pending with no signal. Surface the recreate guidance here too.
+      declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
       _assess_handoff        # prints the "already set up" line, runs `tracebloc`, exit 0
       ;;
     degraded)

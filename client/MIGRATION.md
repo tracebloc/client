@@ -46,7 +46,8 @@ Clearing the envelope is an **explicit, deliberate** act — a chart change cann
 do it for you, because `--reset-then-reuse-values` re-applies the stored
 user-supplied value on every upgrade. Setting the keys to `null` removes them
 (Helm deletes null-valued keys during value coalescing), which drops all three
-env vars and returns `jobs-manager` to its built-in `cpu=2,memory=8Gi` literal
+env vars and returns `jobs-manager` to its built-in `cpu=1,memory=2Gi` literal
+(the contract floor since backend#2254; it was `cpu=2,memory=8Gi`)
 — and, if `env.DERIVE_JOB_ENVELOPE` is also set, unblocks the node-allocatable
 derivation (read the caveat below before you do that):
 
@@ -68,9 +69,12 @@ kubectl -n "$NAMESPACE" get deploy "$NAMESPACE-jobs-manager" -o yaml | grep RESO
 > default (`DERIVE_JOB_ENVELOPE`, backend#2167): an envelope sized to ~75% of a
 > node fits only **one** training job per node, so a second concurrent
 > experiment cannot schedule. With the gate off, clearing the keys returns the
-> edge to the fixed `cpu=2,memory=8Gi` literal — which on a machine with less
-> than ~8 GiB allocatable **cannot schedule at all**. Do not clear the keys on a
-> small machine. To opt in deliberately, clear the pair **and** set the gate in
+> edge to the fixed `cpu=1,memory=2Gi` literal — the contract floor since
+> backend#2254, which fits the smallest host we support. (Before #2254 the
+> fallback was `cpu=2,memory=8Gi`, which on a machine with less than ~8 GiB
+> allocatable could not schedule at all, so clearing the keys on a small machine
+> was unsafe; the floor removes that hazard.) To opt in to node sizing
+> deliberately, clear the pair **and** set the gate in
 > the same upgrade — `--set-string env.DERIVE_JOB_ENVELOPE=true`, with
 > `--set-string`, because every key under `env` is typed `string` and a bare
 > `--set ...=true` is rejected as a boolean. The key is documented in

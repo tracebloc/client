@@ -317,6 +317,19 @@ _bounded() {
   else "$@"; fi
 }
 
+# _bounded_root SECONDS CMD… — like _bounded, but for a command that would
+# otherwise be prefixed with `sudo`. `_bounded` execs `timeout`, a BINARY, which
+# resolves `sudo` from PATH and so bypasses the root-aware `sudo()` shadow below —
+# and as root (the normal `--prepare-host` path, where RFC 0001 often has no sudo
+# binary at all) `timeout sudo CMD` then fails to find sudo and the caller misreads
+# a live daemon as dead (Bugbot, #744). Mirror the shadow's one rule: root needs no
+# sudo; non-root uses the real sudo binary (preflight_sudo has guaranteed it by now).
+_bounded_root() {
+  local t="$1"; shift
+  if [ "$(id -u)" -eq 0 ]; then _bounded "$t" "$@"
+  else                          _bounded "$t" sudo "$@"; fi
+}
+
 # _docker_answers — `docker info`, bounded and silent. The single probe every
 # "is the runtime up?" check should route through.
 #
@@ -628,6 +641,38 @@ spin_cmd_bounded() {
   fi
 }
 
+# _docker_answers_bounded MSG [SECONDS] — "is the daemon up?", bounded on EVERY
+# platform and shown behind a spinner. The bound comes from spin's own
+# background-pid + kill deadline (#426), NOT from _bounded.
+#
+# WHY A SECOND PROBE EXISTS ALONGSIDE _docker_answers (backend#2521). Both answer
+# the same question, but _docker_answers bounds through _bounded, which runs the
+# BARE command when neither timeout(1) nor gtimeout(1) is on PATH -- and NEITHER
+# ships on stock macOS (both are GNU coreutils). So on a Mac with no coreutils,
+# `_docker_answers` degrades to an unbounded `docker info`, and a bare `docker
+# info` does not return against a WEDGED daemon (as opposed to a cleanly stopped
+# one — the same distinction _docker_answers' own header draws). The colima-stop
+# recovery path in setup-macos.sh is reached precisely when a timed-out `colima
+# stop` may have left the VZ VM half-down — exactly the wedged state — so a
+# headless macOS install froze there with no spinner and never reached its
+# restore. spin backgrounds the probe and kills it on the deadline with no
+# coreutils dependency, so the bound holds on a stock Mac too.
+#
+# SILENT on a non-answer (no ✖ / log tail, unlike spin_cmd_bounded): a daemon
+# that does not answer is the expected result on a recovery path, not an error to
+# shout about — the caller decides what to say. Returns 0 iff docker answered
+# within SECONDS; non-zero otherwise (124 when the deadline fired).
+_docker_answers_bounded() {
+  local msg="$1" secs="${2:-${TB_DOCKER_PROBE_TIMEOUT:-10}}" _pid
+  # This IS the coreutils-free bound: the probe runs in the background and `spin`
+  # kills it on the deadline via its PID — so it is bounded without timeout(1). The
+  # check-style rule-5 grep only recognises the lexical _bounded/timeout forms, so
+  # exempt this line explicitly (it is the one legitimate background-PID probe).
+  docker info >/dev/null 2>&1 &   # style-guard: allow
+  _pid=$!
+  spin "$_pid" "$msg" "$secs"
+}
+
 # ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────
 #  The installer's privileged steps are written as `sudo <cmd>`. Two gaps that
 #  needlessly excluded real users — a shared-cluster researcher, a root
@@ -881,6 +926,15 @@ fi
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
 K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
+# CUDA base tag for the GPU-capable k3d node image (client#616/#835). The custom
+# docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
+# base, and its published tag encodes both (…/k3s-cuda:<K8S_VERSION>-cuda-<this>),
+# so cluster.sh::_gpu_node_image can derive the pull ref deterministically.
+# TRACEBLOC_CUDA_BASE_TAG overrides it (mirrors the Windows twin's $CUDA_BASE_TAG).
+# check-facts.sh keeps this in lockstep with facts.env's CUDA_TAG and the four
+# other consumers, so a bump can't derive a GPU image tag that was never built.
+# shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
+TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
 # release at install time instead (an empty value falls back to this pin, like
 # K8S_VERSION above). The binary is fetched directly from the release and
@@ -1004,6 +1058,24 @@ NVIDIA_DRIVER_OK=false
 K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
 PM_INSTALL=""
 PM_UPDATE=""
+
+# True when an NVIDIA GPU has been WIRED INTO THIS CLUSTER — not merely detected.
+# K3D_GPU_FLAGS is populated (--gpus=all) only once the container runtime is ready
+# to expose the GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d
+# node is then created from the GPU-capable image (cluster.sh), and the reuse
+# guard CLEARS it when an existing cluster turns out to be a CPU-only node. So this
+# is the one honest gate for "should we request a GPU for jobs" — the same role the
+# Windows twin's `$K3D_GPU_FLAG -ne ""` plays. Requesting nvidia.com/gpu on a node
+# that advertises 0 GPUs strands every job Pending (client#835), so the GPU chart
+# values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
+# set -u safe: K3D_GPU_FLAGS is declared above, but a unit test that sources only a
+# single lib may not have it, so default the length probe.
+_gpu_wired() {
+  [[ "${GPU_VENDOR:-}" == "nvidia" ]] || return 1
+  local n=0
+  [[ "${K3D_GPU_FLAGS+set}" == set ]] && n="${#K3D_GPU_FLAGS[@]}"
+  (( n > 0 ))
+}
 
 # ── Failure diagnostics (client#681) ─────────────────────────────────────────
 #  Under `set -euo pipefail` a command that fails outside an if/&&/|| context

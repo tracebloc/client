@@ -1,8 +1,14 @@
 # Windows installer e2e — self-hosted runner setup
 
-The nightly **Windows e2e** (`.github/workflows/windows-e2e.yaml`, issue #436 / RFC-CLIENT-0003 **D5**) runs the *real* `install-k8s.ps1` end-to-end on a self-hosted runner. GitHub's `windows-latest` runners can't nest virtualization, so the PowerShell installer otherwise has only mocked Pester coverage — regressions and never-ported behaviors stay green. This job closes that gap: bootstrap → verify Docker/WSL up → install tools → `New-K3dCluster` → credential-free stub discovery → teardown, uploading the install log on failure.
+> **⚠️ DORMANT since 2026-08-27 (backend#2627).** This workflow has **never once succeeded**: it ran nightly for 22 days and every run was recorded `cancelled` — GitHub's 24h queue-timeout, because **no `self-hosted, windows, nested-virt` runner is registered**. A `cancelled` conclusion is not a red check and raises no alert, so a job with zero successful runs read for weeks as "the Windows path is covered nightly" when it never was. The nightly `schedule:` trigger has been **removed**; the workflow is now **manual-dispatch only** so it stops emitting a phantom daily cancel.
+>
+> **Windows install coverage today** is the credentialed EC2 journey (**backend#2619**): the e2e-agent boots an `m7i.xlarge` with `--cpu-options NestedVirtualization=enabled` — ordinary EC2, no metal, no surcharge — which *can* run WSL2, so `install-client-windows` exercises the real installer end-to-end there. Once that journey is reliably green this file can be deleted; it is kept so the self-hosted job can be revived the moment a runner exists.
+>
+> **To revive:** complete the runner setup below, then restore the `schedule:` trigger in `windows-e2e.yaml`. A manual dispatch will queue-timeout until such a runner is online — expected while dormant, but (unlike the old cron) an explicit, visible action rather than a silent phantom.
 
-It is **schedule-only** (nightly + manual `workflow_dispatch`), not per-PR, and tears the k3d cluster down every run so the box stays reusable.
+The **Windows e2e** (`.github/workflows/windows-e2e.yaml`, issue #436 / RFC-CLIENT-0003 **D5**) runs the *real* `install-k8s.ps1` end-to-end on a self-hosted runner. GitHub's `windows-latest` runners can't nest virtualization, so the PowerShell installer otherwise has only mocked Pester coverage — regressions and never-ported behaviors stay green. This job closes that gap: bootstrap → verify Docker/WSL up → install tools → `New-K3dCluster` → credential-free stub discovery → teardown, uploading the install log on failure.
+
+When revived it is **schedule-only** (nightly + manual `workflow_dispatch`), not per-PR, and tears the k3d cluster down every run so the box stays reusable.
 
 ## One-time runner setup
 

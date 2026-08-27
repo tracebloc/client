@@ -26,15 +26,17 @@ env: {
   # HTTP_PROXY_USERNAME: ""
   # HTTP_PROXY_PASSWORD: ""
   # Optional: explicit resource requests/limits for spawned training jobs.
-  # UNSET (the default): jobs-manager uses its built-in "cpu=2,memory=8Gi"
-  # literal. SET: pins the envelope to exactly what you write here.
+  # UNSET (the default): jobs-manager uses its built-in "cpu=1,memory=2Gi"
+  # literal — the contract floor since backend#2254 (was "cpu=2,memory=8Gi",
+  # which exceeded a default Docker Desktop VM and left a fresh install
+  # unschedulable). SET: pins the envelope to exactly what you write here.
   #
   # This comment used to say that leaving the pair unset made jobs-manager size
   # the envelope from node allocatable (75% of the node). It does not: that
   # path is real but GATED OFF behind DERIVE_JOB_ENVELOPE (documented below).
   # Unset means the literal (backend#664 L0, backend#2167, backend#2250).
-  # RESOURCE_REQUESTS: "cpu=2,memory=8Gi"
-  # RESOURCE_LIMITS: "cpu=2,memory=8Gi"
+  # RESOURCE_REQUESTS: "cpu=1,memory=2Gi"
+  # RESOURCE_LIMITS: "cpu=1,memory=2Gi"
   # Bookkeeping only (backend#2220): WHO chose the two values above.
   #   installer - sized to this machine at install time
   #   user      - an explicit `tracebloc resources set`
@@ -133,6 +135,14 @@ gpu:
       repository: nvidia/k8s-device-plugin
       tag: v0.14.5
       digest: ""
+      # RuntimeClass for the plugin pod (client#835). On native Linux the k3s-cuda
+      # node runs the NVIDIA runtime in CDI mode, and the plugin can only enumerate
+      # GPUs (init NVML) if its own pod runs under that runtime — so the Linux
+      # installer sets this to "nvidia" (the RuntimeClass baked into the node image)
+      # whenever the GPU is wired. Empty = plugin runs under the default runtime
+      # (the correct choice for CPU clusters and the Windows/WSL2 path, which does
+      # not run this plugin at all).
+      runtimeClassName: ""
     amd:
       # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin). Set a digest
       # for air-gapped / reproducible installs.
@@ -562,8 +572,16 @@ telemetryCollector:
   # Read through `bearertokenauth`'s `filename`, which watches the projected file
   # (credentialsfile.ValueResolver + WithOnChange upstream), so a rotated token is
   # picked up without restarting the Collector.
+  #
+  # `name` IS DELIBERATELY UNSET (backend#2625). The effective default is
+  # release-scoped — `<release>-telemetry-token` — computed in
+  # tracebloc.telemetryTokenSecretName, because the node-agents namespace is SHARED:
+  # a fixed name let two edges on one cluster overwrite each other's credential, and
+  # the loser's Collector then authenticated as the wrong tenant. Setting it here
+  # would re-pin the fixed name and reintroduce the collision. Set it ONLY to a
+  # genuinely custom per-release name; the helper treats the old fixed
+  # `tracebloc-telemetry-token` as "migrate me", not as a chosen override.
   tokenSecret:
-    name: tracebloc-telemetry-token
     key: token
 
   # `Token`, NOT `Bearer`. The edge authenticates to the backend with a DRF user
@@ -981,10 +999,59 @@ podDisruptionBudget:
   jobsManager:
     create: null
 
-# -- Secrets
-# These MUST be set via --set, a values file, or an external secret manager.
-# The defaults are intentionally empty; deployment fails fast if they are not
-# overridden. Do NOT commit real credentials to version control.
+# -- Platform client credentials. Issued by the backend; the chart never
+# generates them. Resolved in three tiers, like every other credential in
+# templates/secrets.yaml:
+#   1. these values, else
+#   2. the CLIENT_ID / CLIENT_PASSWORD keys already in the release Secret, else
+#   3. a hard failure naming both options.
+#
+# WHY YOU WOULD BOTHER: anything passed as a value is stored by Helm in the
+# release's user-supplied values IN CLEARTEXT, in every retained revision (10 by
+# default), so it outlives any rotation and is readable by anyone with
+# `get secret` in the namespace. Tier 2 exists so the credential need never
+# enter release values at all (backend#2571).
+#
+# SIMPLEST — install once with these set, then drop them from your values on the
+# next upgrade. Tier 2 reads them from the Secret from then on, and the Secret is
+# already Helm-managed, so there is nothing else to do.
+#
+# BEFORE THE FIRST INSTALL, the Secret has to be adopted, not just created. This
+# chart ALWAYS emits `<release>-secrets`, so a plain `kubectl create secret`
+# leaves an object Helm does not own and `helm install` aborts with
+# `invalid ownership metadata` rather than reading it (Bugbot, #859). Helm adopts
+# a pre-existing object that already carries its three ownership fields, so add
+# them in the same breath:
+#
+#   kubectl -n <ns> create secret generic <release>-secrets \
+#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=...
+#   kubectl -n <ns> label secret <release>-secrets \
+#     app.kubernetes.io/managed-by=Helm
+#   kubectl -n <ns> annotate secret <release>-secrets \
+#     meta.helm.sh/release-name=<release> \
+#     meta.helm.sh/release-namespace=<ns>
+#
+# `<release>` and `<ns>` must match the install exactly — Helm compares all
+# three fields and refuses the adoption if any of them disagrees. Both keys must
+# be NON-EMPTY: an empty key reads as absent and falls through to the hard
+# failure, because the chart is the only layer left that can see it (the schema
+# cannot, it runs before render).
+#
+# NOT AVAILABLE UNDER A CLIENT-SIDE RENDERER, and worth knowing before you plan
+# around it. Tier 2 is a `lookup`, which needs a live cluster — so it is inert
+# under `helm template`, `--dry-run`, ArgoCD's default renderer and Flux
+# post-render alike. The chart's other five credentials degrade gracefully there
+# (their tier 3 generates a value); these two cannot, because the backend issues
+# them, so tier 3 is a hard failure and the render simply stops. A GitOps install
+# rendering without cluster access must therefore KEEP these two in its values,
+# and for it the cleartext-in-revisions problem above is not solved. Rendering
+# against a live cluster (server-side apply, or `helm upgrade` from CI) is what
+# makes the value-free path reachable.
+#
+# AVOID `--set clientPassword=...`: that puts the credential in your shell
+# history AND in the `helm` process's argv, where anyone who can run `ps` sees
+# it. A values file, or the Secret above, are both better. And do not commit
+# real credentials to version control.
 clientId: ""
 clientPassword: ""
 

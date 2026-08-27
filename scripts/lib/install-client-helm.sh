@@ -34,19 +34,22 @@ _ensure_helm_runnable() {
   error "Installation tools could not be run. Try: sudo chmod 755 $helm_bin then re-run this script."
 }
 
-# ── Training-size default (backend#1236, option A) ──────────────────────────
+# ── Training-size default (backend#1236, option A; floored backend#2254) ─────
 # One knob, requests == limits (Guaranteed QoS). The old static default
 # ("cpu=2,memory=8Gi") was wrong at both ends: dead on arrival on nodes under
-# 8 GiB (the WSL2 field case — nothing could ever schedule) and ~12% of a
-# 64 GiB box. Precedence:
+# 8 GiB (the WSL2 field case, and a default Docker Desktop VM — nothing could
+# ever schedule, backend#2254) and ~12% of a 64 GiB box. Precedence:
 #   1. TRACEBLOC_TRAINING_RESOURCES  (explicit install-time override, client#308)
 #   2. the installed release's current value — a `tracebloc resources set`
 #      choice must survive re-install, never be clobbered back to a default
 #   3. sized to this machine: LARGEST node allocatable − platform overhead
 #      (~1 CPU / 3 GiB, the cli's constants; a pod schedules onto ONE node, and
 #      k3d's server+agent are the same machine — summing would double-count)
-#   4. the historic static default (tiny or undeterminable machines)
-_TRAINING_DEFAULT="cpu=2,memory=8Gi"
+#   4. the contract FLOOR (tiny or undeterminable machines) — the fallback the
+#      installer writes when it cannot do better. Was the 8Gi literal above,
+#      which exceeded a default Docker Desktop and sat Pending forever, so
+#      backend#2254 floored it. _TRAINING_DEFAULT is DERIVED from the embedded
+#      floor constants (below, so it cannot drift from the contract).
 
 # k8s cpu quantity -> millicores ("12" -> 12000, "11500m" -> 11500); empty on junk.
 _cpu_to_milli() {
@@ -181,6 +184,24 @@ _TB_ENVELOPE_NODE_MIN_CPU_MILLI=2000
 _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
+# ── the fallback training envelope (precedence step 4) ──────────────────────
+# The contract FLOOR — cpu=1,memory=2Gi — DERIVED from the embedded floor
+# constants so it cannot drift from envelope_contract.json. Written when the
+# machine is unschedulable or unreadable. Was cpu=2,memory=8Gi, which exceeded a
+# default Docker Desktop VM and left a fresh install Pending forever; the floor
+# is the largest fallback that still fits the smallest host we support
+# (backend#2254). The bats suite pins it to the embedded floor.
+_TRAINING_DEFAULT="cpu=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 )),memory=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / 1024 / 1024 / 1024 ))Gi"
+
+# The historic fallback literal (pre-backend#2254). FROZEN — NOT the current
+# default — kept only so the carry gate in _resolve_training_size still
+# RECOGNISES it: existing field installs carry cpu=2,memory=8Gi as their
+# absence-of-a-choice default and must re-derive on re-install rather than
+# freeze an unschedulable 8Gi. The current floor default is deliberately NOT
+# matched by that gate — a human may legitimately `tracebloc resources set` the
+# floor, and precedence step 2 says that choice must survive.
+_TRAINING_DEFAULT_HISTORIC="cpu=2,memory=8Gi"
+
 # The node line contract, in ONE place (backend#2237).
 #
 # Three whitespace-separated fields per node: allocatable cpu, allocatable
@@ -246,8 +267,8 @@ _anchor_largest_schedulable() {
     # Cordoned: skipped BEFORE ranking, so it can never win the anchor.
     # Written `!= ... || continue`, not `== ... && continue`: the latter
     # evaluates to 1 for every SCHEDULABLE node, which under the installer's
-    # `set -euo pipefail` aborts the whole run (the shape scripts/tests/
-    # pipefail-early-close.bats exists to catch).
+    # `set -euo pipefail` aborts the whole run (the shape the shared
+    # `early-close` gate in tracebloc/.github's code-quality.yml catches).
     [[ "$unsched" != "true" ]] || continue
     cpu_m="$(_cpu_to_milli "$cpu")"
     mem_b="$(_mem_to_bytes "$mem")"
@@ -276,8 +297,10 @@ _machine_training_resources() {
   (( run_cpu_m < 0 )) && run_cpu_m=0
   (( run_mem_b < 0 )) && run_mem_b=0
   # Below the contract floor the machine is NOT VIABLE. Emit nothing and let
-  # the caller fall back — see _training_resources for why that fallback is
-  # itself a known bug (backend#2220, fixed separately so it stays revertable).
+  # the caller fall back to _TRAINING_DEFAULT. That fallback used to be the 8Gi
+  # literal — larger than such a machine, a known bug (backend#2220); since
+  # backend#2254 it is the contract floor, which fits. The fallback structure is
+  # deliberately kept revertable — only the value it writes changed.
   { (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); } || return 0
   printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
@@ -344,7 +367,7 @@ _training_limits() {
   #
   # `$size` itself is never empty on any reachable path: _training_resources'
   # four-way fallback chain (env override -> installed release -> machine sizing
-  # -> the cpu=2,memory=8Gi literal) always yields a value. An empty input would
+  # -> the contract-floor literal) always yields a value. An empty input would
   # return empty here, and that is the honest answer -- there is nothing to say
   # about an envelope that does not exist.
   printf '%s' "${out:-$size}"
@@ -355,16 +378,17 @@ _training_limits() {
 #
 # The distinction this adds is the whole point: "I cannot see the machine" and
 # "I can see it and it is too small" used to collapse into the same empty
-# answer, so both fell through to the cpu=2,memory=8Gi literal. On a machine
-# with ~4 GiB allocatable that literal is LARGER THAN THE MACHINE, so every
-# training pod stays Pending forever -- and preflight lets exactly those
-# machines install: it hard-fails below 5 GB on Linux and only WARNS on
-# macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's limit is
-# ~8 GiB+. So the permitted band and the unschedulable band overlap.
+# answer, so both fell through to the fallback literal. When that literal was
+# cpu=2,memory=8Gi, on a machine with ~4 GiB allocatable it was LARGER THAN THE
+# MACHINE, so every training pod stayed Pending forever -- and preflight lets
+# exactly those machines install: it hard-fails below 5 GB on Linux and only
+# WARNS on macOS/Windows (PF_MIN_MEM_GB=5), while its own comment notes a job's
+# limit is ~8 GiB+. So the permitted band and the unschedulable band overlapped.
 #
-# Unreadable is still unreadable and still gets the literal -- we genuinely
-# cannot do better than the historical default there. Only the "read it, it is
-# small" case changes, and it changes to a number that FITS.
+# Unreadable is still unreadable and still gets the fallback -- we genuinely
+# cannot do better without measuring. Since backend#2254 that fallback is the
+# contract floor, not the 8Gi literal, so it now FITS; the "read it, it is
+# small" case likewise gets the honest remainder, which fits too.
 #
 # Node selection is the SAME _anchor_largest_schedulable the sizing path uses,
 # so the warning the caller prints can never describe a different node than the
@@ -543,7 +567,12 @@ _resolve_training_size() {
   # The historic static default was the ABSENCE of a choice, not a choice —
   # carrying it would keep the unschedulable 8Gi on exactly the machines this
   # sizing exists to fix (Bugbot). Only a value that differs from it survives.
-  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT" ]]; then
+  # Matched against the FROZEN historic literal, NOT _TRAINING_DEFAULT: since
+  # backend#2254 the latter is the contract floor, which a human may deliberately
+  # pin — and precedence step 2 says that choice must survive re-install, so the
+  # gate must not re-derive it. A field install predating #2254 still carries the
+  # 8Gi literal; that is what this recognises as a non-choice and re-sizes.
+  if [[ -n "$prev" && "$prev" != "$_TRAINING_DEFAULT_HISTORIC" ]]; then
     _TB_TRAINING_SIZE="$prev"
     prev_prov="${carried##*|}"
     case "$prev_prov" in
@@ -670,6 +699,42 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
+# _client_id_from_secret — CLIENT_ID out of release $1's chart-managed Secret in
+# namespace $2, or empty. THE SECOND PLACE THE ID CAN LIVE: backend#2571 lets
+# clientId resolve from the Secret instead of release values, and the chart now
+# recommends dropping it from values once it is there — so "no clientId in
+# values" stopped meaning "not a client" and detect_installed_client has to look
+# here before it may conclude anything.
+# CONTRACT: echoes the id or nothing, and ALWAYS returns 0. Callers assign it
+# inside `$( )`; a non-zero rc there would abort the installer under `set -e`
+# (the same trap _extract_yaml_value documents above), and "couldn't read it" is
+# a state the caller handles, not an error it should die on.
+_client_id_from_secret() {
+  local rel="$1" ns="$2" b64 out=""
+  # kubectl is not guaranteed this early (the pre-provision pre-flight runs
+  # before the cluster exists), and its absence is "couldn't read", not "absent".
+  has kubectl || return 0
+  # BOUNDED, because this call is now on the COMMON path (Bugbot, #859). Once
+  # clientId is dropped from release values — which this chart recommends — every
+  # scanned release reaches here, so an unbounded read against a wedged API would
+  # hang a headless install or assess with no further output. kubectl's default
+  # is no timeout at all; 5s matches the other existence probes in this repo
+  # (install-k8s.ps1's namespace/daemonset/allocatable reads). A timeout exits
+  # non-zero and is handled by the same `|| return 0` as any other unreadable
+  # Secret: "couldn't read it" is a state the caller already knows how to treat,
+  # and the caller's fail-closed path turns it into an unidentifiable client
+  # rather than an absent one.
+  b64="$(kubectl -n "$ns" get secret "${rel}-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>/dev/null)" || return 0
+  [[ -n "$b64" ]] || return 0
+  # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling. Same
+  # both-spellings idiom as scripts/tests/gpu-embed-drift.bats.
+  out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
+    || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
+    || out=""
+  printf '%s' "$out"
+  return 0
+}
+
 # detect_installed_client — report the tracebloc client already installed on this
 # cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
 # (both empty when none is found). Enumerate client-chart releases across ALL
@@ -680,7 +745,10 @@ _extract_yaml_value() {
 # the two can never disagree on "what already runs here". Always returns 0. A
 # missing helm just yields the empty (no-client) result — but a helm/API FAILURE
 # is reported as INSTALLED_CLIENT_UNKNOWN=1 (not "no client"), so guards can fail
-# CLOSED instead of silently overwriting a client they couldn't see.
+# CLOSED instead of silently overwriting a client they couldn't see. The id is
+# read from release values first and from the release Secret second
+# (_client_id_from_secret): since backend#2571 either place is legitimate, and a
+# client-chart release that names an id in NEITHER is UNKNOWN, not absent.
 detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
@@ -710,9 +778,19 @@ detect_installed_client() {
     [[ -z "$_rel" ]] && continue
     if helm get values "$_rel" -n "$_ns" > "$_gvf" 2>/dev/null; then
       _id="$(_extract_yaml_value "$_gvf" clientId)"
+      # VALUES READABLE BUT NO clientId IS NO LONGER "not a client" (backend#2571,
+      # Bugbot #859). clientId stopped being `required` and the chart now tells
+      # operators to drop it from release values once the Secret carries it — so
+      # under the new contract a perfectly live client legitimately has no
+      # clientId in its values, and reading that as "not a match" let the
+      # one-client guard wave through an install that re-points the machine.
+      # Fall back to where the id now lives.
+      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
-      # Values readable but no clientId -> parsed fine, just not a match; keep
-      # scanning (mirrors the PowerShell peer's null-clientId `continue`).
+      # A client-chart release with no id in EITHER place is a client we cannot
+      # NAME, not an absent one. Record it and keep scanning; if nothing else
+      # names one, the fail-closed check below reports UNKNOWN.
+      _unreadable=1
     else
       # Couldn't read THIS client release's values -> an UNIDENTIFIABLE client.
       # Record it and keep scanning (a later release may give a definitive id);
@@ -1039,6 +1117,29 @@ _recover_pending_helm_release() {
   return 0
 }
 
+# _gpu_request_value — the GPU resource a spawned training pod should request,
+# keyed to the vendor (backend#2033). Each vendor advertises its card as a different
+# Kubernetes resource, so the request key must match: nvidia.com/gpu for nvidia,
+# amd.com/gpu for amd, empty (→ CPU) otherwise. Single source of truth so the
+# values-write path (install_client_helm) and the adopt/reconcile path
+# (_reconcile_adopted_client) can never disagree — the reconcile path reused the
+# release's stored values and kept an AMD edge on an empty request, training on
+# CPU while the node's GPU read "verified".
+#
+# NVIDIA is additionally gated on the GPU being WIRED into the cluster (client#835,
+# _gpu_wired): requesting nvidia.com/gpu on a node that advertises 0 GPUs strands
+# every job Pending, so a detected-but-not-wired NVIDIA host requests nothing (CPU).
+# AMD has no k3d wiring step (it uses the device plugin only), so it stays keyed on
+# detection.
+_gpu_request_value() {
+  case "${GPU_VENDOR:-}" in
+    nvidia) if _gpu_wired; then printf 'nvidia.com/gpu=1'; fi ;;
+    amd)    printf 'amd.com/gpu=1' ;;
+    *)      printf '' ;;
+  esac
+  return 0
+}
+
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
 # sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
 # to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
@@ -1068,6 +1169,24 @@ _reconcile_adopted_client() {
   info "This machine already runs a tracebloc client — reconciling '${_rel}' (namespace '${_ns}') in place."
 
   _ensure_helm_runnable
+
+  # backend#2146: the arch gate belongs on the adopt path too, BEFORE the engine is
+  # deployed. Reconcile reuses the release's stored values (--reuse-values), so the
+  # engine that will run is whatever the release already pins — read THAT (never a
+  # fresh resolution, which could pick 8.4 on an arm64 host while Helm keeps the
+  # release's amd64-only 5.7) and ask the same question the normal install path
+  # asks. Without it, an arm64 host with no amd64 emulation adopting a 5.7 release
+  # reported success and then CrashLooped: preflight had classified the machine as
+  # fresh-8.4, so its early gate waved it through. existing-release is the accurate
+  # reason (a live Helm release, not host files — see _assert_engine_runs_on_this_arch).
+  if _release_pins_mysql_84 "$_rel" "$_ns"; then
+    TB_MYSQL_ENGINE_RESOLVED="8.4"
+  else
+    TB_MYSQL_ENGINE_RESOLVED="5.7"
+  fi
+  TB_MYSQL_ENGINE_REASON="existing-release"
+  _assert_engine_runs_on_this_arch
+
   local chart_ref=""
   _resolve_chart_ref
 
@@ -1097,6 +1216,36 @@ _reconcile_adopted_client() {
   local _args=(upgrade "$_rel" "$chart_ref" --namespace "$_ns" "$_reuse" --cleanup-on-fail)
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
+
+  # GPU keys are NOT --reuse-values-safe (backend#2033 + client#835). --reuse-values
+  # carries forward a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME
+  # and its gpu.devicePlugin block, so an adopted release keeps a STALE GPU decision:
+  # a vendor-changed edge trains on the wrong resource, and an NVIDIA edge dropped to
+  # CPU (reuse guard / CDI setup cleared K3D_GPU_FLAGS) keeps requesting a GPU and
+  # strands jobs Pending while the summary says CPU. FORCE the GPU keys to THIS run's
+  # decision — the SAME values the fresh write chooses (_gpu_request_value +
+  # runtime_class) — mirroring the Windows twin's adopt-path --set-string. --set-string
+  # so helm doesn't type-infer the value's '='/'/' or read dots as key navigation, and
+  # it overrides the reused value; empty deliberately clears a stale request
+  # (client-runtime#80: an explicit "" means "no GPU here").
+  local _gpu_val _rtc=""
+  _gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then _rtc="nvidia"; fi
+  _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val"
+          --set-string "env.GPU_LIMITS=$_gpu_val"
+          --set-string "env.RUNTIME_CLASS_NAME=$_rtc")
+  # Reconcile the device-plugin block too, matching the fresh write, so a stale one
+  # can't linger: nvidia only when wired (needs the baked RuntimeClass), amd on
+  # detection, else disabled.
+  if _gpu_wired; then
+    _args+=(--set "gpu.devicePlugin.enabled=true"
+            --set "gpu.devicePlugin.vendor=nvidia"
+            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=nvidia")
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
+  else
+    _args+=(--set "gpu.devicePlugin.enabled=false")
+  fi
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
@@ -1331,6 +1480,108 @@ _client_values_file() { echo "${TRACEBLOC_VALUES_FILE:-${HOST_DATA_DIR}/values.y
 # HOST_DATA_DIR/<namespace>/mysql.
 _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-tracebloc}"; }
 
+# Whether the values on STDIN pin the MySQL 8.4 engine — i.e. the engine that will
+# ACTUALLY run is 8.4. Reads STDIN so a caller streams a file (`< values.yaml`)
+# rather than slurping it (the 60k-line fixture behind backend#1778). The ONE
+# reader three callers share so they cannot drift on what "pins 8.4" means: the
+# sticky rule below, the dev-mode TRACEBLOC_VALUES_FILE arch gate, and the
+# adopt-reconcile arch gate (both backend#2146).
+#
+# STRUCTURAL, not a fixed line window (Asad, client#833 review). The chart's own
+# client/values.yaml documents the 8.4 opt-in in a COMMENT several lines below the
+# real `tag:` — literally `#   tag: "8.4"` — so a `grep -A N` is wrong in BOTH
+# directions: too narrow misses the real tag and refuses a legitimate 8.4 opt-in on
+# arm64; too wide reads that DECOY comment as the pin and skips the gate on a 5.7
+# default (fail OPEN). So walk the indent-delimited mysqlClient block, drop comment
+# and blank lines (the decoy goes with them), and read the real `tag:`/`digest:` by
+# EXACT value — "8.40"/"8.4.1" are not 8.4. Handles the quoted form our heredoc
+# writes (tag: "8.4") and the unquoted form `helm get values` re-serializes
+# (tag: 8.4 — the #200 quote-stripping lesson).
+#
+# DIGEST WINS OVER TAG (Bugbot, client#833). tracebloc.image renders
+# repository@<digest> when a digest is set and ignores the tag entirely, and the
+# default pin is the amd64-only 5.7 image. So `tag: "8.4"` with a NON-empty digest
+# actually runs whatever that (opaque sha256) digest is — which we cannot decode —
+# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is AFFIRMATIVELY empty:
+# the documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
+# heredoc writes it. A set digest is treated as "not provably 8.4" so the 5.7 arch
+# gate runs — fail closed, refuse rather than CrashLoop.
+#
+# AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838).
+# This reader is fed PARTIAL views: `_release_pins_mysql_84` reads `helm get values`
+# WITHOUT `--all`, which omits chart defaults, and a dev-mode overlay can carry only
+# `mysqlClient.tag`. In both, the chart-default `digest` (the amd64-only 5.7 pin) is
+# still what renders — `tracebloc.image` makes it win over the tag — yet the digest
+# line is nowhere on STDIN. Treating that missing line as `digest: ""` reported a
+# real 8.4 pin, skipped the 5.7 arch gate, and CrashLooped the amd64-only image on
+# arm64. So we require the digest key to actually APPEAR and be empty (`sawdigest`);
+# a digest we never saw is "not provably cleared" → not 8.4 → the 5.7 gate runs.
+# (We deliberately do NOT switch the caller to `helm get values --all`: coalescing
+# can re-default an operator's explicit `digest: ""` back to the chart's 5.7 pin,
+# which would false-REFUSE a genuine 8.4 reconcile. Reading only supplied values and
+# demanding an explicit empty digest is the fail-closed direction that costs nothing
+# real — our heredoc always writes the explicit `digest: ""`.)
+#
+# Reads to EOF and decides in END — it never exits on first match, so a producer
+# piping in (helm get values) is never SIGPIPE'd (backend#1778; the trap an early
+# `exit`/`grep -q` would spring).
+_values_pin_mysql_84() {
+  awk '
+    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty. sawdigest guards the
+    # "absent digest is not an empty one" rule (backend#2638): a digest we never saw
+    # on STDIN may still be a non-empty chart default that wins over the tag.
+    function flush() { if (inblk && tag == "8.4" && sawdigest && digest == "") found = 1 }
+    /^[[:space:]]*#/ { next }                      # comment line — drops the decoy
+    /^[[:space:]]*$/ { next }                      # blank line
+    { match($0, /^[[:space:]]*/); indent = RLENGTH }
+    !inblk {
+      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk=1; base=indent; tag=""; digest=""; sawdigest=0 }
+      next
+    }
+    {
+      if (indent <= base) {                        # dedented out of the block
+        flush()                                    # decide this block before leaving it
+        inblk = ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/)
+        if (inblk) { base=indent; tag=""; digest=""; sawdigest=0 }
+        next
+      }
+      if ($0 ~ /^[[:space:]]*tag:[[:space:]]*/) {
+        v = $0
+        sub(/^[[:space:]]*tag:[[:space:]]*/, "", v)
+        sub(/[[:space:]]+#.*$/, "", v)             # strip an inline comment
+        gsub(/"/, "", v)                           # strip quotes (quoted or not)
+        sub(/[[:space:]]+$/, "", v)
+        tag = v
+      } else if ($0 ~ /^[[:space:]]*digest:[[:space:]]*/) {
+        v = $0
+        sub(/^[[:space:]]*digest:[[:space:]]*/, "", v)
+        sub(/[[:space:]]+#.*$/, "", v)
+        gsub(/"/, "", v)
+        sub(/[[:space:]]+$/, "", v)
+        digest = v
+        sawdigest = 1                              # the key is present (empty or not)
+      }
+    }
+    END { flush(); exit(found ? 0 : 1) }
+  '
+}
+
+# Whether the live Helm release <rel> in namespace <ns> runs the MySQL 8.4 engine,
+# read from its STORED values — adopt/reconcile keeps those via --reuse-values, so
+# this is the engine that will actually run, not a fresh resolution. Bounded the
+# way _existing_training_values bounds its read: `helm get values` has no request
+# timeout, so gate it behind a bounded namespace probe and let a wedged API degrade
+# to "not 8.4" (→ the 5.7 arch gate) instead of hanging. Unreadable is deliberately
+# fail-closed: refuse an arm64 reconcile we cannot prove is 8.4 rather than report
+# success and CrashLoop (the stance backend#2146 is about).
+_release_pins_mysql_84() {
+  local _rel="$1" _ns="$2" _vals
+  [[ -n "$_rel" && -n "$_ns" ]] || return 1
+  kubectl get namespace "$_ns" --request-timeout=5s >/dev/null 2>&1 || return 1
+  _vals="$(helm get values "$_rel" -n "$_ns" 2>/dev/null || true)"
+  _values_pin_mysql_84 <<<"$_vals"
+}
+
 # The engine decision itself, with NO logging and NO globals set, so a second
 # caller can ask this rule a question instead of restating it (backend#2047:
 # preflight's arch gate refused a fresh arm64 install that this rule was about
@@ -1351,17 +1602,12 @@ _mysql_engine_decision() {
     *) echo "invalid ${requested}"; return 0 ;;
   esac
   # Sticky: an edge that opted into 8.4 stays there on every later re-run.
-  # Capture-then-match (backend#1778): `grep -A 3 … | grep -q` lets the second
-  # grep close the pipe on its first hit, SIGPIPE'ing the first, and pipefail
-  # turns that into 141 — which the `if` reads as "not 8.4". A machine that opted
-  # into 8.4 would then resolve to 5.7 and point MySQL 5.7 at an 8.4 datadir.
-  local _mysql_block=""
-  if [[ -f "${values_file:-}" ]]; then
-    _mysql_block="$(grep -A 3 'mysqlClient:' "${values_file}" 2>/dev/null || true)"
+  # _values_pin_mysql_84 streams the file (never slurps it), skips comments, and
+  # reads to EOF — it owns the structural-vs-window and SIGPIPE reasoning
+  # (backend#2146, backend#1778).
+  if [[ -f "${values_file:-}" ]] && _values_pin_mysql_84 < "${values_file}"; then
+    echo "8.4 sticky"; return 0
   fi
-  case "$_mysql_block" in
-    *'tag: "8.4"'*) echo "8.4 sticky"; return 0 ;;
-  esac
   # Never auto-flip existing state: a found release or real datadir content
   # means a 5.7-format datadir may exist, and 8.4 refuses to open it. Two
   # DISTINCT triggers, ordered MOST-SPECIFIC FIRST because their remedy differs:
@@ -1614,6 +1860,18 @@ install_client_helm() {
     TB_NAMESPACE="${TB_NAMESPACE:-tracebloc}"
     info "Dev mode: using caller-provided values file"
     log "Using values file: $values_file (namespace: $TB_NAMESPACE)"
+    # backend#2146: gate the arch on the dev-mode path too, BEFORE helm deploys.
+    # We install the caller's file as-is, so the engine that will run is whatever
+    # the file declares — read THAT (do NOT re-resolve: a fresh resolution could
+    # pick 8.4 while the file pins the amd64-only 5.7) and ask the same question
+    # the normal path asks below.
+    if _values_pin_mysql_84 < "$values_file"; then
+      TB_MYSQL_ENGINE_RESOLVED="8.4"
+    else
+      TB_MYSQL_ENGINE_RESOLVED="5.7"
+    fi
+    TB_MYSQL_ENGINE_REASON="values-file"
+    _assert_engine_runs_on_this_arch
   else
 
   local use_existing=""
@@ -1813,14 +2071,27 @@ install_client_helm() {
   TB_CLIENT_ID_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_ID")"
   TB_CLIENT_PASSWORD_ESCAPED="$(_yaml_sq_escape "$TB_CLIENT_PASSWORD")"
 
-  # ── GPU limits ──────────────────────────────────────────────────────────
-  local gpu_val
-  if [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
-    gpu_val="nvidia.com/gpu=1"
-    log "NVIDIA GPU detected — setting GPU_LIMITS and GPU_REQUESTS to nvidia.com/gpu=1"
+  # ── GPU request + runtime class (backend#2033 + client#835) ───────────────
+  # Request a GPU for training jobs, keyed to the vendor's scheduler resource
+  # (_gpu_request_value → nvidia.com/gpu / amd.com/gpu; empty = CPU). For NVIDIA
+  # that value is gated on the GPU being WIRED into the cluster (inside
+  # _gpu_request_value): requesting nvidia.com/gpu on a node that advertises 0
+  # strands every job Pending (the pre-#835 Linux bug), so gate on what PROVISIONS
+  # the GPU, not bare detection. NVIDIA training pods also run under the `nvidia`
+  # RuntimeClass (baked into the GPU node image) so the node's containerd invokes
+  # the NVIDIA runtime; AMD needs no RuntimeClass. A request this fixed single-node
+  # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
+  # a Pending GPU pod to CPU rather than strand it (client-runtime#92). Mirrors the
+  # Windows twin.
+  local gpu_val runtime_class=""
+  gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then runtime_class="nvidia"; fi
+  if [[ -n "$gpu_val" ]]; then
+    log "${GPU_VENDOR} GPU wired — GPU_LIMITS/GPU_REQUESTS=${gpu_val}${runtime_class:+, RUNTIME_CLASS_NAME=${runtime_class}}"
+  elif [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
+    warn "NVIDIA GPU detected but not wired into this cluster — running CPU-only (GPU_LIMITS/GPU_REQUESTS left empty)."
   else
-    gpu_val=""
-    log "No NVIDIA GPU — GPU_LIMITS and GPU_REQUESTS left empty"
+    log "No GPU wired for training jobs — GPU_LIMITS and GPU_REQUESTS left empty"
   fi
 
   # ── GPU device plugin (client#564) ────────────────────────────────────────
@@ -1829,11 +2100,22 @@ install_client_helm() {
   # apply the upstream manifest imperatively (bash: gpu-plugins.sh). The chart
   # now owns it, so it's reconciled on upgrade and removed on `helm uninstall`
   # instead of lingering. CPU-only installs emit nothing → the chart default
-  # (disabled) stands. The GPU *request* (gpu_val) remains NVIDIA-only, as before.
+  # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
+  # above — nvidia.com/gpu or amd.com/gpu (backend#2033).
+  #
+  # NVIDIA (client#835): the plugin must run under the `nvidia` RuntimeClass so it
+  # can init NVML on native Linux — the plugin pod otherwise runs under the default
+  # runtime, sees no GPU, and registers 0. So it is enabled only when the GPU is
+  # actually wired (a stock CPU node has no `nvidia` RuntimeClass, which would leave
+  # the pod unschedulable). AMD is unchanged: its plugin needs no k3d flag or
+  # RuntimeClass, so it stays gated on bare detection.
   local gpu_block=""
-  if [[ "${GPU_VENDOR:-}" == "nvidia" || "${GPU_VENDOR:-}" == "amd" ]]; then
-    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: %s\n' "$GPU_VENDOR")"
-    log "Helm-managed GPU device plugin enabled (vendor=${GPU_VENDOR})"
+  if _gpu_wired; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: nvidia\n    nvidia:\n      runtimeClassName: nvidia\n')"
+    log "Helm-managed GPU device plugin enabled (vendor=nvidia, runtimeClassName=nvidia)"
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: amd\n')"
+    log "Helm-managed GPU device plugin enabled (vendor=amd)"
   fi
 
   # backend#723 A2: pick the MySQL engine for this install (before the heredoc
@@ -1908,7 +2190,9 @@ $([ -n "${CLIENT_ENV:-}" ] && printf '  CLIENT_ENV: "%s"\n' "$(tb_client_env "$C
   RESOURCE_PROVENANCE: "${training_provenance}"
   GPU_LIMITS: "$gpu_val"
   GPU_REQUESTS: "$gpu_val"
-  RUNTIME_CLASS_NAME: ""
+  # nvidia when the GPU is wired (client#835): jobs-manager threads it into every
+  # spawned pod so the node's containerd invokes the NVIDIA runtime; "" on CPU.
+  RUNTIME_CLASS_NAME: "$runtime_class"
   # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster
   # that cannot autoscale, so jobs-manager applies the hard CPU-or-GPU rule —
   # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node

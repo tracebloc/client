@@ -385,6 +385,86 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+# ── GPU chart values: per-vendor request (backend#2033) gated on GPU actually
+# WIRED for NVIDIA (client#835) ───────────────────────────────────────────────
+# The request key must match the vendor (nvidia.com/gpu vs amd.com/gpu), and for
+# NVIDIA it is written only when the GPU is wired (--gpus=all) — requesting it on a
+# node that advertises 0 strands jobs Pending. RuntimeClass + device plugin ride the
+# same NVIDIA-wired gate; AMD keys on detection. Mirrors the Windows twin.
+
+# backend#2033: an AMD GPU host must actually REQUEST the device (amd.com/gpu), or
+# training pods run CPU-only while the installer reports the GPU "verified".
+@test "install_client_helm: AMD host -> values request amd.com/gpu + enable the amd device plugin" {
+  GPU_VENDOR=amd
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  # The GPU path runs _adopt_orphaned_gpu_device_plugin, which probes kubectl for a
+  # pre-#564 orphan; a fresh host answers NotFound (nothing to adopt) — a no-op.
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: "amd.com/gpu=1"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'vendor: amd' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
+@test "install_client_helm: NVIDIA wired -> values carry the GPU request, RuntimeClass, and device plugin" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")   # detected AND wired
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  kubectl() { echo "Error from server (NotFound): daemonsets.apps not found" >&2; return 1; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: "nvidia.com/gpu=1"' "$vf" || { cat "$vf"; return 1; }
+  grep -q 'GPU_REQUESTS: "nvidia.com/gpu=1"' "$vf" || return 1
+  grep -q 'RUNTIME_CLASS_NAME: "nvidia"' "$vf" || return 1
+  grep -q 'vendor: nvidia' "$vf" || return 1
+  grep -q 'runtimeClassName: nvidia' "$vf" || return 1
+}
+
+# client#835: NVIDIA detected but NOT wired (stock/CPU node) must write CPU values —
+# requesting nvidia.com/gpu there would strand every job Pending.
+@test "install_client_helm: NVIDIA detected but NOT wired -> CPU values (no GPU request / plugin)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()               # detected, but the cluster is CPU-only
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local vf="$HOST_DATA_DIR/values.yaml"
+  grep -q 'GPU_LIMITS: ""' "$vf" || { cat "$vf"; return 1; }
+  grep -q 'GPU_REQUESTS: ""' "$vf" || return 1
+  grep -q 'RUNTIME_CLASS_NAME: ""' "$vf" || return 1
+  ! grep -q 'devicePlugin:' "$vf" || { cat "$vf"; return 1; }   # no plugin against a CPU node
+}
+
+# Third arm: a non-GPU host emits EMPTY GPU_LIMITS/GPU_REQUESTS and no device plugin.
+@test "install_client_helm: non-GPU host -> empty GPU_LIMITS/GPU_REQUESTS, no device plugin" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'GPU_LIMITS: ""' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'GPU_REQUESTS: ""' "$HOST_DATA_DIR/values.yaml" || return 1
+  ! grep -q 'devicePlugin:' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+}
+
 # backend#743: when a dataset mount is provided, the generated values must point
 # the dataset PV at /tracebloc-data and pass the host uid/gid so jobs-manager
 # runs spawned ingestion pods as the owning user (NFS writes).
@@ -486,6 +566,65 @@ setup() {
   mock_calls | grep -q -- "--set clientId=0e9db54e-c9c0-4bf3-9ff2-1646da307019"
   run mock_calls
   [[ "$output" != *"helm upgrade --install"* ]] || return 1
+}
+
+# The adopt/reconcile path uses --reuse-values, so it must FORCE the GPU keys to
+# THIS run's decision or a stale request survives (backend#2033 + client#835): an
+# AMD edge trains on the wrong/empty resource, and an NVIDIA edge dropped to CPU
+# keeps requesting a GPU and strands jobs Pending.
+_adopt_gpu_setup() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }; _ensure_release_dirs() { :; }; _ensure_helm_runnable() { :; }
+  kubectl() { return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1 TRACEBLOC_CLIENT_ID=0e9db54e-c9c0-4bf3-9ff2-1646da307019
+}
+
+@test "install_client_helm: adopt + GPU wired -> forces GPU request/RuntimeClass/plugin on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=("--gpus=all")
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.nvidia.runtimeClassName=nvidia"* ]] || return 1
+}
+
+@test "install_client_helm: adopt + NVIDIA detected but NOT wired -> forces CPU keys on reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=nvidia; K3D_GPU_FLAGS=()          # detected, cluster is CPU-only
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"gpu.devicePlugin.enabled=false"* ]] || return 1
+  # The force-EMPTY clears must be PRESENT (deleting them would let --reuse-values
+  # keep a prior GPU request). Flag present AND not a GPU value ⇒ forced empty.
+  [[ "$output" == *"--set-string env.GPU_REQUESTS="* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS="* ]] || return 1
+  [[ "$output" == *"--set-string env.RUNTIME_CLASS_NAME="* ]] || return 1
+  [[ "$output" != *"env.RUNTIME_CLASS_NAME=nvidia"* ]] || return 1
+  [[ "$output" != *"env.GPU_REQUESTS=nvidia.com/gpu=1"* ]] || return 1
+}
+
+# backend#2033: an already-installed AMD edge that re-runs must have its request
+# healed onto the reconcile (--set-string amd.com/gpu=1), overriding stored values.
+@test "install_client_helm: adopt on an AMD host forces the amd.com/gpu request onto the reconcile" {
+  _adopt_gpu_setup
+  GPU_VENDOR=amd
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run mock_calls
+  [[ "$output" == *"helm upgrade munich"* ]] || return 1
+  [[ "$output" == *"--reset-then-reuse-values"* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_REQUESTS=amd.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"--set-string env.GPU_LIMITS=amd.com/gpu=1"* ]] || return 1
+  [[ "$output" == *"gpu.devicePlugin.vendor=amd"* ]] || return 1
 }
 
 @test "install_client_helm: adopt with NO client id (rebuilt host / R7) reconciles WITHOUT a heal — no prompt, no bail" {
@@ -754,6 +893,93 @@ setup() {
   [[ "$output" != *"helm upgrade"* ]] || return 1
 }
 
+# ── backend#2571: the id can live in the SECRET, not just in release values ──
+# Bugbot #859. clientId stopped being `required` and the chart now RECOMMENDS
+# dropping it from release values once the Secret carries it. Before these, a
+# client installed that way had no clientId in `helm get values`, the scan read
+# it as "not a client", and the one-client guard waved through an install that
+# re-points the machine. detect_installed_client's own scanning loop had no test
+# at all — every other test in this file stubs the function out — so nothing
+# would have caught it.
+#
+# `has kubectl` gates the Secret read, so each case declares whether kubectl
+# exists rather than inheriting the developer's PATH.
+_no_clientid_release_ctx() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.72 1.9.72'
+      return 0
+    fi
+    # Values READ FINE and simply carry no clientId — the #2571 shape. Not the
+    # unreadable-values case above, which is a different branch.
+    if [ "$1" = get ] && [ "$2" = values ]; then printf 'storageClass: {}\n'; return 0; fi
+    return 0
+  }
+}
+
+@test "detect_installed_client: no clientId in values -> reads it from the release Secret (backend#2571)" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() {
+    # jsonpath of .data.CLIENT_ID, base64 of "uuid-from-secret".
+    [ "$1" = -n ] && [ "$2" = munich ] || return 1
+    [ "$5" = "liverel-secrets" ] || return 1
+    printf 'dXVpZC1mcm9tLXNlY3JldA=='
+  }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "uuid-from-secret" ] || return 1
+  [ "$INSTALLED_CLIENT_NS" = "munich" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 0 ] || return 1
+}
+
+@test "detect_installed_client: no clientId in values AND no readable Secret -> UNKNOWN, never 'no client'" {
+  _no_clientid_release_ctx
+  # kubectl absent: the id cannot be read from either place. The release still
+  # EXISTS, so this is a client we cannot NAME — the guards must fail closed.
+  has() { [ "$1" = helm ]; }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 1 ] || return 1
+}
+
+@test "detect_installed_client: an EMPTY CLIENT_ID in the Secret is not an id -> UNKNOWN" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() { printf ''; }                 # key present but blank
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 1 ] || return 1
+}
+
+@test "install_client_helm: a client with its id only in the Secret still blocks a DIFFERENT client" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  # THE REGRESSION THIS PR WOULD OTHERWISE HAVE SHIPPED: the live client is
+  # 'otherclient', named only in its Secret. The operator installs 'newclient'.
+  # The guard must refuse, exactly as it does when the id is in values.
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.72 1.9.72'
+      return 0
+    fi
+    if [ "$1" = get ] && [ "$2" = values ]; then printf 'storageClass: {}\n'; return 0; fi
+    record "helm $*"; return 0
+  }
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() { printf 'b3RoZXJjbGllbnQ='; }        # base64 of "otherclient"
+  verify_credentials() { printf valid; }
+  run install_client_helm <<< $'newclient\nmypw'
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"already runs the tracebloc client 'otherclient'"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
 @test "install_client_helm: unreadable client values -> fails CLOSED (refuses, no upgrade)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
@@ -957,7 +1183,7 @@ setup() {
   ! grep -q 'RESOURCE_LIMITS: "cpu' "$HOST_DATA_DIR/values.yaml" || return 1
 }
 
-@test "install_client_helm: undeterminable machine falls back to cpu=2,memory=8Gi" {
+@test "install_client_helm: undeterminable machine falls back to the contract floor" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
@@ -968,10 +1194,11 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  # The literal is still the fallback ENVELOPE; only the limits half loses cpu
+  # The fallback is the contract floor since backend#2254 (was cpu=2,memory=8Gi,
+  # which exceeded a default Docker Desktop); only the limits half loses cpu
   # (backend#2418).
-  grep -q 'RESOURCE_LIMITS: "memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
-  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'RESOURCE_LIMITS: "memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml"
 }
 
 # ── _training_resources (backend#1236, option A) ─────────────────────────────
@@ -1106,7 +1333,7 @@ setup() {
     esac
   }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1
   [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
   [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
 }
@@ -1135,12 +1362,12 @@ setup() {
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
-  kubectl() { return 1; }   # nodes unreadable — we cannot do better than history
+  kubectl() { return 1; }   # nodes unreadable — we cannot do better than the floor
   run _training_resources
-  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$output" = "cpu=1,memory=2Gi" ] || return 1
 }
 
-@test "training size: a machine too small for even a 1c/1Gi run keeps the literal and flags it" {
+@test "training size: a machine too small for even a 1c/1Gi run keeps the fallback and flags it" {
   TB_NAMESPACE=tracebloc
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
@@ -1150,7 +1377,7 @@ setup() {
   # preflight warns instead of failing (macOS/Windows).
   kubectl() { printf '500m 512Mi\n'; }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1
   [ "$_TB_TRAINING_UNSCHEDULABLE" = "1" ] || return 1
   [ "$_TB_TRAINING_UNDERSIZED" = "0" ] || return 1
 }
@@ -1200,6 +1427,20 @@ setup() {
     printf '  scripts/gen-envelope-embed.sh\n' >&2
     return 1
   fi
+}
+
+# The unschedulable/unreadable fallback is the contract FLOOR, pinned to the
+# embedded floor constants so it cannot drift from envelope_contract.json
+# (backend#2254). This is the client-installer end of "the two copies must not
+# be able to disagree": _TRAINING_DEFAULT here, client-runtime's
+# DEFAULT_JOB_RESOURCES, and cli's resources.DefaultTraining all derive from the
+# same floor. A hand-edit that unfloors this reddens here AND diverges from the
+# floor the golden-vector replay above already pins to the contract.
+@test "training size: the fallback default is exactly the contract floor" {
+  local want_cpu=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 ))
+  local want_mem=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / 1024 / 1024 / 1024 ))
+  [ "$_TRAINING_DEFAULT" = "cpu=${want_cpu},memory=${want_mem}Gi" ] || return 1
+  [ "$_TRAINING_DEFAULT" = "cpu=1,memory=2Gi" ] || return 1
 }
 
 @test "envelope contract: ANCHOR_LARGEST picks the same node the contract says" {
@@ -1789,7 +2030,7 @@ PY
   kubectl() { return 1; }   # the probe also fails -> carry skipped hermetically
   has() { case "$1" in kubectl) return 1 ;; *) return 0 ;; esac; }
   run _training_resources
-  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$output" = "cpu=1,memory=2Gi" ] || return 1
 }
 
 # ── _download_services_progress (step-e count bar; must never hang/fail) ─────
@@ -2119,7 +2360,7 @@ _engine_fixture() {
       existing-datadir) touch "$HOST_DATA_DIR/mysql/ibdata1" ;;
       explicit)         TB_MYSQL_ENGINE=5.7 ;;
       invalid)          TB_MYSQL_ENGINE=9.0 ;;
-      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n' > "$values_file" ;;
+      sticky)           printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$values_file" ;;  # explicit empty digest = a real sticky 8.4 pin (backend#2638)
     esac
     # `run` would swallow the global anyway (subshell), so assert on both: the
     # captured output must carry no log line, and the global must stay unset in
@@ -2346,6 +2587,224 @@ _arch_gate_ctx() {
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
   grep -q 'tag: "8.4"' "$HOST_DATA_DIR/values.yaml"
+}
+
+# ── backend#2146: the arch gate now covers the adopt and dev-mode paths too ────
+# Both reach a Helm deploy WITHOUT the normal values-generation path's
+# _resolve_mysql_engine, so each learns the engine that will actually run from ITS
+# OWN source of truth — the live release (adopt, via `helm get values`) or the
+# supplied file (TRACEBLOC_VALUES_FILE) — then calls the SAME
+# _assert_engine_runs_on_this_arch. Before this, an arm64 host with no amd64
+# emulation reported success and then CrashLooped on the amd64-only 5.7 image,
+# because preflight had classified it as fresh-8.4 and its early gate waved it
+# through (adopt keeps the release's 5.7 via --reuse-values; dev-mode installs the
+# file's 5.7 as-is). The backstop only worked on the third path.
+
+@test "_values_pin_mysql_84: matches the quoted heredoc form AND the unquoted helm form" {
+  # Our generated values write tag: "8.4"; `helm get values` re-serializes it as
+  # tag: 8.4 (quotes stripped — the #200 lesson). Both must read as 8.4, or the
+  # adopt gate misreads a live 8.4 release as 5.7 and wrongly refuses it.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""'
+  [ "$status" -eq 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    digest: ""\n    tag: 8.4'
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: no mysqlClient block, or a 5.7 pin, reads as NOT 8.4" {
+  run _values_pin_mysql_84 <<< $'clientId: "x"\nclientPassword: '"'"'y'"'"
+  [ "$status" -ne 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "5.7"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: a tag 8.4 on a SIBLING image is not read as the mysqlClient pin (block-scoped)" {
+  # The reader is scoped to the indent-delimited mysqlClient block, so a
+  # coincidental 8.4 tag on another image cannot flip the engine verdict.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "5.7"\n    digest: ""\n  someOther:\n    repo: x\n    tag: "8.4"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: a look-alike tag (8.40 / 8.4.1) is NOT 8.4 (exact value, not prefix)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.40"'
+  [ "$status" -ne 0 ] || return 1
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: 8.4.1'
+  [ "$status" -ne 0 ] || return 1
+}
+
+# THE REGRESSION Asad caught on client#833: the reader must be checked against the
+# REAL chart values, not compact snippets. The chart's mysqlClient block carries
+# the 8.4 opt-in as a COMMENT (`#   tag: "8.4"`) many lines below the real `tag:`,
+# so a fixed line window is wrong in both directions (see _values_pin_mysql_84).
+@test "_values_pin_mysql_84: the real client/values.yaml default (tag prod + the 8.4 DECOY comment) reads as NOT 8.4" {
+  # Fail-OPEN guard: the decoy comment must never be read as the pin — otherwise a
+  # 5.7 default would skip the arch gate and CrashLoop on arm64.
+  local vf="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$vf" ] || skip "chart values.yaml not present in this checkout"
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: the real client/values.yaml with the documented 8.4 opt-in applied reads as 8.4" {
+  # False-REFUSAL guard: an operator who follows the chart's own opt-in — set
+  # tag: "8.4" AND clear the digest (`tag: "8.4"` + `digest: ""`, exactly as the
+  # block documents), keeping every comment — must be read as 8.4. The real tag
+  # sits well outside any 3-line window, which is what wrongly refused it before.
+  local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
+  local vf="$BATS_TEST_TMPDIR/optin.yaml"
+  sed -E 's/tag: "prod"/tag: "8.4"/; s/^([[:space:]]*)digest: "sha256:[0-9a-f]+"/\1digest: ""/' "$src" > "$vf"
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -eq 0 ] || return 1
+}
+
+# DIGEST WINS OVER TAG (Bugbot, client#833). tracebloc.image renders
+# repository@<digest> when a digest is set and ignores the tag, and the default pin
+# is the amd64-only 5.7 image — so tag: "8.4" with a NON-empty digest actually runs
+# that digest, not 8.4. Reading tag alone would skip the gate and CrashLoop on arm64.
+@test "_values_pin_mysql_84: tag 8.4 with a NON-empty digest is NOT 8.4 (digest wins -> fail closed)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: "sha256:deadbeef"'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_values_pin_mysql_84: the real client/values.yaml with ONLY the tag flipped to 8.4 (5.7 digest kept) is NOT 8.4" {
+  # The partial misconfiguration Bugbot flagged: an operator sets tag: "8.4" but
+  # leaves the chart's 5.7 digest in place. The digest wins, so 5.7 runs — the
+  # reader must fail closed (5.7 gate), not skip the gate on the misread tag.
+  local src="${BATS_TEST_DIRNAME}/../../client/values.yaml"
+  [ -f "$src" ] || skip "chart values.yaml not present in this checkout"
+  local vf="$BATS_TEST_TMPDIR/partial.yaml"
+  sed 's/tag: "prod"/tag: "8.4"/' "$src" > "$vf"   # tag flipped, digest untouched
+  run _values_pin_mysql_84 < "$vf"
+  [ "$status" -ne 0 ] || return 1
+}
+
+# AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838). The
+# reader is fed partial views — `helm get values` without `--all`, a dev-mode overlay
+# — where the chart-default 5.7 digest is what actually renders but its line is nowhere
+# on STDIN. Reading a missing digest as `digest: ""` reported a real 8.4 pin, skipped
+# the arch gate, and CrashLooped the amd64-only image on arm64. The digest key must be
+# present-and-empty to count; a digest we never saw fails closed to the 5.7 gate.
+@test "_values_pin_mysql_84: tag 8.4 with NO digest line (partial overlay / helm get values) is NOT 8.4 (fail closed)" {
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    tag: "8.4"'
+  [ "$status" -ne 0 ] || return 1
+  # The unquoted `helm get values` re-serialization of the same partial view.
+  run _values_pin_mysql_84 <<< $'images:\n  mysqlClient:\n    repository: tracebloc/mysql-client\n    tag: 8.4'
+  [ "$status" -ne 0 ] || return 1
+}
+
+@test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {
+  # `helm get values` has no request timeout, so a wedged API must degrade to the
+  # 5.7 gate — never hang, and never be assumed 8.4 (backend#2146 fail-closed).
+  kubectl() { return 1; }                                  # namespace probe fails
+  # An explicit empty digest — so this genuinely "would say 8.4 if reached", proving
+  # it is the PROBE that fail-closes, not the reader (an absent digest would too).
+  helm() { printf 'images:\n  mysqlClient:\n    tag: 8.4\n    digest: ""\n'; }
+  run _release_pins_mysql_84 rel ns
+  [ "$status" -ne 0 ] || return 1                          # not 8.4 -> the 5.7 arch gate runs
+}
+
+@test "install_client_helm: adopt on arm64 with a 5.7 release + no emulation -> refuses BEFORE reconcile (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then return 0; fi        # 5.7 default: no mysqlClient block
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo VERIFY_CALLED; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"existing tracebloc release is installed"* ]] || return 1  # the existing-release reason
+  [[ "$output" != *"VERIFY_CALLED"* ]] || return 1                            # aborted in adopt, not the fallback
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1                            # never deployed
+}
+
+@test "install_client_helm: adopt on arm64 with an 8.4 release + no emulation -> reconciles (backend#2146)" {
+  # The live release runs the native 8.4 engine — `helm get values` emits the
+  # quote-stripped tag: 8.4 — so this host needs no emulation and the gate must
+  # let the reconcile through (it also proves the unquoted read end to end).
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then printf 'images:\n  mysqlClient:\n    digest: ""\n    tag: 8.4\n'; return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { echo VERIFY_CALLED; printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"tracebloc installed"* ]] || return 1
+  mock_calls | grep -q "helm upgrade munich"
+}
+
+@test "install_client_helm: adopt on arm64 with a 5.7 release BUT emulation present -> reconciles (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 0; }                 # binfmt present -> 5.7 is runnable
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  kubectl() { record "kubectl $*"; return 0; }
+  helm() {
+    if [[ "$1" == list ]]; then echo "munich munich 1 now deployed client-1.8.2 1.8.2"; return 0; fi
+    if [[ "$1 $2" == "get values" ]]; then return 0; fi
+    if [[ "$1 $2" == "upgrade --help" ]]; then echo "  --reset-then-reuse-values"; return 0; fi
+    record "helm $*"; return 0
+  }
+  verify_credentials() { printf invalid; }
+  export TRACEBLOC_CLIENT_ADOPTED=1
+  run install_client_helm </dev/null
+  [ "$status" -eq 0 ] || return 1
+  mock_calls | grep -q "helm upgrade munich"
+}
+
+@test "install_client_helm: dev-mode values file pinning 5.7 on arm64 + no emulation -> refuses BEFORE helm (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  vf="$BATS_TEST_TMPDIR/v.yaml"; printf 'clientId: "x"\n' > "$vf"   # no mysqlClient block -> 5.7
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  TRACEBLOC_VALUES_FILE="$vf"; TB_NAMESPACE=devns
+  run install_client_helm
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"MySQL 5.7 engine (values-file)"* ]] || return 1
+  run mock_calls
+  [[ "$output" != *"helm upgrade"* ]] || return 1
+}
+
+@test "install_client_helm: dev-mode values file pinning 8.4 on arm64 + no emulation -> installs (backend#2146)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  vf="$BATS_TEST_TMPDIR/v.yaml"
+  printf 'clientId: "x"\nimages:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$vf"
+  ARCH=arm64; OS=Linux; unset TRACEBLOC_ALLOW_ARM64
+  amd64_emulation_available() { return 1; }
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  TRACEBLOC_VALUES_FILE="$vf"; TB_NAMESPACE=devns
+  run install_client_helm
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *"helm upgrade --install devns"* ]] || return 1
 }
 
 # ── _recover_pending_helm_release (#554) ─────────────────────────────────────
@@ -2685,7 +3144,10 @@ _arch_gate_ctx() {
   # MySQL 5.7 will not open an 8.4 datadir.
   values_file="$BATS_TEST_TMPDIR/values.yaml"
   {
-    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n'   # match LEADS
+    # tag "8.4" + an explicit empty digest — exactly what the 8.4 heredoc writes and
+    # what a real sticky file carries. The digest must APPEAR and be empty to count
+    # as an 8.4 pin (backend#2638: an absent digest may be a non-empty chart default).
+    printf 'mysqlClient:\n  image:\n    repo: mysql\n    tag: "8.4"\n    digest: ""\n'   # match LEADS
     # More mysqlClient: blocks so `grep -A 3` keeps producing long after the
     # second grep has already matched and closed the pipe.
     seq 1 60000 | sed 's/^/mysqlClient:\
@@ -2873,6 +3335,69 @@ _arch_gate_ctx() {
   [ "$(_training_limits 'cpu=7,cpuset=0-3,memory=29Gi')" = "cpuset=0-3,memory=29Gi" ] || return 1
 }
 
+# The VM-ceiling derivation drops cpu from the LIMITS half (above), so
+# RESOURCE_LIMITS goes out memory-only -- e.g. `memory=12Gi`. client#836: that
+# is exactly the value a Linux host's VM-ceiling sizing (backend#2221 / #804)
+# produced, and it must satisfy the SHIPPED chart's own values.schema.json, or
+# `helm install` rejects the values file the installer just wrote:
+#   at '/env/RESOURCE_LIMITS': 'memory=12Gi' does not match pattern ...
+# The schema was loosened to admit any subset in backend#2223 (#812) precisely
+# so backend#2418's (#820) memory-only limit is expressible; this test pins the
+# two together. The pattern is READ FROM THE SCHEMA, never restated here, so a
+# re-tightening back to the pre-#812 `^(cpu=\S+,memory=\S+)?$` -- which forbids
+# the memory-only value -- reddens here instead of only at a customer's helm
+# step. Drives the real derivation (`_resolve_training_size` then
+# `_training_limits`, byte-for-byte what values generation runs when it renders
+# the RESOURCE_LIMITS line) rather than restating the derived string, so this
+# pins the DERIVATION -> schema link. The pattern is matched with python re here
+# because helm is stubbed in this suite; scripts/tests/chart-env-vocabulary.sh
+# renders the same `memory=12Gi` through the REAL chart schema (`helm template`)
+# as its authoritative half.
+@test "training size: VM-ceiling RESOURCE_LIMITS validates against the chart schema (client#836)" {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "python3 not available"
+  fi
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  helm() { return 1; }            # no carried release -> machine sizing runs
+  has() { return 0; }
+  # 10 cores / 15Gi allocatable, minus the 1c/3Gi platform overhead, is a viable
+  # ceiling of cpu=9,memory=12Gi -- the shape that reproduced client#836.
+  kubectl() { printf '10 15Gi\n'; }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=9,memory=12Gi" ] || return 1
+  # RESOURCE_LIMITS is derived exactly as values generation derives it.
+  local limits; limits="$(_training_limits "$_TB_TRAINING_SIZE")"
+  [ "$limits" = "memory=12Gi" ] || return 1   # the value from the issue
+  local root="${BATS_TEST_DIRNAME}/../.."
+  run python3 - "$root/client/values.schema.json" "$limits" <<'PY'
+import json, re, sys
+schema_path, value = sys.argv[1], sys.argv[2]
+with open(schema_path) as handle:
+    schema = json.load(handle)
+def pattern_for(node, key):
+    if isinstance(node, dict):
+        target = node.get(key)
+        if isinstance(target, dict) and "pattern" in target:
+            return target["pattern"]
+        for child in node.values():
+            found = pattern_for(child, key)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for child in node:
+            found = pattern_for(child, key)
+            if found:
+                return found
+    return None
+pattern = pattern_for(schema, "RESOURCE_LIMITS")
+if not pattern:
+    sys.exit("RESOURCE_LIMITS pattern not found in schema")
+sys.exit(0 if re.match(pattern, value) else 1)
+PY
+  [ "$status" -eq 0 ] || return 1
+}
+
 
 # ── the carry path after L0.2 (backend#2418, Bugbot High on client#820) ──────
 #
@@ -2977,39 +3502,81 @@ _arch_gate_ctx() {
   [[ "$output" == cpu=* ]] || return 1
 }
 
-@test "round trip: a default install re-reads as the literal, so it re-sizes" {
-  # The second half of the same bug. A default install writes
-  # RESOURCE_LIMITS: "memory=8Gi", and the historic-default gate compares
-  # against `cpu=2,memory=8Gi`. Reading the limits half would make the default
-  # look like a deliberate choice and machine sizing would never run again --
-  # keeping an unschedulable 8Gi on exactly the machines this sizing exists to
-  # fix.
+@test "round trip: a default install re-reads with its cpu request intact" {
+  # The second half of the backend#2418 reader bug. A default install writes
+  # RESOURCE_REQUESTS: "cpu=1,memory=2Gi" (the contract floor since backend#2254)
+  # and a memory-only RESOURCE_LIMITS: "memory=2Gi". The carry reader must take
+  # REQUESTS, not the memory-only LIMITS — reading LIMITS would yield
+  # `memory=2Gi`, an envelope with no cpu request at all, and write that back on
+  # re-install. The gate's recognition of the historic 8Gi literal is covered by
+  # the dedicated historic-literal tests; here the fallback is the schedulable
+  # floor, so it is carried forward as the installer's own choice, not re-sized.
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
   _ensure_tracebloc_dirs() { :; }
   _ensure_release_dirs() { :; }
   _ensure_helm_runnable() { :; }
   helm() { record "helm $*"; return 0; }
-  kubectl() { return 1; }   # cluster unreadable -> the static literal
+  kubectl() { return 1; }   # cluster unreadable -> the fallback floor
   verify_credentials() { printf valid; }
   unset TRACEBLOC_TRAINING_RESOURCES
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || return 1
-  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=8Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
 
   TB_NAMESPACE=tracebloc
-  kubectl() { return 0; }
+  # Re-read with a LARGE node visible, not an empty/failing cluster. This is the
+  # gap Bugbot flagged: if the re-read cluster is unreadable, a (wrongly)
+  # re-derived value ALSO falls through to the floor, so carry and re-derive are
+  # indistinguishable. A viable 8c/32Gi node makes them differ — a re-derive
+  # would yield cpu=7,memory=29Gi — so asserting the size stays the floor proves
+  # it was CARRIED, not re-sized.
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
   helm() { cat "$HOST_DATA_DIR/values.yaml"; }
+  has() { return 0; }
 
-  # The reader returns the FULL literal — cpu included. That is the whole point:
-  # reading the memory-only limits half would yield `memory=8Gi`, which the gate
-  # at :546 compares against `cpu=2,memory=8Gi`, fails to match, and then treats
-  # as a deliberate human choice.
+  # The reader returns the FULL envelope — cpu included. Reading the memory-only
+  # limits half would yield `memory=2Gi`, dropping the cpu request (backend#2418).
   run _existing_training_resources
   [ "$status" -eq 0 ] || return 1
-  [ "$output" = "cpu=2,memory=8Gi" ] || return 1
+  [ "$output" = "cpu=1,memory=2Gi" ] || return 1
 
-  # And the gate therefore still refuses it: the size is machine-derived, so the
-  # provenance is `installer` rather than a carried `unknown`/`user`.
+  # The floor carries forward with the `installer` provenance it was written
+  # with: the gate refuses only the historic 8Gi literal, so a schedulable floor
+  # is preserved rather than re-derived on a machine that could host more.
   _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT the node's cpu=7,memory=29Gi
   [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
+}
+
+@test "training size: a user-pinned floor survives re-install (gate matches only the historic literal)" {
+  # Precedence rule 2: a deliberate `tracebloc resources set` must survive a
+  # re-install, never be clobbered back to a default. Since backend#2254 the
+  # installer's OWN no-choice default IS the contract floor, so the carry gate
+  # must compare against the FROZEN historic literal (_TRAINING_DEFAULT_HISTORIC),
+  # never against _TRAINING_DEFAULT. This is the mutation guard for that split
+  # (Bugbot on client#847): point the gate at _TRAINING_DEFAULT and a human's
+  # floor is re-derived to the node size and its `user` marker downgraded to
+  # `installer` — exactly what must not happen.
+  TB_NAMESPACE=tracebloc
+  unset TRACEBLOC_TRAINING_RESOURCES
+  has() { return 0; }
+  # A human pinned the floor; the machine is large, so a re-derive would give
+  # cpu=7,memory=29Gi — that gap is what makes carry vs re-derive observable.
+  helm() { printf 'env:\n  RESOURCE_REQUESTS: "cpu=1,memory=2Gi"\n  RESOURCE_PROVENANCE: "user"\n'; }
+  kubectl() {
+    case "$*" in
+      *"get namespace"*--request-timeout=*) return 0 ;;
+      *"get nodes"*--request-timeout=*) printf '8 32Gi\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  _resolve_training_size
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT re-derived to cpu=7,memory=29Gi
+  [ "$_TB_TRAINING_PROVENANCE" = "user" ] || return 1          # marker preserved, not downgraded to installer
 }

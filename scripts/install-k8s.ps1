@@ -2021,6 +2021,59 @@ echo "NCT installed successfully."
   }
 }
 
+# Quote ONE argument for a native Windows command line so CommandLineToArgvW (what the CRT and
+# every well-behaved Windows program use to re-split $psi.Arguments) recovers it byte-for-byte as a
+# SINGLE token. $psi.Arguments is one flat string, so each arg has to survive that re-parse.
+#
+# The naive "wrap anything with a space in quotes" is WRONG the moment an arg contains BOTH a space
+# and a `"`: `'"' + $_ + '"'` leaves the inner quote unescaped, CommandLineToArgvW toggles in and
+# out of quoting on it, and the arg comes back as ONE token with the inner quotes SILENTLY CONSUMED
+# -- e.g. `--format "{{.Names}} {{.Label "k3d.role"}}"` reaches the program as
+# `--format {{.Names}} {{.Label k3d.role}}` and its Go template no longer parses (backend#2455;
+# #817 dodged this by never passing a quoted arg, this fixes the general helper). It also mangles a
+# quote WITHOUT a space -- `a"b` has no whitespace, so the old code passed it through raw and the
+# bare `"` was read as a quoting toggle.
+#
+# So this follows the actual CommandLineToArgvW / MSVCRT rules exactly:
+#   * a non-empty arg with no whitespace and no `"` needs no quoting -- pass it through untouched
+#   * otherwise wrap in `"`, and inside the quotes:
+#       - `"`               -> `\"`
+#       - a run of N `\` immediately before a `"`  -> 2N+1 `\` then `"`  (backslashes escape each
+#         other, and the last one escapes the quote)
+#       - a run of N `\` at the very END of the arg -> 2N `\`  (doubled so the CLOSING quote we add
+#         is not itself escaped; a raw trailing `\` before the close would eat it)
+#       - `\` anywhere else is literal and left as-is
+#   * the empty string becomes `""` so it survives as a present-but-empty argument
+# Callers therefore pass RAW args and never pre-quote (the old code left `^".*"$` alone; that
+# self-quoting contract is gone -- see Set-NodeGpuCapacity, which now passes $patchFile unquoted).
+function ConvertTo-Win32Arg {
+  param([Parameter(Mandatory)][AllowEmptyString()][string]$Arg)
+  if ($Arg -ne "" -and $Arg -notmatch '[\s"]') { return $Arg }
+  $sb = [System.Text.StringBuilder]::new()
+  [void]$sb.Append('"')
+  $i = 0
+  while ($i -lt $Arg.Length) {
+    $nBackslash = 0
+    while ($i -lt $Arg.Length -and $Arg[$i] -eq '\') { $i++; $nBackslash++ }
+    if ($i -eq $Arg.Length) {
+      [void]$sb.Append('\' * ($nBackslash * 2))   # trailing run: double so the close quote survives
+      break
+    } elseif ($Arg[$i] -eq '"') {
+      [void]$sb.Append('\' * ($nBackslash * 2 + 1)); [void]$sb.Append('"')
+      $i++
+    } else {
+      # [string] cast, not the bare [char] from string indexing: under Windows
+      # PowerShell 5.1 (the installer's relaunch host) the StringBuilder.Append
+      # binder can bind a [char] to a numeric overload and write the code point
+      # instead of the character; Append([string]) is unambiguous (Bugbot #845).
+      [void]$sb.Append('\' * $nBackslash); [void]$sb.Append([string]$Arg[$i])
+      $i++
+    }
+  }
+  [void]$sb.Append('"')
+  return $sb.ToString()
+}
+
 # #616: the AUTHORITATIVE GPU gate. Install-NvidiaContainerToolkit configures the user's own
 # WSL distro, but k3d talks to Docker Desktop's OWN daemon (the `docker-desktop` distro), so
 # toolkit-in-Ubuntu success is not a reliable signal that a GPU can reach a container. The only
@@ -2036,8 +2089,9 @@ echo "NCT installed successfully."
 # Run ANY external command as a real child PROCESS with a HARD timeout (installer external-call
 # timeout rule). NOT a Start-Job: Stop-Job stops the PS job but can orphan the native child it
 # spawned (Bugbot), so a timed-out call would keep running; a direct Process handle lets us Kill()
-# the child on timeout. Args are joined with spaces (callers pass space-free tokens); any stdin
-# (e.g. a login token) is written in-memory, never to disk/argv/logs. 5.1-safe. Returns
+# the child on timeout. Args are quoted+escaped per ConvertTo-Win32Arg so a value carrying spaces
+# and/or quotes survives the join into $psi.Arguments intact; any stdin (e.g. a login token) is
+# written in-memory, never to disk/argv/logs. 5.1-safe. Returns
 # @{ Code = <int>; Output = <string> } with Code=124 on timeout.
 function Invoke-BoundedProcess {
   # -StdoutOnly: return ONLY stdout in .Output on the success path, instead of the
@@ -2063,16 +2117,11 @@ function Invoke-BoundedProcess {
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FileName
-  # Quote any argument containing whitespace (Bugbot): the args are joined into a single command
-  # line, so an unquoted value with a space -- a registry username, a temp path under a profile
-  # like "C:\Users\First Last\..." -- would be split into two arguments and silently corrupt the
-  # command. Already-quoted values are left alone so call sites that quote themselves don't get
-  # double-quoted. Empty strings are quoted too, so they survive as a present-but-empty argument.
-  $psi.Arguments = (($Arguments | ForEach-Object {
-    if ($_ -eq "") { '""' }
-    elseif ($_ -match '\s' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' }
-    else { $_ }
-  }) -join ' ')
+  # Quote+escape each arg (Bugbot): the args are joined into a single command line, so a value with
+  # a space -- a registry username, a temp path under a profile like "C:\Users\First Last\..." --
+  # would be split into two, and a value with a `"` would corrupt the parse. ConvertTo-Win32Arg
+  # applies the exact CommandLineToArgvW rules so both survive as one token; callers pass raw args.
+  $psi.Arguments = (($Arguments | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardOutput = $true
@@ -2360,7 +2409,12 @@ function Build-GpuNodeImage {
     )
     $dExe = (Get-Command docker -ErrorAction SilentlyContinue).Source
     if (-not $dExe) { $dExe = "docker" }
-    $argStr = ($buildArgs | ForEach-Object { if ($_ -match '[\s]') { "`"$_`"" } else { $_ } }) -join " "
+    # Escape+escape-quote each arg per the exact CommandLineToArgvW rules (ConvertTo-Win32Arg,
+    # backend#2545), NOT the naive wrap-if-it-has-a-space: -ArgumentList <one string> is handed to
+    # the child's command line verbatim, just like $psi.Arguments, so an arg carrying BOTH a space
+    # and a `"` (e.g. a `--label`/`--build-arg` value) had its inner quotes silently consumed by
+    # the re-split. The helper leaves a safe arg untouched and quotes the rest correctly.
+    $argStr = ($buildArgs | ForEach-Object { ConvertTo-Win32Arg $_ }) -join " "
 
     $proc = $null
     try {
@@ -3953,9 +4007,13 @@ function New-K3dCluster {
 
     $k3dExe = (Get-Command k3d -ErrorAction SilentlyContinue).Source
     if (-not $k3dExe) { $k3dExe = "k3d" }
-    $k3dArgString = ($k3dArgs | ForEach-Object {
-      if ($_ -match '[\s@]') { "`"$_`"" } else { $_ }
-    }) -join " "
+    # Escape+escape-quote each arg per the exact CommandLineToArgvW rules (ConvertTo-Win32Arg,
+    # backend#2545), NOT the naive wrap-if-it-has-a-space-or-`@`: -ArgumentList <one string> reaches
+    # the child's command line verbatim like $psi.Arguments, so an arg with BOTH a space and a `"`
+    # had its inner quotes silently consumed. `@` is not special to CommandLineToArgvW -- a bare
+    # `-v host:node@all` needs no quoting and re-splits to the identical single token either way, so
+    # dropping its quote branch is a no-op; the fix is escaping the quote the old branch ignored.
+    $k3dArgString = ($k3dArgs | ForEach-Object { ConvertTo-Win32Arg $_ }) -join " "
     $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
     $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
@@ -4169,7 +4227,7 @@ function Set-NodeGpuCapacity {
     for ($i = 1; $i -le 6; $i++) {
       $r = Invoke-BoundedProcess -FileName "kubectl" -Arguments @(
         "patch", "node", $nodeName, "--subresource=status", "--type=json",
-        "--patch-file", "`"$patchFile`"", "--request-timeout=15s") -TimeoutSec 30
+        "--patch-file", $patchFile, "--request-timeout=15s") -TimeoutSec 30
       Log "kubectl patch node (gpu capacity, attempt ${i}): exit=$($r.Code) $($r.Output)"
       if ($r.Code -eq 0) { return $true }
       Start-Sleep -Seconds 5
@@ -4359,14 +4417,17 @@ $TRACEBLOC_CHART_NAME = "client"
 # ── Training-size default (backend#1236, option A; mirrors install-client-helm.sh) ──
 # One knob, requests == limits (Guaranteed QoS). The old static "cpu=2,memory=8Gi"
 # was wrong at both ends: dead on arrival on nodes under 8 GiB (the WSL2 field
-# case — nothing could ever schedule) and ~12% of a 64 GiB box. Precedence:
+# case, and a default Docker Desktop VM — nothing could ever schedule,
+# backend#2254) and ~12% of a 64 GiB box. Precedence:
 #   1. TRACEBLOC_TRAINING_RESOURCES (explicit install-time override)
 #   2. the installed release's current value (a `tracebloc resources set` choice
 #      must survive re-install, never be clobbered back to a default)
 #   3. sized to this machine: LARGEST node allocatable - ~1 CPU / 3 GiB platform
 #      overhead (a pod schedules onto ONE node; k3d's server+agent are the same
 #      machine, so summing would double-count)
-#   4. the historic static default (tiny or undeterminable machines)
+#   4. the contract FLOOR (tiny or undeterminable machines) — the fallback,
+#      cpu=1,memory=2Gi, from the embedded floor constants. Was the 8Gi literal,
+#      which exceeded a default Docker Desktop and sat Pending forever (#2254).
 # Get-ImageMirrorYaml — top-level chart values that re-home every image the chart
 # pulls onto a private registry mirror (#585 / restricted-network + air-gapped
 # installs). Bash parity: lib/install-client-helm.sh::_image_mirror_yaml.
@@ -4508,6 +4569,12 @@ function Get-CarriedTrainingValues {
     # The historic static default was the ABSENCE of a choice -- carrying it
     # would keep the unschedulable 8Gi on exactly the machines this sizing
     # exists to fix (Bugbot). Only a differing value survives re-install.
+    # This is the FROZEN historic literal, NOT the current fallback: since
+    # backend#2254 the fallback is the contract floor (cpu=1,memory=2Gi), which
+    # a human may deliberately pin, so precedence rule 2 says it must survive and
+    # the gate must not re-derive it. A field install predating #2254 still
+    # carries the 8Gi literal; that is the non-choice this recognises. Bash twin:
+    # _TRAINING_DEFAULT_HISTORIC in lib/install-client-helm.sh.
     if (-not $prev -or $prev -eq "cpu=2,memory=8Gi") { return $null }
     # A marker already on the release is authoritative -- preserve it, or a
     # re-install would quietly downgrade a `user` choice to `unknown`. Anything
@@ -4516,7 +4583,18 @@ function Get-CarriedTrainingValues {
     $prevProv = $vals.env.RESOURCE_PROVENANCE
     $prov = if ($prevProv -eq "installer" -or $prevProv -eq "user") { $prevProv } else { "unknown" }
     return @{ Size = $prev; Provenance = $prov }
-  } catch { return $null }
+  } catch {
+    # UNEXPECTED failure only. EXPECTED absence -- no namespace, no release, no
+    # carried value -- returns $null through the explicit branches above and
+    # never lands here; whatever does land here is a defect surfacing (a
+    # ConvertFrom-Json choke, a shape change in helm's output). Degrading to
+    # $null is still right -- a wedged read must not block values generation,
+    # and a failed read means "carry nothing" so the machine gets re-sized --
+    # but degrading SILENTLY is how client#766 and client#768 stayed invisible
+    # (client#771). Log so the install log names the probe and the exception.
+    Log "WARN: Get-CarriedTrainingValues: unexpected failure reading the installed release's training values; carrying nothing: $($_.Exception.Message)"
+    return $null
+  }
 }
 
 # Who chose the training size Get-TrainingResources reports: installer | user |
@@ -4616,8 +4694,10 @@ function Get-TrainingResources {
       $runCpuM = [long][math]::Max([long]0, $bestCpuM - $script:TbEnvelopeOverheadCpuMilli)
       $runMemB = [long][math]::Max([long]0, $bestMemB - $script:TbEnvelopeOverheadMemBytes)
       # Below the contract floor the machine is NOT VIABLE — fall through to the
-      # literal, which is itself a known bug on such machines (backend#2220,
-      # fixed separately so it stays revertable).
+      # fallback literal. That literal used to be the 8Gi default, a known bug on
+      # such machines (backend#2220); since backend#2254 it is the contract floor,
+      # which fits. The fallback structure is kept revertable — only its value
+      # changed.
       if ($runCpuM -ge $script:TbEnvelopeFloorCpuMilli -and $runMemB -ge $script:TbEnvelopeFloorMemBytes) {
         return "cpu=$([math]::Floor($runCpuM / 1000)),memory=$([math]::Floor($runMemB / 1GB))Gi"
       }
@@ -4641,12 +4721,29 @@ function Get-TrainingResources {
           return "cpu=$cores,memory=${gib}Gi"
         }
         # Not even a requestable shape (cpu=0 is not a training request), so
-        # there is no honest number to write. Keep the literal; the caller warns.
+        # there is no honest number to write. Keep the fallback; the caller warns.
         $script:TbTrainingUnschedulable = $true
       }
     }
-  } catch {}
-  return "cpu=2,memory=8Gi"
+  } catch {
+    # UNEXPECTED failure only. EXPECTED absence -- an unreachable API, no
+    # nodes, unparseable quantities -- degrades through the non-throwing
+    # branches above ($LASTEXITCODE gates, `continue` skips) and never lands
+    # here. What does land here is a defect surfacing: this exact catch
+    # swallowed the Int32 [math]::Max overload throw, so every machine with
+    # more than ~2 GiB of headroom silently got the literal below and machine
+    # sizing simply wasn't working, with no diagnostic anywhere (client#766).
+    # The bounded fall-through to the static default is deliberate and stays --
+    # a wedged probe must not hang values generation -- but it must leave a
+    # trace (client#771). Log so support can tell degraded from sized.
+    Log "WARN: Get-TrainingResources: unexpected failure while sizing to the cluster; falling back to the static default: $($_.Exception.Message)"
+  }
+  # The fallback envelope: the contract FLOOR, from the embedded floor constants
+  # (mirrors _TRAINING_DEFAULT in lib/install-client-helm.sh). Was
+  # cpu=2,memory=8Gi, which exceeded a default Docker Desktop and sat Pending
+  # forever, so backend#2254 floored it. Rendered the same way as the sized
+  # branch above so the two cannot drift.
+  return "cpu=$([math]::Floor($script:TbEnvelopeFloorCpuMilli / 1000)),memory=$([math]::Floor($script:TbEnvelopeFloorMemBytes / 1GB))Gi"
 }
 
 # ── the VM beneath the node containers (backend#2221) ────────────────────────
@@ -5052,6 +5149,31 @@ function Wait-MetricsApiService {
   return $false
 }
 
+# Get-ClientIdFromSecret — CLIENT_ID out of a release's chart-managed Secret, or
+# "". THE SECOND PLACE THE ID CAN LIVE: backend#2571 lets clientId resolve from
+# the Secret instead of release values, and the chart now recommends dropping it
+# from values once it is there — so "no clientId in values" stopped meaning "not
+# a client". Returns "" on any failure; the caller treats a client it cannot name
+# as unidentifiable (fail closed), never as absent. Bash peer:
+# _client_id_from_secret in scripts/lib/install-client-helm.sh.
+function Get-ClientIdFromSecret {
+  param([string]$Release, [string]$Namespace)
+  if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return "" }
+  # BOUNDED, because this call is now on the COMMON path (Bugbot, #859). Once
+  # clientId is dropped from release values — which this chart recommends — every
+  # scanned release reaches here, so an unbounded read against a wedged API would
+  # hang a headless install with no further output. kubectl's default is no
+  # timeout at all; 5s matches this file's other existence probes. A timeout
+  # exits non-zero and falls into the same `return ""` as any unreadable Secret,
+  # which the caller turns into an unidentifiable client (fail closed), never an
+  # absent one. Bash peer: _client_id_from_secret.
+  $b64 = (kubectl -n $Namespace get secret "$Release-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { return "" }
+  $b64 = $b64.Trim()
+  if (-not $b64) { return "" }
+  try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)).Trim() } catch { return "" }
+}
+
 # Enumerate what client (if any) is already installed on this cluster — the
 # shared source for the provisioning pre-flight AND the Helm-step guard, so the
 # two can never drift. Values are read with `-o json`, not YAML: helm
@@ -5096,9 +5218,24 @@ function Get-InstalledClientInfo {
             if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
             continue
           }
-          if ($null -eq $vals -or $null -eq $vals.clientId) { continue }
-          $id = "$($vals.clientId)".Trim()
+          # NO clientId IN VALUES IS NO LONGER "not a client" (backend#2571,
+          # Bugbot #859). clientId stopped being `required` and the chart now
+          # tells operators to drop it from release values once the Secret
+          # carries it, so a live client legitimately has none here. Fall back
+          # to the Secret; a client-chart release naming an id in NEITHER place
+          # is a client we cannot NAME -> unidentifiable, so the guard fails
+          # closed rather than waving through an install that re-points the
+          # machine. Bash parity: detect_installed_client / _client_id_from_secret.
+          $id = ""
+          if ($null -ne $vals -and $null -ne $vals.clientId) { $id = "$($vals.clientId)".Trim() }
+          if (-not $id) { $id = Get-ClientIdFromSecret -Release $rel.name -Namespace $rel.namespace }
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
+          # No trailing `continue` here. It is the last statement of the loop
+          # body, so it buys nothing -- and PowerShell reported it escaping as an
+          # unmatched loop label under Pester (pester/Pester#2669), which aborts
+          # the run rather than failing one test. The two `continue`s above are
+          # real: they skip the rest of the body.
+          if (-not $unreadableNs) { $unreadableNs = $rel.namespace }
         }
       }
     } catch {

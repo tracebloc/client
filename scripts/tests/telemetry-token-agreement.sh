@@ -158,4 +158,73 @@ helm template t "$CHART" \
   --set storageClass.create=false \
   --set telemetryCollector.enabled=true 2>/dev/null | python3 "$CMP"
 
+# ── two releases on one cluster resolve to DISTINCT Secrets (backend#2625) ──────
+#
+#  The agreement above proves the four documents of ONE release name the same
+#  Secret. This proves the thing the ticket is actually about: two releases sharing
+#  the node-agents namespace do NOT. A fixed name made both write one Secret — last
+#  writer wins, and the loser's Collector authenticated as the wrong tenant.
+#
+#  DERIVED, like the rest of this file. It writes down no Secret name. It renders
+#  two DIFFERENT release names, pulls the token name each render resolved to out of
+#  the writer's own env and the reader's own volume, and asserts (1) the writer and
+#  reader of each render still agree, (2) each render's name is a function of its
+#  release — it contains the release name — and (3) the two names DIFFER. Point 3 is
+#  the collision fix; points 1–2 stop it passing by resolving both to one constant.
+NAME="$(mktemp -t tok-name.XXXXXX)"
+trap 'rm -f "$CMP" "$NAME"' EXIT
+cat >"$NAME" <<'PY'
+import sys, yaml
+# Chase the references, do not match a string: the token name is whatever the
+# writer was told and whatever the reader mounts, and this reports it only if the
+# two agree — an empty or split render is a finding, not a silent pass.
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+writer = reader = None
+for d in docs:
+    kind = d.get("kind")
+    if kind == "Deployment":
+        for c in d["spec"]["template"]["spec"].get("containers") or []:
+            for e in c.get("env") or []:
+                if e.get("name") == "TELEMETRY_TOKEN_SECRET_NAME":
+                    writer = e.get("value")
+    elif kind == "DaemonSet" and "telemetry" in d["metadata"]["name"]:
+        for v in d["spec"]["template"]["spec"].get("volumes") or []:
+            if "secret" in v:
+                reader = v["secret"].get("secretName")
+if not writer or not reader:
+    sys.exit("[ERROR] could not locate the token name in the render "
+             "(writer env / reader volume) — comparing absences would pass falsely")
+if writer != reader:
+    sys.exit(f"[ERROR] within one render the writer names {writer!r} but the reader "
+             f"mounts {reader!r}")
+print(writer)
+PY
+
+render_name() {
+  helm template "$1" "$CHART" \
+    --set clientId=x --set clientPassword=y \
+    --set storageClass.create=false \
+    --set telemetryCollector.enabled=true 2>/dev/null | python3 "$NAME"
+}
+
+rel_a="tenant-alpha"; rel_b="tenant-beta"
+name_a="$(render_name "$rel_a")" || { echo "$name_a" >&2; exit 1; }
+name_b="$(render_name "$rel_b")" || { echo "$name_b" >&2; exit 1; }
+
+fail=0
+case "$name_a" in *"$rel_a"*) ;; *)
+  echo "[ERROR] release $rel_a resolved to $name_a, which does not scope to the release" >&2; fail=1 ;;
+esac
+case "$name_b" in *"$rel_b"*) ;; *)
+  echo "[ERROR] release $rel_b resolved to $name_b, which does not scope to the release" >&2; fail=1 ;;
+esac
+if [ "$name_a" = "$name_b" ]; then
+  echo "[ERROR] two releases resolved to the SAME Secret $name_a — the shared-namespace collision this ticket fixes" >&2
+  fail=1
+fi
+[ "$fail" -eq 0 ] || { echo "telemetry token agreement: FAILED" >&2; exit 1; }
+echo "   release $rel_a -> $name_a"
+echo "   release $rel_b -> $name_b"
+echo "  ok: two releases resolve to distinct, release-scoped Secrets"
+
 echo "telemetry token agreement: green"

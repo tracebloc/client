@@ -25,6 +25,13 @@ setup() {
   amd64_emulation_available() { return 0; }
   docker() { return 1; }   # keep _pf_docker_root off the real daemon
   has() { return 0; }      # pretend tools present (conds empty) unless overridden
+  # The runtime probes now bound `docker info` via _bounded/_docker_answers, which
+  # runs `timeout … docker info` as an EXTERNAL process when timeout is present —
+  # and has() above reports it present. An external timeout can't see the docker()
+  # shell-function mock, so shadow timeout/gtimeout with a duration-dropping
+  # passthrough that still invokes the mock (the #741 trap; same fix as probe.bats).
+  timeout()  { shift; "$@"; }
+  gtimeout() { shift; "$@"; }
   OS="Linux"; ARCH="x86_64"
 }
 
