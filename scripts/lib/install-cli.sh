@@ -286,5 +286,28 @@ upgrade_cli_only() {
   if declare -F install_tracebloc_cli >/dev/null 2>&1; then
     install_tracebloc_cli
   fi
+
+  # This path exits before _handle_existing_cluster, exactly like the healthy
+  # hand-off — so surface the same advisories the hand-off does, or a
+  # healthy-but-drifted k3s (#547/#565) or an unschedulable-GPU cluster
+  # (client#835) gets no signal on `tracebloc upgrade`. Advisory + guarded.
+  declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
+  declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
+
+  # The CLI update is the ENTIRE point of this path, so — unlike the full flow,
+  # where a CLI hiccup is non-fatal because the client is already connected — a
+  # FAILED update here must NOT report success: it would leave the update nag in
+  # place while `tracebloc upgrade` looked like it worked (Bugbot). When we know
+  # the target (TB_CLI_LATEST) and the CLI is verifiably STILL behind it, exit
+  # non-zero (install_tracebloc_cli has already printed how to retry). Otherwise
+  # — updated, or target/version unreadable so we can't PROVE a failure — exit 0.
+  local latest now
+  latest="${TB_CLI_LATEST:-}"; latest="${latest#v}"
+  now="$(_cli_version_short 2>/dev/null || true)"; now="${now#v}"
+  if [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [[ "$now" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+     && _version_lt "$now" "$latest"; then
+    warn "Couldn't update the tracebloc CLI to ${latest} — still on ${now}. The update reminder will keep showing until it succeeds."
+    exit 1
+  fi
   exit 0
 }

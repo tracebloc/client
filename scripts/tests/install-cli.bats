@@ -232,6 +232,7 @@ setup() {
 # able to clear the update nag — the healthy fast-path used to update nothing.
 @test "upgrade_cli_only: runs the CLI install step and exits 0" {
   install_tracebloc_cli() { echo "INSTALL_RAN"; }
+  _cli_version_short() { echo "0.10.8"; }   # deterministic post-install probe
   run upgrade_cli_only
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"INSTALL_RAN"* ]] || return 1
@@ -240,23 +241,45 @@ setup() {
 # The ticket's acceptance criterion at the installer seam: after `upgrade` on a
 # healthy machine whose CLI is behind latest, the reported version is latest.
 # Before backend#2253 the healthy fast-path updated nothing, so this could not
-# hold; upgrade_cli_only is the step that makes it true — if it stopped calling
-# install_tracebloc_cli, VERFILE would stay at the old version and this fails.
+# hold; upgrade_cli_only is the step that makes it true — model the released
+# installer by advancing the version the post-install probe reports to latest.
 @test "upgrade_cli_only: after upgrade the reported CLI version equals latest (backend#2253)" {
   VERFILE="$BATS_TEST_TMPDIR/ver"; echo "0.10.5" > "$VERFILE"    # behind latest
   TB_CLI_LATEST="0.10.8"
-  # The released installer this step runs drops the latest build; model that as
-  # advancing the reported version to latest.
-  install_tracebloc_cli() { echo "$TB_CLI_LATEST" > "$VERFILE"; }
+  install_tracebloc_cli() { echo "$TB_CLI_LATEST" > "$VERFILE"; }  # installer drops latest
+  _cli_version_short() { cat "$VERFILE"; }                          # reflects the install
   run upgrade_cli_only
   [ "$status" -eq 0 ] || return 1
   [ "$(cat "$VERFILE")" = "$TB_CLI_LATEST" ] || return 1
+}
+
+# Bugbot: a FAILED update on THIS path must not exit 0 — that would leave the nag
+# in place while `tracebloc upgrade` looked like it worked. When the CLI is
+# verifiably still behind a known latest, exit non-zero and say so.
+@test "upgrade_cli_only: a failed update (still behind latest) exits non-zero, not a false success" {
+  TB_CLI_LATEST="0.10.8"
+  install_tracebloc_cli() { :; }              # download/install hiccup: nothing changes
+  _cli_version_short() { echo "0.10.5"; }     # still behind latest afterward
+  run upgrade_cli_only
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"Couldn't update the tracebloc CLI"* ]] || return 1
+}
+
+# Fail SAFE toward success: when we can't PROVE a failure (latest unknown), the
+# explicit upgrade must not be reported as failed on a false negative.
+@test "upgrade_cli_only: latest unknown -> exits 0 (can't prove a failure)" {
+  unset TB_CLI_LATEST
+  install_tracebloc_cli() { :; }
+  _cli_version_short() { echo "0.10.5"; }
+  run upgrade_cli_only
+  [ "$status" -eq 0 ] || return 1
 }
 
 # Non-fatal by inheritance: install_tracebloc_cli never aborts, and a stale
 # bootstrap without it must not crash this path either (the declare -F guard).
 @test "upgrade_cli_only: install step absent (stale bootstrap) still exits 0" {
   unset -f install_tracebloc_cli 2>/dev/null || true
+  _cli_version_short() { echo ""; }           # nothing to compare -> can't prove failure
   run upgrade_cli_only
   [ "$status" -eq 0 ] || return 1
 }
