@@ -67,13 +67,18 @@ rules:
     # Forbidden and the endpoint 500s instead of the intended 409/replay.
     verbs: ["create", "get"]
 {{- if .Values.perExperimentDbCreds }}
-  # Per-experiment DB creds only: jobs-manager's revoke/sweep path deletes the
-  # per-job cred Secret. Scoped to `secrets` alone (never configmaps) and
-  # flag-gated so a default install grants no extra delete — least privilege,
-  # and byte-for-byte unchanged when off (Saqlain review).
+  # Per-experiment DB creds only: jobs-manager's revoke/sweep path reaps the
+  # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
+  # the orphan reaper must LIST cred Secrets to find any whose Job died before
+  # cleanup — without `list` that enumeration 403s and orphaned credential
+  # material accumulates in etcd (backend#2692). Same shape as the perDatasetPvcs
+  # GC grant (`list` + `delete`). `list` on secrets does widen exposure
+  # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
+  # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
+  # unchanged when off (Saqlain review).
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["delete"]
+    verbs: ["list", "delete"]
 {{- end }}
 {{- if .Values.perDatasetPvcs }}
   # Per-dataset PVCs only (RFC-0003 D9 Track B, client-runtime#203/#261):
@@ -150,13 +155,18 @@ rules:
     # Forbidden and the endpoint 500s instead of the intended 409/replay.
     verbs: ["create", "get"]
 {{- if .Values.perExperimentDbCreds }}
-  # Per-experiment DB creds only: jobs-manager's revoke/sweep path deletes the
-  # per-job cred Secret. Scoped to `secrets` alone (never configmaps) and
-  # flag-gated so a default install grants no extra delete — least privilege,
-  # and byte-for-byte unchanged when off (Saqlain review).
+  # Per-experiment DB creds only: jobs-manager's revoke/sweep path reaps the
+  # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
+  # the orphan reaper must LIST cred Secrets to find any whose Job died before
+  # cleanup — without `list` that enumeration 403s and orphaned credential
+  # material accumulates in etcd (backend#2692). Same shape as the perDatasetPvcs
+  # GC grant (`list` + `delete`). `list` on secrets does widen exposure
+  # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
+  # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
+  # unchanged when off (Saqlain review).
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["delete"]
+    verbs: ["list", "delete"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
