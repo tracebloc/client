@@ -203,6 +203,27 @@ YAML
   [ "$status" -eq 2 ] || { echo "expected exit 2, got $status; stdout=[$output]"; return 1; }
 }
 
+@test "a large run history does not hit the Linux argv limit (Bugbot #868)" {
+  # 200 completed 'cancelled' runs with padded html_urls, so the payload passed
+  # to classify_one exceeds 128KiB. Passing that as a single --argjson arg would
+  # blow MAX_ARG_STRLEN on Linux (ubuntu CI) and kill the watcher; via stdin it
+  # must work. Never succeeded -> STALE, and all 200 must be examined.
+  mkwf big.yml
+  local pad; pad="$(printf 'x%.0s' {1..800})"
+  jq -cn --argjson now "$NOW" --arg pad "$pad" '
+    {workflow_runs: [ range(0;200) as $i
+      | { status:"completed", conclusion:"cancelled",
+          created_at: (($now - ($i+1)*86400) | todateiso8601),
+          html_url: ("https://x/runs/\($i)?pad=\($pad)") } ]}' > "$STUB/big.yml.json"
+  # Guard the guard: the payload must actually exceed the 128KiB single-arg cap,
+  # or this test would pass without exercising the limit.
+  [ "$(wc -c < "$STUB/big.yml.json")" -gt 131072 ] || return 1
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  flagged big.yml || return 1
+  jq -e '.[0].last_conclusion == "cancelled" and .[0].runs_examined == 200' >/dev/null <<<"$output" || return 1
+}
+
 @test "bad STALENESS_MAX_DAYS fails closed (exit 2)" {
   mkwf x.yml
   MAX_DAYS=notanumber

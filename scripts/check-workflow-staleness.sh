@@ -122,38 +122,65 @@ fi
 # with an empty result and report the workflow `ok` — a broken watcher looking
 # healthy, the exact fail-OPEN this script exists to prevent (Bugbot, #868). So
 # the caller checks the status and dies in the PARENT shell, where exit works.
+# PROJECT_JQ keeps ONLY the four fields classify_one reads. A raw run object is
+# large (nested repository/head_repository/actor/…), and 100 of them is hundreds
+# of KiB; classify_one would otherwise choke on it — see there. Projecting at the
+# source also means the bats stubs (four-field objects) are the real shape, not a
+# lie that passes while the code cannot (Bugbot, #868).
+PROJECT_JQ='[ (.workflow_runs // [])[] | {status, conclusion, created_at, html_url} ]'
 runs_for() {
   local wf="$1"
   if [[ -n "$STUB" ]]; then
     local f="$STUB/$wf.json"
     if [[ -r "$f" ]]; then
-      jq -c '.workflow_runs // []' "$f" || { echo "ERROR: stub is not valid JSON: $f" >&2; return 1; }
+      jq -c "$PROJECT_JQ" "$f" || { echo "ERROR: stub is not valid JSON: $f" >&2; return 1; }
     else
       echo '[]'
     fi
     return 0
   fi
-  local out
-  # Fail CLOSED: a swallowed API error must not read as "no stale workflows".
-  if ! out="$(gh api -H "Accept: application/vnd.github+json" \
+  local out err
+  err="$(mktemp)"
+  if out="$(gh api -H "Accept: application/vnd.github+json" \
         "/repos/$REPO/actions/workflows/$wf/runs?event=schedule&per_page=100" \
-        --jq '.workflow_runs // []' 2>/dev/null)"; then
-    echo "ERROR: gh api failed listing runs for $wf in $REPO (auth? actions:read?)" >&2
-    return 1
+        --jq "$PROJECT_JQ" 2>"$err")"; then
+    rm -f "$err"
+    printf '%s\n' "$out"
+    return 0
   fi
-  printf '%s\n' "$out"
+  # A 404 means the workflow file exists in the checkout but GitHub has no
+  # registered workflow / no runs for it yet (a just-added scheduled workflow, or
+  # registration lag). That is the "idle / brand-new" case — no scheduled runs to
+  # judge — so treat it as an empty history and skip, NOT as a broken watcher.
+  # Everything else (401/403 auth, 5xx, network) is a real malfunction and must
+  # fail CLOSED: a swallowed error must never read as "no stale workflows".
+  if grep -qiE 'HTTP 404|not found' "$err"; then
+    rm -f "$err"
+    echo '[]'
+    return 0
+  fi
+  cat "$err" >&2
+  rm -f "$err"
+  echo "ERROR: gh api failed listing runs for $wf in $REPO (auth? actions:read?)" >&2
+  return 1
 }
 
 # classify_one <workflow-file> <runs-json> -> emits a finding object, or nothing.
 # All age math is done in jq via fromdateiso8601 (portable — no date -d/-j fork),
 # with `now` injected so tests are deterministic.
+#
+# The runs array is fed on STDIN (`.`), NOT via `--argjson runs`: a single argv
+# string is capped at 128 KiB on Linux (MAX_ARG_STRLEN), and a full run history
+# would blow past that, killing the watcher on ubuntu (never on macOS — the cap
+# is Linux-only, which is why a local run wouldn't catch it). stdin has no such
+# limit. runs_for already projects to four small fields, so this is belt-and-
+# suspenders — together they keep the payload tiny AND uncapped (Bugbot, #868).
 classify_one() {
   local wf="$1" runs="$2"
-  jq -c -n \
+  jq -c \
     --arg wf "$wf" --arg repo "$REPO" \
-    --argjson max_days "$MAX_DAYS" --argjson now "$NOW" \
-    --argjson runs "$runs" '
-    ( [ $runs[] | select(.status=="completed") ] ) as $completed
+    --argjson max_days "$MAX_DAYS" --argjson now "$NOW" '
+    ( [ .[] | select(.status=="completed") ] ) as $completed
     | if ($completed | length) == 0 then empty          # no completed scheduled run: idle or brand-new, not rot
       else
         ( $completed | sort_by(.created_at) | reverse ) as $c
@@ -180,7 +207,7 @@ classify_one() {
             html_url: ($newest.html_url // "")
           }
           else empty end
-      end'
+      end' <<<"$runs"
 }
 
 # --- scan ------------------------------------------------------------------
