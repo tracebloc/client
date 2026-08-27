@@ -40,9 +40,18 @@ labels, so its metadata-bootstrap behaviour is unchanged by the upgrade. Flippin
 that flag is a separate, windowed decision with its own ordering constraint —
 read the note on `images.ingestor.prodDigest` in `values.yaml` before you do.
 
-New values keys, all off or empty by default: `bootstrapDbPassword`,
-`bootstrapDbReparent`, `bootstrapDbReparentByEnv`, `mysqlRootPassword`,
-`rotateMysqlRoot`, `rotateMysqlRootByEnv`.
+**New values keys, all off or empty by default — and they did not all arrive at
+the same version.** All six are new to the `1.9.63` fleet this section targets,
+which is why they are listed together; an operator crossing from `1.9.67` or
+later will already have the first three.
+
+| key | first shipped |
+|---|---|
+| `bootstrapDbPassword` · `bootstrapDbReparent` · `bootstrapDbReparentByEnv` | **1.9.67** (`e03edbb`, #785) |
+| `mysqlRootPassword` · `rotateMysqlRoot` · `rotateMysqlRootByEnv` | **1.9.71** (`09bb86c`, #822) |
+
+Read from the chart rather than recalled: `git log -S<key> -- client/values.yaml`
+gives the introducing commit, and `Chart.yaml` at that commit gives the version.
 
 ## Upgrading to 1.9.49 — `RESOURCE_PROVENANCE`: who chose the training envelope
 
