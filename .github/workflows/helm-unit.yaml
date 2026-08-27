@@ -1,0 +1,79 @@
+name: Helm unit tests
+
+# The 585-test helm-unittest tier (34 suites, ~4s), split out of helm-ci.yaml so
+# it can be a REQUIRED status check. backend#2651.
+#
+# WHY IT IS NOT STILL IN helm-ci.yaml. Two reasons, and the second is why this
+# is a new file rather than a paths-filter edit over there.
+#
+# 1. A required check must be able to REPORT on every PR. helm-ci.yaml filters
+#    `pull_request` by path, and a path-filtered job never creates its check run
+#    on a PR outside those paths -- GitHub leaves it at "Expected - waiting for
+#    status to be reported" and the PR is unmergeable forever. Not hypothetical:
+#    drift-checks.yaml's header records it blocking client#651, #657 and #660 on
+#    2026-08-11. So the tier had to live somewhere with no `pull_request` paths
+#    filter.
+#
+# 2. helm-ci.yaml could not simply lose that filter. It is the repo's heaviest
+#    workflow: `upgrade-e2e` (Fleet auto-upgrade E2E, k3d, 30 min) and
+#    `seal-check-e2e` (Seal-check egress-enforcement, k3d, 30 min) carry NO
+#    job-level `if:` and are gated only by that paths filter. Dropping it would
+#    have started ~60 minutes of k3d E2E on every PR in the repo, including
+#    docs-only ones. Moving the cheap tier out costs nothing and leaves the
+#    expensive jobs exactly as they were.
+#
+# `push` KEEPS a paths filter: pushes are not gated by required checks, so
+# path-scoping there is free and correct. Same split drift-checks.yaml uses.
+#
+# The job name below IS the status-check context (`Helm unit tests`). Renaming
+# it silently un-gates the tier, because protection matches the context string:
+# a near-miss produces the same permanent-pending state as the paths trap.
+# scripts/tests/helm-unittest-gated.sh — which runs in the REQUIRED
+# `Source-of-truth drift` job — pins the name, refuses a `pull_request` paths
+# filter, and refuses a second job producing the same context.
+#
+# What that guard does NOT do, said here rather than implied: it does not read
+# the live branch-protection list, so it cannot prove the context is currently
+# required. That copy lives in GitHub's config, not in this repo. The guard's
+# own header carries the one-line `gh api` command to check it by hand.
+
+on:
+  push:
+    branches: [main, develop, openshift]
+    paths:
+      - 'client/**'
+      - '.github/workflows/helm-unit.yaml'
+  pull_request:
+    branches: [main, develop, openshift]
+    # NO `paths:` HERE, deliberately -- see reason 1 in the header. The suite is
+    # ~4 seconds, so running it on every PR costs nothing next to a permanently
+    # stuck PR.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-unit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    # This string is the required-status-check context. Do not rename it without
+    # updating client/develop and client/main protection in the same change.
+    name: Helm unit tests
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.15.4
+
+      - name: Install helm-unittest
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version 0.5.2
+
+      - name: Run unit tests
+        run: helm unittest ./client
