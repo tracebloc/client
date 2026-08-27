@@ -166,9 +166,15 @@ tests:
       - equal:
           path: spec.jobTemplate.spec.template.spec.serviceAccountName
           value: stg-auto-upgrade
+      # `Never`, CHANGED FROM `OnFailure` (backend#2620). Kubernetes deletes an
+      # OnFailure Job's Pod once backoffLimit is exhausted, so a failing tick
+      # left retained Jobs and no logs — measured on a customer prod edge that
+      # had been failing hourly for 2.7 days with the reason unrecoverable.
+      # `scripts/tests/cronjob-failures-are-readable.sh` sweeps every rendered
+      # CronJob for the same property, so a third one is covered on arrival.
       - equal:
           path: spec.jobTemplate.spec.template.spec.restartPolicy
-          value: OnFailure
+          value: Never
 
   - it: CronJob env carries release identity to the upgrade script
     template: templates/auto-upgrade-cronjob.yaml
