@@ -15,7 +15,12 @@
 #  live cluster, via `helm install --dry-run=server`, which performs the lookups.
 #
 #  SELF-SKIPS with no reachable cluster, the same way the offline checks skip with no
-#  helm. It runs wherever a cluster exists: an e2e leg, or a reviewer with k3d.
+#  helm — so a reviewer or the drift job can run it as a no-op. BUT `--require` turns
+#  every skip condition into a hard failure: the k3d auto-upgrade e2e passes it,
+#  because there a cluster is guaranteed and a silent skip would let acceptance (b)
+#  report "verified" without ever running (the "no silent caps" rule). Every kubectl
+#  call is bounded by `--request-timeout` so a wedged API fails fast, never hangs the
+#  job to its outer timeout.
 #
 #  THREE CASES, because "accepts legacy" only means something beside "still refuses
 #  when nothing exists":
@@ -40,10 +45,25 @@ REL_NS="tok-mig-rel-$$"
 # `tracebloc-node-agents`; `create=false` keeps the chart from trying to own it.
 TOKEN_NS="tok-mig-na-$$"
 
-command -v helm    >/dev/null 2>&1 || { echo "[SKIP] helm not installed"; exit 0; }
-command -v kubectl >/dev/null 2>&1 || { echo "[SKIP] kubectl not installed"; exit 0; }
-kubectl cluster-info >/dev/null 2>&1 \
-  || { echo "[SKIP] no reachable cluster — the pre-flight lookup needs one"; exit 0; }
+# `--require`: turn every skip condition into a hard failure. The e2e passes it (a
+# cluster is guaranteed there); standalone/drift runs omit it and self-skip.
+REQUIRE=""
+[ "${1:-}" = "--require" ] && REQUIRE=1
+
+# Bound every API call. An unbounded kubectl against a wedged control plane hangs
+# until the outer job timeout — a 30-minute red instead of a fast, legible one.
+kc() { kubectl --request-timeout=15s "$@"; }
+
+# A precondition the check cannot run without: a no-op skip by default, a failure
+# under --require (where a skip would masquerade as acceptance (b) passing).
+skip_or_fail() {
+  if [ -n "$REQUIRE" ]; then echo "[ERROR] $1 — cannot run acceptance (b)" >&2; exit 1; fi
+  echo "[SKIP] $1"; exit 0
+}
+
+command -v helm    >/dev/null 2>&1 || skip_or_fail "helm not installed"
+command -v kubectl >/dev/null 2>&1 || skip_or_fail "kubectl not installed"
+kc cluster-info >/dev/null 2>&1     || skip_or_fail "no reachable cluster — the pre-flight lookup needs one"
 
 echo "== telemetry token migration (live) =="
 
@@ -70,12 +90,12 @@ SCOPED_NAME="$(helm template "$REL" "$CHART" \
   || { echo "[ERROR] the release-scoped name equals the legacy name for $REL — pick a different release" >&2; exit 1; }
 
 cleanup() {
-  kubectl delete ns "$TOKEN_NS" "$REL_NS" --ignore-not-found >/dev/null 2>&1 || true
+  kc delete ns "$TOKEN_NS" "$REL_NS" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-kubectl create ns "$TOKEN_NS" >/dev/null
-kubectl create ns "$REL_NS"   >/dev/null
+kc create ns "$TOKEN_NS" >/dev/null
+kc create ns "$REL_NS"   >/dev/null
 
 # The pre-flight is a TEMPLATE-TIME `fail`, so its own message — not helm's overall
 # exit — is the verdict. `--dry-run=server` renders server-side (so `lookup` runs)
@@ -95,8 +115,8 @@ guard_refused() {   # 0 = the telemetry pre-flight refused the render; 1 = it di
   grep -q "$GUARD_SIG" <<<"$out"
 }
 
-put()  { kubectl create secret generic "$1" -n "$TOKEN_NS" --from-literal=token=x >/dev/null; }
-drop() { kubectl delete secret "$1" -n "$TOKEN_NS" --ignore-not-found >/dev/null 2>&1 || true; }
+put()  { kc create secret generic "$1" -n "$TOKEN_NS" --from-literal=token=x >/dev/null; }
+drop() { kc delete secret "$1" -n "$TOKEN_NS" --ignore-not-found >/dev/null 2>&1 || true; }
 
 fail=0
 

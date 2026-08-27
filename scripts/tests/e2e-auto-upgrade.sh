@@ -329,8 +329,11 @@ kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
 #  exercised against a live cluster — here. The check is namespace-isolated and reaps
 #  itself, so it rides this cluster without touching the ${NS} release above.
 echo "── acceptance (b): legacy token name still satisfies the Collector pre-flight ──"
-bash "$HERE/telemetry-token-migration.sh" \
-  || fail "the telemetry token pre-flight rejected the legacy Secret name — renaming to a release-scoped token would wedge an edge already collecting (backend#2625)"
+# `--require`: a cluster is live here, so the check must RUN, not self-skip. Without
+# it a skip would exit 0 and the PASS line below would claim (b) was verified when it
+# never ran — the silent no-op the "no silent caps" rule exists to prevent.
+bash "$HERE/telemetry-token-migration.sh" --require \
+  || fail "the telemetry token pre-flight rejected the legacy Secret name (or could not run) — renaming to a release-scoped token would wedge an edge already collecting (backend#2625)"
 
 echo ""
 echo "E2E PASS: ${PREV} -> ${LOCAL_VERSION} upgrades safe on both flag paths; #102 flip engages and persists;"
