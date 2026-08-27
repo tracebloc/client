@@ -25,6 +25,19 @@
 # something ELSE moves -- which is the failure this script exists to prevent, not
 # a variant of it.
 #
+# ONE DELIBERATE EXCEPTION: ACKNOWLEDGED DRIFT (backend#2673). A pin can be held
+# behind its float ON PURPOSE -- the ingestor prod pin trails channelTags.prod
+# because the float has crossed a compatibility boundary while prod cannot yet
+# take it (docs/SECURITY.md §4.1.1). For such a pin the float-vs-pin divergence is
+# EXPECTED and reds nothing; without this the alarm fires every night forever,
+# trains everyone to ignore it, and masks a NEW drift on some other pin behind the
+# standing red (the backend#2386 failure mode). The exception is NOT a blanket
+# mute: it is DECLARED IN THE CHART (an `ackDrift:` block next to the pin, behind
+# CODEOWNERS review), it is a CLASS not a digest (the float may roam any patch on
+# its line without re-alarming), it LAPSES if the float changes line, and the pin
+# itself is STILL re-verified to resolve to a healthy multi-arch index every run.
+# Any other pin drifting, or the acknowledged pin ceasing to resolve, still reds.
+#
 # WHERE THE TRUSTED VERSIONS ARE REGISTERED: in the chart, as the `digest:` /
 # `prodDigest:` fields of client/values.yaml. There is no second list to keep in
 # sync -- the pin IS the registration. Adding a pin automatically enrols it here.
@@ -40,6 +53,7 @@ chart_values="${CHART_VALUES:-$here/../client/values.yaml}"
 FINDINGS=0
 CHECKED=0
 PINS=0
+ACKNOWLEDGED=0
 
 if [[ ! -r "$chart_values" ]]; then
   echo "ERROR: cannot read $chart_values" >&2
@@ -63,11 +77,15 @@ fi
 # could run (backend#1778). Capture first, slice after.
 # ---------------------------------------------------------------------------
 # DRIFT_RESOLVE_STUB is a TEST SEAM, and the banner below exists so it can never
-# be mistaken for a real audit. It points at a file of `ref<0x1f>digest` lines and
+# be mistaken for a real audit. It points at a file of `ref<0x1f>value` lines and
 # replaces the registry entirely -- the suite needs to assert classification
-# (ok / DRIFT / UNRESOLVED / UNWATCHABLE) without a network, and the parsing is
-# where this script's two real bugs were. A stubbed run prints STUBBED on every
-# line and in the summary, so a log cannot look like evidence it is not.
+# (ok / DRIFT / UNRESOLVED / UNWATCHABLE / ACKNOWLEDGED) without a network, and the
+# parsing is where this script's real bugs were. Two line shapes share the file:
+# a `repo:tag<0x1f>digest` line answers resolve_index_digest (where the float
+# points now), and a `repo@digest<0x1f>platform,platform` line answers
+# pin_platforms (whether the pin is a healthy multi-arch index). A stubbed run
+# prints STUBBED on every line and in the summary, so a log cannot look like
+# evidence it is not.
 # _tmout <seconds> <cmd...> — bound a registry/daemon call so a wedged docker or
 # stuck registry fails closed (non-zero exit -> UNRESOLVED) rather than hanging the
 # daily job (Bugbot). timeout on Linux, gtimeout on macOS; unbounded only if
@@ -100,6 +118,33 @@ resolve_index_digest() {
   printf '%s\n' "$d"
 }
 
+# pin_platforms <repo> <digest> — the platform set of the index a pin points AT
+# (backend#2673). resolve_index_digest asks "where does the float point now?";
+# this asks "is the PIN itself still a healthy, reproducible multi-arch image?",
+# by inspecting repo@digest exactly as resolve-ingestor-digest.sh does. Prints a
+# space-separated platform list, or NOTHING when the pin does not resolve at all
+# (auth, rate limit, network, or a garbage-collected digest) — an empty result
+# is the caller's signal that the pin ceased to resolve.
+#
+# Test seam: under DRIFT_RESOLVE_STUB a `repo@digest` line maps to a
+# comma-separated platform list (e.g. `linux/amd64,linux/arm64`); an absent line
+# means "does not resolve", mirroring the real path.
+pin_platforms() {
+  # Separate declarations on purpose: a single `local a=$1 b="$a…"` expands the
+  # later reference before the earlier assignment is visible, so under the
+  # `set -u` above `b` sees an UNBOUND `a` and the subshell dies -- which read as
+  # the pin failing to resolve. Assign, then compose.
+  local repo="$1" digest="$2"
+  local ref="${repo}@${digest}" out=""
+  if [[ -n "${DRIFT_RESOLVE_STUB:-}" ]]; then
+    [[ -r "$DRIFT_RESOLVE_STUB" ]] || { echo "ERROR: DRIFT_RESOLVE_STUB is set but unreadable: $DRIFT_RESOLVE_STUB" >&2; exit 2; }
+    awk -F"$(printf '\037')" -v want="$ref" '$1 == want { print $2; exit }' "$DRIFT_RESOLVE_STUB" | tr ',' ' '
+    return 0
+  fi
+  out="$(_tmout 30 docker buildx imagetools inspect "$ref" 2>/dev/null || true)"
+  awk '/Platform:/ {print $2}' <<<"$out" | grep -v '^unknown' | sort -u | tr '\n' ' '
+}
+
 # discover_pins <file>
 #
 # PIN-DRIVEN, and deliberately not scoped to `images:`. My first version walked
@@ -126,16 +171,33 @@ discover_pins() {
     # Track the innermost 0-space and 2-space keys so a pin can be named.
     /^[A-Za-z_][A-Za-z0-9_]*:/ {
       top = $0; sub(/:.*$/, "", top); mid = ""; blk_repo = ""; blk_tag = ""
+      ack_line = ""; ack_reason = ""; in_ack = 0
     }
     /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
       mid = $0; sub(/^  /, "", mid); sub(/:[[:space:]]*$/, "", mid)
       blk_repo = ""; blk_tag = ""; ch_prod = ""
+      ack_line = ""; ack_reason = ""; in_ack = 0
+    }
+    # A 4-space BARE key (no inline value): channelTags:, ackDrift:, … . Arm the
+    # acknowledged-drift scope only inside ackDrift:, disarm on any other bare
+    # 4-space key. repository:/tag:/prodDigest: carry inline values so they never
+    # match here. (backend#2673)
+    /^    [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
+      in_ack = ($0 ~ /^    ackDrift:[[:space:]]*$/) ? 1 : 0
     }
     # Leaves of the current block. Only the FIRST of each kind, so a commented
     # example further down cannot overwrite the live value.
     /^    repository:[[:space:]]*/ { if (blk_repo == "") { v = $0; sub(/^    repository:[[:space:]]*/, "", v); blk_repo = trim(v) } }
     /^    tag:[[:space:]]*/        { if (blk_tag  == "") { v = $0; sub(/^    tag:[[:space:]]*/, "", v);        blk_tag  = trim(v) } }
     /^      prod:[[:space:]]*/     { if (ch_prod  == "") { v = $0; sub(/^      prod:[[:space:]]*/, "", v);     ch_prod  = trim(v) } }
+    # ackDrift leaves (backend#2673). Only inside ackDrift:, only the first of
+    # each. `line` binds the acknowledgement to the channel float it was reasoned
+    # about; `reason` is the human justification, surfaced verbatim in the
+    # ACKNOWLEDGED report. Extract reason from between its quotes rather than the
+    # trim()+comment-strip path: it is free text and legitimately contains `#`
+    # (issue refs) and punctuation a comment-stripper would eat.
+    /^      line:[[:space:]]*/    { if (in_ack && ack_line   == "") { v = $0; sub(/^      line:[[:space:]]*/, "", v); ack_line = trim(v) } }
+    /^      reason:[[:space:]]*/  { if (in_ack && ack_reason == "") { v = $0; if (match(v, /"[^"]*"/)) { ack_reason = substr(v, RSTART + 1, RLENGTH - 2) } else { sub(/^      reason:[[:space:]]*/, "", v); ack_reason = trim(v) } } }
     # A pin. prodDigest pairs with channelTags.prod; digest pairs with tag.
     #
     # Quote- and indent-agnostic on purpose (Bugbot, client#697). The old pattern
@@ -153,12 +215,15 @@ discover_pins() {
       if ($0 ~ /^    (digest|prodDigest):/) {
         flt = (kind == "prodDigest") ? ch_prod : blk_tag
         name = (mid == "") ? top : top "." mid
-        printf "%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, flt, SEP, pin
+        # Six fields: path, repo, float, pin, ackLine, ackReason. The ack pair is
+        # empty for every pin that declares no ackDrift block (backend#2673).
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, blk_repo, SEP, flt, SEP, pin, SEP, ack_line, SEP, ack_reason
       } else {
         # Off the canonical structure: name it as best we can, emit empty
-        # repo+float so the main loop reports UNWATCHABLE instead of dropping.
+        # repo+float (and empty ack pair) so the main loop reports UNWATCHABLE
+        # instead of dropping.
         name = (mid != "") ? top "." mid : (top != "" ? top : "?")
-        printf "%s%s%s%s%s%s%s\n", name, SEP, "", SEP, "", SEP, pin
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, "", SEP, "", SEP, pin, SEP, "", SEP, ""
       }
     }
   ' "$1"
@@ -200,6 +265,71 @@ UNWATCHABLE: $1 is pinned to $2
 EOF
 }
 
+# --- ACKNOWLEDGED, EXPECTED DRIFT (backend#2673) ---------------------------
+# A pin may be DELIBERATELY held behind its float (the ingestor prod pin trails
+# channelTags.prod on purpose -- docs/SECURITY.md §4.1.1). Such a pin declares an
+# `ackDrift:` block in values.yaml. When it drifts we do NOT red -- but neither
+# do we pass silently: the acknowledgement is CONDITIONAL, and these functions
+# encode the conditions. report_acknowledged is the only green outcome; the other
+# two are findings, because an acknowledgement whose preconditions broke is not
+# an acknowledgement.
+
+report_acknowledged() {  # <path> <ref> <pinned> <resolved> <reason> <platforms>
+  ACKNOWLEDGED=$((ACKNOWLEDGED + 1))
+  cat <<EOF
+
+ACKNOWLEDGED: $1
+  the label          $2
+  now resolves to    $4
+  but the pin says   $3
+
+  This divergence is EXPECTED and acknowledged in the chart (backend#2673):
+    $5
+  The pin itself was re-verified against the registry and is intact: it still
+  resolves to a multi-arch index ($6). The float roaming away from a deliberately
+  held-back pin is the acknowledged condition, not a finding.
+
+  Acknowledged for THIS pin only, and only while its channel float is unchanged.
+  Any OTHER pin drifting, or this pin ceasing to resolve or going single-arch,
+  still reds this watch. Boundary and lift conditions: docs/SECURITY.md §4.1.1.
+EOF
+}
+
+report_ack_lapsed() {  # <path> <ref> <pinned> <resolved> <ack_line> <float>
+  FINDINGS=$((FINDINGS + 1))
+  cat <<EOF
+
+DRIFT (acknowledgement lapsed): $1
+  the label          $2
+  now resolves to    $4
+  but the pin says   $3
+
+  The chart acknowledges this pin trailing its "$5" float, but the float now
+  tracks "$6". The acknowledgement was reasoned about one specific line and its
+  compatibility boundary (docs/SECURITY.md §4.1.1); a different line is a
+  different boundary that nobody has re-derived. Red until a human re-verifies
+  the boundary for "$6" and updates images.ingestor.ackDrift.line to match (or
+  corrects the float). Not something this watcher may wave through on its own.
+EOF
+}
+
+report_ack_pin_unhealthy() {  # <path> <ref> <pinned> <why>
+  FINDINGS=$((FINDINGS + 1))
+  cat <<EOF
+
+DRIFT (acknowledged pin no longer healthy): $1
+  the label          $2
+  the pin says       $3
+  but $4
+
+  The float moving off this pin is acknowledged (backend#2673) -- but ONLY while
+  the pin itself stays a valid, reproducible multi-arch image, which is the whole
+  reason a prod edge pins a digest. It no longer is. This is a real finding: the
+  reproducibility guarantee the pin exists for is void, independent of the
+  acknowledged float movement. See docs/SECURITY.md §4.1.1.
+EOF
+}
+
 if [[ -n "${DRIFT_RESOLVE_STUB:-}" ]]; then
   echo "*** STUBBED RUN — registry replaced by $DRIFT_RESOLVE_STUB. NOT a real audit. ***"
 fi
@@ -207,7 +337,7 @@ echo "Watching every mutable label that points at a pinned digest."
 echo "Registry of trusted versions: ${chart_values#"$here"/../}"
 echo
 
-while IFS="$(printf '\037')" read -r path repo flt pin; do
+while IFS="$(printf '\037')" read -r path repo flt pin ack_line ack_reason; do
   [[ -n "${pin:-}" ]] || continue
   PINS=$((PINS + 1))
 
@@ -235,8 +365,32 @@ while IFS="$(printf '\037')" read -r path repo flt pin; do
 
   if [[ "$resolved" == "$pin" ]]; then
     printf 'ok    %-46s %s\n' "$ref" "${pin:0:19}…"
-  else
+  elif [[ -z "${ack_line:-}" ]]; then
+    # The common case: the float moved off a pin that was NOT deliberately held
+    # back. A real finding.
     report_drift "$path" "$ref" "$pin" "$resolved"
+  elif [[ "$ack_line" != "$flt" ]]; then
+    # Acknowledged, but for a DIFFERENT float line than the chart now tracks.
+    # The acknowledgement has lapsed -- red until the boundary is re-derived.
+    report_ack_lapsed "$path" "$ref" "$pin" "$resolved" "$ack_line" "$flt"
+  else
+    # Acknowledged expected drift (backend#2673). The float legitimately roams
+    # away from a pin held back on purpose -- but the acknowledgement is
+    # CONDITIONAL on the pin itself still being a healthy, reproducible image.
+    # Re-verify that here; do not wave it through on the ack alone.
+    plats="$(pin_platforms "$repo" "$pin")"
+    if [[ -z "$plats" ]]; then
+      # Fail CLOSED, and do not over-attribute: an empty platform set means the
+      # pin could not be CONFIRMED healthy, which includes causes that are not
+      # "the digest is gone" (buildx absent, auth, rate limit, network).
+      report_ack_pin_unhealthy "$path" "$ref" "$pin" \
+        "its multi-arch index could not be confirmed (registry auth, rate limit, network, docker buildx unavailable, or a garbage-collected digest)."
+    elif ! { grep -q 'linux/amd64' <<<"$plats" && grep -q 'linux/arm64' <<<"$plats"; }; then
+      report_ack_pin_unhealthy "$path" "$ref" "$pin" \
+        "it is not a linux/amd64 + linux/arm64 multi-arch index (saw: ${plats% }); pinning a single-arch digest breaks ingestion on the other arch (client#186)."
+    else
+      report_acknowledged "$path" "$ref" "$pin" "$resolved" "$ack_reason" "${plats% }"
+    fi
   fi
 done <<EOF
 $(discover_pins "$chart_values")
@@ -254,7 +408,16 @@ if [[ "$PINS" -eq 0 ]]; then
   exit 2
 fi
 if [[ "$FINDINGS" -eq 0 ]]; then
-  echo "no drift: $CHECKED of $PINS pinned label(s) checked, all still resolve to their trusted digest."
+  if [[ "$ACKNOWLEDGED" -gt 0 ]]; then
+    # Not "all resolve to their trusted digest" -- some deliberately do not, and
+    # saying so keeps the acknowledged pins visible rather than folding them into
+    # a flat "no drift" that hides how many pins are intentionally held back.
+    echo "no unexpected drift: $CHECKED of $PINS pinned label(s) checked."
+    echo "  $((CHECKED - ACKNOWLEDGED)) resolve to their trusted digest; $ACKNOWLEDGED acknowledged as"
+    echo "  expected drift and re-verified healthy (backend#2673 / docs/SECURITY.md §4.1.1)."
+  else
+    echo "no drift: $CHECKED of $PINS pinned label(s) checked, all still resolve to their trusted digest."
+  fi
   if [[ -n "${DRIFT_RESOLVE_STUB:-}" ]]; then
     echo "  (STUBBED — proves nothing about the real registry.)"
   fi

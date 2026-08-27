@@ -294,3 +294,177 @@ EOF
   [ "$status" -eq 0 ] || return 1
   [[ "$output" != *"UNWATCHABLE"* ]] || return 1
 }
+
+# --- acknowledged, expected drift (backend#2673) ---------------------------
+#
+# The ingestor prod pin is DELIBERATELY held behind its channelTags.prod float
+# (docs/SECURITY.md §4.1.1), so the float resolves away from the pin every night.
+# That standing red trained everyone to ignore the watch AND masked any new drift
+# on another pin. An `ackDrift:` block declares the divergence expected: the job
+# goes green and prints ACKNOWLEDGED, but ONLY while the pin itself stays a
+# healthy multi-arch index and ONLY for the pin that declared it.
+
+# <ack_line> <prod_channel> <pin_digest>. ack_line and prod_channel are separate
+# args so a test can make them disagree (a lapsed acknowledgement). The reason
+# carries `#`, `{`, `}` and `..` on purpose -- the awk that reads it must not eat
+# them the way a trailing-comment stripper would.
+ingestor_ack_values() {
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  ingestor:
+    repository: "ghcr.io/tracebloc/ingestor"
+    tag: ""
+    channelTags:
+      dev: "dev"
+      stg: "stg"
+      prod: "$2"
+    ackDrift:
+      line: "$1"
+      reason: "held behind the 0.8 float pending data-ingestors#468; safe set {v0.8.0..v0.8.4}."
+    prodDigest: "$3"
+EOF
+}
+
+@test "ACK: the float roaming off a held-back ingestor pin is ACKNOWLEDGED, not DRIFT" {
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1
+  [[ "$output" != *"DRIFT"* ]] || return 1
+}
+
+@test "ACK: the report carries the chart's reason verbatim (punctuation intact) and the §4.1.1 pointer" {
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  # reason is DATA from values.yaml, extracted between its quotes -- the #, {, }
+  # and .. must survive.
+  [[ "$output" == *"safe set {v0.8.0..v0.8.4}"* ]] || return 1
+  [[ "$output" == *"data-ingestors#468"* ]] || return 1
+  # the SECURITY pointer is a FIXED line the script always prints.
+  [[ "$output" == *"docs/SECURITY.md §4.1.1"* ]] || return 1
+}
+
+@test "ACK: the summary counts an acknowledged pin distinctly, not as plain agreement" {
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"no unexpected drift"* ]] || return 1
+  [[ "$output" == *"1 acknowledged"* ]] || return 1
+}
+
+@test "ACK is conditional: an acknowledged pin that stopped resolving still REDS" {
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  # float line only -- no repo@pin health line, so the pin does not resolve.
+  printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED" > "$TMP/stub"
+  run_check
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"acknowledged pin no longer healthy"* ]] || return 1
+  [[ "$output" == *"could not be confirmed"* ]] || return 1
+  [[ "$output" != *"ACKNOWLEDGED"* ]] || return 1
+}
+
+@test "ACK is conditional: an acknowledged pin that went single-arch still REDS" {
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"acknowledged pin no longer healthy"* ]] || return 1
+  [[ "$output" == *"multi-arch"* ]] || return 1
+}
+
+@test "ACK lapses when the prod float is moved to a line the acknowledgement was not reasoned about" {
+  # ackDrift.line stays 0.8 while the channel float moved to 0.9.
+  ingestor_ack_values "0.8" "0.9" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.9%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"acknowledgement lapsed"* ]] || return 1
+  [[ "$output" == *"\"0.8\""* ]] || return 1
+  [[ "$output" == *"\"0.9\""* ]] || return 1
+}
+
+@test "ACK is per-pin: an acknowledged ingestor drift does NOT mask a different image drifting" {
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  ingestor:
+    repository: "ghcr.io/tracebloc/ingestor"
+    tag: ""
+    channelTags:
+      prod: "0.8"
+    ackDrift:
+      line: "0.8"
+      reason: "held behind the 0.8 float pending data-ingestors#468; safe set {v0.8.0..v0.8.4}."
+    prodDigest: "$D_TRUST"
+egress:
+  proxy:
+    repository: ubuntu/squid
+    tag: "6.6"
+    digest: "$D_TRUST"
+EOF
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+    printf 'ubuntu/squid:6.6%s%s\n' "$SEP" "$D_MOVED"
+  } > "$TMP/stub"
+  run_check
+  # ingestor acknowledged (green on its own) but squid drifted (red) -> overall RED,
+  # and the squid finding must be visible, not folded into the standing ingestor red.
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1
+  [[ "$output" == *"DRIFT: egress.proxy"* ]] || return 1
+}
+
+@test "ACK is inert when the float still agrees with the pin: a plain ok, not ACKNOWLEDGED" {
+  ingestor_ack_values "0.8" "0.8" "$D_TRUST"
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_TRUST"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ok "* ]] || return 1
+  [[ "$output" != *"ACKNOWLEDGED"* ]] || return 1
+}
+
+@test "ACK: an UNQUOTED reason is still read (the fallback), not dropped to empty" {
+  # YAML permits a plain unquoted scalar; the reason reader tries between-quotes
+  # first and falls back to a trim. A distinctive word proves the fallback ran.
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  ingestor:
+    repository: "ghcr.io/tracebloc/ingestor"
+    tag: ""
+    channelTags:
+      prod: "0.8"
+    ackDrift:
+      line: "0.8"
+      reason: heldbackonpurposeXYZZY
+    prodDigest: "$D_TRUST"
+EOF
+  {
+    printf 'ghcr.io/tracebloc/ingestor:0.8%s%s\n' "$SEP" "$D_MOVED"
+    printf 'ghcr.io/tracebloc/ingestor@%s%slinux/amd64,linux/arm64\n' "$D_TRUST" "$SEP"
+  } > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1
+  [[ "$output" == *"heldbackonpurposeXYZZY"* ]] || return 1
+}

@@ -403,9 +403,14 @@ drift:
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker
-# daemon, and it is knowingly RED today -- the ingestor's 0.8 float has moved
-# off the pinned v0.8.2 digest, which is the whole finding. A red target in the
-# pre-push tier trains people to skip the tier.
+# daemon, so a red run in the pre-push tier would train people to skip the tier.
+#
+# The ingestor's 0.8 float has moved off the pinned v0.8.2 digest and stays off
+# on purpose (docs/SECURITY.md §4.1.1). That was a permanent RED until
+# backend#2673 taught the script to treat this ONE divergence as acknowledged
+# expected drift (declared in values.yaml as images.ingestor.ackDrift): the run
+# is now GREEN, printing ACKNOWLEDGED for the ingestor while still reddening on
+# any OTHER pin drifting or on the ingestor pin ceasing to resolve.
 #
 # It runs on the schedule in .github/workflows/digest-drift.yml. Its bats suite
 # IS in `make bats`, because that part needs no network.
