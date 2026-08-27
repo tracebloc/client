@@ -7,6 +7,9 @@
 # and that needs no network: input validation, the empty case, and the
 # title/marker/body the alert would carry — via ALERT_DRY_RUN=1, which makes the
 # script print the intended issue and make no gh call at all.
+#
+# Every standalone assertion ends in `|| return 1` (bats fails a test only on the
+# last command; see scripts/tests/unenforced-assertions.awk).
 
 setup() {
   SCRIPT="${BATS_TEST_DIRNAME}/../alert-workflow-staleness.sh"
@@ -32,24 +35,23 @@ run_alert() {  # findings-json on stdin
 
 @test "empty findings array files nothing and exits 0" {
   run_alert '[]'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"nothing to file"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"nothing to file"* ]] || return 1
 }
 
 @test "non-array input fails closed (exit 2)" {
   run_alert '{"not":"an array"}'
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 2 ] || return 1
 }
 
 @test "dry-run prints title, label and marker for a never-succeeded finding" {
   run_alert "[$(finding windows-e2e.yaml tracebloc/client 22 never cancelled)]"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"DRY-RUN"* ]]
-  [[ "$output" == *"CI staleness: windows-e2e.yaml in tracebloc/client"* ]]
-  [[ "$output" == *"~22d"* ]]
-  [[ "$output" == *"work-type:bug"* ]]
-  [[ "$output" == *"workflow-staleness:tracebloc/client:windows-e2e.yaml"* ]]
-  [[ "$output" == *"filed 2"* ]] || [[ "$output" == *"filed 1"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"DRY-RUN"* ]] || return 1
+  [[ "$output" == *"CI staleness: windows-e2e.yaml in tracebloc/client"* ]] || return 1
+  [[ "$output" == *"~22d"* ]] || return 1
+  [[ "$output" == *"work-type:bug"* ]] || return 1
+  [[ "$output" == *"workflow-staleness:tracebloc/client:windows-e2e.yaml"* ]] || return 1
 }
 
 @test "dry-run handles multiple findings, one marker each" {
@@ -57,14 +59,14 @@ run_alert() {  # findings-json on stdin
   f1="$(finding windows-e2e.yaml tracebloc/client 22 never cancelled)"
   f2="$(finding digest-drift.yml tracebloc/client 13 never failure)"
   run_alert "[$f1,$f2]"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"workflow-staleness:tracebloc/client:windows-e2e.yaml"* ]]
-  [[ "$output" == *"workflow-staleness:tracebloc/client:digest-drift.yml"* ]]
-  [[ "$output" == *"filed 2, skipped 0"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"workflow-staleness:tracebloc/client:windows-e2e.yaml"* ]] || return 1
+  [[ "$output" == *"workflow-staleness:tracebloc/client:digest-drift.yml"* ]] || return 1
+  [[ "$output" == *"filed 2, skipped 0"* ]] || return 1
 }
 
 @test "missing ALERT_REPO fails closed" {
   printf '%s' "[$(finding a.yml tracebloc/client 9 never failure)]" \
     | ALERT_DRY_RUN=1 "$SCRIPT" >"$TMP/out.log" 2>&1 && status=0 || status=$?
-  [ "$status" -ne 0 ]
+  [ "$status" -ne 0 ] || return 1
 }

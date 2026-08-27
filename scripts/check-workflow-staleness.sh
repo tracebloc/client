@@ -115,12 +115,22 @@ fi
 # (many runs/day) whose failing streak fits inside 100 runs but spans fewer than
 # MAX_DAYS of wall-clock could be under-flagged — see docs/WORKFLOW-STALENESS.md;
 # no such cron exists in this org (slowest cadence here is daily).
+#
+# On any failure this RETURNS non-zero (it does NOT call die). runs_for is
+# invoked from `$(...)`, i.e. a subshell; a `die`/`exit` there would only kill
+# the subshell, and with `set -uo pipefail` (no `-e`) the parent would sail on
+# with an empty result and report the workflow `ok` — a broken watcher looking
+# healthy, the exact fail-OPEN this script exists to prevent (Bugbot, #868). So
+# the caller checks the status and dies in the PARENT shell, where exit works.
 runs_for() {
   local wf="$1"
   if [[ -n "$STUB" ]]; then
     local f="$STUB/$wf.json"
-    if [[ -r "$f" ]]; then jq -c '.workflow_runs // []' "$f" || die "stub is not valid JSON: $f"
-    else echo '[]'; fi
+    if [[ -r "$f" ]]; then
+      jq -c '.workflow_runs // []' "$f" || { echo "ERROR: stub is not valid JSON: $f" >&2; return 1; }
+    else
+      echo '[]'
+    fi
     return 0
   fi
   local out
@@ -128,7 +138,8 @@ runs_for() {
   if ! out="$(gh api -H "Accept: application/vnd.github+json" \
         "/repos/$REPO/actions/workflows/$wf/runs?event=schedule&per_page=100" \
         --jq '.workflow_runs // []' 2>/dev/null)"; then
-    die "gh api failed listing runs for $wf in $REPO (auth? actions:read?)"
+    echo "ERROR: gh api failed listing runs for $wf in $REPO (auth? actions:read?)" >&2
+    return 1
   fi
   printf '%s\n' "$out"
 }
@@ -185,8 +196,17 @@ for path in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do
   grep -qE '^[[:space:]]*-?[[:space:]]*cron:' "$path" || continue
   wf="$(basename "$path")"
   scanned=$((scanned + 1))
-  runs="$(runs_for "$wf")"
-  finding="$(classify_one "$wf" "$runs")"
+  # Check each subshell's status in the PARENT shell so a fetch/parse failure
+  # dies loudly here (exit works) instead of silently yielding a false 'ok' — a
+  # `die` inside runs_for/classify_one would only kill its own subshell (Bugbot,
+  # #868). classify_one exits 0 with empty output when there is simply no finding,
+  # so its non-zero means a real jq/parse error, not "not stale".
+  if ! runs="$(runs_for "$wf")"; then
+    die "could not fetch scheduled runs for $wf in $REPO — failing loudly rather than reporting a false 'not stale'"
+  fi
+  if ! finding="$(classify_one "$wf" "$runs")"; then
+    die "could not classify $wf (invalid runs payload?) — failing loudly rather than reporting a false 'not stale'"
+  fi
   if [[ -n "$finding" ]]; then
     stale=$((stale + 1))
     days="$(jq -r '.days_since_success' <<<"$finding")"

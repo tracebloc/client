@@ -16,6 +16,11 @@
 #   * no completed scheduled runs at all -> not flagged (idle / brand-new)
 #   * a currently-queued run on top of an old cancelled streak -> STALE
 #     (we judge the newest COMPLETED run, not the newest run)
+#   * a fetch/parse failure -> the whole run fails LOUD, never a silent 'ok'
+#
+# Every standalone assertion ends in `|| return 1`: bats only fails a test on the
+# LAST command's status (and `[[ ]]` escapes errexit on bash 3.2), so an
+# unchained assertion is advisory (scripts/tests/unenforced-assertions.awk).
 
 setup() {
   SCRIPT="${BATS_TEST_DIRNAME}/../check-workflow-staleness.sh"
@@ -77,10 +82,10 @@ flagged()    { jq -e --arg w "$1" 'any(.[]; .workflow == $w)' <<<"$output" >/dev
     "$(run_obj 22 completed cancelled)"
   run_check
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(n_findings)" -eq 1 ]
-  flagged windows-e2e.yaml
+  [ "$(n_findings)" -eq 1 ] || return 1
+  flagged windows-e2e.yaml || return 1
   # last_success is "never" and it must report the ~22d floor, not the newest run's 1d.
-  jq -e '.[0].last_success == "never" and .[0].last_success_known == false and .[0].days_since_success >= 21' <<<"$output"
+  jq -e '.[0].last_success == "never" and .[0].last_success_known == false and .[0].days_since_success >= 21' >/dev/null <<<"$output" || return 1
 }
 
 @test "had successes, newest failed, last green too long ago is STALE" {
@@ -90,9 +95,9 @@ flagged()    { jq -e --arg w "$1" 'any(.[]; .workflow == $w)' <<<"$output" >/dev
     "$(run_obj 3 completed failure)" \
     "$(run_obj 9 completed success)"
   run_check
-  [ "$status" -eq 0 ]
-  flagged digest-drift.yml
-  jq -e '.[0].last_success_known == true and .[0].last_conclusion == "failure" and .[0].days_since_success >= 7' <<<"$output"
+  [ "$status" -eq 0 ] || return 1
+  flagged digest-drift.yml || return 1
+  jq -e '.[0].last_success_known == true and .[0].last_conclusion == "failure" and .[0].days_since_success >= 7' >/dev/null <<<"$output" || return 1
 }
 
 @test "newest completed run is a success -> never flagged, even when older than threshold (weekly job)" {
@@ -101,8 +106,8 @@ flagged()    { jq -e --arg w "$1" 'any(.[]; .workflow == $w)' <<<"$output" >/dev
   # Only run in the window is a success 6 days ago. 6 > 3, but it is not stale.
   stub weekly.yml "$(run_obj 6 completed success)"
   run_check
-  [ "$status" -eq 0 ]
-  [ "$(n_findings)" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$(n_findings)" -eq 0 ] || return 1
 }
 
 @test "newest failed but last success still recent -> not flagged (flake grace)" {
@@ -111,8 +116,8 @@ flagged()    { jq -e --arg w "$1" 'any(.[]; .workflow == $w)' <<<"$output" >/dev
     "$(run_obj 1 completed failure)" \
     "$(run_obj 2 completed success)"
   run_check
-  [ "$status" -eq 0 ]
-  [ "$(n_findings)" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$(n_findings)" -eq 0 ] || return 1
 }
 
 @test "no completed scheduled runs -> not flagged (idle / brand-new)" {
@@ -120,16 +125,16 @@ flagged()    { jq -e --arg w "$1" 'any(.[]; .workflow == $w)' <<<"$output" >/dev
   # only an in-progress run, nothing completed
   stub idle.yml "$(run_obj 0 queued null)"
   run_check
-  [ "$status" -eq 0 ]
-  [ "$(n_findings)" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$(n_findings)" -eq 0 ] || return 1
 }
 
 @test "empty run history -> not flagged" {
   mkwf fresh.yml
   stub fresh.yml   # writes {workflow_runs: []}
   run_check
-  [ "$status" -eq 0 ]
-  [ "$(n_findings)" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
+  [ "$(n_findings)" -eq 0 ] || return 1
 }
 
 @test "a queued run on top of an old cancelled streak is still STALE (newest COMPLETED wins)" {
@@ -139,9 +144,9 @@ flagged()    { jq -e --arg w "$1" 'any(.[]; .workflow == $w)' <<<"$output" >/dev
     "$(run_obj 1 completed cancelled)" \
     "$(run_obj 20 completed cancelled)"
   run_check
-  [ "$status" -eq 0 ]
-  flagged windows-e2e.yaml
-  jq -e '.[0].last_conclusion == "cancelled"' <<<"$output"
+  [ "$status" -eq 0 ] || return 1
+  flagged windows-e2e.yaml || return 1
+  jq -e '.[0].last_conclusion == "cancelled"' >/dev/null <<<"$output" || return 1
 }
 
 @test "event-driven workflow (no schedule/cron) is out of scope" {
@@ -153,9 +158,9 @@ YAML
   # even if a stub existed for it, it must not be scanned
   stub pr-only.yml "$(run_obj 30 completed failure)"
   run_check
-  [ "$status" -eq 0 ]
-  [ "$(n_findings)" -eq 0 ]
-  [[ "$output" == "[]" ]]
+  [ "$status" -eq 0 ] || return 1
+  [ "$(n_findings)" -eq 0 ] || return 1
+  [[ "$output" == "[]" ]] || return 1
 }
 
 @test "threshold boundary: exactly MAX_DAYS old is stale, one day short is not" {
@@ -165,9 +170,9 @@ YAML
   stub a.yml "$(run_obj 7 completed failure)"   # exactly 7d, no success -> stale
   stub b.yml "$(run_obj 6 completed failure)"   # 6d -> not yet
   run_check
-  [ "$status" -eq 0 ]
-  flagged a.yml
-  ! flagged b.yml
+  [ "$status" -eq 0 ] || return 1
+  flagged a.yml || return 1
+  ! flagged b.yml || return 1
 }
 
 @test "mixed repo: two stale of several scheduled, findings is valid JSON array" {
@@ -178,20 +183,31 @@ YAML
   stub digest-drift.yml "$(run_obj 13 completed failure)"
   stub healthy.yml      "$(run_obj 1 completed success)"
   run_check
-  [ "$status" -eq 0 ]
-  [ "$(n_findings)" -eq 2 ]
-  flagged windows-e2e.yaml
-  flagged digest-drift.yml
-  ! flagged healthy.yml
+  [ "$status" -eq 0 ] || return 1
+  [ "$(n_findings)" -eq 2 ] || return 1
+  flagged windows-e2e.yaml || return 1
+  flagged digest-drift.yml || return 1
+  ! flagged healthy.yml || return 1
   # stdout is a single JSON array and nothing else
-  jq -e 'type == "array"' <<<"$output"
+  jq -e 'type == "array"' >/dev/null <<<"$output" || return 1
+}
+
+@test "a fetch/parse failure fails the whole run LOUD, never a silent ok (Bugbot #868)" {
+  # A corrupt runs payload stands in for any gh-api/jq failure. runs_for returns
+  # non-zero from its subshell; the caller must die in the parent, NOT print 'ok'
+  # and exit 0. Before the fix this exited 0 with `[]` — a broken watcher looking
+  # healthy.
+  mkwf x.yml
+  printf '%s' '{ this is not json' > "$STUB/x.yml.json"
+  run_check
+  [ "$status" -eq 2 ] || { echo "expected exit 2, got $status; stdout=[$output]"; return 1; }
 }
 
 @test "bad STALENESS_MAX_DAYS fails closed (exit 2)" {
   mkwf x.yml
   MAX_DAYS=notanumber
   run_check
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 2 ] || return 1
 }
 
 @test "missing stub dir fails closed (exit 2)" {
@@ -201,5 +217,5 @@ YAML
   STALENESS_RUNS_STUB="$TMP/does-not-exist" \
   STALENESS_NOW="$NOW" \
     "$SCRIPT" >"$TMP/out.json" 2>"$TMP/err.log" && status=0 || status=$?
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 2 ] || return 1
 }
