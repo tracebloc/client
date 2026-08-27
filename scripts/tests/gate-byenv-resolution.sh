@@ -78,6 +78,18 @@ HELPERS="$CHART/templates/_helpers.tpl"
 [ -r "$HELPERS" ]     || { echo "FATAL: cannot read $HELPERS" >&2; exit 1; }
 command -v helm >/dev/null 2>&1 || { echo "FATAL: helm is required; a skip here is indistinguishable from a pass" >&2; exit 1; }
 
+# PYYAML, PREFLIGHTED BEFORE ANY PYTHON RUNS -- the class rule every yaml-reading
+# guard here obeys, enforced by `scripts/tests/pyyaml-preflight.bats` (Bugbot).
+#
+# Without it the discovery heredocs below die as a bare `ModuleNotFoundError`
+# traceback on a runner that has python3 but not PyYAML, instead of the named
+# refusal every sibling emits -- and the reader is left debugging a stack trace
+# for a missing dependency. The spelling matters as much as the check: the class
+# rule recognises `python3 -c 'import yaml'` as a file-level gate, so writing it
+# any other way passes the runtime and fails the rule.
+command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 is required to read $VALUES_FILE; a skip here is indistinguishable from a pass" >&2; exit 1; }
+python3 -c 'import yaml' >/dev/null 2>&1 || { echo "FATAL: PyYAML required (python3 -m pip install pyyaml) -- this guard reads $VALUES_FILE, and cannot tell is a finding" >&2; exit 1; }
+
 fails=0
 checks=0
 fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
