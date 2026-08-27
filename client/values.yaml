@@ -821,6 +821,40 @@ images:
     # written on 2026-08-12, false hours later when v0.8.8 shipped, and by then
     # it contradicted the paragraph directly above it in this same comment.
     # A boundary is a fact; "the latest release" is a moving target.
+    #
+    # -- ACKNOWLEDGED DRIFT (backend#2673). Because `prodDigest` is deliberately
+    # held behind the `channelTags.prod` float above, scripts/check-digest-drift.sh
+    # sees `ghcr.io/tracebloc/ingestor:0.8` resolve away from this pin every
+    # night. That divergence is EXPECTED. Left unhandled it made the daily watch
+    # RED forever, which trained everyone to ignore it AND masked any NEW,
+    # actionable drift on another pin (squid, mysql-client) behind the standing
+    # red -- the backend#2386 failure mode. This block tells the watcher the
+    # divergence is acknowledged, so the job goes GREEN and prints ACKNOWLEDGED,
+    # while ANY OTHER pin drifting still reds it.
+    #
+    # It is NOT a blanket mute. The watcher still re-verifies, every run, that
+    # THIS pin resolves to a healthy multi-arch index; a pin that stopped
+    # resolving or went single-arch reds regardless of this block. And the
+    # acknowledgement is declared HERE, not in the script, on purpose: acknowledging
+    # a security-relevant drift belongs next to the pin and behind this file's
+    # CODEOWNERS review, so lifting it is a reviewed chart change rather than a
+    # silent script edit.
+    #
+    #   line   — the channel line this acknowledgement was reasoned about. It
+    #            MUST equal channelTags.prod above. If the prod float is ever moved
+    #            to a new line, these stop matching, the acknowledgement LAPSES,
+    #            and the watch reds until someone re-derives the boundary for the
+    #            new line and updates both. Do not paste a digest here: the float
+    #            legitimately roams every 0.8.x patch, so a digest would re-alarm
+    #            on each one — acknowledge the CLASS, never a specific float.
+    #   reason — surfaced verbatim in the ACKNOWLEDGED report. Keep it a factual
+    #            statement of WHY the pin is held back, so a reader (or an operator
+    #            about to flip serviceDbAccountsByEnv.prod) sees when it no longer
+    #            applies. When the boundary is resolved, delete this whole block in
+    #            the same change that advances the pin.
+    ackDrift:
+      line: "0.8"
+      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8) while prod serviceDbAccountsByEnv.prod is still false. Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on."
     prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
