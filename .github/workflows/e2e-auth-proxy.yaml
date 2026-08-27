@@ -1,0 +1,79 @@
+name: E2E auth-proxy
+
+# The authenticated corporate-proxy end-to-end test (the Tenant-a / hospital
+# archetype): stand up a squid that REQUIRES basic auth, bring a k3d cluster up
+# with the installer's proxy config pointed at it as user:pass@host, and prove
+# both egress paths behave — the nodes pull a workload image THROUGH the authed
+# proxy (the squid access log shows an authenticated auth.docker.io CONNECT,
+# which only a real pull makes), and an app pod tunnels via the in-cluster squid
+# only when the ingestion proxy env is set. Guards the #119/#172/#174 proxy
+# hardening end-to-end.
+#
+# WHY ITS OWN FILE — split out of installer-tests.yaml on 2026-08-27
+# (backend#2350). This check shipped RED to `staging` on client#789 and blocked
+# nothing, because it was a job inside installer-tests.yaml: an expensive,
+# path-filtered workflow whose jobs can never be required status checks. A
+# required check behind a paths filter never reports on a PR that touches nothing
+# under the filter, and GitHub then holds the PR at "Expected — waiting for
+# status to be reported" indefinitely. A guard that cannot block is advice, not a
+# gate (backend#1729). To BE a gate a check has to report on the branches it
+# gates, on every PR to them. This workflow is the shape that can — the same move
+# `Source-of-truth drift` made out of installer-tests.yaml's old `static` job
+# (see drift-checks.yaml).
+#
+# NO `paths:` ON pull_request, deliberately. This is a candidate required status
+# check on `staging` and `main`; a required check that is path-filtered is
+# unmergeable-forever the moment a PR touches nothing under the filter — a
+# promotion PR whose batch happens not to touch scripts/, a backmerge, the hotfix
+# lane. So on pull_request it always runs and always reports. (drift-checks.yaml's
+# header spells out the identical hazard, and names the PRs it once stuck.)
+#
+# `push` KEEPS a paths filter: pushes are not gated by required checks, so
+# path-scoping the post-merge signal is free and correct.
+#
+# COST — unlike installer-tests.yaml's 9-distro docker-in-docker matrix this is a
+# SINGLE ubuntu-latest job (~90s k3d), so "runs on every PR to these branches" is
+# one run, not the matrix. That matrix cost is the objection that kept it
+# path-filtered inside installer-tests; it does not apply once the job stands
+# alone. If per-PR cost ever bites, the lever is to scope pull_request to the
+# gating branches only ([main, staging]) and lean on the push signal for develop.
+#
+# This workflow does NOT make the check required — that is a branch-protection
+# setting, armed only after a green-watch window per the "arm while green" rule
+# (CLAUDE.md). Arm it on `staging` + `main` (the hop this protects), not on
+# `develop` where the same blip would tax every PR. See backend#2350.
+on:
+  push:
+    branches: [main, staging, develop, openshift]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/e2e-auth-proxy.yaml'
+  pull_request:
+    branches: [main, staging, develop, openshift]
+  schedule:
+    # Mondays 03:00 UTC — the same cadence e2e-proxy already ran on via
+    # installer-tests.yaml's cron; kept here so extracting the job does not drop
+    # its weekly canary. It pulls external images (squid/nginx/curl) and opens a
+    # real CONNECT to auth.docker.io, so the canary catches drift in those before
+    # it reddens a promotion.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded PR runs; never cancel push/schedule.
+  group: e2e-auth-proxy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e-proxy:
+    # Single runner (arch-agnostic), no secrets. What it proves is in the header.
+    name: E2E auth-proxy (squid)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cluster up through an authenticated proxy
+        run: bash scripts/tests/e2e-proxy.sh

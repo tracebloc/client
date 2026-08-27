@@ -226,20 +226,18 @@ jobs:
       - name: Bring up a real k3d cluster + run a workload
         run: bash scripts/tests/e2e-cluster.sh
 
-  e2e-proxy:
-    timeout-minutes: 30
-    # Authenticated corporate-proxy E2E (the Tenant-a/hospital archetype): stands
-    # up a squid that REQUIRES basic auth, brings the cluster up with the
-    # installer's proxy config pointed at it as user:pass@host, and proves the
-    # nodes pull a workload image THROUGH the authed proxy (the squid log shows an
-    # authenticated auth.docker.io CONNECT, which only a real pull makes). Guards
-    # the #172/#174 proxy hardening end-to-end. Single runner (arch-agnostic). No secrets.
-    name: E2E auth-proxy (squid)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Cluster up through an authenticated proxy
-        run: bash scripts/tests/e2e-proxy.sh
+  # The `e2e-proxy` job (`E2E auth-proxy (squid)`) moved to its own workflow,
+  # e2e-auth-proxy.yaml, on 2026-08-27 (backend#2350). It shipped RED to `staging`
+  # on client#789 and blocked nothing: a job in THIS workflow can never be a
+  # required status check, because installer-tests is path-filtered on both push
+  # AND pull_request, and a required check behind a paths filter never reports on
+  # a PR outside its paths — GitHub then holds the PR at "waiting for status to be
+  # reported" forever. A guard that cannot block is advice, not a gate
+  # (backend#1729). Its new home has `pull_request` with no `paths:` so it always
+  # reports and can be armed as a gate on `staging`/`main` — the same move
+  # drift-checks.yaml's `Source-of-truth drift` made out of the old `static` job.
+  # It ran on a single ubuntu-latest runner, so extracting it costs the matrix
+  # nothing.
 
   path-persist:
     timeout-minutes: 20
