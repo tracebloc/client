@@ -587,6 +587,12 @@ _use_real_runtime_probe() {
   _assess_cluster_servers_running() { echo 1; }
   _assess_release_pending() { return 1; }        # not wedged
   kubectl() { echo 1; }                          # every workload Ready
+  _assess_cli_outdated() { return 1; }           # above the floor — stub the leaf so
+                                                 # this never shells out to a real host
+                                                 # `tracebloc version` (a below-floor CLI
+                                                 # in ~/.local/bin would classify cli-
+                                                 # outdated and mask healthy). Same stub
+                                                 # the sibling classify tests use.
   _assess_classify
   [ "$INSTALL_STATE" = healthy ] || return 1
   assert_has "munich" "$INSTALL_STATE_REASON"

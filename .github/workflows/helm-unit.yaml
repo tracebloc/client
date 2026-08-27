@@ -30,7 +30,9 @@ name: Helm unit tests
 # a near-miss produces the same permanent-pending state as the paths trap.
 # scripts/tests/helm-unittest-gated.sh — which runs in the REQUIRED
 # `Source-of-truth drift` job — pins the name, refuses a `pull_request` paths
-# filter, and refuses a second job producing the same context.
+# filter, refuses `pull_request` types that omit `edited` (the retarget gap
+# documented on the trigger below), and refuses a second job producing the same
+# context.
 #
 # What that guard does NOT do, said here rather than implied: it does not read
 # the live branch-protection list, so it cannot prove the context is currently
@@ -45,6 +47,16 @@ on:
       - '.github/workflows/helm-unit.yaml'
   pull_request:
     branches: [main, develop, openshift]
+    # `edited` closes a THIRD trigger gap, alongside the two paths reasons in the
+    # header. GitHub's default pull_request types are [opened, synchronize,
+    # reopened] -- a base-branch change (a RETARGET) fires only `edited`, which
+    # the defaults omit. A PR opened against a base this workflow does not run on,
+    # then retargeted onto develop/main, would never produce `Helm unit tests`
+    # and would sit at "Expected - waiting for status to be reported" forever --
+    # the same permanent-pending state the paths trap causes, reached a different
+    # way (Bugbot, backend#2701). Listing types REPLACES the defaults, so the
+    # three defaults are spelled out too, not just `edited`.
+    types: [opened, synchronize, reopened, edited]
     # NO `paths:` HERE, deliberately -- see reason 1 in the header. The suite is
     # ~4 seconds, so running it on every PR costs nothing next to a permanently
     # stuck PR.

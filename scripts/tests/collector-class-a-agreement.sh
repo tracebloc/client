@@ -52,7 +52,12 @@ render() {
 CMP="$(mktemp -t collector-class-a.XXXXXX)"
 trap 'rm -f "$CMP"' EXIT
 cat >"$CMP" <<'PY'
-import sys, re, yaml
+import sys, re
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 

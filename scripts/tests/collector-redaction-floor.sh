@@ -77,7 +77,10 @@ cat >"$CHK" <<'PY'
 import re
 import sys
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 # The floor, as BEHAVIOUR. Each specimen is a line that must not leave a cluster
 # with its secret intact, written independently of any pattern that catches it —

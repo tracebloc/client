@@ -33,6 +33,37 @@ run_alert() {  # findings-json on stdin
   output="$(cat "$TMP/out.log")"
 }
 
+# A configurable `gh` stub on PATH, so the real (non-dry-run) dedup + filing path
+# runs offline. Behaviour is driven by env vars the test exports before calling
+# run_alert_live; every invocation is appended to $GH_CALLS so a test can assert
+# whether `gh issue create` was reached.
+#   GH_SEARCH_EXIT  exit code for `gh search issues`      (default 0)
+#   GH_SEARCH_OUT   stdout for `gh search issues`         (default empty)
+#   GH_VIEW_EXIT    exit code for `gh issue view`         (default 0)
+#   GH_VIEW_BODY    stdout for `gh issue view`            (default empty)
+make_gh_stub() {
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "gh $*" >> "$GH_CALLS"
+case "$1 $2" in
+  "search issues") [ -n "${GH_SEARCH_OUT:-}" ] && printf '%s\n' "$GH_SEARCH_OUT"; exit "${GH_SEARCH_EXIT:-0}" ;;
+  "issue view")    [ -n "${GH_VIEW_BODY:-}"  ] && printf '%s\n' "$GH_VIEW_BODY";  exit "${GH_VIEW_EXIT:-0}"   ;;
+  "issue create")  echo "https://github.com/tracebloc/backend/issues/999";        exit 0                      ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$TMP/bin/gh"
+}
+
+run_alert_live() {  # findings-json on stdin, real path with the gh stub on PATH
+  make_gh_stub
+  GH_CALLS="$TMP/gh_calls.log"; : >"$GH_CALLS"; export GH_CALLS
+  printf '%s' "$1" | PATH="$TMP/bin:$PATH" ALERT_REPO="tracebloc/backend" ALERT_DRY_RUN=0 \
+    "$SCRIPT" >"$TMP/out.log" 2>&1 && status=0 || status=$?
+  output="$(cat "$TMP/out.log")"
+}
+
 @test "empty findings array files nothing and exits 0" {
   run_alert '[]'
   [ "$status" -eq 0 ] || return 1
@@ -69,4 +100,41 @@ run_alert() {  # findings-json on stdin
   printf '%s' "[$(finding a.yml tracebloc/client 9 never failure)]" \
     | ALERT_DRY_RUN=1 "$SCRIPT" >"$TMP/out.log" 2>&1 && status=0 || status=$?
   [ "$status" -ne 0 ] || return 1
+}
+
+# --- dedup fails closed on a search/read error (backend#2702) ----------------
+# A dedup existence-check that could not COMPLETE must never be read as "nothing
+# filed yet" and file a duplicate — it must abort loud and file nothing.
+
+@test "dedup search failure fails closed: exits non-zero and does NOT create" {
+  export GH_SEARCH_EXIT=1
+  run_alert_live "[$(finding windows-e2e.yaml tracebloc/client 22 never cancelled)]"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"dedup search failed"* ]] || return 1
+  ! grep -q "issue create" "$GH_CALLS" || return 1
+}
+
+@test "dedup candidate-read failure fails closed: exits non-zero and does NOT create" {
+  export GH_SEARCH_EXIT=0 GH_SEARCH_OUT="123" GH_VIEW_EXIT=1
+  run_alert_live "[$(finding windows-e2e.yaml tracebloc/client 22 never cancelled)]"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"dedup read of tracebloc/backend#123 failed"* ]] || return 1
+  ! grep -q "issue create" "$GH_CALLS" || return 1
+}
+
+@test "existing open issue with the marker is deduped: skips, no create" {
+  export GH_SEARCH_EXIT=0 GH_SEARCH_OUT="123" GH_VIEW_EXIT=0 \
+    GH_VIEW_BODY="tracked <!-- workflow-staleness:tracebloc/client:windows-e2e.yaml -->"
+  run_alert_live "[$(finding windows-e2e.yaml tracebloc/client 22 never cancelled)]"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"already tracked: windows-e2e.yaml -> tracebloc/backend#123"* ]] || return 1
+  ! grep -q "issue create" "$GH_CALLS" || return 1
+}
+
+@test "genuine empty search result still files: a completed check green-lights create" {
+  export GH_SEARCH_EXIT=0 GH_SEARCH_OUT=""
+  run_alert_live "[$(finding windows-e2e.yaml tracebloc/client 22 never cancelled)]"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"filed: windows-e2e.yaml -> https://github.com/tracebloc/backend/issues/999"* ]] || return 1
+  grep -q "issue create" "$GH_CALLS" || return 1
 }

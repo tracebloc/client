@@ -787,6 +787,27 @@
               "type": "boolean",
               "description": "Whether `prodDigest` applies on this edge. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod edge to float it while the rest of the fleet stays pinned."
             },
+            "ackDrift": {
+              "type": "object",
+              "description": "Acknowledged, expected drift for THIS pin (backend#2673). Present only when `prodDigest` is deliberately held behind the `channelTags.prod` float (docs/SECURITY.md §4.1.1). scripts/check-digest-drift.sh then treats the float resolving away from the pin as EXPECTED (job green, printed ACKNOWLEDGED) instead of a finding -- while still re-verifying the pin itself resolves to a healthy multi-arch index, and while ANY OTHER pin drifting still reds. Not consumed by any template; a CI/watch declaration that lives next to the pin and behind CODEOWNERS review. Acknowledge the CLASS, never a specific float digest. Remove this block in the same change that advances the pin off the boundary.",
+              "additionalProperties": false,
+              "required": ["line", "reason"],
+              "properties": {
+                "line": {
+                  "type": "string",
+                  "minLength": 1,
+                  "not": {
+                    "const": "latest"
+                  },
+                  "description": "The channel line the acknowledgement was reasoned about. MUST equal channelTags.prod; if the prod float is moved to a new line these stop matching, the acknowledgement lapses, and the watch reds until the boundary is re-derived for the new line and both are updated."
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Human justification for holding the pin behind its float, surfaced verbatim in the ACKNOWLEDGED report. State WHY, so a reader sees when it no longer applies."
+                }
+              }
+            },
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",

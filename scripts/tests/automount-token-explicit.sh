@@ -80,7 +80,12 @@ EXPECTED="$(grep -rlE '^kind: (Deployment|DaemonSet|StatefulSet|Job|CronJob|Pod|
 CHK="$(mktemp -t automount.XXXXXX)"
 trap 'rm -f "$CHK"' EXIT
 cat >"$CHK" <<'PY'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 KINDS = {"Deployment", "DaemonSet", "StatefulSet", "ReplicaSet",
          "Job", "CronJob", "Pod", "ReplicationController"}

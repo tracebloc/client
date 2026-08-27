@@ -74,6 +74,18 @@ for *what the operator sees and can act on*, not code elegance.
   that prints ✓ / "healthy" / "ready" on a path where the underlying assertion was
   skipped, degraded, or errored, and any summary that counts a skipped check as passed.
 
+- **A python guard that imports `yaml` (or any non-stdlib module) after checking only
+  `command -v python3`.** `command -v python3` proves the INTERPRETER, not the MODULE:
+  a runner with python3 but no PyYAML then dies as a bare `ModuleNotFoundError` traceback
+  (in a `.sh` guard) or degrades to a silent skip (in a `.bats` one — indistinguishable
+  from a pass in a required gate). This class has recurred: client#830 fixed it in
+  `e2e-proxy-probe.bats`, and it came back across 14 guards as backend#2686. The fix is
+  the interpreter-then-module preflight the siblings already carry —
+  `import sys; try: import yaml; except ImportError: sys.exit("[ERROR] PyYAML required (pip install pyyaml)")`,
+  or a `.bats` `require_pymodule`/`require_yaml_tooling` helper.
+  `scripts/tests/pyyaml-preflight.bats` now derives the guard list from the tree and fails
+  closed, so flag any *new* yaml-importing guard that skips it.
+
 - **`A && B` where B is the operation that actually matters.** Chaining makes B conditional
   on A, so the *more likely to fail* call silently cancels the load-bearing one — and the
   `|| echo` tail then reports a graceful degrade that never happened. `init-writable-data`
