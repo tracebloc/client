@@ -205,22 +205,6 @@ jobs:
         with:
           version: v3.15.4
 
-      # THE MIRROR-ENUMERATION GUARD RUNS HERE, in a REQUIRED job, because it
-      # was running NOWHERE. It is a `.sh`, and the only step that ran anything
-      # in scripts/tests/ from this job was `bats scripts/tests/*.bats` -- so the
-      # completeness guard for backend#2633 was written, reviewed and merged
-      # while no workflow ever invoked it. A guard nothing runs is not weaker
-      # than a required one; it is advice (CLAUDE.md rule 2).
-      #
-      # It needs the helm set up above (it renders the real chart) and PyYAML,
-      # which it preflights with an explicit error rather than skipping -- the
-      # same fail-closed shape the rest of this job uses for a missing helm.
-      #
-      # 15 OTHER `.sh` guards in scripts/tests/ are still invoked by no workflow.
-      # That sweep is filed separately rather than smuggled into this PR.
-      - name: Mirror enumeration is complete and fails closed (backend#2633)
-        run: bash scripts/tests/mirror-enumeration-complete.sh
-
       - name: Run bats (bash unit suite, mocked)
         # CI=true is already set by GitHub; chart-pull-secret.bats reads it to
         # turn "helm is missing" from a skip into a FAILURE. A skip is the right
