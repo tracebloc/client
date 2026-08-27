@@ -38,7 +38,12 @@ echo "== telemetry token agreement =="
 CMP="$(mktemp -t tok-agree.XXXXXX)"
 trap 'rm -f "$CMP"' EXIT
 cat >"$CMP" <<'PY'
-import sys, yaml, posixpath
+import sys, posixpath
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 if not docs:
@@ -174,7 +179,12 @@ helm template t "$CHART" \
 NAME="$(mktemp -t tok-name.XXXXXX)"
 trap 'rm -f "$CMP" "$NAME"' EXIT
 cat >"$NAME" <<'PY'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 # Chase the references, do not match a string: the token name is whatever the
 # writer was told and whatever the reader mounts, and this reports it only if the
 # two agree — an empty or split render is a finding, not a silent pass.
