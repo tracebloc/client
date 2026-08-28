@@ -397,7 +397,18 @@ spec:
         - name: PER_DATASET_PVCS
           value: "1"
         {{- end }}
-        {{- if .Values.perExperimentDbCreds }}
+{{- /* Refuse a mis-paired narrowing before the Deployment is patched. */ -}}
+{{- include "tracebloc.assertNarrowEdgeuserIsSafe" . }}
+        {{- if (include "tracebloc.narrowEdgeuser" .) }}
+        # backend#1528 S3 close-out: REVOKE edgeuser to USAGE on every boot, so a
+        # fleet that completed the retirement stays retired across a fresh datadir
+        # (10-edgeuser-bridge-grants.sql re-grants it at init and cannot branch on
+        # a runtime flag). jobs-manager refuses this unless the whole posture is
+        # retired; the render refuses it too, above. It REVOKEs, never DROPs.
+        - name: NARROW_EDGEUSER
+          value: "1"
+        {{- end }}
+        {{- if (include "tracebloc.perExperimentDbCreds" .) }}
         # RFC-0003 D10 (backend#1181): per-experiment MySQL credentials. When
         # on, jobs-manager mints a short-lived MySQL user per experiment scoped
         # to only its own table(s) and injects it into the training pod via a

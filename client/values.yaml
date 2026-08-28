@@ -1481,7 +1481,68 @@ perDatasetPvcs: false
 # behavior, byte-for-byte. Retiring edgeuser is a later step once this is
 # universally on. Needs no per-edge action — the tb_credmgr password is a
 # generated, upgrade-stable Secret value.
-perExperimentDbCreds: false
+# LEFT NULL ON PURPOSE, matching serviceDbAccounts. The helper distinguishes
+# "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
+# `false` here is an OPERATOR OVERRIDE that wins over every fleet default and
+# makes the map below dead. Measured: with `perExperimentDbCreds: false` left in
+# place, `dev` still rendered the gate off.
+perExperimentDbCreds:
+
+# -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#1528).
+#
+# An operator `--set perExperimentDbCreds` still wins; with it unset, the fleet
+# default below applies, resolved through the same CLIENT_ENV normalization as
+# serviceDbAccountsByEnv (so `staging` maps to `stg` and cannot miss its entry).
+#
+# WHY THIS EXISTS. Every other gate in this rollout had a `…ByEnv` map; this one
+# did not, so the flag backend#1528's LAST step is gated on was the one whose
+# fleet posture the chart could not record. A fleet taken to the per-experiment
+# shape held that fact only in its stored release values — and a values-resetting
+# upgrade or a fresh-datadir reinstall drops it, which puts the account mint back
+# on edgeuser: the account the ticket exists to retire, silently restored.
+#
+# `dev: true` records a posture already achieved: dev was fully retired on
+# 2026-08-26 (edgeuser DROPped and verified under a driven experiment). Safe to
+# default on, because `credmgrPassword` generates-and-persists when unset —
+# measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
+# companion secret renders clean.
+#
+# `stg: false` still, deliberately. Staging is at REVOKE, not DROP — the soak is
+# not finished, so its posture is not yet a thing to bake.
+perExperimentDbCredsByEnv:
+  dev: true
+  stg: false
+  prod: false
+
+# Narrow edgeuser to USAGE only at every jobs-manager boot (backend#1528 S3
+# close-out). mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser
+# its broad privileges at every FRESH datadir init and cannot branch on a runtime
+# flag -- it is baked into a digest-frozen image and the mysql entrypoint runs it
+# before jobs-manager exists. So without this, a fleet that completed the entire
+# retirement can be handed a root-equivalent edgeuser again by a reinstall or a
+# datadir loss, silently. With it on, the retired posture is self-sustaining
+# instead of being a property of whoever last ran a REVOKE by hand.
+#
+# It REVOKES; it never DROPs. The account keeps existing with USAGE only -- able
+# to connect, able to do nothing -- which is reversible from the S0
+# `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot. `DROP USER` stays an operator step.
+#
+# ONLY LEGAL WITH ALL THREE PREDECESSORS ON: bootstrapDbReparent (else the REVOKE
+# strips the privileges of the connection issuing it), serviceDbAccounts and
+# perExperimentDbCreds (else a live consumer is still authenticating as edgeuser).
+# Enforced, not documented: the render FAILS on a mis-paired combination, and
+# jobs-manager refuses it again at startup. Verify a fleet is ready with
+# docs/migration-tools/edgeuser-drop-readiness.sh before flipping this.
+#
+# UNSET by default: the effective value comes from narrowEdgeuserByEnv below,
+# keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
+# regardless of environment. Mirrors serviceDbAccounts (backend#1752).
+narrowEdgeuser:
+
+narrowEdgeuserByEnv:
+  dev: false
+  stg: false
+  prod: false
 
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
@@ -1570,6 +1631,17 @@ tbIngestPassword: ""
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
 # edge regardless of environment (an operator override — DR, a fleet held back
 # deliberately, or a customer opt-out). Mirrors serviceDbAccounts (backend#1752).
+#
+# BAKING THIS ON REQUIRES THE ROTATION ON TOO (backend#2738). The re-parent needs
+# root's password pinned as DB_BOOTSTRAP_PASSWORD, and of the three tiers that can
+# supply it only one works for a DEFAULT: an explicit .Values.bootstrapDbPassword
+# is an operator action, the live Secret is empty on a fresh install and in every
+# `helm template`/dry-run, and the third — derived from rotateMysqlRoot, which is
+# what makes the chart the authority on root's password — renders everywhere. So
+# reparent=true with rotate=false has nothing to fall back on and hard-fails the
+# render for every install of that environment that does not pin the password by
+# hand. Bake the two ByEnv gates as a PAIR; scripts/tests/reparent-requires-
+# rotation.sh refuses the half-baked combination at review time.
 bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
