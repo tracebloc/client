@@ -470,6 +470,47 @@ D="$TMP/ingestdone"; clean_fleet "$D"
 sed -i.bak 's/^tracebloc-ingest-xyz Running$/tracebloc-ingest-xyz Succeeded/' "$D/pods"
 run_case "a Succeeded ingestion pod is not accepted as the driven cycle" "$D" 1 "no RUNNING ingestion pod"
 
+# ...AND A FINISHED JOB ALONGSIDE A LIVE ONE MUST NOT FAIL THE GATE (Bugbot, High).
+# `scan_logs` matched on pod NAME alone, so completed ingestion Jobs from earlier
+# cycles were scanned too. Their logs fall outside `--since`, the empty-log rule
+# scores that `untold` -- a cannot-tell, counted as a failure -- and a fleet that
+# had EVER ingested could therefore never print DROP-READY. The gate could not
+# authorise the DROP it exists to gate.
+#
+# Note this is the empty-log rule (correct, and kept) meeting a population it was
+# not written for, not a wrong rule.
+D="$TMP/stale-ingest-jobs"; clean_fleet "$D"
+cat > "$D/pods" <<'P'
+jobs-manager-abc123 Running
+requests-proxy-def456 Running
+mysql-0 Running
+tracebloc-ingest-xyz Running
+tracebloc-ingest-old1 Succeeded
+tracebloc-ingest-old2 Succeeded
+P
+cp "$D/env.tracebloc-ingest-xyz" "$D/env.tracebloc-ingest-old1" 2>/dev/null || true
+cp "$D/env.tracebloc-ingest-xyz" "$D/env.tracebloc-ingest-old2" 2>/dev/null || true
+: > "$D/logs.tracebloc-ingest-old1"   # aged out of --since, as a finished Job is
+: > "$D/logs.tracebloc-ingest-old2"
+run_case "finished ingestion Jobs do not fail a clean in-flight cycle" "$D" 0 \
+  "all three criteria hold" --phase pre-revoke
+
+# The control: the LIVE pod's log still has to be read. If skipping non-Running
+# pods had been implemented as "skip every ingest pod", this would pass too.
+D="$TMP/stale-plus-dirty-live"; clean_fleet "$D"
+cat > "$D/pods" <<'P'
+jobs-manager-abc123 Running
+requests-proxy-def456 Running
+mysql-0 Running
+tracebloc-ingest-xyz Running
+tracebloc-ingest-old1 Succeeded
+P
+cp "$D/env.tracebloc-ingest-xyz" "$D/env.tracebloc-ingest-old1" 2>/dev/null || true
+: > "$D/logs.tracebloc-ingest-old1"
+echo "legacy shared MySQL identity in use" > "$D/logs.tracebloc-ingest-xyz"
+run_case "a dirty RUNNING ingestion pod is still caught beside finished Jobs" "$D" 1 \
+  "legacy-identity warning" --phase pre-revoke
+
 # edgeuser inside a DSN on the INGESTION pod, under a name that is not DB_USER.
 # The DB_USER checks match that name exactly, so a connection string elsewhere in
 # the env would have gone unseen -- a gap against "nothing resolves to edgeuser".

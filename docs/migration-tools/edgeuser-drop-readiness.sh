@@ -297,10 +297,30 @@ fi
 printf '\nCriterion 2 — zero legacy-identity warnings and zero 1045 across the cycle (--since %s)\n' "$SINCE"
 
 scan_logs() {  # $1 = pod substring, $2 = label
-  local pods hits1045 hitslegacy any=0
-  pods=$(K get pods --no-headers -o custom-columns=':metadata.name' 2>/dev/null | grep -i "$1" || true)
+  local pods matched skipped hits1045 hitslegacy any=0
+  # RUNNING PODS ONLY (Bugbot, High). This took every pod whose NAME matched, and
+  # combined with the empty-log rule below that made a real fleet permanently NOT
+  # DROP-READY: completed ingestion Jobs from earlier cycles linger in the
+  # namespace, their logs fall outside `--since` (default 2h), so each one scored
+  # `untold` -- a "cannot tell", counted as a failure -- even when the in-flight
+  # cycle was perfectly clean. A fleet that had ever ingested could never print
+  # DROP-READY, so the tool could not authorise the DROP it exists to gate.
+  #
+  # Note the shape: the empty-log rule is CORRECT and stays. This is its
+  # interaction with a population it was not written for. A Succeeded Job from a
+  # previous cycle is not evidence about THIS cycle in either direction, so it is
+  # skipped and counted rather than judged.
+  #
+  # If nothing is Running, that IS a cannot-tell and is still reported as one --
+  # the doctrine that "could not look" must never render as "looked and clean" is
+  # untouched.
+  matched=$(K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
+              | grep -i "$1" || true)
+  pods=$(printf '%s\n' "$matched" | awk '$2=="Running"{print $1}')
+  skipped=$(printf '%s\n' "$matched" | awk 'NF && $2!="Running"' | grep -c . || true)
+  [ "${skipped:-0}" -gt 0 ] && note "$2: skipped ${skipped} non-Running pod(s) — a finished Job from an earlier cycle is not evidence about this one"
   if [ -z "$pods" ]; then
-    untold "$2: no pod to read logs from — cannot tell"
+    untold "$2: no RUNNING pod to read logs from — cannot tell"
     return
   fi
   while IFS= read -r p; do
