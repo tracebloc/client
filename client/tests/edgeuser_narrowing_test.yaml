@@ -30,8 +30,17 @@ suite: narrowEdgeuser — a retired fleet stays retired, and a half-migrated one
 # render exercises only the re-parent. prod defaults all three false, which is the
 # only environment where the full three-reason refusal is reachable. A suite
 # written entirely at dev would have missed two of the three blockers.
+#
+# THE SUITE RENDERS THREE TEMPLATES, because the posture it calls "whole" spans
+# three (Bugbot, #900). The bake flips five gates; two of them -- rotateMysqlRoot
+# and the Secret half of the re-parent -- render NOWHERE in
+# jobs-manager-deployment.yaml, so a suite pinned to that one file could not see
+# a revert of `rotateMysqlRootByEnv.dev` at all. Every case therefore names its
+# own `template:` explicitly rather than inheriting the list.
 templates:
   - templates/jobs-manager-deployment.yaml
+  - templates/secrets.yaml
+  - templates/mysql-deployment.yaml
 release:
   name: narrow
   namespace: tracebloc
@@ -43,6 +52,7 @@ set:
 tests:
   # ---- default off: byte-identical ------------------------------------
   - it: "dev NARROWS by default — its posture is baked (backend#1528)"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: dev
     asserts:
@@ -53,6 +63,7 @@ tests:
             value: "1"
 
   - it: "a DEFAULT dev install renders the whole retired posture, no --set needed"
+    template: templates/jobs-manager-deployment.yaml
     # This is what the bake buys: a values-resetting upgrade or a fresh-datadir
     # reinstall on dev lands RETIRED instead of landing on defaults that put the
     # account mint back on edgeuser.
@@ -68,8 +79,93 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content: {name: NARROW_EDGEUSER, value: "1"}
+      # The re-parent's env half. `bootstrapDbReparentByEnv.dev` is the third
+      # gate the bake flips, and client-runtime#310's _bootstrap_db_config reads
+      # USER and PASSWORD both-or-neither -- so both are asserted, not just the
+      # one that is a plain literal.
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DB_BOOTSTRAP_USER, value: "root"}
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_BOOTSTRAP_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: narrow-secrets
+                key: DB_BOOTSTRAP_PASSWORD
+
+  # ---- the two gates that render outside jobs-manager ------------------
+  # WHY THESE EXIST (Bugbot, #900). The case above says "the whole retired
+  # posture". It asserted three of the five gates the bake flips, and both
+  # omissions rendered in files the suite did not load -- so a revert of
+  # `rotateMysqlRootByEnv.dev`, or a break in the Secret/mysql wiring on the
+  # bake path, changed nothing here and the suite stayed green while claiming
+  # to cover the whole thing. `rotateMysqlRoot` is not a narrowing predecessor
+  # either, so no refusal case reached it by accident.
+
+  - it: "a DEFAULT dev install rotates root off the image literal — the Secret carries it"
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - exists:
+          path: data.MYSQL_ROOT_PASSWORD
+
+  - it: "and the mysql pod actually consumes it — the Secret alone proves nothing"
+    # A key in the Secret that no pod reads is a rotation nobody performs. This
+    # is the consuming half, and it is a separate render.
+    template: templates/mysql-deployment.yaml
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MYSQL_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: narrow-secrets
+                key: MYSQL_ROOT_PASSWORD
+
+  - it: "prod is untouched by the rotation — no key, and nothing consuming one"
+    # The bake follows retirement one fleet at a time; prod has none of the
+    # posture. Asserted on BOTH halves so a one-sided revert cannot pass.
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notExists:
+          path: data.MYSQL_ROOT_PASSWORD
+
+  - it: "prod's mysql pod injects no MYSQL_ROOT_PASSWORD"
+    # `notExists` on the whole env key, not `notContains` on the entry: with the
+    # gate off the mysql container renders NO env at all, and helm-unittest
+    # 0.5.2 ERRORS on `notContains` against a path that does not exist rather
+    # than treating absence as satisfaction. Measured here, not assumed. The
+    # rotation is that container's only env today, so this says exactly what it
+    # means; if an unrelated env is ever added to it, narrow this back to the
+    # entry and drop the surrounding case's dependence on emptiness.
+    template: templates/mysql-deployment.yaml
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].env
+
+  - it: "prod's jobs-manager is not re-parented either"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DB_BOOTSTRAP_USER, value: "root"}
 
   - it: "renders no NARROW_EDGEUSER by default on prod"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
@@ -80,6 +176,7 @@ tests:
             value: "1"
 
   - it: "stg and prod still default OFF — only dev is baked"
+    template: templates/jobs-manager-deployment.yaml
     # The bake follows RETIREMENT, one fleet at a time. staging is REVOKEd but not
     # DROPped and prod has none of the posture, so neither may default on.
     set:
@@ -92,6 +189,7 @@ tests:
             value: "1"
 
   - it: "renders NARROW_EDGEUSER=1 when all three predecessors are on"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -107,6 +205,7 @@ tests:
             value: "1"
 
   - it: "resolves through the ByEnv map, not only the operator override"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuserByEnv.prod: true
@@ -122,6 +221,7 @@ tests:
             value: "1"
 
   - it: "an explicit narrowEdgeuser:false overrides a ByEnv true"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: false
@@ -139,6 +239,7 @@ tests:
 
   # ---- the refusals, each naming ITS OWN precondition -----------------
   - it: "refuses when the bootstrap is still edgeuser — naming the mid-flight self-revoke"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -150,6 +251,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "refuses when the data plane is still edgeuser — naming serviceDbAccounts"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -162,6 +264,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "refuses when training pods still share the credential — naming perExperimentDbCreds"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -174,6 +277,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "lists ALL missing preconditions at once, not just the first"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -183,6 +287,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "the refusal explains that over-revoking degrades SILENTLY — the reason it refuses at all"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -192,6 +297,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "the refusal points at the readiness verifier, not at prose"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
@@ -201,6 +307,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "a BAKED default declines silently when the posture is incomplete, it does not refuse"
+    template: templates/jobs-manager-deployment.yaml
     # THE DESIGN FIX THAT BAKING DEV EXPOSED. A flat ByEnv `true` used to assert
     # over the posture, so turning ONE predecessor off on a baked environment was a
     # hard render failure -- an operator stepping back (debugging, partial rollback)
@@ -221,6 +328,7 @@ tests:
             value: "1"
 
   - it: "an EXPLICIT request with a broken posture is still refused loudly"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: dev
       narrowEdgeuser: true
@@ -231,6 +339,7 @@ tests:
             narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
 
   - it: "on dev nothing blocks any more — the re-parent is baked too"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: dev
       narrowEdgeuser: true
@@ -242,6 +351,7 @@ tests:
             value: "1"
 
   - it: "dev narrows once the re-parent is on, needing no other override"
+    template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: dev
       narrowEdgeuser: true
