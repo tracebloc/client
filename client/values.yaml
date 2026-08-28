@@ -1540,7 +1540,7 @@ perExperimentDbCredsByEnv:
 narrowEdgeuser:
 
 narrowEdgeuserByEnv:
-  dev: false
+  dev: true
   stg: false
   prod: false
 
@@ -1645,7 +1645,7 @@ tbIngestPassword: ""
 bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
-  dev: false
+  dev: true
   stg: false
   prod: false
 
@@ -1686,7 +1686,7 @@ bootstrapDbPassword: ""
 rotateMysqlRoot:
 
 rotateMysqlRootByEnv:
-  dev: false
+  dev: true
   stg: false
   prod: false
 

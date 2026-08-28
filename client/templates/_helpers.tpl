@@ -705,11 +705,34 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- define "tracebloc.narrowEdgeuser" -}}
 {{- $override := (default dict .Values).narrowEdgeuser -}}
 {{- if not (kindIs "invalid" $override) -}}
+{{- /*
+    EXPLICIT REQUEST: honoured as given, and refused LOUDLY by
+    tracebloc.assertNarrowEdgeuserIsSafe if the posture cannot carry it. An
+    operator who typed this flag gets an answer, never a silent no-op.
+  */ -}}
 {{- if $override }}true{{ end -}}
 {{- else -}}
+{{- /*
+    BAKED DEFAULT: tracks the posture instead of asserting over it.
+    A default says "a retired fleet narrows", and narrowing is a CONSEQUENCE of
+    being retired, not an independent choice. So the default is conditional on
+    the three predecessors, and an operator who steps back from the posture on one
+    edge -- `perExperimentDbCreds=false` while debugging, say -- simply stops
+    narrowing. They do not have to discover a second flag they never set.
+    A flat `true` here made every single-gate override on a baked environment a
+    HARD RENDER FAILURE (found by baking dev: it broke 5 chart tests and the
+    gate-byenv-resolution guard, which renders each gate OFF by design).
+    Silence is the safe direction here and only here: NOT narrowing leaves
+    edgeuser's grants intact and breaks nothing, while narrowing too early
+    degrades the heartbeat silently. The dangerous direction is still refused.
+  */ -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.narrowEdgeuserByEnv -}}
-{{- if get $byEnv $env }}true{{ end -}}
+{{- if get $byEnv $env -}}
+{{-   if and (include "tracebloc.bootstrapDbReparent" .) (include "tracebloc.serviceDbAccounts" .) (include "tracebloc.perExperimentDbCreds" .) -}}
+true
+{{-   end -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -728,6 +751,18 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   datasets. That is why "the operator asked for it" is not sufficient.
 */}}
 {{- define "tracebloc.assertNarrowEdgeuserIsSafe" -}}
+{{- /*
+    Asserts over the RESOLVED value, deliberately, and that is the whole reason it
+    still exists. tracebloc.narrowEdgeuser already declines when a BAKED default
+    meets an incomplete posture, so in practice this fires only for an explicit
+    `.Values.narrowEdgeuser: true` -- which makes it look redundant, and a mutation
+    confirmed no test can tell the two apart today.
+    It is kept resolved-value-scoped anyway: scoping it to the explicit override
+    would mean that if the resolver were ever made unconditional again, a baked
+    default with a broken posture would render NARROW_EDGEUSER=1 with NOTHING
+    checking it -- the dangerous case, silently. One mechanism guarding the other
+    beats two mechanisms where the second can disable the first.
+  */ -}}
 {{- if (include "tracebloc.narrowEdgeuser" .) -}}
 {{-   $missing := list -}}
 {{-   if not (include "tracebloc.bootstrapDbReparent" .) -}}
