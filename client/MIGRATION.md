@@ -7,9 +7,14 @@ This guide explains how to migrate from the legacy per-platform charts (`aks/`, 
 Two things matter when you cross this version from anything below it.
 
 **1. The MySQL root-rotation gate now exists.** `rotateMysqlRoot` /
-`rotateMysqlRootByEnv` were added in `1.9.71`; they are `false` for `dev`, `stg`
-and `prod`, so an upgrade changes nothing on its own. The gate is a
-*precondition* for the rotation runbook
+`rotateMysqlRootByEnv` were added in `1.9.71`. They were `false` for every
+environment when this section was written; **since backend#1528 S3 baked dev's
+retired posture, `rotateMysqlRootByEnv.dev` is `true`** — so on a **dev** fleet
+an upgrade across that version DOES change something: the Secret gains
+`MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. `stg` and
+`prod` remain `false` and are unaffected, and an existing datadir keeps root's
+current password either way (the entrypoint honours this value only at fresh
+datadir init). The gate is a *precondition* for the rotation runbook
 (`docs/migration-tools/rotate-mysql-root.md`), not the rotation itself.
 
 Below `1.9.71` the key does not exist and `values.schema.json` does not close

@@ -25,6 +25,26 @@
 #  vice versa. The claim patterns are the ones that actually appeared, matched
 #  case-insensitively.
 #
+#  WHICH DOCUMENTS. The question above says "any document", and until #900's
+#  review it scanned two files, so the sentence claimed more than the mechanism
+#  did -- rule 7, in the guard written to stop exactly this. It was green over
+#  BOTH stale runbooks in the very PR that introduced them
+#  (`client/MIGRATION.md`, `docs/migration-tools/rotate-mysql-root.md`), which
+#  is how it was caught. The scanned set is now the schema, the helper doc
+#  blocks, AND every markdown file under `client/` and `docs/` -- globbed, not
+#  listed, so a runbook added tomorrow is covered without touching this file.
+#  Markdown is scanned per PARAGRAPH, and only paragraphs naming the gate, so a
+#  claim is read in the context that makes it a claim.
+#
+#  MARKDOWN IS NORMALISED BEFORE MATCHING, and that is load-bearing rather than
+#  cosmetic. The drift that shipped reads "they are `false` for `dev`, `stg`
+#  and `prod`" -- with backticks and bold markers inside the very span the
+#  patterns have to cross. Matching raw text would have found nothing, i.e.
+#  widening the scanned set would have been vacuous: a bigger corpus that
+#  cannot see the sentence it was widened for. Emphasis and code markers are
+#  stripped first, and the mutation test in this suite re-inserts the original
+#  stale sentence to prove the finding is reachable.
+#
 #  It is deliberately NOT a general prose checker. It answers one question --
 #  "does any document assert a default this chart contradicts?" -- which is
 #  decidable, rather than "is this prose accurate", which is not.
@@ -46,10 +66,24 @@ for f in "$VALUES" "$SCHEMA" "$HELPERS"; do
 done
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is required" >&2; exit 1; }
 
-python3 - "$VALUES" "$SCHEMA" "$HELPERS" <<'PY'
+MDFILES=$(find "$ROOT/client" "$ROOT/docs" -name '*.md' -type f 2>/dev/null | sort)
+if [ -z "$MDFILES" ]; then
+  echo "FAIL: found ZERO markdown files under client/ and docs/ -- fail closed; " \
+       "an empty corpus agrees with everything" >&2
+  exit 1
+fi
+
+python3 - "$VALUES" "$SCHEMA" "$HELPERS" $MDFILES <<'PY'
 import json, re, sys
 
 values_p, schema_p, helpers_p = sys.argv[1:4]
+md_paths = sys.argv[4:]
+# Repo root, derived from the values.yaml path we were handed, so labels are
+# repo-relative and identical wherever the checkout lives.
+root = values_p[: -len("/client/values.yaml")] if values_p.endswith("/client/values.yaml") else ""
+if not md_paths:
+    print("FAIL: no markdown files passed -- fail closed", file=sys.stderr)
+    sys.exit(1)
 
 # ---- 1. DERIVE the gates and their shipped defaults from values.yaml -----
 text = open(values_p).read().splitlines()
@@ -101,6 +135,31 @@ def helper_doc(gate):
                   + re.escape(gate) + r'"', helpers, re.S)
     return m.group(1) if m else None
 
+# ---- 3b. markdown runbooks, per paragraph, normalised -------------------
+# EMPHASIS AND CODE MARKERS ARE STRIPPED. The sentence that shipped stale reads
+# "they are `false` for `dev`, `stg` and `prod`" -- the backticks sit inside the
+# span every claim pattern has to cross, so raw matching finds nothing and the
+# whole widening would be theatre. Strip *, _, ` and the markdown link syntax,
+# then collapse whitespace, and match against that.
+_MD_STRIP = re.compile(r"[*_`]+")
+def norm(t):
+    t = _MD_STRIP.sub("", t)
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)   # [text](url) -> text
+    return " ".join(t.lower().split())
+
+md_paragraphs = []   # (label, normalised text)
+for mp in md_paths:
+    try:
+        raw = open(mp).read()
+    except OSError as e:
+        print(f"FAIL: {mp} unreadable ({e}) -- cannot tell, which is a finding",
+              file=sys.stderr)
+        sys.exit(1)
+    rel = mp[len(root) + 1:] if root and mp.startswith(root + "/") else mp
+    for n, para in enumerate(re.split(r"\n\s*\n", raw), 1):
+        if para.strip():
+            md_paragraphs.append((f"{rel}#p{n}", norm(para)))
+
 # ---- 4. compare -------------------------------------------------------
 # Claim patterns, per direction. These are the shapes that actually shipped.
 FALSE_CLAIMS = [
@@ -127,6 +186,14 @@ for gate, envs in sorted(gates.items()):
                         f"operator-facing contract does not describe cannot be "
                         f"checked, and that is a finding")
         continue
+
+    # Only paragraphs that NAME this gate: a claim is read in the context that
+    # makes it a claim about this gate, never as loose prose anywhere in a file.
+    needle = key.lower()
+    alt = gate.lower()
+    for label, para in md_paragraphs:
+        if needle in para or alt in para:
+            sources[label] = para
 
     for where, prose in sources.items():
         if prose is None:

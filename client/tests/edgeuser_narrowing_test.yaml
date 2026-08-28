@@ -187,12 +187,77 @@ tests:
             name: NARROW_EDGEUSER
             value: "1"
 
-  - it: "stg and prod still default OFF — only dev is baked"
+  # ---- stg is unbaked, and asserted so it can FAIL ---------------------
+  # THE OLD CASE HERE WAS VACUOUS (Arturo, #900), and measured: with
+  # `narrowEdgeuserByEnv.stg: true` the whole suite still passed 22/22. A bare
+  # `notContains NARROW_EDGEUSER` at a plain stg render cannot fail, because
+  # the resolver declines stg narrowing on the PREDECESSORS regardless of the
+  # ByEnv map -- so the assertion was reading the predecessors and reporting on
+  # the map. The bake follows RETIREMENT one fleet at a time (staging is
+  # REVOKEd but not DROPped), so stg needs the same three negatives prod has,
+  # and each has to be able to redden.
+
+  - it: "stg does not narrow, and it is the ByEnv map saying so — not the posture"
     template: templates/jobs-manager-deployment.yaml
-    # The bake follows RETIREMENT, one fleet at a time. staging is REVOKEd but not
-    # DROPped and prod has none of the posture, so neither may default on.
+    # The full posture is FORCED ON here so the predecessors cannot be what
+    # declines. `rotateMysqlRoot` is forced too because it is not optional
+    # company for the re-parent on an unbaked fleet: without it (or an explicit
+    # bootstrapDbPassword pin) secrets.yaml FAILS the render outright, so a
+    # posture-forced stg case that omits it tests the refusal, not the map.
+    # With this set, `narrowEdgeuserByEnv.stg` is the only remaining input --
+    # flip it and NARROW_EDGEUSER appears.
     set:
       env.CLIENT_ENV: stg
+      serviceDbAccounts: true
+      perExperimentDbCreds: true
+      bootstrapDbReparent: true
+      rotateMysqlRoot: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  - it: "stg bakes no root rotation — no Secret key, and nothing consuming one"
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - notExists:
+          path: data.MYSQL_ROOT_PASSWORD
+      - notExists:
+          path: data.DB_BOOTSTRAP_PASSWORD
+
+  - it: "stg's mysql pod injects no MYSQL_ROOT_PASSWORD"
+    # `notExists` on the env key for the same measured reason as prod's case:
+    # with the gate off this container renders no env at all, and
+    # helm-unittest 0.5.2 errors on `notContains` against a missing path.
+    template: templates/mysql-deployment.yaml
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].env
+
+  - it: "stg's jobs-manager is not re-parented either"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: stg
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: {name: DB_BOOTSTRAP_USER, value: "root"}
+
+  - it: "prod still defaults OFF too"
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      env.CLIENT_ENV: prod
+      serviceDbAccounts: true
+      perExperimentDbCreds: true
+      bootstrapDbReparent: true
+      rotateMysqlRoot: true
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env
