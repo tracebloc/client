@@ -66,14 +66,29 @@ for f in "$VALUES" "$SCHEMA" "$HELPERS"; do
 done
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is required" >&2; exit 1; }
 
-MDFILES=$(find "$ROOT/client" "$ROOT/docs" -name '*.md' -type f 2>/dev/null | sort)
-if [ -z "$MDFILES" ]; then
+# AN ARRAY, READ LINE BY LINE -- not a whitespace-split string.
+#
+# This was `MDFILES=$(find ...)` passed unquoted as `$MDFILES`, which word-splits
+# on spaces. The primary dev checkout lives under `.../Claude File System/...`, so
+# the guard tried to read `/Users/lukas/Documents/Claude` and failed closed with
+# "cannot tell, which is a finding" on EVERY run.
+#
+# CI never saw it: GitHub runners check out to `/home/runner/work/client/client`,
+# no spaces. And `shellcheck -S warning` -- the severity this repo gates on --
+# does not flag it either, because SC2086 ("double quote to prevent word
+# splitting") is severity INFO. So the guard was green in CI and permanently red
+# on the one machine most likely to break what it guards.
+MDFILES=()
+while IFS= read -r _md; do
+  [ -n "$_md" ] && MDFILES+=("$_md")
+done < <(find "$ROOT/client" "$ROOT/docs" -name '*.md' -type f 2>/dev/null | sort)
+if [ "${#MDFILES[@]}" -eq 0 ]; then
   echo "FAIL: found ZERO markdown files under client/ and docs/ -- fail closed; " \
        "an empty corpus agrees with everything" >&2
   exit 1
 fi
 
-python3 - "$VALUES" "$SCHEMA" "$HELPERS" $MDFILES <<'PY'
+python3 - "$VALUES" "$SCHEMA" "$HELPERS" "${MDFILES[@]}" <<'PY'
 import json, re, sys
 
 values_p, schema_p, helpers_p = sys.argv[1:4]
