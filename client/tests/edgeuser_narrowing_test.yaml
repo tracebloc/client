@@ -112,6 +112,16 @@ tests:
     asserts:
       - exists:
           path: data.MYSQL_ROOT_PASSWORD
+      # BOTH DIRECTIONS OF THE RE-PARENT, not just the one (Bugbot, #900). The
+      # case above asserts jobs-manager REFERENCES `DB_BOOTSTRAP_PASSWORD` via
+      # secretKeyRef; this asserts the Secret actually CARRIES it. A reference
+      # to a key the Secret does not render is not a passing render -- it is a
+      # dev install whose jobs-manager fails on a missing Secret key, and with
+      # only the reference asserted the suite stayed green through it. Same
+      # asymmetry the rotation pair above was split to avoid, missed once on
+      # the half that already had an env assertion.
+      - exists:
+          path: data.DB_BOOTSTRAP_PASSWORD
 
   - it: "and the mysql pod actually consumes it — the Secret alone proves nothing"
     # A key in the Secret that no pod reads is a rotation nobody performs. This
@@ -139,6 +149,8 @@ tests:
     asserts:
       - notExists:
           path: data.MYSQL_ROOT_PASSWORD
+      - notExists:
+          path: data.DB_BOOTSTRAP_PASSWORD
 
   - it: "prod's mysql pod injects no MYSQL_ROOT_PASSWORD"
     # `notExists` on the whole env key, not `notContains` on the entry: with the
