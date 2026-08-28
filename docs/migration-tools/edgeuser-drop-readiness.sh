@@ -416,14 +416,37 @@ for item in json.load(sys.stdin).get("items", []):
       note "smoke test: no live edgeuser connection at this instant — NOT evidence of absence, recorded only for the log."
     fi
     if [ "$PHASE" = "post-drop" ]; then
-      remaining=$(K exec "$mysql_pod" -- env MYSQL_PWD="$root_pw" mysql -u root -N -B \
-                    -e "SELECT GROUP_CONCAT(CONCAT(user,'@',host) ORDER BY user) FROM mysql.user WHERE user NOT IN ('mysql.sys','mysql.session','mysql.infoschema');" 2>/dev/null || true)
-      note "post-drop account inventory: ${remaining:-<unreadable>}"
-      if grep -q 'edgeuser' <<<"${remaining:-edgeuser}"; then
-        bad "post-drop: edgeuser is still present in mysql.user (or the inventory was unreadable — fail closed)"
-      else
-        ok "post-drop: edgeuser is absent from mysql.user"
-      fi
+      # ASKED AS A COUNT, NOT GREPPED OUT OF A STRING (Bugbot). The verdict used to
+      # grep a `GROUP_CONCAT` of every non-system account, and `group_concat_max_len`
+      # defaults to **1024 bytes** -- so on a fleet carrying per-experiment users,
+      # which S3 requires before this phase is even reachable, the list truncates.
+      # `edgeuser` sorts late enough to fall off the END, and a truncated-but-
+      # non-empty string was then reported as "edgeuser is absent".
+      #
+      # That inverts the safety direction of the one check standing in front of an
+      # irreversible DROP: it says "gone" about an account it never actually saw.
+      # The empty case was failed closed via `${remaining:-edgeuser}`, which is why
+      # only the truncated case got through -- the guard was there, it just could
+      # not see this shape.
+      #
+      # A COUNT cannot truncate, and it answers the question being asked instead of
+      # a broader one that has to be searched. The inventory below is kept for the
+      # log and is now ROWS rather than one concatenated string, so it cannot
+      # truncate either -- but nothing decides on it any more.
+      remaining_n=$(K exec "$mysql_pod" -- env MYSQL_PWD="$root_pw" mysql -u root -N -B \
+                      -e "SELECT COUNT(*) FROM mysql.user WHERE user='edgeuser';" 2>/dev/null | tr -d '[:space:]' || true)
+      inventory=$(K exec "$mysql_pod" -- env MYSQL_PWD="$root_pw" mysql -u root -N -B \
+                    -e "SELECT CONCAT(user,'@',host) FROM mysql.user WHERE user NOT IN ('mysql.sys','mysql.session','mysql.infoschema') ORDER BY user;" 2>/dev/null || true)
+      inv_rows=$(printf '%s' "${inventory:-}" | grep -c . || true)
+      note "post-drop account inventory (${inv_rows:-0} row(s)): $(printf '%s' "${inventory:-<unreadable>}" | tr '\n' ' ')"
+      case "${remaining_n:-}" in
+        0)
+          ok "post-drop: edgeuser is absent from mysql.user (COUNT=0)" ;;
+        ''|*[!0-9]*)
+          bad "post-drop: could not count edgeuser in mysql.user (got '${remaining_n:-}') — fail closed, NOT reported as absent" ;;
+        *)
+          bad "post-drop: edgeuser is still present in mysql.user ($remaining_n row(s))" ;;
+      esac
     fi
   else
     untold "could not read MYSQL_ROOT_PASSWORD from any Secret — the smoke test and post-drop inventory were skipped"

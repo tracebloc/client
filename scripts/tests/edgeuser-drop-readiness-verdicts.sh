@@ -65,7 +65,24 @@ case "$args" in
           *metadata*)               cat "$S/count.metadata" 2>/dev/null; exit 0 ;;
         esac ;;
       *processlist*) cat "$S/count.processlist" 2>/dev/null || echo 0; exit 0 ;;
-      *mysql.user*)  cat "$S/mysql.user" 2>/dev/null || echo "root@%,tb_credmgr@%"; exit 0 ;;
+      # TWO DISTINCT QUERIES against mysql.user, and the stub has to tell them
+      # apart or the fixture cannot model the real thing. The verdict now asks
+      # COUNT(*) WHERE user='edgeuser' (which cannot truncate); the inventory is a
+      # separate row query kept only for the log. A stub answering both with one
+      # canned string is how a truncation bug hides -- the COUNT would receive a
+      # comma-joined list, fail closed, and look like a harness problem.
+      *"COUNT(*)"*mysql.user*)
+        if grep -q 'edgeuser' "$S/mysql.user" 2>/dev/null; then echo 1; else echo 0; fi
+        exit 0 ;;
+      # A GROUP_CONCAT ANSWER IS TRUNCATED AT 1024 BYTES, like the real server.
+      # Without this the fixture cannot express the bug at all: a stub that returns
+      # the whole list makes the old grep-a-string verdict pass, so a test written
+      # against truncation would be vacuous and the mutation below would not redden.
+      # MySQL's `group_concat_max_len` default is 1024, and it silently cuts.
+      *GROUP_CONCAT*mysql.user*)
+        tr ',' '\n' < "$S/mysql.user" 2>/dev/null | paste -sd, - | cut -b1-1024
+        exit 0 ;;
+      *mysql.user*)  tr ',' '\n' < "$S/mysql.user" 2>/dev/null || echo "root@%"; exit 0 ;;
       *"-- env"*)
         [ -f "$S/execdenied" ] && exit 1
         cat "$S/env.$pod" 2>/dev/null; exit 0 ;;
@@ -282,6 +299,31 @@ run_case "post-drop passes when edgeuser is absent" "$D" 0 "edgeuser is absent f
 D="$TMP/postdrop2"; clean_fleet "$D"
 echo "root@%,edgeuser@%,tb_meta@%" > "$D/mysql.user"
 run_case "post-drop FAILS when edgeuser survives" "$D" 1 "still present in mysql.user" --phase post-drop
+
+# 14b. THE TRUNCATION CASE, which the two above could never see (Bugbot).
+# `group_concat_max_len` defaults to 1024 bytes. The old verdict grepped a
+# GROUP_CONCAT of every non-system account, so on a fleet carrying per-experiment
+# users -- required before this phase is reachable -- the list truncated and
+# `edgeuser` fell off the END. A truncated-but-non-empty string was then reported
+# as "edgeuser is absent": the tool saying "gone" about an account it never saw,
+# in front of an irreversible DROP.
+#
+# The fixture plants 100 per-experiment users AHEAD of edgeuser alphabetically --
+# 100 x ~14 bytes = ~1400, comfortably past the 1024 cut, which 60 was NOT (~860:
+# the first version of this test could not truncate and so proved nothing) -- so
+# any length-limited concatenation drops it. The verdict is a COUNT now, which
+# cannot truncate, so this must still report edgeuser present.
+D="$TMP/postdrop-truncating"; clean_fleet "$D"
+{ for i in $(seq -w 1 100); do printf 'exp_user_%s@%%,' "$i"; done; printf 'edgeuser@%%,zz_last@%%\n'; } > "$D/mysql.user"
+run_case "post-drop sees edgeuser even when the inventory would truncate" "$D" 1 \
+  "still present in mysql.user" --phase post-drop
+
+# ...and the control: the same long fleet WITHOUT edgeuser must still pass, or a
+# check that simply failed on long lists would satisfy the case above.
+D="$TMP/postdrop-truncating-clean"; clean_fleet "$D"
+{ for i in $(seq -w 1 100); do printf 'exp_user_%s@%%,' "$i"; done; printf 'zz_last@%%\n'; } > "$D/mysql.user"
+run_case "a long clean fleet still passes post-drop (control)" "$D" 0 \
+  "edgeuser is absent from mysql.user" --phase post-drop
 
 # 15. the mandatory baselines: refusing to guess is the point
 for bad_args in "--baseline-datasets" "--baseline-metadata" "--baseline-identity"; do
