@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+#
+#  edgeuser-drop-readiness-verdicts.sh — prove that
+#  docs/migration-tools/edgeuser-drop-readiness.sh reaches the RIGHT verdict on
+#  each posture, including every "cannot tell" path.
+#
+#  WHY. The tool's whole value is that ops trusts its verdict before running a
+#  REVOKE and a DROP on a live fleet. An unverified verifier is worse than none:
+#  a false DROP-READY authorises exactly the destructive step backend#1528 spent
+#  four fleets' worth of care avoiding. And the criterion this tool replaces
+#  failed by PASSING -- so "it printed DROP-READY" is not evidence of anything
+#  until the tool has been shown to print NOT-READY when it should.
+#
+#  HOW. A stub `kubectl` on PATH renders a synthetic fleet from a fixture
+#  directory. Each case asserts the exit status AND a substring of the specific
+#  finding -- never a bare "it failed", because any failure satisfies that and a
+#  test that cannot say WHICH refusal fired is a coin toss reporting success
+#  (backend#1528's own lesson, and this repo's rule 10).
+#
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+TOOL="$ROOT/docs/migration-tools/edgeuser-drop-readiness.sh"
+[ -x "$TOOL" ] || { echo "FAIL: $TOOL missing or not executable" >&2; exit 1; }
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+STUB="$TMP/bin"; mkdir -p "$STUB"
+
+# The stub reads the scenario out of files, so a case is data rather than code.
+cat > "$STUB/kubectl" <<'STUBEOF'
+#!/usr/bin/env bash
+S="$KSTUB_DIR"
+args="$*"
+case "$args" in
+  *version*)          [ -f "$S/unreachable" ] && exit 1; exit 0 ;;
+  *"get pods"*)
+    # Honour the requested columns: name-only vs name+phase.
+    case "$args" in
+      *":status.phase"*) cat "$S/pods" 2>/dev/null ;;
+      *)                 awk '{print $1}' "$S/pods" 2>/dev/null ;;
+    esac
+    exit 0 ;;
+  *"get secret"*)     cat "$S/secrets.json" 2>/dev/null || echo '{"items":[]}'; exit 0 ;;
+esac
+case "$args" in
+  *logs*)
+    for p in $(cat "$S/pods" 2>/dev/null | awk '{print $1}'); do
+      case "$args" in *"$p"*) cat "$S/logs.$p" 2>/dev/null; exit 0 ;; esac
+    done
+    exit 0 ;;
+  *exec*)
+    # which pod?
+    pod=""
+    for p in $(cat "$S/pods" 2>/dev/null | awk '{print $1}'); do
+      case "$args" in *"$p"*) pod="$p" ;; esac
+    done
+    # ORDER MATTERS: the mysql queries are themselves invoked as
+    # `-- env MYSQL_PWD=... mysql ...`, so the SQL cases must be tried BEFORE
+    # the bare `-- env` case or every query is answered with the pod env.
+    case "$args" in
+      *information_schema.tables*)
+        case "$args" in
+          *training_test_datasets*) cat "$S/count.datasets" 2>/dev/null; exit 0 ;;
+          *metadata*)               cat "$S/count.metadata" 2>/dev/null; exit 0 ;;
+        esac ;;
+      *processlist*) cat "$S/count.processlist" 2>/dev/null || echo 0; exit 0 ;;
+      *mysql.user*)  cat "$S/mysql.user" 2>/dev/null || echo "root@%,tb_credmgr@%"; exit 0 ;;
+      *"-- env"*)
+        [ -f "$S/execdenied" ] && exit 1
+        cat "$S/env.$pod" 2>/dev/null; exit 0 ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+STUBEOF
+chmod +x "$STUB/kubectl"
+
+# ---------------------------------------------------------------------------
+#  A fully clean fleet. Every other case is this, minus one thing -- so each
+#  case isolates exactly one cause, and a case that fails for an unrelated
+#  reason shows up as the wrong substring rather than as a pass.
+# ---------------------------------------------------------------------------
+clean_fleet() {
+  local d="$1"; mkdir -p "$d"
+  cat > "$d/pods" <<'P'
+jobs-manager-abc123 Running
+requests-proxy-def456 Running
+mysql-0 Running
+tracebloc-ingest-xyz Running
+P
+  local common='MYSQL_HOST=mysql
+DB_BOOTSTRAP_USER=root
+DB_BOOTSTRAP_PASSWORD=x
+SERVICE_DB_ACCOUNTS=true
+PER_EXPERIMENT_DB_CREDS=true
+TB_META_USER=tb_meta
+TB_META_PASSWORD=x
+TB_INGEST_USER=tb_ingest
+TB_INGEST_PASSWORD=x
+TB_CREDMGR_USER=tb_credmgr
+TB_CREDMGR_PASSWORD=x'
+  printf '%s\n' "$common" > "$d/env.jobs-manager-abc123"
+  printf '%s\n' "$common" > "$d/env.requests-proxy-def456"
+  printf 'DB_USER=tb_ingest\nDB_PASSWORD=x\n' > "$d/env.tracebloc-ingest-xyz"
+  : > "$d/logs.jobs-manager-abc123"
+  : > "$d/logs.requests-proxy-def456"
+  : > "$d/logs.tracebloc-ingest-xyz"
+  echo 87 > "$d/count.datasets"
+  echo 3  > "$d/count.metadata"
+  echo 0  > "$d/count.processlist"
+  echo "root@%,tb_credmgr@%,tb_ingest@%,tb_meta@%" > "$d/mysql.user"
+  python3 - "$d/secrets.json" <<'PY'
+import base64, json, sys
+enc = lambda s: base64.b64encode(s.encode()).decode()
+json.dump({"items": [{"data": {
+    "TB_INGEST_USER": enc("tb_ingest"), "TB_INGEST_PASSWORD": enc("p"),
+    "TB_META_USER": enc("tb_meta"),     "TB_META_PASSWORD": enc("p"),
+    "MYSQL_ROOT_PASSWORD": enc("p"),
+}}]}, open(sys.argv[1], "w"))
+PY
+}
+
+PASSED=0; FAILED=0
+run_case() {  # $1 label, $2 fixture dir, $3 expected exit, $4 expected substring, 5.. extra args
+  local label="$1" dir="$2" want_rc="$3" want_sub="$4"; shift 4
+  local out rc=0
+  out=$(PATH="$STUB:$PATH" KSTUB_DIR="$dir" "$TOOL" \
+          --context c --namespace n \
+          --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root \
+          "$@" 2>&1) || rc=$?
+  local why=""
+  [ "$rc" = "$want_rc" ] || why="exit $rc, wanted $want_rc"
+  if [ -n "$want_sub" ] && ! grep -qF "$want_sub" <<<"$out"; then
+    why="${why:+$why; }missing expected finding: $want_sub"
+  fi
+  if [ -z "$why" ]; then
+    printf '  [ok]   %s\n' "$label"; PASSED=$((PASSED+1))
+  else
+    printf '  [FAIL] %s -- %s\n' "$label" "$why"; FAILED=$((FAILED+1))
+    printf '%s\n' "$out" | sed 's/^/         | /' | head -30
+  fi
+}
+
+echo "edgeuser-drop-readiness verdicts:"
+
+# 1. the happy path must actually pass -- otherwise every refusal below is vacuous
+D="$TMP/clean"; clean_fleet "$D"
+run_case "a clean retired fleet is DROP-READY" "$D" 0 "DROP-READY"
+
+# 2. the finding this tool exists for
+D="$TMP/edgeuser"; clean_fleet "$D"
+sed -i.bak 's/^TB_INGEST_USER=.*/TB_INGEST_USER=edgeuser/' "$D/env.jobs-manager-abc123"
+run_case "a *_USER resolving to edgeuser is caught by NAME" "$D" 1 "TB_INGEST_USER=edgeuser"
+
+# 3. unset bootstrap user == silent fallback to edgeuser
+D="$TMP/nobootstrap"; clean_fleet "$D"
+sed -i.bak '/^DB_BOOTSTRAP_USER=/d' "$D/env.jobs-manager-abc123"
+run_case "DB_BOOTSTRAP_USER unset is a finding (it FALLS BACK to edgeuser)" "$D" 1 "DB_BOOTSTRAP_USER is unset"
+
+# 4. each gate, separately -- default-off is the dangerous value
+D="$TMP/gate1"; clean_fleet "$D"
+sed -i.bak 's/^SERVICE_DB_ACCOUNTS=.*/SERVICE_DB_ACCOUNTS=false/' "$D/env.jobs-manager-abc123"
+run_case "SERVICE_DB_ACCOUNTS=false is a finding" "$D" 1 "SERVICE_DB_ACCOUNTS=false"
+D="$TMP/gate2"; clean_fleet "$D"
+sed -i.bak '/^PER_EXPERIMENT_DB_CREDS=/d' "$D/env.requests-proxy-def456"
+run_case "PER_EXPERIMENT_DB_CREDS unset is a finding on requests-proxy too" "$D" 1 "PER_EXPERIMENT_DB_CREDS is unset"
+
+# 5. a set user with no password cannot authenticate
+D="$TMP/nopw"; clean_fleet "$D"
+sed -i.bak 's/^TB_META_PASSWORD=.*/TB_META_PASSWORD=/' "$D/env.jobs-manager-abc123"
+run_case "a *_USER with an empty *_PASSWORD is a finding" "$D" 1 "TB_META_PASSWORD is empty or absent"
+
+# 6. the spawned ingestion Job is stamped at runtime, not by the chart
+D="$TMP/ingest"; clean_fleet "$D"
+echo 'DB_USER=edgeuser' > "$D/env.tracebloc-ingest-xyz"
+printf 'DB_PASSWORD=x\n' >> "$D/env.tracebloc-ingest-xyz"
+run_case "an ingestion Job on edgeuser is a finding" "$D" 1 "DB_USER=edgeuser"
+
+# 7. FAIL CLOSED: no driven cycle means we cannot tell, and that is a failure
+D="$TMP/nodriven"; clean_fleet "$D"
+grep -v ingest "$D/pods" > "$D/pods.new" && mv "$D/pods.new" "$D/pods"
+run_case "no ingestion pod => cannot tell, NOT a pass" "$D" 1 "requires a DRIVEN cycle"
+
+# 8. FAIL CLOSED: missing workload
+D="$TMP/nopod"; clean_fleet "$D"
+grep -v 'jobs-manager' "$D/pods" > "$D/pods.new" && mv "$D/pods.new" "$D/pods"
+run_case "a missing jobs-manager => cannot tell, NOT a pass" "$D" 1 "no Running pod matching 'jobs-manager'"
+
+# 9. FAIL CLOSED: exec refused
+D="$TMP/denied"; clean_fleet "$D"; : > "$D/execdenied"
+run_case "exec refused => cannot tell, NOT a pass" "$D" 1 "could not read the pod environment"
+
+# 10. FAIL CLOSED: unreachable cluster must not be a clean bill of health
+D="$TMP/unreach"; clean_fleet "$D"; : > "$D/unreachable"
+run_case "an unreachable cluster exits 2, never 0" "$D" 2 "cannot reach cluster"
+
+# 11. criterion 2: the exact producer string from tracebloc-engine
+D="$TMP/legacy"; clean_fleet "$D"
+echo 'WARNING Using the legacy shared MySQL identity for metadata' > "$D/logs.jobs-manager-abc123"
+run_case "a legacy-identity warning in the cycle is a finding" "$D" 1 "legacy-identity warning(s)"
+D="$TMP/denied1045"; clean_fleet "$D"
+echo 'ERROR 1045 (28000): Access denied for user' > "$D/logs.requests-proxy-def456"
+run_case "a 1045 in the cycle is a finding" "$D" 1 "access-denied event(s)"
+
+# 12. criterion 3: the silent shrink -- the whole reason the criterion exists
+D="$TMP/shrink"; clean_fleet "$D"; echo 40 > "$D/count.datasets"
+run_case "a shrunk table count is a finding, with the delta" "$D" 1 "SILENT SHRINK of 47"
+D="$TMP/grew"; clean_fleet "$D"; echo 99 > "$D/count.datasets"
+run_case "a GROWN count is not a shrink (new datasets are fine)" "$D" 0 "grew by 12"
+
+# 13. a live edgeuser connection IS evidence (unlike its absence)
+D="$TMP/straggler"; clean_fleet "$D"; echo 2 > "$D/count.processlist"
+run_case "a non-empty processlist is real evidence of a straggler" "$D" 1 "live edgeuser connection(s) right now"
+
+# 14. post-drop: edgeuser must be gone from mysql.user
+D="$TMP/postdrop"; clean_fleet "$D"
+run_case "post-drop passes when edgeuser is absent" "$D" 0 "edgeuser is absent from mysql.user" --phase post-drop
+D="$TMP/postdrop2"; clean_fleet "$D"
+echo "root@%,edgeuser@%,tb_meta@%" > "$D/mysql.user"
+run_case "post-drop FAILS when edgeuser survives" "$D" 1 "still present in mysql.user" --phase post-drop
+
+# 15. the mandatory baselines: refusing to guess is the point
+for bad_args in "--baseline-datasets" "--baseline-metadata" "--baseline-identity"; do
+  out=""; rc=0
+  case "$bad_args" in
+    --baseline-datasets)  set -- --context c --namespace n --baseline-metadata 3 --baseline-identity root ;;
+    --baseline-metadata)  set -- --context c --namespace n --baseline-datasets 87 --baseline-identity root ;;
+    --baseline-identity)  set -- --context c --namespace n --baseline-datasets 87 --baseline-metadata 3 ;;
+  esac
+  out=$(PATH="$STUB:$PATH" KSTUB_DIR="$TMP/clean" "$TOOL" "$@" 2>&1) || rc=$?
+  if [ "$rc" = 2 ] && grep -qF -- "$bad_args is required" <<<"$out"; then
+    printf '  [ok]   a missing %s is refused, not defaulted\n' "$bad_args"; PASSED=$((PASSED+1))
+  else
+    printf '  [FAIL] a missing %s should exit 2 with "is required" (got %s)\n' "$bad_args" "$rc"; FAILED=$((FAILED+1))
+  fi
+done
+
+# 16. a wrong-identity baseline must not be silently comparable
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$TMP/clean" "$TOOL" --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity nonsense 2>&1) || rc=$?
+if grep -qF "must be root, tb_ingest or tb_meta" <<<"$out"; then
+  printf '  [ok]   an unlabelled/unknown baseline identity is refused\n'; PASSED=$((PASSED+1))
+else
+  printf '  [FAIL] an unknown --baseline-identity should be refused\n'; FAILED=$((FAILED+1))
+fi
+
+printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
+[ "$FAILED" -eq 0 ] || exit 1
