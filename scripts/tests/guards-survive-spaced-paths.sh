@@ -67,7 +67,11 @@ for g in "${GUARDS[@]}"; do
     echo "OK from a spaced path"
   else
     echo "FAILED from a spaced path"
-    printf '%s\n' "$out" | sed 's/^/      | /' | head -6
+    # Capture-then-slice: `head -6` closes early, and under errexit+pipefail
+    # that SIGPIPEs `sed` and fails the pipeline while REPORTING a failure --
+    # turning a legible diagnostic into a second, misleading one.
+    _excerpt=$(printf '%s\n' "$out" | sed 's/^/      | /')
+    printf '%s\n' "$_excerpt" | sed -n '1,6p'
     fails=$((fails + 1))
   fi
 done

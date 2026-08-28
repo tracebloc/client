@@ -53,7 +53,11 @@ run_case() {                        # $1 label, $2 expected rc, $3 expected subs
     printf '%s\n' "$out" | sed 's/^/         | /'
     fail=$((fail + 1)); return
   fi
-  if ! printf '%s' "$out" | grep -qF -- "$want"; then
+  # HERE-STRING, not a pipe: `grep -q` closes its input on the first match, and
+  # under `set -o errexit -o pipefail` the SIGPIPE that gives the writer fails
+  # the whole pipeline -- so a PASSING case would report as a failure. Caught by
+  # `quality / pipefail early-close`, which is a required check here.
+  if ! grep -qF -- "$want" <<<"$out"; then
     printf '  [FAIL] %s -- exit %s as expected but the message did not name it\n' "$label" "$rc"
     printf '         wanted substring: %s\n' "$want"
     printf '%s\n' "$out" | sed 's/^/         | /'
