@@ -158,6 +158,43 @@ COMPANIONS=(--set bootstrapDbPassword=placeholderplaceholder
             --set mysqlRootPassword=placeholderplaceholder
             --set credmgrPassword=placeholderplaceholder)
 
+# PREREQUISITE GATES, DERIVED FROM THE CHART, NOT LISTED HERE.
+#
+# A gate can be illegal without companions -- `narrowEdgeuser` REVOKEs edgeuser,
+# so it is refused unless the bootstrap has been re-parented off edgeuser and both
+# data-plane gates are on (backend#1528 S3). Rendering it alone therefore FAILS BY
+# DESIGN, and a probe that only greps a render would read that refusal as "the map
+# does not reach the templates" -- accusing correct code, which is how the first
+# two versions of this file went wrong in the other direction.
+#
+# The prerequisites are already written down once, in the chart: a gate with
+# preconditions declares them in a `tracebloc.assert<Gate>IsSafe` helper, whose
+# body `include`s each gate it requires. So they are PARSED out of that helper
+# rather than restated here. A future gate that grows prerequisites is handled the
+# day it declares them, and one whose prerequisites change cannot leave this guard
+# holding a stale copy -- there is no copy.
+prerequisites_of() {  # $1 = gate name; prints `--set X=true` args, or nothing
+  local gate="$1" helper body
+  # assert<Gate>IsSafe -- the gate name with its first letter capitalised.
+  helper="assert$(printf '%s' "${gate:0:1}" | tr '[:lower:]' '[:upper:]')${gate:1}IsSafe"
+  body=$(awk -v want="define \"tracebloc.$helper\"" '
+    index($0, want) { inside = 1 }
+    inside          { print }
+    inside && /^\{\{- end \}\}/ { exit }
+  ' "$HELPERS")
+  [ -n "$body" ] || return 0
+  # Every gate this helper consults, except the gate itself.
+  printf '%s\n' "$body" \
+    | grep -oE 'include "tracebloc\.[A-Za-z]+"' \
+    | sed 's/.*tracebloc\.//; s/"//' \
+    | sort -u \
+    | grep -v "^${gate}$" \
+    | while IFS= read -r dep; do
+        [ -n "$dep" ] || continue
+        printf -- '--set\n%s=true\n' "$dep"
+      done
+}
+
 # Which templates READ this gate, from the templates directory rather than a list
 # here. A gate whose helper is referenced nowhere is a finding, not an empty set.
 #
@@ -246,13 +283,17 @@ $(printf '%s\n' "$raw" | sed 's/^/        /')
   while IFS=' ' read -r spelling canonical; do
     [ -n "$spelling" ] || continue
 
-    if ! render_to "$TRUE_OUT" --set "env.CLIENT_ENV=$spelling" --set "${gate}ByEnv.${canonical}=true"; then
+    # Same prerequisites on BOTH renders, so the only difference between them
+    # remains the gate's own ByEnv entry.
+    PREREQ=()
+    while IFS= read -r line; do [ -n "$line" ] && PREREQ+=("$line"); done < <(prerequisites_of "$gate")
+    if ! render_to "$TRUE_OUT" --set "env.CLIENT_ENV=$spelling" --set "${gate}ByEnv.${canonical}=true" ${PREREQ[@]+"${PREREQ[@]}"}; then
       fail "$gate / CLIENT_ENV=$spelling: the ON render FAILED, so this gate is
       unverified rather than off:
 $(sed 's/^/        /' "$TRUE_OUT" | tail -4)"
       continue
     fi
-    if ! render_to "$FALSE_OUT" --set "env.CLIENT_ENV=$spelling" --set "${gate}ByEnv.${canonical}=false"; then
+    if ! render_to "$FALSE_OUT" --set "env.CLIENT_ENV=$spelling" --set "${gate}ByEnv.${canonical}=false" ${PREREQ[@]+"${PREREQ[@]}"}; then
       fail "$gate / CLIENT_ENV=$spelling: the OFF render FAILED:
 $(sed 's/^/        /' "$FALSE_OUT" | tail -4)"
       continue

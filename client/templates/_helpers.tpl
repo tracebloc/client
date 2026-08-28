@@ -682,6 +682,70 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end }}
 
 {{/*
+  Whether to narrow edgeuser to USAGE only at jobs-manager startup (backend#1528
+  S3 close-out). Resolves identically to its three siblings -- operator override
+  first, else the per-environment default -- sharing the CLIENT_ENV normalization
+  (backend#1723).
+
+  WHAT IT IS FOR. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants
+  edgeuser its broad privileges at every FRESH datadir init and cannot branch on a
+  runtime flag: it is COPYd into a digest-frozen image and the mysql entrypoint
+  runs it before jobs-manager exists. So a fleet that completed the whole
+  retirement can be handed a root-equivalent edgeuser again by a reinstall, with
+  nothing to notice it by. With this on, jobs-manager REVOKEs it back to USAGE on
+  every boot -- so the retired posture is self-sustaining rather than a property
+  of the last person who ran a REVOKE by hand.
+
+  It REVOKES; it never DROPs. The account keeps existing with USAGE only, which is
+  reversible from the S0 SHOW GRANTS snapshot. DROP USER stays an operator step.
+
+  DEFAULT FALSE EVERYWHERE, and the pairing below is enforced rather than
+  documented: this is the last step of the last stage.
+*/}}
+{{- define "tracebloc.narrowEdgeuser" -}}
+{{- $override := (default dict .Values).narrowEdgeuser -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.narrowEdgeuserByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+  Refuse a narrowing that this fleet cannot survive, AT RENDER TIME.
+
+  jobs-manager refuses the same combinations at startup with a RuntimeError, and
+  that refusal is the real safety net. This one exists because the render happens
+  BEFORE the Deployment is patched: an operator who mis-pairs the gates gets
+  `helm upgrade` refusing, rather than a CrashLooping jobs-manager on a fleet
+  whose previous pod has already been terminated.
+
+  Each condition is a way narrowing would break a consumer still authenticating
+  as edgeuser -- and because the heartbeat's information_schema enumeration is
+  privilege-filtered, over-revoking does not error, it silently stops returning
+  datasets. That is why "the operator asked for it" is not sufficient.
+*/}}
+{{- define "tracebloc.assertNarrowEdgeuserIsSafe" -}}
+{{- if (include "tracebloc.narrowEdgeuser" .) -}}
+{{-   $missing := list -}}
+{{-   if not (include "tracebloc.bootstrapDbReparent" .) -}}
+{{-     $missing = append $missing "bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight" -}}
+{{-   end -}}
+{{-   if not (include "tracebloc.serviceDbAccounts" .) -}}
+{{-     $missing = append $missing "serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser" -}}
+{{-   end -}}
+{{-   if not (include "tracebloc.perExperimentDbCreds" .) -}}
+{{-     $missing = append $missing "perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential" -}}
+{{-   end -}}
+{{-   if $missing -}}
+{{-     fail (printf "narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: %s. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off." (join "; " $missing)) -}}
+{{-   end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether the chart manages the mysql-client root password from a generated
   Secret instead of the image's baked default (backend#947 / backend#1528 Phase
   0). Resolves identically to tracebloc.serviceDbAccounts / bootstrapDbReparent —

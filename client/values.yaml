@@ -1514,6 +1514,36 @@ perExperimentDbCredsByEnv:
   stg: false
   prod: false
 
+# Narrow edgeuser to USAGE only at every jobs-manager boot (backend#1528 S3
+# close-out). mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser
+# its broad privileges at every FRESH datadir init and cannot branch on a runtime
+# flag -- it is baked into a digest-frozen image and the mysql entrypoint runs it
+# before jobs-manager exists. So without this, a fleet that completed the entire
+# retirement can be handed a root-equivalent edgeuser again by a reinstall or a
+# datadir loss, silently. With it on, the retired posture is self-sustaining
+# instead of being a property of whoever last ran a REVOKE by hand.
+#
+# It REVOKES; it never DROPs. The account keeps existing with USAGE only -- able
+# to connect, able to do nothing -- which is reversible from the S0
+# `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot. `DROP USER` stays an operator step.
+#
+# ONLY LEGAL WITH ALL THREE PREDECESSORS ON: bootstrapDbReparent (else the REVOKE
+# strips the privileges of the connection issuing it), serviceDbAccounts and
+# perExperimentDbCreds (else a live consumer is still authenticating as edgeuser).
+# Enforced, not documented: the render FAILS on a mis-paired combination, and
+# jobs-manager refuses it again at startup. Verify a fleet is ready with
+# docs/migration-tools/edgeuser-drop-readiness.sh before flipping this.
+#
+# UNSET by default: the effective value comes from narrowEdgeuserByEnv below,
+# keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
+# regardless of environment. Mirrors serviceDbAccounts (backend#1752).
+narrowEdgeuser:
+
+narrowEdgeuserByEnv:
+  dev: false
+  stg: false
+  prod: false
+
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
 # on first install. Set it for DR, to match a pre-created MySQL account, or to
@@ -1601,6 +1631,17 @@ tbIngestPassword: ""
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
 # edge regardless of environment (an operator override — DR, a fleet held back
 # deliberately, or a customer opt-out). Mirrors serviceDbAccounts (backend#1752).
+#
+# BAKING THIS ON REQUIRES THE ROTATION ON TOO (backend#2738). The re-parent needs
+# root's password pinned as DB_BOOTSTRAP_PASSWORD, and of the three tiers that can
+# supply it only one works for a DEFAULT: an explicit .Values.bootstrapDbPassword
+# is an operator action, the live Secret is empty on a fresh install and in every
+# `helm template`/dry-run, and the third — derived from rotateMysqlRoot, which is
+# what makes the chart the authority on root's password — renders everywhere. So
+# reparent=true with rotate=false has nothing to fall back on and hard-fails the
+# render for every install of that environment that does not pin the password by
+# hand. Bake the two ByEnv gates as a PAIR; scripts/tests/reparent-requires-
+# rotation.sh refuses the half-baked combination at review time.
 bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
