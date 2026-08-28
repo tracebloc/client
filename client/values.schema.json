@@ -446,8 +446,13 @@
       }
     },
     "perExperimentDbCreds": {
-      "type": "boolean",
-      "description": "RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Flip per environment, dev first."
+      "type": ["boolean", "null"],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from perExperimentDbCredsByEnv keyed on the RESOLVED CLIENT_ENV. RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Set true or false only to pin ONE edge against its fleet default."
+    },
+    "perExperimentDbCredsByEnv": {
+      "type": "object",
+      "description": "Per-environment default for the RFC-0003 D10 per-experiment credential mint (backend#1528), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Every other gate in this rollout had one of these; without it, the flag the ticket's LAST step is gated on was the only one whose fleet posture the chart could not record — so a values-resetting upgrade silently put the account mint back on edgeuser.",
+      "additionalProperties": { "type": "boolean" }
     },
     "credmgrPassword": {
       "type": "string",

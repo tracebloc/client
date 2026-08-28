@@ -125,7 +125,7 @@ The target model is least-privilege, one identity per job, with `edgeuser` retir
 
 | Identity | Scope | Used by | Status |
 |---|---|---|---|
-| **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped, opt-in `perExperimentDbCreds` (RFC-0003 D10, backend#1181) |
+| **per-experiment user** | `SELECT` on one experiment's physical table(s) only | training pods (injected via per-job Secret as `MYSQL_USER`/`MYSQL_PASSWORD`) | Shipped (RFC-0003 D10, backend#1181). On for `dev` via `perExperimentDbCredsByEnv`, off for `stg`/`prod` — `stg` deliberately, its REVOKE soak is unfinished (backend#1528) |
 | **`tb_credmgr`** | `CREATE USER` + `SELECT … WITH GRANT OPTION` on `training_test_datasets.*` — mints the per-experiment users, nothing else | jobs-manager | Shipped with `perExperimentDbCreds` |
 | **`tb_meta`** | `ALL PRIVILEGES` on `metadata.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager + requests-proxy metadata work | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg` via `serviceDbAccountsByEnv`, off for `prod` (backend#1752) |
 | **`tb_ingest`** | `ALL PRIVILEGES` on `training_test_datasets.*` only (no `*.*`, no `GRANT OPTION`) | jobs-manager dataset work + spawned ingestion Jobs | **Consumed** since S2 (client-runtime#305/#308, client#664). On for `dev`/`stg` via `serviceDbAccountsByEnv`, off for `prod` (backend#1752) |
@@ -383,6 +383,8 @@ kubectl -n <ns> create secret generic <release>-secrets \
 kubectl -n <ns> rollout restart deployment/<release>-jobs-manager
 ```
 
+Rotating replaces the credential; it does **not** remove the copies already stored in the release's retained revisions. If this install passes `clientId`/`clientPassword` as values, see §6.7 for how to stop it doing that.
+
 ### 6.2 Verify CNI enforces NetworkPolicy
 
 Before trusting §4.2, verify the cluster's CNI actually enforces. Create a test pod with the training label and confirm a blocked destination is blocked:
@@ -465,6 +467,60 @@ Chart versions bundle specific Dockerfile + jobs-manager builds. Mixing an old c
 `enforce: restricted` is the chart default for CSI-backed deployments. Bare-metal installs (`hostPath.enabled: true`) cannot use enforce because the privileged `init-mysql-data` container — required because kubelet does not apply `fsGroup` to hostPath volumes ([kubernetes/kubernetes#138411](https://github.com/kubernetes/kubernetes/issues/138411)) — would be rejected. `ci/bm-values.yaml` overrides `namespace.podSecurity.enforce` to `""` accordingly. `warn` and `audit` remain on so violations are still logged.
 
 Node-level agents (`tracebloc-resource-monitor` DaemonSet) run in a separate namespace (`tracebloc-node-agents`) at `enforce: privileged` — they legitimately need hostPath access to `/proc` / `/sys` / cgroups. The release namespace stays clean.
+
+### 6.7 Move an existing install off values-stored credentials
+
+`clientId` and `clientPassword` used to be `required` with no fallback, so they had to be supplied as values on **every install and every upgrade** — which means they were necessarily written into the Helm release's user-supplied values, in cleartext, in **every retained revision**. Anyone with `get secret` in the namespace could read them, and a single `helm get values` — which reads like a harmless configuration query — prints them in full.
+
+The chart now resolves both three ways (values → the live Secret → hard failure; see the notes on `clientId` in `values.yaml`), so a credential need never enter release values. **That capability does nothing on its own: an install that already passes them keeps writing them.** This is the migration.
+
+**1. Put the credentials in the Secret, if they are not already there.** On an install that has been running, they are — the chart wrote them. Confirm rather than assume:
+
+```bash
+kubectl -n <ns> get secret <release>-secrets \
+  -o jsonpath='{.data.CLIENT_ID}' | base64 -d
+```
+
+Empty output means tier 2 has nothing to resolve from, and dropping the values would make the next upgrade **fail** rather than degrade. Create them first, using the labelled/annotated form in `values.yaml` so Helm adopts the Secret instead of colliding with it.
+
+**2. Upgrade without the two values.** Do not pass `--reuse-values`: that would carry the old cleartext forward into the new revision, which is the thing being removed.
+
+```bash
+helm upgrade <release> tracebloc/client -n <ns> \
+  -f your-values.yaml        # with clientId/clientPassword REMOVED
+```
+
+**3. Verify the new revision is clean.** This is the check that matters, and it is one command:
+
+```bash
+helm get values <release> -n <ns> | grep -E 'clientId|clientPassword'
+# no output = this revision no longer stores them
+```
+
+**4. The old revisions still hold them.** Rotation does not clear history and neither does this upgrade — every retained revision keeps the values it was installed with. Two honest options:
+
+- **Rotate on the console** (§6.1) so the stored copies are worthless, *and* let the old revisions age out of `--history-max` (10 by default, so ten more upgrades).
+- **Or reinstall** the release if you need the history gone now. `helm uninstall` deletes the revision Secrets outright; there is no supported way to rewrite one in place.
+
+Prefer rotation. A reinstall is disruptive and the cleartext is only useful to someone who already has `get secret` in the namespace.
+
+**A limit worth knowing before you plan around it.** Tier 2 is a `lookup`, so it needs a live cluster. It is inert under `helm template`, `--dry-run`, ArgoCD's default renderer and Flux post-render alike — and unlike the chart's other five credentials these two cannot degrade there, because the backend issues them and tier 3 is a hard failure. **A GitOps install that renders without cluster access must keep both in its values, and for it this section does not apply.** Server-side apply, or `helm upgrade` run from CI against the cluster, is what makes the value-free path reachable.
+
+### 6.8 Bring your own registry credential
+
+`dockerRegistry.password` has the same shape of exposure and its own escape hatch, which is easy to miss because the default path does not use it:
+
+```yaml
+dockerRegistry:
+  create: false                    # do not build a Secret from values
+  existingSecret: my-pull-secret   # a kubernetes.io/dockerconfigjson you own
+```
+
+With `create: true` the registry PAT is supplied as a value and lands in release values exactly like the two above. With `existingSecret` it never enters Helm at all.
+
+Note the chart's own default is `create: false` — an install that needs no pull secret sets nothing and has no exposure here. `create: true` is an override, and it is the path any fleet pulling from a private registry takes, which is why this section exists.
+
+Worth doing on any install whose registry credential is more than a read-only pull token: Docker Desktop mints Read/Write/**Delete** PATs with no expiry by default, so a leaked one is not merely a read of your images.
 
 ---
 
