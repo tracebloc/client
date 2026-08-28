@@ -12,10 +12,34 @@ environment when this section was written; **since backend#1528 S3 baked dev's
 retired posture, `rotateMysqlRootByEnv.dev` is `true`** — so on a **dev** fleet
 an upgrade across that version DOES change something: the Secret gains
 `MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. `stg` and
-`prod` remain `false` and are unaffected, and an existing datadir keeps root's
-current password either way (the entrypoint honours this value only at fresh
-datadir init). The gate is a *precondition* for the rotation runbook
-(`docs/migration-tools/rotate-mysql-root.md`), not the rotation itself.
+`prod` remain `false` and are unaffected. The gate is a *precondition* for the
+rotation runbook (`docs/migration-tools/rotate-mysql-root.md`), not the rotation
+itself.
+
+> **Read this before the first auto-upgrade on a dev edge that has never
+> rotated root.** The bake turns on the re-parent and the rotation together, and
+> on such an edge those two interact badly:
+>
+> * The Secret has no `MYSQL_ROOT_PASSWORD`, so the chart **generates** one.
+> * The mysql entrypoint applies that value only at **fresh datadir init** — an
+>   existing datadir keeps root's current (image-baked) password.
+> * `DB_BOOTSTRAP_PASSWORD` is **derived from the rotation value**
+>   (backend#2738), so `jobs-manager` authenticates as `root` with the generated
+>   password the live account does not have.
+>
+> The visible result is a **`jobs-manager` CrashLoop after the hourly
+> auto-upgrade**, not a silent no-op — auto-upgrade uses
+> `--reset-then-reuse-values`, so it picks up the new chart defaults on its own.
+>
+> This does not affect an edge that already rotated: its Secret holds the
+> current value, the preserve-across-upgrades tier wins, and root's live
+> password matches. Fleet-wide, dev rotated before the re-parent was enabled,
+> which is why the ordering hazard has not bitten (see the `secrets.yaml`
+> derivation comment) — but *check the edge* rather than assume it. If
+> `kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}'`
+> is empty on a dev edge with an existing datadir, complete the one-time
+> `ALTER USER 'root'` step in the rotation runbook **before** letting the
+> upgrade land, or pin `bootstrapDbPassword` to the live root password.
 
 Below `1.9.71` the key does not exist and `values.schema.json` does not close
 `additionalProperties`, so `--set rotateMysqlRoot=true` on an older chart is

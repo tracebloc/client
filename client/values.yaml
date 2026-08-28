@@ -1477,9 +1477,10 @@ perDatasetPvcs: false
 # DB's Service Bus strings). jobs-manager provisions the dedicated tb_credmgr
 # minting identity on startup and revokes each user when its Job ends.
 #
-# Flip per environment, dev first. Default false: today's shared-credential
-# behavior, byte-for-byte. Retiring edgeuser is a later step once this is
-# universally on. Needs no per-edge action — the tb_credmgr password is a
+# Flip per environment, dev first. ON for dev, off for stg and prod (see
+# perExperimentDbCredsByEnv below) — where it is off, behaviour is today's
+# shared-credential path, byte-for-byte. Retiring edgeuser is a later step once
+# this is universally on. Needs no per-edge action — the tb_credmgr password is a
 # generated, upgrade-stable Secret value.
 # LEFT NULL ON PURPOSE, matching serviceDbAccounts. The helper distinguishes
 # "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
@@ -1559,8 +1560,9 @@ credmgrPassword: ""
 # generated Secret below (SERVICE_DB_ACCOUNTS). Additive: nothing consumes them
 # until the S2 consumer switch, so a default install is byte-identical.
 #
-# Flip per environment, dev first. Default false: today's shared-edgeuser
-# behavior, byte-for-byte. Needs no per-edge action — the passwords are
+# Flip per environment, dev first. ON for dev and stg, off for prod (see
+# serviceDbAccountsByEnv below) — where it is off, behaviour is today's
+# shared-edgeuser path, byte-for-byte. Needs no per-edge action — the passwords are
 # generated, upgrade-stable Secret values.
 # UNSET by default: the effective value comes from `serviceDbAccountsByEnv`
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
@@ -1622,10 +1624,12 @@ tbIngestPassword: ""
 # retiring edgeuser. Additive to the data plane: it changes only which identity
 # runs the mint, never which the scoped accounts hold.
 #
-# This is the LAST, prod-irreversible-adjacent step of the rollout, so it is OFF
-# everywhere by default. Flip per environment, dev first, only once
-# serviceDbAccounts + perExperimentDbCreds are verified on that fleet and the S0
-# `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured (the rollback reference).
+# This is the LAST, prod-irreversible-adjacent step of the rollout. It is ON for
+# dev (baked under backend#1528 S3, once dev's posture was verified and its S0
+# snapshot captured) and OFF for stg and prod. Flip the remaining environments
+# one at a time, only once serviceDbAccounts + perExperimentDbCreds are verified
+# on that fleet and the S0 `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured
+# (the rollback reference).
 #
 # UNSET by default: the effective value comes from bootstrapDbReparentByEnv
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an

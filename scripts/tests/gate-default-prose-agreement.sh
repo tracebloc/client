@@ -147,6 +147,37 @@ def norm(t):
     t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)   # [text](url) -> text
     return " ".join(t.lower().split())
 
+# ---- 3a. values.yaml's OWN comment blocks -------------------------------
+# The file this guard derives truth FROM also asserts that truth in prose, and
+# was the one document nothing compared (Bugbot, #900): `bootstrapDbReparent`'s
+# header said "OFF everywhere by default" for a whole PR after dev was baked.
+# Comment runs are grouped exactly as they are written -- consecutive `#` lines
+# with no blank between -- so a claim is read as the paragraph it lives in.
+#
+# ATTRIBUTION IS SCOPED, and getting this wrong is how a widened guard turns
+# into a noisy one. A comment run routinely NAMES several gates -- the
+# re-parent's header cites `serviceDbAccounts` and `perExperimentDbCreds` as its
+# preconditions -- so "any gate mentioned anywhere in the block" attributed the
+# re-parent's own "OFF for stg" to serviceDbAccounts, which ships stg=true. That
+# is a false positive, and a guard that cries wolf gets skipped (rule 4). A
+# values.yaml comment run is therefore attributed to exactly ONE gate: the key
+# it introduces, i.e. the next `<gate>:` / `<gate>ByEnv:` line after it.
+prose_for = {}       # gate -> [(label, text)]
+_run, _start = [], None
+for n, line in enumerate(text + [""], 1):
+    st = line.strip()
+    if st.startswith("#"):
+        if _start is None:
+            _start = n
+        _run.append(st.lstrip("#").strip())
+        continue
+    if _run:
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*?)(?:ByEnv)?:\s*$', st)
+        if m and m.group(1) in gates:
+            prose_for.setdefault(m.group(1), []).append(
+                (f"client/values.yaml#L{_start}", " ".join(_run)))
+    _run, _start = [], None
+
 md_paragraphs = []   # (label, normalised text)
 for mp in md_paths:
     try:
@@ -156,20 +187,35 @@ for mp in md_paths:
               file=sys.stderr)
         sys.exit(1)
     rel = mp[len(root) + 1:] if root and mp.startswith(root + "/") else mp
-    for n, para in enumerate(re.split(r"\n\s*\n", raw), 1):
-        if para.strip():
-            md_paragraphs.append((f"{rel}#p{n}", norm(para)))
+    # ONE LINE AT A TIME, for the same attribution reason as above: a markdown
+    # TABLE is a single paragraph, and its rows describe different gates. The
+    # SECURITY.md identity table said, correctly, "On for `dev` via
+    # `perExperimentDbCredsByEnv`, off for `stg`/`prod`" -- and paragraph
+    # scoping charged that `off for stg` to serviceDbAccounts, three rows away.
+    # Every real drift this guard has seen names its gate on the same line as
+    # the claim, so the line is the honest unit.
+    for n, line in enumerate(raw.splitlines(), 1):
+        if line.strip():
+            md_paragraphs.append((f"{rel}:{n}", norm(line)))
 
 # ---- 4. compare -------------------------------------------------------
 # Claim patterns, per direction. These are the shapes that actually shipped.
+# THE VOCABULARY IS THE CHECK'S REAL SURFACE, and listing only the spellings
+# that already shipped makes it a check for LAST TIME'S wording (Bugbot, #900).
+# `false everywhere` was covered; the same sentence written `OFF everywhere` --
+# which is what values.yaml actually said -- matched nothing. Both polarities
+# now carry the off/on synonyms as well as the boolean words.
+_OFF = r'(?:false|off|disabled)'
+_ON = r'(?:true|on|enabled)'
 FALSE_CLAIMS = [
-    r'false\s+everywhere',
-    r'default\s+false',
-    r'false\s+for\s+{env}\b',
-    r'false\s+for\s+[\w,\s]*\b{env}\b',
+    _OFF + r'\s+everywhere',
+    r'default\s+' + _OFF,
+    _OFF + r'\s+(?:by\s+default\s+)?for\s+{env}\b',
+    _OFF + r'\s+(?:by\s+default\s+)?for\s+[\w,\s]*\b{env}\b',
 ]
 TRUE_CLAIMS = [
-    r'true\s+for\s+{env}\b',
+    _ON + r'\s+everywhere',
+    _ON + r'\s+(?:by\s+default\s+)?for\s+{env}\b',
     r'baked\s+on\s+for\s+{env}\b',
 ]
 
@@ -194,6 +240,8 @@ for gate, envs in sorted(gates.items()):
     for label, para in md_paragraphs:
         if needle in para or alt in para:
             sources[label] = para
+    for label, blk in prose_for.get(gate, []):
+        sources[label] = norm(blk)
 
     for where, prose in sources.items():
         if prose is None:
