@@ -600,8 +600,10 @@ docs/migration-tools/edgeuser-drop-readiness.sh \
 
 It is **read-only** — it performs no `REVOKE`, no `DROP`, and no writes of any kind — and it
 **fails closed**: an absent pod, a refused `exec`, a log that cannot be read **or that is empty over the `--since` window** (an aged-out cycle or a restarted pod is *not* a clean one), no RUNNING ingestion pod, an ingestion `DB_USER` that is absent rather than wrong, or a baseline you did not
-supply each count as a finding, never as a pass. It never prints a password value; for every
-`*_PASSWORD` variable it asserts only SET or UNSET.
+supply each count as a finding, never as a pass. It never prints a password value, and never
+places one on a command line: the MySQL passwords it must connect with are fed to the in-pod
+client over stdin, so no secret reaches `kubectl`'s argv (the operator host's `ps`, or the API
+server's `exec` audit log). For every `*_PASSWORD` variable it asserts only SET or UNSET.
 
 Three things about it are worth knowing before you trust a verdict:
 

@@ -20,11 +20,13 @@
 #  WHAT IT DOES NOT DO. It changes nothing -- no REVOKE, no DROP, no writes of any
 #  kind. It is read-only by construction and refuses rather than guesses.
 #
-#  PASSWORDS ARE NEVER PRINTED. It reads MySQL passwords out of Secrets because it
-#  must connect as the data-plane identities, and passes them to the client via
-#  MYSQL_PWD so they never appear in a pod's argv. Usernames and the gate booleans
-#  ARE printed -- they are the finding. For every *_PASSWORD var the script asserts
-#  only SET or UNSET, never the value.
+#  PASSWORDS ARE NEVER PRINTED, AND NEVER PUT ON A COMMAND LINE. It reads MySQL
+#  passwords out of Secrets because it must connect as the data-plane identities,
+#  and feeds each one to the in-pod client over STDIN (`MYSQL_PWD=$(cat)`), so the
+#  value appears neither on `kubectl exec`'s argv on the operator host (visible in
+#  `ps` and the API server's exec audit log) nor on mysql's argv inside the pod.
+#  Usernames and the gate booleans ARE printed -- they are the finding. For every
+#  *_PASSWORD var the script asserts only SET or UNSET, never the value.
 #
 #  FAIL CLOSED. A pod that is absent, an exec that is refused, a var that cannot be
 #  read, logs that are unavailable, a baseline that was not supplied -- each is a
@@ -427,17 +429,30 @@ for item in json.load(sys.stdin).get("items", []):
 ' "$1" 2>/dev/null || true
   }
 
-  count_as() {  # $1 = mysql user, $2 = password, $3 = schema; prints a count or nothing
+  # ONE mysql-in-the-pod call, WITH THE PASSWORD OFF kubectl's ARGV (Bugbot #2784).
+  # `env MYSQL_PWD=...` only kept the secret off *mysql's* argv INSIDE the pod; on
+  # `kubectl exec`'s OWN command line the value still landed in the operator host's
+  # process list (`ps`) and the API server's exec audit log. Piped to
+  # `MYSQL_PWD=$(cat)` in an in-pod shell, the password rides the exec STDIN stream
+  # instead -- which neither `ps` nor the audit log records. The username and SQL
+  # are not secret, so they stay on argv (what the stub, and a human at `ps`, see).
+  #
+  # `|| true` for the same reason as `pod_of`: a failed `exec` under `pipefail`
+  # must yield EMPTY output, which every caller already treats as "cannot tell
+  # (fail closed)". It must not decide the script's exit status. The `[ -n "$2" ]`
+  # guard keeps an empty password from even opening an exec (an unusable count).
+  mysql_q() {  # $1 = user, $2 = password, $3 = SQL; prints mysql stdout, empty on failure
     [ -n "$2" ] || return 0
-    # `|| true` for the same reason as `pod_of`: a failed `exec` under `pipefail`
-    # must yield an EMPTY count, which `compare` below already reports as
-    # "cannot tell (fail closed)". It must not decide the script's exit status.
-    # Reached today via `"$(count_as ...)"`, where errexit does not fire on a
-    # failing substitution -- but that is a property of the call site, and a
-    # future caller assigning it directly would inherit the abort.
-    K exec "$mysql_pod" -- env MYSQL_PWD="$2" mysql -u "$1" -N -B \
-      -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$3';" 2>/dev/null \
-      | tr -d '[:space:]' || true
+    printf '%s' "$2" \
+      | K exec -i "$mysql_pod" -- \
+          sh -c 'MYSQL_PWD=$(cat) mysql -u "$1" -N -B -e "$2"' sh "$1" "$3" \
+          2>/dev/null \
+      || true
+  }
+
+  count_as() {  # $1 = mysql user, $2 = password, $3 = schema; prints a count or nothing
+    mysql_q "$1" "$2" "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$3';" \
+      | tr -d '[:space:]'
   }
 
   compare() {  # $1 = label, $2 = observed, $3 = baseline, $4 = identity used
@@ -465,13 +480,25 @@ for item in json.load(sys.stdin).get("items", []):
   compare "training_test_datasets" "$(count_as "$ing_u" "$ing_pw" training_test_datasets)" "$BASE_DS"   "$ing_u"
   compare "metadata"               "$(count_as "$met_u" "$met_pw" metadata)"               "$BASE_META" "$met_u"
 
-  # Labelled smoke test only. An EMPTY result is not evidence of absence --
-  # consumers connect per-operation and disconnect, which is precisely why the
-  # processlist criterion was retired. A NON-empty result is real evidence.
+  # ROOT CREDENTIAL, WITH THE S3 FALLBACK (Bugbot #2783). MYSQL_ROOT_PASSWORD is a
+  # Secret key ONLY when rotateMysqlRoot is on (default off, secrets.yaml), so on a
+  # fleet that is S3-ready but not rotated it is simply absent -- and the old `else`
+  # scored that absence `untold` in EVERY phase. `untold` counts as a failure, so a
+  # legitimately-unrotated fleet could NEVER print DROP-READY: the skip and the gate
+  # disagreed. But an S3-ready fleet already carries root's password under a second
+  # name -- DB_BOOTSTRAP_PASSWORD is, by the chart's own resolution, "the MySQL root
+  # password for the cluster" whenever the re-parent gate is on (it is what the mint
+  # authenticates as root with). Criterion 1 above already REQUIRES DB_BOOTSTRAP_USER=
+  # root to pass, so every fleet that could be DROP-READY carries this key. Prefer
+  # the canonical key; fall back to the bootstrap one.
   root_pw=$(secret_val MYSQL_ROOT_PASSWORD)
+  [ -n "$root_pw" ] || root_pw=$(secret_val DB_BOOTSTRAP_PASSWORD)
   if [ -n "$root_pw" ]; then
-    live=$(K exec "$mysql_pod" -- env MYSQL_PWD="$root_pw" mysql -u root -N -B \
-             -e "SELECT COUNT(*) FROM information_schema.processlist WHERE user='edgeuser';" 2>/dev/null | tr -d '[:space:]' || true)
+    # Labelled smoke test only. An EMPTY result is not evidence of absence --
+    # consumers connect per-operation and disconnect, which is precisely why the
+    # processlist criterion was retired. A NON-empty result is real evidence.
+    live=$(mysql_q root "$root_pw" \
+             "SELECT COUNT(*) FROM information_schema.processlist WHERE user='edgeuser';" | tr -d '[:space:]')
     if [ "${live:-0}" != "0" ] && [ -n "${live:-}" ]; then
       bad "smoke test: $live live edgeuser connection(s) right now — a real straggler (a non-empty result IS evidence)"
     else
@@ -495,10 +522,10 @@ for item in json.load(sys.stdin).get("items", []):
       # a broader one that has to be searched. The inventory below is kept for the
       # log and is now ROWS rather than one concatenated string, so it cannot
       # truncate either -- but nothing decides on it any more.
-      remaining_n=$(K exec "$mysql_pod" -- env MYSQL_PWD="$root_pw" mysql -u root -N -B \
-                      -e "SELECT COUNT(*) FROM mysql.user WHERE user='edgeuser';" 2>/dev/null | tr -d '[:space:]' || true)
-      inventory=$(K exec "$mysql_pod" -- env MYSQL_PWD="$root_pw" mysql -u root -N -B \
-                    -e "SELECT CONCAT(user,'@',host) FROM mysql.user WHERE user NOT IN ('mysql.sys','mysql.session','mysql.infoschema') ORDER BY user;" 2>/dev/null || true)
+      remaining_n=$(mysql_q root "$root_pw" \
+                      "SELECT COUNT(*) FROM mysql.user WHERE user='edgeuser';" | tr -d '[:space:]')
+      inventory=$(mysql_q root "$root_pw" \
+                    "SELECT CONCAT(user,'@',host) FROM mysql.user WHERE user NOT IN ('mysql.sys','mysql.session','mysql.infoschema') ORDER BY user;")
       inv_rows=$(printf '%s' "${inventory:-}" | grep -c . || true)
       note "post-drop account inventory (${inv_rows:-0} row(s)): $(printf '%s' "${inventory:-<unreadable>}" | tr '\n' ' ')"
       case "${remaining_n:-}" in
@@ -510,8 +537,20 @@ for item in json.load(sys.stdin).get("items", []):
           bad "post-drop: edgeuser is still present in mysql.user ($remaining_n row(s))" ;;
       esac
     fi
+  elif [ "$PHASE" = "post-drop" ]; then
+    # NO ROOT CREDENTIAL, AND THIS PHASE NEEDS ONE. The post-drop confirmation reads
+    # mysql.user to PROVE edgeuser is gone -- a real criterion standing in front of
+    # an irreversible DROP, and only root can read it. We cannot confirm the drop,
+    # so this IS a genuine cannot-tell: fail closed, exactly as before.
+    untold "could not read a root credential (MYSQL_ROOT_PASSWORD or DB_BOOTSTRAP_PASSWORD) from any Secret — the post-drop mysql.user confirmation could not run"
   else
-    untold "could not read MYSQL_ROOT_PASSWORD from any Secret — the smoke test and post-drop inventory were skipped"
+    # NO ROOT CREDENTIAL, AND THIS PHASE DOES NOT NEED ONE. Here root powers ONLY the
+    # processlist smoke test, which is documented non-evidence: it can raise a `bad`
+    # (a live straggler) or a `note`, but NEVER an `ok` the gate relies on. Reddening
+    # the gate over the absence of a check that could not have satisfied it anyway is
+    # the skip-fails-the-gate contradiction (Bugbot #2783). So this is a `note`, not
+    # an `untold`: the three real criteria above already stand on their own.
+    note "smoke test skipped: no root credential in any Secret (MYSQL_ROOT_PASSWORD exists only when rotateMysqlRoot is on; DB_BOOTSTRAP_PASSWORD only when the S3 re-parent is on). The processlist smoke test is non-evidence anyway, so this does not affect the verdict."
   fi
 fi
 
