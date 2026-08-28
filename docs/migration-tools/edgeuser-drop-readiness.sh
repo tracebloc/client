@@ -270,8 +270,28 @@ check_workload requests-proxy  "requests-proxy"  consumer
 #
 # Spawned ingestion Jobs are stamped at submit time, not by the chart, so they are
 # checked separately -- and their ABSENCE is "cannot tell", never a pass.
+# THE CONTROL-PLANE WORKLOADS, EXCLUDED BY NAME (Bugbot).
+#
+# The picker below matched any Running pod whose name contains `ingest`. Pod names
+# are `{release}-{workload}-{hash}`, so a release or namespace containing `ingest`
+# -- `tracebloc-ingest`, say -- makes `…-jobs-manager-…` and `…-requests-proxy-…`
+# match too. `kubectl get pods` has no guaranteed order, so criterion 1 could pick
+# a control-plane pod, find no `DB_USER` in it, and report `cannot tell` forever:
+# the same structurally-always-red shape this file has now hit three times.
+#
+# DERIVED FROM THE WORKLOADS THIS SCRIPT ALREADY CHECKS, not a fresh list: these
+# are exactly the two names passed to `check_workload` below, so the exclusion
+# cannot drift away from what the chart renders without that call site changing
+# too. `mysql` is here for the same reason `pod_of mysql` exists.
+CONTROL_PLANE_RE='jobs-manager|requests-proxy|mysql'
+
+# `!seen++` rather than `exit`, matching `pod_of`. This pipeline is already
+# `|| true`-guarded so awk's `exit` was NOT an abort here -- unlike the bare
+# assignment `pod_of` fed -- but leaving one of the two spellings behind is how the
+# next reader concludes the early `exit` is fine.
 ing=$(K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
-        | awk '$2=="Running" && tolower($1) ~ /ingest/ { print $1; exit }' || true)
+        | awk -v skip="$CONTROL_PLANE_RE" \
+              '$2=="Running" && tolower($1) ~ /ingest/ && tolower($1) !~ skip && !seen++ { print $1 }' || true)
 if [ -z "$ing" ]; then
   untold "ingestion: no RUNNING ingestion pod. The gate needs a driven cycle, and the ingestion identity can only be read from a live pod -- kubectl exec requires a running container, so a Job pod that already Succeeded cannot be inspected. Run this check WHILE an ingestion run is in flight."
 else

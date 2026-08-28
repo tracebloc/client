@@ -470,6 +470,36 @@ D="$TMP/ingestdone"; clean_fleet "$D"
 sed -i.bak 's/^tracebloc-ingest-xyz Running$/tracebloc-ingest-xyz Succeeded/' "$D/pods"
 run_case "a Succeeded ingestion pod is not accepted as the driven cycle" "$D" 1 "no RUNNING ingestion pod"
 
+# A RELEASE NAMED *ingest* MUST NOT MAKE THE CONTROL PLANE ELIGIBLE (Bugbot).
+# Pod names are `{release}-{workload}-{hash}`, so on a release called
+# `tracebloc-ingest` the jobs-manager and requests-proxy pods both contain
+# `ingest`. `kubectl get pods` has no guaranteed order, so the picker could take a
+# control-plane pod, find no DB_USER in it, and report cannot-tell forever -- the
+# third instance in this file of the same structurally-always-red shape.
+#
+# The fixture puts the control-plane pods FIRST, which is the order that produced
+# the bug: an unfiltered picker takes the first match.
+D="$TMP/ingest-named-release"; clean_fleet "$D"
+cat > "$D/pods" <<'P'
+tracebloc-ingest-jobs-manager-abc123 Running
+tracebloc-ingest-requests-proxy-def456 Running
+mysql-0 Running
+tracebloc-ingest-worker-xyz Running
+P
+for _p in tracebloc-ingest-jobs-manager-abc123 tracebloc-ingest-requests-proxy-def456 tracebloc-ingest-worker-xyz; do
+  case "$_p" in
+    *jobs-manager*)   cp "$D/env.jobs-manager-abc123"   "$D/env.$_p" ;;
+    *requests-proxy*) cp "$D/env.requests-proxy-def456" "$D/env.$_p" ;;
+    *)                cp "$D/env.tracebloc-ingest-xyz"  "$D/env.$_p" ;;
+  esac
+  : > "$D/logs.$_p"
+done
+echo "the driven cycle ran" > "$D/logs.tracebloc-ingest-worker-xyz"
+echo "the driven cycle ran" > "$D/logs.tracebloc-ingest-jobs-manager-abc123"
+echo "the driven cycle ran" > "$D/logs.tracebloc-ingest-requests-proxy-def456"
+run_case "a release named *ingest* does not make the control plane the driven cycle" "$D" 0 \
+  "all three criteria hold" --phase pre-revoke
+
 # ...AND A FINISHED JOB ALONGSIDE A LIVE ONE MUST NOT FAIL THE GATE (Bugbot, High).
 # `scan_logs` matched on pod NAME alone, so completed ingestion Jobs from earlier
 # cycles were scanned too. Their logs fall outside `--since`, the empty-log rule
