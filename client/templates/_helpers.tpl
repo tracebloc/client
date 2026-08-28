@@ -667,8 +667,12 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   operator override first, else the per-environment default — so the fleet's S3
   posture reads out of one place the same way, and the CLIENT_ENV normalization
   (backend#1723) is shared. This is the LAST, edgeuser-retiring step, so
-  bootstrapDbReparentByEnv is false everywhere by default; flip dev first only
-  after serviceDbAccounts + perExperimentDbCreds are verified on the fleet.
+  bootstrapDbReparentByEnv is BAKED ON FOR dev and false for stg and prod: dev
+  has run the whole ladder and its posture is verified, so a fresh dev install
+  should come up retired rather than re-walk the flips by hand. stg and prod
+  still opt in per fleet, after serviceDbAccounts + perExperimentDbCreds are
+  verified there. Paired with rotateMysqlRootByEnv -- reparent=true with
+  rotate=false has no password to fall back on and hard-fails the render.
 */}}
 {{- define "tracebloc.bootstrapDbReparent" -}}
 {{- $override := (default dict .Values).bootstrapDbReparent -}}
@@ -699,8 +703,10 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   It REVOKES; it never DROPs. The account keeps existing with USAGE only, which is
   reversible from the S0 SHOW GRANTS snapshot. DROP USER stays an operator step.
 
-  DEFAULT FALSE EVERYWHERE, and the pairing below is enforced rather than
-  documented: this is the last step of the last stage.
+  BAKED ON FOR dev, FALSE FOR stg AND prod, and the pairing below is enforced
+  rather than documented: this is the last step of the last stage, so it is only
+  legal where every predecessor gate is already on -- which is exactly why dev
+  can carry it as a default and stg/prod cannot yet.
 */}}
 {{- define "tracebloc.narrowEdgeuser" -}}
 {{- $override := (default dict .Values).narrowEdgeuser -}}
@@ -787,7 +793,10 @@ true
   operator override first, else the per-environment default. Only takes effect
   for a FRESH datadir (the mysql entrypoint reads MYSQL_ROOT_PASSWORD at init and
   ignores it thereafter); an existing datadir is rotated by the one-time
-  `ALTER USER 'root'` step that reads the same Secret. Default false everywhere.
+  `ALTER USER 'root'` step that reads the same Secret. Default TRUE for dev,
+  false for stg and prod -- dev is baked to the retired posture, while stg and
+  prod flip per fleet during a rotation window (it rolls the mysql pod, and an
+  existing edge still needs the one-time ALTER USER 'root' DDL).
 */}}
 {{- define "tracebloc.rotateMysqlRoot" -}}
 {{- $override := (default dict .Values).rotateMysqlRoot -}}
