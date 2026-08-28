@@ -145,8 +145,12 @@ fi
 # scripts/tests/mirror-enumeration-complete.sh now compares this extraction
 # against a PyYAML walk of the same render, so a third YAML form cannot slip
 # past the way this one did.
+# `|| true`: a no-match `grep` exits 1, which `pipefail` propagates and `set -e`
+# turns into a script abort HERE — before the empty check below, making its
+# fail-loud diagnostic dead code (backend#2746). Survive the empty case so the
+# check runs and prints the actionable message, exactly as line 338 does.
 chart_images=$(grep -hoE '^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?[^"[:space:]]+' "$RENDER" \
-               | sed -E 's/^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?//' | sort -u)
+               | sed -E 's/^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*"?//' | sort -u) || true
 
 if [ -z "$chart_images" ]; then
   echo "list-images: the render produced no image: lines at all, which cannot be" >&2
