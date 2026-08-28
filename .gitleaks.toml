@@ -6,7 +6,7 @@
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "The telemetry canary tests feed fabricated credentials (hunter2, the joke password) through curl -u / proxy URLs to prove the redaction guards strip them. These are never real secrets, so curl-auth-user hits on `$CANARY:hunter2` across this branch's history are false positives (backend#1907)."
 regexTarget = "match"
 regexes = [
@@ -24,6 +24,32 @@ regexes = [
 # diff is read on every change — whereas suppressing the RULE, or baselining the
 # findings, would reach further and decay less visibly. Inline `gitleaks:allow`
 # markers were tried first and are not honoured by this pipeline.
+[[allowlists]]
+description = "scripts/tests/collector-redaction-floor.sh is a specimen fixture: one fabricated value per class of secret the Collector redacts (backend#1908)."
 paths = [
   '''^scripts/tests/collector-redaction-floor\.sh$''',
+]
+
+# client/tests/secrets_test.yaml carried a high-entropy fixture for the
+# "explicit pin beats the derived value" case (backend#2738). gitleaks 8.30.1
+# reads it as `generic-api-key` at entropy 3.73 -- correctly, by its own rules.
+# It is fabricated and exists nowhere else.
+#
+# THE FIXTURE IS ALSO FIXED IN THE SAME CHANGE, to a value that is not
+# secret-shaped, so nothing new will be found there. This entry exists because
+# the gate scans COMMIT HISTORY (`--log-opts "BASE..HEAD"`) and a finding stays
+# attached to the commit that introduced it: a follow-up commit does not clear
+# it, and the only thing that would is rewriting history. That is exactly what
+# this file's header describes itself as being for.
+#
+# REGEX-ONLY, NOT PATH-SCOPED, and anchored. A `paths` entry for
+# secrets_test.yaml would blind a large, actively-edited test file to every
+# future finding; this matches one fabricated literal and nothing else.
+[[allowlists]]
+description = "Fabricated helm-unittest fixture for the bootstrapDbPassword explicit-pin case (backend#2738); replaced in-tree by a non-secret-shaped value, allowlisted only because the finding lives in commit history."
+# regexTarget defaults to the SECRET (unlike the canary block above, which
+# deliberately matches the whole `match` text). Anchored so it allows exactly
+# this literal and not a superstring of it.
+regexes = [
+  '''^OperatorPinned456$''',
 ]
