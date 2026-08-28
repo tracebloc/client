@@ -74,8 +74,8 @@ done
 [ -n "$BASE_ID" ]  || die "--baseline-identity is required: say which identity READ the baseline (root|tb_ingest|tb_meta). A root count and a tb_ingest count are different measurements."
 case "$BASE_ID" in root|tb_ingest|tb_meta) ;; *) die "--baseline-identity must be root, tb_ingest or tb_meta" ;; esac
 case "$PHASE" in pre-revoke|post-revoke|post-drop) ;; *) die "--phase must be pre-revoke, post-revoke or post-drop" ;; esac
-printf '%s' "$BASE_DS"   | grep -qE '^[0-9]+$' || die "--baseline-datasets must be a number"
-printf '%s' "$BASE_META" | grep -qE '^[0-9]+$' || die "--baseline-metadata must be a number"
+case "$BASE_DS"   in ''|*[!0-9]*) die "--baseline-datasets must be a number" ;; esac
+case "$BASE_META" in ''|*[!0-9]*) die "--baseline-metadata must be a number" ;; esac
 
 command -v kubectl >/dev/null 2>&1 || die "kubectl is required"
 

@@ -137,7 +137,12 @@ run_case() {  # $1 label, $2 fixture dir, $3 expected exit, $4 expected substrin
     printf '  [ok]   %s\n' "$label"; PASSED=$((PASSED+1))
   else
     printf '  [FAIL] %s -- %s\n' "$label" "$why"; FAILED=$((FAILED+1))
-    printf '%s\n' "$out" | sed 's/^/         | /' | head -30
+    # Capture-then-slice: `| head -30` closes the pipe after 30 lines, so under
+    # errexit+pipefail the upstream SIGPIPE can become the pipeline's status and
+    # fail the suite while printing the excerpt it was asked for. The file
+    # already uses here-strings (see the grep above), so this stays one idiom.
+    excerpt=$(head -30 <<<"$out")
+    sed 's/^/         | /' <<<"$excerpt"
   fi
 }
 
@@ -242,6 +247,43 @@ if grep -qF "must be root, tb_ingest or tb_meta" <<<"$out"; then
   printf '  [ok]   an unlabelled/unknown baseline identity is refused\n'; PASSED=$((PASSED+1))
 else
   printf '  [FAIL] an unknown --baseline-identity should be refused\n'; FAILED=$((FAILED+1))
+fi
+
+# 17. A NON-NUMERIC baseline is refused. The suite covered MISSING baselines and an
+# unknown identity, but never a present-and-malformed count -- so the numeric
+# validation itself was untested, and the pipefail fix rewrote exactly that line
+# (`printf | grep -qE` -> `case`). A mechanism change under an untested assertion is
+# how a validation quietly stops validating, so the input is written down here.
+#
+# Both keys, and a NEGATIVE control: a real number must still be accepted, or a
+# validation that refused everything would satisfy the two cases above.
+for bad_num in "abc" "8.7" "" "12x" "-4"; do
+  for key in --baseline-datasets --baseline-metadata; do
+    out=""; rc=0
+    case "$key" in
+      --baseline-datasets) set -- --context c --namespace n --baseline-datasets "$bad_num" --baseline-metadata 3  --baseline-identity root ;;
+      --baseline-metadata) set -- --context c --namespace n --baseline-datasets 87        --baseline-metadata "$bad_num" --baseline-identity root ;;
+    esac
+    out=$(PATH="$STUB:$PATH" KSTUB_DIR="$TMP/clean" "$TOOL" "$@" 2>&1) || rc=$?
+    # An empty value trips the earlier "is required" guard rather than the numeric
+    # one; either refusal is correct, so accept both messages but demand a refusal.
+    if [ "$rc" != 0 ] && { grep -qF -- "$key must be a number" <<<"$out" || grep -qF -- "$key is required" <<<"$out"; }; then
+      printf '  [ok]   %s=%s is refused, not treated as a count\n' "$key" "${bad_num:-<empty>}"; PASSED=$((PASSED+1))
+    else
+      printf '  [FAIL] %s=%s should be refused (rc=%s)\n' "$key" "${bad_num:-<empty>}" "$rc"; FAILED=$((FAILED+1))
+    fi
+  done
+done
+
+# ...and the control: a plain integer still gets through the numeric guard. Without
+# this, a `case` pattern that rejected every value would pass every case above.
+out=""; rc=0
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$TMP/clean" "$TOOL" --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
+if grep -qF "must be a number" <<<"$out"; then
+  printf '  [FAIL] a valid integer baseline was refused as non-numeric (control)\n'; FAILED=$((FAILED+1))
+else
+  printf '  [ok]   a valid integer baseline passes the numeric guard (control)\n'; PASSED=$((PASSED+1))
 fi
 
 printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
