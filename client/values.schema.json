@@ -71,12 +71,12 @@
         "GPU_REQUESTS": {
           "type": "string",
           "default": "nvidia.com/gpu=1",
-          "description": "Optional GPU requests for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
+          "description": "Optional GPU requests for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set) Bounds SCHEDULING, not visibility. Kubernetes uses this to decide how many GPU pods fit on a node -- one at a time at the default -- so concurrent jobs do not contend. It does NOT restrict which devices a container can see when the GPU arrives via CDI: that injection happens outside the Kubernetes resource limit, so on a CDI node (Docker Desktop / WSL2, see GPU_VISIBLE_DEVICES) a pod sees every GPU on the machine regardless of this value. On a device-plugin node the plugin does pin concrete GPU UUIDs, so there the limit is also an isolation boundary -- same key, two meanings, which is why this says so (backend#2657). Setting this to 'nvidia.com/gpu=1' on a multi-GPU CDI box does not cap a job at one device."
         },
         "GPU_LIMITS": {
           "type": "string",
           "default": "nvidia.com/gpu=1",
-          "description": "Optional GPU limits for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set)"
+          "description": "Optional GPU limits for spawned jobs (defaults to 'nvidia.com/gpu=1' if not set) Bounds SCHEDULING, not visibility. Kubernetes uses this to decide how many GPU pods fit on a node -- one at a time at the default -- so concurrent jobs do not contend. It does NOT restrict which devices a container can see when the GPU arrives via CDI: that injection happens outside the Kubernetes resource limit, so on a CDI node (Docker Desktop / WSL2, see GPU_VISIBLE_DEVICES) a pod sees every GPU on the machine regardless of this value. On a device-plugin node the plugin does pin concrete GPU UUIDs, so there the limit is also an isolation boundary -- same key, two meanings, which is why this says so (backend#2657). Setting this to 'nvidia.com/gpu=1' on a multi-GPU CDI box does not cap a job at one device."
         },
         "RUNTIME_CLASS_NAME": {
           "type": "string"
