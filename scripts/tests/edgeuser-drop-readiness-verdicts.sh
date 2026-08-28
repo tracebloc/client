@@ -32,6 +32,11 @@ cat > "$STUB/kubectl" <<'STUBEOF'
 #!/usr/bin/env bash
 S="$KSTUB_DIR"
 args="$*"
+# ARGV RECORDER (backend#2784). When KSTUB_ARGV is set, every argv kubectl is
+# invoked with is appended here, so a case can assert that no password value ever
+# reaches the command line. `$*` is argv ONLY -- a secret fed over stdin never
+# appears in it, and the old `env MYSQL_PWD=<secret>` form did.
+[ -n "${KSTUB_ARGV:-}" ] && printf '%s\n' "$args" >> "$KSTUB_ARGV"
 case "$args" in
   *version*)          [ -f "$S/unreachable" ] && exit 1; exit 0 ;;
   *"get pods"*)
@@ -157,6 +162,24 @@ json.dump({"items": [{"data": {
     "TB_META_USER": enc("tb_meta"),     "TB_META_PASSWORD": enc("p"),
     "MYSQL_ROOT_PASSWORD": enc("p"),
 }}]}, open(sys.argv[1], "w"))
+PY
+}
+
+# Rewrite a fixture's Secret set to EXACTLY the given keys, so a case can model a
+# precise Secret shape -- notably "MYSQL_ROOT_PASSWORD absent" (rotateMysqlRoot off)
+# with or without the DB_BOOTSTRAP_PASSWORD the S3 re-parent supplies. clean_fleet
+# always plants MYSQL_ROOT_PASSWORD, which is exactly why the suite could not see
+# the always-red skip path before (backend#2783).
+write_secrets() {  # $1 = fixture dir; $2.. = KEY=VALUE pairs
+  local dir="$1"; shift
+  python3 - "$dir/secrets.json" "$@" <<'PY'
+import base64, json, sys
+enc = lambda s: base64.b64encode(s.encode()).decode()
+out, data = sys.argv[1], {}
+for kv in sys.argv[2:]:
+    k, _, v = kv.partition("=")
+    data[k] = enc(v)
+json.dump({"items": [{"data": data}]}, open(out, "w"))
 PY
 }
 
@@ -601,6 +624,96 @@ if [ "$rc" -ne 0 ] && grep -q 'DB_USER=tb_ingest' <<<"$out" && grep -q 'DATASET_
 else
   printf '  [FAIL] the DSN scan must run regardless of the DB_USER verdict (rc=%s)\n' "$rc"; FAILED=$((FAILED+1))
 fi
+
+# ===========================================================================
+# backend#2784 — a MySQL password must NEVER reach kubectl's argv.
+#
+# `env MYSQL_PWD=<secret>` only hid the value from mysql INSIDE the pod; on
+# `kubectl exec`'s OWN command line it still landed in the operator host's process
+# list and the API server's exec audit log. The fix feeds it over stdin, so it must
+# appear in NOTHING kubectl was invoked with. The stub records every argv when
+# KSTUB_ARGV is set; we plant distinctive sentinel passwords and assert none show
+# up there. post-drop is used so ALL FOUR query sites run: the two tb_* counts, the
+# root smoke test, and the two root mysql.user queries.
+# ===========================================================================
+D="$TMP/argvleak"; clean_fleet "$D"
+write_secrets "$D" \
+  TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=SENTINEL_INGEST_PW \
+  TB_META_USER=tb_meta     TB_META_PASSWORD=SENTINEL_META_PW \
+  MYSQL_ROOT_PASSWORD=SENTINEL_ROOT_PW
+: > "$D/kubectl.argv"
+rc=0
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$D" KSTUB_ARGV="$D/kubectl.argv" "$TOOL" \
+        --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root \
+        --phase post-drop 2>&1) || rc=$?
+leaked=""
+for pw in SENTINEL_INGEST_PW SENTINEL_META_PW SENTINEL_ROOT_PW; do
+  grep -qF "$pw" "$D/kubectl.argv" 2>/dev/null && leaked="${leaked:+$leaked }$pw"
+done
+if [ -z "$leaked" ]; then
+  printf '  [ok]   no MySQL password reaches kubectl argv (fed over stdin)\n'; PASSED=$((PASSED+1))
+else
+  printf '  [FAIL] password(s) leaked onto kubectl argv: %s\n' "$leaked"; FAILED=$((FAILED+1))
+fi
+# CONTROL: the recorder must have captured the mysql queries, or the leak check
+# above is vacuous -- a stub that logged nothing would "pass" it. Both the tb_*
+# counts and the root mysql.user queries must be present.
+if grep -q 'information_schema.tables' "$D/kubectl.argv" && grep -q 'mysql.user' "$D/kubectl.argv"; then
+  printf '  [ok]   the argv recorder captured the mysql queries (control)\n'; PASSED=$((PASSED+1))
+else
+  printf '  [FAIL] the argv recorder captured no mysql query -- the leak check is vacuous\n'; FAILED=$((FAILED+1))
+fi
+
+# ===========================================================================
+# backend#2783 — the root-secret skip must leave the gate in the RIGHT state.
+#
+# MYSQL_ROOT_PASSWORD is a Secret key ONLY when rotateMysqlRoot is on (default
+# off). The old `else` scored its absence `untold` -- a failure -- in EVERY phase,
+# so a legitimately-unrotated fleet could never print DROP-READY. clean_fleet
+# always planted MYSQL_ROOT_PASSWORD, which is exactly why the suite never saw it.
+# ===========================================================================
+
+# A. S3-ready but NOT rotated: MYSQL_ROOT_PASSWORD absent, DB_BOOTSTRAP_PASSWORD
+#    present. The chart makes DB_BOOTSTRAP_PASSWORD root's password on a re-parented
+#    fleet, so the fallback resolves a root credential and the smoke test RUNS --
+#    which is the proof the fallback fired (a mere skip would print "skipped").
+#    This is the exact always-red path the finding calls out, now green.
+D="$TMP/rootskip-s3"; clean_fleet "$D"
+write_secrets "$D" \
+  TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=p \
+  TB_META_USER=tb_meta     TB_META_PASSWORD=p \
+  DB_BOOTSTRAP_PASSWORD=rootpw
+run_case "an S3-ready unrotated fleet is DROP-READY via the DB_BOOTSTRAP_PASSWORD fallback" \
+  "$D" 0 "no live edgeuser connection at this instant" --phase pre-revoke
+
+# B. NO root credential at all, pre-revoke: root here powers only the non-evidence
+#    smoke test, so its absence must be a NOTE, not a gate failure. Still DROP-READY.
+D="$TMP/rootskip-none"; clean_fleet "$D"
+write_secrets "$D" \
+  TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=p \
+  TB_META_USER=tb_meta     TB_META_PASSWORD=p
+run_case "no root credential does not redden the gate pre-revoke (smoke test is non-evidence)" \
+  "$D" 0 "smoke test skipped" --phase pre-revoke
+
+# C. NO root credential, post-drop: here the mysql.user confirmation is a REAL
+#    criterion and only root can read it, so this must still fail closed.
+D="$TMP/rootskip-none-postdrop"; clean_fleet "$D"
+write_secrets "$D" \
+  TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=p \
+  TB_META_USER=tb_meta     TB_META_PASSWORD=p
+run_case "no root credential post-drop still fails closed (cannot confirm the DROP)" \
+  "$D" 1 "post-drop mysql.user confirmation could not run" --phase post-drop
+
+# D. S3-ready unrotated, post-drop: the fallback must also drive the post-drop
+#    mysql.user confirmation, so a clean fleet passes without rotateMysqlRoot on.
+D="$TMP/rootskip-s3-postdrop"; clean_fleet "$D"
+write_secrets "$D" \
+  TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=p \
+  TB_META_USER=tb_meta     TB_META_PASSWORD=p \
+  DB_BOOTSTRAP_PASSWORD=rootpw
+run_case "the DB_BOOTSTRAP_PASSWORD fallback drives the post-drop confirmation too" \
+  "$D" 0 "edgeuser is absent from mysql.user" --phase post-drop
 
 printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ] || exit 1
