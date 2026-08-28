@@ -1601,6 +1601,17 @@ tbIngestPassword: ""
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
 # edge regardless of environment (an operator override — DR, a fleet held back
 # deliberately, or a customer opt-out). Mirrors serviceDbAccounts (backend#1752).
+#
+# BAKING THIS ON REQUIRES THE ROTATION ON TOO (backend#2738). The re-parent needs
+# root's password pinned as DB_BOOTSTRAP_PASSWORD, and of the three tiers that can
+# supply it only one works for a DEFAULT: an explicit .Values.bootstrapDbPassword
+# is an operator action, the live Secret is empty on a fresh install and in every
+# `helm template`/dry-run, and the third — derived from rotateMysqlRoot, which is
+# what makes the chart the authority on root's password — renders everywhere. So
+# reparent=true with rotate=false has nothing to fall back on and hard-fails the
+# render for every install of that environment that does not pin the password by
+# hand. Bake the two ByEnv gates as a PAIR; scripts/tests/reparent-requires-
+# rotation.sh refuses the half-baked combination at review time.
 bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
