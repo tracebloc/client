@@ -228,17 +228,46 @@ for mp in md_paths:
 # now carry the off/on synonyms as well as the boolean words.
 _OFF = r'(?:false|off|disabled)'
 _ON = r'(?:true|on|enabled)'
-FALSE_CLAIMS = [
-    _OFF + r'\s+everywhere',
-    r'default\s+' + _OFF,
-    _OFF + r'\s+(?:by\s+default\s+)?for\s+{env}\b',
-    _OFF + r'\s+(?:by\s+default\s+)?for\s+[\w,\s]*\b{env}\b',
+
+# ONE SHAPE TABLE, BOTH POLARITIES DERIVED FROM IT (saqlainsyed007, #900).
+#
+# These were two hand-written lists and they had DRIFTED APART: the "off" side
+# carried the LIST form `<pol> for dev, stg and prod`, the "on" side did not. So
+# a stale ON-polarity claim in list form naming a still-off environment did not
+# redden while its off-polarity twin did -- half a guard, in the direction
+# nobody had needed yet. Deriving both from one table is the fix rather than
+# adding the two missing entries, because a new shape now reaches both
+# polarities and this asymmetry cannot come back.
+#
+# TWO LATENT BUGS SURFACED THE MOMENT THE ON-SIDE WAS COMPLETED, and both were
+# already in the shipped off-side patterns -- unexercised, not absent:
+#
+#   1. THE LIST SPAN CROSSED THE OTHER POLARITY. `[\w,\s]*` between the
+#      polarity word and the env happily spanned `true for dev, false for stg`,
+#      reporting "says true for stg". Every one of these documents states BOTH
+#      polarities in one sentence, so the greedy span made 18 false findings.
+#      The span now refuses to cross the opposite polarity word or a second
+#      `for`, which is what makes "true for dev, false for stg" parse the way a
+#      reader parses it.
+#   2. A BARE `default <pol>` HAS NO SCOPE. It named no environment, so it fired
+#      for every env whose shipped value differed -- fine while everything was
+#      false everywhere, wrong the moment one env was baked on. It is gone;
+#      `default`/`defaults to`/`baked` are now a PREFIX on the two scoped
+#      shapes, so a claim must still say *everywhere* or name an env.
+_PRE = r'(?:default(?:s)?\s+(?:to\s+)?|baked\s+)?'
+_SPAN = r'(?:(?!{opp}\b|for\b)[\w,\s])*'
+_POLARITY_SHAPES = [
+    _PRE + r'{pol}\s+(?:by\s+default\s+)?everywhere',
+    _PRE + r'{pol}\s+(?:by\s+default\s+)?for\s+' + _SPAN + r'\b{{env}}\b',
 ]
-TRUE_CLAIMS = [
-    _ON + r'\s+everywhere',
-    _ON + r'\s+(?:by\s+default\s+)?for\s+{env}\b',
-    r'baked\s+on\s+for\s+{env}\b',
-]
+FALSE_CLAIMS = [sh.format(pol=_OFF, opp=_ON) for sh in _POLARITY_SHAPES]
+TRUE_CLAIMS = [sh.format(pol=_ON, opp=_OFF) for sh in _POLARITY_SHAPES]
+
+# The derivation is the claim, so assert it rather than trusting it.
+if len(FALSE_CLAIMS) != len(TRUE_CLAIMS) or len(FALSE_CLAIMS) != len(_POLARITY_SHAPES):
+    print("FAIL: claim lists are no longer symmetric -- the derivation broke",
+          file=sys.stderr)
+    sys.exit(1)
 
 findings = []
 checked = 0

@@ -161,6 +161,66 @@ run_case "a checkout path containing a space still resolves the corpus" 0 \
 # ---- 7. fail closed on an empty corpus --------------------------------------
 D="$TMP/nomd"; mkfixture "$D"
 find "$D/client" "$D/docs" -name '*.md' -type f -delete
+# ---- the ON-polarity mirror, which the guard could not catch ----------------
+# saqlainsyed007 on #900: TRUE_CLAIMS lacked the LIST form and `default on`, so
+# a stale on-polarity claim naming a still-off env did not redden while its
+# off-polarity twin did. These three cases are the missing direction, and each
+# FAILED against the pre-fix guard.
+
+# (a) list form, on-polarity, naming an env that ships false.
+D="$TMP/onlist"; mkfixture "$D"
+python3 - "$D/client/MIGRATION.md" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
+assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(
+    old,
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; it is `true` for `dev`, "
+    "`stg` and `prod`, so every fleet rotates on upgrade."))
+PY2
+run_case "an ON-polarity claim in LIST form is caught (stg/prod ship false)" 1   "MIGRATION.md" "$D"
+
+# (b) the `baked on` prefix in list form -- the same shape via the other prefix.
+D="$TMP/onbaked"; mkfixture "$D"
+python3 - "$D/client/MIGRATION.md" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
+assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(
+    old,
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; it is baked `on` for `dev`, "
+    "`stg` and `prod`."))
+PY2
+run_case "an ON-polarity 'baked on for <list>' claim is caught too" 1   "MIGRATION.md" "$D"
+
+# (c) THE FALSE-POSITIVE GUARD, which the fix for (a) needed and which the
+# shipped off-side patterns would also have failed. Every one of these documents
+# states BOTH polarities in one sentence; a greedy list span crosses the other
+# polarity word and reports "says true for stg" about a sentence that says
+# exactly the opposite. 18 such findings appeared the moment the on-side was
+# completed. This case is the CORRECT sentence and must stay GREEN -- it is the
+# only thing standing between the guard and a wall of false findings.
+D="$TMP/mixed"; mkfixture "$D"
+python3 - "$D/client/MIGRATION.md" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
+assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(
+    old,
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; it is `true` for `dev` and "
+    "`false` for `stg` and `prod`, which is what the chart ships."))
+PY2
+run_case "a sentence stating BOTH polarities correctly is NOT a finding" 0   "no document contradicts" "$D"
+
+# Re-established here rather than relying on the `$D` set above: the cases
+# inserted between that setup and this assertion silently repointed `$D`, and
+# the case then ran against a fixture nobody built for it. Setting it adjacent
+# to its own run_case is the only version an insertion cannot break.
+D="$TMP/nomd2"; mkfixture "$D"
+find "$D/client" "$D/docs" -name '*.md' -type f -delete
 run_case "zero markdown files is a FINDING, not agreement" 1 "fail closed" "$D"
 
 # ---- 8. fail closed when an input cannot be read ----------------------------
