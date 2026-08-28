@@ -454,6 +454,15 @@
       "description": "Per-environment default for the RFC-0003 D10 per-experiment credential mint (backend#1528), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Every other gate in this rollout had one of these; without it, the flag the ticket's LAST step is gated on was the only one whose fleet posture the chart could not record — so a values-resetting upgrade silently put the account mint back on edgeuser.",
       "additionalProperties": { "type": "boolean" }
     },
+    "narrowEdgeuser": {
+      "type": ["boolean", "null"],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#1528 S3 close-out: REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag — it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists — so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH ALL THREE PREDECESSORS ON (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds), and that pairing is ENFORCED rather than documented — the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
+    },
+    "narrowEdgeuserByEnv": {
+      "type": "object",
+      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). False for dev, stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified. Flipping it where any predecessor gate is off fails the render — see narrowEdgeuser.",
+      "additionalProperties": { "type": "boolean" }
+    },
     "credmgrPassword": {
       "type": "string",
       "description": "RFC-0003 D10 (backend#1181): optional operator pin for the tb_credmgr account password (3-tier resolution, mirrors podTokenSigningSecret). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation, or to keep it stable across a perExperimentDbCreds toggle. Must be alphanumeric."

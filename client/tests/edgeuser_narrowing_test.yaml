@@ -1,0 +1,216 @@
+suite: narrowEdgeuser — a retired fleet stays retired, and a half-migrated one is refused (backend#1528 S3)
+# WHY THIS SUITE EXISTS
+#
+# mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad
+# privileges at every FRESH datadir initialization and cannot branch on a runtime
+# flag: it is COPYd into a digest-frozen image and the mysql entrypoint runs it
+# before jobs-manager exists. So a fleet that completed the whole retirement can
+# be handed a root-equivalent edgeuser again by a reinstall or a datadir loss --
+# silently, with no operator action and nothing to notice it by.
+#
+# narrowEdgeuser closes that: jobs-manager REVOKEs edgeuser back to USAGE on every
+# boot. But narrowing a fleet where ANY consumer still authenticates as edgeuser
+# breaks it, and because the heartbeat's information_schema enumeration is
+# privilege-filtered, over-revoking does not error -- it silently stops returning
+# datasets. So the gate is legal ONLY with all three predecessors on, and that
+# pairing is ENFORCED at render time rather than documented.
+#
+# The refusal is asserted with `errorMessage` and the EXACT string, never
+# `errorPattern`. helm-unittest 0.5.2 SILENTLY IGNORES errorPattern -- a pattern
+# appearing nowhere in the output still passes, so such an assertion is exactly
+# equivalent to a bare `failedTemplate: {}` and cannot tell you which refusal
+# fired. The first cut of this suite used errorPattern throughout; the repo's own
+# scripts/tests/helm-unittest-error-assertions.sh guard caught all eight, which is
+# that guard doing precisely the job it was written for. Asserting the full
+# message also means each case pins its own DIAGNOSIS, so a reworded reason or a
+# reason silently dropped from the list reddens here.
+#
+# The environment matters and is stated per case. At CLIENT_ENV=dev,
+# serviceDbAccountsByEnv and perExperimentDbCredsByEnv are ALREADY true, so a dev
+# render exercises only the re-parent. prod defaults all three false, which is the
+# only environment where the full three-reason refusal is reachable. A suite
+# written entirely at dev would have missed two of the three blockers.
+templates:
+  - templates/jobs-manager-deployment.yaml
+release:
+  name: narrow
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  storageClass.create: false
+
+tests:
+  # ---- default off: byte-identical ------------------------------------
+  - it: "renders no NARROW_EDGEUSER by default on dev"
+    set:
+      env.CLIENT_ENV: dev
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  - it: "renders no NARROW_EDGEUSER by default on prod"
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  - it: "every narrowEdgeuserByEnv default is false — this is the last step of the last stage"
+    set:
+      env.CLIENT_ENV: dev
+      narrowEdgeuser: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  # ---- the only legal combination -------------------------------------
+  - it: "renders NARROW_EDGEUSER=1 when all three predecessors are on"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+      bootstrapDbReparent: true
+      bootstrapDbPassword: "root-pw"
+      serviceDbAccounts: true
+      perExperimentDbCreds: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  - it: "resolves through the ByEnv map, not only the operator override"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuserByEnv.prod: true
+      bootstrapDbReparent: true
+      bootstrapDbPassword: "root-pw"
+      serviceDbAccounts: true
+      perExperimentDbCreds: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  - it: "an explicit narrowEdgeuser:false overrides a ByEnv true"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: false
+      narrowEdgeuserByEnv.prod: true
+      bootstrapDbReparent: true
+      bootstrapDbPassword: "root-pw"
+      serviceDbAccounts: true
+      perExperimentDbCreds: true
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
+
+  # ---- the refusals, each naming ITS OWN precondition -----------------
+  - it: "refuses when the bootstrap is still edgeuser — naming the mid-flight self-revoke"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+      serviceDbAccounts: true
+      perExperimentDbCreds: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "refuses when the data plane is still edgeuser — naming serviceDbAccounts"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+      bootstrapDbReparent: true
+      bootstrapDbPassword: "root-pw"
+      perExperimentDbCreds: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "refuses when training pods still share the credential — naming perExperimentDbCreds"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+      bootstrapDbReparent: true
+      bootstrapDbPassword: "root-pw"
+      serviceDbAccounts: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "lists ALL missing preconditions at once, not just the first"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "the refusal explains that over-revoking degrades SILENTLY — the reason it refuses at all"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "the refusal points at the readiness verifier, not at prose"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuser: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "a ByEnv-enabled narrowing is refused just as an override one is"
+    set:
+      env.CLIENT_ENV: prod
+      narrowEdgeuserByEnv.prod: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight; serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser; perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  # ---- dev's posture: only the re-parent is outstanding ---------------
+  - it: "on dev only the re-parent blocks, because the other two are already ByEnv-true"
+    set:
+      env.CLIENT_ENV: dev
+      narrowEdgeuser: true
+    asserts:
+      - failedTemplate:
+          errorMessage: |-
+            narrowEdgeuser is on but this fleet is not ready to narrow edgeuser (backend#1528 S3). Blocking reasons: bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- the REVOKE would strip the privileges of the connection issuing it, mid-flight. Narrowing now would break a live consumer, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error -- datasets would simply stop being listed. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent, verified per fleet with docs/migration-tools/edgeuser-drop-readiness.sh), or leave narrowEdgeuser off.
+
+  - it: "dev narrows once the re-parent is on, needing no other override"
+    set:
+      env.CLIENT_ENV: dev
+      narrowEdgeuser: true
+      bootstrapDbReparent: true
+      bootstrapDbPassword: "root-pw"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NARROW_EDGEUSER
+            value: "1"
