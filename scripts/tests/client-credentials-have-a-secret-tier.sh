@@ -91,8 +91,12 @@ for cred in clientId clientPassword; do
   fi
   ok
 
-  # 4. the DECODED value decides, not key presence
-  if ! grep -qE "else if $var" <<<"$code"; then
+  # 4. the DECODED value decides, not key presence.
+  #    Captured ONCE and reused by the order check below (@saqlainsyed007,
+  #    client#891): existence and position are the same fact read twice, and a
+  #    second grep of the same pattern can drift from the first.
+  secret_hits=$(grep -nE "else if $var" <<<"$code" || true)
+  if [ -z "$secret_hits" ]; then
     fail "$cred does not fall back to $var, so the looked-up value is read but
       never used"
   fi
@@ -106,7 +110,6 @@ for cred in clientId clientPassword; do
   # fail-closes on a live match, indistinguishably. The shared `early-close` job
   # forbids this shape tree-wide; the sibling guards already capture-then-slice.
   values_hits=$(grep -nE "if \.Values\.$cred" <<<"$code" || true)
-  secret_hits=$(grep -nE "else if $var" <<<"$code" || true)
   values_line=${values_hits%%:*}
   secret_line=${secret_hits%%:*}
   if [ -z "$values_line" ] || [ -z "$secret_line" ]; then
