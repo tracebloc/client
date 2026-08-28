@@ -112,7 +112,23 @@ pod_of() {  # $1 = app label substring; prints one Running pod name, or nothing
 
 # `env` inside the pod is the resolved truth: it includes values injected via
 # envFrom/secretKeyRef, which a manifest read cannot resolve.
-check_workload() {  # $1 = pod-name substring, $2 = human label
+check_workload() {  # $1 = pod-name substring, $2 = human label, $3 = mint|consumer
+  # $3 IS WHICH GATES THIS WORKLOAD ACTUALLY CARRIES, and it is not decoration.
+  # Asserting all three on every pod made this tool STRUCTURALLY ALWAYS-RED on a
+  # correctly-retired fleet (Saqlain, #896): `requests-proxy-deployment.yaml`
+  # renders `SERVICE_DB_ACCOUNTS` and `TB_META_USER` and NEITHER
+  # `DB_BOOTSTRAP_USER` nor `PER_EXPERIMENT_DB_CREDS` -- those govern the
+  # mint/bootstrap DDL, which only jobs-manager runs. So requests-proxy tripped
+  # two `bad` findings in every phase, forever, and the gate could never
+  # authorize the DROP it exists to gate -- while printing a factually wrong
+  # reason ("the mint falls back to edgeuser") about a pod that never mints.
+  #
+  # Measured against the chart at this head:
+  #   requests-proxy : DB_BOOTSTRAP_USER 0 | SERVICE_DB_ACCOUNTS 1 | PER_EXPERIMENT_DB_CREDS 0
+  #   jobs-manager   : DB_BOOTSTRAP_USER 2 | SERVICE_DB_ACCOUNTS 1 | PER_EXPERIMENT_DB_CREDS 1
+  #
+  # (a) and (b) below stay workload-agnostic on purpose: "no identity resolves to
+  # edgeuser" and "every identity can authenticate" are true of every pod.
   local pod vars n_user=0
   pod=$(pod_of "$1")
   if [ -z "$pod" ]; then
@@ -154,15 +170,18 @@ check_workload() {  # $1 = pod-name substring, $2 = human label
     fi
   done <<<"$(grep -E '^[A-Z0-9_]*USER=' <<<"$vars" || true)"
 
-  # (c) the three gates, by name, because their VALUES are the posture.
-  local v
-  v=$(grep -E '^DB_BOOTSTRAP_USER=' <<<"$vars" | head -1 | cut -d= -f2- || true)
-  case "$v" in
-    root) ok "$2 ($pod): DB_BOOTSTRAP_USER=root — the mint is re-parented (S3)" ;;
-    "")   bad "$2 ($pod): DB_BOOTSTRAP_USER is unset — the mint falls back to edgeuser (sql_utils.py: unset means the legacy identity)" ;;
-    *)    bad "$2 ($pod): DB_BOOTSTRAP_USER=$v — expected root" ;;
-  esac
-  for gate in SERVICE_DB_ACCOUNTS PER_EXPERIMENT_DB_CREDS; do
+  # (c) the posture gates THIS workload carries, because their VALUES are the posture.
+  local v gates="SERVICE_DB_ACCOUNTS"
+  if [ "${3:-mint}" = "mint" ]; then
+    gates="SERVICE_DB_ACCOUNTS PER_EXPERIMENT_DB_CREDS"
+    v=$(grep -E '^DB_BOOTSTRAP_USER=' <<<"$vars" | head -1 | cut -d= -f2- || true)
+    case "$v" in
+      root) ok "$2 ($pod): DB_BOOTSTRAP_USER=root — the mint is re-parented (S3)" ;;
+      "")   bad "$2 ($pod): DB_BOOTSTRAP_USER is unset — the mint falls back to edgeuser (sql_utils.py: unset means the legacy identity)" ;;
+      *)    bad "$2 ($pod): DB_BOOTSTRAP_USER=$v — expected root" ;;
+    esac
+  fi
+  for gate in $gates; do
     v=$(grep -E "^${gate}=" <<<"$vars" | head -1 | cut -d= -f2- || true)
     case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
       true|1|yes) ok "$2 ($pod): $gate=$v" ;;
@@ -172,8 +191,11 @@ check_workload() {  # $1 = pod-name substring, $2 = human label
   done
 }
 
-check_workload jobs-manager    "jobs-manager"
-check_workload requests-proxy  "requests-proxy"
+check_workload jobs-manager    "jobs-manager"    mint
+# A CONSUMER, not a minter. It reads the data plane; it never runs the bootstrap
+# DDL, so the chart gives it neither gate and demanding them is demanding a
+# variable that cannot be there.
+check_workload requests-proxy  "requests-proxy"  consumer
 
 # Spawned ingestion Jobs are stamped at submit time, not by the chart, so they are
 # checked separately -- and their ABSENCE is "cannot tell", never a pass. The gate

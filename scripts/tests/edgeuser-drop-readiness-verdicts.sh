@@ -99,8 +99,22 @@ TB_INGEST_USER=tb_ingest
 TB_INGEST_PASSWORD=x
 TB_CREDMGR_USER=tb_credmgr
 TB_CREDMGR_PASSWORD=x'
+  # THE FIXTURE MIRRORS THE CHART, AND THAT IS THE WHOLE POINT (Saqlain, #896).
+  # Both pods used to get the identical `$common` -- including DB_BOOTSTRAP_USER
+  # and PER_EXPERIMENT_DB_CREDS, which `requests-proxy-deployment.yaml` does NOT
+  # render. So "a clean retired fleet is DROP-READY" passed only against a fleet
+  # shape that CANNOT EXIST, and every mutation case below was differenced
+  # against that fiction. The real gate was structurally always-red and the suite
+  # was green -- a test that agreed with itself instead of with the chart.
+  #
+  # Measured from the chart at this head:
+  #   requests-proxy : SERVICE_DB_ACCOUNTS + TB_META_USER, and neither mint gate
+  #   jobs-manager   : both mint gates as well
   printf '%s\n' "$common" > "$d/env.jobs-manager-abc123"
-  printf '%s\n' "$common" > "$d/env.requests-proxy-def456"
+  printf '%s\n' "MYSQL_HOST=mysql
+SERVICE_DB_ACCOUNTS=true
+TB_META_USER=tb_meta
+TB_META_PASSWORD=x" > "$d/env.requests-proxy-def456"
   printf 'DB_USER=tb_ingest\nDB_PASSWORD=x\n' > "$d/env.tracebloc-ingest-xyz"
   : > "$d/logs.jobs-manager-abc123"
   : > "$d/logs.requests-proxy-def456"
@@ -166,9 +180,25 @@ run_case "DB_BOOTSTRAP_USER unset is a finding (it FALLS BACK to edgeuser)" "$D"
 D="$TMP/gate1"; clean_fleet "$D"
 sed -i.bak 's/^SERVICE_DB_ACCOUNTS=.*/SERVICE_DB_ACCOUNTS=false/' "$D/env.jobs-manager-abc123"
 run_case "SERVICE_DB_ACCOUNTS=false is a finding" "$D" 1 "SERVICE_DB_ACCOUNTS=false"
+# THIS CASE USED TO ASSERT THE DEFECT (Saqlain, #896). It deleted
+# PER_EXPERIMENT_DB_CREDS from REQUESTS-PROXY and demanded a finding -- but the
+# chart never renders it there, so it was requiring the tool to fail on a
+# correctly-retired fleet. That is what made the gate structurally always-red,
+# and the case that should have caught it was the case demanding it.
+#
+# The gate belongs to the workload that CARRIES it, so that is where its absence
+# must be a finding:
 D="$TMP/gate2"; clean_fleet "$D"
-sed -i.bak '/^PER_EXPERIMENT_DB_CREDS=/d' "$D/env.requests-proxy-def456"
-run_case "PER_EXPERIMENT_DB_CREDS unset is a finding on requests-proxy too" "$D" 1 "PER_EXPERIMENT_DB_CREDS is unset"
+sed -i.bak '/^PER_EXPERIMENT_DB_CREDS=/d' "$D/env.jobs-manager-abc123"
+run_case "PER_EXPERIMENT_DB_CREDS unset on jobs-manager is a finding" "$D" 1 "PER_EXPERIMENT_DB_CREDS is unset"
+
+# And the other half, which is the regression guard for the always-red bug: a
+# CONSUMER that renders neither mint gate is not a finding, because there is
+# nothing there to be wrong. Without this, restoring the unconditional check
+# would go unnoticed again -- case 1 alone cannot say WHY it is ready.
+D="$TMP/gate2b"; clean_fleet "$D"
+run_case "requests-proxy without the mint gates is NOT a finding" "$D" 0 \
+  "requests-proxy (requests-proxy-def456): SERVICE_DB_ACCOUNTS=true"
 
 # 5. a set user with no password cannot authenticate
 D="$TMP/nopw"; clean_fleet "$D"
