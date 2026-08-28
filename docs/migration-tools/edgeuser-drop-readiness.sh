@@ -48,6 +48,11 @@
 #
 set -euo pipefail
 
+#: Repo root, so the declared workload role can be CROSS-CHECKED against the
+#: chart rather than trusted (see assert_role_matches_chart). This script lives
+#: at client/docs/migration-tools/, so the root is two levels up.
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+
 CONTEXT="" NS="" SINCE="2h" PHASE="pre-revoke"
 BASE_DS="" BASE_META="" BASE_ID=""
 
@@ -110,6 +115,35 @@ pod_of() {  # $1 = app label substring; prints one Running pod name, or nothing
     | awk -v want="$1" '$2=="Running" && index($1, want) { print $1; exit }'
 }
 
+# THE DECLARED ROLE IS CROSS-CHECKED AGAINST THE CHART, not trusted.
+#
+# `mint` / `consumer` at the call sites is a written-down copy of which workload
+# renders which gate -- and a copy is what produced the bug this function's role
+# parameter exists to fix: it agrees with itself while the chart moves underneath
+# it. If a gate is ever added to requests-proxy, or the mint moves to a third
+# workload, the label here would keep asserting yesterday's shape in silence.
+#
+# So the role is DERIVED from the template as well, and a disagreement is a
+# FINDING rather than a preference. Keeping the explicit label is deliberate: it
+# stays readable at the call site, and the derivation is what keeps it honest.
+#
+# FAILS CLOSED: an unreadable template is "cannot tell", never "the label is fine".
+assert_role_matches_chart() {  # $1 = workload, $2 = declared role, $3 = label
+  local tpl="$ROOT/client/templates/$1-deployment.yaml" derived
+  if [ ! -r "$tpl" ]; then
+    untold "$3: cannot read client/templates/$1-deployment.yaml, so the declared role '$2' could not be checked against the chart — cannot tell"
+    return
+  fi
+  if grep -qE 'name: (DB_BOOTSTRAP_USER|PER_EXPERIMENT_DB_CREDS)' "$tpl"; then
+    derived=mint
+  else
+    derived=consumer
+  fi
+  if [ "$derived" != "$2" ]; then
+    bad "$3: declared role '$2' disagrees with the chart, which says '$derived' ($1-deployment.yaml). The gate expectations below are therefore wrong for this workload — that disagreement is exactly what made this tool structurally always-red before, so it is a finding, not a note."
+  fi
+}
+
 # `env` inside the pod is the resolved truth: it includes values injected via
 # envFrom/secretKeyRef, which a manifest read cannot resolve.
 check_workload() {  # $1 = pod-name substring, $2 = human label, $3 = mint|consumer
@@ -130,6 +164,7 @@ check_workload() {  # $1 = pod-name substring, $2 = human label, $3 = mint|consu
   # (a) and (b) below stay workload-agnostic on purpose: "no identity resolves to
   # edgeuser" and "every identity can authenticate" are true of every pod.
   local pod vars n_user=0
+  assert_role_matches_chart "$1" "${3:-mint}" "$2"
   pod=$(pod_of "$1")
   if [ -z "$pod" ]; then
     untold "$2: no Running pod matching '$1' — cannot tell whether it resolves to edgeuser"
@@ -155,7 +190,7 @@ check_workload() {  # $1 = pod-name substring, $2 = human label, $3 = mint|consu
     if [ "$value" = "edgeuser" ]; then
       bad "$2 ($pod): $name=edgeuser — a consumer still resolves to the root-equivalent account"
     fi
-  done <<<"$(grep -E '^[A-Z0-9_]*USER=' <<<"$vars" || true)"
+  done <<<"$(grep -E '^[A-Z0-9][A-Z0-9_]*_USER=' <<<"$vars" || true)"
   [ "$n_user" -gt 0 ] || untold "$2 ($pod): the env declares no *_USER variable at all — cannot tell (a pod with no DB identity is not a pod with a safe one)"
 
   # (b) every *_USER that is set must have a non-empty password counterpart.
@@ -168,7 +203,7 @@ check_workload() {  # $1 = pod-name substring, $2 = human label, $3 = mint|consu
     if ! grep -qE "^${pwname}=." <<<"$vars"; then
       bad "$2 ($pod): $name is set but $pwname is empty or absent — that identity cannot authenticate"
     fi
-  done <<<"$(grep -E '^[A-Z0-9_]*USER=' <<<"$vars" || true)"
+  done <<<"$(grep -E '^[A-Z0-9][A-Z0-9_]*_USER=' <<<"$vars" || true)"
 
   # (c) the posture gates THIS workload carries, because their VALUES are the posture.
   local v gates="SERVICE_DB_ACCOUNTS"

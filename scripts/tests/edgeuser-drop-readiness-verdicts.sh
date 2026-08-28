@@ -23,6 +23,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TOOL="$ROOT/docs/migration-tools/edgeuser-drop-readiness.sh"
 [ -x "$TOOL" ] || { echo "FAIL: $TOOL missing or not executable" >&2; exit 1; }
 
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 STUB="$TMP/bin"; mkdir -p "$STUB"
 
@@ -314,6 +315,81 @@ if grep -qF "must be a number" <<<"$out"; then
   printf '  [FAIL] a valid integer baseline was refused as non-numeric (control)\n'; FAILED=$((FAILED+1))
 else
   printf '  [ok]   a valid integer baseline passes the numeric guard (control)\n'; PASSED=$((PASSED+1))
+fi
+
+# A WRONG bootstrap identity, not just an absent one. The empty and `root` cases
+# were covered; a third value was not, so the `*)` arm could be turned into an
+# `ok` with every case still green.
+D="$TMP/bootwrong"; clean_fleet "$D"
+sed -i.bak 's/^DB_BOOTSTRAP_USER=.*/DB_BOOTSTRAP_USER=someoneelse/' "$D/env.jobs-manager-abc123"
+run_case "a DB_BOOTSTRAP_USER that is neither root nor empty is a finding" "$D" 1 "DB_BOOTSTRAP_USER=someoneelse"
+
+# The plain Unix USER is not a database identity. `^[A-Z0-9_]*USER=` matched it,
+# so a container with USER=nobody had a "DB identity" with no password
+# counterpart and produced a false finding (@saqlainsyed007, #896 low note).
+D="$TMP/bareuser"; clean_fleet "$D"
+printf 'USER=nobody\n' >> "$D/env.jobs-manager-abc123"
+printf 'USER=nobody\n' >> "$D/env.requests-proxy-def456"
+run_case "a bare USER= env is not treated as a DB identity" "$D" 0 "DROP-READY"
+
+# FAIL CLOSED when the chart is not beside the tool: the declared role is
+# cross-checked against the template, so a copy without the chart must refuse
+# rather than silently trust the label.
+ORPHAN="$TMP/orphan/docs/migration-tools"; mkdir -p "$ORPHAN"
+cp "$TOOL" "$ORPHAN/edgeuser-drop-readiness.sh"
+# `rc=0; out=$(...) || rc=$?` -- the assignment form aborts the harness under
+# `set -e` the moment the tool exits non-zero, which is what this asserts.
+rc=0
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$TMP/clean" "$ORPHAN/edgeuser-drop-readiness.sh" \
+        --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF 'could not be checked against the chart' <<<"$out"; then
+  printf '  [ok]   the chart being absent is a FINDING, not a trusted label\n'; PASSED=$((PASSED+1))
+else
+  printf '  [FAIL] a tool copied away from the chart must refuse (rc=%s)\n' "$rc"; FAILED=$((FAILED+1))
+fi
+
+# A ROLE THAT DISAGREES WITH THE CHART is a finding. This is what keeps the
+# `mint`/`consumer` labels from drifting: the label is readable, the derivation
+# is what makes it honest.
+MISLABEL="$TMP/mislabel"; mkdir -p "$MISLABEL/docs/migration-tools" "$MISLABEL/client/templates"
+cp "$TOOL" "$MISLABEL/docs/migration-tools/edgeuser-drop-readiness.sh"
+# jobs-manager's template stripped of both mint gates => the chart says
+# "consumer" while the call site still declares "mint".
+grep -v -E 'name: (DB_BOOTSTRAP_USER|PER_EXPERIMENT_DB_CREDS)' \
+  "$ROOT/client/templates/jobs-manager-deployment.yaml" > "$MISLABEL/client/templates/jobs-manager-deployment.yaml"
+cp "$ROOT/client/templates/requests-proxy-deployment.yaml" "$MISLABEL/client/templates/"
+rc=0
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$TMP/clean" "$MISLABEL/docs/migration-tools/edgeuser-drop-readiness.sh" \
+        --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "disagrees with the chart" <<<"$out"; then
+  printf '  [ok]   a declared role that disagrees with the chart is a finding\n'; PASSED=$((PASSED+1))
+else
+  printf '  [FAIL] a mislabelled workload role must be caught (rc=%s)\n' "$rc"; FAILED=$((FAILED+1))
+fi
+
+# THE FIXTURE MIRRORS THE CHART, asserted rather than described in a comment.
+# The fixture is now correct; nothing held it that way, and a fixture that drifts
+# back re-hides the very bug this suite was extended for.
+mirror_fail=0
+for pair in "jobs-manager:env.jobs-manager-abc123" "requests-proxy:env.requests-proxy-def456"; do
+  wl="${pair%%:*}"; envf="${pair##*:}"
+  tpl="$ROOT/client/templates/$wl-deployment.yaml"
+  if [ ! -r "$tpl" ]; then
+    printf '  [FAIL] cannot read %s -- the mirror check cannot tell, which is a finding\n' "$tpl"; mirror_fail=1; continue
+  fi
+  want=$(grep -oE 'name: (DB_BOOTSTRAP_USER|SERVICE_DB_ACCOUNTS|PER_EXPERIMENT_DB_CREDS)' "$tpl" | sed 's/name: //' | sort -u)
+  have=$(grep -oE '^(DB_BOOTSTRAP_USER|SERVICE_DB_ACCOUNTS|PER_EXPERIMENT_DB_CREDS)=' "$TMP/clean/$envf" | tr -d '=' | sort -u)
+  if [ "$want" != "$have" ]; then
+    printf '  [FAIL] fixture for %s does not mirror its template.\n    template renders: %s\n    fixture has:      %s\n' \
+      "$wl" "$(tr '\n' ' ' <<<"$want")" "$(tr '\n' ' ' <<<"$have")"; mirror_fail=1
+  fi
+done
+if [ "$mirror_fail" -eq 0 ]; then
+  printf '  [ok]   the fixture mirrors each workload template exactly\n'; PASSED=$((PASSED+1))
+else
+  FAILED=$((FAILED+1))
 fi
 
 printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
