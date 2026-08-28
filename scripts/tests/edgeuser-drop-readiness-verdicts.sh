@@ -511,6 +511,36 @@ echo "legacy shared MySQL identity in use" > "$D/logs.tracebloc-ingest-xyz"
 run_case "a dirty RUNNING ingestion pod is still caught beside finished Jobs" "$D" 1 \
   "legacy-identity warning" --phase pre-revoke
 
+# A BIG NAMESPACE STILL REACHES A VERDICT -- AND WHAT THIS CANNOT TEST.
+#
+# The bug (Bugbot, High): `pod_of` piped `kubectl get pods` into
+# `awk '...{print;exit}'`. The early `exit` closes the pipe, kubectl takes
+# SIGPIPE, and under this script's `set -euo pipefail` the pipeline's status is
+# 141 -- so `pod=$(pod_of x)`, a bare assignment, aborted the WHOLE script. No
+# finding, no `cannot tell`, no verdict: the one output this tool must never
+# produce silently. It scales in with cluster size, so the small fixtures above
+# could never have seen it.
+#
+# THIS CASE DOES NOT REPRODUCE THAT, AND THE HARNESS CANNOT. The kubectl stub ends
+# its `get pods` branch with an unconditional `exit 0`, which discards whatever
+# status `cat` died of -- so SIGPIPE is masked before the script ever sees it.
+# Measured directly, same 40k-line input and the same pod_of shape:
+#
+#   stub ending in `exit 0`   -> rc=0, script continues   (what this suite sees)
+#   stub without the `exit 0` -> rc=141, script aborts    (what a cluster does)
+#
+# Four mutation attempts on the fix all stayed green for that reason. Rather than
+# ship a case that reads like proof, this one is labelled for what it is: it pins
+# that a large namespace still produces a verdict, which is real but weaker. The
+# fix's evidence is the out-of-suite measurement above. Making exit status
+# observable would mean changing the shared stub for every case in this file, so
+# it is called out here rather than done quietly.
+D="$TMP/big-namespace"; clean_fleet "$D"
+{ cat "$D/pods"; for i in $(seq 1 40000); do printf 'filler-%s Running\n' "$i"; done; } > "$D/pods.new"
+mv "$D/pods.new" "$D/pods"
+run_case "a namespace with thousands of pods still reaches a verdict" "$D" 0 \
+  "all three criteria hold" --phase pre-revoke
+
 # edgeuser inside a DSN on the INGESTION pod, under a name that is not DB_USER.
 # The DB_USER checks match that name exactly, so a connection string elsewhere in
 # the env would have gone unseen -- a gap against "nothing resolves to edgeuser".

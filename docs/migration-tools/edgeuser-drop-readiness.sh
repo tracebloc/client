@@ -118,8 +118,24 @@ K version --request-timeout=20s >/dev/null 2>&1 \
 printf '\nCriterion 1 — nothing resolves to edgeuser (config assertion)\n'
 
 pod_of() {  # $1 = app label substring; prints one Running pod name, or nothing
+  # NO EARLY `exit`, AND THE PIPELINE CANNOT FAIL THE SCRIPT (Bugbot, High).
+  # `awk`'s `exit` closes the pipe as soon as the first match is found, `kubectl`
+  # then takes SIGPIPE, and under the `set -euo pipefail` on line 49 the
+  # pipeline's status is 141 -- so `pod=$(pod_of x)`, a bare assignment, aborted
+  # the ENTIRE script. Not a `cannot tell`, not a finding: no verdict at all,
+  # which is the one output this tool must never produce silently.
+  #
+  # Reproduced before fixing, with a producer long enough for SIGPIPE to land:
+  #   pod_of() { for i in $(seq 1 20000); do echo "pod$i Running"; done \
+  #                | awk '$2=="Running"{print $1; exit}'; }
+  #   p=$(pod_of)          # rc=141, and the next line never runs
+  # A short producer finishes before awk exits, which is why this is intermittent
+  # and why it scales in exactly with cluster size.
+  #
+  # `!seen++` prints only the first match while still draining the input, so the
+  # pipe stays open. `|| true` is belt-and-braces for the `kubectl` half.
   K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
-    | awk -v want="$1" '$2=="Running" && index($1, want) { print $1; exit }'
+    | awk -v want="$1" '$2=="Running" && index($1, want) && !seen++ { print $1 }' || true
 }
 
 # THE DECLARED ROLE IS CROSS-CHECKED AGAINST THE CHART, not trusted.
@@ -172,7 +188,7 @@ check_workload() {  # $1 = pod-name substring, $2 = human label, $3 = mint|consu
   # edgeuser" and "every identity can authenticate" are true of every pod.
   local pod vars n_user=0
   assert_role_matches_chart "$1" "${3:-mint}" "$2"
-  pod=$(pod_of "$1")
+  pod=$(pod_of "$1" || true)
   if [ -z "$pod" ]; then
     untold "$2: no Running pod matching '$1' — cannot tell whether it resolves to edgeuser"
     return
@@ -369,7 +385,7 @@ scan_logs ingest         "ingestion"
 # ---------------------------------------------------------------------------
 printf '\nCriterion 3 — the privilege-filtered enumeration still matches the S0 baseline\n'
 
-mysql_pod=$(pod_of mysql)
+mysql_pod=$(pod_of mysql || true)
 if [ -z "$mysql_pod" ]; then
   untold "no Running mysql pod — cannot count tables, so cannot tell whether the enumeration shrank"
 else
@@ -393,9 +409,15 @@ for item in json.load(sys.stdin).get("items", []):
 
   count_as() {  # $1 = mysql user, $2 = password, $3 = schema; prints a count or nothing
     [ -n "$2" ] || return 0
+    # `|| true` for the same reason as `pod_of`: a failed `exec` under `pipefail`
+    # must yield an EMPTY count, which `compare` below already reports as
+    # "cannot tell (fail closed)". It must not decide the script's exit status.
+    # Reached today via `"$(count_as ...)"`, where errexit does not fire on a
+    # failing substitution -- but that is a property of the call site, and a
+    # future caller assigning it directly would inherit the abort.
     K exec "$mysql_pod" -- env MYSQL_PWD="$2" mysql -u "$1" -N -B \
       -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$3';" 2>/dev/null \
-      | tr -d '[:space:]'
+      | tr -d '[:space:]' || true
   }
 
   compare() {  # $1 = label, $2 = observed, $3 = baseline, $4 = identity used
