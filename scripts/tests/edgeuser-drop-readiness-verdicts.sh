@@ -117,9 +117,17 @@ SERVICE_DB_ACCOUNTS=true
 TB_META_USER=tb_meta
 TB_META_PASSWORD=x" > "$d/env.requests-proxy-def456"
   printf 'DB_USER=tb_ingest\nDB_PASSWORD=x\n' > "$d/env.tracebloc-ingest-xyz"
-  : > "$d/logs.jobs-manager-abc123"
-  : > "$d/logs.requests-proxy-def456"
-  : > "$d/logs.tracebloc-ingest-xyz"
+  # A DRIVEN CYCLE PRODUCES LOGS, and the fixture has to say so. These were
+  # EMPTY, which under the corrected criterion-2 rule now means "we could not
+  # look" rather than "we looked and it was clean" (Saqlain, #896). An empty
+  # log as the happy path was the same shape as the requests-proxy fixture
+  # bug: a clean verdict differenced against a fleet state that does not occur.
+  # The content is deliberately benign -- neither the legacy-identity string
+  # nor a 1045 -- so the two greps still score [ok] on their own terms.
+  for _p in jobs-manager-abc123 requests-proxy-def456 tracebloc-ingest-xyz; do
+    printf 'INFO connected to mysql as tb_ingest\nINFO run complete\n' \
+      > "$d/logs.$_p"
+  done
   echo 87 > "$d/count.datasets"
   echo 3  > "$d/count.metadata"
   echo 0  > "$d/count.processlist"
@@ -216,6 +224,26 @@ run_case "an ingestion Job on edgeuser is a finding" "$D" 1 "DB_USER=edgeuser"
 D="$TMP/nodriven"; clean_fleet "$D"
 grep -v ingest "$D/pods" > "$D/pods.new" && mv "$D/pods.new" "$D/pods"
 run_case "no ingestion pod => cannot tell, NOT a pass" "$D" 1 "requires a DRIVEN cycle"
+
+# BLOCKER 2 (Saqlain, #896): the case that would have caught the false-PASS.
+# The ingestion cases only ever set DB_USER, so a pod with a PASSWORD and NO
+# DB_USER shipped green -- `$ivars` was non-empty, the edgeuser grep missed,
+# and the tool printed DROP-READY for the criterion that authorizes an
+# irreversible DROP. Prod's digest-pinned 0.7 ingestor is exactly this shape.
+D="$TMP/ing-nouser"; clean_fleet "$D"
+printf 'DB_PASSWORD=x\n' > "$D/env.tracebloc-ingest-xyz"
+run_case "ingestion with a PASSWORD but no DB_USER is cannot-tell, NOT a pass" \
+  "$D" 1 "DB_USER is absent or empty"
+
+# The other half of the same doctrine, on criterion 2: a `kubectl logs` that
+# SUCCEEDS with no output used to score both checks [ok]. "Could not look" must
+# not read as "looked and clean".
+D="$TMP/emptylog"; clean_fleet "$D"
+: > "$D/logs.tracebloc-ingest-xyz"
+: > "$D/logs.jobs-manager-abc123"
+: > "$D/logs.requests-proxy-def456"
+run_case "an EMPTY log is cannot-tell, not a clean cycle" \
+  "$D" 1 "the log is empty over --since"
 
 # 8. FAIL CLOSED: missing workload
 D="$TMP/nopod"; clean_fleet "$D"

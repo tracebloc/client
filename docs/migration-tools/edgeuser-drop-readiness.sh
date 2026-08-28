@@ -240,12 +240,29 @@ if [ -z "$ing" ]; then
   untold "ingestion: no ingestion pod found — the gate requires a DRIVEN cycle (one experiment + one ingestion run). Drive one, then re-run."
 else
   ivars=$(K exec "$ing" -- env 2>/dev/null | grep -E '^DB_USER=|^DB_PASSWORD=' || true)
+  # DB_USER SPECIFICALLY, NOT "either of the two" (Saqlain, #896). `$ivars`
+  # matched DB_PASSWORD too, so a pod with a password and NO `DB_USER` cleared
+  # the `-z` guard, failed to match the edgeuser grep, and fell to `ok` with an
+  # EMPTY value -- a reproduced false-PASS that printed DROP-READY and exit 0
+  # for the criterion authorizing an irreversible `DROP USER edgeuser`.
+  #
+  # NOT HYPOTHETICAL. Prod is digest-pinned to the 0.7 ingestor whose edgeuser
+  # `DB_USER` default is applied INSIDE the container and never appears in
+  # `env` (`_helpers.tpl`, backend#1752) -- exactly the pod that would still
+  # authenticate as edgeuser while this gate greenlit the DROP.
+  #
+  # `check_workload`'s criterion 1(a) already treats "no `*_USER` at all" as
+  # `untold`. This is the same rule on the same question, and the asymmetry was
+  # the defect.
+  iuser=$(grep -E '^DB_USER=.' <<<"$ivars" | head -1 | cut -d= -f2- || true)
   if [ -z "$ivars" ]; then
     untold "ingestion ($ing): could not read DB_USER — cannot tell"
-  elif grep -q '^DB_USER=edgeuser$' <<<"$ivars"; then
+  elif [ -z "$iuser" ]; then
+    untold "ingestion ($ing): DB_USER is absent or empty in the pod env, so the identity it authenticates as cannot be read here — cannot tell. An image that defaults DB_USER internally looks exactly like this."
+  elif [ "$iuser" = "edgeuser" ]; then
     bad "ingestion ($ing): DB_USER=edgeuser — the spawned Job still authenticates as the root-equivalent account"
   else
-    ok "ingestion ($ing): DB_USER=$(grep '^DB_USER=' <<<"$ivars" | cut -d= -f2-)"
+    ok "ingestion ($ing): DB_USER=$iuser"
   fi
 fi
 
@@ -266,6 +283,16 @@ scan_logs() {  # $1 = pod substring, $2 = label
     local log
     if ! log=$(K logs "$p" --all-containers --since="$SINCE" 2>/dev/null); then
       untold "$2 ($p): logs unavailable — cannot tell"
+      continue
+    fi
+    # AN EMPTY LOG IS NOT A CLEAN LOG (Saqlain, #896). `kubectl logs` succeeding
+    # with no output scored BOTH checks `[ok]`, so a cycle aged out of
+    # `--since`, a restarted pod whose buffer reset, or a stale pod all read as
+    # "criterion 2 clean" -- "could not look" rendered as "looked and clean",
+    # against this tool's own doctrine. The `any=0` guard below cannot see it:
+    # it fires only when NO pod was read at all.
+    if [ -z "$log" ]; then
+      untold "$2 ($p): the log is empty over --since $SINCE, so the driven cycle was not observed here — cannot tell"
       continue
     fi
     any=1
