@@ -36,12 +36,33 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
    kubectl -n <ns> auth can-i create pods/exec # -> yes
    ```
 
-1. **`rotateMysqlRoot` is on for this fleet**, deployed, so the release Secret
-   carries a `MYSQL_ROOT_PASSWORD` key. Confirm:
+1. **The edge is on chart `>= 1.9.71`, and `rotateMysqlRoot` is on for this
+   fleet**, deployed, so the release Secret carries a `MYSQL_ROOT_PASSWORD` key.
+
+   **Check the chart version before anything else in this step. Below `1.9.71`
+   this runbook cannot work, and it fails silently.**
+   ```bash
+   helm -n <ns> list --filter '^<release>$' -o json | grep -o '"chart":"[^"]*"'   # -> client-1.9.71 or later
+   ```
+   `rotateMysqlRoot` did not exist before `client-1.9.71` (client#822), and the
+   chart's `values.schema.json` does not close `additionalProperties` — so on an
+   older chart `helm upgrade ... --set rotateMysqlRoot=true` is **accepted and
+   exits 0** while rendering no `MYSQL_ROOT_PASSWORD` at all. Measured on
+   `client-1.9.63`: exit 0, zero occurrences of the key. The Secret read below
+   then returns zero, and the paragraph after it tells you to remedy that by
+   enabling the gate — the step you just ran. There is no exit from that loop and
+   nothing in it names the real cause, which is the chart version.
+
+   If the edge is older, **upgrade the chart first, as its own change in its own
+   window** — see `client/MIGRATION.md`, *Upgrading to 1.9.71*, for what that
+   upgrade touches. Do not bundle it with the rotation: the two have different
+   blast radii and different rollback stories.
+
+   Then confirm the gate is live:
    ```bash
    kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | wc -c   # non-zero
    ```
-   If it is zero, enable the gate first — `rotateMysqlRootByEnv` defaults to
+   If it is zero **and the version check above passed**, enable the gate first — `rotateMysqlRootByEnv` defaults to
    `false` for dev/stg/prod. On an unrotated fleet the mysql-client container has
    **no `env:` block at all**, so an empty read there is the correct "gate off"
    signal, not a broken query. `--set` persists across the fleet's hourly

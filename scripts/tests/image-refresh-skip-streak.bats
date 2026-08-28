@@ -38,7 +38,11 @@ setup_file() {
     --show-only templates/image-refresh-cronjob.yaml \
     2>/dev/null \
     | python3 -c '
-import sys, yaml
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 for doc in yaml.safe_load_all(sys.stdin.read()):
     if doc and doc.get("kind") == "ConfigMap":
         sys.stdout.write(doc["data"]["image-refresh.sh"])

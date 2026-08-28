@@ -55,7 +55,12 @@ render() {
 CMP="$(mktemp -t openshift-scc-coverage.XXXXXX)"
 trap 'rm -f "$CMP"' EXIT
 cat >"$CMP" <<'PY'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 

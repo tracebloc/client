@@ -25,7 +25,13 @@ setup() {
   helm template t "$CHART" --set clientId=x --set clientPassword=y \
     --set storageClass.create=false > "$TMP/rendered.yaml"
   python3 - "$TMP/rendered.yaml" "$TMP/branch.sh" <<'PYX'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
+
 def walk(o):
     if isinstance(o, str) and "PIN IS STALE" in o: return o
     if isinstance(o, dict):

@@ -92,7 +92,12 @@ BASE=(--namespace "$RELEASE_NS"
 CMP="$(mktemp -t na-safety.XXXXXX)"
 trap 'rm -f "$CMP"' EXIT
 cat >"$CMP" <<'PY'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 label, release_ns = sys.argv[1], sys.argv[2]
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]

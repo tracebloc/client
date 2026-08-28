@@ -78,7 +78,12 @@ helm template t "$CHART" "${BASE[@]}" \
   --set resourceMonitor=false --set telemetryCollector.enabled=true >"$B" 2>/dev/null
 
 cat >"$CMP" <<'PY'
-import sys, yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 MUTATING = {"create", "update", "patch", "delete", "deletecollection"}
 

@@ -350,7 +350,7 @@ lint-warnings:
 #
 # `|`-separated because each guard is a multi-word command. One entry per guard,
 # and this is the only place they are written down.
-DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh|bash scripts/tests/collector-offsets-persisted.sh|bash scripts/tests/node-agents-tenancy.sh|bash scripts/tests/telemetry-token-agreement.sh|bash scripts/tests/node-agents-namespace-safety.sh|bash scripts/tests/automount-token-explicit.sh|bash scripts/tests/collector-redaction-floor.sh|bash scripts/tests/collector-redaction-derived.sh|bash scripts/tests/telemetry-token-bootstrap.sh|bash scripts/tests/node-jsonpath-agreement.sh|bash scripts/tests/preflight-not-privilege-gated.sh|bash scripts/tests/kubelet-arg-map-safety.sh|bash scripts/tests/cronjob-failures-are-readable.sh|bash scripts/tests/release-name-equals-namespace.sh|bash scripts/tests/helm-unittest-error-assertions.sh|bash scripts/tests/helm-unittest-gated.sh
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh|bash scripts/tests/collector-offsets-persisted.sh|bash scripts/tests/node-agents-tenancy.sh|bash scripts/tests/telemetry-token-agreement.sh|bash scripts/tests/node-agents-namespace-safety.sh|bash scripts/tests/automount-token-explicit.sh|bash scripts/tests/collector-redaction-floor.sh|bash scripts/tests/collector-redaction-derived.sh|bash scripts/tests/telemetry-token-bootstrap.sh|bash scripts/tests/node-jsonpath-agreement.sh|bash scripts/tests/preflight-not-privilege-gated.sh|bash scripts/tests/kubelet-arg-map-safety.sh|bash scripts/tests/cronjob-failures-are-readable.sh|bash scripts/tests/release-name-equals-namespace.sh|bash scripts/tests/helm-unittest-error-assertions.sh|bash scripts/tests/helm-unittest-gated.sh|bash scripts/tests/mirror-enumeration-complete.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
 # environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands
@@ -403,9 +403,14 @@ drift:
 
 # digest-drift: the watcher on every mutable label that points at a pinned
 # digest (backend#1853). NOT in `check`: it needs the network and a docker
-# daemon, and it is knowingly RED today -- the ingestor's 0.8 float has moved
-# off the pinned v0.8.2 digest, which is the whole finding. A red target in the
-# pre-push tier trains people to skip the tier.
+# daemon, so a red run in the pre-push tier would train people to skip the tier.
+#
+# The ingestor's 0.8 float has moved off the pinned v0.8.2 digest and stays off
+# on purpose (docs/SECURITY.md §4.1.1). That was a permanent RED until
+# backend#2673 taught the script to treat this ONE divergence as acknowledged
+# expected drift (declared in values.yaml as images.ingestor.ackDrift): the run
+# is now GREEN, printing ACKNOWLEDGED for the ingestor while still reddening on
+# any OTHER pin drifting or on the ingestor pin ceasing to resolve.
 #
 # It runs on the schedule in .github/workflows/digest-drift.yml. Its bats suite
 # IS in `make bats`, because that part needs no network.

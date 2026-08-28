@@ -75,7 +75,12 @@ PROJ="$(mktemp -t tok-boot-proj.XXXXXX)"
 CMP="$(mktemp -t tok-boot-cmp.XXXXXX)"
 trap 'rm -f "$PROJ" "$CMP"' EXIT
 cat >"$PROJ" <<'PY'
-import json, sys, yaml
+import json, sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 
 # Projects the token-bootstrap surface out of one full-chart render.
 #
