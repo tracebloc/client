@@ -42,8 +42,14 @@
 #  patterns have to cross. Matching raw text would have found nothing, i.e.
 #  widening the scanned set would have been vacuous: a bigger corpus that
 #  cannot see the sentence it was widened for. Emphasis and code markers are
-#  stripped first, and the mutation test in this suite re-inserts the original
-#  stale sentence to prove the finding is reachable.
+#  stripped first, and `gate-default-prose-mutations.sh` -- a real file, armed
+#  in DRIFT_GUARDS beside this one -- re-inserts the original stale sentence to
+#  prove the finding is reachable, and re-inserts it a second time with the
+#  normaliser disabled to prove the stripping is what makes it reachable. That
+#  test did not exist when this paragraph first claimed it did (Bugbot, #900):
+#  the mutations had been run by hand and never committed, which is this file's
+#  own subject one level up. It also runs the guard from a path CONTAINING A
+#  SPACE, so the word-splitting bug fixed just above cannot come back unseen.
 #
 #  It is deliberately NOT a general prose checker. It answers one question --
 #  "does any document assert a default this chart contradicts?" -- which is
