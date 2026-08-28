@@ -76,6 +76,13 @@ done
 [ -n "$NS" ]       || die "--namespace is required"
 [ -n "$BASE_DS" ]  || die "--baseline-datasets is required (the S0 reference for this fleet; there is deliberately no default)"
 [ -n "$BASE_META" ]|| die "--baseline-metadata is required (likewise)"
+# MANDATORY, AND DELIBERATELY NOT LOAD-BEARING. `compare()` always reads the LIVE
+# count as the data-plane identity; this flag changes no comparison. It exists so
+# the operator has to state which identity produced the baseline they are
+# comparing against, because a root count and a tb_ingest count are different
+# measurements and a mismatch is invisible once written down. Recorded here
+# explicitly so a maintainer does not read it as a switch and "fix" it by wiring
+# it into the query (@aptracebloc, #896).
 [ -n "$BASE_ID" ]  || die "--baseline-identity is required: say which identity READ the baseline (root|tb_ingest|tb_meta). A root count and a tb_ingest count are different measurements."
 case "$BASE_ID" in root|tb_ingest|tb_meta) ;; *) die "--baseline-identity must be root, tb_ingest or tb_meta" ;; esac
 case "$PHASE" in pre-revoke|post-revoke|post-drop) ;; *) die "--phase must be pre-revoke, post-revoke or post-drop" ;; esac
@@ -235,35 +242,53 @@ check_workload requests-proxy  "requests-proxy"  consumer
 # Spawned ingestion Jobs are stamped at submit time, not by the chart, so they are
 # checked separately -- and their ABSENCE is "cannot tell", never a pass. The gate
 # requires a DRIVEN cycle: an ingestion run must have happened.
-ing=$(K get pods --no-headers -o custom-columns=':metadata.name' 2>/dev/null | grep -i 'ingest' | head -1 || true)
+# RUNNING ONLY, and that is a precondition rather than tidiness (@aptracebloc on
+# #896 flagged the missing filter; the reason it matters is sharper than the nit).
+#
+# `kubectl exec` needs a running container. An ingestion Job pod that has already
+# SUCCEEDED cannot be exec'd, so picking one would produce an empty env and an
+# unexplained "cannot tell". Filtering here lets the message say the true thing
+# instead: this check has to run WHILE the ingestion is in flight. "Drive one,
+# then re-run" was advice that could not be followed, because a completed run
+# leaves no readable env.
+#
+# Spawned ingestion Jobs are stamped at submit time, not by the chart, so they are
+# checked separately -- and their ABSENCE is "cannot tell", never a pass.
+ing=$(K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
+        | awk '$2=="Running" && tolower($1) ~ /ingest/ { print $1; exit }' || true)
 if [ -z "$ing" ]; then
-  untold "ingestion: no ingestion pod found — the gate requires a DRIVEN cycle (one experiment + one ingestion run). Drive one, then re-run."
+  untold "ingestion: no RUNNING ingestion pod. The gate needs a driven cycle, and the ingestion identity can only be read from a live pod -- kubectl exec requires a running container, so a Job pod that already Succeeded cannot be inspected. Run this check WHILE an ingestion run is in flight."
 else
-  ivars=$(K exec "$ing" -- env 2>/dev/null | grep -E '^DB_USER=|^DB_PASSWORD=' || true)
-  # DB_USER SPECIFICALLY, NOT "either of the two" (Saqlain, #896). `$ivars`
-  # matched DB_PASSWORD too, so a pod with a password and NO `DB_USER` cleared
-  # the `-z` guard, failed to match the edgeuser grep, and fell to `ok` with an
-  # EMPTY value -- a reproduced false-PASS that printed DROP-READY and exit 0
-  # for the criterion authorizing an irreversible `DROP USER edgeuser`.
-  #
-  # NOT HYPOTHETICAL. Prod is digest-pinned to the 0.7 ingestor whose edgeuser
-  # `DB_USER` default is applied INSIDE the container and never appears in
-  # `env` (`_helpers.tpl`, backend#1752) -- exactly the pod that would still
-  # authenticate as edgeuser while this gate greenlit the DROP.
-  #
-  # `check_workload`'s criterion 1(a) already treats "no `*_USER` at all" as
-  # `untold`. This is the same rule on the same question, and the asymmetry was
-  # the defect.
+  # The FULL env is read, not just the two DB_ vars: the DSN scan below has to
+  # look at every value, and filtering first is exactly what would let a
+  # connection string hide.
+  ivars_all=$(K exec "$ing" -- env 2>/dev/null | grep -E '^[A-Z0-9_]+=' || true)
+  ivars=$(grep -E '^DB_USER=|^DB_PASSWORD=' <<<"$ivars_all" || true)
   iuser=$(grep -E '^DB_USER=.' <<<"$ivars" | head -1 | cut -d= -f2- || true)
-  if [ -z "$ivars" ]; then
-    untold "ingestion ($ing): could not read DB_USER — cannot tell"
+
+  if [ -z "$ivars_all" ]; then
+    untold "ingestion ($ing): could not read the pod environment (exec refused?) -- cannot tell"
+  elif [ -z "$ivars" ]; then
+    untold "ingestion ($ing): could not read DB_USER -- cannot tell"
   elif [ -z "$iuser" ]; then
-    untold "ingestion ($ing): DB_USER is absent or empty in the pod env, so the identity it authenticates as cannot be read here — cannot tell. An image that defaults DB_USER internally looks exactly like this."
+    untold "ingestion ($ing): DB_USER is absent or empty in the pod env, so the identity it authenticates as cannot be read here -- cannot tell. An image that defaults DB_USER INTERNALLY looks exactly like this, and prod is digest-pinned to one that does."
   elif [ "$iuser" = "edgeuser" ]; then
-    bad "ingestion ($ing): DB_USER=edgeuser — the spawned Job still authenticates as the root-equivalent account"
+    bad "ingestion ($ing): DB_USER=edgeuser -- the spawned Job still authenticates as the root-equivalent account"
   else
     ok "ingestion ($ing): DB_USER=$iuser"
   fi
+
+  # edgeuser hidden in a VALUE whose name is not DB_USER (@aptracebloc, #896).
+  # The checks above match DB_USER exactly, so a DSN- or URL-style credential
+  # (mysql://edgeuser:pw@host/db) under any other name walks straight past them --
+  # a gap against this criterion's own "nothing resolves to edgeuser" wording.
+  # Reported BY NAME with the value withheld: a value that matched can carry a
+  # password. Runs regardless of the branch above, because a pod can hold both a
+  # correct DB_USER and a stale DSN.
+  while IFS= read -r nm; do
+    [ -n "$nm" ] || continue
+    bad "ingestion ($ing): '$nm' contains the string 'edgeuser' in its VALUE -- a DSN/URL-style credential still names the root-equivalent account (value withheld; it may carry a password)"
+  done <<<"$(grep -F 'edgeuser' <<<"$ivars_all" | cut -d= -f1 | grep -vxF 'DB_USER' | sort -u || true)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -328,8 +353,14 @@ mysql_pod=$(pod_of mysql)
 if [ -z "$mysql_pod" ]; then
   untold "no Running mysql pod — cannot count tables, so cannot tell whether the enumeration shrank"
 else
+  # FETCHED ONCE. This used to run `kubectl get secret -o json` per key, so a
+  # namespace's whole Secret set was pulled five times to read five values
+  # (@aptracebloc, #896). Cached here instead: same data, one call, and the values
+  # still never leave this shell.
+  ALL_SECRETS=$(K get secret -o json 2>/dev/null || true)
+
   secret_val() {  # $1 = secret key; prints the value, never logged
-    K get secret -o json 2>/dev/null \
+    printf '%s' "$ALL_SECRETS" \
       | python3 -c '
 import base64, json, sys
 key = sys.argv[1]

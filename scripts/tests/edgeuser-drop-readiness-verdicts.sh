@@ -223,7 +223,7 @@ run_case "an ingestion Job on edgeuser is a finding" "$D" 1 "DB_USER=edgeuser"
 # 7. FAIL CLOSED: no driven cycle means we cannot tell, and that is a failure
 D="$TMP/nodriven"; clean_fleet "$D"
 grep -v ingest "$D/pods" > "$D/pods.new" && mv "$D/pods.new" "$D/pods"
-run_case "no ingestion pod => cannot tell, NOT a pass" "$D" 1 "requires a DRIVEN cycle"
+run_case "no RUNNING ingestion pod => cannot tell, NOT a pass" "$D" 1 "no RUNNING ingestion pod"
 
 # BLOCKER 2 (Saqlain, #896): the case that would have caught the false-PASS.
 # The ingestion cases only ever set DB_USER, so a pod with a PASSWORD and NO
@@ -418,6 +418,45 @@ if [ "$mirror_fail" -eq 0 ]; then
   printf '  [ok]   the fixture mirrors each workload template exactly\n'; PASSED=$((PASSED+1))
 else
   FAILED=$((FAILED+1))
+fi
+
+# A SUCCEEDED ingestion pod is not usable evidence, and must not be picked.
+# kubectl exec needs a running container, so exec'ing a finished Job pod yields an
+# empty env and an unexplained "cannot tell". The selector filters to Running so
+# the message can name the real precondition instead (@aptracebloc, #896).
+D="$TMP/ingestdone"; clean_fleet "$D"
+sed -i.bak 's/^tracebloc-ingest-xyz Running$/tracebloc-ingest-xyz Succeeded/' "$D/pods"
+run_case "a Succeeded ingestion pod is not accepted as the driven cycle" "$D" 1 "no RUNNING ingestion pod"
+
+# edgeuser inside a DSN on the INGESTION pod, under a name that is not DB_USER.
+# The DB_USER checks match that name exactly, so a connection string elsewhere in
+# the env would have gone unseen -- a gap against "nothing resolves to edgeuser".
+D="$TMP/ingestdsn"; clean_fleet "$D"
+printf 'DATASET_DSN=mysql://edgeuser:secret@mysql:3306/training_test_datasets\n' >> "$D/env.tracebloc-ingest-xyz"
+run_case "edgeuser in an ingestion DSN is caught, by NAME" "$D" 1 "DATASET_DSN"
+
+# ... and that value is never echoed, because it carries a password.
+D="$TMP/ingestdsnquiet"; clean_fleet "$D"
+printf 'DATASET_DSN=mysql://edgeuser:SUPERSECRET@mysql:3306/training_test_datasets\n' >> "$D/env.tracebloc-ingest-xyz"
+rc=0
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$D" "$TOOL" --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
+if grep -qF 'SUPERSECRET' <<<"$out"; then
+  printf '  [FAIL] an ingestion DSN value must never be printed -- it carries a password\n'; FAILED=$((FAILED+1))
+else
+  printf '  [ok]   the ingestion DSN value is withheld from the output\n'; PASSED=$((PASSED+1))
+fi
+
+# A correct DB_USER does NOT excuse a stale DSN beside it: both are reported.
+D="$TMP/ingestboth"; clean_fleet "$D"
+printf 'DATASET_DSN=mysql://edgeuser:x@mysql:3306/training_test_datasets\n' >> "$D/env.tracebloc-ingest-xyz"
+rc=0
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$D" "$TOOL" --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'DB_USER=tb_ingest' <<<"$out" && grep -q 'DATASET_DSN' <<<"$out"; then
+  printf '  [ok]   a good DB_USER does not excuse a stale DSN -- both are reported\n'; PASSED=$((PASSED+1))
+else
+  printf '  [FAIL] the DSN scan must run regardless of the DB_USER verdict (rc=%s)\n' "$rc"; FAILED=$((FAILED+1))
 fi
 
 printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
