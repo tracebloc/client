@@ -1,0 +1,57 @@
+{{/*
+  WHAT THE COLLECTOR DECIDED, AND WHY — backend#1906.
+
+  A component that quietly does nothing is the exact failure this epic exists to
+  remove. `tracebloc.telemetryCollectorState` can now decline to render the
+  Collector (`skipped-no-token`) instead of failing the release, which is the
+  right call for an unattended auto-upgrade — but a skip nobody can see is not
+  safer than a crash, only quieter. So the decision is written down on the
+  cluster, every time, including when the answer is "enabled".
+
+  ALWAYS RENDERED, and that is the point. If this only appeared on a skip, then
+  "no ConfigMap" would mean either "enabled", "operator turned it off", or "chart
+  too old to know" — three readings of one silence, which is the ambiguity the
+  object exists to remove. With it always present, absence means exactly one
+  thing: the release predates this template.
+
+  Reads a resolved state, never re-deriving it. The helper is the one decider; a
+  second evaluation here could report a decision the gates did not make.
+
+  THE NAME DELIBERATELY AVOIDS THE `telemetry-collector` PREFIX. Five shell gates
+  locate the Collector's workload and config by exactly that substring in
+  `metadata.name` (collector-class-a-agreement.sh, collector-offsets-persisted.sh,
+  collector-redaction-{derived,floor}.sh, telemetry-token-bootstrap.sh), and two
+  of them assert there is EXACTLY ONE such ConfigMap. This object is not a
+  Collector workload — it runs nothing, mounts nothing and spools nothing, and it
+  exists precisely when the Collector does NOT — so it must not be counted as one.
+  Naming it `<release>-telemetry-status` keeps those gates exact rather than
+  loosening five of them to accommodate a file that was never their subject.
+  `app.kubernetes.io/component` below still says what it is, for humans and for
+  label selectors.
+*/}}
+{{- $state := include "tracebloc.telemetryCollectorState" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-telemetry-status" .Release.Name }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telemetry-collector-status
+  annotations:
+    # Sweepable across a cluster without parsing the data block:
+    #   kubectl get cm -A -l app.kubernetes.io/component=telemetry-collector-status \
+    #     -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,STATE:.metadata.annotations.tracebloc\.io/telemetry-collector-state
+    tracebloc.io/telemetry-collector-state: {{ $state | quote }}
+data:
+  state: {{ $state | quote }}
+  # WHY, in the operator's terms — the state alone does not say what to do next.
+  reason: {{ if eq $state "enabled" -}}
+    "The Collector is running. Class A container stdout is forwarded to the tracebloc backend."
+  {{- else if eq $state "disabled-by-operator" -}}
+    "telemetryCollector.enabled is explicitly false in this release's values. Nothing is collected, by choice."
+  {{- else if eq $state "skipped-incomplete-values" -}}
+    {{ printf "No Collector: nobody set telemetryCollector.enabled, and this release carries no Class A container lists — helm DELETES a key set to null and does not coalesce chart defaults back under --reuse-values, so a release predating the Collector arrives without them. Upgrading with --reset-then-reuse-values (which auto-upgrade uses) restores them and this resolves itself." | quote }}
+  {{- else -}}
+    {{ printf "No Collector: nobody set telemetryCollector.enabled, and its token Secret is not present in namespace %q (looked for %q, and the legacy %q). jobs-manager writes that Secret when it next re-authenticates (backend#2274); this resolves itself once it does. Set telemetryCollector.enabled: false to opt out permanently." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .) | quote }}
+  {{- end }}

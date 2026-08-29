@@ -491,18 +491,41 @@ egressProxy:
 # backend#1908 lands content redaction. Widening `classAContainers` is not a
 # config tweak — it changes what leaves a customer's cluster.
 telemetryCollector:
-  # OFF BY DEFAULT, BUT THE TOKEN SECRET IS PROVISIONED ANYWAY (backend#2400), and
-  # that asymmetry is deliberate. The Collector's template REFUSES the release when
-  # its token Secret is absent, so the Secret has to be in place BEFORE this flag
-  # can be set — which it cannot be if writing it is conditional on this flag. That
-  # was a deadlock: no edge could enable the Collector at all.
+  # -- `enabled` HAS NO DEFAULT HERE ON PURPOSE. It is deliberately absent, not
+  # forgotten, and setting it back to `false` would undo backend#1906.
   #
-  # So jobs-manager always receives the Secret's coordinates and always holds the
-  # RBAC to write it, and flipping this to `true` on an edge that has re-
-  # authenticated at least once since upgrading is a one-step operation. A FRESH
-  # install with this already `true` is still refused, and correctly: jobs-manager
-  # has not run yet, so nothing has written the Secret.
-  enabled: false
+  # THE KEY'S ABSENCE IS A THIRD STATE. `tracebloc.telemetryCollectorState`
+  # (_helpers.tpl) reads three cases, not two:
+  #
+  #   enabled: true    an operator chose this. A missing token Secret REFUSES the
+  #                    release, naming the Secret — they are watching, and that is
+  #                    actionable.
+  #   enabled: false   an operator opted out. Nothing is collected, permanently.
+  #   (absent)         nobody chose. The chart decides: collect if the token
+  #                    Secret is there, and if it is not, SKIP — recording why in
+  #                    <release>-telemetry-collector-status — rather than fail.
+  #
+  # WHY THE THIRD CASE EXISTS. Auto-upgrade runs unattended, hourly, and
+  # `--reset-then-reuse-values` takes new chart defaults fresh. So a default that
+  # refuses on a missing Secret does not inform anybody — it fails at RENDER time,
+  # before `--atomic` can roll anything back, and the edge stops receiving every
+  # future upgrade including security fixes. On an edge whose jobs-manager predates
+  # backend#2400 nothing will ever write the Secret that would unwedge it. That is
+  # a permanent stop delivered by a checklist item, which is why the unattended
+  # path skips and the attended path refuses.
+  #
+  # An absent key is what makes the two distinguishable: `--reset-then-reuse-values`
+  # preserves operator CHOICES and drops old chart DEFAULTS, so `kindIs "bool"` is
+  # precisely "somebody chose this". Measured on a real cluster, not assumed — see
+  # the helper's comment.
+  #
+  # THE TOKEN SECRET IS PROVISIONED REGARDLESS (backend#2400): jobs-manager always
+  # receives its coordinates and always holds the RBAC to write it, so an edge
+  # becomes eligible on its own once it re-authenticates. That asymmetry is what
+  # broke the original deadlock, in which the Secret could not exist until the flag
+  # was set and the flag could not be set until the Secret existed.
+  #
+  # enabled: <unset>
 
   # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the
   # distinction is load-bearing: `filelog`, `bearertokenauth` and `file_storage`
