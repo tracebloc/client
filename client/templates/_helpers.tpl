@@ -1228,6 +1228,20 @@ https://api.tracebloc.io/
   `(include "tracebloc.nodeAgentsInUse" .)` inside an `and`.
 */}}
 {{- define "tracebloc.nodeAgentsInUse" -}}
-{{- $tc := default (dict) .Values.telemetryCollector -}}
-{{- if or (ne .Values.resourceMonitor false) $tc.enabled }}true{{ end -}}
+{{- /*
+  THE COLLECTOR TENANT IS ASKED THROUGH ITS OWN DECIDER, not through the raw
+  `enabled` key (Bugbot, client#905). `telemetryCollectorState` exists precisely
+  because `enabled` stopped being the answer: in FLEET MODE the key is ABSENT and
+  the state is still `enabled`, so the DaemonSet renders. Reading `$tc.enabled`
+  here therefore said "no pod-bearing tenant" about a namespace that was about to
+  receive a DaemonSet -- and on an edge with `resourceMonitor: false` and a
+  mirrored registry that is a Collector with no image pull Secret, i.e.
+  ImagePullBackOff on every node.
+  
+  This is the exact failure the docstring above describes happening once already:
+  "each carried its own copy of 'is resource-monitor on'; when the Collector
+  became a second tenant, two of them were widened and the rest were not." The
+  tri-state made `enabled` a second copy of the answer for a third time.
+*/ -}}
+{{- if or (ne .Values.resourceMonitor false) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
 {{- end -}}
