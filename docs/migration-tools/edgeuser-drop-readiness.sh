@@ -415,7 +415,36 @@ else
   # namespace's whole Secret set was pulled five times to read five values
   # (@aptracebloc, #896). Cached here instead: same data, one call, and the values
   # still never leave this shell.
-  ALL_SECRETS=$(K get secret -o json 2>/dev/null || true)
+  #
+  # "COULD NOT FETCH" AND "KEY ABSENT" ARE DIFFERENT FINDINGS (backend#2835).
+  # This used to be `$(K get secret -o json 2>/dev/null || true)`. On a failed
+  # call ALL_SECRETS went empty, every secret_val returned empty, mysql_q returned
+  # early on the empty password, and compare() reported "could not enumerate as
+  # tb_meta -- cannot tell". Failing closed was right; naming the wrong cause was
+  # not. The two want opposite actions from the operator: retry the connection, or
+  # go and find the missing Secret.
+  #
+  # THIS IS THE COMMON FAILURE, NOT AN EXOTIC ONE. Every fleet in backend#1528 is a
+  # private-endpoint cluster reached through an SSM tunnel, and the Secret set is by
+  # far the largest response body this tool asks for -- measured against staging
+  # 2026-08-30, `get secret -o json` returned `http2: client connection lost` in the
+  # same run where `get pods` succeeded.
+  #
+  # NO PIPE IN THE SHAPE CHECK. `printf '%s' "$x" | head -c 1 | grep -q '{'` looks
+  # equivalent and is not: `head` closes the pipe after one byte, `printf` takes
+  # SIGPIPE, and under `pipefail` the pipeline reports 141 -- so a perfectly good
+  # payload scores as a failed fetch. A `case` glob asks the same question with no
+  # subprocess and no pipe.
+  SECRETS_READABLE=1
+  if ! ALL_SECRETS=$(K get secret -o json 2>/dev/null); then
+    SECRETS_READABLE=0; ALL_SECRETS=""
+  else
+    case "$ALL_SECRETS" in
+      \{*) : ;;
+      *)   SECRETS_READABLE=0; ALL_SECRETS="" ;;
+    esac
+  fi
+  [ "$SECRETS_READABLE" = 1 ] || untold "could not read the namespace Secret set — every credential-backed check below is 'cannot tell' FOR THAT REASON, not because a key is absent. Over a tunnelled private-endpoint cluster a dropped connection is the usual cause; retry before concluding anything about the fleet."
 
   secret_val() {  # $1 = secret key; prints the value, never logged
     printf '%s' "$ALL_SECRETS" \
@@ -455,7 +484,23 @@ for item in json.load(sys.stdin).get("items", []):
       | tr -d '[:space:]'
   }
 
-  compare() {  # $1 = label, $2 = observed, $3 = baseline, $4 = identity used
+  # THE GROWTH RATIONALE IS PER-SCHEMA, because the two schemas grow for entirely
+  # different reasons (backend#2835). `training_test_datasets` grows when someone
+  # ingests a dataset -- routine, and nothing to attribute. `metadata` is a FIXED
+  # bookkeeping set that no dataset ever lands in, so a new table there is a SCHEMA
+  # CHANGE and has to be attributed to the code that creates it.
+  #
+  # Measured instance: staging read `metadata: 5 ... grew by 1 (new datasets)` on
+  # 2026-08-30. The fifth table was `respin_markers` from client-runtime#445 -- a
+  # legitimate new bookkeeping table, reported with a reason that could not be true
+  # of that schema, immediately before an irreversible DROP.
+  #
+  # GROWTH STILL DOES NOT REDDEN THE GATE, in either schema. Criterion 3 tests for a
+  # SHRINK -- the silent over-revoke -- and a chart upgrade adding a table is not
+  # that. Scoring growth as a failure would have blocked staging on a correct fleet,
+  # which is the same over-strict mistake in the opposite direction. The operator is
+  # told what to check, not stopped.
+  compare() {  # $1 = label, $2 = observed, $3 = baseline, $4 = identity, $5 = growth rationale
     if [ -z "$2" ]; then
       untold "$1: could not enumerate as $4 — cannot tell (fail closed; an unreadable count is not a matching count)"
     elif [ "$2" -eq "$3" ]; then
@@ -463,7 +508,8 @@ for item in json.load(sys.stdin).get("items", []):
     elif [ "$2" -lt "$3" ]; then
       bad "$1: $2 tables as $4 but baseline is $3 — SILENT SHRINK of $(( $3 - $2 )). Over-revoked: the enumeration is privilege-filtered, so this does not raise an error, it just stops returning datasets."
     else
-      ok "$1: $2 tables as $4, baseline $3 — grew by $(( $2 - $3 )) (new datasets; not a shrink)"
+      ok "$1: $2 tables as $4, baseline $3 — grew by $(( $2 - $3 )); not a shrink"
+      note "  ${1}: $5"
     fi
   }
 
@@ -477,8 +523,10 @@ for item in json.load(sys.stdin).get("items", []):
   fi
   [ "$BASE_ID" = "root" ] && note "note: the baseline was read as root (the TOTAL). Comparing a tb_* count against it is the correct test — the data-plane identity must still see every table root could."
 
-  compare "training_test_datasets" "$(count_as "$ing_u" "$ing_pw" training_test_datasets)" "$BASE_DS"   "$ing_u"
-  compare "metadata"               "$(count_as "$met_u" "$met_pw" metadata)"               "$BASE_META" "$met_u"
+  compare "training_test_datasets" "$(count_as "$ing_u" "$ing_pw" training_test_datasets)" "$BASE_DS"   "$ing_u" \
+    "new datasets were ingested since the baseline — routine, nothing to attribute."
+  compare "metadata"               "$(count_as "$met_u" "$met_pw" metadata)"               "$BASE_META" "$met_u" \
+    "the metadata schema is a FIXED bookkeeping set — no dataset lands here, so a new table is a SCHEMA CHANGE. Attribute it to the code that creates it (grep client-runtime for 'CREATE TABLE IF NOT EXISTS <name>') before trusting this line, and re-record the baseline once explained."
 
   # ROOT CREDENTIAL, WITH THE S3 FALLBACK (Bugbot #2783). MYSQL_ROOT_PASSWORD is a
   # Secret key ONLY when rotateMysqlRoot is on (default off, secrets.yaml), so on a
