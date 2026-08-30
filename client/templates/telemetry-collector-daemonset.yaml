@@ -18,7 +18,7 @@
   arrive on a cluster by way of a values map the operator never saw.
 */}}
 {{- $tc := default (dict) .Values.telemetryCollector -}}
-{{- if $tc.enabled }}
+{{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" }}
 {{- /*
   The edge Collector — RFC-BACKEND-1872 D6/D7, backend#1906.
 
@@ -34,54 +34,32 @@
   already reached central telemetry once (backend#1879).
 */}}
 {{/*
-  Pre-flight: the token Secret must exist before this DaemonSet does.
+  Pre-flight: the token Secret must exist before this DaemonSet does. THE CHECK
+  ITSELF NOW LIVES IN `tracebloc.telemetryCollectorState` (_helpers.tpl), which
+  the gate above consults — read it there. Four templates render on this decision
+  and three of them held a byte-identical copy of the old gate, which is three
+  places for it to drift; the helper is the one reader.
 
-  `optional: true` on the volume stops the kubelet failing the MOUNT — it does not
-  make the file appear, and `bearertokenauth` needs `filename` to resolve. Whether
-  a missing file aborts the extension's Start is version-dependent and lives in
-  core's `credentialsfile.ValueResolver`, not in the extension: I could not
-  establish it for 0.159.0 from either that tag or `main`. (Bugbot on #779 asserts
-  it aborts.)
+  Why it exists at all: `optional: true` on the volume stops the kubelet failing
+  the MOUNT — it does not make the file appear, and `bearertokenauth` needs
+  `filename` to resolve. Whether a missing file aborts the extension's Start is
+  version-dependent and lives in core's `credentialsfile.ValueResolver`, not in
+  the extension: I could not establish it for 0.159.0 from either that tag or
+  `main`. (Bugbot on #779 asserts it aborts.) So the chart does not BET on the
+  answer — it declines to reach the case.
 
-  So this does not BET on the answer. Same `lookup` idiom as resource-monitor's
-  metrics-server probe: empty during `helm template` (no cluster access), so
-  offline rendering is unblocked; on a real install where lookup can see the
-  cluster, a missing Secret refuses the release with a message naming it. Either
-  upstream behaviour is then acceptable, because the case cannot be reached —
-  which is a better answer than reading the source correctly and depending on it.
+  WHAT CHANGED (backend#1906): "declines to reach the case" used to mean `fail`,
+  unconditionally. That is right when an operator set the flag and is watching,
+  and wrong when the flag arrived as a chart default and a CronJob is the only
+  thing looking — there, refusing costs the edge every future upgrade rather than
+  informing anyone. The helper now splits those two, and the skip is RECORDED
+  (telemetry-collector-status.yaml) rather than silent.
 
-  Refusing the RELEASE rather than crashlooping every node is also the right
-  direction for a fail-soft component: telemetry may never be the reason a node
-  looks unhealthy, and "the install said no, here is the Secret it wants" is
-  actionable in a way that CrashLoopBackOff on 200 nodes is not.
+  Refusing the RELEASE rather than crashlooping every node remains the right
+  direction for the operator case: telemetry may never be the reason a node looks
+  unhealthy, and "the install said no, here is the Secret it wants" is actionable
+  in a way that CrashLoopBackOff on 200 nodes is not.
 */}}
-{{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
-{{- if $probe -}}
-{{- $tokenNs := .Values.nodeAgents.namespace.name -}}
-{{- $tokenName := include "tracebloc.telemetryTokenSecretName" . -}}
-{{- /*
-  ACCEPT THE LEGACY FIXED NAME TOO, while it still exists (backend#2625). jobs-
-  manager writes the release-scoped $tokenName from now on, but an edge already
-  collecting was authenticated under the old fixed name and, at upgrade time, holds
-  ONLY that Secret — the release-scoped one is not written until jobs-manager next
-  re-authenticates. Refusing unless the release-scoped name is already present would
-  wedge exactly that edge: the backend#2400 deadlock in a new costume, aimed at the
-  one edge currently collecting. So the pre-flight passes when EITHER name resolves.
-
-  REMOVAL CONDITION (acceptance c) — delete this $legacyName acceptance, and the
-  tracebloc.telemetryTokenLegacyName helper it reads, together, once no edge still
-  holds a Secret under the legacy name: every collecting edge has upgraded past this
-  change and jobs-manager has written the release-scoped Secret at least once on
-  each, observable as no `tracebloc-telemetry-token` Secret remaining across the
-  fleet's node-agents namespaces. Until then this acceptance is load-bearing, not
-  permanent — removing it early re-creates the wedge above.
-*/}}
-{{- $legacyName := include "tracebloc.telemetryTokenLegacyName" . -}}
-{{- $found := or (lookup "v1" "Secret" $tokenNs $tokenName) (lookup "v1" "Secret" $tokenNs $legacyName) -}}
-{{- if not $found -}}
-{{- fail (printf "telemetryCollector.enabled is true but its token Secret does not exist in namespace %q — looked for %q, and during migration the legacy %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." $tokenNs $tokenName $legacyName) -}}
-{{- end -}}
-{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
