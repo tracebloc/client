@@ -1409,7 +1409,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": false
+          "description": "Tri-state, and its ABSENCE is meaningful (backend#1906). true = an operator opted in, and a missing token Secret refuses the release. false = an operator opted out. Absent = nobody chose, so the chart collects where the token Secret is present and otherwise SKIPS, recording why in the <release>-telemetry-status ConfigMap rather than failing an unattended auto-upgrade. NO `default` HERE ON PURPOSE: a default would make the absent case unreachable, and the absent case is the whole mechanism."
         },
         "image": {
           "type": "object",

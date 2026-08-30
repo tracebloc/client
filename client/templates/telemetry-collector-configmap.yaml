@@ -18,7 +18,7 @@
   arrive on a cluster by way of a values map the operator never saw.
 */}}
 {{- $tc := default (dict) .Values.telemetryCollector -}}
-{{- if $tc.enabled }}
+{{- if eq (include "tracebloc.telemetryCollectorState" .) "enabled" }}
 {{- /*
   The edge Collector's pipeline — RFC-BACKEND-1872 D6/D7, backend#1906.
 

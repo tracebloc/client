@@ -3,6 +3,7 @@ templates:
   - templates/telemetry-collector-configmap.yaml
   - templates/telemetry-collector-daemonset.yaml
   - templates/telemetry-collector-rbac.yaml
+  - templates/telemetry-collector-status.yaml
   - templates/telemetry-collector-scc.yaml
   - templates/telemetry-token-rbac.yaml
   - templates/jobs-manager-deployment.yaml
@@ -26,12 +27,21 @@ release:
   namespace: tracebloc
 tests:
   # ── it ships inert ────────────────────────────────────────────────────────
-  # The single most important assertion in this file. The exporter authenticates
-  # with a token jobs-manager does not write yet, so an enabled-by-default
-  # Collector would put a DaemonSet on every customer node spooling to disk with
-  # nothing it can deliver — the "telemetry must never be the reason a node fills"
-  # risk D7 exists to bound.
-  - it: renders nothing at all by default
+  # THIS TEST USED TO READ "renders nothing at all by default", and its premise
+  # was that "the exporter authenticates with a token jobs-manager does not write
+  # yet". backend#2400 ended that: jobs-manager now always holds the Secret's
+  # coordinates and the RBAC to write it, so an edge becomes eligible on its own.
+  # backend#1906 then made `enabled` tri-state and removed the `false` default,
+  # so "by default" no longer means "off" — it means "the chart decides".
+  #
+  # THE RISK THE OLD TEST GUARDED IS STILL LIVE, and is still guarded: a DaemonSet
+  # must never appear on a node that cannot deliver what it spools (D7). What
+  # changed is that the condition is now checked rather than assumed — the chart
+  # renders only where a token Secret exists, and records why when it does not.
+  # The two skip paths are asserted below and in the k3d gate.
+  - it: an operator who opts out gets nothing at all
+    set:
+      telemetryCollector.enabled: false
     templates:
       - templates/telemetry-collector-configmap.yaml
       - templates/telemetry-collector-daemonset.yaml
@@ -39,6 +49,81 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: the opt-out is RECORDED, not merely silent
+    set:
+      telemetryCollector.enabled: false
+    template: templates/telemetry-collector-status.yaml
+    asserts:
+      - equal:
+          path: data.state
+          value: disabled-by-operator
+
+  # THE UNATTENDED SKIP, and the reason this whole tri-state exists. A release
+  # whose stored values predate the Collector arrives with the entire
+  # `telemetryCollector` map deleted (helm drops a null key and --reuse-values
+  # does not coalesce defaults back). Fleet mode must then decline to render and
+  # SAY SO — never `fail`, because the only thing watching an auto-upgrade is a
+  # CronJob, and a render failure costs that edge every future security fix.
+  - it: fleet mode SKIPS rather than failing when the values are incomplete
+    set:
+      telemetryCollector: null
+    templates:
+      - templates/telemetry-collector-configmap.yaml
+      - templates/telemetry-collector-daemonset.yaml
+      - templates/telemetry-collector-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: and the skip names its reason on the cluster
+    set:
+      telemetryCollector: null
+    template: templates/telemetry-collector-status.yaml
+    asserts:
+      - equal:
+          path: data.state
+          value: skipped-incomplete-values
+      - matchRegex:
+          path: data.reason
+          pattern: "reset-then-reuse-values"
+
+  # THE ATTENDED PATH IS UNCHANGED — and the way it is unchanged could not be
+  # asserted here, which is worth writing down rather than leaving as a gap.
+  #
+  # The intended test was "an operator who set enabled: true with the Class A
+  # lists nulled still gets a loud refusal, not a skip". IT CANNOT BE CONSTRUCTED
+  # THROUGH VALUES: values.schema.json lists `classAContainers` and
+  # `classANodeAgentContainers` in `telemetryCollector.required`, so nulling one
+  # while keeping the map is refused by SCHEMA VALIDATION before any template
+  # renders —
+  #
+  #   Error: values don't meet the specifications of the schema(s) in the
+  #   following chart(s)
+  #
+  # — and a `failedTemplate` assertion written against it passes on the schema
+  # error rather than on the guard it names. The first cut of this test did
+  # exactly that in the other direction: with the lists left at their defaults
+  # nothing failed at all, and `failedTemplate` reported
+  # "Invalid rendering: %!s(<nil>)" while appearing to cover the refusal.
+  #
+  # So the partial-map case is unreachable in practice, which is the correct
+  # answer and not a missing test. The reachable attended refusal is the TOKEN
+  # one, and it needs a live `lookup`; it is asserted in the k3d gate, not here.
+  # What IS asserted here is that an opt-in with a complete config renders — every
+  # `telemetryCollector.enabled: true` test below.
+  # (No test here: helm-unittest surfaces a schema refusal as a SUITE error, not
+  # as something `failedTemplate` can assert, so an assertion would only be able
+  # to pass by not running. Reproduced by hand instead —
+  #   helm template ... --set telemetryCollector.enabled=true \
+  #                     --set telemetryCollector.classAContainers=null
+  # -> at '/telemetryCollector': missing property 'classAContainers'.)
+
+  - it: the status ConfigMap is ALWAYS rendered, so absence means only "chart too old"
+    template: templates/telemetry-collector-status.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
 
   # THE UPGRADE GUARD, and the most important test in this file after the
   # ships-inert one. `helm upgrade --reuse-values` replays the values STORED WITH
@@ -475,6 +560,14 @@ tests:
   - it: does not mirror the pull Secret when neither tenant is enabled
     set:
       resourceMonitor: false
+      # BOTH TENANTS, EXPLICITLY. `resourceMonitor: false` alone stopped meaning
+      # "the node-agents namespace has no pod-bearing tenant" when backend#1906
+      # made the Collector tri-state: with `telemetryCollector.enabled` ABSENT the
+      # chart resolves to fleet mode, which is `enabled`, so the Collector IS a
+      # tenant and this namespace does get a DaemonSet. Without the line below this
+      # test asserts the fleet-default path while claiming to assert the empty one.
+      telemetryCollector:
+        enabled: false
       dockerRegistry:
         create: true
         server: https://registry.example.com
@@ -487,6 +580,33 @@ tests:
       # above pass for free — the same vacuity the namespace pair guards against.
       - hasDocuments:
           count: 1
+
+  # THE POSITIVE COUNTERPART to the `enabled: false` added above, and the
+  # behaviour this PR actually changes. That line made the negative case say what
+  # it means again — but it also STOPPED it exercising the fleet path, which is
+  # now the default. Correcting a stale assertion and deleting the coverage it
+  # used to provide look identical in a green suite.
+  #
+  # So: `enabled` ABSENT is fleet mode, the Collector DaemonSet renders, and a
+  # rendering DaemonSet with a mirrored registry MUST have a pull Secret in its
+  # namespace or every node hits ImagePullBackOff.
+  - it: mirrors the pull Secret in fleet mode, where enabled is absent
+    set:
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://registry.example.com
+        username: u
+        password: p
+        email: ops@example.com
+    template: templates/docker-registry-secret.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+        documentIndex: 1
 
   # ── the pre-flight must not break offline rendering ──────────────────────
   # @aptracebloc: the `lookup`-based `fail` is inherently un-pinnable here, because
@@ -596,6 +716,10 @@ tests:
   # test above pass for free.
   - it: renders no Collector SCC when the Collector is off
     set:
+      # EXPLICIT NOW. This used to lean on the `enabled: false` chart default,
+      # which backend#1906 removed — without it this asserts the fleet-default
+      # path rather than the "Collector is off" path it is named for.
+      telemetryCollector.enabled: false
       openshift.scc.enabled: true
     template: templates/telemetry-collector-scc.yaml
     asserts:
@@ -1043,6 +1167,9 @@ tests:
   # The bootstrap wiring is ungated; the WORKLOAD is not. If these ever stop being
   # different questions, a default install puts a DaemonSet on every customer node.
   - it: still ships no Collector workload when the wiring is present but the flag is off
+    set:
+      # EXPLICIT NOW — see the note on the SCC test above.
+      telemetryCollector.enabled: false
     templates:
       - templates/telemetry-collector-daemonset.yaml
       - templates/telemetry-collector-configmap.yaml
