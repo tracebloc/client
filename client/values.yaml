@@ -472,6 +472,27 @@ egressProxy:
       cpu: "500m"
       memory: "256Mi"
 
+# -- Rename the resources this chart creates, without uninstall + reinstall.
+# backend#2626.
+#
+# UNSET BY DEFAULT, and the default resolves to `.Release.Name` VERBATIM, so
+# leaving it alone renders byte-identical to the chart before this existed. That
+# is asserted, not asserted-in-prose: `scripts/tests/fullname-override-completeness.sh`
+# renders with the override set to the release name and diffs against unset.
+#
+# IT RENAMES RESOURCES, NOT THE RELEASE. The Helm release keeps its name --
+# `helm list`, `helm status` and `helm rollback` are unaffected, and so are
+# `app.kubernetes.io/instance`, Helm's `meta.helm.sh/release-name` bookkeeping,
+# and the RELEASE_NAME env auto-upgrade rolls back with (backend#2620).
+#
+# IT DOES NOT MOVE DATA. Release-scoped on-disk paths -- the dataset directory,
+# the hostPath PVs, the Collector's queue -- keep the RELEASE name, because a
+# path is a location: renaming it orphans a tenant's data instead of moving it.
+#
+# Changing it on an existing install renames every resource, which Helm performs
+# as delete + create. Treat it as a migration, not a config tweak.
+# fullnameOverride: ""
+
 # -- Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906).
 # An OpenTelemetry Collector DaemonSet that reads Class A container stdout with a
 # `filelog` receiver and forwards it to the tracebloc backend's ingest endpoint.

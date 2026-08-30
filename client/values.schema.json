@@ -1396,6 +1396,10 @@
         "type": "boolean"
       }
     },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Rename the resources this chart creates without uninstall + reinstall (backend#2626). Unset resolves to .Release.Name verbatim, so leaving it alone is byte-identical to before it existed. Renames RESOURCES, not the Helm release: app.kubernetes.io/instance, meta.helm.sh/release-name and the RELEASE_NAME env keep the release name, and release-scoped on-disk paths keep it too because a path is a location, not a name. Changing it on an existing install is a migration (Helm renames as delete + create), not a config tweak."
+    },
     "telemetryCollector": {
       "type": [
         "object",

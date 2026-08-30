@@ -17,8 +17,51 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{/*
+  tracebloc.fullname — the prefix every resource name this chart creates is built
+  from. backend#2626.
+
+  DEFAULTS TO `.Release.Name` VERBATIM, and verbatim is load-bearing: no `trunc`,
+  no `trimSuffix`, no normalisation. Those are defensible in a fresh chart and
+  wrong here, because the whole migration-safety argument is that an UNSET
+  override renders byte-identical to the chart before this existed. A `trunc 63`
+  firing only for release names over 63 characters is a behaviour change hiding
+  behind a default nobody exercises until it breaks an install.
+
+  WHAT MAY USE IT is not a style question -- backend#2621 was reverted over
+  exactly this. The release name appears ~174 times across these templates and is
+  at least six different things:
+
+    MAY follow the override -- names of resources THIS CHART CREATES, and
+    anything referencing one of those names (an env naming a Deployment to
+    restart; a log glob matching pod directories, because pod directories are
+    named after the DaemonSet).
+
+    MUST NOT follow it:
+      * `app.kubernetes.io/instance`     Helm convention: it IS the release
+      * `meta.helm.sh/release-name`      Helm's own ownership bookkeeping
+      * `RELEASE_NAME` / `RELEASE` env   a HELM IDENTITY -- `helm status`,
+                                         `helm rollback`. Rename it and
+                                         auto-upgrade hunts a release that does
+                                         not exist and fails every tick: that is
+                                         backend#2620, re-introduced by the fix
+                                         for backend#2621.
+      * on-disk paths                    a LOCATION, not a name. Renaming
+                                         orphans a tenant's data.
+      * `.Release.Namespace`             unrelated
+
+  `scripts/tests/fullname-override-completeness.sh` keeps that table true: it
+  renders with a distinctive override and fails on any resource name still
+  carrying the release name, and in the same pass on any exception that STOPPED
+  carrying it. Both halves are required -- without the second, the guard is
+  satisfied by breaking auto-upgrade.
+*/}}
+{{- define "tracebloc.fullname" -}}
+{{- default .Release.Name .Values.fullnameOverride -}}
+{{- end -}}
+
 {{- define "tracebloc.secretName" -}}
-{{ .Release.Name }}-secrets
+{{ include "tracebloc.fullname" . }}-secrets
 {{- end }}
 
 {{/*
@@ -54,7 +97,7 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- end }}
 
 {{- define "tracebloc.serviceAccountName" -}}
-{{ .Release.Name }}-jobs-manager
+{{ include "tracebloc.fullname" . }}-jobs-manager
 {{- end }}
 
 {{/*
@@ -80,11 +123,11 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
   See the v1.2.0 release notes / tenant-d-prod migration case study.
 */}}
 {{- define "tracebloc.resourceMonitorName" -}}
-{{ .Release.Name }}-resource-monitor
+{{ include "tracebloc.fullname" . }}-resource-monitor
 {{- end }}
 
 {{- define "tracebloc.rbacName" -}}
-{{ .Release.Name }}-jobs-manager-rbac
+{{ include "tracebloc.fullname" . }}-jobs-manager-rbac
 {{- end }}
 
 {{- define "tracebloc.clientDataPvc" -}}
@@ -92,7 +135,7 @@ client-pvc
 {{- end }}
 
 {{- define "tracebloc.clientDataPvName" -}}
-{{ .Release.Name }}-data-pv
+{{ include "tracebloc.fullname" . }}-data-pv
 {{- end }}
 
 {{- define "tracebloc.clientDataStorage" -}}
@@ -118,7 +161,7 @@ client-logs-pvc
 {{- end }}
 
 {{- define "tracebloc.clientLogsPvName" -}}
-{{ .Release.Name }}-logs-pv
+{{ include "tracebloc.fullname" . }}-logs-pv
 {{- end }}
 
 {{- define "tracebloc.clientLogsStorage" -}}
@@ -130,7 +173,7 @@ mysql-pvc
 {{- end }}
 
 {{- define "tracebloc.mysqlPvName" -}}
-{{ .Release.Name }}-mysql-pv
+{{ include "tracebloc.fullname" . }}-mysql-pv
 {{- end }}
 
 {{- define "tracebloc.mysqlStorage" -}}
@@ -165,7 +208,7 @@ mysql-pvc
   403 and stall auto-upgrade on every later tick.
 */}}
 {{- define "tracebloc.createdRegistrySecretName" -}}
-{{ .Release.Name }}-regcred
+{{ include "tracebloc.fullname" . }}-regcred
 {{- end }}
 
 {{- define "tracebloc.registrySecretName" -}}
@@ -173,7 +216,7 @@ mysql-pvc
 {{- if $reg.existingSecret -}}
 {{ $reg.existingSecret }}
 {{- else -}}
-{{ .Release.Name }}-regcred
+{{ include "tracebloc.fullname" . }}-regcred
 {{- end -}}
 {{- end }}
 
@@ -212,7 +255,7 @@ nvidia-device-plugin-daemonset
   the SA by name, and the CronJob mounts the ConfigMap by name.
 */}}
 {{- define "tracebloc.autoUpgradeName" -}}
-{{ .Release.Name }}-auto-upgrade
+{{ include "tracebloc.fullname" . }}-auto-upgrade
 {{- end }}
 
 {{/*
@@ -225,7 +268,7 @@ nvidia-device-plugin-daemonset
   cluster-admin), and customers may reasonably disable one but not the other.
 */}}
 {{- define "tracebloc.imageRefreshName" -}}
-{{ .Release.Name }}-image-refresh
+{{ include "tracebloc.fullname" . }}-image-refresh
 {{- end }}
 
 {{/*
@@ -248,7 +291,7 @@ nvidia-device-plugin-daemonset
   grant.
 */}}
 {{- define "tracebloc.imageRefreshNodeAgentsName" -}}
-{{ .Release.Name }}-image-refresh-node-agents
+{{ include "tracebloc.fullname" . }}-image-refresh-node-agents
 {{- end }}
 
 {{/*
@@ -257,7 +300,7 @@ nvidia-device-plugin-daemonset
   release namespace.
 */}}
 {{- define "tracebloc.rbacNodeAgentsName" -}}
-{{ .Release.Name }}-jobs-manager-node-agents
+{{ include "tracebloc.fullname" . }}-jobs-manager-node-agents
 {{- end }}
 
 {{/*
@@ -280,7 +323,7 @@ nvidia-device-plugin-daemonset
   left for its own PR; a contract test pins the two sides here in the meantime.
 */}}
 {{- define "tracebloc.requestsProxyName" -}}
-{{ .Release.Name }}-requests-proxy
+{{ include "tracebloc.fullname" . }}-requests-proxy
 {{- end }}
 
 {{/*
@@ -443,7 +486,7 @@ Always
 */}}
 {{- define "tracebloc.storageClassName" -}}
 {{- if .Values.storageClass.create -}}
-{{ .Release.Name }}-storage-class
+{{ include "tracebloc.fullname" . }}-storage-class
 {{- else -}}
 {{ .Values.storageClass.name }}
 {{- end -}}
@@ -1000,7 +1043,7 @@ can be kept above the configured helm timeout.
   two releases on one cluster do not collide in the shared node-agents namespace.
 */}}
 {{- define "tracebloc.telemetryCollectorName" -}}
-{{- printf "%s-telemetry-collector" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-telemetry-collector" (include "tracebloc.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
@@ -1054,7 +1097,7 @@ tracebloc-telemetry-token
 {{- $tc := default (dict) .Values.telemetryCollector -}}
 {{- $name := (default (dict) $tc.tokenSecret).name | default "" -}}
 {{- if or (eq $name "") (eq $name (include "tracebloc.telemetryTokenLegacyName" .)) -}}
-{{- printf "%s-telemetry-token" .Release.Name -}}
+{{- printf "%s-telemetry-token" (include "tracebloc.fullname" .) -}}
 {{- else -}}
 {{- $name -}}
 {{- end -}}

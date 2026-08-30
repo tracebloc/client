@@ -17,7 +17,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Release.Name }}-egress-enforcement-check
+  name: {{ include "tracebloc.fullname" . }}-egress-enforcement-check
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
