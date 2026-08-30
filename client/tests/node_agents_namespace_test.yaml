@@ -283,6 +283,14 @@ tests:
     template: templates/docker-registry-secret.yaml
     set:
       resourceMonitor: false
+      # BOTH TENANTS, EXPLICITLY. `resourceMonitor: false` alone stopped meaning
+      # "the node-agents namespace has no pod-bearing tenant" when backend#1906
+      # made the Collector tri-state: with `telemetryCollector.enabled` ABSENT the
+      # chart resolves to fleet mode, which is `enabled`, so the Collector IS a
+      # tenant and this namespace does get a DaemonSet. Without the line below this
+      # test asserts the fleet-default path while claiming to assert the empty one.
+      telemetryCollector:
+        enabled: false
       dockerRegistry:
         create: true
         server: https://index.docker.io/v1/

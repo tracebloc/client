@@ -1061,6 +1061,110 @@ tracebloc-telemetry-token
 {{- end -}}
 
 {{/*
+  tracebloc.telemetryTokenPresent — "yes" / "no" / "unknown".
+
+  "unknown" IS A THIRD ANSWER, not a tidier "no". `lookup` returns empty during
+  `helm template` (no cluster to ask), and treating that as absence would make
+  offline rendering disagree with what a real install does — the silent-zero shape
+  this whole epic keeps finding. Callers must branch on all three.
+
+  Accepts the legacy fixed name as well as the release-scoped one, for the reason
+  telemetryTokenSecretName sets out: an edge mid-migration holds only the old one
+  until jobs-manager next re-authenticates, and refusing it would wedge exactly the
+  edge that is already collecting.
+*/}}
+{{- define "tracebloc.telemetryTokenPresent" -}}
+{{- if not (lookup "v1" "Namespace" "" "kube-system") -}}
+unknown
+{{- else -}}
+{{- $ns := .Values.nodeAgents.namespace.name -}}
+{{- if or (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenSecretName" .)) (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenLegacyName" .)) -}}
+yes
+{{- else -}}
+no
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  tracebloc.telemetryCollectorState — the ONE decider for whether the Collector
+  renders, and why. Returns exactly one of:
+
+    enabled                    render it
+    disabled-by-operator       the operator said no
+    skipped-no-token           nobody chose; the token Secret is not there yet
+    skipped-incomplete-values  nobody chose; the Class A lists are missing, so
+                               there is nothing coherent to collect
+
+  THE SECOND SKIP IS NOT DEFENSIVENESS, it is the same wedge one guard further
+  along, and the chart's own tests caught it. `helm upgrade --reuse-values`
+  DELETES a key set to null and does not coalesce chart defaults back, so a
+  release predating this block arrives with the whole `telemetryCollector` map
+  gone — `enabled` absent (fleet mode, correctly) and `classAContainers` absent
+  too. Rendering then dies on the configmap's own `fail`, which is exactly the
+  unattended hard-stop this helper exists to prevent, just relocated. Fleet mode
+  therefore requires a COMPLETE config, not merely a token.
+
+  The attended path is untouched: an operator who set `enabled: true` with those
+  lists nulled still gets the loud configmap failure naming the list, because
+  that branch never reaches these checks.
+
+  WHY THIS IS NOT A BOOLEAN, and why `telemetryCollector.enabled` has no default
+  in values.yaml any more (backend#1906).
+
+  The chart could not previously tell "an operator deliberately enabled this" from
+  "this arrived as a new chart default", and the right answer differs sharply:
+
+    * An operator who set the flag is WATCHING. A missing token Secret must refuse
+      the release, loudly, naming the Secret — that is actionable, and silently
+      installing nothing would be the backend#2400 deadlock again.
+
+    * A value that arrived as a chart default has NOBODY watching: auto-upgrade is
+      a CronJob. Refusing there does not inform anyone, it costs that edge every
+      future upgrade — including security fixes — because `helm upgrade` fails at
+      RENDER time, before `--atomic` can roll anything back, and an edge whose
+      jobs-manager predates backend#2400 will never write the Secret that would
+      unwedge it. That is a permanent stop, delivered by a checklist item.
+
+  `--reset-then-reuse-values` (what auto-upgrade runs) makes the two
+  distinguishable, and this is MEASURED, not assumed — on a real cluster, upgrading
+  a release onto a chart whose values.yaml omits the key:
+
+    never set the flag    -> key ABSENT      (kindOf "invalid")
+    --set enabled=true    -> true, preserved
+    --set enabled=false   -> false, preserved
+
+  Old chart DEFAULTS are not carried forward; operator CHOICES are, both ways. So
+  `kindIs "bool"` is exactly "an operator chose this", and the absent case is the
+  fleet default the chart itself gets to decide.
+
+  THE SKIP IS RECORDED, never silent — see templates/telemetry-collector-status.yaml.
+  A component that quietly does nothing is the failure this epic exists to remove;
+  a skip nobody can see is not safer than a crash, only quieter.
+*/}}
+{{- define "tracebloc.telemetryCollectorState" -}}
+{{- $tc := default (dict) .Values.telemetryCollector -}}
+{{- if kindIs "bool" $tc.enabled -}}
+{{- if $tc.enabled -}}
+{{- if eq (include "tracebloc.telemetryTokenPresent" .) "no" -}}
+{{- fail (printf "telemetryCollector.enabled is true but its token Secret does not exist in namespace %q — looked for %q, and during migration the legacy %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .)) -}}
+{{- end -}}
+enabled
+{{- else -}}
+disabled-by-operator
+{{- end -}}
+{{- else -}}
+{{- if or (not $tc.classAContainers) (not $tc.classANodeAgentContainers) -}}
+skipped-incomplete-values
+{{- else if eq (include "tracebloc.telemetryTokenPresent" .) "no" -}}
+skipped-no-token
+{{- else -}}
+enabled
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   tracebloc.backendUrl — the tracebloc API base URL for this CLIENT_ENV, with a
   trailing slash.
 
@@ -1124,6 +1228,20 @@ https://api.tracebloc.io/
   `(include "tracebloc.nodeAgentsInUse" .)` inside an `and`.
 */}}
 {{- define "tracebloc.nodeAgentsInUse" -}}
-{{- $tc := default (dict) .Values.telemetryCollector -}}
-{{- if or (ne .Values.resourceMonitor false) $tc.enabled }}true{{ end -}}
+{{- /*
+  THE COLLECTOR TENANT IS ASKED THROUGH ITS OWN DECIDER, not through the raw
+  `enabled` key (Bugbot, client#905). `telemetryCollectorState` exists precisely
+  because `enabled` stopped being the answer: in FLEET MODE the key is ABSENT and
+  the state is still `enabled`, so the DaemonSet renders. Reading `$tc.enabled`
+  here therefore said "no pod-bearing tenant" about a namespace that was about to
+  receive a DaemonSet -- and on an edge with `resourceMonitor: false` and a
+  mirrored registry that is a Collector with no image pull Secret, i.e.
+  ImagePullBackOff on every node.
+  
+  This is the exact failure the docstring above describes happening once already:
+  "each carried its own copy of 'is resource-monitor on'; when the Collector
+  became a second tenant, two of them were widened and the rest were not." The
+  tri-state made `enabled` a second copy of the answer for a third time.
+*/ -}}
+{{- if or (ne .Values.resourceMonitor false) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
 {{- end -}}

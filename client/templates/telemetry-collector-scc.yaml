@@ -1,5 +1,5 @@
 {{- $tcScc := default (dict) .Values.telemetryCollector -}}
-{{- if and $tcScc.enabled .Values.openshift.scc.enabled }}
+{{- if and (eq (include "tracebloc.telemetryCollectorState" .) "enabled") .Values.openshift.scc.enabled }}
 {{- /*
   OpenShift SCC for the edge Collector — backend#1906.
 
