@@ -781,6 +781,84 @@ D="$TMP/meta-shrink"; clean_fleet "$D"
 echo 2 > "$D/count.metadata"
 run_case "a metadata SHRINK still reddens the gate" \
   "$D" 1 "SILENT SHRINK of 1"
+# EVERY kubectl CALL IS BOUNDED (tracebloc/backend#2819).
+#
+# The tool's own header says it must never leave an operator without a verdict.
+# `K()` wrapped nine calls with no bound at all; only `K version` passed
+# `--request-timeout`, which is how the gap survived a reading -- the one call you
+# look at first was the one call that was right.
+#
+# TWO ASSERTIONS, BECAUSE THE TWO BOUNDS STOP DIFFERENT THINGS. Asserting only the
+# flag would pass on a script that still hangs forever inside `kubectl exec`, which
+# is precisely the case Bugbot named (a stuck container, not just a wedged API
+# server) -- `--request-timeout` does not apply once exec upgrades to a stream.
+# ===========================================================================
+D="$TMP/bounded-argv"; clean_fleet "$D"
+write_secrets "$D" \
+  TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=p \
+  TB_META_USER=tb_meta     TB_META_PASSWORD=p \
+  MYSQL_ROOT_PASSWORD=rootpw
+: > "$D/kubectl.argv"
+PATH="$STUB:$PATH" KSTUB_DIR="$D" KSTUB_ARGV="$D/kubectl.argv" "$TOOL" \
+  --context c --namespace n \
+  --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root \
+  --phase post-drop >/dev/null 2>&1 || true
+
+# DERIVED FROM WHAT THE RUN ACTUALLY INVOKED, not from a list of verbs written
+# here: a call added to the tool later is covered the day it ships.
+# `grep -vc` exits 1 when the count is zero, so `|| echo 0` APPENDS a second line
+# and the `[` below then sees "0\n0" -- caught by the suite printing an
+# "integer expression expected" error while still reporting a pass.
+unbounded=$(grep -vc -- '--request-timeout' "$D/kubectl.argv" 2>/dev/null) || unbounded=0
+total=$(wc -l < "$D/kubectl.argv" | tr -d ' ')
+if [ "$total" -eq 0 ]; then
+  printf '  [FAIL] no kubectl calls recorded — this case asserts nothing\n'; FAILED=$((FAILED+1))
+elif [ "$unbounded" -ne 0 ]; then
+  printf '  [FAIL] %d of %d kubectl calls carry no --request-timeout\n' "$unbounded" "$total"
+  # CAPTURE THEN SLICE, never `| head` (this repo's pipefail early-close guard,
+  # which caught this line): under `set -euo pipefail` an early-closing reader
+  # turns SIGPIPE into a failed job, so a diagnostic would fail the very run it
+  # exists to explain.
+  offenders=$(grep -v -- '--request-timeout' "$D/kubectl.argv" || true)
+  # A HERE-STRING, and `sed -n '1,3p'` rather than `head`. The first attempt at
+  # this fix only MOVED the `head` and kept it in a pipeline, which the guard
+  # rejected again: the objection is to an early-closing reader anywhere in a
+  # pipe under `errexit+pipefail`, not to where it sits. `sed -n` reads the whole
+  # stream, so nothing closes early.
+  sed -n '1,3s/^/           /p' <<<"$offenders"
+  FAILED=$((FAILED+1))
+else
+  printf '  [ok]   all %d kubectl calls carry --request-timeout\n' "$total"; PASSED=$((PASSED+1))
+fi
+
+# THE WALL-CLOCK BOUND, against a kubectl that never returns. `--request-timeout`
+# cannot save this case; only `_tmout` can. Skipped rather than failed where
+# neither timeout nor gtimeout exists, because there the tool degrades to its old
+# behaviour BY DESIGN and a red here would be a red nobody can clear.
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+  D="$TMP/bounded-hang"; clean_fleet "$D"
+  write_secrets "$D" TB_INGEST_USER=tb_ingest TB_INGEST_PASSWORD=p
+  HANGSTUB="$TMP/hangbin"; mkdir -p "$HANGSTUB"
+  printf '#!/usr/bin/env bash\nsleep 120\n' > "$HANGSTUB/kubectl"
+  chmod +x "$HANGSTUB/kubectl"
+  started=$(date +%s)
+  PATH="$HANGSTUB:$PATH" KSTUB_DIR="$D" KUBE_CALL_TIMEOUT=2 "$TOOL" \
+    --context c --namespace n \
+    --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root \
+    >/dev/null 2>&1 || true
+  elapsed=$(( $(date +%s) - started ))
+  # Generous against the bound (2s x the handful of calls before it gives up) and
+  # far under the 120s the stub would take unbounded, so this cannot pass by luck.
+  if [ "$elapsed" -lt 60 ]; then
+    printf '  [ok]   a kubectl that never returns is cut off (%ds, not 120s)\n' "$elapsed"
+    PASSED=$((PASSED+1))
+  else
+    printf '  [FAIL] a hanging kubectl was not bounded (%ds elapsed)\n' "$elapsed"
+    FAILED=$((FAILED+1))
+  fi
+else
+  printf '  [skip] no timeout/gtimeout on this host — the wall-clock bound is a no-op here by design\n'
+fi
 
 printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ] || exit 1
