@@ -93,7 +93,45 @@ case "$BASE_META" in ''|*[!0-9]*) die "--baseline-metadata must be a number" ;; 
 
 command -v kubectl >/dev/null 2>&1 || die "kubectl is required"
 
-K() { kubectl --context "$CONTEXT" -n "$NS" "$@"; }
+#  EVERY kubectl CALL IS BOUNDED, not just the version probe (Bugbot, on the
+#  develop->staging and staging->main scans of this file; tracebloc/backend#2819).
+#  `K()` wrapped nine calls with no bound at all, and the one exception proved the
+#  rule: `K version` passed `--request-timeout=20s` explicitly while the `get`,
+#  `exec` and `logs` that follow it passed nothing. On a wedged API server or a
+#  stuck container this script hangs with no verdict -- and "no verdict" is the one
+#  output its own header says it must never produce, on a headless operator session
+#  where nobody is watching to Ctrl-C it.
+#
+#  TWO BOUNDS, BECAUSE THEY STOP DIFFERENT THINGS. This is not belt-and-braces:
+#
+#    * `--request-timeout` bounds a single API REQUEST. It is what saves `get`,
+#      `logs` and `version` from an unresponsive apiserver.
+#    * It does NOT bound `exec`. `kubectl exec` upgrades the connection and streams,
+#      and a request timeout does not apply once it has -- so a container whose
+#      `env` never returns hangs indefinitely with the flag set. Four of the nine
+#      calls here are `exec`, and Bugbot's finding names a stuck container
+#      explicitly, so the flag alone would have left the stated case unfixed.
+#
+#  `_tmout` is the wall-clock bound that covers the second case, and it is the
+#  idiom this repo already uses (`scripts/check-digest-drift.sh`) rather than a
+#  second one invented here: `timeout` on Linux, `gtimeout` on macOS, unbounded
+#  only where neither exists. An operator on a stock macOS box without coreutils
+#  therefore degrades to today's behaviour rather than to a broken script.
+KUBE_REQUEST_TIMEOUT="${KUBE_REQUEST_TIMEOUT:-20s}"
+KUBE_CALL_TIMEOUT="${KUBE_CALL_TIMEOUT:-60}"
+
+_tmout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"; fi
+}
+
+K() {
+  _tmout "$KUBE_CALL_TIMEOUT" \
+    kubectl --context "$CONTEXT" -n "$NS" \
+            --request-timeout="$KUBE_REQUEST_TIMEOUT" "$@"
+}
 
 FAILURES=0
 CANNOT_TELL=0
@@ -104,7 +142,9 @@ untold(){ printf '  [????] %s\n' "$1"; CANNOT_TELL=$((CANNOT_TELL+1)); FAILURES=
 
 printf '\n=== backend#1528 DROP-readiness — %s / %s — phase: %s ===\n' "$CONTEXT" "$NS" "$PHASE"
 
-K version --request-timeout=20s >/dev/null 2>&1 \
+# No explicit `--request-timeout` here any more: `K()` carries it (and a wall-clock
+# bound) for every call, and passing it twice would suggest it did not.
+K version >/dev/null 2>&1 \
   || die "cannot reach cluster '$CONTEXT' (fail closed: unreachable is not evidence of anything)"
 
 # ---------------------------------------------------------------------------
