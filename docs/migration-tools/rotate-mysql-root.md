@@ -62,8 +62,11 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
    ```bash
    kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | wc -c   # non-zero
    ```
-   If it is zero **and the version check above passed**, enable the gate first — `rotateMysqlRootByEnv` defaults to
-   `false` for dev/stg/prod. On an unrotated fleet the mysql-client container has
+   If it is zero **and the version check above passed**, enable the gate first.
+   `rotateMysqlRootByEnv` is `true` for **dev** (baked under backend#1528 S3) and
+   `false` for **stg** and **prod** — so a zero read on a dev fleet means
+   something is wrong with the install rather than that the gate is simply off,
+   while on stg/prod it is the expected default. On an unrotated fleet the mysql-client container has
    **no `env:` block at all**, so an empty read there is the correct "gate off"
    signal, not a broken query. `--set` persists across the fleet's hourly
    auto-upgrade, which uses `--reset-then-reuse-values`

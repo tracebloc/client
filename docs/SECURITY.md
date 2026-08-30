@@ -585,6 +585,48 @@ kubectl get namespace <ns> -o json \
 # expected: warn and audit keys set to "restricted"
 ```
 
+### 7.7 No consumer resolves to the legacy shared MySQL identity
+
+Before revoking or dropping `edgeuser` on a fleet (§8.10 step 3), run the readiness
+verifier. It evaluates all three acceptance criteria against the live fleet and prints one
+verdict:
+
+```bash
+docs/migration-tools/edgeuser-drop-readiness.sh \
+  --context <kube-context> --namespace <ns> \
+  --baseline-datasets <N> --baseline-metadata <N> --baseline-identity root \
+  --phase pre-revoke
+```
+
+It is **read-only** — it performs no `REVOKE`, no `DROP`, and no writes of any kind — and it
+**fails closed**: an absent pod, a refused `exec`, a log that cannot be read **or that is empty over the `--since` window** (an aged-out cycle or a restarted pod is *not* a clean one), no RUNNING ingestion pod, an ingestion `DB_USER` that is absent rather than wrong, or a baseline you did not
+supply each count as a finding, never as a pass. It never prints a password value, and never
+places one on a command line: the MySQL passwords it must connect with are fed to the in-pod
+client over stdin, so no secret reaches `kubectl`'s argv (the operator host's `ps`, or the API
+server's `exec` audit log). For every `*_PASSWORD` variable it asserts only SET or UNSET.
+
+Three things about it are worth knowing before you trust a verdict:
+
+- **The variable list is derived from the deployed pods' own environment**, not from a list
+  written inside the script, so a credential variable added to the chart later is covered the
+  day it ships.
+- **The table counts are read as `tb_ingest` / `tb_meta`, not as `root`.** `information_schema`
+  is privilege-filtered, so a count read as `root` is the total and can never reveal a
+  shrink — root sees everything by definition. This is why `--baseline-identity` is mandatory:
+  a root count and a `tb_ingest` count are different measurements.
+- **The baselines have no defaults.** They are the S0 reference captured for *that* fleet, and
+  the script refuses to run without them rather than compare against a number baked into it.
+
+Re-run with `--phase post-revoke` after the revoke, and `--phase post-drop` after the drop —
+the last phase additionally asserts `edgeuser` is gone from `mysql.user`.
+
+> The criterion this replaced could not fail. A point-in-time
+> `information_schema.processlist` sample showed no `edgeuser` on a fleet where `edgeuser` was
+> still root-equivalent and in active use, because consumers connect per-operation and
+> disconnect — it would have passed before any of the retirement work started. The script keeps
+> that query only as a labelled smoke test: an empty result is recorded as *not* evidence of
+> absence, while a non-empty one is a real finding.
+
 ---
 
 ## 8. Residual risks
@@ -708,7 +750,7 @@ The in-cluster MySQL identity `edgeuser` is provisioned root-equivalent (`ALL PR
 **Rollout (per fleet, staged, each step reversible until S3):**
 1. **S1 — mint (done).** jobs-manager mints `tb_meta` + `tb_ingest` at startup under `serviceDbAccounts`.
 2. **S2 — switch consumers (done; on for `dev`/`stg`, off for `prod`).** Move jobs-manager and requests-proxy off the hardcoded `edgeuser` constants onto `tb_meta`/`tb_ingest`; stamp `tb_ingest` onto spawned ingestion Jobs (`DB_USER`/`DB_PASSWORD`); re-parent the `tb_credmgr` bootstrap. Verify heartbeat `information_schema` dataset visibility, not just "no exceptions" — over-revoking degrades silently.
-3. **S3 — retire.** With `perExperimentDbCreds` + `serviceDbAccounts` universally on and S2 shipped, `REVOKE` `edgeuser` to nothing and `DROP USER`. Prod-irreversible; gated on a `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot as the rollback reference.
+3. **S3 — retire.** With `perExperimentDbCreds` + `serviceDbAccounts` universally on and S2 shipped, `REVOKE` `edgeuser` to nothing and `DROP USER`. Prod-irreversible; gated on a `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot as the rollback reference. Confirm readiness with [§7.7](#77-no-consumer-resolves-to-the-legacy-shared-mysql-identity) — `docs/migration-tools/edgeuser-drop-readiness.sh` — rather than by eye; it is the machine form of the three-criteria gate and fails closed.
 
 **Residual until S3 completes fleet-wide:** the root-equivalent account still exists, and on `prod` fleets it is still the authentication identity. `edgeuser` intentionally retains `CREATE USER` + `GRANT OPTION` until the `tb_credmgr` bootstrap is re-parented (S2), so the revoke is deliberately the last step.
 

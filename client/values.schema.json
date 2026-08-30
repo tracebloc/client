@@ -460,7 +460,7 @@
     },
     "narrowEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). False for dev, stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified. Flipping it where any predecessor gate is off fails the render — see narrowEdgeuser.",
+      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, false for stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- dev's is, so a fresh dev install comes up already retired. Flipping it where any predecessor gate is off fails the render — see narrowEdgeuser.",
       "additionalProperties": { "type": "boolean" }
     },
     "credmgrPassword": {
@@ -1384,14 +1384,14 @@
     },
     "bootstrapDbReparentByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is false everywhere by default; flip dev-first only after the earlier flags are verified on the fleet.",
+      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is baked ON for dev and false for stg and prod; flip stg/prod only after the earlier flags are verified on that fleet.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "rotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. False everywhere by default; flip per fleet during a rotation window (it rolls the mysql pod, and an existing edge still needs the one-time ALTER USER 'root' DDL).",
+      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. True for dev, false for stg and prod; flip stg/prod per fleet during a rotation window (it rolls the mysql pod, and an existing edge still needs the one-time ALTER USER 'root' DDL).",
       "additionalProperties": {
         "type": "boolean"
       }
