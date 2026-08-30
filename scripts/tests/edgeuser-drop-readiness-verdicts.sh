@@ -755,7 +755,12 @@ elif [ "$unbounded" -ne 0 ]; then
   # turns SIGPIPE into a failed job, so a diagnostic would fail the very run it
   # exists to explain.
   offenders=$(grep -v -- '--request-timeout' "$D/kubectl.argv" || true)
-  printf '%s\n' "$offenders" | head -3 | sed 's/^/           /'
+  # A HERE-STRING, and `sed -n '1,3p'` rather than `head`. The first attempt at
+  # this fix only MOVED the `head` and kept it in a pipeline, which the guard
+  # rejected again: the objection is to an early-closing reader anywhere in a
+  # pipe under `errexit+pipefail`, not to where it sits. `sed -n` reads the whole
+  # stream, so nothing closes early.
+  sed -n '1,3s/^/           /p' <<<"$offenders"
   FAILED=$((FAILED+1))
 else
   printf '  [ok]   all %d kubectl calls carry --request-timeout\n' "$total"; PASSED=$((PASSED+1))
