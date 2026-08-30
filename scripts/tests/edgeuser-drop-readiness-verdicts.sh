@@ -750,7 +750,12 @@ if [ "$total" -eq 0 ]; then
   printf '  [FAIL] no kubectl calls recorded — this case asserts nothing\n'; FAILED=$((FAILED+1))
 elif [ "$unbounded" -ne 0 ]; then
   printf '  [FAIL] %d of %d kubectl calls carry no --request-timeout\n' "$unbounded" "$total"
-  grep -v -- '--request-timeout' "$D/kubectl.argv" | sed 's/^/           /' | head -3
+  # CAPTURE THEN SLICE, never `| head` (this repo's pipefail early-close guard,
+  # which caught this line): under `set -euo pipefail` an early-closing reader
+  # turns SIGPIPE into a failed job, so a diagnostic would fail the very run it
+  # exists to explain.
+  offenders=$(grep -v -- '--request-timeout' "$D/kubectl.argv" || true)
+  printf '%s\n' "$offenders" | head -3 | sed 's/^/           /'
   FAILED=$((FAILED+1))
 else
   printf '  [ok]   all %d kubectl calls carry --request-timeout\n' "$total"; PASSED=$((PASSED+1))
