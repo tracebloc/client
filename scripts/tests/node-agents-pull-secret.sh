@@ -44,6 +44,18 @@ CHART=client
 
 command -v helm >/dev/null 2>&1 || { echo "[SKIP] helm not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "[ERROR] python3 required" >&2; exit 1; }
+# THE INTERPRETER IS NOT THE LIBRARY (Bugbot Medium; @saqlainsyed007 confirmed it
+# against :79 and :147). Both heredocs below `import yaml`, so on a box with
+# python3 and no PyYAML this guard died as a bare ModuleNotFoundError traceback
+# — which reads as a broken test rather than the stated precondition the two
+# checks above it already express.
+#
+# ONE FILE-LEVEL GATE rather than a try/except in each heredoc: this file embeds
+# TWO yaml-importing snippets and will grow more, and a per-snippet guard is a
+# copy that one future case forgets. It is also the shape
+# scripts/tests/pyyaml-preflight.bats accepts as a whole-file refusal.
+python3 -c 'import yaml' 2>/dev/null \
+  || { echo "[ERROR] PyYAML required (pip install pyyaml)" >&2; exit 1; }
 
 echo "== node-agents pull Secret =="
 

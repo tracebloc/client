@@ -581,6 +581,33 @@ tests:
       - hasDocuments:
           count: 1
 
+  # THE POSITIVE COUNTERPART to the `enabled: false` added above, and the
+  # behaviour this PR actually changes. That line made the negative case say what
+  # it means again — but it also STOPPED it exercising the fleet path, which is
+  # now the default. Correcting a stale assertion and deleting the coverage it
+  # used to provide look identical in a green suite.
+  #
+  # So: `enabled` ABSENT is fleet mode, the Collector DaemonSet renders, and a
+  # rendering DaemonSet with a mirrored registry MUST have a pull Secret in its
+  # namespace or every node hits ImagePullBackOff.
+  - it: mirrors the pull Secret in fleet mode, where enabled is absent
+    set:
+      resourceMonitor: false
+      dockerRegistry:
+        create: true
+        server: https://registry.example.com
+        username: u
+        password: p
+        email: ops@example.com
+    template: templates/docker-registry-secret.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.namespace
+          value: tracebloc-node-agents
+        documentIndex: 1
+
   # ── the pre-flight must not break offline rendering ──────────────────────
   # @aptracebloc: the `lookup`-based `fail` is inherently un-pinnable here, because
   # `lookup` returns empty under `helm template` so the guard never fires. Agreed —
