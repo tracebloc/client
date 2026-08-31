@@ -42,7 +42,7 @@
    installer they just renamed something. */ -}}
 {{- if (default dict .Values.hostPath).enabled }}
 
-{{ "\033[1;33m" }}hostPath PersistentVolumes:{{ "\033[0m" }} {{ "\033[0;90m" }}these PV OBJECTS are named through fullnameOverride and carry NO helm.sh/resource-policy: keep, unlike the PVCs. So CHANGING OR CLEARING fullnameOverride on a live release recreates them under the new name and leaves the retained PVCs Bound to the objects that went away -- after any such change, confirm the PVCs are still Bound.{{ "\033[0m" }}
+{{ "\033[1;33m" }}hostPath PersistentVolumes:{{ "\033[0m" }} {{ "\033[0;90m" }}these PV OBJECTS are named through fullnameOverride and carry NO helm.sh/resource-policy: keep, unlike the PVCs. So CHANGING OR CLEARING fullnameOverride on a live release recreates them under the new name and leaves the retained PVCs Bound to the objects that went away. An upgrade that would do it is now REFUSED at template time, so you cannot reach it silently -- but after any such change, confirm the PVCs are still Bound.{{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.mysqlPvName" . }}{{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientDataPvName" . }}{{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientLogsPvName" . }}{{ "\033[0m" }}

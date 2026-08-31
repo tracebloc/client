@@ -742,13 +742,20 @@ def main() -> int:
     # regression backend#2620 describes.
     want_sites = identity_env_sites(default_docs, rel, ns, rel)
     have_sites = identity_env_sites(docs, rel, ns, ovr)
+    # PER-PROFILE EMPTINESS IS NOT A CHART FINDING, on the same terms as the PATH
+    # class above. A profile that renders neither CronJob nor the
+    # storage-assertions Job has no identity env, and failing here would refuse a
+    # complete chart -- the mistake the PATH class already made and had demoted
+    # after measuring. So the count goes out machine-readably and the shell
+    # asserts it once ACROSS profiles, which is the only layer that sees all four.
+    # Measured at head: aks 5, bm 5, eks 5, oc 5.
     if not want_sites:
-        fail = True
         print(
-            "   [ERROR] the DEFAULT render names zero helm-identity env sites, so "
-            "there is no domain to compare against and this assertion proves "
-            "nothing. RELEASE_ENV or the env walk has stopped matching."
+            "   [note] the DEFAULT render names no helm-identity env in this profile "
+            "— legitimate when neither CronJob nor the storage-assertions Job "
+            "renders. Asserted across profiles, not here."
         )
+        print("ENVCLASS 0")
     else:
         missing = sorted(want_sites - have_sites)
         if missing:
@@ -764,6 +771,68 @@ def main() -> int:
             print(
                 f"   [OK] all {len(want_sites)} helm-identity env site(s) still carry "
                 f"the release identity, site by site"
+            )
+        print(f"ENVCLASS {len(want_sites)}")
+
+        # AND EACH NAME MUST CARRY ITS OWN IDENTITY, which the set comparison
+        # above cannot see. `identity_env_sites` accepts a value in (rel, ns) for
+        # any of the three names, so swapping RELEASE_NAME with
+        # RELEASE_NAMESPACE keys the same triple on both sides and passes -- a
+        # consumer reading RELEASE_NAME would get the namespace. Checked here
+        # against the name's own meaning, which is assertable only because this
+        # profile deliberately makes rel and ns differ
+        # (`relnamelongenoughtocatchatruncation38` vs `tracebloc`); under the
+        # installer's own one-string-for-both convention (backend#2621) it would
+        # not be.
+        #
+        # A `valueFrom` env has no literal to read. That is not a pass: it is a
+        # site this text-level check cannot see, and saying so is the finding
+        # (rule 3). It also drops silently out of both sets above, so this is the
+        # only place it is reported at all.
+        env_expected = {"RELEASE_NAME": rel, "RELEASE": rel, "RELEASE_NAMESPACE": ns}
+        assert set(env_expected) == RELEASE_ENV, (
+            "env_expected and RELEASE_ENV disagree: a name in one and not the "
+            "other is either an unchecked env or a check for an env that does "
+            "not exist"
+        )
+        swapped, unreadable = [], []
+        for d in docs:
+            where = f"{d.get('kind')}/{(d.get('metadata') or {}).get('name')}"
+            envs = env_value_paths(d)
+            if not envs:
+                continue
+            values = {path: val for path, val in walk(d) if isinstance(val, str)}
+            for vpath, ename in envs.items():
+                if ename not in RELEASE_ENV:
+                    continue
+                if vpath not in values:
+                    unreadable.append((where, vpath, ename))
+                elif values[vpath] != env_expected[ename]:
+                    swapped.append((where, ename, values[vpath]))
+        if unreadable:
+            fail = True
+            print(
+                f"   [ERROR] {len(unreadable)} helm-identity env(s) carry no literal "
+                f"value, so neither this check nor the site comparison above can "
+                f"read them:"
+            )
+            for where, vpath, ename in sorted(unreadable):
+                print(f"             {where}  {ename} at {vpath}")
+        if swapped:
+            fail = True
+            print(
+                f"   [ERROR] {len(swapped)} helm-identity env(s) carry an identity "
+                f"that is not the one they name:"
+            )
+            for where, ename, val in sorted(swapped):
+                print(
+                    f"             {where}  {ename} = {val!r} "
+                    f"(expected {env_expected[ename]!r})"
+                )
+        elif not unreadable:
+            print(
+                f"   [OK] each helm-identity env carries the identity it names "
+                f"(RELEASE_NAME/RELEASE={rel!r}, RELEASE_NAMESPACE={ns!r})"
             )
 
     # --- NOTES --------------------------------------------------------------

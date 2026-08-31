@@ -100,8 +100,11 @@ failures=0
 # Accumulators for the cross-profile release-scoped-path assertion after the loop.
 path_profiles=0
 pathclass_missing=0
+env_profiles=0
+envclass_missing=0
 could_not_run=0
 path_counts=""
+env_counts=""
 
 # NOTES NEEDS ITS OWN RENDER, AND EVERY OBVIOUS ROUTE IS CLOSED. Measured on the
 # CI-pinned helm v3.15.4:
@@ -214,6 +217,12 @@ for VALUES in "${profiles[@]}"; do
   pc=$(grep -E '^PATHCLASS [0-9]+$' "$tmp/out.txt" | awk '{print $2}' | head -1 || true)
   path_counts="${path_counts}${prof}=${pc:-none} "
   case "${pc:-0}" in ''|0) ;; *) path_profiles=$((path_profiles + 1)) ;; esac
+  # The Helm-identity env count, on exactly the same terms as PATHCLASS above and
+  # for the same reason: a profile that renders no CronJob has no such env, so
+  # per-profile emptiness is legitimate and per-CHART emptiness is not.
+  ec=$(grep -E '^ENVCLASS [0-9]+$' "$tmp/out.txt" | awk '{print $2}' | head -1 || true)
+  env_counts="${env_counts}${prof}=${ec:-none} "
+  case "${ec:-0}" in ''|0) ;; *) env_profiles=$((env_profiles + 1)) ;; esac
   # NO COUNT MEANS NO ANSWER, NOT AN ANSWER OF ZERO (@saadqbal on client#911).
   # A profile that never PRINTED `PATHCLASS` leaves `pc` empty, `path_profiles`
   # unincremented, and assertion 6 below then reports "NO profile rendered a
@@ -230,6 +239,7 @@ for VALUES in "${profiles[@]}"; do
   # which is a legitimate finding code. The property that actually licenses
   # assertion 6 is that the count was PRODUCED, so that is what is tracked.
   [ -n "${pc:-}" ] || pathclass_missing=$((pathclass_missing + 1))
+  [ -n "${ec:-}" ] || envclass_missing=$((envclass_missing + 1))
   # EXIT CODES THE SIDECAR OWNS: 0 clean, 1 a real finding, 2 could-not-run.
   # ANYTHING ELSE MEANS IT DID NOT RUN, and lumping those into `failures` was the
   # half of @saadqbal's interpreter finding that survived the fix above: a
@@ -340,6 +350,44 @@ elif [ "$path_profiles" -eq 0 ]; then
   failures=$((failures + 1))
 else
   echo "-- release-scoped paths present in $path_profiles profile(s) [OK]"
+fi
+
+# --- 7. HELM-IDENTITY ENVS EXIST SOMEWHERE -----------------------------------
+# The chart-level half of the env class, on the same terms as assertion 6.
+#
+# WHY THE CLASS NEEDED A COMPLETE ENUMERATION AT ALL (Bugbot, Medium; confirmed
+# by reproduction). The sidecar's STAYED check only ever saw sites that still
+# CONTAIN the release name, because the walk skips the rest -- so a routed
+# RELEASE_NAME simply vanished from the class instead of failing it, and the two
+# remaining sites carried the assertion. Measured: routing RELEASE_NAME on the
+# auto-upgrade CronJob to `tracebloc.fullname` -- backend#2620's exact bug, where
+# auto-upgrade then `helm rollback`s a name that is no longer the release -- left
+# this guard printing a pass and exiting 0. The sidecar now enumerates every env
+# named in RELEASE_ENV from the render and checks each positively, so that same
+# mutation exits 1 and names the site.
+#
+# This assertion is the chart-level backstop for it: "every identity env carries
+# its identity" is also true of a chart that stopped setting them, and that is a
+# consumer reading an unset name rather than a wrong one.
+echo "-- Helm-identity envs per profile: ${env_counts% }"
+if [ "$envclass_missing" -ne 0 ]; then
+  echo "-- Helm-identity env class: NOT CHECKED — $envclass_missing profile(s)"
+  echo "   produced no ENVCLASS count, so this assertion has no input. Not a"
+  echo "   verdict on the chart in either direction; fix the finding(s) above and"
+  echo "   re-run."
+  # `could_not_run`, not `failures` — same vocabulary and the same reason as
+  # assertion 6: renaming the ENVCLASS marker in the sidecar is a pure refactor
+  # that would otherwise print NOT CHECKED and exit 0 on a required guard.
+  could_not_run=1
+elif [ "$env_profiles" -eq 0 ]; then
+  echo "[ERROR] NO profile rendered a RELEASE_NAME / RELEASE / RELEASE_NAMESPACE"
+  echo "        env, so 'every identity env carries its identity' proves nothing —"
+  echo "        it is equally true of a chart that stopped setting them. Either the"
+  echo "        envs disappeared or every profile now disables the CronJobs and the"
+  echo "        storage-assertions Job, and both are findings."
+  failures=$((failures + 1))
+else
+  echo "-- Helm-identity envs present in $env_profiles profile(s) [OK]"
 fi
 
 if [ "$failures" -ne 0 ]; then

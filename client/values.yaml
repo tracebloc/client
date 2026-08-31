@@ -544,8 +544,16 @@ egressProxy:
 # The refusal says so too, but only while it FIRES: once a Secret exists under
 # the new name it is skipped, and an operator on their second attempt would
 # otherwise read this remedy with the caveat missing. NOTES.txt repeats it on
-# every hostPath render of an overridden release, which is the path the refusal
-# cannot reach.
+# every hostPath render, which is the path the refusal cannot reach.
+#
+# ON EVERY hostPath RENDER, not only an overridden one -- this sentence said
+# "of an overridden release" and the gate never matched it (Bugbot, Low). The
+# gate is `hostPath.enabled` alone, deliberately: the hazard is the name MOVING,
+# and A->unset moves it just as much as unset->A. Gating the notice on the key
+# being SET would go quiet on exactly the direction where the operator has no
+# override left to look at. The cost is a standing notice on first installs that
+# never rename, so the notice says outright that nothing is wrong yet rather than
+# addressing a reader who just renamed.
 #
 # So: choose it at INSTALL time. On a live release, read the refusal message.
 #
