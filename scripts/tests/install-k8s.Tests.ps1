@@ -3828,6 +3828,81 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   }
 }
 
+Describe "A failure reported from an exit-code branch names the code (backend#2906)" {
+  # THE CLASS, ENFORCED BY WHAT IT DOES RATHER THAN BY WHAT IT LOOKS LIKE.
+  #
+  # client#913 fixed the sites that rendered a code as BLANK -- `wsl exited `,
+  # `installer exited `. It missed the CLI-install branch, which never rendered
+  # one at all. Identical information loss, different spelling, so the search
+  # that found the first shape (`exited $(`) was structurally blind to the
+  # second. A marker per known site cannot close that: it can only be as
+  # complete as the enumeration behind it, and the enumeration is the thing that
+  # was wrong.
+  #
+  # The invariant is checkable directly instead: if you tell the user something
+  # failed, from inside a branch a process exit code decided, name the code.
+  # That found BOTH sites without anyone thinking of either -- verified by
+  # reverting each fix independently and watching this go red.
+  #
+  # AST, NOT REGEX. The question is "which Warn/Err calls are lexically inside a
+  # branch gated on .ExitCode", which is a shape in the tree; a text match cannot
+  # see the nesting and would have to approximate it.
+  BeforeAll {
+    $script:ExitCodeScope = {
+      $tok = $null; $perr = $null
+      $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot "../install-k8s.ps1"), [ref]$tok, [ref]$perr)
+      $calls = $ast.FindAll({
+        $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+        $args[0].GetCommandName() -in @('Warn','Err')
+      }, $true)
+      $inScope = @()
+      foreach ($c in $calls) {
+        $n = $c.Parent; $gate = $null
+        while ($n) {
+          if ($n -is [System.Management.Automation.Language.IfStatementAst]) {
+            foreach ($cl in $n.Clauses) {
+              if ($cl.Item1.Extent.Text -match '\.ExitCode\s*-(eq|ne)\s*0') {
+                $gate = $cl.Item1.Extent.Text
+              }
+            }
+          }
+          $n = $n.Parent
+        }
+        if ($gate) {
+          $inScope += [pscustomobject]@{
+            Line  = $c.Extent.StartLineNumber
+            Gate  = $gate
+            Text  = $c.Extent.Text
+            Names = [bool]($c.Extent.Text -match 'ExitCode')
+          }
+        }
+      }
+      ,$inScope
+    }
+  }
+
+  It "finds the sites at all -- an empty sweep agrees with everything" {
+    # Rule 3. If the AST walk stops matching -- a helper renamed, the gate
+    # written differently -- every assertion below passes vacuously and reports
+    # clean forever. Two is what exists today; a THIRD is fine, a drop to zero
+    # is the finding.
+    $sites = & $script:ExitCodeScope
+    $sites.Count | Should -BeGreaterOrEqual 2
+  }
+
+  It "no user-facing failure message drops the exit code that decided it" {
+    $sites = & $script:ExitCodeScope
+    $bad = @($sites | Where-Object { -not $_.Names })
+    # The message must NAME the offender, not just count it: a bare count sends
+    # the reader back to re-run the sweep by hand.
+    $detail = ($bad | ForEach-Object {
+      "line $($_.Line) gated on [$($_.Gate)]: $($_.Text)"
+    }) -join "`n"
+    $bad.Count | Should -Be 0 -Because "these report a failure without the one number that says why:`n$detail"
+  }
+}
+
 Describe "Every Docker/child wait on the install path is bounded (backend#2849)" {
   # WHAT THIS DEFENDS, and why it is the shape that keeps costing this journey
   # runs: an unbounded external call against a SICK dependency does not fail, it

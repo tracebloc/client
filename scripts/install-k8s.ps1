@@ -4080,7 +4080,10 @@ function New-K3dCluster {
         Err "Starting the existing '$CLUSTER_NAME' environment timed out (k3d stopped). Check Docker is running, then re-run." $startLog
       }
       if ($sp.ExitCode -ne 0) {
-        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." $startLog
+        # The code, alongside the log excerpt Err already prints. Weaker than the
+        # CLI case above -- $startLog does carry k3d's own words -- but the code
+        # is the cheapest discriminator and this is the same class.
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment (k3d exited $(Format-ExitCode $sp.ExitCode)). Check Docker is running, then re-run." $startLog
       }
       Ok "Compute environment started."
     }
@@ -7304,11 +7307,24 @@ function Edit-Redaction([string]$Path) {
 # as a missing bundle. 20s is generous for a healthy tool (30s for a log fetch,
 # which legitimately streams more).
 #
-# WORST CASE ~350s, i.e. under 6 minutes -- NOT "well under a minute" as this
-# comment first claimed (@LukasWodka corrected the arithmetic on client#917). The
-# deadlines are SEQUENTIAL, so a fully wedged box pays 13 reads x 20s + 3
-# kubectl-logs x 30s. Still bounded, and still far better than never returning --
-# but the number a support engineer plans around should be the real one.
+# WORST CASE ~330s, i.e. under 6 minutes -- NOT "well under a minute" as this
+# comment first claimed. The deadlines are SEQUENTIAL:
+#
+#   10 x Invoke-DiagnoseCapture at the 20s default          200s
+#    3 x kubectl logs at 30s (one per workload in the loop)   90s
+#    2 x Invoke-DockerCli at 20s                              40s
+#                                                            ----
+#                                                            330s
+#
+# #934 said 350s, from "13 reads x 20s + 3 kubectl-logs x 30s". That counts the
+# three log fetches TWICE -- 13 is the number of captures (10 sites + 3 loop
+# iterations), not the number of 20s reads -- and omits the two Invoke-DockerCli
+# waits, which are bounded on this same sequential path but do not go through
+# Invoke-DiagnoseCapture. The two errors partly cancel, which is how a wrong
+# number survived a PR written to correct a wrong number.
+#
+# The test below sums these from the source, so the next drift fails instead of
+# being reviewed.
 function Invoke-DiagnoseCapture {
   param(
     [Parameter(Mandatory)][string]$FileName,
@@ -7549,7 +7565,19 @@ function Install-TraceblocCli {
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli
     } else {
-      Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
+      # NAME THE CODE (backend#2906). This branch reported the failure and threw
+      # away the one number that says why. The block above redirects both
+      # streams, caches .Handle so .ExitCode is reliable, and replays the files
+      # into the log -- and on e2e run 33395912890 those streams held nothing
+      # beyond the CLI installer's own banner, so the exit code was the ONLY
+      # surviving evidence of the cause. `Warn` takes no $Detail, so unlike the
+      # k3d path below there is no second channel to fall back on.
+      #
+      # A FIFTH SITE of the class client#913 fixed. #913 corrected the sites that
+      # rendered a code as BLANK (`installer exited `); this one never rendered
+      # one at all. Same information loss, different spelling -- which is why a
+      # search for `exited $(...)` could not find it.
+      Warn "Couldn't install the tracebloc CLI automatically (installer exited $(Format-ExitCode $p.ExitCode)) -- you can still connect with existing client credentials."
       Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     }
   } catch {
