@@ -26,6 +26,23 @@
 #Requires -Version 5.1
 param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
 
+# --- TRACEBLOC_SKIP_REBOOT_PROMPT: the env-var twin of -NoReboot (backend#2675)
+# The documented Windows entry point is `irm https://tracebloc.io/i.ps1 | iex`,
+# and `iex` has nowhere to put a switch: install.ps1 forwards `$args` to this
+# script, and an `irm | iex` launch has no `$args`. So an unattended Windows
+# install -- CI, a scheduled task, an auto-logon session -- had NO way to say
+# "don't ask me about the reboot", while the bash twin has had one for as long
+# as the GPU path has existed (lib/gpu-nvidia.sh:53). This closes that asymmetry
+# with the SAME variable name, so one contract covers both platforms.
+#
+# Folded into $NoReboot rather than read at the prompt site so it also reaches
+# the elevated relaunch and the registered resume, both of which pass the SWITCH
+# on ($NoReboot is forwarded by Get-ElevationCommand / Register-ResumeAfterReboot
+# while TRACEBLOC_* env vars deliberately are not -- ShellExecute/RunAs does not
+# inherit the caller's environment). A run that opted out of the prompt must stay
+# opted out after it elevates, or the hang simply moves one process along.
+if ($env:TRACEBLOC_SKIP_REBOOT_PROMPT) { $NoReboot = $true }
+
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
 # Run from a .ps1 on disk -> re-run that file; run via the documented one-liner
@@ -971,6 +988,9 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
+  TRACEBLOC_SKIP_REBOOT_PROMPT=1
+                 Same as -NoReboot, for the `irm ... | iex` entry point, which
+                 has no way to pass a switch (bash twin: same variable name)
   -Resume        Continue an install interrupted by a reboot (set automatically
                  by the registered RunOnce continuation; rarely needed by hand)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
@@ -1621,6 +1641,32 @@ function Update-Wsl {
   Hint "Download the latest WSL MSI (wsl.<version>.$msiArch.msi) from https://github.com/microsoft/WSL/releases, run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
 }
 
+# ASK ONLY IF SOMEONE CAN ANSWER (backend#2675). "Reboot now?" was the one
+# unguarded Read-Host on the install path -- the daily-user and leftover-data
+# prompts both sit behind Test-CanPrompt already -- and it is the one EVERY
+# fresh Windows install reaches, because a fresh host always has WSL2 / Virtual
+# Machine Platform / Hyper-V still to enable.
+#
+# An unanswerable prompt does not fail, it HANGS: Read-Host blocks on a console
+# nobody is typing into, so the `exit 2` that follows it -- this installer's
+# declared "reboot, then re-run" handoff -- is never reached, and whatever is
+# driving the install sees a process that is alive and doing nothing. The e2e
+# Windows journey sat here for 22 minutes and reported a timeout with no cause
+# (backend#2675); a customer's scheduled or auto-logon install looks identical.
+#
+# "Nobody to ask" is answered the way the bash twin answers it -- gpu-nvidia.sh:
+# "No tty (unattended) => treat as 'no reboot'" -- so an empty choice falls
+# through to the same Set-TbRerunHandoff + exit 2 that -NoReboot takes. The
+# resume RunOnce is armed before either path, so the install still continues by
+# itself at the next sign-in.
+#
+# A FUNCTION, not an inline `if`, so the guard is reachable by the test suite:
+# the caller ends in `exit 2`, which no Pester mock can intercept.
+function Read-RebootChoice {
+  if (-not (Test-CanPrompt)) { return "" }
+  try { return (Read-Host "  Reboot now? [y/N]") } catch { return "" }
+}
+
 function Enable-VirtualisationFeatures {
   $rebootNeeded = $false
   $features = @{
@@ -1670,7 +1716,7 @@ function Enable-VirtualisationFeatures {
       Set-TbRerunHandoff
       exit 2
     }
-    $choice = Read-Host "  Reboot now? [y/N]"
+    $choice = Read-RebootChoice
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
     if (-not $resumeArmed) { Hint "After the reboot, re-run this installer to continue." }
     Set-TbRerunHandoff   # declared: reboot then re-run (see above)
@@ -5455,6 +5501,22 @@ function Invoke-ProvisionClient {
   Log "Provisioned - credential handed to the install (not shown)."
 }
 
+# The message the fallback branch refuses with when there is no terminal to ask
+# for credentials (backend#2675). A PURE FUNCTION for the same reason the reboot
+# decision became Read-RebootChoice: the call site ends in a throw (Err never
+# returns), and asserting the message THROUGH a throwing mock turned out to bind
+# differently on every Pester/PowerShell pairing the CI matrix runs -- three
+# capture strategies, three version-specific failures. Returning the string lets
+# the test read it directly, no mock involved. The pair it names is the one
+# Get-ProvisioningPreset reads: the documented unattended contract.
+function Get-UnattendedCredentialRefusal {
+  return ("This machine is not registered yet and there is no terminal to ask for credentials.`n" +
+          "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
+          "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
+          "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
+          "  Find them at https://ai.tracebloc.io/clients")
+}
+
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
   Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client" "e"
@@ -5520,6 +5582,19 @@ function Install-ClientHelm {
       # -- Legacy manual connect (fallback ONLY: the CLI was missing or too old
       # for browser provisioning in Step 4). Hand-copied credentials from the
       # web app — dropped from the primary path by #388.
+
+      # NO TERMINAL -> REFUSE, DON'T SPIN (backend#2675) -- and FIRST, before the
+      # "Use previous settings?" prompt below, which is itself a Read-Host that
+      # would hang an unattended run on any machine that still holds a
+      # values.yaml (Bugbot on the first placement, which sat after it). Every
+      # prompt in this branch is unanswerable with nobody at the console, and
+      # the credential loop further down is worse than a hang: it `continue`s on
+      # an empty answer WITHOUT charging an attempt, printing "Client ID cannot
+      # be empty." forever. Fail closed at the branch door, naming the two
+      # variables that make this path unnecessary -- the same pair
+      # Get-ProvisioningPreset reads, and the documented automation contract.
+      if (-not (Test-CanPrompt)) { Err (Get-UnattendedCredentialRefusal) }
+
       $defaultClientId = ""
       $defaultClientPassword = ""
 
