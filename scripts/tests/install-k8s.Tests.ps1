@@ -1123,7 +1123,7 @@ Describe "Install-TraceblocCli" {
   BeforeEach {
     Mock RefreshPath {}
     Mock Has { $false }   # tracebloc not already on PATH
-    Mock Add-DirToMachinePath {}   # don't touch the real Machine PATH from unit tests
+    Mock Publish-TraceblocCliToToolDir {}   # don't touch the real filesystem from unit tests
   }
   # Fake the System.Diagnostics.Process that Start-Process -PassThru returns:
   # the function caches .Handle, calls .WaitForExit(), then reads .ExitCode.
@@ -1164,30 +1164,79 @@ Describe "Install-TraceblocCli" {
     $out | Should -Match "Couldn't install the tracebloc CLI"   # …so it must still warn
   }
 
-  # backend#2904: a fresh SSM shell sources no profile and can't see the CLI's
-  # USER-scope PATH entry, so on success the CLI dir is persisted to the MACHINE PATH.
-  It "persists the CLI dir onto the Machine PATH on success" {
+  # backend#2904: a fresh SSM shell (or a different user) can't see the CLI's
+  # USER-scope PATH entry, so on success the exe is published into the admin-only
+  # $TOOL_DIR that is already on the Machine PATH.
+  It "publishes the CLI into the tools dir on success" {
     Mock Start-Process { New-CliInstallerProc 0 }
     Install-TraceblocCli 6>&1 | Out-Null
-    Should -Invoke Add-DirToMachinePath -Times 1 -Exactly -ParameterFilter { $Dir -eq $TRACEBLOC_CLI_INSTALL_DIR }
+    Should -Invoke Publish-TraceblocCliToToolDir -Times 1 -Exactly
   }
-  It "does NOT touch the Machine PATH when the CLI install failed" {
+  It "does NOT publish the CLI when the install failed" {
     Mock Start-Process { New-CliInstallerProc 1 }
     Install-TraceblocCli 6>&1 | Out-Null
-    Should -Not -Invoke Add-DirToMachinePath
+    Should -Not -Invoke Publish-TraceblocCliToToolDir
   }
-  It "non-fatal: a persist failure is CONTAINED so the success verify still runs" {
+  It "non-fatal: a publish failure is CONTAINED so the success verify still runs" {
     # A `Should -Not -Throw` here would be inert: the function-wide catch already
-    # swallows the throw, so it passes even with the inner Add-DirToMachinePath
+    # swallows the throw, so it passes even with the inner Publish-TraceblocCliToToolDir
     # try/catch deleted (Bugbot). Assert the DISCRIMINATING behavior instead: the
     # inner catch must contain the throw so Test-TraceblocCli still runs and the
     # CLI is reported installed — NOT bounced to the function-wide catch, which
     # would misreport the (successful) CLI install as failed and skip the verify.
     Mock Start-Process { New-CliInstallerProc 0 }
-    Mock Add-DirToMachinePath { throw "access denied" }
+    Mock Publish-TraceblocCliToToolDir { throw "access denied" }
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "tracebloc CLI (ready|installed)"          # verify still ran
     $out | Should -Not -Match "Couldn't install the tracebloc CLI"  # not the outer catch's failure copy
+  }
+}
+
+Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools dir on the Machine PATH)" {
+  # Copies the freshly-installed CLI exe from its per-user install dir into $TOOL_DIR,
+  # which Initialize-ToolDir already put on the Machine PATH — so a fresh/other-user
+  # shell resolves it WITHOUT a user-writable dir on the system search path (CWE-426).
+  # Args are passed explicitly (the script defaults are "" off-Windows). Relative dir
+  # names (no drive letter / backslash) so Join-Path works on the Linux CI runner too —
+  # the copy LOGIC is path-shape-agnostic. Defined in BeforeEach so they exist at RUN
+  # time, not only during Pester discovery.
+  BeforeEach {
+    $installDir = 'la-programs-tracebloc'
+    $toolDir    = 'pf-tracebloc-bin'
+    Mock Test-Path { $true }   # src exe + dest dir both present by default
+    Mock New-Item {}
+    Mock Copy-Item {}
+  }
+
+  It "copies tracebloc.exe from the install dir into TOOL_DIR" {
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    $expectDest = Join-Path 'pf-tracebloc-bin' 'tracebloc.exe'
+    Should -Invoke Copy-Item -Times 1 -Exactly -ParameterFilter { $Destination -eq $expectDest }
+  }
+
+  It "creates TOOL_DIR first when it doesn't exist yet" {
+    Mock Test-Path { $LiteralPath -ne 'pf-tracebloc-bin' }   # src present, dest dir absent
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Invoke New-Item -Times 1 -Exactly
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+
+  It "no-op when the install dir is empty/whitespace (the non-Windows placeholder)" {
+    Publish-TraceblocCliToToolDir -InstallDir ''   -ToolDir $toolDir
+    Publish-TraceblocCliToToolDir -InstallDir '  ' -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+
+  It "no-op when TOOL_DIR is empty (Initialize-ToolDir hasn't run)" {
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir ''
+    Should -Not -Invoke Copy-Item
+  }
+
+  It "no-op (no throw) when the source exe isn't where we expect (INSTALL_PREFIX override)" {
+    Mock Test-Path { $false }   # source exe missing
+    { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Not -Throw
+    Should -Not -Invoke Copy-Item
+    Should -Not -Invoke New-Item
   }
 }
 
@@ -1335,8 +1384,12 @@ Describe "Add-DirToMachinePath (backend#2904: persist a tool dir to the Machine 
     $script:FakeMachinePath | Should -Not -Match ';;'   # no empty entry == no cwd on PATH
   }
 
-  It "does nothing for an empty dir (the non-Windows load-time placeholder)" {
+  It "does nothing for an empty OR whitespace dir (guard matches Test-DirOnPath's trim)" {
+    # '' and '  ' must BOTH early-return: a whitespace dir that slipped the guard would
+    # be trimmed to '' by Test-DirOnPath, judged absent, and appended as junk every run
+    # (backend#2904 review, saadqbal).
     Add-DirToMachinePath -Dir ''
+    Add-DirToMachinePath -Dir '   '
     Should -Not -Invoke Get-MachinePath
     Should -Not -Invoke Set-MachinePath
   }

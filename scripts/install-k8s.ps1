@@ -342,17 +342,23 @@ function Test-DirOnPath {
 }
 
 # Persist $Dir onto the MACHINE PATH (idempotently) so a BRAND-NEW, non-interactive
-# shell resolves the tools in it WITHOUT an interactive login: the Windows e2e opens
-# a fresh SSM session that sources no profile and need not even run as the installing
-# user, so a User-scope or session-only ($env:PATH) edit is invisible to it
-# (backend#2904). Machine scope is the same mechanism every other client tool uses
-# (Initialize-ToolDir). RefreshPath then mirrors the persisted value into THIS
-# process so the dir is usable immediately, without waiting for a new shell. Writing
-# Machine scope needs elevation — the installer has already self-elevated by the time
-# either caller runs.
+# shell resolves the tools in it WITHOUT an interactive login: a fresh shell that
+# sources no profile can't see a User-scope or session-only ($env:PATH) edit. Machine
+# scope is admin-only-writable and the mechanism the client's tools dir uses
+# (Initialize-ToolDir, the sole caller). RefreshPath then mirrors the persisted value
+# into THIS process so the dir is usable immediately, without waiting for a new shell.
+# Writing Machine scope needs elevation — the installer has already self-elevated by
+# the time the caller runs. The dir MUST be admin-only-writable: a user-writable dir on
+# the system search path is CWE-426 (a non-admin plants an exe an elevated process then
+# resolves unqualified), which is why the tracebloc CLI is COPIED into the admin-only
+# $TOOL_DIR rather than having its per-user install dir added here (backend#2904 review).
 function Add-DirToMachinePath {
   param([string]$Dir)
-  if (-not $Dir) { return }
+  # `.Trim()`-aware, matching Test-DirOnPath's own trimming: `''` and `'  '` must both
+  # early-return, or a whitespace dir slips the guard here and appends a junk PATH entry
+  # every run (Test-DirOnPath trims it to '' and reports it absent). Same
+  # empty-means-empty disagreement this change set exists to remove.
+  if ([string]::IsNullOrWhiteSpace($Dir)) { return }
   $machinePath = Get-MachinePath
   if (Test-DirOnPath -PathValue $machinePath -Dir $Dir) { return }
   # Collapse any trailing ';' on the existing value before joining: "$mp;$Dir" over
@@ -7486,27 +7492,57 @@ function Invoke-DiagnoseBundle {
 # never abort THIS installer.
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
 
-# Where the CLI's own Windows installer drops the binary (see cli's install.ps1).
-# That installer PATH-adds this dir at USER scope only, which a fresh
-# non-interactive shell can't see (backend#2904) — so Install-TraceblocCli also
-# persists this dir onto the MACHINE PATH, and Test-TraceblocCli points at it if a
-# fresh shell still can't resolve the CLI. Guard the Join-Path: $env:LOCALAPPDATA
-# is null when the Pester suite dot-sources this script on Linux CI, and Join-Path
-# throws on a null -Path (aborting the whole test container). The value is only ever
-# USED on Windows, so "" is a fine non-Windows load-time placeholder.
+# Where the CLI's own Windows installer drops the binary (see cli's install.ps1) —
+# a PER-USER, user-writable dir it PATH-adds at USER scope only. A fresh
+# non-interactive shell (the e2e's SSM session) can't see that entry, and in the
+# elevate-to-a-different-admin flow it is the installing admin's profile, unreadable
+# by the daily user (backend#2904). So rather than add THIS dir to the system PATH —
+# a user-writable dir on the machine search path is CWE-426 — Install-TraceblocCli
+# COPIES the exe into the admin-only $TOOL_DIR, which is already on the Machine PATH.
+# Guard the Join-Path: $env:LOCALAPPDATA is null when the Pester suite dot-sources
+# this script on Linux CI, and Join-Path throws on a null -Path (aborting the whole
+# test container). Only ever USED on Windows, so "" is a fine non-Windows placeholder.
 $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
   Join-Path $env:LOCALAPPDATA "Programs\tracebloc"
 } else { "" }
+
+# Copy the freshly-installed CLI exe from its per-user install dir into the
+# machine-wide, admin-only tools dir ($TOOL_DIR — created and put on the Machine PATH
+# by Initialize-ToolDir), so a fresh shell OR a different user resolves `tracebloc`
+# without a user-writable dir on the system search path (backend#2904 review, saadqbal:
+# CWE-426). Adds NO new PATH entry. Best-effort/non-fatal — the caller wraps it:
+#   * no-op off-Windows ($TRACEBLOC_CLI_INSTALL_DIR / $TOOL_DIR empty), and
+#   * no-op when the source exe isn't where we expect (the CLI installer honored an
+#     INSTALL_PREFIX override) — Test-TraceblocCli then reports the real location.
+# Copy, not a shim: a `tb.cmd`-style shim would bake the admin's LOCALAPPDATA path and
+# reintroduce the unreadable-profile problem for the daily user. The `tb` alias stays
+# on the installing user's own User PATH (the CLI installer's shim); `tracebloc` is the
+# machine-wide command, and Test-TraceblocCli already falls back to it when `tb` is absent.
+# Params default to the script vars (so the caller passes nothing); they exist so the
+# copy/guards are unit-testable without the script's Windows-only load-time values.
+function Publish-TraceblocCliToToolDir {
+  param(
+    [string]$InstallDir = $TRACEBLOC_CLI_INSTALL_DIR,
+    [string]$ToolDir    = $script:TOOL_DIR
+  )
+  if ([string]::IsNullOrWhiteSpace($InstallDir) -or [string]::IsNullOrWhiteSpace($ToolDir)) { return }
+  $src = Join-Path $InstallDir "tracebloc.exe"
+  if (-not (Test-Path -LiteralPath $src)) { return }
+  if (-not (Test-Path -LiteralPath $ToolDir)) {
+    New-Item -ItemType Directory -Path $ToolDir -Force | Out-Null
+  }
+  Copy-Item -LiteralPath $src -Destination (Join-Path $ToolDir "tracebloc.exe") -Force
+}
 
 # Post-install self-verification (#738). Proves the CLI is usable from a FRESH
 # terminal and prints a VERIFIED next command — or, if a new shell wouldn't
 # find it yet, the exact Windows-correct fix (the install dir + open a new
 # window) rather than a vague "open a new terminal". By the time this runs
-# Install-TraceblocCli has persisted the CLI dir onto the Machine PATH
-# (backend#2904), so RefreshPath (re-reading Machine+User PATH) is the faithful
-# "fresh terminal" probe here — there is no `source ~/.rc` analogue on Windows.
-# ALWAYS non-fatal: a missing CLI degrades Step 4 to the legacy manual-credential
-# fallback (#388).
+# Install-TraceblocCli has copied the CLI exe into $TOOL_DIR, which is already on the
+# Machine PATH (backend#2904), so RefreshPath (re-reading Machine+User PATH) is the
+# faithful "fresh terminal" probe here — there is no `source ~/.rc` analogue on
+# Windows. ALWAYS non-fatal: a missing CLI degrades Step 4 to the legacy
+# manual-credential fallback (#388).
 function Test-TraceblocCli {
   # Pull the persisted (registry) PATH into THIS process — same env a brand-new
   # PowerShell window would start with.
@@ -7527,10 +7563,10 @@ function Test-TraceblocCli {
     return
   }
 
-  # Installed, but STILL not resolvable in-process even after persisting to the
-  # Machine PATH (backend#2904) + RefreshPath — e.g. the binary landed somewhere
-  # other than $TRACEBLOC_CLI_INSTALL_DIR. A NEW window reads the persisted PATH,
-  # so tell the user exactly where it is and how to use it now.
+  # Installed, but STILL not resolvable in-process even after the copy into $TOOL_DIR
+  # (backend#2904) + RefreshPath — e.g. the exe landed somewhere other than
+  # $TRACEBLOC_CLI_INSTALL_DIR (an INSTALL_PREFIX override), so the copy no-op'd. A NEW
+  # window reads the persisted PATH, so tell the user exactly where it is and how to use it.
   Ok "tracebloc CLI installed -- open a new PowerShell window to use it."
   Hint "  Installed to: $TRACEBLOC_CLI_INSTALL_DIR"
   Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" data ingest .\data"
@@ -7601,13 +7637,14 @@ function Install-TraceblocCli {
       # The CLI's own installer PATH-adds its bin dir at USER scope only, so the
       # `tracebloc` command is invisible to a fresh, non-interactive shell that
       # sources no profile — exactly the SSM session the Windows e2e opens, which
-      # then fails to find the CLI it just installed (backend#2904). Persist that
-      # dir onto the MACHINE PATH, like every other client tool, so a brand-new
-      # process resolves it. Best-effort: a PATH-edit hiccup must not fail an
+      # then fails to find the CLI it just installed (backend#2904). Copy the exe
+      # into the admin-only $TOOL_DIR (already on the Machine PATH) so a brand-new
+      # process — or a different user — resolves it, without putting a user-writable
+      # dir on the system search path. Best-effort: a copy hiccup must not fail an
       # install whose client is already up (this whole step is non-fatal), and it
       # runs BEFORE Test-TraceblocCli so the RefreshPath verify below sees it.
-      try { Add-DirToMachinePath -Dir $TRACEBLOC_CLI_INSTALL_DIR }
-      catch { Log "Persisting the tracebloc CLI dir to the Machine PATH failed: $_" }
+      try { Publish-TraceblocCliToToolDir }
+      catch { Log "Publishing the tracebloc CLI to the tools dir failed: $_" }
       # Self-verify usability from a fresh terminal and print a verified next
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli
