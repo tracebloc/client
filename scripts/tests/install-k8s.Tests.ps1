@@ -3528,16 +3528,21 @@ Describe "Unattended install with no credentials refuses instead of spinning (ba
   }
   It "the refusal names the two variables that make the path unnecessary" {
     # Whoever hits this is automating; the message has to be actionable, and the
-    # pair it names is the same one Get-ProvisioningPreset reads. Asserted with
-    # -ParameterFilter rather than by capturing $m inside the mock body: the
-    # capture bound on Pester 6 locally and came back empty on the CI's 5.5.
+    # pair it names is the same one Get-ProvisioningPreset reads.
+    #
+    # CAPTURED IN THE MOCK BODY, WITH param() DECLARED (the :1516 pattern) --
+    # third attempt, and the two failed ones are worth their line each: a body
+    # reading $m with NO param() binds on Pester 6 and is $null on the CI's 5.5;
+    # `Should -Invoke -ParameterFilter` fails on 5.5 too, because 5.5 does not
+    # record an invocation whose mock body THROWS -- and this mock must throw,
+    # since the real Err never returns and the code after it assumes so.
     Mock Test-CanPrompt { $false }
     Mock Step { }
-    Mock Err { throw "refused" }
+    $script:Refusal = ""
+    Mock Err { param($m, $Detail) $script:Refusal = "$m"; throw "refused" }
     { Install-ClientHelm } | Should -Throw
-    Should -Invoke Err -Times 1 -ParameterFilter {
-      "$m" -match 'TRACEBLOC_CLIENT_ID' -and "$m" -match 'TRACEBLOC_CLIENT_PASSWORD'
-    }
+    $script:Refusal | Should -Match 'TRACEBLOC_CLIENT_ID'
+    $script:Refusal | Should -Match 'TRACEBLOC_CLIENT_PASSWORD'
   }
 }
 
