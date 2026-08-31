@@ -24,6 +24,22 @@
 #              backend#2620 re-introduced by the fix for backend#2621.
 #   4. NOTES    The install message names no stale release. Its own render, because
 #              `helm template` does not emit NOTES.txt at all.
+#   5. LOOKUPS  Every Secret `lookup` keyed on a name that FOLLOWS the override
+#              carries a mitigation. THE CLASS behind Bugbot's High on this PR: a
+#              lookup that misses is not an error, it silently takes the last
+#              resolution tier -- for `secrets.yaml` that meant minting a new
+#              password while the fixed-name `mysql-pvc` datadir kept the old, so
+#              the upgrade succeeded and the database refused every login.
+#
+#              THE INSTANCE IS FIXED IN `secrets.yaml` (a refusal keyed on the
+#              un-overridden name, measured against a live cluster with
+#              `--dry-run=server`, and held by
+#              `client-credentials-have-a-secret-tier.sh`). This assertion holds
+#              the CLASS, which has a second member nothing checked:
+#              `telemetryTokenPresent` is safe only because it ORs a lookup on the
+#              legacy fixed name. Two mitigation shapes are accepted -- a refusal
+#              or a fallback lookup -- and which one a site needs is not this
+#              assertion'"'"'s call to make; it only requires that one is still there.
 #
 # (2) AND (3) SHARE ONE CLASSIFIER, and that is what closes the gap the first
 # version had: (2) read doc-root `metadata.name` only, so every name-REFERENCE

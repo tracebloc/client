@@ -125,6 +125,205 @@ def classify(doc, path, val, rel, ns, envs):
     return None
 
 
+# --------------------------------------------------------------------------
+# Assertion 5 — the CLASS behind the credential-Secret finding
+# --------------------------------------------------------------------------
+#
+# THE INSTANCE IS FIXED ELSEWHERE, AND THIS IS THE CLASS. `secrets.yaml` resolves
+# credentials as "explicit, else THE VALUE IN THE LIVE SECRET, else randAlphaNum",
+# and the middle tier is a `lookup` keyed on a name that follows the override. A
+# lookup that misses is not an error -- it silently takes the last tier, which for
+# a credential means minting a new password while the fixed-name `mysql-pvc`
+# datadir keeps the old one. That was Bugbot's High on this PR, and it is fixed in
+# `secrets.yaml` by refusing a rename of a live release.
+#
+# But it is a CLASS, and this chart has TWO members:
+#
+#   secrets.yaml                     mitigated by a `fail` keyed on the
+#                                    un-overridden name (that refusal)
+#   tracebloc.telemetryTokenPresent  mitigated by OR-ing a lookup on the LEGACY
+#                                    fixed name -- and nothing asserted that
+#
+# So the second member was one edit away from the same silent shape, with no
+# check. This holds both: a Secret lookup keyed on a name that follows the
+# override must carry one of the two mitigations, in its own file.
+#
+# WHICH NAMES FOLLOW THE OVERRIDE IS DERIVED, INCLUDING THROUGH HELPERS -- closed
+# over `include` across the template sources rather than listed here, so a helper
+# added tomorrow that wraps `fullname` is covered without anyone remembering.
+#
+# IT DOES NOT SECOND-GUESS WHICH MITIGATION IS RIGHT. `secrets.yaml`'s refusal was
+# measured against a live cluster with `--dry-run=server`, which is the only way to
+# exercise a `lookup` at all; this assertion is a text-level check and could not
+# have established that. It only requires that a mitigation is still there.
+
+TEMPLATES = "client/templates"
+_DEFINE = re.compile(r'{{-?\s*define\s+"([^"]+)"\s*-?}}(.*?){{-?\s*end\s*-?}}', re.S)
+_INCLUDE = re.compile(r'include\s+"([^"]+)"')
+_SECRET_LOOKUP = re.compile(r'lookup\s+"v1"\s+"Secret"\s+\S+\s+([^\n)]*\)?)')
+
+
+def helpers_following_the_override(sources):
+    """Helper names whose rendered value contains `tracebloc.fullname`.
+
+    Transitive: a helper that includes a helper that includes `fullname` follows
+    the override too. Closed by iteration rather than recursion so a cyclic
+    include cannot hang the guard.
+    """
+    bodies = {}
+    for text in sources:
+        for name, body in _DEFINE.findall(text):
+            bodies[name] = body
+    following = {"tracebloc.fullname"}
+    changed = True
+    while changed:
+        changed = False
+        for name, body in bodies.items():
+            if name in following:
+                continue
+            if any(inc in following for inc in _INCLUDE.findall(body)):
+                following.add(name)
+                changed = True
+    return following
+
+
+def _mitigations(text, routed_vars):
+    """Which mitigation shapes this file carries, as a set of labels.
+
+    TWO SHAPES, BOTH REAL, and neither is a substitute for judgement about which
+    one a given site needs:
+
+      "refusal"  a MISS on the routed lookup leads to `fail` — however the other
+                 half of the condition is computed
+      "fallback" a second lookup in the same expression, on a name that does not
+                 follow the override — `telemetryTokenPresent`'s legacy name
+
+    THE REFUSAL IS DETECTED ON THE INVARIANT, NOT ON THE ARITHMETIC. The first cut
+    matched `printf "%s-secrets" .Release.Name` — the shape the refusal happened to
+    have when it keyed on the UN-OVERRIDDEN NAME. Arturo then showed that name
+    keying caught only one of three rename directions and missed reinstall-over-a-
+    kept-PVC entirely, so the refusal was re-keyed on the persisted DATA (the
+    retained `mysql-pvc`) — a strictly better guard that my detector would have
+    reported as no guard at all.
+
+    A detector that breaks when the thing it guards is IMPROVED is worse than
+    none: it pushes back toward the shape it happened to be written against. So it
+    now keys on the property that has to hold however the other half is computed —
+    a miss on THIS lookup must reach a `fail`:
+
+        $existingSecret := (lookup "v1" "Secret" … $secretName)
+        …
+        if and $mysqlDataPresent (not $existingSecret)   <- the miss
+          fail …                                        <- the refusal
+
+    `routed_vars` are the variables assigned from a routed Secret lookup, so the
+    negation has to be of THAT lookup's result rather than of any variable.
+    """
+    out = set()
+    lines = text.splitlines()
+    for var in routed_vars:
+        neg = re.compile(rf"(not|empty)\s+\${re.escape(var)}\b")
+        for i, line in enumerate(lines):
+            if not neg.search(line):
+                continue
+            # `fail` within the guarded block. A small window rather than a full
+            # parse: the refusal is the first statement of the branch in every
+            # spelling this chart uses, and a wider window would start accepting
+            # an unrelated `fail` further down the file.
+            if any("fail " in nxt or "fail(" in nxt for nxt in lines[i : i + 4]):
+                out.add("refusal")
+    for line in lines:
+        if line.split("#", 1)[0].count("lookup ") >= 2:
+            out.add("fallback")
+    return out
+
+
+def assert_lookup_keys():
+    """`(ok, messages)` — every Secret lookup on a routed name is mitigated."""
+    files = sorted(
+        os.path.join(TEMPLATES, f)
+        for f in os.listdir(TEMPLATES)
+        if f.endswith(".yaml") or f.endswith(".tpl")
+    )
+    if not files:
+        return False, [f"   [ERROR] no templates found under {TEMPLATES} — nothing checked."]
+    sources = {f: open(f, encoding="utf-8").read() for f in files}
+    following = helpers_following_the_override(sources.values())
+    if len(following) < 2:
+        # FAIL CLOSED: `fullname` alone means the define regex matched nothing, so
+        # every name would read as "does not follow the override" and this
+        # assertion would pass vacuously.
+        return False, [
+            "   [ERROR] resolved no helpers as following the override, so every "
+            "lookup would read as safe. The define parser matched nothing."
+        ]
+
+    msgs, lookups, routed_sites = [], 0, 0
+    for path, text in sources.items():
+        vars_ = dict(
+            re.findall(r'\$(\w+)\s*:?=\s*\(?\s*include\s+"([^"]+)"', text)
+        )
+        # Variables assigned from a Secret lookup whose NAME follows the
+        # override — the ones a refusal has to negate.
+        routed_vars = set()
+        for m in re.finditer(
+            r'\$(\w+)\s*:?=\s*\(?\s*lookup\s+"v1"\s+"Secret"\s+\S+\s+([^\n)]*\)?)', text
+        ):
+            expr = m.group(2)
+            referenced = set(_INCLUDE.findall(expr))
+            for v in re.findall(r"\$(\w+)", expr):
+                if v in vars_:
+                    referenced.add(vars_[v])
+            if referenced & following:
+                routed_vars.add(m.group(1))
+        have = _mitigations(text, routed_vars)
+        for line in text.splitlines():
+            code = line.split("#", 1)[0]
+            if "lookup " not in code or '"Secret"' not in code:
+                continue
+            lookups += 1
+            routed = []
+            for expr in _SECRET_LOOKUP.findall(code):
+                referenced = set(_INCLUDE.findall(expr))
+                for v in re.findall(r"\$(\w+)", expr):
+                    if v in vars_:
+                        referenced.add(vars_[v])
+                if referenced & following:
+                    routed.append(expr.strip())
+            if not routed:
+                continue
+            routed_sites += 1
+            if not have:
+                msgs.append(
+                    f"   [ERROR] {path}: a Secret lookup keys on a name that follows "
+                    f"fullnameOverride ({', '.join(routed)}) and the file carries "
+                    f"NEITHER mitigation — no `fail` reached by a MISS on that "
+                    f"lookup, and no fallback lookup on a name the override cannot "
+                    f"move. A missed lookup is not an error: it silently takes the "
+                    f"last resolution tier, which for a credential means minting a "
+                    f"new one while the kept datadir holds the old."
+                )
+    if not lookups:
+        return False, [
+            "   [ERROR] found ZERO Secret lookups in the templates — the matcher "
+            "sees nothing, so this assertion proves nothing."
+        ]
+    if not routed_sites:
+        # Also a finding: this chart HAS routed lookups, so zero means the
+        # "follows the override" resolution stopped resolving.
+        return False, [
+            "   [ERROR] found ZERO Secret lookups keyed on a routed name, but this "
+            "chart has at least two. The name resolution has stopped working, so "
+            "every site would read as safe."
+        ]
+    if msgs:
+        return False, msgs
+    return True, [
+        f"   [OK] all {routed_sites} routed Secret lookup(s) of {lookups} carry a "
+        f"mitigation (refusal or fallback)"
+    ]
+
+
 def strip_ansi(text):
     return re.sub(r"\033\[[0-9;]*m", "", text)
 
@@ -318,6 +517,13 @@ def main() -> int:
         # NOT SILENTLY SKIPPED. A guard that quietly checks three things when it
         # documents four is the shape this whole file exists to prevent.
         print("   [ERROR] no rendered NOTES was passed, so NOTES was not checked at all.")
+        fail = True
+
+    # --- 5. the class behind the credential-Secret finding -------------------
+    ok, msgs = assert_lookup_keys()
+    for m in msgs:
+        print(m)
+    if not ok:
         fail = True
 
     return 1 if fail else 0
