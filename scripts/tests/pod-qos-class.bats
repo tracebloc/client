@@ -30,11 +30,14 @@ setup() {
 # credentials the chart requires. Fails the caller if helm fails: an unrendered
 # chart must not read as "no findings".
 _render() {
-  local hp="$1" out="$2"
+  local hp="$1" out="$2"; shift 2
+  # "$@" carries any extra --set pairs. Added because the suite could not render the
+  # GPU device plugins at all, so it never classified the chart's ONLY Guaranteed
+  # pods (Bugbot, review on client#922).
   helm template t "$CHART" \
     --set "hostPath.enabled=${hp}" \
     --set storageClass.create=false \
-    --set clientId=probe --set clientPassword=probe > "$out" 2>"${out}.err"
+    --set clientId=probe --set clientPassword=probe "$@" > "$out" 2>"${out}.err"
 }
 
 # _class_of <rendered> <workload-suffix> — the derived class for one workload.
@@ -64,6 +67,38 @@ _class_of() {
   _render false "$r" || return 1
   run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.csi.txt"
   [ "$status" -eq 0 ] || return 1
+}
+
+@test "GPU device plugins are Guaranteed — the chart's only Guaranteed pods, per vendor" {
+  # THE GAP THIS CLOSES: `_render` never enabled gpu.devicePlugin, so neither
+  # nvidia-device-plugin-daemonset nor amdgpu-device-plugin-daemonset was ever
+  # classified. They are Guaranteed — which is exactly what client#919 bought — so
+  # stripping their resources would return them to BestEffort, leave every GPU
+  # training pod Pending, and this guard would have stayed green.
+  #
+  # Per vendor, because the chart renders ONE plugin keyed on
+  # gpu.devicePlugin.vendor: asserting only nvidia would leave the amd template
+  # unclassified, which is the same partial-coverage mistake one level down.
+  local v
+  for v in nvidia amd; do
+    local r="$BATS_TEST_TMPDIR/gpu-$v.yaml"
+    _render true "$r" --set gpu.devicePlugin.enabled=true --set "gpu.devicePlugin.vendor=$v" || return 1
+    run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.gpu-$v.txt"
+    [ "$status" -eq 0 ] || return 1
+  done
+}
+
+@test "a device plugin demoted to BestEffort FAILS (the regression client#919 fixed)" {
+  # Non-vacuity for the test above, and it pins the actual regression: the plugin
+  # shipped BestEffort before client#919. Strip the class from the expectation and
+  # the check must refuse rather than shrug.
+  local r="$BATS_TEST_TMPDIR/gpu-mut.yaml" e="$BATS_TEST_TMPDIR/gpu-mut.txt"
+  _render true "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=nvidia || return 1
+  sed 's/^class  nvidia-device-plugin-daemonset  Guaranteed/class  nvidia-device-plugin-daemonset  BestEffort/' \
+    "${BATS_TEST_DIRNAME}/pod-qos-expect.gpu-nvidia.txt" > "$e"
+  run python3 "$QOS" "$r" --expect "$e"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"QoS class is Guaranteed, expected BestEffort"* ]] || return 1
 }
 
 @test "an unclassified workload FAILS rather than being ignored (the guard is not vacuous)" {
