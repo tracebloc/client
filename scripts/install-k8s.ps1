@@ -7316,6 +7316,29 @@ function Invoke-DiagnoseCapture {
   return $text
 }
 
+# Namespace of the tracebloc jobs-manager pod, parsed from `kubectl get pods -A` TEXT.
+#
+# PURE and side-effect-free so the guarantee is directly unit-testable, like
+# Format-ExitCode -- and this one earned that treatment. Bounding the capture
+# changed its TYPE: native `kubectl` emitted one object per LINE, while
+# Invoke-DiagnoseCapture returns a single multi-line string, and
+# `$blob | Select-String ...` treats the whole blob as ONE line. The first
+# whitespace token of that match is then the table HEADER, "NAMESPACE", not a
+# namespace -- so a SUCCESSFUL -Diagnose went on to collect pod logs, helm values
+# and the chart version from a namespace that does not exist (Bugbot, High).
+#
+# Splitting first restores the per-line semantics the native call had. The explicit
+# header rejection is a belt-and-braces fail-safe: if a future refactor breaks the
+# split again, "NAMESPACE" still cannot leak out of here as a real namespace.
+function Get-JobsManagerNamespace {
+  param([string]$PodsText)
+  $line = ("$PodsText" -split "`r?`n" | Select-String '\-jobs-manager' | Select-Object -First 1)
+  if (-not $line) { return "" }
+  $ns = ($line.ToString().Trim() -split '\s+')[0]
+  if ($ns -eq 'NAMESPACE') { return "" }
+  return $ns
+}
+
 function Invoke-DiagnoseBundle {
   $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
   $base = if ($HOST_DATA_DIR) { $HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
@@ -7330,9 +7353,8 @@ function Invoke-DiagnoseBundle {
   if (-not $ns) {
     # bounded: this is the FIRST cluster read on a standalone diagnose run, so an
     # unreachable API server used to hang before a single file was written.
-    $jm = (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A") -TimeoutSec 20 |
-             Select-String '\-jobs-manager' | Select-Object -First 1)
-    if ($jm) { $ns = ($jm.ToString().Trim() -split '\s+')[0] }
+    # Parsed by a pure helper because the capture is TEXT, not line objects.
+    $ns = Get-JobsManagerNamespace (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A") -TimeoutSec 20)
   }
   if (-not $ns) { $ns = "default" }
 

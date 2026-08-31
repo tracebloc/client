@@ -3939,6 +3939,38 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
   # real absent one, deliberately. Mocking Get-Command hangs the run -- both the
   # installer and Pester itself call it constantly -- so the presence check is
   # exercised against the live command table instead.
+  # THE TYPE CHANGE, not just the timeout (Bugbot, High). Bounding a native call
+  # swaps line OBJECTS for one multi-line STRING, and any consumer that parsed
+  # per-line silently changes meaning. That is what happened to namespace
+  # discovery: `$blob | Select-String` matches the whole blob as a single line, so
+  # the first token became the table header "NAMESPACE" and a SUCCESSFUL -Diagnose
+  # collected logs, helm values and the chart version from a namespace that does
+  # not exist. Extracted as a pure function precisely so this is pinned.
+  It "namespace discovery reads the POD's namespace, never the table header" {
+    $pods = @(
+      "NAMESPACE     NAME                          READY   STATUS",
+      "kube-system   coredns-5d78c9869d-abcde      1/1     Running",
+      "tb-rel-a1     tb-rel-a1-jobs-manager-xyz    1/1     Running",
+      "tb-rel-a1     tb-rel-a1-requests-proxy-q    1/1     Running"
+    ) -join "`n"
+    Get-JobsManagerNamespace $pods | Should -Be "tb-rel-a1"
+  }
+  It "namespace discovery survives CRLF, the shape a Windows kubectl actually emits" {
+    $pods = "NAMESPACE  NAME  READY`r`nns-b2  ns-b2-jobs-manager-abc  1/1"
+    Get-JobsManagerNamespace $pods | Should -Be "ns-b2"
+  }
+  It "namespace discovery returns EMPTY when no jobs-manager is present, so the caller falls back" {
+    # Empty, not the header and not a wrong namespace: the caller then uses
+    # "default", which is the documented behaviour.
+    Get-JobsManagerNamespace "NAMESPACE  NAME  READY`nkube-system  coredns-1  1/1" | Should -Be ""
+    Get-JobsManagerNamespace ""    | Should -Be ""
+    Get-JobsManagerNamespace $null | Should -Be ""
+  }
+  It "namespace discovery never yields 'NAMESPACE' even if the split is broken again" {
+    # The belt-and-braces guard: the header is rejected explicitly, so a future
+    # refactor that re-breaks the line split still cannot leak it as a namespace.
+    Get-JobsManagerNamespace "NAMESPACE NAME jobs-manager" | Should -Be ""
+  }
   It "a timed-out capture becomes DATA in the bundle, not a missing file" {
     # The distinction that makes the bundle useful: "k3d cluster list timed out"
     # is itself the finding support needs. Swallowing it to $null would hand them
