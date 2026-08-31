@@ -166,35 +166,57 @@ done
 # login. secrets.yaml refuses that case.
 #
 # It belongs in THIS file rather than the chart suite for the same structural reason
-# as everything above: it is a `lookup`, so helm-unittest renders it away. Verified
-# against a live cluster instead (k3d, `--dry-run=server`, 2026-08-31): refused with
-# the named message when the un-overridden Secret exists, silent on a fresh install
-# with an override, and silent with no override at all.
+# as everything above: it is a `lookup`, so helm-unittest renders it away.
+#
+# THE FIRST VERSION OF THESE ASSERTIONS PINNED THE WRONG DESIGN, and that is worth
+# recording because they passed while two thirds of the class was open. They asserted
+# the refusal "keys on the UN-OVERRIDDEN name" and called that "the whole correctness
+# of it". It was not: `<rel>-secrets` is a PROXY for the lockout, and it missed
+# override A -> B (the probe looks for a name that was never live) and override A ->
+# none (the `ne` gate makes the body unreachable). Both re-mint against the same kept
+# PVC. A test that pins a proxy cements it -- Arturo's re-review of ea6568dc caught
+# exactly that, and it is why assertion 4 below now forbids the name key outright.
 code_all="$(grep -v '^[[:space:]]*#' "$TPL" 2>/dev/null || true)"
 
 # 1. the refusal exists at all.
-if ! grep -qF 'fullnameOverride is set to' <<<"$code_all"; then
-  fail "secrets.yaml no longer refuses a rename of a live release. Setting
-    fullnameOverride on an existing release re-mints the generated credentials while
-    the kept MySQL PVC holds the old ones: upgrade succeeds, database refuses login."
+if ! grep -qF 'already has MySQL data' <<<"$code_all"; then
+  fail "secrets.yaml no longer refuses to re-mint credentials over a live database.
+    Any render that resolves to a Secret name the namespace does not have -- adding,
+    changing or dropping fullnameOverride, or reinstalling over a kept PVC -- re-mints
+    the generated credentials while the retained MySQL PVC holds the old ones:
+    upgrade succeeds, database refuses every login."
 fi
 ok
 
-# 2. it keys on the UN-OVERRIDDEN name. This is the whole correctness of it: keying
-#    the second lookup on tracebloc.secretName -- the overridden name -- would make
-#    it compare a name against itself and never fire, while reading as a guard.
-if ! grep -qE 'printf "%s-secrets" \.Release\.Name' <<<"$code_all"; then
-  fail "the rename refusal no longer derives the UN-overridden Secret name from
-    .Release.Name. Keyed on the overridden name it can never fire, because that is
-    the name it is being compared against."
+# 2. it probes the PERSISTED DATA. This is the correctness of it: the MySQL PVC is
+#    `mysql-pvc`, a constant that never follows the override and is retained by
+#    resource-policy: keep, so its presence is what "there is already a database
+#    here" means. Keying on any release-derived NAME instead is what missed two of
+#    the three rename directions.
+if ! grep -qE 'lookup "v1" "PersistentVolumeClaim" \.Release\.Namespace \(include "tracebloc\.mysqlPvc"' <<<"$code_all"; then
+  fail "the refusal no longer probes the MySQL PVC, so it is back to inferring the
+    lockout from a name. A name-keyed probe cannot see override A -> override B (it
+    looks for a name that was never live) or a dropped override (the names are equal
+    and the gate never opens), and both re-mint against retained data."
 fi
 ok
 
-# 3. it only fires when the two names DIFFER, so an ordinary release -- where they
-#    are equal -- is never refused. Without this the guard would break every install.
-if ! grep -qE 'ne \$secretName \$unoverriddenSecretName' <<<"$code_all"; then
-  fail "the rename refusal no longer gates on the two names differing, so it would
-    fire on releases that set no override at all."
+# 3. it gates on the CURRENT EFFECTIVE Secret being absent, so an ordinary upgrade --
+#    PVC and Secret both present -- is never refused. Without this the guard would
+#    fire on every upgrade of every release.
+if ! grep -qE 'if and \$mysqlDataPresent \(not \$existingSecret\)' <<<"$code_all"; then
+  fail "the refusal no longer gates on the current effective Secret being ABSENT, so
+    it would fire on ordinary upgrades where nothing is being renamed at all."
+fi
+ok
+
+# 4. THE OLD PROXY MUST STAY GONE. Re-introducing the name comparison reopens the two
+#    directions it could not see, and it would do so while every other assertion here
+#    still passed -- which is precisely how ea6568dc shipped looking complete.
+if grep -qE '\$unoverriddenSecretName|ne \$secretName' <<<"$code_all"; then
+  fail "the refusal is keyed on a release-derived Secret NAME again. That proxy misses
+    override A -> override B and a dropped override; the invariant is 'persisted MySQL
+    data exists and the Secret under the current effective name does not'."
 fi
 ok
 
@@ -202,8 +224,8 @@ if [ "$fails" -ne 0 ]; then
   echo "client-credentials-have-a-secret-tier: $fails failure(s) across $checks assertion(s)" >&2
   exit 1
 fi
-if [ "$checks" -lt 16 ]; then
-  echo "client-credentials-have-a-secret-tier: only $checks assertion(s) ran; expected 16+.
+if [ "$checks" -lt 17 ]; then
+  echo "client-credentials-have-a-secret-tier: only $checks assertion(s) ran; expected 17+.
   A collapsed run must not report success (rule 3)." >&2
   exit 1
 fi
