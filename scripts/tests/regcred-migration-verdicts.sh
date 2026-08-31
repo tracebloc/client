@@ -629,21 +629,32 @@ echo "the values rewrite — EXECUTED, not grepped (Bugbot on client#916):"
 # Thirteen other ambiguous forms round-trip correctly, so this is one narrow
 # cross-parser disagreement, which is exactly the kind a grep cannot see.
 rw="$TMP/rewrite.py"
-python3 - "$RUNBOOK" "$rw" <<'EXTRACT' || { echo "  [bad]  could not extract the rewrite script from the runbook" >&2; fail=$((fail+1)); }
+python3 - "$RUNBOOK" "$rw" "$TMP" <<'EXTRACT' || { echo "  [bad]  could not extract the rewrite script from the runbook" >&2; fail=$((fail+1)); }
 import re, sys
 md = open(sys.argv[1], encoding="utf-8").read()
 m = re.search(r"python3 - > \"/tmp/\$REL-values-new\.yaml\" <<'PY'.*?\n(.*?)\nPY\n", md, re.S)
 if not m:
     sys.exit("no rewrite heredoc found")
 body = "\n".join(l for l in m.group(1).split("\n") if not l.lstrip().startswith("|| {"))
+# ONE DECLARED DEVIATION: the runbook reads /tmp/$REL-values-before.yaml by
+# absolute path, which is its contract with the operator. Pointing the EXTRACTED
+# copy at the suite's own mktemp -d (mode 0700) instead of world-writable /tmp is
+# a security fix, not a change to the logic under test: a PID-predictable name in
+# /tmp can be pre-empted by a symlink that the `>` then follows and truncates.
+# Flagged on 4f920bb by the commit security review -- and the other 38 temp files
+# in this suite already do it this way, so my three were the outlier.
+# Only the DIRECTORY changes; the regex, the assertions and the refusals are the
+# real text.
+body = body.replace('f"/tmp/{os.environ[', 'f"' + sys.argv[3] + '/{os.environ[')
 open(sys.argv[2], "w").write(body)
 EXTRACT
 
 if [ -s "$rw" ]; then
   # A snapshot in the shape `helm get values -o yaml` actually produces: Go YAML
   # QUOTES "1e5", because its own loader would read it bare as a float.
-  RW_REL="regcred-verdicts-$$"
-  rw_before="/tmp/${RW_REL}-values-before.yaml"
+  # In $TMP (mktemp -d, 0700), not /tmp: see the deviation note in EXTRACT above.
+  RW_REL="rwfix"
+  rw_before="$TMP/${RW_REL}-values-before.yaml"
   printf 'clientId: abc\nclientPassword: "1e5"\nmysqlRootPassword: "yes"\ndockerRegistry:\n  create: true\n  server: https://x/\n  username: u\n  password: p\n  email: e@x.io\nstorageClass:\n  create: false\n' \
     > "$rw_before"
   out="$(REL="$RW_REL" NEW=tracebloc-ops-regcred python3 "$rw" 2>&1)"; rc=$?
@@ -674,7 +685,7 @@ if [ -s "$rw" ]; then
     fi
   fi
   # 4. a snapshot with NO dockerRegistry block still gets one appended.
-  rw_add="/tmp/${RW_REL}add-values-before.yaml"; printf 'clientId: abc\n' > "$rw_add"
+  rw_add="$TMP/${RW_REL}add-values-before.yaml"; printf 'clientId: abc\n' > "$rw_add"
   out2="$(REL="${RW_REL}add" NEW=tracebloc-ops-regcred python3 "$rw" 2>&1)"
   if printf '%s' "$out2" | grep -qF 'existingSecret: tracebloc-ops-regcred'; then
     ok "a snapshot with no dockerRegistry block gets one appended"
@@ -682,7 +693,7 @@ if [ -s "$rw" ]; then
     bad "a snapshot with no dockerRegistry block gets one appended" "$(printf '%s' "$out2" | head -2)"
   fi
   # 5. a non-mapping snapshot is refused, not silently rewritten.
-  rw_bad="/tmp/${RW_REL}bad-values-before.yaml"; printf -- '- not\n- a\n- mapping\n' > "$rw_bad"
+  rw_bad="$TMP/${RW_REL}bad-values-before.yaml"; printf -- '- not\n- a\n- mapping\n' > "$rw_bad"
   # ASSERTS THE NAMED REFUSAL, not a bare non-zero exit (CLAUDE.md rule 10). The
   # first version checked only the status, and removing the isinstance guard stayed
   # GREEN: a list input then reached `.get()` on a list, raised AttributeError, and
@@ -694,7 +705,7 @@ if [ -s "$rw" ]; then
   else
     bad "a non-mapping snapshot is refused BY NAME" "exit $rc3: $(printf '%s' "$out3" | head -1)"
   fi
-  rm -f "$rw_before" "$rw_add" "$rw_bad"
+  # No rm needed: $TMP is removed wholesale by the suite's own trap.
 fi
 
 echo "the copy loop — a partial copy must not look finished:"
