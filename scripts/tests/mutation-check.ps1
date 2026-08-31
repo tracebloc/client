@@ -91,8 +91,11 @@ $Mutations = @(
 
   @{ Name  = 'the CLI installer child is waited on with no deadline (backend#2849)'
      File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
-     Find  = '    if (-not $p.WaitForExit($cliWaitMs)) {'
-     Repl  = '    if (-not $p.WaitForExit()) {' }
+     # RE-AIMED after develop inverted this branch: Bugbot found that the
+     # timeout overload does not drain the redirected streams, so the shape is
+     # now `if (WaitForExit(ms)) { flush } else { kill }`. Same property, new line.
+     Find  = '    if ($p.WaitForExit($cliWaitMs)) {'
+     Repl  = '    if ($p.WaitForExit()) {' }
 
   @{ Name  = 'a dashboard link is hardcoded to production again (backend#2849)'
      File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'

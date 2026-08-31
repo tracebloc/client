@@ -804,10 +804,21 @@ function ConvertTo-WorkspaceName {
 
 # Best-effort chart version of the installed client release (e.g. "1.4.4");
 # empty if not found / cluster unreachable. Greps helm's CHART column.
+# BOUNDED (backend#2849 / Bugbot). `helm list` reaches the API server behind the
+# Docker engine, so on an unreachable cluster this did not return empty -- it
+# BLOCKED. That matters most in `-Diagnose`, which calls this BEFORE writing any
+# bundle file, so the one tool an operator runs because the cluster is unreachable
+# stopped here and produced no zip at all. Print-Summary's call had the same
+# exposure at the end of a successful install.
+#
+# A timeout keeps the documented contract exactly: "empty if not found / cluster
+# unreachable". The version is parsed ONLY on a clean exit, so synthetic timeout
+# text can never be mistaken for a chart version.
 function Get-ChartVersion {
   param([string]$Namespace = "tracebloc")
-  $out = (helm list -n $Namespace 2>$null) | Out-String
-  if ($out -match 'client-([0-9][^\s]*)') { return $Matches[1] }
+  $r = Invoke-BoundedProcess -FileName "helm" -Arguments @("list", "-n", $Namespace) -TimeoutSec 20
+  if ($r.Code -ne 0) { return "" }
+  if ("$($r.Output)" -match 'client-([0-9][^\s]*)') { return $Matches[1] }
   return ""
 }
 
@@ -7290,8 +7301,14 @@ function Edit-Redaction([string]$Path) {
 #
 # A timeout is DATA, not an error: the synthetic text is written into the file, so
 # "k3d cluster list timed out after 20s" reaches support as a finding rather than
-# as a missing bundle. 20s is generous for a healthy tool and short enough that a
-# fully wedged box still produces a complete bundle in well under a minute.
+# as a missing bundle. 20s is generous for a healthy tool (30s for a log fetch,
+# which legitimately streams more).
+#
+# WORST CASE ~350s, i.e. under 6 minutes -- NOT "well under a minute" as this
+# comment first claimed (@LukasWodka corrected the arithmetic on client#917). The
+# deadlines are SEQUENTIAL, so a fully wedged box pays 13 reads x 20s + 3
+# kubectl-logs x 30s. Still bounded, and still far better than never returning --
+# but the number a support engineer plans around should be the real one.
 function Invoke-DiagnoseCapture {
   param(
     [Parameter(Mandatory)][string]$FileName,
@@ -7303,6 +7320,29 @@ function Invoke-DiagnoseCapture {
   $text = "$($r.Output)"
   if ($r.Code -ne 0) { return "## $FileName $($Arguments -join ' ') -- FAILED or TIMED OUT (exit $($r.Code))`n$text" }
   return $text
+}
+
+# Namespace of the tracebloc jobs-manager pod, parsed from `kubectl get pods -A` TEXT.
+#
+# PURE and side-effect-free so the guarantee is directly unit-testable, like
+# Format-ExitCode -- and this one earned that treatment. Bounding the capture
+# changed its TYPE: native `kubectl` emitted one object per LINE, while
+# Invoke-DiagnoseCapture returns a single multi-line string, and
+# `$blob | Select-String ...` treats the whole blob as ONE line. The first
+# whitespace token of that match is then the table HEADER, "NAMESPACE", not a
+# namespace -- so a SUCCESSFUL -Diagnose went on to collect pod logs, helm values
+# and the chart version from a namespace that does not exist (Bugbot, High).
+#
+# Splitting first restores the per-line semantics the native call had. The explicit
+# header rejection is a belt-and-braces fail-safe: if a future refactor breaks the
+# split again, "NAMESPACE" still cannot leak out of here as a real namespace.
+function Get-JobsManagerNamespace {
+  param([string]$PodsText)
+  $line = ("$PodsText" -split "`r?`n" | Select-String '\-jobs-manager' | Select-Object -First 1)
+  if (-not $line) { return "" }
+  $ns = ($line.ToString().Trim() -split '\s+')[0]
+  if ($ns -eq 'NAMESPACE') { return "" }
+  return $ns
 }
 
 function Invoke-DiagnoseBundle {
@@ -7319,9 +7359,8 @@ function Invoke-DiagnoseBundle {
   if (-not $ns) {
     # bounded: this is the FIRST cluster read on a standalone diagnose run, so an
     # unreachable API server used to hang before a single file was written.
-    $jm = (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A") -TimeoutSec 20 |
-             Select-String '\-jobs-manager' | Select-Object -First 1)
-    if ($jm) { $ns = ($jm.ToString().Trim() -split '\s+')[0] }
+    # Parsed by a pure helper because the capture is TEXT, not line objects.
+    $ns = Get-JobsManagerNamespace (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A") -TimeoutSec 20)
   }
   if (-not $ns) { $ns = "default" }
 
@@ -7480,7 +7519,20 @@ function Install-TraceblocCli {
     # the caller's `$p.ExitCode -eq 0` test below simply does not pass. Killed
     # rather than abandoned, so it cannot keep writing to the log we then read.
     $cliWaitMs = 10 * 60 * 1000
-    if (-not $p.WaitForExit($cliWaitMs)) {
+    if ($p.WaitForExit($cliWaitMs)) {
+      # FLUSH THE STREAMS, and this is not optional (Bugbot, on my own change).
+      # WaitForExit(ms) waits for the PROCESS; only the PARAMETERLESS overload also
+      # waits for the redirected stdout/stderr readers to drain, and until they do
+      # .ExitCode can read back $null. `$p.ExitCode -eq 0` below would then be false
+      # after a SUCCESSFUL install and Step 4 would fall back to the legacy
+      # credential path -- the #611 failure shape, and the empty-ExitCode class this
+      # very ticket exists to remove. Wait-ProcessWithDeadline does exactly this,
+      # for exactly this reason; swapping the parameterless call for the timeout
+      # overload here dropped it, and the comment above about ".Handle then
+      # WaitForExit()" was describing a call that no longer happened.
+      # Bounded in practice: the process has already exited.
+      try { $p.WaitForExit() } catch {}
+    } else {
       Log "tracebloc CLI installer did not finish within 10 minutes; stopping it and continuing."
       try { $p.Kill() } catch {}
       try { $null = $p.WaitForExit(30 * 1000) } catch {}

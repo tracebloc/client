@@ -1026,7 +1026,18 @@ Describe "Write-NotReadyDetail (#425 failure copy carries the event text)" {
 }
 
 Describe "Print-Summary" {
-  BeforeEach { $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false }
+  # NO REAL PROCESSES (Bugbot, on this PR). Print-Summary reaches Get-ChartVersion,
+  # whose `helm list` is bounded now -- and Invoke-BoundedProcess calls
+  # [Process]::Start directly, so it does NOT see the suite's `function helm` stub
+  # at the top of this file. Two "connected" cases here were therefore spawning the
+  # REAL helm against whatever kubeconfig the machine has. Measured against develop:
+  # exactly 3 tests in this file gained a real spawn from this PR, and two are here.
+  # A Describe-level default covers every case; the ones needing a specific answer
+  # override it with their own Mock.
+  BeforeEach {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "" } }
+    $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+  }
   It "connected: Connected + trust claim" {
     $script:ClientState = "connected"
     $out = Print-Summary 6>&1 | Out-String
@@ -1051,11 +1062,25 @@ Describe "Print-Summary" {
     $out | Should -Match "crash loop"
   }
   It "connected: shows the client version" {
+    # SEAM MOVED OUT ONE LAYER: Get-ChartVersion's `helm list` is bounded now
+    # (backend#2849 / Bugbot), so the mock sits on Invoke-BoundedProcess. Same
+    # assertions.
     $script:ClientState = "connected"
-    Mock helm { "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" }
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" } }
     $out = Print-Summary 6>&1 | Out-String
     $out | Should -Match "Version"
     $out | Should -Match "1\.4\.4"
+    # The mock must actually have INTERCEPTED. If the seam moves again this fails
+    # loudly instead of silently shelling out to the real helm (Bugbot).
+    Should -Invoke Invoke-BoundedProcess -Times 1 -Exactly
+  }
+  It "connected: a timed-out helm leaves the version 'unknown' instead of hanging the summary" {
+    # Previously unreachable: the bare `helm list` blocked instead of returning, so
+    # a wedged API server froze the summary at the very end of a good install.
+    $script:ClientState = "connected"
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 124; Output = "" } }
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "unknown"
   }
   It "GPU detected but not enabled: summary says CPU + the reason, not 'NVIDIA GPU' (#616)" {
     $script:ClientState = "connected"
@@ -3384,9 +3409,17 @@ Describe "Invoke-DiagnoseBundle" {
     $HOST_DATA_DIR = Join-Path $TestDrive "tb"
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     "clientPassword: 'LEAKME123'" | Set-Content (Join-Path $HOST_DATA_DIR "values.yaml")
-    Mock kubectl { "" }; Mock docker { "" }; Mock helm { "" }; Mock k3d { "" }
+    # MOCK THE SEAM THAT IS ACTUALLY USED (Bugbot). The bundle's reads now go through
+    # Invoke-BoundedProcess, which calls [Process]::Start directly and so bypasses
+    # both the `function kubectl/docker/helm/k3d` stubs at the top of this file and
+    # any `Mock kubectl`. Left as-is, this test spawned the REAL kubectl, docker,
+    # helm and k3d -- against the machine's live kubeconfig -- while claiming to
+    # test redaction of a seeded secret.
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "" } }
     Mock Get-WindowsArch { "amd64" }   # avoid the PROCESSOR_ARCHITECTURE Err off-Windows
     { Invoke-DiagnoseBundle } | Should -Not -Throw
+    # and prove the collectors went through it, so a future seam move is loud
+    Should -Invoke Invoke-BoundedProcess -Times 1
     $zip = Get-ChildItem $HOST_DATA_DIR -Filter 'tracebloc-diagnose-*.zip' | Select-Object -First 1
     $zip | Should -Not -BeNullOrEmpty
     $ex = Join-Path $TestDrive "ex"
@@ -3874,16 +3907,52 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
     $errors.Count | Should -Be 0
 
-    $fn = $ast.FindAll({ param($n)
-      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-DiagnoseBundle' }, $true)
-    $fn.Count | Should -Be 1 -Because "cannot locate Invoke-DiagnoseBundle"
+    # INTERPROCEDURAL (Bugbot, second High). The first version of this looked only
+    # at native commands written INSIDE Invoke-DiagnoseBundle, so a bare call in a
+    # HELPER the bundle calls was invisible -- which is exactly how `Get-ChartVersion`
+    # (`helm list`, no deadline) survived it. And it is the worst possible place for
+    # one: the bundle calls it BEFORE writing any file, so an unreachable cluster
+    # meant no zip at all.
+    #
+    # So walk the whole call graph the bundle can reach, not just its own body.
+    $allFns = @{}
+    foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+      $allFns[$f.Name] = $f
+    }
+    $allFns.ContainsKey('Invoke-DiagnoseBundle') | Should -BeTrue -Because "cannot locate Invoke-DiagnoseBundle"
 
-    # Every external tool the bundle shells out to must go through a bounded
-    # wrapper. Native invocations of these are, by definition, not bounded.
-    $unbounded = $fn[0].FindAll({ param($n)
-      $n -is [System.Management.Automation.Language.CommandAst] -and
-      $n.GetCommandName() -in @('docker','k3d','kubectl','helm') }, $true) |
-      ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Extent.Text)" }
+    # transitive closure of in-file functions reachable from the bundle
+    $reach = [System.Collections.Generic.HashSet[string]]::new()
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    [void]$reach.Add('Invoke-DiagnoseBundle'); $queue.Enqueue('Invoke-DiagnoseBundle')
+    while ($queue.Count -gt 0) {
+      $cur = $queue.Dequeue()
+      foreach ($call in $allFns[$cur].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $name = $call.GetCommandName()
+        if ($name -and $allFns.ContainsKey($name) -and -not $reach.Contains($name)) {
+          [void]$reach.Add($name); $queue.Enqueue($name)
+        }
+      }
+    }
+    # must actually have followed calls, or the closure proves nothing
+    $reach.Count | Should -BeGreaterThan 1 -Because "the closure must follow the bundle's helper calls"
+
+    # Every external tool anything in that closure shells out to must be bounded.
+    # A native invocation is unbounded unless it sits in a Start-Job (reaped on a
+    # deadline -- the docker guard above enforces that reap per job).
+    $unbounded = @()
+    foreach ($name in $reach) {
+      foreach ($c in $allFns[$name].FindAll({ param($n)
+          $n -is [System.Management.Automation.Language.CommandAst] -and
+          $n.GetCommandName() -in @('docker','k3d','kubectl','helm') }, $true)) {
+        $p = $c.Parent; $inJob = $false
+        while ($p) {
+          if ($p -is [System.Management.Automation.Language.CommandAst] -and $p.GetCommandName() -eq 'Start-Job') { $inJob = $true; break }
+          $p = $p.Parent
+        }
+        if (-not $inJob) { $unbounded += "$name line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
+      }
+    }
 
     $unbounded -join "`n" | Should -BeNullOrEmpty -Because "the support bundle must never block on the dependency it exists to describe"
   }
@@ -3892,6 +3961,49 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
   # real absent one, deliberately. Mocking Get-Command hangs the run -- both the
   # installer and Pester itself call it constantly -- so the presence check is
   # exercised against the live command table instead.
+  # THE TYPE CHANGE, not just the timeout (Bugbot, High). Bounding a native call
+  # swaps line OBJECTS for one multi-line STRING, and any consumer that parsed
+  # per-line silently changes meaning. That is what happened to namespace
+  # discovery: `$blob | Select-String` matches the whole blob as a single line, so
+  # the first token became the table header "NAMESPACE" and a SUCCESSFUL -Diagnose
+  # collected logs, helm values and the chart version from a namespace that does
+  # not exist. Extracted as a pure function precisely so this is pinned.
+  It "namespace discovery reads the POD's namespace, never the table header" {
+    $pods = @(
+      "NAMESPACE     NAME                          READY   STATUS",
+      "kube-system   coredns-5d78c9869d-abcde      1/1     Running",
+      "tb-rel-a1     tb-rel-a1-jobs-manager-xyz    1/1     Running",
+      "tb-rel-a1     tb-rel-a1-requests-proxy-q    1/1     Running"
+    ) -join "`n"
+    Get-JobsManagerNamespace $pods | Should -Be "tb-rel-a1"
+  }
+  It "namespace discovery survives CRLF, the shape a Windows kubectl actually emits" {
+    $pods = "NAMESPACE  NAME  READY`r`nns-b2  ns-b2-jobs-manager-abc  1/1"
+    Get-JobsManagerNamespace $pods | Should -Be "ns-b2"
+  }
+  It "namespace discovery returns EMPTY when no jobs-manager is present, so the caller falls back" {
+    # Empty, not the header and not a wrong namespace: the caller then uses
+    # "default", which is the documented behaviour.
+    Get-JobsManagerNamespace "NAMESPACE  NAME  READY`nkube-system  coredns-1  1/1" | Should -Be ""
+    Get-JobsManagerNamespace ""    | Should -Be ""
+    Get-JobsManagerNamespace $null | Should -Be ""
+  }
+  It "namespace discovery never yields 'NAMESPACE' even if the split is broken again" {
+    # The belt-and-braces guard: the header is rejected explicitly, so a future
+    # refactor that re-breaks the line split still cannot leak it as a namespace.
+    #
+    # THE FIXTURE MUST MATCH (@LukasWodka). The first version used
+    # "NAMESPACE NAME jobs-manager" -- no hyphen before jobs-manager, so
+    # `Select-String '\-jobs-manager'` found nothing, the function returned early at
+    # `-not $line`, and the header guard this test is named for never ran. It passed
+    # identically with the guard present and removed: a vacuous test, in a test
+    # written to catch exactly that. Measured after the fix, guard vs no guard:
+    # "" / "NAMESPACE".
+    #
+    # One line whose first token IS the header and which DOES contain a
+    # jobs-manager pod is precisely the broken-split shape.
+    Get-JobsManagerNamespace "NAMESPACE NAME tb-jobs-manager" | Should -Be ""
+  }
   It "a timed-out capture becomes DATA in the bundle, not a missing file" {
     # The distinction that makes the bundle useful: "k3d cluster list timed out"
     # is itself the finding support needs. Swallowing it to $null would hand them
@@ -4015,8 +4127,36 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     # This was the only wait in ~7400 lines with no bound. The child is
     # `irm <url> | iex` -- a network fetch we then execute.
     $script:Src | Should -Match '\$p\.WaitForExit\(\$cliWaitMs\)'
-    $script:Src | Should -Not -Match '(?m)^\s*\$p\.WaitForExit\(\)\s*$'
     $script:Src | Should -Match '\$p\.Kill\(\)'
+    # The GATING wait must be the bounded one: a bare parameterless call as its own
+    # statement is the unbounded wait this ticket removed.
+    $script:Src | Should -Not -Match '(?m)^\s*\$p\.WaitForExit\(\)\s*$'
+  }
+
+  It "and its streams are FLUSHED after the bounded wait, or a success reads as failure" {
+    # Bugbot on acefcae, against my own change. WaitForExit(ms) waits for the
+    # PROCESS only; the PARAMETERLESS overload is what also waits for redirected
+    # stdout/stderr to drain, and until they do .ExitCode can read back $null. So
+    # `$p.ExitCode -eq 0` goes false after a SUCCESSFUL CLI install and Step 4
+    # silently falls back to the legacy credential path -- the #611 shape, and the
+    # empty-ExitCode class backend#2849 exists to remove. Swapping the parameterless
+    # call for the timeout overload dropped the flush; the assertion above forbade
+    # only the BARE form, so nothing caught it.
+    $fn = [regex]::Match($script:Src, 'function Install-TraceblocCli[\s\S]*?\n\}').Value
+    $fn | Should -Not -BeNullOrEmpty -Because "cannot locate Install-TraceblocCli"
+    $fn | Should -Match '\$null = \$p\.Handle'                     # code survives the reap
+    $fn | Should -Match 'try \{ \$p\.WaitForExit\(\) \} catch \{\}'   # streams drain before ExitCode is read
+    # ORDER: the flush must come after the bounded wait and BEFORE ExitCode is read.
+    # Anchored on CODE shapes, not bare substrings -- the surrounding comments quote
+    # `$p.ExitCode -eq 0` in prose, and matching that text found the comment first.
+    $gate  = [regex]::Match($fn, '(?m)^\s*if \(\$p\.WaitForExit\(\$cliWaitMs\)\)')
+    $flush = [regex]::Match($fn, '(?m)^\s*try \{ \$p\.WaitForExit\(\) \} catch \{\}')
+    $read  = [regex]::Match($fn, '(?m)^\s*if \(\$p\.ExitCode -eq 0\)')
+    $gate.Success  | Should -BeTrue -Because "the bounded wait must gate the branch"
+    $flush.Success | Should -BeTrue -Because "the stream flush must be a real statement"
+    $read.Success  | Should -BeTrue -Because "cannot locate the ExitCode test"
+    $flush.Index | Should -BeGreaterThan $gate.Index -Because "flushing before the bounded wait proves nothing"
+    $read.Index  | Should -BeGreaterThan $flush.Index -Because "ExitCode must not be read before the streams have drained"
   }
 }
 
