@@ -100,6 +100,7 @@ failures=0
 # Accumulators for the cross-profile release-scoped-path assertion after the loop.
 path_profiles=0
 pathclass_missing=0
+could_not_run=0
 path_counts=""
 
 # NOTES NEEDS ITS OWN RENDER, AND EVERY OBVIOUS ROUTE IS CLOSED. Measured on the
@@ -316,6 +317,20 @@ if [ "$pathclass_missing" -ne 0 ]; then
   echo "   verdict on the chart in either direction; fix the finding(s) above and"
   echo "   re-run. (Reporting it as 'NO profile rendered a path' would be a claim"
   echo "   about the chart derived from never having looked.)"
+  # AND IT MUST NOT EXIT 0 (@saadqbal, review of backend#2626). Printing this and
+  # falling through left assertion 6 asserting nothing while `DRIFT_GUARDS`
+  # reported a pass. The two causes enumerated above both raise `failures`
+  # elsewhere, so the branch LOOKED safe -- but a third does not: rename the
+  # `PATHCLASS` marker in the sidecar, a pure refactor with every assertion
+  # intact, and the guard prints NOT CHECKED and exits 0 everywhere. A required
+  # drift guard going vacuous in silence, on the class whose whole point is that
+  # renaming a path orphans a tenant's data.
+  #
+  # `could_not_run`, not `failures`: this is the vocabulary the interpreter loop
+  # above already owns -- 0 clean, 1 a real finding, 2 could-not-run -- and
+  # counting it as a finding would report a chart defect that was never observed,
+  # the same misdiagnosis the exit-code case was just fixed to stop making.
+  could_not_run=1
 elif [ "$path_profiles" -eq 0 ]; then
   echo "[ERROR] NO profile rendered a release-scoped on-disk path, so 'no path"
   echo "        followed the override' proves nothing — it is equally true of a"
@@ -330,5 +345,15 @@ fi
 if [ "$failures" -ne 0 ]; then
   echo "[ERROR] fullnameOverride is incomplete in $failures profile check(s)"
   exit 1
+fi
+# A CONFIRMED FINDING OUTRANKS "could not tell", which is why this sits below the
+# block above rather than replacing it: a run that both found a defect AND failed
+# to check something should report the defect, the actionable half. With no
+# finding, "could not tell" is the verdict -- and it is a non-zero one.
+if [ "$could_not_run" -ne 0 ]; then
+  echo "[ERROR] one or more assertions had no input, so this run did not check"
+  echo "        what it is required to check. That is not a pass: see the"
+  echo "        NOT CHECKED line(s) above for which, and why."
+  exit 2
 fi
 echo "[OK] fullnameOverride routes every resource name, and no exception followed it"

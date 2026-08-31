@@ -344,6 +344,78 @@ a-constant-name
 """
 
 
+#: THREE LINES THAT PIN `_fallback_on_line` TO ITS STATED PROPERTY (@saadqbal,
+#: review of client#911). The detector it replaced -- `count("lookup ") >= 2` over
+#: the whole FILE -- was quietly wrong for five rounds and nothing in the tree
+#: could tell: regress to it and the real chart still renders green, because the
+#: chart happens not to contain the shape that separates them. Same reasoning as
+#: `_SELFTEST_TEMPLATE` above: a check exercisable only once the bug is present
+#: arrives too late, so the input is written down rather than waited for.
+#:
+#: `_BOTH_ROUTED` is the one that does the pinning. Two lookups on one line, both
+#: keyed on names the override moves -- so on a rename both probes miss together
+#: and the "fallback" mitigates nothing. The old form counted two `lookup `s and
+#: called it mitigated; the property says it is not.
+_SELFTEST_BOTH_ROUTED = (
+    '{{- $s := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.fullname" .)) '
+    '| default (lookup "v1" "Secret" .Release.Namespace (include "probe.routed" .)) -}}'
+)
+#: A genuine fallback: the second lookup keys on a literal, which no override can
+#: move, so it still resolves after a rename.
+_SELFTEST_REAL_FALLBACK = (
+    '{{- $s := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.fullname" .)) '
+    '| default (lookup "v1" "Secret" .Release.Namespace "tracebloc-legacy-secret") -}}'
+)
+#: And the single-lookup routed case, which has no fallback at all -- the negative
+#: control for a detector that simply answered True.
+_SELFTEST_NO_FALLBACK = (
+    '{{- $s := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.fullname" .)) -}}'
+)
+
+
+def selftest_the_fallback_detector():
+    """`(ok, messages)` — `_fallback_on_line` asks the property, not the arity.
+
+    Three halves, and the FIRST is the one the old form fails: without it, a
+    detector counting `lookup ` occurrences passes everything here.
+    """
+    following = {"tracebloc.fullname", "probe.routed"}
+    msgs, ok = [], True
+    if _fallback_on_line(_SELFTEST_BOTH_ROUTED, following, {}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a line whose BOTH Secret lookups key on names the override "
+            "moves reads as mitigated. That is the arity of the fallback, not its "
+            "point — on a rename both probes miss together, and assertion 5 then "
+            "passes a chart where a routed credential Secret is unreachable.")
+    if not _fallback_on_line(_SELFTEST_REAL_FALLBACK, following, {}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a lookup keyed on a literal name is not recognised as a "
+            "fallback, so every genuinely mitigated site reports as unmitigated "
+            "and the assertion fails on a safe chart — noise that gets it muted.")
+    if _fallback_on_line(_SELFTEST_NO_FALLBACK, following, {}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a single routed lookup with no second probe reads as "
+            "mitigated, so the detector answers True regardless of its input.")
+    # THE `$var` INDIRECTION IS LIVE CODE and gets the same treatment: the same
+    # routed name reached through `$name` must read exactly as it does inline.
+    if _fallback_on_line(
+        '{{- $s := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.fullname" .)) '
+        '| default (lookup "v1" "Secret" .Release.Namespace $probe) -}}',
+        following, {"probe": "probe.routed"},
+    ):
+        ok = False
+        msgs.append(
+            "   [ERROR] a routed name reached through a `$var` reads as an "
+            "unmovable one, so the indirection launders a routed lookup into a "
+            "mitigation.")
+    if ok:
+        msgs.append("   [OK] the fallback detector keys on the property, not the lookup count")
+    return ok, msgs
+
+
 def selftest_the_parser():
     """`(ok, messages)` — the define parser reads a body past an inner `end`.
 
@@ -679,6 +751,12 @@ def main() -> int:
     # The parser this rests on is self-tested first: if it cannot read a helper
     # body, everything below reads as safe.
     ok, msgs = selftest_the_parser()
+    for m in msgs:
+        print(m)
+    if not ok:
+        fail = True
+
+    ok, msgs = selftest_the_fallback_detector()
     for m in msgs:
         print(m)
     if not ok:
