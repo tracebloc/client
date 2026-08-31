@@ -11,6 +11,8 @@ Read [`../MIGRATIONS.md`](../MIGRATIONS.md) first for the *why* — this directo
 | `tenant-config.example.env` | Per-tenant secrets + PV mappings template. Copy, fill in real values, keep local. **Never commit a populated copy.** |
 | `generate.sh` | Reads `tenant-config.env` (or whatever you point `TENANT_CONFIG` at) and emits `values.yaml`, `pvcs.yaml`, `storageclass.yaml` for every tenant in the file, into `/tmp/tracebloc-migration-<tenant>/`. |
 | `migrate-tenant.sh phase1\|phase2 <tenant>` | Parameterised runbook. Phase 1 is non-destructive (mysqldump, AWS Backup, render). Phase 2 is destructive (`helm uninstall` → claimRef clear → SC re-create → PVC pre-create → `helm install` → verify). |
+| `regcred-preflight.sh <rel> <ns> <chart> <values.yaml>` | Gate for the `dockerRegistry.create` -> `existingSecret` migration (backend#2571). Renders the chart with the values you are about to apply and refuses unless the target pull Secret exists, with the right type, in **every** namespace the render references it from. `helm upgrade` does not check this: a copy made into only one of the two namespaces reports `STATUS: deployed` and leaves those workloads unable to pull. Exit 0 safe, 1 would break, 2 cannot tell. |
+| `regcred-copy.py <new-name>` | Copies a Helm-managed pull Secret under an operator-owned name, stripping every trace of Helm ownership so Helm cannot adopt and later delete it. The credential is never decoded, printed or retyped. The new name must NOT be `<release>-regcred` — that is the chart's own name and applying over it rewrites the live Secret in place. |
 
 ## Workflow
 
