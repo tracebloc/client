@@ -83,13 +83,42 @@ CLI_VERSION="${TRACEBLOC_CLI_VERSION:-}"
 # A customer reached install.sh via `curl | sh`, so curl always exists. Minimal
 # base images may ship neither curl nor a shell beyond /bin/sh — install what we
 # need so the run mirrors a real machine. We are root in the container.
+# Package installs run in an EPHEMERAL CI container against distro mirrors that
+# occasionally STALL rather than fail. An unbounded `zypper`/`apt`/`dnf` then hangs
+# until the job's `timeout-minutes`, and GitHub reports that as `cancelled` — NOT a
+# red check — so a scheduled run can rot unnoticed for a week (backend#2859:
+# opensuse/leap:15.6 hung the full 20 min on 2026-08-31 while every other leg, and
+# this same script run by hand, went green in ~80s). Same infra-stall class the
+# workflow already bounds one layer out for `docker pull` (#525/#592) — the
+# container's own package installs were the layer left unbounded. Bound each attempt
+# and retry: a transient stall recovers (→ green); a genuinely dead mirror fails
+# FAST with an honest error (→ red), never a silent 20-minute cancel. `command -v`
+# (not has()) so this is safe even before common.sh is sourced; notices go to stderr
+# so a caller's `>/dev/null` can't swallow them.
+_pm_run() { # bounded + retried package-manager invocation; $@ = the PM argv
+  local i
+  for i in 1 2 3; do
+    if   command -v timeout  >/dev/null 2>&1; then timeout  "${TB_PM_TIMEOUT:-60}" "$@" && return 0
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "${TB_PM_TIMEOUT:-60}" "$@" && return 0
+    else "$@" && return 0; fi
+    echo "::warning::package-manager step stalled or failed (attempt $i/3): $*" >&2
+    # No backoff after the LAST attempt. Sized so the pathological all-installs-
+    # stall case (a few best-effort installs × 3 bounded attempts) stays well under
+    # the job's 20-min timeout-minutes, so a dead mirror fails RED here — it does
+    # not run the clock out into a silent `cancelled` (the very failure of #2859).
+    [ "$i" -lt 3 ] && sleep $((i * 5))
+  done
+  echo "::error::package-manager step failed after 3 bounded attempts: $* — distro-mirror connectivity inside the CI container, not this PR. Re-run this job." >&2
+  return 1
+}
+
 _pm_install() { # install one or more packages with whatever PM exists; best-effort
-  if   command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq "$@"
-  elif command -v dnf     >/dev/null 2>&1; then dnf install -y -q "$@"
-  elif command -v yum     >/dev/null 2>&1; then yum install -y -q "$@"
-  elif command -v zypper  >/dev/null 2>&1; then zypper --non-interactive --quiet install "$@"
-  elif command -v apk     >/dev/null 2>&1; then apk add --no-cache "$@" >/dev/null
-  elif command -v pacman  >/dev/null 2>&1; then pacman -Sy --noconfirm "$@" >/dev/null
+  if   command -v apt-get >/dev/null 2>&1; then _pm_run apt-get update -qq && _pm_run apt-get install -y -qq "$@"
+  elif command -v dnf     >/dev/null 2>&1; then _pm_run dnf install -y -q "$@"
+  elif command -v yum     >/dev/null 2>&1; then _pm_run yum install -y -q "$@"
+  elif command -v zypper  >/dev/null 2>&1; then _pm_run zypper --non-interactive --quiet install "$@"
+  elif command -v apk     >/dev/null 2>&1; then _pm_run apk add --no-cache "$@" >/dev/null
+  elif command -v pacman  >/dev/null 2>&1; then _pm_run pacman -Sy --noconfirm "$@" >/dev/null
   fi
 }
 
