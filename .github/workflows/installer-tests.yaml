@@ -153,6 +153,24 @@ jobs:
           $cfg.Output.Verbosity = "Detailed"
           Invoke-Pester -Configuration $cfg
 
+  mutation-check:
+    # EVERY GUARD MUST STILL CATCH ITS OWN BUG. 1000+ green assertions prove
+    # nothing on their own: most installer guards read a property off the SOURCE
+    # TEXT, and such a guard passes forever once the string drifts. This
+    # reintroduces each fixed defect into a COPY of the tree and requires the
+    # suite to go red. backend#2675 / #2849 are why -- both were "already fixed",
+    # and both were found by a human running the installer instead.
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prove every installer guard still bites
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          pwsh -NoProfile -File scripts/tests/mutation-check.ps1
+
   distro-prereqs:
     timeout-minutes: 20
     # Runs the installer's REAL Linux prerequisite path in a fresh container for
