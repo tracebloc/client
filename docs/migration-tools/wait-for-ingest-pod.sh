@@ -58,7 +58,7 @@
 #  release named `…ingest…`) makes the blocking wait hand off to nothing — a
 #  silent loss of the one guarantee this script exists to give. Anchoring also
 #  retires the control-plane denylist the tool needs. The tool carries the same
-#  `/ingest/` hole; that is tracked separately for a fix in both.
+#  `/ingest/` hole; tracked for a matching fix in backend#2887.
 #
 #  READ-ONLY. It only ever `kubectl get pods`. It changes nothing, and it does not
 #  read Secrets or pod envs — the readiness tool it hands off to does that.
