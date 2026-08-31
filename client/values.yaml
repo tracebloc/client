@@ -1742,16 +1742,18 @@ bootstrapDbPassword: ""
 # Any tooling/runbook that dials root with the old literal must move to the
 # Secret first, or it breaks at rotation.
 #
-# GUARDED (backend#2879). Because that DDL is manual and mandatory, the chart
-# REFUSES to render a rotation that would silently break auth: when the gate is
-# on, the chart would MINT a new random root password (no mysqlRootPassword pin,
-# no MYSQL_ROOT_PASSWORD already in the Secret), AND the MySQL datadir PVC
-# already exists in the cluster, the render FAILS at template time naming
+# GUARDED (backend#2879, backend#2892). Because that DDL is manual and mandatory,
+# the chart REFUSES to render a rotation that would silently break auth: when the
+# gate is on, the chart would MINT a new random root password (no mysqlRootPassword
+# pin, no MYSQL_ROOT_PASSWORD already in the Secret), AND the MySQL datadir already
+# exists, the render FAILS at template time naming
 # docs/migration-tools/rotate-mysql-root.md — rather than at runtime with a 1045.
-# A FRESH install is unaffected (no datadir yet → born rotated), and so is every
-# `helm template`/`--dry-run`/GitOps render (the datadir lookup is empty without
-# a live cluster). Acknowledge the manual migration with
-# mysqlRootRotationAcknowledged below to proceed on an existing fleet.
+# "Datadir already exists" is read from the live cluster (the mysql-pvc `lookup`)
+# and, for cluster-less renderers that get an empty lookup — ArgoCD's default
+# render, Flux post-render, `helm template`, `--dry-run` — from mysqlDatadirExists
+# below (backend#2892), so a GitOps fleet is refused too. A FRESH install sets
+# neither → unaffected (no datadir yet → born rotated). Acknowledge the manual
+# migration with mysqlRootRotationAcknowledged below to proceed on an existing fleet.
 #
 # UNSET by default: the effective value comes from rotateMysqlRootByEnv below,
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
@@ -1787,6 +1789,33 @@ mysqlRootPassword: ""
 # re-minted). It does NOT run any DDL and does NOT weaken a FRESH install (which
 # never needs it). Leaving stale --set flags on is harmless here.
 mysqlRootRotationAcknowledged:
+
+# Declare that this fleet's MySQL datadir ALREADY EXISTS (backend#2892; chart
+# `>= 1.9.90`). Normally unset. The existing-datadir guard above (backend#2879)
+# detects the datadir with a live-cluster `lookup` of mysql-pvc — but `lookup`
+# returns nothing under every CLUSTER-LESS renderer (ArgoCD's default render, Flux
+# post-render, `helm template`, `--dry-run`), so a GitOps-managed fleet that flips
+# rotateMysqlRoot on over an existing datadir would otherwise fall straight through
+# the guard and mint a root password the live database never got — the exact silent
+# 1045 the guard exists to stop. Setting this true asserts the datadir exists
+# WITHOUT a cluster read, so the flip is REFUSED offline instead. Pin it in the
+# fleet's checked-in values overlay: a DURABLE per-fleet fact (an existing install
+# stays existing), the GitOps counterpart of the live `lookup`. A FRESH install
+# leaves it unset and is born rotated.
+#
+# PROTECTION, not an offline rotation path. It converts the silent mint into a loud
+# refusal; it does NOT make a cluster-less rotation converge, because the generated
+# root password is itself not preserved offline — tier-2 preservation is a live
+# `lookup` too (the same limit the chart documents for clientId/clientPassword), so
+# a bare mint re-generates a different value every render. To actually rotate a
+# cluster-less fleet, pin mysqlRootPassword (tier 1, deterministic across renders —
+# and it bypasses this guard) or render server-side (argocd-repo-server against the
+# live cluster), where both lookups work. On a live/server-side render this is
+# self-expiring — once rotated, tier 2 preserves MYSQL_ROOT_PASSWORD and the mint
+# branch is never reached again. Charts `< 1.9.90` ignore this key (open schema), so
+# it gives no protection there — upgrade first. See
+# docs/migration-tools/rotate-mysql-root.md.
+mysqlDatadirExists:
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

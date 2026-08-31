@@ -23,6 +23,61 @@ render**, naming this runbook, unless you pass
 below. So the gate and this migration are coupled in the chart now, not only in
 prose — a fresh install is still born rotated with no operator action.
 
+The chart sees "a datadir already exists" by looking the `mysql-pvc`
+PersistentVolumeClaim up **in the live cluster**. That look-up returns nothing
+under any **cluster-less** renderer — ArgoCD's default (non–server-side) render,
+Flux post-render, `helm template`, `--dry-run=client` — so on those the guard is
+inert and the flip would render straight through to the silent 1045 it exists to
+stop (backend#2892, chart `1.9.90`). If this fleet is GitOps-managed, do the
+[pre-flight for GitOps-managed fleets](#pre-flight-for-gitops-managed-fleets)
+below **before** you enable the gate. It is a hard pre-flight, not an optional
+note.
+
+## Pre-flight for GitOps-managed fleets
+
+**Do this before enabling `rotateMysqlRoot` if this fleet is rendered by ArgoCD
+(default, non–server-side), Flux, or any pipeline that renders manifests without
+a live cluster.** Two separate things break offline, and they need different
+fixes:
+
+1. **The guard goes inert.** The existing-datadir guard's `mysql-pvc` look-up is
+   empty cluster-less (backend#2892), so it would not fire and the flip would mint
+   a new root password the live database never got — the exact silent `1045 Access
+   denied for user 'root'` this runbook exists to prevent.
+2. **A generated value is not preserved.** The chart keeps a generated
+   `MYSQL_ROOT_PASSWORD` stable across upgrades with a live `lookup` of the Secret
+   (tier 2), which is *also* empty cluster-less — the same limit the chart
+   documents for `clientId`/`clientPassword`. So a bare mint re-generates a
+   **different** random password on every render and root auth never settles.
+
+Pick your path:
+
+- **B — render server-side against the live cluster (recommended to actually
+  rotate).** ArgoCD server-side render (`argocd-repo-server` pointed at the live
+  cluster), or any renderer that runs template functions with cluster access. Both
+  look-ups then work: the guard fires exactly as on a manual `helm upgrade`, and
+  the generated value is preserved across renders. This fixes **(1) and (2)**.
+  Choose it if you can guarantee *every* render of this fleet is server-side — one
+  default-mode render slips both.
+
+- **A — declare the datadir (protection when you can't render server-side).** Pin
+  `mysqlDatadirExists: true` in the fleet's checked-in overlay (chart `>= 1.9.90`;
+  older charts ignore it — open schema — so the protection is simply absent, and
+  you must upgrade first). It asserts the datadir exists without a cluster read, so
+  an accidental `rotateMysqlRoot` flip **fails the render** naming this runbook
+  instead of silently minting — it fixes **(1)** only. It does **not** fix (2): to
+  actually rotate offline you must also give the value a cluster-less-stable
+  source — pin `mysqlRootPassword` to a fixed alphanumeric value (tier 1,
+  deterministic across renders, and it bypasses the mint guard entirely) and run
+  the `ALTER USER` below to that value. `mysqlRootRotationAcknowledged=true` alone
+  only clears the guard; it does not stabilise the minted value.
+
+The acknowledgement escape hatch is the same on both paths:
+`mysqlRootRotationAcknowledged=true` is what lets the render through once you
+commit to running the `ALTER USER` step. Everything below then applies; a GitOps
+fleet commits these values to its overlay instead of running the `helm upgrade`
+shown.
+
 ## Preconditions (per fleet, do in order)
 
 0. **You can actually reach the fleet, with the permissions these steps need.**
@@ -91,7 +146,12 @@ prose — a fresh install is still born rotated with no operator action.
    this runbook — by design, so the flip cannot land as a silent 1045. The flag
    is inert on a fresh install (no datadir yet → born rotated) and ignored by
    charts older than `1.9.89` (schema is open), so it is safe to pass
-   unconditionally.
+   unconditionally. On a **GitOps-managed** fleet, commit these values to the
+   fleet's overlay instead of running this `helm upgrade`, and do the
+   [pre-flight](#pre-flight-for-gitops-managed-fleets) first — cluster-less
+   `mysqlRootRotationAcknowledged=true` clears the guard but does not by itself
+   give a converging rotation (path A there), so pin `mysqlRootPassword` or render
+   server-side (path B).
    ```bash
    helm repo add tracebloc https://tracebloc.github.io/client && helm repo update tracebloc
    helm upgrade <release> tracebloc/client --version <chart> -n <ns> \
