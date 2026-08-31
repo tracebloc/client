@@ -51,11 +51,13 @@ env: {
   # Optional, OFF by default: let jobs-manager size the training-job envelope
   # from node allocatable capacity instead of the literal above --
   # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)). MEMORY is requests == limits; CPU is a
-  # request-only share weight with NO limit since backend#2418, so the job pod
-  # is BURSTABLE. It is not Guaranteed QoS -- this line said it was until
-  # backend#2872, and `test_pod_envelope_sizing.py` asserts the opposite
-  # ("cpu" not in resource_limits).
+  # floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and
+  # CPU is a request-only share weight with NO limit since backend#2418, so the
+  # job pod is BURSTABLE -- not Guaranteed QoS, as this line said until
+  # backend#2872 (`test_pod_envelope_sizing.py` asserts the opposite: "cpu" not
+  # in resource_limits). With this flag OFF -- the default -- jobs-manager uses
+  # its built-in literal on requests AND limits, so those pods are GUARANTEED.
+  # The class follows the flag; do not read "Burstable" as the default.
   #
   # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
   # an explicit envelope always wins, and this key is then inert (jobs-manager

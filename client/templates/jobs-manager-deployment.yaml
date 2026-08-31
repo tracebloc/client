@@ -575,15 +575,25 @@ spec:
           value: {{ if ne .Values.resourceMonitor false }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
-        # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi
-        # floors; MEMORY requests == limits, CPU request-only with no limit since
-        # backend#2418, so the job pod is Burstable — this line said "Guaranteed
-        # QoS" until backend#2872, which #2418 had already made false). With
-        # derivation off (the
-        # default), jobs-manager instead uses its built-in fallback — the
-        # contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254 image
-        # used cpu=2,memory=8Gi, the value this template used to inject), so the
-        # spawned-job default drops when the runtime image crosses that version.
+        # sizes the envelope from node allocatable — BUT ONLY IF
+        # DERIVE_JOB_ENVELOPE is set. It is off by default, so the two cases
+        # differ and so does their QoS class (backend#2872; this line said
+        # "requests == limits / Guaranteed QoS" flatly, which #2418 had already
+        # made false for one case and which was never true of both):
+        #
+        #   * derivation ON  -> 75% with cpu=2/memory=8Gi floors; MEMORY
+        #     requests == limits, CPU request-only with NO limit since
+        #     backend#2418 -> the job pod is BURSTABLE.
+        #   * derivation OFF (the default) -> jobs-manager's built-in fallback,
+        #     the contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254
+        #     image used cpu=2,memory=8Gi, the value this template used to
+        #     inject), assigned to requests AND limits -> the job pod is
+        #     GUARANTEED. client-runtime's own comment says it: "the literal
+        #     (and a symmetric env-override) has request == limit, so those pods
+        #     are Guaranteed".
+        #
+        # So the spawned-job default drops when the runtime image crosses #2254,
+        # and the class depends on the flag, not on this template.
         # The standalone installer writes explicit values (backend#1236), so the
         # derivation path applies to chart-direct installs only.
         #
