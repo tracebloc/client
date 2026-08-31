@@ -4726,14 +4726,14 @@ function Install-GpuDevicePlugin {
       if ($gpuOk) {
         Info "NVIDIA device plugin deployed -- verifying the node advertises a GPU..."
       } else {
-        Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+        Warn "Couldn't enable GPU acceleration (exited $(Format-ExitCode $LASTEXITCODE)) - continuing in CPU mode. Re-run the installer later to retry."
       }
       return $gpuOk
     } catch {
       # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
       # (#577 fatal-vs-recoverable) — otherwise the throw would reach the top-level
       # boundary and stop everything. Warn and continue in CPU mode.
-      Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
+      Warn "Couldn't enable GPU acceleration (exited $(Format-ExitCode $LASTEXITCODE)) - continuing in CPU mode. Re-run the installer later to retry."
       Log "GPU device-plugin setup error: $($_.Exception.Message)"
       return $false
     } finally {
@@ -5708,7 +5708,7 @@ function Invoke-ProvisionClient {
   Write-Host "  (on this or any device) and enter the code:"
   Write-Host ""
   & tracebloc login
-  if ($LASTEXITCODE -ne 0) { Err "Sign-in didn't complete - re-run the installer to try again." }
+  if ($LASTEXITCODE -ne 0) { Err "Sign-in didn't complete (exited $(Format-ExitCode $LASTEXITCODE)) - re-run the installer to try again." }
 
   # One-client-per-machine pre-flight (mirrors provision.sh #303): if a client
   # is already installed here and the signed-in account can't be shown to own
@@ -6222,7 +6222,7 @@ $envBlock
     Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
     $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
     Log "helm repo add: $addOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
+    if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL) (helm exited $(Format-ExitCode $LASTEXITCODE))." $addOutput }
   }
 
   # Pre-create this release's hostPath dirs BEFORE Helm, so kubelet never gets to
@@ -6275,7 +6275,7 @@ $envBlock
       --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" `
       --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
     # the clientId line, never regenerate — the live release is the truth.
     if (Test-Path $valuesFile) {
@@ -6291,7 +6291,7 @@ $envBlock
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client installation failed." $helmOutput }
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
   }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the

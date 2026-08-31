@@ -3885,6 +3885,18 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
           $codeVars += $a.Left.VariablePath.UserPath
         }
       }
+      # AND THE ONE THE LANGUAGE ASSIGNS. $LASTEXITCODE is PowerShell's
+      # automatic for the exit status of the last native command -- it is never
+      # the LEFT side of an assignment, so a derivation built purely from
+      # assignment statements cannot see it. It is also the commonest way this
+      # file spells the gate: 21 branch sites, against four derived locals.
+      #
+      # This is not a hand-list creeping back in. $LASTEXITCODE holds an exit
+      # code BY DEFINITION OF THE LANGUAGE, which is the same authority the
+      # derivation above appeals to -- it just reaches it through the automatic
+      # variable table rather than through an assignment. The rule stays "a
+      # variable that holds an exit code"; only the way of knowing differs.
+      $codeVars += 'LASTEXITCODE'
       $codeVars = @($codeVars | Sort-Object -Unique)
       $varAlt = if ($codeVars.Count) {
         '|\$(' + (($codeVars | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*-(eq|ne)\s*0'
