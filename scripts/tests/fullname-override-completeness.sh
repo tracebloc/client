@@ -229,11 +229,32 @@ for VALUES in "${profiles[@]}"; do
   # which is a legitimate finding code. The property that actually licenses
   # assertion 6 is that the count was PRODUCED, so that is what is tracked.
   [ -n "${pc:-}" ] || pathclass_missing=$((pathclass_missing + 1))
-  if [ "$rc" -eq 2 ]; then
-    echo "[ERROR] the guard could not run (see above). This is NOT a verdict on the chart."
-    exit 2
-  fi
-  [ "$rc" -eq 0 ] || failures=$((failures + 1))
+  # EXIT CODES THE SIDECAR OWNS: 0 clean, 1 a real finding, 2 could-not-run.
+  # ANYTHING ELSE MEANS IT DID NOT RUN, and lumping those into `failures` was the
+  # half of @saadqbal's interpreter finding that survived the fix above: a
+  # `python3` that EXISTS and exits 127 -- a stale pyenv shim, a dangling symlink,
+  # a 126 from a non-executable interpreter, a 137 from an OOM kill -- produced no
+  # output, no PATHCLASS, and a final line reading "fullnameOverride is incomplete
+  # in N profile check(s)". A broken tool reported as a chart defect, which is the
+  # exact misdiagnosis the module-level PyYAML refusal and the interpreter
+  # preflight were both added to remove.
+  #
+  # THE `command -v python3` PREFLIGHT CANNOT COVER THIS, and it reads as though
+  # it does: `command -v` answers "is there something on PATH by that name", not
+  # "does it run". A shim that execs a deleted interpreter passes it and then
+  # exits 127 here.
+  case "$rc" in
+    0) ;;
+    1) failures=$((failures + 1)) ;;
+    *)
+      echo "[ERROR] the assertions exited $rc, which is not a verdict: 0 is clean,"
+      echo "        1 is a finding, 2 is could-not-run. Anything else means the"
+      echo "        sidecar did not run -- a python3 that exists but exits non-zero"
+      echo "        (a stale shim), a non-executable interpreter, or a killed"
+      echo "        process. NOTHING ABOUT fullnameOverride WAS CHECKED."
+      exit 2
+      ;;
+  esac
 done
 
 # --- 5. THE GUARD REFUSES TO RUN HALF OF ITSELF -----------------------------
