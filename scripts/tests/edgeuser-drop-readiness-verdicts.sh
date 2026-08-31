@@ -46,7 +46,16 @@ case "$args" in
       *)                 awk '{print $1}' "$S/pods" 2>/dev/null ;;
     esac
     exit 0 ;;
-  *"get secret"*)     cat "$S/secrets.json" 2>/dev/null || echo '{"items":[]}'; exit 0 ;;
+  # A FAILED FETCH MUST BE EXPRESSIBLE, or the fixture cannot tell the two causes
+  # apart at all (backend#2835). `secretsunreadable` models the real observed
+  # failure -- a dropped connection to a private-endpoint cluster -- which is a
+  # NON-ZERO exit with diagnostics on stderr, not an empty JSON document.
+  *"get secret"*)
+    if [ -f "$S/secretsunreadable" ]; then
+      echo 'error: unexpected error when reading response body. Original error: http2: client connection lost' >&2
+      exit 1
+    fi
+    cat "$S/secrets.json" 2>/dev/null || echo '{"items":[]}'; exit 0 ;;
 esac
 case "$args" in
   *logs*)
@@ -716,6 +725,62 @@ run_case "the DB_BOOTSTRAP_PASSWORD fallback drives the post-drop confirmation t
   "$D" 0 "edgeuser is absent from mysql.user" --phase post-drop
 
 # ===========================================================================
+#  backend#2835 — the tool must not name the wrong CAUSE.
+#  Both defects below fail closed already; what they got wrong is what they SAY,
+#  and an operator acts on what it says immediately before an irreversible DROP.
+# ===========================================================================
+
+# E. An unreadable Secret set must blame ITSELF, not a missing key. Before the
+#    fix this rendered as "could not enumerate as tb_meta -- cannot tell", which
+#    sends the operator hunting for a Secret that is present and fine.
+D="$TMP/secrets-unreadable"; clean_fleet "$D"
+touch "$D/secretsunreadable"
+run_case "an unreadable Secret set is blamed on the FETCH, not on an absent key" \
+  "$D" 1 "could not read the namespace Secret set"
+
+# F. ...and it must still fail closed. Same fixture, asserting the verdict rather
+#    than the wording -- a clear message that stopped gating would be worse than
+#    the confusing one it replaced.
+run_case "an unreadable Secret set still fails closed" \
+  "$D" 1 "NOT DROP-READY"
+
+# G. Growth in `metadata` is a SCHEMA CHANGE and must say so. clean_fleet writes
+#    3 and run_case passes --baseline-metadata 3, so 5 is growth of 2. This is the
+#    staging `respin_markers` case that prompted the ticket.
+D="$TMP/meta-growth"; clean_fleet "$D"
+echo 5 > "$D/count.metadata"
+run_case "metadata growth is called a schema change, not new datasets" \
+  "$D" 0 "the metadata schema is a FIXED bookkeeping set"
+
+# H. The SAME fixture must NOT claim datasets were ingested into `metadata`. This
+#    is the actual defect -- the old line was reachable and wrong, so asserting the
+#    new string alone would pass even if the old one were still printed alongside.
+D="$TMP/meta-growth-neg"; clean_fleet "$D"
+echo 5 > "$D/count.metadata"
+out=$(PATH="$STUB:$PATH" KSTUB_DIR="$D" "$TOOL" --context c --namespace n \
+        --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || true
+if grep -qF "metadata: 5 tables as tb_meta, baseline 3 — grew by 2 (new datasets" <<<"$out"; then
+  printf '  [FAIL] %s\n' "metadata growth must not be attributed to new datasets"; FAILED=$((FAILED+1))
+else
+  printf '  [ok]   %s\n' "metadata growth must not be attributed to new datasets"; PASSED=$((PASSED+1))
+fi
+
+# I. Dataset growth keeps its own, correct rationale -- the fix must not flatten
+#    both schemas onto the metadata wording, which would be the same bug mirrored.
+D="$TMP/ds-growth"; clean_fleet "$D"
+echo 90 > "$D/count.datasets"
+run_case "dataset growth still reads as routine ingestion" \
+  "$D" 0 "new datasets were ingested since the baseline"
+
+# J. MUTATION ANCHOR. Growth must not have become a gate failure: a chart upgrade
+#    adding a bookkeeping table is not a shrink, and reddening it would have
+#    blocked staging on a correct fleet. Both growth fixtures above assert exit 0
+#    for this reason; this asserts the SHRINK still reddens, so "growth passes" is
+#    not achieved by criterion 3 having stopped checking anything.
+D="$TMP/meta-shrink"; clean_fleet "$D"
+echo 2 > "$D/count.metadata"
+run_case "a metadata SHRINK still reddens the gate" \
+  "$D" 1 "SILENT SHRINK of 1"
 # EVERY kubectl CALL IS BOUNDED (tracebloc/backend#2819).
 #
 # The tool's own header says it must never leave an operator without a verdict.
