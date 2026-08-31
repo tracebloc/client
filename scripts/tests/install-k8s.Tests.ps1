@@ -680,6 +680,183 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     Mock Start-Process { throw "no such file" }
     (Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t").State | Should -Be 'spawn-failed'
   }
+  It "counts a caller-declared reboot-required code as SUCCESS, preserving the real code (backend#2849)" {
+    # Docker Desktop's installer returns 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) when the
+    # WSL2 backend adds Windows features -- a COMPLETED install, not a failure. A caller
+    # that declares 3010 succeeds must get State 'ok' AND the real code back (not 0), so
+    # the reboot-pending outcome stays visible in the log.
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 3010; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" -SuccessExitCodes @(0, 3010)
+    $r.State | Should -Be 'ok'; $r.ExitCode | Should -Be 3010
+  }
+  It "a NULL ExitCode is NOT success -- `-contains` does not invert the null case (backend#2849 / Bugbot)" {
+    # PowerShell: `0 -eq $null` is $false and `@(0,3010,...) -contains $null` is $false,
+    # so a null code falls through to 'failed' exactly as the old `$p.ExitCode -eq 0`
+    # did -- the `-contains` swap does NOT make a missing code read as ok. (#913 makes a
+    # real null unlikely by caching .Handle; this pins the guard regardless.)
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+      -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
+    $r.State | Should -Be 'failed'
+  }
+  It "still FAILS a reboot code the caller did NOT declare (default success set is @(0))" {
+    # The broadening is opt-in per caller: without -SuccessExitCodes, 3010 is a failure,
+    # so no non-installer caller (k3d, cluster start) silently starts tolerating it.
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 3010; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t"
+    $r.State | Should -Be 'failed'; $r.ExitCode | Should -Be 3010
+  }
+  It "the reboot-OK code set is exactly the SUCCESS codes -- and excludes winget's FAILURE reboot code" {
+    # Guards against a future 'helpful' addition: 0x8A15010A (-1978334966,
+    # REBOOT_REQUIRED_FOR_INSTALL) means the install did NOT complete -- a real failure,
+    # not a success -- so it must never be in the accepted set.
+    $script:INSTALLER_REBOOT_OK_CODES | Should -Be @(3010, 1641, -1978334967, -1978334965)
+    $script:INSTALLER_REBOOT_OK_CODES | Should -Not -Contain -1978334966
+  }
+  It "the reboot-INITIATED subset is exactly the 'already restarting' codes, and a subset of the OK codes (backend#2849 review)" {
+    # 1641 / winget 0x8A15010B mean the installer ALREADY started a reboot; the handler
+    # branches on this. 3010 / 0x8A150109 (reboot merely REQUIRED, box still up) must NOT
+    # be in this set.
+    $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Be @(1641, -1978334965)
+    foreach ($c in $script:INSTALLER_REBOOT_INITIATED_CODES) { $script:INSTALLER_REBOOT_OK_CODES | Should -Contain $c }
+    $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Not -Contain 3010
+    $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Not -Contain -1978334967
+  }
+  It "an INITIATED reboot arms a FRESH resume and stops via declared exit 2 -- no false handoff claim (backend#2849 / Bugbot)" {
+    # Step 1's RunOnce is spent by Step 2, so an installer that already started a reboot
+    # must re-arm the resume before the box goes down, else the install can't come back.
+    # exit 2 would terminate Pester, so the exit/arm path is asserted on source; the
+    # REQUIRED/no-op branches are exercised behaviorally below.
+    $fn = [regex]::Match($script:ISRC, 'function Invoke-PostInstallReboot[\s\S]*?\n\}').Value
+    $fn | Should -Match 'INSTALLER_REBOOT_INITIATED_CODES -contains \$Result\.ExitCode'
+    $fn | Should -Match 'Register-ResumeAfterReboot'   # arm a FRESH resume before the box goes down
+    $fn | Should -Match 'Set-TbRerunHandoff'           # declared handoff, not an interruption
+    $fn | Should -Match 'exit 2'                       # stop, don't race the reboot into the engine wait
+    # the resume promise carries Step 1's split-account caveat (RunOnce is per-hive)
+    $fn | Should -Match '\$DailyUser -and \(\$DailyUser -ne \$env:USERNAME\)'
+    # BOTH Docker install paths (winget-first and direct) route their result through it,
+    # so the handling can't depend on which path ran (the Bugbot gap).
+    ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r -Label "Docker Desktop"')).Count | Should -BeGreaterOrEqual 2
+  }
+  It "EVERY installer that accepts the reboot codes routes its result through the handler -- no permissive-without-handler gap (backend#2849 review)" {
+    # shujaat's catch: helm-winget opted into the reboot codes but skipped the handler, so
+    # a 1641 there would count as success and continue into the direct-download fallback
+    # while the box restarts underneath, with no resume armed. The invariant that forecloses
+    # this whole class: each -SuccessExitCodes reboot-code site is paired with a handler call.
+    $accepts = ([regex]::Matches($script:ISRC, '-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)')).Count
+    $routes  = ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r ')).Count
+    $accepts | Should -BeGreaterOrEqual 3     # docker-winget, docker-direct, helm-winget
+    $routes  | Should -Be $accepts            # one handler call per accepting site
+  }
+  It "Invoke-PostInstallReboot is a no-op on clean/non-ok and just logs+continues on a REQUIRED reboot (never arms/exits)" {
+    # The REQUIRED reboot (box still up) and the 0 / non-ok cases must NOT arm a resume or
+    # exit -- only the INITIATED set does. If any of these armed a resume, an ordinary
+    # install would strand itself behind a reboot handoff.
+    Mock Log { }
+    Mock Register-ResumeAfterReboot { $true }
+    { Invoke-PostInstallReboot -Result @{ State = 'ok';     ExitCode = 0 }    -Label "X" } | Should -Not -Throw
+    { Invoke-PostInstallReboot -Result @{ State = 'failed'; ExitCode = 1 }    -Label "X" } | Should -Not -Throw
+    { Invoke-PostInstallReboot -Result @{ State = 'ok';     ExitCode = 3010 } -Label "X" } | Should -Not -Throw
+    Should -Invoke Register-ResumeAfterReboot -Times 0
+  }
+  It "accepts EVERY reboot-OK code end-to-end (not just 3010), including the negative winget HRESULTs" {
+    # 3010 above is the headline; this drives all four documented codes -- incl. the
+    # Int32-negative winget HRESULTs -1978334967 / -1978334965 -- through the real
+    # `-contains` path so a mistyped code or a negative-Int32 comparison regression is
+    # caught behaviorally, not just as constant membership.
+    Mock Wait-ProcessWithDeadline { $true }
+    foreach ($code in $script:INSTALLER_REBOOT_OK_CODES) {
+      # Build the mock with the literal interpolated in, so the returned ExitCode is not
+      # captured by reference (Pester runs the mock body in a later scope).
+      Mock Start-Process ([scriptblock]::Create("[pscustomobject]@{ ExitCode = $code; HasExited = 1 -eq 1 }"))
+      $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
+      $r.State | Should -Be 'ok' -Because "code $code is a documented reboot-pending success"
+      $r.ExitCode | Should -Be $code
+    }
+    # winget REBOOT_REQUIRED_FOR_INSTALL (-1978334966) means the install did NOT complete:
+    # it must stay 'failed' even when the installer reboot-OK set is passed.
+    Mock Start-Process ([scriptblock]::Create("[pscustomobject]@{ ExitCode = -1978334966; HasExited = 1 -eq 1 }"))
+    (Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+      -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)).State | Should -Be 'failed'
+  }
+  It "both Docker install paths opt into the reboot-OK codes so a completed install isn't aborted (backend#2849 finding 1)" {
+    # The fatal direct path (docker-direct) and the best-effort winget path both pass the
+    # reboot-OK codes. Without this, a 3010 success is misfiled 'failed' and the direct
+    # path Errs out on a Docker Desktop that actually installed -- the reopened finding 1.
+    $script:ISRC | Should -Match 'Invoke-TrackedInstall -FilePath \$installer[\s\S]{0,400}-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)'
+    $script:ISRC | Should -Match 'Invoke-TrackedInstall -FilePath "winget" -ArgumentList \$wingetArgs[\s\S]{0,400}-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)'
+  }
+}
+
+Describe "Format-ExitCode (backend#2849 the exit-code slot is never empty)" {
+  # backend#2849: the Windows journey printed "Docker Desktop installation failed
+  # (installer exited )" and "wsl exited " -- the ONE number that names the cause,
+  # dropped. Format-ExitCode is the guarantee that a failure line can never render a
+  # blank code, whatever the captured value.
+  It "renders a real code verbatim" {
+    Format-ExitCode 0   | Should -Be '0'
+    Format-ExitCode 1   | Should -Be '1'
+    Format-ExitCode 3   | Should -Be '3'
+    Format-ExitCode 137 | Should -Be '137'
+    Format-ExitCode -1  | Should -Be '-1'
+  }
+  It "never returns blank for an absent code ($null / empty / whitespace)" {
+    foreach ($code in @($null, '', '   ', "`t")) {
+      $out = Format-ExitCode $code
+      $out               | Should -Not -Match '^\s*$'     # not empty, not whitespace
+      $out               | Should -Be 'with no code reported'
+    }
+  }
+  It "no exit-code value can produce an empty slot in the failure message" {
+    # The load-bearing assertion for the acceptance criterion: build the SAME
+    # message the installer emits and prove the slot after 'exited ' is never blank,
+    # across every value ExitCode can carry (including the $null that shipped).
+    foreach ($code in @($null, '', '   ', "`t", 0, 1, 3, 137, -1)) {
+      $docker = "Docker Desktop installation failed (installer exited $(Format-ExitCode $code)). Install it manually and re-run."
+      $wsl    = "Couldn't update WSL automatically (wsl exited $(Format-ExitCode $code))."
+      $docker | Should -Match 'installer exited \S'       # a non-space char follows 'exited '
+      $docker | Should -Not -Match 'installer exited \)'  # never the empty "exited )"
+      $wsl    | Should -Match 'wsl exited \S'
+      $wsl    | Should -Not -Match 'wsl exited \)'
+    }
+  }
+}
+
+Describe "Wait-ProcessWithDeadline exit-code reliability (backend#2849 root cause)" {
+  BeforeAll { $script:WSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "caches \$Process.Handle before the wait loop (keeps .ExitCode readable after reap)" {
+    # A Start-Process -PassThru process, once reaped, reports a $null ExitCode unless
+    # its handle was retained while it was alive. The cache MUST precede the wait loop.
+    $script:WSRC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]*\$null = \$Process\.Handle[\s\S]*while \(-not \$Process\.HasExited\)'
+  }
+  It "actually touches .Handle at runtime" {
+    # Behavioral proof, not just a source grep: a fake process that records access.
+    $script:handleTouched = $false
+    $fake = [pscustomobject]@{ HasExited = $true }
+    $fake | Add-Member ScriptProperty Handle { $script:handleTouched = $true; [IntPtr]::Zero }
+    $fake | Add-Member ScriptMethod WaitForExit { }
+    $fake | Add-Member ScriptMethod Kill { }
+    Wait-ProcessWithDeadline -Process $fake -Deadline (Get-Date).AddMinutes(1) -Message "t" 6>$null | Out-Null
+    $script:handleTouched | Should -BeTrue
+  }
+}
+
+Describe "Failure lines route exit codes through Format-ExitCode (backend#2849 no drift)" {
+  BeforeAll { $script:FSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the Docker install failure renders via Format-ExitCode" {
+    $script:FSRC | Should -Match 'installer exited \$\(Format-ExitCode \$r\.ExitCode\)'
+  }
+  It "the WSL update failure renders via Format-ExitCode" {
+    $script:FSRC | Should -Match 'wsl exited \$\(Format-ExitCode \$r\.ExitCode\)'
+  }
+  It "no user-facing 'exited' line renders a bare \$r.ExitCode" {
+    # If a new call site reintroduces the raw form, this fails and points at it.
+    $script:FSRC | Should -Not -Match 'exited \$\(\$r\.ExitCode\)'
+  }
 }
 
 Describe "Get-ErrDetailLines (#423 honest failure output)" {
@@ -3562,6 +3739,104 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   }
 }
 
+Describe "Read-ClientName (the client-name prompt cannot hang an unattended install; backend#2836)" {
+  # THE SECOND PROMPT. Right after the reboot question backend#2675 fixed, the
+  # PRIMARY provisioning path asks for a client name with Read-Host. With no
+  # console that call BLOCKS -- and the 3-try "empty Enter" loop is no defence,
+  # because a blocked Read-Host never returns to be retried. Gated on
+  # Test-CanPrompt, an unattended run gets "" and the caller fails closed naming
+  # TRACEBLOC_CLIENT_NAME. Extracted (like Read-RebootChoice) because the call
+  # site ends in Err, which no Pester mock can intercept.
+  It "does not prompt at all when there is no terminal" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the hang" }
+    Read-ClientName | Should -Be ""
+    Should -Invoke Read-Host -Times 0 -Exactly
+  }
+  It "returns the name a present operator types" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "acme-lab" }
+    Read-ClientName | Should -Be "acme-lab"
+    Should -Invoke Read-Host -Times 1 -Exactly
+  }
+  It "retries an empty answer up to three times, then gives up (never an infinite loop)" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Read-ClientName | Should -Be ""
+    Should -Invoke Read-Host -Times 3 -Exactly
+  }
+  It "a Read-Host that throws is 'no name', not a crash" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { throw "console gone" }
+    Read-ClientName | Should -Be ""
+  }
+}
+
+Describe "No Read-Host is reachable without a Test-CanPrompt gate (the hang class stays closed; backend#2836)" {
+  # THE CLASS, NOT THE INSTANCE. A Read-Host with nobody at the console does not
+  # fail, it HANGS -- backend#2675 fixed one such site, backend#2836's audit found
+  # six more. The durable fix is a RULE: every Read-Host in this installer must
+  # sit behind Test-CanPrompt, so an unattended run refuses or hands off instead
+  # of blocking. This asserts the rule against the parsed script, so a future
+  # unguarded Read-Host fails HERE, in CI, rather than in a customer's
+  # console-less install.
+  #
+  # "Guarded" = a Test-CanPrompt CALL appears, lexically before the Read-Host, in
+  # the Read-Host's own enclosing function -- or, for the load-time admin gate
+  # that has no enclosing function, earlier at script scope. Every real guard in
+  # this file has that shape: `if (Test-CanPrompt) { ...Read-Host... }`, an
+  # `if (-not (Test-CanPrompt)) { return/Err }` at the top of the function or
+  # branch, or `$canPrompt = Test-CanPrompt` before the gate. (Comments and
+  # strings that mention Read-Host are invisible to the AST, so they can't
+  # confuse this the way a grep would.)
+  #
+  # LIMITS, on purpose. This is lexical precedence, not true dominance -- a real
+  # dominance/data-flow check would have to follow the admin gate's
+  # `$canPrompt = Test-CanPrompt; if ($canPrompt)` indirection, which is more
+  # machinery than a guard test should carry. So it will MISS a future Read-Host
+  # dropped into the same function (or script scope) as an unrelated earlier
+  # Test-CanPrompt call, and it REQUIRES each prompt to carry its own gate rather
+  # than lean on a caller's. Both are acceptable here: it covers all 11 current
+  # sites and fails the moment any of their gates is removed (that is the
+  # regression this defends against); "self-guarded prompt" is a fine house rule.
+  BeforeAll {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $script:ReadHosts = @($ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Read-Host'
+    }, $true))
+    $script:CanPromptCalls = @($ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Test-CanPrompt'
+    }, $true))
+  }
+
+  It "the AST query actually found Read-Host sites (a zero-site guard is green and worthless)" {
+    $script:ReadHosts.Count | Should -BeGreaterThan 0
+  }
+
+  It "every Read-Host has a Test-CanPrompt gate before it in the same scope" {
+    $unguarded = @()
+    foreach ($rh in $script:ReadHosts) {
+      # Nearest enclosing function; $null => the Read-Host sits at script scope
+      # (the load-time admin gate), where the whole script is the search scope.
+      $fn = $rh.Parent
+      while ($fn -and -not ($fn -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fn = $fn.Parent }
+      $scopeStart = if ($fn) { $fn.Extent.StartOffset } else { 0 }
+      $scopeEnd   = if ($fn) { $fn.Extent.EndOffset }   else { [int]::MaxValue }
+      $gate = $script:CanPromptCalls | Where-Object {
+        $_.Extent.StartOffset -ge $scopeStart -and
+        $_.Extent.EndOffset   -le $scopeEnd   -and
+        $_.Extent.StartOffset -lt $rh.Extent.StartOffset
+      }
+      if (-not $gate) {
+        $where = if ($fn) { $fn.Name } else { "<script scope>" }
+        $unguarded += "line $($rh.Extent.StartLineNumber) (in $where)"
+      }
+    }
+    $unguarded.Count | Should -Be 0 -Because "these Read-Host sites can hang an unattended install: $($unguarded -join '; ')"
+  }
+}
+
 Describe "Test-ApiReachable (bounded probe gates helm; Bugbot)" {
   It "API answers within the timeout -> reachable" {
     Mock kubectl { $global:LASTEXITCODE = 0 }
@@ -4370,7 +4645,14 @@ Describe "Top-level error boundary: crashes become a clean message, never a stac
 
   It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
     $script:PSRC577 | Should -Match 'Show-FatalError \$_'
-    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+    # Anchor on the trap->try pair that opens the top-level boundary, NOT on a
+    # char-window from the TB_PESTER guard. That window (600 chars) only ever
+    # passed by coincidentally matching the admin gate's own inline `try`, ~1200
+    # chars nearer than the real boundary; removing that inline copy in
+    # backend#2836 (one Test-CanPrompt predicate, no inline duplicate) exposed
+    # the miscalibration. The main run's trap routes crashes to Show-FatalError
+    # and sits immediately above the top-level try.
+    $script:PSRC577 | Should -Match 'trap \{ Show-FatalError \$_[\s\S]{0,120}?\}\s*try \{'
   }
 
   It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
@@ -4720,7 +5002,10 @@ Describe "Cluster-create exit-code reliability (#611)" {
   It "Wait-ProcessWithDeadline calls WaitForExit before returning success" {
     # HasExited can flip true before redirected stdout/stderr drain, leaving
     # $proc.ExitCode null; WaitForExit flushes them so every caller reads a real code.
-    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,1600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
+    # Reliability is now co-guaranteed by the .Handle cache at the function's entry
+    # (backend#2849) -- asserted in "Wait-ProcessWithDeadline exit-code reliability
+    # (backend#2849 root cause)" -- so the header->WaitForExit window is wider than it was.
+    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,2600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
   }
 
   It "the null-exit fallback checks BOTH k3d streams (logrus success goes to stderr) (Bugbot)" {

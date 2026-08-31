@@ -148,6 +148,62 @@ tests:
           path: data["auto-upgrade.sh"]
           pattern: "uninstalling\\)"
 
+  # #2877: the #554 recovery must NOT roll back an upgrade that is in flight — a
+  # pending-upgrade is also the state of a currently-running `helm upgrade`. The
+  # rollback is gated on the release's AGE in the pending state; only a wedge
+  # older than the threshold is reclaimed. (The behavioural proof that recent
+  # pending states are NOT rolled back lives in
+  # scripts/tests/auto-upgrade-inflight-vs-wedge.sh, which DRIVES the script; these
+  # are render-level regression guards that the gate is present and ordered.)
+  - it: rollback of a pending-upgrade is gated on its age, never unconditional (#2877)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # The threshold the discrimination turns on…
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "WEDGE_MIN_AGE_SECONDS"
+      # …compared with -ge, so ONLY a release old enough to be an abandoned wedge
+      # is rolled back…
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '-ge "\$WEDGE_MIN_AGE_SECONDS"'
+      # …the age gate must sit BEFORE the rollback, so a recent (in-flight)
+      # pending state can never reach it…
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '(?s)-ge "\$WEDGE_MIN_AGE_SECONDS".*helm rollback "\$RELEASE_NAME"'
+      # …and a too-recent pending state is explicitly NOT rolled back (the tick is
+      # skipped instead), which is the whole point of #2877.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "NOT rolling back"
+
+  - it: CronJob passes the wedge-age threshold to the upgrade script (#2877)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      # Default autoUpgrade.pendingWedgeMinAge "45m" → 2700s, converted at render
+      # time (the script's awk does the age math but not duration parsing).
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: WEDGE_MIN_AGE_SECONDS
+            value: "2700"
+
+  - it: the wedge-age threshold honours an operator override (#2877)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    set:
+      autoUpgrade:
+        pendingWedgeMinAge: "90m"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: WEDGE_MIN_AGE_SECONDS
+            value: "5400"
+
   - it: CronJob has the right schedule, concurrency, and SA wiring
     template: templates/auto-upgrade-cronjob.yaml
     documentIndex: 1

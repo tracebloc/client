@@ -386,6 +386,17 @@ _pf_mysql_engine_decision() {
   if ! declare -F _mysql_engine_decision >/dev/null 2>&1; then
     echo "5.7 no-engine-rule"; return 0
   fi
+  # Dev mode (TRACEBLOC_VALUES_FILE): install_client_helm deploys the caller's file
+  # AS-IS and resolves the engine straight from it (_devmode_engine_decision), NOT
+  # via the auto rule below. Preflight MUST ask that same question, or the auto
+  # rule's "8.4 fresh" green-lights a fresh arm64 host whose silent values file
+  # actually leaves the amd64-only 5.7 default in place — and the refusal then lands
+  # only at step e, after the cluster is already provisioned (backend#2854). The
+  # engine rule and this helper live in the same lib, so the guard above proves both
+  # are loaded.
+  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
+    _devmode_engine_decision; return 0
+  fi
   # Both are read by _mysql_engine_decision through bash dynamic scope, which is
   # what SC2034 can't see (the documented false positive for scripts/lib/*.sh).
   # shellcheck disable=SC2034
@@ -466,6 +477,14 @@ _pf_arch() {
       _pf_fail_line "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it can't run on ${ARCH}."
       hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
       hint "To keep 5.7, enable amd64 emulation and re-run:"
+      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+    values-file)
+      # Dev mode (caller-supplied values file) that did not pin the multi-arch 8.4
+      # engine, so the amd64-only 5.7 chart default is what would render. Two fixes:
+      # pin 8.4 in the file (fresh data only), or enable emulation.
+      _pf_fail_line "The supplied values file leaves the amd64-only MySQL 5.7 engine in place (it doesn't pin 8.4), and that image can't run on ${ARCH}."
+      hint "Pin the native multi-arch 8.4 engine in your values file (images.mysqlClient.tag: \"8.4\" + digest: \"\") — fresh data directories only."
+      hint "Or enable amd64 emulation and re-run:"
       hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
     *)
       # Includes `amd64` (unreachable — this host is not amd64) and
