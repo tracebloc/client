@@ -246,3 +246,71 @@ _render() {
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"Guaranteed"* ]] || return 1
 }
+
+# --- THE MODE THAT RENDERS THE LOCKDOWN JOB ---------------------------------
+# `egress-enforcement-check` renders ONLY with the training NetworkPolicy on, the
+# lockdown flipped (allowExternalHttps=false) and a probe host set -- three values
+# no other mode here sets, so the Job was never classified (Bugbot, review on
+# client#922). Same hole the GPU expect files were added to close: strip its
+# resources and it demotes to BestEffort with the suite still green.
+@test "egress lockdown: the enforcement-check Job is classified too" {
+  local r="$BATS_TEST_TMPDIR/lockdown.yaml"
+  _render true "$r" \
+    --set networkPolicy.training.enabled=true \
+    --set networkPolicy.training.allowExternalHttps=false \
+    --set networkPolicy.training.enforcementProbeHost=1.1.1.1 || return 1
+  run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.lockdown.txt"
+  [ "$status" -eq 0 ] || return 1
+  # The Job this mode exists for must actually BE in the render, or the expect
+  # file's set equality is satisfied by a render that never grew it.
+  [[ "$output" == *"t-egress-enforcement-check"* ]] || return 1
+}
+
+# --- AND THE REASON ONE MORE MODE IS NOT THE FIX ----------------------------
+# Adding a mode closes the instance; it does not close the class. Nothing failed
+# when a pod-bearing template went UNREACHED, so the next conditionally-rendered
+# workload is invisible again — and a name cannot tell you which file produced it,
+# so a template that renders nothing contributes nothing to notice the absence of.
+#
+# BOTH SIDES DERIVED. The chart side greps the templates for a pod-bearing `kind`;
+# the reached side is the union of `--sources` over every mode this suite renders.
+# A new conditionally-rendered workload therefore FAILS until a mode reaches it.
+@test "coverage: every pod-bearing template is classified by at least one mode" {
+  local u="$BATS_TEST_TMPDIR/reached.txt" want="$BATS_TEST_TMPDIR/want.txt"
+  : > "$u"
+  local r
+  for mode in "hostpath" "csi" "nvidia" "amd" "lockdown"; do
+    r="$BATS_TEST_TMPDIR/cov-$mode.yaml"
+    case "$mode" in
+      hostpath) _render true  "$r" ;;
+      csi)      _render false "$r" ;;
+      nvidia)   _render true  "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=nvidia ;;
+      amd)      _render true  "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=amd ;;
+      lockdown) _render true  "$r" \
+                  --set networkPolicy.training.enabled=true \
+                  --set networkPolicy.training.allowExternalHttps=false \
+                  --set networkPolicy.training.enforcementProbeHost=1.1.1.1 ;;
+    esac
+    python3 "$QOS" "$r" --sources >> "$u" || return 1
+  done
+  sort -u -o "$u" "$u"
+
+  # DERIVED, not restated: the chart's own declarations are the denominator.
+  grep -lE '^[[:space:]]*kind:[[:space:]]*(Deployment|StatefulSet|DaemonSet|Job|CronJob)[[:space:]]*$' \
+    "$CHART"/templates/*.yaml | xargs -n1 basename | sort -u > "$want"
+
+  # FAIL CLOSED on an empty denominator: zero templates compares equal to zero
+  # reached, which is how a broken grep reports full coverage.
+  [ -s "$want" ] || return 1
+  [ -s "$u" ] || return 1
+
+  local missing
+  missing=$(comm -23 "$want" "$u")
+  if [ -n "$missing" ]; then
+    echo "pod-bearing template(s) NEVER classified by any mode:"
+    echo "$missing"
+    echo "add a render mode that reaches them, or this suite's class table"
+    echo "silently excludes them and a demotion to BestEffort stays green."
+    return 1
+  fi
+}

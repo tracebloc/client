@@ -36,6 +36,7 @@ Prints one `workload<TAB>class<TAB>reason` line per pod-bearing workload.
 Exits non-zero on anything it cannot determine -- an unreadable render is
 "cannot tell", not "agrees".
 """
+import re
 import sys
 
 try:
@@ -200,7 +201,41 @@ def _pod_spec(d):
     return d["spec"]["template"]["spec"]
 
 
+
+def pod_bearing_sources(text):
+    """Basenames of the templates that emitted a pod-bearing kind in this render.
+
+    Reads the raw text, not the parsed docs: helm's `# Source:` line is a COMMENT
+    and `yaml.safe_load_all` throws it away. Needed because the question "was this
+    template ever classified?" cannot be answered from workload names -- a name
+    does not say which file produced it, and a template that renders nothing
+    contributes no name to notice the absence of.
+    """
+    out, src = set(), None
+    for line in text.splitlines():
+        m = re.match(r"^# Source: (.+)$", line)
+        if m:
+            src = m.group(1).split("/")[-1]
+            continue
+        m = re.match(r"^kind:\s*(\w+)\s*$", line)
+        if m and m.group(1) in POD_KINDS and src:
+            out.add(src)
+    return out
+
+
 def main(argv):
+    if len(argv) == 3 and argv[2] == "--sources":
+        # One basename per line, for the cross-mode coverage assertion in
+        # pod-qos-class.bats. Fails closed on a render with no pod at all.
+        with open(argv[1]) as fh:
+            found = pod_bearing_sources(fh.read())
+        if not found:
+            sys.stderr.write("no pod-bearing template in this render -- "
+                             "refusing to report coverage\n")
+            return 1
+        for s in sorted(found):
+            print(s)
+        return 0
     if len(argv) not in (2, 4) or (len(argv) == 4 and argv[2] != "--expect"):
         sys.stderr.write(__doc__)
         return 2
