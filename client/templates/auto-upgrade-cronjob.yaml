@@ -45,15 +45,18 @@ data:
     # math is Howard Hinnant's civil→days algorithm; the zone offset is applied by
     # hand. now comes from `date -u +%s`, which every date agrees on.
     #
-    # `tr -d '\n'` FIRST (backend#2896): alpine/helm:3.16.4 PRETTY-PRINTS
-    # `helm status -o json`, so its first line is a bare `{`. The awk body below
-    # runs once per input line and `exit`s on the first line without
-    # `last_deployed`, so on pretty-printed JSON it quit on that `{` line and the
-    # age came back EMPTY — every pending-upgrade then took the skip path and NO
-    # abandoned wedge ever rolled back (#2877's recovery was silently inert on
-    # real fleets). Collapsing to a single line makes the parse independent of
-    # helm's formatting; the compact JSON the unit test used to feed happened to
-    # survive line-by-line awk, which is exactly why it hid the bug.
+    # `tr -d '\n'` FIRST (backend#2896): make the parse independent of helm's JSON
+    # FORMATTING. The awk body below runs once per input line and `exit`s on the
+    # first line that lacks `last_deployed`, so it only works on a body where the
+    # key sits on the same line the scan starts — fine for the single-line output
+    # helm actually emits today (v3.16.4 `EncodeJSON` is `json.NewEncoder(out);
+    # enc.Encode(obj)` with no `SetIndent`, i.e. compact JSON, one line), but it
+    # would return EMPTY on any multi-line body: a bare `{` first line, a future
+    # helm that indents, or a differently-built image. Collapsing to one line
+    # first removes that dependence entirely. NOTE: the backend#2896 Bugbot claim
+    # that this image pretty-prints did NOT reproduce — the gate was never inert
+    # on real fleets; this is defensive hardening, not a live fix. Fail-closed is
+    # unchanged: an unreadable/empty body still yields no age (→ skip).
     pending_age_seconds() {
       _now="$(date -u +%s 2>/dev/null || true)"
       [ -n "$_now" ] || return 0
@@ -121,12 +124,12 @@ data:
           # awk-only; `[0-9][0-9]*` (>=1 digit, no quote) so this matches only the
           # bare-number top-level release "version":N, never a quoted
           # chart-metadata "version":"1.2.3" that may also appear in the JSON.
-          # `[ ]*` after the colon (backend#2896): alpine/helm:3.16.4 PRETTY-PRINTS
-          # `-o json` as `"version": 5` (a space after the colon), so a
-          # space-less regex silently matched NOTHING on the real image — the
-          # rollback still fired but this operator-facing warning dropped the
-          # discarded revision number and its `--revision` recovery hint. The
-          # compact JSON the unit test fed had no such space, which hid it.
+          # `[ ]*` after the colon (backend#2896) tolerates an optional space so
+          # the match is independent of formatting: helm's real output is compact
+          # (`"version":N`, no space) and `[ ]*` matches zero spaces, so this is a
+          # strict superset of the previous regex — no behaviour change on the
+          # real image, but it also survives a spaced `"version": N` from a
+          # future indented body. Same defensive hardening as the `tr` above.
           PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[ ]*[0-9][0-9]*/) {
             v = substr($0, RSTART, RLENGTH); sub(/"version":[ ]*/, "", v); print v; exit }')"
           # Surface it (#2877): the rollback discards the pending revision's
