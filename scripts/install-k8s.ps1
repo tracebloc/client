@@ -3499,7 +3499,15 @@ function Test-ExistingClusterKubeletConfig {
     param($n) (docker inspect "k3d-$n-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String)
   } -ArgumentList $CLUSTER_NAME
   if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking the existing cluster's image-GC bound") {
-    $kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+    # .Trim(), like the k3s sibling below (Bugbot, Medium, on client#912). Without
+    # it a failed or empty `docker inspect` comes back as a lone newline, which
+    # PowerShell treats as TRUTHY -- so the `-and` empty-guard passed and the
+    # recreate warning fired on a cluster nobody could read. That is the
+    # cannot-tell-reads-as-missing failure this function is explicitly written to
+    # avoid, and the bash twin stays silent on the same input, so it was also a
+    # twin divergence. Two Out-String hops make it certain rather than likely: the
+    # job body already stringifies, and Receive-Job stringifies again.
+    $kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
   } else {
     Log "docker inspect (kubelet config mount) timed out; skipping the image-GC advisory."
   }

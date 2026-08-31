@@ -36,7 +36,11 @@ run_case() {
 
   if [ -n "$file" ]; then
     local target="$td/$file" n
-    n="$(grep -cF -- "$old" "$target" 2>/dev/null)" || n=0
+    # COUNTED IN PYTHON, not `grep -cF`: grep treats a multi-line pattern as SEVERAL
+    # patterns and counts matching LINES, so a two-line anchor reported 5 when the
+    # real occurrence count was 1. An anchor count that is wrong in the permissive
+    # direction turns the inert-mutation refusal below into noise.
+    n="$(TB_M_TARGET="$target" TB_M_OLD="$old" python3 -c 'import os;print(open(os.environ["TB_M_TARGET"],encoding="utf-8").read().count(os.environ["TB_M_OLD"]))' 2>/dev/null)" || n=0
     if [ "$n" -ne 1 ]; then
       printf '  %-54s ANCHOR MATCHED %sx (INERT MUTATION)\n' "$label" "$n"
       fail=$((fail + 1)); rm -rf "$td"; return
@@ -107,6 +111,16 @@ run_case "bash points the kubelet at a DIFFERENT path than it mounts" "$CS" \
 run_case "ps1 points the kubelet at a DIFFERENT path than it mounts" "$PS" \
   '"--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all"' \
   '"--kubelet-arg=config=/etc/tracebloc/elsewhere.yaml@all"' 1
+
+# THE EMPTY-INPUT AXIS (Bugbot, Medium, on client#912). Values agreed and the
+# presence of a check agreed; how the two twins treat an UNREADABLE inspect did not.
+run_case "ps1 stops trimming, so an empty inspect warns" "$PS" \
+  '$kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()' \
+  '$kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)' 1
+run_case "bash stops returning early on empty mounts (in the KUBELET fn, not a sibling)" "$CS" \
+  '  [[ -z "$mounts" ]] && return 0
+  if ! grep -qx "${TB_KUBELET_CONFIG_NODE_PATH}"' \
+  '  if ! grep -qx "${TB_KUBELET_CONFIG_NODE_PATH}"' 1
 
 # BEHAVIOUR PARITY on the reuse path (Bugbot, Medium, on client#912). The two twins
 # agreed on every VALUE while only one of them looked at an existing cluster, so the

@@ -7552,6 +7552,22 @@ Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
     $window | Should -Match 'Wait-JobWithProgress'
   }
 
+  It 'TRIMS the received inspect output, so an unreadable cluster stays silent' {
+    # Bugbot Medium on client#912. Two Out-String hops (the job body stringifies,
+    # then Receive-Job stringifies again) turn an empty or failed `docker inspect`
+    # into a lone newline -- TRUTHY in PowerShell -- so the `-and` empty-guard
+    # passed and the recreate warning fired on a cluster nobody could read. The
+    # bash twin returns early on the same input, so it was a twin divergence too.
+    #
+    # Asserted inside the FUNCTION's own text: the k3s sibling has always had the
+    # .Trim(), so a whole-file match is satisfied by it while this one has none.
+    # That is exactly how the first version of the drift assertion went vacuous.
+    $fn = [regex]::Match($script:Code,
+      '(?s)function Test-ExistingClusterKubeletConfig \{.*?\n\}').Value
+    $fn | Should -Not -BeNullOrEmpty
+    $fn | Should -Match 'Out-String\)\.Trim\(\)'
+  }
+
   It 'agrees with the bash twin on the operator-visible message' {
     # The agreement guard keys on this exact phrase in both files. If either side
     # rewords it, the guard stops tying them together and this catches it here.

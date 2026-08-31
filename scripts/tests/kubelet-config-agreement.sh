@@ -229,6 +229,45 @@ if [ "$bsh_reuse" -eq 0 ] || [ "$ps1_reuse" -eq 0 ]; then
     "on every VALUE while disagreeing on this, so the checks above cannot see it."
 fi
 
+# BOTH TWINS MUST TREAT AN UNREADABLE INSPECT AS SILENCE (Bugbot, Medium, on
+# client#912). This is a THIRD parity axis, distinct from the two above: the values
+# agreed, the presence-of-a-check agreed, and the EMPTY-INPUT BEHAVIOUR did not.
+#
+# The bash twin guards on `[[ -z "$mounts" ]]`. The ps1 twin received its job output
+# through two Out-String hops without `.Trim()`, so a failed or empty `docker
+# inspect` arrived as a lone newline -- truthy in PowerShell -- and the `-and`
+# empty-guard passed, firing the recreate warning on a cluster nobody could read.
+# Cannot-tell read as missing, on the twin, in the function written to avoid exactly
+# that. Its own k3s sibling `Test-K3sVersionDrift` had the `.Trim()` all along.
+# SCOPED TO THE FUNCTION, for the same reason as the bash side below: the k3s
+# sibling Test-K3sVersionDrift has always had the .Trim(), so a whole-file grep is
+# satisfied by IT while the kubelet function has none. Its own mutation proved that
+# (rc=0, VACUOUS) before this shipped.
+ps1_kubelet_fn="$(awk '/^function Test-ExistingClusterKubeletConfig \{/{f=1} f{print} f&&/^\}$/{exit}' "$PS1_FILE")"
+if [ -z "$ps1_kubelet_fn" ]; then
+  note "could not extract Test-ExistingClusterKubeletConfig's body from install-k8s.ps1" \
+    "Refusing to report on an empty extraction -- zero lines satisfy every check."
+elif ! grep -qE 'Receive-Job \$job[^|]*\| Out-String\)\.Trim\(\)' <<<"$ps1_kubelet_fn"; then
+  note "the ps1 twin does not Trim() the received docker-inspect output" \
+    "Two Out-String hops turn an empty or failed inspect into a lone newline, which" \
+    "is TRUTHY -- so the empty-guard passes and the advisory fires on a cluster that" \
+    "could not be read. The bash twin stays silent on the same input."
+fi
+# SCOPED TO THE FUNCTION'S OWN BODY, and that scoping is the assertion. Four sibling
+# checks in cluster.sh carry the identical `[[ -z "$mounts" ]] && return 0` line, so a
+# whole-file grep is satisfied by any of them: deleting the kubelet one leaves three
+# and the check passes. Caught by its own mutation (ANCHOR MATCHED 4x) before this
+# shipped -- the same "one guard, several call sites, reports on whichever it finds"
+# shape as the finding it exists for.
+bsh_kubelet_fn="$(awk '/^_check_existing_cluster_kubelet_config\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$BASH_LIB")"
+if [ -z "$bsh_kubelet_fn" ]; then
+  note "could not extract _check_existing_cluster_kubelet_config's body from cluster.sh" \
+    "Refusing to report on an empty extraction -- zero lines satisfy every check below."
+elif ! grep -qE '\[\[ -z "\$mounts" \]\] && return 0' <<<"$bsh_kubelet_fn"; then
+  note "the bash twin no longer returns early on empty mounts" \
+    "'Cannot tell' would then read as 'missing' and warn on an unreadable cluster."
+fi
+
 # And the bash check must be CALLED somewhere, not merely defined.
 #
 # THIS ASSERTION IS DELIBERATELY WEAK, AND SAYING SO IS THE POINT (@aptracebloc and
