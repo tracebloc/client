@@ -510,8 +510,24 @@ egressProxy:
 # the hostPath PVs, the Collector's queue -- keep the RELEASE name, because a
 # path is a location: renaming it orphans a tenant's data instead of moving it.
 #
-# Changing it on an existing install renames every resource, which Helm performs
-# as delete + create. Treat it as a migration, not a config tweak.
+# CHANGING IT ON A LIVE RELEASE IS REFUSED, not merely discouraged. Earlier
+# revisions of this comment called it "a migration, not a config tweak", which
+# invited planning a migration the chart will not let you start. `secrets.yaml`
+# now hard-fails at template time when the MySQL PVC is present and no Secret
+# exists under the name this render resolves to -- which is every direction of a
+# rename (unset->A, A->B, A->none) and also a reinstall over a retained PVC. The
+# refusal names the one-command remedy: copy the Secret to the name this render
+# wants. Without it, four credentials would be re-minted while the kept
+# `mysql-pvc` datadir still holds the old ones, the upgrade would report
+# `deployed`, and MySQL would refuse every login.
+#
+# So: choose it at INSTALL time. On a live release, read the refusal message.
+#
+# The commented example below is the EMPTY STRING, which the template treats as
+# unset (`default .Release.Name .Values.fullnameOverride`) and which
+# values.schema.json therefore accepts explicitly -- an earlier revision of the
+# schema pattern required at least one character and would have rejected this
+# very line if uncommented verbatim (Arturo, review of backend#2626).
 # fullnameOverride: ""
 
 # -- Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906).
@@ -1116,7 +1132,16 @@ podDisruptionBudget:
 # already Helm-managed, so there is nothing else to do.
 #
 # BEFORE THE FIRST INSTALL, the Secret has to be adopted, not just created. This
-# chart ALWAYS emits `<release>-secrets`, so a plain `kubectl create secret`
+# chart emits `<release>-secrets` -- or `<fullnameOverride>-secrets` if you set
+# that (see `fullnameOverride` above; `tracebloc.secretName` follows it). USE THE
+# NAME THIS RENDER RESOLVES TO in the three commands below, substituting your
+# override for `<release>` if you have one. Get it from the chart rather than
+# guessing:
+#
+#   helm template <release> ./client -n <ns> --show-only templates/secrets.yaml \
+#     [-f your-values.yaml] | grep -m1 "  name:"
+#
+# Naming the wrong one is not a cosmetic error: a plain `kubectl create secret`
 # leaves an object Helm does not own and `helm install` aborts with
 # `invalid ownership metadata` rather than reading it (Bugbot, #859). Helm adopts
 # a pre-existing object that already carries its three ownership fields, so add

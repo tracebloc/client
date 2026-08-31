@@ -60,6 +60,21 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# PREFLIGHT, IN THE SAME SHAPE AS 23 SIBLINGS IN THIS DIRECTORY, and exit 2 is
+# the point rather than the tidiness (Asad, review of backend#2626).
+#
+# The assertions sidecar already answers "PyYAML is missing" with exit 2 and a
+# named refusal. The INTERPRETER half had no gate at all, and it lands worse:
+# python3 absent gives rc 127, which misses the `exit 2` branch below entirely,
+# increments `failures` once per profile, and the run ends on "fullnameOverride
+# is incomplete in 4 profile check(s)" -- a MISSING TOOL reported as a chart
+# defect, which is exactly the misdiagnosis the module half was fixed for.
+fail_closed() { printf '[ERROR] %s\n' "$1" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || fail_closed \
+  "python3 is required for this check -- assertions 2-5 are a python sidecar and it was not found on PATH. Install python3 or add it to 'make setup'. THIS IS A MISSING TOOL, NOT A VERDICT ON THE CHART: nothing about fullnameOverride was checked."
+command -v helm >/dev/null 2>&1 || fail_closed \
+  "helm is required for this check -- every assertion reads a rendered manifest and it was not found on PATH. THIS IS A MISSING TOOL, NOT A VERDICT ON THE CHART."
+
 # DELIBERATELY LONG, and that is not cosmetic. Assertion 1 diffs two renders
 # that BOTH pass through the helper, so a transformation applied uniformly --
 # `| trunc N` on the default -- cancels out and is invisible to it. With a short
@@ -201,17 +216,39 @@ done
 # deleting that branch left the whole guard green.
 #
 # So invoke the assertions directly with the NOTES arguments MISSING and require
-# a non-zero exit. If this ever passes, a future caller could quietly drop the
-# NOTES render and the guard would report three assertions as four.
-if RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
-   python3 scripts/tests/fullname_override_assertions.py \
-     "$tmp/override.yaml" "$tmp/a.yaml" >/dev/null 2>&1; then
+# THE SPECIFIC exit code that means "checked, and found a problem".
+#
+# EXIT 1, NOT MERELY NON-ZERO, and the difference was a real defect (Asad,
+# review of backend#2626). Written as `if …; then error; else OK; fi`, ANY
+# non-zero satisfied the `else` -- so with python3 absent the sidecar never ran,
+# rc was 127, and this printed `[OK]`. The one assertion whose stated purpose is
+# "an unreachable refusal is one nobody notices has stopped refusing" reported
+# green for a reason unrelated to what it checks. That is the bare
+# `assertRaises(Exception)` shape, in shell.
+#
+# 1 = the assertions ran and refused. 2 = could not run (no PyYAML). 127 = no
+# interpreter. Only the first is the thing being asserted, and the preflight
+# above now makes 127 unreachable anyway -- belt and braces, because this
+# assertion must not be satisfiable by the absence of the thing it invokes.
+set +e
+RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
+  python3 scripts/tests/fullname_override_assertions.py \
+    "$tmp/override.yaml" "$tmp/a.yaml" >/dev/null 2>&1
+selfcheck_rc=$?
+set -e
+if [ "$selfcheck_rc" -eq 1 ]; then
+  echo "-- self-check: the assertions refuse to run without the NOTES render [OK]"
+elif [ "$selfcheck_rc" -eq 0 ]; then
   echo "[ERROR] the assertions PASSED with no rendered NOTES supplied, so a caller"
   echo "        that drops the NOTES render would get a green guard that checked"
   echo "        three things while documenting four."
   failures=$((failures + 1))
 else
-  echo "-- self-check: the assertions refuse to run without the NOTES render [OK]"
+  echo "[ERROR] the self-check could not establish anything: the assertions exited"
+  echo "        $selfcheck_rc, which is neither 0 (passed -- a defect) nor 1 (refused"
+  echo "        -- correct). Exit 2 means the sidecar could not run at all, and any"
+  echo "        other code means it did not get that far. Cannot tell is not OK."
+  failures=$((failures + 1))
 fi
 
 if [ "$failures" -ne 0 ]; then

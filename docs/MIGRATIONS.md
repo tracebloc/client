@@ -70,6 +70,35 @@ If you find yourself reaching for Option B, you actually want Option A or Option
 
 If neither A nor B works and the underlying storage is `Retain`, the data survives PVC deletion. You'll need to rebuild the PVCs manually after uninstall:
 
+**Save the credentials Secret FIRST.** The PVCs carry
+`helm.sh/resource-policy: keep`; the Secret does **not**, so `helm uninstall`
+deletes it while the MySQL datadir survives on the retained PV. The re-install
+would then find a datadir with no matching credentials, and since backend#2626 it
+**refuses at template time** rather than silently re-minting them:
+
+> already has MySQL data (PersistentVolumeClaim "mysql-pvc" …), but there is no
+> Secret named …
+
+That refusal is correct — without it the install would report `deployed` and MySQL
+would refuse every login — but in this flow there is nothing left to copy from
+unless you saved it in step 0. So:
+
+```bash
+# 0. SAVE THE SECRET. Do this before the uninstall; there is no recovering it
+#    afterwards, and the re-install in step 4 will refuse without it.
+#    Get the name this release actually rendered (it follows fullnameOverride if
+#    that is set) rather than assuming <release>-secrets:
+SECRET=$(kubectl -n <ns> get secret -l app.kubernetes.io/instance=<release> \
+  -o jsonpath='{.items[?(@.type=="Opaque")].metadata.name}' | tr ' ' '\n' \
+  | grep -- '-secrets$' | head -1)
+kubectl -n <ns> get secret "$SECRET" -o json > /tmp/tracebloc-secret-backup.json
+```
+
+If you are deliberately starting from an empty database, delete the datadir PVC
+instead and let the chart mint fresh credentials —
+`kubectl -n <ns> delete pvc mysql-pvc`. That is the accept-data-loss path, and it
+is the only other way past the refusal.
+
 ```bash
 # 1. Uninstall (PVCs deleted; PVs go to Released; underlying EFS/EBS intact)
 helm uninstall <release> -n <ns>
@@ -100,6 +129,25 @@ spec:
   volumeName: <pv-name>
 EOF
 ```
+
+```bash
+# 4. Restore the Secret under the name the NEW release will render, then install.
+#    Strip the fields the API server owns, and re-stamp Helm's ownership for the
+#    new release so `helm install` adopts it instead of aborting on
+#    `invalid ownership metadata`.
+jq --arg n "<new-release-name>-secrets" --arg ns "<ns>" --arg rel "<new-release-name>" '
+     .metadata.name = $n
+   | .metadata.namespace = $ns
+   | .metadata.labels["app.kubernetes.io/managed-by"] = "Helm"
+   | .metadata.annotations["meta.helm.sh/release-name"] = $rel
+   | .metadata.annotations["meta.helm.sh/release-namespace"] = $ns
+   | del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp,
+         .metadata.ownerReferences, .metadata.managedFields)' \
+  /tmp/tracebloc-secret-backup.json | kubectl apply -f -
+```
+
+If the new release uses `fullnameOverride`, use `<override>-secrets` as the name
+in step 4 — that is what the chart will look for.
 
 Only safe if the PV's `reclaimPolicy` is `Retain`. With `Delete` you lose data the moment the PV goes Released.
 

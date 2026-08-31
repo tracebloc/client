@@ -49,7 +49,19 @@ import sys
 # sidecar in this tree carries this shape.
 try:
     import yaml
-except ModuleNotFoundError:
+except ImportError:
+    # `ImportError`, NOT `ModuleNotFoundError`, and the distinction is not
+    # pedantic. `ModuleNotFoundError` is a SUBCLASS of `ImportError`, so catching
+    # the subclass misses the parent -- and a plain `ImportError` is exactly what
+    # `scripts/tests/pyyaml-preflight.bats` injects to simulate an absent PyYAML
+    # (`raise ImportError("simulated: PyYAML not installed")`). Measured: under
+    # that simulation the narrow form gave a TRACEBACK and rc 1, i.e. the very
+    # failure this block exists to prevent, while the bats class-rule stayed
+    # green because it reads the AST and accepts either name.
+    #
+    # It is also the real-world case: a PyYAML installed but broken (a partial
+    # wheel, a C-extension mismatch) raises `ImportError`, not
+    # `ModuleNotFoundError`. Catching the parent covers both.
     sys.stderr.write(
         "[ERROR] this guard needs PyYAML and the interpreter does not have it.\n"
         "        Install it:  python3 -m pip install pyyaml\n"
