@@ -1085,6 +1085,14 @@ Describe "Install-ClientHelm" {
   BeforeEach {
     $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false; $env:CLIENT_ENV = $null
     Mock helm { $global:LASTEXITCODE = 0 }
+    # AN OPERATOR IS AT THE TERMINAL for every test in this block -- the
+    # fallback-mode ones supply their answers with `Mock Read-Host`, which is
+    # only a faithful model of an install that CAN prompt. Under Pester the real
+    # Test-CanPrompt is $false (stdin is redirected), so without this the
+    # no-terminal refusal added in backend#2675 fires before any of them reach
+    # the path they are about. The refusal has its own Describe below, where the
+    # non-interactive case is the subject rather than the setup.
+    Mock Test-CanPrompt { $true }
   }
   # Step-4 provisioning state must never leak between tests (#388): unset means
   # the legacy fallback path, which is what the pre-#388 tests below drive.
@@ -3450,6 +3458,107 @@ Describe "Invoke-LeftoverDataGuard (Windows leftover-data guard; Bugbot r3655218
     Invoke-LeftoverDataGuard
     $mysql | Should -Not -Exist                                # leftover dir (+ the link entry) gone
     (Join-Path $outside 'precious.dat') | Should -Exist        # target OUTSIDE never followed/deleted
+  }
+}
+
+Describe "Read-RebootChoice (the reboot prompt cannot hang an unattended install; backend#2675)" {
+  # WHAT THIS DEFENDS. The "Reboot now?" question sits on the path EVERY fresh
+  # Windows install takes -- a fresh host always has WSL2 / Virtual Machine
+  # Platform / Hyper-V still to enable -- and it used to call Read-Host
+  # unconditionally. With nobody at the console that call never returns, so the
+  # `exit 2` handoff below it never happens and the caller watches a live process
+  # do nothing. That is how the e2e Windows journey burned 22 minutes and
+  # reported a timeout with no cause.
+  #
+  # The prompt itself is unreachable from Pester (its caller ends in `exit 2`),
+  # which is exactly why the decision was lifted into this function.
+  It "does not prompt at all when there is no terminal" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the hang" }
+    Read-RebootChoice | Should -Be ""
+    Should -Invoke Read-Host -Times 0
+  }
+  It "an empty answer is 'no reboot', not a retry" {
+    # A terminal IS there and the user just presses Enter: Read-Host returns ""
+    # and the caller's ^[Yy]$ match falls through to Set-TbRerunHandoff +
+    # exit 2 -- the same handoff -NoReboot takes. (Bugbot: the first version
+    # mocked Test-CanPrompt false, so it re-covered the no-terminal early
+    # return and never drove Read-Host at all.)
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Read-RebootChoice | Should -Not -Match "^[Yy]$"
+    Should -Invoke Read-Host -Times 1
+  }
+  It "still asks when a terminal is there" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "y" }
+    Read-RebootChoice | Should -Be "y"
+    Should -Invoke Read-Host -Times 1
+  }
+  It "a Read-Host that throws is 'no reboot', not a crash" {
+    # Same shape as the leftover guard's prompt: a console that dies mid-question
+    # must not take the install with it.
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { throw "console gone" }
+    Read-RebootChoice | Should -Be ""
+  }
+}
+
+Describe "Unattended install with no credentials refuses instead of spinning (backend#2675)" {
+  # THE SPIN. Install-ClientHelm's `fallback` branch reads the credential with
+  # Read-Host and does `continue` on an empty answer WITHOUT charging an attempt
+  # against $credMax. With nothing on stdin that is an infinite loop printing
+  # "Client ID cannot be empty." -- an install that neither finishes nor fails,
+  # which reads to any caller exactly like the reboot-prompt hang above.
+  #
+  # Only the GUARD is exercised here: everything past it needs a live cluster.
+  # Err is mocked to throw, the way the leftover-guard tests do it.
+  BeforeEach {
+    $script:TB_PROV_MODE = "fallback"
+    $env:TRACEBLOC_CLIENT_ID = $null
+    $env:TRACEBLOC_CLIENT_PASSWORD = $null
+  }
+  It "no terminal + no credentials -> refuses, and never reaches a prompt" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the spin" }
+    Mock Err { throw "refused" }
+    Mock Step { }
+    { Install-ClientHelm } | Should -Throw
+    Should -Invoke Read-Host -Times 0
+  }
+  It "the refusal names the two variables that make the path unnecessary" {
+    # Whoever hits this is automating; the message has to be actionable, and the
+    # pair it names is the same one Get-ProvisioningPreset reads. Read straight
+    # off the pure function the branch passes to Err -- capturing it THROUGH a
+    # throwing mock bound differently on every Pester/PowerShell pairing in the
+    # CI matrix (three strategies, three version-specific failures), which is
+    # exactly why the message was lifted out, mirroring Read-RebootChoice.
+    $refusal = Get-UnattendedCredentialRefusal
+    $refusal | Should -Match 'TRACEBLOC_CLIENT_ID'
+    $refusal | Should -Match 'TRACEBLOC_CLIENT_PASSWORD'
+  }
+}
+
+Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#2675)" {
+  # The documented Windows entry point is `irm https://tracebloc.io/i.ps1 | iex`,
+  # and `iex` has nowhere to put a switch: install.ps1 forwards $args, and an
+  # `irm | iex` launch has none. So without this variable there was NO unattended
+  # way to opt out of the reboot prompt on Windows, while the bash twin has had
+  # one for as long as the GPU path has existed.
+  #
+  # Dot-sourced into a CHILD SCOPE (`& { . $ps1; ... }`) so the binding is read
+  # from the script itself rather than asserted against its wording -- and so the
+  # $NoReboot this sets cannot leak into the rest of the suite.
+  BeforeAll { $script:Ps1 = Join-Path $PSScriptRoot "../install-k8s.ps1" }
+  AfterEach { $env:TRACEBLOC_SKIP_REBOOT_PROMPT = $null }
+
+  It "set -> -NoReboot is on without the switch" {
+    $env:TRACEBLOC_SKIP_REBOOT_PROMPT = "1"
+    (& { . $script:Ps1; [bool]$NoReboot }) | Should -BeTrue
+  }
+  It "unset -> -NoReboot stays off (the customer default still asks)" {
+    $env:TRACEBLOC_SKIP_REBOOT_PROMPT = $null
+    (& { . $script:Ps1; [bool]$NoReboot }) | Should -BeFalse
   }
 }
 
