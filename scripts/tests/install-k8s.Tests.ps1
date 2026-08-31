@@ -3523,14 +3523,16 @@ Describe "Unattended install with no credentials refuses instead of spinning (ba
   }
   It "the refusal names the two variables that make the path unnecessary" {
     # Whoever hits this is automating; the message has to be actionable, and the
-    # pair it names is the same one Get-ProvisioningPreset reads.
+    # pair it names is the same one Get-ProvisioningPreset reads. Asserted with
+    # -ParameterFilter rather than by capturing $m inside the mock body: the
+    # capture bound on Pester 6 locally and came back empty on the CI's 5.5.
     Mock Test-CanPrompt { $false }
     Mock Step { }
-    $script:Refusal = ""
-    Mock Err { $script:Refusal = $m; throw "refused" } -ParameterFilter { $true }
+    Mock Err { throw "refused" }
     { Install-ClientHelm } | Should -Throw
-    $script:Refusal | Should -Match 'TRACEBLOC_CLIENT_ID'
-    $script:Refusal | Should -Match 'TRACEBLOC_CLIENT_PASSWORD'
+    Should -Invoke Err -Times 1 -ParameterFilter {
+      "$m" -match 'TRACEBLOC_CLIENT_ID' -and "$m" -match 'TRACEBLOC_CLIENT_PASSWORD'
+    }
   }
 }
 
