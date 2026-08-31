@@ -433,6 +433,14 @@ function Format-ExitCode {
 # the union is safe -- a process can only return codes from its own space.
 $script:INSTALLER_REBOOT_OK_CODES = @(3010, 1641, -1978334967, -1978334965)
 
+# Of the reboot-pending SUCCESS codes above, this subset means the installer has
+# ALREADY INITIATED the reboot (1641 ERROR_SUCCESS_REBOOT_INITIATED, and winget's
+# 0x8A15010B INSTALL_REBOOT_INITIATED) -- the box is going down now -- as opposed to
+# merely REQUIRING one later (3010 / 0x8A150109, machine still up). The Docker log line
+# distinguishes the two so a mid-run termination reads as an expected reboot handoff,
+# not a script that claimed to carry on (backend#2849 review).
+$script:INSTALLER_REBOOT_INITIATED_CODES = @(1641, -1978334965)
+
 # Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
 # with a KILLING deadline (spinner via Wait-ProcessWithDeadline), fold any captured
 # output into the install log, and return the outcome. Mirrors the WSL / k3d-cluster-
@@ -1899,11 +1907,18 @@ function Install-DockerDesktop {
         'failed'       { Err "Docker Desktop installation failed (installer exited $(Format-ExitCode $r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
       }
       # A reboot-pending success code (3010 &c., accepted above) means the install
-      # COMPLETED but the installer wants a reboot to finish -- the WSL2 features it
-      # just touched were already enabled and rebooted in Step 1, so the engine can
-      # still come up now; record the code and press on (backend#2849).
+      # COMPLETED but a reboot is pending -- the WSL2 features it just touched were
+      # already enabled and rebooted in Step 1, so the engine can still come up. Say
+      # which kind, since the two differ in what happens next: a REQUIRED reboot leaves
+      # the box up and we continue here; an INITIATED reboot means the installer is
+      # already restarting the machine, so this line may be the last before it goes
+      # down and the reboot handoff resumes the install (backend#2849).
       if ($r.State -eq 'ok' -and $r.ExitCode -ne 0) {
-        Log "Docker Desktop installed with reboot-pending code $(Format-ExitCode $r.ExitCode); features were enabled in Step 1, continuing to bring up the engine."
+        if ($script:INSTALLER_REBOOT_INITIATED_CODES -contains $r.ExitCode) {
+          Log "Docker Desktop installed and its installer INITIATED a reboot (code $(Format-ExitCode $r.ExitCode)); the machine is restarting -- the install resumes via the reboot handoff."
+        } else {
+          Log "Docker Desktop installed with reboot pending (code $(Format-ExitCode $r.ExitCode)); features were enabled in Step 1, continuing to bring up the engine."
+        }
       }
       RefreshPath
     }

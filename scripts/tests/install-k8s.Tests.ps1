@@ -705,6 +705,17 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $script:INSTALLER_REBOOT_OK_CODES | Should -Be @(3010, 1641, -1978334967, -1978334965)
     $script:INSTALLER_REBOOT_OK_CODES | Should -Not -Contain -1978334966
   }
+  It "the reboot-INITIATED subset is exactly the 'already restarting' codes, and a subset of the OK codes (backend#2849 review)" {
+    # 1641 / winget 0x8A15010B mean the installer ALREADY started a reboot; the Docker
+    # log line branches on this so an INITIATED code doesn't claim the script carried on.
+    # 3010 / 0x8A150109 (reboot merely REQUIRED, box still up) must NOT be in this set.
+    $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Be @(1641, -1978334965)
+    foreach ($c in $script:INSTALLER_REBOOT_INITIATED_CODES) { $script:INSTALLER_REBOOT_OK_CODES | Should -Contain $c }
+    $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Not -Contain 3010
+    $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Not -Contain -1978334967
+    # The Docker direct handler distinguishes the two message families by that subset.
+    $script:ISRC | Should -Match 'INSTALLER_REBOOT_INITIATED_CODES -contains \$r\.ExitCode[\s\S]{0,160}INITIATED a reboot'
+  }
   It "accepts EVERY reboot-OK code end-to-end (not just 3010), including the negative winget HRESULTs" {
     # 3010 above is the headline; this drives all four documented codes -- incl. the
     # Int32-negative winget HRESULTs -1978334967 / -1978334965 -- through the real
