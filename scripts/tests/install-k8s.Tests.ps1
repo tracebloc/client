@@ -682,6 +682,73 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
   }
 }
 
+Describe "Format-ExitCode (backend#2849 the exit-code slot is never empty)" {
+  # backend#2849: the Windows journey printed "Docker Desktop installation failed
+  # (installer exited )" and "wsl exited " -- the ONE number that names the cause,
+  # dropped. Format-ExitCode is the guarantee that a failure line can never render a
+  # blank code, whatever the captured value.
+  It "renders a real code verbatim" {
+    Format-ExitCode 0   | Should -Be '0'
+    Format-ExitCode 1   | Should -Be '1'
+    Format-ExitCode 3   | Should -Be '3'
+    Format-ExitCode 137 | Should -Be '137'
+    Format-ExitCode -1  | Should -Be '-1'
+  }
+  It "never returns blank for an absent code ($null / empty / whitespace)" {
+    foreach ($code in @($null, '', '   ', "`t")) {
+      $out = Format-ExitCode $code
+      $out               | Should -Not -Match '^\s*$'     # not empty, not whitespace
+      $out               | Should -Be 'with no code reported'
+    }
+  }
+  It "no exit-code value can produce an empty slot in the failure message" {
+    # The load-bearing assertion for the acceptance criterion: build the SAME
+    # message the installer emits and prove the slot after 'exited ' is never blank,
+    # across every value ExitCode can carry (including the $null that shipped).
+    foreach ($code in @($null, '', '   ', "`t", 0, 1, 3, 137, -1)) {
+      $docker = "Docker Desktop installation failed (installer exited $(Format-ExitCode $code)). Install it manually and re-run."
+      $wsl    = "Couldn't update WSL automatically (wsl exited $(Format-ExitCode $code))."
+      $docker | Should -Match 'installer exited \S'       # a non-space char follows 'exited '
+      $docker | Should -Not -Match 'installer exited \)'  # never the empty "exited )"
+      $wsl    | Should -Match 'wsl exited \S'
+      $wsl    | Should -Not -Match 'wsl exited \)'
+    }
+  }
+}
+
+Describe "Wait-ProcessWithDeadline exit-code reliability (backend#2849 root cause)" {
+  BeforeAll { $script:WSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "caches \$Process.Handle before the wait loop (keeps .ExitCode readable after reap)" {
+    # A Start-Process -PassThru process, once reaped, reports a $null ExitCode unless
+    # its handle was retained while it was alive. The cache MUST precede the wait loop.
+    $script:WSRC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]*\$null = \$Process\.Handle[\s\S]*while \(-not \$Process\.HasExited\)'
+  }
+  It "actually touches .Handle at runtime" {
+    # Behavioral proof, not just a source grep: a fake process that records access.
+    $script:handleTouched = $false
+    $fake = [pscustomobject]@{ HasExited = $true }
+    $fake | Add-Member ScriptProperty Handle { $script:handleTouched = $true; [IntPtr]::Zero }
+    $fake | Add-Member ScriptMethod WaitForExit { }
+    $fake | Add-Member ScriptMethod Kill { }
+    Wait-ProcessWithDeadline -Process $fake -Deadline (Get-Date).AddMinutes(1) -Message "t" 6>$null | Out-Null
+    $script:handleTouched | Should -BeTrue
+  }
+}
+
+Describe "Failure lines route exit codes through Format-ExitCode (backend#2849 no drift)" {
+  BeforeAll { $script:FSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the Docker install failure renders via Format-ExitCode" {
+    $script:FSRC | Should -Match 'installer exited \$\(Format-ExitCode \$r\.ExitCode\)'
+  }
+  It "the WSL update failure renders via Format-ExitCode" {
+    $script:FSRC | Should -Match 'wsl exited \$\(Format-ExitCode \$r\.ExitCode\)'
+  }
+  It "no user-facing 'exited' line renders a bare \$r.ExitCode" {
+    # If a new call site reintroduces the raw form, this fails and points at it.
+    $script:FSRC | Should -Not -Match 'exited \$\(\$r\.ExitCode\)'
+  }
+}
+
 Describe "Get-ErrDetailLines (#423 honest failure output)" {
   BeforeEach { $script:LOG_FILE = "C:\Users\x\.tracebloc\install-20260729-000000.log" }
   AfterEach  { $script:LOG_FILE = $null }
@@ -4825,7 +4892,10 @@ Describe "Cluster-create exit-code reliability (#611)" {
   It "Wait-ProcessWithDeadline calls WaitForExit before returning success" {
     # HasExited can flip true before redirected stdout/stderr drain, leaving
     # $proc.ExitCode null; WaitForExit flushes them so every caller reads a real code.
-    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,1600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
+    # Reliability is now co-guaranteed by the .Handle cache at the function's entry
+    # (backend#2849) -- asserted in "Wait-ProcessWithDeadline exit-code reliability
+    # (backend#2849 root cause)" -- so the header->WaitForExit window is wider than it was.
+    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,2600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
   }
 
   It "the null-exit fallback checks BOTH k3d streams (logrus success goes to stderr) (Bugbot)" {
