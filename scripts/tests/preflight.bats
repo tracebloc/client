@@ -183,6 +183,63 @@ _engine_ctx() {
   unset TRACEBLOC_ALLOW_ARM64
 }
 
+# ── Dev-mode (TRACEBLOC_VALUES_FILE) must gate at preflight, not step e (backend#2854) ─
+# The auto rule answers "8.4 fresh" for a FRESH arm64 host because the normal path
+# would generate an 8.4 override. Dev mode installs the caller's file AS-IS and
+# writes no such override, so a values file silent on the engine leaves the
+# amd64-only 5.7 chart default in place. Before this, preflight consulted the auto
+# rule (native 8.4, pass), the runtime provisioned, and the install refused only at
+# step e (install-client-helm.sh:1742). Preflight now resolves the engine the SAME
+# way the install path does, so the refusal lands up front.
+@test "_pf_arch: DEV-MODE values file SILENT on the engine, fresh arm64 -> hard fail at preflight, not a phantom native-8.4 pass (backend#2854)" {
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }
+  _load_engine_rule; _engine_ctx fresh
+  local vf="$BATS_TEST_TMPDIR/dev.values.yaml"
+  # Exactly the e2e values.yaml.example shape: only pvc.mysql (a volume size), no
+  # mysqlClient block — so nothing pins 8.4 and the amd64-only 5.7 default renders.
+  printf 'env:\n  CLIENT_ENV: "dev"\npvc:\n  mysql: 2Gi\nclientId: "x"\n' > "$vf"
+  TRACEBLOC_VALUES_FILE="$vf"
+  run _pf_arch
+  [[ "$output" == *"amd64-only"* ]] || return 1
+  [[ "$output" != *"natively"* ]] || return 1            # the phantom native-8.4 pass is gone
+  [[ "$output" == *"tag: \"8.4\""* ]] || return 1        # names the fix: pin 8.4 in the file
+  [[ "$output" == *"tonistiigi/binfmt"* ]] || return 1   # or enable emulation
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 1 ] || return 1
+  unset TRACEBLOC_VALUES_FILE
+}
+
+@test "_pf_arch: DEV-MODE values file that PINS 8.4, fresh arm64 -> native, no hard fail (backend#2854)" {
+  ARCH=aarch64; OS=Linux
+  amd64_emulation_available() { return 1; }              # prove it passes NATIVELY, not via emulation
+  _load_engine_rule; _engine_ctx fresh
+  local vf="$BATS_TEST_TMPDIR/dev84.values.yaml"
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\nclientId: "x"\n' > "$vf"
+  TRACEBLOC_VALUES_FILE="$vf"
+  run _pf_arch
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"natively"* ]] || return 1
+  PF_HARD_FAIL=0; _pf_arch >/dev/null 2>&1; [ "$PF_HARD_FAIL" -eq 0 ] || return 1
+  unset TRACEBLOC_VALUES_FILE
+}
+
+@test "_pf_mysql_engine_decision: in dev mode it resolves EXACTLY as the install path — no drift (backend#2854)" {
+  # The bug itself: preflight consulted the auto rule (8.4 fresh) while the dev-mode
+  # install path read the file (5.7). Both now go through _devmode_engine_decision,
+  # so they cannot disagree and refuse at different steps again.
+  ARCH=aarch64; OS=Linux
+  _load_engine_rule; _engine_ctx fresh
+  local vf="$BATS_TEST_TMPDIR/dev.values.yaml"
+  TRACEBLOC_VALUES_FILE="$vf"
+  printf 'clientId: "x"\n' > "$vf"                        # silent -> 5.7
+  [ "$(_pf_mysql_engine_decision)" == "$(_devmode_engine_decision)" ] || return 1
+  [ "$(_pf_mysql_engine_decision)" == "5.7 values-file" ] || return 1
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$vf"   # 8.4 pin
+  [ "$(_pf_mysql_engine_decision)" == "$(_devmode_engine_decision)" ] || return 1
+  [ "$(_pf_mysql_engine_decision)" == "8.4 values-file" ] || return 1
+  unset TRACEBLOC_VALUES_FILE
+}
+
 # ── _pf_connectivity ─────────────────────────────────────────────────────────
 @test "_pf_connectivity: all reachable -> no hard fail" {
   _pf_probe_url() { echo ok; }
