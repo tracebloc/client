@@ -128,12 +128,56 @@ umask 077
 
   python3 - > "/tmp/$REL-values-new.yaml" <<'PY' \
     || { echo "STOP: the values rewrite failed -- no PyYAML, or an unreadable snapshot."; exit 1; }
-import os, sys, yaml
-v = yaml.safe_load(open(f"/tmp/{os.environ['REL']}-values-before.yaml"))
-if not isinstance(v, dict):
+# SURGICAL TEXT EDIT, NOT A YAML ROUND-TRIP (Bugbot on client#916).
+#
+# safe_load + safe_dump re-encodes EVERY scalar in the file, and PyYAML and helm's
+# Go YAML do not agree on one form. Measured with a chart that prints `kindOf`:
+#
+#   value in the snapshot   PyYAML dumps as   helm reads as
+#   the string "1e5"        1e5  (UNQUOTED)   float64 => 100000
+#
+# PyYAML emits it bare because ITS loader needs a decimal point for a float, so
+# the file round-trips inside python and changes meaning on the way into helm.
+# Thirteen other ambiguous forms ('yes', 'true', '0755', '~', '0x1f', '.inf' …)
+# were checked and PyYAML quotes all of them correctly -- so this is one narrow
+# cross-parser disagreement, not a general re-encoding problem. But a
+# clientPassword of `1e5` would reach the chart as the number 100000, and present
+# as an unexplained auth failure in the middle of a credential migration.
+#
+# The fix is not to quote harder -- a denylist of ambiguous forms is the defect,
+# not the fix. It is to STOP RE-ENCODING WHAT WE WERE NOT ASKED TO CHANGE. Only
+# the dockerRegistry block is rewritten; every other byte is passed through
+# untouched, and the script asserts that before printing anything.
+import os, re, sys, yaml
+
+src = open(f"/tmp/{os.environ['REL']}-values-before.yaml").read()
+if not isinstance(yaml.safe_load(src), dict):
     sys.exit("the snapshot did not parse as a mapping -- refusing to build values from it")
-v["dockerRegistry"] = {"create": False, "existingSecret": os.environ["NEW"]}
-yaml.safe_dump(v, sys.stdout, sort_keys=False)
+
+block = "dockerRegistry:\n  create: false\n  existingSecret: %s\n" % os.environ["NEW"]
+# A top-level key, its nested lines, and any blank lines between them.
+pat = re.compile(r"^dockerRegistry:[^\n]*\n(?:(?:[ \t]+[^\n]*|[ \t]*)\n)*", re.M)
+out, n = pat.subn(block, src)
+if n == 0:
+    out = src + ("" if src.endswith("\n") else "\n") + block
+elif n > 1:
+    sys.exit("found %d dockerRegistry blocks -- refusing to guess which to rewrite" % n)
+
+# EVERY OTHER KEY MUST BE BYTE-IDENTICAL. This is the assertion the round-trip
+# could not make: compare the two files with the dockerRegistry block removed
+# from each, and refuse if a single byte elsewhere moved.
+#
+# DEFENCE IN DEPTH, stated as such. With the surgical edit above nothing else CAN
+# change, so its own mutation in the verdicts suite comes back green -- the suite
+# asserts the same property on the output, which a regex bug would fail first. It
+# is kept because an operator runs this script directly: if the regex ever
+# over-matches, they get a refusal instead of a values file that quietly lost a key.
+if pat.sub("", src) != pat.sub("", out):
+    sys.exit("the rewrite changed bytes outside dockerRegistry -- refusing")
+check = yaml.safe_load(out)
+if check.get("dockerRegistry") != {"create": False, "existingSecret": os.environ["NEW"]}:
+    sys.exit("the rewritten dockerRegistry block does not read back as intended -- refusing")
+sys.stdout.write(out)
 PY
   # `>` truncated the target before python3 ran, so a failed rewrite leaves an
   # EMPTY file -- the exact input this runbook warns resets every value.
@@ -162,11 +206,31 @@ good.
 ### 2. Copy the Secret into every namespace the preflight listed
 
 ```bash
+# `set -euo pipefail` and an explicit per-namespace check (Bugbot on client#916).
+# This loop is the ONLY write of the credential. Without pipefail a failed
+# `kubectl get`, a refusal from regcred-copy.py, or a failed `apply` in ONE
+# namespace is discarded -- `for` continues, the step prints nothing, and a
+# PARTIAL copy looks exactly like a finished one. The preflight in step 3 would
+# catch it, but only if you run it; the copy step must not look successful when it
+# was not.
+# A SUBSHELL, like every other block here. A runbook is PASTED into the operator's
+# shell: a top-level `set -e` would change their session for everything after it,
+# and the `exit 1` below would CLOSE THEIR TERMINAL rather than stopping the step.
+# Inside `( )` the exit leaves the subshell and nothing else.
+( set -euo pipefail
 for n in <each namespace from the preflight>; do
-  kubectl -n "$n" get secret "${REL}-regcred" -o yaml \
+  if kubectl -n "$n" get secret "${REL}-regcred" -o yaml \
     | python3 ./docs/migration-tools/regcred-copy.py "$NEW" \
     | kubectl -n "$n" apply -f -
-done
+  then
+    echo "copied into $n"
+  else
+    # `exit 1` on the SAME line as the STOP: the suite keys on that shape, because a
+    # runbook is pasted and a STOP that prints without aborting is how the previous
+    # two Highs on this PR happened.
+    echo "STOP: the copy into $n FAILED -- the credential is now in some namespaces and not others." >&2; exit 1
+  fi
+done )
 ```
 
 The credential is never decoded, printed, or retyped — `.data` passes through

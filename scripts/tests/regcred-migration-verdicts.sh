@@ -617,6 +617,103 @@ EOF
   fi
 fi
 
+echo "the values rewrite — EXECUTED, not grepped (Bugbot on client#916):"
+# The runbook tells operators to run this heredoc, so the suite runs the same text.
+# A grep would only pin its shape; the bug was in what it DID to the bytes.
+#
+# The bug, measured through helm rather than reasoned about: safe_load + safe_dump
+# round-trips every scalar, and PyYAML emits the string "1e5" UNQUOTED because its
+# own loader needs a decimal point for a float. helm's Go YAML does not, so it reads
+# `1e5` as float64 100000. A clientPassword of 1e5 reached the chart as the number
+# 100000 -- an unexplained auth failure in the middle of a credential migration.
+# Thirteen other ambiguous forms round-trip correctly, so this is one narrow
+# cross-parser disagreement, which is exactly the kind a grep cannot see.
+rw="$TMP/rewrite.py"
+python3 - "$RUNBOOK" "$rw" <<'EXTRACT' || { echo "  [bad]  could not extract the rewrite script from the runbook" >&2; fail=$((fail+1)); }
+import re, sys
+md = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"python3 - > \"/tmp/\$REL-values-new\.yaml\" <<'PY'.*?\n(.*?)\nPY\n", md, re.S)
+if not m:
+    sys.exit("no rewrite heredoc found")
+body = "\n".join(l for l in m.group(1).split("\n") if not l.lstrip().startswith("|| {"))
+open(sys.argv[2], "w").write(body)
+EXTRACT
+
+if [ -s "$rw" ]; then
+  # A snapshot in the shape `helm get values -o yaml` actually produces: Go YAML
+  # QUOTES "1e5", because its own loader would read it bare as a float.
+  RW_REL="regcred-verdicts-$$"
+  rw_before="/tmp/${RW_REL}-values-before.yaml"
+  printf 'clientId: abc\nclientPassword: "1e5"\nmysqlRootPassword: "yes"\ndockerRegistry:\n  create: true\n  server: https://x/\n  username: u\n  password: p\n  email: e@x.io\nstorageClass:\n  create: false\n' \
+    > "$rw_before"
+  out="$(REL="$RW_REL" NEW=tracebloc-ops-regcred python3 "$rw" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    bad "the rewrite runs on a well-formed snapshot" "exit $rc: $(printf '%s' "$out" | head -1)"
+  else
+    ok "the rewrite runs on a well-formed snapshot"
+    # 1. the credential's QUOTING is preserved -- this is the whole finding.
+    if printf '%s' "$out" | grep -qF 'clientPassword: "1e5"'; then
+      ok "an ambiguous credential keeps its quotes (helm reads a string, not 100000)"
+    else
+      bad "an ambiguous credential keeps its quotes" "$(printf '%s' "$out" | grep -i clientPassword || echo '<absent>')"
+    fi
+    # 2. dockerRegistry really was replaced.
+    if printf '%s' "$out" | grep -qF 'existingSecret: tracebloc-ops-regcred' \
+       && ! printf '%s' "$out" | grep -qE '^  (username|password|server|email):'; then
+      ok "dockerRegistry is replaced and its credential keys are gone"
+    else
+      bad "dockerRegistry is replaced and its credential keys are gone" "$(printf '%s' "$out" | sed -n '/^dockerRegistry:/,/^[a-z]/p' | head -4)"
+    fi
+    # 3. EVERY other line is byte-identical -- the assertion a round-trip cannot make.
+    before_others="$(grep -vE '^dockerRegistry:|^  ' "$rw_before")"
+    after_others="$(printf '%s' "$out" | grep -vE '^dockerRegistry:|^  ')"
+    if [ "$before_others" = "$after_others" ]; then
+      ok "no byte outside dockerRegistry changed"
+    else
+      bad "no byte outside dockerRegistry changed" "$(diff <(printf '%s' "$before_others") <(printf '%s' "$after_others") | head -4)"
+    fi
+  fi
+  # 4. a snapshot with NO dockerRegistry block still gets one appended.
+  rw_add="/tmp/${RW_REL}add-values-before.yaml"; printf 'clientId: abc\n' > "$rw_add"
+  out2="$(REL="${RW_REL}add" NEW=tracebloc-ops-regcred python3 "$rw" 2>&1)"
+  if printf '%s' "$out2" | grep -qF 'existingSecret: tracebloc-ops-regcred'; then
+    ok "a snapshot with no dockerRegistry block gets one appended"
+  else
+    bad "a snapshot with no dockerRegistry block gets one appended" "$(printf '%s' "$out2" | head -2)"
+  fi
+  # 5. a non-mapping snapshot is refused, not silently rewritten.
+  rw_bad="/tmp/${RW_REL}bad-values-before.yaml"; printf -- '- not\n- a\n- mapping\n' > "$rw_bad"
+  # ASSERTS THE NAMED REFUSAL, not a bare non-zero exit (CLAUDE.md rule 10). The
+  # first version checked only the status, and removing the isinstance guard stayed
+  # GREEN: a list input then reached `.get()` on a list, raised AttributeError, and
+  # exited non-zero. A crash satisfied a test named for a refusal.
+  out3="$(REL="${RW_REL}bad" NEW=x python3 "$rw" 2>&1)"; rc3=$?
+  if [ "$rc3" -ne 0 ] && printf '%s' "$out3" | grep -qF "did not parse as a mapping" \
+     && ! printf '%s' "$out3" | grep -q "Traceback"; then
+    ok "a non-mapping snapshot is refused BY NAME (not a traceback)"
+  else
+    bad "a non-mapping snapshot is refused BY NAME" "exit $rc3: $(printf '%s' "$out3" | head -1)"
+  fi
+  rm -f "$rw_before" "$rw_add" "$rw_bad"
+fi
+
+echo "the copy loop — a partial copy must not look finished:"
+# Requires the SUBSHELL form `( set -euo pipefail`, not a bare one. My first version
+# grepped `^set -euo pipefail` anchored at column 0 and so rejected the correct
+# shape -- a runbook is PASTED, so a top-level `set -e` changes the operator's
+# session and the `exit 1` closes their terminal. Every other block here uses the
+# subshell; the check now demands it rather than merely tolerating it.
+if grep -B8 'for n in <each namespace' "$RUNBOOK" | grep -qE '^\( set -euo pipefail'; then
+  ok "the copy loop runs in a subshell under set -euo pipefail"
+else
+  fail=$((fail+1)); echo "  [bad]  the copy loop is not in a '( set -euo pipefail' subshell -- either a failed namespace is discarded, or the exit closes the operator's terminal" >&2
+fi
+if sed -n '/for n in <each namespace/,/^done/p' "$RUNBOOK" | grep -qE 'STOP: the copy into'; then
+  ok "a failed namespace STOPS the loop and says which one"
+else
+  fail=$((fail+1)); echo "  [bad]  a failed copy does not abort the loop, so a partial copy prints nothing" >&2
+fi
+
 printf '\nregcred-migration-verdicts: %d ok, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
 exit 0
