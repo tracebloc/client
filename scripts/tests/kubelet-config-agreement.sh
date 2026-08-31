@@ -168,14 +168,27 @@ fi
 # version of this entire change: the install succeeds, /configz shows stock.
 for pair in "cluster.sh:$bsh_body" "install-k8s.ps1:$ps1_body"; do
   fname="${pair%%:*}"; body="${pair#*:}"
+  # BOTH PATHS ARE EXTRACTED AND COMPARED (Bugbot, Medium, on client#912). The
+  # header claimed this compared them; it only asserted that SOME config= flag
+  # existed and SOME -v line mentioned the variable, so a kubelet pointed at a
+  # different path than the one mounted passed cleanly -- the exact silent no-op
+  # this gate exists to block, missed by the assertion written to block it. A
+  # docstring claiming a check that is not there teaches the bypass (rule 7).
   argpath="$(grep -oE -- '--kubelet-arg=config=[^"'"'"' ]+' <<<"$body" | head -1 | sed 's/.*--kubelet-arg=config=//; s/@all$//')"
-  mountref="$(grep -cE -- '(-v|"-v")[^\n]*TB_KUBELET_CONFIG_NODE_PATH' <<<"$body")"
+  # The mount DESTINATION: after the last ':' and before any @node-filter.
+  mountpath="$(grep -F 'TB_KUBELET_CONFIG_NODE_PATH' <<<"$body" \
+    | grep -oE -- '[^"[:space:]]*:[^"[:space:]]*@all' | head -1 \
+    | sed 's/@all$//; s/.*://')"
   if [ -z "$argpath" ]; then
     note "$fname passes no --kubelet-arg=config=, so nothing loads the drop-in" \
       "The file would be written and mounted, and the kubelet would never read it."
-  elif [ "$mountref" -eq 0 ]; then
-    note "$fname points the kubelet at $argpath but no -v mount references TB_KUBELET_CONFIG_NODE_PATH" \
-      "The kubelet would be told to read a path that does not exist in the node."
+  elif [ -z "$mountpath" ]; then
+    note "$fname points the kubelet at '$argpath' but mounts the config nowhere" \
+      "The kubelet would be told to read a path that is not in the node."
+  elif [ "$argpath" != "$mountpath" ]; then
+    note "$fname mounts the config at '$mountpath' but points the kubelet at '$argpath'" \
+      "Same install, two different paths: the kubelet reads nothing, the node keeps" \
+      "the stock 85% threshold, and the install reports success. Silent no-op."
   fi
 done
 

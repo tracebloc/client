@@ -429,10 +429,21 @@ TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
 # --kubelet-arg must not be able to disagree about it.
 TB_KUBELET_CONFIG_NODE_PATH="/etc/tracebloc/kubelet.yaml"
 
+# NOT under /tmp (Bugbot, High, on client#912). This file is BIND-MOUNTED into
+# every k3d node, so the host path has to outlive the install: a bind-mount source
+# that has disappeared cannot be remounted, and `docker start` of the node then
+# fails with a generic Docker error. /tmp is cleared on reboot on macOS and on most
+# Linux, so a cluster created from a temp path comes up healthy and can never be
+# RESTARTED -- a headless edge looks fine until its first reboot, which is the
+# worst possible moment to find out. HOST_DATA_DIR is the installer's own
+# persistent directory (already bind-mounted into the nodes as /tracebloc).
+_kubelet_config_path() { printf '%s/kubelet/kubelet.yaml' "${HOST_DATA_DIR:-$HOME/.tracebloc}"; }
+
 _write_kubelet_config() {
-  local td cfg
-  td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-kubelet-XXXXXX")" || return 1
-  cfg="$td/kubelet.yaml"
+  local cfg
+  cfg="$(_kubelet_config_path)"
+  # Fixed path, so a re-install must overwrite rather than trip over what is there.
+  mkdir -p "$(dirname "$cfg")" || return 1
   cat > "$cfg" <<EOF || return 1
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration

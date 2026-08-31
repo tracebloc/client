@@ -1369,6 +1369,44 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   [[ "$output" != *"failCgroupV1"* ]] || { echo "$output"; return 1; }
 }
 
+@test "kubelet config: the file lives on PERSISTENT storage, not /tmp" {
+  # Bugbot High on client#912. The file is BIND-MOUNTED into every node, so a host
+  # path cleared on reboot cannot be remounted and `docker start` of the node fails
+  # with a generic Docker error. The cluster comes up healthy once and can never be
+  # RESTARTED -- a headless edge looks fine until its first reboot.
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cfg="$output"
+  [[ "$cfg" == "$HOST_DATA_DIR/"* ]] || { echo "not under HOST_DATA_DIR: $cfg"; return 1; }
+  [[ "$cfg" != /tmp/* && "$cfg" != /var/tmp/* ]] || { echo "ephemeral path: $cfg"; return 1; }
+  [ -r "$cfg" ] || { echo "not readable: $cfg"; return 1; }
+}
+
+@test "kubelet config: rewriting it is idempotent, so a re-install does not fail" {
+  # The path is FIXED now rather than a fresh mktemp -d, so a second install has to
+  # overwrite rather than trip over what is already there or append to it.
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  first="$output"
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "$first" ] || { echo "path moved between runs: $first -> $output"; return 1; }
+  run grep -c "imageGCHighThresholdPercent" "$first"
+  [ "$output" = "1" ] || { echo "content duplicated on rewrite: $output"; return 1; }
+}
+
+@test "kubelet config: the mounted path IS the path the kubelet is told to read" {
+  # Two different strings is a silent no-op: the kubelet reads nothing, the node
+  # keeps the stock 85% threshold, and the install reports success.
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *":${TB_KUBELET_CONFIG_NODE_PATH}@all"* ]] \
+    || { echo "the config is not mounted at TB_KUBELET_CONFIG_NODE_PATH"; return 1; }
+  [[ "$output" == *"--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all"* ]] \
+    || { echo "the kubelet is pointed somewhere other than the mount"; return 1; }
+}
+
 @test "kubelet config: the reclaim band is wider than one task image's worth" {
   # Not a restatement of the numbers -- a check on their RELATIONSHIP, which is
   # what the ticket is about. GC reclaims down to LOW and stops, so a band

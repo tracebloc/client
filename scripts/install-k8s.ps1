@@ -4023,7 +4023,13 @@ function New-K3dCluster {
     # the CLI, but belongs beside the eviction thresholds it interacts with. One
     # file, authored whole. Stock 85/80 leaves a 5-point band, which on a real disk
     # can be smaller than ONE 2.7-11 GB task image.
-    $kubeletCfgDir  = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-kubelet-" + [System.Guid]::NewGuid().ToString('N').Substring(0,8))
+    # NOT under %TEMP% (Bugbot, High, on client#912). This file is BIND-MOUNTED
+    # into every k3d node, so the host path must outlive the install: a bind-mount
+    # source that has vanished cannot be remounted and `docker start` of the node
+    # fails with a generic Docker error. A cluster created from a temp path comes
+    # up healthy and can never be RESTARTED. HOST_DATA_DIR is the installer's own
+    # persistent directory; matches the bash twin's _kubelet_config_path.
+    $kubeletCfgDir  = Join-Path $HOST_DATA_DIR "kubelet"
     $kubeletCfgPath = Join-Path $kubeletCfgDir "kubelet.yaml"
     # HARD-FAIL, not a warning: a silent skip leaves the node on the stock 85%
     # threshold -- the unbounded image store #2634 is about -- while the install

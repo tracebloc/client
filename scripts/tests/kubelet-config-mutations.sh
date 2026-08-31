@@ -98,6 +98,15 @@ run_case "ps1 stops passing --kubelet-arg=config" "$PS" \
 run_case "bash mounts the file but never points the kubelet at it" "$CS" \
   '  K3D_ARGS+=(--k3s-arg "--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all")' \
   '  :' 1
+# THE PATH-EQUALITY CHECK ITSELF (Bugbot, Medium, on client#912). The guard used to
+# assert only that a config= flag and a -v mount both EXISTED, so a kubelet pointed
+# somewhere other than the mount passed. These pin the comparison.
+run_case "bash points the kubelet at a DIFFERENT path than it mounts" "$CS" \
+  '--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all' \
+  '--kubelet-arg=config=/etc/tracebloc/elsewhere.yaml@all' 1
+run_case "ps1 points the kubelet at a DIFFERENT path than it mounts" "$PS" \
+  '"--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all"' \
+  '"--kubelet-arg=config=/etc/tracebloc/elsewhere.yaml@all"' 1
 
 printf '\nfail closed — "cannot tell" must never read as agreement:\n'
 run_case "cluster.sh unreadable" "" "" "" 2 unreadable
