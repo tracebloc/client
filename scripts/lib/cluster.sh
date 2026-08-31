@@ -385,9 +385,6 @@ wire_ca_trust() {
   return 0
 }
 
-# Write a k3d registries.yaml pointing containerd at the mounted CA for every
-# registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
-# node (where the -v mount lands). Caller removes the temp dir.
 # --- kubelet config drop-in (backend#2634, mechanism shared with backend#2460) ---
 #
 # WHY A CONFIG FILE AND NOT `--kubelet-arg` (read before "simplifying" this)
@@ -454,6 +451,14 @@ EOF
   echo "$cfg"
 }
 
+# Write a k3d registries.yaml pointing containerd at the mounted CA for every
+# registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
+# node (where the -v mount lands). Caller removes the temp dir.
+#
+# (Reunited with its function: the kubelet section above was inserted between the
+# two, leaving this prose reading as documentation for `_write_kubelet_config`,
+# whose contract is the opposite -- a fixed persistent path, no temp dir, nothing
+# for a caller to clean up. Reviewer, client#912.)
 _write_k3d_registries_config() {
   local node_ca="$1" host td cfg
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 1
@@ -1137,15 +1142,7 @@ _check_existing_cluster_bind() {
   fi
 }
 
-# backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data) is
-# baked into the k3d nodes at create time (_create_new_cluster). k3d cannot add
-# a bind mount to a RUNNING cluster, so re-using an existing cluster that lacks
-# it would point the chart's `datasetPath: /tracebloc-data` PV at ephemeral
-# in-node storage — datasets would silently land on disposable storage instead
-# of the network export and vanish on a restart. Fail fast with the recreate
-# remedy rather than installing a quietly-misrouted dataset volume. No-op when
-# HOST_DATASET_DIR is unset or the node can't be inspected.
-# The image-GC drop-in is a create-time bind mount too, so a cluster made before
+# The image-GC drop-in is a create-time bind mount, so a cluster made before
 # backend#2634 -- or by an older installer -- keeps the kubelet's stock 85/80
 # thresholds forever, and a re-run used to print "Secure environment already
 # running" without looking (Bugbot, Medium, on client#912). Every already-created
@@ -1162,7 +1159,11 @@ _check_existing_cluster_bind() {
 # honest answer when the mount cannot be read at all.
 _check_existing_cluster_kubelet_config() {
   local mounts
-  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+  # BOUNDED, because this now runs on the already-healthy fast paths (reviewer).
+  # On the reuse path a wedged Docker was already stalling an install that had
+  # nothing else to do; on a healthy re-run it would stall a machine that is
+  # working, to print an advisory. Same bound its k3s sibling uses.
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" \
     --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
   if ! grep -qx "${TB_KUBELET_CONFIG_NODE_PATH}" <<<"$mounts"; then
@@ -1177,6 +1178,20 @@ _check_existing_cluster_kubelet_config() {
   fi
 }
 
+# backend#743: the dataset bind mount (HOST_DATASET_DIR -> /tracebloc-data) is
+# baked into the k3d nodes at create time (_create_new_cluster). k3d cannot add
+# a bind mount to a RUNNING cluster, so re-using an existing cluster that lacks
+# it would point the chart's `datasetPath: /tracebloc-data` PV at ephemeral
+# in-node storage — datasets would silently land on disposable storage instead
+# of the network export and vanish on a restart. Fail fast with the recreate
+# remedy rather than installing a quietly-misrouted dataset volume. No-op when
+# HOST_DATASET_DIR is unset or the node can't be inspected.
+#
+# (Reunited with its function: the image-GC advisory was inserted between the two,
+# leaving "Fail fast with the recreate remedy" standing directly above a function
+# that deliberately WARNS and continues. Someone would eventually have made the
+# function match the comment and turned every ordinary re-run into a hard failure
+# -- the outcome this change argues against at length. Reviewer, client#912.)
 _check_existing_cluster_dataset_mount() {
   [[ -z "${HOST_DATASET_DIR:-}" ]] && return 0
   local mounts
@@ -1605,7 +1620,7 @@ _create_new_cluster() {
   # Same posture as the CA bundle above, for the same reason.
   local _kubelet_cfg
   _kubelet_cfg="$(_write_kubelet_config)" \
-    || error "Couldn't write the kubelet config (temp dir/disk?). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
+    || error "Couldn't write the kubelet config to $(_kubelet_config_path) (disk full, or the directory not writable?). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
   # `@all`, NOT `@server:*`: an agent runs a kubelet and pulls the same 2.7-11 GB
   # task images, so a server-only drop-in would leave agents unbounded -- the same
   # reasoning the cgroupv1 arg above records.

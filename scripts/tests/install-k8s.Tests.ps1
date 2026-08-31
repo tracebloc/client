@@ -7523,6 +7523,35 @@ Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
     $script:Code | Should -Match '\$kubeletMounts -and'
   }
 
+  It 'is a FUNCTION, so a path that does not build a cluster can call it' {
+    # Inline in New-K3dCluster it was unreachable by the population it exists for:
+    # main()'s completed+healthy fast path never enters New-K3dCluster, so every
+    # already-working pre-#2634 edge got silence. The only mention of the name over
+    # here was a comment (reviewer, client#912). Same lesson as Read-RebootChoice
+    # and Test-K3sVersionDrift: a guard the fast path cannot call does not exist.
+    $script:Code | Should -Match 'function Test-ExistingClusterKubeletConfig'
+  }
+
+  It 'runs on the completed+healthy fast path, after the k3s and GPU advisories' {
+    # THE ASSERTION THAT WOULD HAVE CAUGHT THIS. Defining the function is not
+    # wiring it; the previous version of this Describe asserted the block existed
+    # and said nothing about who reaches it, which is exactly how it shipped
+    # unreachable. Anchored on the fast path's own success line, the way the
+    # Test-K3sVersionDrift assertion at ~4393 already is.
+    $script:Code | Should -Match 'client is healthy -- nothing to do[\s\S]{0,700}?Test-ExistingClusterKubeletConfig'
+  }
+
+  It 'bounds the docker inspect, so a wedged engine cannot hang a healthy re-run' {
+    # It now runs AFTER the success line on a machine that is already working, so an
+    # unbounded probe would hang a healthy host to deliver an advisory (installer
+    # rule; the reviewer asked for this explicitly). Same Start-Job + deadline
+    # pattern as its siblings.
+    $idx = $script:Code.IndexOf('function Test-ExistingClusterKubeletConfig')
+    $window = $script:Code.Substring($idx, [Math]::Min(1400, $script:Code.Length - $idx))
+    $window | Should -Match 'Start-Job'
+    $window | Should -Match 'Wait-JobWithProgress'
+  }
+
   It 'agrees with the bash twin on the operator-visible message' {
     # The agreement guard keys on this exact phrase in both files. If either side
     # rewords it, the guard stops tying them together and this catches it here.

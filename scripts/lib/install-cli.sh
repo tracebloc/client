@@ -308,6 +308,7 @@ upgrade_cli_only() {
   # (client#835) gets no signal on `tracebloc upgrade`. Advisory + guarded.
   declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
   declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
+  declare -F _check_existing_cluster_kubelet_config >/dev/null 2>&1 && _check_existing_cluster_kubelet_config
 
   # The CLI update is the ENTIRE point of this path, so — unlike the full flow,
   # where a CLI hiccup is non-fatal because the client is already connected — a

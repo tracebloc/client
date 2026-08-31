@@ -121,10 +121,16 @@ for name in $SETTINGS; do
 
   if [ -z "$b" ] || [ -z "$p" ]; then
     note "$name is not set by both installers (bash='${b:-<absent>}' ps1='${p:-<absent>}')" \
-      "An absent threshold is NOT a neutral default -- the node keeps the kubelet's" \
-      "stock 85% high / 80% low image GC, which is the unbounded image store" \
-      "backend#2634 is about. An absent node path means the mount and the" \
-      "--kubelet-arg can no longer be held to the same string."
+      "For the two THRESHOLDS an absent value is NOT a neutral default -- the node" \
+      "keeps the kubelet's stock 85% high / 80% low image GC, which is the unbounded" \
+      "image store backend#2634 is about. An absent node path means the mount and the" \
+      "--kubelet-arg can no longer be held to the same string." \
+      "imageMinimumGCAge is the exception and is called out so this note is not read" \
+      "as claiming more than it can: 2m IS the kubelet default, so setting it changes" \
+      "nothing on the node and its /configz row cannot distinguish 'read our file'" \
+      "from 'took the default' the way the 75/60 rows can. It is held here for TWIN" \
+      "AGREEMENT only -- the two installers must not disagree about a field either" \
+      "of them writes (reviewer, client#912)."
   elif [ "$b" != "$p" ]; then
     note "$name DIVERGES between the twins: bash='$b' ps1='$p'" \
       "The two installers must configure the same node. client#772 records five" \

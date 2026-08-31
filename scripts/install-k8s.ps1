@@ -3471,6 +3471,49 @@ function Write-RecreateClusterHint {
 # (Bugbot #565), so a healthy-but-drifted cluster still gets the recreate guidance.
 # Silent no-op if the image can't be read or isn't a parseable rancher/k3s:<tag>
 # (e.g. a digest-only pin) -- never false-warn.
+# Image-GC bound on a cluster this installer did not create (backend#2634).
+#
+# A FUNCTION, not the inline block it started as (reviewer, client#912). Inline in
+# New-K3dCluster it was unreachable by the one population it exists for: main()'s
+# completed+healthy fast path never enters New-K3dCluster, so every already-working
+# pre-#2634 edge -- the whole point of the advisory -- got silence. The only mention
+# of the name over here was a comment. Extracted for the same reason
+# Test-K3sVersionDrift and Read-RebootChoice were: a guard the fast path cannot call
+# is a guard that does not exist.
+#
+# WARN, do not Err, and that is the deliberate difference from the dataset check in
+# New-K3dCluster: a missing dataset mount puts customer data on ephemeral storage, so
+# refusing is right there. A missing image-GC bound is the status quo on every
+# existing edge, so refusing would turn every ordinary re-run into a hard failure.
+# Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+#
+# BOUNDED, via the same Start-Job + Wait-JobWithProgress pattern as its siblings.
+# Unbounded it would hang an already-healthy machine on a wedged Docker engine, after
+# the success line has printed, to deliver an advisory (installer rule; #565 Bugbot).
+#
+# Empty output stays silent: 'cannot tell' must not read as 'missing', or the warning
+# trains people to ignore it.
+function Test-ExistingClusterKubeletConfig {
+  $kubeletMounts = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking the existing cluster's image-GC bound") {
+    $kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+  } else {
+    Log "docker inspect (kubelet config mount) timed out; skipping the image-GC advisory."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if ($kubeletMounts -and ($kubeletMounts -notmatch ('(?m)^' + [regex]::Escape($TB_KUBELET_CONFIG_NODE_PATH) + '\s*$'))) {
+    Warn "The existing '$CLUSTER_NAME' cluster has no kubelet config mount, so its nodes keep the stock 85% image-GC threshold."
+    Hint "Training images are 2.7-11 GB each and floating tags leave the previous digest resident on every"
+    Hint "republish, so the node fills until garbage collection and disk-pressure eviction start DURING a"
+    Hint "training run. k3d bakes bind mounts in at create time, so this can't be added to a running cluster."
+    Hint "The install will proceed. To bound the image store, recreate the cluster when convenient:"
+    Write-RecreateClusterHint
+  }
+}
+
 function Test-K3sVersionDrift {
   if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
   # Bounded (installer rule: every docker probe must have a deadline) so a wedged
@@ -3959,16 +4002,7 @@ function New-K3dCluster {
     #
     # Empty output stays silent: 'cannot tell' must not read as 'missing', or the
     # warning trains people to ignore it.
-    $kubeletMounts = ""
-    try { $kubeletMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
-    if ($kubeletMounts -and ($kubeletMounts -notmatch ('(?m)^' + [regex]::Escape($TB_KUBELET_CONFIG_NODE_PATH) + '\s*$'))) {
-      Warn "The existing '$CLUSTER_NAME' cluster has no kubelet config mount, so its nodes keep the stock 85% image-GC threshold."
-      Hint "Training images are 2.7-11 GB each and floating tags leave the previous digest resident on every"
-      Hint "republish, so the node fills until garbage collection and disk-pressure eviction start DURING a"
-      Hint "training run. k3d bakes bind mounts in at create time, so this can't be added to a running cluster."
-      Hint "The install will proceed. To bound the image store, recreate the cluster when convenient:"
-      Write-RecreateClusterHint
-    }
+    Test-ExistingClusterKubeletConfig
 
     # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
@@ -7312,6 +7346,11 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
     # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
     Test-HealthyClusterGpuConsistent
+    # Third time, same shape (backend#2634, reviewer on client#912): the image-GC
+    # drop-in is a create-time bind mount, so every cluster built before #2634 keeps
+    # the stock 85/80 thresholds. A HEALTHY pre-#2634 edge is the entire population
+    # the advisory is for, and it is exactly the population this fast path serves.
+    Test-ExistingClusterKubeletConfig
     # This path exits before Helm, so a cluster installed BEFORE this fix would never
     # get its PV dirs repaired -- the client is healthy, so every re-run shortcuts
     # here and the first ingest keeps failing with "Permission denied". Repair it now:

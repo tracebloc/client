@@ -1359,10 +1359,16 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
 }
 
 @test "kubelet config: the file does NOT carry failCgroupV1" {
-  # kubelet-arg-map-safety.sh's header records that the kubelet REFUSES a field
-  # set both on the CLI and in a config file. fail-cgroupv1 travels as a CLI arg
-  # (it must, and it is version-gated), so putting it in the file too would make
-  # the node fail to start on exactly the hosts the flag exists to rescue.
+  # NOT justified by "the kubelet refuses a field set both on the CLI and in a
+  # file" -- this PR's own measurement found that claim empirically false, so a
+  # test resting on it would be justified by nothing the moment the header it
+  # cites gets corrected (reviewer, client#912).
+  #
+  # The real reason is stronger and holds independently: this file is written
+  # UNCONDITIONALLY, while `--kubelet-arg=fail-cgroupv1` is gated on k3s >= 1.35.
+  # An unrecognised field in a KubeletConfiguration is a HARD START FAILURE, so
+  # putting it in the file would brick the node on every k3s below 1.35 -- exactly
+  # the hosts the flag exists to rescue, and the ones that never get the CLI arg.
   run _write_kubelet_config
   [ "$status" -eq 0 ] || return 1
   run cat "$output"
