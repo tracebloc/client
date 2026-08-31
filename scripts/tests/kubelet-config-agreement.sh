@@ -192,6 +192,47 @@ for pair in "cluster.sh:$bsh_body" "install-k8s.ps1:$ps1_body"; do
   fi
 done
 
+# BOTH TWINS MUST CHECK AN EXISTING CLUSTER, not just create a new one
+# (Bugbot, Medium, on client#912). The drop-in is a create-time bind mount, so an
+# already-created edge keeps the stock 85/80 thresholds forever. The bash twin got
+# that check and the PowerShell twin did not -- and WSL2 edges are a real part of
+# exactly that population. The values agreed perfectly while the BEHAVIOUR did not,
+# which is why value agreement alone was not enough to catch it.
+#
+# Derived, like everything above: each body is searched for its own idiom -- the
+# bash function, and the ps1 reuse-branch inspection keyed on the shared node-path
+# variable. No copy of either installer is held here.
+# KEYED ON THE OPERATOR-VISIBLE MESSAGE, not on an internal identifier. Two
+# reasons. It is what the finding was about -- an existing edge staying unbounded
+# "with no operator-visible signal" -- so the message IS the behaviour. And an
+# internal name is a weak key: `kubeletMounts` occurs three times in the ps1, so
+# any single-line edit leaves the grep satisfied while the check is gone, which is
+# exactly how the first version of this assertion went vacuous under its own
+# mutation. The message appears once per twin.
+REUSE_MSG='no kubelet config mount'
+bsh_reuse=0
+grep -qF "$REUSE_MSG" <<<"$bsh_body" && bsh_reuse=1
+ps1_reuse=0
+grep -qF "$REUSE_MSG" <<<"$ps1_body" && ps1_reuse=1
+
+if [ "$bsh_reuse" -eq 0 ] || [ "$ps1_reuse" -eq 0 ]; then
+  note "only one twin checks an EXISTING cluster for the image-GC bound (bash=$bsh_reuse ps1=$ps1_reuse)" \
+    "The drop-in is a create-time bind mount, so every edge created before it keeps" \
+    "the kubelet's stock 85% threshold. A twin that does not look leaves that whole" \
+    "population unbounded with no operator-visible signal -- and the two twins agreed" \
+    "on every VALUE while disagreeing on this, so the checks above cannot see it."
+fi
+
+# And the bash check must be CALLED, not merely defined -- a check nobody invokes is
+# the shape this repo keeps closing. Two occurrences = definition + call site.
+if [ "$bsh_reuse" -eq 1 ]; then
+  n_bsh="$(grep -c '_check_existing_cluster_kubelet_config' <<<"$bsh_body")"
+  if [ "$n_bsh" -lt 2 ]; then
+    note "_check_existing_cluster_kubelet_config is defined but never called (occurrences: $n_bsh)" \
+      "Defined-and-unwired reports clean here and does nothing on a real re-run."
+  fi
+fi
+
 if [ "$findings" -gt 0 ]; then
   printf '\nkubelet-config-agreement: %d finding(s).\n' "$findings"
   exit 1

@@ -3945,6 +3945,31 @@ function New-K3dCluster {
       }
     }
 
+    # Image-GC bound (backend#2634). The drop-in is a create-time bind mount, so a
+    # cluster made before this change keeps the kubelet's stock 85/80 thresholds and
+    # a re-run used to say "Compute environment already running" without looking
+    # (Bugbot, Medium, on client#912 -- the bash twin had this check and this one did
+    # not, and WSL2 edges are a real part of that population).
+    #
+    # WARN, do not Err, and that is the deliberate difference from the dataset check
+    # above: a missing dataset mount puts customer data on ephemeral storage, so
+    # refusing is right there. A missing image-GC bound is the status quo on every
+    # existing edge, so refusing would turn every ordinary re-run into a hard
+    # failure. Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+    #
+    # Empty output stays silent: 'cannot tell' must not read as 'missing', or the
+    # warning trains people to ignore it.
+    $kubeletMounts = ""
+    try { $kubeletMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+    if ($kubeletMounts -and ($kubeletMounts -notmatch ('(?m)^' + [regex]::Escape($TB_KUBELET_CONFIG_NODE_PATH) + '\s*$'))) {
+      Warn "The existing '$CLUSTER_NAME' cluster has no kubelet config mount, so its nodes keep the stock 85% image-GC threshold."
+      Hint "Training images are 2.7-11 GB each and floating tags leave the previous digest resident on every"
+      Hint "republish, so the node fills until garbage collection and disk-pressure eviction start DURING a"
+      Hint "training run. k3d bakes bind mounts in at create time, so this can't be added to a running cluster."
+      Hint "The install will proceed. To bound the image store, recreate the cluster when convenient:"
+      Write-RecreateClusterHint
+    }
+
     # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
     # a healthy-but-drifted cluster is warned too (Bugbot #565).

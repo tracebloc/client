@@ -108,6 +108,16 @@ run_case "ps1 points the kubelet at a DIFFERENT path than it mounts" "$PS" \
   '"--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all"' \
   '"--kubelet-arg=config=/etc/tracebloc/elsewhere.yaml@all"' 1
 
+# BEHAVIOUR PARITY on the reuse path (Bugbot, Medium, on client#912). The two twins
+# agreed on every VALUE while only one of them looked at an existing cluster, so the
+# value checks above were all green while a whole population stayed unbounded.
+run_case "only bash checks an existing cluster (the parity gap as shipped)" "$PS" \
+  'no kubelet config mount' 'nothing worth saying' 1
+run_case "only ps1 checks an existing cluster" "$CS" \
+  'no kubelet config mount' 'nothing worth saying' 1
+run_case "the bash check is DEFINED but never called" "$CS" \
+  "  _check_existing_cluster_kubelet_config" "  : # unwired" 1
+
 printf '\nfail closed — "cannot tell" must never read as agreement:\n'
 run_case "cluster.sh unreadable" "" "" "" 2 unreadable
 run_case "install-k8s.ps1 absent" "" "" "" 2 missing

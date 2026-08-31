@@ -7475,3 +7475,58 @@ Describe "Get-TrainingResources carry path (backend#2418)" {
     Get-TrainingResources | Should -Match '^cpu='
   }
 }
+
+Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
+  # Bugbot Medium on client#912: the bash twin warned when a reused cluster had no
+  # kubelet config mount and this twin did not, so every Windows/WSL2 edge created
+  # before that change stayed on the stock 85/80 thresholds with no signal. The two
+  # twins agreed on every VALUE while disagreeing on this BEHAVIOUR, which is why
+  # value agreement did not catch it.
+  #
+  # Source-level, like the k3s-component block above and for the same reason:
+  # New-K3dCluster's reuse branch needs a live k3d + docker to execute. The gate is
+  # scripts/tests/kubelet-config-agreement.sh, which runs in the required
+  # `Source-of-truth drift` job and asserts BOTH twins carry the check. This is the
+  # local-feedback half.
+  BeforeAll {
+    $script:Raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    # Comment lines dropped: the block documents itself, and a check satisfied by
+    # its own documentation is not checking code.
+    $script:Code = ($script:Raw -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+  }
+
+  It 'inspects the node mounts on the reuse path' {
+    $script:Code | Should -Match 'kubeletMounts'
+    $script:Code | Should -Match 'docker inspect'
+  }
+
+  It 'keys the comparison on the SHARED node-path variable, not a literal' {
+    # A literal would silently stop matching the moment the mount path moves, and
+    # the agreement guard could not tie the two twins together.
+    $script:Code | Should -Match 'TB_KUBELET_CONFIG_NODE_PATH'
+  }
+
+  It 'WARNS and offers the recreate hint, and does NOT Err' {
+    # Err here would turn every ordinary re-run against an existing cluster into a
+    # hard failure, because an unbounded image store is today's status quo on every
+    # edge. The dataset-mount sibling Errs; this one deliberately must not.
+    $script:Code | Should -Match 'no kubelet config mount'
+    $idx = $script:Code.IndexOf('no kubelet config mount')
+    $window = $script:Code.Substring($idx, [Math]::Min(900, $script:Code.Length - $idx))
+    $window | Should -Match 'Write-RecreateClusterHint'
+    $window | Should -Not -Match '\bErr\b'
+  }
+
+  It 'stays silent when the mounts could not be read' {
+    # 'cannot tell' must not read as 'missing', or the warning trains people to
+    # ignore it. The guard is the `-and` on a non-empty $kubeletMounts.
+    $script:Code | Should -Match '\$kubeletMounts -and'
+  }
+
+  It 'agrees with the bash twin on the operator-visible message' {
+    # The agreement guard keys on this exact phrase in both files. If either side
+    # rewords it, the guard stops tying them together and this catches it here.
+    $bash = Get-Content "$PSScriptRoot/../lib/cluster.sh" -Raw
+    $bash | Should -Match 'no kubelet config mount'
+  }
+}
