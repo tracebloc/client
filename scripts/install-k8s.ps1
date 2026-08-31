@@ -5445,6 +5445,22 @@ function Invoke-ProvisionClient {
   Log "Provisioned - credential handed to the install (not shown)."
 }
 
+# The message the fallback branch refuses with when there is no terminal to ask
+# for credentials (backend#2675). A PURE FUNCTION for the same reason the reboot
+# decision became Read-RebootChoice: the call site ends in a throw (Err never
+# returns), and asserting the message THROUGH a throwing mock turned out to bind
+# differently on every Pester/PowerShell pairing the CI matrix runs -- three
+# capture strategies, three version-specific failures. Returning the string lets
+# the test read it directly, no mock involved. The pair it names is the one
+# Get-ProvisioningPreset reads: the documented unattended contract.
+function Get-UnattendedCredentialRefusal {
+  return ("This machine is not registered yet and there is no terminal to ask for credentials.`n" +
+          "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
+          "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
+          "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
+          "  Find them at https://ai.tracebloc.io/clients")
+}
+
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
   Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client" "e"
@@ -5521,13 +5537,7 @@ function Install-ClientHelm {
       # be empty." forever. Fail closed at the branch door, naming the two
       # variables that make this path unnecessary -- the same pair
       # Get-ProvisioningPreset reads, and the documented automation contract.
-      if (-not (Test-CanPrompt)) {
-        Err ("This machine is not registered yet and there is no terminal to ask for credentials.`n" +
-             "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
-             "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
-             "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
-             "  Find them at https://ai.tracebloc.io/clients")
-      }
+      if (-not (Test-CanPrompt)) { Err (Get-UnattendedCredentialRefusal) }
 
       $defaultClientId = ""
       $defaultClientPassword = ""

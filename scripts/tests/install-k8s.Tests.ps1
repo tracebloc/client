@@ -3528,21 +3528,14 @@ Describe "Unattended install with no credentials refuses instead of spinning (ba
   }
   It "the refusal names the two variables that make the path unnecessary" {
     # Whoever hits this is automating; the message has to be actionable, and the
-    # pair it names is the same one Get-ProvisioningPreset reads.
-    #
-    # CAPTURED IN THE MOCK BODY, WITH param() DECLARED (the :1516 pattern) --
-    # third attempt, and the two failed ones are worth their line each: a body
-    # reading $m with NO param() binds on Pester 6 and is $null on the CI's 5.5;
-    # `Should -Invoke -ParameterFilter` fails on 5.5 too, because 5.5 does not
-    # record an invocation whose mock body THROWS -- and this mock must throw,
-    # since the real Err never returns and the code after it assumes so.
-    Mock Test-CanPrompt { $false }
-    Mock Step { }
-    $script:Refusal = ""
-    Mock Err { param($m, $Detail) $script:Refusal = "$m"; throw "refused" }
-    { Install-ClientHelm } | Should -Throw
-    $script:Refusal | Should -Match 'TRACEBLOC_CLIENT_ID'
-    $script:Refusal | Should -Match 'TRACEBLOC_CLIENT_PASSWORD'
+    # pair it names is the same one Get-ProvisioningPreset reads. Read straight
+    # off the pure function the branch passes to Err -- capturing it THROUGH a
+    # throwing mock bound differently on every Pester/PowerShell pairing in the
+    # CI matrix (three strategies, three version-specific failures), which is
+    # exactly why the message was lifted out, mirroring Read-RebootChoice.
+    $refusal = Get-UnattendedCredentialRefusal
+    $refusal | Should -Match 'TRACEBLOC_CLIENT_ID'
+    $refusal | Should -Match 'TRACEBLOC_CLIENT_PASSWORD'
   }
 }
 
