@@ -43,7 +43,11 @@ helm template t client \
 
 SCRIPT="$WORK/auto-upgrade.sh"
 python3 - "$WORK/rendered.yaml" "$SCRIPT" <<'PY'
-import sys, yaml
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 src, out = sys.argv[1], sys.argv[2]
 for d in yaml.safe_load_all(open(src)):
     if d and d.get("kind") == "ConfigMap" and "auto-upgrade.sh" in (d.get("data") or {}):
