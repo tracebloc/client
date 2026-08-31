@@ -229,13 +229,35 @@ if [ "$bsh_reuse" -eq 0 ] || [ "$ps1_reuse" -eq 0 ]; then
     "on every VALUE while disagreeing on this, so the checks above cannot see it."
 fi
 
-# And the bash check must be CALLED, not merely defined -- a check nobody invokes is
-# the shape this repo keeps closing. Two occurrences = definition + call site.
+# And the bash check must be CALLED somewhere, not merely defined.
+#
+# THIS ASSERTION IS DELIBERATELY WEAK, AND SAYING SO IS THE POINT (@aptracebloc and
+# @saadqbal on client#912). It counts occurrences, so it answers "is this wired at
+# all" and NOT "is it wired on the path a healthy edge actually takes". That
+# distinction is the whole finding on this PR: the advisory had one call site, in
+# `_handle_existing_cluster`, which assess.sh's healthy hand-off and
+# `upgrade_cli_only` both return before reaching -- so it was dead for the entire
+# population it exists for while this check sat green.
+#
+# REACHABILITY IS GATED ELSEWHERE, and not duplicated here on purpose:
+# `scripts/tests/assess-early-exit-drift.bats` derives the reuse-path advisory set
+# from `_handle_existing_cluster` and the early-exit set from
+# `assess_existing_install` + `upgrade_cli_only`, and fails on any advisory in the
+# first that is in neither of the second (with an exemption list that is itself
+# checked for staleness). It runs in the `Unit tests` job, which IS a required
+# context on develop -- verified, not assumed. Re-deriving that rule in shell here
+# would give two derivations of one invariant that can drift apart, which is worse
+# than one gated derivation.
+#
+# So what this line is for: catching the cheap regression of the function being
+# deleted or renamed away entirely, in the same pass that checks the values.
 if [ "$bsh_reuse" -eq 1 ]; then
   n_bsh="$(grep -c '_check_existing_cluster_kubelet_config' <<<"$bsh_body")"
   if [ "$n_bsh" -lt 2 ]; then
     note "_check_existing_cluster_kubelet_config is defined but never called (occurrences: $n_bsh)" \
-      "Defined-and-unwired reports clean here and does nothing on a real re-run."
+      "Defined-and-unwired reports clean here and does nothing on a real re-run." \
+      "NOTE: whether the call sites are on a REACHED path is gated by" \
+      "assess-early-exit-drift.bats, not by this line."
   fi
 fi
 
