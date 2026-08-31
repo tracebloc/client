@@ -1051,11 +1051,22 @@ Describe "Print-Summary" {
     $out | Should -Match "crash loop"
   }
   It "connected: shows the client version" {
+    # SEAM MOVED OUT ONE LAYER: Get-ChartVersion's `helm list` is bounded now
+    # (backend#2849 / Bugbot), so the mock sits on Invoke-BoundedProcess. Same
+    # assertions.
     $script:ClientState = "connected"
-    Mock helm { "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" }
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" } }
     $out = Print-Summary 6>&1 | Out-String
     $out | Should -Match "Version"
     $out | Should -Match "1\.4\.4"
+  }
+  It "connected: a timed-out helm leaves the version 'unknown' instead of hanging the summary" {
+    # Previously unreachable: the bare `helm list` blocked instead of returning, so
+    # a wedged API server froze the summary at the very end of a good install.
+    $script:ClientState = "connected"
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 124; Output = "" } }
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "unknown"
   }
   It "GPU detected but not enabled: summary says CPU + the reason, not 'NVIDIA GPU' (#616)" {
     $script:ClientState = "connected"
@@ -3874,16 +3885,52 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
     $errors.Count | Should -Be 0
 
-    $fn = $ast.FindAll({ param($n)
-      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-DiagnoseBundle' }, $true)
-    $fn.Count | Should -Be 1 -Because "cannot locate Invoke-DiagnoseBundle"
+    # INTERPROCEDURAL (Bugbot, second High). The first version of this looked only
+    # at native commands written INSIDE Invoke-DiagnoseBundle, so a bare call in a
+    # HELPER the bundle calls was invisible -- which is exactly how `Get-ChartVersion`
+    # (`helm list`, no deadline) survived it. And it is the worst possible place for
+    # one: the bundle calls it BEFORE writing any file, so an unreachable cluster
+    # meant no zip at all.
+    #
+    # So walk the whole call graph the bundle can reach, not just its own body.
+    $allFns = @{}
+    foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+      $allFns[$f.Name] = $f
+    }
+    $allFns.ContainsKey('Invoke-DiagnoseBundle') | Should -BeTrue -Because "cannot locate Invoke-DiagnoseBundle"
 
-    # Every external tool the bundle shells out to must go through a bounded
-    # wrapper. Native invocations of these are, by definition, not bounded.
-    $unbounded = $fn[0].FindAll({ param($n)
-      $n -is [System.Management.Automation.Language.CommandAst] -and
-      $n.GetCommandName() -in @('docker','k3d','kubectl','helm') }, $true) |
-      ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Extent.Text)" }
+    # transitive closure of in-file functions reachable from the bundle
+    $reach = [System.Collections.Generic.HashSet[string]]::new()
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    [void]$reach.Add('Invoke-DiagnoseBundle'); $queue.Enqueue('Invoke-DiagnoseBundle')
+    while ($queue.Count -gt 0) {
+      $cur = $queue.Dequeue()
+      foreach ($call in $allFns[$cur].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $name = $call.GetCommandName()
+        if ($name -and $allFns.ContainsKey($name) -and -not $reach.Contains($name)) {
+          [void]$reach.Add($name); $queue.Enqueue($name)
+        }
+      }
+    }
+    # must actually have followed calls, or the closure proves nothing
+    $reach.Count | Should -BeGreaterThan 1 -Because "the closure must follow the bundle's helper calls"
+
+    # Every external tool anything in that closure shells out to must be bounded.
+    # A native invocation is unbounded unless it sits in a Start-Job (reaped on a
+    # deadline -- the docker guard above enforces that reap per job).
+    $unbounded = @()
+    foreach ($name in $reach) {
+      foreach ($c in $allFns[$name].FindAll({ param($n)
+          $n -is [System.Management.Automation.Language.CommandAst] -and
+          $n.GetCommandName() -in @('docker','k3d','kubectl','helm') }, $true)) {
+        $p = $c.Parent; $inJob = $false
+        while ($p) {
+          if ($p -is [System.Management.Automation.Language.CommandAst] -and $p.GetCommandName() -eq 'Start-Job') { $inJob = $true; break }
+          $p = $p.Parent
+        }
+        if (-not $inJob) { $unbounded += "$name line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
+      }
+    }
 
     $unbounded -join "`n" | Should -BeNullOrEmpty -Because "the support bundle must never block on the dependency it exists to describe"
   }

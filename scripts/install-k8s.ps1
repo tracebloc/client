@@ -804,10 +804,21 @@ function ConvertTo-WorkspaceName {
 
 # Best-effort chart version of the installed client release (e.g. "1.4.4");
 # empty if not found / cluster unreachable. Greps helm's CHART column.
+# BOUNDED (backend#2849 / Bugbot). `helm list` reaches the API server behind the
+# Docker engine, so on an unreachable cluster this did not return empty -- it
+# BLOCKED. That matters most in `-Diagnose`, which calls this BEFORE writing any
+# bundle file, so the one tool an operator runs because the cluster is unreachable
+# stopped here and produced no zip at all. Print-Summary's call had the same
+# exposure at the end of a successful install.
+#
+# A timeout keeps the documented contract exactly: "empty if not found / cluster
+# unreachable". The version is parsed ONLY on a clean exit, so synthetic timeout
+# text can never be mistaken for a chart version.
 function Get-ChartVersion {
   param([string]$Namespace = "tracebloc")
-  $out = (helm list -n $Namespace 2>$null) | Out-String
-  if ($out -match 'client-([0-9][^\s]*)') { return $Matches[1] }
+  $r = Invoke-BoundedProcess -FileName "helm" -Arguments @("list", "-n", $Namespace) -TimeoutSec 20
+  if ($r.Code -ne 0) { return "" }
+  if ("$($r.Output)" -match 'client-([0-9][^\s]*)') { return $Matches[1] }
   return ""
 }
 
