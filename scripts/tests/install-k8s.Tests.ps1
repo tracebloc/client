@@ -1238,6 +1238,21 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Should -Not -Invoke Copy-Item
     Should -Not -Invoke New-Item
   }
+
+  # backend#2915 (Bugbot): Copy-Item raises a NON-terminating error by default, which the
+  # caller's try/catch would miss. -ErrorAction Stop must make a failed copy THROW so it
+  # is logged (and Test-TraceblocCli then reports the truth), not silently swallowed.
+  It "propagates a copy failure so the caller can log it (not silently swallowed)" {
+    Mock Copy-Item { throw "access is denied" }
+    { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Throw
+  }
+
+  It "throws if the copy 'succeeded' but the artifact isn't there" {
+    # src present, dest dir absent (so New-Item runs, mocked), and the dest exe never
+    # materializes -> the post-copy Test-Path is false -> throw.
+    Mock Test-Path { $LiteralPath -notlike '*pf-tracebloc-bin*' }
+    { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Throw
+  }
 }
 
 Describe "Test-TraceblocCliCurrent" {
@@ -1297,19 +1312,37 @@ Describe "Test-TraceblocCli" {
   # Post-install self-verification (#738). Proves the CLI is usable from a fresh
   # terminal and prints a VERIFIED next command, or the Windows-correct fix if a
   # new shell wouldn't find it. Load-bearing property: NON-FATAL (never throws).
-  BeforeEach { Mock RefreshPath {} }
+  BeforeEach {
+    Mock RefreshPath {}
+    $script:TOOL_DIR = 'pf-tracebloc-bin'   # machine-wide tools dir (on the Machine PATH)
+  }
+  AfterEach { $script:TOOL_DIR = $null }
 
-  It "fresh-shell success: reports a VERIFIED verdict, not 'open a new terminal so'" {
+  It "machine-wide success: reports a VERIFIED verdict, not 'open a new terminal so'" {
     Mock Has { $true }                       # a fresh shell resolves tracebloc
     Mock tracebloc { "tracebloc 0.2.0" }
+    Mock Test-Path { $true }                 # the machine-wide $TOOL_DIR\tracebloc.exe is present
     $out = Test-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "run 'tb'"          # usable-now verdict (was "verified on your PATH")
     $out | Should -Match "0.2.0"             # real proof via `tracebloc version`
     $out | Should -Not -Match "open a new terminal so"   # the old, useless line is gone
   }
 
+  # backend#2915 (Bugbot): the installer's OWN process carries the CLI installer's
+  # User-scope entry, so `Has tracebloc` alone must NOT read as "ready" when the
+  # machine-wide copy didn't land — a fresh/other-user shell still fails.
+  It "resolvable only via the user's PATH (machine-wide copy absent): honest, NOT a false 'ready'" {
+    Mock Has { $true }                       # resolves in-process (User-scope LOCALAPPDATA)
+    Mock tracebloc { "tracebloc 0.2.0" }
+    Mock Test-Path { $false }                # but $TOOL_DIR\tracebloc.exe is NOT present
+    $out = Test-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "not machine-wide"          # honest verdict
+    $out | Should -Not -Match "tracebloc CLI ready"  # never a false ready
+  }
+
   It "CLI-missing-from-fresh-shell: prints an actionable hint (install dir)" {
     Mock Has { $false }                      # installed, but not yet resolvable
+    Mock Test-Path { $false }
     $out = Test-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "open a new PowerShell window"
     $out | Should -Match "Installed to:"     # the exact location, not a vague hint
@@ -1318,6 +1351,7 @@ Describe "Test-TraceblocCli" {
   It "non-fatal: does not throw even if RefreshPath blows up" {
     Mock RefreshPath { throw "registry unavailable" }
     Mock Has { $false }
+    Mock Test-Path { $false }
     { Test-TraceblocCli 6>&1 | Out-Null } | Should -Not -Throw
   }
 }

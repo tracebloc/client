@@ -7528,10 +7528,17 @@ function Publish-TraceblocCliToToolDir {
   if ([string]::IsNullOrWhiteSpace($InstallDir) -or [string]::IsNullOrWhiteSpace($ToolDir)) { return }
   $src = Join-Path $InstallDir "tracebloc.exe"
   if (-not (Test-Path -LiteralPath $src)) { return }
+  $dest = Join-Path $ToolDir "tracebloc.exe"
+  # -ErrorAction Stop, because Copy-Item/New-Item raise NON-terminating errors under the
+  # installer's default $ErrorActionPreference='Continue' — the caller's try/catch would
+  # NOT catch those, so a failed copy would be silent (Bugbot). Make them terminating and
+  # then CONFIRM the artifact actually landed, so any failure is logged by the caller and
+  # Test-TraceblocCli's machine-wide check reports the truth instead of a false "ready".
   if (-not (Test-Path -LiteralPath $ToolDir)) {
-    New-Item -ItemType Directory -Path $ToolDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $ToolDir -Force -ErrorAction Stop | Out-Null
   }
-  Copy-Item -LiteralPath $src -Destination (Join-Path $ToolDir "tracebloc.exe") -Force
+  Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
+  if (-not (Test-Path -LiteralPath $dest)) { throw "tracebloc.exe copy to '$dest' reported success but the file is absent" }
 }
 
 # Post-install self-verification (#738). Proves the CLI is usable from a FRESH
@@ -7548,7 +7555,16 @@ function Test-TraceblocCli {
   # PowerShell window would start with.
   try { RefreshPath } catch { Log "RefreshPath failed during CLI verify: $_" }
 
-  if (Has "tracebloc") {
+  # The guarantee backend#2915 makes is MACHINE-WIDE reachability: the exe copied into
+  # $TOOL_DIR, which is on the Machine PATH, so ANY fresh/non-interactive shell — or a
+  # different user — resolves it. Prove THAT, not merely `Has tracebloc`: the installer's
+  # own process ALSO carries the CLI installer's User-scope LOCALAPPDATA entry, so a
+  # silently-failed $TOOL_DIR copy would otherwise still read as "ready" here while a
+  # fresh shell finds nothing (Bugbot).
+  $machineExe    = if ($script:TOOL_DIR) { Join-Path $script:TOOL_DIR "tracebloc.exe" } else { $null }
+  $onMachinePath = $machineExe -and (Test-Path -LiteralPath $machineExe)
+
+  if ($onMachinePath -and (Has "tracebloc")) {
     # `tracebloc version` is the real proof; cosmetic, never fatal. The canonical
     # "tracebloc data ingest ./data" next step lives in Print-Summary's "What to
     # do next" — don't duplicate it; just confirm the verdict.
@@ -7563,10 +7579,19 @@ function Test-TraceblocCli {
     return
   }
 
-  # Installed, but STILL not resolvable in-process even after the copy into $TOOL_DIR
-  # (backend#2904) + RefreshPath — e.g. the exe landed somewhere other than
-  # $TRACEBLOC_CLI_INSTALL_DIR (an INSTALL_PREFIX override), so the copy no-op'd. A NEW
-  # window reads the persisted PATH, so tell the user exactly where it is and how to use it.
+  if (Has "tracebloc") {
+    # Resolvable in THIS process — but only via the installing user's own User PATH, not
+    # the machine-wide copy (the $TOOL_DIR copy didn't land, e.g. an INSTALL_PREFIX
+    # override or a copy that failed). A fresh, non-interactive shell or a different user
+    # still won't find it (backend#2915), so say so honestly rather than a false "ready".
+    Warn "tracebloc CLI installed for you, but not machine-wide -- a fresh shell or another user may not resolve it."
+    if ($machineExe) { Hint "  Expected machine-wide at: $machineExe" }
+    Hint "  Re-run this installer as Administrator to place it there."
+    return
+  }
+
+  # Not resolvable in-process at all. A NEW window reads the persisted PATH, so tell the
+  # user exactly where the CLI installer put it and how to use it now.
   Ok "tracebloc CLI installed -- open a new PowerShell window to use it."
   Hint "  Installed to: $TRACEBLOC_CLI_INSTALL_DIR"
   Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" data ingest .\data"
