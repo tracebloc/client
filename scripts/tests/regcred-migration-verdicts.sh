@@ -608,6 +608,20 @@ $written
 EOF
   fi
 
+  # 15. A FAILED ROLLOUT MUST NAME THE OBJECT. `rollout status` over the whole
+  #     discovered set fails anonymously -- the operator learns "the rollout did
+  #     not complete" and not which of six workloads. Reviewer finding on #916,
+  #     whose stated mechanism (kubectl refuses multiple resources,
+  #     kubernetes#72216) did NOT reproduce on v1.37.0 -- that limitation is fixed
+  #     upstream, and a Deployment + DaemonSet together exit 0. The per-object
+  #     loop is kept for the property this pins, plus robustness on an older
+  #     kubectl, and this assertion is about the DIAGNOSTIC, not the refusal.
+  if grep -qE 'STOP: \$obj did not roll out' "$RUNBOOK"; then
+    pass=$((pass + 1)); echo "  [ok]   a failed rollout names the object that did not complete"
+  else
+    fail=$((fail + 1)); echo "  [bad]  a failed rollout does not name the object -- the operator cannot tell which of the discovered workloads stalled" >&2
+  fi
+
   # 9. and the step must NOTICE an empty match, because `rollout restart` over a
   #    selector that hits nothing prints nothing and exits 0.
   if grep -qE 'matched NO workloads' "$RUNBOOK"; then

@@ -349,9 +349,24 @@ clean pull for a restart that never happened.
   # shellcheck disable=SC2086
   kubectl -n "$NS" rollout restart $targets \
     || { echo "STOP: rollout restart failed -- nothing was proved."; exit 1; }
-  # shellcheck disable=SC2086
-  kubectl -n "$NS" rollout status $targets --timeout=5m \
-    || { echo "STOP: the rollout did not complete -- look for ImagePullBackOff."; exit 1; }
+  # ONE `rollout status` PER OBJECT, and the reason is robustness rather than a
+  # bug being fixed. `kubectl rollout status` historically refused more than one
+  # resource ("rollout status is only supported on individual resources and
+  # resource collections", kubernetes#72216); that is FIXED in current kubectl --
+  # measured on v1.37.0, where a Deployment and a DaemonSet passed together, a
+  # multi-match `-l` selector, and a bare kind all succeed and exit 0. So the
+  # multi-arg form is not broken on anything we ship against.
+  #
+  # The loop is kept anyway because it costs nothing and buys two things: it works
+  # on an operator's older kubectl whatever its version, and a failure NAMES the
+  # object that did not roll out instead of failing the whole set anonymously.
+  while IFS= read -r obj; do
+    [ -n "$obj" ] || continue
+    kubectl -n "$NS" rollout status "$obj" --timeout=5m \
+      || { echo "STOP: $obj did not roll out -- look for ImagePullBackOff."; exit 1; }
+  done <<ROLLOUT
+$targets
+ROLLOUT
   echo "restarted and rolled out: the images above were pulled fresh."
 )
 ```
