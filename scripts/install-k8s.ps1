@@ -736,6 +736,21 @@ $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USE
 # Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
 $HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
 
+# Kubelet image-GC thresholds (backend#2634). The bash twin holds the identical
+# three values in scripts/lib/cluster.sh and
+# scripts/tests/kubelet-config-agreement.sh derives both sides and fails the build
+# on divergence -- so these are one contract in two files, not two sources.
+# NOT env-overridable, deliberately: an operator who lowers `high` to 95 to "get
+# more disk" re-creates the unbounded image store, and the value that matters is
+# the RELATIONSHIP between the two (the band must exceed one task image), which a
+# single env var cannot express safely.
+$TB_KUBELET_IMAGE_GC_HIGH_PERCENT = 75
+$TB_KUBELET_IMAGE_GC_LOW_PERCENT  = 60
+$TB_KUBELET_IMAGE_MIN_GC_AGE      = "2m"
+# Path the config is mounted to INSIDE every k3d node. Named once so the volume
+# mount and the --kubelet-arg cannot disagree about it.
+$TB_KUBELET_CONFIG_NODE_PATH      = "/etc/tracebloc/kubelet.yaml"
+
 # Pre-create the per-release hostPath dirs the chart's PVs bind to (logs, mysql,
 # data), mirroring bash _ensure_release_dirs (scripts/lib/cluster.sh). Without
 # these the mount target does not exist yet and the first dataset ingest fails
@@ -3947,6 +3962,47 @@ function New-K3dCluster {
         $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
       }
     }
+
+    # --- kubelet config drop-in (backend#2634; mechanism shared with #2460) ---
+    #
+    # The bash twin's `_write_kubelet_config` in scripts/lib/cluster.sh carries the
+    # full rationale; `scripts/tests/kubelet-config-agreement.sh` derives the three
+    # values from BOTH files and fails the build if they diverge, so this is not a
+    # second source of truth -- it is the second half of one, held together by a
+    # guard in a required job.
+    #
+    # Short version: EvictionHard / KubeReserved / SystemReserved are maps the
+    # kubelet replaces WHOLESALE, so they cannot travel as `--kubelet-arg` without
+    # silently dropping k3s's disk thresholds. Image GC is scalar and would survive
+    # the CLI, but belongs beside the eviction thresholds it interacts with. One
+    # file, authored whole. Stock 85/80 leaves a 5-point band, which on a real disk
+    # can be smaller than ONE 2.7-11 GB task image.
+    $kubeletCfgDir  = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-kubelet-" + [System.Guid]::NewGuid().ToString('N').Substring(0,8))
+    $kubeletCfgPath = Join-Path $kubeletCfgDir "kubelet.yaml"
+    # HARD-FAIL, not a warning: a silent skip leaves the node on the stock 85%
+    # threshold -- the unbounded image store #2634 is about -- while the install
+    # reports success and nothing downstream can tell.
+    try {
+      New-Item -ItemType Directory -Path $kubeletCfgDir -Force | Out-Null
+      # LF and no BOM: this file is read by the kubelet inside a Linux container.
+      # Set-Content on Windows PowerShell would write CRLF and a UTF-8 BOM, and the
+      # YAML parser rejects the BOM -- so the node would fail to start with a
+      # message about the file, not about us.
+      $kubeletYaml = @(
+        "apiVersion: kubelet.config.k8s.io/v1beta1",
+        "kind: KubeletConfiguration",
+        "imageGCHighThresholdPercent: $TB_KUBELET_IMAGE_GC_HIGH_PERCENT",
+        "imageGCLowThresholdPercent: $TB_KUBELET_IMAGE_GC_LOW_PERCENT",
+        "imageMinimumGCAge: $TB_KUBELET_IMAGE_MIN_GC_AGE"
+      ) -join "`n"
+      [System.IO.File]::WriteAllText($kubeletCfgPath, $kubeletYaml + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+      throw "Couldn't write the kubelet config to $kubeletCfgPath ($($_.Exception.Message)). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
+    }
+    # `@all` for the same reason as the cgroupv1 arg above: an agent runs a kubelet
+    # and pulls the same task images, so a server-only drop-in leaves it unbounded.
+    $k3dArgs += @("-v", "${kubeletCfgPath}:${TB_KUBELET_CONFIG_NODE_PATH}@all")
+    $k3dArgs += @("--k3s-arg", "--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all")
 
     # backend#743: bind-mount the customer dataset volume at a distinct cluster
     # path so the chart's dataset PV points there while mysql + logs stay on the

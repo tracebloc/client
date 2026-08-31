@@ -388,6 +388,61 @@ wire_ca_trust() {
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every
 # registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
 # node (where the -v mount lands). Caller removes the temp dir.
+# --- kubelet config drop-in (backend#2634, mechanism shared with backend#2460) ---
+#
+# WHY A CONFIG FILE AND NOT `--kubelet-arg` (read before "simplifying" this)
+# `EvictionHard`, `KubeReserved` and `SystemReserved` are MAPS and the kubelet
+# replaces them WHOLESALE. k3s ships `imagefs.available` / `nodefs.available`
+# defaults, so a CLI write of one eviction key silently drops both disk
+# thresholds -- the failure backend#2223 and backend#2443 exist to prevent.
+# `scripts/tests/kubelet-arg-map-safety.sh` refuses those settings as CLI args
+# for exactly this reason. Image GC is scalar and would survive the CLI, but it
+# has to live beside the eviction thresholds it interacts with (`imagefs`
+# governs both), and #2460 needs the maps here anyway. One file, authored whole.
+#
+# MEASURED, not assumed (2026-08-31, k3d v5.8.3 / rancher/k3s:v1.36.3-k3s1,
+# server + agent): with this file mounted and `--kubelet-arg=config=` pointing at
+# it, /configz on BOTH nodes reports the values below, `evictionHard` keeps k3s's
+# defaults when the file omits it, and the file's own map replaces them when it
+# does not. It also coexists with the `fail-cgroupv1` CLI arg.
+#
+# THE VALUES, and why they are not the stock 85/80
+# Task images are 2.7-11 GB and the base image IS the image (`base:gpu` 7.88 GB,
+# `client-image_classification-gpu` 7.89 GB -- the task adds ~10 MB), so there is
+# no small image to fall back to. Stock leaves a 5-point reclaim band: on a 200 GB
+# disk that is 10 GB, which can be less than ONE image, so GC frees nothing
+# useful and immediately re-trips while a pull is already failing.
+#   high 75  start reclaiming before the disk is full enough to fail a pull
+#   low  60  a 15-point band -- on a 100 GB disk ~15 GB, about 2x the largest
+#            single image, so one pass makes room for the next pull
+#   age  2m  the kubelet never GCs an image a running container uses; this only
+#            protects a just-pulled, not-yet-used image from being reclaimed
+#            under the same burst that pulled it
+# The guard asserts the INVARIANTS (all three set, both twins agree, low < high,
+# never looser than stock) rather than these exact integers, so retuning them is
+# a values change and not a guard change.
+TB_KUBELET_IMAGE_GC_HIGH_PERCENT=75
+TB_KUBELET_IMAGE_GC_LOW_PERCENT=60
+TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
+
+# Path the file is mounted to INSIDE every k3d node. Named once; the mount and the
+# --kubelet-arg must not be able to disagree about it.
+TB_KUBELET_CONFIG_NODE_PATH="/etc/tracebloc/kubelet.yaml"
+
+_write_kubelet_config() {
+  local td cfg
+  td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-kubelet-XXXXXX")" || return 1
+  cfg="$td/kubelet.yaml"
+  cat > "$cfg" <<EOF || return 1
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+imageGCHighThresholdPercent: ${TB_KUBELET_IMAGE_GC_HIGH_PERCENT}
+imageGCLowThresholdPercent: ${TB_KUBELET_IMAGE_GC_LOW_PERCENT}
+imageMinimumGCAge: ${TB_KUBELET_IMAGE_MIN_GC_AGE}
+EOF
+  echo "$cfg"
+}
+
 _write_k3d_registries_config() {
   local node_ca="$1" host td cfg
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 1
@@ -1498,6 +1553,20 @@ _create_new_cluster() {
   if [[ "${K8S_VERSION}" == "latest" ]] || ! _version_lt "${K8S_VERSION#v}" "1.31.0"; then
     K3D_ARGS+=(--k3s-arg "--kubelet-arg=fail-cgroupv1=false@all")
   fi
+
+  # Image GC, and the drop-in that backend#2460 will add its reservation maps to.
+  # HARD-FAIL rather than continue: a silent skip leaves every edge on the stock
+  # 85/80 thresholds -- the exact unbounded image store #2634 is about -- while
+  # the install reports success, and nothing downstream can tell the difference.
+  # Same posture as the CA bundle above, for the same reason.
+  local _kubelet_cfg
+  _kubelet_cfg="$(_write_kubelet_config)" \
+    || error "Couldn't write the kubelet config (temp dir/disk?). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
+  # `@all`, NOT `@server:*`: an agent runs a kubelet and pulls the same 2.7-11 GB
+  # task images, so a server-only drop-in would leave agents unbounded -- the same
+  # reasoning the cgroupv1 arg above records.
+  K3D_ARGS+=(-v "${_kubelet_cfg}:${TB_KUBELET_CONFIG_NODE_PATH}@all")
+  K3D_ARGS+=(--k3s-arg "--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all")
 
   # Bounded create (#426): --wait alone has no deadline, so a stalled image
   # pull (rate-limited registry, TLS-intercepting proxy) hangs the create

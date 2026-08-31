@@ -1307,6 +1307,79 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   [[ "${output%%k3d cluster delete*}" == *"tracebloc delete --keep-data"* ]] || return 1
 }
 
+# ── kubelet config drop-in: image GC (backend#2634) ─────────────────────────
+#
+# Verified against a real cluster before these were written (2026-08-31, k3d
+# v5.8.3 / rancher/k3s:v1.36.3-k3s1, server + agent): with the file mounted and
+# `--kubelet-arg=config=` pointing at it, /configz on BOTH nodes reported
+# imageGCHighThresholdPercent=70 / low=55 / imageMinimumGCAge=2m0s from a probe
+# file, `evictionHard` kept k3s's own defaults when the file omitted it, and the
+# file's map replaced them when it did not. So these tests pin wiring whose effect
+# is measured, not assumed.
+#
+# UNGATED on the k3s version, unlike fail-cgroupv1 above, and that asymmetry is
+# deliberate: `--kubelet-arg=config=` is a path to a KubeletConfiguration, which
+# the kubelet has accepted for far longer than any version we support, and the
+# three fields are v1beta1. There is no band to straddle.
+
+@test "kubelet config: the drop-in is mounted and the kubelet is pointed at it" {
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  # Both halves, because either alone is a silent no-op: a mount nothing reads,
+  # or a kubelet told to read a path that is not in the node.
+  [[ "$output" == *"--kubelet-arg=config=/etc/tracebloc/kubelet.yaml@all"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *":/etc/tracebloc/kubelet.yaml@all"* ]] || { echo "$output"; return 1; }
+}
+
+@test "kubelet config: @all, so agent kubelets are bounded too" {
+  # An agent runs a kubelet and pulls the same 2.7-11 GB task images. A
+  # server-only drop-in would leave every agent on the stock 85% threshold --
+  # the unbounded image store the ticket is about, half-fixed and looking done.
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"--kubelet-arg=config=/etc/tracebloc/kubelet.yaml@server:"* ]] || return 1
+  [[ "$output" == *"--kubelet-arg=config=/etc/tracebloc/kubelet.yaml@all"* ]] || return 1
+}
+
+@test "kubelet config: the file written is valid, complete KubeletConfiguration YAML" {
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  local cfg="$output"
+  [ -r "$cfg" ] || { echo "no readable file at '$cfg'"; return 1; }
+  run cat "$cfg"
+  [[ "$output" == *"kind: KubeletConfiguration"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"apiVersion: kubelet.config.k8s.io/v1beta1"* ]] || { echo "$output"; return 1; }
+  # All three, by name. A missing field is not a neutral default: the node keeps
+  # the stock 85/80 and the install still reports success.
+  [[ "$output" == *"imageGCHighThresholdPercent: 75"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"imageGCLowThresholdPercent: 60"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"imageMinimumGCAge: 2m"* ]] || { echo "$output"; return 1; }
+}
+
+@test "kubelet config: the file does NOT carry failCgroupV1" {
+  # kubelet-arg-map-safety.sh's header records that the kubelet REFUSES a field
+  # set both on the CLI and in a config file. fail-cgroupv1 travels as a CLI arg
+  # (it must, and it is version-gated), so putting it in the file too would make
+  # the node fail to start on exactly the hosts the flag exists to rescue.
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  run cat "$output"
+  [[ "$output" != *"failCgroupV1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "kubelet config: the reclaim band is wider than one task image's worth" {
+  # Not a restatement of the numbers -- a check on their RELATIONSHIP, which is
+  # what the ticket is about. GC reclaims down to LOW and stops, so a band
+  # narrower than the largest single image frees less than one image and
+  # re-trips immediately. That is the stock 85/80 behaviour being replaced.
+  [ "$TB_KUBELET_IMAGE_GC_LOW_PERCENT" -lt "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" ] || return 1
+  [ "$((TB_KUBELET_IMAGE_GC_HIGH_PERCENT - TB_KUBELET_IMAGE_GC_LOW_PERCENT))" -ge 10 ] || return 1
+  # Explicit configuration that reclaims LATER than the default inverts the ticket.
+  [ "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" -le 85 ] || return 1
+}
+
 # ── fail-cgroupv1: gated on the k3s pin (backend#2422) ──────────────────────
 #
 # k8s 1.35 flipped the kubelet's failCgroupV1 default to true, so from k3s 1.35
