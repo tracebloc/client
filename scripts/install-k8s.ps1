@@ -315,6 +315,56 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Thin, mockable wrappers around the persistent MACHINE-scope PATH in the
+# registry. Isolated as functions ONLY so the persist logic below (Add-DirToMachinePath)
+# is unit-testable off-Windows: the .NET static setter is a silent no-op on
+# non-Windows and the getter always returns $null there, so a Pester run on
+# Linux/macOS Mocks these two to simulate the registry instead of a real one.
+function Get-MachinePath { [System.Environment]::GetEnvironmentVariable("PATH","Machine") }
+function Set-MachinePath { param([string]$Value) [System.Environment]::SetEnvironmentVariable("PATH",$Value,"Machine") }
+
+# Is $Dir already an entry in a ';'-delimited PATH string? Splits on ';' and
+# compares each entry EXACTLY (case-insensitive, tolerant of a trailing separator)
+# rather than the substring test Initialize-ToolDir used to inline (`-like
+# "*$Dir*"`), which both false-POSITIVES (one dir is a prefix of a longer one, so a
+# dir that needs adding is judged already present and never gets added) and, because
+# $Dir was a raw wildcard pattern there, mis-parses a '[' in a path. Pure +
+# cross-platform, so it carries the dedup unit tests directly.
+function Test-DirOnPath {
+  param([string]$PathValue, [string]$Dir)
+  if (-not $PathValue -or -not $Dir) { return $false }
+  $target = $Dir.Trim().TrimEnd('\','/')
+  if (-not $target) { return $false }
+  foreach ($entry in ($PathValue -split ';')) {
+    if ($entry.Trim().TrimEnd('\','/') -ieq $target) { return $true }
+  }
+  return $false
+}
+
+# Persist $Dir onto the MACHINE PATH (idempotently) so a BRAND-NEW, non-interactive
+# shell resolves the tools in it WITHOUT an interactive login: the Windows e2e opens
+# a fresh SSM session that sources no profile and need not even run as the installing
+# user, so a User-scope or session-only ($env:PATH) edit is invisible to it
+# (backend#2904). Machine scope is the same mechanism every other client tool uses
+# (Initialize-ToolDir). RefreshPath then mirrors the persisted value into THIS
+# process so the dir is usable immediately, without waiting for a new shell. Writing
+# Machine scope needs elevation — the installer has already self-elevated by the time
+# either caller runs.
+function Add-DirToMachinePath {
+  param([string]$Dir)
+  if (-not $Dir) { return }
+  $machinePath = Get-MachinePath
+  if (Test-DirOnPath -PathValue $machinePath -Dir $Dir) { return }
+  # Collapse any trailing ';' on the existing value before joining: "$mp;$Dir" over
+  # a value that already ends in ';' yields "...;;$Dir", and that empty entry is
+  # resolved as the CURRENT directory on the system PATH — a binary-planting
+  # search-path injection the CLI installer guards against too. TrimEnd is a no-op
+  # on a well-formed PATH.
+  $newPath = if ($machinePath) { $machinePath.TrimEnd(';') + ";" + $Dir } else { $Dir }
+  Set-MachinePath -Value $newPath
+  RefreshPath
+}
+
 # Shared braille spinner frames for the progress helpers below.
 $script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
 
@@ -605,11 +655,10 @@ function Initialize-ToolDir {
   if (-not (Test-Path $TOOL_DIR)) {
     New-Item -ItemType Directory -Path $TOOL_DIR -Force | Out-Null
   }
-  $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-  if ($machinePath -notlike "*$TOOL_DIR*") {
-    [Environment]::SetEnvironmentVariable("PATH", "$machinePath;$TOOL_DIR", "Machine")
-    RefreshPath
-  }
+  # Same persist-to-Machine-PATH the CLI dir now uses (backend#2904), via the one
+  # dedup-correct helper — so a fresh shell finds the tools and a re-install never
+  # duplicates the entry.
+  Add-DirToMachinePath -Dir $TOOL_DIR
 }
 
 function Invoke-WithRetry {
@@ -7431,12 +7480,14 @@ function Invoke-DiagnoseBundle {
 # never abort THIS installer.
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
 
-# Where the CLI's own Windows installer drops the binary + adds to the *user*
-# PATH (see cli's install.ps1) — the dir we point at if a fresh shell can't
-# find it yet. Guard the Join-Path: $env:LOCALAPPDATA is null when the Pester
-# suite dot-sources this script on Linux CI, and Join-Path throws on a null
-# -Path (aborting the whole test container). The value is only ever USED on
-# Windows (in Test-TraceblocCli), so "" is a fine non-Windows load-time placeholder.
+# Where the CLI's own Windows installer drops the binary (see cli's install.ps1).
+# That installer PATH-adds this dir at USER scope only, which a fresh
+# non-interactive shell can't see (backend#2904) — so Install-TraceblocCli also
+# persists this dir onto the MACHINE PATH, and Test-TraceblocCli points at it if a
+# fresh shell still can't resolve the CLI. Guard the Join-Path: $env:LOCALAPPDATA
+# is null when the Pester suite dot-sources this script on Linux CI, and Join-Path
+# throws on a null -Path (aborting the whole test container). The value is only ever
+# USED on Windows, so "" is a fine non-Windows load-time placeholder.
 $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
   Join-Path $env:LOCALAPPDATA "Programs\tracebloc"
 } else { "" }
@@ -7444,11 +7495,12 @@ $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
 # Post-install self-verification (#738). Proves the CLI is usable from a FRESH
 # terminal and prints a VERIFIED next command — or, if a new shell wouldn't
 # find it yet, the exact Windows-correct fix (the install dir + open a new
-# window) rather than a vague "open a new terminal". The CLI installer edits the
-# user-scope PATH in the registry, so RefreshPath (re-reading Machine+User PATH)
-# is the faithful "fresh terminal" probe here — there is no `source ~/.rc`
-# analogue on Windows. ALWAYS non-fatal: a missing CLI degrades Step 4 to the
-# legacy manual-credential fallback (#388).
+# window) rather than a vague "open a new terminal". By the time this runs
+# Install-TraceblocCli has persisted the CLI dir onto the Machine PATH
+# (backend#2904), so RefreshPath (re-reading Machine+User PATH) is the faithful
+# "fresh terminal" probe here — there is no `source ~/.rc` analogue on Windows.
+# ALWAYS non-fatal: a missing CLI degrades Step 4 to the legacy manual-credential
+# fallback (#388).
 function Test-TraceblocCli {
   # Pull the persisted (registry) PATH into THIS process — same env a brand-new
   # PowerShell window would start with.
@@ -7469,9 +7521,10 @@ function Test-TraceblocCli {
     return
   }
 
-  # Installed, but not resolvable from a fresh shell yet. The installer added it
-  # to the user PATH, so a NEW window will have it; tell the user exactly where
-  # it is and how to use it now (so the summary's command works from a new window).
+  # Installed, but STILL not resolvable in-process even after persisting to the
+  # Machine PATH (backend#2904) + RefreshPath — e.g. the binary landed somewhere
+  # other than $TRACEBLOC_CLI_INSTALL_DIR. A NEW window reads the persisted PATH,
+  # so tell the user exactly where it is and how to use it now.
   Ok "tracebloc CLI installed -- open a new PowerShell window to use it."
   Hint "  Installed to: $TRACEBLOC_CLI_INSTALL_DIR"
   Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" data ingest .\data"
@@ -7539,6 +7592,16 @@ function Install-TraceblocCli {
     # as success — a failed re-install on a machine that already had the CLI
     # would then be misreported as a success.
     if ($p.ExitCode -eq 0) {
+      # The CLI's own installer PATH-adds its bin dir at USER scope only, so the
+      # `tracebloc` command is invisible to a fresh, non-interactive shell that
+      # sources no profile — exactly the SSM session the Windows e2e opens, which
+      # then fails to find the CLI it just installed (backend#2904). Persist that
+      # dir onto the MACHINE PATH, like every other client tool, so a brand-new
+      # process resolves it. Best-effort: a PATH-edit hiccup must not fail an
+      # install whose client is already up (this whole step is non-fatal), and it
+      # runs BEFORE Test-TraceblocCli so the RefreshPath verify below sees it.
+      try { Add-DirToMachinePath -Dir $TRACEBLOC_CLI_INSTALL_DIR }
+      catch { Log "Persisting the tracebloc CLI dir to the Machine PATH failed: $_" }
       # Self-verify usability from a fresh terminal and print a verified next
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli

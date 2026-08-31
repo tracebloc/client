@@ -1107,9 +1107,23 @@ Describe "Install-TraceblocCli" {
   # Step 5 of the installer: install the tracebloc CLI via its own released
   # installer, run in a CHILD powershell process. The load-bearing property is
   # NON-FATAL — a failure must Warn (not throw), since the client is already up.
+  BeforeAll {
+    # The Start-Process -PassThru double the tests reuse: a Process whose
+    # WaitForExit(ms) reports "exited in time" and whose Kill is a no-op, so the
+    # function reaches its `$p.ExitCode -eq 0` branch. Defined in BeforeAll (not the
+    # Describe body) so it exists at RUN time, not only during Pester discovery.
+    function New-CliInstallerProc([int]$ExitCode) {
+      $o = [pscustomobject]@{ ExitCode = $ExitCode }
+      $o | Add-Member ScriptProperty Handle { [IntPtr]::Zero }
+      $o | Add-Member ScriptMethod WaitForExit { $true }
+      $o | Add-Member ScriptMethod Kill { }
+      $o
+    }
+  }
   BeforeEach {
     Mock RefreshPath {}
     Mock Has { $false }   # tracebloc not already on PATH
+    Mock Add-DirToMachinePath {}   # don't touch the real Machine PATH from unit tests
   }
   # Fake the System.Diagnostics.Process that Start-Process -PassThru returns:
   # the function caches .Handle, calls .WaitForExit(), then reads .ExitCode.
@@ -1148,6 +1162,24 @@ Describe "Install-TraceblocCli" {
     Mock Has { $true }    # a CLI is already present, but the installer failed…
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "Couldn't install the tracebloc CLI"   # …so it must still warn
+  }
+
+  # backend#2904: a fresh SSM shell sources no profile and can't see the CLI's
+  # USER-scope PATH entry, so on success the CLI dir is persisted to the MACHINE PATH.
+  It "persists the CLI dir onto the Machine PATH on success" {
+    Mock Start-Process { New-CliInstallerProc 0 }
+    Install-TraceblocCli 6>&1 | Out-Null
+    Should -Invoke Add-DirToMachinePath -Times 1 -Exactly -ParameterFilter { $Dir -eq $TRACEBLOC_CLI_INSTALL_DIR }
+  }
+  It "does NOT touch the Machine PATH when the CLI install failed" {
+    Mock Start-Process { New-CliInstallerProc 1 }
+    Install-TraceblocCli 6>&1 | Out-Null
+    Should -Not -Invoke Add-DirToMachinePath
+  }
+  It "non-fatal: a Machine-PATH persist failure warns/logs but does not throw" {
+    Mock Start-Process { New-CliInstallerProc 0 }
+    Mock Add-DirToMachinePath { throw "access denied" }
+    { Install-TraceblocCli 6>&1 | Out-Null } | Should -Not -Throw
   }
 }
 
@@ -1230,6 +1262,90 @@ Describe "Test-TraceblocCli" {
     Mock RefreshPath { throw "registry unavailable" }
     Mock Has { $false }
     { Test-TraceblocCli 6>&1 | Out-Null } | Should -Not -Throw
+  }
+}
+
+Describe "Initialize-ToolDir (persists the tools dir to the Machine PATH)" {
+  # The refactor (backend#2904) routes the tools dir through the same
+  # Add-DirToMachinePath helper the CLI dir uses. Lock that wiring so the Linux
+  # Pester run catches a regression the infrequent self-hosted Windows e2e would.
+  It "creates the tools dir and persists it to the Machine PATH" {
+    Mock Test-Path { $true }          # dir already exists -> New-Item is skipped
+    Mock New-Item {}
+    Mock Add-DirToMachinePath {}
+    Initialize-ToolDir
+    $script:TOOL_DIR | Should -Match 'tracebloc[\\/]bin$'
+    Should -Invoke Add-DirToMachinePath -Times 1 -Exactly -ParameterFilter { $Dir -eq $script:TOOL_DIR }
+  }
+}
+
+Describe "Add-DirToMachinePath (backend#2904: persist a tool dir to the Machine PATH)" {
+  # A fresh, non-interactive shell (the Windows e2e's SSM session) sources no
+  # profile and reads only the PERSISTED env, so a tool dir must be on the MACHINE
+  # PATH — not merely the session or USER PATH — to be resolvable there. These
+  # simulate the Machine-scope registry with a script var (the real static setter
+  # is a no-op off-Windows, and the getter always returns $null), so the
+  # append/dedup logic is covered on the Linux CI run.
+  BeforeEach {
+    $script:FakeMachinePath = "C:\Windows;C:\Windows\System32"
+    Mock Get-MachinePath { $script:FakeMachinePath }
+    Mock Set-MachinePath { $script:FakeMachinePath = $Value }
+    Mock RefreshPath {}
+  }
+
+  It "appends a dir that isn't present yet, and refreshes the session" {
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    $script:FakeMachinePath | Should -Be "C:\Windows;C:\Windows\System32;C:\Program Files\tracebloc\bin"
+    Should -Invoke Set-MachinePath -Times 1 -Exactly
+    Should -Invoke RefreshPath   -Times 1 -Exactly
+  }
+
+  It "is idempotent: a re-install does NOT duplicate an existing entry" {
+    $script:FakeMachinePath = "C:\Windows;C:\Program Files\tracebloc\bin"
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    $script:FakeMachinePath | Should -Be "C:\Windows;C:\Program Files\tracebloc\bin"
+    Should -Not -Invoke Set-MachinePath
+    Should -Not -Invoke RefreshPath
+  }
+
+  It "dedups case-insensitively and tolerant of a trailing separator" {
+    $script:FakeMachinePath = "C:\Program Files\Tracebloc\Bin\"
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    Should -Not -Invoke Set-MachinePath
+  }
+
+  It "seeds PATH from just the dir when the Machine PATH is empty/unset" {
+    Mock Get-MachinePath { $null }
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    Should -Invoke Set-MachinePath -ParameterFilter { $Value -eq 'C:\Program Files\tracebloc\bin' }
+  }
+
+  It "collapses a trailing ';' instead of creating an empty (cwd) PATH entry" {
+    $script:FakeMachinePath = "C:\Windows;"
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    $script:FakeMachinePath | Should -Be "C:\Windows;C:\Program Files\tracebloc\bin"
+    $script:FakeMachinePath | Should -Not -Match ';;'   # no empty entry == no cwd on PATH
+  }
+
+  It "does nothing for an empty dir (the non-Windows load-time placeholder)" {
+    Add-DirToMachinePath -Dir ''
+    Should -Not -Invoke Get-MachinePath
+    Should -Not -Invoke Set-MachinePath
+  }
+}
+
+Describe "Test-DirOnPath (exact per-entry dedup, not substring)" {
+  It "true when the dir is an exact entry" {
+    Test-DirOnPath -PathValue "C:\a;C:\b" -Dir "C:\b" | Should -BeTrue
+  }
+  # The substring bug the old `-like "*$Dir*"` had: a parent dir must NOT be judged
+  # present just because a child dir is on PATH, or it would never get added.
+  It "false when the dir only appears as a substring of a longer entry" {
+    Test-DirOnPath -PathValue "C:\Program Files\tracebloc\bin" -Dir "C:\Program Files\tracebloc" | Should -BeFalse
+  }
+  It "false for empty inputs" {
+    Test-DirOnPath -PathValue ""      -Dir "C:\b" | Should -BeFalse
+    Test-DirOnPath -PathValue "C:\a"  -Dir ""     | Should -BeFalse
   }
 }
 
