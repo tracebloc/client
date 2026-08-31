@@ -86,12 +86,46 @@ drift() {
 @test "the committed list is non-trivial, so these cases are not the only ones" {
   # FAIL CLOSED on the real list: if it ever shrinks to a couple of entries, the
   # cases above would still pass while `make drift` gated almost nothing. Read
-  # from the Makefile as Make expands it, not by re-parsing the file.
+  # from the Makefile as Make EXPANDS it, not by re-parsing the file — the value
+  # the recipe sees is the one worth counting.
+  #
+  # THE PREFIX IS OPTIONAL, and that is a portability fix rather than a bug fix
+  # (Bugbot, Medium, demoted with evidence). The claim was that GNU Make 4.x
+  # renders an exported simply-expanded variable as `export DRIFT_GUARDS :=`, so
+  # a `^DRIFT_GUARDS :=` matcher misses on Ubuntu CI. Measured: this suite passed
+  # on Ubuntu CI as written (`bats (bash unit, mocked) = SUCCESS`), because Make
+  # records the assignment and the `export` directive separately. So the finding
+  # does not reproduce — but the matcher WAS depending on which of those two
+  # shapes a given Make emits, and it costs one alternation not to. A miss would
+  # fail closed (the `-n` check below) rather than pass silently, so this is
+  # about not going red on a Make upgrade, not about a hole.
   run make -C "$REPO" -pn
   [ "$status" -eq 0 ] || return 1
   local line count
-  line="$(printf '%s\n' "$output" | grep -m1 '^DRIFT_GUARDS :=')"
+  line="$(printf '%s\n' "$output" | grep -m1 -E '^(export )?DRIFT_GUARDS[[:space:]]*:?=')"
   [ -n "$line" ] || return 1
-  count="$(printf '%s' "${line#DRIFT_GUARDS := }" | awk -F'|' '{print NF}')"
+  # Strip whichever prefix arrived, then count `|`-separated entries.
+  count="$(printf '%s' "$line" | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//' \
+           | awk -F'|' '{print NF}')"
   [ "$count" -ge 20 ] || return 1
+}
+
+@test "the floor's matcher accepts BOTH shapes Make can print" {
+  # The assertion above can only ever exercise the shape THIS Make emits, so the
+  # other shape would be untested until a Make upgrade made it the live one —
+  # exactly the gap the finding pointed at. Both are driven here directly.
+  local real
+  real="$(printf '%s\n' "a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u")"
+  for prefix in "DRIFT_GUARDS := " "export DRIFT_GUARDS := " "DRIFT_GUARDS = " "export DRIFT_GUARDS = "; do
+    local line count
+    line="${prefix}${real}"
+    printf '%s\n' "$line" | grep -qE '^(export )?DRIFT_GUARDS[[:space:]]*:?=' || return 1
+    count="$(printf '%s' "$line" | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//' \
+             | awk -F'|' '{print NF}')"
+    [ "$count" -eq 21 ] || return 1
+  done
+  # And the control: a line that merely MENTIONS the name is not an assignment.
+  printf '%s\n' "#   DRIFT_GUARDS is documented above" \
+    | grep -qE '^(export )?DRIFT_GUARDS[[:space:]]*:?=' && return 1
+  return 0
 }
