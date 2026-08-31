@@ -3909,15 +3909,62 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
       }, $true)
       $inScope = @()
       foreach ($c in $calls) {
-        $n = $c.Parent; $gate = $null; $branch = $null
+        # WHICH BRANCH, AND NOT THROUGH A CATCH (Bugbot, Medium, on this PR).
+        #
+        # The first walk set the gate from any ANCESTOR `if` whose condition
+        # mentioned an exit code, regardless of where the call actually sat. Two
+        # ways that was wrong, and it did not merely over-report -- it FORCED a
+        # misleading number into the product:
+        #
+        #   * `Enable-GpuPlugin`'s existence probe is `if ($LASTEXITCODE -eq 0)`
+        #     at :4697. The CPU-mode Warn is in that if's ELSE, after a download
+        #     and an apply, so the probe's code is long stale by then.
+        #   * The same function's `catch` is entered by an EXCEPTION.
+        #     `Invoke-WebRequest` never sets $LASTEXITCODE, so the value there is
+        #     whatever the last native command left behind.
+        #
+        # Both were "fixed" to name that number, which is worse than naming
+        # none: a wrong cause reads as information. A guard that can demand a
+        # false statement is not a weaker guard, it is a harmful one.
+        #
+        # So: walk up remembering which child we came THROUGH, attribute only
+        # when we arrived via the branch the failing code selects, and abandon
+        # the walk at a catch or finally.
+        $n = $c.Parent; $prev = $c; $gate = $null; $branch = $null
         while ($n) {
+          if ($n -is [System.Management.Automation.Language.CatchClauseAst] -or
+              $n -is [System.Management.Automation.Language.TrapStatementAst]) {
+            $gate = $null; break
+          }
+          if ($n -is [System.Management.Automation.Language.TryStatementAst] -and
+              $n.Finally -and $prev -eq $n.Finally) {
+            $gate = $null; break
+          }
           if ($n -is [System.Management.Automation.Language.IfStatementAst]) {
+            # THE NEAREST ENCLOSING `if`, AND THEN STOP. Being somewhere inside a
+            # distant exit-code branch is not the same as being decided by that
+            # code: `Enable-GpuPlugin`'s CPU-mode Warn sits in the ELSE of the
+            # probe at :4697, but a download and a `kubectl apply` run in
+            # between, so $LASTEXITCODE there is nothing to do with the probe.
+            # Attributing it demanded a stale number on screen.
+            #
+            # THE TRADE, STATED: a call nested one level deeper inside a genuine
+            # exit-code branch is now MISSED. That direction is safe -- the guard
+            # under-reports and the floor test below notices if the count
+            # collapses -- whereas over-reporting made the guard demand a false
+            # statement, which is the one outcome worse than not checking.
             foreach ($cl in $n.Clauses) {
-              if ($cl.Item1.Extent.Text -match $gateRe) {
-                $gate = $cl.Item1.Extent.Text; $branch = $cl.Item2
+              if ($cl.Item1.Extent.Text -notmatch $gateRe) { continue }
+              # `-ne 0` selects failure in the clause BODY; `-eq 0` selects
+              # success there, so failure is the ELSE.
+              $failureBlock = if ($cl.Item1.Extent.Text -match '-ne\s*0') { $cl.Item2 } else { $n.ElseClause }
+              if ($failureBlock -and $prev -eq $failureBlock) {
+                $gate = $cl.Item1.Extent.Text; $branch = $failureBlock
               }
             }
+            break
           }
+          $prev = $n
           $n = $n.Parent
         }
         if ($gate) {
@@ -3975,10 +4022,12 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
     # clean forever. Two is what exists today; a THIRD is fine, a drop to zero
     # is the finding.
     $sites = & $script:ExitCodeScope
-    # FOUR now, not two: the derived-variable spelling brought the k3d create
-    # path and the GPU build branch into view. A THIRD-and-up is fine, a drop
-    # below the dotted-only floor means the walk stopped matching.
-    $sites.Count | Should -BeGreaterOrEqual 4
+    # EIGHT, measured, not carried over. It was 2 for the dotted-only gate and
+    # 4 once the derived locals were added; $LASTEXITCODE -- never assigned, so
+    # invisible to an assignment-derived gate, and the commonest spelling here --
+    # took it to 8. A floor left at an older number is the thing this test exists
+    # to prevent, since it goes on passing over everything the gate newly sees.
+    $sites.Count | Should -BeGreaterOrEqual 8
   }
 
   It "no user-facing failure message drops the exit code that decided it" {

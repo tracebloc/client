@@ -4726,14 +4726,14 @@ function Install-GpuDevicePlugin {
       if ($gpuOk) {
         Info "NVIDIA device plugin deployed -- verifying the node advertises a GPU..."
       } else {
-        Warn "Couldn't enable GPU acceleration (exited $(Format-ExitCode $LASTEXITCODE)) - continuing in CPU mode. Re-run the installer later to retry."
+        Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
       }
       return $gpuOk
     } catch {
       # GPU is OPTIONAL: a plugin download/apply failure must NOT abort the install
       # (#577 fatal-vs-recoverable) — otherwise the throw would reach the top-level
       # boundary and stop everything. Warn and continue in CPU mode.
-      Warn "Couldn't enable GPU acceleration (exited $(Format-ExitCode $LASTEXITCODE)) - continuing in CPU mode. Re-run the installer later to retry."
+      Warn "Couldn't enable GPU acceleration - continuing in CPU mode. Re-run the installer later to retry."
       Log "GPU device-plugin setup error: $($_.Exception.Message)"
       return $false
     } finally {
