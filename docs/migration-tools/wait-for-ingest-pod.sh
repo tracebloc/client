@@ -34,23 +34,31 @@
 #  TWO TRAPS THIS ENCODES SO THE OPERATOR DOES NOT HIT THEM (backend#2881):
 #
 #    1. THE STAGING POD IS NOT THE INGESTION POD. An ingest first creates
-#       `tracebloc-stage-<name>-<hash>` (file staging) and only THEN
-#       `ingest-job-<hash>-<suffix>`. A naive "wait for any non-control-plane pod"
-#       poll catches the stage pod and hands off too early — the readiness tool
-#       then finds no live ingestion pod and reports a false failed cycle. The
-#       match below keys on `/ingest/`, which `tracebloc-stage-*` does not contain,
-#       so the stage pod is skipped. Do NOT loosen this to "a new pod appeared".
+#       `tracebloc-stage-<table>-<hash>` (file staging) and only THEN
+#       `ingest-job-<digest>-<suffix>`. A naive "wait for any non-control-plane
+#       pod" poll catches the stage pod and hands off too early — the readiness
+#       tool then reads the wrong pod and reports a false "cannot tell" cycle.
+#       Note `<table>` is the OPERATOR'S table name (lowercased, `_`->`-`), so a
+#       `/ingest/` SUBSTRING is name-dependent: a table called `ingest_test` gives
+#       `tracebloc-stage-ingest-test-<hash>`, which a substring match would wrongly
+#       catch (LukasWodka, #924). The picker below anchors on the Job's real
+#       producer-side prefix instead: `^ingest-job-` (`client-runtime/
+#       submit_ingestion_run.py:358`), which no stage pod carries whatever the
+#       table is named. Do NOT loosen this to a substring or to "a new pod".
 #
 #    2. A FINISHED JOB IS NOT EVIDENCE. Completed ingestion Jobs from earlier
 #       cycles linger; a Succeeded Job pod cannot be exec'd, so it is no cover for
 #       THIS evaluation. Only `Running` counts here, exactly as the readiness tool
 #       ignores non-Running pods — each evaluation needs its own live run.
 #
-#  DELIBERATELY THE SAME MATCH AS THE TOOL. The picker below is byte-for-byte
-#  edgeuser-drop-readiness.sh's ingestion picker (its `CONTROL_PLANE_RE` + awk), so
-#  this wait returns exactly when the tool would find a live pod — it cannot arm a
-#  microsecond before or after the thing it is arming. If that picker changes in
-#  the tool, change it here too; a divergence is a silent early/late hand-off.
+#  ANCHORED, DELIBERATELY STRICTER THAN THE TOOL. edgeuser-drop-readiness.sh keys
+#  on the looser `/ingest/` substring; this picker anchors on `^ingest-job-`. The
+#  difference is intentional: for the TOOL a mismatch is a wrong reading a human
+#  still reviews, but here a false positive (a stage pod, or any workload on a
+#  release named `…ingest…`) makes the blocking wait hand off to nothing — a
+#  silent loss of the one guarantee this script exists to give. Anchoring also
+#  retires the control-plane denylist the tool needs. The tool carries the same
+#  `/ingest/` hole; that is tracked separately for a fix in both.
 #
 #  READ-ONLY. It only ever `kubectl get pods`. It changes nothing, and it does not
 #  read Secrets or pod envs — the readiness tool it hands off to does that.
@@ -73,10 +81,14 @@ die() { printf 'wait-for-ingest-pod: %s\n' "$1" >&2; exit 2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --context)      CONTEXT="${2:-}"; shift 2 ;;
-    --namespace|-n) NS="${2:-}"; shift 2 ;;
-    --interval)     INTERVAL="${2:-}"; shift 2 ;;
-    --timeout)      TIMEOUT="${2:-}"; shift 2 ;;
+    # Guard the value BEFORE `shift 2`: a trailing flag leaves <2 positionals, and
+    # `shift 2` then returns non-zero — which under `set -e` kills the script with
+    # exit 1 and no message, breaking the "exits nonzero WITH a message" contract
+    # right when an operator is racing the ~9s window (LukasWodka, #924).
+    --context)      [ $# -ge 2 ] || die "--context needs a value"; CONTEXT="$2"; shift 2 ;;
+    --namespace|-n) [ $# -ge 2 ] || die "--namespace needs a value"; NS="$2"; shift 2 ;;
+    --interval)     [ $# -ge 2 ] || die "--interval needs a value"; INTERVAL="$2"; shift 2 ;;
+    --timeout)      [ $# -ge 2 ] || die "--timeout needs a value"; TIMEOUT="$2"; shift 2 ;;
     # `--exec --` consumes the REST of the argv as the command to run on
     # appearance. Everything after the `--` is the operator's command verbatim, so
     # no further flag of ours can appear past it — that is the point: the readiness
@@ -88,7 +100,10 @@ while [ $# -gt 0 ]; do
       EXEC_REQUESTED=1
       EXEC_CMD=("$@")
       break ;;
-    -h|--help)      sed -n '2,64p' "$0"; exit 0 ;;
+    # Derive the header block rather than hardcode a line range that silently
+    # drifts as the header is edited (LukasWodka, #924): print every `#` comment
+    # line after the shebang, stop at the first non-comment line.
+    -h|--help)      awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *)              die "unknown argument: $1 (did you mean to put it after --exec --?)" ;;
   esac
 done
@@ -125,20 +140,24 @@ K() {
             --request-timeout="$KUBE_REQUEST_TIMEOUT" "$@"
 }
 
-# THE PICKER — one live ingestion pod name, or nothing. Identical match to the
-# readiness tool: Running only, name contains `ingest`, and NOT one of the
-# control-plane workloads whose names can also contain the substring on a release
-# or namespace that happens to carry it (e.g. `tracebloc-ingest-…-jobs-manager-…`).
-CONTROL_PLANE_RE='jobs-manager|requests-proxy|mysql'
+# THE PICKER — one live ingestion Job pod name, or nothing. Anchored on the Job's
+# producer-side prefix `^ingest-job-` (`client-runtime/submit_ingestion_run.py:358`),
+# NOT a loose `/ingest/` substring (see Trap 1): anchoring skips the file-staging
+# pod whatever the operator's table is named, and needs no control-plane denylist —
+# no jobs-manager / requests-proxy / mysql / egress-proxy pod carries the prefix,
+# even on a release named `…ingest…`.
+INGEST_JOB_RE='^ingest-job-'
 ingest_pod() {
   # `!seen++ { print $1 }`, NOT `{ print $1; exit }`: awk must DRAIN the pod list,
   # not close the pipe early. An early `exit` sends SIGPIPE (141) upstream while
-  # kubectl is still writing a long list; the tool avoids exactly this, and `|| true`
-  # papering over the 141 is not a reason to reintroduce it (cursor Bugbot, #924).
-  # This is now byte-for-byte the tool's ingestion picker — keep it that way.
+  # kubectl is still writing a long list, and `|| true` papering over the 141 is
+  # not a reason to reintroduce the shape the tool avoids (cursor Bugbot, #924).
+  # stderr is suppressed here on purpose so a transient blip during the ~9s window
+  # does not abort the wait; a PERSISTENT failure is surfaced by the timeout
+  # re-probe below (LukasWodka, #924).
   K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
-    | awk -v skip="$CONTROL_PLANE_RE" \
-          '$2=="Running" && tolower($1) ~ /ingest/ && tolower($1) !~ skip && !seen++ { print $1 }' \
+    | awk -v want="$INGEST_JOB_RE" \
+          '$2=="Running" && tolower($1) ~ want && !seen++ { print $1 }' \
     || true
 }
 
@@ -161,7 +180,15 @@ while :; do
   POD="$(ingest_pod)"
   [ -n "$POD" ] && break
   if [ "$SECONDS" -ge "$TIMEOUT" ]; then
-    die "no Running ingestion pod appeared within ${TIMEOUT}s. The pod lives ~9s–tens of seconds, so this normally means the driven ingestion was not started (start it, THEN run this), or it already finished — a Succeeded Job cannot be inspected. Ingest a deliberately large dataset to widen the window."
+    # Distinguish "we could not look" from "nothing was there" (the sibling tool's
+    # own rule): re-probe once, unsuppressed. A failure here means the wait went
+    # BLIND — a context/token that broke mid-wait, after the preflight passed — not
+    # that the ingestion is absent, so don't tell the operator to re-drive one
+    # (LukasWodka, #924).
+    if ! probe_err="$(K get pods --no-headers -o name 2>&1 >/dev/null)"; then
+      die "no ingestion pod seen within ${TIMEOUT}s AND pod listing is now failing (${probe_err:-kubectl error}) — the wait went blind, not empty. Fix cluster access and re-run; the ingestion may well have been running."
+    fi
+    die "no Running ingestion pod (\`^ingest-job-\`) appeared within ${TIMEOUT}s. The pod lives ~9s–tens of seconds, so the driven ingestion was probably not started (start it, THEN run this) or already finished — a Succeeded Job cannot be inspected. Ingest a deliberately large dataset to widen the window."
   fi
   sleep "$INTERVAL"
 done

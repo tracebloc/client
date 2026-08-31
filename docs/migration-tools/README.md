@@ -100,7 +100,7 @@ Two of the gate's three criteria read the ingestion identity from a **live** pod
     --baseline-datasets N --baseline-metadata N --baseline-identity root --phase pre-revoke
 ```
 
-The wait uses the tool's own ingestion-pod match, so it returns exactly when the tool would find a live pod — and it skips the file-staging pod (`tracebloc-stage-*`) that a naive "any new pod" poll fires on too early. See each script's `--help`.
+The wait anchors on the ingestion Job's own name prefix (`ingest-job-…`), so it returns only once the real ingestion pod is `Running` — never on the file-staging pod (`tracebloc-stage-<table>-…`, whatever the table is named) or on a control-plane pod that happens to share the `ingest` substring on an `…ingest…`-named release. See each script's `--help`.
 
 ## After all migrations are done
 
