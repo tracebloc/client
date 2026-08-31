@@ -348,3 +348,49 @@ Describe "The bootstrap must not close the user's window (#577 / client#917)" {
         $script:Boot | Should -Match '(?s)KeyAvailable.*?\}\s*catch\s*\{\}'
     }
 }
+
+Describe "A branch ref may contain '/' — and '..' still may not (client#917)" {
+    # THE BLANKET '/' REFUSAL BROKE THE ONLY FLOW IT EXISTS FOR. Every real
+    # development branch is `fix/1234-thing`, so the documented developer
+    # override could fetch develop/staging/main and NOTHING ELSE -- while the
+    # point of the escape hatch is testing unreleased code, which lives on
+    # feature branches. Measured on a real Windows box: the install stopped at
+    # "Ref '...' contains a path separator" before doing anything.
+    It "accepts a real feature-branch ref under the unverified opt-in" {
+        Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/2849-bound-the-docker-probes' `
+            -AllowUnverified:$true | Should -Be 'fix/2849-bound-the-docker-probes'
+    }
+    It "still accepts the slash-free branches it always did" {
+        Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'develop' -AllowUnverified:$true |
+            Should -Be 'develop'
+    }
+
+    # --- and the R8 property, unchanged ---
+    It "refuses '..' even under the opt-in — that is the actual traversal lever" {
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/../../heads/main' `
+            -AllowUnverified:$true } | Should -Throw -ExpectedMessage "*'..'*"
+    }
+    It "refuses a tag-shaped ref carrying a traversal, the RFC-0001 R8 case" {
+        { Resolve-InstallRef -DefaultRef 'v1.2.3-../../heads/main' -AllowUnverified:$true } |
+            Should -Throw
+    }
+    It "refuses '/' when the caller has NOT opted in to an unverified branch" {
+        # A pinned REF is a tag; a tag never contains '/'.
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -RefEnv 'a/b' -AllowUnverified:$true } |
+            Should -Throw -ExpectedMessage "*path separator*"
+    }
+    It "refuses a leading, trailing or doubled slash (empty segment)" {
+        foreach ($bad in @('/fix/x', 'fix/x/', 'fix//x')) {
+            { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv $bad -AllowUnverified:$true } |
+                Should -Throw -ExpectedMessage "*invalid path segment*"
+        }
+    }
+    It "refuses a bare '.' segment" {
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/./x' -AllowUnverified:$true } |
+            Should -Throw -ExpectedMessage "*invalid path segment*"
+    }
+    It "a branch ref still REQUIRES the opt-in — the slash change did not widen that" {
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/x' -AllowUnverified:$false } |
+            Should -Throw
+    }
+}

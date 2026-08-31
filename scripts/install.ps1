@@ -126,12 +126,39 @@ function Resolve-InstallRef {
     }
   }
 
-  # Belt-and-suspenders: even after the shape checks above, refuse a ref carrying
-  # a path separator or a parent-dir token before it is interpolated into a URL.
-  # A '/' or '..' here is a path-traversal lever (it could escape the pinned tag
-  # onto a mutable branch) — independent of which branch above let it through.
-  if ($ref -match '/' -or $ref -match '\.\.') {
-    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard)."
+  # Belt-and-suspenders: even after the shape checks above, refuse a parent-dir
+  # token before the ref is interpolated into a URL. '..' is the traversal lever
+  # -- it is what could escape the pinned tag onto a mutable branch (RFC-0001 R8)
+  # -- and it is refused on EVERY path, opt-in or not.
+  if ($ref -match '\.\.') {
+    throw "Ref '$ref' contains '..' -- refusing to build a fetch URL from it (path-traversal guard)."
+  }
+
+  # '/' IS NOT THE LEVER, AND REFUSING IT OUTRIGHT BROKE THE ONLY FLOW IT EXISTS
+  # FOR (client#917). Every real development branch is `fix/1234-thing` or
+  # `feat/...`, so a blanket refusal meant the documented developer override
+  # could fetch `develop`, `staging` and `main` and NOTHING ELSE -- while the
+  # whole point of the escape hatch is testing unreleased code, which lives on
+  # feature branches. Measured on a real Windows box: the install stopped at
+  # "contains a path separator" before it did anything.
+  #
+  # The R8 property is unchanged, because it never rested on '/': a TAG still
+  # cannot carry one (the vX.Y.Z shape check above rejects it, so a ref like
+  # 'v1.2.3-../../heads/main' is refused twice over -- by that check and by the
+  # '..' guard). A '/' is accepted ONLY on the path that has already announced
+  # itself as an unverified branch install and printed the four-line warning.
+  if ($ref -match '/') {
+    if (-not ($usingBranch -and $AllowUnverified)) {
+      throw "Ref '$ref' contains a path separator -- only a branch ref under TRACEBLOC_ALLOW_UNVERIFIED may contain one (path-traversal guard)."
+    }
+    # SEGMENT BY SEGMENT, so a multi-segment ref is held to exactly the same
+    # shape as a single-segment one: no empty segment (which is a leading,
+    # trailing or doubled slash), and no bare '.'.
+    foreach ($seg in $ref.Split('/')) {
+      if ($seg -eq '' -or $seg -eq '.' -or $seg -notmatch '^[A-Za-z0-9._-]+$') {
+        throw "Ref '$ref' has an invalid path segment -- refusing to build a fetch URL from it (path-traversal guard)."
+      }
+    }
   }
 
   return $ref
