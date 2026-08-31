@@ -3991,7 +3991,18 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
   It "namespace discovery never yields 'NAMESPACE' even if the split is broken again" {
     # The belt-and-braces guard: the header is rejected explicitly, so a future
     # refactor that re-breaks the line split still cannot leak it as a namespace.
-    Get-JobsManagerNamespace "NAMESPACE NAME jobs-manager" | Should -Be ""
+    #
+    # THE FIXTURE MUST MATCH (@LukasWodka). The first version used
+    # "NAMESPACE NAME jobs-manager" -- no hyphen before jobs-manager, so
+    # `Select-String '\-jobs-manager'` found nothing, the function returned early at
+    # `-not $line`, and the header guard this test is named for never ran. It passed
+    # identically with the guard present and removed: a vacuous test, in a test
+    # written to catch exactly that. Measured after the fix, guard vs no guard:
+    # "" / "NAMESPACE".
+    #
+    # One line whose first token IS the header and which DOES contain a
+    # jobs-manager pod is precisely the broken-split shape.
+    Get-JobsManagerNamespace "NAMESPACE NAME tb-jobs-manager" | Should -Be ""
   }
   It "a timed-out capture becomes DATA in the bundle, not a missing file" {
     # The distinction that makes the bundle useful: "k3d cluster list timed out"
