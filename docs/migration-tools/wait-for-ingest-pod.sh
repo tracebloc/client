@@ -131,9 +131,14 @@ K() {
 # or namespace that happens to carry it (e.g. `tracebloc-ingest-…-jobs-manager-…`).
 CONTROL_PLANE_RE='jobs-manager|requests-proxy|mysql'
 ingest_pod() {
+  # `!seen++ { print $1 }`, NOT `{ print $1; exit }`: awk must DRAIN the pod list,
+  # not close the pipe early. An early `exit` sends SIGPIPE (141) upstream while
+  # kubectl is still writing a long list; the tool avoids exactly this, and `|| true`
+  # papering over the 141 is not a reason to reintroduce it (cursor Bugbot, #924).
+  # This is now byte-for-byte the tool's ingestion picker — keep it that way.
   K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
     | awk -v skip="$CONTROL_PLANE_RE" \
-          '$2=="Running" && tolower($1) ~ /ingest/ && tolower($1) !~ skip { print $1; exit }' \
+          '$2=="Running" && tolower($1) ~ /ingest/ && tolower($1) !~ skip && !seen++ { print $1 }' \
     || true
 }
 
