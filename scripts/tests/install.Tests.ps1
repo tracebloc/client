@@ -304,3 +304,160 @@ Describe "A cosign that won't execute is not a failed signature (client#734)" {
     Should -Invoke Warn -Times 2 -Exactly
   }
 }
+
+Describe "The bootstrap must not close the user's window (#577 / client#917)" {
+    # #577 -- "the PowerShell installer must never terminate ungracefully" -- was
+    # fixed in install-k8s.ps1, which runs as a CHILD process where `exit` costs
+    # nothing. THIS file was missed, and it is the one that runs INSIDE the
+    # user's console via the documented `irm ... | iex`. A top-level `exit` there
+    # ends their session: reported from a real Windows machine as "it just closed
+    # the PowerShell", with the outcome gone with it.
+    #
+    # `exit $LASTEXITCODE` after the child returns fires on EVERY run, so this
+    # was not only a failure-path defect -- a SUCCESSFUL install also slammed the
+    # window shut over its own summary.
+    BeforeAll { $script:Boot = Get-Content (Join-Path $PSScriptRoot "../install.ps1") -Raw }
+
+    It "no USER-CONSOLE exit site skips the hold" {
+        # The property is not "exactly one bare exit" -- that was a count standing in
+        # for a rule, and it made the platform-gate fix below look like a regression.
+        # It is: no `exit` that could close a USER's console skips Complete-Bootstrap.
+        # Exactly two bare exits are legitimate, and this DERIVES both rather than
+        # counting:
+        #   - `exit $Code` INSIDE Complete-Bootstrap (the hold already happened), and
+        #   - the platform gate's `exit 1`, reachable only on macOS/Linux, where this
+        #     script runs as a child pwsh and there is no window to lose.
+        $cb = [regex]::Match($script:Boot, '(?m)^function Complete-Bootstrap\b[\s\S]*?\n\}')
+        $cb.Success | Should -BeTrue -Because "cannot locate Complete-Bootstrap"
+        $gate = [regex]::Match($script:Boot, '(?m)^\s*if \(\$PSVersionTable\.PSEdition -eq "Core" -and -not \$IsWindows\) \{[\s\S]*?\n  \}')
+        $gate.Success | Should -BeTrue -Because "cannot locate the platform gate"
+
+        $offenders = @()
+        foreach ($m in [regex]::Matches($script:Boot, '(?m)^\s{2,}exit\s')) {
+            $inCb   = ($m.Index -ge $cb.Index   -and $m.Index -lt ($cb.Index   + $cb.Length))
+            $inGate = ($m.Index -ge $gate.Index -and $m.Index -lt ($gate.Index + $gate.Length))
+            if (-not ($inCb -or $inGate)) {
+                $line = ($script:Boot.Substring(0, $m.Index) -split "`n").Count
+                $offenders += "line ${line}: bare exit outside Complete-Bootstrap"
+            }
+        }
+        $offenders -join "`n" | Should -BeNullOrEmpty -Because "a bare exit on a Windows path closes the user's window over the outcome (#577)"
+    }
+    It "the wrong-platform bail does NOT hold -- there is no window to lose off Windows" {
+        # [Environment]::UserInteractive is hardcoded $true on non-Windows .NET, so
+        # Test-BootstrapCanPrompt would answer "yes" here and stall an instant,
+        # zero-cost bail-out for 60s. This branch only runs on macOS/Linux, where
+        # `exit` from a child pwsh closes nothing at all (review).
+        $gate = [regex]::Match($script:Boot, '(?m)^\s*if \(\$PSVersionTable\.PSEdition -eq "Core" -and -not \$IsWindows\) \{[\s\S]*?\n  \}')
+        $gate.Success | Should -BeTrue
+        $gate.Value | Should -Match '(?m)^\s+exit 1\s*$'
+        # a CALL, not the word -- the rationale comment names the function it avoids
+        $gate.Value | Should -Not -Match '(?m)^\s+Complete-Bootstrap\b'
+    }
+    It "a keystroke left over from the install cannot collapse the hold to zero" {
+        # [Console]::KeyAvailable reports whatever is QUEUED, not a press since the
+        # hold began. install-k8s.ps1 just ran on this same console with 11 Read-Host
+        # sites, so an extra Enter, a key tapped at the Docker spinner, or the trailing
+        # newline of `irm | iex` would make the wait loop false on its FIRST evaluation
+        # and close the window over the summary -- the #577 bug this function exists to
+        # prevent (Bugbot + review). The buffer must be drained BEFORE the wait, and
+        # inside the same try, so a host that throws on KeyAvailable still no-holds.
+        $fn = [regex]::Match($script:Boot, '(?m)^function Complete-Bootstrap\b[\s\S]*?\n\}').Value
+        $fn | Should -Match 'while \(\[Console\]::KeyAvailable\) \{ \[void\]\[Console\]::ReadKey\(\$true\) \}'
+        # ORDER is the whole point: the drain must precede the deadline wait.
+        $drain = $fn.IndexOf('while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }')
+        $wait  = $fn.IndexOf('while (-not [Console]::KeyAvailable')
+        $drain | Should -BeGreaterThan -1
+        $wait  | Should -BeGreaterThan $drain -Because "draining AFTER the wait would eat the user's actual keypress and never fix the skip"
+    }
+    It "the child's exit code is still propagated, not swallowed" {
+        # The e2e harness reads this code to tell install-k8s.ps1's declared
+        # `exit 2` reboot handoff from a real failure, so the fix must NOT become
+        # a `return` -- that would report 0 for every `powershell.exe -Command`
+        # caller and turn a failed install into a pass.
+        $script:Boot | Should -Match 'Complete-Bootstrap -Code \$LASTEXITCODE'
+        $script:Boot | Should -Match '(?m)^\s+exit \$Code\s*$'
+    }
+    It "the hold is skipped when nothing is there to lose" {
+        # CI, a service, piped/redirected stdin: no window is closing, and a hold
+        # would be a hang -- the exact class this ticket spent its life removing.
+        $script:Boot | Should -Match 'function Test-BootstrapCanPrompt'
+        $script:Boot | Should -Match 'if \(Test-BootstrapCanPrompt\)'
+    }
+    It "the bootstrap's prompt predicate IS the child's, not a copy that can drift" {
+        # Two separate scripts genuinely cannot share a function, so the equality the
+        # PR leans on ("the same predicate the child uses") has to be a machine check.
+        # The old assertion was a hand-written copy of the rule tested against
+        # install.ps1 ONLY -- a copy checked against a copy. If Test-CanPrompt gains a
+        # condition (a TRACEBLOC_NONINTERACTIVE escape hatch, a $env:CI check -- both
+        # plausible; backend#2675/#2836 kept widening this predicate), the child takes
+        # the no-prompt path, the bootstrap keeps holding, and that assertion stays
+        # green. Parse the body out of BOTH files and require they agree (review).
+        $boot = Get-Content (Join-Path $PSScriptRoot "../install.ps1")     -Raw
+        $k8s  = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+        $rx   = 'function Test-(?:Bootstrap)?CanPrompt\s*\{(?<body>[\s\S]*?)\n\}'
+        $a = [regex]::Match($boot, $rx); $b = [regex]::Match($k8s, $rx)
+        # fail CLOSED: an unreadable predicate must not read as "they agree"
+        $a.Success | Should -BeTrue -Because "cannot read the bootstrap predicate"
+        $b.Success | Should -BeTrue -Because "cannot read the child predicate"
+        ($a.Groups['body'].Value -replace '\s+',' ').Trim() |
+            Should -Be (($b.Groups['body'].Value -replace '\s+',' ').Trim())
+    }
+    It "the hold is BOUNDED, so a forgotten window still closes" {
+        $script:Boot | Should -Match '\[int\]\$HoldSec = \d+'
+        $script:Boot | Should -Match '\(Get-Date\) -lt \$deadline'
+    }
+    It "a host that cannot report keystrokes does not crash the exit" {
+        # KeyAvailable throws on a redirected console and in the ISE.
+        $script:Boot | Should -Match '(?s)KeyAvailable.*?\}\s*catch\s*\{\}'
+    }
+}
+
+Describe "A branch ref may contain '/' — and '..' still may not (client#917)" {
+    # THE BLANKET '/' REFUSAL BROKE THE ONLY FLOW IT EXISTS FOR. Every real
+    # development branch is `fix/1234-thing`, so the documented developer
+    # override could fetch develop/staging/main and NOTHING ELSE -- while the
+    # point of the escape hatch is testing unreleased code, which lives on
+    # feature branches. Measured on a real Windows box: the install stopped at
+    # "Ref '...' contains a path separator" before doing anything.
+    It "accepts a real feature-branch ref under the unverified opt-in" {
+        Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/2849-bound-the-docker-probes' `
+            -AllowUnverified:$true | Should -Be 'fix/2849-bound-the-docker-probes'
+    }
+    It "still accepts the slash-free branches it always did" {
+        Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'develop' -AllowUnverified:$true |
+            Should -Be 'develop'
+    }
+
+    # --- and the R8 property, unchanged ---
+    It "refuses '..' even under the opt-in — that is the actual traversal lever" {
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/../../heads/main' `
+            -AllowUnverified:$true } | Should -Throw -ExpectedMessage "*'..'*"
+    }
+    It "refuses a tag-shaped ref carrying a traversal, the RFC-0001 R8 case" {
+        # -ExpectedMessage, because the name claims the TRAVERSAL refusal and three
+        # different refusals satisfied a bare -Throw -- the test could pass while the
+        # traversal check was gone (review). Seven siblings here already pin theirs.
+        { Resolve-InstallRef -DefaultRef 'v1.2.3-../../heads/main' -AllowUnverified:$true } |
+            Should -Throw -ExpectedMessage "*'..'*"
+    }
+    It "refuses '/' when the caller has NOT opted in to an unverified branch" {
+        # A pinned REF is a tag; a tag never contains '/'.
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -RefEnv 'a/b' -AllowUnverified:$true } |
+            Should -Throw -ExpectedMessage "*path separator*"
+    }
+    It "refuses a leading, trailing or doubled slash (empty segment)" {
+        foreach ($bad in @('/fix/x', 'fix/x/', 'fix//x')) {
+            { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv $bad -AllowUnverified:$true } |
+                Should -Throw -ExpectedMessage "*invalid path segment*"
+        }
+    }
+    It "refuses a bare '.' segment" {
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/./x' -AllowUnverified:$true } |
+            Should -Throw -ExpectedMessage "*invalid path segment*"
+    }
+    It "a branch ref still REQUIRES the opt-in — the slash change did not widen that" {
+        { Resolve-InstallRef -DefaultRef 'v1.8.4' -BranchEnv 'fix/x' -AllowUnverified:$false } |
+            Should -Throw -ExpectedMessage "*TRACEBLOC_ALLOW_UNVERIFIED*"
+    }
+}
