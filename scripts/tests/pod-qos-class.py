@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compute each rendered pod's Kubernetes QoS class from the chart's own output.
 
-WHY THIS EXISTS (backend#2872). Ten places in this org claimed a workload had
+WHY THIS EXISTS (backend#2872). Six places in this org claimed a workload had
 "Guaranteed QoS". Every one was false, and every one survived because
 `status.qosClass` is computed by the API SERVER: `helm unittest` renders
 manifests, so it structurally cannot express the class, and `grep qosClass
@@ -26,7 +26,7 @@ comment implied, reaches Guaranteed for jobs-manager only on a CSI cluster and
 for mysql nowhere. A checker that looked only at the main containers would agree
 with the wrong comments.
 
-Pod-level resources (KEP-2837, beta 1.36) are handled: `spec.resources` with
+Pod-level resources (KEP-2837, beta 1.34) are handled: `spec.resources` with
 requests == limits yields Guaranteed even with unresourced init containers.
 Measured on a real 1.36 cluster before being encoded here. When the chart adopts
 them, this checker follows the class change rather than needing a rewrite.
@@ -59,6 +59,13 @@ def _norm(v):
     false alarm the expected table would catch immediately, and it is the safe
     direction to be wrong in. Parsing units would add an arithmetic surface whose
     own bugs would be silent.
+
+    ONE EXCEPTION, and it is the looser direction: requests == limits == {cpu:
+    "0", memory: "0"} derives Guaranteed here and is BestEffort on a cluster,
+    because the kubelet treats a zero quantity as unset. Stated rather than
+    handled -- no chart workload sets zero, and inventing a numeric special case
+    would reintroduce the parse surface this function exists to avoid. If one
+    ever does, the expected table is what catches it.
     """
     return None if v is None else str(v).strip()
 
@@ -66,7 +73,8 @@ def _norm(v):
 def pod_qos(pod_spec):
     """Return (class, reason). The single implementation of the rule -- the
     assertion and the mutation check in pod-qos-class.bats both call THIS, so
-    breaking it reddens rather than being re-implemented inline (CLAUDE.md #9).
+    breaking it reddens. A mutation check that re-implements the rule inline
+    proves only that its own copy works.
     """
     # Pod-level resources (KEP-2837) short-circuit the per-container walk, which
     # is exactly why they clear the unresourced-init-container blocker.
@@ -135,7 +143,7 @@ def check_expectations(rows, inits, path):
     six workload names in a bats file; the chart renders TEN, so `auto-upgrade`,
     `image-refresh` and the two check Jobs were classified and then ignored -- a
     silent Burstable/Guaranteed change on any of them stayed green, which is the
-    defect shape this guard exists to close (CLAUDE.md: derive, never restate).
+    defect shape this guard exists to close -- derive, never restate.
 
     Format, one per line, `#` comments allowed:
         class   <workload>  <Guaranteed|Burstable|BestEffort>
@@ -208,7 +216,8 @@ def main(argv):
         rows.append((name, cls, why))
     if not rows:
         # Fail closed: zero pods parsed compares equal to zero pods parsed, which
-        # is how an empty render passes a naive sweep (CLAUDE.md #3).
+        # is how an empty render passes a naive sweep: zero parsed rows compares
+        # equal to zero parsed rows, so "cannot tell" has to be a finding.
         sys.stderr.write("no pod-bearing workloads found in the render -- "
                          "refusing to report agreement\n")
         return 1

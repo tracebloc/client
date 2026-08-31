@@ -138,12 +138,22 @@ def snippet_ok(src):
 
 guards, offenders = [], []
 for name in sorted(os.listdir(tests_dir)):
-    if not (name.endswith(".sh") or name.endswith(".bats")):
+    if not (name.endswith(".sh") or name.endswith(".bats")
+            or name.endswith(".py")):
         continue
     if name == self_name:          # this enforcer is not itself a guard-under-test
         continue
     lines = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read().splitlines()
-    yaml_snips = [s for s in extract_python(lines) if IMPORT_YAML.search(s)]
+    if name.endswith(".py"):
+        # A python guard is not a shell file with python inside it: the whole
+        # file is the snippet. extract_python finds only EMBEDDED blocks, so
+        # feeding a .py through it yields nothing and the file would land in the
+        # "import present but not captured" branch -- failing closed on a guard
+        # that is correctly wrapped.
+        whole = "\n".join(lines)
+        yaml_snips = [whole] if IMPORT_YAML.search(whole) else []
+    else:
+        yaml_snips = [s for s in extract_python(lines) if IMPORT_YAML.search(s)]
     raw_import = any(IMPORT_YAML.match(l) for l in lines)
     if not (raw_import or yaml_snips):     # not a yaml-importing guard
         continue

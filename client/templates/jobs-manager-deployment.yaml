@@ -194,10 +194,16 @@ spec:
         # Measured: EKS values (hostPath off, no init container rendered) + cpu
         # overrides -> Guaranteed; bare-metal values + the same overrides ->
         # Burstable. Per-container equalisation only reaches Guaranteed on CSI
-        # clusters. Pod-level resources (KEP-2837, beta in 1.36) clear it on both,
-        # and are the only route that does — measured on a real 1.36 cluster:
-        # pod-level requests == limits with an unresourced init container yields
-        # Guaranteed.
+        # clusters. Pod-level resources (KEP-2837, beta in 1.34) clear it on
+        # both — measured on a real 1.36 cluster: pod-level requests == limits
+        # with an unresourced init container yields Guaranteed.
+        #
+        # NOT the only route, though an earlier version of this comment said so
+        # (review on client#922): resourcing every init container requests ==
+        # limits reaches Guaranteed too, and pod-qos-class.py returns exactly
+        # that for t-jobs-manager and mysql-client when they are equalised. It is
+        # rejected on cost, not capability — those reservations are held for the
+        # pod's whole life, not just the seconds the init container runs.
         #
         # requests.cpu is
         # also raised (100m -> 250m) so a mass restart doesn't throttle its

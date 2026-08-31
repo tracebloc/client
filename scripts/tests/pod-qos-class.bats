@@ -2,7 +2,7 @@
 # =============================================================================
 #  pod-qos-class.bats — pin the QoS class of every workload this chart renders.
 #
-#  backend#2872: ten places claimed "Guaranteed QoS" and every one was false. They
+#  backend#2872: six places claimed "Guaranteed QoS" and every one was false. They
 #  survived because no test tier could assert a class -- `status.qosClass` is
 #  computed by the API server, so `helm unittest` cannot express it, and
 #  `grep qosClass client/tests/` returned nothing. What existed instead were
@@ -40,11 +40,6 @@ _render() {
     --set clientId=probe --set clientPassword=probe "$@" > "$out" 2>"${out}.err"
 }
 
-# _class_of <rendered> <workload-suffix> — the derived class for one workload.
-_class_of() {
-  python3 "$QOS" "$1" | awk -F'\t' -v w="$2" '$1 ~ w {print $2; exit}'
-}
-
 @test "hostPath edges (installer default): EVERY rendered workload matches the declared class" {
   local r="$BATS_TEST_TMPDIR/hostpath-on.yaml"
   _render true "$r" || return 1
@@ -53,7 +48,8 @@ _class_of() {
   # classifies it, and a stale row fails rather than being satisfied by nothing.
   # The previous version listed six names by hand while the chart rendered TEN --
   # auto-upgrade, image-refresh and the two check Jobs were classified and then
-  # ignored (Bugbot, review on client#922; CLAUDE.md rule 1).
+  # ignored (Bugbot, review on client#922): a check holding its own copy of the
+  # rule agrees with itself while disagreeing with the chart.
   run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.hostpath.txt"
   [ "$status" -eq 0 ] || return 1
   # No workload is BestEffort. values.yaml claimed jobs-manager once was; it never
@@ -174,7 +170,7 @@ _class_of() {
 }
 
 @test "derivation: pod-level resources reach Guaranteed DESPITE an unresourced init container" {
-  # KEP-2837, beta in 1.36 — measured on a real cluster before being encoded.
+  # KEP-2837, beta in 1.34 — measured on a real cluster before being encoded.
   # This is the assertion that makes pod-level resources the only route for
   # installer edges, rather than a preference.
   local f="$BATS_TEST_TMPDIR/podlevel.yaml"
@@ -188,8 +184,9 @@ _class_of() {
 # BOTH dimensions must be checked, and no chart pod exercises this: every pod
 # here has cpu req != lim, so a checker that ignored MEMORY entirely would agree
 # with the expected table above. Found by mutation Q2 — the table alone could not
-# see the gap (CLAUDE.md #6: mutation coverage cannot see a vocabulary gap, so
-# derive the input domain instead).
+# see the gap: mutation coverage is coupled to the mutation, not to the
+# requirement, so it cannot tell you a dimension was never exercised. Derive the
+# input domain from the producer's surface and test all of it instead.
 @test "derivation: cpu equal but MEMORY unequal is still Burstable" {
   local f="$BATS_TEST_TMPDIR/mem-unequal.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: m\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 512Mi}\n      limits: {cpu: "1", memory: 1Gi}\n' > "$f"
