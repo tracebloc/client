@@ -590,10 +590,59 @@ function Invoke-Bootstrap {
     } else {
       & powershell.exe -ExecutionPolicy Bypass -File $k8s
     }
-    exit $LASTEXITCODE
+    Complete-Bootstrap -Code $LASTEXITCODE
   } finally {
     Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
   }
+}
+
+# =============================================================================
+#  EXITING WITHOUT TAKING THE USER'S WINDOW WITH IT (#577, client#917)
+# =============================================================================
+# #577 made the installer always show a clean "what happened" instead of
+# vanishing -- and it fixed that in install-k8s.ps1, which runs as a CHILD
+# process where `exit` is harmless. THIS file is the other half, and it was
+# missed: the documented entry point is `irm ... | iex`, so this script runs
+# INSIDE the user's own console. A top-level `exit` there ends THEIR session --
+# the window closes and takes the outcome with it.
+#
+# And it is not only the failure paths. `exit $LASTEXITCODE` after the child
+# returns fires on EVERY run, so a perfectly successful install also slammed the
+# window shut over its own summary. Reported from a real Windows machine: "it
+# just closed the PowerShell".
+#
+# The exit CODE must still propagate untouched -- the e2e harness reads it to
+# tell install-k8s.ps1's declared `exit 2` reboot handoff from a real failure --
+# so this does not swap `exit` for `return`, which would silently turn every
+# code into 0 for `powershell.exe -Command` callers. It holds the window open
+# just long enough to be read, then exits exactly as before.
+#
+# Can we prompt? Same predicate install-k8s.ps1 uses, deliberately: false under
+# CI, a service, or piped/redirected stdin -- every context where a hold would
+# be a hang and where no human is losing a window anyway. The e2e journey pipes
+# stdin, so it takes the no-hold path.
+function Test-BootstrapCanPrompt {
+  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
+  catch { return $false }
+}
+
+# BOUNDED, because an unbounded hold is the bug we spent this whole ticket
+# removing. 60s is long enough to read a summary or an error and short enough
+# that a forgotten window closes itself. A host that cannot report keystrokes
+# (ISE, a redirected console) throws on KeyAvailable -- caught, and treated as
+# "nothing is waiting to be read".
+function Complete-Bootstrap {
+  param([int]$Code, [int]$HoldSec = 60)
+  if (Test-BootstrapCanPrompt) {
+    try {
+      Write-Host ""
+      Write-Host "  This window closes when you press a key (or in ${HoldSec}s)." -ForegroundColor DarkGray
+      $deadline = (Get-Date).AddSeconds($HoldSec)
+      while (-not [Console]::KeyAvailable -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+      if ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
+    } catch {}
+  }
+  exit $Code
 }
 
 # =============================================================================
@@ -607,7 +656,7 @@ if (-not $env:TB_PESTER) {
     Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline
     Write-Host " This script is for Windows. On macOS / Linux use:" -ForegroundColor Red
     Write-Host "  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash" -ForegroundColor Cyan
-    exit 1
+    Complete-Bootstrap -Code 1
   }
   # TLS 1.2 floor — Windows PowerShell 5.1 otherwise negotiates down to TLS 1.0.
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -620,6 +669,6 @@ if (-not $env:TB_PESTER) {
     Write-Host ""
     Err "Installation stopped: $_"
     Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
-    exit 1
+    Complete-Bootstrap -Code 1
   }
 }

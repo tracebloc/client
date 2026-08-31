@@ -304,3 +304,47 @@ Describe "A cosign that won't execute is not a failed signature (client#734)" {
     Should -Invoke Warn -Times 2 -Exactly
   }
 }
+
+Describe "The bootstrap must not close the user's window (#577 / client#917)" {
+    # #577 -- "the PowerShell installer must never terminate ungracefully" -- was
+    # fixed in install-k8s.ps1, which runs as a CHILD process where `exit` costs
+    # nothing. THIS file was missed, and it is the one that runs INSIDE the
+    # user's console via the documented `irm ... | iex`. A top-level `exit` there
+    # ends their session: reported from a real Windows machine as "it just closed
+    # the PowerShell", with the outcome gone with it.
+    #
+    # `exit $LASTEXITCODE` after the child returns fires on EVERY run, so this
+    # was not only a failure-path defect -- a SUCCESSFUL install also slammed the
+    # window shut over its own summary.
+    BeforeAll { $script:Boot = Get-Content (Join-Path $PSScriptRoot "../install.ps1") -Raw }
+
+    It "no exit site skips the hold" {
+        # Every `exit` on a user-reachable path goes through Complete-Bootstrap.
+        # The only bare `exit` left is the one INSIDE it.
+        $bare = [regex]::Matches($script:Boot, '(?m)^\s{2,}exit\s')
+        $bare.Count | Should -Be 1
+    }
+    It "the child's exit code is still propagated, not swallowed" {
+        # The e2e harness reads this code to tell install-k8s.ps1's declared
+        # `exit 2` reboot handoff from a real failure, so the fix must NOT become
+        # a `return` -- that would report 0 for every `powershell.exe -Command`
+        # caller and turn a failed install into a pass.
+        $script:Boot | Should -Match 'Complete-Bootstrap -Code \$LASTEXITCODE'
+        $script:Boot | Should -Match '(?m)^\s+exit \$Code\s*$'
+    }
+    It "the hold is skipped when nothing is there to lose" {
+        # CI, a service, piped/redirected stdin: no window is closing, and a hold
+        # would be a hang -- the exact class this ticket spent its life removing.
+        $script:Boot | Should -Match 'function Test-BootstrapCanPrompt'
+        $script:Boot | Should -Match 'UserInteractive -and -not \[Console\]::IsInputRedirected'
+        $script:Boot | Should -Match 'if \(Test-BootstrapCanPrompt\)'
+    }
+    It "the hold is BOUNDED, so a forgotten window still closes" {
+        $script:Boot | Should -Match '\[int\]\$HoldSec = \d+'
+        $script:Boot | Should -Match '\(Get-Date\) -lt \$deadline'
+    }
+    It "a host that cannot report keystrokes does not crash the exit" {
+        # KeyAvailable throws on a redirected console and in the ISE.
+        $script:Boot | Should -Match '(?s)KeyAvailable.*?\}\s*catch\s*\{\}'
+    }
+}
