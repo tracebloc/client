@@ -7480,7 +7480,20 @@ function Install-TraceblocCli {
     # the caller's `$p.ExitCode -eq 0` test below simply does not pass. Killed
     # rather than abandoned, so it cannot keep writing to the log we then read.
     $cliWaitMs = 10 * 60 * 1000
-    if (-not $p.WaitForExit($cliWaitMs)) {
+    if ($p.WaitForExit($cliWaitMs)) {
+      # FLUSH THE STREAMS, and this is not optional (Bugbot, on my own change).
+      # WaitForExit(ms) waits for the PROCESS; only the PARAMETERLESS overload also
+      # waits for the redirected stdout/stderr readers to drain, and until they do
+      # .ExitCode can read back $null. `$p.ExitCode -eq 0` below would then be false
+      # after a SUCCESSFUL install and Step 4 would fall back to the legacy
+      # credential path -- the #611 failure shape, and the empty-ExitCode class this
+      # very ticket exists to remove. Wait-ProcessWithDeadline does exactly this,
+      # for exactly this reason; swapping the parameterless call for the timeout
+      # overload here dropped it, and the comment above about ".Handle then
+      # WaitForExit()" was describing a call that no longer happened.
+      # Bounded in practice: the process has already exited.
+      try { $p.WaitForExit() } catch {}
+    } else {
       Log "tracebloc CLI installer did not finish within 10 minutes; stopping it and continuing."
       try { $p.Kill() } catch {}
       try { $null = $p.WaitForExit(30 * 1000) } catch {}

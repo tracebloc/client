@@ -4015,8 +4015,36 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     # This was the only wait in ~7400 lines with no bound. The child is
     # `irm <url> | iex` -- a network fetch we then execute.
     $script:Src | Should -Match '\$p\.WaitForExit\(\$cliWaitMs\)'
-    $script:Src | Should -Not -Match '(?m)^\s*\$p\.WaitForExit\(\)\s*$'
     $script:Src | Should -Match '\$p\.Kill\(\)'
+    # The GATING wait must be the bounded one: a bare parameterless call as its own
+    # statement is the unbounded wait this ticket removed.
+    $script:Src | Should -Not -Match '(?m)^\s*\$p\.WaitForExit\(\)\s*$'
+  }
+
+  It "and its streams are FLUSHED after the bounded wait, or a success reads as failure" {
+    # Bugbot on acefcae, against my own change. WaitForExit(ms) waits for the
+    # PROCESS only; the PARAMETERLESS overload is what also waits for redirected
+    # stdout/stderr to drain, and until they do .ExitCode can read back $null. So
+    # `$p.ExitCode -eq 0` goes false after a SUCCESSFUL CLI install and Step 4
+    # silently falls back to the legacy credential path -- the #611 shape, and the
+    # empty-ExitCode class backend#2849 exists to remove. Swapping the parameterless
+    # call for the timeout overload dropped the flush; the assertion above forbade
+    # only the BARE form, so nothing caught it.
+    $fn = [regex]::Match($script:Src, 'function Install-TraceblocCli[\s\S]*?\n\}').Value
+    $fn | Should -Not -BeNullOrEmpty -Because "cannot locate Install-TraceblocCli"
+    $fn | Should -Match '\$null = \$p\.Handle'                     # code survives the reap
+    $fn | Should -Match 'try \{ \$p\.WaitForExit\(\) \} catch \{\}'   # streams drain before ExitCode is read
+    # ORDER: the flush must come after the bounded wait and BEFORE ExitCode is read.
+    # Anchored on CODE shapes, not bare substrings -- the surrounding comments quote
+    # `$p.ExitCode -eq 0` in prose, and matching that text found the comment first.
+    $gate  = [regex]::Match($fn, '(?m)^\s*if \(\$p\.WaitForExit\(\$cliWaitMs\)\)')
+    $flush = [regex]::Match($fn, '(?m)^\s*try \{ \$p\.WaitForExit\(\) \} catch \{\}')
+    $read  = [regex]::Match($fn, '(?m)^\s*if \(\$p\.ExitCode -eq 0\)')
+    $gate.Success  | Should -BeTrue -Because "the bounded wait must gate the branch"
+    $flush.Success | Should -BeTrue -Because "the stream flush must be a real statement"
+    $read.Success  | Should -BeTrue -Because "cannot locate the ExitCode test"
+    $flush.Index | Should -BeGreaterThan $gate.Index -Because "flushing before the bounded wait proves nothing"
+    $read.Index  | Should -BeGreaterThan $flush.Index -Because "ExitCode must not be read before the streams have drained"
   }
 }
 
