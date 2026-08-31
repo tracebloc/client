@@ -1855,11 +1855,7 @@ function Install-DockerDesktop {
     }
   }
 
-  $dockerRunning = $false
-  try {
-    $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
-    if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true }
-  } catch {}
+  $dockerRunning = (Test-DockerEngineUp)
 
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
@@ -1870,16 +1866,21 @@ function Install-DockerDesktop {
     # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
     $waitMin = 10
     if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
+    # WALL-CLOCK, NOT ITERATIONS (backend#2849). `$waitMin * 20` assumed each
+    # pass costs exactly the 3s sleep, which is only true while `docker info`
+    # returns promptly. A WEDGED daemon -- a half-open \\.\pipe\docker_engine,
+    # which is what Docker Desktop leaves behind when it starts and then gives up
+    # -- makes each probe block instead, so the loop could run far past the cap it
+    # believes it has, with the spinner still turning. The probe is bounded below
+    # AND the deadline is now real, so `$waitMin` means minutes either way.
     $maxWait = $waitMin * 20                     # 3s per iteration
+    $dockerDeadline = (Get-Date).AddMinutes($waitMin)
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
-    for ($i = 1; $i -le $maxWait; $i++) {
+    for ($i = 1; $i -le $maxWait -and (Get-Date) -lt $dockerDeadline; $i++) {
       Start-Sleep -Seconds 3
-      try {
-        $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
-        if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
-      } catch {}
+      if (Test-DockerEngineUp) { $dockerRunning = $true; break }
       # Honest elapsed status after the first minute — silent dead air on a
       # slow first start reads as a hang.
       $label = " Waiting for Docker..."
@@ -2264,6 +2265,27 @@ function Invoke-DockerCli {
     [switch]$StdoutOnly
   )
   return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin -StdoutOnly:$StdoutOnly
+}
+
+# Is the Docker ENGINE answering? (backend#2849)
+#
+# BOUNDED, because this is the one probe that runs while the daemon is least
+# likely to be healthy. A bare `docker info` against a wedged daemon does not
+# fail -- it BLOCKS, and this file already has a rule about that
+# ("installer external-call timeout rule", see Invoke-BoundedProcess): every
+# external call goes through a wrapper with a deadline. The engine-up wait was
+# the one place that read `docker info` directly, so the very wait that exists to
+# survive a bad Docker start was the one that could hang on it, with a spinner
+# still turning and the 10-minute cap never reached.
+#
+# 15s: `docker info` against a HEALTHY daemon answers in well under a second, so
+# this is generous for a slow cold start and still short enough that the wait
+# loop keeps its cadence when the daemon is wedged. A timeout is "not up yet",
+# not an error -- the caller's deadline decides when that becomes fatal.
+function Test-DockerEngineUp {
+  $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.ID}}") -TimeoutSec 15 -StdoutOnly
+  if ($r.Code -ne 0) { return $false }
+  return (-not [string]::IsNullOrWhiteSpace("$($r.Output)"))
 }
 
 function Confirm-DockerGpu {
@@ -6286,9 +6308,18 @@ function Get-PfFsType {
 # Memory/CPU as the container runtime sees it (the Docker Desktop / WSL2 VM budget,
 # which is what the pods actually get — smaller than the host). $null if the daemon
 # is down or the value is junk, so callers fall back to the host (CIM) reader.
+# BOUNDED (backend#2849). These three run at the TOP of Step 3, via
+# Test-PreflightRuntimeMem, and they are the first thing that touches Docker after
+# the engine wait. A bare `docker info` against a wedged daemon blocks rather than
+# failing, so an install that got past Step 2 on a sick engine would hang HERE --
+# at the entry to the step, before anything prints -- instead of falling back to
+# the host reader as the `$null` contract below promises. A timeout returns $null,
+# which is exactly the "undeterminable" the callers already handle.
 function Get-PfRuntimeMemGb {
   try {
-    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.MemTotal}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1GB) }
   } catch {}
   return $null
@@ -6302,14 +6333,18 @@ function Get-PfRuntimeMemGb {
 # (mirrors bash's PF_VM_MEM_GRACE_MIB, preflight.sh #513). $null if undeterminable.
 function Get-PfRuntimeMemMib {
   try {
-    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.MemTotal}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1MB) }
   } catch {}
   return $null
 }
 function Get-PfRuntimeCpu {
   try {
-    $v = ((docker info --format '{{.NCPU}}' 2>$null) | Out-String).Trim()
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.NCPU}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int]$v -gt 0) { return [int]$v }
   } catch {}
   return $null
@@ -7081,7 +7116,24 @@ function Install-TraceblocCli {
     # .ExitCode reliable. (The -Wait -PassThru form can leave .ExitCode $null
     # with redirected output; -PassThru + Handle + WaitForExit does not.)
     $null = $p.Handle
-    $p.WaitForExit()
+    # A DEADLINE, because this was the only wait in the file without one
+    # (backend#2849). The child is `irm <cli install.ps1> | iex` -- a network
+    # fetch of a script we then execute -- so a stalled TLS handshake, a slow CDN
+    # redirect or anything blocking inside the CLI's own installer parked the
+    # whole install here forever, with no console output and nothing to kill it.
+    # Every other wait in this file goes through Wait-ProcessWithDeadline or
+    # Invoke-BoundedProcess; this one predates that rule.
+    #
+    # 10 minutes, and a timeout is NOT fatal: a failed CLI install is already
+    # explicitly non-fatal (Step 4 falls back to the legacy credential flow), so
+    # the caller's `$p.ExitCode -eq 0` test below simply does not pass. Killed
+    # rather than abandoned, so it cannot keep writing to the log we then read.
+    $cliWaitMs = 10 * 60 * 1000
+    if (-not $p.WaitForExit($cliWaitMs)) {
+      Log "tracebloc CLI installer did not finish within 10 minutes; stopping it and continuing."
+      try { $p.Kill() } catch {}
+      try { $null = $p.WaitForExit(30 * 1000) } catch {}
+    }
     foreach ($f in @($cliOut, $cliErr)) {
       if (Test-Path $f) { Get-Content $f -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     }

@@ -2736,29 +2736,42 @@ Describe "Get-PfFsType" -Skip:(-not $IsWindows) {
 }
 
 Describe "Get-Pf* runtime (Docker VM) view preference" {
+  # THE SEAM MOVED, THE ASSERTIONS DID NOT (backend#2849). These readers used to
+  # invoke `docker` natively; they now go through Invoke-DockerCli so the call
+  # carries a deadline (a bare `docker info` against a wedged daemon blocks rather
+  # than failing, and these run at the top of Step 3). Every case below still
+  # asserts the same behaviour -- prefer the runtime view, fall back to null on
+  # junk or on a dead daemon -- just mocked one layer out.
   It "Get-PfRuntimeMemGb follows the docker MemTotal (#417)" {
-    Mock docker { '8589934592' }          # 8 GiB, in bytes
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = '8589934592' } }   # 8 GiB, in bytes
     Get-PfRuntimeMemGb | Should -Be 8
   }
   It "Get-PfMemGb never consults the Docker VM budget (#417 no flip-flop)" {
     # Host-independent + cross-platform: the flip-flop bug was Get-PfMemGb reading
-    # the docker budget. Prove it's decoupled by asserting Get-PfMemGb never calls
+    # the docker budget. Prove it's decoupled by asserting Get-PfMemGb never asks
     # docker at all. Avoids the flaky "Should -Not -Be 8" on a real 8 GB host; the
     # exact host figure is locked by the Windows-gated CIM-mocked sibling test.
-    Mock docker { '8589934592' }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = '8589934592' } }
     $null = Get-PfMemGb
-    Should -Invoke docker -Times 0
+    Should -Invoke Invoke-DockerCli -Times 0
   }
   It "Get-PfCpu prefers docker NCPU over the host" {
-    Mock docker { '2' }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = '2' } }
     Get-PfCpu | Should -Be 2
   }
   It "Get-PfRuntimeMemGb: junk value -> null (forces host fallback)" {
-    Mock docker { 'lots' }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = 'lots' } }
     Get-PfRuntimeMemGb | Should -BeNullOrEmpty
   }
   It "Get-PfRuntimeMemGb: docker errors -> null" {
-    Mock docker { throw "daemon down" }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1; Output = 'daemon down' } }
+    Get-PfRuntimeMemGb | Should -BeNullOrEmpty
+  }
+  It "Get-PfRuntimeMemGb: a TIMED-OUT probe -> null, not a hang (backend#2849)" {
+    # The case that did not exist before: the reader used to have no way to time
+    # out, so this state was unreachable and untested. 124 is the timeout code
+    # Invoke-BoundedProcess returns.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = 'docker info timed out after 20s' } }
     Get-PfRuntimeMemGb | Should -BeNullOrEmpty
   }
 }
@@ -3626,6 +3639,73 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   It "unset -> -NoReboot stays off (the customer default still asks)" {
     $env:TRACEBLOC_SKIP_REBOOT_PROMPT = $null
     (& { . $script:Ps1; [bool]$NoReboot }) | Should -BeFalse
+  }
+}
+
+Describe "Every Docker/child wait on the install path is bounded (backend#2849)" {
+  # WHAT THIS DEFENDS, and why it is the shape that keeps costing this journey
+  # runs: an unbounded external call against a SICK dependency does not fail, it
+  # BLOCKS. The caller then spends its whole budget and reports a timeout that
+  # names nothing -- which is exactly how the reboot prompt (backend#2675) and the
+  # empty exit code (backend#2849) each burned four Windows runs before anyone
+  # could say what was wrong. This file already has the rule (Invoke-BoundedProcess,
+  # "installer external-call timeout rule"); these are the sites that predated it.
+  BeforeAll { $script:Src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw }
+
+  It "no bare 'docker info' survives anywhere -- every engine read is bounded" {
+    # SOURCE-LEVEL and deliberately so: the sites are inside functions whose
+    # callers exit, and the property is "this text does not appear", which is
+    # only expressible against the text. Matches the NATIVE-call form
+    # `(docker info ...)`, not the string inside an Invoke-DockerCli arg list.
+    $script:Src | Should -Not -Match '\(docker info'
+  }
+
+  It "the engine probe goes through the bounded wrapper, with a timeout" {
+    $script:Src | Should -Match 'function Test-DockerEngineUp'
+    $script:Src | Should -Match 'Invoke-DockerCli -DockerArgs @\("info", "--format", "\{\{\.ID\}\}"\) -TimeoutSec \d+'
+  }
+
+  It "a timed-out probe reads as 'not up', never as up" {
+    # The distinction that matters: a wedged daemon must not be mistaken for a
+    # healthy one, or the install proceeds into Step 3 on an engine that is not
+    # there. Non-zero Code -> false, regardless of what Output happens to hold.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "abc123" } }
+    Test-DockerEngineUp | Should -BeFalse
+  }
+  It "an empty ID reads as 'not up' even on a zero exit" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "   " } }
+    Test-DockerEngineUp | Should -BeFalse
+  }
+  It "a real ID on a zero exit is 'up'" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "SOMEID" } }
+    Test-DockerEngineUp | Should -BeTrue
+  }
+
+  It "the engine wait's deadline is wall-clock, not an iteration count" {
+    # `$waitMin * 20` assumed every pass costs exactly its 3s sleep, which stops
+    # being true the moment a probe blocks -- so the cap the code believed it had
+    # was not a time bound at all.
+    $script:Src | Should -Match '\$dockerDeadline = \(Get-Date\)\.AddMinutes\(\$waitMin\)'
+    $script:Src | Should -Match '\(Get-Date\) -lt \$dockerDeadline'
+  }
+
+  It "the runtime preflight readers fall back to null on a timeout, not hang" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "" } }
+    Get-PfRuntimeMemGb  | Should -BeNullOrEmpty
+    Get-PfRuntimeMemMib | Should -BeNullOrEmpty
+    Get-PfRuntimeCpu    | Should -BeNullOrEmpty
+  }
+  It "the runtime preflight readers still parse a healthy answer" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "8589934592" } }
+    Get-PfRuntimeMemGb | Should -Be 8
+  }
+
+  It "the CLI installer child is waited on WITH a deadline, and killed on timeout" {
+    # This was the only wait in ~7400 lines with no bound. The child is
+    # `irm <url> | iex` -- a network fetch we then execute.
+    $script:Src | Should -Match '\$p\.WaitForExit\(\$cliWaitMs\)'
+    $script:Src | Should -Not -Match '(?m)^\s*\$p\.WaitForExit\(\)\s*$'
+    $script:Src | Should -Match '\$p\.Kill\(\)'
   }
 }
 
