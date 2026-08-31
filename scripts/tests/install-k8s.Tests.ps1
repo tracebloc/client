@@ -1274,7 +1274,22 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
     Should -Not -Invoke Copy-Item
   }
-  It "does NOT copy when a version is unreadable (no downgrade on uncertainty)" {
+  It "does NOT copy when the SOURCE version is unreadable (can't vouch — keep the machine copy)" {
+    # src unreadable, dest a valid build -> a partially-failed reinstall must not clobber a
+    # working CLI.
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { $null } else { [version]'2.0.0' } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  It "REPAIRS a broken machine copy: source readable, DEST version unreadable -> copy (Bugbot)" {
+    # The machine copy exists but won't report a version (corrupt/wrong-arch); the source is
+    # a known-good build. Without this, a corrupt snapshot shadows every user and re-running
+    # never fixes it.
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'2.0.0' } else { $null } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+  It "does NOT copy when BOTH versions are unreadable (unvouchable source)" {
     Mock Get-TraceblocExeVersion { $null }
     Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
     Should -Not -Invoke Copy-Item

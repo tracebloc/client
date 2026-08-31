@@ -7571,7 +7571,17 @@ function Publish-TraceblocCliToToolDir {
     } catch { }
     $srcVer  = Get-TraceblocExeVersion -ExePath $src
     $destVer = Get-TraceblocExeVersion -ExePath $dest
-    if (-not ($srcVer -and $destVer -and ($srcVer -gt $destVer))) { return }
+    # Refresh only toward a KNOWN-GOOD, non-downgrading source. The two "unknown" sides are
+    # NOT symmetric (Bugbot):
+    #   * source version unreadable -> we can't vouch for it, so keep the machine copy (a
+    #     partially-failed reinstall must not clobber a working CLI), and
+    #   * source READABLE but dest version unreadable -> the machine copy is broken/unknown
+    #     and the source is a known-good build, so REPAIR it (otherwise a corrupt snapshot
+    #     shadows every user's CLI and re-running never fixes it).
+    # With both readable, copy only when the source is strictly newer (no downgrade —
+    # a pinned older %LOCALAPPDATA% has a readable, older version and lands here).
+    if (-not $srcVer) { return }                          # unvouchable source -> don't touch
+    if ($destVer -and ($srcVer -le $destVer)) { return }  # readable & not newer -> no downgrade
   }
   # -ErrorAction Stop, because Copy-Item/New-Item raise NON-terminating errors under the
   # installer's default $ErrorActionPreference='Continue' — the caller's try/catch would
