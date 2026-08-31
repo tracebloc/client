@@ -5510,6 +5510,25 @@ function Install-ClientHelm {
       # -- Legacy manual connect (fallback ONLY: the CLI was missing or too old
       # for browser provisioning in Step 4). Hand-copied credentials from the
       # web app — dropped from the primary path by #388.
+
+      # NO TERMINAL -> REFUSE, DON'T SPIN (backend#2675) -- and FIRST, before the
+      # "Use previous settings?" prompt below, which is itself a Read-Host that
+      # would hang an unattended run on any machine that still holds a
+      # values.yaml (Bugbot on the first placement, which sat after it). Every
+      # prompt in this branch is unanswerable with nobody at the console, and
+      # the credential loop further down is worse than a hang: it `continue`s on
+      # an empty answer WITHOUT charging an attempt, printing "Client ID cannot
+      # be empty." forever. Fail closed at the branch door, naming the two
+      # variables that make this path unnecessary -- the same pair
+      # Get-ProvisioningPreset reads, and the documented automation contract.
+      if (-not (Test-CanPrompt)) {
+        Err ("This machine is not registered yet and there is no terminal to ask for credentials.`n" +
+             "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
+             "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
+             "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
+             "  Find them at https://ai.tracebloc.io/clients")
+      }
+
       $defaultClientId = ""
       $defaultClientPassword = ""
 
@@ -5528,21 +5547,6 @@ function Install-ClientHelm {
           if ($defaultClientId) { Log "Using existing clientId as default." }
           if ($defaultClientPassword) { Log "Using existing clientPassword as default." }
         }
-      }
-
-      # NO TERMINAL -> REFUSE, DON'T SPIN (backend#2675). The loop below reads
-      # the credential with Read-Host and does `continue` on an empty answer
-      # WITHOUT charging an attempt, so with nothing on stdin it prints
-      # "Client ID cannot be empty." forever: an unattended install that neither
-      # finishes nor fails. Fail closed here instead, naming the two variables
-      # that make this path unnecessary -- the same pair Get-ProvisioningPreset
-      # reads, and the documented Windows automation contract.
-      if (-not (Test-CanPrompt)) {
-        Err ("This machine is not registered yet and there is no terminal to ask for credentials.`n" +
-             "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
-             "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
-             "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
-             "  Find them at https://ai.tracebloc.io/clients")
       }
 
       PromptHeader "To connect this machine, you need a tracebloc client."

@@ -3479,10 +3479,15 @@ Describe "Read-RebootChoice (the reboot prompt cannot hang an unattended install
     Should -Invoke Read-Host -Times 0
   }
   It "an empty answer is 'no reboot', not a retry" {
-    # The caller matches ^[Yy]$, so "" falls through to Set-TbRerunHandoff +
-    # exit 2 -- the same handoff -NoReboot takes.
-    Mock Test-CanPrompt { $false }
+    # A terminal IS there and the user just presses Enter: Read-Host returns ""
+    # and the caller's ^[Yy]$ match falls through to Set-TbRerunHandoff +
+    # exit 2 -- the same handoff -NoReboot takes. (Bugbot: the first version
+    # mocked Test-CanPrompt false, so it re-covered the no-terminal early
+    # return and never drove Read-Host at all.)
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
     Read-RebootChoice | Should -Not -Match "^[Yy]$"
+    Should -Invoke Read-Host -Times 1
   }
   It "still asks when a terminal is there" {
     Mock Test-CanPrompt { $true }
