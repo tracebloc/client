@@ -67,6 +67,15 @@ def _norm(v):
     handled -- no chart workload sets zero, and inventing a numeric special case
     would reintroduce the parse surface this function exists to avoid. If one
     ever does, the expected table is what catches it.
+
+    AND A THIRD, declared because the other two are (Asad, review of
+    backend#2872): a container that sets LIMITS ONLY is reported Burstable here
+    and is GUARANTEED on a cluster, because the API server defaults requests
+    from limits before the kubelet computes the class -- this checker reads the
+    rendered manifest, which is the shape BEFORE that defaulting. Safe direction
+    again, and no chart pod writes limits without requests today. It is written
+    down because the cost of an undeclared divergence is paid by whoever next
+    meets a red CI on correct code with nothing to read.
     """
     return None if v is None else str(v).strip()
 

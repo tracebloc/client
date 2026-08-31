@@ -593,13 +593,25 @@ spec:
         #   * derivation OFF (the default) -> jobs-manager's built-in fallback,
         #     the contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254
         #     image used cpu=2,memory=8Gi, the value this template used to
-        #     inject), assigned to requests AND limits -> the job pod is
-        #     GUARANTEED. client-runtime's own comment says it: "the literal
-        #     (and a symmetric env-override) has request == limit, so those pods
-        #     are Guaranteed".
+        #     inject), assigned to requests AND limits -> a CPU job pod is
+        #     GUARANTEED.
+        #   * a GPU job -> BESTEFFORT under EITHER setting. client-runtime's GPU
+        #     path resolves its envelope to nvidia.com/gpu and ephemeral-storage
+        #     only, and neither is QoS-relevant, so the container sets no
+        #     cpu/memory request or limit at all and the flag changes nothing
+        #     (backend#2871; `pod-qos-class.py` encodes the same carve-out).
+        #
+        # NO VERBATIM CROSS-REPO QUOTE HERE, deliberately (Asad, review of
+        # backend#2872). This block used to quote client-runtime's own comment
+        # word for word to support the Guaranteed claim. A quote is a dependency
+        # nothing checks -- client-runtime#457 exists to delete one in the other
+        # direction -- and it would have gone stale on the very sentence this
+        # commit is correcting. Cite the behaviour and where it lives; do not
+        # copy its prose.
         #
         # So the spawned-job default drops when the runtime image crosses #2254,
-        # and the class depends on the flag, not on this template.
+        # and the class depends on the flag AND on whether the job asks for a
+        # GPU -- not on this template.
         # The standalone installer writes explicit values (backend#1236), so the
         # derivation path applies to chart-direct installs only.
         #

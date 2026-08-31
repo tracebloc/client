@@ -56,8 +56,21 @@ env: {
   # job pod is BURSTABLE -- not Guaranteed QoS, as this line said until
   # backend#2872 (`test_pod_envelope_sizing.py` asserts the opposite: "cpu" not
   # in resource_limits). With this flag OFF -- the default -- jobs-manager uses
-  # its built-in literal on requests AND limits, so those pods are GUARANTEED.
-  # The class follows the flag; do not read "Burstable" as the default.
+  # its built-in literal on requests AND limits, so a CPU job pod is GUARANTEED.
+  #
+  # THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU (Asad,
+  # review of backend#2872). A GPU job's envelope resolves to nvidia.com/gpu and
+  # ephemeral-storage only; neither is QoS-relevant, so the container sets no
+  # cpu/memory request or limit at all and the pod is BESTEFFORT whichever way
+  # the flag is set. `pod-qos-class.py` already encodes that carve-out
+  # (backend#2871) -- this line asserted the opposite of the chart's own checker.
+  #
+  #   cpu-only + flag off -> GUARANTEED
+  #   cpu-only + flag on  -> BURSTABLE
+  #   GPU                 -> BESTEFFORT, either way
+  #
+  # So do not read "Burstable" as the default, and do not turn this on expecting
+  # to escape Burstable on a GPU node: on that cluster it changes nothing.
   #
   # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
   # an explicit envelope always wins, and this key is then inert (jobs-manager
