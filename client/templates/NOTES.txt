@@ -3,7 +3,7 @@
 {{ "\033[1;36m" }}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{{ "\033[0m" }}
 
 {{ "\033[1;35m" }}Components:{{ "\033[0m" }}
-  - {{ "\033[1;34m" }}Jobs Manager:{{ "\033[0m" }}            {{ "\033[0;33m" }}{{ .Release.Name }}-jobs-manager{{ "\033[0m" }}
+  - {{ "\033[1;34m" }}Jobs Manager:{{ "\033[0m" }}            {{ "\033[0;33m" }}{{ include "tracebloc.fullname" . }}-jobs-manager{{ "\033[0m" }}
   - {{ "\033[1;34m" }}MySQL Host:{{ "\033[0m" }}                   {{ "\033[0;33m" }}mysql-client{{ "\033[0m" }}
 {{- if ne .Values.resourceMonitor false }}
   - {{ "\033[1;34m" }}Resource Monitor (DS):{{ "\033[0m" }}   {{ "\033[0;33m" }}{{ include "tracebloc.resourceMonitorName" . }}{{ "\033[0m" }}
@@ -21,10 +21,10 @@
   {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}dynamic PVC ({{ include "tracebloc.storageClassName" . }}){{ "\033[0m" }}
 {{- end }}
 {{- if .Values.openshift.scc.enabled }}
-  {{ "\033[1;34m" }}OpenShift SCC:{{ "\033[0m" }}    {{ "\033[0;33m" }}tracebloc-resource-monitor-{{ .Release.Name }}{{ "\033[0m" }}
+  {{ "\033[1;34m" }}OpenShift SCC:{{ "\033[0m" }}    {{ "\033[0;33m" }}tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}{{ "\033[0m" }}
 {{- end }}
 {{- if .Values.autoUpgrade.enabled }}
-  {{ "\033[1;34m" }}Auto-upgrade:{{ "\033[0m" }}     {{ "\033[1;32m" }}ON{{ "\033[0m" }} {{ "\033[0;90m" }}(CronJob {{ .Release.Name }}-auto-upgrade, schedule "{{ .Values.autoUpgrade.schedule }}", repo {{ .Values.autoUpgrade.repoUrl }}){{ "\033[0m" }}
+  {{ "\033[1;34m" }}Auto-upgrade:{{ "\033[0m" }}     {{ "\033[1;32m" }}ON{{ "\033[0m" }} {{ "\033[0;90m" }}(CronJob {{ include "tracebloc.autoUpgradeName" . }}, schedule "{{ .Values.autoUpgrade.schedule }}", repo {{ .Values.autoUpgrade.repoUrl }}){{ "\033[0m" }}
 {{- else }}
   {{ "\033[1;34m" }}Auto-upgrade:{{ "\033[0m" }}     {{ "\033[1;33m" }}OFF{{ "\033[0m" }} {{ "\033[0;90m" }}(release pinned to chart {{ .Chart.Version }}; set autoUpgrade.enabled=true to receive future fixes automatically){{ "\033[0m" }}
 {{- end }}

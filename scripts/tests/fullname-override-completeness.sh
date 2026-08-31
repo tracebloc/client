@@ -22,6 +22,17 @@
 #              name. Without this half, (2) is trivially satisfied by renaming
 #              everything — including the env `helm rollback` reads, which is
 #              backend#2620 re-introduced by the fix for backend#2621.
+#   4. NOTES    The install message names no stale release. Its own render, because
+#              `helm template` does not emit NOTES.txt at all.
+#
+# (2) AND (3) SHARE ONE CLASSIFIER, and that is what closes the gap the first
+# version had: (2) read doc-root `metadata.name` only, so every name-REFERENCE
+# site — the `DEPLOYMENT_NAME` env `kubectl set image` targets, the Collector's
+# filelog glob — could be un-routed with the guard staying green on all four
+# profiles. It now walks every string scalar and asks `classify()` which
+# exception licenses each release-name hit; (2) is "nothing unlicensed", (3) is
+# "every class non-empty and correct". Adding a class cannot weaken (2) without
+# also adding an obligation to (3).
 #
 # EVERY PLATFORM PROFILE, because the platform decides which templates render at
 # all: `bm-values.yaml` sets `hostPath.enabled`, and the hostPath PVs plus the
@@ -56,6 +67,49 @@ echo "== fullnameOverride completeness =="
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 failures=0
 
+# NOTES NEEDS ITS OWN RENDER, AND EVERY OBVIOUS ROUTE IS CLOSED. Measured on the
+# CI-pinned helm v3.15.4:
+#
+#   helm template …                                  omits NOTES entirely
+#   helm template … --show-only templates/NOTES.txt  "could not find template"
+#                                                    (NOTES is not in the
+#                                                    manifest set)
+#   helm install … --dry-run                         "Kubernetes cluster
+#                                                    unreachable"
+#   helm install … --dry-run=client                  ALSO needs a cluster on
+#                                                    3.15.4, and with a reachable
+#                                                    one it fails ownership
+#                                                    validation against real
+#                                                    objects -- so the guard's
+#                                                    verdict would depend on
+#                                                    whose kubeconfig ran it
+#
+# So: render a COPY of the chart in which NOTES.txt is an ordinary template. That
+# keeps the real template engine and the real values, needs no cluster, and gives
+# the same answer on a laptop and on CI. `--debug` is required because NOTES
+# carries ANSI escapes and helm refuses to emit output it cannot parse as YAML
+# ("control characters are not allowed"); `--debug` renders it anyway.
+# KUBECONFIG=/dev/null is belt-and-braces: it makes the hermeticity a property of
+# the command rather than of the machine.
+probe="$tmp/notes-probe"
+mkdir -p "$probe"
+cp -R client "$probe/chart"
+mv "$probe/chart/templates/NOTES.txt" "$probe/chart/templates/zz-notes-probe.txt"
+
+# EXIT CODE 1 IS EXPECTED HERE, and swallowing it is deliberate rather than lazy.
+# `--debug` prints the render AND still exits non-zero, because helm considers
+# unparseable output an error even when asked to emit it anyway. Under
+# `set -euo pipefail` that killed the whole guard silently after the first
+# profile. So the exit code is discarded and EMPTINESS is the failure signal
+# instead — checked by the caller, which is the honest test of "did we get a
+# render": a non-zero exit here means nothing, an empty file means we checked
+# nothing.
+render_notes() {
+  KUBECONFIG=/dev/null helm template "$RELEASE" "$probe/chart" --namespace "$NS" \
+    --set clientId=x --set clientPassword=p -f "$VALUES" "$@" \
+    --show-only templates/zz-notes-probe.txt --debug 2>/dev/null || true
+}
+
 for VALUES in "${profiles[@]}"; do
   prof=$(basename "$VALUES" -values.yaml)
   echo "-- profile: $prof"
@@ -68,6 +122,16 @@ for VALUES in "${profiles[@]}"; do
   render                                    > "$tmp/b.yaml"
   render --set fullnameOverride="$RELEASE"  > "$tmp/explicit.yaml"
   render --set fullnameOverride="$OVERRIDE" > "$tmp/override.yaml"
+
+  notes()  { render_notes "$@"; }
+  notes                                    > "$tmp/notes-default.txt"
+  notes --set fullnameOverride="$OVERRIDE" > "$tmp/notes-override.txt"
+  for f in notes-default notes-override; do
+    if ! [ -s "$tmp/$f.txt" ]; then
+      echo "   [ERROR] rendering NOTES produced nothing ($f). Cannot tell is not OK."
+      failures=$((failures + 1))
+    fi
+  done
 
   # --- 1. NO-OP -------------------------------------------------------------
   # NON-DETERMINISM IS MEASURED, NOT LISTED. secrets.yaml mints credentials with
@@ -98,13 +162,41 @@ for VALUES in "${profiles[@]}"; do
   fi
 
   # --- 2 and 3 --------------------------------------------------------------
-  if RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
-     python3 scripts/tests/fullname_override_assertions.py "$tmp/override.yaml" "$tmp/a.yaml"; then
-    :
-  else
-    failures=$((failures + 1))
+  # Exit 2 is "could not check" (PyYAML absent), NOT "the chart is incomplete" —
+  # reported separately so a missing dependency never reads as a chart defect.
+  set +e
+  RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
+    python3 scripts/tests/fullname_override_assertions.py \
+      "$tmp/override.yaml" "$tmp/a.yaml" \
+      "$tmp/notes-override.txt" "$tmp/notes-default.txt"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ]; then
+    echo "[ERROR] the guard could not run (see above). This is NOT a verdict on the chart."
+    exit 2
   fi
+  [ "$rc" -eq 0 ] || failures=$((failures + 1))
 done
+
+# --- 5. THE GUARD REFUSES TO RUN HALF OF ITSELF -----------------------------
+# A self-check, because assertion 4's "no rendered NOTES was passed" branch is
+# unreachable from the loop above (which always passes both files) — and an
+# unreachable refusal is one nobody notices has stopped refusing. Measured:
+# deleting that branch left the whole guard green.
+#
+# So invoke the assertions directly with the NOTES arguments MISSING and require
+# a non-zero exit. If this ever passes, a future caller could quietly drop the
+# NOTES render and the guard would report three assertions as four.
+if RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
+   python3 scripts/tests/fullname_override_assertions.py \
+     "$tmp/override.yaml" "$tmp/a.yaml" >/dev/null 2>&1; then
+  echo "[ERROR] the assertions PASSED with no rendered NOTES supplied, so a caller"
+  echo "        that drops the NOTES render would get a green guard that checked"
+  echo "        three things while documenting four."
+  failures=$((failures + 1))
+else
+  echo "-- self-check: the assertions refuse to run without the NOTES render [OK]"
+fi
 
 if [ "$failures" -ne 0 ]; then
   echo "[ERROR] fullnameOverride is incomplete in $failures profile check(s)"
