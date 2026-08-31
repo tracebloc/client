@@ -35,16 +35,23 @@ drift() {
 # deleting the live matcher left it green, which is the unreachable-fixture
 # shape this suite exists to refuse. Both now call this.
 #
-# Reads the candidate text on STDIN, prints the number of `|`-separated entries,
-# and fails (non-zero, no output) when no assignment line is present — so
-# "cannot find it" is never indistinguishable from "found a list of one".
-drift_guards_entries() {
+# Reads the candidate text on STDIN, prints the `|`-joined VALUE with the
+# assignment prefix stripped, and fails (non-zero, no output) when no assignment
+# line is present — so "cannot find it" is never indistinguishable from "found a
+# list of one".
+#
+# THE VALUE, NOT THE COUNT, and that is what makes the STRIP testable. `awk -F'|'
+# NF` gives the same answer whether or not the prefix was removed, because a
+# leftover prefix just rides along inside field 1 — so a narrowed `sed` left all
+# nine cases green. Measured on the count-returning version of this very
+# function. Callers count; the shape case additionally asserts the value
+# BYTE-EXACT, which is the only thing a wrong strip changes.
+drift_guards_value() {
   local line
   line="$(grep -m1 -E '^(export )?DRIFT_GUARDS[[:space:]]*:?=')" || return 1
   [ -n "$line" ] || return 1
   printf '%s' "$line" \
-    | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//' \
-    | awk -F'|' '{print NF}'
+    | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//'
 }
 
 @test "an EMPTY list is a failure, not a clean sweep" {
@@ -121,9 +128,12 @@ drift_guards_entries() {
   # about not going red on a Make upgrade, not about a hole.
   run make -C "$REPO" -pn
   [ "$status" -eq 0 ] || return 1
-  local count
-  count="$(printf '%s\n' "$output" | drift_guards_entries)" || return 1
+  local value count
+  value="$(printf '%s\n' "$output" | drift_guards_value)" || return 1
+  count="$(printf '%s' "$value" | awk -F'|' '{print NF}')"
   [ "$count" -ge 20 ] || return 1
+  # The strip worked: the value starts with a guard, not a leftover assignment.
+  case "$value" in DRIFT_GUARDS*|export*) return 1 ;; esac
 }
 
 @test "the floor's matcher accepts BOTH shapes Make can print" {
@@ -133,12 +143,27 @@ drift_guards_entries() {
   local real
   real="$(printf '%s\n' "a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u")"
   for prefix in "DRIFT_GUARDS := " "export DRIFT_GUARDS := " "DRIFT_GUARDS = " "export DRIFT_GUARDS = "; do
-    local count
-    count="$(printf '%s\n' "${prefix}${real}" | drift_guards_entries)" || return 1
-    [ "$count" -eq 21 ] || return 1
+    local value
+    value="$(printf '%s\n' "${prefix}${real}" | drift_guards_value)" || return 1
+    # BYTE-EXACT: a prefix left behind changes this and changes no count.
+    [ "$value" = "$real" ] || return 1
   done
   # And the control: a line that merely MENTIONS the name is not an assignment,
-  # so the matcher must REFUSE it rather than count it.
-  ! printf '%s\n' "#   DRIFT_GUARDS is documented above" | drift_guards_entries
-
+  # so the matcher must REFUSE it rather than strip nothing and succeed.
+  #
+  # THE FUNCTION IS CALLED BY ITS REAL NAME, checked because renaming it left
+  # this line pointing at a function that no longer existed — `! missing_command`
+  # is non-zero, `!` inverts it, and the control went on "passing" while
+  # exercising nothing. A negated assertion whose subject may not exist is a coin
+  # toss (CLAUDE.md rule 10).
+  #
+  # EXISTENCE FIRST, then the refusal. `bash -c` cannot see a bats-defined
+  # function, so routing through it made every run status 127 — the same
+  # not-found that the bare `!` was silently accepting. Asserting the function is
+  # there is what makes the next line mean "it refused" rather than "it is gone".
+  [ "$(type -t drift_guards_value)" = "function" ] || return 1
+  local out rc
+  out="$(printf '%s\n' "#   DRIFT_GUARDS is documented above" | drift_guards_value)" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  [ -z "$out" ] || return 1
 }
