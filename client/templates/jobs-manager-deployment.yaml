@@ -48,6 +48,19 @@ spec:
         # It never reaches those spawned writers, so it's all risk and no gain.
         seccompProfile:
           type: RuntimeDefault
+      # backend#2913: gate the api container on MySQL accepting connections. Its
+      # jobs_manager.py makes an INITIAL, un-retried connect at startup; a MySQL
+      # that is not listening yet (errno 111, connection refused) makes that
+      # connect raise and the process exit, so the kubelet crashloops the pod and
+      # an e2e leg fails before it reaches training — and because the pod recovers
+      # minutes later, the only evidence is the PREVIOUS container's log. The chart
+      # already sequences its other MySQL clients (requests-proxy retries its
+      # bootstrap in-image); the api container had no such gate. This is a
+      # chart-level wait because the retry does not live in the jobs-manager image,
+      # and putting it here also protects every non-e2e install. wait-for-mysql is
+      # appended AFTER init-writable-data below, so the hostPath-only perm fix keeps
+      # index 0 and only ever runs against the local dirs.
+      initContainers:
       {{- if .Values.hostPath.enabled }}
       # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
       # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
@@ -106,7 +119,6 @@ spec:
       # divergence: the chart does NOT send chown/chmod stderr to /dev/null, so the real errno
       # (Operation not permitted vs Read-only file system) lands in `kubectl logs` beside the
       # verdict; the installer suppresses it because its output is a user-facing progress line.
-      initContainers:
       - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
@@ -152,6 +164,56 @@ spec:
         - name: logs-volume
           mountPath: /data/logs
       {{- end }}
+      # backend#2913: always-on (both hostPath and CSI installs) — the MySQL
+      # dependency exists on every install, unlike the perm fix above. Bounded
+      # retry: it loops until mysql-client:3306 accepts a TCP connection, then
+      # exits 0; past the cap it exits non-zero so a genuinely-down MySQL surfaces
+      # as a LOUD init failure rather than an infinite Pending or a silent
+      # crashloop. The cap (80 attempts 3s apart: ~240s of sleeping when the port
+      # is refused, up to ~480s if a connect hangs) sits above MySQL's own
+      # worst-case startup — its startupProbe tolerates ~130s on a fresh datadir
+      # (mysql-deployment.yaml: initialDelaySeconds 10 + failureThreshold 24 *
+      # periodSeconds 5). A TCP connect is the right signal: errno 111 is exactly
+      # "not listening yet", and
+      # mysqld binds :3306 only once it is ready to accept connections. Same
+      # busybox image as init-writable-data, but non-root — it needs only the
+      # network, no writes; busybox has no baked non-root user, so runAsUser is set
+      # explicitly to satisfy the pod's runAsNonRoot.
+      - name: wait-for-mysql
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        securityContext:
+          runAsUser: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        command:
+          - 'sh'
+          - '-c'
+          - |
+            host=mysql-client port=3306
+            # 80 attempts, 3s apart: ~240s of sleeping in the refused case (the
+            # errno-111 bug), up to ~480s if a connect hangs on -w 3. Both sit
+            # above MySQL's ~130s worst-case startup; see the YAML comment above.
+            attempts=80 interval=3
+            i=1
+            while [ "$i" -le "$attempts" ]; do
+              # busybox nc: -z scan (no I/O), -w 3 per-connect timeout. exit 0 =
+              # listening. Before mysql-client's Service/endpoint exists the name
+              # may not resolve — that is just another not-ready attempt.
+              if nc -z -w 3 "$host" "$port" 2>/dev/null; then
+                echo "wait-for-mysql: $host:$port is accepting connections (attempt $i/$attempts)"
+                exit 0
+              fi
+              echo "wait-for-mysql: $host:$port not ready yet (attempt $i/$attempts), retrying in ${interval}s"
+              sleep "$interval"
+              i=$((i+1))
+            done
+            echo "wait-for-mysql: FATAL $host:$port did not accept a connection after $attempts attempts -- refusing to start jobs-manager against a MySQL that is not listening. Check the mysql-client pod: kubectl get pods -l app=mysql-client" >&2
+            exit 1
       containers:
       - name: api
         image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}

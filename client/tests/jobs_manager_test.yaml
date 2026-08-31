@@ -830,6 +830,9 @@ tests:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: '(?m)^exit 0$'
 
+  # On CSI the privileged init-writable-data is still skipped, but wait-for-mysql
+  # (backend#2913) is always-on, so it is now the ONLY initContainer here — not
+  # the empty list this used to assert.
   - it: "CSI install (hostPath disabled) skips the privileged init and sets no fsGroup (#611)"
     set:
       hostPath:
@@ -837,8 +840,74 @@ tests:
     asserts:
       - notExists:
           path: spec.template.spec.securityContext.fsGroup
-      - notExists:
+      # exactly one initContainer, and it is the mysql gate — not the privileged perm fix
+      - lengthEqual:
           path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mysql
+      - notExists:
+          path: spec.template.spec.initContainers[1]
+
+  # backend#2913: the api container's jobs_manager.py makes an INITIAL, un-retried
+  # MySQL connect at startup; a MySQL not yet listening (errno 111) makes it raise
+  # and the pod crashloops, failing an e2e leg before training. This chart-level
+  # initContainer waits for mysql-client:3306 before the api container starts.
+  - it: "waits for MySQL before starting the api container (backend#2913)"
+    asserts:
+      # always-on: present even on a default (CSI, hostPath disabled) install
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mysql
+      # non-root, no caps, read-only rootfs — it needs only the network
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+          value: 1000
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.drop
+          value: ["ALL"]
+      # gates on the mysql Service host:port the api container also uses
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'host=mysql-client port=3306'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'nc -z -w 3 "\$host" "\$port"'
+      # BOUNDED, then fails LOUDLY: a genuinely-down MySQL must surface as an init
+      # error, not an infinite Pending or a silent crashloop (issue "Do" item 1).
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'attempts=80 interval=3'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'while \[ "\$i" -le "\$attempts" \]'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '(?s)wait-for-mysql: FATAL.*exit 1'
+
+  # hostPath install: the perm fix keeps index 0 (its tests pin [0]), and
+  # wait-for-mysql is appended after it — so BOTH init containers run, in order.
+  - it: "hostPath install runs both init-writable-data and wait-for-mysql, in order (backend#2913)"
+    set:
+      hostPath:
+        enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 2
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: init-writable-data
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: wait-for-mysql
 
   # backend#1528 S1: the tb_meta / tb_ingest env is flag-gated on
   # serviceDbAccounts so a default install is byte-identical.
