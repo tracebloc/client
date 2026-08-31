@@ -51,7 +51,11 @@ env: {
   # Optional, OFF by default: let jobs-manager size the training-job envelope
   # from node allocatable capacity instead of the literal above --
   # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS).
+  # floor(allocatable*0.75)). MEMORY is requests == limits; CPU is a
+  # request-only share weight with NO limit since backend#2418, so the job pod
+  # is BURSTABLE. It is not Guaranteed QoS -- this line said it was until
+  # backend#2872, and `test_pod_envelope_sizing.py` asserts the opposite
+  # ("cpu" not in resource_limits).
   #
   # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
   # an explicit envelope always wins, and this key is then inert (jobs-manager
@@ -961,8 +965,16 @@ images:
 
 # -- Container resource requests and limits.
 # Tuned in v1.1.0 after the prod investigation showed mysql being killed
-# every ~12 minutes when jobs-manager (under-resourced, BestEffort QoS in
-# older releases) ate node memory and triggered the kernel OOM killer.
+# every ~12 minutes when jobs-manager, under-resourced, ate node memory and
+# triggered the kernel OOM killer.
+#
+# NOT "BestEffort QoS in older releases", as this comment claimed until
+# backend#2872. Before #66 introduced this block the template hardcoded
+# requests cpu 100m / memory 256Mi and limits cpu 500m / memory 512Mi
+# (`git show 2d9d013^:client/templates/jobs-manager-deployment.yaml`) —
+# requests AND limits set, so Burstable from day one. BestEffort requires
+# neither, and jobs-manager has never had neither. The pod was under-resourced,
+# which is the real cause; the QoS class was never the difference.
 #
 # mysql: requests.memory == limits.memory pins the cgroup memory budget so
 # mysqld is never the largest victim during node-level OOM. CPU limit is
@@ -977,8 +989,20 @@ images:
 # 512Mi pods-monitor) to lower each container's oom_score_adj — on a
 # single-node cluster-recovery mass restart they were otherwise the kernel
 # OOM-killer's preferred victims and were exit-137 killed, taking ~9m to
-# recover. The pods stay Burstable (cpu request != limit); pinning memory
-# just makes them less-preferred OOM victims. requests.cpu was also raised so
+# recover. The pods stay Burstable; pinning memory just makes them
+# less-preferred OOM victims.
+#
+# Burstable for TWO reasons, not one — cpu request != limit is the obvious one,
+# and the one every earlier version of this comment stopped at. The other:
+# ComputePodQOS requires requests == limits in EVERY container including INIT
+# containers, and `jobs-manager` renders an unresourced `init-writable-data`
+# whenever hostPath.enabled=true (every installer edge), while `mysql` renders
+# an unresourced `mysql-format-guard` UNCONDITIONALLY plus `init-mysql-data` on
+# hostPath edges. So equalising cpu below buys Guaranteed only for jobs-manager
+# on a CSI cluster, and never for mysql anywhere (backend#2872). Pod-level
+# resources (KEP-2837, beta 1.36) are the only route that clears both.
+#
+# requests.cpu was also raised so
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:

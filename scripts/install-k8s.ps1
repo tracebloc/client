@@ -4507,7 +4507,10 @@ $TRACEBLOC_HELM_REPO_NAME = "tracebloc"
 $TRACEBLOC_CHART_NAME = "client"
 
 # ── Training-size default (backend#1236, option A; mirrors install-client-helm.sh) ──
-# One knob, requests == limits (Guaranteed QoS). The old static "cpu=2,memory=8Gi"
+# One knob. MEMORY is requests == limits; CPU is a request-only share weight with
+# no limit, so the pod is BURSTABLE, not Guaranteed QoS -- see the L0.2 rationale
+# at Get-TrainingLimits, which this header used to contradict outright
+# (backend#2872). The old static "cpu=2,memory=8Gi"
 # was wrong at both ends: dead on arrival on nodes under 8 GiB (the WSL2 field
 # case, and a default Docker Desktop VM — nothing could ever schedule,
 # backend#2254) and ~12% of a 64 GiB box. Precedence:
