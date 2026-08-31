@@ -528,6 +528,48 @@ def assert_lookup_keys():
     ]
 
 
+def identity_env_sites(docs, rel, ns, name_token):
+    """`{(kind, normalised-name, ENV_NAME)}` for every helm-identity env value.
+
+    THE CLASS BEING NON-EMPTY IS NOT THE PROPERTY (@saadqbal / Bugbot, Medium on
+    client#911). STAYED asked only that the `RELEASE_NAME`/`RELEASE`/
+    `RELEASE_NAMESPACE` class still hold values equal to the release identity —
+    and a value routed through `fullnameOverride` no longer CARRIES the release
+    name, so the token scan never classifies it and it simply LEAVES the set.
+    `RELEASE_NAME` is set on both the auto-upgrade and image-refresh CronJobs and
+    `RELEASE` on the storage-assertions Job, so routing any one of them left the
+    class populated by its siblings and the guard green — while auto-upgrade
+    would `helm rollback` a name that is no longer the release (backend#2620),
+    which is the exact failure this guard exists to prevent.
+
+    So the domain is DERIVED from the render that cannot be wrong — the one with
+    the override UNSET — and every site it names must still be there with the
+    override set. Disappearing is the finding; the old check could not see it,
+    because it only ever looked at what remained.
+
+    The workload NAME moves under the override, so it cannot key the site as-is:
+    the release/override token is normalised out, leaving `<NAME>-jobs-manager`
+    on both sides.
+    """
+    out = set()
+    token = re.compile(
+        rf"(^|[^A-Za-z0-9]){re.escape(name_token)}($|[^A-Za-z0-9])"
+    )
+    for d in docs:
+        kind = d.get("kind")
+        raw = (d.get("metadata") or {}).get("name") or ""
+        norm = token.sub(r"\1<NAME>\2", raw)
+        envs = env_value_paths(d)
+        for path, val in walk(d):
+            if not isinstance(val, str) or path not in envs:
+                continue
+            # RELEASE_ENV is the declaration; this reads it rather than repeating
+            # the three names, so adding a fourth is covered without an edit here.
+            if envs[path] in RELEASE_ENV and val in (rel, ns):
+                out.add((kind, norm, envs[path]))
+    return out
+
+
 def strip_ansi(text):
     return re.sub(r"\033\[[0-9;]*m", "", text)
 
@@ -693,6 +735,36 @@ def main() -> int:
                 print(f"             {where}  {name or path} = {val!r}")
         else:
             print(f"   [OK] {len(found)} {cls} value(s) still carry the release identity")
+
+    # --- EVERY IDENTITY ENV SITE SURVIVED, not just the class ----------------
+    # See identity_env_sites: a routed site vanishes from the class instead of
+    # failing it, so the class-level check above is blind to exactly the
+    # regression backend#2620 describes.
+    want_sites = identity_env_sites(default_docs, rel, ns, rel)
+    have_sites = identity_env_sites(docs, rel, ns, ovr)
+    if not want_sites:
+        fail = True
+        print(
+            "   [ERROR] the DEFAULT render names zero helm-identity env sites, so "
+            "there is no domain to compare against and this assertion proves "
+            "nothing. RELEASE_ENV or the env walk has stopped matching."
+        )
+    else:
+        missing = sorted(want_sites - have_sites)
+        if missing:
+            fail = True
+            print(
+                f"   [ERROR] {len(missing)} helm-identity env site(s) present with the "
+                f"override UNSET no longer carry the release identity under "
+                f"fullnameOverride={ovr!r} — routed away, not merely changed:"
+            )
+            for kind, name, env in missing:
+                print(f"             {kind}/{name}  {env}")
+        else:
+            print(
+                f"   [OK] all {len(want_sites)} helm-identity env site(s) still carry "
+                f"the release identity, site by site"
+            )
 
     # --- NOTES --------------------------------------------------------------
     # A SEPARATE RENDER, because `helm template` does not emit NOTES.txt at all

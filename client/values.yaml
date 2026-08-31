@@ -1814,16 +1814,26 @@ bootstrapDbPassword: ""
 # Any tooling/runbook that dials root with the old literal must move to the
 # Secret first, or it breaks at rotation.
 #
-# GUARDED (backend#2879). Because that DDL is manual and mandatory, the chart
-# REFUSES to render a rotation that would silently break auth: when the gate is
-# on, the chart would MINT a new random root password (no mysqlRootPassword pin,
-# no MYSQL_ROOT_PASSWORD already in the Secret), AND the MySQL datadir PVC
-# already exists in the cluster, the render FAILS at template time naming
-# docs/migration-tools/rotate-mysql-root.md — rather than at runtime with a 1045.
-# A FRESH install is unaffected (no datadir yet → born rotated), and so is every
-# `helm template`/`--dry-run`/GitOps render (the datadir lookup is empty without
-# a live cluster). Acknowledge the manual migration with
-# mysqlRootRotationAcknowledged below to proceed on an existing fleet.
+# GUARDED (backend#2879, backend#2892) — fail-CLOSED. Because that DDL is manual
+# and mandatory, the chart REFUSES to render a rotation that would silently break
+# auth rather than fail at runtime with a 1045. On the MINT path (gate on, no
+# mysqlRootPassword pin, no MYSQL_ROOT_PASSWORD already in the Secret) the render
+# FAILS at template time, naming docs/migration-tools/rotate-mysql-root.md, in
+# THREE cases:
+#   1. the MySQL datadir PVC already exists in the live cluster (`lookup`);
+#   2. mysqlDatadirExists=true is declared (below) — arm 1, asserted for a render
+#      that cannot see the PVC; or
+#   3. the render CANNOT SEE A CLUSTER AT ALL: `helm template`, `--dry-run`,
+#      ArgoCD's default (non-server-side) render, Flux post-render (backend#2892).
+#      Offline the chart can neither check for an existing datadir NOR preserve the
+#      value it mints (tier-2 preservation is a live `lookup` too), so an offline
+#      mint re-randomises every render and never converges — refuse it.
+# The ONLY render that mints is a FRESH install on a LIVE cluster (datadir absent,
+# cluster visible, nothing declared → born rotated, and the next live render's
+# tier 2 preserves it). Acknowledge the manual migration with
+# mysqlRootRotationAcknowledged below to clear all three arms and proceed on an
+# existing fleet; a cluster-less fleet that wants the rotation pins mysqlRootPassword
+# (below) or renders server-side.
 #
 # UNSET by default: the effective value comes from rotateMysqlRootByEnv below,
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
@@ -1834,6 +1844,16 @@ rotateMysqlRootByEnv:
   dev: true
   stg: false
   prod: false
+#
+# CLUSTER-LESS DEV NOTE (backend#2892). Because `dev` defaults rotation ON, a dev
+# fleet rendered WITHOUT a live cluster — ArgoCD's default render, Flux
+# post-render, or a bare `helm template` for validation — hits the fail-closed
+# mint guard above (arm 3) and REFUSES. That is correct: such a render cannot
+# preserve the minted value, so it would re-randomise every sync. To render a dev
+# fleet cluster-less, either PIN mysqlRootPassword below (tier 1 — stable, and it
+# bypasses the mint guard) or render SERVER-SIDE (argocd-repo-server against the
+# live cluster). A live install/upgrade — the in-cluster auto-upgrade CronJob
+# included — sees the cluster and is unaffected.
 
 # Optional operator pin for the root password (3-tier resolution, mirrors
 # credmgrPassword). Leave "" to generate-and-persist on first install. Set for
@@ -1847,18 +1867,48 @@ rotateMysqlRootByEnv:
 mysqlRootPassword: ""
 
 # Acknowledge the manual root-rotation migration on an EXISTING fleet
-# (backend#2879). Normally unset. When rotateMysqlRoot is turned on for a fleet
-# whose MySQL datadir already exists, the chart would mint a new root password
-# the live database does not have, breaking auth — so the render FAILS at
-# template time (naming docs/migration-tools/rotate-mysql-root.md) unless this is
-# true. Set it ONLY as part of that runbook: it asserts you have read the runbook
-# and will run the one-time `ALTER USER 'root'` DDL to align root's live password
-# to the generated Secret value in the same maintenance window. It is a one-time
-# acknowledgement — once the fleet is rotated the Secret carries
-# MYSQL_ROOT_PASSWORD and this flag is a no-op (the value is preserved, never
-# re-minted). It does NOT run any DDL and does NOT weaken a FRESH install (which
-# never needs it). Leaving stale --set flags on is harmless here.
+# (backend#2879). Normally unset. When rotateMysqlRoot is on and the chart would
+# MINT (see the guard above), the render FAILS at template time (naming
+# docs/migration-tools/rotate-mysql-root.md) unless this is true. Set it ONLY as
+# part of that runbook: it asserts you have read it and will run the one-time
+# `ALTER USER 'root'` DDL to align root's live password to the Secret value in the
+# same maintenance window. It clears ALL of the guard's refuse arms (existing
+# datadir, declared, and the offline fail-closed one), and it runs no DDL itself.
+#
+# SELF-EXPIRING ONLY ON A LIVE OR SERVER-SIDE RENDER (backend#2892): once rotated,
+# tier 2 (a live `lookup` of the Secret) preserves MYSQL_ROOT_PASSWORD and the mint
+# branch is never reached again, so the flag becomes a no-op. On a CLUSTER-LESS
+# render tier 2 is empty EVERY render, so it does NOT self-expire there — an
+# operator who rotates a cluster-less fleet on the ack alone would have to leave it
+# set permanently, which permanently DISARMS the guard (and the ack replays through
+# `--reuse-values` and `--reset-then-reuse-values`, which the auto-upgrade CronJob
+# and runbook use). Do not rotate a cluster-less fleet with the ack alone: pin
+# mysqlRootPassword or render server-side (see the cluster-less note above). A
+# FRESH install on a live cluster never needs this.
 mysqlRootRotationAcknowledged:
+
+# Declare that this fleet's MySQL datadir ALREADY EXISTS (backend#2892; chart
+# `>= 1.9.90`). Normally unset — the fail-closed guard above already covers most
+# fleets: a cluster-less render REFUSES the mint by default (arm 3) and a live
+# render DETECTS the datadir by its PVC (arm 1). This is the explicit arm-2
+# assertion, for the two gaps those leave:
+#   - a LIVE render whose datadir PVC the `lookup` cannot see (a renamed PVC, or
+#     one not yet bound) though you know the datadir exists; and
+#   - message clarity: with it set, the refusal names the existing-datadir
+#     migration specifically, instead of the generic cannot-see-a-cluster message.
+# Pin it in the fleet's checked-in overlay: a DURABLE per-fleet fact (an existing
+# install stays existing). A FRESH install leaves it unset. No drift check against
+# live cluster state is warranted: a stale `true` only ever makes a render REFUSE
+# (fail-closed-safe — clear it, or acknowledge), it can never cause a wrong mint.
+#
+# PROTECTION, not a rotation path — like the acknowledgement, it does NOT make a
+# cluster-less rotation converge (the minted value is not preserved offline: tier-2
+# preservation is a live `lookup` too, the same limit documented for
+# clientId/clientPassword). To actually rotate a cluster-less fleet, pin
+# mysqlRootPassword (tier 1 — deterministic, and it bypasses the mint) or render
+# server-side. Charts `< 1.9.90` ignore this key (open schema). See
+# docs/migration-tools/rotate-mysql-root.md.
+mysqlDatadirExists:
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

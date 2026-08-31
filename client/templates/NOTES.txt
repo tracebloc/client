@@ -34,9 +34,15 @@
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientLogsPvc" . }}{{ "\033[0m" }}  {{ "\033[0;90m" }}({{ include "tracebloc.clientLogsStorage" . }}){{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.mysqlPvc" . }}{{ "\033[0m" }}       {{ "\033[0;90m" }}({{ include "tracebloc.mysqlStorage" . }}){{ "\033[0m" }}
 
+{{- /* GATED ON hostPath ALONE, and the WORDING carries the condition rather
+   than the gate (Bugbot, Low). Gating on `fullnameOverride` being SET would
+   go quiet on the A->unset rename, which is the same hazard -- so the block
+   states a STANDING PROPERTY of every hostPath release ("these PVs are named
+   through the override and are not kept") instead of telling a first-time
+   installer they just renamed something. */ -}}
 {{- if (default dict .Values.hostPath).enabled }}
 
-{{ "\033[1;33m" }}hostPath + fullnameOverride:{{ "\033[0m" }} {{ "\033[0;90m" }}the PersistentVolume OBJECTS below are named through the override and carry NO helm.sh/resource-policy: keep, unlike the PVCs. If you just changed fullnameOverride, confirm the PVCs are still Bound before trusting this release -- a rename recreates the PVs under the new name and leaves the retained PVCs Bound to the deleted ones.{{ "\033[0m" }}
+{{ "\033[1;33m" }}hostPath PersistentVolumes:{{ "\033[0m" }} {{ "\033[0;90m" }}these PV OBJECTS are named through fullnameOverride and carry NO helm.sh/resource-policy: keep, unlike the PVCs. So CHANGING OR CLEARING fullnameOverride on a live release recreates them under the new name and leaves the retained PVCs Bound to the objects that went away -- after any such change, confirm the PVCs are still Bound.{{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.mysqlPvName" . }}{{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientDataPvName" . }}{{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientLogsPvName" . }}{{ "\033[0m" }}

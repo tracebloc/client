@@ -12,9 +12,10 @@ data:
   auto-upgrade.sh: |
     #!/bin/sh
     # Self-upgrade loop. See client/values.yaml `autoUpgrade` for the
-    # design + trust boundary discussion. Parsing is awk-only on purpose:
-    # the upstream alpine/helm image ships without jq and we don't want to
-    # apk-add at runtime under a runAsNonRoot pod.
+    # design + trust boundary discussion. JSON is parsed with awk (plus a `tr`
+    # newline-strip, backend#2896) on purpose: the upstream alpine/helm image
+    # ships without jq and we don't want to apk-add at runtime under a
+    # runAsNonRoot pod — both `awk` and `tr` are busybox built-ins.
     set -eu
 
     # Helm needs writable cache/config/data dirs. The Pod runs with
@@ -38,15 +39,28 @@ data:
     # #2877: seconds the release has been in its current (pending) revision, i.e.
     # now - info.last_deployed. Echoes the age, or nothing if it can't be read.
     # Takes the `helm status -o json` body as $1 so the caller reads status once.
-    # awk-only, per this script's header (the image has no jq): it lifts the
+    # awk-based, per this script's header (the image has no jq): it lifts the
     # RFC3339 last_deployed out of the JSON and computes the epoch itself, since
     # busybox `date` cannot parse an RFC3339 zone offset. The days-since-epoch
     # math is Howard Hinnant's civil→days algorithm; the zone offset is applied by
     # hand. now comes from `date -u +%s`, which every date agrees on.
+    #
+    # `tr -d '\n'` FIRST (backend#2896): make the parse independent of helm's JSON
+    # FORMATTING. The awk body below runs once per input line and `exit`s on the
+    # first line that lacks `last_deployed`, so it only works on a body where the
+    # key sits on the same line the scan starts — fine for the single-line output
+    # helm actually emits today (v3.16.4 `EncodeJSON` is `json.NewEncoder(out);
+    # enc.Encode(obj)` with no `SetIndent`, i.e. compact JSON, one line), but it
+    # would return EMPTY on any multi-line body: a bare `{` first line, a future
+    # helm that indents, or a differently-built image. Collapsing to one line
+    # first removes that dependence entirely. NOTE: the backend#2896 Bugbot claim
+    # that this image pretty-prints did NOT reproduce — the gate was never inert
+    # on real fleets; this is defensive hardening, not a live fix. Fail-closed is
+    # unchanged: an unreadable/empty body still yields no age (→ skip).
     pending_age_seconds() {
       _now="$(date -u +%s 2>/dev/null || true)"
       [ -n "$_now" ] || return 0
-      printf '%s' "$1" | awk -v now="$_now" '{
+      printf '%s' "$1" | tr -d '\n' | awk -v now="$_now" '{
         if (match($0, /"last_deployed":[ ]*"[^"]*"/) == 0) exit
         ts = substr($0, RSTART, RLENGTH)
         sub(/^"last_deployed":[ ]*"/, "", ts); sub(/"$/, "", ts)
@@ -107,11 +121,17 @@ data:
         # falls through as "too recent", which is the safe side: never clobber.
         case "$AGE" in ''|*[!0-9-]*) AGE="" ;; esac
         if [ -n "$AGE" ] && [ "$AGE" -ge "$WEDGE_MIN_AGE_SECONDS" ]; then
-          # awk-only; `[0-9][0-9]*` (>=1 digit) so this matches only the
+          # awk-only; `[0-9][0-9]*` (>=1 digit, no quote) so this matches only the
           # bare-number top-level release "version":N, never a quoted
           # chart-metadata "version":"1.2.3" that may also appear in the JSON.
-          PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[0-9][0-9]*/) {
-            v = substr($0, RSTART, RLENGTH); sub(/"version":/, "", v); print v; exit }')"
+          # `[ ]*` after the colon (backend#2896) tolerates an optional space so
+          # the match is independent of formatting: helm's real output is compact
+          # (`"version":N`, no space) and `[ ]*` matches zero spaces, so this is a
+          # strict superset of the previous regex — no behaviour change on the
+          # real image, but it also survives a spaced `"version": N` from a
+          # future indented body. Same defensive hardening as the `tr` above.
+          PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[ ]*[0-9][0-9]*/) {
+            v = substr($0, RSTART, RLENGTH); sub(/"version":[ ]*/, "", v); print v; exit }')"
           # Surface it (#2877): the rollback discards the pending revision's
           # values. Log it loud and actionable — `restartPolicy: Never`
           # (backend#2620) keeps this Pod's log readable so an operator can see
