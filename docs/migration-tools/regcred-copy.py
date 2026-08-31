@@ -20,7 +20,23 @@ The credential is never read, printed, or retyped: `.data` passes through byte
 for byte. That is the point -- re-entering the PAT would put it in shell history
 and argv, which is the exposure this migration removes.
 """
-import sys, yaml
+import sys
+
+# NAME THE MISSING MODULE (Bugbot on client#916). This ran `import sys, yaml`
+# bare, so on a host with python3 but no PyYAML it died with a ModuleNotFoundError
+# traceback -- while the verdicts suite had a section titled "both tools -- PyYAML
+# is named, not a traceback" that only ever drove the preflight. The claim was in a
+# heading; the guard was in one tool. An operator following the runbook copies a
+# credential with this, and a traceback mid-migration reads like the Secret is
+# broken rather than like one `pip install` away.
+try:
+    import yaml
+except ImportError:
+    sys.exit(
+        "REFUSING: this needs PyYAML and it is not importable. "
+        "Install it (python3 -m pip install pyyaml) and re-run. "
+        "Nothing was written, and no credential was read."
+    )
 
 STRIP_META = ("uid", "resourceVersion", "creationTimestamp", "ownerReferences",
               "generation", "managedFields", "selfLink", "namespace")

@@ -238,6 +238,32 @@ else
   bad "preflight names PyYAML and refuses" "exit $rc" "$(printf '%s' "$out" | head -2)"
 fi
 
+# AND THE COPIER, which is what "both tools" claims (Bugbot on client#916). The
+# section said both and drove one: the stub above fails only the preflight's
+# `-c 'import yaml'` probe and defers everything else to the real interpreter, so
+# `python3 regcred-copy.py` still got a working yaml. The copier had no guard at
+# all, and removing one that did not exist could not redden anything.
+#
+# The copier imports yaml itself, so the module has to be unimportable INSIDE the
+# child rather than a probe being failed. PYTHONPATH shadows it with a module that
+# raises ImportError, which drives the copier's real `except ImportError` branch.
+mkdir -p "$TMP/yamlshadow"
+printf 'raise ImportError("No module named %s")\n' "'yaml'" > "$TMP/yamlshadow/yaml.py"
+out="$(printf 'apiVersion: v1\nkind: Secret\n' \
+       | PYTHONPATH="$TMP/yamlshadow" python3 "$COPY" tracebloc-ops-regcred 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi "pyyaml"; then
+  ok "copier names PyYAML and refuses (exit $rc)"
+else
+  bad "copier names PyYAML and refuses" "exit $rc" "$(printf '%s' "$out" | head -2)"
+fi
+# A traceback is NOT a refusal, and rc alone cannot tell them apart -- an uncaught
+# ModuleNotFoundError also exits non-zero. Assert the traceback is absent.
+if printf '%s' "$out" | grep -q "Traceback"; then
+  bad "copier refuses without a traceback" "it printed a Python traceback"
+else
+  ok "copier refuses without a traceback"
+fi
+
 echo "regcred-copy.py — the name collision is ENFORCED, not just documented:"
 src_named() { printf 'apiVersion: v1\nkind: Secret\ntype: kubernetes.io/dockerconfigjson\nmetadata:\n  name: %s\ndata:\n  .dockerconfigjson: e30=\n' "$1"; }
 out="$(src_named tracebloc-regcred | python3 "$COPY" tracebloc-regcred 2>&1)"; rc=$?
