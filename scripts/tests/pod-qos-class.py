@@ -88,7 +88,14 @@ def pod_qos(pod_spec):
     for c in containers:
         r = c.get("resources") or {}
         req, lim = r.get("requests") or {}, r.get("limits") or {}
-        if req or lim:
+        # ONLY cpu and memory count toward the class. ComputePodQOS skips
+        # anything `isSupportedQoSComputeResource` rejects, so a container whose
+        # only requests are `nvidia.com/gpu` and `ephemeral-storage` -- which is
+        # exactly what client-runtime's GPU path produces (backend#2871) -- has
+        # EMPTY qos-relevant maps and the pod is BestEffort, not Burstable. The
+        # first version of this checker counted any key and would have reported
+        # those pods as Burstable: the same defect shape it exists to catch.
+        if any(d in req or d in lim for d in DIMS):
             any_set = True
         for d in DIMS:
             rv, lv = _norm(req.get(d)), _norm(lim.get(d))

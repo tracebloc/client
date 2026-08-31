@@ -168,3 +168,27 @@ _class_of() {
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"refusing to report agreement"* ]] || return 1
 }
+
+# ONLY cpu and memory count toward the class. This is not pedantry: it is the
+# difference between "Burstable" and "BestEffort" for every GPU training pod
+# client-runtime spawns (backend#2871), whose container requests
+# `nvidia.com/gpu` and `ephemeral-storage` and NEITHER cpu nor memory. A checker
+# that counted any resource key would call those Burstable and quietly agree that
+# they are fine.
+@test "derivation: gpu + ephemeral-storage only, no cpu/memory -> BestEffort" {
+  local f="$BATS_TEST_TMPDIR/gpu-only.yaml"
+  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n      limits: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n' > "$f"
+  run python3 "$QOS" "$f"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"BestEffort"* ]] || return 1
+}
+
+# The mirror, so the rule is not simply "ignore everything unknown": a pod that
+# sets cpu/memory AND extended resources is still classified on cpu/memory.
+@test "derivation: extended resources alongside equal cpu/memory -> still Guaranteed" {
+  local f="$BATS_TEST_TMPDIR/gpu-plus.yaml"
+  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi, nvidia.com/gpu: "1"}\n      limits: {cpu: "1", memory: 1Gi, nvidia.com/gpu: "1"}\n' > "$f"
+  run python3 "$QOS" "$f"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Guaranteed"* ]] || return 1
+}
