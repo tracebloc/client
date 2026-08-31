@@ -65,16 +65,15 @@ name, so the rule holds whatever the chart calls its Secret.
    signal. A missing tunnel would tell you the fleet is already clean.
 
    ```bash
-   if vals=$(helm get values "$REL" -n "$NS" -a -o yaml 2>&1); then
+   ( set -euo pipefail
+     vals="$(helm get values "$REL" -n "$NS" -a -o yaml 2>&1)" \
+       || { echo "STOP: could not read the release -- this is NOT 'nothing to migrate'."; exit 1; }
      if printf '%s\n' "$vals" | grep -A6 '^dockerRegistry:'; then
        echo "^ this fleet HAS a registry credential in release values -- continue"
      else
        echo "no dockerRegistry block -> nothing to migrate on this fleet"
      fi
-   else
-     echo "STOP: could not read the release -- this is NOT 'nothing to migrate':"
-     printf '%s\n' "$vals"
-   fi
+   )
    kubectl -n "$NS" get secrets --field-selector type=kubernetes.io/dockerconfigjson
    ```
 
@@ -111,24 +110,38 @@ export CHART=<the chart ref you already deploy>
 #     in a predictable path, on a shared bastion -- which is the exposure this
 #     whole migration exists to remove.
 umask 077
-# THE ROLLBACK IS THE ONE READ THAT MUST NOT FAIL SILENTLY. `>` creates the file
-# whether or not helm succeeds, so an unjudged read leaves an EMPTY rollback --
-# and you would find out at the worst moment, having already migrated. Worse, an
-# empty file handed to `helm upgrade -f` sets every value to the chart default.
-if ! helm get values "$REL" -n "$NS" -o yaml > /tmp/$REL-values-before.yaml; then
-  echo "STOP: could not read the release -- no rollback was captured. Do not continue."
-elif [ ! -s /tmp/$REL-values-before.yaml ]; then
-  echo "STOP: the rollback snapshot is EMPTY. Do not continue."
-else
-  echo "rollback captured: $(wc -l < /tmp/$REL-values-before.yaml) line(s)"
-fi
-python3 - <<'PY' > /tmp/$REL-values-new.yaml
+# A SUBSHELL WITH `set -e`, SO "STOP" ACTUALLY STOPS. Printing STOP and carrying
+# on is what the previous revision did: a failed snapshot said STOP, and the
+# rewrite below then truncated the new values file and preflight ran on it
+# anyway. A subshell is what makes this paste-safe -- `exit 1` leaves the
+# subshell, never your terminal.
+( set -euo pipefail
+  # THE ROLLBACK IS THE ONE READ THAT MUST NOT FAIL SILENTLY. `>` creates the
+  # file whether or not helm succeeds, so an unjudged read leaves an EMPTY
+  # rollback -- found at the worst moment, having already migrated. Worse, an
+  # empty file handed to `helm upgrade -f` sets every value to the chart default.
+  helm get values "$REL" -n "$NS" -o yaml > "/tmp/$REL-values-before.yaml" \
+    || { echo "STOP: could not read the release -- no rollback captured."; exit 1; }
+  [ -s "/tmp/$REL-values-before.yaml" ] \
+    || { echo "STOP: the rollback snapshot is EMPTY."; exit 1; }
+  echo "rollback captured: $(wc -l < "/tmp/$REL-values-before.yaml") line(s)"
+
+  python3 - > "/tmp/$REL-values-new.yaml" <<'PY' \
+    || { echo "STOP: the values rewrite failed -- no PyYAML, or an unreadable snapshot."; exit 1; }
 import os, sys, yaml
 v = yaml.safe_load(open(f"/tmp/{os.environ['REL']}-values-before.yaml"))
+if not isinstance(v, dict):
+    sys.exit("the snapshot did not parse as a mapping -- refusing to build values from it")
 v["dockerRegistry"] = {"create": False, "existingSecret": os.environ["NEW"]}
 yaml.safe_dump(v, sys.stdout, sort_keys=False)
 PY
-./docs/migration-tools/regcred-preflight.sh "$REL" "$NS" "$CHART" /tmp/$REL-values-new.yaml
+  # `>` truncated the target before python3 ran, so a failed rewrite leaves an
+  # EMPTY file -- the exact input this runbook warns resets every value.
+  [ -s "/tmp/$REL-values-new.yaml" ] \
+    || { echo "STOP: the rewritten values file is EMPTY."; exit 1; }
+
+  ./docs/migration-tools/regcred-preflight.sh "$REL" "$NS" "$CHART" "/tmp/$REL-values-new.yaml"
+)
 ```
 
 It will list every `(namespace, secret)` pair the upgrade would reference and
@@ -200,13 +213,12 @@ that did not exist.
 #    helm call would otherwise print nothing, and "no dockerRegistry block" is
 #    indistinguishable from "the credential is gone", which is what this check
 #    is looking for.
-if dr=$(helm get values "$REL" -n "$NS" -a -o yaml 2>&1); then
+( set -euo pipefail
+  dr="$(helm get values "$REL" -n "$NS" -a -o yaml 2>&1)" \
+    || { echo "STOP: could not read the release -- this is NOT 'the credential is gone'."; exit 1; }
   printf '%s\n' "$dr" | grep -A4 '^dockerRegistry:' \
     || echo "no dockerRegistry block at all -- unexpected here, investigate"
-else
-  echo "STOP: could not read the release -- this is NOT 'the credential is gone':"
-  printf '%s\n' "$dr"
-fi
+)
 # expect exactly: create: false / existingSecret: <NEW>
 
 # 2. nothing anywhere still carries it -- READ ONCE, then judge (Bugbot on #916).
@@ -257,14 +269,27 @@ and prints `No resources found` — after which the events check below reports a
 clean pull for a restart that never happened.
 
 ```bash
-restarted=$(kubectl -n "$NS" rollout restart deploy,daemonset \
-              -l "app.kubernetes.io/instance=$REL" 2>&1) || {
-  echo "STOP: rollout restart failed -- nothing was proved:"; printf '%s\n' "$restarted"; }
-printf '%s\n' "$restarted"
-# An empty match is the silent-no-op this step exists to avoid, so say so.
-[ -n "$restarted" ] || echo "STOP: the selector matched NO workloads -- nothing restarted, nothing pulled."
+( set -euo pipefail
+  # DISCOVER FIRST, AND JUDGE THAT. `rollout restart` over a selector matching
+  # nothing prints "No resources found" and exits 0, so testing ITS output for
+  # emptiness never fires: the output is not empty, it is a sentence saying there
+  # was nothing to do. `get -o name` writes matched objects to stdout and nothing
+  # else, so an empty capture is a real empty match.
+  targets="$(kubectl -n "$NS" get deploy,daemonset \
+               -l "app.kubernetes.io/instance=$REL" -o name)"
+  [ -n "$targets" ] \
+    || { echo "STOP: the selector matched NO workloads -- nothing to restart, nothing pulled."; exit 1; }
+  printf 'restarting:\n%s\n' "$targets"
 
-kubectl -n "$NS" rollout status deploy -l "app.kubernetes.io/instance=$REL" --timeout=5m
+  # Deliberate word-splitting: one argument per discovered object.
+  # shellcheck disable=SC2086
+  kubectl -n "$NS" rollout restart $targets \
+    || { echo "STOP: rollout restart failed -- nothing was proved."; exit 1; }
+  # shellcheck disable=SC2086
+  kubectl -n "$NS" rollout status $targets --timeout=5m \
+    || { echo "STOP: the rollout did not complete -- look for ImagePullBackOff."; exit 1; }
+  echo "restarted and rolled out: the images above were pulled fresh."
+)
 ```
 
 Then read the events **once** and judge on the exit status, not on an empty
@@ -272,16 +297,15 @@ pipeline — `grep` finding nothing in the output of a *failed* `kubectl` is
 indistinguishable from `grep` finding nothing in a healthy cluster:
 
 ```bash
-if ev=$(kubectl -n "$NS" get events --field-selector reason=Failed 2>&1); then
+( set -euo pipefail
+  ev="$(kubectl -n "$NS" get events --field-selector reason=Failed 2>&1)" \
+    || { echo "STOP: could not read events -- this is NOT 'no pull failures'."; exit 1; }
   if printf '%s\n' "$ev" | grep -i -E "pull|401|429"; then
     echo "^ PULL FAILURES -- the credential did not work"
   else
     echo "no pull failures"
   fi
-else
-  echo "STOP: could not read events -- this is NOT 'no pull failures':"
-  printf '%s\n' "$ev"
-fi
+)
 ```
 
 ## Rollback

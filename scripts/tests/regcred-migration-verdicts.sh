@@ -339,7 +339,10 @@ if [ ! -r "$RUNBOOK" ]; then
   fail=$((fail + 1))
 else
   # The line that snapshots values and is later fed to `helm upgrade -f`.
-  snap="$(grep -n 'helm get values .*> */tmp/' "$RUNBOOK" | head -1)"
+  # The redirect target may be quoted (`> "/tmp/..."`). Matching only the bare
+  # form found nothing once the path was quoted, and an empty `$snap` then failed
+  # the -o yaml check below with a message about the wrong thing.
+  snap="$(grep -nE 'helm get values .*> *\"?/tmp/' "$RUNBOOK" | head -1)"
 
   # 1. `-o yaml`, because the DEFAULT format is `table` and prefixes
   #    "COMPUTED VALUES:", which parses as a top-level key of that name. Measured on
@@ -483,8 +486,22 @@ EOF
         # tests something else entirely -- and its own mutation said so by staying
         # green. The rule is that the `if` must test THIS command, so the shape has
         # to be pinned from the first token.
-        if [[ "$line" =~ ^[[:space:]]*if[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\$\(helm\ get\ values ]] \
-           || [[ "$line" =~ ^[[:space:]]*if[[:space:]]+!\ helm\ get\ values ]]; then
+        # THREE shapes judge the read. The third spans a line continuation, so the
+        # extractor above folds `\`-joined lines first -- without that, the
+        # capture line is seen alone, its `|| { ...; exit 1; }` is on the next
+        # line, and a correctly-judged read reads as unjudged.
+        #   if var=$(helm get values ...)          branch on the status
+        #   if ! helm get values ... > file        branch on the status
+        #   var="$(helm get values ...)" || { ... exit 1; }
+        # A read is JUDGED when its exit status decides what happens next. Two
+        # families cover every legitimate form, and both are needed:
+        #   `if ...`            the read is the if-condition (capture or redirect)
+        #   `... || ... exit 1` the read aborts the block on failure
+        # The second was added after the redirect form
+        #   helm get values ... > file || { echo STOP; exit 1; }
+        # was reported unjudged: it judges perfectly, it just is not an `if`.
+        if [[ "$line" =~ ^[[:space:]]*if[[:space:]] ]] \
+           || [[ "$line" =~ \|\|.*exit[[:space:]]+1 ]]; then
           :
         else
           unjudged=$((unjudged + 1)); echo "      unjudged read: $(printf '%s' "$line" | sed 's/^ *//' | cut -c1-90)" >&2
@@ -492,12 +509,103 @@ EOF
     esac
   done <<EOF
 $(awk '/^[[:space:]]*```bash$/{inblk=1;next} /^[[:space:]]*```$/{inblk=0;next} inblk' "$RUNBOOK" \
-    | grep -v '^[[:space:]]*#' | grep 'helm get values')
+    | grep -v '^[[:space:]]*#' \
+    | awk '{ while (sub(/\\$/, "")) { if ((getline nxt) > 0) $0 = $0 nxt; else break } print }' \
+    | grep 'helm get values')
 EOF
   if [ "$unjudged" -eq 0 ]; then
     pass=$((pass + 1)); echo "  [ok]   every 'helm get values' is judged on its exit status"
   else
     fail=$((fail + 1)); echo "  [bad]  $unjudged 'helm get values' read(s) are not judged on their exit status -- a failed call produces empty output, which every check here reads as good news" >&2
+  fi
+
+  # 11. "STOP" MUST ACTUALLY STOP. The previous revision printed STOP and carried
+  #     on: a failed snapshot said STOP, then the rewrite truncated the new values
+  #     file and preflight ran on it; a failed restart said STOP, then `rollout
+  #     status` and the events read ran and printed "no pull failures" for a pull
+  #     that never happened (Bugbot High + Medium on #916). A runbook is pasted, so
+  #     the fix is a subshell with `set -e` and a real `exit` -- which leaves the
+  #     subshell, never the operator's terminal.
+  #
+  #     Keyed on the shape: every `echo "STOP` must carry `exit` on the same line.
+  stopless=0
+  while IFS= read -r line; do
+    case "$line" in
+      *'echo "STOP'*)
+        case "$line" in
+          *"exit 1"*) ;;
+          *) stopless=$((stopless + 1)); echo "      STOP with no abort: $(printf '%s' "$line" | sed 's/^ *//' | cut -c1-80)" >&2 ;;
+        esac ;;
+    esac
+  done <<EOF
+$(awk '/^[[:space:]]*```bash$/{inblk=1;next} /^[[:space:]]*```$/{inblk=0;next} inblk' "$RUNBOOK")
+EOF
+  if [ "$stopless" -eq 0 ]; then
+    pass=$((pass + 1)); echo "  [ok]   every STOP aborts rather than printing and continuing"
+  else
+    fail=$((fail + 1)); echo "  [bad]  $stopless STOP message(s) do not abort -- the block runs on and a later step reports success for work that never happened" >&2
+  fi
+
+  # 12. and a block that can say STOP must run under `set -e`, or the `exit` in
+  #     the middle of a `&&`/`||` chain is the only thing stopping it.
+  unguarded=0
+  blk=""; n=0
+  while IFS= read -r line; do
+    case "$line" in
+      '```bash'|'   ```bash') n=$((n+1)); blk="" ;;
+      '```'|'   ```')
+        case "$blk" in
+          *'echo "STOP'*)
+            case "$blk" in *"set -euo pipefail"*) ;; *) unguarded=$((unguarded+1)) ;; esac ;;
+        esac
+        blk="" ;;
+      *) blk="$blk
+$line" ;;
+    esac
+  done < "$RUNBOOK"
+  if [ "$unguarded" -eq 0 ]; then
+    pass=$((pass + 1)); echo "  [ok]   every block that can STOP runs under set -euo pipefail"
+  else
+    fail=$((fail + 1)); echo "  [bad]  $unguarded block(s) can print STOP without running under set -e" >&2
+  fi
+
+  # 13. THE EMPTY-MATCH TEST MUST NOT READ `rollout restart` OUTPUT. Over a
+  #     selector that matches nothing it prints "No resources found" and exits 0 --
+  #     NOT empty, so an emptiness test on it never fires. That is what made the
+  #     previous fix fail open in the same way it was fixing.
+  if grep -qE 'restarted=\$\(kubectl.*rollout restart' "$RUNBOOK"; then
+    fail=$((fail + 1)); echo "  [bad]  the empty-match test reads 'rollout restart' output, which is non-empty ('No resources found') on a no-match" >&2
+  else
+    pass=$((pass + 1)); echo "  [ok]   the empty-match test does not read 'rollout restart' output"
+  fi
+
+  # 14. EVERY /tmp FILE THIS RUNBOOK WRITES MUST BE EMPTINESS-CHECKED before
+  #     anything consumes it, and the list is DERIVED from the redirects rather
+  #     than naming the two files (CLAUDE.md rule 1) -- a third file added later
+  #     is covered without touching this.
+  #
+  #     `>` truncates the target before the writer runs, so a failed write leaves
+  #     a ZERO-BYTE file. This runbook's own text says an empty `-f` resets every
+  #     value to the chart default. Judging the writer's exit status is not enough
+  #     on its own: by then the file is already truncated, and the emptiness test
+  #     is what stops it reaching `helm upgrade` (Bugbot Medium on #916).
+  unchecked=0
+  written="$(awk '/^[[:space:]]*```bash$/{inblk=1;next} /^[[:space:]]*```$/{inblk=0;next} inblk' "$RUNBOOK" \
+              | grep -oE '> *"?/tmp/[^" ]+' | sed -E 's/^> *"?//' | sort -u)"
+  if [ -z "$written" ]; then
+    fail=$((fail + 1)); echo "  [bad]  parsed NO /tmp redirects from the runbook -- this check would pass vacuously" >&2
+  else
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if grep -qF -- "[ -s \"$f\" ]" "$RUNBOOK" || grep -qF -- "[ -s $f ]" "$RUNBOOK"; then
+        pass=$((pass + 1)); echo "  [ok]   $f is checked for emptiness before use"
+      else
+        unchecked=$((unchecked + 1))
+        fail=$((fail + 1)); echo "  [bad]  $f is written but never checked for emptiness -- a failed write leaves a truncated file that resets every value" >&2
+      fi
+    done <<EOF
+$written
+EOF
   fi
 
   # 9. and the step must NOTICE an empty match, because `rollout restart` over a
