@@ -680,6 +680,59 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     Mock Start-Process { throw "no such file" }
     (Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t").State | Should -Be 'spawn-failed'
   }
+  It "counts a caller-declared reboot-required code as SUCCESS, preserving the real code (backend#2849)" {
+    # Docker Desktop's installer returns 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) when the
+    # WSL2 backend adds Windows features -- a COMPLETED install, not a failure. A caller
+    # that declares 3010 succeeds must get State 'ok' AND the real code back (not 0), so
+    # the reboot-pending outcome stays visible in the log.
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 3010; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" -SuccessExitCodes @(0, 3010)
+    $r.State | Should -Be 'ok'; $r.ExitCode | Should -Be 3010
+  }
+  It "still FAILS a reboot code the caller did NOT declare (default success set is @(0))" {
+    # The broadening is opt-in per caller: without -SuccessExitCodes, 3010 is a failure,
+    # so no non-installer caller (k3d, cluster start) silently starts tolerating it.
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 3010; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t"
+    $r.State | Should -Be 'failed'; $r.ExitCode | Should -Be 3010
+  }
+  It "the reboot-OK code set is exactly the SUCCESS codes -- and excludes winget's FAILURE reboot code" {
+    # Guards against a future 'helpful' addition: 0x8A15010A (-1978334966,
+    # REBOOT_REQUIRED_FOR_INSTALL) means the install did NOT complete -- a real failure,
+    # not a success -- so it must never be in the accepted set.
+    $script:INSTALLER_REBOOT_OK_CODES | Should -Be @(3010, 1641, -1978334967, -1978334965)
+    $script:INSTALLER_REBOOT_OK_CODES | Should -Not -Contain -1978334966
+  }
+  It "accepts EVERY reboot-OK code end-to-end (not just 3010), including the negative winget HRESULTs" {
+    # 3010 above is the headline; this drives all four documented codes -- incl. the
+    # Int32-negative winget HRESULTs -1978334967 / -1978334965 -- through the real
+    # `-contains` path so a mistyped code or a negative-Int32 comparison regression is
+    # caught behaviorally, not just as constant membership.
+    Mock Wait-ProcessWithDeadline { $true }
+    foreach ($code in $script:INSTALLER_REBOOT_OK_CODES) {
+      # Build the mock with the literal interpolated in, so the returned ExitCode is not
+      # captured by reference (Pester runs the mock body in a later scope).
+      Mock Start-Process ([scriptblock]::Create("[pscustomobject]@{ ExitCode = $code; HasExited = 1 -eq 1 }"))
+      $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
+      $r.State | Should -Be 'ok' -Because "code $code is a documented reboot-pending success"
+      $r.ExitCode | Should -Be $code
+    }
+    # winget REBOOT_REQUIRED_FOR_INSTALL (-1978334966) means the install did NOT complete:
+    # it must stay 'failed' even when the installer reboot-OK set is passed.
+    Mock Start-Process ([scriptblock]::Create("[pscustomobject]@{ ExitCode = -1978334966; HasExited = 1 -eq 1 }"))
+    (Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+      -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)).State | Should -Be 'failed'
+  }
+  It "both Docker install paths opt into the reboot-OK codes so a completed install isn't aborted (backend#2849 finding 1)" {
+    # The fatal direct path (docker-direct) and the best-effort winget path both pass the
+    # reboot-OK codes. Without this, a 3010 success is misfiled 'failed' and the direct
+    # path Errs out on a Docker Desktop that actually installed -- the reopened finding 1.
+    $script:ISRC | Should -Match 'Invoke-TrackedInstall -FilePath \$installer[\s\S]{0,400}-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)'
+    $script:ISRC | Should -Match 'Invoke-TrackedInstall -FilePath "winget" -ArgumentList \$wingetArgs[\s\S]{0,400}-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)'
+  }
 }
 
 Describe "Format-ExitCode (backend#2849 the exit-code slot is never empty)" {

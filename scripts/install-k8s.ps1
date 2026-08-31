@@ -413,12 +413,36 @@ function Format-ExitCode {
   return "$Code"
 }
 
+# A Windows installer can SUCCEED while leaving a reboot pending, and it says so with
+# a dedicated exit code rather than 0 (backend#2849 finding 1). Docker Desktop's own
+# installer returns 3010 whenever the WSL2 backend adds Windows features -- our exact
+# `--backend=wsl-2` path -- and Docker's enterprise-deployment docs name 3010 as
+# expected success. Reading such a code as a failure is the client#611 idiom one layer
+# up: a completed install reported as failed (measured on the Windows Server 2022
+# journey host, where Docker Desktop installed cleanly -- full tree on disk, no error
+# log -- yet the run aborted). These are the "succeeded, reboot to finish/initiated"
+# codes an install caller may count as success:
+#   3010         Win32 ERROR_SUCCESS_REBOOT_REQUIRED   (a direct installer, e.g. Docker)
+#   1641         Win32 ERROR_SUCCESS_REBOOT_INITIATED  (an installer that self-restarted)
+#   -1978334967  winget 0x8A150109 INSTALL_REBOOT_REQUIRED_TO_FINISH  (HRESULT as Int32)
+#   -1978334965  winget 0x8A15010B INSTALL_REBOOT_INITIATED
+# Deliberately NOT here: winget 0x8A15010A (-1978334966) REBOOT_REQUIRED_FOR_INSTALL,
+# which means the install did NOT complete and must be retried after a reboot -- a
+# genuine failure. The bare code the caller sees decides which subset applies: a direct
+# installer only ever yields the Win32 pair, winget only the HRESULT pair, so passing
+# the union is safe -- a process can only return codes from its own space.
+$script:INSTALLER_REBOOT_OK_CODES = @(3010, 1641, -1978334967, -1978334965)
+
 # Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
 # with a KILLING deadline (spinner via Wait-ProcessWithDeadline), fold any captured
 # output into the install log, and return the outcome. Mirrors the WSL / k3d-cluster-
 # start redirect pattern so a failed install leaves the real winget/installer output
 # in the log + -Diagnose bundle instead of only a bare exit code (#500). Never throws;
 # each caller applies its own policy (best-effort fall-through vs fatal Err).
+# -SuccessExitCodes lists every code counted as success (default @(0)); an installer
+# caller passes @(0) + $script:INSTALLER_REBOOT_OK_CODES so a reboot-pending success is
+# not misfiled as a failure (backend#2849). The real code is preserved in the return so
+# a reboot-pending 'ok' is still visible to the caller and the log.
 # Returns @{ State = 'ok'|'spawn-failed'|'timeout'|'failed'; ExitCode; Output }.
 function Invoke-TrackedInstall {
   param(
@@ -426,7 +450,8 @@ function Invoke-TrackedInstall {
     $ArgumentList,                 # string (PS 5.1 verbatim) or array
     [string]$Label,
     [int]$TimeoutMinutes = 40,
-    [string]$Tag = 'install'
+    [string]$Tag = 'install',
+    [int[]]$SuccessExitCodes = @(0)
   )
   $tmp  = [System.IO.Path]::GetTempPath()   # portable (== %TEMP% on Windows); testable off-Windows
   $outF = Join-Path $tmp "$Tag-$(Get-Random).out.log"
@@ -445,8 +470,8 @@ function Invoke-TrackedInstall {
   $log = ("$(Get-Content $errF -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outF -Raw -ErrorAction SilentlyContinue)").Trim()
   Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
   if ($log) { Log "${Label}: $log" }
-  if ($timedOut)          { return @{ State = 'timeout';  ExitCode = $null;        Output = $log } }
-  if ($p.ExitCode -eq 0)  { return @{ State = 'ok';       ExitCode = 0;            Output = $log } }
+  if ($timedOut)                              { return @{ State = 'timeout'; ExitCode = $null;       Output = $log } }
+  if ($SuccessExitCodes -contains $p.ExitCode) { return @{ State = 'ok';      ExitCode = $p.ExitCode; Output = $log } }
   return @{ State = 'failed'; ExitCode = $p.ExitCode; Output = $log }
 }
 
@@ -1836,7 +1861,8 @@ function Install-DockerDesktop {
       # Best-effort: on any non-ok outcome the direct download below takes over. Output
       # is captured to the log so a winget failure is diagnosable, not a bare code (#500).
       $r = Invoke-TrackedInstall -FilePath "winget" -ArgumentList $wingetArgs `
-        -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget"
+        -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget" `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "Docker Desktop winget install failed (will try direct download): state=$($r.State) exit=$($r.ExitCode)" }
       RefreshPath
     }
@@ -1864,12 +1890,20 @@ function Install-DockerDesktop {
       # zero Docker Desktop interaction (#419). Any non-ok outcome fails loudly.
       $r = Invoke-TrackedInstall -FilePath $installer `
         -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
-        -Label "Installing Docker Desktop" -TimeoutMinutes 40 -Tag "docker-direct"
+        -Label "Installing Docker Desktop" -TimeoutMinutes 40 -Tag "docker-direct" `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
       switch ($r.State) {
         'spawn-failed' { Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$($r.Output)" }
         'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
         'failed'       { Err "Docker Desktop installation failed (installer exited $(Format-ExitCode $r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+      }
+      # A reboot-pending success code (3010 &c., accepted above) means the install
+      # COMPLETED but the installer wants a reboot to finish -- the WSL2 features it
+      # just touched were already enabled and rebooted in Step 1, so the engine can
+      # still come up now; record the code and press on (backend#2849).
+      if ($r.State -eq 'ok' -and $r.ExitCode -ne 0) {
+        Log "Docker Desktop installed with reboot-pending code $(Format-ExitCode $r.ExitCode); features were enabled in Step 1, continuing to bring up the engine."
       }
       RefreshPath
     }
@@ -2753,7 +2787,8 @@ function Install-K3dAndHelm {
       # (a job would orphan the child on timeout), capturing output so a failure is
       # diagnosable (#500). Best-effort: the direct download below takes over (#422).
       $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing Helm (winget)" -TimeoutMinutes 10 -Tag "helm-winget" `
-        -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+        -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent") `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "helm winget install: state=$($r.State) exit=$($r.ExitCode)" }
       RefreshPath
     }
