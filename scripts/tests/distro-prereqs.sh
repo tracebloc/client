@@ -33,12 +33,36 @@ LIB="$HERE/../lib"
 # Anyone running the real installer reached it via `curl | bash`, so curl always
 # exists and the box has sudo. Minimal base images ship neither — install them
 # up front (we are root here) so the rest of the run mirrors a real machine.
+# These bootstrap installs run in an EPHEMERAL CI container against distro mirrors
+# that occasionally STALL rather than fail. An unbounded package-manager call then
+# hangs until the job's `timeout-minutes`, which GitHub reports as `cancelled` — NOT
+# a red check — so the failure is silent (this is the exact class that bit the
+# sibling path-persist job's opensuse leg on 2026-08-31; backend#2859). Bound each
+# attempt and retry: a transient stall recovers, a dead mirror fails FAST with an
+# honest error. `command -v` (not has()) because this runs BEFORE common.sh is
+# sourced; notices go to stderr. NB: this bounds the harness's own bootstrap only —
+# the real installer functions invoked below use common.sh's bounded probes.
+_pm_run() { # bounded + retried package-manager invocation; $@ = the PM argv
+  local i
+  for i in 1 2 3; do
+    if   command -v timeout  >/dev/null 2>&1; then timeout  "${TB_PM_TIMEOUT:-60}" "$@" && return 0
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "${TB_PM_TIMEOUT:-60}" "$@" && return 0
+    else "$@" && return 0; fi
+    echo "::warning::package-manager step stalled or failed (attempt $i/3): $*" >&2
+    # No backoff after the LAST attempt, so a dead mirror fails RED here well under
+    # the job's timeout-minutes rather than running the clock out into a silent
+    # `cancelled` (the failure class of #2859).
+    [ "$i" -lt 3 ] && sleep $((i * 5))
+  done
+  echo "::error::package-manager step failed after 3 bounded attempts: $* — distro-mirror connectivity inside the CI container, not this PR. Re-run this job." >&2
+  return 1
+}
 _pm_install_one() { # install a single package with whatever PM exists
-  if   command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq "$1"
-  elif command -v dnf     >/dev/null 2>&1; then dnf install -y -q "$1"
-  elif command -v yum     >/dev/null 2>&1; then yum install -y -q "$1"
-  elif command -v zypper  >/dev/null 2>&1; then zypper --non-interactive install "$1"
-  elif command -v pacman  >/dev/null 2>&1; then pacman -Sy --noconfirm "$1"
+  if   command -v apt-get >/dev/null 2>&1; then _pm_run apt-get update -qq && _pm_run apt-get install -y -qq "$1"
+  elif command -v dnf     >/dev/null 2>&1; then _pm_run dnf install -y -q "$1"
+  elif command -v yum     >/dev/null 2>&1; then _pm_run yum install -y -q "$1"
+  elif command -v zypper  >/dev/null 2>&1; then _pm_run zypper --non-interactive install "$1"
+  elif command -v pacman  >/dev/null 2>&1; then _pm_run pacman -Sy --noconfirm "$1"
   fi
 }
 _bootstrap_host() {
