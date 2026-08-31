@@ -224,6 +224,16 @@ def pod_bearing_sources(text):
 
 
 def main(argv):
+    if len(argv) == 2 and argv[1] == "--kinds":
+        # THE KIND LIST HAS ONE OWNER. The coverage assertion in
+        # pod-qos-class.bats used to grep for a hand-written
+        # `Deployment|StatefulSet|DaemonSet|Job|CronJob`, which omitted `Pod` --
+        # so a raw Pod template no mode rendered stayed out of the denominator and
+        # coverage passed while `--expect` never saw it (Bugbot, review on
+        # client#922). A check holding its own copy of the rule agrees with itself
+        # and disagrees with the classifier.
+        print("|".join(POD_KINDS))
+        return 0
     if len(argv) == 3 and argv[2] == "--sources":
         # One basename per line, for the cross-mode coverage assertion in
         # pod-qos-class.bats. Fails closed on a render with no pod at all.

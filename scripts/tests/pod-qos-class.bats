@@ -295,8 +295,17 @@ _render() {
   done
   sort -u -o "$u" "$u"
 
-  # DERIVED, not restated: the chart's own declarations are the denominator.
-  grep -lE '^[[:space:]]*kind:[[:space:]]*(Deployment|StatefulSet|DaemonSet|Job|CronJob)[[:space:]]*$' \
+  # DERIVED ON BOTH AXES: the chart's own declarations are the denominator, and
+  # THE KIND LIST COMES FROM THE CLASSIFIER, not from a copy here. The first
+  # version wrote the five workload kinds out by hand and omitted `Pod`, which
+  # POD_KINDS has -- so a raw Pod template no mode rendered was absent from the
+  # denominator and coverage reported green (Bugbot, review on client#922).
+  local kinds
+  kinds=$(python3 "$QOS" --kinds) || return 1
+  # FAIL CLOSED: an empty pattern would make the grep match every template or
+  # none, and either way the comparison below stops meaning anything.
+  [ -n "$kinds" ] || return 1
+  grep -lE "^[[:space:]]*kind:[[:space:]]*($kinds)[[:space:]]*\$" \
     "$CHART"/templates/*.yaml | xargs -n1 basename | sort -u > "$want"
 
   # FAIL CLOSED on an empty denominator: zero templates compares equal to zero
