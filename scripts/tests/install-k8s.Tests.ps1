@@ -728,6 +728,16 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     # so the handling can't depend on which path ran (the Bugbot gap).
     ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r -Label "Docker Desktop"')).Count | Should -BeGreaterOrEqual 2
   }
+  It "EVERY installer that accepts the reboot codes routes its result through the handler -- no permissive-without-handler gap (backend#2849 review)" {
+    # shujaat's catch: helm-winget opted into the reboot codes but skipped the handler, so
+    # a 1641 there would count as success and continue into the direct-download fallback
+    # while the box restarts underneath, with no resume armed. The invariant that forecloses
+    # this whole class: each -SuccessExitCodes reboot-code site is paired with a handler call.
+    $accepts = ([regex]::Matches($script:ISRC, '-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)')).Count
+    $routes  = ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r ')).Count
+    $accepts | Should -BeGreaterOrEqual 3     # docker-winget, docker-direct, helm-winget
+    $routes  | Should -Be $accepts            # one handler call per accepting site
+  }
   It "Invoke-PostInstallReboot is a no-op on clean/non-ok and just logs+continues on a REQUIRED reboot (never arms/exits)" {
     # The REQUIRED reboot (box still up) and the 0 / non-ok cases must NOT arm a resume or
     # exit -- only the INITIATED set does. If any of these armed a resume, an ordinary

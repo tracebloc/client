@@ -2827,6 +2827,10 @@ function Install-K3dAndHelm {
         -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent") `
         -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "helm winget install: state=$($r.State) exit=$($r.ExitCode)" }
+      # Opted into the reboot codes above, so route it through the same handler: an
+      # initiated reboot here must arm a resume + stop, not fall through into the direct
+      # download while the box restarts underneath (backend#2849 review).
+      Invoke-PostInstallReboot -Result $r -Label "Helm"
       RefreshPath
     }
 
