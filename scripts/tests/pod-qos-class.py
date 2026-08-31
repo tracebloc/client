@@ -109,8 +109,91 @@ def pod_qos(pod_spec):
     return "Burstable", "; ".join(offenders)
 
 
+def unresourced_inits(docs):
+    """{workload: [init container names with no resources]} across the render.
+
+    Split out so the expectation can assert the SET, not just that two known names
+    appear. `init-mysql-data` could previously vanish with no test reddening
+    (Bugbot, review on client#922) because the check only looked for names it
+    already expected to find -- a membership test where a set comparison was needed.
+    """
+    out = {}
+    for d in docs:
+        if not d or d.get("kind") not in POD_KINDS:
+            continue
+        spec = _pod_spec(d)
+        bare = [c["name"] for c in (spec.get("initContainers") or []) if not (c.get("resources") or {})]
+        if bare:
+            out[d["metadata"]["name"]] = sorted(bare)
+    return out
+
+
+def check_expectations(rows, inits, path):
+    """Compare the render against a declared expectation file. Returns problems.
+
+    THE POINT IS SET EQUALITY, NOT LOOKUP. The first version of this suite restated
+    six workload names in a bats file; the chart renders TEN, so `auto-upgrade`,
+    `image-refresh` and the two check Jobs were classified and then ignored -- a
+    silent Burstable/Guaranteed change on any of them stayed green, which is the
+    defect shape this guard exists to close (CLAUDE.md: derive, never restate).
+
+    Format, one per line, `#` comments allowed:
+        class   <workload>  <Guaranteed|Burstable|BestEffort>
+        init    <workload>  <comma-separated unresourced init containers>
+    """
+    want_class, want_init = {}, {}
+    with open(path) as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 3 or parts[0] not in ("class", "init"):
+                return [f"{path}:{lineno}: not `class|init <workload> <value>`: {line!r}"]
+            kind, name, value = parts
+            (want_class if kind == "class" else want_init)[name] = value
+
+    problems = []
+    got_class = {name: cls for name, cls, _ in rows}
+    # BOTH directions. A missing row means a new workload nobody classified; an extra
+    # row means a stale expectation still being "satisfied" by nothing.
+    for name in sorted(set(got_class) - set(want_class)):
+        problems.append(
+            f"{name}: rendered and classified {got_class[name]}, but no `class` row "
+            f"declares it. Add one — an unlisted workload is not covered by this guard."
+        )
+    for name in sorted(set(want_class) - set(got_class)):
+        problems.append(f"{name}: declared in {path} but the chart renders no such workload")
+    for name in sorted(set(got_class) & set(want_class)):
+        if got_class[name] != want_class[name]:
+            problems.append(
+                f"{name}: QoS class is {got_class[name]}, expected {want_class[name]}"
+            )
+
+    got_init = {k: ",".join(v) for k, v in inits.items()}
+    for name in sorted(set(got_init) | set(want_init)):
+        g, w = got_init.get(name, ""), want_init.get(name, "")
+        if g != w:
+            problems.append(
+                f"{name}: unresourced init containers are {g or '(none)'}, "
+                f"expected {w or '(none)'} — this set decides whether Guaranteed is "
+                f"reachable at all, so a change here is a behaviour change"
+            )
+    return problems
+
+
+def _pod_spec(d):
+    """The pod spec for any POD_KINDS document. One implementation, so the classifier
+    and the init-container sweep can never disagree about where the spec lives."""
+    if d["kind"] == "Pod":
+        return d.get("spec") or {}
+    if d["kind"] == "CronJob":
+        return d["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    return d["spec"]["template"]["spec"]
+
+
 def main(argv):
-    if len(argv) != 2:
+    if len(argv) not in (2, 4) or (len(argv) == 4 and argv[2] != "--expect"):
         sys.stderr.write(__doc__)
         return 2
     with open(argv[1]) as fh:
@@ -120,12 +203,7 @@ def main(argv):
         if not d or d.get("kind") not in POD_KINDS:
             continue
         name = d.get("metadata", {}).get("name", "?")
-        if d["kind"] == "Pod":
-            spec = d.get("spec") or {}
-        elif d["kind"] == "CronJob":
-            spec = d["spec"]["jobTemplate"]["spec"]["template"]["spec"]
-        else:
-            spec = d["spec"]["template"]["spec"]
+        spec = _pod_spec(d)
         cls, why = pod_qos(spec)
         rows.append((name, cls, why))
     if not rows:
@@ -136,6 +214,13 @@ def main(argv):
         return 1
     for name, cls, why in sorted(rows):
         print(f"{name}\t{cls}\t{why}")
+
+    if len(argv) == 4:
+        problems = check_expectations(rows, unresourced_inits(docs), argv[3])
+        if problems:
+            sys.stderr.write("\n".join(f"  ✗ {p}" for p in problems) + "\n")
+            sys.stderr.write(f"{len(problems)} expectation problem(s).\n")
+            return 1
     return 0
 
 

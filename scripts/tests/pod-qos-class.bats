@@ -42,41 +42,63 @@ _class_of() {
   python3 "$QOS" "$1" | awk -F'\t' -v w="$2" '$1 ~ w {print $2; exit}'
 }
 
-@test "hostPath edges (installer default): every workload's QoS class is the expected one" {
+@test "hostPath edges (installer default): EVERY rendered workload matches the declared class" {
   local r="$BATS_TEST_TMPDIR/hostpath-on.yaml"
   _render true "$r" || return 1
-
-  # EXPECTED TABLE — installer-provisioned edge. Every entry is Burstable, and
-  # the two that people have tried to make Guaranteed cannot be, per workload,
-  # for the reason named.
-  #   jobs-manager  unresourced init-writable-data (hostPath) + cpu req != lim
-  #   mysql-client  unresourced mysql-format-guard (UNCONDITIONAL) + no cpu limit
-  [[ "$(_class_of "$r" 'jobs-manager')"   == "Burstable" ]] || return 1
-  [[ "$(_class_of "$r" 'mysql-client')"   == "Burstable" ]] || return 1
-  [[ "$(_class_of "$r" 'egress-proxy')"   == "Burstable" ]] || return 1
-  [[ "$(_class_of "$r" 'requests-proxy')" == "Burstable" ]] || return 1
-  [[ "$(_class_of "$r" 'resource-monitor')" == "Burstable" ]] || return 1
-  [[ "$(_class_of "$r" 'telemetry-collector')" == "Burstable" ]] || return 1
-
+  # DERIVED, NOT RESTATED. The expectation file is compared by set equality in both
+  # directions, so a workload the chart starts rendering fails until someone
+  # classifies it, and a stale row fails rather than being satisfied by nothing.
+  # The previous version listed six names by hand while the chart rendered TEN --
+  # auto-upgrade, image-refresh and the two check Jobs were classified and then
+  # ignored (Bugbot, review on client#922; CLAUDE.md rule 1).
+  run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.hostpath.txt"
+  [ "$status" -eq 0 ] || return 1
   # No workload is BestEffort. values.yaml claimed jobs-manager once was; it never
-  # was (backend#2872), and a workload that BECAME BestEffort would be a real
-  # regression -- an unresourced pod is the kernel OOM killer's first victim.
+  # was (backend#2872), and a workload BECOMING BestEffort is a real regression --
+  # an unresourced pod is the kernel OOM killer's first victim.
   ! python3 "$QOS" "$r" | grep -q 'BestEffort' || return 1
 }
 
 @test "CSI clusters (hostPath off): the class table is asserted separately, because the mode changes it" {
   local r="$BATS_TEST_TMPDIR/hostpath-off.yaml"
   _render false "$r" || return 1
+  run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.csi.txt"
+  [ "$status" -eq 0 ] || return 1
+}
 
-  # jobs-manager loses its unresourced init container here, so cpu req != lim
-  # becomes the SOLE remaining blocker. Still Burstable -- but for one reason
-  # rather than two, which is exactly why equalising cpu appeared to work on EKS
-  # and not on bare metal (backend#2872).
-  [[ "$(_class_of "$r" 'jobs-manager')" == "Burstable" ]] || return 1
-  # mysql keeps mysql-format-guard unconditionally, so it stays blocked on BOTH
-  # clusters. This is the assertion that makes the mysql cpu-limit override
-  # honestly pointless rather than arguably useful.
-  [[ "$(_class_of "$r" 'mysql-client')" == "Burstable" ]] || return 1
+@test "an unclassified workload FAILS rather than being ignored (the guard is not vacuous)" {
+  # Mutation-in-a-test: drop a row from the expectation and the check must refuse.
+  # Without this, the set-equality claim above is untested and the file could drift
+  # back to a partial list silently.
+  local r="$BATS_TEST_TMPDIR/hp.yaml" e="$BATS_TEST_TMPDIR/partial.txt"
+  _render true "$r" || return 1
+  grep -v 't-image-refresh' "${BATS_TEST_DIRNAME}/pod-qos-expect.hostpath.txt" > "$e"
+  run python3 "$QOS" "$r" --expect "$e"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"t-image-refresh"* ]] || return 1
+  [[ "$output" == *"no \`class\` row declares it"* ]] || return 1
+}
+
+@test "a stale expectation row FAILS rather than passing on nothing" {
+  local r="$BATS_TEST_TMPDIR/hp2.yaml" e="$BATS_TEST_TMPDIR/stale.txt"
+  _render true "$r" || return 1
+  cat "${BATS_TEST_DIRNAME}/pod-qos-expect.hostpath.txt" > "$e"
+  printf 'class  t-workload-that-was-deleted  Burstable\n' >> "$e"
+  run python3 "$QOS" "$r" --expect "$e"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"renders no such workload"* ]] || return 1
+}
+
+@test "a vanished unresourced init container FAILS (it decides whether Guaranteed is reachable)" {
+  # init-mysql-data disappearing was invisible before: the old check tested that two
+  # names APPEARED, which is a membership test where a set comparison was needed.
+  local r="$BATS_TEST_TMPDIR/hp3.yaml" e="$BATS_TEST_TMPDIR/initdrift.txt"
+  _render true "$r" || return 1
+  sed 's/init-mysql-data,mysql-format-guard/mysql-format-guard/' \
+    "${BATS_TEST_DIRNAME}/pod-qos-expect.hostpath.txt" > "$e"
+  run python3 "$QOS" "$r" --expect "$e"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"unresourced init containers are"* ]] || return 1
 }
 
 @test "the unresourced init container is really there on hostPath edges (the blocker is not hypothetical)" {
