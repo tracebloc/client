@@ -157,12 +157,53 @@ for cred in clientId clientPassword; do
 done
 
 
+# --- the RENAME refusal, same unreachable class (Bugbot, High, on client#911) ---
+#
+# `fullnameOverride` routes tracebloc.secretName, which is right for an install and
+# unsafe for a rename: the lookup above misses under the new name, four credentials
+# fall to their randAlphaNum tier and are minted fresh, and the kept MySQL PVC still
+# holds the old ones. `helm upgrade` reports deployed and the database refuses every
+# login. secrets.yaml refuses that case.
+#
+# It belongs in THIS file rather than the chart suite for the same structural reason
+# as everything above: it is a `lookup`, so helm-unittest renders it away. Verified
+# against a live cluster instead (k3d, `--dry-run=server`, 2026-08-31): refused with
+# the named message when the un-overridden Secret exists, silent on a fresh install
+# with an override, and silent with no override at all.
+code_all="$(grep -v '^[[:space:]]*#' "$TPL" 2>/dev/null || true)"
+
+# 1. the refusal exists at all.
+if ! grep -qF 'fullnameOverride is set to' <<<"$code_all"; then
+  fail "secrets.yaml no longer refuses a rename of a live release. Setting
+    fullnameOverride on an existing release re-mints the generated credentials while
+    the kept MySQL PVC holds the old ones: upgrade succeeds, database refuses login."
+fi
+ok
+
+# 2. it keys on the UN-OVERRIDDEN name. This is the whole correctness of it: keying
+#    the second lookup on tracebloc.secretName -- the overridden name -- would make
+#    it compare a name against itself and never fire, while reading as a guard.
+if ! grep -qE 'printf "%s-secrets" \.Release\.Name' <<<"$code_all"; then
+  fail "the rename refusal no longer derives the UN-overridden Secret name from
+    .Release.Name. Keyed on the overridden name it can never fire, because that is
+    the name it is being compared against."
+fi
+ok
+
+# 3. it only fires when the two names DIFFER, so an ordinary release -- where they
+#    are equal -- is never refused. Without this the guard would break every install.
+if ! grep -qE 'ne \$secretName \$unoverriddenSecretName' <<<"$code_all"; then
+  fail "the rename refusal no longer gates on the two names differing, so it would
+    fire on releases that set no override at all."
+fi
+ok
+
 if [ "$fails" -ne 0 ]; then
   echo "client-credentials-have-a-secret-tier: $fails failure(s) across $checks assertion(s)" >&2
   exit 1
 fi
-if [ "$checks" -lt 13 ]; then
-  echo "client-credentials-have-a-secret-tier: only $checks assertion(s) ran; expected 13+.
+if [ "$checks" -lt 16 ]; then
+  echo "client-credentials-have-a-secret-tier: only $checks assertion(s) ran; expected 16+.
   A collapsed run must not report success (rule 3)." >&2
   exit 1
 fi
