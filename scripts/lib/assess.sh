@@ -509,6 +509,13 @@ assess_existing_install() {
       # schedule (a pre-#835 install on a stock node) would strand every GPU job
       # Pending with no signal. Surface the recreate guidance here too.
       declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
+      # Same rationale a third time (backend#2634, reviewer on client#912): the
+      # image-GC drop-in is a create-time bind mount, so every cluster built before
+      # #2634 keeps the stock 85/80 thresholds forever. A HEALTHY pre-#2634 edge is
+      # the entire population that advisory exists for, and it is exactly the
+      # population this fast path serves -- wired only into _handle_existing_cluster
+      # it could never once reach them.
+      declare -F _check_existing_cluster_kubelet_config >/dev/null 2>&1 && _check_existing_cluster_kubelet_config
       _assess_handoff        # prints the "already set up" line, runs `tracebloc`, exit 0
       ;;
     degraded)
