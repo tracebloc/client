@@ -1307,6 +1307,181 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   [[ "${output%%k3d cluster delete*}" == *"tracebloc delete --keep-data"* ]] || return 1
 }
 
+# ── kubelet config drop-in: image GC (backend#2634) ─────────────────────────
+#
+# Verified against a real cluster before these were written (2026-08-31, k3d
+# v5.8.3 / rancher/k3s:v1.36.3-k3s1, server + agent): with the file mounted and
+# `--kubelet-arg=config=` pointing at it, /configz on BOTH nodes reported
+# imageGCHighThresholdPercent=70 / low=55 / imageMinimumGCAge=2m0s from a probe
+# file, `evictionHard` kept k3s's own defaults when the file omitted it, and the
+# file's map replaced them when it did not. So these tests pin wiring whose effect
+# is measured, not assumed.
+#
+# UNGATED on the k3s version, unlike fail-cgroupv1 above, and that asymmetry is
+# deliberate: `--kubelet-arg=config=` is a path to a KubeletConfiguration, which
+# the kubelet has accepted for far longer than any version we support, and the
+# three fields are v1beta1. There is no band to straddle.
+
+@test "kubelet config: the drop-in is mounted and the kubelet is pointed at it" {
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  # Both halves, because either alone is a silent no-op: a mount nothing reads,
+  # or a kubelet told to read a path that is not in the node.
+  [[ "$output" == *"--kubelet-arg=config=/etc/tracebloc/kubelet.yaml@all"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *":/etc/tracebloc/kubelet.yaml@all"* ]] || { echo "$output"; return 1; }
+}
+
+@test "kubelet config: @all, so agent kubelets are bounded too" {
+  # An agent runs a kubelet and pulls the same 2.7-11 GB task images. A
+  # server-only drop-in would leave every agent on the stock 85% threshold --
+  # the unbounded image store the ticket is about, half-fixed and looking done.
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"--kubelet-arg=config=/etc/tracebloc/kubelet.yaml@server:"* ]] || return 1
+  [[ "$output" == *"--kubelet-arg=config=/etc/tracebloc/kubelet.yaml@all"* ]] || return 1
+}
+
+@test "kubelet config: the file written is valid, complete KubeletConfiguration YAML" {
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  local cfg="$output"
+  [ -r "$cfg" ] || { echo "no readable file at '$cfg'"; return 1; }
+  run cat "$cfg"
+  [[ "$output" == *"kind: KubeletConfiguration"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"apiVersion: kubelet.config.k8s.io/v1beta1"* ]] || { echo "$output"; return 1; }
+  # All three, by name. A missing field is not a neutral default: the node keeps
+  # the stock 85/80 and the install still reports success.
+  [[ "$output" == *"imageGCHighThresholdPercent: 75"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"imageGCLowThresholdPercent: 60"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"imageMinimumGCAge: 2m"* ]] || { echo "$output"; return 1; }
+}
+
+@test "kubelet config: the file does NOT carry failCgroupV1" {
+  # NOT justified by "the kubelet refuses a field set both on the CLI and in a
+  # file" -- this PR's own measurement found that claim empirically false, so a
+  # test resting on it would be justified by nothing the moment the header it
+  # cites gets corrected (reviewer, client#912).
+  #
+  # The real reason is stronger and holds independently: this file is written
+  # UNCONDITIONALLY, while `--kubelet-arg=fail-cgroupv1` is gated on k3s >= 1.35.
+  # An unrecognised field in a KubeletConfiguration is a HARD START FAILURE, so
+  # putting it in the file would brick the node on every k3s below 1.35 -- exactly
+  # the hosts the flag exists to rescue, and the ones that never get the CLI arg.
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  run cat "$output"
+  [[ "$output" != *"failCgroupV1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "kubelet config: the file lives on PERSISTENT storage, not /tmp" {
+  # Bugbot High on client#912. The file is BIND-MOUNTED into every node, so a host
+  # path cleared on reboot cannot be remounted and `docker start` of the node fails
+  # with a generic Docker error. The cluster comes up healthy once and can never be
+  # RESTARTED -- a headless edge looks fine until its first reboot.
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cfg="$output"
+  # The REAL requirement: the path is derived from HOST_DATA_DIR, the installer's
+  # own persistent directory. A literal `/tmp` check was wrong and CI caught it --
+  # the bats harness points HOST_DATA_DIR at a temp dir, so that assertion failed
+  # on the FIXTURE's path while the code was correct. It was testing the harness.
+  [[ "$cfg" == "$HOST_DATA_DIR/"* ]] || { echo "not under HOST_DATA_DIR: $cfg"; return 1; }
+  [ -r "$cfg" ] || { echo "not readable: $cfg"; return 1; }
+
+  # And the resolver must not mint its own temp path, which is the actual defect
+  # (Bugbot High): a bind-mount source under mktemp/TMPDIR cannot be remounted
+  # after a reboot. Asserted on the resolver's source because it is environment-
+  # independent, unlike any statement about where /tmp happens to be today.
+  run declare -f _kubelet_config_path
+  [[ "$output" != *mktemp* ]] || { echo "resolver mints a temp path: $output"; return 1; }
+  [[ "$output" != *TMPDIR* ]] || { echo "resolver reads TMPDIR: $output"; return 1; }
+  [[ "$output" == *HOST_DATA_DIR* ]] || { echo "resolver ignores HOST_DATA_DIR: $output"; return 1; }
+}
+
+@test "kubelet config: rewriting it is idempotent, so a re-install does not fail" {
+  # The path is FIXED now rather than a fresh mktemp -d, so a second install has to
+  # overwrite rather than trip over what is already there or append to it.
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  first="$output"
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "$first" ] || { echo "path moved between runs: $first -> $output"; return 1; }
+  run grep -c "imageGCHighThresholdPercent" "$first"
+  [ "$output" = "1" ] || { echo "content duplicated on rewrite: $output"; return 1; }
+}
+
+@test "kubelet config: the mounted path IS the path the kubelet is told to read" {
+  # Two different strings is a silent no-op: the kubelet reads nothing, the node
+  # keeps the stock 85% threshold, and the install reports success.
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" == *":${TB_KUBELET_CONFIG_NODE_PATH}@all"* ]] \
+    || { echo "the config is not mounted at TB_KUBELET_CONFIG_NODE_PATH"; return 1; }
+  [[ "$output" == *"--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all"* ]] \
+    || { echo "the kubelet is pointed somewhere other than the mount"; return 1; }
+}
+
+@test "existing cluster: no kubelet mount -> warns with a recreate hint, does NOT refuse" {
+  # Bugbot Medium on client#912. Every edge created before this change keeps the
+  # stock 85/80 thresholds, and a re-run used to say "already running" without
+  # looking. WARN not error, deliberately: a missing bound is today's status quo
+  # everywhere, so refusing would turn every ordinary re-run into a hard failure.
+  docker() { if [[ "$1" == inspect ]]; then printf '/tracebloc\n/etc/other\n'; return 0; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || { echo "refused instead of warning: $output"; return 1; }
+  [[ "$output" == *"stock 85% image-GC threshold"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"k3d"* ]] || { echo "no explanation of why it cannot be added live"; return 1; }
+}
+
+@test "existing cluster: kubelet mount present -> silent" {
+  docker() { if [[ "$1" == inspect ]]; then printf '/tracebloc\n%s\n' "$TB_KUBELET_CONFIG_NODE_PATH"; return 0; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"stock 85%"* ]] || { echo "warned on a cluster that IS bounded: $output"; return 1; }
+}
+
+@test "existing cluster: node not inspectable -> no-op, not a false warning" {
+  # 'cannot tell' must not read as 'missing' here: the siblings all no-op, and
+  # warning about a mount we could not read would train people to ignore it.
+  docker() { if [[ "$1" == inspect ]]; then return 1; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || { echo "warned without reading the mounts: $output"; return 1; }
+}
+
+@test "existing cluster: docker succeeds but lists NO mounts -> no-op, not a warning" {
+  # Distinct from the case above and it needs its own test: there, docker EXITS
+  # non-zero and the `|| return 0` catches it. Here docker succeeds and prints
+  # nothing, which only the `-z "$mounts"` guard catches. Without this case that
+  # guard was vacuous -- the mutation removing it stayed green.
+  docker() { if [[ "$1" == inspect ]]; then printf ''; return 0; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || { echo "warned on an empty mount list: $output"; return 1; }
+}
+
+@test "existing cluster: the kubelet check is actually WIRED into the existing path" {
+  # A check nobody calls is the whole class this repo keeps closing. Asserted on
+  # code, with comment lines stripped -- the block above names the function in prose.
+  run bash -c "grep -v '^[[:space:]]*#' '${SCRIPTS_DIR}/lib/cluster.sh' | grep -c '_check_existing_cluster_kubelet_config'"
+  [ "$output" -ge 2 ] || { echo "defined but never called (count=$output)"; return 1; }
+}
+
+@test "kubelet config: the reclaim band is wider than one task image's worth" {
+  # Not a restatement of the numbers -- a check on their RELATIONSHIP, which is
+  # what the ticket is about. GC reclaims down to LOW and stops, so a band
+  # narrower than the largest single image frees less than one image and
+  # re-trips immediately. That is the stock 85/80 behaviour being replaced.
+  [ "$TB_KUBELET_IMAGE_GC_LOW_PERCENT" -lt "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" ] || return 1
+  [ "$((TB_KUBELET_IMAGE_GC_HIGH_PERCENT - TB_KUBELET_IMAGE_GC_LOW_PERCENT))" -ge 10 ] || return 1
+  # Explicit configuration that reclaims LATER than the default inverts the ticket.
+  [ "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" -le 85 ] || return 1
+}
+
 # ── fail-cgroupv1: gated on the k3s pin (backend#2422) ──────────────────────
 #
 # k8s 1.35 flipped the kubelet's failCgroupV1 default to true, so from k3s 1.35

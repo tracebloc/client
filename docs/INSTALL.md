@@ -259,6 +259,8 @@ helm upgrade my-tracebloc ./tracebloc-2.0.1.tgz -n tracebloc -f my-values.yaml
 helm rollback my-tracebloc -n tracebloc
 ```
 
+> **If an upgrade on a running fleet aborts** with `conflict … with "kubectl-patch" … resources.limits.cpu` (or any `conflict occurred while applying`), Helm 4's server-side apply is refusing to take a field a non-Helm manager owns. It is **not** a clean no-op — Helm stops at the first conflict and leaves whatever it already applied in place, so check what landed. Recover with `--server-side=true --force-conflicts` — and mind the post-rollback trap where `--force-conflicts` alone is rejected. Full explanation and the diagnostic in [MIGRATIONS.md § server-side apply conflict](MIGRATIONS.md#helm-upgrade-aborts-with-a-server-side-apply-conflict).
+
 ### Upgrading by hand needs cluster scope, not just namespace admin
 
 **Namespace admin is not sufficient to upgrade this chart**, even for a change that

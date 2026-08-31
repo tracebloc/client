@@ -690,6 +690,17 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" -SuccessExitCodes @(0, 3010)
     $r.State | Should -Be 'ok'; $r.ExitCode | Should -Be 3010
   }
+  It "a NULL ExitCode is NOT success -- `-contains` does not invert the null case (backend#2849 / Bugbot)" {
+    # PowerShell: `0 -eq $null` is $false and `@(0,3010,...) -contains $null` is $false,
+    # so a null code falls through to 'failed' exactly as the old `$p.ExitCode -eq 0`
+    # did -- the `-contains` swap does NOT make a missing code read as ok. (#913 makes a
+    # real null unlikely by caching .Handle; this pins the guard regardless.)
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+      -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
+    $r.State | Should -Be 'failed'
+  }
   It "still FAILS a reboot code the caller did NOT declare (default success set is @(0))" {
     # The broadening is opt-in per caller: without -SuccessExitCodes, 3010 is a failure,
     # so no non-installer caller (k3d, cluster start) silently starts tolerating it.
@@ -724,9 +735,21 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $fn | Should -Match 'Register-ResumeAfterReboot'   # arm a FRESH resume before the box goes down
     $fn | Should -Match 'Set-TbRerunHandoff'           # declared handoff, not an interruption
     $fn | Should -Match 'exit 2'                       # stop, don't race the reboot into the engine wait
+    # the resume promise carries Step 1's split-account caveat (RunOnce is per-hive)
+    $fn | Should -Match '\$DailyUser -and \(\$DailyUser -ne \$env:USERNAME\)'
     # BOTH Docker install paths (winget-first and direct) route their result through it,
     # so the handling can't depend on which path ran (the Bugbot gap).
     ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r -Label "Docker Desktop"')).Count | Should -BeGreaterOrEqual 2
+  }
+  It "EVERY installer that accepts the reboot codes routes its result through the handler -- no permissive-without-handler gap (backend#2849 review)" {
+    # shujaat's catch: helm-winget opted into the reboot codes but skipped the handler, so
+    # a 1641 there would count as success and continue into the direct-download fallback
+    # while the box restarts underneath, with no resume armed. The invariant that forecloses
+    # this whole class: each -SuccessExitCodes reboot-code site is paired with a handler call.
+    $accepts = ([regex]::Matches($script:ISRC, '-SuccessExitCodes \(@\(0\) \+ \$script:INSTALLER_REBOOT_OK_CODES\)')).Count
+    $routes  = ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r ')).Count
+    $accepts | Should -BeGreaterOrEqual 3     # docker-winget, docker-direct, helm-winget
+    $routes  | Should -Be $accepts            # one handler call per accepting site
   }
   It "Invoke-PostInstallReboot is a no-op on clean/non-ok and just logs+continues on a REQUIRED reboot (never arms/exits)" {
     # The REQUIRED reboot (box still up) and the 0 / non-ok cases must NOT arm a resume or
@@ -7640,5 +7663,105 @@ Describe "Get-TrainingResources carry path (backend#2418)" {
     # the mutation this test exists to catch.
     Get-TrainingResources | Should -Not -Be "memory=8Gi"
     Get-TrainingResources | Should -Match '^cpu='
+  }
+}
+
+Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
+  # Bugbot Medium on client#912: the bash twin warned when a reused cluster had no
+  # kubelet config mount and this twin did not, so every Windows/WSL2 edge created
+  # before that change stayed on the stock 85/80 thresholds with no signal. The two
+  # twins agreed on every VALUE while disagreeing on this BEHAVIOUR, which is why
+  # value agreement did not catch it.
+  #
+  # Source-level, like the k3s-component block above and for the same reason:
+  # New-K3dCluster's reuse branch needs a live k3d + docker to execute. The gate is
+  # scripts/tests/kubelet-config-agreement.sh, which runs in the required
+  # `Source-of-truth drift` job and asserts BOTH twins carry the check. This is the
+  # local-feedback half.
+  BeforeAll {
+    $script:Raw = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    # Comment lines dropped: the block documents itself, and a check satisfied by
+    # its own documentation is not checking code.
+    $script:Code = ($script:Raw -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+  }
+
+  It 'inspects the node mounts on the reuse path' {
+    $script:Code | Should -Match 'kubeletMounts'
+    $script:Code | Should -Match 'docker inspect'
+  }
+
+  It 'keys the comparison on the SHARED node-path variable, not a literal' {
+    # A literal would silently stop matching the moment the mount path moves, and
+    # the agreement guard could not tie the two twins together.
+    $script:Code | Should -Match 'TB_KUBELET_CONFIG_NODE_PATH'
+  }
+
+  It 'WARNS and offers the recreate hint, and does NOT Err' {
+    # Err here would turn every ordinary re-run against an existing cluster into a
+    # hard failure, because an unbounded image store is today's status quo on every
+    # edge. The dataset-mount sibling Errs; this one deliberately must not.
+    $script:Code | Should -Match 'no kubelet config mount'
+    $idx = $script:Code.IndexOf('no kubelet config mount')
+    $window = $script:Code.Substring($idx, [Math]::Min(900, $script:Code.Length - $idx))
+    $window | Should -Match 'Write-RecreateClusterHint'
+    $window | Should -Not -Match '\bErr\b'
+  }
+
+  It 'stays silent when the mounts could not be read' {
+    # 'cannot tell' must not read as 'missing', or the warning trains people to
+    # ignore it. The guard is the `-and` on a non-empty $kubeletMounts.
+    $script:Code | Should -Match '\$kubeletMounts -and'
+  }
+
+  It 'is a FUNCTION, so a path that does not build a cluster can call it' {
+    # Inline in New-K3dCluster it was unreachable by the population it exists for:
+    # main()'s completed+healthy fast path never enters New-K3dCluster, so every
+    # already-working pre-#2634 edge got silence. The only mention of the name over
+    # here was a comment (reviewer, client#912). Same lesson as Read-RebootChoice
+    # and Test-K3sVersionDrift: a guard the fast path cannot call does not exist.
+    $script:Code | Should -Match 'function Test-ExistingClusterKubeletConfig'
+  }
+
+  It 'runs on the completed+healthy fast path, after the k3s and GPU advisories' {
+    # THE ASSERTION THAT WOULD HAVE CAUGHT THIS. Defining the function is not
+    # wiring it; the previous version of this Describe asserted the block existed
+    # and said nothing about who reaches it, which is exactly how it shipped
+    # unreachable. Anchored on the fast path's own success line, the way the
+    # Test-K3sVersionDrift assertion at ~4393 already is.
+    $script:Code | Should -Match 'client is healthy -- nothing to do[\s\S]{0,700}?Test-ExistingClusterKubeletConfig'
+  }
+
+  It 'bounds the docker inspect, so a wedged engine cannot hang a healthy re-run' {
+    # It now runs AFTER the success line on a machine that is already working, so an
+    # unbounded probe would hang a healthy host to deliver an advisory (installer
+    # rule; the reviewer asked for this explicitly). Same Start-Job + deadline
+    # pattern as its siblings.
+    $idx = $script:Code.IndexOf('function Test-ExistingClusterKubeletConfig')
+    $window = $script:Code.Substring($idx, [Math]::Min(1400, $script:Code.Length - $idx))
+    $window | Should -Match 'Start-Job'
+    $window | Should -Match 'Wait-JobWithProgress'
+  }
+
+  It 'TRIMS the received inspect output, so an unreadable cluster stays silent' {
+    # Bugbot Medium on client#912. Two Out-String hops (the job body stringifies,
+    # then Receive-Job stringifies again) turn an empty or failed `docker inspect`
+    # into a lone newline -- TRUTHY in PowerShell -- so the `-and` empty-guard
+    # passed and the recreate warning fired on a cluster nobody could read. The
+    # bash twin returns early on the same input, so it was a twin divergence too.
+    #
+    # Asserted inside the FUNCTION's own text: the k3s sibling has always had the
+    # .Trim(), so a whole-file match is satisfied by it while this one has none.
+    # That is exactly how the first version of the drift assertion went vacuous.
+    $fn = [regex]::Match($script:Code,
+      '(?s)function Test-ExistingClusterKubeletConfig \{.*?\n\}').Value
+    $fn | Should -Not -BeNullOrEmpty
+    $fn | Should -Match 'Out-String\)\.Trim\(\)'
+  }
+
+  It 'agrees with the bash twin on the operator-visible message' {
+    # The agreement guard keys on this exact phrase in both files. If either side
+    # rewords it, the guard stops tying them together and this catches it here.
+    $bash = Get-Content "$PSScriptRoot/../lib/cluster.sh" -Raw
+    $bash | Should -Match 'no kubelet config mount'
   }
 }

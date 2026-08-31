@@ -135,6 +135,21 @@ gpu:
       repository: nvidia/k8s-device-plugin
       tag: v0.14.5
       digest: ""
+      # -- Device-plugin pod resources. ONE pair, applied to both requests AND limits,
+      # because the pod must be **Guaranteed** (backend#2871) — Guaranteed needs
+      # requests == limits on both cpu and memory, so a separate requests/limits
+      # shape here would just be a way to get it wrong.
+      #
+      # Why Guaranteed and not Burstable: if this pod is OOM-killed the node stops
+      # advertising nvidia.com/gpu and every GPU training pod on it goes Pending.
+      # `priorityClassName: system-node-critical` does not help — it ranks preemption
+      # and eviction, not the kernel's oom_score_adj, which is set from the QoS class.
+      #
+      # The plugin is a tiny long-lived watcher (it enumerates devices and serves a
+      # gRPC socket), so 50m/64Mi is generous; raise it only with a measurement.
+      resources:
+        cpu: 50m
+        memory: 64Mi
       # RuntimeClass for the plugin pod (client#835). On native Linux the k3s-cuda
       # node runs the NVIDIA runtime in CDI mode, and the plugin can only enumerate
       # GPUs (init NVML) if its own pod runs under that runtime — so the Linux
@@ -150,6 +165,12 @@ gpu:
       repository: rocm/k8s-device-plugin
       tag: latest
       digest: ""
+      # -- Same contract as nvidia.resources above: ONE pair, both sides, Guaranteed
+      # (backend#2871). This container also runs privileged, so it is the last thing
+      # that should be first in the OOM queue.
+      resources:
+        cpu: 50m
+        memory: 64Mi
 
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
@@ -1232,6 +1253,20 @@ autoUpgrade:
   # images can take several minutes; 10m gives PVC bind + image pull headroom
   # without holding the slot all night if something is genuinely wedged.
   timeout: "10m"
+  # #2877: a release in `pending-upgrade` is NOT necessarily a wedge left by a
+  # killed upgrade — it is ALSO the state of an upgrade that is CURRENTLY RUNNING
+  # (an operator's manual `helm upgrade`, or a slow one of ours). The hourly
+  # wedge-recovery (#554) must not roll back an in-flight upgrade: doing so
+  # silently reverts it and discards the operator's new values (measured turning
+  # a backend#1528 retirement into a fleet-breaking sequence). The discriminator
+  # is AGE — a real wedge is at least ~an hour old by the next hourly tick, an
+  # in-flight upgrade is seconds/minutes old. Only a release that has sat in
+  # pending-upgrade/pending-rollback for AT LEAST this long is treated as an
+  # abandoned wedge and rolled back; anything younger is left untouched and the
+  # tick is skipped. Keep it comfortably ABOVE the longest upgrade an operator
+  # would run by hand (well above `timeout`) and BELOW the ~1h schedule gap, so a
+  # genuine wedge still recovers on the very next tick. Duration string (Ns/Nm/Nh).
+  pendingWedgeMinAge: "45m"
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   successfulJobsHistoryLimit: 3
@@ -1707,6 +1742,17 @@ bootstrapDbPassword: ""
 # Any tooling/runbook that dials root with the old literal must move to the
 # Secret first, or it breaks at rotation.
 #
+# GUARDED (backend#2879). Because that DDL is manual and mandatory, the chart
+# REFUSES to render a rotation that would silently break auth: when the gate is
+# on, the chart would MINT a new random root password (no mysqlRootPassword pin,
+# no MYSQL_ROOT_PASSWORD already in the Secret), AND the MySQL datadir PVC
+# already exists in the cluster, the render FAILS at template time naming
+# docs/migration-tools/rotate-mysql-root.md — rather than at runtime with a 1045.
+# A FRESH install is unaffected (no datadir yet → born rotated), and so is every
+# `helm template`/`--dry-run`/GitOps render (the datadir lookup is empty without
+# a live cluster). Acknowledge the manual migration with
+# mysqlRootRotationAcknowledged below to proceed on an existing fleet.
+#
 # UNSET by default: the effective value comes from rotateMysqlRootByEnv below,
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
 # regardless of environment. Mirrors serviceDbAccounts / bootstrapDbReparent.
@@ -1727,6 +1773,20 @@ rotateMysqlRootByEnv:
 # — that one is only ever a mysql-connector connection parameter, this one also
 # lands in DDL.
 mysqlRootPassword: ""
+
+# Acknowledge the manual root-rotation migration on an EXISTING fleet
+# (backend#2879). Normally unset. When rotateMysqlRoot is turned on for a fleet
+# whose MySQL datadir already exists, the chart would mint a new root password
+# the live database does not have, breaking auth — so the render FAILS at
+# template time (naming docs/migration-tools/rotate-mysql-root.md) unless this is
+# true. Set it ONLY as part of that runbook: it asserts you have read the runbook
+# and will run the one-time `ALTER USER 'root'` DDL to align root's live password
+# to the generated Secret value in the same maintenance window. It is a one-time
+# acknowledgement — once the fleet is rotated the Secret carries
+# MYSQL_ROOT_PASSWORD and this flag is a no-op (the value is preserved, never
+# re-minted). It does NOT run any DDL and does NOT weaken a FRESH install (which
+# never needs it). Leaving stale --set flags on is harmless here.
+mysqlRootRotationAcknowledged:
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

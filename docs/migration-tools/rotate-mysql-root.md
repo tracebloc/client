@@ -15,6 +15,14 @@ datadir, so its live `root` password stays the baked literal until the one-time
 that DDL itself: it would have to authenticate as `root` with the *current*
 literal (re-introducing it) or hit a chicken/egg once rotated.
 
+Because that step is manual and mandatory, from chart `1.9.89` the chart no
+longer lets the flip render as a bare flag on an existing fleet (backend#2879):
+enabling `rotateMysqlRoot` where a MySQL datadir already exists **fails the
+render**, naming this runbook, unless you pass
+`mysqlRootRotationAcknowledged=true` to acknowledge you will run the `ALTER USER`
+below. So the gate and this migration are coupled in the chart now, not only in
+prose — a fresh install is still born rotated with no operator action.
+
 ## Preconditions (per fleet, do in order)
 
 0. **You can actually reach the fleet, with the permissions these steps need.**
@@ -73,11 +81,37 @@ literal (re-introducing it) or hit a chicken/egg once rotated.
    (`templates/auto-upgrade-cronjob.yaml`) and re-applies user-supplied values
    after resetting to chart defaults. This rolls the mysql pod once, so do it in
    a window. It does **not** rotate root — it only generates the new value.
+
+   `mysqlRootRotationAcknowledged=true` is **required on an existing fleet** from
+   chart `1.9.89` (backend#2879). Because this fleet already has a datadir, the
+   chart would otherwise mint a root password the live database does not have and
+   break auth, so it **refuses to render** `rotateMysqlRoot=true` here unless you
+   acknowledge that you will run the `ALTER USER 'root'` step below in the same
+   window. Without it the upgrade fails at template time with a message naming
+   this runbook — by design, so the flip cannot land as a silent 1045. The flag
+   is inert on a fresh install (no datadir yet → born rotated) and ignored by
+   charts older than `1.9.89` (schema is open), so it is safe to pass
+   unconditionally.
    ```bash
    helm repo add tracebloc https://tracebloc.github.io/client && helm repo update tracebloc
    helm upgrade <release> tracebloc/client --version <chart> -n <ns> \
-     --reset-then-reuse-values --set rotateMysqlRoot=true
+     --reset-then-reuse-values \
+     --set rotateMysqlRoot=true --set mysqlRootRotationAcknowledged=true
    ```
+   **Let this upgrade FINISH before you act on its result.** While a `helm
+   upgrade` runs, the release sits in `pending-upgrade` — and that is the same
+   state a killed upgrade leaves behind. The hourly auto-upgrade CronJob no longer
+   confuses the two (tracebloc/client#2877): it leaves a release that has only
+   recently entered `pending-upgrade` untouched, and only reclaims one that has
+   been stuck there past `autoUpgrade.pendingWedgeMinAge` (default 45m). So do the
+   flip in a window and let it converge to `STATUS: deployed`; do **not** leave a
+   half-finished manual upgrade parked in `pending-upgrade` for longer than that
+   threshold, or the next tick will treat it as an abandoned wedge and roll it
+   back (it logs a loud warning with the discarded revision when it does — read
+   the CronJob Pod's log to recover the values). If you must hold a manual upgrade
+   open longer, raise `pendingWedgeMinAge` or set `autoUpgrade.suspend=true` for
+   the duration.
+
    **This upgrade needs an identity with cluster scope. Plain `admin` is not
    enough, and no combination of `--set` flags substitutes for it.** The chart
    templates seven cluster-scoped kinds — Namespace, PersistentVolume,

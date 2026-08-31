@@ -134,6 +134,23 @@
                 },
                 "digest": {
                   "type": "string"
+                },
+                "resources": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Device-plugin pod resources. ONE cpu/memory pair, applied to BOTH requests and limits, because the pod must be Guaranteed QoS (backend#2871): if it is OOM-killed the node stops advertising its GPU resource and every GPU training pod on it goes Pending. A separate requests/limits shape is deliberately NOT expressible here \u2014 that is how Guaranteed gets lost by accident. system-node-critical does not cover this; it ranks preemption, not the kernel's oom_score_adj.",
+                  "properties": {
+                    "cpu": {
+                      "type": "string",
+                      "default": "50m",
+                      "description": "cpu for both requests and limits (Kubernetes quantity)."
+                    },
+                    "memory": {
+                      "type": "string",
+                      "default": "64Mi",
+                      "description": "memory for both requests and limits (Kubernetes quantity)."
+                    }
+                  }
                 }
               }
             },
@@ -152,6 +169,23 @@
                 },
                 "digest": {
                   "type": "string"
+                },
+                "resources": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Device-plugin pod resources. ONE cpu/memory pair, applied to BOTH requests and limits, because the pod must be Guaranteed QoS (backend#2871): if it is OOM-killed the node stops advertising its GPU resource and every GPU training pod on it goes Pending. A separate requests/limits shape is deliberately NOT expressible here \u2014 that is how Guaranteed gets lost by accident. system-node-critical does not cover this; it ranks preemption, not the kernel's oom_score_adj.",
+                  "properties": {
+                    "cpu": {
+                      "type": "string",
+                      "default": "50m",
+                      "description": "cpu for both requests and limits (Kubernetes quantity)."
+                    },
+                    "memory": {
+                      "type": "string",
+                      "default": "64Mi",
+                      "description": "memory for both requests and limits (Kubernetes quantity)."
+                    }
+                  }
                 }
               }
             }
@@ -446,22 +480,32 @@
       }
     },
     "perExperimentDbCreds": {
-      "type": ["boolean", "null"],
+      "type": [
+        "boolean",
+        "null"
+      ],
       "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from perExperimentDbCredsByEnv keyed on the RESOLVED CLIENT_ENV. RFC-0003 D10 (backend#1181): mint a per-experiment MySQL user scoped to the experiment's own table(s), injected via a per-job Secret, instead of the shared edgeuser. Set true or false only to pin ONE edge against its fleet default."
     },
     "perExperimentDbCredsByEnv": {
       "type": "object",
-      "description": "Per-environment default for the RFC-0003 D10 per-experiment credential mint (backend#1528), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Every other gate in this rollout had one of these; without it, the flag the ticket's LAST step is gated on was the only one whose fleet posture the chart could not record — so a values-resetting upgrade silently put the account mint back on edgeuser.",
-      "additionalProperties": { "type": "boolean" }
+      "description": "Per-environment default for the RFC-0003 D10 per-experiment credential mint (backend#1528), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Every other gate in this rollout had one of these; without it, the flag the ticket's LAST step is gated on was the only one whose fleet posture the chart could not record \u2014 so a values-resetting upgrade silently put the account mint back on edgeuser.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
     },
     "narrowEdgeuser": {
-      "type": ["boolean", "null"],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#1528 S3 close-out: REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag — it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists — so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH ALL THREE PREDECESSORS ON (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds), and that pairing is ENFORCED rather than documented — the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#1528 S3 close-out: REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag \u2014 it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists \u2014 so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH ALL THREE PREDECESSORS ON (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds), and that pairing is ENFORCED rather than documented \u2014 the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
     },
     "narrowEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, false for stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- dev's is, so a fresh dev install comes up already retired. Flipping it where any predecessor gate is off fails the render — see narrowEdgeuser.",
-      "additionalProperties": { "type": "boolean" }
+      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, false for stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- dev's is, so a fresh dev install comes up already retired. Flipping it where any predecessor gate is off fails the render \u2014 see narrowEdgeuser.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
     },
     "credmgrPassword": {
       "type": "string",
@@ -491,7 +535,7 @@
     },
     "bootstrapDbPassword": {
       "type": "string",
-      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on — the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the mysql-client image's baked root password (see backend#947 for the value and its rotated replacement). NOT constrained to alphanumeric — never interpolated into DDL, only a connection parameter."
+      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on \u2014 the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the mysql-client image's baked root password (see backend#947 for the value and its rotated replacement). NOT constrained to alphanumeric \u2014 never interpolated into DDL, only a connection parameter."
     },
     "rotateMysqlRoot": {
       "type": [
@@ -502,7 +546,14 @@
     },
     "mysqlRootPassword": {
       "type": "string",
-      "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. Must be alphanumeric ([A-Za-z0-9]+) — the rotation runbook embeds it in an ALTER USER ... IDENTIFIED BY '...' statement, so metacharacters would break the one-time rotation (generated randAlphaNum already satisfies this). Constrained where bootstrapDbPassword is not: that is only a connection parameter, this also lands in DDL."
+      "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. Must be alphanumeric ([A-Za-z0-9]+) \u2014 the rotation runbook embeds it in an ALTER USER ... IDENTIFIED BY '...' statement, so metacharacters would break the one-time rotation (generated randAlphaNum already satisfies this). Constrained where bootstrapDbPassword is not: that is only a connection parameter, this also lands in DDL."
+    },
+    "mysqlRootRotationAcknowledged": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "backend#2879: acknowledge the manual root-rotation migration on an EXISTING fleet. Normally unset. When rotateMysqlRoot resolves on and the chart would MINT a new root password (no mysqlRootPassword pin, no MYSQL_ROOT_PASSWORD in the live Secret) while the MySQL datadir PVC already exists, the render FAILS at template time naming docs/migration-tools/rotate-mysql-root.md \u2014 because the mysql entrypoint honours MYSQL_ROOT_PASSWORD only at fresh-datadir init, so root would otherwise authenticate with neither value and the fleet would lose MySQL auth (helm reports success; jobs-manager CrashLoops on 1045). Set true ONLY as part of that runbook: it asserts you will run the one-time ALTER USER 'root' DDL to align root's live password to the generated Secret value in the same window. One-time and self-expiring \u2014 once rotated, tier 2 preserves the value and this is a no-op. It runs no DDL itself and a FRESH install never needs it (the datadir lookup is empty without a live cluster, so template/dry-run/GitOps renders are unaffected)."
     },
     "perIngestionTables": {
       "type": "boolean",
@@ -803,9 +854,12 @@
             },
             "ackDrift": {
               "type": "object",
-              "description": "Acknowledged, expected drift for THIS pin (backend#2673). Present only when `prodDigest` is deliberately held behind the `channelTags.prod` float (docs/SECURITY.md §4.1.1). scripts/check-digest-drift.sh then treats the float resolving away from the pin as EXPECTED (job green, printed ACKNOWLEDGED) instead of a finding -- while still re-verifying the pin itself resolves to a healthy multi-arch index, and while ANY OTHER pin drifting still reds. Not consumed by any template; a CI/watch declaration that lives next to the pin and behind CODEOWNERS review. Acknowledge the CLASS, never a specific float digest. Remove this block in the same change that advances the pin off the boundary.",
+              "description": "Acknowledged, expected drift for THIS pin (backend#2673). Present only when `prodDigest` is deliberately held behind the `channelTags.prod` float (docs/SECURITY.md \u00a74.1.1). scripts/check-digest-drift.sh then treats the float resolving away from the pin as EXPECTED (job green, printed ACKNOWLEDGED) instead of a finding -- while still re-verifying the pin itself resolves to a healthy multi-arch index, and while ANY OTHER pin drifting still reds. Not consumed by any template; a CI/watch declaration that lives next to the pin and behind CODEOWNERS review. Acknowledge the CLASS, never a specific float digest. Remove this block in the same change that advances the pin off the boundary.",
               "additionalProperties": false,
-              "required": ["line", "reason"],
+              "required": [
+                "line",
+                "reason"
+              ],
               "properties": {
                 "line": {
                   "type": "string",
@@ -1114,6 +1168,11 @@
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `helm upgrade --timeout`. Allow enough headroom for image pull + PVC bind on slow infra."
+        },
+        "pendingWedgeMinAge": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$",
+          "description": "How long a release must sit in pending-upgrade/pending-rollback before the hourly recovery treats it as an abandoned wedge (rolls it back) rather than an in-flight upgrade (leaves it alone) — tracebloc/client#2877. Keep it above the longest hand-run upgrade and below the schedule gap. Default 45m."
         },
         "suspend": {
           "type": "boolean",

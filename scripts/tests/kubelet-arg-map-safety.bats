@@ -206,9 +206,15 @@ SAFE_PS1='      $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@al
   # exact vacuity this test exists to rule out, in the test meant to rule it out
   # (Bugbot, Medium). The two lines below are printed from the PARSED sets, so they
   # cannot be satisfied by the allowlist.
+  #
+  # The parsed set is `config fail-cgroupv1` since backend#2634 added the kubelet
+  # config drop-in -- SORTED, which is why `config` comes first here while
+  # SAFE_KUBELET_ARGS lists it second. That ordering difference is load-bearing for
+  # this test: the allowlist echo reads `fail-cgroupv1 config`, so neither
+  # assertion below can be satisfied by it even ignoring the line prefix.
   run bash "$GUARD"
-  [[ "$output" == *"cluster.sh    fail-cgroupv1"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"install-k8s.ps1   fail-cgroupv1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"cluster.sh    config fail-cgroupv1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"install-k8s.ps1   config fail-cgroupv1"* ]] || { echo "$output"; return 1; }
 }
 
 @test "an empty allowlist cannot make the live-run assertion pass on its own" {
@@ -221,8 +227,8 @@ SAFE_PS1='      $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@al
   # Pointed at the real repo, since the copy would otherwise resolve `root` from
   # its own location in the tmpdir and fail closed on unreadable installers.
   run env TB_KUBELET_ARG_ROOT="$(cd "${SCRIPTS_DIR}/.." && pwd)" bash "$BATS_TEST_TMPDIR/g.sh"
-  [[ "$output" == *"cluster.sh    fail-cgroupv1"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"install-k8s.ps1   fail-cgroupv1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"cluster.sh    config fail-cgroupv1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"install-k8s.ps1   config fail-cgroupv1"* ]] || { echo "$output"; return 1; }
   # And with nothing permitted, the guard REPORTS -- which pins that the allowlist
   # is load-bearing rather than decorative.
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }

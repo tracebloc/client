@@ -827,6 +827,21 @@ $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USE
 # Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
 $HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
 
+# Kubelet image-GC thresholds (backend#2634). The bash twin holds the identical
+# three values in scripts/lib/cluster.sh and
+# scripts/tests/kubelet-config-agreement.sh derives both sides and fails the build
+# on divergence -- so these are one contract in two files, not two sources.
+# NOT env-overridable, deliberately: an operator who lowers `high` to 95 to "get
+# more disk" re-creates the unbounded image store, and the value that matters is
+# the RELATIONSHIP between the two (the band must exceed one task image), which a
+# single env var cannot express safely.
+$TB_KUBELET_IMAGE_GC_HIGH_PERCENT = 75
+$TB_KUBELET_IMAGE_GC_LOW_PERCENT  = 60
+$TB_KUBELET_IMAGE_MIN_GC_AGE      = "2m"
+# Path the config is mounted to INSIDE every k3d node. Named once so the volume
+# mount and the --kubelet-arg cannot disagree about it.
+$TB_KUBELET_CONFIG_NODE_PATH      = "/etc/tracebloc/kubelet.yaml"
+
 # Pre-create the per-release hostPath dirs the chart's PVs bind to (logs, mysql,
 # data), mirroring bash _ensure_release_dirs (scripts/lib/cluster.sh). Without
 # these the mount target does not exist yet and the first dataset ingest fails
@@ -1860,8 +1875,16 @@ function Invoke-PostInstallReboot {
   if ($script:INSTALLER_REBOOT_INITIATED_CODES -contains $Result.ExitCode) {
     Warn "$Label installed, and its installer has initiated a reboot (code $(Format-ExitCode $Result.ExitCode))."
     $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
-    if ($resumeArmed) { Ok "The install will resume automatically after the reboot." }
-    else              { Hint "After the machine restarts, re-run this installer to continue." }
+    if ($resumeArmed) {
+      Ok "The install will resume automatically after the reboot."
+      # Split-account caveat (mirrors Step 1): the RunOnce lives in THIS account's hive,
+      # so the "automatic" promise is false if a different daily user signs in after the
+      # reboot -- qualify it exactly as the Step 1 handoff does (Bugbot).
+      if ($DailyUser -and ($DailyUser -ne $env:USERNAME)) {
+        Hint "Resume is registered for '$env:USERNAME'. Sign back in as '$env:USERNAME' to continue; if '$DailyUser' signs in instead, re-run the installer."
+      }
+    }
+    else { Hint "After the machine restarts, re-run this installer to continue." }
     $script:OutcomeReported = $true    # a declared reboot-pending stop, not an interruption
     Set-TbRerunHandoff
     exit 2
@@ -2849,6 +2872,10 @@ function Install-K3dAndHelm {
         -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent") `
         -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "helm winget install: state=$($r.State) exit=$($r.ExitCode)" }
+      # Opted into the reboot codes above, so route it through the same handler: an
+      # initiated reboot here must arm a resume + stop, not fall through into the direct
+      # download while the box restarts underneath (backend#2849 review).
+      Invoke-PostInstallReboot -Result $r -Label "Helm"
       RefreshPath
     }
 
@@ -3550,6 +3577,57 @@ function Write-RecreateClusterHint {
 # (Bugbot #565), so a healthy-but-drifted cluster still gets the recreate guidance.
 # Silent no-op if the image can't be read or isn't a parseable rancher/k3s:<tag>
 # (e.g. a digest-only pin) -- never false-warn.
+# Image-GC bound on a cluster this installer did not create (backend#2634).
+#
+# A FUNCTION, not the inline block it started as (reviewer, client#912). Inline in
+# New-K3dCluster it was unreachable by the one population it exists for: main()'s
+# completed+healthy fast path never enters New-K3dCluster, so every already-working
+# pre-#2634 edge -- the whole point of the advisory -- got silence. The only mention
+# of the name over here was a comment. Extracted for the same reason
+# Test-K3sVersionDrift and Read-RebootChoice were: a guard the fast path cannot call
+# is a guard that does not exist.
+#
+# WARN, do not Err, and that is the deliberate difference from the dataset check in
+# New-K3dCluster: a missing dataset mount puts customer data on ephemeral storage, so
+# refusing is right there. A missing image-GC bound is the status quo on every
+# existing edge, so refusing would turn every ordinary re-run into a hard failure.
+# Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+#
+# BOUNDED, via the same Start-Job + Wait-JobWithProgress pattern as its siblings.
+# Unbounded it would hang an already-healthy machine on a wedged Docker engine, after
+# the success line has printed, to deliver an advisory (installer rule; #565 Bugbot).
+#
+# Empty output stays silent: 'cannot tell' must not read as 'missing', or the warning
+# trains people to ignore it.
+function Test-ExistingClusterKubeletConfig {
+  $kubeletMounts = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking the existing cluster's image-GC bound") {
+    # .Trim(), like the k3s sibling below (Bugbot, Medium, on client#912). Without
+    # it a failed or empty `docker inspect` comes back as a lone newline, which
+    # PowerShell treats as TRUTHY -- so the `-and` empty-guard passed and the
+    # recreate warning fired on a cluster nobody could read. That is the
+    # cannot-tell-reads-as-missing failure this function is explicitly written to
+    # avoid, and the bash twin stays silent on the same input, so it was also a
+    # twin divergence. Two Out-String hops make it certain rather than likely: the
+    # job body already stringifies, and Receive-Job stringifies again.
+    $kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (kubelet config mount) timed out; skipping the image-GC advisory."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if ($kubeletMounts -and ($kubeletMounts -notmatch ('(?m)^' + [regex]::Escape($TB_KUBELET_CONFIG_NODE_PATH) + '\s*$'))) {
+    Warn "The existing '$CLUSTER_NAME' cluster has no kubelet config mount, so its nodes keep the stock 85% image-GC threshold."
+    Hint "Training images are 2.7-11 GB each and floating tags leave the previous digest resident on every"
+    Hint "republish, so the node fills until garbage collection and disk-pressure eviction start DURING a"
+    Hint "training run. k3d bakes bind mounts in at create time, so this can't be added to a running cluster."
+    Hint "The install will proceed. To bound the image store, recreate the cluster when convenient:"
+    Write-RecreateClusterHint
+  }
+}
+
 function Test-K3sVersionDrift {
   if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
   # Bounded (installer rule: every docker probe must have a deadline) so a wedged
@@ -4024,6 +4102,22 @@ function New-K3dCluster {
       }
     }
 
+    # Image-GC bound (backend#2634). The drop-in is a create-time bind mount, so a
+    # cluster made before this change keeps the kubelet's stock 85/80 thresholds and
+    # a re-run used to say "Compute environment already running" without looking
+    # (Bugbot, Medium, on client#912 -- the bash twin had this check and this one did
+    # not, and WSL2 edges are a real part of that population).
+    #
+    # WARN, do not Err, and that is the deliberate difference from the dataset check
+    # above: a missing dataset mount puts customer data on ephemeral storage, so
+    # refusing is right there. A missing image-GC bound is the status quo on every
+    # existing edge, so refusing would turn every ordinary re-run into a hard
+    # failure. Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+    #
+    # Empty output stays silent: 'cannot tell' must not read as 'missing', or the
+    # warning trains people to ignore it.
+    Test-ExistingClusterKubeletConfig
+
     # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
     # a healthy-but-drifted cluster is warned too (Bugbot #565).
@@ -4133,6 +4227,53 @@ function New-K3dCluster {
         $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
       }
     }
+
+    # --- kubelet config drop-in (backend#2634; mechanism shared with #2460) ---
+    #
+    # The bash twin's `_write_kubelet_config` in scripts/lib/cluster.sh carries the
+    # full rationale; `scripts/tests/kubelet-config-agreement.sh` derives the three
+    # values from BOTH files and fails the build if they diverge, so this is not a
+    # second source of truth -- it is the second half of one, held together by a
+    # guard in a required job.
+    #
+    # Short version: EvictionHard / KubeReserved / SystemReserved are maps the
+    # kubelet replaces WHOLESALE, so they cannot travel as `--kubelet-arg` without
+    # silently dropping k3s's disk thresholds. Image GC is scalar and would survive
+    # the CLI, but belongs beside the eviction thresholds it interacts with. One
+    # file, authored whole. Stock 85/80 leaves a 5-point band, which on a real disk
+    # can be smaller than ONE 2.7-11 GB task image.
+    # NOT under %TEMP% (Bugbot, High, on client#912). This file is BIND-MOUNTED
+    # into every k3d node, so the host path must outlive the install: a bind-mount
+    # source that has vanished cannot be remounted and `docker start` of the node
+    # fails with a generic Docker error. A cluster created from a temp path comes
+    # up healthy and can never be RESTARTED. HOST_DATA_DIR is the installer's own
+    # persistent directory; matches the bash twin's _kubelet_config_path.
+    $kubeletCfgDir  = Join-Path $HOST_DATA_DIR "kubelet"
+    $kubeletCfgPath = Join-Path $kubeletCfgDir "kubelet.yaml"
+    # HARD-FAIL, not a warning: a silent skip leaves the node on the stock 85%
+    # threshold -- the unbounded image store #2634 is about -- while the install
+    # reports success and nothing downstream can tell.
+    try {
+      New-Item -ItemType Directory -Path $kubeletCfgDir -Force | Out-Null
+      # LF and no BOM: this file is read by the kubelet inside a Linux container.
+      # Set-Content on Windows PowerShell would write CRLF and a UTF-8 BOM, and the
+      # YAML parser rejects the BOM -- so the node would fail to start with a
+      # message about the file, not about us.
+      $kubeletYaml = @(
+        "apiVersion: kubelet.config.k8s.io/v1beta1",
+        "kind: KubeletConfiguration",
+        "imageGCHighThresholdPercent: $TB_KUBELET_IMAGE_GC_HIGH_PERCENT",
+        "imageGCLowThresholdPercent: $TB_KUBELET_IMAGE_GC_LOW_PERCENT",
+        "imageMinimumGCAge: $TB_KUBELET_IMAGE_MIN_GC_AGE"
+      ) -join "`n"
+      [System.IO.File]::WriteAllText($kubeletCfgPath, $kubeletYaml + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+      throw "Couldn't write the kubelet config to $kubeletCfgPath ($($_.Exception.Message)). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
+    }
+    # `@all` for the same reason as the cgroupv1 arg above: an agent runs a kubelet
+    # and pulls the same task images, so a server-only drop-in leaves it unbounded.
+    $k3dArgs += @("-v", "${kubeletCfgPath}:${TB_KUBELET_CONFIG_NODE_PATH}@all")
+    $k3dArgs += @("--k3s-arg", "--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all")
 
     # backend#743: bind-mount the customer dataset volume at a distinct cluster
     # path so the chart's dataset PV points there while mysql + logs stay on the
@@ -7349,6 +7490,11 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
     # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
     Test-HealthyClusterGpuConsistent
+    # Third time, same shape (backend#2634, reviewer on client#912): the image-GC
+    # drop-in is a create-time bind mount, so every cluster built before #2634 keeps
+    # the stock 85/80 thresholds. A HEALTHY pre-#2634 edge is the entire population
+    # the advisory is for, and it is exactly the population this fast path serves.
+    Test-ExistingClusterKubeletConfig
     # This path exits before Helm, so a cluster installed BEFORE this fix would never
     # get its PV dirs repaired -- the client is healthy, so every re-run shortcuts
     # here and the first ingest keeps failing with "Permission denied". Repair it now:
