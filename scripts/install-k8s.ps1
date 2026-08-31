@@ -7533,6 +7533,18 @@ $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
 # machine-wide command, and Test-TraceblocCli already falls back to it when `tb` is absent.
 # Params default to the script vars (so the caller passes nothing); they exist so the
 # copy/guards are unit-testable without the script's Windows-only load-time values.
+# The [version] a tracebloc.exe reports, by running it directly (it need not be on PATH),
+# or $null if the exe is missing / errors / prints no parseable version. Same parse as
+# Test-TraceblocCliCurrent. Used to make the machine-copy refresh DIRECTIONAL.
+function Get-TraceblocExeVersion {
+  param([string]$ExePath)
+  if ([string]::IsNullOrWhiteSpace($ExePath) -or -not (Test-Path -LiteralPath $ExePath)) { return $null }
+  $out = ""
+  try { $out = (& $ExePath version 2>$null | Select-Object -First 1) } catch { return $null }
+  if ($out -match '(\d+(?:\.\d+)+)') { try { return [version]$Matches[1] } catch { return $null } }
+  return $null
+}
+
 function Publish-TraceblocCliToToolDir {
   param(
     [string]$InstallDir = $TRACEBLOC_CLI_INSTALL_DIR,
@@ -7542,16 +7554,24 @@ function Publish-TraceblocCliToToolDir {
   $src = Join-Path $InstallDir "tracebloc.exe"
   if (-not (Test-Path -LiteralPath $src)) { return }
   $dest = Join-Path $ToolDir "tracebloc.exe"
-  # Skip the copy when the machine copy already matches the source. The Machine PATH is
-  # searched BEFORE the CLI installer's updatable %LOCALAPPDATA% copy, so this snapshot
-  # would otherwise SHADOW a later out-of-band CLI update — `tracebloc` would keep running
-  # the stale build (backend#2915/Bugbot). Being a cheap no-op when already in sync is what
-  # lets the caller re-run this on EVERY invocation (incl. the fast path) to refresh it.
-  # Compare by content hash; on any compare error fall through and re-copy (safe: -Force).
+  # The Machine PATH is searched BEFORE the CLI installer's updatable %LOCALAPPDATA% copy,
+  # so this snapshot would otherwise SHADOW a later out-of-band CLI update — `tracebloc`
+  # would keep running the stale build (backend#2915/Bugbot). The caller re-runs this on
+  # EVERY invocation (incl. the fast path) to keep it fresh, so the refresh must be BOTH
+  # cheap and DIRECTIONAL: refreshing on any hash difference would let a %LOCALAPPDATA% that
+  # holds an OLDER build (a pinned CLI, a partially-failed reinstall) silently DOWNGRADE the
+  # machine-wide CLI for every user (@LukasWodka). When the machine copy exists, refuse the
+  # copy unless the SOURCE is a strictly NEWER version:
+  #   * identical content (hash) -> nothing to do (the cheap common case), and
+  #   * different content -> copy ONLY when src version > dest version; same/older/unknown
+  #     leaves the machine copy in place, so it is never downgraded.
   if (Test-Path -LiteralPath $dest) {
     try {
       if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash) { return }
     } catch { }
+    $srcVer  = Get-TraceblocExeVersion -ExePath $src
+    $destVer = Get-TraceblocExeVersion -ExePath $dest
+    if (-not ($srcVer -and $destVer -and ($srcVer -gt $destVer))) { return }
   }
   # -ErrorAction Stop, because Copy-Item/New-Item raise NON-terminating errors under the
   # installer's default $ErrorActionPreference='Continue' — the caller's try/catch would

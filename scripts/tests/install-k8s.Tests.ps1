@@ -1203,6 +1203,16 @@ Describe "Install-TraceblocCli" {
   }
 }
 
+Describe "Get-TraceblocExeVersion (guards; drives the no-downgrade refresh)" {
+  It "returns `$null for a missing exe path" {
+    Get-TraceblocExeVersion -ExePath '/no/such/tracebloc.exe' | Should -BeNullOrEmpty
+  }
+  It "returns `$null for an empty/whitespace path (no exec attempted)" {
+    Get-TraceblocExeVersion -ExePath ''   | Should -BeNullOrEmpty
+    Get-TraceblocExeVersion -ExePath '  ' | Should -BeNullOrEmpty
+  }
+}
+
 Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools dir on the Machine PATH)" {
   # Copies the freshly-installed CLI exe from its per-user install dir into $TOOL_DIR,
   # which Initialize-ToolDir already put on the Machine PATH — so a fresh/other-user
@@ -1218,8 +1228,11 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Mock New-Item {}
     Mock Copy-Item {}
     # Distinct hash per path by default (src != dest) -> the staleness check sees them
-    # differ, so the default is "copy". Tests that want the in-sync no-op override this.
+    # differ and proceeds to the version gate. Tests that want the in-sync no-op override.
     Mock Get-FileHash { [pscustomobject]@{ Hash = "$LiteralPath" } }
+    # Default: the SOURCE (%LOCALAPPDATA%) is NEWER than the machine copy -> refresh. Tests
+    # of the no-downgrade guard override this. src == la-programs-tracebloc, dest == pf-.
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'2.0.0' } else { [version]'1.0.0' } }
   }
 
   It "copies tracebloc.exe from the install dir into TOOL_DIR" {
@@ -1243,15 +1256,28 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
     Should -Not -Invoke Copy-Item
   }
-  It "re-copies when the machine copy is STALE (source differs — an out-of-band update)" {
-    Mock Get-FileHash { if ($LiteralPath -like '*la-programs-tracebloc*') { [pscustomobject]@{Hash='NEW'} } else { [pscustomobject]@{Hash='OLD'} } }
+  # @LukasWodka: the refresh must be DIRECTIONAL. Copying on ANY hash difference would let
+  # a %LOCALAPPDATA% holding an OLDER build (a pinned CLI / partial reinstall) silently
+  # DOWNGRADE the machine-wide CLI for every user. Copy ONLY toward a strictly newer version.
+  It "refreshes UP when the source is a strictly NEWER version" {
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'2.1.0' } else { [version]'2.0.0' } }
     Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
     Should -Invoke Copy-Item -Times 1 -Exactly
   }
-  It "re-copies (fail-safe) when the hashes can't be compared" {
-    Mock Get-FileHash { throw "file locked" }
+  It "does NOT downgrade when the source is an OLDER version (differs but older)" {
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'1.0.0' } else { [version]'2.0.0' } }
     Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
-    Should -Invoke Copy-Item -Times 1 -Exactly
+    Should -Not -Invoke Copy-Item
+  }
+  It "does NOT copy at equal version even when the build (hash) differs" {
+    Mock Get-TraceblocExeVersion { [version]'2.0.0' }   # same version, different hash
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  It "does NOT copy when a version is unreadable (no downgrade on uncertainty)" {
+    Mock Get-TraceblocExeVersion { $null }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
   }
 
   It "no-op when the install dir is empty/whitespace (the non-Windows placeholder)" {
@@ -1272,11 +1298,15 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Should -Not -Invoke New-Item
   }
 
-  # backend#2915 (Bugbot): Copy-Item raises a NON-terminating error by default, which the
-  # caller's try/catch would miss. -ErrorAction Stop must make a failed copy THROW so it
-  # is logged (and Test-TraceblocCli then reports the truth), not silently swallowed.
-  It "propagates a copy failure so the caller can log it (not silently swallowed)" {
-    Mock Copy-Item { throw "access is denied" }
+  # backend#2915 (Bugbot/@LukasWodka): the real Copy-Item raises a NON-terminating error
+  # under the installer's default 'Continue', which the caller's try/catch would miss; a
+  # stale dest already present would then pass the post-copy Test-Path and the box would
+  # serve a stale CLI machine-wide. This asserts -ErrorAction Stop is LOAD-BEARING: the
+  # mock emits a NON-terminating error via Write-Error (unlike `throw`, which is terminating
+  # regardless of -ErrorAction and so cannot tell the two apart). With -ErrorAction Stop it
+  # must promote to terminating and THROW; delete the flag and this reddens.
+  It "promotes a NON-terminating copy error to a throw (so -ErrorAction Stop bites)" {
+    Mock Copy-Item { Write-Error "access is denied" }   # non-terminating
     { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Throw
   }
 
