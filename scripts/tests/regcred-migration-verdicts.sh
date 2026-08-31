@@ -61,6 +61,10 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 # usage seen from the tool: kubectl -n <ns> get secret <name> -o jsonpath={.type}
+# LOG FIRST: the parse loop below shifts every argument away, so "$*" is empty by
+# the time it finishes. The first cut logged after the loop and recorded 0 calls,
+# which the assertion correctly refused to read as coverage.
+[ -n "${STUB_ARGV_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_ARGV_LOG"
 ns=""; name=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -194,6 +198,61 @@ else
   for k in 'managed-by' 'helm.sh/chart' 'meta.helm.sh' 'app.kubernetes.io/instance' 'uid:' 'resourceVersion' 'creationTimestamp' 'namespace:'; do
     check "$k" && bad "STRIPPED: $k" "still present in the copy -- Helm would adopt and later delete it" || ok "stripped: $k"
   done
+fi
+
+echo "preflight — every cluster read is BOUNDED:"
+# A read with no --request-timeout hangs forever on a wedged API server, and
+# "hung with no verdict" is the cannot-tell outcome this gate exists to refuse
+# (Bugbot on #916). Asserted on the stub's recorded argv, so it pins what the
+# tool actually PASSES rather than that the string appears in the source.
+argvlog="$TMP/argv.log"; : > "$argvlog"
+STUB_RENDER_FILE="$TMP/render-both.yaml" STUB_ARGV_LOG="$argvlog" \
+STUB_PRESENT="tracebloc-templates/tracebloc-ops-regcred tracebloc-node-agents/tracebloc-ops-regcred" \
+  "$PREFLIGHT" tracebloc tracebloc-templates ./client "$TMP/values.yaml" >/dev/null 2>&1
+if [ ! -s "$argvlog" ]; then
+  bad "kubectl was invoked at all" "the stub recorded no invocation -- the check below would be vacuous"
+elif grep -qv -- '--request-timeout' "$argvlog"; then
+  bad "every kubectl read carries --request-timeout" "$(grep -c . "$argvlog") call(s), at least one unbounded" "$(grep -v -- '--request-timeout' "$argvlog" | head -1)"
+else
+  ok "every kubectl read carries --request-timeout ($(grep -c . "$argvlog") call(s))"
+fi
+
+echo "both tools — PyYAML is named, not a traceback:"
+# A host with python3 but no PyYAML must get a named refusal. Simulated with a
+# python3 stub whose `import yaml` fails, first on PATH.
+mkdir -p "$TMP/nopyyaml"
+cat > "$TMP/nopyyaml/python3" <<'PYSTUB'
+#!/usr/bin/env bash
+# `-c 'import yaml'` is the preflight's probe -> fail it. Everything else defers
+# to the real interpreter with an import hook that hides yaml.
+if [ "$1" = "-c" ] && [ "$2" = "import yaml" ]; then exit 1; fi
+exec "$REAL_PYTHON3" "$@"
+PYSTUB
+chmod +x "$TMP/nopyyaml/python3"
+out="$(REAL_PYTHON3="$(command -v python3)" PATH="$TMP/nopyyaml:$PATH" \
+       STUB_RENDER_FILE="$TMP/render-both.yaml" STUB_PRESENT="" \
+       "$PREFLIGHT" tracebloc tracebloc-templates ./client "$TMP/values.yaml" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -qi "pyyaml"; then
+  ok "preflight names PyYAML and refuses (exit 2)"
+else
+  bad "preflight names PyYAML and refuses" "exit $rc" "$(printf '%s' "$out" | head -2)"
+fi
+
+echo "regcred-copy.py — the name collision is ENFORCED, not just documented:"
+src_named() { printf 'apiVersion: v1\nkind: Secret\ntype: kubernetes.io/dockerconfigjson\nmetadata:\n  name: %s\ndata:\n  .dockerconfigjson: e30=\n' "$1"; }
+out="$(src_named tracebloc-regcred | python3 "$COPY" tracebloc-regcred 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  bad "the SOURCE's own name is refused" "exited 0 -- this would rewrite the live Helm-managed Secret in place"
+elif ! printf '%s' "$out" | grep -qF "SOURCE Secret's own name"; then
+  bad "the SOURCE's own name is refused" "refused for the wrong reason: $(printf '%s' "$out" | head -1)"
+else
+  ok "the SOURCE's own name is refused, by name"
+fi
+out="$(src_named tracebloc-regcred | python3 "$COPY" tracebloc-ops-regcred 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'name: tracebloc-ops-regcred'; then
+  ok "a DISTINCT name is still accepted (the guard is not over-broad)"
+else
+  bad "a distinct name is still accepted" "exit $rc: $(printf '%s' "$out" | head -1)"
 fi
 
 echo "regcred-copy.py — refusals:"

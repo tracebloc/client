@@ -37,6 +37,10 @@ name* — applying a copy over it rewrites the live Helm-managed Secret in place
 and strips its ownership metadata, breaking the next upgrade. Use
 `tracebloc-ops-regcred`.
 
+`regcred-copy.py` **refuses** this rather than relying on you reading the
+paragraph above — it compares the requested name against the source Secret's own
+name, so the rule holds whatever the chart calls its Secret.
+
 ## Preconditions
 
 0. **You can reach the fleet, with `helm` and `kubectl` both tunnelled.** Our

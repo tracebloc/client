@@ -29,7 +29,7 @@ STRIP_LABELS = ("app.kubernetes.io/managed-by", "helm.sh/chart",
 
 def main():
     if len(sys.argv) != 2:
-        sys.exit("usage: strip.py <new-secret-name>   (Secret YAML on stdin)")
+        sys.exit("usage: regcred-copy.py <new-secret-name>   (Secret YAML on stdin)")
     new_name = sys.argv[1]
     d = yaml.safe_load(sys.stdin)
     if not isinstance(d, dict) or d.get("kind") != "Secret":
@@ -39,6 +39,25 @@ def main():
                  % d.get("type"))
     if not (d.get("data") or {}).get(".dockerconfigjson"):
         sys.exit("Secret has no .dockerconfigjson payload -- refusing")
+    # THE COLLISION IS ENFORCED, NOT MERELY DOCUMENTED (Bugbot on #916). The
+    # docstring warns that the new name must not be the chart's own
+    # `<release>-regcred`, and a rule that lives only in prose is the shape that
+    # teaches the bypass: applying this output over the source rewrites the LIVE
+    # Helm-managed Secret in place and strips its ownership metadata, breaking
+    # the next `helm upgrade`.
+    #
+    # Compared against the SOURCE's own name, read from the input, rather than
+    # pattern-matching "-regcred" -- so it holds whatever the chart calls its
+    # Secret, and cannot drift from the chart's naming.
+    source_name = ((d.get("metadata") or {}).get("name")) or ""
+    if new_name == source_name:
+        sys.exit(
+            "the new name %r is the SOURCE Secret's own name -- refusing.\n"
+            "  That is the chart's Secret. Applying this over it would rewrite the\n"
+            "  live Helm-managed Secret and strip its ownership metadata, breaking\n"
+            "  the next `helm upgrade`. Pick a distinct operator-owned name,\n"
+            "  e.g. %r." % (new_name, source_name + "-ops" if source_name else "tracebloc-ops-regcred")
+        )
 
     m = d["metadata"]
     for k in STRIP_META:
