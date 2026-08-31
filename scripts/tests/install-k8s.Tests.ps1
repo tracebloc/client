@@ -3925,12 +3925,33 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       Where-Object { $_.GetCommandName() -eq 'docker' }
     $native.Count | Should -BeGreaterThan 0
 
+    # PER-JOB, not per-function (@LukasWodka's follow-up). The first version of this
+    # matched `Wait-JobWithProgress -Job $x -TimeoutSec N` anywhere in the enclosing
+    # FUNCTION, so one compliant job vouched for its neighbours -- he proved it by
+    # adding a second, unreaped docker job to a function that already had a good one
+    # and watching all 41 tests stay green. Bind the reap to the SPECIFIC variable
+    # this job was assigned to, so every job answers for itself.
     foreach ($c in $native) {
-      # walk out to the enclosing function and require a deadlined reap in its body
       $fn = $c.Parent
       while ($fn -and -not ($fn -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fn = $fn.Parent }
       $fn | Should -Not -BeNullOrEmpty -Because "the docker call at line $($c.Extent.StartLineNumber) is not inside a function, so nothing owns its deadline"
-      $fn.Extent.Text | Should -Match 'Wait-JobWithProgress -Job \$\w+ -TimeoutSec \d+' -Because "$($fn.Name) runs docker in a job but does not reap it on a deadline"
+
+      # the Start-Job this call lives in ...
+      $job = $c.Parent
+      while ($job -and -not ($job -is [System.Management.Automation.Language.CommandAst] -and $job.GetCommandName() -eq 'Start-Job')) { $job = $job.Parent }
+      $job | Should -Not -BeNullOrEmpty -Because "line $($c.Extent.StartLineNumber) is a native docker call outside Start-Job"
+
+      # ... and the variable it is assigned to. No assignment => nothing can reap it.
+      $assign = $job.Parent
+      while ($assign -and -not ($assign -is [System.Management.Automation.Language.AssignmentStatementAst])) { $assign = $assign.Parent }
+      $assign | Should -Not -BeNullOrEmpty -Because "the Start-Job at line $($job.Extent.StartLineNumber) is not assigned to a variable, so no reap can name it"
+
+      $varAst = $assign.Left.Find({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)
+      $varAst | Should -Not -BeNullOrEmpty -Because "cannot determine the job variable at line $($job.Extent.StartLineNumber)"
+      $var = $varAst.VariablePath.UserPath
+
+      $reap = "Wait-JobWithProgress -Job \$" + [regex]::Escape($var) + " -TimeoutSec \d+"
+      $fn.Extent.Text | Should -Match $reap -Because "$($fn.Name) starts docker job '$var' but never reaps THAT job on a deadline"
     }
   }
 
