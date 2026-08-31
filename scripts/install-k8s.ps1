@@ -7350,8 +7350,14 @@ function Edit-Redaction([string]$Path) {
 #
 # A timeout is DATA, not an error: the synthetic text is written into the file, so
 # "k3d cluster list timed out after 20s" reaches support as a finding rather than
-# as a missing bundle. 20s is generous for a healthy tool and short enough that a
-# fully wedged box still produces a complete bundle in well under a minute.
+# as a missing bundle. 20s is generous for a healthy tool (30s for a log fetch,
+# which legitimately streams more).
+#
+# WORST CASE ~350s, i.e. under 6 minutes -- NOT "well under a minute" as this
+# comment first claimed (@LukasWodka corrected the arithmetic on client#917). The
+# deadlines are SEQUENTIAL, so a fully wedged box pays 13 reads x 20s + 3
+# kubectl-logs x 30s. Still bounded, and still far better than never returning --
+# but the number a support engineer plans around should be the real one.
 function Invoke-DiagnoseCapture {
   param(
     [Parameter(Mandatory)][string]$FileName,
