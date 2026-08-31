@@ -1788,6 +1788,17 @@ bootstrapDbPassword: ""
 # Any tooling/runbook that dials root with the old literal must move to the
 # Secret first, or it breaks at rotation.
 #
+# GUARDED (backend#2879). Because that DDL is manual and mandatory, the chart
+# REFUSES to render a rotation that would silently break auth: when the gate is
+# on, the chart would MINT a new random root password (no mysqlRootPassword pin,
+# no MYSQL_ROOT_PASSWORD already in the Secret), AND the MySQL datadir PVC
+# already exists in the cluster, the render FAILS at template time naming
+# docs/migration-tools/rotate-mysql-root.md — rather than at runtime with a 1045.
+# A FRESH install is unaffected (no datadir yet → born rotated), and so is every
+# `helm template`/`--dry-run`/GitOps render (the datadir lookup is empty without
+# a live cluster). Acknowledge the manual migration with
+# mysqlRootRotationAcknowledged below to proceed on an existing fleet.
+#
 # UNSET by default: the effective value comes from rotateMysqlRootByEnv below,
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
 # regardless of environment. Mirrors serviceDbAccounts / bootstrapDbReparent.
@@ -1808,6 +1819,20 @@ rotateMysqlRootByEnv:
 # — that one is only ever a mysql-connector connection parameter, this one also
 # lands in DDL.
 mysqlRootPassword: ""
+
+# Acknowledge the manual root-rotation migration on an EXISTING fleet
+# (backend#2879). Normally unset. When rotateMysqlRoot is turned on for a fleet
+# whose MySQL datadir already exists, the chart would mint a new root password
+# the live database does not have, breaking auth — so the render FAILS at
+# template time (naming docs/migration-tools/rotate-mysql-root.md) unless this is
+# true. Set it ONLY as part of that runbook: it asserts you have read the runbook
+# and will run the one-time `ALTER USER 'root'` DDL to align root's live password
+# to the generated Secret value in the same maintenance window. It is a one-time
+# acknowledgement — once the fleet is rotated the Secret carries
+# MYSQL_ROOT_PASSWORD and this flag is a no-op (the value is preserved, never
+# re-minted). It does NOT run any DDL and does NOT weaken a FRESH install (which
+# never needs it). Leaving stale --set flags on is harmless here.
+mysqlRootRotationAcknowledged:
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

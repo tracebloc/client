@@ -36,6 +36,7 @@ setup() {
   source "${LIB_DIR}/install-cli.sh"           # upgrade_cli_only
   ASSESS="${LIB_DIR}/assess.sh"
   INSTALL_CLI="${LIB_DIR}/install-cli.sh"
+  CLUSTER="${LIB_DIR}/cluster.sh"
   unset TB_FORCE_REINSTALL TRACEBLOC_FORCE_REINSTALL INSTALL_STATE INSTALL_STATE_REASON \
         TB_UPGRADE_CLI TB_CLI_LATEST
 }
@@ -199,6 +200,91 @@ _count_calls() {
     echo "Add the missing advisory to the other path too (backend#2674, advisory axis)."
     return 1
   }
+}
+
+# _reuse_path_advisories FILE — every `_check_*` the REUSE path runs, derived from
+# `_handle_existing_cluster`'s body. Note it calls them UNGUARDED (plain
+# `_check_x`, no `declare -F`), so `_advisories_in` cannot see them: that helper
+# keys on the guard idiom the early exits use. Two idioms, two extractors, and
+# conflating them is what made the gap below invisible.
+_reuse_path_advisories() {
+  awk '
+    /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{/ { fn=$0; sub(/\(\).*/,"",fn) }
+    fn=="_handle_existing_cluster" {
+      l=$0
+      if (l ~ /^[[:space:]]*#/) next        # full-line comment
+      sub(/[[:space:]]#.*/,"",l)            # trailing inline comment
+      if (l ~ /(^|[^A-Za-z0-9_])_check_[A-Za-z0-9_]+/) {
+        match(l, /_check_[A-Za-z0-9_]+/)
+        print substr(l, RSTART, RLENGTH)
+      }
+    }
+  ' "$1" | sort -u
+}
+
+#: Reuse-path advisories deliberately NOT run on an early exit, each with the
+#: reason. THE RULE IS DERIVED, THESE ARE THE RECORDED JUDGEMENTS -- anything in
+#: the reuse path that is neither here nor on the early exits is a gap, and the
+#: test below fails on it. That is the axis the parity test above cannot see:
+#: parity compares the two early exits to EACH OTHER, so an advisory missing from
+#: both is unanimous and green. Measured: `_check_existing_cluster_kubelet_config`
+#: (backend#2634) was wired only into the reuse path, every existing healthy edge
+#: was the population it was for, and this suite passed (reviewer, client#912 --
+#: instance #4 of the class this file's header says we kept fixing one at a time).
+_EARLY_EXIT_EXEMPT=(
+  # Both REFUSE (they call `error`), and an early exit serves a machine that is
+  # already working: turning an ordinary healthy re-run into a hard failure is the
+  # opposite of an advisory. They belong on the install path only.
+  _check_existing_cluster_dataset_mount
+  _check_existing_cluster_storage_mode
+  # These three decide how THIS RUN installs -- proxy interception, CA trust, which
+  # address the API is bound to -- rather than reporting a latent defect that
+  # outlives the installer. The three the early exits do carry (k3s drift, GPU,
+  # image-GC) are all "your cluster has a problem that will bite you later".
+  # Recorded as a judgement, not a proof: revisit if one of them turns out to be
+  # latent too. What must NOT happen is a NEW advisory joining this list silently.
+  _check_existing_cluster_proxy
+  _check_existing_cluster_ca
+  _check_existing_cluster_bind
+  # The reuse path reconciles GPU with `_check_existing_cluster_gpu`; the early
+  # exits use `_check_healthy_cluster_gpu_consistent`, the healthy-cluster variant.
+  # Covered, under a different name.
+  _check_existing_cluster_gpu
+)
+
+@test "every reuse-path advisory is on the early exits or explicitly exempt" {
+  local reuse early missing=""
+  reuse="$(_reuse_path_advisories "$CLUSTER")"
+  early="$(printf '%s\n%s\n' "$(_advisories_in assess_existing_install "$ASSESS")" \
+                              "$(_advisories_in upgrade_cli_only "$INSTALL_CLI")" | sort -u)"
+  # FAIL CLOSED both ways: an empty extraction on either side agrees with every
+  # comparison below, and a derivation that stopped matching is indistinguishable
+  # from a fully-wired installer.
+  [ -n "$reuse" ] || { echo "derived NO advisories from _handle_existing_cluster — the extractor or the reuse path changed shape"; return 1; }
+  [ -n "$early" ] || { echo "derived NO advisories from the early exits — the guard idiom changed shape"; return 1; }
+  local a
+  for a in $reuse; do
+    printf '%s\n' "$early" | grep -qx "$a" && continue
+    local exempt=false e
+    for e in "${_EARLY_EXIT_EXEMPT[@]}"; do [ "$a" = "$e" ] && exempt=true && break; done
+    $exempt || missing="${missing:+$missing }$a"
+  done
+  [ -z "$missing" ] || {
+    echo "reuse-path advisor(y/ies) run on NO early exit and not exempt: $missing"
+    echo "A healthy edge never reaches _handle_existing_cluster, so this advisory"
+    echo "cannot fire for the population it exists for. Add it to assess.sh's healthy"
+    echo "hand-off AND install-cli.sh's upgrade_cli_only, or record it in"
+    echo "_EARLY_EXIT_EXEMPT with the reason (backend#2674, reuse-vs-early-exit axis)."
+    return 1
+  }
+  # The exemption list must not rot into a bypass: an entry naming an advisory the
+  # reuse path no longer runs is dead, and dead entries are how a list stops being
+  # read at all.
+  local stale="" 
+  for e in "${_EARLY_EXIT_EXEMPT[@]}"; do
+    printf '%s\n' "$reuse" | grep -qx "$e" || stale="${stale:+$stale }$e"
+  done
+  [ -z "$stale" ] || { echo "_EARLY_EXIT_EXEMPT names advisor(y/ies) the reuse path no longer runs: $stale"; return 1; }
 }
 
 # ── The enumeration itself works: it DETECTS unguarded early-exits ───────────

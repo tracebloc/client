@@ -198,4 +198,61 @@ Two real migrations on the prod EKS cluster, both `eks-1.0.x` → `client-1.x`. 
 
 The new unified `client` chart DOES template `helm.sh/resource-policy: keep` on all three PVCs (`client-pvc`, `client-logs-pvc`, `mysql-pvc`). Confirmed on 2026-04-22 by uninstalling the `tb-client-test` release — Helm correctly reported the 3 PVCs + namespace as kept.
 
-For migrations **away from** a release of this chart, Option A/B/C still apply if the destination chart uses different resource names. For migrations **between** versions of this chart, the keep annotation is already in the stored manifest — a regular `helm upgrade` is safe.
+For migrations **away from** a release of this chart, Option A/B/C still apply if the destination chart uses different resource names. For migrations **between** versions of this chart, the keep annotation is already in the stored manifest, so no PVC is at risk — but a regular `helm upgrade` is **not unconditionally** safe: it aborts — leaving a partial, mixed state that reads as failure — when a non-Helm field manager owns a field the chart renders. See [§ `helm upgrade` aborts with a server-side apply conflict](#helm-upgrade-aborts-with-a-server-side-apply-conflict).
+
+---
+
+## `helm upgrade` aborts with a server-side apply conflict
+
+A plain `helm upgrade` on a fleet **that has been running** can fail outright:
+
+```
+Error: UPGRADE FAILED: conflict occurred while applying object <ns>/<release>-jobs-manager
+apps/v1, Kind=Deployment: Apply failed with 1 conflict: conflict with "kubectl-patch"
+using apps/v1: .spec.template.spec.containers[name="api"].resources.limits.cpu
+```
+
+### Why it happens
+
+**Helm 4 uses server-side apply by default.** Under server-side apply the API server tracks, per field, which *manager* last set it. When Helm re-applies the chart it refuses to take over a field another manager owns, and the upgrade errors out at that object — marking the release `failed`.
+
+**It is not atomic.** Without `--atomic`, Helm applies objects in sequence and stops at the *first* conflict; everything it applied before that object **stays applied**. Verified: a plain `helm upgrade` that changed `mysql`'s memory limit *and* hit the `jobs-manager` conflict left mysql on the new value while reporting failure. So a conflict-aborted upgrade leaves the fleet in a **partial, mixed state that reads as a clean failure** — more dangerous than a no-op, and exactly the input `auto-upgrade`'s wedge detector then rolls back (`backend#2877`). Do not assume "it failed, so nothing changed"; check what landed.
+
+The `kubectl-patch` in the message is the manager name the API server records for any `kubectl patch` command (verify: `kubectl set …` records `kubectl-set`, `kubectl annotate` records `kubectl-annotate`). So the field was taken over by an out-of-band `kubectl patch` at some point in the fleet's life — a manual resize, a migration step, a rehearsal. It is **not** a Helm or installer action, and **no runtime component of this chart patches that field**:
+
+- The chart is the sole intended owner of `jobs-manager`'s `resources.limits.cpu` — the `1000m` ceiling is deliberate (issue #1144: keeps the api container Burstable while memory is pinned). Do **not** delete the declaration from the chart to dodge the conflict; that silently removes the CPU ceiling.
+- `jobs-manager` reads `RESOURCE_REQUESTS` / `RESOURCE_LIMITS` / `RESOURCE_PROVENANCE` only to size the **training pods it spawns** — it never patches its own Deployment.
+- `resource-monitor` (the node-agent DaemonSet) has RBAC on `pods` and `nodes` only.
+- `image-refresh` uses `kubectl set image` (`kubectl-set`) and `kubectl annotate` (`kubectl-annotate`), never `kubectl patch`.
+
+Confirm who owns the contested field on your fleet before you plan around it:
+
+```bash
+kubectl -n <ns> get deploy <release>-jobs-manager --show-managed-fields -o json \
+  | jq '.metadata.managedFields[] | {manager, operation, time}'
+```
+
+### Recovery
+
+Re-run the upgrade telling Helm to take the field back:
+
+```bash
+helm upgrade <release> tracebloc/client -n <ns> --reuse-values \
+  --server-side=true --force-conflicts
+```
+
+Two things to know before you force:
+
+1. **`--force-conflicts` re-takes *every* field the chart renders that a non-Helm manager owns — not only `limits.cpu`.** Helm prints the full conflict list on the failed attempt; read it first. On a long-running fleet the list can include `image-refresh`'s pinned digests (`kubectl set image`); forcing reverts them to the chart's rendered image, and `image-refresh` re-pins on its next tick. That is recoverable but is a real, if brief, image churn — don't force blind.
+
+2. **`--server-side=true` is not optional, even though Helm 4 defaults to it.** After a rollback (including the automatic one the `auto-upgrade` CronJob performs when it reads a `pending-upgrade` release as a wedge — `backend#2877`), the release's stored apply method can revert to client-side. Then `--force-conflicts` **alone** fails with:
+
+   ```
+   Error: UPGRADE FAILED: invalid client update option(s): forceConflicts enabled when serverSideApply disabled
+   ```
+
+   Pass `--server-side=true` explicitly to override the stored method.
+
+### The durable fix is to stop the out-of-band patch
+
+Forcing the field back every upgrade is a workaround, not a resolution: whoever ran the `kubectl patch` re-creates the conflict the next time. Settle ownership instead — the chart owns `resources.limits.cpu`, so pin the value through chart values (`resources.jobsManager.limits.cpu`) and stop patching the live Deployment. If a real need arises for a component to own that field at runtime, the chart declaration is what has to go — but not before that owner exists.

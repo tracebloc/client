@@ -490,6 +490,8 @@ helm upgrade <release> tracebloc/client -n <ns> \
   -f your-values.yaml        # with clientId/clientPassword REMOVED
 ```
 
+> On a fleet that has been running, this upgrade can abort with a server-side apply conflict (`conflict with "kubectl-patch" …`) if a field the chart renders was taken over out-of-band. The abort is **not** atomic — Helm stops at the first conflict and leaves whatever it already applied in place, so a failed run can still have removed the two values. See [MIGRATIONS.md § server-side apply conflict](MIGRATIONS.md#helm-upgrade-aborts-with-a-server-side-apply-conflict) for the cause and the `--server-side=true --force-conflicts` recovery.
+
 **3. Verify the new revision is clean.** This is the check that matters, and it is one command:
 
 ```bash

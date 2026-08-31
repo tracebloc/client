@@ -312,28 +312,50 @@ check_workload requests-proxy  "requests-proxy"  consumer
 #
 # Spawned ingestion Jobs are stamped at submit time, not by the chart, so they are
 # checked separately -- and their ABSENCE is "cannot tell", never a pass.
-# THE CONTROL-PLANE WORKLOADS, EXCLUDED BY NAME (Bugbot).
+# ANCHORED ON THE PRODUCER'S PREFIX, NOT A SUBSTRING PLUS A DENYLIST (backend#2887).
 #
-# The picker below matched any Running pod whose name contains `ingest`. Pod names
-# are `{release}-{workload}-{hash}`, so a release or namespace containing `ingest`
-# -- `tracebloc-ingest`, say -- makes `…-jobs-manager-…` and `…-requests-proxy-…`
-# match too. `kubectl get pods` has no guaranteed order, so criterion 1 could pick
-# a control-plane pod, find no `DB_USER` in it, and report `cannot tell` forever:
-# the same structurally-always-red shape this file has now hit three times.
+# This used to match any Running pod containing `ingest`, minus a hand-kept
+# CONTROL_PLANE_RE denylist. Both halves were wrong, and both mis-fire inside a
+# normal gate cycle:
 #
-# DERIVED FROM THE WORKLOADS THIS SCRIPT ALREADY CHECKS, not a fresh list: these
-# are exactly the two names passed to `check_workload` below, so the exclusion
-# cannot drift away from what the chart renders without that call site changing
-# too. `mysql` is here for the same reason `pod_of mysql` exists.
-CONTROL_PLANE_RE='jobs-manager|requests-proxy|mysql'
-
+#   1. THE FILE-STAGING POD. An ingest creates `tracebloc-stage-<table>-<hash>`
+#      before the Job (`cli/internal/push/pod.go:179`), where `<table>` is the
+#      OPERATOR'S table name. This gate asks for a deliberately large driven
+#      ingestion, so a table called `ingest_test` yields
+#      `tracebloc-stage-ingest-test-<hash>` -- which `/ingest/` matches. Sampling
+#      it exec's the tar sidecar, finds no DB_USER, and reports a FALSE
+#      "cannot tell" while the real Job is fine.
+#
+#   2. THE REST OF THE CONTROL PLANE. The denylist named three workloads; the
+#      chart renders more (`egress-proxy`, `telemetry-collector`,
+#      `resource-monitor`, `gpu-device-plugin`, check-hooks). On a release named
+#      `tracebloc-ingest`, `tracebloc-ingest-egress-proxy-…` matches `/ingest/`
+#      and is on no denylist. The previous comment here claimed the list was
+#      "derived from the workloads this script already checks" -- it was derived
+#      from the two this script EXECS, which is not the same set as the ones that
+#      can COLLIDE, and that gap is the bug.
+#
+# The ingestion Job pod is named `f"ingest-job-{digest}"`
+# (`client-runtime/submit_ingestion_run.py:358`) -- a fixed producer-side prefix
+# no stage pod and no chart workload carries, whatever the table or release is
+# called. Anchoring on it is derived from the producer rather than restated
+# against the chart, so there is no longer a list to keep in sync: CONTROL_PLANE_RE
+# is retired rather than extended.
+#
 # `!seen++` rather than `exit`, matching `pod_of`. This pipeline is already
 # `|| true`-guarded so awk's `exit` was NOT an abort here -- unlike the bare
 # assignment `pod_of` fed -- but leaving one of the two spellings behind is how the
 # next reader concludes the early `exit` is fine.
+# ONE SPELLING, TWO CALLERS. Criterion 1 (below) and criterion 2's `scan_logs`
+# BOTH have to identify ingestion pods, and they used to say so separately -- an
+# awk regex here and a `grep -i` pattern there. Anchoring only this one left the
+# log scan still matching `tracebloc-stage-…`, so the gate reported a false
+# cannot-tell from criterion 2 while criterion 1 was correct: two copies of one
+# rule, drifting, which is this repo's rule 9. Both now read this constant.
+INGEST_POD_RE='^ingest-job-'
+
 ing=$(K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
-        | awk -v skip="$CONTROL_PLANE_RE" \
-              '$2=="Running" && tolower($1) ~ /ingest/ && tolower($1) !~ skip && !seen++ { print $1 }' || true)
+        | awk -v re="$INGEST_POD_RE" '$2=="Running" && tolower($1) ~ re && !seen++ { print $1 }' || true)
 if [ -z "$ing" ]; then
   untold "ingestion: no RUNNING ingestion pod. The gate needs a driven cycle, and the ingestion identity can only be read from a live pod -- kubectl exec requires a running container, so a Job pod that already Succeeded cannot be inspected. Run this check WHILE an ingestion run is in flight."
 else
@@ -392,8 +414,12 @@ scan_logs() {  # $1 = pod substring, $2 = label
   # If nothing is Running, that IS a cannot-tell and is still reported as one --
   # the doctrine that "could not look" must never render as "looked and clean" is
   # untouched.
+  # `-E`, so callers can pass an ANCHORED pattern. `jobs-manager` /
+  # `requests-proxy` are release-prefixed and stay substrings; ingestion passes
+  # $INGEST_POD_RE, because the stage pod and an `…ingest…`-named release both
+  # collide with a bare substring (backend#2887).
   matched=$(K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
-              | grep -i "$1" || true)
+              | grep -iE "$1" || true)
   pods=$(printf '%s\n' "$matched" | awk '$2=="Running"{print $1}')
   skipped=$(printf '%s\n' "$matched" | awk 'NF && $2!="Running"' | grep -c . || true)
   [ "${skipped:-0}" -gt 0 ] && note "$2: skipped ${skipped} non-Running pod(s) — a finished Job from an earlier cycle is not evidence about this one"
@@ -434,7 +460,7 @@ scan_logs() {  # $1 = pod substring, $2 = label
 
 scan_logs jobs-manager   "jobs-manager"
 scan_logs requests-proxy "requests-proxy"
-scan_logs ingest         "ingestion"
+scan_logs "$INGEST_POD_RE" "ingestion"
 
 # ---------------------------------------------------------------------------
 #  Criterion 3 — no silent shrink.
