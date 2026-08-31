@@ -59,9 +59,22 @@ name, so the rule holds whatever the chart calls its Secret.
    `dockerRegistry` key, no dockerconfigjson Secret, no `imagePullSecrets` — and
    never had one. For such a fleet this runbook is a no-op; stop here.
 
+   Reads once and judges on the **exit status**, because piping a failed `helm`
+   into `grep` is the fail-open shape this whole runbook is about: an empty
+   stdin matches nothing, and "nothing" is this check's *stop, no work here*
+   signal. A missing tunnel would tell you the fleet is already clean.
+
    ```bash
-   helm get values "$REL" -n "$NS" -a | grep -A6 '^dockerRegistry:' \
-     || echo "no dockerRegistry block -> nothing to migrate"
+   if vals=$(helm get values "$REL" -n "$NS" -a -o yaml 2>&1); then
+     if printf '%s\n' "$vals" | grep -A6 '^dockerRegistry:'; then
+       echo "^ this fleet HAS a registry credential in release values -- continue"
+     else
+       echo "no dockerRegistry block -> nothing to migrate on this fleet"
+     fi
+   else
+     echo "STOP: could not read the release -- this is NOT 'nothing to migrate':"
+     printf '%s\n' "$vals"
+   fi
    kubectl -n "$NS" get secrets --field-selector type=kubernetes.io/dockerconfigjson
    ```
 
@@ -98,7 +111,17 @@ export CHART=<the chart ref you already deploy>
 #     in a predictable path, on a shared bastion -- which is the exposure this
 #     whole migration exists to remove.
 umask 077
-helm get values "$REL" -n "$NS" -o yaml > /tmp/$REL-values-before.yaml
+# THE ROLLBACK IS THE ONE READ THAT MUST NOT FAIL SILENTLY. `>` creates the file
+# whether or not helm succeeds, so an unjudged read leaves an EMPTY rollback --
+# and you would find out at the worst moment, having already migrated. Worse, an
+# empty file handed to `helm upgrade -f` sets every value to the chart default.
+if ! helm get values "$REL" -n "$NS" -o yaml > /tmp/$REL-values-before.yaml; then
+  echo "STOP: could not read the release -- no rollback was captured. Do not continue."
+elif [ ! -s /tmp/$REL-values-before.yaml ]; then
+  echo "STOP: the rollback snapshot is EMPTY. Do not continue."
+else
+  echo "rollback captured: $(wc -l < /tmp/$REL-values-before.yaml) line(s)"
+fi
 python3 - <<'PY' > /tmp/$REL-values-new.yaml
 import os, sys, yaml
 v = yaml.safe_load(open(f"/tmp/{os.environ['REL']}-values-before.yaml"))
@@ -173,8 +196,17 @@ plausible fingerprint (`e3b0c442…`, the hash of the empty string) for a Secret
 that did not exist.
 
 ```bash
-# 1. the credential is out of release values
-helm get values "$REL" -n "$NS" -a | grep -A4 '^dockerRegistry:'
+# 1. the credential is out of release values -- READ ONCE, then judge. A failed
+#    helm call would otherwise print nothing, and "no dockerRegistry block" is
+#    indistinguishable from "the credential is gone", which is what this check
+#    is looking for.
+if dr=$(helm get values "$REL" -n "$NS" -a -o yaml 2>&1); then
+  printf '%s\n' "$dr" | grep -A4 '^dockerRegistry:' \
+    || echo "no dockerRegistry block at all -- unexpected here, investigate"
+else
+  echo "STOP: could not read the release -- this is NOT 'the credential is gone':"
+  printf '%s\n' "$dr"
+fi
 # expect exactly: create: false / existingSecret: <NEW>
 
 # 2. nothing anywhere still carries it -- READ ONCE, then judge (Bugbot on #916).
@@ -215,10 +247,41 @@ done
 Checks 1–3 all pass with a **broken** credential, because every running pod
 already has its images.
 
+The selector is `app.kubernetes.io/instance=$REL` on the **workloads**, and that
+is not interchangeable with what the pods carry. The chart's pod templates are
+labelled `app: manager`, `app: mysql-client`, `app: egress-proxy` and so on —
+they carry **no** `app.kubernetes.io/*` identity at all, and the chart's
+`app.kubernetes.io/name` is `client`, not `tracebloc`. A `delete pod -l
+app.kubernetes.io/name=tracebloc` therefore matches nothing, deletes nothing,
+and prints `No resources found` — after which the events check below reports a
+clean pull for a restart that never happened.
+
 ```bash
-kubectl -n "$NS" delete pod -l app.kubernetes.io/name=tracebloc --wait=false
-kubectl -n "$NS" get pods -w      # Ctrl-C once Running
-kubectl -n "$NS" get events --field-selector reason=Failed | grep -i "pull\|401\|429" || echo "no pull failures"
+restarted=$(kubectl -n "$NS" rollout restart deploy,daemonset \
+              -l "app.kubernetes.io/instance=$REL" 2>&1) || {
+  echo "STOP: rollout restart failed -- nothing was proved:"; printf '%s\n' "$restarted"; }
+printf '%s\n' "$restarted"
+# An empty match is the silent-no-op this step exists to avoid, so say so.
+[ -n "$restarted" ] || echo "STOP: the selector matched NO workloads -- nothing restarted, nothing pulled."
+
+kubectl -n "$NS" rollout status deploy -l "app.kubernetes.io/instance=$REL" --timeout=5m
+```
+
+Then read the events **once** and judge on the exit status, not on an empty
+pipeline — `grep` finding nothing in the output of a *failed* `kubectl` is
+indistinguishable from `grep` finding nothing in a healthy cluster:
+
+```bash
+if ev=$(kubectl -n "$NS" get events --field-selector reason=Failed 2>&1); then
+  if printf '%s\n' "$ev" | grep -i -E "pull|401|429"; then
+    echo "^ PULL FAILURES -- the credential did not work"
+  else
+    echo "no pull failures"
+  fi
+else
+  echo "STOP: could not read events -- this is NOT 'no pull failures':"
+  printf '%s\n' "$ev"
+fi
 ```
 
 ## Rollback

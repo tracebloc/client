@@ -88,6 +88,9 @@ cat > "$TMP/bin/helm" <<'STUB'
 cat "${STUB_RENDER_FILE:?STUB_RENDER_FILE unset}"
 STUB
 chmod +x "$TMP/bin/kubectl" "$TMP/bin/helm"
+# The REAL helm, captured BEFORE the stub goes on PATH. Assertion 8 renders the
+# actual chart; without this it would invoke the stub, get nothing, and refuse.
+REAL_HELM="$(command -v helm 2>/dev/null)"
 PATH="$TMP/bin:$PATH"; export PATH
 
 # A render referencing the pull Secret from BOTH namespaces -- the real shape.
@@ -395,6 +398,114 @@ else
     pass=$((pass + 1)); echo "  [ok]   check 2 reads once and judges on the exit status"
   else
     fail=$((fail + 1)); echo "  [bad]  check 2 does not test whether the helm read succeeded, so a failed call counts 0 matches and reads as clean" >&2
+  fi
+
+  # 7. PRECONDITION 1 is the same shape and was missed by #6, which keys on the
+  #    string `vals=$(helm get values` -- present in check 2 -- while the
+  #    precondition piped its own `helm get values` straight into `grep`. A
+  #    failed read there is worse than in the verify table: it tells the operator
+  #    the fleet has NOTHING to migrate, so staging/prod credentials stay in
+  #    release values and nobody looks again (Bugbot High on #916).
+  #
+  #    Keyed on the DEFECT, not on the fix: any `helm get values` whose output is
+  #    piped directly into `grep` on one line is the fail-open shape, wherever in
+  #    the doc it appears.
+  # Comment lines dropped, for the reason kubelet-arg-map-safety.sh gives at
+  # length: this doc DOCUMENTS the defect it fixed, so a check that reads prose
+  # fires on its own explanation rather than on a command.
+  if awk '/^[[:space:]]*```bash$/{inblk=1;next} /^[[:space:]]*```$/{inblk=0;next} inblk' "$RUNBOOK" \
+       | grep -v '^[[:space:]]*#' | grep -qE 'helm get values[^|]*\| *grep'; then
+    fail=$((fail + 1)); echo "  [bad]  a 'helm get values ... | grep' remains: an empty stdin from a FAILED read matches nothing, and 'nothing' is a success signal in this runbook" >&2
+  else
+    pass=$((pass + 1)); echo "  [ok]   no cluster read is piped straight into grep"
+  fi
+
+  # 8. THE FORCE-PULL SELECTOR MUST MATCH SOMETHING THE CHART RENDERS, and this is
+  #    DERIVED from the chart rather than compared against a remembered label
+  #    (CLAUDE.md rule 1). The doc used `-l app.kubernetes.io/name=tracebloc`,
+  #    which matches nothing twice over: the chart's pod templates carry only
+  #    `app: manager` / `app: mysql-client` / ... with no app.kubernetes.io/*
+  #    identity at all, and the chart's own app.kubernetes.io/name is `client`.
+  #    So the step billed as "the only proof the credential works" deleted
+  #    nothing, and the events check then reported a clean pull for a restart
+  #    that never happened (Bugbot High on #916).
+  sel="$(grep -oE -- '-l +"?app\.kubernetes\.io/[a-z]+=[^" ]+' "$RUNBOOK" \
+          | sed -E 's/^-l +"?//' | sort -u)"
+  if [ -z "$sel" ]; then
+    fail=$((fail + 1)); echo "  [bad]  the runbook names no app.kubernetes.io/* selector at all -- the force-pull step cannot be checked" >&2
+  else
+    "${REAL_HELM:-helm}" template rel "$ROOT/client" -n ns \
+        -f "$ROOT/client/ci/bm-values.yaml" > "$TMP/render.yaml" 2>/dev/null
+    if [ ! -s "$TMP/render.yaml" ]; then
+      fail=$((fail + 1)); echo "  [bad]  could not render the chart, so the selector could not be checked -- refusing to report it valid" >&2
+    else
+      while IFS= read -r one; do
+        [ -n "$one" ] || continue
+        key="${one%%=*}"; val="${one#*=}"
+        # `$REL` is whatever the operator sets; the render above uses `rel`.
+        [ "$val" = '$REL' ] && val=rel
+        # grep on a FILE, not a pipe: `grep -q` closes early and SIGPIPEs the
+        # writer, which is the pipefail early-close shape the org checker flags.
+        if grep -qE "^[[:space:]]+${key}: ${val}\$" "$TMP/render.yaml"; then
+          pass=$((pass + 1)); echo "  [ok]   selector $key=$val matches labels the chart renders"
+        else
+          fail=$((fail + 1)); echo "  [bad]  selector $key=$val matches NOTHING the chart renders -- the force-pull step would restart nothing and still report a clean pull" >&2
+        fi
+      done <<EOF
+$sel
+EOF
+    fi
+  fi
+
+  # 10. EVERY `helm get values` in a command line must be judged on its exit
+  #     status, not just the two that had named assertions. The file already
+  #     records "two reads, two failure modes, two assertions" -- there are now
+  #     THREE, and a per-read assertion misses the next one by construction. This
+  #     is the general form: any command line invoking `helm get values` that is
+  #     NOT of the shape `if <var>=$(helm get values ...)` is a finding.
+  #
+  #     It caught its own gap: assertions 6 and 7 were both green while verify
+  #     check 1 had gone back to an unjudged read, because 6 keys on check 2's
+  #     variable name and 7 keys on the one-line pipe.
+  unjudged=0
+  while IFS= read -r line; do
+    case "$line" in
+      *"helm get values"*)
+        # Two shapes JUDGE the read, and both are legitimate:
+        #   if var=$(helm get values ...)    capture, then branch on the status
+        #   if ! helm get values ... > file  redirect, then branch on the status
+        # The second matters because the rollback snapshot must write to a file:
+        # `>` creates it whether or not helm succeeds, so the status is the only
+        # thing separating a real snapshot from an empty one.
+        #
+        # ANCHORED AT THE START OF THE LINE. A `case` glob of `*"if "*"=$(helm get
+        # values"*` accepts `if true; then dr=$(helm get values ...)` -- the `if`
+        # tests something else entirely -- and its own mutation said so by staying
+        # green. The rule is that the `if` must test THIS command, so the shape has
+        # to be pinned from the first token.
+        if [[ "$line" =~ ^[[:space:]]*if[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=\$\(helm\ get\ values ]] \
+           || [[ "$line" =~ ^[[:space:]]*if[[:space:]]+!\ helm\ get\ values ]]; then
+          :
+        else
+          unjudged=$((unjudged + 1)); echo "      unjudged read: $(printf '%s' "$line" | sed 's/^ *//' | cut -c1-90)" >&2
+        fi ;;
+    esac
+  done <<EOF
+$(awk '/^[[:space:]]*```bash$/{inblk=1;next} /^[[:space:]]*```$/{inblk=0;next} inblk' "$RUNBOOK" \
+    | grep -v '^[[:space:]]*#' | grep 'helm get values')
+EOF
+  if [ "$unjudged" -eq 0 ]; then
+    pass=$((pass + 1)); echo "  [ok]   every 'helm get values' is judged on its exit status"
+  else
+    fail=$((fail + 1)); echo "  [bad]  $unjudged 'helm get values' read(s) are not judged on their exit status -- a failed call produces empty output, which every check here reads as good news" >&2
+  fi
+
+  # 9. and the step must NOTICE an empty match, because `rollout restart` over a
+  #    selector that hits nothing prints nothing and exits 0.
+  if grep -qE 'matched NO workloads' "$RUNBOOK"; then
+    pass=$((pass + 1)); echo "  [ok]   the force-pull step refuses an empty selector match"
+  else
+    fail=$((fail + 1)); echo "  [bad]  nothing checks that the restart actually matched a workload -- a no-op restart reads as a successful pull" >&2
   fi
 fi
 
