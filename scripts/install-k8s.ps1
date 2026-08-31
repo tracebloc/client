@@ -345,6 +345,15 @@ function Get-TrainingLimits {
 # Extracted as a function so the deadline/kill path is unit-testable (#412).
 function Wait-ProcessWithDeadline {
   param([object]$Process, [datetime]$Deadline, [string]$Message)
+  # Cache the OS handle NOW, while the process is still alive (before the wait
+  # loop). A Start-Process -PassThru process, once it exits and is reaped, can no
+  # longer report its exit code: .NET has released the handle and $Process.ExitCode
+  # reads back $null -- WaitForExit() alone does NOT prevent this. Touching .Handle
+  # here makes .NET retain the handle so .ExitCode survives the reap -- the same
+  # capture Install-TraceblocCli relies on. Field-proven on the Windows Server 2022
+  # journey host, where BOTH the WSL update and the Docker install rendered
+  # "exited " with an EMPTY code precisely because this cache was missing (backend#2849).
+  try { $null = $Process.Handle } catch {}
   $frames = $script:SpinnerFrames
   $f = 0
   Write-Host -NoNewline "  "
@@ -367,9 +376,24 @@ function Wait-ProcessWithDeadline {
   # misreads a SUCCESSFUL run as a failure -- the #611 field case: k3d printed
   # "Cluster created successfully!" with empty stderr, yet the install aborted with
   # the cluster actually up. WaitForExit() (bounded: the process has already exited)
-  # flushes the streams and guarantees ExitCode is populated for every caller.
+  # flushes the streams; together with the .Handle cache taken at entry -- which
+  # keeps .ExitCode readable after the process is reaped -- ExitCode is reliably
+  # populated for every caller.
   try { $Process.WaitForExit() } catch {}
   return $true
+}
+
+# Render a process exit code for a user-facing failure line so the slot is NEVER
+# blank (backend#2849). The .Handle cache above makes ExitCode reliable for a normal
+# non-zero exit, but a code can still be legitimately absent -- the spawn-failed and
+# timeout paths carry ExitCode $null by design -- and a blank "exited " drops the one
+# number that names the cause. A $null/empty/whitespace code renders as an explicit
+# "with no code reported" tail instead of nothing; a real code renders verbatim. Pure
+# and side-effect-free so the guarantee is directly unit-testable.
+function Format-ExitCode {
+  param($Code)
+  if ($null -eq $Code -or "$Code".Trim() -eq '') { return 'with no code reported' }
+  return "$Code"
 }
 
 # Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
@@ -1620,7 +1644,7 @@ function Update-Wsl {
   switch ($r.State) {
     'not-found' { Warn "Couldn't update WSL: wsl.exe wasn't found." }
     'timeout'   { Warn "Updating WSL timed out and was stopped." }
-    default     { Warn "Couldn't update WSL automatically (wsl exited $($r.ExitCode))." }
+    default     { Warn "Couldn't update WSL automatically (wsl exited $(Format-ExitCode $r.ExitCode))." }
   }
   $msiArch = if ((Get-WindowsArch) -eq 'arm64') { 'arm64' } else { 'x64' }
   Hint "Download the latest WSL MSI (wsl.<version>.$msiArch.msi) from https://github.com/microsoft/WSL/releases, run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
@@ -1819,7 +1843,7 @@ function Install-DockerDesktop {
       switch ($r.State) {
         'spawn-failed' { Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$($r.Output)" }
         'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
-        'failed'       { Err "Docker Desktop installation failed (installer exited $($r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+        'failed'       { Err "Docker Desktop installation failed (installer exited $(Format-ExitCode $r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
       }
       RefreshPath
     }
