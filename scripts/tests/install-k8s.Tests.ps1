@@ -690,6 +690,17 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" -SuccessExitCodes @(0, 3010)
     $r.State | Should -Be 'ok'; $r.ExitCode | Should -Be 3010
   }
+  It "a NULL ExitCode is NOT success -- `-contains` does not invert the null case (backend#2849 / Bugbot)" {
+    # PowerShell: `0 -eq $null` is $false and `@(0,3010,...) -contains $null` is $false,
+    # so a null code falls through to 'failed' exactly as the old `$p.ExitCode -eq 0`
+    # did -- the `-contains` swap does NOT make a missing code read as ok. (#913 makes a
+    # real null unlikely by caching .Handle; this pins the guard regardless.)
+    Mock Start-Process { [pscustomobject]@{ ExitCode = $null; HasExited = $true } }
+    Mock Wait-ProcessWithDeadline { $true }
+    $r = Invoke-TrackedInstall -FilePath "x" -ArgumentList @() -Label "t" -Tag "t" `
+      -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
+    $r.State | Should -Be 'failed'
+  }
   It "still FAILS a reboot code the caller did NOT declare (default success set is @(0))" {
     # The broadening is opt-in per caller: without -SuccessExitCodes, 3010 is a failure,
     # so no non-installer caller (k3d, cluster start) silently starts tolerating it.
