@@ -857,6 +857,34 @@ _backend_url() {
   esac
 }
 
+# The DASHBOARD for this environment — where a human goes to create a client,
+# read their credentials, or see whether it came online (backend#2849).
+#
+# THE BASH TWIN OF Get-TraceblocDashboardUrl. The PowerShell side was fixed
+# first; Bugbot caught that this half still hardcoded production at ten sites
+# while `_backend_url` directly above was correctly env-aware — so a
+# `CLIENT_ENV=dev` install on Linux or macOS still sent the operator to
+# ai.tracebloc.io for credentials `dev-api` then rejects. Same defect, other half
+# of the contract.
+#
+# The hosts are the backend's OWN per-environment settings, not a guess:
+# DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL in
+# xraybackend/settings/{dev,stg,prod}.py resolve to dev.tracebloc.io,
+# stg.tracebloc.io and ai.tracebloc.io. Same `tb_client_env` alias reduction and
+# the same unknown->prod fallback as `_backend_url`, so the two can never
+# disagree about which environment an install belongs to.
+#
+#   $1 = path under the dashboard (default "clients"; pass "" for the bare host)
+_dashboard_url() {
+  local path="${1-clients}" base
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
+    dev) base='https://dev.tracebloc.io' ;;
+    stg) base='https://stg.tracebloc.io' ;;
+    *)   base='https://ai.tracebloc.io' ;;
+  esac
+  if [[ -n "$path" ]]; then printf '%s/%s' "$base" "$path"; else printf '%s' "$base"; fi
+}
+
 # Validate the entered Client ID / password against the backend's
 # api-token-auth/ endpoint — the same call jobs-manager makes at runtime —
 # using curl (already a dependency). Echoes: valid | invalid | inactive | unverified.
@@ -1307,7 +1335,7 @@ _tty_available() { [[ -r "$TB_TTY" ]]; }
 _no_interactive_creds_die() {
   error "No credentials supplied and no terminal to prompt on.
   Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
-  https://ai.tracebloc.io/clients), then re-run — under \`curl … | bash\` the
+  $(_dashboard_url)), then re-run — under \`curl … | bash\` the
   prompt cannot read your input."
 }
 
@@ -1951,7 +1979,7 @@ install_client_helm() {
     info "Verifying credentials with tracebloc…"
     case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
       valid)      success "Credentials verified." ;;
-      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at https://ai.tracebloc.io/clients and re-run." ;;
+      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at $(_dashboard_url) and re-run." ;;
       inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
     esac
@@ -1973,7 +2001,7 @@ install_client_helm() {
   hint "Already have one? Enter its credentials below — or set"
   hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."
   hint "Need one? Create it (free) at:"
-  echo -e "    ${BOLD}${WHITE}https://ai.tracebloc.io/clients${RESET}"
+  echo -e "    ${BOLD}${WHITE}$(_dashboard_url)${RESET}"
   echo ""
 
   # Collect + verify credentials. The entered Client ID / password are checked
@@ -2010,18 +2038,18 @@ install_client_helm() {
         break ;;
       invalid)
         warn "That Client ID / password was rejected by tracebloc — please re-enter."
-        hint "Find your credentials at https://ai.tracebloc.io/clients" ;;
+        hint "Find your credentials at $(_dashboard_url)" ;;
       inactive)
         error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified)
         warn "Couldn't reach tracebloc to verify your credentials right now — continuing."
-        hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+        hint "If they are wrong, your client will stay offline at $(_dashboard_url) after install."
         break ;;
     esac
 
     _cred_attempt=$((_cred_attempt + 1))
     if [[ $_cred_attempt -ge $_cred_max ]]; then
-      error "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run."
+      error "Too many failed attempts. Double-check your credentials at $(_dashboard_url) and re-run."
     fi
     # Force an active re-entry on retry (don't silently reuse a rejected default).
     default_client_id=""; default_client_password=""
