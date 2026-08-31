@@ -348,7 +348,9 @@ Anything else — notably **Flannel alone** and a **self-managed AWS VPC CNI** �
 
 **Silent-no-enforcement risk:** If `networkPolicy.training.enabled: true` on a cluster whose CNI does not enforce, the policy is created but ignored. Customers must verify their CNI enforces NetworkPolicy before relying on this layer. We default the EKS `ci/eks-values.yaml` to `enabled: false` for this reason.
 
-> Verified 2026-06 on `tb-client-dev-templates` (EKS, **self-managed** VPC CNI, NetworkPolicy disabled): a DNS-only egress NetworkPolicy did **not** block `https://example.com` — the probe returned `200`. On such a fleet, flipping `allowExternalHttps=false` is **cosmetic**: the rule renders and nothing enforces it.
+> Verified 2026-06 on `tb-client-dev-templates` (then EKS **self-managed** VPC CNI, NetworkPolicy disabled): a DNS-only egress NetworkPolicy did **not** block `https://example.com` — the probe returned `200`. On such a fleet, flipping `allowExternalHttps=false` is **cosmetic**: the rule renders and nothing enforces it.
+>
+> **Updated 2026-08 — both tracebloc EKS fleets now enforce.** `tb-client-dev-templates` (dev/staging) and `tracebloc-clients-prod` (prod) have since moved to the **managed** `vpc-cni` add-on with `enableNetworkPolicy=true` (verified via `aws eks describe-addon --cluster-name <c> --addon-name vpc-cni --query addon.configurationValues` → `{"enableNetworkPolicy":"true"}`). Egress NetworkPolicy is now **enforced** on both — the "cosmetic" caveat above applied to the older self-managed CNI, not to the current state. (Standard-mode reconcile window still applies; the `egress-enforcement` seal check retries across it.)
 
 ### 5.2 Pod Security Admission
 
