@@ -111,6 +111,7 @@ spec:
         - name: {{ include "tracebloc.registrySecretName" . }}
       {{- end }}
       containers:
+        {{- $nvRes := ($nv.resources | default dict) }}
         - name: nvidia-device-plugin-ctr
           image: {{ include "tracebloc.image" (dict "repository" ($nv.repository | default "nvidia/k8s-device-plugin") "tag" ($nv.tag | default "v0.14.5") "digest" ($nv.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($nv.registry | default "nvcr.io"))) | quote }}
           env:
@@ -123,6 +124,30 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          # GUARANTEED QoS, deliberately (backend#2871). Vendored from the upstream
+          # manifest, which ships no resources at all -- so before this the pod was
+          # the only BestEffort workload in the chart alongside its AMD twin, i.e. the
+          # kernel OOM-killer's FIRST victim on the node.
+          #
+          # priorityClassName: system-node-critical (above) does NOT cover this. It
+          # ranks preemption and kubelet eviction; the kernel's oom_score_adj is driven
+          # by QoS class, and BestEffort scores +1000. So a node under memory pressure
+          # kills the device plugin, the node stops advertising nvidia.com/gpu, and
+          # EVERY GPU training pod on it goes Pending -- the least-protected pod on the
+          # node was the one all GPU work depends on.
+          #
+          # requests == limits on BOTH dimensions, which is what Guaranteed requires;
+          # anything less leaves it Burstable. Per-field `default` rather than a bare
+          # `toYaml` so a values file that sets `resources: null` cannot silently drop
+          # it back to BestEffort (the failure mode telemetryCollector/autoUpgrade/
+          # imageRefresh still have).
+          resources:
+            requests:
+              cpu: {{ $nvRes.cpu | default "50m" | quote }}
+              memory: {{ $nvRes.memory | default "64Mi" | quote }}
+            limits:
+              cpu: {{ $nvRes.cpu | default "50m" | quote }}
+              memory: {{ $nvRes.memory | default "64Mi" | quote }}
           volumeMounts:
             - name: device-plugin
               mountPath: /var/lib/kubelet/device-plugins
@@ -170,12 +195,22 @@ spec:
       {{- end }}
       containers:
         {{- $am := $dp.amd | default dict }}
+        {{- $amRes := ($am.resources | default dict) }}
         - name: amdgpu-dp-cntr
           image: {{ include "tracebloc.image" (dict "repository" ($am.repository | default "rocm/k8s-device-plugin") "tag" ($am.tag | default "latest") "digest" ($am.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($am.registry | default "docker.io"))) | quote }}
           securityContext:
             privileged: true
             capabilities:
               drop: ["ALL"]
+          # GUARANTEED QoS -- see the nvidia twin above for why this is not optional.
+          # Same cascade, and this container is additionally `privileged: true`.
+          resources:
+            requests:
+              cpu: {{ $amRes.cpu | default "50m" | quote }}
+              memory: {{ $amRes.memory | default "64Mi" | quote }}
+            limits:
+              cpu: {{ $amRes.cpu | default "50m" | quote }}
+              memory: {{ $amRes.memory | default "64Mi" | quote }}
           volumeMounts:
             - name: dp
               mountPath: /var/lib/kubelet/device-plugins
