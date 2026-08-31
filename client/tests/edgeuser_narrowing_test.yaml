@@ -48,6 +48,15 @@ set:
   clientId: "test-id"
   clientPassword: "test"
   storageClass.create: false
+  # backend#2892: helm-unittest renders CLUSTER-LESS, and the fail-closed guard
+  # refuses an unpinned rotation-on mint offline. dev's ByEnv default turns
+  # rotation ON, so every dev render here would otherwise hit that refusal. The
+  # pin sources root's value from tier 1 so the cluster-less render succeeds. It
+  # does NOT change whether rotation RESOLVES on (the dev ByEnv default still
+  # does that -- the `exists MYSQL_ROOT_PASSWORD` assertions below still prove the
+  # gate is on); it only supplies the value. The default-UNPINNED rotation render
+  # is a live-cluster property, driven in e2e (scripts/tests/e2e-auto-upgrade.sh).
+  mysqlRootPassword: "RotatedRootPw123"
 
 tests:
   # ---- default off: byte-identical ------------------------------------
