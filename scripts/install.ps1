@@ -646,8 +646,11 @@ function Invoke-Bootstrap {
 #
 # Can we prompt? Same predicate install-k8s.ps1 uses, deliberately: false under
 # CI, a service, or piped/redirected stdin -- every context where a hold would
-# be a hang and where no human is losing a window anyway. The e2e journey pipes
-# stdin, so it takes the no-hold path.
+# be a hang and where no human is losing a window anyway. Note this predicate is
+# a best-effort filter, NOT a guarantee: an interactive Windows desktop session
+# satisfies both conjuncts, so the e2e journey may well take the HOLD path. That
+# is safe because the hold is bounded (60s/run) and the exit code is unchanged --
+# the correctness of this function must not, and does not, rest on the predicate.
 function Test-BootstrapCanPrompt {
   try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
   catch { return $false }
@@ -665,6 +668,15 @@ function Complete-Bootstrap {
       Write-Host ""
       Write-Host "  This window closes when you press a key (or in ${HoldSec}s)." -ForegroundColor DarkGray
       $deadline = (Get-Date).AddSeconds($HoldSec)
+      # DRAIN FIRST. KeyAvailable reports whatever is sitting in the console input
+      # buffer, not a press since the hold began -- and install-k8s.ps1 just ran as a
+      # child on THIS console with 11 Read-Host sites. Any key the user tapped during
+      # a 15-40 minute install (an extra Enter at a prompt, the trailing newline of
+      # `irm ... | iex`, a keystroke at the Docker spinner) is still queued, would make
+      # the `while` false on its FIRST evaluation, and would close the window over the
+      # summary -- reproducing the exact #577 failure this function exists to stop,
+      # under a line that just promised to wait.
+      while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
       while (-not [Console]::KeyAvailable -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
       if ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
     } catch {}
@@ -683,7 +695,13 @@ if (-not $env:TB_PESTER) {
     Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline
     Write-Host " This script is for Windows. On macOS / Linux use:" -ForegroundColor Red
     Write-Host "  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash" -ForegroundColor Cyan
-    Complete-Bootstrap -Code 1
+    # A BARE exit, deliberately, and the only one outside Complete-Bootstrap. This
+    # branch is reachable only on macOS/Linux (`Core -and -not $IsWindows`), where
+    # this script runs as a child `pwsh` and `exit` closes no window at all -- and
+    # where [Environment]::UserInteractive is hardcoded $true on non-Windows .NET,
+    # so Test-BootstrapCanPrompt would say "yes" and stall an instant, zero-cost
+    # bail-out for 60s. There is no window to lose here; holding only wastes time.
+    exit 1
   }
   # TLS 1.2 floor — Windows PowerShell 5.1 otherwise negotiates down to TLS 1.0.
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

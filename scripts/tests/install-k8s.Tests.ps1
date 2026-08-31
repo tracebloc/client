@@ -3284,19 +3284,62 @@ Describe "WSL update wiring (#414 source guards)" {
 
 # --- reboot persistence (Set-ClusterAutostart) -------------------------------
 Describe "Set-ClusterAutostart" {
+  # SEAM MOVED OUT ONE LAYER (backend#2849 review): both docker calls here are now
+  # bounded, so the mock is on Invoke-DockerCli, not the native `docker`. Same
+  # assertions -- one `update --restart` per node -- plus the timeout cases, which
+  # were unreachable while the calls were bare.
   AfterEach { $env:TRACEBLOC_NO_AUTOSTART = $null }
   It "sets unless-stopped on each k3d node" {
-    Mock docker {
-      if (($args -join ' ') -match 'ps -a') { return @("k3d-tracebloc-server-0", "k3d-tracebloc-serverlb") }
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') {
+        return [pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`nk3d-tracebloc-serverlb" }
+      }
+      return [pscustomobject]@{ Code = 0; Output = "" }
     }
     Set-ClusterAutostart
-    Should -Invoke docker -ParameterFilter { ($args -join ' ') -match 'update --restart unless-stopped' } -Times 2
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart unless-stopped' } -Times 2
   }
   It "TRACEBLOC_NO_AUTOSTART -> no docker calls" {
     $env:TRACEBLOC_NO_AUTOSTART = "1"
-    Mock docker { }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
     Set-ClusterAutostart
-    Should -Invoke docker -Times 0 -Exactly
+    Should -Invoke Invoke-DockerCli -Times 0 -Exactly
+  }
+  It "every docker call carries a timeout -- no bare probe left on the main install path" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0" } }
+    Set-ClusterAutostart
+    Should -Invoke Invoke-DockerCli -ParameterFilter { $TimeoutSec -gt 0 } -Times 2
+  }
+  It "a timed-out 'ps' SKIPS the pass instead of blocking, and never runs an update" {
+    # This is defensive housekeeping (k3d already sets unless-stopped), so a wedged
+    # daemon must cost a log line -- not the install. Previously the bare `ps`
+    # blocked here and Step 3 never printed anything.
+    Mock Log { }
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') { return [pscustomobject]@{ Code = 124; Output = "" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    { Set-ClusterAutostart } | Should -Not -Throw
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart' } -Times 0 -Exactly
+  }
+  It "a timed-out 'update' on one node does not abort the others" {
+    Mock Log { }
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') { return [pscustomobject]@{ Code = 0; Output = "n1`nn2" } }
+      return [pscustomobject]@{ Code = 124; Output = "" }
+    }
+    { Set-ClusterAutostart } | Should -Not -Throw
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart' } -Times 2
+  }
+  It "blank lines in the node list are not treated as nodes" {
+    # The native call returned an ARRAY; the wrapper returns a STRING, so the split
+    # is new code and a trailing newline would otherwise become a `docker update ""`.
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') { return [pscustomobject]@{ Code = 0; Output = "n1`n`n  `nn2`n" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Set-ClusterAutostart
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart' } -Times 2
   }
 }
 
@@ -3770,6 +3813,74 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $script:Src | Should -Not -Match '\(docker info'
   }
 
+  # THE CLASS, not one verb (backend#2849 review, @LukasWodka).
+  #
+  # The assertion above defends `docker info`. Its input domain is one needle, so
+  # a NEW unbounded call -- `docker ps -a`, `docker inspect`, `docker version` --
+  # walks straight past it while this Describe's name claims "every Docker/child
+  # wait". Lukas proved that by injecting one and watching 38 tests stay green.
+  #
+  # So assert the real property: no native `docker` invocation anywhere in this
+  # file is unbounded. Two bounding mechanisms are legitimate and both are
+  # recognised -- Invoke-DockerCli (which is not a native call at all, so it
+  # cannot match) and a `Start-Job` scriptblock reaped by Wait-JobWithProgress.
+  # Anything else is a hang against a wedged daemon.
+  #
+  # AST, NOT REGEX, and that is the load-bearing choice. Every text-level version
+  # of this either drowns in false positives -- this file has ~10 Log/return
+  # strings containing "docker run", "docker build", "docker exec" -- or gets
+  # narrowed until it is an instance guard again, which is exactly the failure
+  # being fixed. The PowerShell parser knows a command from a string, so the
+  # property can be stated once and stay true.
+  It "EVERY native docker call is bounded -- the class, not just 'docker info' (backend#2849 review)" {
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    # Fail CLOSED: an unparseable file must not read as "no unbounded calls".
+    $errors.Count | Should -Be 0 -Because "the installer must parse before this property means anything"
+    $ast | Should -Not -BeNullOrEmpty -Because "cannot read the installer AST"
+
+    $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+      Where-Object { $_.GetCommandName() -eq 'docker' }
+
+    # Sanity: this guard must be looking at something. If a refactor moves every
+    # docker call behind the wrapper, delete this line -- do not let it pass vacuously.
+    $native.Count | Should -BeGreaterThan 0 -Because "the AST query must still find native calls to judge"
+
+    $unbounded = @()
+    foreach ($c in $native) {
+      $p = $c.Parent; $inJob = $false
+      while ($p) {
+        if ($p -is [System.Management.Automation.Language.CommandAst] -and $p.GetCommandName() -eq 'Start-Job') { $inJob = $true; break }
+        $p = $p.Parent
+      }
+      if (-not $inJob) { $unbounded += "line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
+    }
+    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker call must go through Invoke-DockerCli or a Wait-JobWithProgress-reaped Start-Job"
+  }
+
+  It "the Start-Job docker sites are actually reaped on a deadline, not merely in a job" {
+    # "inside Start-Job" only bounds the call if something reaps the job. Without
+    # this, the guard above could be satisfied by wrapping a hang in a job and
+    # then waiting on it forever -- a bounded-looking unbounded wait.
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    $errors.Count | Should -Be 0
+
+    $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+      Where-Object { $_.GetCommandName() -eq 'docker' }
+    $native.Count | Should -BeGreaterThan 0
+
+    foreach ($c in $native) {
+      # walk out to the enclosing function and require a deadlined reap in its body
+      $fn = $c.Parent
+      while ($fn -and -not ($fn -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fn = $fn.Parent }
+      $fn | Should -Not -BeNullOrEmpty -Because "the docker call at line $($c.Extent.StartLineNumber) is not inside a function, so nothing owns its deadline"
+      $fn.Extent.Text | Should -Match 'Wait-JobWithProgress -Job \$\w+ -TimeoutSec \d+' -Because "$($fn.Name) runs docker in a job but does not reap it on a deadline"
+    }
+  }
+
   It "the engine probe goes through the bounded wrapper, with a timeout" {
     $script:Src | Should -Match 'function Test-DockerEngineUp'
     $script:Src | Should -Match 'Invoke-DockerCli -DockerArgs @\("info", "--format", "\{\{\.ID\}\}"\) -TimeoutSec \d+'
@@ -3795,8 +3906,24 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     # `$waitMin * 20` assumed every pass costs exactly its 3s sleep, which stops
     # being true the moment a probe blocks -- so the cap the code believed it had
     # was not a time bound at all.
-    $script:Src | Should -Match '\$dockerDeadline = \(Get-Date\)\.AddMinutes\(\$waitMin\)'
+    $script:Src | Should -Match '\$dockerStart\s+= Get-Date'
+    $script:Src | Should -Match '\$dockerDeadline = \$dockerStart\.AddMinutes\(\$waitMin\)'
     $script:Src | Should -Match '\(Get-Date\) -lt \$dockerDeadline'
+    # the iteration counter is GONE, not merely unused -- `$waitMin * 20` was the
+    # thing that made a cap look like a time bound.
+    $script:Src | Should -Not -Match '\$maxWait'
+  }
+
+  It "the ELAPSED the user reads comes from the same clock as the deadline" {
+    # Bugbot + review: the deadline became wall-clock but the label still divided
+    # the iteration counter by 20, i.e. assumed a 3s pass. With the probe capped
+    # at 15s a wedged-daemon pass costs ~18s, so the loop exited at ~10 REAL
+    # minutes still printing "1 min elapsed", immediately before "didn't come up
+    # within 10 minutes". The status line exists to be honest on exactly that
+    # pathology, so it must not be derived from a counter.
+    $script:Src | Should -Match '\$elapsedMin = \[math\]::Floor\(\(\(Get-Date\) - \$dockerStart\)\.TotalMinutes\)'
+    $script:Src | Should -Match '\$elapsedMin -ge 1'
+    $script:Src | Should -Not -Match 'Floor\(\$i / 20\)'
   }
 
   It "the runtime preflight readers fall back to null on a timeout, not hang" {

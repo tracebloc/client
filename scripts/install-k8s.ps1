@@ -1992,19 +1992,29 @@ function Install-DockerDesktop {
     # which is what Docker Desktop leaves behind when it starts and then gives up
     # -- makes each probe block instead, so the loop could run far past the cap it
     # believes it has, with the spinner still turning. The probe is bounded below
-    # AND the deadline is now real, so `$waitMin` means minutes either way.
-    $maxWait = $waitMin * 20                     # 3s per iteration
-    $dockerDeadline = (Get-Date).AddMinutes($waitMin)
+    # AND the deadline is now real, so `$waitMin` means minutes either way. The
+    # iteration counter is gone entirely: with the bound expressed as a deadline
+    # there is nothing left for it to do, and keeping it invites the same
+    # iterations-are-seconds slip back in.
+    $dockerStart    = Get-Date
+    $dockerDeadline = $dockerStart.AddMinutes($waitMin)
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
-    for ($i = 1; $i -le $maxWait -and (Get-Date) -lt $dockerDeadline; $i++) {
+    while ((Get-Date) -lt $dockerDeadline) {
       Start-Sleep -Seconds 3
       if (Test-DockerEngineUp) { $dockerRunning = $true; break }
       # Honest elapsed status after the first minute — silent dead air on a
-      # slow first start reads as a hang.
+      # slow first start reads as a hang. Derived from the SAME clock as the
+      # deadline: an iteration counter is not a time (backend#2849 review). With
+      # the probe capped at 15s a wedged-daemon pass costs ~18s, not 3s, so
+      # `$i / 20` advanced ~6x slower than real time -- the loop would exit at 10
+      # real minutes still reading "1 min elapsed", immediately followed by
+      # "didn't come up within 10 minutes". The label exists to be honest on
+      # exactly the pathology this ticket is about.
+      $elapsedMin = [math]::Floor(((Get-Date) - $dockerStart).TotalMinutes)
       $label = " Waiting for Docker..."
-      if ($i -ge 20) { $label = " Waiting for Docker... ($([math]::Floor($i / 20)) min elapsed; a first start can take up to $waitMin)" }
+      if ($elapsedMin -ge 1) { $label = " Waiting for Docker... ($elapsedMin min elapsed; a first start can take up to $waitMin)" }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
       Write-Host $label -NoNewline
@@ -3072,12 +3082,20 @@ function Write-K3dRegistriesConfig {
 # Opt out with TRACEBLOC_NO_AUTOSTART=1.
 function Set-ClusterAutostart {
   if ($env:TRACEBLOC_NO_AUTOSTART) { return }
+  # BOUNDED (backend#2849 review). Both calls ran bare, and this function is on
+  # the MAIN install path -- against the wedged daemon this ticket is about, the
+  # `ps` blocks and the install stops here with a spinner and no message. This is
+  # defensive housekeeping, so a timeout is a skip, never a failure: k3d already
+  # sets unless-stopped, which is why this can be dropped without a remedy.
   try {
-    $nodes = docker ps -a --filter "name=k3d-$CLUSTER_NAME-" --format "{{.Names}}" 2>$null
+    $psr = Invoke-DockerCli -DockerArgs @("ps", "-a", "--filter", "name=k3d-$CLUSTER_NAME-", "--format", "{{.Names}}") -TimeoutSec 20 -StdoutOnly
+    if ($psr.Code -ne 0) { Log "docker ps (autostart) failed or timed out (exit $($psr.Code)); leaving k3d's own restart policy in place."; return }
+    $nodes = @("$($psr.Output)" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     foreach ($n in $nodes) {
-      if ($n) { docker update --restart unless-stopped $n 2>&1 | Out-Null }
+      $ur = Invoke-DockerCli -DockerArgs @("update", "--restart", "unless-stopped", $n) -TimeoutSec 20
+      if ($ur.Code -ne 0) { Log "docker update --restart on '$n' failed or timed out (exit $($ur.Code)); k3d's own policy still applies." }
     }
-    if ($nodes) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
+    if ($nodes.Count) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
   } catch {}
 }
 
@@ -4059,7 +4077,11 @@ function New-K3dCluster {
     # warn (the kubeconfig rewrite below still normalizes it to 127.0.0.1, so
     # reuse works). Silent if the serverlb can't be inspected.
     try {
-      $binds = (docker inspect "k3d-$CLUSTER_NAME-serverlb" --format '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}} {{end}}{{end}}' 2>$null | Out-String)
+      # BOUNDED (backend#2849 review): bare, and on the cluster-REUSE path -- the
+      # path a user takes precisely when a previous run left Docker unhappy.
+      # A timeout reads as "couldn't inspect", i.e. the documented silent skip.
+      $bindsRes = Invoke-DockerCli -DockerArgs @("inspect", "k3d-$CLUSTER_NAME-serverlb", "--format", '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}} {{end}}{{end}}') -TimeoutSec 20 -StdoutOnly
+      $binds = if ($bindsRes.Code -eq 0) { "$($bindsRes.Output)" } else { "" }
       if ($binds -match '0\.0\.0\.0' -and $binds -notmatch '127\.0\.0\.1') {
         Warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
         Hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
@@ -4075,7 +4097,13 @@ function New-K3dCluster {
     # (Bugbot #424). Path mirrors New-K3dCluster's mount destination.
     if ($env:TRACEBLOC_CA_BUNDLE -or $env:CURL_CA_BUNDLE) {
       $caMounts = ""
-      try { $caMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      # BOUNDED (backend#2849 review). A timeout leaves $caMounts empty, which is
+      # exactly what a failed inspect did before: the advisory is skipped, never
+      # inverted into a false "no CA mount" warning.
+      try {
+        $caRes = Invoke-DockerCli -DockerArgs @("inspect", "k3d-$CLUSTER_NAME-server-0", "--format", '{{range .Mounts}}{{println .Destination}}{{end}}') -TimeoutSec 20 -StdoutOnly
+        if ($caRes.Code -eq 0) { $caMounts = "$($caRes.Output)" } else { Log "docker inspect (CA mounts) failed or timed out (exit $($caRes.Code)); skipping the CA-trust advisory." }
+      } catch {}
       if ($caMounts -and ($caMounts -notmatch '(?m)^/etc/ssl/certs/tracebloc-mitm-ca\.crt\s*$')) {
         Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
         Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
@@ -4091,7 +4119,14 @@ function New-K3dCluster {
     # instead of the network export. Fail fast with the recreate remedy.
     if ($HOST_DATASET_DIR) {
       $dsMounts = ""
-      try { $dsMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      # BOUNDED (backend#2849 review). Empty on timeout, so the fail-fast below is
+      # SKIPPED rather than fired -- identical to a failed inspect today, and the
+      # only safe direction: inferring "no dataset mount" from a wedged daemon
+      # would abort a correctly-mounted cluster.
+      try {
+        $dsRes = Invoke-DockerCli -DockerArgs @("inspect", "k3d-$CLUSTER_NAME-server-0", "--format", '{{range .Mounts}}{{println .Destination}}{{end}}') -TimeoutSec 20 -StdoutOnly
+        if ($dsRes.Code -eq 0) { $dsMounts = "$($dsRes.Output)" } else { Log "docker inspect (dataset mount) failed or timed out (exit $($dsRes.Code)); skipping the bind-mount precondition." }
+      } catch {}
       if ($dsMounts -and ($dsMounts -notmatch '(?m)^/tracebloc-data\s*$')) {
         Warn "HOST_DATASET_DIR is set, but the existing '$CLUSTER_NAME' cluster has no /tracebloc-data bind mount."
         Hint "k3d bakes bind mounts in at create time - they can't be added to a running cluster. Re-using this"
@@ -7242,11 +7277,16 @@ function Invoke-DiagnoseBundle {
   $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
          "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
          (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
-         (helm version --short 2>&1 | Out-String), (docker version 2>&1 | Out-String))
+         (helm version --short 2>&1 | Out-String), "$((Invoke-DockerCli -DockerArgs @("version") -TimeoutSec 20).Output)")
   try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}
   ($h -join "`n") | Out-File (Join-Path $d "00-host.txt") -Encoding utf8
 
-  ((docker ps -a --filter "name=k3d-$cn-" 2>&1 | Out-String) + "`n" + (k3d cluster list 2>&1 | Out-String)) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
+  # BOUNDED (backend#2849 review), and this is the sharpest of the seven: the
+  # diagnose bundle is what a user runs BECAUSE Docker is wedged. Bare calls here
+  # hang the one tool meant to explain the hang, and support gets nothing. On a
+  # timeout the wrapper's synthetic text lands in the file, which is itself the
+  # finding.
+  ("$((Invoke-DockerCli -DockerArgs @("ps", "-a", "--filter", "name=k3d-$cn-") -TimeoutSec 20).Output)" + "`n" + (k3d cluster list 2>&1 | Out-String)) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
 
   if (Get-Command kubectl -ErrorAction SilentlyContinue) {
     (@("## nodes", (kubectl get nodes -o wide 2>&1 | Out-String),
