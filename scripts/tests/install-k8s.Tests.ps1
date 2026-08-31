@@ -3859,6 +3859,59 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker call must go through Invoke-DockerCli or a Wait-JobWithProgress-reaped Start-Job"
   }
 
+  It "the -Diagnose bundle has NO unbounded external read -- it must work when the box does not" {
+    # Bugbot (High) on the first pass of this PR, and it caught a real hole in the
+    # fix: `docker ps` was bounded but `k3d cluster list` in the SAME expression
+    # was not, and `Out-File` cannot run until both sides finish -- so the bundle
+    # still never appeared on a wedged engine. Bounding one tool is not the
+    # property; the property is that the bundle a user collects BECAUSE the
+    # machine is broken always gets written.
+    #
+    # Same AST reasoning as the docker guard: k3d/kubectl/helm all reach the
+    # engine or the API server behind it, and every one of them blocks.
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    $errors.Count | Should -Be 0
+
+    $fn = $ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-DiagnoseBundle' }, $true)
+    $fn.Count | Should -Be 1 -Because "cannot locate Invoke-DiagnoseBundle"
+
+    # Every external tool the bundle shells out to must go through a bounded
+    # wrapper. Native invocations of these are, by definition, not bounded.
+    $unbounded = $fn[0].FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and
+      $n.GetCommandName() -in @('docker','k3d','kubectl','helm') }, $true) |
+      ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Extent.Text)" }
+
+    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "the support bundle must never block on the dependency it exists to describe"
+  }
+
+  # NOTE: these use a REAL present tool (pwsh, which is running this suite) and a
+  # real absent one, deliberately. Mocking Get-Command hangs the run -- both the
+  # installer and Pester itself call it constantly -- so the presence check is
+  # exercised against the live command table instead.
+  It "a timed-out capture becomes DATA in the bundle, not a missing file" {
+    # The distinction that makes the bundle useful: "k3d cluster list timed out"
+    # is itself the finding support needs. Swallowing it to $null would hand them
+    # an empty section and no explanation.
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 124; Output = "" } }
+    $out = Invoke-DiagnoseCapture -FileName "pwsh" -Arguments @("-x") -TimeoutSec 5
+    $out | Should -Match 'FAILED or TIMED OUT'
+    $out | Should -Match 'exit 124'
+  }
+  It "a capture passes its deadline through and returns healthy output unchanged" {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "NAME  SERVERS`ntracebloc  1/1" } }
+    Invoke-DiagnoseCapture -FileName "pwsh" -Arguments @("-v") | Should -Match 'tracebloc  1/1'
+    Should -Invoke Invoke-BoundedProcess -ParameterFilter { $TimeoutSec -gt 0 } -Times 1
+  }
+  It "a missing tool is reported, not shelled out to" {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "x" } }
+    Invoke-DiagnoseCapture -FileName "tb-definitely-not-installed-xyz" -Arguments @("x") | Should -Match 'not installed'
+    Should -Invoke Invoke-BoundedProcess -Times 0 -Exactly
+  }
+
   It "the Start-Job docker sites are actually reaped on a deadline, not merely in a job" {
     # "inside Start-Job" only bounds the call if something reaps the job. Without
     # this, the guard above could be satisfied by wrapping a hang in a job and
@@ -4041,6 +4094,68 @@ Describe "No Read-Host is reachable without a Test-CanPrompt gate (the hang clas
       }
     }
     $unguarded.Count | Should -Be 0 -Because "these Read-Host sites can hang an unattended install: $($unguarded -join '; ')"
+  }
+}
+
+Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
+  # WAS HARDCODED TO PRODUCTION at all thirteen sites, while Get-BackendUrl
+  # right beside it was correctly env-aware. So a `CLIENT_ENV=dev` install sent
+  # the operator to ai.tracebloc.io for credentials that dev-api then rejects.
+  # Reported from a real dev install on Windows.
+  #
+  # The hosts are the BACKEND'S OWN settings, not a guess: DEVICE_VERIFICATION_URI
+  # / RESET_PASSWORD_URL in xraybackend/settings/{dev,stg,prod}.py.
+  AfterEach { $env:CLIENT_ENV = $null }
+
+  It "dev -> dev.tracebloc.io" {
+    $env:CLIENT_ENV = "dev"; Get-TraceblocDashboardUrl | Should -Be "https://dev.tracebloc.io/clients"
+  }
+  It "staging -> stg.tracebloc.io" {
+    $env:CLIENT_ENV = "staging"; Get-TraceblocDashboardUrl | Should -Be "https://stg.tracebloc.io/clients"
+  }
+  It "prod -> ai.tracebloc.io" {
+    $env:CLIENT_ENV = "production"; Get-TraceblocDashboardUrl | Should -Be "https://ai.tracebloc.io/clients"
+  }
+  It "unset or unknown -> prod, the same fallback Get-BackendUrl takes" {
+    $env:CLIENT_ENV = $null;      Get-TraceblocDashboardUrl | Should -Be "https://ai.tracebloc.io/clients"
+    $env:CLIENT_ENV = "whatever"; Get-TraceblocDashboardUrl | Should -Be "https://ai.tracebloc.io/clients"
+  }
+  It "honours the alias spellings the docs tell people to write" {
+    # The exact class backend#1745 cost us on Get-BackendUrl: `staging` fell
+    # through to prod. Same vocabulary, so it cannot drift apart here.
+    $env:CLIENT_ENV = "development"; Get-TraceblocDashboardUrl | Should -Match 'dev\.tracebloc\.io'
+    $env:CLIENT_ENV = "stg";         Get-TraceblocDashboardUrl | Should -Match 'stg\.tracebloc\.io'
+  }
+  It "takes a path, and an empty path gives the bare host" {
+    $env:CLIENT_ENV = "dev"
+    Get-TraceblocDashboardUrl 'my-use-cases' | Should -Be "https://dev.tracebloc.io/my-use-cases"
+    Get-TraceblocDashboardUrl ''             | Should -Be "https://dev.tracebloc.io"
+  }
+  It "and it AGREES with Get-BackendUrl about which environment this is" {
+    # The defect was precisely these two disagreeing. Pair them per environment
+    # rather than asserting each alone, so a future edit cannot split them.
+    foreach ($pair in @(@('dev','dev-api','dev.'), @('staging','stg-api','stg.'), @('production','//api','ai.'))) {
+      $env:CLIENT_ENV = $pair[0]
+      (Get-BackendUrl)             | Should -Match ([regex]::Escape($pair[1]))
+      (Get-TraceblocDashboardUrl)  | Should -Match ([regex]::Escape($pair[2]))
+    }
+  }
+  It "every dashboard host lives ONLY in the mapping" {
+    # The three hosts must appear exactly once each -- as the switch arms of
+    # Get-TraceblocDashboardUrl. A second occurrence is a site that went back to
+    # hardcoding, which is the whole defect.
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    foreach ($h in @('https://dev.tracebloc.io', 'https://stg.tracebloc.io', 'https://ai.tracebloc.io')) {
+      ([regex]::Matches($src, '"' + [regex]::Escape($h) + '"')).Count |
+        Should -Be 1 -Because "$h should be written once, in the mapping"
+    }
+  }
+  It "no LIVE dashboard link is hardcoded to production" {
+    # The sharp one: a hardcoded link always carries a PATH (/clients,
+    # /my-use-cases). The bare host with no path is only ever the mapping arm.
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    ([regex]::Matches($src, 'https://ai\.tracebloc\.io/[a-z-]')).Count |
+      Should -Be 0 -Because 'every live dashboard link must go through Get-TraceblocDashboardUrl'
   }
 }
 

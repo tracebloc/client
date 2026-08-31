@@ -1074,7 +1074,8 @@ Advanced configuration (environment variables):
 
 Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
   Set the client credentials as environment variables so nothing prompts:
-    TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from https://ai.tracebloc.io/clients
+    TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from your dashboard's Clients page
+                 (dev.tracebloc.io | stg.tracebloc.io | ai.tracebloc.io, per CLIENT_ENV)
     TRACEBLOC_CLIENT_NAME                             the name shown on your dashboard
   With those set (plus TRACEBLOC_SKIP_REBOOT_PROMPT=1, or -NoReboot), a
   console-less install runs end to end instead of blocking on a prompt.
@@ -5245,6 +5246,31 @@ function Get-BackendUrl {
   }
 }
 
+# The DASHBOARD for this environment -- where a human goes to create a client,
+# read their credentials, or see whether it came online (backend#2849).
+#
+# WAS HARDCODED TO PRODUCTION at every site, while Get-BackendUrl right above it
+# was correctly env-aware. So a `CLIENT_ENV=dev` install told the operator to
+# fetch credentials from ai.tracebloc.io -- the PROD dashboard -- and those
+# credentials are then rejected by dev-api. Reported from a real dev install.
+#
+# The hosts are the backend's OWN per-environment settings, not a guess:
+# `DEVICE_VERIFICATION_URI` / `RESET_PASSWORD_URL` in xraybackend/settings/
+# {dev,stg,prod}.py resolve to dev.tracebloc.io, stg.tracebloc.io and
+# ai.tracebloc.io respectively. Same vocabulary and same unknown->prod fallback
+# as Get-BackendUrl, so the two can never disagree about which environment an
+# install belongs to.
+function Get-TraceblocDashboardUrl {
+  param([string]$Path = "clients")
+  $base = switch ("$(Get-TraceblocClientEnv)") {
+    "dev"   { "https://dev.tracebloc.io" }
+    "stg"   { "https://stg.tracebloc.io" }
+    default { "https://ai.tracebloc.io" }
+  }
+  if ($Path) { return ($base + "/" + $Path) }
+  return $base
+}
+
 # Validate the entered Client ID / password against the backend's
 # api-token-auth/ endpoint -- the same call jobs-manager makes at runtime.
 # Returns: valid | invalid | inactive | unverified.
@@ -5788,7 +5814,7 @@ function Get-UnattendedCredentialRefusal {
           "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
           "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
           "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
-          "  Find them at https://ai.tracebloc.io/clients")
+          "  Find them at $(Get-TraceblocDashboardUrl)")
 }
 
 function Install-ClientHelm {
@@ -5846,10 +5872,10 @@ function Install-ClientHelm {
       $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
       if ($credStatus -eq "valid") { Ok "Credentials verified." }
       elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
-      elseif ($credStatus -eq "invalid") { Err "The supplied TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them at https://ai.tracebloc.io/clients and re-run." }
+      elseif ($credStatus -eq "invalid") { Err "The supplied TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them at $(Get-TraceblocDashboardUrl) and re-run." }
       else {
         Warn "Couldn't reach tracebloc to verify the supplied credentials right now - continuing."
-        Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+        Hint "If they are wrong, your client will stay offline at $(Get-TraceblocDashboardUrl) after install."
       }
     }
     default {
@@ -5894,7 +5920,7 @@ function Install-ClientHelm {
       Hint "platform so other collaborators can submit models for evaluation."
       Write-Host ""
       Hint "Create one here (free):"
-      Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
+      Write-Host "    " -NoNewline; Write-Host "$(Get-TraceblocDashboardUrl)" -ForegroundColor White
       Write-Host ""
 
       # Collect + verify credentials. The entered Client ID / password are checked
@@ -5932,15 +5958,15 @@ function Install-ClientHelm {
         elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
         elseif ($credStatus -eq "unverified") {
           Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
-          Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+          Hint "If they are wrong, your client will stay offline at $(Get-TraceblocDashboardUrl) after install."
           break
         } else {
           Warn "That Client ID / password was rejected by tracebloc - please re-enter."
-          Hint "Find your credentials at https://ai.tracebloc.io/clients"
+          Hint "Find your credentials at $(Get-TraceblocDashboardUrl)"
         }
 
         $credAttempt++
-        if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
+        if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at $(Get-TraceblocDashboardUrl) and re-run." }
         # Force active re-entry on retry (don't silently reuse a rejected default).
         $defaultClientId = ""; $defaultClientPassword = ""
       }
@@ -6414,7 +6440,7 @@ function Print-Summary {
       }
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
-      Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host "    $(Get-TraceblocDashboardUrl)" -ForegroundColor Cyan
       Write-Host ""
       Hint "Models other collaborators submit train on this machine -- your data never leaves it."
       Write-Host ""
@@ -6423,9 +6449,9 @@ function Print-Summary {
       Write-Host "  What to do next" -ForegroundColor Cyan
       Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
       Write-Host "       tracebloc data ingest ./data" -ForegroundColor Green
-      Write-Host "  2. Create your use case and invite other collaborators: https://ai.tracebloc.io/my-use-cases"
+      Write-Host "  2. Create your use case and invite other collaborators: $(Get-TraceblocDashboardUrl 'my-use-cases')"
       Write-Host ""
-      Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
+      Hint "Dashboard: $(Get-TraceblocDashboardUrl '')   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
       Write-Host ""
       Write-Host "  $line" -ForegroundColor Green
     }
@@ -6435,14 +6461,14 @@ function Print-Summary {
       Write-Host "  Components are still downloading/starting (first run can take a few minutes)."
       Write-Host "  Check progress:   " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host ""
-      Write-Host "  Your client will show as Online at https://ai.tracebloc.io/clients once it finishes."
+      Write-Host "  Your client will show as Online at $(Get-TraceblocDashboardUrl) once it finishes."
       Hint "Re-running this installer is safe."
     }
     "bad_creds" {
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red; Log "Couldn't connect - Client ID or password rejected by tracebloc."
       Write-Host ""
       Write-Host "  The environment installed, but tracebloc refused those credentials."
-      Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host "    1. Re-check them at $(Get-TraceblocDashboardUrl)" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
     }
     "image_pull_ca" {
@@ -7251,6 +7277,34 @@ function Edit-Redaction([string]$Path) {
   } catch {}
 }
 
+# EVERY external read in the support bundle is bounded (backend#2849 / Bugbot).
+#
+# THE WHOLE POINT of this bundle is that it works when the machine does not. An
+# operator runs `-Diagnose` BECAUSE Docker is wedged or the cluster is unreachable,
+# so a bare call here hangs the one tool meant to explain the hang and support
+# receives nothing at all. Bounding only the `docker` calls was not enough and
+# Bugbot was right to say so: `k3d cluster list` talks to the same engine, and it
+# shared an expression with a bounded docker call -- `Out-File` cannot run until
+# BOTH sides finish, so the file still never appeared. kubectl/helm reach the API
+# server behind that same engine and block the same way.
+#
+# A timeout is DATA, not an error: the synthetic text is written into the file, so
+# "k3d cluster list timed out after 20s" reaches support as a finding rather than
+# as a missing bundle. 20s is generous for a healthy tool and short enough that a
+# fully wedged box still produces a complete bundle in well under a minute.
+function Invoke-DiagnoseCapture {
+  param(
+    [Parameter(Mandatory)][string]$FileName,
+    [Parameter(Mandatory)][string[]]$Arguments,
+    [int]$TimeoutSec = 20
+  )
+  if (-not (Get-Command $FileName -ErrorAction SilentlyContinue)) { return "$FileName is not installed" }
+  $r = Invoke-BoundedProcess -FileName $FileName -Arguments $Arguments -TimeoutSec $TimeoutSec
+  $text = "$($r.Output)"
+  if ($r.Code -ne 0) { return "## $FileName $($Arguments -join ' ') -- FAILED or TIMED OUT (exit $($r.Code))`n$text" }
+  return $text
+}
+
 function Invoke-DiagnoseBundle {
   $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
   $base = if ($HOST_DATA_DIR) { $HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
@@ -7263,7 +7317,10 @@ function Invoke-DiagnoseBundle {
   # Namespace discovery (TB_NAMESPACE isn't set on a standalone diagnose run).
   $ns = $TB_NAMESPACE
   if (-not $ns) {
-    $jm = kubectl get pods -A 2>$null | Select-String '\-jobs-manager' | Select-Object -First 1
+    # bounded: this is the FIRST cluster read on a standalone diagnose run, so an
+    # unreachable API server used to hang before a single file was written.
+    $jm = (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A") -TimeoutSec 20 |
+             Select-String '\-jobs-manager' | Select-Object -First 1)
     if ($jm) { $ns = ($jm.ToString().Trim() -split '\s+')[0] }
   }
   if (-not $ns) { $ns = "default" }
@@ -7276,28 +7333,33 @@ function Invoke-DiagnoseBundle {
   # host / versions
   $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
          "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
-         (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
-         (helm version --short 2>&1 | Out-String), "$((Invoke-DockerCli -DockerArgs @("version") -TimeoutSec 20).Output)")
+         (Invoke-DiagnoseCapture -FileName "k3d" -Arguments @("version")),
+         (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("version","--client")),
+         (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("version","--short")),
+         "$((Invoke-DockerCli -DockerArgs @("version") -TimeoutSec 20).Output)")
   try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}
   ($h -join "`n") | Out-File (Join-Path $d "00-host.txt") -Encoding utf8
 
-  # BOUNDED (backend#2849 review), and this is the sharpest of the seven: the
-  # diagnose bundle is what a user runs BECAUSE Docker is wedged. Bare calls here
-  # hang the one tool meant to explain the hang, and support gets nothing. On a
-  # timeout the wrapper's synthetic text lands in the file, which is itself the
-  # finding.
-  ("$((Invoke-DockerCli -DockerArgs @("ps", "-a", "--filter", "name=k3d-$cn-") -TimeoutSec 20).Output)" + "`n" + (k3d cluster list 2>&1 | Out-String)) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
+  # BOTH sides bounded. Bounding only the docker half left the file unwritten
+  # anyway: `Out-File` waits for the whole expression, and `k3d cluster list`
+  # talks to the very engine that is wedged (Bugbot, High).
+  ("$((Invoke-DockerCli -DockerArgs @("ps", "-a", "--filter", "name=k3d-$cn-") -TimeoutSec 20).Output)" + "`n" +
+   (Invoke-DiagnoseCapture -FileName "k3d" -Arguments @("cluster","list"))) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
 
   if (Get-Command kubectl -ErrorAction SilentlyContinue) {
-    (@("## nodes", (kubectl get nodes -o wide 2>&1 | Out-String),
-       "## pods", (kubectl get pods -A -o wide 2>&1 | Out-String),
-       "## events", (kubectl get events -A 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
+    (@("## nodes",  (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","nodes","-o","wide")),
+       "## pods",   (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A","-o","wide")),
+       "## events", (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","events","-A"))) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
     foreach ($w in @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")) {
-      kubectl logs -n $ns "deploy/$w" --all-containers --tail=500 2>&1 | Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
+      # 30s: a log fetch legitimately streams more than a status read, and each
+      # workload gets its own deadline so one wedged deploy cannot eat the bundle.
+      Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("logs","-n",$ns,"deploy/$w","--all-containers","--tail=500") -TimeoutSec 30 |
+        Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
     }
   }
   if (Get-Command helm -ErrorAction SilentlyContinue) {
-    (@("## helm list", (helm list -A 2>&1 | Out-String), "## values", (helm get values $ns -n $ns 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "04-helm.txt") -Encoding utf8
+    (@("## helm list", (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("list","-A")),
+       "## values",    (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("get","values",$ns,"-n",$ns))) -join "`n") | Out-File (Join-Path $d "04-helm.txt") -Encoding utf8
   }
 
   Get-ChildItem -Path $base -Filter "install-*.log" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path $d $_.Name) -ErrorAction SilentlyContinue }
