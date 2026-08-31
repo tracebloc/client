@@ -1377,9 +1377,21 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
   run _write_kubelet_config
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   cfg="$output"
+  # The REAL requirement: the path is derived from HOST_DATA_DIR, the installer's
+  # own persistent directory. A literal `/tmp` check was wrong and CI caught it --
+  # the bats harness points HOST_DATA_DIR at a temp dir, so that assertion failed
+  # on the FIXTURE's path while the code was correct. It was testing the harness.
   [[ "$cfg" == "$HOST_DATA_DIR/"* ]] || { echo "not under HOST_DATA_DIR: $cfg"; return 1; }
-  [[ "$cfg" != /tmp/* && "$cfg" != /var/tmp/* ]] || { echo "ephemeral path: $cfg"; return 1; }
   [ -r "$cfg" ] || { echo "not readable: $cfg"; return 1; }
+
+  # And the resolver must not mint its own temp path, which is the actual defect
+  # (Bugbot High): a bind-mount source under mktemp/TMPDIR cannot be remounted
+  # after a reboot. Asserted on the resolver's source because it is environment-
+  # independent, unlike any statement about where /tmp happens to be today.
+  run declare -f _kubelet_config_path
+  [[ "$output" != *mktemp* ]] || { echo "resolver mints a temp path: $output"; return 1; }
+  [[ "$output" != *TMPDIR* ]] || { echo "resolver reads TMPDIR: $output"; return 1; }
+  [[ "$output" == *HOST_DATA_DIR* ]] || { echo "resolver ignores HOST_DATA_DIR: $output"; return 1; }
 }
 
 @test "kubelet config: rewriting it is idempotent, so a re-install does not fail" {
@@ -1405,6 +1417,52 @@ merge_setup() {                       # isolate HOME/KUBECONFIG from the real ma
     || { echo "the config is not mounted at TB_KUBELET_CONFIG_NODE_PATH"; return 1; }
   [[ "$output" == *"--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all"* ]] \
     || { echo "the kubelet is pointed somewhere other than the mount"; return 1; }
+}
+
+@test "existing cluster: no kubelet mount -> warns with a recreate hint, does NOT refuse" {
+  # Bugbot Medium on client#912. Every edge created before this change keeps the
+  # stock 85/80 thresholds, and a re-run used to say "already running" without
+  # looking. WARN not error, deliberately: a missing bound is today's status quo
+  # everywhere, so refusing would turn every ordinary re-run into a hard failure.
+  docker() { if [[ "$1" == inspect ]]; then printf '/tracebloc\n/etc/other\n'; return 0; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || { echo "refused instead of warning: $output"; return 1; }
+  [[ "$output" == *"stock 85% image-GC threshold"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"k3d"* ]] || { echo "no explanation of why it cannot be added live"; return 1; }
+}
+
+@test "existing cluster: kubelet mount present -> silent" {
+  docker() { if [[ "$1" == inspect ]]; then printf '/tracebloc\n%s\n' "$TB_KUBELET_CONFIG_NODE_PATH"; return 0; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"stock 85%"* ]] || { echo "warned on a cluster that IS bounded: $output"; return 1; }
+}
+
+@test "existing cluster: node not inspectable -> no-op, not a false warning" {
+  # 'cannot tell' must not read as 'missing' here: the siblings all no-op, and
+  # warning about a mount we could not read would train people to ignore it.
+  docker() { if [[ "$1" == inspect ]]; then return 1; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || { echo "warned without reading the mounts: $output"; return 1; }
+}
+
+@test "existing cluster: docker succeeds but lists NO mounts -> no-op, not a warning" {
+  # Distinct from the case above and it needs its own test: there, docker EXITS
+  # non-zero and the `|| return 0` catches it. Here docker succeeds and prints
+  # nothing, which only the `-z "$mounts"` guard catches. Without this case that
+  # guard was vacuous -- the mutation removing it stayed green.
+  docker() { if [[ "$1" == inspect ]]; then printf ''; return 0; fi; command docker "$@"; }
+  run _check_existing_cluster_kubelet_config
+  [ "$status" -eq 0 ] || return 1
+  [ -z "$output" ] || { echo "warned on an empty mount list: $output"; return 1; }
+}
+
+@test "existing cluster: the kubelet check is actually WIRED into the existing path" {
+  # A check nobody calls is the whole class this repo keeps closing. Asserted on
+  # code, with comment lines stripped -- the block above names the function in prose.
+  run bash -c "grep -v '^[[:space:]]*#' '${SCRIPTS_DIR}/lib/cluster.sh' | grep -c '_check_existing_cluster_kubelet_config'"
+  [ "$output" -ge 2 ] || { echo "defined but never called (count=$output)"; return 1; }
 }
 
 @test "kubelet config: the reclaim band is wider than one task image's worth" {

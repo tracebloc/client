@@ -912,6 +912,7 @@ _handle_existing_cluster() {
   _check_existing_cluster_ca
   _check_existing_cluster_bind
   _check_existing_cluster_dataset_mount
+  _check_existing_cluster_kubelet_config
   _check_existing_cluster_storage_mode
   _check_existing_cluster_k8s_version
   # GPU capability is fixed at create time: a reused CPU-only node can't run GPU
@@ -1144,6 +1145,38 @@ _check_existing_cluster_bind() {
 # of the network export and vanish on a restart. Fail fast with the recreate
 # remedy rather than installing a quietly-misrouted dataset volume. No-op when
 # HOST_DATASET_DIR is unset or the node can't be inspected.
+# The image-GC drop-in is a create-time bind mount too, so a cluster made before
+# backend#2634 -- or by an older installer -- keeps the kubelet's stock 85/80
+# thresholds forever, and a re-run used to print "Secure environment already
+# running" without looking (Bugbot, Medium, on client#912). Every already-created
+# edge is exactly the population this ticket is about.
+#
+# WARN, DO NOT REFUSE, and that is the deliberate difference from the dataset
+# check above. A missing dataset mount puts customer data on ephemeral storage, so
+# refusing is right there. A missing image-GC bound is the status quo everywhere
+# today: erroring would turn every ordinary re-run on an existing cluster into a
+# hard failure and strand operators mid-install. The remedy is a recreate at a
+# time of their choosing, so this states the consequence and offers the hint.
+#
+# No-op when the node cannot be inspected -- consistent with its siblings, and the
+# honest answer when the mount cannot be read at all.
+_check_existing_cluster_kubelet_config() {
+  local mounts
+  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+    --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  [[ -z "$mounts" ]] && return 0
+  if ! grep -qx "${TB_KUBELET_CONFIG_NODE_PATH}" <<<"$mounts"; then
+    echo ""
+    warn "The existing '$CLUSTER_NAME' cluster has no kubelet config mount, so its nodes keep the stock 85% image-GC threshold."
+    hint "Training images are 2.7-11 GB each and floating tags leave the previous digest resident on every"
+    hint "republish, so the node fills until garbage collection and disk-pressure eviction start DURING a"
+    hint "training run. k3d bakes bind mounts in at create time, so this cannot be added to a running cluster."
+    hint "The install will proceed. To bound the image store, recreate the cluster when convenient:"
+    _recreate_cluster_hint
+    echo ""
+  fi
+}
+
 _check_existing_cluster_dataset_mount() {
   [[ -z "${HOST_DATASET_DIR:-}" ]] && return 0
   local mounts
