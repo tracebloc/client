@@ -1026,7 +1026,18 @@ Describe "Write-NotReadyDetail (#425 failure copy carries the event text)" {
 }
 
 Describe "Print-Summary" {
-  BeforeEach { $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false }
+  # NO REAL PROCESSES (Bugbot, on this PR). Print-Summary reaches Get-ChartVersion,
+  # whose `helm list` is bounded now -- and Invoke-BoundedProcess calls
+  # [Process]::Start directly, so it does NOT see the suite's `function helm` stub
+  # at the top of this file. Two "connected" cases here were therefore spawning the
+  # REAL helm against whatever kubeconfig the machine has. Measured against develop:
+  # exactly 3 tests in this file gained a real spawn from this PR, and two are here.
+  # A Describe-level default covers every case; the ones needing a specific answer
+  # override it with their own Mock.
+  BeforeEach {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "" } }
+    $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+  }
   It "connected: Connected + trust claim" {
     $script:ClientState = "connected"
     $out = Print-Summary 6>&1 | Out-String
@@ -1059,6 +1070,9 @@ Describe "Print-Summary" {
     $out = Print-Summary 6>&1 | Out-String
     $out | Should -Match "Version"
     $out | Should -Match "1\.4\.4"
+    # The mock must actually have INTERCEPTED. If the seam moves again this fails
+    # loudly instead of silently shelling out to the real helm (Bugbot).
+    Should -Invoke Invoke-BoundedProcess -Times 1 -Exactly
   }
   It "connected: a timed-out helm leaves the version 'unknown' instead of hanging the summary" {
     # Previously unreachable: the bare `helm list` blocked instead of returning, so
@@ -3395,9 +3409,17 @@ Describe "Invoke-DiagnoseBundle" {
     $HOST_DATA_DIR = Join-Path $TestDrive "tb"
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     "clientPassword: 'LEAKME123'" | Set-Content (Join-Path $HOST_DATA_DIR "values.yaml")
-    Mock kubectl { "" }; Mock docker { "" }; Mock helm { "" }; Mock k3d { "" }
+    # MOCK THE SEAM THAT IS ACTUALLY USED (Bugbot). The bundle's reads now go through
+    # Invoke-BoundedProcess, which calls [Process]::Start directly and so bypasses
+    # both the `function kubectl/docker/helm/k3d` stubs at the top of this file and
+    # any `Mock kubectl`. Left as-is, this test spawned the REAL kubectl, docker,
+    # helm and k3d -- against the machine's live kubeconfig -- while claiming to
+    # test redaction of a seeded secret.
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "" } }
     Mock Get-WindowsArch { "amd64" }   # avoid the PROCESSOR_ARCHITECTURE Err off-Windows
     { Invoke-DiagnoseBundle } | Should -Not -Throw
+    # and prove the collectors went through it, so a future seam move is loud
+    Should -Invoke Invoke-BoundedProcess -Times 1
     $zip = Get-ChildItem $HOST_DATA_DIR -Filter 'tracebloc-diagnose-*.zip' | Select-Object -First 1
     $zip | Should -Not -BeNullOrEmpty
     $ex = Join-Path $TestDrive "ex"
