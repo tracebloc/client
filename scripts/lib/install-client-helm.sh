@@ -1643,6 +1643,28 @@ _mysql_engine_decision() {
   esac
 }
 
+# Dev-mode (TRACEBLOC_VALUES_FILE) engine resolution — DELIBERATELY not the auto
+# rule above. When the caller supplies a values file, install_client_helm deploys
+# it AS-IS and never generates the mysqlClient override the normal path writes, so
+# the engine that RUNS is simply what the file declares: 8.4 iff it affirmatively
+# pins 8.4 (_values_pin_mysql_84), else the chart default, which is the amd64-only
+# 5.7 image. _mysql_engine_decision answers "8.4 fresh" for a fresh arm64 host
+# PRECISELY because the normal path would generate that 8.4 override — one dev-mode
+# never writes. Consulting the auto rule for a dev-mode install is what let
+# backend#2854 pass preflight (auto -> 8.4 fresh, native, no gate) and then refuse
+# after the cluster was already up (dev-mode -> 5.7). This helper is the ONE reader
+# both the step-e install path and preflight's early arch gate share, so the two
+# cannot drift. Fail-closed: a missing/unreadable file reads as 5.7 (refuse rather
+# than false-pass). Echoes "<engine> values-file".
+_devmode_engine_decision() {
+  local vf="${TRACEBLOC_VALUES_FILE:-}"
+  if [[ -n "$vf" && -f "$vf" ]] && _values_pin_mysql_84 < "$vf"; then
+    echo "8.4 values-file"
+  else
+    echo "5.7 values-file"
+  fi
+}
+
 # The logging wrapper around the rule above: sets TB_MYSQL_ENGINE_RESOLVED and
 # narrates the choice. Kept separate so the rule can be consulted without
 # emitting an install-time log line (preflight would otherwise log the engine
@@ -1709,10 +1731,11 @@ _assert_engine_runs_on_this_arch() {
     *)
       return 0 ;;  # unknown OS: no emulation model — do not gate
   esac
-  # LINUX ONLY past here. Name the actual cause. Only `explicit`, `existing-release`
-  # and `existing-datadir` can reach here (`sticky`/`fresh` resolve to 8.4, `amd64`
-  # was returned above), but the reason is matched rather than assumed: a future
-  # reason must not inherit a claim about this host's data that may be false.
+  # LINUX ONLY past here. Name the actual cause. `explicit`, `existing-release`,
+  # `existing-datadir` and the dev-mode `values-file` (its own `*)` arm below) can
+  # reach here (`sticky`/`fresh` resolve to 8.4, `amd64` was returned above), but
+  # the reason is matched rather than assumed: a future reason must not inherit a
+  # claim about this host's data that may be false.
   case "${TB_MYSQL_ENGINE_REASON:-}" in
     explicit)
       warn "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it cannot run on ${ARCH}."
@@ -1863,14 +1886,13 @@ install_client_helm() {
     # backend#2146: gate the arch on the dev-mode path too, BEFORE helm deploys.
     # We install the caller's file as-is, so the engine that will run is whatever
     # the file declares — read THAT (do NOT re-resolve: a fresh resolution could
-    # pick 8.4 while the file pins the amd64-only 5.7) and ask the same question
-    # the normal path asks below.
-    if _values_pin_mysql_84 < "$values_file"; then
-      TB_MYSQL_ENGINE_RESOLVED="8.4"
-    else
-      TB_MYSQL_ENGINE_RESOLVED="5.7"
-    fi
-    TB_MYSQL_ENGINE_REASON="values-file"
+    # pick 8.4 while the file leaves the amd64-only 5.7 default in place) and ask
+    # the same question the normal path asks below. The SAME helper backs
+    # preflight's early arch gate, so the two can't drift and refuse at different
+    # steps (backend#2854).
+    local _dm_decision; _dm_decision="$(_devmode_engine_decision)"
+    TB_MYSQL_ENGINE_RESOLVED="${_dm_decision%% *}"
+    TB_MYSQL_ENGINE_REASON="${_dm_decision#* }"
     _assert_engine_runs_on_this_arch
   else
 

@@ -682,6 +682,73 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
   }
 }
 
+Describe "Format-ExitCode (backend#2849 the exit-code slot is never empty)" {
+  # backend#2849: the Windows journey printed "Docker Desktop installation failed
+  # (installer exited )" and "wsl exited " -- the ONE number that names the cause,
+  # dropped. Format-ExitCode is the guarantee that a failure line can never render a
+  # blank code, whatever the captured value.
+  It "renders a real code verbatim" {
+    Format-ExitCode 0   | Should -Be '0'
+    Format-ExitCode 1   | Should -Be '1'
+    Format-ExitCode 3   | Should -Be '3'
+    Format-ExitCode 137 | Should -Be '137'
+    Format-ExitCode -1  | Should -Be '-1'
+  }
+  It "never returns blank for an absent code ($null / empty / whitespace)" {
+    foreach ($code in @($null, '', '   ', "`t")) {
+      $out = Format-ExitCode $code
+      $out               | Should -Not -Match '^\s*$'     # not empty, not whitespace
+      $out               | Should -Be 'with no code reported'
+    }
+  }
+  It "no exit-code value can produce an empty slot in the failure message" {
+    # The load-bearing assertion for the acceptance criterion: build the SAME
+    # message the installer emits and prove the slot after 'exited ' is never blank,
+    # across every value ExitCode can carry (including the $null that shipped).
+    foreach ($code in @($null, '', '   ', "`t", 0, 1, 3, 137, -1)) {
+      $docker = "Docker Desktop installation failed (installer exited $(Format-ExitCode $code)). Install it manually and re-run."
+      $wsl    = "Couldn't update WSL automatically (wsl exited $(Format-ExitCode $code))."
+      $docker | Should -Match 'installer exited \S'       # a non-space char follows 'exited '
+      $docker | Should -Not -Match 'installer exited \)'  # never the empty "exited )"
+      $wsl    | Should -Match 'wsl exited \S'
+      $wsl    | Should -Not -Match 'wsl exited \)'
+    }
+  }
+}
+
+Describe "Wait-ProcessWithDeadline exit-code reliability (backend#2849 root cause)" {
+  BeforeAll { $script:WSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "caches \$Process.Handle before the wait loop (keeps .ExitCode readable after reap)" {
+    # A Start-Process -PassThru process, once reaped, reports a $null ExitCode unless
+    # its handle was retained while it was alive. The cache MUST precede the wait loop.
+    $script:WSRC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]*\$null = \$Process\.Handle[\s\S]*while \(-not \$Process\.HasExited\)'
+  }
+  It "actually touches .Handle at runtime" {
+    # Behavioral proof, not just a source grep: a fake process that records access.
+    $script:handleTouched = $false
+    $fake = [pscustomobject]@{ HasExited = $true }
+    $fake | Add-Member ScriptProperty Handle { $script:handleTouched = $true; [IntPtr]::Zero }
+    $fake | Add-Member ScriptMethod WaitForExit { }
+    $fake | Add-Member ScriptMethod Kill { }
+    Wait-ProcessWithDeadline -Process $fake -Deadline (Get-Date).AddMinutes(1) -Message "t" 6>$null | Out-Null
+    $script:handleTouched | Should -BeTrue
+  }
+}
+
+Describe "Failure lines route exit codes through Format-ExitCode (backend#2849 no drift)" {
+  BeforeAll { $script:FSRC = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw }
+  It "the Docker install failure renders via Format-ExitCode" {
+    $script:FSRC | Should -Match 'installer exited \$\(Format-ExitCode \$r\.ExitCode\)'
+  }
+  It "the WSL update failure renders via Format-ExitCode" {
+    $script:FSRC | Should -Match 'wsl exited \$\(Format-ExitCode \$r\.ExitCode\)'
+  }
+  It "no user-facing 'exited' line renders a bare \$r.ExitCode" {
+    # If a new call site reintroduces the raw form, this fails and points at it.
+    $script:FSRC | Should -Not -Match 'exited \$\(\$r\.ExitCode\)'
+  }
+}
+
 Describe "Get-ErrDetailLines (#423 honest failure output)" {
   BeforeEach { $script:LOG_FILE = "C:\Users\x\.tracebloc\install-20260729-000000.log" }
   AfterEach  { $script:LOG_FILE = $null }
@@ -1085,6 +1152,14 @@ Describe "Install-ClientHelm" {
   BeforeEach {
     $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false; $env:CLIENT_ENV = $null
     Mock helm { $global:LASTEXITCODE = 0 }
+    # AN OPERATOR IS AT THE TERMINAL for every test in this block -- the
+    # fallback-mode ones supply their answers with `Mock Read-Host`, which is
+    # only a faithful model of an install that CAN prompt. Under Pester the real
+    # Test-CanPrompt is $false (stdin is redirected), so without this the
+    # no-terminal refusal added in backend#2675 fires before any of them reach
+    # the path they are about. The refusal has its own Describe below, where the
+    # non-interactive case is the subject rather than the setup.
+    Mock Test-CanPrompt { $true }
   }
   # Step-4 provisioning state must never leak between tests (#388): unset means
   # the legacy fallback path, which is what the pre-#388 tests below drive.
@@ -3453,6 +3528,205 @@ Describe "Invoke-LeftoverDataGuard (Windows leftover-data guard; Bugbot r3655218
   }
 }
 
+Describe "Read-RebootChoice (the reboot prompt cannot hang an unattended install; backend#2675)" {
+  # WHAT THIS DEFENDS. The "Reboot now?" question sits on the path EVERY fresh
+  # Windows install takes -- a fresh host always has WSL2 / Virtual Machine
+  # Platform / Hyper-V still to enable -- and it used to call Read-Host
+  # unconditionally. With nobody at the console that call never returns, so the
+  # `exit 2` handoff below it never happens and the caller watches a live process
+  # do nothing. That is how the e2e Windows journey burned 22 minutes and
+  # reported a timeout with no cause.
+  #
+  # The prompt itself is unreachable from Pester (its caller ends in `exit 2`),
+  # which is exactly why the decision was lifted into this function.
+  It "does not prompt at all when there is no terminal" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the hang" }
+    Read-RebootChoice | Should -Be ""
+    Should -Invoke Read-Host -Times 0
+  }
+  It "an empty answer is 'no reboot', not a retry" {
+    # A terminal IS there and the user just presses Enter: Read-Host returns ""
+    # and the caller's ^[Yy]$ match falls through to Set-TbRerunHandoff +
+    # exit 2 -- the same handoff -NoReboot takes. (Bugbot: the first version
+    # mocked Test-CanPrompt false, so it re-covered the no-terminal early
+    # return and never drove Read-Host at all.)
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Read-RebootChoice | Should -Not -Match "^[Yy]$"
+    Should -Invoke Read-Host -Times 1
+  }
+  It "still asks when a terminal is there" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "y" }
+    Read-RebootChoice | Should -Be "y"
+    Should -Invoke Read-Host -Times 1
+  }
+  It "a Read-Host that throws is 'no reboot', not a crash" {
+    # Same shape as the leftover guard's prompt: a console that dies mid-question
+    # must not take the install with it.
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { throw "console gone" }
+    Read-RebootChoice | Should -Be ""
+  }
+}
+
+Describe "Unattended install with no credentials refuses instead of spinning (backend#2675)" {
+  # THE SPIN. Install-ClientHelm's `fallback` branch reads the credential with
+  # Read-Host and does `continue` on an empty answer WITHOUT charging an attempt
+  # against $credMax. With nothing on stdin that is an infinite loop printing
+  # "Client ID cannot be empty." -- an install that neither finishes nor fails,
+  # which reads to any caller exactly like the reboot-prompt hang above.
+  #
+  # Only the GUARD is exercised here: everything past it needs a live cluster.
+  # Err is mocked to throw, the way the leftover-guard tests do it.
+  BeforeEach {
+    $script:TB_PROV_MODE = "fallback"
+    $env:TRACEBLOC_CLIENT_ID = $null
+    $env:TRACEBLOC_CLIENT_PASSWORD = $null
+  }
+  It "no terminal + no credentials -> refuses, and never reaches a prompt" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the spin" }
+    Mock Err { throw "refused" }
+    Mock Step { }
+    { Install-ClientHelm } | Should -Throw
+    Should -Invoke Read-Host -Times 0
+  }
+  It "the refusal names the two variables that make the path unnecessary" {
+    # Whoever hits this is automating; the message has to be actionable, and the
+    # pair it names is the same one Get-ProvisioningPreset reads. Read straight
+    # off the pure function the branch passes to Err -- capturing it THROUGH a
+    # throwing mock bound differently on every Pester/PowerShell pairing in the
+    # CI matrix (three strategies, three version-specific failures), which is
+    # exactly why the message was lifted out, mirroring Read-RebootChoice.
+    $refusal = Get-UnattendedCredentialRefusal
+    $refusal | Should -Match 'TRACEBLOC_CLIENT_ID'
+    $refusal | Should -Match 'TRACEBLOC_CLIENT_PASSWORD'
+  }
+}
+
+Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#2675)" {
+  # The documented Windows entry point is `irm https://tracebloc.io/i.ps1 | iex`,
+  # and `iex` has nowhere to put a switch: install.ps1 forwards $args, and an
+  # `irm | iex` launch has none. So without this variable there was NO unattended
+  # way to opt out of the reboot prompt on Windows, while the bash twin has had
+  # one for as long as the GPU path has existed.
+  #
+  # Dot-sourced into a CHILD SCOPE (`& { . $ps1; ... }`) so the binding is read
+  # from the script itself rather than asserted against its wording -- and so the
+  # $NoReboot this sets cannot leak into the rest of the suite.
+  BeforeAll { $script:Ps1 = Join-Path $PSScriptRoot "../install-k8s.ps1" }
+  AfterEach { $env:TRACEBLOC_SKIP_REBOOT_PROMPT = $null }
+
+  It "set -> -NoReboot is on without the switch" {
+    $env:TRACEBLOC_SKIP_REBOOT_PROMPT = "1"
+    (& { . $script:Ps1; [bool]$NoReboot }) | Should -BeTrue
+  }
+  It "unset -> -NoReboot stays off (the customer default still asks)" {
+    $env:TRACEBLOC_SKIP_REBOOT_PROMPT = $null
+    (& { . $script:Ps1; [bool]$NoReboot }) | Should -BeFalse
+  }
+}
+
+Describe "Read-ClientName (the client-name prompt cannot hang an unattended install; backend#2836)" {
+  # THE SECOND PROMPT. Right after the reboot question backend#2675 fixed, the
+  # PRIMARY provisioning path asks for a client name with Read-Host. With no
+  # console that call BLOCKS -- and the 3-try "empty Enter" loop is no defence,
+  # because a blocked Read-Host never returns to be retried. Gated on
+  # Test-CanPrompt, an unattended run gets "" and the caller fails closed naming
+  # TRACEBLOC_CLIENT_NAME. Extracted (like Read-RebootChoice) because the call
+  # site ends in Err, which no Pester mock can intercept.
+  It "does not prompt at all when there is no terminal" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the hang" }
+    Read-ClientName | Should -Be ""
+    Should -Invoke Read-Host -Times 0 -Exactly
+  }
+  It "returns the name a present operator types" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "acme-lab" }
+    Read-ClientName | Should -Be "acme-lab"
+    Should -Invoke Read-Host -Times 1 -Exactly
+  }
+  It "retries an empty answer up to three times, then gives up (never an infinite loop)" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Read-ClientName | Should -Be ""
+    Should -Invoke Read-Host -Times 3 -Exactly
+  }
+  It "a Read-Host that throws is 'no name', not a crash" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { throw "console gone" }
+    Read-ClientName | Should -Be ""
+  }
+}
+
+Describe "No Read-Host is reachable without a Test-CanPrompt gate (the hang class stays closed; backend#2836)" {
+  # THE CLASS, NOT THE INSTANCE. A Read-Host with nobody at the console does not
+  # fail, it HANGS -- backend#2675 fixed one such site, backend#2836's audit found
+  # six more. The durable fix is a RULE: every Read-Host in this installer must
+  # sit behind Test-CanPrompt, so an unattended run refuses or hands off instead
+  # of blocking. This asserts the rule against the parsed script, so a future
+  # unguarded Read-Host fails HERE, in CI, rather than in a customer's
+  # console-less install.
+  #
+  # "Guarded" = a Test-CanPrompt CALL appears, lexically before the Read-Host, in
+  # the Read-Host's own enclosing function -- or, for the load-time admin gate
+  # that has no enclosing function, earlier at script scope. Every real guard in
+  # this file has that shape: `if (Test-CanPrompt) { ...Read-Host... }`, an
+  # `if (-not (Test-CanPrompt)) { return/Err }` at the top of the function or
+  # branch, or `$canPrompt = Test-CanPrompt` before the gate. (Comments and
+  # strings that mention Read-Host are invisible to the AST, so they can't
+  # confuse this the way a grep would.)
+  #
+  # LIMITS, on purpose. This is lexical precedence, not true dominance -- a real
+  # dominance/data-flow check would have to follow the admin gate's
+  # `$canPrompt = Test-CanPrompt; if ($canPrompt)` indirection, which is more
+  # machinery than a guard test should carry. So it will MISS a future Read-Host
+  # dropped into the same function (or script scope) as an unrelated earlier
+  # Test-CanPrompt call, and it REQUIRES each prompt to carry its own gate rather
+  # than lean on a caller's. Both are acceptable here: it covers all 11 current
+  # sites and fails the moment any of their gates is removed (that is the
+  # regression this defends against); "self-guarded prompt" is a fine house rule.
+  BeforeAll {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $script:ReadHosts = @($ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Read-Host'
+    }, $true))
+    $script:CanPromptCalls = @($ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Test-CanPrompt'
+    }, $true))
+  }
+
+  It "the AST query actually found Read-Host sites (a zero-site guard is green and worthless)" {
+    $script:ReadHosts.Count | Should -BeGreaterThan 0
+  }
+
+  It "every Read-Host has a Test-CanPrompt gate before it in the same scope" {
+    $unguarded = @()
+    foreach ($rh in $script:ReadHosts) {
+      # Nearest enclosing function; $null => the Read-Host sits at script scope
+      # (the load-time admin gate), where the whole script is the search scope.
+      $fn = $rh.Parent
+      while ($fn -and -not ($fn -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fn = $fn.Parent }
+      $scopeStart = if ($fn) { $fn.Extent.StartOffset } else { 0 }
+      $scopeEnd   = if ($fn) { $fn.Extent.EndOffset }   else { [int]::MaxValue }
+      $gate = $script:CanPromptCalls | Where-Object {
+        $_.Extent.StartOffset -ge $scopeStart -and
+        $_.Extent.EndOffset   -le $scopeEnd   -and
+        $_.Extent.StartOffset -lt $rh.Extent.StartOffset
+      }
+      if (-not $gate) {
+        $where = if ($fn) { $fn.Name } else { "<script scope>" }
+        $unguarded += "line $($rh.Extent.StartLineNumber) (in $where)"
+      }
+    }
+    $unguarded.Count | Should -Be 0 -Because "these Read-Host sites can hang an unattended install: $($unguarded -join '; ')"
+  }
+}
+
 Describe "Test-ApiReachable (bounded probe gates helm; Bugbot)" {
   It "API answers within the timeout -> reachable" {
     Mock kubectl { $global:LASTEXITCODE = 0 }
@@ -4261,7 +4535,14 @@ Describe "Top-level error boundary: crashes become a clean message, never a stac
 
   It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
     $script:PSRC577 | Should -Match 'Show-FatalError \$_'
-    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+    # Anchor on the trap->try pair that opens the top-level boundary, NOT on a
+    # char-window from the TB_PESTER guard. That window (600 chars) only ever
+    # passed by coincidentally matching the admin gate's own inline `try`, ~1200
+    # chars nearer than the real boundary; removing that inline copy in
+    # backend#2836 (one Test-CanPrompt predicate, no inline duplicate) exposed
+    # the miscalibration. The main run's trap routes crashes to Show-FatalError
+    # and sits immediately above the top-level try.
+    $script:PSRC577 | Should -Match 'trap \{ Show-FatalError \$_[\s\S]{0,120}?\}\s*try \{'
   }
 
   It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
@@ -4611,7 +4892,10 @@ Describe "Cluster-create exit-code reliability (#611)" {
   It "Wait-ProcessWithDeadline calls WaitForExit before returning success" {
     # HasExited can flip true before redirected stdout/stderr drain, leaving
     # $proc.ExitCode null; WaitForExit flushes them so every caller reads a real code.
-    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,1600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
+    # Reliability is now co-guaranteed by the .Handle cache at the function's entry
+    # (backend#2849) -- asserted in "Wait-ProcessWithDeadline exit-code reliability
+    # (backend#2849 root cause)" -- so the header->WaitForExit window is wider than it was.
+    $script:CEC | Should -Match 'function Wait-ProcessWithDeadline[\s\S]{0,2600}\$Process\.WaitForExit\(\)[\s\S]{0,80}return \$true'
   }
 
   It "the null-exit fallback checks BOTH k3d streams (logrus success goes to stderr) (Bugbot)" {

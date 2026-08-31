@@ -238,3 +238,134 @@ tests:
           value: false
       - notExists:
           path: spec.template.spec.serviceAccountName
+
+  # ── QoS class (backend#2871) ────────────────────────────────────────────────
+  # These two DaemonSets were the ONLY BestEffort pods in the chart: vendored from
+  # upstream manifests that ship no resources, so the omission came along with them.
+  #
+  # Why it mattered more than for any other workload: if the device plugin is
+  # OOM-killed, the node stops advertising nvidia.com/gpu (or amd.com/gpu) and EVERY
+  # GPU training pod on it goes Pending. The least-protected pod on the node was the
+  # one all GPU work depended on.
+  #
+  # `priorityClassName: system-node-critical` does NOT cover this, and is why the gap
+  # looked closed: it ranks preemption and kubelet eviction, while the kernel's
+  # oom_score_adj comes from the QoS class (+1000 for BestEffort).
+  #
+  # WHAT THIS SUITE CAN AND CANNOT ASSERT: status.qosClass is computed by the API
+  # server, so helm unittest cannot read it. These tests assert the *inputs*
+  # Guaranteed requires — requests == limits on BOTH dimensions, and no container
+  # left without resources. The class itself needs a live-cluster assertion; that gap
+  # is backend#2872. A green run here is not proof of the class.
+  - it: the nvidia plugin has requests == limits on both dimensions (Guaranteed inputs)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 64Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 64Mi
+
+  - it: the amd plugin has requests == limits on both dimensions (Guaranteed inputs)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: amd
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 64Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 64Mi
+
+  # The regression that shipped the original bug is "no resources block at all", so
+  # assert PRESENCE independently of the values above — a future refactor that drops
+  # the block would otherwise only be caught incidentally.
+  - it: the nvidia plugin always carries a resources block (never BestEffort)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+    asserts:
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.requests
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits
+
+  - it: the amd plugin always carries a resources block (never BestEffort)
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: amd
+    asserts:
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.requests
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits
+
+  # A values file that clears the block must NOT silently return the pod to
+  # BestEffort. That is the live failure mode of telemetryCollector / autoUpgrade /
+  # imageRefresh, which render a bare `toYaml` with no per-field default. This
+  # template uses `| default` per field precisely so it cannot happen here.
+  - it: an explicit resources=null still renders the Guaranteed defaults, not BestEffort
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          nvidia:
+            resources: null
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 64Mi
+
+  # One pair drives both sides, so an operator cannot raise the request and leave the
+  # limit behind — which is how you lose Guaranteed without noticing.
+  - it: an operator override moves BOTH sides together, so the class cannot be lost
+    set:
+      gpu:
+        devicePlugin:
+          enabled: true
+          vendor: nvidia
+          nvidia:
+            resources:
+              cpu: 100m
+              memory: 128Mi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 128Mi

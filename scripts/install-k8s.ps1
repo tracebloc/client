@@ -26,6 +26,40 @@
 #Requires -Version 5.1
 param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [switch]$Resume)
 
+# --- TRACEBLOC_SKIP_REBOOT_PROMPT: the env-var twin of -NoReboot (backend#2675)
+# The documented Windows entry point is `irm https://tracebloc.io/i.ps1 | iex`,
+# and `iex` has nowhere to put a switch: install.ps1 forwards `$args` to this
+# script, and an `irm | iex` launch has no `$args`. So an unattended Windows
+# install -- CI, a scheduled task, an auto-logon session -- had NO way to say
+# "don't ask me about the reboot", while the bash twin has had one for as long
+# as the GPU path has existed (lib/gpu-nvidia.sh:53). This closes that asymmetry
+# with the SAME variable name, so one contract covers both platforms.
+#
+# Folded into $NoReboot rather than read at the prompt site so it also reaches
+# the elevated relaunch and the registered resume, both of which pass the SWITCH
+# on ($NoReboot is forwarded by Get-ElevationCommand / Register-ResumeAfterReboot
+# while TRACEBLOC_* env vars deliberately are not -- ShellExecute/RunAs does not
+# inherit the caller's environment). A run that opted out of the prompt must stay
+# opted out after it elevates, or the hang simply moves one process along.
+if ($env:TRACEBLOC_SKIP_REBOOT_PROMPT) { $NoReboot = $true }
+
+# --- Test-CanPrompt: the single "may I ask the operator?" predicate ----------
+# Defined HERE, at the very top, on purpose. The admin gate below runs at
+# script-LOAD time -- before any `function` further down is in scope -- and used
+# to re-derive this inline as its own `$canPrompt = ...` copy, so the two
+# definitions of "can we prompt" could drift apart (backend#2836). One predicate,
+# reachable by every caller including the load-time gate.
+#
+# False under CI / a service / piped or redirected stdin -- exactly the hosts
+# where a Read-Host would BLOCK FOREVER rather than fail. Every Read-Host in this
+# installer is gated on it; the Pester AST guard (backend#2836) asserts that no
+# Read-Host is reachable without it, so this predicate cannot silently regrow a
+# blind spot.
+function Test-CanPrompt {
+  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
+  catch { return $false }
+}
+
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
 # Run from a .ps1 on disk -> re-run that file; run via the documented one-liner
@@ -80,7 +114,7 @@ if (-not $env:TB_PESTER) {
     # Offer to self-elevate instead of only instructing (#421): a hospital user who
     # pasted into a normal PowerShell shouldn't have to know that "Terminal (Admin)"
     # is a separate thing to open. One consent -> one UAC prompt -> install proceeds.
-    $canPrompt = try { [Environment]::UserInteractive -and -not [Console]::IsInputRedirected } catch { $false }
+    $canPrompt = Test-CanPrompt   # one predicate (defined at top); was an inline copy that could drift (backend#2836)
     $elevated  = $false
     if ($canPrompt) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
@@ -328,6 +362,15 @@ function Get-TrainingLimits {
 # Extracted as a function so the deadline/kill path is unit-testable (#412).
 function Wait-ProcessWithDeadline {
   param([object]$Process, [datetime]$Deadline, [string]$Message)
+  # Cache the OS handle NOW, while the process is still alive (before the wait
+  # loop). A Start-Process -PassThru process, once it exits and is reaped, can no
+  # longer report its exit code: .NET has released the handle and $Process.ExitCode
+  # reads back $null -- WaitForExit() alone does NOT prevent this. Touching .Handle
+  # here makes .NET retain the handle so .ExitCode survives the reap -- the same
+  # capture Install-TraceblocCli relies on. Field-proven on the Windows Server 2022
+  # journey host, where BOTH the WSL update and the Docker install rendered
+  # "exited " with an EMPTY code precisely because this cache was missing (backend#2849).
+  try { $null = $Process.Handle } catch {}
   $frames = $script:SpinnerFrames
   $f = 0
   Write-Host -NoNewline "  "
@@ -350,9 +393,24 @@ function Wait-ProcessWithDeadline {
   # misreads a SUCCESSFUL run as a failure -- the #611 field case: k3d printed
   # "Cluster created successfully!" with empty stderr, yet the install aborted with
   # the cluster actually up. WaitForExit() (bounded: the process has already exited)
-  # flushes the streams and guarantees ExitCode is populated for every caller.
+  # flushes the streams; together with the .Handle cache taken at entry -- which
+  # keeps .ExitCode readable after the process is reaped -- ExitCode is reliably
+  # populated for every caller.
   try { $Process.WaitForExit() } catch {}
   return $true
+}
+
+# Render a process exit code for a user-facing failure line so the slot is NEVER
+# blank (backend#2849). The .Handle cache above makes ExitCode reliable for a normal
+# non-zero exit, but a code can still be legitimately absent -- the spawn-failed and
+# timeout paths carry ExitCode $null by design -- and a blank "exited " drops the one
+# number that names the cause. A $null/empty/whitespace code renders as an explicit
+# "with no code reported" tail instead of nothing; a real code renders verbatim. Pure
+# and side-effect-free so the guarantee is directly unit-testable.
+function Format-ExitCode {
+  param($Code)
+  if ($null -eq $Code -or "$Code".Trim() -eq '') { return 'with no code reported' }
+  return "$Code"
 }
 
 # Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
@@ -956,12 +1014,24 @@ Advanced configuration (environment variables):
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
+  TRACEBLOC_SKIP_REBOOT_PROMPT=1
+                 Same as -NoReboot, for the `irm ... | iex` entry point, which
+                 has no way to pass a switch (bash twin: same variable name)
   -Resume        Continue an install interrupted by a reboot (set automatically
                  by the registered RunOnce continuation; rarely needed by hand)
   HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
   TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
                  network, so in-cluster image pulls don't fail x509 (#424).
                  CURL_CA_BUNDLE is also honored.
+
+Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
+  Set the client credentials as environment variables so nothing prompts:
+    TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from https://ai.tracebloc.io/clients
+    TRACEBLOC_CLIENT_NAME                             the name shown on your dashboard
+  With those set (plus TRACEBLOC_SKIP_REBOOT_PROMPT=1, or -NoReboot), a
+  console-less install runs end to end instead of blocking on a prompt.
+  Note: TRACEBLOC_VALUES_FILE is a knob of the Linux (bash) installer only --
+  this Windows installer does not read it. Use the three variables above.
 
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
@@ -1600,10 +1670,36 @@ function Update-Wsl {
   switch ($r.State) {
     'not-found' { Warn "Couldn't update WSL: wsl.exe wasn't found." }
     'timeout'   { Warn "Updating WSL timed out and was stopped." }
-    default     { Warn "Couldn't update WSL automatically (wsl exited $($r.ExitCode))." }
+    default     { Warn "Couldn't update WSL automatically (wsl exited $(Format-ExitCode $r.ExitCode))." }
   }
   $msiArch = if ((Get-WindowsArch) -eq 'arm64') { 'arm64' } else { 'x64' }
   Hint "Download the latest WSL MSI (wsl.<version>.$msiArch.msi) from https://github.com/microsoft/WSL/releases, run it, then re-run this installer -- otherwise Docker Desktop will prompt you to install WSL."
+}
+
+# ASK ONLY IF SOMEONE CAN ANSWER (backend#2675). "Reboot now?" was the one
+# unguarded Read-Host on the install path -- the daily-user and leftover-data
+# prompts both sit behind Test-CanPrompt already -- and it is the one EVERY
+# fresh Windows install reaches, because a fresh host always has WSL2 / Virtual
+# Machine Platform / Hyper-V still to enable.
+#
+# An unanswerable prompt does not fail, it HANGS: Read-Host blocks on a console
+# nobody is typing into, so the `exit 2` that follows it -- this installer's
+# declared "reboot, then re-run" handoff -- is never reached, and whatever is
+# driving the install sees a process that is alive and doing nothing. The e2e
+# Windows journey sat here for 22 minutes and reported a timeout with no cause
+# (backend#2675); a customer's scheduled or auto-logon install looks identical.
+#
+# "Nobody to ask" is answered the way the bash twin answers it -- gpu-nvidia.sh:
+# "No tty (unattended) => treat as 'no reboot'" -- so an empty choice falls
+# through to the same Set-TbRerunHandoff + exit 2 that -NoReboot takes. The
+# resume RunOnce is armed before either path, so the install still continues by
+# itself at the next sign-in.
+#
+# A FUNCTION, not an inline `if`, so the guard is reachable by the test suite:
+# the caller ends in `exit 2`, which no Pester mock can intercept.
+function Read-RebootChoice {
+  if (-not (Test-CanPrompt)) { return "" }
+  try { return (Read-Host "  Reboot now? [y/N]") } catch { return "" }
 }
 
 function Enable-VirtualisationFeatures {
@@ -1655,7 +1751,7 @@ function Enable-VirtualisationFeatures {
       Set-TbRerunHandoff
       exit 2
     }
-    $choice = Read-Host "  Reboot now? [y/N]"
+    $choice = Read-RebootChoice
     if ($choice -match "^[Yy]$") { Restart-Computer -Force }
     if (-not $resumeArmed) { Hint "After the reboot, re-run this installer to continue." }
     Set-TbRerunHandoff   # declared: reboot then re-run (see above)
@@ -1773,7 +1869,7 @@ function Install-DockerDesktop {
       switch ($r.State) {
         'spawn-failed' { Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$($r.Output)" }
         'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
-        'failed'       { Err "Docker Desktop installation failed (installer exited $($r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
+        'failed'       { Err "Docker Desktop installation failed (installer exited $(Format-ExitCode $r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
       }
       RefreshPath
     }
@@ -3116,12 +3212,8 @@ function Set-DailyUserProvisioning {
 #  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
 # =============================================================================
 
-# Can we prompt? False under CI / piped / redirected stdin — where the guard must
-# fail safe (abort) rather than hang or silently adopt.
-function Test-CanPrompt {
-  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
-  catch { return $false }
-}
+# (Test-CanPrompt -- "can we prompt?" -- is defined at the top of the file, next
+# to the load-time admin gate that also needs it; this guard calls it below.)
 
 # Directories under HOST_DATA_DIR that hold real client data — a MySQL data dir
 # or a dataset dir with at least one file — across BOTH on-disk layouts: flat
@@ -5246,6 +5338,26 @@ function Get-InstalledClientInfo {
   return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; Name = $existingName; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
 }
 
+# Ask the operator to name this client, on a console that can answer. Returns
+# the sanitized name, or "" when there is nobody to ask (Test-CanPrompt false) or
+# three empty tries -- the caller then fails closed naming TRACEBLOC_CLIENT_NAME.
+# Extracted from Invoke-ProvisionClient (like Read-RebootChoice) so the guard is
+# reachable by the test suite: with no console, Read-Host BLOCKS rather than
+# returning, so the 3-try loop is no defence and only the Test-CanPrompt gate
+# keeps an unattended run from hanging here (backend#2836).
+function Read-ClientName {
+  if (-not (Test-CanPrompt)) { return "" }
+  foreach ($try in 1..3) {
+    $name = ""
+    try { $name = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)") } catch { $name = "" }
+    # Strip paste/arrow-key escape garbage BEFORE the trim — it would slug-ify
+    # into a garbage name like "d-d-d-a-a-a" (bash flow, 2026-07-20).
+    $name = (ConvertTo-SanitizedInput -Value $name).Trim()
+    if ($name) { return $name }
+  }
+  return ""
+}
+
 # -- Step 4/5: Register this machine (browser sign-in; mirrors provision_client)
 # Sets $script:TB_PROV_MODE to route the Helm step:
 #   preset   - operator supplied TRACEBLOC_CLIENT_ID/PASSWORD (env automation)
@@ -5329,18 +5441,12 @@ function Invoke-ProvisionClient {
   # Name this machine. `client create` would prompt itself, but its output is
   # captured to the log below (the credential must never reach the terminal) —
   # so collect the name here. Precedence: TRACEBLOC_CLIENT_NAME (unattended) >
-  # interactive prompt (3 tries on empty Enter) > fail closed.
+  # interactive prompt (3 tries on empty Enter) > fail closed. The prompt lives
+  # in Read-ClientName, gated on Test-CanPrompt, so an unattended run falls
+  # straight through to the Err instead of blocking on Read-Host (backend#2836).
   $clientName = ""
   if ($env:TRACEBLOC_CLIENT_NAME) { $clientName = $env:TRACEBLOC_CLIENT_NAME.Trim() }
-  if (-not $clientName) {
-    foreach ($try in 1..3) {
-      $clientName = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)")
-      # Strip paste/arrow-key escape garbage BEFORE the trim — it would slug-ify
-      # into a garbage name like "d-d-d-a-a-a" (bash flow, 2026-07-20).
-      $clientName = (ConvertTo-SanitizedInput -Value $clientName).Trim()
-      if ($clientName) { break }
-    }
-  }
+  if (-not $clientName) { $clientName = Read-ClientName }
   if (-not $clientName) { Err "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME for an unattended install." }
 
   # Location is NEVER prompted (RFC-0001 §6.4). Windows has no zone.tab to
@@ -5397,6 +5503,22 @@ function Invoke-ProvisionClient {
   # may be de-duplicated from the raw typed name.
   Ok "Registered as `"$($script:TB_PROV_NS)`""
   Log "Provisioned - credential handed to the install (not shown)."
+}
+
+# The message the fallback branch refuses with when there is no terminal to ask
+# for credentials (backend#2675). A PURE FUNCTION for the same reason the reboot
+# decision became Read-RebootChoice: the call site ends in a throw (Err never
+# returns), and asserting the message THROUGH a throwing mock turned out to bind
+# differently on every Pester/PowerShell pairing the CI matrix runs -- three
+# capture strategies, three version-specific failures. Returning the string lets
+# the test read it directly, no mock involved. The pair it names is the one
+# Get-ProvisioningPreset reads: the documented unattended contract.
+function Get-UnattendedCredentialRefusal {
+  return ("This machine is not registered yet and there is no terminal to ask for credentials.`n" +
+          "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
+          "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
+          "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
+          "  Find them at https://ai.tracebloc.io/clients")
 }
 
 function Install-ClientHelm {
@@ -5464,6 +5586,19 @@ function Install-ClientHelm {
       # -- Legacy manual connect (fallback ONLY: the CLI was missing or too old
       # for browser provisioning in Step 4). Hand-copied credentials from the
       # web app — dropped from the primary path by #388.
+
+      # NO TERMINAL -> REFUSE, DON'T SPIN (backend#2675) -- and FIRST, before the
+      # "Use previous settings?" prompt below, which is itself a Read-Host that
+      # would hang an unattended run on any machine that still holds a
+      # values.yaml (Bugbot on the first placement, which sat after it). Every
+      # prompt in this branch is unanswerable with nobody at the console, and
+      # the credential loop further down is worse than a hang: it `continue`s on
+      # an empty answer WITHOUT charging an attempt, printing "Client ID cannot
+      # be empty." forever. Fail closed at the branch door, naming the two
+      # variables that make this path unnecessary -- the same pair
+      # Get-ProvisioningPreset reads, and the documented automation contract.
+      if (-not (Test-CanPrompt)) { Err (Get-UnattendedCredentialRefusal) }
+
       $defaultClientId = ""
       $defaultClientPassword = ""
 
