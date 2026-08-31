@@ -3847,34 +3847,109 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
   # AST, NOT REGEX. The question is "which Warn/Err calls are lexically inside a
   # branch gated on .ExitCode", which is a shape in the tree; a text match cannot
   # see the nesting and would have to approximate it.
+  # THE DOTTED SPELLING IS NOT THE CLASS (Bugbot, Medium). The first cut matched
+  # only `.ExitCode -eq/-ne 0` in the condition text, so the house idiom after a
+  # wait -- copy the code into a local, then branch on the local -- was invisible.
+  # `$k3dExitCode = $k3dProc.ExitCode` … `if ($k3dExitCode -ne 0) { Err … }` is
+  # exactly that, and it reported a k3d failure without the code while this guard
+  # called the class closed. Restating one spelling is what went wrong the first
+  # time (client#913's `exited $(` search) and restating two is the same mistake
+  # with a larger list, so the variable names are DERIVED: any variable assigned
+  # from an expression mentioning `.ExitCode` becomes a gate token.
+  #
+  # COMPLIANCE FOLLOWS ONE HOP, and that is not a loophole -- it is the
+  # difference between the two sites this now sees. `Warn ("GPU couldn't be
+  # enabled: " + $GPU_SKIP_REASON)` names no code in its own text, but
+  # $GPU_SKIP_REASON is assigned IN THAT BRANCH from
+  # `Get-GpuBuildFailureReason -ExitCode $buildExit`, whose fallback returns
+  # "docker build exit $ExitCode". The code reaches the operator; the classifier
+  # is deliberately preferred over a bare number, and the comment there says so.
+  # The k3d branch has no such hop -- the code is read, tested, and dropped.
+  # Checking only the call's own text would have failed the first and passed
+  # nothing extra; checking the whole branch body would pass a `Log`-only
+  # mention, which the operator never sees. One hop, through the arguments.
   BeforeAll {
     $script:ExitCodeScope = {
       $tok = $null; $perr = $null
       $ast = [System.Management.Automation.Language.Parser]::ParseFile(
         (Join-Path $PSScriptRoot "../install-k8s.ps1"), [ref]$tok, [ref]$perr)
+
+      # DERIVED, not restated: every variable that takes its value from a
+      # `.ExitCode` read is a legitimate way to spell this gate.
+      $codeVars = @()
+      foreach ($a in $ast.FindAll({
+        $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
+      }, $true)) {
+        if ($a.Right.Extent.Text -match '\.ExitCode' -and
+            $a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+          $codeVars += $a.Left.VariablePath.UserPath
+        }
+      }
+      $codeVars = @($codeVars | Sort-Object -Unique)
+      $varAlt = if ($codeVars.Count) {
+        '|\$(' + (($codeVars | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*-(eq|ne)\s*0'
+      } else { '' }
+      $gateRe = '\.ExitCode\s*-(eq|ne)\s*0' + $varAlt
+
       $calls = $ast.FindAll({
         $args[0] -is [System.Management.Automation.Language.CommandAst] -and
         $args[0].GetCommandName() -in @('Warn','Err')
       }, $true)
       $inScope = @()
       foreach ($c in $calls) {
-        $n = $c.Parent; $gate = $null
+        $n = $c.Parent; $gate = $null; $branch = $null
         while ($n) {
           if ($n -is [System.Management.Automation.Language.IfStatementAst]) {
             foreach ($cl in $n.Clauses) {
-              if ($cl.Item1.Extent.Text -match '\.ExitCode\s*-(eq|ne)\s*0') {
-                $gate = $cl.Item1.Extent.Text
+              if ($cl.Item1.Extent.Text -match $gateRe) {
+                $gate = $cl.Item1.Extent.Text; $branch = $cl.Item2
               }
             }
           }
           $n = $n.Parent
         }
         if ($gate) {
+          # The token this branch was gated on -- `.ExitCode`, or the derived
+          # local. That, not the literal word "ExitCode", is what has to reach
+          # the operator.
+          # THE PROPERTY READ AND THE VARIABLE, NEVER THE BARE WORD. Matching
+          # `ExitCode` loose also matches the PARAMETER NAME `-ExitCode`, so
+          # `Get-GpuBuildFailureReason -ExitCode 0` -- a constant, carrying none
+          # of the branch's information -- read as compliant. Measured: the
+          # mutation that replaced `$buildExit` with `0` there left this green,
+          # which is the one-hop degenerating into a blanket pass.
+          $tokens = @('\.ExitCode\b')
+          foreach ($v in $codeVars) {
+            if ($gate -match ('\$' + [regex]::Escape($v) + '\b')) {
+              $tokens += '\$' + [regex]::Escape($v) + '\b'
+            }
+          }
+          $tokRe = '(' + ($tokens -join '|') + ')'
+
+          $names = [bool]($c.Extent.Text -match $tokRe)
+          if (-not $names -and $branch) {
+            # ONE HOP: a variable the call renders, assigned in this branch from
+            # something that carries the code.
+            foreach ($v in $c.CommandElements) {
+              foreach ($ref in $v.FindAll({
+                $args[0] -is [System.Management.Automation.Language.VariableExpressionAst]
+              }, $true)) {
+                $rn = $ref.VariablePath.UserPath -replace '^(script|global|local):', ''
+                foreach ($a in $branch.FindAll({
+                  $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
+                }, $true)) {
+                  $ln = $a.Left.Extent.Text -replace '^\$(script|global|local):', '' -replace '^\$', ''
+                  if ($ln -eq $rn -and $a.Right.Extent.Text -match $tokRe) { $names = $true }
+                }
+              }
+            }
+          }
+
           $inScope += [pscustomobject]@{
             Line  = $c.Extent.StartLineNumber
             Gate  = $gate
             Text  = $c.Extent.Text
-            Names = [bool]($c.Extent.Text -match 'ExitCode')
+            Names = $names
           }
         }
       }
@@ -3888,7 +3963,10 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
     # clean forever. Two is what exists today; a THIRD is fine, a drop to zero
     # is the finding.
     $sites = & $script:ExitCodeScope
-    $sites.Count | Should -BeGreaterOrEqual 2
+    # FOUR now, not two: the derived-variable spelling brought the k3d create
+    # path and the GPU build branch into view. A THIRD-and-up is fine, a drop
+    # below the dotted-only floor means the walk stopped matching.
+    $sites.Count | Should -BeGreaterOrEqual 4
   }
 
   It "no user-facing failure message drops the exit code that decided it" {

@@ -4476,7 +4476,7 @@ function New-K3dCluster {
       # (the FATA/x509/port reason) survives Get-ErrDetailLines' last-5-line window
       # even if k3d wrote to stdout; matches the Write-HostCaCreateHint order above
       # (reviewer).
-      Err "Failed to create compute environment." "$k3dStdout`n$k3dStderr"
+      Err "Failed to create compute environment (k3d exited $(Format-ExitCode $k3dExitCode))." "$k3dStdout`n$k3dStderr"
     }
     Ok "Compute environment ready."
   }
