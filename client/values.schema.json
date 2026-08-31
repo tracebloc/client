@@ -1162,6 +1162,11 @@
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "Passed to `helm upgrade --timeout`. Allow enough headroom for image pull + PVC bind on slow infra."
         },
+        "pendingWedgeMinAge": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$",
+          "description": "How long a release must sit in pending-upgrade/pending-rollback before the hourly recovery treats it as an abandoned wedge (rolls it back) rather than an in-flight upgrade (leaves it alone) — tracebloc/client#2877. Keep it above the longest hand-run upgrade and below the schedule gap. Default 45m."
+        },
         "suspend": {
           "type": "boolean",
           "default": false,

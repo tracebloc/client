@@ -1279,6 +1279,20 @@ autoUpgrade:
   # images can take several minutes; 10m gives PVC bind + image pull headroom
   # without holding the slot all night if something is genuinely wedged.
   timeout: "10m"
+  # #2877: a release in `pending-upgrade` is NOT necessarily a wedge left by a
+  # killed upgrade — it is ALSO the state of an upgrade that is CURRENTLY RUNNING
+  # (an operator's manual `helm upgrade`, or a slow one of ours). The hourly
+  # wedge-recovery (#554) must not roll back an in-flight upgrade: doing so
+  # silently reverts it and discards the operator's new values (measured turning
+  # a backend#1528 retirement into a fleet-breaking sequence). The discriminator
+  # is AGE — a real wedge is at least ~an hour old by the next hourly tick, an
+  # in-flight upgrade is seconds/minutes old. Only a release that has sat in
+  # pending-upgrade/pending-rollback for AT LEAST this long is treated as an
+  # abandoned wedge and rolled back; anything younger is left untouched and the
+  # tick is skipped. Keep it comfortably ABOVE the longest upgrade an operator
+  # would run by hand (well above `timeout`) and BELOW the ~1h schedule gap, so a
+  # genuine wedge still recovers on the very next tick. Duration string (Ns/Nm/Nh).
+  pendingWedgeMinAge: "45m"
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   successfulJobsHistoryLimit: 3

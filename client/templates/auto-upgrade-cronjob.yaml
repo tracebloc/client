@@ -28,6 +28,47 @@ data:
 
     log() { printf '[auto-upgrade] %s\n' "$*"; }
 
+    # #2877: minimum age (seconds) a release must have sat in a pending-* state
+    # before we treat it as an ABANDONED wedge (safe to roll back) rather than an
+    # upgrade that is currently IN FLIGHT (must be left alone). Injected from
+    # autoUpgrade.pendingWedgeMinAge; the `:-` fallback keeps a standalone run
+    # (e.g. the discrimination test) working when the env var is absent.
+    WEDGE_MIN_AGE_SECONDS="${WEDGE_MIN_AGE_SECONDS:-2700}"
+
+    # #2877: seconds the release has been in its current (pending) revision, i.e.
+    # now - info.last_deployed. Echoes the age, or nothing if it can't be read.
+    # Takes the `helm status -o json` body as $1 so the caller reads status once.
+    # awk-only, per this script's header (the image has no jq): it lifts the
+    # RFC3339 last_deployed out of the JSON and computes the epoch itself, since
+    # busybox `date` cannot parse an RFC3339 zone offset. The days-since-epoch
+    # math is Howard Hinnant's civil→days algorithm; the zone offset is applied by
+    # hand. now comes from `date -u +%s`, which every date agrees on.
+    pending_age_seconds() {
+      _now="$(date -u +%s 2>/dev/null || true)"
+      [ -n "$_now" ] || return 0
+      printf '%s' "$1" | awk -v now="$_now" '{
+        if (match($0, /"last_deployed":[ ]*"[^"]*"/) == 0) exit
+        ts = substr($0, RSTART, RLENGTH)
+        sub(/^"last_deployed":[ ]*"/, "", ts); sub(/"$/, "", ts)
+        if (match(ts, /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) == 0) exit
+        y = substr(ts, 1, 4) + 0; mo = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
+        hh = substr(ts, 12, 2) + 0; mi = substr(ts, 15, 2) + 0; ss = substr(ts, 18, 2) + 0
+        off = 0; rest = substr(ts, 20)
+        if (rest !~ /[Zz]$/ && match(rest, /[+-][0-9][0-9]:[0-9][0-9]$/)) {
+          o = substr(rest, RSTART, RLENGTH)
+          sign = (substr(o, 1, 1) == "-") ? -1 : 1
+          off = sign * (substr(o, 2, 2) * 3600 + substr(o, 5, 2) * 60)
+        }
+        if (mo <= 2) y = y - 1
+        era = int((y >= 0 ? y : y - 399) / 400)
+        yoe = y - era * 400
+        doy = int((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5) + d - 1
+        doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        days = era * 146097 + doe - 719468
+        print now - (days * 86400 + hh * 3600 + mi * 60 + ss - off)
+      }'
+    }
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
 
     helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
@@ -48,9 +89,55 @@ data:
       | awk '/^STATUS:/ {print $2; exit}')"
     case "$STATUS" in
       pending-upgrade|pending-rollback)
-        log "release wedged in '$STATUS' (a previous upgrade was killed mid-operation); rolling back to the last deployed revision before retrying"
-        helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE"
-        log "rollback complete; continuing"
+        # #2877: `pending-upgrade` is NOT proof of a wedge. It is ALSO the state
+        # of an upgrade that is CURRENTLY RUNNING — an operator's manual `helm
+        # upgrade` (e.g. flipping the backend#1528 retirement gates), or a slow
+        # one of ours. Rolling that back silently reverts the in-flight upgrade
+        # and discards the operator's new values, while the operator — seeing
+        # `deployed` — proceeds as if it stuck. The two are indistinguishable by
+        # status alone; the discriminator is AGE. A real wedge was left by an
+        # earlier tick and is at least ~an hour old by now; an in-flight or
+        # just-attempted upgrade is seconds/minutes old. Only reclaim a release
+        # that has sat here past the threshold. Read the release JSON once (for
+        # both the age and the discarded revision number).
+        INFO_JSON="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>/dev/null || true)"
+        AGE="$(pending_age_seconds "$INFO_JSON")"
+        # Guard: only an unsigned/negative integer is a usable age. A negative
+        # age (node clock skew — the pending revision looks "in the future")
+        # falls through as "too recent", which is the safe side: never clobber.
+        case "$AGE" in ''|*[!0-9-]*) AGE="" ;; esac
+        if [ -n "$AGE" ] && [ "$AGE" -ge "$WEDGE_MIN_AGE_SECONDS" ]; then
+          # awk-only; `[0-9][0-9]*` (>=1 digit) so this matches only the
+          # bare-number top-level release "version":N, never a quoted
+          # chart-metadata "version":"1.2.3" that may also appear in the JSON.
+          PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[0-9][0-9]*/) {
+            v = substr($0, RSTART, RLENGTH); sub(/"version":/, "", v); print v; exit }')"
+          # Surface it (#2877): the rollback discards the pending revision's
+          # values. Log it loud and actionable — `restartPolicy: Never`
+          # (backend#2620) keeps this Pod's log readable so an operator can see
+          # what was undone and recover the values.
+          log "=========================== auto-upgrade WARNING ==========================="
+          log "release '$RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
+          log "${WEDGE_MIN_AGE_SECONDS}s): a previous 'helm upgrade' is presumed killed"
+          log "mid-operation and ABANDONED. Rolling back to the last deployed revision so"
+          log "auto-upgrade can proceed (#554). This DISCARDS the values from the"
+          log "interrupted upgrade${PENDING_REV:+ (revision $PENDING_REV)}. If that upgrade was intentional,"
+          log "recover its values BEFORE the next tick re-applies chart defaults:"
+          log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
+          log "  helm get values $RELEASE_NAME -n $RELEASE_NAMESPACE${PENDING_REV:+ --revision $PENDING_REV}"
+          log "============================================================================"
+          helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE"
+          log "rollback complete; continuing"
+        else
+          # Recent (or indeterminate age): far more likely an upgrade in progress
+          # than an abandoned wedge. Do NOT touch it — skip this tick cleanly (we
+          # cannot `helm upgrade` over a pending operation anyway). The next tick
+          # re-evaluates: by then the upgrade has either completed (STATUS:
+          # deployed → normal upgrade path) or aged past the threshold (→ handled
+          # above as a genuine wedge).
+          log "release is '$STATUS' but only ${AGE:-an indeterminate number of} seconds old (< threshold ${WEDGE_MIN_AGE_SECONDS}s): an upgrade is most likely in progress. NOT rolling back — skipping this tick so an in-flight upgrade is never clobbered."
+          exit 0
+        fi
         ;;
       uninstalling)
         # A killed `helm uninstall` leaves this state. We can't clear it here — the
@@ -224,6 +311,13 @@ spec:
                   value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: UPGRADE_TIMEOUT
                   value: {{ .Values.autoUpgrade.timeout | quote }}
+                # #2877: the wedge-vs-in-flight age threshold, in whole seconds.
+                # The script's awk does the age math but not duration parsing, so
+                # convert the human duration here. `| default "45m"` preserves the
+                # reset-then-reuse-values nil-guard when an older values.yaml
+                # predates the key (same pattern as activeDeadlineSeconds).
+                - name: WEDGE_MIN_AGE_SECONDS
+                  value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
