@@ -1860,8 +1860,16 @@ function Invoke-PostInstallReboot {
   if ($script:INSTALLER_REBOOT_INITIATED_CODES -contains $Result.ExitCode) {
     Warn "$Label installed, and its installer has initiated a reboot (code $(Format-ExitCode $Result.ExitCode))."
     $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
-    if ($resumeArmed) { Ok "The install will resume automatically after the reboot." }
-    else              { Hint "After the machine restarts, re-run this installer to continue." }
+    if ($resumeArmed) {
+      Ok "The install will resume automatically after the reboot."
+      # Split-account caveat (mirrors Step 1): the RunOnce lives in THIS account's hive,
+      # so the "automatic" promise is false if a different daily user signs in after the
+      # reboot -- qualify it exactly as the Step 1 handoff does (Bugbot).
+      if ($DailyUser -and ($DailyUser -ne $env:USERNAME)) {
+        Hint "Resume is registered for '$env:USERNAME'. Sign back in as '$env:USERNAME' to continue; if '$DailyUser' signs in instead, re-run the installer."
+      }
+    }
+    else { Hint "After the machine restarts, re-run this installer to continue." }
     $script:OutcomeReported = $true    # a declared reboot-pending stop, not an interruption
     Set-TbRerunHandoff
     exit 2

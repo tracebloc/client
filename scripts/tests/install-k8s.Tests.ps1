@@ -735,6 +735,8 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $fn | Should -Match 'Register-ResumeAfterReboot'   # arm a FRESH resume before the box goes down
     $fn | Should -Match 'Set-TbRerunHandoff'           # declared handoff, not an interruption
     $fn | Should -Match 'exit 2'                       # stop, don't race the reboot into the engine wait
+    # the resume promise carries Step 1's split-account caveat (RunOnce is per-hive)
+    $fn | Should -Match '\$DailyUser -and \(\$DailyUser -ne \$env:USERNAME\)'
     # BOTH Docker install paths (winget-first and direct) route their result through it,
     # so the handling can't depend on which path ran (the Bugbot gap).
     ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r -Label "Docker Desktop"')).Count | Should -BeGreaterOrEqual 2
