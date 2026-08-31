@@ -1176,10 +1176,18 @@ Describe "Install-TraceblocCli" {
     Install-TraceblocCli 6>&1 | Out-Null
     Should -Not -Invoke Add-DirToMachinePath
   }
-  It "non-fatal: a Machine-PATH persist failure warns/logs but does not throw" {
+  It "non-fatal: a persist failure is CONTAINED so the success verify still runs" {
+    # A `Should -Not -Throw` here would be inert: the function-wide catch already
+    # swallows the throw, so it passes even with the inner Add-DirToMachinePath
+    # try/catch deleted (Bugbot). Assert the DISCRIMINATING behavior instead: the
+    # inner catch must contain the throw so Test-TraceblocCli still runs and the
+    # CLI is reported installed — NOT bounced to the function-wide catch, which
+    # would misreport the (successful) CLI install as failed and skip the verify.
     Mock Start-Process { New-CliInstallerProc 0 }
     Mock Add-DirToMachinePath { throw "access denied" }
-    { Install-TraceblocCli 6>&1 | Out-Null } | Should -Not -Throw
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "tracebloc CLI (ready|installed)"          # verify still ran
+    $out | Should -Not -Match "Couldn't install the tracebloc CLI"  # not the outer catch's failure copy
   }
 }
 
