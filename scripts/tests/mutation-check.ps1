@@ -97,6 +97,24 @@ $Mutations = @(
      Find  = '    if ($p.WaitForExit($cliWaitMs)) {'
      Repl  = '    if ($p.WaitForExit()) {' }
 
+  # THE CLI WAIT'S OWN HANDLE + FLUSH (Bugbot on #931). The registry tracked the
+  # handle-cache/empty-ExitCode class only on Wait-ProcessWithDeadline, and the
+  # CLI wait only as a missing deadline -- so Install-TraceblocCli's two lines
+  # were source-text assertions with nothing behind them. That is the exact hole
+  # the class keeps recurring in: Bugbot found the missing flush on #917, INSIDE
+  # the fix for the same class.
+  @{ Name  = 'the CLI wait stops flushing its streams, so a success reads null (backend#2849)'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     After = '    if ($p.WaitForExit($cliWaitMs)) {'
+     Find  = '      try { $p.WaitForExit() } catch {}'
+     Repl  = '      try { $null = $p.Id } catch {}' }
+
+  @{ Name  = 'the CLI child''s handle is no longer cached before the wait (backend#2849)'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     After = '  Info "Installing the tracebloc CLI..."'
+     Find  = '    $null = $p.Handle'
+     Repl  = '    $null = $p.StartTime' }
+
   @{ Name  = 'a dashboard link is hardcoded to production again (backend#2849)'
      File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
      Find  = '          Hint "Find your credentials at $(Get-TraceblocDashboardUrl)"'

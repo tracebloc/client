@@ -1138,6 +1138,54 @@ Describe "Install-TraceblocCli" {
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "tracebloc CLI (ready|installed)"   # happy verdict is "ready", edge is "installed"
   }
+  # THE SUCCESS BRANCH, WHICH NOTHING ABOVE ACTUALLY ENTERS (Bugbot on #931).
+  #
+  # The fakes above give `WaitForExit` a no-arg ScriptMethod that returns
+  # NOTHING, so `if ($p.WaitForExit($cliWaitMs))` is falsy and every one of them
+  # takes the TIMEOUT branch. "reports success only when the installer exits 0"
+  # therefore passes through the kill path -- the right verdict for the wrong
+  # reason -- and the flush this branch exists for is never executed.
+  #
+  # WHAT THE FLUSH IS FOR: `WaitForExit(ms)` waits for the PROCESS; only the
+  # PARAMETERLESS overload also waits for the redirected stdout/stderr readers to
+  # drain, and until they do `.ExitCode` reads back $null. A null then fails
+  # `-eq 0` after a SUCCESSFUL install, Step 4 warns, and Step 5 falls back to
+  # the legacy credential prompt -- the client#611 shape, and the empty-ExitCode
+  # class backend#2849 exists to remove, reappearing inside its own fix.
+  #
+  # So the fake models the REAL contract: ExitCode is $null until the
+  # parameterless overload has been called.
+  It "flushes the streams on the success branch, so ExitCode is readable" {
+    $script:cliFlushed = $false
+    Mock Start-Process {
+      $o = [pscustomobject]@{}
+      $o | Add-Member ScriptProperty Handle   { [IntPtr]::Zero }
+      $o | Add-Member ScriptProperty ExitCode { if ($script:cliFlushed) { 0 } else { $null } }
+      $o | Add-Member ScriptMethod   WaitForExit {
+        if ($args.Count -gt 0) { return $true }      # process exited inside the deadline
+        $script:cliFlushed = $true                    # streams drained
+      }
+      $o
+    }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $script:cliFlushed | Should -BeTrue -Because 'the parameterless WaitForExit() flush was never called'
+    $out | Should -Match "tracebloc CLI (ready|installed)"
+  }
+  It "a successful install whose streams never drained must NOT report success" {
+    # The other direction, so the test above cannot pass by accident: with the
+    # flush absent ExitCode stays $null, and the function must warn rather than
+    # credit an install it cannot read the verdict of.
+    Mock Start-Process {
+      $o = [pscustomobject]@{}
+      $o | Add-Member ScriptProperty Handle   { [IntPtr]::Zero }
+      $o | Add-Member ScriptProperty ExitCode { $null }
+      $o | Add-Member ScriptMethod   WaitForExit { if ($args.Count -gt 0) { return $true } }
+      $o
+    }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"
+  }
+
   It "warns on a failed re-install even when a CLI is already on PATH" {
     Mock Start-Process {
       $o = [pscustomobject]@{ ExitCode = 1 }
