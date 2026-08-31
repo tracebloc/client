@@ -515,9 +515,18 @@ egressProxy:
 # instead of no-opping. Set this via `helm upgrade` directly until #2888 lands,
 # or accept that the installer's idempotence check is wrong for this release.
 #
-# IT DOES NOT MOVE DATA. Release-scoped on-disk paths -- the dataset directory,
-# the hostPath PVs, the Collector's queue -- keep the RELEASE name, because a
-# path is a location: renaming it orphans a tenant's data instead of moving it.
+# IT DOES NOT MOVE DATA. Release-scoped on-disk PATHS -- the dataset directory,
+# the hostPath PV's `path`, the Collector's queue -- keep the RELEASE name,
+# because a path is a location: renaming it orphans a tenant's data instead of
+# moving it.
+#
+# A PATH IS NOT AN OBJECT, and this comment used to conflate the two (Bugbot,
+# High). The hostPath PVs' on-disk paths stay put, but the PersistentVolume
+# OBJECTS are named through `tracebloc.fullname` -- `<name>-mysql-pv`,
+# `-data-pv`, `-logs-pv` -- so their names DO follow this key. Unlike the PVCs
+# they carry no `helm.sh/resource-policy: keep`, so on a bare-metal (hostPath)
+# release a rename deletes those PV objects and creates them under the new name
+# while the retained PVCs stay Bound to the ones that just went away.
 #
 # CHANGING IT ON A LIVE RELEASE IS REFUSED, not merely discouraged. Earlier
 # revisions of this comment called it "a migration, not a config tweak", which
@@ -529,6 +538,14 @@ egressProxy:
 # wants. Without it, four credentials would be re-minted while the kept
 # `mysql-pvc` datadir still holds the old ones, the upgrade would report
 # `deployed`, and MySQL would refuse every login.
+#
+# ON hostPath, COPYING THE SECRET IS NOT THE WHOLE REMEDY -- see the PV-object
+# paragraph above, and re-point the PVCs at the new PVs (or keep the old name).
+# The refusal says so too, but only while it FIRES: once a Secret exists under
+# the new name it is skipped, and an operator on their second attempt would
+# otherwise read this remedy with the caveat missing. NOTES.txt repeats it on
+# every hostPath render of an overridden release, which is the path the refusal
+# cannot reach.
 #
 # So: choose it at INSTALL time. On a live release, read the refusal message.
 #
