@@ -512,8 +512,28 @@ def main() -> int:
     expected = {CLS_INSTANCE: rel, CLS_ANNOTATION: rel, CLS_ENV: None, CLS_PATH: None}
     for cls, found in licensed.items():
         if not found:
-            # CANNOT TELL IS A FINDING. An empty list agrees with every
-            # expectation, so a class that stops matching would read as a pass.
+            # CANNOT TELL IS A FINDING — but for the PATH class the scope of that
+            # finding is the CHART, not the profile (Bugbot, High; demoted after
+            # measuring). The only release-scoped path on a cloud profile is the
+            # Collector's queue directory, which renders because
+            # `telemetryCollector` is on by chart DEFAULT and no `client/ci`
+            # profile sets it. A profile that disabled it — entirely plausible now
+            # the gate is tri-state (backend#1906) — would have no release-scoped
+            # path at all, and a per-profile check would then refuse a complete
+            # chart.
+            #
+            # MEASURED AT HEAD, so the finding as filed does not reproduce: aks 1,
+            # bm 4, eks 1, oc 1. The concern is real and the failure is not, so the
+            # emptiness is REPORTED here and asserted once ACROSS profiles by the
+            # shell, which is the only layer that sees all four.
+            if cls is CLS_PATH:
+                print(
+                    f"   [note] no {cls} in this profile — legitimate when neither "
+                    f"hostPath nor the Collector renders. Asserted across profiles, "
+                    f"not here."
+                )
+                print("PATHCLASS 0")
+                continue
             print(
                 f"   [ERROR] found NO {cls} carrying the release name — the class matches "
                 f"nothing, so its half of this assertion proves nothing."
@@ -550,6 +570,10 @@ def main() -> int:
                     print(f"             {where}  {path} = {val!r}")
             else:
                 print(f"   [OK] {len(found)} release-scoped path(s) kept the release name")
+            # A MACHINE-READABLE COUNT for the cross-profile assertion in the
+            # shell. Printed on both branches so a profile that HAS paths and a
+            # profile that has none are distinguishable there.
+            print(f"PATHCLASS {len(found)}")
             continue
         want = expected[cls]
         if cls is CLS_ENV:

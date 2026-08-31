@@ -97,6 +97,9 @@ fi
 echo "== fullnameOverride completeness =="
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 failures=0
+# Accumulators for the cross-profile release-scoped-path assertion after the loop.
+path_profiles=0
+path_counts=""
 
 # NOTES NEEDS ITS OWN RENDER, AND EVERY OBVIOUS ROUTE IS CLOSED. Measured on the
 # CI-pinned helm v3.15.4:
@@ -199,9 +202,16 @@ for VALUES in "${profiles[@]}"; do
   RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
     python3 scripts/tests/fullname_override_assertions.py \
       "$tmp/override.yaml" "$tmp/a.yaml" \
-      "$tmp/notes-override.txt" "$tmp/notes-default.txt"
-  rc=$?
+      "$tmp/notes-override.txt" "$tmp/notes-default.txt" | tee "$tmp/out.txt"
+  rc=${PIPESTATUS[0]}
   set -e
+  # The release-scoped-path count, accumulated for the cross-profile assertion
+  # below. `|| true` because grep exits 1 on no match, which under pipefail would
+  # abort the loop -- and "the sidecar printed no count" is itself a finding the
+  # assertion after the loop reports, not one to die on here.
+  pc=$(grep -E '^PATHCLASS [0-9]+$' "$tmp/out.txt" | awk '{print $2}' | head -1 || true)
+  path_counts="${path_counts}${prof}=${pc:-none} "
+  case "${pc:-0}" in ''|0) ;; *) path_profiles=$((path_profiles + 1)) ;; esac
   if [ "$rc" -eq 2 ]; then
     echo "[ERROR] the guard could not run (see above). This is NOT a verdict on the chart."
     exit 2
@@ -249,6 +259,28 @@ else
   echo "        -- correct). Exit 2 means the sidecar could not run at all, and any"
   echo "        other code means it did not get that far. Cannot tell is not OK."
   failures=$((failures + 1))
+fi
+
+# --- 6. RELEASE-SCOPED PATHS EXIST SOMEWHERE ---------------------------------
+# The chart-level half of assertion 3's path class. Per profile, an empty class is
+# legitimate: on a cloud profile the only release-scoped path is the Collector's
+# queue directory, and a profile that disabled the Collector would have none. Per
+# CHART it is not: "no path followed the override" is also true of a chart that
+# stopped scoping paths by release at all, which is the failure the class exists
+# to catch (Bugbot, High -- the finding named the right hazard and the wrong
+# scope; measured at head, all four profiles have at least one).
+#
+# Counts are printed either way so a reader can see WHICH profile contributed.
+echo "-- release-scoped paths per profile: ${path_counts% }"
+if [ "$path_profiles" -eq 0 ]; then
+  echo "[ERROR] NO profile rendered a release-scoped on-disk path, so 'no path"
+  echo "        followed the override' proves nothing — it is equally true of a"
+  echo "        chart that stopped scoping paths by release. Either the paths"
+  echo "        disappeared or every profile now disables both hostPath and the"
+  echo "        Collector, and both are findings."
+  failures=$((failures + 1))
+else
+  echo "-- release-scoped paths present in $path_profiles profile(s) [OK]"
 fi
 
 if [ "$failures" -ne 0 ]; then

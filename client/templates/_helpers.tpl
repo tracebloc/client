@@ -1116,12 +1116,34 @@ tracebloc-telemetry-token
   until jobs-manager next re-authenticates, and refusing it would wedge exactly the
   edge that is already collecting.
 */}}
+{{/*
+  The token Secret's name BEFORE `fullnameOverride` was set — i.e. what a release
+  installed without one is still carrying (Bugbot, Medium, on client#911).
+
+  `telemetryTokenSecretName` follows the override, so on a renamed release the
+  lookup below missed the live Secret and `telemetryCollectorState` hard-FAILED
+  for an operator who had explicitly enabled the Collector: the token exists, it
+  is simply under `<release>-telemetry-token`. The legacy fallback did not cover
+  it either — that is a different, FIXED name (`tracebloc-telemetry-token`), not
+  the release-scoped one.
+
+  Accepted rather than refused, and that is deliberately the opposite call from
+  the credentials Secret. There, a name miss means SILENTLY MINTING a new
+  password against a datadir that holds the old one, so refusing is the only safe
+  answer. Here the token is server-side and re-derivable — jobs-manager writes it
+  (backend#2274) — so finding the existing one is both safe and what the operator
+  meant. Same reasoning as the legacy name this sits beside.
+*/}}
+{{- define "tracebloc.telemetryTokenPreOverrideName" -}}
+{{- printf "%s-telemetry-token" .Release.Name -}}
+{{- end -}}
+
 {{- define "tracebloc.telemetryTokenPresent" -}}
 {{- if not (lookup "v1" "Namespace" "" "kube-system") -}}
 unknown
 {{- else -}}
 {{- $ns := .Values.nodeAgents.namespace.name -}}
-{{- if or (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenSecretName" .)) (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenLegacyName" .)) -}}
+{{- if or (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenSecretName" .)) (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenLegacyName" .)) (lookup "v1" "Secret" $ns (include "tracebloc.telemetryTokenPreOverrideName" .)) -}}
 yes
 {{- else -}}
 no
@@ -1190,7 +1212,7 @@ no
 {{- if kindIs "bool" $tc.enabled -}}
 {{- if $tc.enabled -}}
 {{- if eq (include "tracebloc.telemetryTokenPresent" .) "no" -}}
-{{- fail (printf "telemetryCollector.enabled is true but its token Secret does not exist in namespace %q — looked for %q, and during migration the legacy %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .)) -}}
+{{- fail (printf "telemetryCollector.enabled is true but its token Secret does not exist in namespace %q — looked for %q, the legacy %q, and the pre-fullnameOverride %q. The Collector's exporter authenticates with it, and jobs-manager writes it (backend#2274). Create it, or set telemetryCollector.enabled: false — enabling without it buys a DaemonSet that spools to every node's disk and delivers nothing." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .) (include "tracebloc.telemetryTokenPreOverrideName" .)) -}}
 {{- end -}}
 enabled
 {{- else -}}
