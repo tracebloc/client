@@ -158,9 +158,51 @@ def classify(doc, path, val, rel, ns, envs):
 # have established that. It only requires that a mitigation is still there.
 
 TEMPLATES = "client/templates"
-_DEFINE = re.compile(r'{{-?\s*define\s+"([^"]+)"\s*-?}}(.*?){{-?\s*end\s*-?}}', re.S)
 _INCLUDE = re.compile(r'include\s+"([^"]+)"')
 _SECRET_LOOKUP = re.compile(r'lookup\s+"v1"\s+"Secret"\s+\S+\s+([^\n)]*\)?)')
+#: Every `{{ … }}` action, in order. Used to find a define's BALANCED end.
+_ACTION = re.compile(r"{{-?\s*(.*?)\s*-?}}", re.S)
+#: Actions that open a block and therefore need their own `end`.
+_OPENS = re.compile(r"^(if|range|with|block|define)\b")
+
+
+def define_bodies(text):
+    """`{helper: body}`, each body closed at its BALANCED `end`.
+
+    NOT A REGEX, and the regex it replaces was a real defect (Bugbot, Medium).
+    `{{- define "x" -}}(.*?){{- end -}}` is non-greedy, so a helper containing an
+    inner `if`/`range`/`with` closes at the INNER `end` and its tail is silently
+    dropped. Measured on this chart: 28 of 55 helper bodies were truncated.
+
+    It changed no answer TODAY — no helper's `tracebloc.fullname` reference
+    happens to sit in a dropped tail, so the routed-helper closure came out at 21
+    either way. That is exactly why it was worth fixing rather than noting: the
+    guard's coverage depended on WHERE in a helper an include happened to sit, and
+    one edit moving an include below an `if` would have silently un-routed it —
+    after which a routed Secret lookup reads as unrouted and assertion 5 stops
+    requiring a mitigation. A check that passes because it is not connected to
+    what it claims to check.
+
+    Depth is counted over the ACTIONS rather than over the text, so an `end`
+    inside a quoted string or a comment cannot close a block early.
+    """
+    out, stack = {}, []
+    for m in _ACTION.finditer(text):
+        action = m.group(1)
+        opened = re.match(r'define\s+"([^"]+)"', action)
+        if opened:
+            stack.append([opened.group(1), m.end(), 1])
+            continue
+        if not stack:
+            continue
+        if _OPENS.match(action):
+            stack[-1][2] += 1
+        elif re.match(r"^end\b", action):
+            stack[-1][2] -= 1
+            if stack[-1][2] == 0:
+                name, start, _ = stack.pop()
+                out[name] = text[start : m.start()]
+    return out
 
 
 def helpers_following_the_override(sources):
@@ -172,8 +214,7 @@ def helpers_following_the_override(sources):
     """
     bodies = {}
     for text in sources:
-        for name, body in _DEFINE.findall(text):
-            bodies[name] = body
+        bodies.update(define_bodies(text))
     following = {"tracebloc.fullname"}
     changed = True
     while changed:
@@ -236,6 +277,51 @@ def _mitigations(text, routed_vars):
         if line.split("#", 1)[0].count("lookup ") >= 2:
             out.add("fallback")
     return out
+
+
+#: A helper whose `fullname` reference sits AFTER an inner `if`/`end` — the exact
+#: shape the non-greedy regex dropped. Written down here rather than hunted for in
+#: the chart, because the chart does not currently contain one: the defect was
+#: LATENT, and a check that can only be exercised by a bug already present is a
+#: check that arrives too late (CLAUDE.md rule 6 — derive the input domain, do not
+#: wait for the input).
+_SELFTEST_TEMPLATE = """
+{{- define "probe.routed" -}}
+{{- if .Values.something -}}
+irrelevant
+{{- end -}}
+{{ include "tracebloc.fullname" . }}-probe
+{{- end -}}
+{{- define "probe.unrouted" -}}
+{{- if .Values.something -}}
+irrelevant
+{{- end -}}
+a-constant-name
+{{- end -}}
+"""
+
+
+def selftest_the_parser():
+    """`(ok, messages)` — the define parser reads a body past an inner `end`.
+
+    Two halves, and the second is what stops this passing vacuously: a parser that
+    marked EVERYTHING routed would satisfy the first assertion and fail this one.
+    """
+    following = helpers_following_the_override([_SELFTEST_TEMPLATE])
+    if "probe.routed" not in following:
+        return False, [
+            "   [ERROR] the define parser does not read a helper body past an inner "
+            "`end`, so a helper whose `fullname` reference sits below an `if` reads "
+            "as UNROUTED — after which a routed Secret lookup needs no mitigation "
+            "and assertion 5 passes on a chart that is not safe."
+        ]
+    if "probe.unrouted" in following:
+        return False, [
+            "   [ERROR] the define parser marked a helper with no `fullname` "
+            "reference as routed, so 'follows the override' means nothing and the "
+            "check above cannot distinguish a safe site from an unsafe one."
+        ]
+    return True, ["   [OK] the define parser reads helper bodies past an inner `end`"]
 
 
 def assert_lookup_keys():
@@ -520,6 +606,14 @@ def main() -> int:
         fail = True
 
     # --- 5. the class behind the credential-Secret finding -------------------
+    # The parser this rests on is self-tested first: if it cannot read a helper
+    # body, everything below reads as safe.
+    ok, msgs = selftest_the_parser()
+    for m in msgs:
+        print(m)
+    if not ok:
+        fail = True
+
     ok, msgs = assert_lookup_keys()
     for m in msgs:
         print(m)

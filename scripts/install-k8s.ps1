@@ -5226,9 +5226,23 @@ function Get-InstalledClientInfo {
           # is a client we cannot NAME -> unidentifiable, so the guard fails
           # closed rather than waving through an install that re-points the
           # machine. Bash parity: detect_installed_client / _client_id_from_secret.
+          #
+          # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on
+          # client#911). `tracebloc.secretName` follows `fullnameOverride`, so on
+          # a release installed with one, `<release>-secrets` does not exist and
+          # this fallback reads nothing -- a live client whose id lives only in
+          # the Secret then reads as UNIDENTIFIABLE. The override is in the
+          # values already parsed above; absent -> the release name, which is
+          # the chart's own `default .Release.Name .Values.fullnameOverride`.
+          # Bash parity: detect_installed_client's `_fno` read.
           $id = ""
           if ($null -ne $vals -and $null -ne $vals.clientId) { $id = "$($vals.clientId)".Trim() }
-          if (-not $id) { $id = Get-ClientIdFromSecret -Release $rel.name -Namespace $rel.namespace }
+          $prefix = $rel.name
+          if ($null -ne $vals -and $null -ne $vals.fullnameOverride) {
+            $fno = "$($vals.fullnameOverride)".Trim()
+            if ($fno) { $prefix = $fno }
+          }
+          if (-not $id) { $id = Get-ClientIdFromSecret -Release $prefix -Namespace $rel.namespace }
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
           # No trailing `continue` here. It is the last statement of the loop
           # body, so it buys nothing -- and PowerShell reported it escaping as an

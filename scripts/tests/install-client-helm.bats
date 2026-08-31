@@ -934,6 +934,59 @@ _no_clientid_release_ctx() {
   [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 0 ] || return 1
 }
 
+# THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on #911).
+# `tracebloc.secretName` follows `fullnameOverride`, so on a release installed
+# with one the Secret is `<override>-secrets`. Reading `<release>-secrets` finds
+# nothing, and a live client whose id lives only in the Secret then reads as
+# UNIDENTIFIABLE -- `diagnose` and `upgrade` treat it as having no id.
+#
+# BOTH DIRECTIONS ARE ASSERTED. Without the second, the first is satisfied by a
+# fallback that always uses the override key even when it is absent, which would
+# break every ordinary release; without the first, nothing catches the bug.
+_override_release_ctx() {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  helm() {
+    if [ "$1" = list ]; then
+      printf '%s\n' 'NAME NAMESPACE REVISION UPDATED STATUS CHART APP VERSION' \
+                    'liverel munich 1 2026-01-01 deployed client-1.9.87 1.9.87'
+      return 0
+    fi
+    # Values carry the override and NO clientId -- the #2571 shape on a renamed
+    # release, which is what this PR makes reachable.
+    if [ "$1" = get ] && [ "$2" = values ]; then
+      printf 'fullnameOverride: zzoverride\nstorageClass: {}\n'; return 0
+    fi
+    return 0
+  }
+}
+
+@test "detect_installed_client: the Secret is read under fullnameOverride, not the release name (#911)" {
+  _override_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() {
+    [ "$1" = -n ] && [ "$2" = munich ] || return 1
+    # THE ASSERTION: the overridden name, not `liverel-secrets`.
+    [ "$5" = "zzoverride-secrets" ] || return 1
+    printf 'dXVpZC1mcm9tLXNlY3JldA=='
+  }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "uuid-from-secret" ] || return 1
+  [ "$INSTALLED_CLIENT_NS" = "munich" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 0 ] || return 1
+}
+
+@test "detect_installed_client: with NO override the Secret is still the release name (#911 control)" {
+  _no_clientid_release_ctx
+  has() { [ "$1" = helm ] || [ "$1" = kubectl ]; }
+  kubectl() {
+    [ "$5" = "liverel-secrets" ] || return 1
+    printf 'dXVpZC1mcm9tLXNlY3JldA=='
+  }
+  detect_installed_client
+  [ "$INSTALLED_CLIENT_ID" = "uuid-from-secret" ] || return 1
+  [ "${INSTALLED_CLIENT_UNKNOWN:-0}" = 0 ] || return 1
+}
+
 @test "detect_installed_client: no clientId in values AND no readable Secret -> UNKNOWN, never 'no client'" {
   _no_clientid_release_ctx
   # kubectl absent: the id cannot be read from either place. The release still
