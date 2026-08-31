@@ -231,6 +231,8 @@ helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reuse-values \
   --set networkPolicy.training.allowExternalHttps=true
 ```
 
+> If either `helm upgrade` above aborts with `conflict occurred while applying …` (Helm 4 server-side apply refusing a field a non-Helm manager owns), see [MIGRATIONS.md § server-side apply conflict](MIGRATIONS.md#helm-upgrade-aborts-with-a-server-side-apply-conflict) — re-run with `--server-side=true --force-conflicts`.
+
 The *full-chart* probe run (steps 1–4 above, against a deployed release) is
 still to be recorded here (pass/fail, k3s/k3d versions, date) and folded into
 the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on is already
