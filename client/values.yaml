@@ -506,6 +506,15 @@ egressProxy:
 # `app.kubernetes.io/instance`, Helm's `meta.helm.sh/release-name` bookkeeping,
 # and the RELEASE_NAME env auto-upgrade rolls back with (backend#2620).
 #
+# THE INSTALLER DOES NOT YET UNDERSTAND IT — backend#2888. `helm` renders the
+# overridden names correctly, but the shell and PowerShell installers still derive
+# the client's workload names as `<namespace>-jobs-manager` / `-requests-proxy`
+# (`scripts/lib/common.sh` `_client_workload_deployments`, `scripts/install-k8s.ps1`
+# `Get-ClientDeploymentNames`). So on an overridden release the #420 fast-path
+# health check reads UNHEALTHY and a re-run reinstalls over a working client
+# instead of no-opping. Set this via `helm upgrade` directly until #2888 lands,
+# or accept that the installer's idempotence check is wrong for this release.
+#
 # IT DOES NOT MOVE DATA. Release-scoped on-disk paths -- the dataset directory,
 # the hostPath PVs, the Collector's queue -- keep the RELEASE name, because a
 # path is a location: renaming it orphans a tenant's data instead of moving it.

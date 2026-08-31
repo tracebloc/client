@@ -249,7 +249,11 @@ def _mitigations(text, routed_vars):
       "refusal"  a MISS on the routed lookup leads to `fail` — however the other
                  half of the condition is computed
       "fallback" a second lookup in the same expression, on a name that does not
-                 follow the override — `telemetryTokenPresent`'s legacy name
+                 follow the override — `telemetryTokenPresent`'s legacy name.
+                 NOT computed here: it is a property of the LINE, so it is
+                 established per site by `_fallback_on_line` rather than once per
+                 file. A file-wide answer let one qualifying line license every
+                 routed lookup in it (client#911).
 
     THE REFUSAL IS DETECTED ON THE INVARIANT, NOT ON THE ARITHMETIC. The first cut
     matched `printf "%s-secrets" .Release.Name` — the shape the refusal happened to
@@ -285,10 +289,37 @@ def _mitigations(text, routed_vars):
             # an unrelated `fail` further down the file.
             if any("fail " in nxt or "fail(" in nxt for nxt in lines[i : i + 4]):
                 out.add("refusal")
-    for line in lines:
-        if line.split("#", 1)[0].count("lookup ") >= 2:
-            out.add("fallback")
     return out
+
+
+def _fallback_on_line(code, following, vars_):
+    """True iff THIS line carries a Secret lookup the override cannot move.
+
+    THE PROPERTY, NOT A PROXY FOR IT (@saadqbal on client#911). This used to be
+    `count("lookup ") >= 2` over every line in the FILE, and the result was reused
+    for every routed lookup in that file. Both halves were wrong, and the docstring
+    above already described the check this now performs — "a second lookup in the
+    same expression, on a name that does not follow the override" — while the code
+    asserted only that two `lookup ` substrings existed SOMEWHERE.
+
+    Measured: routing all three telemetry-token names through `fullnameOverride`
+    leaves every probe missing on a rename, and the old detector still reported
+    "all 2 routed Secret lookup(s) of 2 carry a mitigation" and exited 0. It
+    counted the arity of the fallback and never its point — a fallback that also
+    follows the override is not a fallback, it is the same miss twice.
+
+    So the question asked here is the one that matters: does at least one lookup on
+    this line key on a name the override CANNOT move? `.Release.Name` and a literal
+    both qualify; anything reaching `tracebloc.fullname` does not.
+    """
+    for expr in _SECRET_LOOKUP.findall(code):
+        referenced = set(_INCLUDE.findall(expr))
+        for v in re.findall(r"\$(\w+)", expr):
+            if v in vars_:
+                referenced.add(vars_[v])
+        if not (referenced & following):
+            return True
+    return False
 
 
 #: A helper whose `fullname` reference sits AFTER an inner `if`/`end` — the exact
@@ -391,7 +422,10 @@ def assert_lookup_keys():
             if not routed:
                 continue
             routed_sites += 1
-            if not have:
+            # Per SITE, not per file: the refusal is a property of the file (it
+            # keys on routed_vars), the fallback is a property of this line.
+            site_have = have | ({"fallback"} if _fallback_on_line(code, following, vars_) else set())
+            if not site_have:
                 msgs.append(
                     f"   [ERROR] {path}: a Secret lookup keys on a name that follows "
                     f"fullnameOverride ({', '.join(routed)}) and the file carries "

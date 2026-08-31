@@ -99,6 +99,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 failures=0
 # Accumulators for the cross-profile release-scoped-path assertion after the loop.
 path_profiles=0
+pathclass_missing=0
 path_counts=""
 
 # NOTES NEEDS ITS OWN RENDER, AND EVERY OBVIOUS ROUTE IS CLOSED. Measured on the
@@ -212,6 +213,22 @@ for VALUES in "${profiles[@]}"; do
   pc=$(grep -E '^PATHCLASS [0-9]+$' "$tmp/out.txt" | awk '{print $2}' | head -1 || true)
   path_counts="${path_counts}${prof}=${pc:-none} "
   case "${pc:-0}" in ''|0) ;; *) path_profiles=$((path_profiles + 1)) ;; esac
+  # NO COUNT MEANS NO ANSWER, NOT AN ANSWER OF ZERO (@saadqbal on client#911).
+  # A profile that never PRINTED `PATHCLASS` leaves `pc` empty, `path_profiles`
+  # unincremented, and assertion 6 below then reports "NO profile rendered a
+  # release-scoped on-disk path" — a claim about the CHART derived from the fact
+  # that we never looked. Two ways to reach it, and both are real:
+  #
+  #   * a `python3` on PATH that exits 127 (stale pyenv shim, dangling symlink) —
+  #     the sidecar produces nothing at all;
+  #   * the sidecar's own `scanned == 0` refusal, which returns 1 BEFORE the
+  #     PATHCLASS print, so a genuine "the walk sees nothing" finding collects a
+  #     fabricated path-class one on top of it.
+  #
+  # Gating on the exit status would fix only the first: `scanned == 0` exits 1,
+  # which is a legitimate finding code. The property that actually licenses
+  # assertion 6 is that the count was PRODUCED, so that is what is tracked.
+  [ -n "${pc:-}" ] || pathclass_missing=$((pathclass_missing + 1))
   if [ "$rc" -eq 2 ]; then
     echo "[ERROR] the guard could not run (see above). This is NOT a verdict on the chart."
     exit 2
@@ -272,7 +289,13 @@ fi
 #
 # Counts are printed either way so a reader can see WHICH profile contributed.
 echo "-- release-scoped paths per profile: ${path_counts% }"
-if [ "$path_profiles" -eq 0 ]; then
+if [ "$pathclass_missing" -ne 0 ]; then
+  echo "-- release-scoped path class: NOT CHECKED — $pathclass_missing profile(s)"
+  echo "   produced no PATHCLASS count, so this assertion has no input. Not a"
+  echo "   verdict on the chart in either direction; fix the finding(s) above and"
+  echo "   re-run. (Reporting it as 'NO profile rendered a path' would be a claim"
+  echo "   about the chart derived from never having looked.)"
+elif [ "$path_profiles" -eq 0 ]; then
   echo "[ERROR] NO profile rendered a release-scoped on-disk path, so 'no path"
   echo "        followed the override' proves nothing — it is equally true of a"
   echo "        chart that stopped scoping paths by release. Either the paths"

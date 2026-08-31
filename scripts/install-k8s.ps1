@@ -1386,8 +1386,16 @@ function Get-ClusterRunState {
   return (Get-ClusterRunStateFromList -Json $out -Name $CLUSTER_NAME)
 }
 
-# The client's three workload deployments in a namespace. Single source of truth for
-# both the readiness gate and the fast-path health check (#420).
+# The client's three workload deployments in a namespace. One source for the two
+# POWERSHELL consumers (the readiness gate and the #420 fast-path health check) --
+# NOT for the installer as a whole: `scripts/lib/common.sh` holds an independent
+# `_client_workload_deployments` with the same list, and nothing checks the two
+# agree. The previous "single source of truth" here named a guarantee that a
+# second implementation makes impossible (@saadqbal on client#911).
+#
+# Neither copy resolves `fullnameOverride`: both assume `<namespace>-` prefixes,
+# so an overridden release reads UNHEALTHY on the fast path and a re-run
+# reinstalls over a working client. Tracked as backend#2888.
 function Get-ClientDeploymentNames {
   param([string]$Namespace)
   return @("mysql-client", "$Namespace-jobs-manager", "$Namespace-requests-proxy")

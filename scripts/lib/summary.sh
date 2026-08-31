@@ -35,8 +35,10 @@ READY_TIMEOUT="${READY_TIMEOUT:-600}"
 wait_for_client_ready() {
   local ns="${TB_NAMESPACE:-default}"
   # The workloads that must be Ready are shared with the installer's stop-and-check
-  # gate (assess.sh) via _client_workload_deployments — single source of truth, so
-  # the readiness gate and the gate's "healthy" test can't drift.
+  # gate (assess.sh) via _client_workload_deployments, so those two cannot drift.
+  # NOT shared with the PowerShell installer, which holds its own copy — and
+  # neither copy resolves `fullnameOverride` (backend#2888), so an overridden
+  # release reads as not-Ready here while being perfectly healthy.
   local deploys=() _d
   while IFS= read -r _d; do [[ -n "$_d" ]] && deploys+=("$_d"); done < <(_client_workload_deployments "$ns")
   local deadline=$(( $(date +%s) + READY_TIMEOUT ))

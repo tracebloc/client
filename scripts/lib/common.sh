@@ -533,11 +533,21 @@ _chart_version() {
 }
 
 # The client's core workload Deployments in namespace $1 — the set whose
-# readiness DEFINES "the client is up". SINGLE SOURCE OF TRUTH: both
+# readiness DEFINES "the client is up". One source for the two BASH consumers:
 # wait_for_client_ready (summary.sh, the post-install readiness gate) and the
-# installer's stop-and-check gate (assess.sh) consume this, so the two can never
-# drift on what "ready" / "healthy" means. Echoes one Deployment name per line;
-# `mysql-client` is fixed, the other two are release-namespace-prefixed.
+# installer's stop-and-check gate (assess.sh). It is NOT one source across tiers —
+# `scripts/install-k8s.ps1` carries its own `Get-ClientDeploymentNames`, and
+# nothing checks the two agree.
+#
+# `mysql-client` is fixed. The other two are prefixed by the release's RESOLVED
+# NAME, which equals the namespace only while `fullnameOverride` is unset — the
+# earlier "release-namespace-prefixed" here stated the default as the rule, and
+# that is what made these sites easy to miss when the override landed
+# (@saadqbal on client#911). Under an override the chart renders
+# `<fullnameOverride>-jobs-manager`, this function still looks for
+# `<namespace>-jobs-manager`, and the readiness gate therefore fails on a healthy
+# client. Tracked as backend#2888; deliberately NOT fixed here, because the fix
+# has to land in both tiers at once or they drift further apart.
 _client_workload_deployments() {
   local ns="${1:-${TB_NAMESPACE:-default}}"
   printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"
