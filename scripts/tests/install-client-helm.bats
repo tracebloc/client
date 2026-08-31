@@ -2745,6 +2745,22 @@ _arch_gate_ctx() {
   [ "$status" -ne 0 ] || return 1
 }
 
+@test "_devmode_engine_decision: silent file -> 5.7, 8.4-pinned file -> 8.4, missing file -> 5.7 (fail closed) (backend#2854)" {
+  # The ONE reader shared by the dev-mode install path and preflight's early arch
+  # gate, so they can't drift and refuse at different steps. Reason is always
+  # values-file (the install path's TB_MYSQL_ENGINE_REASON, matched by _pf_arch).
+  local vf="$BATS_TEST_TMPDIR/dm.yaml"
+  export TRACEBLOC_VALUES_FILE="$vf"
+  printf 'clientId: "x"\n' > "$vf"                         # no mysqlClient block -> 5.7
+  [ "$(_devmode_engine_decision)" == "5.7 values-file" ] || return 1
+  printf 'images:\n  mysqlClient:\n    tag: "8.4"\n    digest: ""\n' > "$vf"
+  [ "$(_devmode_engine_decision)" == "8.4 values-file" ] || return 1
+  # Fail-closed: a missing/unreadable file reads as 5.7 (refuse rather than false-pass).
+  export TRACEBLOC_VALUES_FILE="$BATS_TEST_TMPDIR/does-not-exist.yaml"
+  [ "$(_devmode_engine_decision)" == "5.7 values-file" ] || return 1
+  unset TRACEBLOC_VALUES_FILE
+}
+
 @test "_release_pins_mysql_84: an unreadable release (namespace probe fails) is fail-closed to NOT 8.4" {
   # `helm get values` has no request timeout, so a wedged API must degrade to the
   # 5.7 gate — never hang, and never be assumed 8.4 (backend#2146 fail-closed).

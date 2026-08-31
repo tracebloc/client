@@ -135,6 +135,21 @@ gpu:
       repository: nvidia/k8s-device-plugin
       tag: v0.14.5
       digest: ""
+      # -- Device-plugin pod resources. ONE pair, applied to both requests AND limits,
+      # because the pod must be **Guaranteed** (backend#2871) — Guaranteed needs
+      # requests == limits on both cpu and memory, so a separate requests/limits
+      # shape here would just be a way to get it wrong.
+      #
+      # Why Guaranteed and not Burstable: if this pod is OOM-killed the node stops
+      # advertising nvidia.com/gpu and every GPU training pod on it goes Pending.
+      # `priorityClassName: system-node-critical` does not help — it ranks preemption
+      # and eviction, not the kernel's oom_score_adj, which is set from the QoS class.
+      #
+      # The plugin is a tiny long-lived watcher (it enumerates devices and serves a
+      # gRPC socket), so 50m/64Mi is generous; raise it only with a measurement.
+      resources:
+        cpu: 50m
+        memory: 64Mi
       # RuntimeClass for the plugin pod (client#835). On native Linux the k3s-cuda
       # node runs the NVIDIA runtime in CDI mode, and the plugin can only enumerate
       # GPUs (init NVML) if its own pod runs under that runtime — so the Linux
@@ -150,6 +165,12 @@ gpu:
       repository: rocm/k8s-device-plugin
       tag: latest
       digest: ""
+      # -- Same contract as nvidia.resources above: ONE pair, both sides, Guaranteed
+      # (backend#2871). This container also runs privileged, so it is the last thing
+      # that should be first in the OOM queue.
+      resources:
+        cpu: 50m
+        memory: 64Mi
 
 # -- StorageClass configuration
 # When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
