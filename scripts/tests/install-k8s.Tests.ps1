@@ -706,15 +706,38 @@ Describe "Invoke-TrackedInstall (#500 capture installer output)" {
     $script:INSTALLER_REBOOT_OK_CODES | Should -Not -Contain -1978334966
   }
   It "the reboot-INITIATED subset is exactly the 'already restarting' codes, and a subset of the OK codes (backend#2849 review)" {
-    # 1641 / winget 0x8A15010B mean the installer ALREADY started a reboot; the Docker
-    # log line branches on this so an INITIATED code doesn't claim the script carried on.
-    # 3010 / 0x8A150109 (reboot merely REQUIRED, box still up) must NOT be in this set.
+    # 1641 / winget 0x8A15010B mean the installer ALREADY started a reboot; the handler
+    # branches on this. 3010 / 0x8A150109 (reboot merely REQUIRED, box still up) must NOT
+    # be in this set.
     $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Be @(1641, -1978334965)
     foreach ($c in $script:INSTALLER_REBOOT_INITIATED_CODES) { $script:INSTALLER_REBOOT_OK_CODES | Should -Contain $c }
     $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Not -Contain 3010
     $script:INSTALLER_REBOOT_INITIATED_CODES | Should -Not -Contain -1978334967
-    # The Docker direct handler distinguishes the two message families by that subset.
-    $script:ISRC | Should -Match 'INSTALLER_REBOOT_INITIATED_CODES -contains \$r\.ExitCode[\s\S]{0,160}INITIATED a reboot'
+  }
+  It "an INITIATED reboot arms a FRESH resume and stops via declared exit 2 -- no false handoff claim (backend#2849 / Bugbot)" {
+    # Step 1's RunOnce is spent by Step 2, so an installer that already started a reboot
+    # must re-arm the resume before the box goes down, else the install can't come back.
+    # exit 2 would terminate Pester, so the exit/arm path is asserted on source; the
+    # REQUIRED/no-op branches are exercised behaviorally below.
+    $fn = [regex]::Match($script:ISRC, 'function Invoke-PostInstallReboot[\s\S]*?\n\}').Value
+    $fn | Should -Match 'INSTALLER_REBOOT_INITIATED_CODES -contains \$Result\.ExitCode'
+    $fn | Should -Match 'Register-ResumeAfterReboot'   # arm a FRESH resume before the box goes down
+    $fn | Should -Match 'Set-TbRerunHandoff'           # declared handoff, not an interruption
+    $fn | Should -Match 'exit 2'                       # stop, don't race the reboot into the engine wait
+    # BOTH Docker install paths (winget-first and direct) route their result through it,
+    # so the handling can't depend on which path ran (the Bugbot gap).
+    ([regex]::Matches($script:ISRC, 'Invoke-PostInstallReboot -Result \$r -Label "Docker Desktop"')).Count | Should -BeGreaterOrEqual 2
+  }
+  It "Invoke-PostInstallReboot is a no-op on clean/non-ok and just logs+continues on a REQUIRED reboot (never arms/exits)" {
+    # The REQUIRED reboot (box still up) and the 0 / non-ok cases must NOT arm a resume or
+    # exit -- only the INITIATED set does. If any of these armed a resume, an ordinary
+    # install would strand itself behind a reboot handoff.
+    Mock Log { }
+    Mock Register-ResumeAfterReboot { $true }
+    { Invoke-PostInstallReboot -Result @{ State = 'ok';     ExitCode = 0 }    -Label "X" } | Should -Not -Throw
+    { Invoke-PostInstallReboot -Result @{ State = 'failed'; ExitCode = 1 }    -Label "X" } | Should -Not -Throw
+    { Invoke-PostInstallReboot -Result @{ State = 'ok';     ExitCode = 3010 } -Label "X" } | Should -Not -Throw
+    Should -Invoke Register-ResumeAfterReboot -Times 0
   }
   It "accepts EVERY reboot-OK code end-to-end (not just 3010), including the negative winget HRESULTs" {
     # 3010 above is the headline; this drives all four documented codes -- incl. the

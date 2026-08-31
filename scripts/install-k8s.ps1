@@ -1841,6 +1841,34 @@ function Install-Winget {
 #  DOCKER DESKTOP
 # =============================================================================
 
+# Act on a reboot-pending SUCCESS from an installer, by WHICH kind (backend#2849):
+#  - REQUIRED (3010 / winget 0x8A150109 TO_FINISH): the install completed and the box
+#    is still up. The WSL2 features were already enabled + rebooted in Step 1, so
+#    continuing to the engine wait is correct -- just record the code.
+#  - INITIATED (1641 / winget 0x8A15010B): the installer has ALREADY started restarting
+#    the machine. Step 1's RunOnce continuation is spent by Step 2, so arm a FRESH
+#    resume-after-reboot and stop with the declared exit 2 -- the same "reboot then
+#    resume" handoff Step 1 uses -- otherwise the box goes down mid-Step-2 with nothing
+#    to bring the install back (Bugbot). Our install flags never allow a reboot
+#    (`--quiet`; no winget `--allow-reboot`), so INITIATED is the unexpected-but-safe
+#    branch, not the common path. Routed through here from BOTH Docker install paths
+#    (winget is tried first and is the one that can return the winget HRESULT), so the
+#    handling can't depend on which path ran. A code of 0 or a non-ok state is a no-op.
+function Invoke-PostInstallReboot {
+  param([hashtable]$Result, [string]$Label)
+  if ($Result.State -ne 'ok' -or $Result.ExitCode -eq 0) { return }
+  if ($script:INSTALLER_REBOOT_INITIATED_CODES -contains $Result.ExitCode) {
+    Warn "$Label installed, and its installer has initiated a reboot (code $(Format-ExitCode $Result.ExitCode))."
+    $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    if ($resumeArmed) { Ok "The install will resume automatically after the reboot." }
+    else              { Hint "After the machine restarts, re-run this installer to continue." }
+    $script:OutcomeReported = $true    # a declared reboot-pending stop, not an interruption
+    Set-TbRerunHandoff
+    exit 2
+  }
+  Log "$Label installed with reboot pending (code $(Format-ExitCode $Result.ExitCode)); features were enabled in Step 1, continuing to bring up the engine."
+}
+
 function Install-DockerDesktop {
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
@@ -1872,6 +1900,10 @@ function Install-DockerDesktop {
         -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget" `
         -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "Docker Desktop winget install failed (will try direct download): state=$($r.State) exit=$($r.ExitCode)" }
+      # winget is tried first and is the path that can return the winget reboot HRESULT;
+      # route its result through the same handler so an initiated reboot arms a resume +
+      # stops here instead of silently falling through to the engine wait (Bugbot).
+      Invoke-PostInstallReboot -Result $r -Label "Docker Desktop"
       RefreshPath
     }
 
@@ -1906,20 +1938,10 @@ function Install-DockerDesktop {
         'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
         'failed'       { Err "Docker Desktop installation failed (installer exited $(Format-ExitCode $r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
       }
-      # A reboot-pending success code (3010 &c., accepted above) means the install
-      # COMPLETED but a reboot is pending -- the WSL2 features it just touched were
-      # already enabled and rebooted in Step 1, so the engine can still come up. Say
-      # which kind, since the two differ in what happens next: a REQUIRED reboot leaves
-      # the box up and we continue here; an INITIATED reboot means the installer is
-      # already restarting the machine, so this line may be the last before it goes
-      # down and the reboot handoff resumes the install (backend#2849).
-      if ($r.State -eq 'ok' -and $r.ExitCode -ne 0) {
-        if ($script:INSTALLER_REBOOT_INITIATED_CODES -contains $r.ExitCode) {
-          Log "Docker Desktop installed and its installer INITIATED a reboot (code $(Format-ExitCode $r.ExitCode)); the machine is restarting -- the install resumes via the reboot handoff."
-        } else {
-          Log "Docker Desktop installed with reboot pending (code $(Format-ExitCode $r.ExitCode)); features were enabled in Step 1, continuing to bring up the engine."
-        }
-      }
+      # A reboot-pending success (3010 &c., accepted above) means the install COMPLETED;
+      # act on whether the reboot is merely required (continue) or already initiated
+      # (arm a resume + stop) -- see Invoke-PostInstallReboot (backend#2849).
+      Invoke-PostInstallReboot -Result $r -Label "Docker Desktop"
       RefreshPath
     }
 
