@@ -548,6 +548,13 @@
       "type": "string",
       "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. Must be alphanumeric ([A-Za-z0-9]+) \u2014 the rotation runbook embeds it in an ALTER USER ... IDENTIFIED BY '...' statement, so metacharacters would break the one-time rotation (generated randAlphaNum already satisfies this). Constrained where bootstrapDbPassword is not: that is only a connection parameter, this also lands in DDL."
     },
+    "mysqlRootRotationAcknowledged": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "backend#2879: acknowledge the manual root-rotation migration on an EXISTING fleet. Normally unset. When rotateMysqlRoot resolves on and the chart would MINT a new root password (no mysqlRootPassword pin, no MYSQL_ROOT_PASSWORD in the live Secret) while the MySQL datadir PVC already exists, the render FAILS at template time naming docs/migration-tools/rotate-mysql-root.md \u2014 because the mysql entrypoint honours MYSQL_ROOT_PASSWORD only at fresh-datadir init, so root would otherwise authenticate with neither value and the fleet would lose MySQL auth (helm reports success; jobs-manager CrashLoops on 1045). Set true ONLY as part of that runbook: it asserts you will run the one-time ALTER USER 'root' DDL to align root's live password to the generated Secret value in the same window. One-time and self-expiring \u2014 once rotated, tier 2 preserves the value and this is a no-op. It runs no DDL itself and a FRESH install never needs it (the datadir lookup is empty without a live cluster, so template/dry-run/GitOps renders are unaffected)."
+    },
     "perIngestionTables": {
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."

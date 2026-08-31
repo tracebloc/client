@@ -324,6 +324,52 @@ kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
   || fail "could not restore CLIENT_ID after the empty-key check"
 [ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] || fail "CLIENT_ID not restored after the empty-key check"
 
+# ── backend#2879: the existing-datadir root-rotation guard ───────────────────
+#  This release was installed with rotation OFF (prod default), so its Secret has
+#  no MYSQL_ROOT_PASSWORD and `mysql-pvc` already exists — the exact "datadir
+#  predates the rotation" state the guard refuses. Turning the gate on would mint
+#  a new root password the live database was never told about (the entrypoint
+#  reads MYSQL_ROOT_PASSWORD only at FRESH init), so root would authenticate with
+#  neither value and the fleet would lose MySQL auth. The guard is `lookup`-backed
+#  and therefore invisible to `helm template` / helm-unittest (secrets_test.yaml
+#  says as much): deleting the whole guard, or only its ack term, leaves the
+#  chart's unit tests green. This is the test that reddens.
+echo "── backend#2879: rotateMysqlRoot on an existing datadir refuses without the ack ──"
+[ -z "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
+  || fail "precondition: this release must have no MYSQL_ROOT_PASSWORD before the rotation guard check"
+_guard_err="$(mktemp)"
+if helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
+     --set rotateMysqlRoot=true >/dev/null 2>"$_guard_err"; then
+  fail "rotateMysqlRoot=true was accepted on an EXISTING datadir — the guard did not fire (backend#2879); the mint would break root auth (1045)"
+fi
+grep -q "rotate-mysql-root.md" "$_guard_err" \
+  || fail "the rotation upgrade failed for the WRONG reason (it must name the runbook): $(tr -d '\n' < "$_guard_err")"
+rm -f "$_guard_err"
+[ -z "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
+  || fail "a REFUSED render still mutated the Secret — a failed guard must not mint (backend#2879)"
+echo "   OK: the flip is refused at render time, naming the runbook, Secret untouched"
+
+#  The ack flag is the documented escape hatch (the operator will run the manual
+#  ALTER USER in the same window): the SAME upgrade must now render and mint. This
+#  is what proves the guard's `not .Values.mysqlRootRotationAcknowledged` term is
+#  wired — deleting it leaves this red because the flag would no longer matter.
+echo "── backend#2879: mysqlRootRotationAcknowledged clears the guard and the mint proceeds ──"
+helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
+  --set rotateMysqlRoot=true --set mysqlRootRotationAcknowledged=true >/dev/null \
+  || fail "the acknowledged rotation upgrade was refused — the ack flag must let the render through (backend#2879)"
+[ -n "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
+  || fail "the acknowledged upgrade rendered but minted no MYSQL_ROOT_PASSWORD — the ack path must still generate the value"
+echo "   OK: with the ack, the render passes and a root password is minted"
+
+#  Restore rotation-off so the rest of the run sees the baseline release, mirroring
+#  the empty-key check's restore discipline.
+helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
+  --set rotateMysqlRoot=false --set mysqlRootRotationAcknowledged=false >/dev/null \
+  || fail "could not restore rotation-off after the backend#2879 guard check"
+[ -z "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
+  || fail "MYSQL_ROOT_PASSWORD not cleared after turning rotation back off"
+echo "   OK: rotation restored to off; Secret back to baseline"
+
 # ── acceptance (b): the token rename does not wedge an edge already collecting ──
 #  backend#2625. The published chart wrote the Collector's ingest token under the
 #  fixed `tracebloc-telemetry-token`; this working tree writes a release-scoped name.
