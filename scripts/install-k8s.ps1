@@ -7542,6 +7542,17 @@ function Publish-TraceblocCliToToolDir {
   $src = Join-Path $InstallDir "tracebloc.exe"
   if (-not (Test-Path -LiteralPath $src)) { return }
   $dest = Join-Path $ToolDir "tracebloc.exe"
+  # Skip the copy when the machine copy already matches the source. The Machine PATH is
+  # searched BEFORE the CLI installer's updatable %LOCALAPPDATA% copy, so this snapshot
+  # would otherwise SHADOW a later out-of-band CLI update — `tracebloc` would keep running
+  # the stale build (backend#2915/Bugbot). Being a cheap no-op when already in sync is what
+  # lets the caller re-run this on EVERY invocation (incl. the fast path) to refresh it.
+  # Compare by content hash; on any compare error fall through and re-copy (safe: -Force).
+  if (Test-Path -LiteralPath $dest) {
+    try {
+      if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash) { return }
+    } catch { }
+  }
   # -ErrorAction Stop, because Copy-Item/New-Item raise NON-terminating errors under the
   # installer's default $ErrorActionPreference='Continue' — the caller's try/catch would
   # NOT catch those, so a failed copy would be silent (Bugbot). Make them terminating and
@@ -7796,6 +7807,13 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # namespace) is what the PV paths embed.
     $fpRelease = (Get-InstalledClientInfo).Name
     if ($fpRelease) { Initialize-ReleaseDataDirs -Release $fpRelease }
+    # Refresh the machine-wide CLI copy if a later out-of-band CLI update — a direct
+    # `irm <cli>/install.ps1 | iex` or a self-update — left %LOCALAPPDATA% newer than the
+    # $TOOL_DIR snapshot the Machine PATH shadows it with, so `tracebloc` stops running a
+    # stale build (backend#2915/Bugbot). Same "re-run is a real remedy" reasoning as the
+    # PV-dir repair above; Publish is a cheap hash-check no-op when already in sync, and
+    # best-effort so it never fails the fast path.
+    try { Publish-TraceblocCliToToolDir } catch { Log "Refreshing the machine-wide CLI copy failed: $_" }
     Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
     Unregister-ResumeAfterReboot
     Log "Already installed and healthy - nothing to do."

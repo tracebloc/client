@@ -442,6 +442,13 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-TraceblocCliCurrent\) -and \(Test-TraceblocCliMachineWide\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
     $script:PSRC | Should -Match 'already installed and the client is healthy -- nothing to do'
   }
+  It "refreshes the machine-wide CLI copy on the fast path (so an out-of-band update isn't shadowed)" {
+    # backend#2915 (Bugbot): the fast path is entered when the machine copy is merely
+    # PRESENT, so it must still call Publish (a cheap no-op when in sync) to re-copy a
+    # snapshot a later %LOCALAPPDATA% update left stale — otherwise re-running the
+    # installer never refreshes it.
+    $script:PSRC | Should -Match '(?s)Initialize-ReleaseDataDirs -Release \$fpRelease[\s\S]{0,700}?Publish-TraceblocCliToToolDir[\s\S]{0,400}?force a full reinstall'
+  }
   It "names the ACTUAL state-file path in the force-reinstall hint (honours HOST_DATA_DIR)" {
     # Must interpolate Get-InstallStatePath, not hard-code ~\.tracebloc\install-state.json.
     $script:PSRC | Should -Match 'Delete \$\(Get-InstallStatePath\)'
@@ -1210,6 +1217,9 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Mock Test-Path { $true }   # src exe + dest dir both present by default
     Mock New-Item {}
     Mock Copy-Item {}
+    # Distinct hash per path by default (src != dest) -> the staleness check sees them
+    # differ, so the default is "copy". Tests that want the in-sync no-op override this.
+    Mock Get-FileHash { [pscustomobject]@{ Hash = "$LiteralPath" } }
   }
 
   It "copies tracebloc.exe from the install dir into TOOL_DIR" {
@@ -1222,6 +1232,25 @@ Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools d
     Mock Test-Path { $LiteralPath -ne 'pf-tracebloc-bin' }   # src present, dest dir absent
     Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
     Should -Invoke New-Item -Times 1 -Exactly
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+
+  # backend#2915 (Bugbot): the Machine PATH shadows the CLI installer's updatable
+  # %LOCALAPPDATA% copy, so a stale $TOOL_DIR snapshot would mask an out-of-band update.
+  # Being a cheap no-op when in sync is what lets the fast path call this every run.
+  It "skips the copy when the machine copy already matches the source (in sync)" {
+    Mock Get-FileHash { [pscustomobject]@{ Hash = 'SAME' } }   # src == dest
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  It "re-copies when the machine copy is STALE (source differs — an out-of-band update)" {
+    Mock Get-FileHash { if ($LiteralPath -like '*la-programs-tracebloc*') { [pscustomobject]@{Hash='NEW'} } else { [pscustomobject]@{Hash='OLD'} } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+  It "re-copies (fail-safe) when the hashes can't be compared" {
+    Mock Get-FileHash { throw "file locked" }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
     Should -Invoke Copy-Item -Times 1 -Exactly
   }
 
