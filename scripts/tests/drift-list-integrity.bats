@@ -27,6 +27,26 @@ drift() {
   run make -C "$REPO" drift "DRIFT_GUARDS=$1"
 }
 
+# ONE MATCHER, TWO CALLERS (Bugbot, and this file's own header rule 9).
+#
+# The floor case reads Make's real output; the shape case feeds it synthetic
+# assignment lines. Both used to carry their OWN literal copy of this grep+sed,
+# so the shape case named the floor's matcher and never reached it: narrowing or
+# deleting the live matcher left it green, which is the unreachable-fixture
+# shape this suite exists to refuse. Both now call this.
+#
+# Reads the candidate text on STDIN, prints the number of `|`-separated entries,
+# and fails (non-zero, no output) when no assignment line is present — so
+# "cannot find it" is never indistinguishable from "found a list of one".
+drift_guards_entries() {
+  local line
+  line="$(grep -m1 -E '^(export )?DRIFT_GUARDS[[:space:]]*:?=')" || return 1
+  [ -n "$line" ] || return 1
+  printf '%s' "$line" \
+    | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//' \
+    | awk -F'|' '{print NF}'
+}
+
 @test "an EMPTY list is a failure, not a clean sweep" {
   drift ""
   [ "$status" -ne 0 ] || return 1
@@ -101,12 +121,8 @@ drift() {
   # about not going red on a Make upgrade, not about a hole.
   run make -C "$REPO" -pn
   [ "$status" -eq 0 ] || return 1
-  local line count
-  line="$(printf '%s\n' "$output" | grep -m1 -E '^(export )?DRIFT_GUARDS[[:space:]]*:?=')"
-  [ -n "$line" ] || return 1
-  # Strip whichever prefix arrived, then count `|`-separated entries.
-  count="$(printf '%s' "$line" | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//' \
-           | awk -F'|' '{print NF}')"
+  local count
+  count="$(printf '%s\n' "$output" | drift_guards_entries)" || return 1
   [ "$count" -ge 20 ] || return 1
 }
 
@@ -117,15 +133,12 @@ drift() {
   local real
   real="$(printf '%s\n' "a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u")"
   for prefix in "DRIFT_GUARDS := " "export DRIFT_GUARDS := " "DRIFT_GUARDS = " "export DRIFT_GUARDS = "; do
-    local line count
-    line="${prefix}${real}"
-    printf '%s\n' "$line" | grep -qE '^(export )?DRIFT_GUARDS[[:space:]]*:?=' || return 1
-    count="$(printf '%s' "$line" | sed -E 's/^(export )?DRIFT_GUARDS[[:space:]]*:?=[[:space:]]*//' \
-             | awk -F'|' '{print NF}')"
+    local count
+    count="$(printf '%s\n' "${prefix}${real}" | drift_guards_entries)" || return 1
     [ "$count" -eq 21 ] || return 1
   done
-  # And the control: a line that merely MENTIONS the name is not an assignment.
-  printf '%s\n' "#   DRIFT_GUARDS is documented above" \
-    | grep -qE '^(export )?DRIFT_GUARDS[[:space:]]*:?=' && return 1
-  return 0
+  # And the control: a line that merely MENTIONS the name is not an assignment,
+  # so the matcher must REFUSE it rather than count it.
+  ! printf '%s\n' "#   DRIFT_GUARDS is documented above" | drift_guards_entries
+
 }
