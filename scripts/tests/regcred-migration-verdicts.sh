@@ -326,6 +326,78 @@ metadata:
 data:
   .dockerconfigjson: e30='
 
+echo "the RUNBOOK's own commands — three findings that were in the doc, not the tools:"
+# The runbook is the operator's instruction sheet, and all three of Bugbot's third
+# round landed there rather than in regcred-preflight.sh or regcred-copy.py. A
+# doc-only defect is still a defect: it is what somebody types on a live fleet.
+RUNBOOK="$ROOT/docs/migration-tools/regcred-existing-secret.md"
+if [ ! -r "$RUNBOOK" ]; then
+  echo "  [bad]  cannot read $RUNBOOK -- refusing to report clean over an unread file" >&2
+  fail=$((fail + 1))
+else
+  # The line that snapshots values and is later fed to `helm upgrade -f`.
+  snap="$(grep -n 'helm get values .*> */tmp/' "$RUNBOOK" | head -1)"
+
+  # 1. `-o yaml`, because the DEFAULT format is `table` and prefixes
+  #    "COMPUTED VALUES:", which parses as a top-level key of that name. Measured on
+  #    helm v4.1.1: yaml.safe_load returns ['COMPUTED VALUES', 'foo', 'nested'].
+  if printf '%s' "$snap" | grep -q -- '-o yaml'; then
+    pass=$((pass + 1)); echo "  [ok]   the snapshot uses -o yaml, so no COMPUTED VALUES key reaches helm upgrade"
+  else
+    fail=$((fail + 1)); echo "  [bad]  the snapshot omits -o yaml: $snap" >&2
+  fi
+
+  # 2. NOT `-a`, because that dumps COMPUTED values and freezes today's chart
+  #    defaults as user-supplied. A later --reset-then-reuse-values tick keeps them.
+  if printf '%s' "$snap" | grep -qE -- '-a( |$)'; then
+    fail=$((fail + 1)); echo "  [bad]  the snapshot still passes -a, freezing chart defaults into the rollback: $snap" >&2
+  else
+    pass=$((pass + 1)); echo "  [ok]   the snapshot does not pass -a, so only operator-set values are captured"
+  fi
+
+  # 3. the credential file is not world-readable. It holds the live registry
+  #    password in cleartext, in a predictable path, on a shared bastion.
+  if grep -qE '^(umask 077|chmod 600|chmod 0600)' "$RUNBOOK"; then
+    pass=$((pass + 1)); echo "  [ok]   the credential snapshot is mode-restricted before it is written"
+  else
+    fail=$((fail + 1)); echo "  [bad]  nothing restricts the mode of the file holding the registry password" >&2
+  fi
+
+  # 4. no verify check maps an error to its own success signal. `2>/dev/null` on a
+  #    read whose empty result MEANS success is the fail-open shape: an unreachable
+  #    cluster printed a clean bill of health for the whole table.
+  if grep -qE 'kubectl .*-o jsonpath.*2>/dev/null' "$RUNBOOK"; then
+    fail=$((fail + 1)); echo "  [bad]  a verify read still discards stderr, so an error reads as ABSENT" >&2
+  else
+    pass=$((pass + 1)); echo "  [ok]   verify reads keep stderr and judge on exit status"
+  fi
+
+  # 5. and the failed-read branch is DISTINGUISHABLE from the success branch.
+  #
+  #    KEYED ON THE DISCRIMINATOR, not on the message. Checking for the string
+  #    "FAILED (" was VACUOUS: replacing the `*NotFound*)` arm with `*)` makes the
+  #    first arm swallow every error and the FAILED arm unreachable -- while the
+  #    string stays in the file. Its own mutation caught that. `*NotFound*` is the
+  #    only thing separating "genuinely gone" (the success signal for the old name)
+  #    from "the read failed".
+  if grep -qE '[*]NotFound[*][)]' "$RUNBOOK" && grep -qE 'INCONCLUSIVE|FAILED [(]' "$RUNBOOK"; then
+    pass=$((pass + 1)); echo "  [ok]   a failed read is discriminated from NotFound and reported as FAILED"
+  else
+    fail=$((fail + 1)); echo "  [bad]  nothing separates 'genuinely absent' from 'could not read'" >&2
+  fi
+
+  # 6. and check 2's read is judged on its EXIT STATUS, not piped straight into
+  #    `grep -ci`. This is a SEPARATE assertion from #4 on purpose: #4 keys on the
+  #    kubectl read, so it went green while check 2 -- a `helm get values` -- had
+  #    gone back to counting matches in the empty output of a failed call. Two
+  #    reads, two failure modes, two assertions.
+  if grep -qE 'if +vals=[$][(]helm get values' "$RUNBOOK"; then
+    pass=$((pass + 1)); echo "  [ok]   check 2 reads once and judges on the exit status"
+  else
+    fail=$((fail + 1)); echo "  [bad]  check 2 does not test whether the helm read succeeded, so a failed call counts 0 matches and reads as clean" >&2
+  fi
+fi
+
 printf '\nregcred-migration-verdicts: %d ok, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

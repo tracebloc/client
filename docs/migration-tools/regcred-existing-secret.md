@@ -83,7 +83,22 @@ export CHART=<the chart ref you already deploy>
 ### 1. Record what the upgrade will reference
 
 ```bash
-helm get values "$REL" -n "$NS" -a > /tmp/$REL-values-before.yaml
+# `-o yaml`, and NOT `-a`, and mode 0600. All three matter (Bugbot on client#916):
+#
+#   default output is `table`, which prefixes `COMPUTED VALUES:` -- that line parses
+#     as a top-level key called "COMPUTED VALUES", and this file is fed straight to
+#     `helm upgrade -f`. Measured on helm v4.1.1: `yaml.safe_load` returns
+#     ['COMPUTED VALUES', 'foo', 'nested'].
+#   `-a` dumps COMPUTED values, so every current chart default is frozen here as a
+#     user-supplied value. A later auto-upgrade tick with
+#     `--reset-then-reuse-values` would keep those frozen defaults instead of the
+#     new chart's. A rollback snapshot wants what the OPERATOR set, nothing else.
+#   `umask 077` because the next line writes the live registry password in
+#     cleartext. Without it the file lands world-readable under the process umask,
+#     in a predictable path, on a shared bastion -- which is the exposure this
+#     whole migration exists to remove.
+umask 077
+helm get values "$REL" -n "$NS" -o yaml > /tmp/$REL-values-before.yaml
 python3 - <<'PY' > /tmp/$REL-values-new.yaml
 import os, sys, yaml
 v = yaml.safe_load(open(f"/tmp/{os.environ['REL']}-values-before.yaml"))
@@ -145,7 +160,13 @@ Doing both at once leaves you unable to say which caused a problem.
 ## Verify
 
 Each check below either prints a value or says `ABSENT`/`FAILED` — none of them
-can absorb an error into a reassuring answer. That is deliberate: earlier
+can absorb an error into a reassuring answer. **Two of them did not honour that
+until client#916's third round** (Bugbot): check 2's `grep -ci` counted zero
+matches in the empty output of a *failed* `helm get values`, and check 3's
+`2>/dev/null` mapped every kubectl error to the empty string, which it reported as
+`ABSENT` — the success signal for the old Secret. An unreachable cluster printed a
+clean bill of health for the entire table. Both now test the exit status first, and
+distinguish `NotFound` from every other failure. That is deliberate: earlier
 versions of this procedure used `cmd 2>/dev/null || echo "fine"` and
 `... | shasum`, which reported a confident conclusion for a failed read and a
 plausible fingerprint (`e3b0c442…`, the hash of the empty string) for a Secret
@@ -156,16 +177,34 @@ that did not exist.
 helm get values "$REL" -n "$NS" -a | grep -A4 '^dockerRegistry:'
 # expect exactly: create: false / existingSecret: <NEW>
 
-# 2. nothing anywhere still carries it
-helm get values "$REL" -n "$NS" -a | grep -ci "<the registry username>"
-# expect: 0
+# 2. nothing anywhere still carries it -- READ ONCE, then judge (Bugbot on #916).
+#    `helm get values | grep -ci <user>` printed 0 on a FAILED helm call, because
+#    grep counts zero matches in empty stdin. An unreachable cluster read as
+#    "credential gone", which is this check's success signal.
+if vals=$(helm get values "$REL" -n "$NS" -a 2>&1); then
+  printf 'occurrences of the registry username in release values: %s\n' \
+    "$(printf '%s' "$vals" | grep -ci "<the registry username>")"   # expect 0
+else
+  printf 'FAILED to read release values -- this check is INCONCLUSIVE, not a pass\n%s\n' "$vals"
+fi
 
 # 3. the chart's Secret is gone and the operator's remains, in every namespace
 for n in <each namespace from the preflight>; do
   for s in "${REL}-regcred" "$NEW"; do
-    v=$(kubectl -n "$n" get secret "$s" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null)
-    if [ -z "$v" ]; then printf '%-26s %-26s ABSENT\n' "$n" "$s"
-    else printf '%-26s %-26s %s\n' "$n" "$s" "$(printf %s "$v" | shasum -a 256 | cut -c1-16)"; fi
+    # EXIT STATUS FIRST, then emptiness (Bugbot on #916). `2>/dev/null` mapped every
+    # kubectl error to the empty string, and empty was reported as ABSENT -- which is
+    # the SUCCESS signal for "${REL}-regcred". An unreachable cluster printed a clean
+    # bill of health for the whole table.
+    if ! v=$(kubectl -n "$n" get secret "$s" -o jsonpath='{.data.\.dockerconfigjson}' 2>&1); then
+      case "$v" in
+        *NotFound*) printf '%-26s %-26s ABSENT\n' "$n" "$s" ;;
+        *)          printf '%-26s %-26s FAILED (%s)\n' "$n" "$s" "$(printf '%s' "$v" | head -1)" ;;
+      esac
+    elif [ -z "$v" ]; then
+      printf '%-26s %-26s PRESENT-BUT-EMPTY\n' "$n" "$s"
+    else
+      printf '%-26s %-26s %s\n' "$n" "$s" "$(printf %s "$v" | shasum -a 256 | cut -c1-16)"
+    fi
   done
 done
 # expect: "${REL}-regcred" ABSENT everywhere; "$NEW" present with matching hashes
