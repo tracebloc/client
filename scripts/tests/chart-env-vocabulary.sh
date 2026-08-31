@@ -41,7 +41,13 @@ fails=0
 checks=0
 
 render() { # $@ = extra helm args; prints combined output, returns helm's status
-  helm template vocab "$CHART" -f "$VALUES" "$@" 2>&1
+  # backend#2892: pin mysqlRootPassword so the dev renders below (dev turns
+  # rotateMysqlRoot on via its ByEnv default) don't trip the fail-closed
+  # root-rotation guard — `helm template` is cluster-less, so an unpinned dev
+  # render refuses. The pin is tier 1 (bypasses the mint) and is inert to the env
+  # vocabulary this script checks; a bad CLIENT_ENV / channelTags value is still
+  # rejected by the schema regardless.
+  helm template vocab "$CHART" -f "$VALUES" --set mysqlRootPassword=RotatedRootPw123 "$@" 2>&1
 }
 
 pass() { checks=$((checks + 1)); echo "  ok    $1"; }
