@@ -215,8 +215,8 @@ echo "   OK: recorded values reset to the genuine overrides — path 2 now tests
 
 echo "── path 2: the fleet auto-upgrade — helm upgrade --reset-then-reuse-values ──"
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values
-netpol_has_external_443 || fail "auto-upgrade dropped the external 443 rule (allowExternalHttps default did not flow)"
-[ -z "$(jm_egress_proxy_url)" ] || fail "auto-upgrade injected EGRESS_PROXY_URL (routeWorkloads should default false)"
+netpol_has_external_443 && fail "auto-upgrade kept the external 443 rule (deny-by-default allowExternalHttps=false did not flow — RFC-0003 D6 / client-runtime#199)"
+[ "$(jm_egress_proxy_url)" = "http://egress-proxy-service:3128" ] || fail "auto-upgrade did not inject EGRESS_PROXY_URL (routeWorkloads=true default did not flow — RFC-0003 D6 / client-runtime#199)"
 kubectl get deploy "${NS}-egress-proxy" -n "$NS" >/dev/null \
   || fail "auto-upgrade did not deploy the egress gateway (new defaults did not flow)"
 ANNOT="$(kubectl get -n "$NS" "$(jm_deploy)" \
@@ -245,7 +245,7 @@ WANT_DIGEST="$(local_prod_digest)"
 GOT_DIGEST="$(jm_ingestor_digest)"
 [ "$GOT_DIGEST" = "$WANT_DIGEST" ] \
   || fail "auto-upgrade did not push the prod ingestor pin onto the installed edge: got '${GOT_DIGEST:-<empty>}', want '$WANT_DIGEST' (backend#1245)"
-echo "   OK: new defaults flowed in (gateway deployed, inert), annotations survived"
+echo "   OK: new defaults flowed in (deny-by-default: gateway routing + external-443 dropped), annotations survived"
 echo "   OK: prod ingestor pin reached the installed edge ($WANT_DIGEST)"
 
 echo "── path 3: operator flips the #102 lockdown + opts a canary off the prod pin ──"

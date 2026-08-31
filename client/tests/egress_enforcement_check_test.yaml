@@ -9,10 +9,10 @@ set:
   clientId: "test-id"
   clientPassword: "test"
 tests:
-  - it: does NOT render by default (lockdown off — allowExternalHttps defaults true)
+  - it: renders by default (lockdown on — allowExternalHttps defaults false)
     asserts:
       - hasDocuments:
-          count: 0
+          count: 1
 
   - it: does NOT render when training NetworkPolicy is disabled
     set:

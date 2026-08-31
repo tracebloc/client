@@ -152,12 +152,9 @@ tests:
 
   # --- Step 1: routing training pods through the gateway ---
 
-  - it: jobs-manager gets EGRESS_PROXY_URL only when routeWorkloads is enabled
+  - it: jobs-manager gets EGRESS_PROXY_URL by default (routeWorkloads defaults true)
     template: templates/jobs-manager-deployment.yaml
     documentIndex: 0
-    set:
-      egressProxy:
-        routeWorkloads: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -165,9 +162,12 @@ tests:
             name: EGRESS_PROXY_URL
             value: "http://egress-proxy-service:3128"
 
-  - it: jobs-manager does NOT get EGRESS_PROXY_URL by default (routeWorkloads false)
+  - it: jobs-manager omits EGRESS_PROXY_URL when routeWorkloads is disabled
     template: templates/jobs-manager-deployment.yaml
     documentIndex: 0
+    set:
+      egressProxy:
+        routeWorkloads: false
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env
@@ -197,10 +197,10 @@ tests:
 
   # --- Step 3: the lockdown — drop the external 0.0.0.0/0:443 rule ---
 
-  - it: keeps the external 443 egress rule by default (allowExternalHttps true)
+  - it: drops the external 443 egress rule by default (allowExternalHttps defaults false)
     template: templates/network-policy-training.yaml
     asserts:
-      - contains:
+      - notContains:
           path: spec.egress
           content:
             to:
@@ -214,14 +214,14 @@ tests:
               - port: 443
                 protocol: TCP
 
-  - it: drops the external 443 rule but keeps the gateway path when allowExternalHttps is false
+  - it: keeps the external 443 rule but keeps the gateway path when allowExternalHttps is opted back to true
     template: templates/network-policy-training.yaml
     set:
       networkPolicy:
         training:
-          allowExternalHttps: false
+          allowExternalHttps: true
     asserts:
-      - notContains:
+      - contains:
           path: spec.egress
           content:
             to:
