@@ -1382,6 +1382,19 @@ function Test-TraceblocCliCurrent {
   try { return ([version]$Matches[1] -ge [version]$script:TB_CLI_MIN_VERSION) } catch { return $true }
 }
 
+# Is the CLI reachable MACHINE-WIDE — the exe copied into $TOOL_DIR, which is on the
+# Machine PATH? The fast path must ALSO gate on this, not just Test-TraceblocCliCurrent:
+# a prior install that only ever put the CLI on the USER PATH (an older installer, or a
+# copy that failed) is "current" by version yet invisible to a fresh/non-interactive or
+# other-user shell. Without this the fast path would shortcut a completed-but-User-only
+# machine and never run Publish-TraceblocCliToToolDir — so re-running the installer, the
+# documented repair, would fix nothing (backend#2915 / Bugbot). Runs after
+# Initialize-ToolDir has set $TOOL_DIR, so a missing dir is a real "not placed" answer.
+function Test-TraceblocCliMachineWide {
+  if (-not $script:TOOL_DIR) { return $false }
+  return (Test-Path -LiteralPath (Join-Path $script:TOOL_DIR "tracebloc.exe"))
+}
+
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
 # output. Distinguishes "confidently not ours" from "can't tell" so callers never
 # conflate an indeterminate read with a definitive answer (#557 Bugbot 3728340365,
@@ -7746,7 +7759,7 @@ Find-Gpu
 # verifies live health (not just the checkpoint), so a stopped cluster or a down
 # client falls through to the repairing walk. Skipped on -Resume (a resume must
 # finish the interrupted walk).
-if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-TraceblocCliCurrent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-TraceblocCliCurrent) -and (Test-TraceblocCliMachineWide) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
   # GPU is "fully enabled" only when the node ACTUALLY advertises a GPU AND the live release
   # requests one. If an NVIDIA GPU is present but EITHER is missing, do NOT shortcut -- the state is
   # inconsistent in one of two ways (Bugbot), both of which a re-run should fix:

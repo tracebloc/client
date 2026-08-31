@@ -430,12 +430,16 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Not -Match "Set-StageComplete"
     $script:PSRC | Should -Not -Match "function Add-CompletedStage"
   }
-  It "gates the fast nothing-to-do path on tools + a CURRENT CLI + running cluster + HEALTHY client" {
+  It "gates the fast nothing-to-do path on tools + a CURRENT + MACHINE-WIDE CLI + running cluster + HEALTHY client" {
     # Test-TraceblocCliCurrent is load-bearing here (client#707): Test-ToolsPresent
     # covers docker/kubectl/k3d/helm only, so without it the fast path shortcuts
     # past Install-TraceblocCli and the CLI is never updated — nor even retried on
     # a machine where its (non-fatal) install had failed.
-    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-TraceblocCliCurrent\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
+    # Test-TraceblocCliMachineWide (backend#2915) is equally load-bearing: a CLI that is
+    # "current" but only on the USER PATH would fast-path out and never get the
+    # machine-wide copy, so a fresh/other-user shell stays broken and re-running fixes
+    # nothing.
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-TraceblocCliCurrent\) -and \(Test-TraceblocCliMachineWide\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
     $script:PSRC | Should -Match 'already installed and the client is healthy -- nothing to do'
   }
   It "names the ACTUAL state-file path in the force-reinstall hint (honours HOST_DATA_DIR)" {
@@ -1305,6 +1309,28 @@ Describe "Test-TraceblocCliCurrent" {
     Mock Has { $true }
     Mock tracebloc { throw "boom" }
     Test-TraceblocCliCurrent | Should -BeTrue
+  }
+}
+
+Describe "Test-TraceblocCliMachineWide (backend#2915: the fast path must require the machine-wide copy)" {
+  # A CLI that is 'current' but only on the USER PATH must NOT let the fast path
+  # shortcut past Publish-TraceblocCliToToolDir — or re-running the installer, the
+  # documented repair, would never place the machine-wide copy.
+  AfterEach { $script:TOOL_DIR = $null }
+
+  It "true when \$TOOL_DIR\tracebloc.exe is present" {
+    $script:TOOL_DIR = 'pf-tracebloc-bin'
+    Mock Test-Path { $true }
+    Test-TraceblocCliMachineWide | Should -BeTrue
+  }
+  It "false when the machine-wide copy is absent (User-PATH-only CLI)" {
+    $script:TOOL_DIR = 'pf-tracebloc-bin'
+    Mock Test-Path { $false }
+    Test-TraceblocCliMachineWide | Should -BeFalse
+  }
+  It "false when \$TOOL_DIR is unset (Initialize-ToolDir hasn't run)" {
+    $script:TOOL_DIR = $null
+    Test-TraceblocCliMachineWide | Should -BeFalse
   }
 }
 
