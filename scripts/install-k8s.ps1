@@ -43,6 +43,23 @@ param([switch]$Help, [switch]$NoReboot, [switch]$Diagnose, [string]$DailyUser, [
 # opted out after it elevates, or the hang simply moves one process along.
 if ($env:TRACEBLOC_SKIP_REBOOT_PROMPT) { $NoReboot = $true }
 
+# --- Test-CanPrompt: the single "may I ask the operator?" predicate ----------
+# Defined HERE, at the very top, on purpose. The admin gate below runs at
+# script-LOAD time -- before any `function` further down is in scope -- and used
+# to re-derive this inline as its own `$canPrompt = ...` copy, so the two
+# definitions of "can we prompt" could drift apart (backend#2836). One predicate,
+# reachable by every caller including the load-time gate.
+#
+# False under CI / a service / piped or redirected stdin -- exactly the hosts
+# where a Read-Host would BLOCK FOREVER rather than fail. Every Read-Host in this
+# installer is gated on it; the Pester AST guard (backend#2836) asserts that no
+# Read-Host is reachable without it, so this predicate cannot silently regrow a
+# blind spot.
+function Test-CanPrompt {
+  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
+  catch { return $false }
+}
+
 # --- Self-elevation (#421) ---------------------------------------------------
 # Build the powershell.exe argument list to relaunch this installer ELEVATED.
 # Run from a .ps1 on disk -> re-run that file; run via the documented one-liner
@@ -97,7 +114,7 @@ if (-not $env:TB_PESTER) {
     # Offer to self-elevate instead of only instructing (#421): a hospital user who
     # pasted into a normal PowerShell shouldn't have to know that "Terminal (Admin)"
     # is a separate thing to open. One consent -> one UAC prompt -> install proceeds.
-    $canPrompt = try { [Environment]::UserInteractive -and -not [Console]::IsInputRedirected } catch { $false }
+    $canPrompt = Test-CanPrompt   # one predicate (defined at top); was an inline copy that could drift (backend#2836)
     $elevated  = $false
     if ($canPrompt) {
       Write-Host "  " -NoNewline; Write-Host ([char]0x26A0) -ForegroundColor Yellow -NoNewline; Write-Host "  Administrator rights are required to set up Docker + WSL." -ForegroundColor Yellow
@@ -982,6 +999,15 @@ Advanced configuration (environment variables):
   TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
                  network, so in-cluster image pulls don't fail x509 (#424).
                  CURL_CA_BUNDLE is also honored.
+
+Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
+  Set the client credentials as environment variables so nothing prompts:
+    TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from https://ai.tracebloc.io/clients
+    TRACEBLOC_CLIENT_NAME                             the name shown on your dashboard
+  With those set (plus TRACEBLOC_SKIP_REBOOT_PROMPT=1, or -NoReboot), a
+  console-less install runs end to end instead of blocking on a prompt.
+  Note: TRACEBLOC_VALUES_FILE is a knob of the Linux (bash) installer only --
+  this Windows installer does not read it. Use the three variables above.
 
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
@@ -3162,12 +3188,8 @@ function Set-DailyUserProvisioning {
 #  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
 # =============================================================================
 
-# Can we prompt? False under CI / piped / redirected stdin — where the guard must
-# fail safe (abort) rather than hang or silently adopt.
-function Test-CanPrompt {
-  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
-  catch { return $false }
-}
+# (Test-CanPrompt -- "can we prompt?" -- is defined at the top of the file, next
+# to the load-time admin gate that also needs it; this guard calls it below.)
 
 # Directories under HOST_DATA_DIR that hold real client data — a MySQL data dir
 # or a dataset dir with at least one file — across BOTH on-disk layouts: flat
@@ -5292,6 +5314,26 @@ function Get-InstalledClientInfo {
   return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; Name = $existingName; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
 }
 
+# Ask the operator to name this client, on a console that can answer. Returns
+# the sanitized name, or "" when there is nobody to ask (Test-CanPrompt false) or
+# three empty tries -- the caller then fails closed naming TRACEBLOC_CLIENT_NAME.
+# Extracted from Invoke-ProvisionClient (like Read-RebootChoice) so the guard is
+# reachable by the test suite: with no console, Read-Host BLOCKS rather than
+# returning, so the 3-try loop is no defence and only the Test-CanPrompt gate
+# keeps an unattended run from hanging here (backend#2836).
+function Read-ClientName {
+  if (-not (Test-CanPrompt)) { return "" }
+  foreach ($try in 1..3) {
+    $name = ""
+    try { $name = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)") } catch { $name = "" }
+    # Strip paste/arrow-key escape garbage BEFORE the trim — it would slug-ify
+    # into a garbage name like "d-d-d-a-a-a" (bash flow, 2026-07-20).
+    $name = (ConvertTo-SanitizedInput -Value $name).Trim()
+    if ($name) { return $name }
+  }
+  return ""
+}
+
 # -- Step 4/5: Register this machine (browser sign-in; mirrors provision_client)
 # Sets $script:TB_PROV_MODE to route the Helm step:
 #   preset   - operator supplied TRACEBLOC_CLIENT_ID/PASSWORD (env automation)
@@ -5375,18 +5417,12 @@ function Invoke-ProvisionClient {
   # Name this machine. `client create` would prompt itself, but its output is
   # captured to the log below (the credential must never reach the terminal) —
   # so collect the name here. Precedence: TRACEBLOC_CLIENT_NAME (unattended) >
-  # interactive prompt (3 tries on empty Enter) > fail closed.
+  # interactive prompt (3 tries on empty Enter) > fail closed. The prompt lives
+  # in Read-ClientName, gated on Test-CanPrompt, so an unattended run falls
+  # straight through to the Err instead of blocking on Read-Host (backend#2836).
   $clientName = ""
   if ($env:TRACEBLOC_CLIENT_NAME) { $clientName = $env:TRACEBLOC_CLIENT_NAME.Trim() }
-  if (-not $clientName) {
-    foreach ($try in 1..3) {
-      $clientName = (Read-Host "  Name your secure environment (shown on your tracebloc dashboard)")
-      # Strip paste/arrow-key escape garbage BEFORE the trim — it would slug-ify
-      # into a garbage name like "d-d-d-a-a-a" (bash flow, 2026-07-20).
-      $clientName = (ConvertTo-SanitizedInput -Value $clientName).Trim()
-      if ($clientName) { break }
-    }
-  }
+  if (-not $clientName) { $clientName = Read-ClientName }
   if (-not $clientName) { Err "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME for an unattended install." }
 
   # Location is NEVER prompted (RFC-0001 §6.4). Windows has no zone.tab to

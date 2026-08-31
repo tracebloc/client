@@ -3562,6 +3562,104 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   }
 }
 
+Describe "Read-ClientName (the client-name prompt cannot hang an unattended install; backend#2836)" {
+  # THE SECOND PROMPT. Right after the reboot question backend#2675 fixed, the
+  # PRIMARY provisioning path asks for a client name with Read-Host. With no
+  # console that call BLOCKS -- and the 3-try "empty Enter" loop is no defence,
+  # because a blocked Read-Host never returns to be retried. Gated on
+  # Test-CanPrompt, an unattended run gets "" and the caller fails closed naming
+  # TRACEBLOC_CLIENT_NAME. Extracted (like Read-RebootChoice) because the call
+  # site ends in Err, which no Pester mock can intercept.
+  It "does not prompt at all when there is no terminal" {
+    Mock Test-CanPrompt { $false }
+    Mock Read-Host { throw "must not prompt with no terminal -- this is the hang" }
+    Read-ClientName | Should -Be ""
+    Should -Invoke Read-Host -Times 0 -Exactly
+  }
+  It "returns the name a present operator types" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "acme-lab" }
+    Read-ClientName | Should -Be "acme-lab"
+    Should -Invoke Read-Host -Times 1 -Exactly
+  }
+  It "retries an empty answer up to three times, then gives up (never an infinite loop)" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { "" }
+    Read-ClientName | Should -Be ""
+    Should -Invoke Read-Host -Times 3 -Exactly
+  }
+  It "a Read-Host that throws is 'no name', not a crash" {
+    Mock Test-CanPrompt { $true }
+    Mock Read-Host { throw "console gone" }
+    Read-ClientName | Should -Be ""
+  }
+}
+
+Describe "No Read-Host is reachable without a Test-CanPrompt gate (the hang class stays closed; backend#2836)" {
+  # THE CLASS, NOT THE INSTANCE. A Read-Host with nobody at the console does not
+  # fail, it HANGS -- backend#2675 fixed one such site, backend#2836's audit found
+  # six more. The durable fix is a RULE: every Read-Host in this installer must
+  # sit behind Test-CanPrompt, so an unattended run refuses or hands off instead
+  # of blocking. This asserts the rule against the parsed script, so a future
+  # unguarded Read-Host fails HERE, in CI, rather than in a customer's
+  # console-less install.
+  #
+  # "Guarded" = a Test-CanPrompt CALL appears, lexically before the Read-Host, in
+  # the Read-Host's own enclosing function -- or, for the load-time admin gate
+  # that has no enclosing function, earlier at script scope. Every real guard in
+  # this file has that shape: `if (Test-CanPrompt) { ...Read-Host... }`, an
+  # `if (-not (Test-CanPrompt)) { return/Err }` at the top of the function or
+  # branch, or `$canPrompt = Test-CanPrompt` before the gate. (Comments and
+  # strings that mention Read-Host are invisible to the AST, so they can't
+  # confuse this the way a grep would.)
+  #
+  # LIMITS, on purpose. This is lexical precedence, not true dominance -- a real
+  # dominance/data-flow check would have to follow the admin gate's
+  # `$canPrompt = Test-CanPrompt; if ($canPrompt)` indirection, which is more
+  # machinery than a guard test should carry. So it will MISS a future Read-Host
+  # dropped into the same function (or script scope) as an unrelated earlier
+  # Test-CanPrompt call, and it REQUIRES each prompt to carry its own gate rather
+  # than lean on a caller's. Both are acceptable here: it covers all 11 current
+  # sites and fails the moment any of their gates is removed (that is the
+  # regression this defends against); "self-guarded prompt" is a fine house rule.
+  BeforeAll {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      "$PSScriptRoot/../install-k8s.ps1", [ref]$null, [ref]$null)
+    $script:ReadHosts = @($ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Read-Host'
+    }, $true))
+    $script:CanPromptCalls = @($ast.FindAll({ param($n)
+      $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Test-CanPrompt'
+    }, $true))
+  }
+
+  It "the AST query actually found Read-Host sites (a zero-site guard is green and worthless)" {
+    $script:ReadHosts.Count | Should -BeGreaterThan 0
+  }
+
+  It "every Read-Host has a Test-CanPrompt gate before it in the same scope" {
+    $unguarded = @()
+    foreach ($rh in $script:ReadHosts) {
+      # Nearest enclosing function; $null => the Read-Host sits at script scope
+      # (the load-time admin gate), where the whole script is the search scope.
+      $fn = $rh.Parent
+      while ($fn -and -not ($fn -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fn = $fn.Parent }
+      $scopeStart = if ($fn) { $fn.Extent.StartOffset } else { 0 }
+      $scopeEnd   = if ($fn) { $fn.Extent.EndOffset }   else { [int]::MaxValue }
+      $gate = $script:CanPromptCalls | Where-Object {
+        $_.Extent.StartOffset -ge $scopeStart -and
+        $_.Extent.EndOffset   -le $scopeEnd   -and
+        $_.Extent.StartOffset -lt $rh.Extent.StartOffset
+      }
+      if (-not $gate) {
+        $where = if ($fn) { $fn.Name } else { "<script scope>" }
+        $unguarded += "line $($rh.Extent.StartLineNumber) (in $where)"
+      }
+    }
+    $unguarded.Count | Should -Be 0 -Because "these Read-Host sites can hang an unattended install: $($unguarded -join '; ')"
+  }
+}
+
 Describe "Test-ApiReachable (bounded probe gates helm; Bugbot)" {
   It "API answers within the timeout -> reachable" {
     Mock kubectl { $global:LASTEXITCODE = 0 }
@@ -4370,7 +4468,14 @@ Describe "Top-level error boundary: crashes become a clean message, never a stac
 
   It "the main run is wrapped in a top-level try/catch that calls Show-FatalError" {
     $script:PSRC577 | Should -Match 'Show-FatalError \$_'
-    $script:PSRC577 | Should -Match 'if \(-not \$env:TB_PESTER\)[\s\S]{0,600}?try \{'
+    # Anchor on the trap->try pair that opens the top-level boundary, NOT on a
+    # char-window from the TB_PESTER guard. That window (600 chars) only ever
+    # passed by coincidentally matching the admin gate's own inline `try`, ~1200
+    # chars nearer than the real boundary; removing that inline copy in
+    # backend#2836 (one Test-CanPrompt predicate, no inline duplicate) exposed
+    # the miscalibration. The main run's trap routes crashes to Show-FatalError
+    # and sits immediately above the top-level try.
+    $script:PSRC577 | Should -Match 'trap \{ Show-FatalError \$_[\s\S]{0,120}?\}\s*try \{'
   }
 
   It "Show-FatalError renders a clean 'stopped' message with reason + re-run hint, no stack" {
