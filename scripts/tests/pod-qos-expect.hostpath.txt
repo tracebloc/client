@@ -10,10 +10,10 @@
 # ComputePodQOS yields, and the `init` rows below record WHY it cannot be Guaranteed
 # for the two people keep trying to fix.
 class  mysql-client                 Burstable
-class  t-auto-upgrade               Burstable
+class  t-auto-upgrade               Guaranteed
 class  t-egress-proxy               Burstable
 class  t-egress-reachability-check  Burstable
-class  t-image-refresh              Burstable
+class  t-image-refresh              Guaranteed
 class  t-jobs-manager               Burstable
 class  t-requests-proxy             Burstable
 class  t-resource-monitor           Burstable
