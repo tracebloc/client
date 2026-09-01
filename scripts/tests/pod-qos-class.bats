@@ -29,6 +29,25 @@ setup() {
 # _render <hostPathEnabled> <outfile> — render the chart with the placeholder
 # credentials the chart requires. Fails the caller if helm fails: an unrendered
 # chart must not read as "no findings".
+# _ok — assert the last `run` succeeded, and SHOW WHY when it did not.
+#
+# `[ "$status" -eq 0 ] || return 1` throws `$output` away, so a red CI run prints
+# a line number and nothing else. That is not hypothetical here: the pod-level
+# carve-out (51681eb) turned four of these tests red on CI, the checker's own
+# per-workload diff -- the thing it exists to produce -- never reached the log,
+# and the change was reverted rather than diagnosed. The revert may well be
+# right; it was made without the evidence either way.
+#
+# bats surfaces a failing test's stdout, so echoing costs nothing on the green
+# path and is the whole story on the red one.
+_ok() {
+  if [ "$status" -ne 0 ]; then
+    echo "--- exit $status; the checker said:"
+    echo "$output"
+    return 1
+  fi
+}
+
 _render() {
   local hp="$1" out="$2"; shift 2
   # "$@" carries any extra --set pairs. Added because the suite could not render the
@@ -51,7 +70,7 @@ _render() {
   # ignored (Bugbot, review on client#922): a check holding its own copy of the
   # rule agrees with itself while disagreeing with the chart.
   run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.hostpath.txt"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   # No workload is BestEffort. values.yaml claimed jobs-manager once was; it never
   # was (backend#2872), and a workload BECOMING BestEffort is a real regression --
   # an unresourced pod is the kernel OOM killer's first victim.
@@ -62,7 +81,7 @@ _render() {
   local r="$BATS_TEST_TMPDIR/hostpath-off.yaml"
   _render false "$r" || return 1
   run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.csi.txt"
-  [ "$status" -eq 0 ] || return 1
+  _ok
 }
 
 @test "GPU device plugins are Guaranteed — the chart's only Guaranteed pods, per vendor" {
@@ -80,7 +99,7 @@ _render() {
     local r="$BATS_TEST_TMPDIR/gpu-$v.yaml"
     _render true "$r" --set gpu.devicePlugin.enabled=true --set "gpu.devicePlugin.vendor=$v" || return 1
     run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.gpu-$v.txt"
-    [ "$status" -eq 0 ] || return 1
+    _ok
   done
 }
 
@@ -136,7 +155,7 @@ _render() {
   local r="$BATS_TEST_TMPDIR/hp-on.yaml"
   _render true "$r" || return 1
   run python3 "$QOS" "$r"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   # The REASON must name the init container, not just the class. A checker that
   # said "Burstable" for the wrong reason would agree with the comments this
   # ticket corrected.
@@ -156,7 +175,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/guaranteed.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi}\n      limits: {cpu: "1", memory: 1Gi}\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"Guaranteed"* ]] || return 1
 }
 
@@ -164,7 +183,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/init-demote.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: d\nspec:\n  initContainers:\n  - name: bare\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi}\n      limits: {cpu: "1", memory: 1Gi}\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"Burstable"* ]] || return 1
   [[ "$output" == *"bare:cpu"* ]] || return 1
 }
@@ -176,7 +195,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/podlevel.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\nspec:\n  resources:\n    requests: {cpu: "1", memory: 512Mi}\n    limits: {cpu: "1", memory: 512Mi}\n  initContainers:\n  - name: bare\n  containers:\n  - name: c\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"Guaranteed"* ]] || return 1
   [[ "$output" == *"pod-level"* ]] || return 1
 }
@@ -191,7 +210,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/mem-unequal.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: m\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 512Mi}\n      limits: {cpu: "1", memory: 1Gi}\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"Burstable"* ]] || return 1
   [[ "$output" == *"c:memory"* ]] || return 1
 }
@@ -202,7 +221,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/cpu-unequal.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi}\n      limits: {cpu: "2", memory: 1Gi}\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"Burstable"* ]] || return 1
   [[ "$output" == *"c:cpu"* ]] || return 1
 }
@@ -211,7 +230,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/besteffort.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: b\nspec:\n  containers:\n  - name: c\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"BestEffort"* ]] || return 1
 }
 
@@ -233,7 +252,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/gpu-only.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n      limits: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"BestEffort"* ]] || return 1
 }
 
@@ -243,7 +262,7 @@ _render() {
   local f="$BATS_TEST_TMPDIR/gpu-plus.yaml"
   printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi, nvidia.com/gpu: "1"}\n      limits: {cpu: "1", memory: 1Gi, nvidia.com/gpu: "1"}\n' > "$f"
   run python3 "$QOS" "$f"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   [[ "$output" == *"Guaranteed"* ]] || return 1
 }
 
@@ -260,7 +279,7 @@ _render() {
     --set networkPolicy.training.allowExternalHttps=false \
     --set networkPolicy.training.enforcementProbeHost=1.1.1.1 || return 1
   run python3 "$QOS" "$r" --expect "${BATS_TEST_DIRNAME}/pod-qos-expect.lockdown.txt"
-  [ "$status" -eq 0 ] || return 1
+  _ok
   # The Job this mode exists for must actually BE in the render, or the expect
   # file's set equality is satisfied by a render that never grew it.
   [[ "$output" == *"t-egress-enforcement-check"* ]] || return 1
