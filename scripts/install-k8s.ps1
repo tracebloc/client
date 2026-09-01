@@ -1607,7 +1607,9 @@ function Confirm-NvidiaDriver {
     # install -- and Find-Gpu now runs before the fast path, so an unbounded nvidia-smi would hang
     # every "nothing to do" re-run too.
     $dr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=driver_version","--format=csv,noheader") -TimeoutSec 15
-    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi failed or timed out) -- GPU checks skipped."; return }
+    # 124 IS THE TIMEOUT, so the code is what separates the two causes this
+    # message names -- "failed or timed out" made the operator guess which.
+    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi exited $(Format-ExitCode $dr.Code); 124 means it timed out) -- GPU checks skipped."; return }
     $driverVer = ($dr.Output -split "`n" | Select-Object -First 1).Trim()
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
@@ -4156,7 +4158,10 @@ function New-K3dCluster {
         Err "Starting the existing '$CLUSTER_NAME' environment timed out (k3d stopped). Check Docker is running, then re-run." $startLog
       }
       if ($sp.ExitCode -ne 0) {
-        Err "Couldn't start the existing '$CLUSTER_NAME' environment. Check Docker is running, then re-run." $startLog
+        # The code, alongside the log excerpt Err already prints. Weaker than the
+        # CLI case above -- $startLog does carry k3d's own words -- but the code
+        # is the cheapest discriminator and this is the same class.
+        Err "Couldn't start the existing '$CLUSTER_NAME' environment (k3d exited $(Format-ExitCode $sp.ExitCode)). Check Docker is running, then re-run." $startLog
       }
       Ok "Compute environment started."
     }
@@ -4549,7 +4554,7 @@ function New-K3dCluster {
       # (the FATA/x509/port reason) survives Get-ErrDetailLines' last-5-line window
       # even if k3d wrote to stdout; matches the Write-HostCaCreateHint order above
       # (reviewer).
-      Err "Failed to create compute environment." "$k3dStdout`n$k3dStderr"
+      Err "Failed to create compute environment (k3d exited $(Format-ExitCode $k3dExitCode))." "$k3dStdout`n$k3dStderr"
     }
     Ok "Compute environment ready."
   }
@@ -4583,7 +4588,7 @@ function New-K3dCluster {
     Hint "cluster kubectl currently points at, so continuing would connect it to the wrong cluster."
     Hint "Fix that (or merge it yourself with the command below), then re-run this installer:"
     Hint "  $mergeCmd"
-    Err "kubectl was not pointed at '$CLUSTER_NAME' - refusing to continue against an unknown cluster." $merge.Output
+    Err "kubectl was not pointed at '$CLUSTER_NAME' (k3d kubeconfig merge exited $(Format-ExitCode $merge.Code)) - refusing to continue against an unknown cluster." $merge.Output
   }
   if ($merge.Output) { Log "k3d kubeconfig merge: $($merge.Output)" }
 
@@ -4607,7 +4612,7 @@ function New-K3dCluster {
   $haveCtx = Get-CurrentContextFromOutput -Output "$($ctx.Output)"
   if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx) {
     if ($ctx.Code -ne 0) {
-      Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current."
+      Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current (kubectl exited $(Format-ExitCode $ctx.Code))."
     } else {
       Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl's current context is '$haveCtx', not '$wantCtx'."
     }
@@ -4711,7 +4716,7 @@ function Install-GpuDevicePlugin {
     if ($spec.Code -ne 0) {
       $script:GPU_SKIP_REASON = "the node couldn't generate its WSL GPU (CDI) spec, so pods wouldn't be able to use the GPU -- running CPU-only (see the install log)"
       Log "CDI spec /etc/cdi/nvidia.yaml missing or empty in the node (exit $($spec.Code)): $($spec.Output)"
-      Warn "GPU couldn't be wired into the cluster (CDI spec missing) - continuing in CPU mode."
+      Warn "GPU couldn't be wired into the cluster (CDI spec missing; the probe exited $(Format-ExitCode $spec.Code)) - continuing in CPU mode."
       return $false
     }
     # A spec that EXISTS is not enough: it must also carry libdxcore.so. `nvidia-ctk cdi generate
@@ -4724,7 +4729,7 @@ function Install-GpuDevicePlugin {
     if ($dxc.Code -ne 0) {
       $script:GPU_SKIP_REASON = "the node's WSL GPU (CDI) spec is missing libdxcore, so CUDA would fail inside pods with a misleading 'driver insufficient' error -- running CPU-only (see the install log)"
       Log "CDI spec is present but has no libdxcore mount (exit $($dxc.Code)): $($dxc.Output)"
-      Warn "GPU couldn't be fully wired into the cluster (CDI spec incomplete) - continuing in CPU mode."
+      Warn "GPU couldn't be fully wired into the cluster (CDI spec incomplete; the libdxcore probe exited $(Format-ExitCode $dxc.Code)) - continuing in CPU mode."
       return $false
     }
     # Remove a LEFTOVER NVML device plugin before advertising capacity ourselves (Bugbot, HIGH).
@@ -5795,7 +5800,7 @@ function Invoke-ProvisionClient {
   Write-Host "  (on this or any device) and enter the code:"
   Write-Host ""
   & tracebloc login
-  if ($LASTEXITCODE -ne 0) { Err "Sign-in didn't complete - re-run the installer to try again." }
+  if ($LASTEXITCODE -ne 0) { Err "Sign-in didn't complete (exited $(Format-ExitCode $LASTEXITCODE)) - re-run the installer to try again." }
 
   # One-client-per-machine pre-flight (mirrors provision.sh #303): if a client
   # is already installed here and the signed-in account can't be shown to own
@@ -5873,7 +5878,7 @@ function Invoke-ProvisionClient {
     if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     if ($createRc -ne 0) {
       Print-CreateFailure -OutFile $createOut -Location $clientLocation
-      Err "Couldn't provision the client. Re-run to retry."
+      Err "Couldn't provision the client (tracebloc exited $(Format-ExitCode $createRc)). Re-run to retry."
     }
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
@@ -6309,7 +6314,7 @@ $envBlock
     Log "Adding Helm repo: $TRACEBLOC_HELM_REPO_URL"
     $addOutput = (helm repo add $TRACEBLOC_HELM_REPO_NAME $TRACEBLOC_HELM_REPO_URL --force-update 2>&1) | Out-String
     Log "helm repo add: $addOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL)." $addOutput }
+    if ($LASTEXITCODE -ne 0) { Err "Couldn't add the tracebloc chart repo ($TRACEBLOC_HELM_REPO_URL) (helm exited $(Format-ExitCode $LASTEXITCODE))." $addOutput }
   }
 
   # Pre-create this release's hostPath dirs BEFORE Helm, so kubelet never gets to
@@ -6362,7 +6367,7 @@ $envBlock
       --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" `
       --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed." $helmOutput }
+    if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
     # the clientId line, never regenerate — the live release is the truth.
     if (Test-Path $valuesFile) {
@@ -6378,7 +6383,7 @@ $envBlock
       --create-namespace `
       --values $valuesFile 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
-    if ($LASTEXITCODE -ne 0) { Err "Client installation failed." $helmOutput }
+    if ($LASTEXITCODE -ne 0) { Err "Client installation failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
   }
 
   # Point kubeconfig's current context at the client namespace so kubectl + the
@@ -7394,11 +7399,24 @@ function Edit-Redaction([string]$Path) {
 # as a missing bundle. 20s is generous for a healthy tool (30s for a log fetch,
 # which legitimately streams more).
 #
-# WORST CASE ~350s, i.e. under 6 minutes -- NOT "well under a minute" as this
-# comment first claimed (@LukasWodka corrected the arithmetic on client#917). The
-# deadlines are SEQUENTIAL, so a fully wedged box pays 13 reads x 20s + 3
-# kubectl-logs x 30s. Still bounded, and still far better than never returning --
-# but the number a support engineer plans around should be the real one.
+# WORST CASE ~330s, i.e. under 6 minutes -- NOT "well under a minute" as this
+# comment first claimed. The deadlines are SEQUENTIAL:
+#
+#   10 x Invoke-DiagnoseCapture at the 20s default          200s
+#    3 x kubectl logs at 30s (one per workload in the loop)   90s
+#    2 x Invoke-DockerCli at 20s                              40s
+#                                                            ----
+#                                                            330s
+#
+# #934 said 350s, from "13 reads x 20s + 3 kubectl-logs x 30s". That counts the
+# three log fetches TWICE -- 13 is the number of captures (10 sites + 3 loop
+# iterations), not the number of 20s reads -- and omits the two Invoke-DockerCli
+# waits, which are bounded on this same sequential path but do not go through
+# Invoke-DiagnoseCapture. The two errors partly cancel, which is how a wrong
+# number survived a PR written to correct a wrong number.
+#
+# The test below sums these from the source, so the next drift fails instead of
+# being reviewed.
 function Invoke-DiagnoseCapture {
   param(
     [Parameter(Mandatory)][string]$FileName,
@@ -7758,7 +7776,19 @@ function Install-TraceblocCli {
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli
     } else {
-      Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
+      # NAME THE CODE (backend#2906). This branch reported the failure and threw
+      # away the one number that says why. The block above redirects both
+      # streams, caches .Handle so .ExitCode is reliable, and replays the files
+      # into the log -- and on e2e run 33395912890 those streams held nothing
+      # beyond the CLI installer's own banner, so the exit code was the ONLY
+      # surviving evidence of the cause. `Warn` takes no $Detail, so unlike the
+      # k3d path below there is no second channel to fall back on.
+      #
+      # A FIFTH SITE of the class client#913 fixed. #913 corrected the sites that
+      # rendered a code as BLANK (`installer exited `); this one never rendered
+      # one at all. Same information loss, different spelling -- which is why a
+      # search for `exited $(...)` could not find it.
+      Warn "Couldn't install the tracebloc CLI automatically (installer exited $(Format-ExitCode $p.ExitCode)) -- you can still connect with existing client credentials."
       Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
     }
   } catch {

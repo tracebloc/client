@@ -4147,6 +4147,273 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   }
 }
 
+Describe "A failure reported from an exit-code branch names the code (backend#2906)" {
+  # THE CLASS, ENFORCED BY WHAT IT DOES RATHER THAN BY WHAT IT LOOKS LIKE.
+  #
+  # client#913 fixed the sites that rendered a code as BLANK -- `wsl exited `,
+  # `installer exited `. It missed the CLI-install branch, which never rendered
+  # one at all. Identical information loss, different spelling, so the search
+  # that found the first shape (`exited $(`) was structurally blind to the
+  # second. A marker per known site cannot close that: it can only be as
+  # complete as the enumeration behind it, and the enumeration is the thing that
+  # was wrong.
+  #
+  # The invariant is checkable directly instead: if you tell the user something
+  # failed, from inside a branch a process exit code decided, name the code.
+  # That found BOTH sites without anyone thinking of either -- verified by
+  # reverting each fix independently and watching this go red.
+  #
+  # AST, NOT REGEX. The question is "which Warn/Err calls are lexically inside a
+  # branch gated on .ExitCode", which is a shape in the tree; a text match cannot
+  # see the nesting and would have to approximate it.
+  # THE DOTTED SPELLING IS NOT THE CLASS (Bugbot, Medium). The first cut matched
+  # only `.ExitCode -eq/-ne 0` in the condition text, so the house idiom after a
+  # wait -- copy the code into a local, then branch on the local -- was invisible.
+  # `$k3dExitCode = $k3dProc.ExitCode` … `if ($k3dExitCode -ne 0) { Err … }` is
+  # exactly that, and it reported a k3d failure without the code while this guard
+  # called the class closed. Restating one spelling is what went wrong the first
+  # time (client#913's `exited $(` search) and restating two is the same mistake
+  # with a larger list, so the variable names are DERIVED: any variable assigned
+  # from an expression mentioning `.ExitCode` becomes a gate token.
+  #
+  # COMPLIANCE FOLLOWS ONE HOP, and that is not a loophole -- it is the
+  # difference between the two sites this now sees. `Warn ("GPU couldn't be
+  # enabled: " + $GPU_SKIP_REASON)` names no code in its own text, but
+  # $GPU_SKIP_REASON is assigned IN THAT BRANCH from
+  # `Get-GpuBuildFailureReason -ExitCode $buildExit`, whose fallback returns
+  # "docker build exit $ExitCode". The code reaches the operator; the classifier
+  # is deliberately preferred over a bare number, and the comment there says so.
+  # The k3d branch has no such hop -- the code is read, tested, and dropped.
+  # Checking only the call's own text would have failed the first and passed
+  # nothing extra; checking the whole branch body would pass a `Log`-only
+  # mention, which the operator never sees. One hop, through the arguments.
+  BeforeAll {
+    $script:ExitCodeScope = {
+      $tok = $null; $perr = $null
+      $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot "../install-k8s.ps1"), [ref]$tok, [ref]$perr)
+
+      # DERIVED, not restated: every variable that takes its value from a
+      # `.ExitCode` read is a legitimate way to spell this gate.
+      $codeVars = @()
+      foreach ($a in $ast.FindAll({
+        $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
+      }, $true)) {
+        # BOTH SPELLINGS (@saadqbal). This followed `.ExitCode` only, so
+        # `$createRc = $LASTEXITCODE` never became a gate token and
+        # `if ($createRc -ne 0)` was invisible to the walk -- the copy-into-a-local
+        # idiom, which is the same shape round one flagged for `.ExitCode` and which
+        # was then fixed for one spelling only. `$LASTEXITCODE` was added as a DIRECT
+        # token below, catching `if ($LASTEXITCODE -ne 0)` but not the capture. The
+        # live site is install-k8s.ps1:5785-5787.
+        if ($a.Right.Extent.Text -match '\.ExitCode|\.Code|\$LASTEXITCODE' -and
+            $a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+          $codeVars += $a.Left.VariablePath.UserPath
+        }
+      }
+      # AND THE ONE THE LANGUAGE ASSIGNS. $LASTEXITCODE is PowerShell's
+      # automatic for the exit status of the last native command -- it is never
+      # the LEFT side of an assignment, so a derivation built purely from
+      # assignment statements cannot see it. It is also the commonest way this
+      # file spells the gate: 21 branch sites, against four derived locals.
+      #
+      # This is not a hand-list creeping back in. $LASTEXITCODE holds an exit
+      # code BY DEFINITION OF THE LANGUAGE, which is the same authority the
+      # derivation above appeals to -- it just reaches it through the automatic
+      # variable table rather than through an assignment. The rule stays "a
+      # variable that holds an exit code"; only the way of knowing differs.
+      $codeVars += 'LASTEXITCODE'
+      $codeVars = @($codeVars | Sort-Object -Unique)
+      $varAlt = if ($codeVars.Count) {
+        '|\$(' + (($codeVars | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*-(eq|ne)\s*0'
+      } else { '' }
+      $gateRe = '\.(ExitCode|Code)\s*-(eq|ne)\s*0' + $varAlt
+
+      $calls = $ast.FindAll({
+        $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+        $args[0].GetCommandName() -in @('Warn','Err')
+      }, $true)
+      $inScope = @()
+      foreach ($c in $calls) {
+        # WHICH BRANCH, AND NOT THROUGH A CATCH (Bugbot, Medium, on this PR).
+        #
+        # The first walk set the gate from any ANCESTOR `if` whose condition
+        # mentioned an exit code, regardless of where the call actually sat. Two
+        # ways that was wrong, and it did not merely over-report -- it FORCED a
+        # misleading number into the product:
+        #
+        #   * `Enable-GpuPlugin`'s existence probe is `if ($LASTEXITCODE -eq 0)`
+        #     at :4697. The CPU-mode Warn is in that if's ELSE, after a download
+        #     and an apply, so the probe's code is long stale by then.
+        #   * The same function's `catch` is entered by an EXCEPTION.
+        #     `Invoke-WebRequest` never sets $LASTEXITCODE, so the value there is
+        #     whatever the last native command left behind.
+        #
+        # Both were "fixed" to name that number, which is worse than naming
+        # none: a wrong cause reads as information. A guard that can demand a
+        # false statement is not a weaker guard, it is a harmful one.
+        #
+        # So: walk up remembering which child we came THROUGH, attribute only
+        # when we arrived via the branch the failing code selects, and abandon
+        # the walk at a catch or finally.
+        $n = $c.Parent; $prev = $c; $gate = $null; $branch = $null
+        while ($n) {
+          if ($n -is [System.Management.Automation.Language.CatchClauseAst] -or
+              $n -is [System.Management.Automation.Language.TrapStatementAst]) {
+            $gate = $null; break
+          }
+          if ($n -is [System.Management.Automation.Language.TryStatementAst] -and
+              $n.Finally -and $prev -eq $n.Finally) {
+            $gate = $null; break
+          }
+          if ($n -is [System.Management.Automation.Language.IfStatementAst]) {
+            # THE NEAREST ENCLOSING `if`, AND THEN STOP. Being somewhere inside a
+            # distant exit-code branch is not the same as being decided by that
+            # code: `Enable-GpuPlugin`'s CPU-mode Warn sits in the ELSE of the
+            # probe at :4697, but a download and a `kubectl apply` run in
+            # between, so $LASTEXITCODE there is nothing to do with the probe.
+            # Attributing it demanded a stale number on screen.
+            #
+            # THE TRADE, STATED: a call nested one level deeper inside a genuine
+            # exit-code branch is now MISSED. That direction is safe -- the guard
+            # under-reports and the floor test below notices if the count
+            # collapses -- whereas over-reporting made the guard demand a false
+            # statement, which is the one outcome worse than not checking.
+            foreach ($cl in $n.Clauses) {
+              if ($cl.Item1.Extent.Text -notmatch $gateRe) { continue }
+              # AND NOT A DISJUNCTION, for the same reason the ELSE and the CATCH
+              # are excluded above: the guard cannot know WHICH disjunct fired, so
+              # demanding the code would demand a possibly-false cause.
+              #
+              # Widening to the `.Code` spelling (Bugbot, Medium) exposed two of
+              # these -- `if ($res.Code -ne 0 -or $out -match "FAIL " -or
+              # $unconfirmed.Count -gt 0)` at install-k8s.ps1:4030 and
+              # `if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx)` at :4544. In both,
+              # a run that failed on the NON-code disjunct has a code of 0, and
+              # "exit 0" printed next to a failure is exactly the wrong-cause-reads-
+              # as-information outcome this Describe already refuses to produce.
+              # @saadqbal flagged the same hazard pre-emptively for the bool-collapsed
+              # sites (:4729, whose code would be a stale apply/rollout probe).
+              #
+              # A site that WANTS to name the code conditionally still can -- this
+              # only stops the guard from requiring it unconditionally.
+              if ($cl.Item1.Extent.Text -match '\s-or\s') { continue }
+              # `-ne 0` selects failure in the clause BODY; `-eq 0` selects
+              # success there, so failure is the ELSE.
+              $failureBlock = if ($cl.Item1.Extent.Text -match '-ne\s*0') { $cl.Item2 } else { $n.ElseClause }
+              if ($failureBlock -and $prev -eq $failureBlock) {
+                $gate = $cl.Item1.Extent.Text; $branch = $failureBlock
+              }
+            }
+            break
+          }
+          $prev = $n
+          $n = $n.Parent
+        }
+        if ($gate) {
+          # The token this branch was gated on -- `.ExitCode`, or the derived
+          # local. That, not the literal word "ExitCode", is what has to reach
+          # the operator.
+          # THE PROPERTY READ AND THE VARIABLE, NEVER THE BARE WORD. Matching
+          # `ExitCode` loose also matches the PARAMETER NAME `-ExitCode`, so
+          # `Get-GpuBuildFailureReason -ExitCode 0` -- a constant, carrying none
+          # of the branch's information -- read as compliant. Measured: the
+          # mutation that replaced `$buildExit` with `0` there left this green,
+          # which is the one-hop degenerating into a blanket pass.
+          # BOTH PROPERTY SPELLINGS, AND THE GATE SIDE ALONE IS NOT ENOUGH.
+          # Widening only the gate regex to `.Code` made this guard
+          # UNSATISFIABLE: it demanded the code from five newly-visible sites and
+          # then could not see it when supplied, because compliance still matched
+          # `.ExitCode` only. All five kept failing with the code sitting in the
+          # message text. A guard that cannot be satisfied is worse than one that
+          # does not check -- it trains the reader to edit the guard instead of the
+          # code. The two sides must widen together, which is why they are named
+          # here in one place.
+          #
+          # `\.Code\b` carries the same false-positive risk profile as
+          # `\.ExitCode\b` and no more: the leading dot is what keeps the
+          # parameter-name shape (`-ExitCode 0`) out, and that is the trap the
+          # comment above records.
+          $tokens = @('\.ExitCode\b', '\.Code\b')
+          foreach ($v in $codeVars) {
+            if ($gate -match ('\$' + [regex]::Escape($v) + '\b')) {
+              $tokens += '\$' + [regex]::Escape($v) + '\b'
+            }
+          }
+          $tokRe = '(' + ($tokens -join '|') + ')'
+
+          $names = [bool]($c.Extent.Text -match $tokRe)
+          if (-not $names -and $branch) {
+            # ONE HOP: a variable the call renders, assigned in this branch from
+            # something that carries the code.
+            foreach ($v in $c.CommandElements) {
+              foreach ($ref in $v.FindAll({
+                $args[0] -is [System.Management.Automation.Language.VariableExpressionAst]
+              }, $true)) {
+                $rn = $ref.VariablePath.UserPath -replace '^(script|global|local):', ''
+                foreach ($a in $branch.FindAll({
+                  $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
+                }, $true)) {
+                  $ln = $a.Left.Extent.Text -replace '^\$(script|global|local):', '' -replace '^\$', ''
+                  if ($ln -eq $rn -and $a.Right.Extent.Text -match $tokRe) { $names = $true }
+                }
+              }
+            }
+          }
+
+          $inScope += [pscustomobject]@{
+            Line  = $c.Extent.StartLineNumber
+            Gate  = $gate
+            Text  = $c.Extent.Text
+            Names = $names
+          }
+        }
+      }
+      ,$inScope
+    }
+  }
+
+  It "finds the sites at all -- an empty sweep agrees with everything" {
+    # Rule 3. If the AST walk stops matching -- a helper renamed, the gate
+    # written differently -- every assertion below passes vacuously and reports
+    # clean forever. Two is what exists today; a THIRD is fine, a drop to zero
+    # is the finding.
+    $sites = & $script:ExitCodeScope
+    # EIGHT, measured, not carried over. It was 2 for the dotted-only gate and
+    # 4 once the derived locals were added; $LASTEXITCODE -- never assigned, so
+    # invisible to an assignment-derived gate, and the commonest spelling here --
+    # took it to 8. A floor left at an older number is the thing this test exists
+    # to prevent, since it goes on passing over everything the gate newly sees.
+    # 8 -> 9: widening the derivation above makes the `$createRc = $LASTEXITCODE`
+    # site at install-k8s.ps1:5785 visible to the walk. The floor moves with it
+    # deliberately -- a floor left at 8 is what made the hole self-concealing: the
+    # test passed either way, so nothing said a site had gone missing.
+    #
+    # 9 -> 14: the `.Code` spelling (Bugbot, Medium). `Invoke-BoundedProcess` and
+    # `Invoke-DockerCli` return `@{ Code; Output }` -- the house result shape,
+    # documented at install-k8s.ps1:2307-2308 -- so every branch on `$r.Code` was
+    # a gate this walk could not see. 31 such gates exist in the file; 7 of them
+    # carry a user-facing Warn/Err, 2 of those are disjunctions and excluded
+    # above, and 5 were reporting a failure with the code dropped.
+    #
+    # MEASURED BY RAISING THIS FLOOR UNTIL IT FAILED AND READING THE NUMBER BACK,
+    # not by counting the additions by hand -- which is how a floor and a walk
+    # start disagreeing.
+    $sites.Count | Should -BeGreaterOrEqual 14
+  }
+
+  It "no user-facing failure message drops the exit code that decided it" {
+    $sites = & $script:ExitCodeScope
+    $bad = @($sites | Where-Object { -not $_.Names })
+    # The message must NAME the offender, not just count it: a bare count sends
+    # the reader back to re-run the sweep by hand.
+    $detail = ($bad | ForEach-Object {
+      "line $($_.Line) gated on [$($_.Gate)]: $($_.Text)"
+    }) -join "`n"
+    $bad.Count | Should -Be 0 -Because "these report a failure without the one number that says why:`n$detail"
+  }
+}
+
 Describe "Every Docker/child wait on the install path is bounded (backend#2849)" {
   # WHAT THIS DEFENDS, and why it is the shape that keeps costing this journey
   # runs: an unbounded external call against a SICK dependency does not fail, it
