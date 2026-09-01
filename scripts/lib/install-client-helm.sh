@@ -1310,7 +1310,7 @@ _tty_available() { [[ -r "$TB_TTY" ]]; }
 _no_interactive_creds_die() {
   error "No credentials supplied and no terminal to prompt on.
   Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
-  https://ai.tracebloc.io/clients), then re-run — under \`curl … | bash\` the
+  $(_dashboard_url)), then re-run — under \`curl … | bash\` the
   prompt cannot read your input."
 }
 
@@ -1954,7 +1954,7 @@ install_client_helm() {
     info "Verifying credentials with tracebloc…"
     case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
       valid)      success "Credentials verified." ;;
-      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at https://ai.tracebloc.io/clients and re-run." ;;
+      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at $(_dashboard_url) and re-run." ;;
       inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
     esac
@@ -1976,7 +1976,7 @@ install_client_helm() {
   hint "Already have one? Enter its credentials below — or set"
   hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."
   hint "Need one? Create it (free) at:"
-  echo -e "    ${BOLD}${WHITE}https://ai.tracebloc.io/clients${RESET}"
+  echo -e "    ${BOLD}${WHITE}$(_dashboard_url)${RESET}"
   echo ""
 
   # Collect + verify credentials. The entered Client ID / password are checked
@@ -2013,18 +2013,18 @@ install_client_helm() {
         break ;;
       invalid)
         warn "That Client ID / password was rejected by tracebloc — please re-enter."
-        hint "Find your credentials at https://ai.tracebloc.io/clients" ;;
+        hint "Find your credentials at $(_dashboard_url)" ;;
       inactive)
         error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified)
         warn "Couldn't reach tracebloc to verify your credentials right now — continuing."
-        hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+        hint "If they are wrong, your client will stay offline at $(_dashboard_url) after install."
         break ;;
     esac
 
     _cred_attempt=$((_cred_attempt + 1))
     if [[ $_cred_attempt -ge $_cred_max ]]; then
-      error "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run."
+      error "Too many failed attempts. Double-check your credentials at $(_dashboard_url) and re-run."
     fi
     # Force an active re-entry on retry (don't silently reuse a rejected default).
     default_client_id=""; default_client_password=""
