@@ -413,12 +413,44 @@ function Format-ExitCode {
   return "$Code"
 }
 
+# A Windows installer can SUCCEED while leaving a reboot pending, and it says so with
+# a dedicated exit code rather than 0 (backend#2849 finding 1). Docker Desktop's own
+# installer returns 3010 whenever the WSL2 backend adds Windows features -- our exact
+# `--backend=wsl-2` path -- and Docker's enterprise-deployment docs name 3010 as
+# expected success. Reading such a code as a failure is the client#611 idiom one layer
+# up: a completed install reported as failed (measured on the Windows Server 2022
+# journey host, where Docker Desktop installed cleanly -- full tree on disk, no error
+# log -- yet the run aborted). These are the "succeeded, reboot to finish/initiated"
+# codes an install caller may count as success:
+#   3010         Win32 ERROR_SUCCESS_REBOOT_REQUIRED   (a direct installer, e.g. Docker)
+#   1641         Win32 ERROR_SUCCESS_REBOOT_INITIATED  (an installer that self-restarted)
+#   -1978334967  winget 0x8A150109 INSTALL_REBOOT_REQUIRED_TO_FINISH  (HRESULT as Int32)
+#   -1978334965  winget 0x8A15010B INSTALL_REBOOT_INITIATED
+# Deliberately NOT here: winget 0x8A15010A (-1978334966) REBOOT_REQUIRED_FOR_INSTALL,
+# which means the install did NOT complete and must be retried after a reboot -- a
+# genuine failure. The bare code the caller sees decides which subset applies: a direct
+# installer only ever yields the Win32 pair, winget only the HRESULT pair, so passing
+# the union is safe -- a process can only return codes from its own space.
+$script:INSTALLER_REBOOT_OK_CODES = @(3010, 1641, -1978334967, -1978334965)
+
+# Of the reboot-pending SUCCESS codes above, this subset means the installer has
+# ALREADY INITIATED the reboot (1641 ERROR_SUCCESS_REBOOT_INITIATED, and winget's
+# 0x8A15010B INSTALL_REBOOT_INITIATED) -- the box is going down now -- as opposed to
+# merely REQUIRING one later (3010 / 0x8A150109, machine still up). The Docker log line
+# distinguishes the two so a mid-run termination reads as an expected reboot handoff,
+# not a script that claimed to carry on (backend#2849 review).
+$script:INSTALLER_REBOOT_INITIATED_CODES = @(1641, -1978334965)
+
 # Run a tracked install PROCESS with its stdout+stderr captured to temp files, wait
 # with a KILLING deadline (spinner via Wait-ProcessWithDeadline), fold any captured
 # output into the install log, and return the outcome. Mirrors the WSL / k3d-cluster-
 # start redirect pattern so a failed install leaves the real winget/installer output
 # in the log + -Diagnose bundle instead of only a bare exit code (#500). Never throws;
 # each caller applies its own policy (best-effort fall-through vs fatal Err).
+# -SuccessExitCodes lists every code counted as success (default @(0)); an installer
+# caller passes @(0) + $script:INSTALLER_REBOOT_OK_CODES so a reboot-pending success is
+# not misfiled as a failure (backend#2849). The real code is preserved in the return so
+# a reboot-pending 'ok' is still visible to the caller and the log.
 # Returns @{ State = 'ok'|'spawn-failed'|'timeout'|'failed'; ExitCode; Output }.
 function Invoke-TrackedInstall {
   param(
@@ -426,7 +458,8 @@ function Invoke-TrackedInstall {
     $ArgumentList,                 # string (PS 5.1 verbatim) or array
     [string]$Label,
     [int]$TimeoutMinutes = 40,
-    [string]$Tag = 'install'
+    [string]$Tag = 'install',
+    [int[]]$SuccessExitCodes = @(0)
   )
   $tmp  = [System.IO.Path]::GetTempPath()   # portable (== %TEMP% on Windows); testable off-Windows
   $outF = Join-Path $tmp "$Tag-$(Get-Random).out.log"
@@ -445,8 +478,8 @@ function Invoke-TrackedInstall {
   $log = ("$(Get-Content $errF -Raw -ErrorAction SilentlyContinue)`n$(Get-Content $outF -Raw -ErrorAction SilentlyContinue)").Trim()
   Remove-Item $outF, $errF -Force -ErrorAction SilentlyContinue
   if ($log) { Log "${Label}: $log" }
-  if ($timedOut)          { return @{ State = 'timeout';  ExitCode = $null;        Output = $log } }
-  if ($p.ExitCode -eq 0)  { return @{ State = 'ok';       ExitCode = 0;            Output = $log } }
+  if ($timedOut)                              { return @{ State = 'timeout'; ExitCode = $null;       Output = $log } }
+  if ($SuccessExitCodes -contains $p.ExitCode) { return @{ State = 'ok';      ExitCode = $p.ExitCode; Output = $log } }
   return @{ State = 'failed'; ExitCode = $p.ExitCode; Output = $log }
 }
 
@@ -771,10 +804,21 @@ function ConvertTo-WorkspaceName {
 
 # Best-effort chart version of the installed client release (e.g. "1.4.4");
 # empty if not found / cluster unreachable. Greps helm's CHART column.
+# BOUNDED (backend#2849 / Bugbot). `helm list` reaches the API server behind the
+# Docker engine, so on an unreachable cluster this did not return empty -- it
+# BLOCKED. That matters most in `-Diagnose`, which calls this BEFORE writing any
+# bundle file, so the one tool an operator runs because the cluster is unreachable
+# stopped here and produced no zip at all. Print-Summary's call had the same
+# exposure at the end of a successful install.
+#
+# A timeout keeps the documented contract exactly: "empty if not found / cluster
+# unreachable". The version is parsed ONLY on a clean exit, so synthetic timeout
+# text can never be mistaken for a chart version.
 function Get-ChartVersion {
   param([string]$Namespace = "tracebloc")
-  $out = (helm list -n $Namespace 2>$null) | Out-String
-  if ($out -match 'client-([0-9][^\s]*)') { return $Matches[1] }
+  $r = Invoke-BoundedProcess -FileName "helm" -Arguments @("list", "-n", $Namespace) -TimeoutSec 20
+  if ($r.Code -ne 0) { return "" }
+  if ("$($r.Output)" -match 'client-([0-9][^\s]*)') { return $Matches[1] }
   return ""
 }
 
@@ -793,6 +837,21 @@ $HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USE
 # local). The host-uid ingestion mechanism for root_squash NFS is Linux-only; on
 # Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
 $HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
+
+# Kubelet image-GC thresholds (backend#2634). The bash twin holds the identical
+# three values in scripts/lib/cluster.sh and
+# scripts/tests/kubelet-config-agreement.sh derives both sides and fails the build
+# on divergence -- so these are one contract in two files, not two sources.
+# NOT env-overridable, deliberately: an operator who lowers `high` to 95 to "get
+# more disk" re-creates the unbounded image store, and the value that matters is
+# the RELATIONSHIP between the two (the band must exceed one task image), which a
+# single env var cannot express safely.
+$TB_KUBELET_IMAGE_GC_HIGH_PERCENT = 75
+$TB_KUBELET_IMAGE_GC_LOW_PERCENT  = 60
+$TB_KUBELET_IMAGE_MIN_GC_AGE      = "2m"
+# Path the config is mounted to INSIDE every k3d node. Named once so the volume
+# mount and the --kubelet-arg cannot disagree about it.
+$TB_KUBELET_CONFIG_NODE_PATH      = "/etc/tracebloc/kubelet.yaml"
 
 # Pre-create the per-release hostPath dirs the chart's PVs bind to (logs, mysql,
 # data), mirroring bash _ensure_release_dirs (scripts/lib/cluster.sh). Without
@@ -1026,7 +1085,8 @@ Advanced configuration (environment variables):
 
 Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
   Set the client credentials as environment variables so nothing prompts:
-    TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from https://ai.tracebloc.io/clients
+    TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from your dashboard's Clients page
+                 (dev.tracebloc.io | stg.tracebloc.io | ai.tracebloc.io, per CLIENT_ENV)
     TRACEBLOC_CLIENT_NAME                             the name shown on your dashboard
   With those set (plus TRACEBLOC_SKIP_REBOOT_PROMPT=1, or -NoReboot), a
   console-less install runs end to end instead of blocking on a prompt.
@@ -1808,6 +1868,42 @@ function Install-Winget {
 #  DOCKER DESKTOP
 # =============================================================================
 
+# Act on a reboot-pending SUCCESS from an installer, by WHICH kind (backend#2849):
+#  - REQUIRED (3010 / winget 0x8A150109 TO_FINISH): the install completed and the box
+#    is still up. The WSL2 features were already enabled + rebooted in Step 1, so
+#    continuing to the engine wait is correct -- just record the code.
+#  - INITIATED (1641 / winget 0x8A15010B): the installer has ALREADY started restarting
+#    the machine. Step 1's RunOnce continuation is spent by Step 2, so arm a FRESH
+#    resume-after-reboot and stop with the declared exit 2 -- the same "reboot then
+#    resume" handoff Step 1 uses -- otherwise the box goes down mid-Step-2 with nothing
+#    to bring the install back (Bugbot). Our install flags never allow a reboot
+#    (`--quiet`; no winget `--allow-reboot`), so INITIATED is the unexpected-but-safe
+#    branch, not the common path. Routed through here from BOTH Docker install paths
+#    (winget is tried first and is the one that can return the winget HRESULT), so the
+#    handling can't depend on which path ran. A code of 0 or a non-ok state is a no-op.
+function Invoke-PostInstallReboot {
+  param([hashtable]$Result, [string]$Label)
+  if ($Result.State -ne 'ok' -or $Result.ExitCode -eq 0) { return }
+  if ($script:INSTALLER_REBOOT_INITIATED_CODES -contains $Result.ExitCode) {
+    Warn "$Label installed, and its installer has initiated a reboot (code $(Format-ExitCode $Result.ExitCode))."
+    $resumeArmed = Register-ResumeAfterReboot -ScriptPath $PSCommandPath -NoReboot:$NoReboot -Diagnose:$Diagnose -DailyUser $DailyUser
+    if ($resumeArmed) {
+      Ok "The install will resume automatically after the reboot."
+      # Split-account caveat (mirrors Step 1): the RunOnce lives in THIS account's hive,
+      # so the "automatic" promise is false if a different daily user signs in after the
+      # reboot -- qualify it exactly as the Step 1 handoff does (Bugbot).
+      if ($DailyUser -and ($DailyUser -ne $env:USERNAME)) {
+        Hint "Resume is registered for '$env:USERNAME'. Sign back in as '$env:USERNAME' to continue; if '$DailyUser' signs in instead, re-run the installer."
+      }
+    }
+    else { Hint "After the machine restarts, re-run this installer to continue." }
+    $script:OutcomeReported = $true    # a declared reboot-pending stop, not an interruption
+    Set-TbRerunHandoff
+    exit 2
+  }
+  Log "$Label installed with reboot pending (code $(Format-ExitCode $Result.ExitCode)); features were enabled in Step 1, continuing to bring up the engine."
+}
+
 function Install-DockerDesktop {
   $dockerExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
@@ -1836,8 +1932,13 @@ function Install-DockerDesktop {
       # Best-effort: on any non-ok outcome the direct download below takes over. Output
       # is captured to the log so a winget failure is diagnosable, not a bare code (#500).
       $r = Invoke-TrackedInstall -FilePath "winget" -ArgumentList $wingetArgs `
-        -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget"
+        -Label "Installing Docker Desktop (winget)" -TimeoutMinutes 40 -Tag "docker-winget" `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "Docker Desktop winget install failed (will try direct download): state=$($r.State) exit=$($r.ExitCode)" }
+      # winget is tried first and is the path that can return the winget reboot HRESULT;
+      # route its result through the same handler so an initiated reboot arms a resume +
+      # stops here instead of silently falling through to the engine wait (Bugbot).
+      Invoke-PostInstallReboot -Result $r -Label "Docker Desktop"
       RefreshPath
     }
 
@@ -1864,13 +1965,18 @@ function Install-DockerDesktop {
       # zero Docker Desktop interaction (#419). Any non-ok outcome fails loudly.
       $r = Invoke-TrackedInstall -FilePath $installer `
         -ArgumentList "install --quiet --accept-license --backend=wsl-2 --always-run-service" `
-        -Label "Installing Docker Desktop" -TimeoutMinutes 40 -Tag "docker-direct"
+        -Label "Installing Docker Desktop" -TimeoutMinutes 40 -Tag "docker-direct" `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       Remove-Item $installer -Force -ErrorAction SilentlyContinue
       switch ($r.State) {
         'spawn-failed' { Err "Docker Desktop installer wouldn't start. Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." "$($r.Output)" }
         'timeout'      { Err "Docker Desktop installation timed out (installer stopped). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
         'failed'       { Err "Docker Desktop installation failed (installer exited $(Format-ExitCode $r.ExitCode)). Install it manually from https://www.docker.com/products/docker-desktop/ and re-run." }
       }
+      # A reboot-pending success (3010 &c., accepted above) means the install COMPLETED;
+      # act on whether the reboot is merely required (continue) or already initiated
+      # (arm a resume + stop) -- see Invoke-PostInstallReboot (backend#2849).
+      Invoke-PostInstallReboot -Result $r -Label "Docker Desktop"
       RefreshPath
     }
 
@@ -1881,11 +1987,7 @@ function Install-DockerDesktop {
     }
   }
 
-  $dockerRunning = $false
-  try {
-    $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
-    if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true }
-  } catch {}
+  $dockerRunning = (Test-DockerEngineUp)
 
   if (-not $dockerRunning) {
     Start-Process $dockerExe -ErrorAction SilentlyContinue
@@ -1896,20 +1998,35 @@ function Install-DockerDesktop {
     # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
     $waitMin = 10
     if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
-    $maxWait = $waitMin * 20                     # 3s per iteration
+    # WALL-CLOCK, NOT ITERATIONS (backend#2849). `$waitMin * 20` assumed each
+    # pass costs exactly the 3s sleep, which is only true while `docker info`
+    # returns promptly. A WEDGED daemon -- a half-open \\.\pipe\docker_engine,
+    # which is what Docker Desktop leaves behind when it starts and then gives up
+    # -- makes each probe block instead, so the loop could run far past the cap it
+    # believes it has, with the spinner still turning. The probe is bounded below
+    # AND the deadline is now real, so `$waitMin` means minutes either way. The
+    # iteration counter is gone entirely: with the bound expressed as a deadline
+    # there is nothing left for it to do, and keeping it invites the same
+    # iterations-are-seconds slip back in.
+    $dockerStart    = Get-Date
+    $dockerDeadline = $dockerStart.AddMinutes($waitMin)
     Write-Host -NoNewline "  "
     $frames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
     $f = 0
-    for ($i = 1; $i -le $maxWait; $i++) {
+    while ((Get-Date) -lt $dockerDeadline) {
       Start-Sleep -Seconds 3
-      try {
-        $dkOut = (docker info --format '{{.ID}}' 2>$null) | Out-String
-        if (-not [string]::IsNullOrWhiteSpace($dkOut)) { $dockerRunning = $true; break }
-      } catch {}
+      if (Test-DockerEngineUp) { $dockerRunning = $true; break }
       # Honest elapsed status after the first minute — silent dead air on a
-      # slow first start reads as a hang.
+      # slow first start reads as a hang. Derived from the SAME clock as the
+      # deadline: an iteration counter is not a time (backend#2849 review). With
+      # the probe capped at 15s a wedged-daemon pass costs ~18s, not 3s, so
+      # `$i / 20` advanced ~6x slower than real time -- the loop would exit at 10
+      # real minutes still reading "1 min elapsed", immediately followed by
+      # "didn't come up within 10 minutes". The label exists to be honest on
+      # exactly the pathology this ticket is about.
+      $elapsedMin = [math]::Floor(((Get-Date) - $dockerStart).TotalMinutes)
       $label = " Waiting for Docker..."
-      if ($i -ge 20) { $label = " Waiting for Docker... ($([math]::Floor($i / 20)) min elapsed; a first start can take up to $waitMin)" }
+      if ($elapsedMin -ge 1) { $label = " Waiting for Docker... ($elapsedMin min elapsed; a first start can take up to $waitMin)" }
       Write-Host "`r  " -NoNewline
       Write-Host $frames[$f] -ForegroundColor Cyan -NoNewline
       Write-Host $label -NoNewline
@@ -2290,6 +2407,27 @@ function Invoke-DockerCli {
     [switch]$StdoutOnly
   )
   return Invoke-BoundedProcess -FileName "docker" -Arguments $DockerArgs -TimeoutSec $TimeoutSec -Stdin $Stdin -StdoutOnly:$StdoutOnly
+}
+
+# Is the Docker ENGINE answering? (backend#2849)
+#
+# BOUNDED, because this is the one probe that runs while the daemon is least
+# likely to be healthy. A bare `docker info` against a wedged daemon does not
+# fail -- it BLOCKS, and this file already has a rule about that
+# ("installer external-call timeout rule", see Invoke-BoundedProcess): every
+# external call goes through a wrapper with a deadline. The engine-up wait was
+# the one place that read `docker info` directly, so the very wait that exists to
+# survive a bad Docker start was the one that could hang on it, with a spinner
+# still turning and the 10-minute cap never reached.
+#
+# 15s: `docker info` against a HEALTHY daemon answers in well under a second, so
+# this is generous for a slow cold start and still short enough that the wait
+# loop keeps its cadence when the daemon is wedged. A timeout is "not up yet",
+# not an error -- the caller's deadline decides when that becomes fatal.
+function Test-DockerEngineUp {
+  $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.ID}}") -TimeoutSec 15 -StdoutOnly
+  if ($r.Code -ne 0) { return $false }
+  return (-not [string]::IsNullOrWhiteSpace("$($r.Output)"))
 }
 
 function Confirm-DockerGpu {
@@ -2753,8 +2891,13 @@ function Install-K3dAndHelm {
       # (a job would orphan the child on timeout), capturing output so a failure is
       # diagnosable (#500). Best-effort: the direct download below takes over (#422).
       $r = Invoke-TrackedInstall -FilePath "winget" -Label "Installing Helm (winget)" -TimeoutMinutes 10 -Tag "helm-winget" `
-        -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent")
+        -ArgumentList @("install","-e","--id","Helm.Helm","--accept-package-agreements","--accept-source-agreements","--silent") `
+        -SuccessExitCodes (@(0) + $script:INSTALLER_REBOOT_OK_CODES)
       if ($r.State -ne 'ok') { Log "helm winget install: state=$($r.State) exit=$($r.ExitCode)" }
+      # Opted into the reboot codes above, so route it through the same handler: an
+      # initiated reboot here must arm a resume + stop, not fall through into the direct
+      # download while the box restarts underneath (backend#2849 review).
+      Invoke-PostInstallReboot -Result $r -Label "Helm"
       RefreshPath
     }
 
@@ -2951,12 +3094,20 @@ function Write-K3dRegistriesConfig {
 # Opt out with TRACEBLOC_NO_AUTOSTART=1.
 function Set-ClusterAutostart {
   if ($env:TRACEBLOC_NO_AUTOSTART) { return }
+  # BOUNDED (backend#2849 review). Both calls ran bare, and this function is on
+  # the MAIN install path -- against the wedged daemon this ticket is about, the
+  # `ps` blocks and the install stops here with a spinner and no message. This is
+  # defensive housekeeping, so a timeout is a skip, never a failure: k3d already
+  # sets unless-stopped, which is why this can be dropped without a remedy.
   try {
-    $nodes = docker ps -a --filter "name=k3d-$CLUSTER_NAME-" --format "{{.Names}}" 2>$null
+    $psr = Invoke-DockerCli -DockerArgs @("ps", "-a", "--filter", "name=k3d-$CLUSTER_NAME-", "--format", "{{.Names}}") -TimeoutSec 20 -StdoutOnly
+    if ($psr.Code -ne 0) { Log "docker ps (autostart) failed or timed out (exit $($psr.Code)); leaving k3d's own restart policy in place."; return }
+    $nodes = @("$($psr.Output)" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     foreach ($n in $nodes) {
-      if ($n) { docker update --restart unless-stopped $n 2>&1 | Out-Null }
+      $ur = Invoke-DockerCli -DockerArgs @("update", "--restart", "unless-stopped", $n) -TimeoutSec 20
+      if ($ur.Code -ne 0) { Log "docker update --restart on '$n' failed or timed out (exit $($ur.Code)); k3d's own policy still applies." }
     }
-    if ($nodes) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
+    if ($nodes.Count) { Log "Set restart=unless-stopped on k3d nodes (auto-restart after reboot)." }
   } catch {}
 }
 
@@ -3456,6 +3607,57 @@ function Write-RecreateClusterHint {
 # (Bugbot #565), so a healthy-but-drifted cluster still gets the recreate guidance.
 # Silent no-op if the image can't be read or isn't a parseable rancher/k3s:<tag>
 # (e.g. a digest-only pin) -- never false-warn.
+# Image-GC bound on a cluster this installer did not create (backend#2634).
+#
+# A FUNCTION, not the inline block it started as (reviewer, client#912). Inline in
+# New-K3dCluster it was unreachable by the one population it exists for: main()'s
+# completed+healthy fast path never enters New-K3dCluster, so every already-working
+# pre-#2634 edge -- the whole point of the advisory -- got silence. The only mention
+# of the name over here was a comment. Extracted for the same reason
+# Test-K3sVersionDrift and Read-RebootChoice were: a guard the fast path cannot call
+# is a guard that does not exist.
+#
+# WARN, do not Err, and that is the deliberate difference from the dataset check in
+# New-K3dCluster: a missing dataset mount puts customer data on ephemeral storage, so
+# refusing is right there. A missing image-GC bound is the status quo on every
+# existing edge, so refusing would turn every ordinary re-run into a hard failure.
+# Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+#
+# BOUNDED, via the same Start-Job + Wait-JobWithProgress pattern as its siblings.
+# Unbounded it would hang an already-healthy machine on a wedged Docker engine, after
+# the success line has printed, to deliver an advisory (installer rule; #565 Bugbot).
+#
+# Empty output stays silent: 'cannot tell' must not read as 'missing', or the warning
+# trains people to ignore it.
+function Test-ExistingClusterKubeletConfig {
+  $kubeletMounts = ""
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    param($n) (docker inspect "k3d-$n-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String)
+  } -ArgumentList $CLUSTER_NAME
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking the existing cluster's image-GC bound") {
+    # .Trim(), like the k3s sibling below (Bugbot, Medium, on client#912). Without
+    # it a failed or empty `docker inspect` comes back as a lone newline, which
+    # PowerShell treats as TRUTHY -- so the `-and` empty-guard passed and the
+    # recreate warning fired on a cluster nobody could read. That is the
+    # cannot-tell-reads-as-missing failure this function is explicitly written to
+    # avoid, and the bash twin stays silent on the same input, so it was also a
+    # twin divergence. Two Out-String hops make it certain rather than likely: the
+    # job body already stringifies, and Receive-Job stringifies again.
+    $kubeletMounts = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+  } else {
+    Log "docker inspect (kubelet config mount) timed out; skipping the image-GC advisory."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  if ($kubeletMounts -and ($kubeletMounts -notmatch ('(?m)^' + [regex]::Escape($TB_KUBELET_CONFIG_NODE_PATH) + '\s*$'))) {
+    Warn "The existing '$CLUSTER_NAME' cluster has no kubelet config mount, so its nodes keep the stock 85% image-GC threshold."
+    Hint "Training images are 2.7-11 GB each and floating tags leave the previous digest resident on every"
+    Hint "republish, so the node fills until garbage collection and disk-pressure eviction start DURING a"
+    Hint "training run. k3d bakes bind mounts in at create time, so this can't be added to a running cluster."
+    Hint "The install will proceed. To bound the image store, recreate the cluster when convenient:"
+    Write-RecreateClusterHint
+  }
+}
+
 function Test-K3sVersionDrift {
   if ($K8S_VERSION -eq "" -or $K8S_VERSION -eq "latest") { return }
   # Bounded (installer rule: every docker probe must have a deadline) so a wedged
@@ -3887,7 +4089,11 @@ function New-K3dCluster {
     # warn (the kubeconfig rewrite below still normalizes it to 127.0.0.1, so
     # reuse works). Silent if the serverlb can't be inspected.
     try {
-      $binds = (docker inspect "k3d-$CLUSTER_NAME-serverlb" --format '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}} {{end}}{{end}}' 2>$null | Out-String)
+      # BOUNDED (backend#2849 review): bare, and on the cluster-REUSE path -- the
+      # path a user takes precisely when a previous run left Docker unhappy.
+      # A timeout reads as "couldn't inspect", i.e. the documented silent skip.
+      $bindsRes = Invoke-DockerCli -DockerArgs @("inspect", "k3d-$CLUSTER_NAME-serverlb", "--format", '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}} {{end}}{{end}}') -TimeoutSec 20 -StdoutOnly
+      $binds = if ($bindsRes.Code -eq 0) { "$($bindsRes.Output)" } else { "" }
       if ($binds -match '0\.0\.0\.0' -and $binds -notmatch '127\.0\.0\.1') {
         Warn "The existing '$CLUSTER_NAME' cluster binds its API to 0.0.0.0 (created outside this installer)."
         Hint "This installer binds clusters to 127.0.0.1; behind a corporate proxy a 0.0.0.0 bind can be intercepted."
@@ -3903,7 +4109,13 @@ function New-K3dCluster {
     # (Bugbot #424). Path mirrors New-K3dCluster's mount destination.
     if ($env:TRACEBLOC_CA_BUNDLE -or $env:CURL_CA_BUNDLE) {
       $caMounts = ""
-      try { $caMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      # BOUNDED (backend#2849 review). A timeout leaves $caMounts empty, which is
+      # exactly what a failed inspect did before: the advisory is skipped, never
+      # inverted into a false "no CA mount" warning.
+      try {
+        $caRes = Invoke-DockerCli -DockerArgs @("inspect", "k3d-$CLUSTER_NAME-server-0", "--format", '{{range .Mounts}}{{println .Destination}}{{end}}') -TimeoutSec 20 -StdoutOnly
+        if ($caRes.Code -eq 0) { $caMounts = "$($caRes.Output)" } else { Log "docker inspect (CA mounts) failed or timed out (exit $($caRes.Code)); skipping the CA-trust advisory." }
+      } catch {}
       if ($caMounts -and ($caMounts -notmatch '(?m)^/etc/ssl/certs/tracebloc-mitm-ca\.crt\s*$')) {
         Warn "A CA bundle is set, but the existing '$CLUSTER_NAME' cluster was created without it."
         Hint "k3d bakes CA trust into the nodes at create time -- it can't be added to a running cluster."
@@ -3919,7 +4131,14 @@ function New-K3dCluster {
     # instead of the network export. Fail fast with the recreate remedy.
     if ($HOST_DATASET_DIR) {
       $dsMounts = ""
-      try { $dsMounts = (docker inspect "k3d-$CLUSTER_NAME-server-0" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null | Out-String) } catch {}
+      # BOUNDED (backend#2849 review). Empty on timeout, so the fail-fast below is
+      # SKIPPED rather than fired -- identical to a failed inspect today, and the
+      # only safe direction: inferring "no dataset mount" from a wedged daemon
+      # would abort a correctly-mounted cluster.
+      try {
+        $dsRes = Invoke-DockerCli -DockerArgs @("inspect", "k3d-$CLUSTER_NAME-server-0", "--format", '{{range .Mounts}}{{println .Destination}}{{end}}') -TimeoutSec 20 -StdoutOnly
+        if ($dsRes.Code -eq 0) { $dsMounts = "$($dsRes.Output)" } else { Log "docker inspect (dataset mount) failed or timed out (exit $($dsRes.Code)); skipping the bind-mount precondition." }
+      } catch {}
       if ($dsMounts -and ($dsMounts -notmatch '(?m)^/tracebloc-data\s*$')) {
         Warn "HOST_DATASET_DIR is set, but the existing '$CLUSTER_NAME' cluster has no /tracebloc-data bind mount."
         Hint "k3d bakes bind mounts in at create time - they can't be added to a running cluster. Re-using this"
@@ -3929,6 +4148,22 @@ function New-K3dCluster {
         Err "Existing cluster is missing the dataset bind mount - refusing to install datasets onto ephemeral storage."
       }
     }
+
+    # Image-GC bound (backend#2634). The drop-in is a create-time bind mount, so a
+    # cluster made before this change keeps the kubelet's stock 85/80 thresholds and
+    # a re-run used to say "Compute environment already running" without looking
+    # (Bugbot, Medium, on client#912 -- the bash twin had this check and this one did
+    # not, and WSL2 edges are a real part of that population).
+    #
+    # WARN, do not Err, and that is the deliberate difference from the dataset check
+    # above: a missing dataset mount puts customer data on ephemeral storage, so
+    # refusing is right there. A missing image-GC bound is the status quo on every
+    # existing edge, so refusing would turn every ordinary re-run into a hard
+    # failure. Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+    #
+    # Empty output stays silent: 'cannot tell' must not read as 'missing', or the
+    # warning trains people to ignore it.
+    Test-ExistingClusterKubeletConfig
 
     # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
@@ -4039,6 +4274,53 @@ function New-K3dCluster {
         $k3dArgs += @("--k3s-arg", "--kubelet-arg=fail-cgroupv1=false@all")
       }
     }
+
+    # --- kubelet config drop-in (backend#2634; mechanism shared with #2460) ---
+    #
+    # The bash twin's `_write_kubelet_config` in scripts/lib/cluster.sh carries the
+    # full rationale; `scripts/tests/kubelet-config-agreement.sh` derives the three
+    # values from BOTH files and fails the build if they diverge, so this is not a
+    # second source of truth -- it is the second half of one, held together by a
+    # guard in a required job.
+    #
+    # Short version: EvictionHard / KubeReserved / SystemReserved are maps the
+    # kubelet replaces WHOLESALE, so they cannot travel as `--kubelet-arg` without
+    # silently dropping k3s's disk thresholds. Image GC is scalar and would survive
+    # the CLI, but belongs beside the eviction thresholds it interacts with. One
+    # file, authored whole. Stock 85/80 leaves a 5-point band, which on a real disk
+    # can be smaller than ONE 2.7-11 GB task image.
+    # NOT under %TEMP% (Bugbot, High, on client#912). This file is BIND-MOUNTED
+    # into every k3d node, so the host path must outlive the install: a bind-mount
+    # source that has vanished cannot be remounted and `docker start` of the node
+    # fails with a generic Docker error. A cluster created from a temp path comes
+    # up healthy and can never be RESTARTED. HOST_DATA_DIR is the installer's own
+    # persistent directory; matches the bash twin's _kubelet_config_path.
+    $kubeletCfgDir  = Join-Path $HOST_DATA_DIR "kubelet"
+    $kubeletCfgPath = Join-Path $kubeletCfgDir "kubelet.yaml"
+    # HARD-FAIL, not a warning: a silent skip leaves the node on the stock 85%
+    # threshold -- the unbounded image store #2634 is about -- while the install
+    # reports success and nothing downstream can tell.
+    try {
+      New-Item -ItemType Directory -Path $kubeletCfgDir -Force | Out-Null
+      # LF and no BOM: this file is read by the kubelet inside a Linux container.
+      # Set-Content on Windows PowerShell would write CRLF and a UTF-8 BOM, and the
+      # YAML parser rejects the BOM -- so the node would fail to start with a
+      # message about the file, not about us.
+      $kubeletYaml = @(
+        "apiVersion: kubelet.config.k8s.io/v1beta1",
+        "kind: KubeletConfiguration",
+        "imageGCHighThresholdPercent: $TB_KUBELET_IMAGE_GC_HIGH_PERCENT",
+        "imageGCLowThresholdPercent: $TB_KUBELET_IMAGE_GC_LOW_PERCENT",
+        "imageMinimumGCAge: $TB_KUBELET_IMAGE_MIN_GC_AGE"
+      ) -join "`n"
+      [System.IO.File]::WriteAllText($kubeletCfgPath, $kubeletYaml + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+      throw "Couldn't write the kubelet config to $kubeletCfgPath ($($_.Exception.Message)). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
+    }
+    # `@all` for the same reason as the cgroupv1 arg above: an agent runs a kubelet
+    # and pulls the same task images, so a server-only drop-in leaves it unbounded.
+    $k3dArgs += @("-v", "${kubeletCfgPath}:${TB_KUBELET_CONFIG_NODE_PATH}@all")
+    $k3dArgs += @("--k3s-arg", "--kubelet-arg=config=${TB_KUBELET_CONFIG_NODE_PATH}@all")
 
     # backend#743: bind-mount the customer dataset volume at a distinct cluster
     # path so the chart's dataset PV points there while mysql + logs stay on the
@@ -4975,6 +5257,31 @@ function Get-BackendUrl {
   }
 }
 
+# The DASHBOARD for this environment -- where a human goes to create a client,
+# read their credentials, or see whether it came online (backend#2849).
+#
+# WAS HARDCODED TO PRODUCTION at every site, while Get-BackendUrl right above it
+# was correctly env-aware. So a `CLIENT_ENV=dev` install told the operator to
+# fetch credentials from ai.tracebloc.io -- the PROD dashboard -- and those
+# credentials are then rejected by dev-api. Reported from a real dev install.
+#
+# The hosts are the backend's OWN per-environment settings, not a guess:
+# `DEVICE_VERIFICATION_URI` / `RESET_PASSWORD_URL` in xraybackend/settings/
+# {dev,stg,prod}.py resolve to dev.tracebloc.io, stg.tracebloc.io and
+# ai.tracebloc.io respectively. Same vocabulary and same unknown->prod fallback
+# as Get-BackendUrl, so the two can never disagree about which environment an
+# install belongs to.
+function Get-TraceblocDashboardUrl {
+  param([string]$Path = "clients")
+  $base = switch ("$(Get-TraceblocClientEnv)") {
+    "dev"   { "https://dev.tracebloc.io" }
+    "stg"   { "https://stg.tracebloc.io" }
+    default { "https://ai.tracebloc.io" }
+  }
+  if ($Path) { return ($base + "/" + $Path) }
+  return $base
+}
+
 # Validate the entered Client ID / password against the backend's
 # api-token-auth/ endpoint -- the same call jobs-manager makes at runtime.
 # Returns: valid | invalid | inactive | unverified.
@@ -5518,7 +5825,7 @@ function Get-UnattendedCredentialRefusal {
           "  Run the installer in a terminal, or set both of these first for an unattended install:`n" +
           "    `$env:TRACEBLOC_CLIENT_ID='<client id>'`n" +
           "    `$env:TRACEBLOC_CLIENT_PASSWORD='<client password>'`n" +
-          "  Find them at https://ai.tracebloc.io/clients")
+          "  Find them at $(Get-TraceblocDashboardUrl)")
 }
 
 function Install-ClientHelm {
@@ -5576,10 +5883,10 @@ function Install-ClientHelm {
       $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
       if ($credStatus -eq "valid") { Ok "Credentials verified." }
       elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
-      elseif ($credStatus -eq "invalid") { Err "The supplied TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them at https://ai.tracebloc.io/clients and re-run." }
+      elseif ($credStatus -eq "invalid") { Err "The supplied TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them at $(Get-TraceblocDashboardUrl) and re-run." }
       else {
         Warn "Couldn't reach tracebloc to verify the supplied credentials right now - continuing."
-        Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+        Hint "If they are wrong, your client will stay offline at $(Get-TraceblocDashboardUrl) after install."
       }
     }
     default {
@@ -5624,7 +5931,7 @@ function Install-ClientHelm {
       Hint "platform so other collaborators can submit models for evaluation."
       Write-Host ""
       Hint "Create one here (free):"
-      Write-Host "    " -NoNewline; Write-Host "https://ai.tracebloc.io/clients" -ForegroundColor White
+      Write-Host "    " -NoNewline; Write-Host "$(Get-TraceblocDashboardUrl)" -ForegroundColor White
       Write-Host ""
 
       # Collect + verify credentials. The entered Client ID / password are checked
@@ -5662,15 +5969,15 @@ function Install-ClientHelm {
         elseif ($credStatus -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
         elseif ($credStatus -eq "unverified") {
           Warn "Couldn't reach tracebloc to verify your credentials right now - continuing."
-          Hint "If they are wrong, your client will stay offline at https://ai.tracebloc.io/clients after install."
+          Hint "If they are wrong, your client will stay offline at $(Get-TraceblocDashboardUrl) after install."
           break
         } else {
           Warn "That Client ID / password was rejected by tracebloc - please re-enter."
-          Hint "Find your credentials at https://ai.tracebloc.io/clients"
+          Hint "Find your credentials at $(Get-TraceblocDashboardUrl)"
         }
 
         $credAttempt++
-        if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at https://ai.tracebloc.io/clients and re-run." }
+        if ($credAttempt -ge $credMax) { Err "Too many failed attempts. Double-check your credentials at $(Get-TraceblocDashboardUrl) and re-run." }
         # Force active re-entry on retry (don't silently reuse a rejected default).
         $defaultClientId = ""; $defaultClientPassword = ""
       }
@@ -6144,7 +6451,7 @@ function Print-Summary {
       }
       Write-Host ""
       Write-Host "  Your client is live. Confirm it shows as Online:"
-      Write-Host "    https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host "    $(Get-TraceblocDashboardUrl)" -ForegroundColor Cyan
       Write-Host ""
       Hint "Models other collaborators submit train on this machine -- your data never leaves it."
       Write-Host ""
@@ -6153,9 +6460,9 @@ function Print-Summary {
       Write-Host "  What to do next" -ForegroundColor Cyan
       Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
       Write-Host "       tracebloc data ingest ./data" -ForegroundColor Green
-      Write-Host "  2. Create your use case and invite other collaborators: https://ai.tracebloc.io/my-use-cases"
+      Write-Host "  2. Create your use case and invite other collaborators: $(Get-TraceblocDashboardUrl 'my-use-cases')"
       Write-Host ""
-      Hint "Dashboard: https://ai.tracebloc.io   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
+      Hint "Dashboard: $(Get-TraceblocDashboardUrl '')   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
       Write-Host ""
       Write-Host "  $line" -ForegroundColor Green
     }
@@ -6165,14 +6472,14 @@ function Print-Summary {
       Write-Host "  Components are still downloading/starting (first run can take a few minutes)."
       Write-Host "  Check progress:   " -NoNewline; Write-Host "kubectl get pods -n $ns" -ForegroundColor Green
       Write-Host ""
-      Write-Host "  Your client will show as Online at https://ai.tracebloc.io/clients once it finishes."
+      Write-Host "  Your client will show as Online at $(Get-TraceblocDashboardUrl) once it finishes."
       Hint "Re-running this installer is safe."
     }
     "bad_creds" {
       Write-Host "  " -NoNewline; Write-Host "$([char]0x2716) Couldn't connect - your Client ID or password was rejected." -ForegroundColor Red; Log "Couldn't connect - Client ID or password rejected by tracebloc."
       Write-Host ""
       Write-Host "  The environment installed, but tracebloc refused those credentials."
-      Write-Host "    1. Re-check them at https://ai.tracebloc.io/clients" -ForegroundColor Cyan
+      Write-Host "    1. Re-check them at $(Get-TraceblocDashboardUrl)" -ForegroundColor Cyan
       Write-Host "    2. Re-run this installer (safe to re-run)"
     }
     "image_pull_ca" {
@@ -6322,9 +6629,18 @@ function Get-PfFsType {
 # Memory/CPU as the container runtime sees it (the Docker Desktop / WSL2 VM budget,
 # which is what the pods actually get — smaller than the host). $null if the daemon
 # is down or the value is junk, so callers fall back to the host (CIM) reader.
+# BOUNDED (backend#2849). These three run at the TOP of Step 3, via
+# Test-PreflightRuntimeMem, and they are the first thing that touches Docker after
+# the engine wait. A bare `docker info` against a wedged daemon blocks rather than
+# failing, so an install that got past Step 2 on a sick engine would hang HERE --
+# at the entry to the step, before anything prints -- instead of falling back to
+# the host reader as the `$null` contract below promises. A timeout returns $null,
+# which is exactly the "undeterminable" the callers already handle.
 function Get-PfRuntimeMemGb {
   try {
-    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.MemTotal}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1GB) }
   } catch {}
   return $null
@@ -6338,14 +6654,18 @@ function Get-PfRuntimeMemGb {
 # (mirrors bash's PF_VM_MEM_GRACE_MIB, preflight.sh #513). $null if undeterminable.
 function Get-PfRuntimeMemMib {
   try {
-    $v = ((docker info --format '{{.MemTotal}}' 2>$null) | Out-String).Trim()
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.MemTotal}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1MB) }
   } catch {}
   return $null
 }
 function Get-PfRuntimeCpu {
   try {
-    $v = ((docker info --format '{{.NCPU}}' 2>$null) | Out-String).Trim()
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.NCPU}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int]$v -gt 0) { return [int]$v }
   } catch {}
   return $null
@@ -6968,6 +7288,63 @@ function Edit-Redaction([string]$Path) {
   } catch {}
 }
 
+# EVERY external read in the support bundle is bounded (backend#2849 / Bugbot).
+#
+# THE WHOLE POINT of this bundle is that it works when the machine does not. An
+# operator runs `-Diagnose` BECAUSE Docker is wedged or the cluster is unreachable,
+# so a bare call here hangs the one tool meant to explain the hang and support
+# receives nothing at all. Bounding only the `docker` calls was not enough and
+# Bugbot was right to say so: `k3d cluster list` talks to the same engine, and it
+# shared an expression with a bounded docker call -- `Out-File` cannot run until
+# BOTH sides finish, so the file still never appeared. kubectl/helm reach the API
+# server behind that same engine and block the same way.
+#
+# A timeout is DATA, not an error: the synthetic text is written into the file, so
+# "k3d cluster list timed out after 20s" reaches support as a finding rather than
+# as a missing bundle. 20s is generous for a healthy tool (30s for a log fetch,
+# which legitimately streams more).
+#
+# WORST CASE ~350s, i.e. under 6 minutes -- NOT "well under a minute" as this
+# comment first claimed (@LukasWodka corrected the arithmetic on client#917). The
+# deadlines are SEQUENTIAL, so a fully wedged box pays 13 reads x 20s + 3
+# kubectl-logs x 30s. Still bounded, and still far better than never returning --
+# but the number a support engineer plans around should be the real one.
+function Invoke-DiagnoseCapture {
+  param(
+    [Parameter(Mandatory)][string]$FileName,
+    [Parameter(Mandatory)][string[]]$Arguments,
+    [int]$TimeoutSec = 20
+  )
+  if (-not (Get-Command $FileName -ErrorAction SilentlyContinue)) { return "$FileName is not installed" }
+  $r = Invoke-BoundedProcess -FileName $FileName -Arguments $Arguments -TimeoutSec $TimeoutSec
+  $text = "$($r.Output)"
+  if ($r.Code -ne 0) { return "## $FileName $($Arguments -join ' ') -- FAILED or TIMED OUT (exit $($r.Code))`n$text" }
+  return $text
+}
+
+# Namespace of the tracebloc jobs-manager pod, parsed from `kubectl get pods -A` TEXT.
+#
+# PURE and side-effect-free so the guarantee is directly unit-testable, like
+# Format-ExitCode -- and this one earned that treatment. Bounding the capture
+# changed its TYPE: native `kubectl` emitted one object per LINE, while
+# Invoke-DiagnoseCapture returns a single multi-line string, and
+# `$blob | Select-String ...` treats the whole blob as ONE line. The first
+# whitespace token of that match is then the table HEADER, "NAMESPACE", not a
+# namespace -- so a SUCCESSFUL -Diagnose went on to collect pod logs, helm values
+# and the chart version from a namespace that does not exist (Bugbot, High).
+#
+# Splitting first restores the per-line semantics the native call had. The explicit
+# header rejection is a belt-and-braces fail-safe: if a future refactor breaks the
+# split again, "NAMESPACE" still cannot leak out of here as a real namespace.
+function Get-JobsManagerNamespace {
+  param([string]$PodsText)
+  $line = ("$PodsText" -split "`r?`n" | Select-String '\-jobs-manager' | Select-Object -First 1)
+  if (-not $line) { return "" }
+  $ns = ($line.ToString().Trim() -split '\s+')[0]
+  if ($ns -eq 'NAMESPACE') { return "" }
+  return $ns
+}
+
 function Invoke-DiagnoseBundle {
   $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
   $base = if ($HOST_DATA_DIR) { $HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
@@ -6980,8 +7357,10 @@ function Invoke-DiagnoseBundle {
   # Namespace discovery (TB_NAMESPACE isn't set on a standalone diagnose run).
   $ns = $TB_NAMESPACE
   if (-not $ns) {
-    $jm = kubectl get pods -A 2>$null | Select-String '\-jobs-manager' | Select-Object -First 1
-    if ($jm) { $ns = ($jm.ToString().Trim() -split '\s+')[0] }
+    # bounded: this is the FIRST cluster read on a standalone diagnose run, so an
+    # unreachable API server used to hang before a single file was written.
+    # Parsed by a pure helper because the capture is TEXT, not line objects.
+    $ns = Get-JobsManagerNamespace (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A") -TimeoutSec 20)
   }
   if (-not $ns) { $ns = "default" }
 
@@ -6993,23 +7372,33 @@ function Invoke-DiagnoseBundle {
   # host / versions
   $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
          "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
-         (k3d version 2>&1 | Out-String), (kubectl version --client 2>&1 | Out-String),
-         (helm version --short 2>&1 | Out-String), (docker version 2>&1 | Out-String))
+         (Invoke-DiagnoseCapture -FileName "k3d" -Arguments @("version")),
+         (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("version","--client")),
+         (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("version","--short")),
+         "$((Invoke-DockerCli -DockerArgs @("version") -TimeoutSec 20).Output)")
   try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $h += "CPUs=$($cs.NumberOfLogicalProcessors)  MemBytes=$($cs.TotalPhysicalMemory)" } catch {}
   ($h -join "`n") | Out-File (Join-Path $d "00-host.txt") -Encoding utf8
 
-  ((docker ps -a --filter "name=k3d-$cn-" 2>&1 | Out-String) + "`n" + (k3d cluster list 2>&1 | Out-String)) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
+  # BOTH sides bounded. Bounding only the docker half left the file unwritten
+  # anyway: `Out-File` waits for the whole expression, and `k3d cluster list`
+  # talks to the very engine that is wedged (Bugbot, High).
+  ("$((Invoke-DockerCli -DockerArgs @("ps", "-a", "--filter", "name=k3d-$cn-") -TimeoutSec 20).Output)" + "`n" +
+   (Invoke-DiagnoseCapture -FileName "k3d" -Arguments @("cluster","list"))) | Out-File (Join-Path $d "01-docker.txt") -Encoding utf8
 
   if (Get-Command kubectl -ErrorAction SilentlyContinue) {
-    (@("## nodes", (kubectl get nodes -o wide 2>&1 | Out-String),
-       "## pods", (kubectl get pods -A -o wide 2>&1 | Out-String),
-       "## events", (kubectl get events -A 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
+    (@("## nodes",  (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","nodes","-o","wide")),
+       "## pods",   (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A","-o","wide")),
+       "## events", (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","events","-A"))) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
     foreach ($w in @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")) {
-      kubectl logs -n $ns "deploy/$w" --all-containers --tail=500 2>&1 | Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
+      # 30s: a log fetch legitimately streams more than a status read, and each
+      # workload gets its own deadline so one wedged deploy cannot eat the bundle.
+      Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("logs","-n",$ns,"deploy/$w","--all-containers","--tail=500") -TimeoutSec 30 |
+        Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
     }
   }
   if (Get-Command helm -ErrorAction SilentlyContinue) {
-    (@("## helm list", (helm list -A 2>&1 | Out-String), "## values", (helm get values $ns -n $ns 2>&1 | Out-String)) -join "`n") | Out-File (Join-Path $d "04-helm.txt") -Encoding utf8
+    (@("## helm list", (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("list","-A")),
+       "## values",    (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("get","values",$ns,"-n",$ns))) -join "`n") | Out-File (Join-Path $d "04-helm.txt") -Encoding utf8
   }
 
   Get-ChildItem -Path $base -Filter "install-*.log" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName (Join-Path $d $_.Name) -ErrorAction SilentlyContinue }
@@ -7117,7 +7506,37 @@ function Install-TraceblocCli {
     # .ExitCode reliable. (The -Wait -PassThru form can leave .ExitCode $null
     # with redirected output; -PassThru + Handle + WaitForExit does not.)
     $null = $p.Handle
-    $p.WaitForExit()
+    # A DEADLINE, because this was the only wait in the file without one
+    # (backend#2849). The child is `irm <cli install.ps1> | iex` -- a network
+    # fetch of a script we then execute -- so a stalled TLS handshake, a slow CDN
+    # redirect or anything blocking inside the CLI's own installer parked the
+    # whole install here forever, with no console output and nothing to kill it.
+    # Every other wait in this file goes through Wait-ProcessWithDeadline or
+    # Invoke-BoundedProcess; this one predates that rule.
+    #
+    # 10 minutes, and a timeout is NOT fatal: a failed CLI install is already
+    # explicitly non-fatal (Step 4 falls back to the legacy credential flow), so
+    # the caller's `$p.ExitCode -eq 0` test below simply does not pass. Killed
+    # rather than abandoned, so it cannot keep writing to the log we then read.
+    $cliWaitMs = 10 * 60 * 1000
+    if ($p.WaitForExit($cliWaitMs)) {
+      # FLUSH THE STREAMS, and this is not optional (Bugbot, on my own change).
+      # WaitForExit(ms) waits for the PROCESS; only the PARAMETERLESS overload also
+      # waits for the redirected stdout/stderr readers to drain, and until they do
+      # .ExitCode can read back $null. `$p.ExitCode -eq 0` below would then be false
+      # after a SUCCESSFUL install and Step 4 would fall back to the legacy
+      # credential path -- the #611 failure shape, and the empty-ExitCode class this
+      # very ticket exists to remove. Wait-ProcessWithDeadline does exactly this,
+      # for exactly this reason; swapping the parameterless call for the timeout
+      # overload here dropped it, and the comment above about ".Handle then
+      # WaitForExit()" was describing a call that no longer happened.
+      # Bounded in practice: the process has already exited.
+      try { $p.WaitForExit() } catch {}
+    } else {
+      Log "tracebloc CLI installer did not finish within 10 minutes; stopping it and continuing."
+      try { $p.Kill() } catch {}
+      try { $null = $p.WaitForExit(30 * 1000) } catch {}
+    }
     foreach ($f in @($cliOut, $cliErr)) {
       if (Test-Path $f) { Get-Content $f -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     }
@@ -7225,6 +7644,11 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # Same reasoning for GPU: a healthy cluster whose values request GPU but whose node is
     # CPU-only would strand GPU experiments; flag it here since the fast path skips the gate (Bugbot).
     Test-HealthyClusterGpuConsistent
+    # Third time, same shape (backend#2634, reviewer on client#912): the image-GC
+    # drop-in is a create-time bind mount, so every cluster built before #2634 keeps
+    # the stock 85/80 thresholds. A HEALTHY pre-#2634 edge is the entire population
+    # the advisory is for, and it is exactly the population this fast path serves.
+    Test-ExistingClusterKubeletConfig
     # This path exits before Helm, so a cluster installed BEFORE this fix would never
     # get its PV dirs repaired -- the client is healthy, so every re-run shortcuts
     # here and the first ingest keeps failing with "Permission denied". Repair it now:

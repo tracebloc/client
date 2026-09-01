@@ -118,7 +118,7 @@ clean_fleet() {
 jobs-manager-abc123 Running
 requests-proxy-def456 Running
 mysql-0 Running
-tracebloc-ingest-xyz Running
+ingest-job-deadbeef01-x9q2z Running
 P
   local common='MYSQL_HOST=mysql
 DB_BOOTSTRAP_USER=root
@@ -147,7 +147,7 @@ TB_CREDMGR_PASSWORD=x'
 SERVICE_DB_ACCOUNTS=true
 TB_META_USER=tb_meta
 TB_META_PASSWORD=x" > "$d/env.requests-proxy-def456"
-  printf 'DB_USER=tb_ingest\nDB_PASSWORD=x\n' > "$d/env.tracebloc-ingest-xyz"
+  printf 'DB_USER=tb_ingest\nDB_PASSWORD=x\n' > "$d/env.ingest-job-deadbeef01-x9q2z"
   # A DRIVEN CYCLE PRODUCES LOGS, and the fixture has to say so. These were
   # EMPTY, which under the corrected criterion-2 rule now means "we could not
   # look" rather than "we looked and it was clean" (Saqlain, #896). An empty
@@ -155,7 +155,7 @@ TB_META_PASSWORD=x" > "$d/env.requests-proxy-def456"
   # bug: a clean verdict differenced against a fleet state that does not occur.
   # The content is deliberately benign -- neither the legacy-identity string
   # nor a 1045 -- so the two greps still score [ok] on their own terms.
-  for _p in jobs-manager-abc123 requests-proxy-def456 tracebloc-ingest-xyz; do
+  for _p in jobs-manager-abc123 requests-proxy-def456 ingest-job-deadbeef01-x9q2z; do
     printf 'INFO connected to mysql as tb_ingest\nINFO run complete\n' \
       > "$d/logs.$_p"
   done
@@ -265,8 +265,8 @@ run_case "a *_USER with an empty *_PASSWORD is a finding" "$D" 1 "TB_META_PASSWO
 
 # 6. the spawned ingestion Job is stamped at runtime, not by the chart
 D="$TMP/ingest"; clean_fleet "$D"
-echo 'DB_USER=edgeuser' > "$D/env.tracebloc-ingest-xyz"
-printf 'DB_PASSWORD=x\n' >> "$D/env.tracebloc-ingest-xyz"
+echo 'DB_USER=edgeuser' > "$D/env.ingest-job-deadbeef01-x9q2z"
+printf 'DB_PASSWORD=x\n' >> "$D/env.ingest-job-deadbeef01-x9q2z"
 run_case "an ingestion Job on edgeuser is a finding" "$D" 1 "DB_USER=edgeuser"
 
 # 7. FAIL CLOSED: no driven cycle means we cannot tell, and that is a failure
@@ -280,7 +280,7 @@ run_case "no RUNNING ingestion pod => cannot tell, NOT a pass" "$D" 1 "no RUNNIN
 # and the tool printed DROP-READY for the criterion that authorizes an
 # irreversible DROP. Prod's digest-pinned 0.7 ingestor is exactly this shape.
 D="$TMP/ing-nouser"; clean_fleet "$D"
-printf 'DB_PASSWORD=x\n' > "$D/env.tracebloc-ingest-xyz"
+printf 'DB_PASSWORD=x\n' > "$D/env.ingest-job-deadbeef01-x9q2z"
 run_case "ingestion with a PASSWORD but no DB_USER is cannot-tell, NOT a pass" \
   "$D" 1 "DB_USER is absent or empty"
 
@@ -288,7 +288,7 @@ run_case "ingestion with a PASSWORD but no DB_USER is cannot-tell, NOT a pass" \
 # SUCCEEDS with no output used to score both checks [ok]. "Could not look" must
 # not read as "looked and clean".
 D="$TMP/emptylog"; clean_fleet "$D"
-: > "$D/logs.tracebloc-ingest-xyz"
+: > "$D/logs.ingest-job-deadbeef01-x9q2z"
 : > "$D/logs.jobs-manager-abc123"
 : > "$D/logs.requests-proxy-def456"
 run_case "an EMPTY log is cannot-tell, not a clean cycle" \
@@ -499,7 +499,7 @@ fi
 # empty env and an unexplained "cannot tell". The selector filters to Running so
 # the message can name the real precondition instead (@aptracebloc, #896).
 D="$TMP/ingestdone"; clean_fleet "$D"
-sed -i.bak 's/^tracebloc-ingest-xyz Running$/tracebloc-ingest-xyz Succeeded/' "$D/pods"
+sed -i.bak 's/^ingest-job-deadbeef01-x9q2z Running$/ingest-job-deadbeef01-x9q2z Succeeded/' "$D/pods"
 run_case "a Succeeded ingestion pod is not accepted as the driven cycle" "$D" 1 "no RUNNING ingestion pod"
 
 # A RELEASE NAMED *ingest* MUST NOT MAKE THE CONTROL PLANE ELIGIBLE (Bugbot).
@@ -512,23 +512,28 @@ run_case "a Succeeded ingestion pod is not accepted as the driven cycle" "$D" 1 
 # The fixture puts the control-plane pods FIRST, which is the order that produced
 # the bug: an unfiltered picker takes the first match.
 D="$TMP/ingest-named-release"; clean_fleet "$D"
+#
+# THE REAL JOB KEEPS ITS OWN NAME (backend#2887). `submit_ingestion_run.py:358`
+# names the pod `ingest-job-{digest}` -- it is NOT `{release}-` prefixed, so on a
+# release called `tracebloc-ingest` the control plane collides with `/ingest/` and
+# the actual ingestion Job still does not. The old fixture expressed the driven
+# cycle as `tracebloc-ingest-worker-xyz`, a pod shape the producer never emits;
+# the loose picker accepted it, so this case passed against a fleet that cannot
+# exist. Both are present here now: ingest-named control plane FIRST (the order
+# that produced the bug), real Job last.
 cat > "$D/pods" <<'P'
 tracebloc-ingest-jobs-manager-abc123 Running
 tracebloc-ingest-requests-proxy-def456 Running
 mysql-0 Running
-tracebloc-ingest-worker-xyz Running
+ingest-job-deadbeef01-x9q2z Running
 P
-for _p in tracebloc-ingest-jobs-manager-abc123 tracebloc-ingest-requests-proxy-def456 tracebloc-ingest-worker-xyz; do
+for _p in tracebloc-ingest-jobs-manager-abc123 tracebloc-ingest-requests-proxy-def456; do
   case "$_p" in
     *jobs-manager*)   cp "$D/env.jobs-manager-abc123"   "$D/env.$_p" ;;
     *requests-proxy*) cp "$D/env.requests-proxy-def456" "$D/env.$_p" ;;
-    *)                cp "$D/env.tracebloc-ingest-xyz"  "$D/env.$_p" ;;
   esac
-  : > "$D/logs.$_p"
+  echo "the driven cycle ran" > "$D/logs.$_p"
 done
-echo "the driven cycle ran" > "$D/logs.tracebloc-ingest-worker-xyz"
-echo "the driven cycle ran" > "$D/logs.tracebloc-ingest-jobs-manager-abc123"
-echo "the driven cycle ran" > "$D/logs.tracebloc-ingest-requests-proxy-def456"
 run_case "a release named *ingest* does not make the control plane the driven cycle" "$D" 0 \
   "all three criteria hold" --phase pre-revoke
 
@@ -546,14 +551,14 @@ cat > "$D/pods" <<'P'
 jobs-manager-abc123 Running
 requests-proxy-def456 Running
 mysql-0 Running
-tracebloc-ingest-xyz Running
-tracebloc-ingest-old1 Succeeded
-tracebloc-ingest-old2 Succeeded
+ingest-job-deadbeef01-x9q2z Running
+ingest-job-old1111111-aaaaa Succeeded
+ingest-job-old2222222-bbbbb Succeeded
 P
-cp "$D/env.tracebloc-ingest-xyz" "$D/env.tracebloc-ingest-old1" 2>/dev/null || true
-cp "$D/env.tracebloc-ingest-xyz" "$D/env.tracebloc-ingest-old2" 2>/dev/null || true
-: > "$D/logs.tracebloc-ingest-old1"   # aged out of --since, as a finished Job is
-: > "$D/logs.tracebloc-ingest-old2"
+cp "$D/env.ingest-job-deadbeef01-x9q2z" "$D/env.ingest-job-old1111111-aaaaa" 2>/dev/null || true
+cp "$D/env.ingest-job-deadbeef01-x9q2z" "$D/env.ingest-job-old2222222-bbbbb" 2>/dev/null || true
+: > "$D/logs.ingest-job-old1111111-aaaaa"   # aged out of --since, as a finished Job is
+: > "$D/logs.ingest-job-old2222222-bbbbb"
 run_case "finished ingestion Jobs do not fail a clean in-flight cycle" "$D" 0 \
   "all three criteria hold" --phase pre-revoke
 
@@ -564,12 +569,12 @@ cat > "$D/pods" <<'P'
 jobs-manager-abc123 Running
 requests-proxy-def456 Running
 mysql-0 Running
-tracebloc-ingest-xyz Running
-tracebloc-ingest-old1 Succeeded
+ingest-job-deadbeef01-x9q2z Running
+ingest-job-old1111111-aaaaa Succeeded
 P
-cp "$D/env.tracebloc-ingest-xyz" "$D/env.tracebloc-ingest-old1" 2>/dev/null || true
-: > "$D/logs.tracebloc-ingest-old1"
-echo "legacy shared MySQL identity in use" > "$D/logs.tracebloc-ingest-xyz"
+cp "$D/env.ingest-job-deadbeef01-x9q2z" "$D/env.ingest-job-old1111111-aaaaa" 2>/dev/null || true
+: > "$D/logs.ingest-job-old1111111-aaaaa"
+echo "legacy shared MySQL identity in use" > "$D/logs.ingest-job-deadbeef01-x9q2z"
 run_case "a dirty RUNNING ingestion pod is still caught beside finished Jobs" "$D" 1 \
   "legacy-identity warning" --phase pre-revoke
 
@@ -607,12 +612,12 @@ run_case "a namespace with thousands of pods still reaches a verdict" "$D" 0 \
 # The DB_USER checks match that name exactly, so a connection string elsewhere in
 # the env would have gone unseen -- a gap against "nothing resolves to edgeuser".
 D="$TMP/ingestdsn"; clean_fleet "$D"
-printf 'DATASET_DSN=mysql://edgeuser:secret@mysql:3306/training_test_datasets\n' >> "$D/env.tracebloc-ingest-xyz"
+printf 'DATASET_DSN=mysql://edgeuser:secret@mysql:3306/training_test_datasets\n' >> "$D/env.ingest-job-deadbeef01-x9q2z"
 run_case "edgeuser in an ingestion DSN is caught, by NAME" "$D" 1 "DATASET_DSN"
 
 # ... and that value is never echoed, because it carries a password.
 D="$TMP/ingestdsnquiet"; clean_fleet "$D"
-printf 'DATASET_DSN=mysql://edgeuser:SUPERSECRET@mysql:3306/training_test_datasets\n' >> "$D/env.tracebloc-ingest-xyz"
+printf 'DATASET_DSN=mysql://edgeuser:SUPERSECRET@mysql:3306/training_test_datasets\n' >> "$D/env.ingest-job-deadbeef01-x9q2z"
 rc=0
 out=$(PATH="$STUB:$PATH" KSTUB_DIR="$D" "$TOOL" --context c --namespace n \
         --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
@@ -624,7 +629,7 @@ fi
 
 # A correct DB_USER does NOT excuse a stale DSN beside it: both are reported.
 D="$TMP/ingestboth"; clean_fleet "$D"
-printf 'DATASET_DSN=mysql://edgeuser:x@mysql:3306/training_test_datasets\n' >> "$D/env.tracebloc-ingest-xyz"
+printf 'DATASET_DSN=mysql://edgeuser:x@mysql:3306/training_test_datasets\n' >> "$D/env.ingest-job-deadbeef01-x9q2z"
 rc=0
 out=$(PATH="$STUB:$PATH" KSTUB_DIR="$D" "$TOOL" --context c --namespace n \
         --baseline-datasets 87 --baseline-metadata 3 --baseline-identity root 2>&1) || rc=$?
@@ -859,6 +864,49 @@ if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; th
 else
   printf '  [skip] no timeout/gtimeout on this host — the wall-clock bound is a no-op here by design\n'
 fi
+
+# ===========================================================================
+#  backend#2887 — the ingestion picker anchors on the PRODUCER's prefix.
+#  A substring match plus a denylist mis-fired two ways, both reachable inside a
+#  normal gate cycle. Neither could produce a false PASS, but both produce a false
+#  "cannot tell", which reads as "drive another cycle" on a fleet that is fine.
+# ===========================================================================
+
+# K. THE STAGE POD, ALONE. An ingest creates `tracebloc-stage-<table>-<hash>`
+#    before the Job. The gate asks for a deliberately LARGE driven ingestion, so
+#    a table named `ingest_test` produces `tracebloc-stage-ingest-test-<hash>` --
+#    which the old `/ingest/` matched. Sampling during that window exec'd the tar
+#    sidecar, found no DB_USER, and reported cannot-tell while the real Job had
+#    not started yet. The correct answer is "no ingestion pod", not a reading of
+#    the wrong pod.
+D="$TMP/stage-pod-only"; clean_fleet "$D"
+cat > "$D/pods" <<'P'
+jobs-manager-abc123 Running
+requests-proxy-def456 Running
+mysql-0 Running
+tracebloc-stage-ingest-test-7a56def7 Running
+P
+printf 'TAR_OPTS=-xz\n' > "$D/env.tracebloc-stage-ingest-test-7a56def7"
+: > "$D/logs.tracebloc-stage-ingest-test-7a56def7"
+run_case "a stage pod on an ingest-named table is NOT read as the ingestion pod" \
+  "$D" 1 "no RUNNING ingestion pod"
+
+# L. ...AND IT MUST NOT SHADOW THE REAL JOB. Same stage pod, listed FIRST (the
+#    order that produced the bug -- `kubectl get pods` has no guaranteed order and
+#    the picker takes the first match), with the genuine Job alongside. The Job
+#    must still be the one selected, so the cycle passes.
+D="$TMP/stage-plus-job"; clean_fleet "$D"
+cat > "$D/pods" <<'P'
+tracebloc-stage-ingest-test-7a56def7 Running
+jobs-manager-abc123 Running
+requests-proxy-def456 Running
+mysql-0 Running
+ingest-job-deadbeef01-x9q2z Running
+P
+printf 'TAR_OPTS=-xz\n' > "$D/env.tracebloc-stage-ingest-test-7a56def7"
+: > "$D/logs.tracebloc-stage-ingest-test-7a56def7"
+run_case "a stage pod listed first does not shadow the real ingestion Job" \
+  "$D" 0 "all three criteria hold" --phase pre-revoke
 
 printf '\nedgeuser-drop-readiness-verdicts: %d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ] || exit 1
