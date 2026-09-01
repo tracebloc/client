@@ -195,6 +195,61 @@ for shape in compact pretty; do
       echo "  [OK]   pending_age_seconds parsed a non-empty age (${age}s) from $shape helm output" ;;
   esac
 done
+
+# --- unit assertion: a NON-INSTANT last_deployed yields NO age (backend#2908) --
+# The `^...T..:..:..` regex the parser gates on proves the fields are DIGITS in
+# the RFC3339 slots — NOT that they name a real instant. So `2026-00-01` (month
+# 00), `2026-13-01`, `2026-08-00`/`2026-08-40` (day), and `...T40:99:99` (h/m/s)
+# all pass it and then feed the civil→days math a nonsensical date. `2026-00-01`
+# and `2026-08-00` in particular land a LARGE POSITIVE age; the downstream
+# sanitiser only drops empty/non-numeric/NEGATIVE, so that bogus-but-positive age
+# sails through, clears WEDGE_MIN_AGE_SECONDS, and rolls back a release that was
+# never wedged (bug present since #923). Three sibling gates must turn EVERY such
+# non-instant into an empty age ("cannot tell"): the date/time RANGE check, the
+# zone-offset RANGE check, and the pre-2000 year floor. This asserts on EMPTY vs
+# non-empty, so it is independent of the wall-clock `now`.
+#
+# Mutation guard — each case reddens when ITS OWN gate is reverted (they do not
+# all hang off one line): the `+HH:MM` cases exit on the offset check, the `19xx`
+# / `0000` cases on the `y < 2000` floor, and the rest on the `mo<1||…` range
+# line. Remove that gate from the template and the parser prints a fabricated
+# number instead of nothing.
+for bad in \
+  "2026-00-01T00:00:00Z" \
+  "2026-13-01T00:00:00Z" \
+  "2026-08-00T00:00:00Z" \
+  "2026-08-40T00:00:00Z" \
+  "2026-99-40T40:99:99Z" \
+  "2026-08-30T24:00:00Z" \
+  "2026-08-30T12:60:00Z" \
+  "2026-08-30T12:00:00+40:00" \
+  "2026-08-30T12:00:00+00:99" \
+  "1999-12-31T23:59:59Z" \
+  "0000-01-01T00:00:00Z" \
+; do
+  for shape in compact pretty; do
+    age="$(sh -c '. "$0"; pending_age_seconds "$1"' "$FN" "$(status_json "$shape" "$bad")")"
+    if [ -n "$age" ]; then
+      echo "  [FAIL] pending_age_seconds returned a non-empty age '${age}' for out-of-range last_deployed '$bad' ($shape) — a non-instant must read as 'cannot tell' (backend#2908)"
+      fails=1
+    else
+      echo "  [OK]   out-of-range last_deployed '$bad' ($shape) -> no age (cannot tell)"
+    fi
+  done
+done
+# Counter-guard against an over-tight range gate: a leap second (ss=60) is a LEGAL
+# RFC3339 instant and MUST still parse (bound is ss<=60, not <=59). A fixed
+# past-dated fixture keeps this non-empty whenever the suite runs.
+for shape in compact pretty; do
+  age="$(sh -c '. "$0"; pending_age_seconds "$1"' "$FN" "$(status_json "$shape" "2026-06-30T23:59:60Z")")"
+  if [ -n "$age" ]; then
+    echo "  [OK]   leap-second last_deployed ($shape) still parses (age ${age}s)"
+  else
+    echo "  [FAIL] leap-second last_deployed ($shape) was rejected — the range gate is too strict (ss<=60, backend#2908)"
+    fails=1
+  fi
+done
+
 # Every case runs under BOTH shapes: `compact` (what helm actually emits, the
 # production path) and `pretty` (defensive forward-cover for an indented body).
 for shape in compact pretty; do
@@ -211,6 +266,28 @@ for shape in compact pretty; do
   run_case "[$shape] wedged (50m, UTC)"         "$(ts_utc 3000)"       rollback "$shape" || fails=1
   # Unparseable timestamp → age indeterminate → fail safe (never clobber).
   run_case "[$shape] unparseable last_deployed" "not-a-timestamp"      skip     "$shape" || fails=1
+  # backend#2908, at the DECISION level: a last_deployed with an out-of-range
+  # field is not a real instant. Before the range gate, month `00` (`2026-01`'s
+  # civil math run with mo=0) and day `00` computed a LARGE POSITIVE age — a fake
+  # ~274d / ~31d — that cleared the threshold and rolled back a release that was
+  # NEVER wedged. Both are anchored to fixed 2026 dates that only recede further
+  # into the past, so they land huge-positive no matter when the suite runs — the
+  # rollback would fire deterministically pre-fix. They must now read as "cannot
+  # tell" and SKIP. Mutation guard: revert the range check and either ROLLS BACK.
+  run_case "[$shape] out-of-range month (00)"   "2026-00-01T00:00:00Z" skip     "$shape" || fails=1
+  run_case "[$shape] out-of-range day (00)"     "2026-08-00T00:00:00Z" skip     "$shape" || fails=1
+  # Same class, the zone offset: a genuinely RECENT wall time (2026-08-31 23:55)
+  # stamped with a bogus +40:00 offset. Pre-fix the offset shifted the epoch ~1.7d
+  # into the past — a fabricated age well over the threshold that rolled back an
+  # in-flight upgrade. The instant is fixed in 2026 so it only ages further; the
+  # rollback would fire deterministically pre-fix. Must now read "cannot tell".
+  run_case "[$shape] out-of-range offset (+40:00)" "2026-08-31T23:55:00+40:00" skip "$shape" || fails=1
+  # Same class via the one field the RFC3339 ranges can't bound — the year. An
+  # impossible-but-in-range `1970-01-01` is a valid instant, so the field-range
+  # gate passes it; without the pre-2000 domain floor it computes a ~56-year
+  # positive age and rolls back a release that was never wedged. Must read
+  # "cannot tell" and SKIP. Mutation guard: drop `if (y < 2000) exit` → ROLLS BACK.
+  run_case "[$shape] impossible year (1970)"    "1970-01-01T00:00:00Z" skip     "$shape" || fails=1
 done
 
 if [ "$fails" -ne 0 ]; then

@@ -1436,11 +1436,45 @@ autoUpgrade:
     repository: alpine/helm
     tag: "3.16.4"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network + helm I/O.
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. backend#2935:
+  # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
+  # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
+  # container overrunning its own cgroup limit. The helm CLI's peak working set
+  # on this chart is ~50Mi measured (repo update + search + `helm template`
+  # render), a fraction of the 256Mi limit, so no ceiling was ever the binding
+  # constraint. Two independent levers fix the two halves of that:
+  #
+  #  1. The memory REQUEST rising to meet the limit is an honest scheduler
+  #     RESERVATION. It attacks the CAUSE: the node is no longer overcommitted by
+  #     the gap between what these pods reserved and what they use, so it is less
+  #     likely to enter the pressure that triggered the kill. (This is the real
+  #     structural half — NOT an oom_score_adj change: a Burstable pod's
+  #     oom_score_adj is 1000 - 1000*memRequest/nodeCapacity, fixed at start and
+  #     independent of usage, so 128Mi->256Mi barely moves it, ~992->984 on a
+  #     16Gi node, and does nothing on a large node. An earlier revision of this
+  #     comment wrongly credited the memory pin with the victim-preference change
+  #     below — @saadqbal on client#948.)
+  #  2. Pinning CPU too makes the pod GUARANTEED, whose oom_score_adj is -997.
+  #     THAT is what genuinely moves it off the kernel OOM-killer's shortlist
+  #     under pressure, regardless of node size. These two CronJobs (and
+  #     image-refresh) are the only chart pods one line from Guaranteed — zero
+  #     initContainers, memory already equal, cpu the sole blocker. #642 pinned
+  #     jobs-manager's memory but could NOT reach Guaranteed there (it renders an
+  #     unresourced init container); here we can, so we do. auto-upgrade is the
+  #     security-fix delivery path — worth the strongest protection.
+  #
+  # TRADEOFF (reservation vs throttle): Guaranteed reserves the full 500m/256Mi
+  # for the pod's brief hourly run and caps it there (helm is I/O/network-bound,
+  # not CPU-bound, so the 500m cap does not slow a real upgrade). Limits never
+  # moved — only the requests rose to meet them. If a small edge cannot spare the
+  # reservation the pod goes Pending/skipped rather than OOM-looping; `Forbid` +
+  # startingDeadlineSeconds bound that. auto_upgrade_test.yaml pins cpu AND memory
+  # request==limit, which (no initContainers) is the in-manifest proxy for
+  # Guaranteed until client#922's pod-qos-class checker asserts the class directly.
   resources:
     requests:
-      cpu: "50m"
-      memory: "128Mi"
+      cpu: "500m"
+      memory: "256Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -1621,12 +1655,24 @@ imageRefresh:
     repository: alpine/k8s
     tag: "1.30.5"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network I/O for the digest
-  # HEADs and the rollout-status watch.
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. See the fuller
+  # note on autoUpgrade.resources for the mechanism. backend#2935: image-refresh
+  # was OOM-killed in lock-step with auto-upgrade (six paired failures — this Job
+  # runs every 15m, so failing only when it coincides with the hourly upgrade
+  # tick is itself the tell), which is what makes the cause SHARED: a node-level
+  # OOM event, not two independent overruns. kubectl's peak here is ~40-80Mi
+  # measured (one `get deployment -o json` + `rollout status` at a time; the curl
+  # HEADs return headers only, jq ~2Mi) — well under 128Mi, so no ceiling was the
+  # constraint. The memory pin is the honest reservation that reduces node
+  # overcommit; pinning cpu makes the pod Guaranteed (oom_score_adj -997), which
+  # is what actually keeps it off the OOM-killer's shortlist — a memory pin alone
+  # barely moves a Burstable pod's oom_score_adj (on a large node, 64Mi->128Mi
+  # moves 999->998, i.e. nothing). Limits never moved; only requests rose to meet
+  # them. image_refresh_test.yaml pins cpu AND memory request==limit.
   resources:
     requests:
-      cpu: "20m"
-      memory: "64Mi"
+      cpu: "200m"
+      memory: "128Mi"
     limits:
       cpu: "200m"
       memory: "128Mi"
