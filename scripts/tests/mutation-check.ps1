@@ -37,6 +37,18 @@
     * It never lets a mutation be a no-op. `Find` must be present and `Replace`
       must differ, checked before the suite runs.
 
+  WHAT THIS DOES NOT YET GUARANTEE, stated here so the file does not overstate
+  itself -- which would be the very class it exists to catch. `mutation-check` is
+  NOT a required status check on `develop` (@aptracebloc confirmed against branch
+  protection on client#931; the required set is Unit tests, Lint, quality/*,
+  version-bump-gate, Source-of-truth drift, chart-version bump, Helm unit tests).
+  So a guard-death reddens THIS job and still passes the gate the merge button
+  reads. Adding the context needs admin scope -- protection is not managed as code
+  in this org, so it cannot be done in a PR.
+
+  Until it is added, read the claim above as "every registered guard is verified
+  by CI-as-run", not "by CI-as-enforced".
+
   Usage:
     pwsh -File scripts/tests/mutation-check.ps1 -Dry   # markers only, seconds
     pwsh -File scripts/tests/mutation-check.ps1        # the real thing
