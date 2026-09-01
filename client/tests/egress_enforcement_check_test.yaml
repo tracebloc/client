@@ -14,6 +14,20 @@ tests:
       - hasDocuments:
           count: 1
 
+  # Opt-out coverage: with lockdown now the default, an operator who sets
+  # allowExternalHttps=true has re-opened direct egress, so the seal-check has
+  # nothing to verify and must NOT render. This is the assertion the inverted
+  # default-render case above used to carry (Bugbot on this PR) — without it a
+  # regression that still emits the Job after opt-out would stay green.
+  - it: does NOT render when an operator opts back out (allowExternalHttps=true)
+    set:
+      networkPolicy:
+        training:
+          allowExternalHttps: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
   - it: does NOT render when training NetworkPolicy is disabled
     set:
       networkPolicy:
