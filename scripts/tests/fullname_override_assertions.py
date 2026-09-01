@@ -416,6 +416,87 @@ def selftest_the_fallback_detector():
     return ok, msgs
 
 
+#: FOUR SPECIMENS THAT PIN `_mitigations` (@saadqbal, review of client#911).
+#: `_fallback_on_line` had three; its sibling had NONE, and that asymmetry is the
+#: whole finding: make `_mitigations` return `{"refusal"}` unconditionally and
+#: assertion 5 still prints "all 2 routed Secret lookup(s) of 2 carry a mitigation"
+#: and exits 0, with both existing selftests green. The detector that decides
+#: whether a routed credential Secret is mitigated could be deleted and nothing in
+#: the tree would say so.
+#:
+#: Written down here rather than hunted for in the chart, for the reason the
+#: fallback specimens give: a check exercisable only once the bug is present
+#: arrives too late.
+_SELFTEST_REFUSAL = (
+    '{{- $existingSecret := (lookup "v1" "Secret" .Release.Namespace $secretName) -}}\n'
+    '{{- if and $mysqlDataPresent (not $existingSecret) -}}\n'
+    '{{-   fail "refusing to reinstall over a kept PVC" -}}\n'
+    '{{- end -}}\n'
+)
+#: The same negation, but NO `fail` follows it -- a condition that merely branches.
+_SELFTEST_NO_REFUSAL = (
+    '{{- $existingSecret := (lookup "v1" "Secret" .Release.Namespace $secretName) -}}\n'
+    '{{- if and $mysqlDataPresent (not $existingSecret) -}}\n'
+    '{{-   $bootstrap = true -}}\n'
+    '{{- end -}}\n'
+)
+#: A `fail` reached by negating some OTHER variable. This is the discrimination
+#: `routed_vars` exists for: a refusal elsewhere in the file must not license the
+#: routed lookup.
+_SELFTEST_OTHER_VAR_REFUSAL = (
+    '{{- if (not $somethingElse) -}}\n'
+    '{{-   fail "unrelated refusal" -}}\n'
+    '{{- end -}}\n'
+)
+#: And a `fail` too far below the negation to be its consequence -- the window the
+#: detector deliberately keeps small so an unrelated `fail` cannot be adopted.
+_SELFTEST_DISTANT_FAIL = (
+    '{{- if (not $existingSecret) -}}\n'
+    '{{-   $a = 1 -}}\n{{-   $b = 2 -}}\n{{-   $c = 3 -}}\n{{-   $d = 4 -}}\n'
+    '{{- end -}}\n'
+    '{{- fail "something unrelated, much later" -}}\n'
+)
+
+
+def selftest_the_refusal_detector():
+    """`(ok, messages)` — `_mitigations` answers about THIS lookup, not the file.
+
+    The first half is the one an unconditional `return {"refusal"}` fails; the
+    rest stop it drifting to "any `fail` anywhere licenses anything".
+    """
+    msgs, ok = [], True
+    if "refusal" not in _mitigations(_SELFTEST_REFUSAL, {"existingSecret"}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a MISS on the routed lookup that reaches `fail` is not "
+            "recognised as a refusal, so every mitigated site reports as "
+            "unmitigated and assertion 5 fails on a safe chart — noise that gets "
+            "it muted.")
+    if _mitigations(_SELFTEST_NO_REFUSAL, {"existingSecret"}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a negation that merely BRANCHES reads as a refusal. This is "
+            "the half an unconditional `return {\"refusal\"}` fails: without it the "
+            "detector can be deleted and assertion 5 still reports every routed "
+            "credential Secret as mitigated.")
+    if _mitigations(_SELFTEST_OTHER_VAR_REFUSAL, {"existingSecret"}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a `fail` reached by negating an UNRELATED variable licenses "
+            "the routed lookup, so one refusal anywhere in a file mitigates every "
+            "routed Secret in it — which is the file-wide mistake the fallback half "
+            "was already demoted for.")
+    if _mitigations(_SELFTEST_DISTANT_FAIL, {"existingSecret"}):
+        ok = False
+        msgs.append(
+            "   [ERROR] a `fail` well below the negation is adopted as its "
+            "consequence, so the window is not bounded and any later refusal in the "
+            "file counts.")
+    if ok:
+        msgs.append("   [OK] the refusal detector answers about the routed lookup, not the file")
+    return ok, msgs
+
+
 def selftest_the_parser():
     """`(ok, messages)` — the define parser reads a body past an inner `end`.
 
@@ -682,6 +763,33 @@ def main() -> int:
                 )
                 print("PATHCLASS 0")
                 continue
+            if cls is CLS_ENV:
+                # SAME DEMOTION AS CLS_PATH, and it was already half-made
+                # (Bugbot Medium; reproduced by @saadqbal). The identity-env block
+                # below ALREADY treats per-profile emptiness as legitimate and
+                # prints `ENVCLASS 0` — but this arm set `fail = True` first, so
+                # that half could never rescue the run. On aks with autoUpgrade,
+                # imageRefresh and sealCheck.storageAssertions all off: 41
+                # documents, 0 identity envs, sidecar exit 1, and BOTH messages in
+                # one output — an [ERROR] saying the class proves nothing, then a
+                # note saying the emptiness is fine. A required drift guard
+                # refusing a complete chart.
+                #
+                # NO `ENVCLASS 0` HERE, deliberately, and this is the part the
+                # one-line "extend the demotion" fix would get wrong. The shell
+                # parses `grep -E '^ENVCLASS [0-9]+$' | head -1`, and the
+                # identity-env block below prints the REAL count unconditionally.
+                # Printing one here too would make `head -1` read this zero and
+                # discard the true value — turning a cross-profile assertion into
+                # one that always sees 0. CLS_PATH can print its count because its
+                # two branches are mutually exclusive within this loop; CLS_ENV's
+                # count is owned by the block below.
+                print(
+                    f"   [note] no {cls} in this profile — legitimate when neither "
+                    f"the CronJobs nor the storage-assertions Job renders. Counted "
+                    f"and asserted across profiles below, not here."
+                )
+                continue
             print(
                 f"   [ERROR] found NO {cls} carrying the release name — the class matches "
                 f"nothing, so its half of this assertion proves nothing."
@@ -898,6 +1006,12 @@ def main() -> int:
         fail = True
 
     ok, msgs = selftest_the_fallback_detector()
+    for m in msgs:
+        print(m)
+    if not ok:
+        fail = True
+
+    ok, msgs = selftest_the_refusal_detector()
     for m in msgs:
         print(m)
     if not ok:
