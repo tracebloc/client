@@ -48,6 +48,76 @@ spec:
         # It never reaches those spawned writers, so it's all risk and no gain.
         seccompProfile:
           type: RuntimeDefault
+      # INITCONTAINERS IS UNCONDITIONAL, and that is the change (backend#2913).
+      # It used to open inside `if .Values.hostPath.enabled`, so an edge without
+      # hostPath had NO init containers at all. MySQL is deployed unconditionally
+      # by this chart, so the wait below must be too; `init-writable-data` stays
+      # gated exactly as before.
+      initContainers:
+      # =====================================================================
+      # WAIT FOR MYSQL TO ACCEPT CONNECTIONS (backend#2913).
+      #
+      # jobs-manager opens its database connection during initialisation and
+      # EXITS when it fails, so a MySQL a few seconds behind it crashloops the
+      # container:
+      #
+      #   ERROR Jobs manager failed to initialize against https://.../
+      #   2003 (HY000): Can't connect to MySQL server on 'mysql-client:3306' (111)
+      #   Warning  BackOff  Back-off restarting failed container api
+      #
+      # Errno 111 is connection refused -- nothing is listening yet. It is none
+      # of the four causes that error message lists, which is why it cost a real
+      # investigation to separate from backend#2492.
+      #
+      # IT RECOVERS ON ITS OWN, AND THAT IS WHAT MAKES IT EXPENSIVE. By the time
+      # anyone looks the pod is healthy and the reason survives only in the
+      # PREVIOUS container's log; on the e2e journey the leg had already failed.
+      #
+      # AN INIT CONTAINER RATHER THAN A RETRY IN THE APP: the ordering is a
+      # property of the pod spec, it needs no image change, and it reaches every
+      # edge on the next chart upgrade rather than the next jobs-manager release.
+      #
+      # BOUNDED, AND IT FAILS LOUDLY. An unbounded wait turns a crashloop into a
+      # pod that hangs in Init forever -- quieter and strictly worse, because a
+      # crashloop at least announces itself.
+      # =====================================================================
+      - name: wait-for-mysql
+        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        securityContext:
+          runAsUser: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        command:
+          - 'sh'
+          - '-c'
+          - |
+            # 300s: MySQL's own start plus first-boot initialisation on a cold
+            # single-node edge, with headroom. Long enough that a slow disk is
+            # not a false failure, short enough that a genuinely absent MySQL is
+            # reported within one upgrade window rather than pending forever.
+            deadline=$(( $(date +%s) + 300 ))
+            until nc -z mysql-client 3306 2>/dev/null; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "wait-for-mysql: FAIL mysql-client:3306 never accepted a connection within 300s."
+                echo "wait-for-mysql: jobs-manager exits when its first database connection fails, so it would crashloop against this."
+                echo "wait-for-mysql: this is connection refused -- check the mysql-client Deployment and its PVC, NOT the credentials."
+                exit 1
+              fi
+              sleep 2
+            done
+            echo "wait-for-mysql: OK mysql-client:3306 is accepting connections"
       {{- if .Values.hostPath.enabled }}
       # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
       # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
@@ -106,7 +176,6 @@ spec:
       # divergence: the chart does NOT send chown/chmod stderr to /dev/null, so the real errno
       # (Operation not permitted vs Read-only file system) lands in `kubectl logs` beside the
       # verdict; the installer suppresses it because its output is a user-facing progress line.
-      initContainers:
       - name: init-writable-data
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
