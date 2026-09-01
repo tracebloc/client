@@ -829,6 +829,34 @@ tests:
           path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '(?m)^exit 0$'
 
+  # THE WAIT MUST USE AN IMAGE WHOSE USER IS NON-ROOT (Bugbot High, #942).
+  # `runAsNonRoot: true` only FORBIDS uid 0; it assigns nothing. With no
+  # `runAsUser` anywhere -- which is what the OpenShift arbitrary-UID path
+  # requires -- the kubelet takes the effective user from the IMAGE, and
+  # `library/busybox` declares `Config.User` empty, i.e. root. AKS, EKS, k3d and
+  # bare metal then all fail the init with "container has runAsNonRoot and image
+  # will run as root". `Dockerfile.jobs_manager:26` declares `USER 1001`, which is
+  # why `api` needs no pin either.
+  - it: "wait-for-mysql uses an image with a non-root USER, so no uid must be pinned"
+    asserts:
+      # The app image, not busybox. Asserted by what it IS rather than by what it
+      # is not, so swapping in a third root image fails too.
+      - matchRegex:
+          path: spec.template.spec.initContainers[?(@.name=="wait-for-mysql")].image
+          pattern: "tracebloc/jobs-manager"
+      # AND NOTHING IN THE POD PINS A UID, which is the invariant the image choice
+      # exists to make safe. If a future change re-pins one, OpenShift SCC
+      # admission fails for the whole pod.
+      - notExists:
+          path: spec.template.spec.initContainers[?(@.securityContext.runAsUser)]
+      - notExists:
+          path: spec.template.spec.containers[?(@.securityContext.runAsUser)]
+      # Non-vacuity: the pod DOES forbid root, so the two refusals above are load
+      # bearing rather than describing a pod with no policy at all.
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+
   - it: "CSI install (hostPath disabled) skips the privileged init and sets no fsGroup (#611)"
     set:
       hostPath:

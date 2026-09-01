@@ -82,7 +82,25 @@ spec:
       # crashloop at least announces itself.
       # =====================================================================
       - name: wait-for-mysql
-        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        # THE APP IMAGE, NOT BUSYBOX, AND THAT IS WHAT MAKES THE MISSING UID SAFE
+        # (Bugbot High on #942, corroborating a plain-Kubernetes regression this
+        # branch introduced when it dropped the pin). `runAsNonRoot: true` only
+        # FORBIDS uid 0 -- it assigns nothing -- so with no `runAsUser` anywhere the
+        # kubelet reads the effective user from the IMAGE. `library/busybox`
+        # declares `Config.User` empty (measured: `[]`), i.e. root, so AKS, EKS,
+        # k3d and bare metal all failed the init with "container has runAsNonRoot
+        # and image will run as root". Dropping the pin fixed OpenShift and broke
+        # every other platform.
+        #
+        # `Dockerfile.jobs_manager:26` declares `USER 1001`, which is exactly why
+        # `api` and `pods-monitor-container` need no pin either. Reusing it means
+        # NO uid is pinned anywhere in this pod -- OpenShift assigns from the
+        # project range, plain Kubernetes gets 1001 from the image, and the
+        # arbitrary-UID invariant this branch added holds without a values seam.
+        #
+        # It also removes an image: busybox was a second pull on every edge, for a
+        # TCP connect the app image can already do.
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
           # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
           # `restricted` SCC assigns a UID from the project's range, and the pod
@@ -111,24 +129,37 @@ spec:
             cpu: 100m
             memory: 64Mi
         command:
-          - 'sh'
+          # PYTHON, NOT `nc`. The app image is a python service and carries no
+          # netcat; `socket.create_connection` is the same test with a real
+          # per-attempt timeout, which `nc -z` did not have. Every message below is
+          # byte-identical to the shell version it replaces -- the diagnosis is the
+          # value here, and it was already right.
+          - 'python3'
           - '-c'
           - |
             # 300s: MySQL's own start plus first-boot initialisation on a cold
             # single-node edge, with headroom. Long enough that a slow disk is
             # not a false failure, short enough that a genuinely absent MySQL is
             # reported within one upgrade window rather than pending forever.
-            deadline=$(( $(date +%s) + 300 ))
-            until nc -z mysql-client 3306 2>/dev/null; do
-              if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "wait-for-mysql: FAIL mysql-client:3306 never accepted a connection within 300s."
-                echo "wait-for-mysql: jobs-manager exits when its first database connection fails, so it would crashloop against this."
-                echo "wait-for-mysql: this is connection refused -- check the mysql-client Deployment and its PVC, NOT the credentials."
-                exit 1
-              fi
-              sleep 2
-            done
-            echo "wait-for-mysql: OK mysql-client:3306 is accepting connections"
+            import socket, sys, time
+            deadline = time.monotonic() + 300
+            while True:
+                try:
+                    with socket.create_connection(("mysql-client", 3306), timeout=5):
+                        print("wait-for-mysql: OK mysql-client:3306 is accepting connections", flush=True)
+                        sys.exit(0)
+                except OSError:
+                    pass
+                # THE DEADLINE IS CHECKED AFTER AN ATTEMPT, so a wait that starts
+                # inside the last two seconds still gets one try -- the shell
+                # version had the same shape and it is the difference between a
+                # bounded wait and an off-by-one refusal.
+                if time.monotonic() >= deadline:
+                    print("wait-for-mysql: FAIL mysql-client:3306 never accepted a connection within 300s.", flush=True)
+                    print("wait-for-mysql: jobs-manager exits when its first database connection fails, so it would crashloop against this.", flush=True)
+                    print("wait-for-mysql: this is connection refused -- check the mysql-client Deployment and its PVC, NOT the credentials.", flush=True)
+                    sys.exit(1)
+                time.sleep(2)
       {{- if .Values.hostPath.enabled }}
       # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
       # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
