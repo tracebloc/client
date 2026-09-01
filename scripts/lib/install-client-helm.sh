@@ -36,9 +36,29 @@ _ensure_helm_runnable() {
 
 # ── Training-size default (backend#1236, option A; floored backend#2254) ─────
 # One knob. MEMORY is requests == limits; CPU is a request-only share weight
-# with no limit, so the pod is BURSTABLE, not Guaranteed QoS -- see the L0.2
-# rationale at `_training_limits` below, which this header used to contradict
-# outright (backend#2872). The old static default
+# with no limit, so on a CPU edge the pod is BURSTABLE, not Guaranteed QoS --
+# see the L0.2 rationale at `_training_limits` below, which this header used to
+# contradict outright (backend#2872).
+#
+# ON A GPU EDGE IT IS BestEffort, NOT BURSTABLE, and saying BURSTABLE flat here
+# was the same overshoot this branch fixed in the schema, in the file it was not
+# fixed for (review on client#922). `_gpu_request_value` emits
+# `nvidia.com/gpu=1` / `amd.com/gpu=1`, and client-runtime's `_get_gpu_resources`
+# returns ONLY that plus ephemeral-storage -- it never reads RESOURCE_REQUESTS /
+# RESOURCE_LIMITS on that path. QoS is computed from cpu and memory alone
+# (`isSupportedQoSComputeResource`), so both accumulators are empty and the pod
+# lands in the worst class: first choice for OOM kill and eviction, on a node it
+# shares with mysql and jobs-manager.
+#
+# THE TICKET IS CLOSED WITH THIS HALF UNFIXED, which is why it is written here
+# rather than left as a reference. backend#2871 raised both GPU BestEffort
+# workloads; client#919 fixed the DEVICE-PLUGIN half (both DaemonSets are now
+# Guaranteed) and the issue was closed, while the TRAINING-pod half stayed open
+# and lost its record. `scripts/tests/pod-qos-class.py` asserts the shape from
+# this side -- "gpu + ephemeral-storage only, no cpu/memory -> BestEffort" -- but
+# the fix belongs in client-runtime.
+#
+# The old static default
 # ("cpu=2,memory=8Gi") was wrong at both ends: dead on arrival on nodes under
 # 8 GiB (the WSL2 field case, and a default Docker Desktop VM — nothing could
 # ever schedule, backend#2254) and ~12% of a 64 GiB box. Precedence:

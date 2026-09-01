@@ -1,0 +1,54 @@
+# qos-reachability-expect.txt — is Guaranteed QoS REACHABLE through values?
+#
+# Written by scripts/tests/qos-reachability.sh, which equalises EVERY resources.*
+# knob values.schema.json exposes and then classifies. A pod still short of
+# Guaranteed after that cannot be made Guaranteed by an operator, and the names
+# in the last column are why.
+#
+# FORMAT:  <pod>  hostPath=<bool>  reachable|blocked  <blocking containers, or ->
+#
+# The last column holds container NAMES, not quantities, on purpose: bumping a
+# hardcoded cpu limit is not a QoS change and must not redden this file. A new
+# blocker appearing IS, which is the case that went unnoticed (see below).
+#
+# WHY THIS FILE EXISTS. #942 added `wait-for-mysql` to jobs-manager --
+# unconditional, resourced, unequal on both dimensions, and with no values key.
+# Every QoS guard stayed green (they pin the class and the unresourced-init set,
+# neither of which moved), while two comments in the chart that said equalising
+# cpu buys Guaranteed for jobs-manager on a CSI cluster became false. This file
+# is the assertion those claims did not have.
+#
+# t-jobs-manager is `blocked` on BOTH profiles for that reason. Before #942 the
+# hostPath=false row would have read `reachable`, and changing it is exactly the
+# step that should have happened in #942.
+#
+# t-requests-proxy is the only pod reachable through values today.
+#
+# Most other rows are `blocked` because the chart exposes no resources knob for
+# the named container at all -- honest, and it means adding such a knob flips the
+# row and has to be acknowledged here.
+#
+# LIMIT, stated so this file is not read as more than it is: `blocked` means "not
+# reachable through VALUES". A chart edit (resourcing the blocker, or pod-level
+# resources under KEP-2837) still reaches Guaranteed. That is the right scope for
+# the claims it guards, which are claims about what an operator can do.
+mysql-client	hostPath=false	blocked	mysql-format-guard
+mysql-client	hostPath=true	blocked	init-mysql-data,mysql-format-guard
+t-auto-upgrade	hostPath=false	blocked	helm
+t-auto-upgrade	hostPath=true	blocked	helm
+t-egress-proxy	hostPath=false	blocked	squid
+t-egress-proxy	hostPath=true	blocked	squid
+t-egress-reachability-check	hostPath=false	blocked	probe
+t-egress-reachability-check	hostPath=true	blocked	probe
+t-image-refresh	hostPath=false	blocked	refresh
+t-image-refresh	hostPath=true	blocked	refresh
+t-jobs-manager	hostPath=false	blocked	wait-for-mysql
+t-jobs-manager	hostPath=true	blocked	init-writable-data,wait-for-mysql
+t-requests-proxy	hostPath=false	reachable	-
+t-requests-proxy	hostPath=true	reachable	-
+t-resource-monitor	hostPath=false	blocked	tracebloc-resource-monitor
+t-resource-monitor	hostPath=true	blocked	tracebloc-resource-monitor
+t-storage-assertions-check	hostPath=false	blocked	assert
+t-storage-assertions-check	hostPath=true	blocked	assert
+t-telemetry-collector	hostPath=false	blocked	otel-collector
+t-telemetry-collector	hostPath=true	blocked	otel-collector

@@ -1034,16 +1034,35 @@ images:
 # containers, and `jobs-manager` renders an unresourced `init-writable-data`
 # whenever hostPath.enabled=true (every installer edge), while `mysql` renders
 # an unresourced `mysql-format-guard` UNCONDITIONALLY plus `init-mysql-data` on
-# hostPath edges. So equalising cpu below buys Guaranteed only for jobs-manager
-# on a CSI cluster, and never for mysql anywhere (backend#2872).
+# hostPath edges.
 #
-# TWO routes clear both, and the earlier "only route" was false (review on
+# AND SINCE #942, EQUALISING CPU BELOW BUYS GUARANTEED NOWHERE (review on
+# client#922). The claim here used to read "only for jobs-manager on a CSI
+# cluster"; #942 added `wait-for-mysql`, which is UNCONDITIONAL and unequal on
+# BOTH dimensions (cpu 10m/100m, memory 16Mi/64Mi) and has no values key. So
+# Guaranteed is now unreachable through values for t-jobs-manager on EVERY
+# cluster, not just off-CSI. Measured on the merged tree -- hostPath off plus
+# every resources.* knob this chart exposes equalised:
+#
+#   t-jobs-manager  Burstable  wait-for-mysql:cpu(req=10m,lim=100m);
+#                              wait-for-mysql:memory(req=16Mi,lim=64Mi)
+#
+# `wait-for-mysql` is the only blocker left, and nothing in values can move it.
+#
+# THE GUARD STAYED GREEN THROUGH THAT, which is this PR's own subject one turn
+# deeper. The goldens pin the CLASS (still Burstable) and the unresourced-init
+# SET (`wait-for-mysql` is resourced, merely unequal), so a claim about
+# REACHABILITY had nothing asserting it and went stale in silence.
+# `scripts/tests/qos-reachability.sh` now asserts it: see that file for what it
+# derives and what it cannot.
+#
+# TWO routes still clear it, and the earlier "only route" was false (review on
 # client#922). Pod-level resources (KEP-2837, beta 1.34) clear it without
 # touching the init containers. Giving every init container requests == limits
-# also reaches Guaranteed -- verified with scripts/tests/pod-qos-class.py, which
-# returns Guaranteed for t-jobs-manager and mysql-client once they are equalised
-# -- at the cost of reserving that capacity for the pod's whole life, which is
-# why it is not the route taken here.
+# also reaches Guaranteed -- but note that is now a CHART edit rather than a
+# values change, because `wait-for-mysql` has no key -- at the cost of reserving
+# that capacity for the pod's whole life, which is why it is not the route taken
+# here.
 #
 # requests.cpu was also raised so
 # a mass restart does not throttle their startup. Same requests.memory==limits

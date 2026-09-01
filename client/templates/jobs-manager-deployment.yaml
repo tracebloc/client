@@ -302,19 +302,36 @@ spec:
         # dimensions in EVERY container, INIT CONTAINERS INCLUDED — and
         # `init-writable-data` above carries no resources at all whenever
         # hostPath.enabled=true, i.e. on every installer-provisioned edge.
-        # Measured: EKS values (hostPath off, no init container rendered) + cpu
-        # overrides -> Guaranteed; bare-metal values + the same overrides ->
-        # Burstable. Per-container equalisation only reaches Guaranteed on CSI
-        # clusters. Pod-level resources (KEP-2837, beta in 1.34) clear it on
-        # both — measured on a real 1.36 cluster: pod-level requests == limits
-        # with an unresourced init container yields Guaranteed.
+        #
+        # AND SINCE #942 IT REACHES GUARANTEED ON NO CLUSTER AT ALL (review on
+        # client#922). This comment used to end "Per-container equalisation only
+        # reaches Guaranteed on CSI clusters", which #942 falsified the day it
+        # merged: `wait-for-mysql` is UNCONDITIONAL and unequal on BOTH
+        # dimensions (cpu 10m/100m, memory 16Mi/64Mi), so it blocks Guaranteed
+        # on CSI exactly as `init-writable-data` does off it. Measured on the
+        # merged tree with hostPath off and every resources.* knob equalised:
+        #
+        #   t-jobs-manager  Burstable  wait-for-mysql:cpu(req=10m,lim=100m);
+        #                              wait-for-mysql:memory(req=16Mi,lim=64Mi)
+        #
+        # There is no values key for `wait-for-mysql`, so through values this is
+        # now unreachable everywhere. Pod-level resources (KEP-2837, beta in
+        # 1.34) still clear it — measured on a real 1.36 cluster: pod-level
+        # requests == limits with an unresourced init container yields
+        # Guaranteed.
         #
         # NOT the only route, though an earlier version of this comment said so
         # (review on client#922): resourcing every init container requests ==
         # limits reaches Guaranteed too, and pod-qos-class.py returns exactly
-        # that for t-jobs-manager and mysql-client when they are equalised. It is
-        # rejected on cost, not capability — those reservations are held for the
-        # pod's whole life, not just the seconds the init container runs.
+        # that for t-jobs-manager and mysql-client when they are equalised. That
+        # is now a CHART edit rather than a values change, for the reason above.
+        # It is rejected on cost, not capability — those reservations are held
+        # for the pod's whole life, not just the seconds the init container runs.
+        #
+        # THE STALENESS IS THE POINT. Both claims above survived #942 with every
+        # QoS guard green, because the guards pin the class and the
+        # unresourced-init set, and neither is reachability.
+        # `scripts/tests/qos-reachability.sh` asserts it now.
         #
         # requests.cpu is
         # also raised (100m -> 250m) so a mass restart doesn't throttle its
