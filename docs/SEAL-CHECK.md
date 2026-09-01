@@ -155,7 +155,7 @@ on the live cluster when the corresponding check runs.*
 
 | Guarantee | k3d local (k3s) | EKS | AKS | OpenShift | bare metal |
 |---|---|---|---|---|---|
-| Training egress blocked (NetworkPolicy) | **Substrate verified; full-probe run pending** — k3s enforces egress NetworkPolicy (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30; see §8.4 Status), full-chart `egress-enforcement` probe run not yet recorded | **Substrate verified; full-probe run pending** — dev fleet `tb-client-dev-templates` runs the VPC CNI netpol agent (v1.2.7, `--enable-network-policy=true`, mode `standard`, 2026-08-24; see EKS Status below), full-chart `egress-enforcement` probe not recorded (per-fleet lockdown held — client-runtime#199). Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` once the lockdown is flipped | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` once the lockdown is flipped | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
+| Training egress blocked (NetworkPolicy) | **Substrate verified; full-probe run pending** — k3s enforces egress NetworkPolicy (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30; see §8.4 Status), full-chart `egress-enforcement` probe run not yet recorded | **Substrate verified; full-probe run pending** — dev fleet `tb-client-dev-templates` runs the VPC CNI netpol agent (v1.2.7, `--enable-network-policy=true`, mode `standard`, 2026-08-24; see EKS Status below), full-chart `egress-enforcement` probe run recording still in progress across fleets (client-runtime#199; deny-by-default is the chart default as of 1.9.96). Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
 | Backend reachability (required egress) | **Verified** by `backend-reachability` | **Verified** | **Verified** | **Verified** | **Verified** |
 | Storage on the declared class, bound | **Verified** by `storage-assertions` | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
 | No unmanaged hostPath backing (dynamic mode) | **Verified** once the Option C flip lands (today's installer still declares hostPath mode → sub-check SKIPs, honestly) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
@@ -163,11 +163,14 @@ on the live cluster when the corresponding check runs.*
 
 Two lockdown caveats the suite states rather than hides:
 
-- `egress-enforcement` only *renders* after the per-fleet lockdown flip
-  (`allowExternalHttps=false` — the RFC-0003 §8.1 rollout). Until that flip,
-  training-pod outbound :443 is deliberately open and there is no
-  enforcement to verify — the environment is **not sealed for egress** and
-  nothing here claims it is.
+- `egress-enforcement` renders **by default** as of chart 1.9.96
+  (`allowExternalHttps=false` is the shipped default — RFC-0003 D6), so a fresh
+  install seals training-pod outbound :443 and `helm test` runs this check. An
+  operator who opts a fleet back out (`allowExternalHttps=true`) re-opens direct
+  :443; the hook then does not render and there is no enforcement to verify —
+  that fleet is **not sealed for egress** until the lockdown is restored. (Charts
+  `≥ 1.7.0` and `< 1.9.96` shipped permissive, so on those the hook renders only
+  after an explicit flip.)
 - A rendered check that fails means the environment is **unsealed** for that
   guarantee until fixed — e.g. a CNI that does not enforce NetworkPolicy
   fails `egress-enforcement` with remediation hints, exactly so the lockdown

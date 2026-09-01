@@ -214,7 +214,7 @@ tests:
               - port: 443
                 protocol: TCP
 
-  - it: keeps the external 443 rule but keeps the gateway path when allowExternalHttps is opted back to true
+  - it: renders the external 443 rule and keeps the gateway path when allowExternalHttps is opted back to true
     template: templates/network-policy-training.yaml
     set:
       networkPolicy:
