@@ -10,7 +10,7 @@ metadata:
   # to a list of table-name prefixes. Omit `namespace` to default to the
   # release's namespace — the common case where the ingestor subchart is
   # installed alongside the tracebloc client.
-  name: {{ .Release.Name }}-ingestion-authz
+  name: {{ include "tracebloc.fullname" . }}-ingestion-authz
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}

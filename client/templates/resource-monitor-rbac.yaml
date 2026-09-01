@@ -33,7 +33,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: tracebloc-resource-monitor-{{ .Release.Name }}
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -79,7 +79,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: tracebloc-resource-monitor-{{ .Release.Name }}
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
   annotations:
     meta.helm.sh/release-name: {{ .Release.Name }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
@@ -89,7 +89,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: tracebloc-resource-monitor-{{ .Release.Name }}
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "tracebloc.resourceMonitorName" . }}

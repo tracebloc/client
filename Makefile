@@ -390,7 +390,8 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   bash scripts/tests/auto-upgrade-inflight-vs-wedge.sh|\
   bash scripts/tests/hostpath-reads-guarded.sh|\
   bash scripts/tests/jobs-manager-waits-for-mysql.sh|\
-  bash scripts/tests/control-plane-footprint.sh
+  bash scripts/tests/control-plane-footprint.sh|\
+  bash scripts/tests/fullname-override-completeness.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
 # environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands
