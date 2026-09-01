@@ -663,7 +663,8 @@ spec:
         {{- if and (default dict .Values.egressProxy).enabled (default dict .Values.egressProxy).routeWorkloads }}
         # client-runtime#102: when routing is enabled, jobs-manager injects
         # HTTPS_PROXY=<gateway> into training pods (and suppresses raw HTTP_PROXY_HOST).
-        # Inert until egressProxy.routeWorkloads=true.
+        # routeWorkloads defaults true (RFC-0003 D6), so this renders by default;
+        # set egressProxy.routeWorkloads=false to opt a fleet out of gateway routing.
         - name: EGRESS_PROXY_URL
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}

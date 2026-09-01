@@ -370,11 +370,12 @@ networkPolicy:
     # Egress lockdown (SECURITY §8.2 / client-runtime#102). When false, the
     # training NetworkPolicy DROPS the 0.0.0.0/0:443 rule, so training pods can
     # reach only DNS, in-cluster MySQL, the requests-proxy, and the egress
-    # gateway. Default true keeps the fleet unchanged; flip OFF per-fleet AFTER
-    # verifying the egress gateway works on that cluster (G2). The template
+    # gateway. Shipped default is now FALSE — deny-by-default egress (RFC-0003 D6 /
+    # client-runtime#199): new installs are locked down, external HTTPS goes through
+    # the gateway allowlist. Set true only to opt a fleet back out. The template
     # nil-guards this key, so a `helm upgrade --reuse-values` from a release
     # predating it keeps the old behaviour (rule present).
-    allowExternalHttps: true
+    allowExternalHttps: false
     # client-runtime#104: enforcement check, run via `helm test <release>` after
     # flipping the lockdown (allowExternalHttps=false). A training-labelled pod opens a
     # direct TCP connection to this host's :443 and RETRIES until it is blocked (PASS) or
@@ -480,10 +481,11 @@ sealCheck:
 # so the training NetworkPolicy never selects it (it keeps its own egress).
 egressProxy:
   enabled: true
-  # Route training-pod outbound HTTPS through the gateway (Step 1 of #102). Default
-  # FALSE so the gateway ships inert; flip per-fleet to true, verify a real training
-  # run, THEN set networkPolicy.training.allowExternalHttps=false to drop direct egress.
-  routeWorkloads: false
+  # Route training-pod outbound HTTPS through the gateway (Step 1 of #102). Shipped
+  # default is now TRUE — deny-by-default egress (RFC-0003 D6 / client-runtime#199):
+  # training egress flows through the gateway allowlist, paired with
+  # networkPolicy.training.allowExternalHttps=false. Set false only to opt back out.
+  routeWorkloads: true
   # squid image, pinned by multi-arch (amd64+arm64) index digest — tracebloc pins
   # all images by digest. `tag` stays for readability; the digest is authoritative.
   # ubuntu/squid:6.6-24.04_beta (Ubuntu 24.04 LTS base), resolved 2026-06-10.
@@ -594,8 +596,9 @@ egressProxy:
 # DaemonSet on every customer node spooling to disk with nothing it can deliver —
 # filling toward the 1 GiB cap per node for no benefit, which is precisely the
 # "telemetry must never be the reason a node fills" risk D7 exists to bound.
-# Same posture as `egressProxy.routeWorkloads`: the component ships inert and is
-# flipped per fleet once its prerequisite is in place.
+# Ships inert and is flipped per fleet once its prerequisite is in place — the
+# posture `egressProxy.routeWorkloads` had before RFC-0003 D6 flipped it on by
+# default.
 #
 # CLASS A ONLY (D12). The receiver is scoped to the control-plane containers this
 # chart owns; training and ingestion pods are Class B and stay out until
