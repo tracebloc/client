@@ -1171,6 +1171,22 @@ Describe "Install-TraceblocCli" {
     $script:cliFlushed | Should -BeTrue -Because 'the parameterless WaitForExit() flush was never called'
     $out | Should -Match "tracebloc CLI (ready|installed)"
   }
+  It "caches .Handle before the wait, so a reaped child's ExitCode stays readable" {
+    # SOURCE-LEVEL, and deliberately: handle reaping is real .NET behaviour that a
+    # pscustomobject mock cannot reproduce -- `$p.StartTime` on a mock silently
+    # returns $null, so removing the cache is a semantic NO-OP under any fake we
+    # can build. The mutation registry found exactly that: the mutation reddened
+    # the suite via unrelated flaky tests and was reported MISATTRIBUTED rather
+    # than credited, which is the attribution check earning its place.
+    #
+    # Same shape as the Wait-ProcessWithDeadline guard, and the same reason: once
+    # the process is reaped .NET has released the handle and .ExitCode reads back
+    # $null, so Step 4 would warn after a SUCCESSFUL install and Step 5 fall back
+    # to the legacy credential prompt (client#611).
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    $src | Should -Match '(?s)Info "Installing the tracebloc CLI\.\.\."(?:.*?)\$null = \$p\.Handle(?:.*?)\$p\.WaitForExit\(\$cliWaitMs\)'
+  }
+
   It "a successful install whose streams never drained must NOT report success" {
     # The other direction, so the test above cannot pass by accident: with the
     # flush absent ExitCode stays $null, and the function must warn rather than
