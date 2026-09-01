@@ -169,14 +169,17 @@ for vf in "${profiles[@]}"; do
   # resources -- an undercount that would sit under the ceiling and print OK while
   # hiding the error. Capture helm's EXIT CODE and refuse on non-zero, rather than
   # `|| true`-ing it into a success.
+  # `mktemp`, not /tmp/...$$ (Bugbot Low): a PID-predictable path in a world-
+  # writable dir is a symlink-clobber vector and can collide; mktemp is unguessable.
   rendered=""
-  if ! rendered="$(_render_profile "$vf" 2>/tmp/cp-footprint-helm.$$)"; then
-    echo "[ERROR] $prof: the render exited non-zero, so its footprint is incomplete: $(tail -1 "/tmp/cp-footprint-helm.$$" 2>/dev/null)" >&2
-    rm -f "/tmp/cp-footprint-helm.$$"
+  errf="$(mktemp "${TMPDIR:-/tmp}/cp-footprint-helm.XXXXXX")"
+  if ! rendered="$(_render_profile "$vf" 2>"$errf")"; then
+    echo "[ERROR] $prof: the render exited non-zero, so its footprint is incomplete: $(tail -1 "$errf" 2>/dev/null)" >&2
+    rm -f "$errf"
     fail=1
     continue
   fi
-  rm -f "/tmp/cp-footprint-helm.$$"
+  rm -f "$errf"
   if [ -z "$rendered" ]; then
     echo "[ERROR] $prof: the chart rendered nothing -- a footprint cannot be summed from an empty render." >&2
     fail=1
