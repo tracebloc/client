@@ -315,6 +315,62 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
+# Thin, mockable wrappers around the persistent MACHINE-scope PATH in the
+# registry. Isolated as functions ONLY so the persist logic below (Add-DirToMachinePath)
+# is unit-testable off-Windows: the .NET static setter is a silent no-op on
+# non-Windows and the getter always returns $null there, so a Pester run on
+# Linux/macOS Mocks these two to simulate the registry instead of a real one.
+function Get-MachinePath { [System.Environment]::GetEnvironmentVariable("PATH","Machine") }
+function Set-MachinePath { param([string]$Value) [System.Environment]::SetEnvironmentVariable("PATH",$Value,"Machine") }
+
+# Is $Dir already an entry in a ';'-delimited PATH string? Splits on ';' and
+# compares each entry EXACTLY (case-insensitive, tolerant of a trailing separator)
+# rather than the substring test Initialize-ToolDir used to inline (`-like
+# "*$Dir*"`), which both false-POSITIVES (one dir is a prefix of a longer one, so a
+# dir that needs adding is judged already present and never gets added) and, because
+# $Dir was a raw wildcard pattern there, mis-parses a '[' in a path. Pure +
+# cross-platform, so it carries the dedup unit tests directly.
+function Test-DirOnPath {
+  param([string]$PathValue, [string]$Dir)
+  if (-not $PathValue -or -not $Dir) { return $false }
+  $target = $Dir.Trim().TrimEnd('\','/')
+  if (-not $target) { return $false }
+  foreach ($entry in ($PathValue -split ';')) {
+    if ($entry.Trim().TrimEnd('\','/') -ieq $target) { return $true }
+  }
+  return $false
+}
+
+# Persist $Dir onto the MACHINE PATH (idempotently) so a BRAND-NEW, non-interactive
+# shell resolves the tools in it WITHOUT an interactive login: a fresh shell that
+# sources no profile can't see a User-scope or session-only ($env:PATH) edit. Machine
+# scope is admin-only-writable and the mechanism the client's tools dir uses
+# (Initialize-ToolDir, the sole caller). RefreshPath then mirrors the persisted value
+# into THIS process so the dir is usable immediately, without waiting for a new shell.
+# Writing Machine scope needs elevation — the installer has already self-elevated by
+# the time the caller runs. The dir MUST be admin-only-writable: a user-writable dir on
+# the system search path is CWE-426 (a non-admin plants an exe an elevated process then
+# resolves unqualified), which is why the tracebloc CLI is COPIED into the admin-only
+# $TOOL_DIR rather than having its per-user install dir added here (backend#2904 review).
+function Add-DirToMachinePath {
+  param([string]$Dir)
+  # `.Trim()`-aware, matching Test-DirOnPath's own trimming: `''` and `'  '` must both
+  # early-return, or a whitespace dir slips the guard here and appends a junk PATH entry
+  # every run (Test-DirOnPath trims it to '' and reports it absent). Same
+  # empty-means-empty disagreement this change set exists to remove.
+  if ([string]::IsNullOrWhiteSpace($Dir)) { return }
+  $machinePath = Get-MachinePath
+  if (Test-DirOnPath -PathValue $machinePath -Dir $Dir) { return }
+  # Collapse any trailing ';' on the existing value before joining: "$mp;$Dir" over
+  # a value that already ends in ';' yields "...;;$Dir", and that empty entry is
+  # resolved as the CURRENT directory on the system PATH — a binary-planting
+  # search-path injection the CLI installer guards against too. TrimEnd is a no-op
+  # on a well-formed PATH.
+  $newPath = if ($machinePath) { $machinePath.TrimEnd(';') + ";" + $Dir } else { $Dir }
+  Set-MachinePath -Value $newPath
+  RefreshPath
+}
+
 # Shared braille spinner frames for the progress helpers below.
 $script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
 
@@ -605,11 +661,10 @@ function Initialize-ToolDir {
   if (-not (Test-Path $TOOL_DIR)) {
     New-Item -ItemType Directory -Path $TOOL_DIR -Force | Out-Null
   }
-  $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-  if ($machinePath -notlike "*$TOOL_DIR*") {
-    [Environment]::SetEnvironmentVariable("PATH", "$machinePath;$TOOL_DIR", "Machine")
-    RefreshPath
-  }
+  # Same persist-to-Machine-PATH the CLI dir now uses (backend#2904), via the one
+  # dedup-correct helper — so a fresh shell finds the tools and a re-install never
+  # duplicates the entry.
+  Add-DirToMachinePath -Dir $TOOL_DIR
 }
 
 function Invoke-WithRetry {
@@ -1325,6 +1380,19 @@ function Test-TraceblocCliCurrent {
   try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
   if ($ver -notmatch '(\d+(?:\.\d+)+)') { return $true }
   try { return ([version]$Matches[1] -ge [version]$script:TB_CLI_MIN_VERSION) } catch { return $true }
+}
+
+# Is the CLI reachable MACHINE-WIDE — the exe copied into $TOOL_DIR, which is on the
+# Machine PATH? The fast path must ALSO gate on this, not just Test-TraceblocCliCurrent:
+# a prior install that only ever put the CLI on the USER PATH (an older installer, or a
+# copy that failed) is "current" by version yet invisible to a fresh/non-interactive or
+# other-user shell. Without this the fast path would shortcut a completed-but-User-only
+# machine and never run Publish-TraceblocCliToToolDir — so re-running the installer, the
+# documented repair, would fix nothing (backend#2915 / Bugbot). Runs after
+# Initialize-ToolDir has set $TOOL_DIR, so a missing dir is a real "not placed" answer.
+function Test-TraceblocCliMachineWide {
+  if (-not $script:TOOL_DIR) { return $false }
+  return (Test-Path -LiteralPath (Join-Path $script:TOOL_DIR "tracebloc.exe"))
 }
 
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
@@ -7437,47 +7505,155 @@ function Invoke-DiagnoseBundle {
 # never abort THIS installer.
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
 
-# Where the CLI's own Windows installer drops the binary + adds to the *user*
-# PATH (see cli's install.ps1) — the dir we point at if a fresh shell can't
-# find it yet. Guard the Join-Path: $env:LOCALAPPDATA is null when the Pester
-# suite dot-sources this script on Linux CI, and Join-Path throws on a null
-# -Path (aborting the whole test container). The value is only ever USED on
-# Windows (in Test-TraceblocCli), so "" is a fine non-Windows load-time placeholder.
+# Where the CLI's own Windows installer drops the binary (see cli's install.ps1) —
+# a PER-USER, user-writable dir it PATH-adds at USER scope only. A fresh
+# non-interactive shell (the e2e's SSM session) can't see that entry, and in the
+# elevate-to-a-different-admin flow it is the installing admin's profile, unreadable
+# by the daily user (backend#2904). So rather than add THIS dir to the system PATH —
+# a user-writable dir on the machine search path is CWE-426 — Install-TraceblocCli
+# COPIES the exe into the admin-only $TOOL_DIR, which is already on the Machine PATH.
+# Guard the Join-Path: $env:LOCALAPPDATA is null when the Pester suite dot-sources
+# this script on Linux CI, and Join-Path throws on a null -Path (aborting the whole
+# test container). Only ever USED on Windows, so "" is a fine non-Windows placeholder.
 $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
   Join-Path $env:LOCALAPPDATA "Programs\tracebloc"
 } else { "" }
 
+# Copy the freshly-installed CLI exe from its per-user install dir into the
+# machine-wide, admin-only tools dir ($TOOL_DIR — created and put on the Machine PATH
+# by Initialize-ToolDir), so a fresh shell OR a different user resolves `tracebloc`
+# without a user-writable dir on the system search path (backend#2904 review, saadqbal:
+# CWE-426). Adds NO new PATH entry. Best-effort/non-fatal — the caller wraps it:
+#   * no-op off-Windows ($TRACEBLOC_CLI_INSTALL_DIR / $TOOL_DIR empty), and
+#   * no-op when the source exe isn't where we expect (the CLI installer honored an
+#     INSTALL_PREFIX override) — Test-TraceblocCli then reports the real location.
+# Copy, not a shim: a `tb.cmd`-style shim would bake the admin's LOCALAPPDATA path and
+# reintroduce the unreadable-profile problem for the daily user. The `tb` alias stays
+# on the installing user's own User PATH (the CLI installer's shim); `tracebloc` is the
+# machine-wide command, and Test-TraceblocCli already falls back to it when `tb` is absent.
+# Params default to the script vars (so the caller passes nothing); they exist so the
+# copy/guards are unit-testable without the script's Windows-only load-time values.
+# The [version] a tracebloc.exe reports, by running it directly (it need not be on PATH),
+# or $null if the exe is missing / errors / prints no parseable version. Same parse as
+# Test-TraceblocCliCurrent. Used to make the machine-copy refresh DIRECTIONAL.
+function Get-TraceblocExeVersion {
+  param([string]$ExePath)
+  if ([string]::IsNullOrWhiteSpace($ExePath) -or -not (Test-Path -LiteralPath $ExePath)) { return $null }
+  $out = ""
+  try { $out = (& $ExePath version 2>$null | Select-Object -First 1) } catch { return $null }
+  if ($out -match '(\d+(?:\.\d+)+)') { try { return [version]$Matches[1] } catch { return $null } }
+  return $null
+}
+
+function Publish-TraceblocCliToToolDir {
+  param(
+    [string]$InstallDir = $TRACEBLOC_CLI_INSTALL_DIR,
+    [string]$ToolDir    = $script:TOOL_DIR
+  )
+  if ([string]::IsNullOrWhiteSpace($InstallDir) -or [string]::IsNullOrWhiteSpace($ToolDir)) { return }
+  $src = Join-Path $InstallDir "tracebloc.exe"
+  if (-not (Test-Path -LiteralPath $src)) { return }
+  $dest = Join-Path $ToolDir "tracebloc.exe"
+  # The Machine PATH is searched BEFORE the CLI installer's updatable %LOCALAPPDATA% copy,
+  # so this snapshot would otherwise SHADOW a later out-of-band CLI update — `tracebloc`
+  # would keep running the stale build (backend#2915/Bugbot). The caller re-runs this on
+  # EVERY invocation (incl. the fast path) to keep it fresh, so the refresh must be BOTH
+  # cheap and DIRECTIONAL: refreshing on any hash difference would let a %LOCALAPPDATA% that
+  # holds an OLDER build (a pinned CLI, a partially-failed reinstall) silently DOWNGRADE the
+  # machine-wide CLI for every user (@LukasWodka). When the machine copy exists, refuse the
+  # copy unless the SOURCE is a strictly NEWER version:
+  #   * identical content (hash) -> nothing to do (the cheap common case), and
+  #   * different content -> copy ONLY when src version > dest version; same/older/unknown
+  #     leaves the machine copy in place, so it is never downgraded.
+  if (Test-Path -LiteralPath $dest) {
+    try {
+      if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash) { return }
+    } catch { }
+    $srcVer  = Get-TraceblocExeVersion -ExePath $src
+    $destVer = Get-TraceblocExeVersion -ExePath $dest
+    # Refresh only toward a KNOWN-GOOD, non-downgrading source. The two "unknown" sides are
+    # NOT symmetric (Bugbot):
+    #   * source version unreadable -> we can't vouch for it, so keep the machine copy (a
+    #     partially-failed reinstall must not clobber a working CLI), and
+    #   * source READABLE but dest version unreadable -> the machine copy is broken/unknown
+    #     and the source is a known-good build, so REPAIR it (otherwise a corrupt snapshot
+    #     shadows every user's CLI and re-running never fixes it).
+    # With both readable, copy only when the source is strictly newer (no downgrade —
+    # a pinned older %LOCALAPPDATA% has a readable, older version and lands here).
+    if (-not $srcVer) { return }                          # unvouchable source -> don't touch
+    if ($destVer -and ($srcVer -le $destVer)) { return }  # readable & not newer -> no downgrade
+  }
+  # -ErrorAction Stop, because Copy-Item/New-Item raise NON-terminating errors under the
+  # installer's default $ErrorActionPreference='Continue' — the caller's try/catch would
+  # NOT catch those, so a failed copy would be silent (Bugbot). Make them terminating and
+  # then CONFIRM the artifact actually landed, so any failure is logged by the caller and
+  # Test-TraceblocCli's machine-wide check reports the truth instead of a false "ready".
+  if (-not (Test-Path -LiteralPath $ToolDir)) {
+    New-Item -ItemType Directory -Path $ToolDir -Force -ErrorAction Stop | Out-Null
+  }
+  Copy-Item -LiteralPath $src -Destination $dest -Force -ErrorAction Stop
+  if (-not (Test-Path -LiteralPath $dest)) { throw "tracebloc.exe copy to '$dest' reported success but the file is absent" }
+}
+
 # Post-install self-verification (#738). Proves the CLI is usable from a FRESH
 # terminal and prints a VERIFIED next command — or, if a new shell wouldn't
 # find it yet, the exact Windows-correct fix (the install dir + open a new
-# window) rather than a vague "open a new terminal". The CLI installer edits the
-# user-scope PATH in the registry, so RefreshPath (re-reading Machine+User PATH)
-# is the faithful "fresh terminal" probe here — there is no `source ~/.rc`
-# analogue on Windows. ALWAYS non-fatal: a missing CLI degrades Step 4 to the
-# legacy manual-credential fallback (#388).
+# window) rather than a vague "open a new terminal". By the time this runs
+# Install-TraceblocCli has copied the CLI exe into $TOOL_DIR, which is already on the
+# Machine PATH (backend#2904), so RefreshPath (re-reading Machine+User PATH) is the
+# faithful "fresh terminal" probe here — there is no `source ~/.rc` analogue on
+# Windows. ALWAYS non-fatal: a missing CLI degrades Step 4 to the legacy
+# manual-credential fallback (#388).
 function Test-TraceblocCli {
   # Pull the persisted (registry) PATH into THIS process — same env a brand-new
   # PowerShell window would start with.
   try { RefreshPath } catch { Log "RefreshPath failed during CLI verify: $_" }
 
-  if (Has "tracebloc") {
+  # The guarantee backend#2915 makes is MACHINE-WIDE reachability: the exe copied into
+  # $TOOL_DIR, which is on the Machine PATH, so ANY fresh/non-interactive shell — or a
+  # different user — resolves it. Prove THAT, not merely `Has tracebloc`: the installer's
+  # own process ALSO carries the CLI installer's User-scope LOCALAPPDATA entry, so a
+  # silently-failed $TOOL_DIR copy would otherwise still read as "ready" here while a
+  # fresh shell finds nothing (Bugbot).
+  $machineExe    = if ($script:TOOL_DIR) { Join-Path $script:TOOL_DIR "tracebloc.exe" } else { $null }
+  $onMachinePath = $machineExe -and (Test-Path -LiteralPath $machineExe)
+
+  if ($onMachinePath -and (Has "tracebloc")) {
     # `tracebloc version` is the real proof; cosmetic, never fatal. The canonical
     # "tracebloc data ingest ./data" next step lives in Print-Summary's "What to
     # do next" — don't duplicate it; just confirm the verdict.
     $ver = ""
     try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
     $short = if ($ver -match '\s(\S+)') { "v" + $Matches[1] } else { "" }
-    # Prefer the short 'tb' alias; fall back to 'tracebloc' if it isn't on PATH
-    # (the alias wasn't created), so the copy never names a missing command (Bugbot).
-    $cli = if (Has "tb") { "tb" } else { "tracebloc" }
-    if ($short) { Ok "tracebloc CLI ready ($short) -- run '$cli' to use it." }
-    else        { Ok "tracebloc CLI ready -- run '$cli' to use it." }
+    # Name `tracebloc`, the MACHINE-WIDE command — the exe we copied into $TOOL_DIR — NOT
+    # `tb`. `Has tb` is true in THIS process only because RefreshPath pulled in the
+    # installing user's User PATH, where the CLI installer dropped its per-user `tb.cmd`
+    # shim; a fresh or other-user shell (exactly what this verdict is about) has
+    # `tracebloc` on the Machine PATH but no `tb` (Bugbot). Never name a command that
+    # won't resolve in the shell the message is promising works.
+    if ($short) { Ok "tracebloc CLI ready ($short) -- run 'tracebloc' to use it." }
+    else        { Ok "tracebloc CLI ready -- run 'tracebloc' to use it." }
     return
   }
 
-  # Installed, but not resolvable from a fresh shell yet. The installer added it
-  # to the user PATH, so a NEW window will have it; tell the user exactly where
-  # it is and how to use it now (so the summary's command works from a new window).
+  if (Has "tracebloc") {
+    # Resolvable in THIS process — but only via the installing user's own User PATH, not
+    # the machine-wide copy (the $TOOL_DIR copy didn't land, e.g. an INSTALL_PREFIX
+    # override or a copy that failed). A fresh, non-interactive shell or a different user
+    # still won't find it (backend#2915), so say so honestly rather than a false "ready".
+    Warn "tracebloc CLI installed for you, but not machine-wide -- a fresh shell or another user may not resolve it."
+    if ($machineExe) { Hint "  Expected machine-wide at: $machineExe" }
+    # NOT "re-run as Administrator": the installer has already self-elevated, so another
+    # run hits the same no-op — the machine-wide copy is absent because the copy FAILED
+    # (see the log) or a custom INSTALL_PREFIX put the CLI somewhere Publish never sees
+    # (Bugbot). Name the real causes instead of a fix that can't work.
+    Hint "  The copy into that dir didn't land -- check the install log, or a custom INSTALL_PREFIX put the CLI elsewhere."
+    if ($script:LOG_FILE) { Hint "  Log: $script:LOG_FILE" }
+    return
+  }
+
+  # Not resolvable in-process at all. A NEW window reads the persisted PATH, so tell the
+  # user exactly where the CLI installer put it and how to use it now.
   Ok "tracebloc CLI installed -- open a new PowerShell window to use it."
   Hint "  Installed to: $TRACEBLOC_CLI_INSTALL_DIR"
   Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" data ingest .\data"
@@ -7545,6 +7721,17 @@ function Install-TraceblocCli {
     # as success — a failed re-install on a machine that already had the CLI
     # would then be misreported as a success.
     if ($p.ExitCode -eq 0) {
+      # The CLI's own installer PATH-adds its bin dir at USER scope only, so the
+      # `tracebloc` command is invisible to a fresh, non-interactive shell that
+      # sources no profile — exactly the SSM session the Windows e2e opens, which
+      # then fails to find the CLI it just installed (backend#2904). Copy the exe
+      # into the admin-only $TOOL_DIR (already on the Machine PATH) so a brand-new
+      # process — or a different user — resolves it, without putting a user-writable
+      # dir on the system search path. Best-effort: a copy hiccup must not fail an
+      # install whose client is already up (this whole step is non-fatal), and it
+      # runs BEFORE Test-TraceblocCli so the RefreshPath verify below sees it.
+      try { Publish-TraceblocCliToToolDir }
+      catch { Log "Publishing the tracebloc CLI to the tools dir failed: $_" }
       # Self-verify usability from a fresh terminal and print a verified next
       # command (or the Windows-correct fix). Non-fatal.
       Test-TraceblocCli
@@ -7621,7 +7808,7 @@ Find-Gpu
 # verifies live health (not just the checkpoint), so a stopped cluster or a down
 # client falls through to the repairing walk. Skipped on -Resume (a resume must
 # finish the interrupted walk).
-if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-TraceblocCliCurrent) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
+if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) -and (Test-TraceblocCliCurrent) -and (Test-TraceblocCliMachineWide) -and (Test-ClusterRunning) -and (Test-ClientHealthy)) {
   # GPU is "fully enabled" only when the node ACTUALLY advertises a GPU AND the live release
   # requests one. If an NVIDIA GPU is present but EITHER is missing, do NOT shortcut -- the state is
   # inconsistent in one of two ways (Bugbot), both of which a re-run should fix:
@@ -7658,6 +7845,13 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # namespace) is what the PV paths embed.
     $fpRelease = (Get-InstalledClientInfo).Name
     if ($fpRelease) { Initialize-ReleaseDataDirs -Release $fpRelease }
+    # Refresh the machine-wide CLI copy if a later out-of-band CLI update — a direct
+    # `irm <cli>/install.ps1 | iex` or a self-update — left %LOCALAPPDATA% newer than the
+    # $TOOL_DIR snapshot the Machine PATH shadows it with, so `tracebloc` stops running a
+    # stale build (backend#2915/Bugbot). Same "re-run is a real remedy" reasoning as the
+    # PV-dir repair above; Publish is a cheap hash-check no-op when already in sync, and
+    # best-effort so it never fails the fast path.
+    try { Publish-TraceblocCliToToolDir } catch { Log "Refreshing the machine-wide CLI copy failed: $_" }
     Hint "Delete $(Get-InstallStatePath) (or set a fresh HOST_DATA_DIR) to force a full reinstall."
     Unregister-ResumeAfterReboot
     Log "Already installed and healthy - nothing to do."
