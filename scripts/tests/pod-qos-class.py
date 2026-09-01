@@ -27,9 +27,12 @@ for mysql nowhere. A checker that looked only at the main containers would agree
 with the wrong comments.
 
 Pod-level resources (KEP-2837, beta 1.34) are handled: `spec.resources` with
-requests == limits yields Guaranteed even with unresourced init containers.
-Measured on a real 1.36 cluster before being encoded here. When the chart adopts
-them, this checker follows the class change rather than needing a rewrite.
+requests == limits yields Guaranteed even with unresourced init containers, and
+carry the SAME cpu/memory carve-out as the per-container walk -- an envelope of
+only extended resources (nvidia.com/gpu, ephemeral-storage) is BestEffort, not
+Burstable (backend#2962). Measured on a real 1.36 cluster before being encoded
+here. When the chart adopts them, this checker follows the class change rather
+than needing a rewrite.
 
 Usage:  pod-qos-class.py <rendered.yaml>
 Prints one `workload<TAB>class<TAB>reason` line per pod-bearing workload.
@@ -91,6 +94,33 @@ def pod_qos(pod_spec):
     pod_res = pod_spec.get("resources") or {}
     if pod_res:
         req, lim = pod_res.get("requests") or {}, pod_res.get("limits") or {}
+        # THE SAME CARVE-OUT THE PER-CONTAINER WALK CARRIES, and it belongs here
+        # too (Asad, review of backend#2872). Only cpu and memory count toward the
+        # class: with pod-level resources set, `ComputePodQOS` derives the class
+        # from `pod.Spec.Resources` filtered by `isSupportedQoSComputeResource`
+        # and does NOT fall back to the containers -- so a pod-level envelope of
+        # `nvidia.com/gpu` + `ephemeral-storage` and nothing else has EMPTY
+        # qos-relevant maps and is BestEffort on a cluster (measured on 1.36),
+        # while this branch reported Burstable purely because `pod_res` was
+        # non-empty. Returning here rather than falling through is the point: the
+        # kubelet ignores the containers once pod-level resources exist, so a pod
+        # with Guaranteed containers underneath is still BestEffort.
+        #
+        # One divergence, stated not handled (the file's habit -- see _norm): this
+        # branch keys off `resources` being present, where the kubelet keys off
+        # IsPodLevelResourcesSet (requests or limits non-empty). A present-but-empty
+        # `resources: {requests: {}, limits: {}}` returns BestEffort here and falls
+        # through to the containers on a cluster. `spec.resources.{}` does not reach
+        # this branch (`pod_res` is falsy) and no chart renders the empty-subkey
+        # shape, so it is a stated corner, not a bug to code around.
+        #
+        # Latent: no chart workload renders pod-level resources on any hostPath
+        # mode, under helm 3.15.4 or helm 4 (verified for backend#2962, the
+        # reverted-and-re-landed half of this rule). But it is the same "a guard
+        # hides a BestEffort demotion" shape this file exists to catch, one turn
+        # deeper, and half a rule is how the class comes back.
+        if not any(d in req or d in lim for d in DIMS):
+            return "BestEffort", "pod-level resources set, but none of them are cpu or memory"
         if all(_norm(req.get(d)) is not None and _norm(req.get(d)) == _norm(lim.get(d))
                for d in DIMS):
             return "Guaranteed", "pod-level resources, requests == limits on both dimensions"
