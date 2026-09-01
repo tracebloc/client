@@ -315,9 +315,17 @@ done
 # `assertRaises(Exception)` shape, in shell.
 #
 # 1 = the assertions ran and refused. 2 = could not run (no PyYAML). 127 = no
-# interpreter. Only the first is the thing being asserted, and the preflight
-# above now makes 127 unreachable anyway -- belt and braces, because this
-# assertion must not be satisfiable by the absence of the thing it invokes.
+# interpreter. Only the first is the thing being asserted.
+#
+# AND 127 IS STILL REACHABLE -- the earlier version of this comment said the
+# preflight "makes 127 unreachable anyway", which contradicts the `case "$rc"`
+# block 34 lines up that explains at length why it cannot (Asad, review of
+# backend#2626). `command -v python3` answers "is there something on PATH by
+# that name", not "does it run": a shim that execs a deleted interpreter passes
+# the preflight and exits 127 here. So requiring exactly 1 is not belt-and-braces
+# over an impossible code -- it is the whole point, because the one exit status
+# this assertion must never accept is the one produced by the absence of the
+# thing it invokes.
 set +e
 RELEASE="$RELEASE" NS="$NS" OVERRIDE="$OVERRIDE" \
   python3 scripts/tests/fullname_override_assertions.py \
