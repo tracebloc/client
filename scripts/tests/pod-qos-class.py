@@ -91,21 +91,6 @@ def pod_qos(pod_spec):
     pod_res = pod_spec.get("resources") or {}
     if pod_res:
         req, lim = pod_res.get("requests") or {}, pod_res.get("limits") or {}
-        # THE SAME CARVE-OUT THE CONTAINER PATH HAS, and it was missing here
-        # (Asad, review of backend#2872). Only cpu and memory count toward the
-        # class; `ComputePodQOS` skips whatever `isSupportedQoSComputeResource`
-        # rejects. A pod-level envelope of `nvidia.com/gpu` + `ephemeral-storage`
-        # and nothing else therefore has EMPTY qos-relevant maps -- BestEffort on
-        # a cluster -- while this branch reported Burstable purely because
-        # `pod_res` was non-empty.
-        #
-        # Latent today: nothing in the chart renders pod-level resources. But it
-        # is the same "a guard hides a BestEffort demotion" shape this file
-        # exists to catch, one turn deeper, and the container path below already
-        # carries the fix -- so leaving it would be an inconsistency between two
-        # halves of one rule.
-        if not any(d in req or d in lim for d in DIMS):
-            return "BestEffort", "pod-level resources set, but none of them are cpu or memory"
         if all(_norm(req.get(d)) is not None and _norm(req.get(d)) == _norm(lim.get(d))
                for d in DIMS):
             return "Guaranteed", "pod-level resources, requests == limits on both dimensions"
