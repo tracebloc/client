@@ -49,7 +49,7 @@
   at install/upgrade time, so it can never block them or the auto-upgrade.
   Set sealCheck.storageAssertions.enabled=false to disable.
 */ -}}
-{{- $name := printf "%s-storage-assertions-check" .Release.Name }}
+{{- $name := printf "%s-storage-assertions-check" (include "tracebloc.fullname" .) }}
 {{- $timeout := dig "timeoutSeconds" 120 $cfg }}
 {{- $img := default dict $cfg.image }}
 {{- $pvScan := ne .Values.clusterScope false }}

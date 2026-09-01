@@ -237,4 +237,73 @@ echo "   release $rel_a -> $name_a"
 echo "   release $rel_b -> $name_b"
 echo "  ok: two releases resolve to distinct, release-scoped Secrets"
 
+# --- the ACCEPTED-NAME SET, and the message that reports it -----------------
+#
+# `telemetryTokenPresent` ORs several lookups, and `telemetryCollectorState`
+# hard-FAILS when none hits. Three names are accepted:
+#
+#   telemetryTokenSecretName        follows fullnameOverride  — the current one
+#   telemetryTokenLegacyName        the fixed pre-#2274 name  — mid-migration
+#   telemetryTokenPreOverrideName   <release>-telemetry-token — a RENAMED release
+#
+# The third was missing and the omission was invisible: on a release with
+# fullnameOverride set, the token exists under the release-scoped name, the lookup
+# missed it, and an operator who had explicitly enabled the Collector got a hard
+# refusal naming two names that were never going to match (Bugbot, Medium, on
+# client#911). Nothing pinned the set, so nothing would have caught it going away
+# again.
+#
+# ASSERTED AS AN AGREEMENT, not as a list: every name the lookup accepts must
+# also be NAMED IN THE REFUSAL. That is the property a human depends on — a
+# message that omits a name it searched sends the reader to create a Secret that
+# already exists under another name — and it is derived from the template on both
+# sides, so adding a fourth name without mentioning it fails here.
+helpers="client/templates/_helpers.tpl"
+[ -r "$helpers" ] || { echo "[ERROR] cannot read $helpers — refusing to report agreement" >&2; exit 2; }
+
+accepted="$(grep -oE 'include "tracebloc\.telemetryToken[A-Za-z]*Name"' "$helpers" \
+            | sed -E 's/.*"tracebloc\.(telemetryToken[A-Za-z]*Name)".*/\1/' | sort -u)"
+[ -n "$accepted" ] || { echo "[ERROR] found ZERO telemetry-token name helpers — the matcher sees nothing" >&2; exit 2; }
+
+# The `or (lookup …)` chain, on one line by construction.
+chain="$(grep -E 'if or \(lookup "v1" "Secret"' "$helpers" || true)"
+[ -n "$chain" ] || { echo "[ERROR] could not find the telemetryTokenPresent lookup chain" >&2; exit 2; }
+# The refusal, which must report every name the chain searched.
+msg="$(grep -E 'telemetryCollector\.enabled is true but its token Secret' "$helpers" || true)"
+[ -n "$msg" ] || { echo "[ERROR] could not find the token refusal message" >&2; exit 2; }
+
+# PLACEHOLDERS COUNTED AGAINST ARGUMENTS, not "the name appears on the line".
+# The first cut did the latter, and the `fail (printf "…" args)` call has the name
+# helpers in its ARGUMENT list on the same line as the format string — so deleting
+# a `%q` from the message left the include in the args, the substring still
+# matched, and the check stayed green while the refusal reported one name fewer
+# than it searched. Found by mutation-proving.
+#
+# An argument with no placeholder is silently dropped by printf, which is exactly
+# the failure being guarded: a name searched and not reported.
+set_fail=0
+mismatch="$(python3 scripts/tests/telemetry_token_refusal_arity.py "$helpers")"
+if [ -n "$mismatch" ]; then
+  echo "[ERROR] $mismatch" >&2
+  set_fail=1
+else
+  echo "  ok: the refusal reports every argument it is given"
+fi
+for n in $accepted; do
+  case "$chain" in *"$n"*) ;; *) continue ;; esac      # not in the chain -> not our business
+  case "$msg" in
+    *"$n"*) echo "   accepted and passed to the refusal: $n" ;;
+    *) echo "[ERROR] the lookup accepts $n but the refusal is not even given it" >&2
+       set_fail=1 ;;
+  esac
+done
+case "$chain" in
+  *telemetryTokenPreOverrideName*) echo "  ok: a renamed release's pre-override token name is still accepted" ;;
+  *) echo "[ERROR] telemetryTokenPresent no longer accepts the pre-fullnameOverride name" >&2
+     echo "        (<release>-telemetry-token). A renamed release with the Collector" >&2
+     echo "        explicitly enabled will hard-fail with the token sitting right there." >&2
+     set_fail=1 ;;
+esac
+[ "$set_fail" -eq 0 ] || { echo "telemetry token agreement: FAILED" >&2; exit 1; }
+
 echo "telemetry token agreement: green"

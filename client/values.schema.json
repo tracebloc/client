@@ -1462,6 +1462,12 @@
         "type": "boolean"
       }
     },
+    "fullnameOverride": {
+      "type": "string",
+      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+      "maxLength": 53,
+      "description": "Rename the resources this chart creates without uninstall + reinstall (backend#2626). Unset resolves to .Release.Name verbatim, so leaving it alone is byte-identical to before it existed. Renames RESOURCES, not the Helm release: app.kubernetes.io/instance, meta.helm.sh/release-name and the RELEASE_NAME env keep the release name, and release-scoped on-disk paths keep it too because a path is a location, not a name. Changing it on an existing install is a migration (Helm renames as delete + create), not a config tweak. THE PATTERN AND LENGTH ARE THE ONES HELM ENFORCES ON THE VALUE THIS REPLACES: a release name is a DNS-1123 label capped at 53 characters, so without them this key was a strictly weaker gate than the thing it substitutes for. A value like Bad_Name! templated clean and then failed object-by-object at the API server, mid-install, leaving a partly-created release. Declared here so it fails at template time, by name (reviewer, backend#2626). THE EMPTY STRING IS ACCEPTED EXPLICITLY: the template treats it as unset (default .Release.Name .Values.fullnameOverride) and values.yaml ships `fullnameOverride: \"\"` as its commented example, so a pattern requiring at least one character would reject the chart's own documented line if uncommented verbatim (Arturo). CHANGING IT ON A LIVE RELEASE IS REFUSED at template time by secrets.yaml, not merely discouraged - earlier prose here called it a migration, which invited planning one the chart will not start."
+    },
     "telemetryCollector": {
       "type": [
         "object",

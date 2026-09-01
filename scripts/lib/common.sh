@@ -42,6 +42,44 @@ tb_client_env() {
   esac
 }
 
+# The DASHBOARD for this environment — where a human goes to create a client,
+# read their credentials, or see whether it came online (backend#2849).
+#
+# THE BASH TWIN OF Get-TraceblocDashboardUrl. The PowerShell side was fixed
+# first; Bugbot caught that this half still hardcoded production at ten sites
+# while `_backend_url` was correctly env-aware — so a `CLIENT_ENV=dev` install on
+# Linux or macOS still sent the operator to ai.tracebloc.io for credentials
+# `dev-api` then rejects. Same defect, other half of the contract.
+#
+# IT LIVES HERE, NOT IN install-client-helm.sh, and that placement is the whole
+# point (@LukasWodka on client#946). It was defined in install-client-helm.sh and
+# CALLED from summary.sh — sibling libraries where neither sources the other — so
+# summary.sh silently depended on a load order nothing enforced. Standalone (which
+# is exactly what summary.bats does) the four call sites rendered an EMPTY link:
+# `See it on your dashboard:` followed by nothing. That is WORSE than the bug
+# being fixed, because a wrong link a reader can recover from and a missing one
+# they cannot. common.sh is sourced first by install-k8s.sh AND by the bats
+# load_lib, and it already holds `tb_client_env` — which this calls — so both
+# twins get it by construction rather than by accident.
+#
+# The hosts are the backend's OWN per-environment settings, not a guess:
+# DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL in
+# xraybackend/settings/{dev,stg,prod}.py resolve to dev.tracebloc.io,
+# stg.tracebloc.io and ai.tracebloc.io. Same `tb_client_env` alias reduction and
+# the same unknown->prod fallback as `_backend_url`, so the two can never
+# disagree about which environment an install belongs to.
+#
+#   $1 = path under the dashboard (default "clients"; pass "" for the bare host)
+_dashboard_url() {
+  local path="${1-clients}" base
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
+    dev) base='https://dev.tracebloc.io' ;;
+    stg) base='https://stg.tracebloc.io' ;;
+    *)   base='https://ai.tracebloc.io' ;;
+  esac
+  if [[ -n "$path" ]]; then printf '%s/%s' "$base" "$path"; else printf '%s' "$base"; fi
+}
+
 # curl_secure — the one way this installer fetches anything.
 #
 # The TLS floor used to be opt-in: every call site had to remember to splice
@@ -533,11 +571,21 @@ _chart_version() {
 }
 
 # The client's core workload Deployments in namespace $1 — the set whose
-# readiness DEFINES "the client is up". SINGLE SOURCE OF TRUTH: both
+# readiness DEFINES "the client is up". One source for the two BASH consumers:
 # wait_for_client_ready (summary.sh, the post-install readiness gate) and the
-# installer's stop-and-check gate (assess.sh) consume this, so the two can never
-# drift on what "ready" / "healthy" means. Echoes one Deployment name per line;
-# `mysql-client` is fixed, the other two are release-namespace-prefixed.
+# installer's stop-and-check gate (assess.sh). It is NOT one source across tiers —
+# `scripts/install-k8s.ps1` carries its own `Get-ClientDeploymentNames`, and
+# nothing checks the two agree.
+#
+# `mysql-client` is fixed. The other two are prefixed by the release's RESOLVED
+# NAME, which equals the namespace only while `fullnameOverride` is unset — the
+# earlier "release-namespace-prefixed" here stated the default as the rule, and
+# that is what made these sites easy to miss when the override landed
+# (@saadqbal on client#911). Under an override the chart renders
+# `<fullnameOverride>-jobs-manager`, this function still looks for
+# `<namespace>-jobs-manager`, and the readiness gate therefore fails on a healthy
+# client. Tracked as backend#2888; deliberately NOT fixed here, because the fix
+# has to land in both tiers at once or they drift further apart.
 _client_workload_deployments() {
   local ns="${1:-${TB_NAMESPACE:-default}}"
   printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"

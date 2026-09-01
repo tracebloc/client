@@ -76,9 +76,30 @@ rules:
   # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
   # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
   # unchanged when off (Saqlain review).
+  #
+  # `patch` IS THE SECOND CYCLE (backend#2795). Cycle 1 CREATES the cred Secret
+  # and is covered by `create` above; cycle 2 reuses the experiment's Secret and
+  # PATCHES it, which nothing here granted. Measured on dev, experiment 15044:
+  #
+  #   secrets "tb-dbcreds-exp15044c2-0fbcc6e0f93f" is forbidden:
+  #   User "system:serviceaccount:e2e-tier-a:e2e-tier-a-jobs-manager"
+  #   cannot patch resource "secrets" in API group "" in the namespace
+  #
+  # The edge 403s before it runs inference, so it never reports back, the
+  # inference row stays `inference_captured=False`, and no leaderboard row is
+  # ever written — with the experiment recorded COMPLETED and no error. Every
+  # cycle-1 inference on dev is captured and every cycle-2 one since the flag
+  # went on is not, which is this verb and nothing else.
+  #
+  # NOT name-restricted, unlike the pull-secret grants elsewhere in this chart:
+  # the Secret name carries the experiment id and cycle
+  # (`tb-dbcreds-exp<id>c<cycle>-<hash>`), so there is no fixed name to pin and
+  # `resourceNames` cannot express a prefix. It sits in the same flag-gated,
+  # secrets-only rule as `list`/`delete` so the blast radius is unchanged when
+  # the flag is off.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["list", "delete"]
+    verbs: ["list", "delete", "patch"]
 {{- end }}
 {{- if .Values.perDatasetPvcs }}
   # Per-dataset PVCs only (RFC-0003 D9 Track B, client-runtime#203/#261):
@@ -164,9 +185,30 @@ rules:
   # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
   # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
   # unchanged when off (Saqlain review).
+  #
+  # `patch` IS THE SECOND CYCLE (backend#2795). Cycle 1 CREATES the cred Secret
+  # and is covered by `create` above; cycle 2 reuses the experiment's Secret and
+  # PATCHES it, which nothing here granted. Measured on dev, experiment 15044:
+  #
+  #   secrets "tb-dbcreds-exp15044c2-0fbcc6e0f93f" is forbidden:
+  #   User "system:serviceaccount:e2e-tier-a:e2e-tier-a-jobs-manager"
+  #   cannot patch resource "secrets" in API group "" in the namespace
+  #
+  # The edge 403s before it runs inference, so it never reports back, the
+  # inference row stays `inference_captured=False`, and no leaderboard row is
+  # ever written — with the experiment recorded COMPLETED and no error. Every
+  # cycle-1 inference on dev is captured and every cycle-2 one since the flag
+  # went on is not, which is this verb and nothing else.
+  #
+  # NOT name-restricted, unlike the pull-secret grants elsewhere in this chart:
+  # the Secret name carries the experiment id and cycle
+  # (`tb-dbcreds-exp<id>c<cycle>-<hash>`), so there is no fixed name to pin and
+  # `resourceNames` cannot express a prefix. It sits in the same flag-gated,
+  # secrets-only rule as `list`/`delete` so the blast radius is unchanged when
+  # the flag is off.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["list", "delete"]
+    verbs: ["list", "delete", "patch"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
