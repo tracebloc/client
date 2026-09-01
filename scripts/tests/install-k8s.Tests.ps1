@@ -1438,6 +1438,10 @@ Describe "Test-TraceblocCli" {
     $out = Test-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "not machine-wide"          # honest verdict
     $out | Should -Not -Match "tracebloc CLI ready"  # never a false ready
+    # The hint must name the real cause (failed copy / INSTALL_PREFIX), NOT "re-run as
+    # Administrator" — the installer already self-elevated, so that can't be the fix (Bugbot).
+    $out | Should -Not -Match "as Administrator"
+    $out | Should -Match "didn't land"
   }
 
   It "CLI-missing-from-fresh-shell: prints an actionable hint (install dir)" {

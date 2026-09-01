@@ -7640,7 +7640,12 @@ function Test-TraceblocCli {
     # still won't find it (backend#2915), so say so honestly rather than a false "ready".
     Warn "tracebloc CLI installed for you, but not machine-wide -- a fresh shell or another user may not resolve it."
     if ($machineExe) { Hint "  Expected machine-wide at: $machineExe" }
-    Hint "  Re-run this installer as Administrator to place it there."
+    # NOT "re-run as Administrator": the installer has already self-elevated, so another
+    # run hits the same no-op — the machine-wide copy is absent because the copy FAILED
+    # (see the log) or a custom INSTALL_PREFIX put the CLI somewhere Publish never sees
+    # (Bugbot). Name the real causes instead of a fix that can't work.
+    Hint "  The copy into that dir didn't land -- check the install log, or a custom INSTALL_PREFIX put the CLI elsewhere."
+    if ($script:LOG_FILE) { Hint "  Log: $script:LOG_FILE" }
     return
   }
 
