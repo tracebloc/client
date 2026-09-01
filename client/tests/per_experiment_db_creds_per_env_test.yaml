@@ -155,7 +155,7 @@ tests:
           content:
             apiGroups: [""]
             resources: ["secrets"]
-            verbs: ["list", "delete"]
+            verbs: ["list", "delete", "patch"]
 
   - it: "prod does not get it — the RBAC follows the same map"
     template: templates/rbac.yaml
@@ -164,9 +164,18 @@ tests:
       clusterScope: true
     documentIndex: 1
     asserts:
+      # THREE shapes guarded since `patch` joined the grant (backend#2795):
+      # a leak on prod would render as the three-verb rule, which the older
+      # two-verb guard alone would not catch.
       - notContains:
           path: rules
           content:
             apiGroups: [""]
             resources: ["secrets"]
             verbs: ["list", "delete"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete", "patch"]

@@ -49,7 +49,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       # INITCONTAINERS IS UNCONDITIONAL, and that is the change (backend#2913).
-      # It used to open inside `if .Values.hostPath.enabled`, so an edge without
+      # It used to open inside the hostPath.enabled gate, so an edge without
       # hostPath had NO init containers at all. MySQL is deployed unconditionally
       # by this chart, so the wait below must be too; `init-writable-data` stays
       # gated exactly as before.
@@ -160,7 +160,7 @@ spec:
                     print("wait-for-mysql: this is connection refused -- check the mysql-client Deployment and its PVC, NOT the credentials.", flush=True)
                     sys.exit(1)
                 time.sleep(2)
-      {{- if .Values.hostPath.enabled }}
+      {{- if (default dict .Values.hostPath).enabled }}
       # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
       # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
       # to them. Two failures this causes: (1) dataset ingest — `tb data ingest` streams files

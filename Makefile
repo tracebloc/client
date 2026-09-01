@@ -350,7 +350,46 @@ lint-warnings:
 #
 # `|`-separated because each guard is a multi-word command. One entry per guard,
 # and this is the only place they are written down.
-DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|bash scripts/check-style.sh|bash scripts/tests/check-drift.sh|bash scripts/tests/env-vocabulary-agreement.sh|bash scripts/tests/telemetry-vocabulary-agreement.sh|bash scripts/tests/k3s-components-agreement.sh|bash scripts/tests/collector-class-a-agreement.sh|bash scripts/tests/openshift-scc-coverage.sh|bash scripts/tests/collector-offsets-persisted.sh|bash scripts/tests/node-agents-tenancy.sh|bash scripts/tests/node-agents-pull-secret.sh|bash scripts/tests/telemetry-token-agreement.sh|bash scripts/tests/node-agents-namespace-safety.sh|bash scripts/tests/automount-token-explicit.sh|bash scripts/tests/collector-redaction-floor.sh|bash scripts/tests/collector-redaction-derived.sh|bash scripts/tests/telemetry-token-bootstrap.sh|bash scripts/tests/node-jsonpath-agreement.sh|bash scripts/tests/preflight-not-privilege-gated.sh|bash scripts/tests/kubelet-arg-map-safety.sh|bash scripts/tests/kubelet-config-agreement.sh|bash scripts/tests/kubelet-config-mutations.sh|bash scripts/tests/cronjob-failures-are-readable.sh|bash scripts/tests/release-name-equals-namespace.sh|bash scripts/tests/helm-unittest-error-assertions.sh|bash scripts/tests/helm-unittest-gated.sh|bash scripts/tests/mirror-enumeration-complete.sh|bash scripts/tests/reparent-requires-rotation.sh|bash scripts/tests/edgeuser-drop-readiness-verdicts.sh|bash scripts/tests/regcred-migration-verdicts.sh|bash scripts/tests/client-credentials-have-a-secret-tier.sh|bash scripts/tests/gate-byenv-resolution.sh|bash scripts/tests/gpu-limit-semantics-documented.sh|bash scripts/tests/gate-default-prose-agreement.sh|bash scripts/tests/gate-default-prose-mutations.sh|bash scripts/tests/guards-survive-spaced-paths.sh|bash scripts/tests/auto-upgrade-inflight-vs-wedge.sh|bash scripts/tests/jobs-manager-waits-for-mysql.sh
+DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
+  scripts/check-facts.sh --check|\
+  bash scripts/check-style.sh|\
+  bash scripts/tests/check-drift.sh|\
+  bash scripts/tests/env-vocabulary-agreement.sh|\
+  bash scripts/tests/telemetry-vocabulary-agreement.sh|\
+  bash scripts/tests/k3s-components-agreement.sh|\
+  bash scripts/tests/collector-class-a-agreement.sh|\
+  bash scripts/tests/openshift-scc-coverage.sh|\
+  bash scripts/tests/collector-offsets-persisted.sh|\
+  bash scripts/tests/node-agents-tenancy.sh|\
+  bash scripts/tests/node-agents-pull-secret.sh|\
+  bash scripts/tests/telemetry-token-agreement.sh|\
+  bash scripts/tests/node-agents-namespace-safety.sh|\
+  bash scripts/tests/automount-token-explicit.sh|\
+  bash scripts/tests/collector-redaction-floor.sh|\
+  bash scripts/tests/collector-redaction-derived.sh|\
+  bash scripts/tests/telemetry-token-bootstrap.sh|\
+  bash scripts/tests/node-jsonpath-agreement.sh|\
+  bash scripts/tests/preflight-not-privilege-gated.sh|\
+  bash scripts/tests/kubelet-arg-map-safety.sh|\
+  bash scripts/tests/kubelet-config-agreement.sh|\
+  bash scripts/tests/kubelet-config-mutations.sh|\
+  bash scripts/tests/cronjob-failures-are-readable.sh|\
+  bash scripts/tests/release-name-equals-namespace.sh|\
+  bash scripts/tests/helm-unittest-error-assertions.sh|\
+  bash scripts/tests/helm-unittest-gated.sh|\
+  bash scripts/tests/mirror-enumeration-complete.sh|\
+  bash scripts/tests/reparent-requires-rotation.sh|\
+  bash scripts/tests/edgeuser-drop-readiness-verdicts.sh|\
+  bash scripts/tests/regcred-migration-verdicts.sh|\
+  bash scripts/tests/client-credentials-have-a-secret-tier.sh|\
+  bash scripts/tests/gate-byenv-resolution.sh|\
+  bash scripts/tests/gpu-limit-semantics-documented.sh|\
+  bash scripts/tests/gate-default-prose-agreement.sh|\
+  bash scripts/tests/gate-default-prose-mutations.sh|\
+  bash scripts/tests/guards-survive-spaced-paths.sh|\
+  bash scripts/tests/auto-upgrade-inflight-vs-wedge.sh|\
+  bash scripts/tests/hostpath-reads-guarded.sh|\
+  bash scripts/tests/jobs-manager-waits-for-mysql.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
 # environment; it used to do `guards='$(DRIFT_GUARDS)'`, which Make expands
@@ -371,6 +410,52 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|scripts/check-facts.sh --check|b
 #   * the environment carries the value, so no quote in a guard can collapse it;
 #   * the loop COUNTS its iterations and refuses to report green unless it ran
 #     exactly the number of `|`-separated entries the list declares.
+# ONE GUARD PER LINE, for a measured reason and NOT the obvious one.
+#
+# As a single line this conflicted every time two branches each added a guard --
+# three times on client#911 in one day. The tempting claim is that one-per-line
+# makes those a clean auto-merge. IT DOES NOT, and that was checked rather than
+# assumed: appending requires editing the previous last line to add its `|\`
+# continuation, so both sides still touch the same line and git still conflicts.
+# Measured both ways on the real list.
+#
+# What DOES change is whether the conflict can be resolved by READING it:
+#
+#   one line  ->  conflict hunk containing 1842-character lines. Finding which
+#                 guard each side added means diffing two 1842-char strings by
+#                 eye, and the resolution that looks right in a diff viewer is
+#                 "take one side" -- which silently DELETES the other branch's
+#                 gate. A required check stops existing and every run still
+#                 reports green, which is this file's own subject.
+#   one each  ->  the differing entry is a 30-character line. You can see it.
+#
+# So this buys legibility at the moment of highest risk, not automation. The
+# thing that would actually remove the conflict is deriving the list from the
+# filesystem instead of maintaining it -- see the note at the end of this block.
+#
+# THE SEPARATOR ENDS EACH LINE so the join is visible where it happens, and Make
+# turns each `\`+newline into a single space -- so every entry after the first
+# arrives with a leading space. The recipe trims, because `==>  bash ...` reads
+# like a typo and a trimmed value is what `guards-survive-spaced-paths.sh`
+# expects to see.
+#
+# A DOUBLED `|` WAS ALREADY A FAIL-OPEN, and one-per-line makes it much easier to
+# type, so it is closed here. A `||` in the middle yields an EMPTY entry;
+# `sh -c ""` exits 0 and `ran` still increments, so the count check passes and the
+# run reports "all N guards green" while one of them was the empty string.
+# Measured: without the check below, `DRIFT_GUARDS=a||b` prints "all 3 guards
+# green" and exits 0. A TRAILING `|` was already caught -- the `for` drops a
+# trailing empty field, so `ran` falls short of `exp` -- which is why only the
+# middle case needed a new guard.
+#
+# STILL NOT DERIVED, and that is the remaining gap. This list restates which of
+# the files in `scripts/tests/` are drift guards, so it is a second source of
+# truth that can disagree with the directory -- and it is the reason two branches
+# adding a guard collide at all. Deriving it (every `scripts/tests/*.sh` bar a
+# declared opt-out) would remove both problems and make an added guard file
+# auto-merge. It is not done here because it changes which scripts RUN: a new
+# `.sh` in that directory that was never meant to be a drift guard would start
+# gating merges. That needs its own change and its own opt-out list.
 export DRIFT_GUARDS
 
 # Every guard RUNS even when an earlier one fails, and the target fails at the
@@ -387,6 +472,13 @@ drift:
 	fail=0; ran=0; oifs=$$IFS; IFS='|'; \
 	for g in $$DRIFT_GUARDS; do \
 	  IFS=$$oifs; ran=$$((ran+1)); \
+	  g=$$(printf '%s' "$$g" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$$//'); \
+	  if [ -z "$$g" ]; then \
+	    printf '\ndrift: entry %s of the list is EMPTY -- a dangling or doubled "|".\n' "$$ran"; \
+	    printf '       `sh -c ""` succeeds, so this would have counted as a guard that\n'; \
+	    printf '       ran and passed, and the run would report green one guard short.\n'; \
+	    exit 1; \
+	  fi; \
 	  printf '\n==> %s\n' "$$g"; \
 	  sh -c "$$g" || { fail=1; printf '!! FAILED: %s\n' "$$g"; }; \
 	  IFS='|'; \
