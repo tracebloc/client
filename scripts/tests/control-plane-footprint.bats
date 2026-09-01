@@ -53,6 +53,45 @@ YAML
   printf '%s\n' "$output" | grep -q '2176 MiB / 550 m' || { echo "wrong sum: $output"; return 1; }
 }
 
+@test "arithmetic: decimal-SI and plain-byte quantities are summed, not counted as zero" {
+  # 250M (decimal) = 238 MiB, 268435456 bytes = 256 MiB, on a DaemonSet (x1).
+  # The old Ki|Mi|Gi|Ti-only parser returned 0 for both -- an undercount that
+  # slips the ratchet (Bugbot, backend#2870). Total: 238 + 256 = 494 MiB.
+  local fx; fx="$(mktemp)"
+  cat > "$fx" <<'YAML'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: dec}
+spec:
+  template: {spec: {containers: [{name: c, resources: {requests: {memory: "250M"}}}]}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bytes}
+spec:
+  template: {spec: {containers: [{name: c, resources: {requests: {memory: "268435456"}}}]}}
+YAML
+  TB_CP_FOOTPRINT_FIXTURE="$fx" TB_CP_FOOTPRINT_MEM_CEIL=9999 TB_CP_FOOTPRINT_CPU_CEIL=9999 run bash "$GUARD"
+  rm -f "$fx"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q '494 MiB' || { echo "wrong sum: $output"; return 1; }
+}
+
+@test "arithmetic: an UNPARSEABLE quantity fails closed, never sums to zero" {
+  local fx; fx="$(mktemp)"
+  cat > "$fx" <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bad}
+spec:
+  template: {spec: {containers: [{name: c, resources: {requests: {memory: "25Xy"}}}]}}
+YAML
+  TB_CP_FOOTPRINT_FIXTURE="$fx" run bash "$GUARD"
+  rm -f "$fx"
+  [ "$status" -eq 1 ] || { echo "expected exit 1, got $status: $output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'cannot parse' || { echo "$output"; return 1; }
+}
+
 @test "guard: the real render is at or under the recorded ceiling (green today)" {
   run bash "$GUARD"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }

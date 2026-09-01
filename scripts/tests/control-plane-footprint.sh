@@ -102,25 +102,51 @@ try:
     import yaml
 except ImportError:
     sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
+# The FULL Kubernetes memory-quantity grammar, and FAIL CLOSED on anything else
+# (Bugbot, backend#2870). The first version matched only Ki|Mi|Gi|Ti and silently
+# returned 0 otherwise -- so a valid `250M` (decimal) or a plain-byte integer would
+# count as ZERO, undercount the footprint and slip the ratchet, which is the exact
+# blind spot this guard exists to remove. A quantity that is present but
+# unrecognised is a finding, not a free pass: raise so the guard refuses.
+_BIN={'Ki':2**10,'Mi':2**20,'Gi':2**30,'Ti':2**40,'Pi':2**50,'Ei':2**60}
+_DEC={'k':1e3,'M':1e6,'G':1e9,'T':1e12,'P':1e15,'E':1e18}
+_MIB=2**20
 def mib(v):
-    if not v: return 0.0
-    m=re.match(r'^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti)?$', str(v))
-    if not m: return 0.0
-    return float(m.group(1))*{'Ki':1/1024,'Mi':1,'Gi':1024,'Ti':1024*1024}[m.group(2) or 'Mi']
+    if v in (None, ''): return 0.0
+    s=str(v).strip()
+    m=re.match(r'^(\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)([A-Za-z]+)?$', s)
+    if not m:
+        raise ValueError("unparseable memory quantity %r" % v)
+    num=float(m.group(1)); suf=m.group(2)
+    if suf is None:      bytes_=num                 # a bare number is BYTES (k8s)
+    elif suf in _BIN:    bytes_=num*_BIN[suf]
+    elif suf in _DEC:    bytes_=num*_DEC[suf]
+    else:                raise ValueError("unknown memory unit %r in %r" % (suf, v))
+    return bytes_/_MIB
 def milli(v):
-    if not v: return 0.0
-    v=str(v); return float(v[:-1]) if v.endswith('m') else float(v)*1000
+    if v in (None, ''): return 0.0
+    s=str(v).strip()
+    if s.endswith('m'):
+        try: return float(s[:-1])
+        except ValueError: raise ValueError("unparseable cpu quantity %r" % v)
+    try: return float(s)*1000                       # cores -> millicores
+    except ValueError: raise ValueError("unparseable cpu quantity %r" % v)
 mem=cpu=0.0; n=0
-with open(sys.argv[1], encoding="utf-8") as fh:
-    for d in yaml.safe_load_all(fh):
-        if not d: continue
-        if d.get('kind') not in ('Deployment','StatefulSet','DaemonSet'): continue
-        reps=1 if d.get('kind')=='DaemonSet' else (d.get('spec',{}).get('replicas',1) or 1)
-        sp=d.get('spec',{}).get('template',{}).get('spec',{}) or {}
-        for c in (sp.get('containers',[]) or [])+(sp.get('initContainers',[]) or []):
-            r=(c.get('resources',{}) or {}).get('requests') or {}
-            if r.get('memory') or r.get('cpu'): n+=1
-            mem+=mib(r.get('memory'))*reps; cpu+=milli(r.get('cpu'))*reps
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for d in yaml.safe_load_all(fh):
+            if not d: continue
+            if d.get('kind') not in ('Deployment','StatefulSet','DaemonSet'): continue
+            reps=1 if d.get('kind')=='DaemonSet' else (d.get('spec',{}).get('replicas',1) or 1)
+            sp=d.get('spec',{}).get('template',{}).get('spec',{}) or {}
+            for c in (sp.get('containers',[]) or [])+(sp.get('initContainers',[]) or []):
+                r=(c.get('resources',{}) or {}).get('requests') or {}
+                if r.get('memory') or r.get('cpu'): n+=1
+                mem+=mib(r.get('memory'))*reps; cpu+=milli(r.get('cpu'))*reps
+except ValueError as exc:
+    # FAIL CLOSED: a quantity we cannot read is not a footprint of zero. Refusing
+    # is the whole posture of this guard -- a silent 0 would undercount and pass.
+    sys.exit("[ERROR] %s -- refusing to sum a footprint from a quantity this guard cannot parse" % exc)
 print(f"{mem:.0f} {cpu:.0f} {n}")
 PY
 }
