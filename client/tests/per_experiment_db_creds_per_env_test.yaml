@@ -39,6 +39,13 @@ release:
 set:
   clientId: "test-id"
   clientPassword: "test"
+  # backend#2892: this suite renders dev fleets (dev's ByEnv default turns
+  # rotateMysqlRoot ON) only to assert perExperimentDbCreds resolution. The
+  # fail-closed guard refuses an unpinned rotation-on mint on a CLUSTER-LESS
+  # render (which helm-unittest always is), so pin root's value tier-1 to let the
+  # render through. Nothing here asserts on the root password; the pin is inert to
+  # what this suite tests.
+  mysqlRootPassword: "RotatedRootPw123"
 
 tests:
   - it: "dev edges mint per-experiment credentials — the retired fleet's posture"

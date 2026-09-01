@@ -330,10 +330,13 @@ kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
 #  predates the rotation" state the guard refuses. Turning the gate on would mint
 #  a new root password the live database was never told about (the entrypoint
 #  reads MYSQL_ROOT_PASSWORD only at FRESH init), so root would authenticate with
-#  neither value and the fleet would lose MySQL auth. The guard is `lookup`-backed
-#  and therefore invisible to `helm template` / helm-unittest (secrets_test.yaml
-#  says as much): deleting the whole guard, or only its ack term, leaves the
-#  chart's unit tests green. This is the test that reddens.
+#  neither value and the fleet would lose MySQL auth. This is the guard's LIVE arm
+#  (backend#2879 + backend#2892). The guard now has three refuse arms: two are
+#  cluster-less — an offline render, or a declared datadir — and ARE unit-tested
+#  (helm-unittest renders without a cluster; secrets_test.yaml). This one is
+#  different: an existing `mysql-pvc` found by `lookup` on a real cluster.
+#  helm-unittest cannot mock `lookup`, so only a live upgrade like this exercises
+#  it — deleting the arm-1 `lookup`, or the ack term, is what reddens HERE.
 echo "── backend#2879: rotateMysqlRoot on an existing datadir refuses without the ack ──"
 [ -z "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
   || fail "precondition: this release must have no MYSQL_ROOT_PASSWORD before the rotation guard check"

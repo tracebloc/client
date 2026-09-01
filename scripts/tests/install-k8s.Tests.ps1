@@ -1026,7 +1026,18 @@ Describe "Write-NotReadyDetail (#425 failure copy carries the event text)" {
 }
 
 Describe "Print-Summary" {
-  BeforeEach { $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false }
+  # NO REAL PROCESSES (Bugbot, on this PR). Print-Summary reaches Get-ChartVersion,
+  # whose `helm list` is bounded now -- and Invoke-BoundedProcess calls
+  # [Process]::Start directly, so it does NOT see the suite's `function helm` stub
+  # at the top of this file. Two "connected" cases here were therefore spawning the
+  # REAL helm against whatever kubeconfig the machine has. Measured against develop:
+  # exactly 3 tests in this file gained a real spawn from this PR, and two are here.
+  # A Describe-level default covers every case; the ones needing a specific answer
+  # override it with their own Mock.
+  BeforeEach {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "" } }
+    $script:TB_NAMESPACE = "ns"; $GPU_VENDOR = "none"; $NVIDIA_DRIVER_OK = $false
+  }
   It "connected: Connected + trust claim" {
     $script:ClientState = "connected"
     $out = Print-Summary 6>&1 | Out-String
@@ -1051,11 +1062,25 @@ Describe "Print-Summary" {
     $out | Should -Match "crash loop"
   }
   It "connected: shows the client version" {
+    # SEAM MOVED OUT ONE LAYER: Get-ChartVersion's `helm list` is bounded now
+    # (backend#2849 / Bugbot), so the mock sits on Invoke-BoundedProcess. Same
+    # assertions.
     $script:ClientState = "connected"
-    Mock helm { "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" }
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4" } }
     $out = Print-Summary 6>&1 | Out-String
     $out | Should -Match "Version"
     $out | Should -Match "1\.4\.4"
+    # The mock must actually have INTERCEPTED. If the seam moves again this fails
+    # loudly instead of silently shelling out to the real helm (Bugbot).
+    Should -Invoke Invoke-BoundedProcess -Times 1 -Exactly
+  }
+  It "connected: a timed-out helm leaves the version 'unknown' instead of hanging the summary" {
+    # Previously unreachable: the bare `helm list` blocked instead of returning, so
+    # a wedged API server froze the summary at the very end of a good install.
+    $script:ClientState = "connected"
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 124; Output = "" } }
+    $out = Print-Summary 6>&1 | Out-String
+    $out | Should -Match "unknown"
   }
   It "GPU detected but not enabled: summary says CPU + the reason, not 'NVIDIA GPU' (#616)" {
     $script:ClientState = "connected"
@@ -2846,29 +2871,42 @@ Describe "Get-PfFsType" -Skip:(-not $IsWindows) {
 }
 
 Describe "Get-Pf* runtime (Docker VM) view preference" {
+  # THE SEAM MOVED, THE ASSERTIONS DID NOT (backend#2849). These readers used to
+  # invoke `docker` natively; they now go through Invoke-DockerCli so the call
+  # carries a deadline (a bare `docker info` against a wedged daemon blocks rather
+  # than failing, and these run at the top of Step 3). Every case below still
+  # asserts the same behaviour -- prefer the runtime view, fall back to null on
+  # junk or on a dead daemon -- just mocked one layer out.
   It "Get-PfRuntimeMemGb follows the docker MemTotal (#417)" {
-    Mock docker { '8589934592' }          # 8 GiB, in bytes
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = '8589934592' } }   # 8 GiB, in bytes
     Get-PfRuntimeMemGb | Should -Be 8
   }
   It "Get-PfMemGb never consults the Docker VM budget (#417 no flip-flop)" {
     # Host-independent + cross-platform: the flip-flop bug was Get-PfMemGb reading
-    # the docker budget. Prove it's decoupled by asserting Get-PfMemGb never calls
+    # the docker budget. Prove it's decoupled by asserting Get-PfMemGb never asks
     # docker at all. Avoids the flaky "Should -Not -Be 8" on a real 8 GB host; the
     # exact host figure is locked by the Windows-gated CIM-mocked sibling test.
-    Mock docker { '8589934592' }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = '8589934592' } }
     $null = Get-PfMemGb
-    Should -Invoke docker -Times 0
+    Should -Invoke Invoke-DockerCli -Times 0
   }
   It "Get-PfCpu prefers docker NCPU over the host" {
-    Mock docker { '2' }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = '2' } }
     Get-PfCpu | Should -Be 2
   }
   It "Get-PfRuntimeMemGb: junk value -> null (forces host fallback)" {
-    Mock docker { 'lots' }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = 'lots' } }
     Get-PfRuntimeMemGb | Should -BeNullOrEmpty
   }
   It "Get-PfRuntimeMemGb: docker errors -> null" {
-    Mock docker { throw "daemon down" }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 1; Output = 'daemon down' } }
+    Get-PfRuntimeMemGb | Should -BeNullOrEmpty
+  }
+  It "Get-PfRuntimeMemGb: a TIMED-OUT probe -> null, not a hang (backend#2849)" {
+    # The case that did not exist before: the reader used to have no way to time
+    # out, so this state was unreachable and untested. 124 is the timeout code
+    # Invoke-BoundedProcess returns.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = 'docker info timed out after 20s' } }
     Get-PfRuntimeMemGb | Should -BeNullOrEmpty
   }
 }
@@ -3271,19 +3309,62 @@ Describe "WSL update wiring (#414 source guards)" {
 
 # --- reboot persistence (Set-ClusterAutostart) -------------------------------
 Describe "Set-ClusterAutostart" {
+  # SEAM MOVED OUT ONE LAYER (backend#2849 review): both docker calls here are now
+  # bounded, so the mock is on Invoke-DockerCli, not the native `docker`. Same
+  # assertions -- one `update --restart` per node -- plus the timeout cases, which
+  # were unreachable while the calls were bare.
   AfterEach { $env:TRACEBLOC_NO_AUTOSTART = $null }
   It "sets unless-stopped on each k3d node" {
-    Mock docker {
-      if (($args -join ' ') -match 'ps -a') { return @("k3d-tracebloc-server-0", "k3d-tracebloc-serverlb") }
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') {
+        return [pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0`nk3d-tracebloc-serverlb" }
+      }
+      return [pscustomobject]@{ Code = 0; Output = "" }
     }
     Set-ClusterAutostart
-    Should -Invoke docker -ParameterFilter { ($args -join ' ') -match 'update --restart unless-stopped' } -Times 2
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart unless-stopped' } -Times 2
   }
   It "TRACEBLOC_NO_AUTOSTART -> no docker calls" {
     $env:TRACEBLOC_NO_AUTOSTART = "1"
-    Mock docker { }
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "" } }
     Set-ClusterAutostart
-    Should -Invoke docker -Times 0 -Exactly
+    Should -Invoke Invoke-DockerCli -Times 0 -Exactly
+  }
+  It "every docker call carries a timeout -- no bare probe left on the main install path" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "k3d-tracebloc-server-0" } }
+    Set-ClusterAutostart
+    Should -Invoke Invoke-DockerCli -ParameterFilter { $TimeoutSec -gt 0 } -Times 2
+  }
+  It "a timed-out 'ps' SKIPS the pass instead of blocking, and never runs an update" {
+    # This is defensive housekeeping (k3d already sets unless-stopped), so a wedged
+    # daemon must cost a log line -- not the install. Previously the bare `ps`
+    # blocked here and Step 3 never printed anything.
+    Mock Log { }
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') { return [pscustomobject]@{ Code = 124; Output = "" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    { Set-ClusterAutostart } | Should -Not -Throw
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart' } -Times 0 -Exactly
+  }
+  It "a timed-out 'update' on one node does not abort the others" {
+    Mock Log { }
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') { return [pscustomobject]@{ Code = 0; Output = "n1`nn2" } }
+      return [pscustomobject]@{ Code = 124; Output = "" }
+    }
+    { Set-ClusterAutostart } | Should -Not -Throw
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart' } -Times 2
+  }
+  It "blank lines in the node list are not treated as nodes" {
+    # The native call returned an ARRAY; the wrapper returns a STRING, so the split
+    # is new code and a trailing newline would otherwise become a `docker update ""`.
+    Mock Invoke-DockerCli {
+      if (($DockerArgs -join ' ') -match 'ps -a') { return [pscustomobject]@{ Code = 0; Output = "n1`n`n  `nn2`n" } }
+      return [pscustomobject]@{ Code = 0; Output = "" }
+    }
+    Set-ClusterAutostart
+    Should -Invoke Invoke-DockerCli -ParameterFilter { ($DockerArgs -join ' ') -match 'update --restart' } -Times 2
   }
 }
 
@@ -3328,9 +3409,17 @@ Describe "Invoke-DiagnoseBundle" {
     $HOST_DATA_DIR = Join-Path $TestDrive "tb"
     New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     "clientPassword: 'LEAKME123'" | Set-Content (Join-Path $HOST_DATA_DIR "values.yaml")
-    Mock kubectl { "" }; Mock docker { "" }; Mock helm { "" }; Mock k3d { "" }
+    # MOCK THE SEAM THAT IS ACTUALLY USED (Bugbot). The bundle's reads now go through
+    # Invoke-BoundedProcess, which calls [Process]::Start directly and so bypasses
+    # both the `function kubectl/docker/helm/k3d` stubs at the top of this file and
+    # any `Mock kubectl`. Left as-is, this test spawned the REAL kubectl, docker,
+    # helm and k3d -- against the machine's live kubeconfig -- while claiming to
+    # test redaction of a seeded secret.
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "" } }
     Mock Get-WindowsArch { "amd64" }   # avoid the PROCESSOR_ARCHITECTURE Err off-Windows
     { Invoke-DiagnoseBundle } | Should -Not -Throw
+    # and prove the collectors went through it, so a future seam move is loud
+    Should -Invoke Invoke-BoundedProcess -Times 1
     $zip = Get-ChildItem $HOST_DATA_DIR -Filter 'tracebloc-diagnose-*.zip' | Select-Object -First 1
     $zip | Should -Not -BeNullOrEmpty
     $ex = Join-Path $TestDrive "ex"
@@ -3739,6 +3828,338 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   }
 }
 
+Describe "Every Docker/child wait on the install path is bounded (backend#2849)" {
+  # WHAT THIS DEFENDS, and why it is the shape that keeps costing this journey
+  # runs: an unbounded external call against a SICK dependency does not fail, it
+  # BLOCKS. The caller then spends its whole budget and reports a timeout that
+  # names nothing -- which is exactly how the reboot prompt (backend#2675) and the
+  # empty exit code (backend#2849) each burned four Windows runs before anyone
+  # could say what was wrong. This file already has the rule (Invoke-BoundedProcess,
+  # "installer external-call timeout rule"); these are the sites that predated it.
+  BeforeAll { $script:Src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw }
+
+  It "no bare 'docker info' survives anywhere -- every engine read is bounded" {
+    # SOURCE-LEVEL and deliberately so: the sites are inside functions whose
+    # callers exit, and the property is "this text does not appear", which is
+    # only expressible against the text. Matches the NATIVE-call form
+    # `(docker info ...)`, not the string inside an Invoke-DockerCli arg list.
+    $script:Src | Should -Not -Match '\(docker info'
+  }
+
+  # THE CLASS, not one verb (backend#2849 review, @LukasWodka).
+  #
+  # The assertion above defends `docker info`. Its input domain is one needle, so
+  # a NEW unbounded call -- `docker ps -a`, `docker inspect`, `docker version` --
+  # walks straight past it while this Describe's name claims "every Docker/child
+  # wait". Lukas proved that by injecting one and watching 38 tests stay green.
+  #
+  # So assert the real property: no native `docker` invocation anywhere in this
+  # file is unbounded. Two bounding mechanisms are legitimate and both are
+  # recognised -- Invoke-DockerCli (which is not a native call at all, so it
+  # cannot match) and a `Start-Job` scriptblock reaped by Wait-JobWithProgress.
+  # Anything else is a hang against a wedged daemon.
+  #
+  # AST, NOT REGEX, and that is the load-bearing choice. Every text-level version
+  # of this either drowns in false positives -- this file has ~10 Log/return
+  # strings containing "docker run", "docker build", "docker exec" -- or gets
+  # narrowed until it is an instance guard again, which is exactly the failure
+  # being fixed. The PowerShell parser knows a command from a string, so the
+  # property can be stated once and stay true.
+  It "EVERY native docker call is bounded -- the class, not just 'docker info' (backend#2849 review)" {
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    # Fail CLOSED: an unparseable file must not read as "no unbounded calls".
+    $errors.Count | Should -Be 0 -Because "the installer must parse before this property means anything"
+    $ast | Should -Not -BeNullOrEmpty -Because "cannot read the installer AST"
+
+    $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+      Where-Object { $_.GetCommandName() -eq 'docker' }
+
+    # Sanity: this guard must be looking at something. If a refactor moves every
+    # docker call behind the wrapper, delete this line -- do not let it pass vacuously.
+    $native.Count | Should -BeGreaterThan 0 -Because "the AST query must still find native calls to judge"
+
+    $unbounded = @()
+    foreach ($c in $native) {
+      $p = $c.Parent; $inJob = $false
+      while ($p) {
+        if ($p -is [System.Management.Automation.Language.CommandAst] -and $p.GetCommandName() -eq 'Start-Job') { $inJob = $true; break }
+        $p = $p.Parent
+      }
+      if (-not $inJob) { $unbounded += "line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
+    }
+    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker call must go through Invoke-DockerCli or a Wait-JobWithProgress-reaped Start-Job"
+  }
+
+  It "the -Diagnose bundle has NO unbounded external read -- it must work when the box does not" {
+    # Bugbot (High) on the first pass of this PR, and it caught a real hole in the
+    # fix: `docker ps` was bounded but `k3d cluster list` in the SAME expression
+    # was not, and `Out-File` cannot run until both sides finish -- so the bundle
+    # still never appeared on a wedged engine. Bounding one tool is not the
+    # property; the property is that the bundle a user collects BECAUSE the
+    # machine is broken always gets written.
+    #
+    # Same AST reasoning as the docker guard: k3d/kubectl/helm all reach the
+    # engine or the API server behind it, and every one of them blocks.
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    $errors.Count | Should -Be 0
+
+    # INTERPROCEDURAL (Bugbot, second High). The first version of this looked only
+    # at native commands written INSIDE Invoke-DiagnoseBundle, so a bare call in a
+    # HELPER the bundle calls was invisible -- which is exactly how `Get-ChartVersion`
+    # (`helm list`, no deadline) survived it. And it is the worst possible place for
+    # one: the bundle calls it BEFORE writing any file, so an unreachable cluster
+    # meant no zip at all.
+    #
+    # So walk the whole call graph the bundle can reach, not just its own body.
+    $allFns = @{}
+    foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+      $allFns[$f.Name] = $f
+    }
+    $allFns.ContainsKey('Invoke-DiagnoseBundle') | Should -BeTrue -Because "cannot locate Invoke-DiagnoseBundle"
+
+    # transitive closure of in-file functions reachable from the bundle
+    $reach = [System.Collections.Generic.HashSet[string]]::new()
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    [void]$reach.Add('Invoke-DiagnoseBundle'); $queue.Enqueue('Invoke-DiagnoseBundle')
+    while ($queue.Count -gt 0) {
+      $cur = $queue.Dequeue()
+      foreach ($call in $allFns[$cur].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $name = $call.GetCommandName()
+        if ($name -and $allFns.ContainsKey($name) -and -not $reach.Contains($name)) {
+          [void]$reach.Add($name); $queue.Enqueue($name)
+        }
+      }
+    }
+    # must actually have followed calls, or the closure proves nothing
+    $reach.Count | Should -BeGreaterThan 1 -Because "the closure must follow the bundle's helper calls"
+
+    # Every external tool anything in that closure shells out to must be bounded.
+    # A native invocation is unbounded unless it sits in a Start-Job (reaped on a
+    # deadline -- the docker guard above enforces that reap per job).
+    $unbounded = @()
+    foreach ($name in $reach) {
+      foreach ($c in $allFns[$name].FindAll({ param($n)
+          $n -is [System.Management.Automation.Language.CommandAst] -and
+          $n.GetCommandName() -in @('docker','k3d','kubectl','helm') }, $true)) {
+        $p = $c.Parent; $inJob = $false
+        while ($p) {
+          if ($p -is [System.Management.Automation.Language.CommandAst] -and $p.GetCommandName() -eq 'Start-Job') { $inJob = $true; break }
+          $p = $p.Parent
+        }
+        if (-not $inJob) { $unbounded += "$name line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
+      }
+    }
+
+    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "the support bundle must never block on the dependency it exists to describe"
+  }
+
+  # NOTE: these use a REAL present tool (pwsh, which is running this suite) and a
+  # real absent one, deliberately. Mocking Get-Command hangs the run -- both the
+  # installer and Pester itself call it constantly -- so the presence check is
+  # exercised against the live command table instead.
+  # THE TYPE CHANGE, not just the timeout (Bugbot, High). Bounding a native call
+  # swaps line OBJECTS for one multi-line STRING, and any consumer that parsed
+  # per-line silently changes meaning. That is what happened to namespace
+  # discovery: `$blob | Select-String` matches the whole blob as a single line, so
+  # the first token became the table header "NAMESPACE" and a SUCCESSFUL -Diagnose
+  # collected logs, helm values and the chart version from a namespace that does
+  # not exist. Extracted as a pure function precisely so this is pinned.
+  It "namespace discovery reads the POD's namespace, never the table header" {
+    $pods = @(
+      "NAMESPACE     NAME                          READY   STATUS",
+      "kube-system   coredns-5d78c9869d-abcde      1/1     Running",
+      "tb-rel-a1     tb-rel-a1-jobs-manager-xyz    1/1     Running",
+      "tb-rel-a1     tb-rel-a1-requests-proxy-q    1/1     Running"
+    ) -join "`n"
+    Get-JobsManagerNamespace $pods | Should -Be "tb-rel-a1"
+  }
+  It "namespace discovery survives CRLF, the shape a Windows kubectl actually emits" {
+    $pods = "NAMESPACE  NAME  READY`r`nns-b2  ns-b2-jobs-manager-abc  1/1"
+    Get-JobsManagerNamespace $pods | Should -Be "ns-b2"
+  }
+  It "namespace discovery returns EMPTY when no jobs-manager is present, so the caller falls back" {
+    # Empty, not the header and not a wrong namespace: the caller then uses
+    # "default", which is the documented behaviour.
+    Get-JobsManagerNamespace "NAMESPACE  NAME  READY`nkube-system  coredns-1  1/1" | Should -Be ""
+    Get-JobsManagerNamespace ""    | Should -Be ""
+    Get-JobsManagerNamespace $null | Should -Be ""
+  }
+  It "namespace discovery never yields 'NAMESPACE' even if the split is broken again" {
+    # The belt-and-braces guard: the header is rejected explicitly, so a future
+    # refactor that re-breaks the line split still cannot leak it as a namespace.
+    #
+    # THE FIXTURE MUST MATCH (@LukasWodka). The first version used
+    # "NAMESPACE NAME jobs-manager" -- no hyphen before jobs-manager, so
+    # `Select-String '\-jobs-manager'` found nothing, the function returned early at
+    # `-not $line`, and the header guard this test is named for never ran. It passed
+    # identically with the guard present and removed: a vacuous test, in a test
+    # written to catch exactly that. Measured after the fix, guard vs no guard:
+    # "" / "NAMESPACE".
+    #
+    # One line whose first token IS the header and which DOES contain a
+    # jobs-manager pod is precisely the broken-split shape.
+    Get-JobsManagerNamespace "NAMESPACE NAME tb-jobs-manager" | Should -Be ""
+  }
+  It "a timed-out capture becomes DATA in the bundle, not a missing file" {
+    # The distinction that makes the bundle useful: "k3d cluster list timed out"
+    # is itself the finding support needs. Swallowing it to $null would hand them
+    # an empty section and no explanation.
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 124; Output = "" } }
+    $out = Invoke-DiagnoseCapture -FileName "pwsh" -Arguments @("-x") -TimeoutSec 5
+    $out | Should -Match 'FAILED or TIMED OUT'
+    $out | Should -Match 'exit 124'
+  }
+  It "a capture passes its deadline through and returns healthy output unchanged" {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "NAME  SERVERS`ntracebloc  1/1" } }
+    Invoke-DiagnoseCapture -FileName "pwsh" -Arguments @("-v") | Should -Match 'tracebloc  1/1'
+    Should -Invoke Invoke-BoundedProcess -ParameterFilter { $TimeoutSec -gt 0 } -Times 1
+  }
+  It "a missing tool is reported, not shelled out to" {
+    Mock Invoke-BoundedProcess { [pscustomobject]@{ Code = 0; Output = "x" } }
+    Invoke-DiagnoseCapture -FileName "tb-definitely-not-installed-xyz" -Arguments @("x") | Should -Match 'not installed'
+    Should -Invoke Invoke-BoundedProcess -Times 0 -Exactly
+  }
+
+  It "the Start-Job docker sites are actually reaped on a deadline, not merely in a job" {
+    # "inside Start-Job" only bounds the call if something reaps the job. Without
+    # this, the guard above could be satisfied by wrapping a hang in a job and
+    # then waiting on it forever -- a bounded-looking unbounded wait.
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    $errors.Count | Should -Be 0
+
+    $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+      Where-Object { $_.GetCommandName() -eq 'docker' }
+    $native.Count | Should -BeGreaterThan 0
+
+    # PER-JOB, not per-function (@LukasWodka's follow-up). The first version of this
+    # matched `Wait-JobWithProgress -Job $x -TimeoutSec N` anywhere in the enclosing
+    # FUNCTION, so one compliant job vouched for its neighbours -- he proved it by
+    # adding a second, unreaped docker job to a function that already had a good one
+    # and watching all 41 tests stay green. Bind the reap to the SPECIFIC variable
+    # this job was assigned to, so every job answers for itself.
+    foreach ($c in $native) {
+      $fn = $c.Parent
+      while ($fn -and -not ($fn -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $fn = $fn.Parent }
+      $fn | Should -Not -BeNullOrEmpty -Because "the docker call at line $($c.Extent.StartLineNumber) is not inside a function, so nothing owns its deadline"
+
+      # the Start-Job this call lives in ...
+      $job = $c.Parent
+      while ($job -and -not ($job -is [System.Management.Automation.Language.CommandAst] -and $job.GetCommandName() -eq 'Start-Job')) { $job = $job.Parent }
+      $job | Should -Not -BeNullOrEmpty -Because "line $($c.Extent.StartLineNumber) is a native docker call outside Start-Job"
+
+      # ... and the variable it is assigned to. No assignment => nothing can reap it.
+      $assign = $job.Parent
+      while ($assign -and -not ($assign -is [System.Management.Automation.Language.AssignmentStatementAst])) { $assign = $assign.Parent }
+      $assign | Should -Not -BeNullOrEmpty -Because "the Start-Job at line $($job.Extent.StartLineNumber) is not assigned to a variable, so no reap can name it"
+
+      $varAst = $assign.Left.Find({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)
+      $varAst | Should -Not -BeNullOrEmpty -Because "cannot determine the job variable at line $($job.Extent.StartLineNumber)"
+      $var = $varAst.VariablePath.UserPath
+
+      $reap = "Wait-JobWithProgress -Job \$" + [regex]::Escape($var) + " -TimeoutSec \d+"
+      $fn.Extent.Text | Should -Match $reap -Because "$($fn.Name) starts docker job '$var' but never reaps THAT job on a deadline"
+    }
+  }
+
+  It "the engine probe goes through the bounded wrapper, with a timeout" {
+    $script:Src | Should -Match 'function Test-DockerEngineUp'
+    $script:Src | Should -Match 'Invoke-DockerCli -DockerArgs @\("info", "--format", "\{\{\.ID\}\}"\) -TimeoutSec \d+'
+  }
+
+  It "a timed-out probe reads as 'not up', never as up" {
+    # The distinction that matters: a wedged daemon must not be mistaken for a
+    # healthy one, or the install proceeds into Step 3 on an engine that is not
+    # there. Non-zero Code -> false, regardless of what Output happens to hold.
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "abc123" } }
+    Test-DockerEngineUp | Should -BeFalse
+  }
+  It "an empty ID reads as 'not up' even on a zero exit" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "   " } }
+    Test-DockerEngineUp | Should -BeFalse
+  }
+  It "a real ID on a zero exit is 'up'" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "SOMEID" } }
+    Test-DockerEngineUp | Should -BeTrue
+  }
+
+  It "the engine wait's deadline is wall-clock, not an iteration count" {
+    # `$waitMin * 20` assumed every pass costs exactly its 3s sleep, which stops
+    # being true the moment a probe blocks -- so the cap the code believed it had
+    # was not a time bound at all.
+    $script:Src | Should -Match '\$dockerStart\s+= Get-Date'
+    $script:Src | Should -Match '\$dockerDeadline = \$dockerStart\.AddMinutes\(\$waitMin\)'
+    $script:Src | Should -Match '\(Get-Date\) -lt \$dockerDeadline'
+    # the iteration counter is GONE, not merely unused -- `$waitMin * 20` was the
+    # thing that made a cap look like a time bound.
+    $script:Src | Should -Not -Match '\$maxWait'
+  }
+
+  It "the ELAPSED the user reads comes from the same clock as the deadline" {
+    # Bugbot + review: the deadline became wall-clock but the label still divided
+    # the iteration counter by 20, i.e. assumed a 3s pass. With the probe capped
+    # at 15s a wedged-daemon pass costs ~18s, so the loop exited at ~10 REAL
+    # minutes still printing "1 min elapsed", immediately before "didn't come up
+    # within 10 minutes". The status line exists to be honest on exactly that
+    # pathology, so it must not be derived from a counter.
+    $script:Src | Should -Match '\$elapsedMin = \[math\]::Floor\(\(\(Get-Date\) - \$dockerStart\)\.TotalMinutes\)'
+    $script:Src | Should -Match '\$elapsedMin -ge 1'
+    $script:Src | Should -Not -Match 'Floor\(\$i / 20\)'
+  }
+
+  It "the runtime preflight readers fall back to null on a timeout, not hang" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 124; Output = "" } }
+    Get-PfRuntimeMemGb  | Should -BeNullOrEmpty
+    Get-PfRuntimeMemMib | Should -BeNullOrEmpty
+    Get-PfRuntimeCpu    | Should -BeNullOrEmpty
+  }
+  It "the runtime preflight readers still parse a healthy answer" {
+    Mock Invoke-DockerCli { [pscustomobject]@{ Code = 0; Output = "8589934592" } }
+    Get-PfRuntimeMemGb | Should -Be 8
+  }
+
+  It "the CLI installer child is waited on WITH a deadline, and killed on timeout" {
+    # This was the only wait in ~7400 lines with no bound. The child is
+    # `irm <url> | iex` -- a network fetch we then execute.
+    $script:Src | Should -Match '\$p\.WaitForExit\(\$cliWaitMs\)'
+    $script:Src | Should -Match '\$p\.Kill\(\)'
+    # The GATING wait must be the bounded one: a bare parameterless call as its own
+    # statement is the unbounded wait this ticket removed.
+    $script:Src | Should -Not -Match '(?m)^\s*\$p\.WaitForExit\(\)\s*$'
+  }
+
+  It "and its streams are FLUSHED after the bounded wait, or a success reads as failure" {
+    # Bugbot on acefcae, against my own change. WaitForExit(ms) waits for the
+    # PROCESS only; the PARAMETERLESS overload is what also waits for redirected
+    # stdout/stderr to drain, and until they do .ExitCode can read back $null. So
+    # `$p.ExitCode -eq 0` goes false after a SUCCESSFUL CLI install and Step 4
+    # silently falls back to the legacy credential path -- the #611 shape, and the
+    # empty-ExitCode class backend#2849 exists to remove. Swapping the parameterless
+    # call for the timeout overload dropped the flush; the assertion above forbade
+    # only the BARE form, so nothing caught it.
+    $fn = [regex]::Match($script:Src, 'function Install-TraceblocCli[\s\S]*?\n\}').Value
+    $fn | Should -Not -BeNullOrEmpty -Because "cannot locate Install-TraceblocCli"
+    $fn | Should -Match '\$null = \$p\.Handle'                     # code survives the reap
+    $fn | Should -Match 'try \{ \$p\.WaitForExit\(\) \} catch \{\}'   # streams drain before ExitCode is read
+    # ORDER: the flush must come after the bounded wait and BEFORE ExitCode is read.
+    # Anchored on CODE shapes, not bare substrings -- the surrounding comments quote
+    # `$p.ExitCode -eq 0` in prose, and matching that text found the comment first.
+    $gate  = [regex]::Match($fn, '(?m)^\s*if \(\$p\.WaitForExit\(\$cliWaitMs\)\)')
+    $flush = [regex]::Match($fn, '(?m)^\s*try \{ \$p\.WaitForExit\(\) \} catch \{\}')
+    $read  = [regex]::Match($fn, '(?m)^\s*if \(\$p\.ExitCode -eq 0\)')
+    $gate.Success  | Should -BeTrue -Because "the bounded wait must gate the branch"
+    $flush.Success | Should -BeTrue -Because "the stream flush must be a real statement"
+    $read.Success  | Should -BeTrue -Because "cannot locate the ExitCode test"
+    $flush.Index | Should -BeGreaterThan $gate.Index -Because "flushing before the bounded wait proves nothing"
+    $read.Index  | Should -BeGreaterThan $flush.Index -Because "ExitCode must not be read before the streams have drained"
+  }
+}
+
 Describe "Read-ClientName (the client-name prompt cannot hang an unattended install; backend#2836)" {
   # THE SECOND PROMPT. Right after the reboot question backend#2675 fixed, the
   # PRIMARY provisioning path asks for a client name with Read-Host. With no
@@ -3834,6 +4255,68 @@ Describe "No Read-Host is reachable without a Test-CanPrompt gate (the hang clas
       }
     }
     $unguarded.Count | Should -Be 0 -Because "these Read-Host sites can hang an unattended install: $($unguarded -join '; ')"
+  }
+}
+
+Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
+  # WAS HARDCODED TO PRODUCTION at all thirteen sites, while Get-BackendUrl
+  # right beside it was correctly env-aware. So a `CLIENT_ENV=dev` install sent
+  # the operator to ai.tracebloc.io for credentials that dev-api then rejects.
+  # Reported from a real dev install on Windows.
+  #
+  # The hosts are the BACKEND'S OWN settings, not a guess: DEVICE_VERIFICATION_URI
+  # / RESET_PASSWORD_URL in xraybackend/settings/{dev,stg,prod}.py.
+  AfterEach { $env:CLIENT_ENV = $null }
+
+  It "dev -> dev.tracebloc.io" {
+    $env:CLIENT_ENV = "dev"; Get-TraceblocDashboardUrl | Should -Be "https://dev.tracebloc.io/clients"
+  }
+  It "staging -> stg.tracebloc.io" {
+    $env:CLIENT_ENV = "staging"; Get-TraceblocDashboardUrl | Should -Be "https://stg.tracebloc.io/clients"
+  }
+  It "prod -> ai.tracebloc.io" {
+    $env:CLIENT_ENV = "production"; Get-TraceblocDashboardUrl | Should -Be "https://ai.tracebloc.io/clients"
+  }
+  It "unset or unknown -> prod, the same fallback Get-BackendUrl takes" {
+    $env:CLIENT_ENV = $null;      Get-TraceblocDashboardUrl | Should -Be "https://ai.tracebloc.io/clients"
+    $env:CLIENT_ENV = "whatever"; Get-TraceblocDashboardUrl | Should -Be "https://ai.tracebloc.io/clients"
+  }
+  It "honours the alias spellings the docs tell people to write" {
+    # The exact class backend#1745 cost us on Get-BackendUrl: `staging` fell
+    # through to prod. Same vocabulary, so it cannot drift apart here.
+    $env:CLIENT_ENV = "development"; Get-TraceblocDashboardUrl | Should -Match 'dev\.tracebloc\.io'
+    $env:CLIENT_ENV = "stg";         Get-TraceblocDashboardUrl | Should -Match 'stg\.tracebloc\.io'
+  }
+  It "takes a path, and an empty path gives the bare host" {
+    $env:CLIENT_ENV = "dev"
+    Get-TraceblocDashboardUrl 'my-use-cases' | Should -Be "https://dev.tracebloc.io/my-use-cases"
+    Get-TraceblocDashboardUrl ''             | Should -Be "https://dev.tracebloc.io"
+  }
+  It "and it AGREES with Get-BackendUrl about which environment this is" {
+    # The defect was precisely these two disagreeing. Pair them per environment
+    # rather than asserting each alone, so a future edit cannot split them.
+    foreach ($pair in @(@('dev','dev-api','dev.'), @('staging','stg-api','stg.'), @('production','//api','ai.'))) {
+      $env:CLIENT_ENV = $pair[0]
+      (Get-BackendUrl)             | Should -Match ([regex]::Escape($pair[1]))
+      (Get-TraceblocDashboardUrl)  | Should -Match ([regex]::Escape($pair[2]))
+    }
+  }
+  It "every dashboard host lives ONLY in the mapping" {
+    # The three hosts must appear exactly once each -- as the switch arms of
+    # Get-TraceblocDashboardUrl. A second occurrence is a site that went back to
+    # hardcoding, which is the whole defect.
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    foreach ($h in @('https://dev.tracebloc.io', 'https://stg.tracebloc.io', 'https://ai.tracebloc.io')) {
+      ([regex]::Matches($src, '"' + [regex]::Escape($h) + '"')).Count |
+        Should -Be 1 -Because "$h should be written once, in the mapping"
+    }
+  }
+  It "no LIVE dashboard link is hardcoded to production" {
+    # The sharp one: a hardcoded link always carries a PATH (/clients,
+    # /my-use-cases). The bare host with no path is only ever the mapping arm.
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    ([regex]::Matches($src, 'https://ai\.tracebloc\.io/[a-z-]')).Count |
+      Should -Be 0 -Because 'every live dashboard link must go through Get-TraceblocDashboardUrl'
   }
 }
 
