@@ -3597,53 +3597,10 @@ PY
   [ "$_TB_TRAINING_PROVENANCE" = "user" ] || return 1          # marker preserved, not downgraded to installer
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  _dashboard_url — the dashboard link follows CLIENT_ENV (backend#2849)
-#
-#  Hardcoded to production at ten sites across this file and summary.sh, while
-#  `_backend_url` directly above was correctly env-aware — so a CLIENT_ENV=dev
-#  install sent the operator to ai.tracebloc.io for credentials dev-api then
-#  rejects. The PowerShell twin was fixed first; Bugbot caught that this half
-#  was skipped. Hosts come from the backend's own settings
-#  (DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL per environment).
-# ─────────────────────────────────────────────────────────────────────────────
-
-@test "_dashboard_url: dev goes to the dev dashboard, not production" {
-  CLIENT_ENV=dev run _dashboard_url
-  [ "$status" -eq 0 ] || return 1
-  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
-}
-
-@test "_dashboard_url: staging goes to the staging dashboard" {
-  CLIENT_ENV=staging run _dashboard_url
-  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
-}
-
-@test "_dashboard_url: prod, unset and unknown all go to production" {
-  CLIENT_ENV=production run _dashboard_url
-  [ "$output" = "https://ai.tracebloc.io/clients" ] || return 1
-  CLIENT_ENV= run _dashboard_url
-  [ "$output" = "https://ai.tracebloc.io/clients" ] || return 1
-  CLIENT_ENV=whatever run _dashboard_url
-  [ "$output" = "https://ai.tracebloc.io/clients" ] || return 1
-}
-
-@test "_dashboard_url: the alias spellings the docs tell people to write" {
-  # backend#1745's class: a raw 'staging' fell through to prod on _backend_url.
-  # Same tb_client_env reduction here, so the two cannot drift apart.
-  CLIENT_ENV=development run _dashboard_url
-  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
-  CLIENT_ENV=stg run _dashboard_url
-  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
-}
-
-@test "_dashboard_url: takes a path, and an empty path gives the bare host" {
-  CLIENT_ENV=dev run _dashboard_url my-use-cases
-  [ "$output" = "https://dev.tracebloc.io/my-use-cases" ] || return 1
-  CLIENT_ENV=dev run _dashboard_url ""
-  [ "$output" = "https://dev.tracebloc.io" ] || return 1
-}
-
+# _dashboard_url lives in common.sh (client#946) and its own tests are in
+# common.bats. THIS one stays here, because it is the only assertion that needs
+# BOTH helpers in scope: `_backend_url` is defined in this file's lib, and the
+# defect being guarded was precisely the two disagreeing about the environment.
 @test "_dashboard_url AGREES with _backend_url about the environment" {
   # The defect was precisely these two disagreeing, so pair them per
   # environment rather than asserting each alone.
@@ -3651,11 +3608,4 @@ PY
   CLIENT_ENV=dev run _dashboard_url;  [[ "$output" == *"dev."* ]]    || return 1
   CLIENT_ENV=staging run _backend_url;   [[ "$output" == *"stg-api"* ]] || return 1
   CLIENT_ENV=staging run _dashboard_url; [[ "$output" == *"stg."* ]]    || return 1
-}
-
-@test "no LIVE dashboard link is hardcoded to production in either bash file" {
-  # A hardcoded link always carries a PATH (/clients, /my-use-cases); the bare
-  # host with no path is only ever the mapping arm inside _dashboard_url.
-  run bash -c "grep -c 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/install-client-helm.sh' '$BATS_TEST_DIRNAME/../lib/summary.sh' | grep -v ':0$' || true"
-  [ -z "$output" ] || return 1
 }
