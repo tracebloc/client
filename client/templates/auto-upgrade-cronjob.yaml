@@ -122,9 +122,12 @@ data:
     helm repo update "$REPO_NAME" >/dev/null
 
     # #554: auto-recover from an interrupted upgrade BEFORE attempting another
-    # one. If a previous tick's `helm upgrade` was killed mid-operation — OOM at
-    # the 256Mi memory limit, node reboot, or a cluster restart inside the
-    # upgrade window — the release is left in a pending-upgrade state, and every
+    # one. If a previous tick's `helm upgrade` was killed mid-operation — a
+    # node-level OOM kill under memory pressure (backend#2935; this pod is now
+    # Guaranteed QoS, oom_score_adj -997, so the kernel OOM-killer picks it last,
+    # but Guaranteed is not unkillable under extreme pressure), node reboot, or a
+    # cluster restart inside the upgrade window — the release is left in a
+    # pending-upgrade state, and every
     # subsequent hourly tick then fails with "another operation is in progress"
     # forever: auto-upgrade (the security-fix delivery path) is silently dead
     # until a human runs `helm rollback`. Detect that wedge and roll back to the
