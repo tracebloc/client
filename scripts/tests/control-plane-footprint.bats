@@ -3,99 +3,89 @@
 #
 # The guard runs in DRIFT_GUARDS (the required `Source-of-truth drift` job), so
 # per this repo's rule it must have a test of its own rather than only its own
-# green run against the real tree (backend#1729). Two things are exercised:
+# green run against the real tree (backend#1729).
 #
-#   1  the summer (sum_control_plane_requests.py) parses a KNOWN manifest to a
-#      known total -- Gi->MiB, DaemonSet counted x1, Deployment x replicas, and
-#      Job/CronJob EXCLUDED. This is the arithmetic the whole guard rests on, and
-#      helm is not needed to test it: it reads rendered YAML on stdin.
-#   2  the guard's RATCHET and FAIL-CLOSED branches, driven through the real
-#      script via TB_CP_FOOTPRINT_ROOT / the ceiling overrides -- never a copy.
+# Every assertion ends in `|| return 1`: bats-hygiene.bats requires it, and on
+# bash 3.2 a bare `[[ … ]]` as a test's last statement can pass vacuously.
+#
+# The ARITHMETIC is driven through TB_CP_FOOTPRINT_FIXTURE -- a known manifest fed
+# to the real guard in place of a helm render -- so the sum (Gi->MiB, replicas,
+# DaemonSet x1, Job excluded) is exercised without helm. The RATCHET and
+# FAIL-CLOSED branches are driven through the real script via its env overrides.
 
 setup() {
   HERE="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
-  SUMMER="$HERE/sum_control_plane_requests.py"
   GUARD="$HERE/control-plane-footprint.sh"
 }
 
-# A manifest with one of each shape, so the exclusions and multipliers are all
-# exercised by a total that is wrong under any one of them.
-fixture() {
-  cat <<'YAML'
+# One of each shape, so the exclusions and multipliers all matter: Deployment 1Gi
+# x2 = 2048 MiB / 500m ; DaemonSet 128 MiB / 50m x1 ; Job (512 MiB / 500m) EXCLUDED.
+# Expected steady-state total: 2176 MiB / 550 m across 2 requesting containers.
+write_fixture() {
+  cat > "$1" <<'YAML'
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: a}
 spec:
   replicas: 2
-  template:
-    spec:
-      containers:
-        - name: c1
-          resources: {requests: {memory: 1Gi, cpu: 250m}}
+  template: {spec: {containers: [{name: c1, resources: {requests: {memory: 1Gi, cpu: 250m}}}]}}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata: {name: b}
 spec:
-  template:
-    spec:
-      containers:
-        - name: c2
-          resources: {requests: {memory: 128Mi, cpu: 50m}}
+  template: {spec: {containers: [{name: c2, resources: {requests: {memory: 128Mi, cpu: 50m}}}]}}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata: {name: hook}
 spec:
-  template:
-    spec:
-      containers:
-        - name: probe
-          resources: {requests: {memory: 512Mi, cpu: 500m}}
+  template: {spec: {containers: [{name: probe, resources: {requests: {memory: 512Mi, cpu: 500m}}}]}}
 YAML
 }
 
-@test "summer: Gi->MiB, Deployment x replicas, DaemonSet x1, Job excluded" {
-  # Deployment 1Gi x2 = 2048 MiB, 250m x2 = 500m ; DaemonSet 128 MiB / 50m x1
-  # Job (512 MiB / 500m) MUST NOT count. Expected: 2176 MiB / 550 m / 2 containers.
-  local f; f="$(mktemp)"; fixture > "$f"
-  run bash -c "python3 '$SUMMER' < '$f'"
-  rm -f "$f"
-  [ "$status" -eq 0 ]
-  [ "$output" = "2176 550 2" ]
-}
-
-@test "summer: an empty render sums to zero containers (the guard treats that as a finding)" {
-  run bash -c "printf '' | python3 '$SUMMER'"
-  [ "$status" -eq 0 ]
-  [ "$output" = "0 0 0" ]
+@test "arithmetic: Gi->MiB, Deployment x replicas, DaemonSet x1, Job excluded" {
+  local fx; fx="$(mktemp)"; write_fixture "$fx"
+  # A ceiling above the fixture total keeps the ratchet green; we assert the SUM.
+  TB_CP_FOOTPRINT_FIXTURE="$fx" TB_CP_FOOTPRINT_MEM_CEIL=9999 TB_CP_FOOTPRINT_CPU_CEIL=9999 run bash "$GUARD"
+  rm -f "$fx"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q '2176 MiB / 550 m' || { echo "wrong sum: $output"; return 1; }
 }
 
 @test "guard: the real render is at or under the recorded ceiling (green today)" {
   run bash "$GUARD"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"control-plane-footprint: OK"* ]]
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'control-plane-footprint: OK' || { echo "$output"; return 1; }
 }
 
 @test "guard: RATCHET reddens when the footprint would exceed the ceiling" {
   TB_CP_FOOTPRINT_MEM_CEIL=3000 run bash "$GUARD"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"exceed the recorded ceiling"* ]]
+  [ "$status" -eq 1 ] || { echo "expected exit 1, got $status: $output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'exceed the recorded ceiling' || { echo "$output"; return 1; }
 }
 
 @test "guard: it reports the gap against the reserve, not asserts schedulability" {
   run bash "$GUARD"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"OVER"* || "$output" == *"headroom"* ]]
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -qE 'OVER|headroom' || { echo "$output"; return 1; }
+}
+
+@test "guard: FAIL-CLOSED when a render exits non-zero (partial/failed helm)" {
+  # A fixture path that does not exist makes `cat` in _render_profile exit non-zero,
+  # standing in for a failed helm render -- which must refuse, not undercount.
+  TB_CP_FOOTPRINT_FIXTURE="/no/such/manifest.$$" run bash "$GUARD"
+  [ "$status" -eq 1 ] || { echo "expected exit 1, got $status: $output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'exited non-zero' || { echo "$output"; return 1; }
 }
 
 @test "guard: FAIL-CLOSED when the installer reserve cannot be read" {
-  root="$(mktemp -d)"
+  local root; root="$(mktemp -d)"
   mkdir -p "$root/client/ci" "$root/scripts/lib"
   cp -r "$HERE/../../client/." "$root/client/" 2>/dev/null || true
   : > "$root/scripts/lib/install-client-helm.sh"   # present but carries no reserve constant
   TB_CP_FOOTPRINT_ROOT="$root" run bash "$GUARD"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"could not read _TB_ENVELOPE_OVERHEAD"* ]]
+  [ "$status" -eq 1 ] || { echo "expected exit 1, got $status: $output"; rm -rf "$root"; return 1; }
+  printf '%s\n' "$output" | grep -q 'could not read _TB_ENVELOPE_OVERHEAD' || { echo "$output"; rm -rf "$root"; return 1; }
   rm -rf "$root"
 }

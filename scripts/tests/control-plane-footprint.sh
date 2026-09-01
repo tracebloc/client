@@ -65,8 +65,12 @@ command -v python3 >/dev/null 2>&1 || { echo "[ERROR] python3 is required to sum
 
 # THE RESERVE, DERIVED from the installer's embedded constant, not restated. A
 # `\b` word match on the exact assignment; missing it is a finding, not a pass.
-reserve_bytes="$(sed -n 's/^_TB_ENVELOPE_OVERHEAD_MEM_BYTES=\([0-9]\{1,\}\).*/\1/p' "$installer" | head -1)"
-reserve_cpu_milli="$(sed -n 's/^_TB_ENVELOPE_OVERHEAD_CPU_MILLI=\([0-9]\{1,\}\).*/\1/p' "$installer" | head -1)"
+# awk, not `sed ... | head -1`: `head` closes the pipe early, which the org
+# pipefail gate flags (SIGPIPE on the upstream would be masked under pipefail).
+# awk `exit`s after the FIRST match -- one process, no pipe -- and is portable
+# across the BSD sed on macOS and GNU sed in CI (the `{s;q}` sed form is not).
+reserve_bytes="$(awk -F= '$1=="_TB_ENVELOPE_OVERHEAD_MEM_BYTES"{v=$2; sub(/[^0-9].*/,"",v); print v; exit}' "$installer")"
+reserve_cpu_milli="$(awk -F= '$1=="_TB_ENVELOPE_OVERHEAD_CPU_MILLI"{v=$2; sub(/[^0-9].*/,"",v); print v; exit}' "$installer")"
 if [ -z "$reserve_bytes" ] || [ -z "$reserve_cpu_milli" ]; then
   echo "[ERROR] could not read _TB_ENVELOPE_OVERHEAD_{MEM_BYTES,CPU_MILLI} from $installer." >&2
   echo "        The reserve moved or was renamed; this guard compares against it and cannot 'cannot tell' into a pass." >&2
@@ -80,15 +84,86 @@ profiles=("$chart"/ci/*-values.yaml)
 worst_mem=0
 worst_cpu=0
 fail=0
+# The summer, INLINE in this .sh with a shell-level PyYAML preflight (Bugbot,
+# backend#2870). A separate `.py` sidecar carried a top-level `import yaml` that
+# `pyyaml-preflight.bats` does not scan (it reads `.sh`/`.bats`), so a runner with
+# python3 but no PyYAML would die as a bare traceback. Inlined, the import lives in
+# the heredoc the preflight guard already checks, and a missing module is a NAMED
+# refusal. STEADY STATE ONLY -- Deployment/StatefulSet/DaemonSet, never Job/CronJob
+# (the egress-reachability and storage-assertions hooks are one-shot and exit); a
+# DaemonSet is one replica per node, x1 on the single-node edge this ticket is about.
+# $1 = a file of rendered manifests. Read from the FILE, not stdin: `python3 -
+# <<'PY'` already occupies stdin with the heredoc, so a piped manifest would never
+# arrive -- the sibling guards pass their input as an argv for exactly this reason.
+_sum_requests() {
+  python3 - "$1" <<'PY'
+import sys, re
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
+def mib(v):
+    if not v: return 0.0
+    m=re.match(r'^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti)?$', str(v))
+    if not m: return 0.0
+    return float(m.group(1))*{'Ki':1/1024,'Mi':1,'Gi':1024,'Ti':1024*1024}[m.group(2) or 'Mi']
+def milli(v):
+    if not v: return 0.0
+    v=str(v); return float(v[:-1]) if v.endswith('m') else float(v)*1000
+mem=cpu=0.0; n=0
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for d in yaml.safe_load_all(fh):
+        if not d: continue
+        if d.get('kind') not in ('Deployment','StatefulSet','DaemonSet'): continue
+        reps=1 if d.get('kind')=='DaemonSet' else (d.get('spec',{}).get('replicas',1) or 1)
+        sp=d.get('spec',{}).get('template',{}).get('spec',{}) or {}
+        for c in (sp.get('containers',[]) or [])+(sp.get('initContainers',[]) or []):
+            r=(c.get('resources',{}) or {}).get('requests') or {}
+            if r.get('memory') or r.get('cpu'): n+=1
+            mem+=mib(r.get('memory'))*reps; cpu+=milli(r.get('cpu'))*reps
+print(f"{mem:.0f} {cpu:.0f} {n}")
+PY
+}
+
+# Render one profile, or -- when TB_CP_FOOTPRINT_FIXTURE points at a manifest --
+# read that instead, so the arithmetic can be tested on a KNOWN render without helm.
+_render_profile() {
+  local vf="$1"
+  if [ -n "${TB_CP_FOOTPRINT_FIXTURE:-}" ]; then
+    cat "$TB_CP_FOOTPRINT_FIXTURE"
+    return   # propagate cat's status -- an unreadable fixture is a failed render
+  fi
+  helm template be "$chart" --set image.tag=footprint-probe -f "$vf"
+}
+
 for vf in "${profiles[@]}"; do
   prof="$(basename "$vf" -values.yaml)"
-  rendered="$(helm template be "$chart" --set image.tag=footprint-probe -f "$vf" 2>/dev/null || true)"
+  # A FAILED render is not a smaller footprint (Bugbot, backend#2870). helm streams
+  # documents, so a template error partway through still emits YAML for the earlier
+  # resources -- an undercount that would sit under the ceiling and print OK while
+  # hiding the error. Capture helm's EXIT CODE and refuse on non-zero, rather than
+  # `|| true`-ing it into a success.
+  rendered=""
+  if ! rendered="$(_render_profile "$vf" 2>/tmp/cp-footprint-helm.$$)"; then
+    echo "[ERROR] $prof: the render exited non-zero, so its footprint is incomplete: $(tail -1 "/tmp/cp-footprint-helm.$$" 2>/dev/null)" >&2
+    rm -f "/tmp/cp-footprint-helm.$$"
+    fail=1
+    continue
+  fi
+  rm -f "/tmp/cp-footprint-helm.$$"
   if [ -z "$rendered" ]; then
     echo "[ERROR] $prof: the chart rendered nothing -- a footprint cannot be summed from an empty render." >&2
     fail=1
     continue
   fi
-  summed="$(printf '%s' "$rendered" | python3 "$here/sum_control_plane_requests.py")"
+  # `_sum_requests` exits non-zero (the PyYAML refusal) rather than printing a sum;
+  # propagate that as a finding instead of reading an empty `summed` as zero.
+  mf="$(mktemp)"; printf '%s' "$rendered" > "$mf"
+  if ! summed="$(_sum_requests "$mf")"; then
+    echo "[ERROR] $prof: could not sum the rendered requests ($summed)." >&2
+    rm -f "$mf"; fail=1; continue
+  fi
+  rm -f "$mf"
   read -r mem cpu n <<<"$summed"
   if [ -z "${n:-}" ] || [ "${n:-0}" -eq 0 ]; then
     echo "[ERROR] $prof: rendered workloads carried ZERO resource requests -- the sum walked nothing, which is not the same as a footprint of zero." >&2
