@@ -126,12 +126,39 @@ function Resolve-InstallRef {
     }
   }
 
-  # Belt-and-suspenders: even after the shape checks above, refuse a ref carrying
-  # a path separator or a parent-dir token before it is interpolated into a URL.
-  # A '/' or '..' here is a path-traversal lever (it could escape the pinned tag
-  # onto a mutable branch) — independent of which branch above let it through.
-  if ($ref -match '/' -or $ref -match '\.\.') {
-    throw "Ref '$ref' contains a path separator or '..' -- refusing to build a fetch URL from it (path-traversal guard)."
+  # Belt-and-suspenders: even after the shape checks above, refuse a parent-dir
+  # token before the ref is interpolated into a URL. '..' is the traversal lever
+  # -- it is what could escape the pinned tag onto a mutable branch (RFC-0001 R8)
+  # -- and it is refused on EVERY path, opt-in or not.
+  if ($ref -match '\.\.') {
+    throw "Ref '$ref' contains '..' -- refusing to build a fetch URL from it (path-traversal guard)."
+  }
+
+  # '/' IS NOT THE LEVER, AND REFUSING IT OUTRIGHT BROKE THE ONLY FLOW IT EXISTS
+  # FOR (client#917). Every real development branch is `fix/1234-thing` or
+  # `feat/...`, so a blanket refusal meant the documented developer override
+  # could fetch `develop`, `staging` and `main` and NOTHING ELSE -- while the
+  # whole point of the escape hatch is testing unreleased code, which lives on
+  # feature branches. Measured on a real Windows box: the install stopped at
+  # "contains a path separator" before it did anything.
+  #
+  # The R8 property is unchanged, because it never rested on '/': a TAG still
+  # cannot carry one (the vX.Y.Z shape check above rejects it, so a ref like
+  # 'v1.2.3-../../heads/main' is refused twice over -- by that check and by the
+  # '..' guard). A '/' is accepted ONLY on the path that has already announced
+  # itself as an unverified branch install and printed the four-line warning.
+  if ($ref -match '/') {
+    if (-not ($usingBranch -and $AllowUnverified)) {
+      throw "Ref '$ref' contains a path separator -- only a branch ref under TRACEBLOC_ALLOW_UNVERIFIED may contain one (path-traversal guard)."
+    }
+    # SEGMENT BY SEGMENT, so a multi-segment ref is held to exactly the same
+    # shape as a single-segment one: no empty segment (which is a leading,
+    # trailing or doubled slash), and no bare '.'.
+    foreach ($seg in $ref.Split('/')) {
+      if ($seg -eq '' -or $seg -eq '.' -or $seg -notmatch '^[A-Za-z0-9._-]+$') {
+        throw "Ref '$ref' has an invalid path segment -- refusing to build a fetch URL from it (path-traversal guard)."
+      }
+    }
   }
 
   return $ref
@@ -590,10 +617,71 @@ function Invoke-Bootstrap {
     } else {
       & powershell.exe -ExecutionPolicy Bypass -File $k8s
     }
-    exit $LASTEXITCODE
+    Complete-Bootstrap -Code $LASTEXITCODE
   } finally {
     Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
   }
+}
+
+# =============================================================================
+#  EXITING WITHOUT TAKING THE USER'S WINDOW WITH IT (#577, client#917)
+# =============================================================================
+# #577 made the installer always show a clean "what happened" instead of
+# vanishing -- and it fixed that in install-k8s.ps1, which runs as a CHILD
+# process where `exit` is harmless. THIS file is the other half, and it was
+# missed: the documented entry point is `irm ... | iex`, so this script runs
+# INSIDE the user's own console. A top-level `exit` there ends THEIR session --
+# the window closes and takes the outcome with it.
+#
+# And it is not only the failure paths. `exit $LASTEXITCODE` after the child
+# returns fires on EVERY run, so a perfectly successful install also slammed the
+# window shut over its own summary. Reported from a real Windows machine: "it
+# just closed the PowerShell".
+#
+# The exit CODE must still propagate untouched -- the e2e harness reads it to
+# tell install-k8s.ps1's declared `exit 2` reboot handoff from a real failure --
+# so this does not swap `exit` for `return`, which would silently turn every
+# code into 0 for `powershell.exe -Command` callers. It holds the window open
+# just long enough to be read, then exits exactly as before.
+#
+# Can we prompt? Same predicate install-k8s.ps1 uses, deliberately: false under
+# CI, a service, or piped/redirected stdin -- every context where a hold would
+# be a hang and where no human is losing a window anyway. Note this predicate is
+# a best-effort filter, NOT a guarantee: an interactive Windows desktop session
+# satisfies both conjuncts, so the e2e journey may well take the HOLD path. That
+# is safe because the hold is bounded (60s/run) and the exit code is unchanged --
+# the correctness of this function must not, and does not, rest on the predicate.
+function Test-BootstrapCanPrompt {
+  try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
+  catch { return $false }
+}
+
+# BOUNDED, because an unbounded hold is the bug we spent this whole ticket
+# removing. 60s is long enough to read a summary or an error and short enough
+# that a forgotten window closes itself. A host that cannot report keystrokes
+# (ISE, a redirected console) throws on KeyAvailable -- caught, and treated as
+# "nothing is waiting to be read".
+function Complete-Bootstrap {
+  param([int]$Code, [int]$HoldSec = 60)
+  if (Test-BootstrapCanPrompt) {
+    try {
+      Write-Host ""
+      Write-Host "  This window closes when you press a key (or in ${HoldSec}s)." -ForegroundColor DarkGray
+      $deadline = (Get-Date).AddSeconds($HoldSec)
+      # DRAIN FIRST. KeyAvailable reports whatever is sitting in the console input
+      # buffer, not a press since the hold began -- and install-k8s.ps1 just ran as a
+      # child on THIS console with 11 Read-Host sites. Any key the user tapped during
+      # a 15-40 minute install (an extra Enter at a prompt, the trailing newline of
+      # `irm ... | iex`, a keystroke at the Docker spinner) is still queued, would make
+      # the `while` false on its FIRST evaluation, and would close the window over the
+      # summary -- reproducing the exact #577 failure this function exists to stop,
+      # under a line that just promised to wait.
+      while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
+      while (-not [Console]::KeyAvailable -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+      if ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
+    } catch {}
+  }
+  exit $Code
 }
 
 # =============================================================================
@@ -607,6 +695,12 @@ if (-not $env:TB_PESTER) {
     Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline
     Write-Host " This script is for Windows. On macOS / Linux use:" -ForegroundColor Red
     Write-Host "  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash" -ForegroundColor Cyan
+    # A BARE exit, deliberately, and the only one outside Complete-Bootstrap. This
+    # branch is reachable only on macOS/Linux (`Core -and -not $IsWindows`), where
+    # this script runs as a child `pwsh` and `exit` closes no window at all -- and
+    # where [Environment]::UserInteractive is hardcoded $true on non-Windows .NET,
+    # so Test-BootstrapCanPrompt would say "yes" and stall an instant, zero-cost
+    # bail-out for 60s. There is no window to lose here; holding only wastes time.
     exit 1
   }
   # TLS 1.2 floor — Windows PowerShell 5.1 otherwise negotiates down to TLS 1.0.
@@ -620,6 +714,6 @@ if (-not $env:TB_PESTER) {
     Write-Host ""
     Err "Installation stopped: $_"
     Write-Host "  It's safe to re-run this installer. If it keeps failing, share the output above with tracebloc support." -ForegroundColor DarkGray
-    exit 1
+    Complete-Bootstrap -Code 1
   }
 }

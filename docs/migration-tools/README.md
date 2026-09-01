@@ -11,6 +11,9 @@ Read [`../MIGRATIONS.md`](../MIGRATIONS.md) first for the *why* — this directo
 | `tenant-config.example.env` | Per-tenant secrets + PV mappings template. Copy, fill in real values, keep local. **Never commit a populated copy.** |
 | `generate.sh` | Reads `tenant-config.env` (or whatever you point `TENANT_CONFIG` at) and emits `values.yaml`, `pvcs.yaml`, `storageclass.yaml` for every tenant in the file, into `/tmp/tracebloc-migration-<tenant>/`. |
 | `migrate-tenant.sh phase1\|phase2 <tenant>` | Parameterised runbook. Phase 1 is non-destructive (mysqldump, AWS Backup, render). Phase 2 is destructive (`helm uninstall` → claimRef clear → SC re-create → PVC pre-create → `helm install` → verify). |
+| `regcred-existing-secret.md` | Operational runbook for moving a fleet's registry credential out of its Helm release values (backend#2571). Drives the two `regcred-*` tools below. Records the three things measured on a k3d rehearsal: `helm upgrade` cannot tell you the migration is half-done, the chart's own Secret is **deleted** rather than orphaned, and `<release>-regcred` is a name collision on our releases. |
+| `regcred-preflight.sh <rel> <ns> <chart> <values.yaml>` | Gate for the `dockerRegistry.create` -> `existingSecret` migration (backend#2571). Renders the chart with the values you are about to apply and refuses unless the target pull Secret exists, with the right type, in **every** namespace the render references it from. `helm upgrade` does not check this: a copy made into only one of the two namespaces reports `STATUS: deployed` and leaves those workloads unable to pull. Exit 0 safe, 1 would break, 2 cannot tell. |
+| `regcred-copy.py <new-name>` | Copies a Helm-managed pull Secret under an operator-owned name, stripping every trace of Helm ownership so Helm cannot adopt and later delete it. The credential is never decoded, printed or retyped. The new name must NOT be `<release>-regcred` — that is the chart's own name and applying over it rewrites the live Secret in place. |
 
 ## Workflow
 
@@ -81,6 +84,26 @@ After Phase 1 each tenant has three independent recovery paths:
 ## Re-running the survey
 
 Tenant data captured by hand on 2026-04-28. If a tenant's PVs or release name change, re-run the survey commands at the top of `tenant-config.example.env` and update `tenant-config.env`. The PVs are `Retain`, so PV IDs are stable across the legacy chart's lifetime.
+
+## DROP-readiness gate (backend#1528)
+
+Not part of the `eks-1.0.x` → `client-1.x` migration above — grouped here because it is the same kind of fleet-operational tooling. Retiring the root-equivalent `edgeuser` account needs the DROP-readiness gate evaluated on each fleet.
+
+| File | Purpose |
+|---|---|
+| `edgeuser-drop-readiness.sh` | Evaluates backend#1528's three DROP-readiness criteria against a live fleet and prints one verdict. Read-only, fails closed, never prints a password. |
+| `wait-for-ingest-pod.sh` | Blocks until a driven ingestion Job pod is `Running`, then (with `--exec`) hands off — so the gate fires the instant the pod appears instead of being raced by hand. |
+
+Two of the gate's three criteria read the ingestion identity from a **live** pod (`kubectl exec` needs a running container), so `edgeuser-drop-readiness.sh` has to run **while an ingestion run is in flight**. Measured (backend#2881), that window is ~9 s (500 rows) to tens of seconds (20k rows) — unhittable by hand. Fire on the pod's appearance instead:
+
+```bash
+# start a driven ingestion first (a deliberately LARGE dataset widens the window), then:
+./wait-for-ingest-pod.sh --context "$CTX" --namespace "$NS" --exec -- \
+  ./edgeuser-drop-readiness.sh --context "$CTX" --namespace "$NS" \
+    --baseline-datasets N --baseline-metadata N --baseline-identity root --phase pre-revoke
+```
+
+The wait anchors on the ingestion Job's own name prefix (`ingest-job-…`), so it returns only once the real ingestion pod is `Running` — never on the file-staging pod (`tracebloc-stage-<table>-…`, whatever the table is named) or on a control-plane pod that happens to share the `ingest` substring on an `…ingest…`-named release. See each script's `--help`.
 
 ## After all migrations are done
 

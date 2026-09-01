@@ -89,7 +89,21 @@ done
 #   fail-cgroupv1  scalar boolean, no k3s default to replace, and it must be set
 #                  at cluster-create time before any config file exists
 #                  (backend#2422). Gated on kubelet >= 1.31 in both twins.
-SAFE_KUBELET_ARGS="fail-cgroupv1"
+#   config         a PATH, not a setting -- it is how the drop-in this guard's
+#                  header demanded actually gets loaded (backend#2634). Adding it
+#                  cannot clobber a map, because it is the mechanism that lets the
+#                  maps be authored whole. What it points at is checked by
+#                  kubelet-config-agreement.sh, which reads the YAML both twins
+#                  emit; this guard stays about CLI-vs-file and nothing else.
+#
+#                  MEASURED before admitting it (2026-08-31, k3d v5.8.3 /
+#                  rancher/k3s:v1.36.3-k3s1, server + agent): `config=` coexists
+#                  with `fail-cgroupv1` on the same command line, and /configz on
+#                  both nodes reports the file's values. The header above warns
+#                  that the kubelet REFUSES a field set both on the CLI and in a
+#                  config file -- that is why the file must never carry
+#                  `failCgroupV1`, and it is why only a path is admitted here.
+SAFE_KUBELET_ARGS="fail-cgroupv1 config"
 
 findings=0
 note() { findings=$((findings + 1)); printf '\nFINDING %d: %s\n' "$findings" "$1"; shift; for l in "$@"; do printf '  %s\n' "$l"; done; }
