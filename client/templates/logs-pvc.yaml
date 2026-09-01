@@ -1,6 +1,6 @@
 {{- $name := include "tracebloc.clientLogsPvc" . -}}
 {{- $storage := include "tracebloc.clientLogsStorage" . -}}
-{{- if .Values.hostPath.enabled }}
+{{- if (default dict .Values.hostPath).enabled }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -33,7 +33,7 @@ metadata:
 spec:
   storageClassName: {{ include "tracebloc.storageClassName" . }}
   accessModes:
-    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" .Values.hostPath.enabled) }}
+    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .Values.hostPath).enabled | default false)) }}
   resources:
     requests:
       storage: {{ $storage }}
