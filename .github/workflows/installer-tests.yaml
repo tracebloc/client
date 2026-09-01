@@ -168,7 +168,12 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          # THE SAME CEILING THE HARNESS IMPORTS WITH (Bugbot on #931).
+          # `-MinimumVersion` alone takes the newest the gallery has -- 6.x today --
+          # while every suite child imports with a 5.x ceiling, so the child cannot
+          # load Pester, prints no RESULT, and this job dies at the baseline having
+          # proven nothing. @saadqbal hit exactly that. The two pins move together.
+          Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
           pwsh -NoProfile -File scripts/tests/mutation-check.ps1
 
   distro-prereqs:

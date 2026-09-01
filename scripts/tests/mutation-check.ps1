@@ -218,6 +218,12 @@ if ($Dry) { Write-Host "--dry: markers only. This is NOT evidence that anything 
 # is also how CI runs the suite.
 function Invoke-Suite {
     param([string]$Root, [string]$Suite)
+    # PINNED TO THE 5 MAJOR, and the workflow's Install-Module carries the SAME
+    # ceiling (Bugbot; @saadqbal measured the failure). `-MinimumVersion` alone
+    # takes the newest the gallery has, which is 6.x -- so an unpinned install
+    # plus a pinned import means the child cannot load Pester at all, prints no
+    # RESULT, and the job dies at the baseline having proven nothing. The two
+    # numbers have to move together or not at all.
     $script = @"
 Import-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force
 `$c = New-PesterConfiguration
@@ -263,7 +269,7 @@ foreach ($suite in ($Mutations.Suite | Sort-Object -Unique)) {
 }
 
 # ── the real thing ───────────────────────────────────────────────────────────
-$caught = 0; $survived = @(); $misattributed = @()
+$caught = 0; $survived = @(); $misattributed = @(); $crashed = @()
 foreach ($m in $Mutations) {
     $sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-mut-" + [guid]::NewGuid().ToString('N').Substring(0,8))
     try {
@@ -305,7 +311,17 @@ foreach ($m in $Mutations) {
         # test is MISATTRIBUTED -- reported as a failure of the registry, not as a
         # catch -- because it means the guard we believe protects this fix does not.
         $expected = @($mr.Failed | Where-Object { $_ -like "*$($m.Expect)*" })
-        if ($expected.Count -gt 0) {
+        # A CRASHED CHILD IS NOT A SURVIVED MUTATION (Bugbot). Invoke-Suite returns
+        # FailedCount -1 when the child died before printing RESULT, and -1 is not
+        # `-gt 0`, so it fell through to SURVIVED -- reporting "this guard does not
+        # bite" for a run that never reached the guard, and throwing away the very
+        # stderr the previous fix went to the trouble of capturing. Its own third
+        # outcome, and it prints the cause.
+        if ($fails -lt 0) {
+            $crashed += "$($m.Name)  [$($mr.Failed -join '; ')]"
+            Write-Host ("  CRASHED  {0}" -f $m.Name) -ForegroundColor Red
+            $mr.Failed | ForEach-Object { Write-Host ("             $_") -ForegroundColor Red }
+        } elseif ($expected.Count -gt 0) {
             $caught++
             Write-Host ("  caught   {0}" -f $m.Name) -ForegroundColor Green
             Write-Host ("             by: {0}" -f ($expected[0] -replace '^.*?\.', '')) -ForegroundColor DarkGray
@@ -328,6 +344,12 @@ if ($survived.Count -gt 0) {
     Write-Host "SURVIVED -- these guards do not bite, so the fix is unprotected:" -ForegroundColor Red
     $survived | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
 }
+if ($crashed.Count -gt 0) {
+    # Loudest of the three: a crash means the entry proved NOTHING either way, so
+    # scoring it as anything but a hard failure would be the harness lying again.
+    Write-Host "CRASHED -- the suite never ran, so these entries proved nothing:" -ForegroundColor Red
+    $crashed | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+}
 if ($misattributed.Count -gt 0) {
     # Deliberately as loud as SURVIVED. A mutation that reddens the suite via some
     # OTHER test tells us nothing about the guard we think protects the fix, and a
@@ -335,5 +357,5 @@ if ($misattributed.Count -gt 0) {
     Write-Host "MISATTRIBUTED -- the suite reddened, but not via the claiming guard:" -ForegroundColor Red
     $misattributed | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
 }
-if ($survived.Count -gt 0 -or $misattributed.Count -gt 0) { exit 1 }
+if ($survived.Count -gt 0 -or $misattributed.Count -gt 0 -or $crashed.Count -gt 0) { exit 1 }
 exit 0
