@@ -294,7 +294,46 @@ spec:
         # lowers the container's oom_score_adj so it is a less-preferred victim
         # when the node runs out of memory — the pod stays Burstable (cpu request
         # != limit), exactly as mysql-deployment.yaml already does (mysql has no
-        # cpu limit either). requests.cpu is
+        # cpu limit either).
+        #
+        # EQUALISING CPU HERE WOULD NOT MAKE THIS POD GUARANTEED, and stopping at
+        # cpu is how the last attempt concluded the chart was broken
+        # (backend#2872). ComputePodQOS requires requests == limits for BOTH
+        # dimensions in EVERY container, INIT CONTAINERS INCLUDED — and
+        # `init-writable-data` above carries no resources at all whenever
+        # hostPath.enabled=true, i.e. on every installer-provisioned edge.
+        #
+        # AND SINCE #942 IT REACHES GUARANTEED ON NO CLUSTER AT ALL (review on
+        # client#922). This comment used to end "Per-container equalisation only
+        # reaches Guaranteed on CSI clusters", which #942 falsified the day it
+        # merged: `wait-for-mysql` is UNCONDITIONAL and unequal on BOTH
+        # dimensions (cpu 10m/100m, memory 16Mi/64Mi), so it blocks Guaranteed
+        # on CSI exactly as `init-writable-data` does off it. Measured on the
+        # merged tree with hostPath off and every resources.* knob equalised:
+        #
+        #   t-jobs-manager  Burstable  wait-for-mysql:cpu(req=10m,lim=100m);
+        #                              wait-for-mysql:memory(req=16Mi,lim=64Mi)
+        #
+        # There is no values key for `wait-for-mysql`, so through values this is
+        # now unreachable everywhere. Pod-level resources (KEP-2837, beta in
+        # 1.34) still clear it — measured on a real 1.36 cluster: pod-level
+        # requests == limits with an unresourced init container yields
+        # Guaranteed.
+        #
+        # NOT the only route, though an earlier version of this comment said so
+        # (review on client#922): resourcing every init container requests ==
+        # limits reaches Guaranteed too, and pod-qos-class.py returns exactly
+        # that for t-jobs-manager and mysql-client when they are equalised. That
+        # is now a CHART edit rather than a values change, for the reason above.
+        # It is rejected on cost, not capability — those reservations are held
+        # for the pod's whole life, not just the seconds the init container runs.
+        #
+        # THE STALENESS IS THE POINT. Both claims above survived #942 with every
+        # QoS guard green, because the guards pin the class and the
+        # unresourced-init set, and neither is reachability.
+        # `scripts/tests/qos-reachability.sh` asserts it now.
+        #
+        # requests.cpu is
         # also raised (100m -> 250m) so a mass restart doesn't throttle its
         # startup to a crawl (the ~9m recovery seen on lukas-test).
         resources:
@@ -670,12 +709,37 @@ spec:
           value: {{ if ne .Values.resourceMonitor false }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
         # nor env.RESOURCE_LIMITS set, BOTH vars are omitted and jobs-manager
-        # sizes the envelope from node allocatable (75% with cpu=2/memory=8Gi
-        # floors, requests == limits / Guaranteed QoS). With derivation off (the
-        # default), jobs-manager instead uses its built-in fallback — the
-        # contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254 image
-        # used cpu=2,memory=8Gi, the value this template used to inject), so the
-        # spawned-job default drops when the runtime image crosses that version.
+        # sizes the envelope from node allocatable — BUT ONLY IF
+        # DERIVE_JOB_ENVELOPE is set. It is off by default, so the two cases
+        # differ and so does their QoS class (backend#2872; this line said
+        # "requests == limits / Guaranteed QoS" flatly, which #2418 had already
+        # made false for one case and which was never true of both):
+        #
+        #   * derivation ON  -> 75% with cpu=2/memory=8Gi floors; MEMORY
+        #     requests == limits, CPU request-only with NO limit since
+        #     backend#2418 -> the job pod is BURSTABLE.
+        #   * derivation OFF (the default) -> jobs-manager's built-in fallback,
+        #     the contract floor cpu=1,memory=2Gi since backend#2254 (a pre-#2254
+        #     image used cpu=2,memory=8Gi, the value this template used to
+        #     inject), assigned to requests AND limits -> a CPU job pod is
+        #     GUARANTEED.
+        #   * a GPU job -> BESTEFFORT under EITHER setting. client-runtime's GPU
+        #     path resolves its envelope to nvidia.com/gpu and ephemeral-storage
+        #     only, and neither is QoS-relevant, so the container sets no
+        #     cpu/memory request or limit at all and the flag changes nothing
+        #     (backend#2871; `pod-qos-class.py` encodes the same carve-out).
+        #
+        # NO VERBATIM CROSS-REPO QUOTE HERE, deliberately (Asad, review of
+        # backend#2872). This block used to quote client-runtime's own comment
+        # word for word to support the Guaranteed claim. A quote is a dependency
+        # nothing checks -- client-runtime#457 exists to delete one in the other
+        # direction -- and it would have gone stale on the very sentence this
+        # commit is correcting. Cite the behaviour and where it lives; do not
+        # copy its prose.
+        #
+        # So the spawned-job default drops when the runtime image crosses #2254,
+        # and the class depends on the flag AND on whether the job asks for a
+        # GPU -- not on this template.
         # The standalone installer writes explicit values (backend#1236), so the
         # derivation path applies to chart-direct installs only.
         #
@@ -807,7 +871,9 @@ spec:
         # #1144: same cluster-recovery treatment as the api container above —
         # pods-monitor was also exit-137 killed in the mass restart. Pin
         # requests.memory == limits.memory (512Mi) to lower its oom_score_adj
-        # (a less-preferred node OOM victim; the pod stays Burstable), and raise
+        # (a less-preferred node OOM victim; the pod stays Burstable — and cpu is
+        # not the only reason: see the init-container note on the api container
+        # above, backend#2872), and raise
         # requests.cpu (50m -> 100m) so its startup is not starved under
         # contention.
         resources:
