@@ -155,16 +155,38 @@ BASELINE_PROD_DIGEST="$(helm get values "$NS" -n "$NS" --all -o json \
   | jq -r '.images.ingestor.prodDigest // ""')"
 echo "   baseline prod ingestor pin: ${BASELINE_PROD_DIGEST:-<none — pre-pin era>}"
 
+# The baseline (published) release's RENDERED egress posture, captured the same
+# way and for the same reason as the prod pin above: path 1's --reuse-values
+# replays the baseline's computed values verbatim, so what it must assert is
+# "unchanged from the baseline", NOT a hardcoded era. While the published
+# baseline is still permissive this is the external-443 rule present + no
+# EGRESS_PROXY_URL; once THIS chart (RFC-0003 D6 deny-by-default defaults) is
+# the published baseline, --reuse-values replays lockdown instead — 443 gone,
+# gateway routed. Read the posture from the installed baseline so the assertion
+# is correct in both eras rather than tripping the moment the default flips
+# (Bugbot on this PR).
+if netpol_has_external_443; then BASELINE_EXTERNAL_443=1; else BASELINE_EXTERNAL_443=0; fi
+BASELINE_EGRESS_PROXY_URL="$(jm_egress_proxy_url)"
+echo "   baseline egress posture: external_443=$([ "$BASELINE_EXTERNAL_443" = 1 ] && echo present || echo absent) egress_proxy_url=${BASELINE_EGRESS_PROXY_URL:-<none>}"
+
 echo "── simulate an image-refresh-managed annotation (must survive upgrades) ──"
 kubectl annotate -n "$NS" "$(jm_deploy)" \
   "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2e-sentinel" --overwrite
 
 echo "── path 1: manual-operator habit — helm upgrade --reuse-values ──"
-# Old stored values replayed against the new chart: every new key is absent.
-# The nil-guards must hold, and the lockdown must NOT engage by accident.
+# Old stored values replayed against the new chart: every new key is absent and
+# the nil-guards must hold. The egress posture must be REPLAYED FROM THE BASELINE
+# VERBATIM — not moved by the new chart's defaults in either direction. That is
+# baseline-derived (like the prod pin below), so the assertion holds whether the
+# baseline is permissive (443 present, no gateway) or already deny-by-default
+# (443 gone, gateway routed) once this chart is published.
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reuse-values
-netpol_has_external_443 || fail "--reuse-values upgrade dropped the external 443 rule (lockdown engaged by accident)"
-[ -z "$(jm_egress_proxy_url)" ] || fail "--reuse-values upgrade injected EGRESS_PROXY_URL (routing engaged by accident)"
+if [ "$BASELINE_EXTERNAL_443" = 1 ]; then
+  netpol_has_external_443 || fail "--reuse-values dropped the baseline's external 443 rule (new deny-by-default default leaked in; --reuse-values must replay the baseline verbatim)"
+else
+  netpol_has_external_443 && fail "--reuse-values added an external 443 rule the deny-by-default baseline did not have (--reuse-values must replay the baseline verbatim)"
+fi
+[ "$(jm_egress_proxy_url)" = "$BASELINE_EGRESS_PROXY_URL" ] || fail "--reuse-values did not replay the baseline EGRESS_PROXY_URL verbatim: got '$(jm_egress_proxy_url)', want '${BASELINE_EGRESS_PROXY_URL:-<none>}' (new routeWorkloads default leaked in on this path)"
 # Documented limitation, asserted so it stays a known quantity: plain
 # --reuse-values replays the old release's COMPUTED values and ignores the new
 # chart's defaults. What that means for the prod ingestor pin depends on the
@@ -181,7 +203,7 @@ else
   [ "$(jm_ingestor_digest)" = "$BASELINE_PROD_DIGEST" ] \
     || fail "--reuse-values did not replay the baseline prod pin verbatim: got '$(jm_ingestor_digest)', want '$BASELINE_PROD_DIGEST' (stored computed values must win over new chart defaults on this path)"
 fi
-echo "   OK: upgrade succeeded, lockdown stayed off, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
+echo "   OK: upgrade succeeded, egress posture replayed from the baseline verbatim, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
 
 echo "── isolate path 2 from path 1's --reuse-values contamination (#459) ──"
 # path 1's --reuse-values rewrote THIS release's recorded values to the baseline's FULL
