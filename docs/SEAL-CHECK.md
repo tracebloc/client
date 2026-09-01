@@ -81,9 +81,9 @@ these):
   (the storage check's ServiceAccount/RBAC) deliberately do not — counting
   them would inflate the suite.
 - A check that does not *render* (its gating values turned it off, or its
-  preconditions are not declared — e.g. the egress-enforcement probe before
-  the lockdown is flipped) is **not part of the suite on that cluster**, and
-  the values that gated it away say why.
+  preconditions are not declared — e.g. the egress-enforcement probe when an
+  operator has opted a fleet back out with `allowExternalHttps=true`) is **not
+  part of the suite on that cluster**, and the values that gated it away say why.
 - Log lines are human-oriented and not part of the contract; the machine
   contract today is *labels + Job exit status*. (A structured verdict is the
   CLI's job — cli#393.)
