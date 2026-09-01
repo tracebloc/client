@@ -443,6 +443,23 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
+  - it: CronJob pins requests.memory == limits.memory so a node OOM cannot cull it first (backend#2935)
+    # backend#2935: image-refresh was exit-137 killed in lock-step with
+    # auto-upgrade — the SHARED, node-level OOM cause. kubectl's measured peak
+    # here is ~40-80Mi, well under 128Mi, so the ceiling was never the
+    # constraint; the request/limit gap was. Pin requests.memory == limit to
+    # lower oom_score_adj and keep the pod off the OOM-killer's shortlist
+    # (#642 / backend#1144). Guard against reopening the gap.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.limits.memory
+          value: 128Mi
+
   - it: Role is namespace-scoped, deployments-only (no pods, no cluster-admin)
     # The annotation pattern eliminated the need to read pods entirely —
     # the script reads the recorded digest from a deployment annotation,

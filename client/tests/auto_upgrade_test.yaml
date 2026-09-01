@@ -272,6 +272,25 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
+  - it: CronJob pins requests.memory == limits.memory so a node OOM cannot cull it first (backend#2935)
+    # backend#2935: auto-upgrade was exit-137 (SIGKILL) killed hourly on a live
+    # edge, together with image-refresh — a node-level OOM signature, not a
+    # container-limit overrun (helm's measured peak on this chart is ~50Mi, well
+    # under 256Mi). The fix is to keep the pod Burstable but pin requests.memory
+    # to limits.memory: that reserves the memory and lowers oom_score_adj so the
+    # kernel OOM-killer stops preferring this pod (same remedy as #642 /
+    # backend#1144 for jobs-manager). This guard fails if the request/limit gap
+    # that made it an easy victim is ever silently reopened.
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.memory
+          value: 256Mi
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.limits.memory
+          value: 256Mi
+
   - it: RBAC is least-privilege — namespaced Role plus a scoped ClusterRole, NOT cluster-admin (backend#953)
     template: templates/auto-upgrade-rbac.yaml
     asserts:

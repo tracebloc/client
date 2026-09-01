@@ -1291,11 +1291,28 @@ autoUpgrade:
     repository: alpine/helm
     tag: "3.16.4"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network + helm I/O.
+  # Memory is PINNED: requests.memory == limits.memory == 256Mi. This is NOT a
+  # limit bump. backend#2935: this CronJob AND image-refresh were both exit-137
+  # (SIGKILL) killed hourly on a live edge, TOGETHER — the signature of a
+  # NODE-level OOM kill, not either container overrunning its own limit. The
+  # helm CLI's peak working set on this chart is ~50Mi measured (repo update +
+  # search + `helm template` render), a fraction of the 256Mi ceiling, so the
+  # limit was never the binding constraint. What made these two the kernel
+  # OOM-killer's first victims is that they were Burstable with requests BELOW
+  # real usage: a Burstable pod running above its memory request draws a high
+  # oom_score_adj. Pinning requests.memory to the limit reserves the memory and
+  # drops oom_score_adj (the pod stays Burstable) so a node under pressure no
+  # longer prefers it — the exact remedy applied to jobs-manager/pods-monitor
+  # after their own exit-137 mass-restart OOM (#642, backend#1144) and to the
+  # GPU device plugins (#919). CPU stays burstable: it is a share weight,
+  # throttled not killed (backend#2418). Raising the request also forces honest
+  # accounting — if the node genuinely cannot spare 256Mi the pod goes Pending
+  # (visible) instead of OOM-looping (invisible), which is the whole point of
+  # #2935. auto_upgrade_test.yaml pins request==limit so the gap cannot re-open.
   resources:
     requests:
       cpu: "50m"
-      memory: "128Mi"
+      memory: "256Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -1476,12 +1493,21 @@ imageRefresh:
     repository: alpine/k8s
     tag: "1.30.5"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network I/O for the digest
-  # HEADs and the rollout-status watch.
+  # Memory is PINNED: requests.memory == limits.memory == 128Mi. See the fuller
+  # note on autoUpgrade.resources. backend#2935: image-refresh was OOM-killed in
+  # lock-step with auto-upgrade (six paired failures — this Job runs every 15m,
+  # so failing only when it coincides with the hourly upgrade tick is itself the
+  # tell), which is what makes the cause SHARED — a node-level OOM event —
+  # rather than two independent overruns. kubectl's peak here is ~40-80Mi measured (one `get deployment
+  # -o json` + `rollout status` at a time; the curl HEADs return headers only,
+  # jq ~2Mi) — well under 128Mi, so again the ceiling was never the constraint.
+  # Pinning requests.memory == limit lowers oom_score_adj so the node OOM-killer
+  # stops culling this Burstable pod first (#642 / backend#1144). CPU stays
+  # burstable (backend#2418). image_refresh_test.yaml pins request==limit.
   resources:
     requests:
       cpu: "20m"
-      memory: "64Mi"
+      memory: "128Mi"
     limits:
       cpu: "200m"
       memory: "128Mi"
