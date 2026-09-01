@@ -156,6 +156,11 @@ for name in sorted(os.listdir(tests_dir)):
     body = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read()
     lines = body.splitlines()
     if name.endswith(".py"):
+        # A python guard is not a shell file with python inside it: the whole file
+        # IS the snippet. extract_python finds only EMBEDDED blocks, so feeding a
+        # .py through it yields nothing and the file would land in the "import
+        # present but not captured" branch -- failing closed on a guard that is
+        # correctly wrapped.
         yaml_snips = [body] if IMPORT_YAML.search(body) else []
     else:
         yaml_snips = [s for s in extract_python(lines) if IMPORT_YAML.search(s)]
