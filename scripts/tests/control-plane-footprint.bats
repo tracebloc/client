@@ -67,6 +67,55 @@ YAML
   printf '%s\n' "$output" | grep -q '2176 MiB / 550 m' || { echo "wrong sum: $output"; return 1; }
 }
 
+@test "arithmetic: init containers are max()'d against the app sum, not added to it" {
+  # THE SCHEDULER'S FORMULA (@aptracebloc on client#944). A pod's effective request
+  # per resource is max( sum(app containers), max(init containers) ) -- init
+  # containers run to completion one at a time BEFORE the app containers, so they
+  # are never resident alongside them. Summing them both inflates the figure this
+  # guard hands to backend#2460/#2461.
+  #
+  # THIS FIXTURE EXISTS BECAUSE THE REAL CHART CANNOT TELL THE TWO APART. On the
+  # live render the number is 3136 MiB either way -- the chart's init containers
+  # carry no requests -- so the fix is INERT there and a green run proves nothing
+  # about the formula. Here the two answers differ, deliberately:
+  #
+  #   app containers  : 100Mi + 200Mi = 300Mi ,  100m + 100m = 200m
+  #   init containers : max(1000Mi, 50Mi) = 1000Mi , max(50m, 500m) = 500m
+  #   sum-everything  : 1350 MiB / 750 m   <- the old, wrong answer
+  #   scheduler       : max(300,1000)=1000 MiB , max(200,500)=500 m
+  #
+  # And it is PER-RESOURCE: memory comes from the init side, cpu also from the init
+  # side here, but a fixture where they came from opposite sides would pass equally
+  # -- which is why both numbers are asserted rather than a single total.
+  local fx; fx="$(mktemp)"
+  cat > "$fx" <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: cp}
+spec:
+  replicas: 1
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          resources: {requests: {memory: 1000Mi, cpu: 50m}}
+        - name: seed
+          resources: {requests: {memory: 50Mi, cpu: 500m}}
+      containers:
+        - name: api
+          resources: {requests: {memory: 100Mi, cpu: 100m}}
+        - name: sidecar
+          resources: {requests: {memory: 200Mi, cpu: 100m}}
+YAML
+  TB_CP_FOOTPRINT_FIXTURE="$fx" TB_CP_FOOTPRINT_MEM_CEIL=9999 TB_CP_FOOTPRINT_CPU_CEIL=9999 run bash "$GUARD"
+  rm -f "$fx"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # 1000 MiB / 500 m -- NOT 1350 / 750. Asserting the exact pair is what separates
+  # the two formulas; "under the ceiling" would pass on both.
+  printf '%s\n' "$output" | grep -q '1000 MiB / 500 m' || {
+    echo "expected 1000 MiB / 500 m (scheduler formula), got: $output"; return 1; }
+}
+
 @test "arithmetic: decimal-SI and plain-byte quantities are summed, not counted as zero" {
   # 250M (decimal) = 238 MiB, 268435456 bytes = 256 MiB, on a DaemonSet (x1).
   # The old Ki|Mi|Gi|Ti-only parser returned 0 for both -- an undercount that

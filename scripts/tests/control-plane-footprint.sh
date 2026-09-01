@@ -139,10 +139,39 @@ try:
             if d.get('kind') not in ('Deployment','StatefulSet','DaemonSet'): continue
             reps=1 if d.get('kind')=='DaemonSet' else (d.get('spec',{}).get('replicas',1) or 1)
             sp=d.get('spec',{}).get('template',{}).get('spec',{}) or {}
-            for c in (sp.get('containers',[]) or [])+(sp.get('initContainers',[]) or []):
+            # THE SCHEDULER'S FORMULA, NOT sum(everything) (@aptracebloc nit 1).
+            #
+            # A pod's effective request per resource is
+            #   max( sum(app containers), max(init containers) )
+            # because init containers run to completion ONE AT A TIME before the
+            # app containers start -- they are never resident alongside them.
+            # Summing both CONTRADICTED this guard's own "STEADY STATE ONLY" note
+            # and inflated the figure the ceiling is compared against. Conservative
+            # is not harmless here: this number is the input to backend#2460/#2461,
+            # so an inflated one sends that work after MiB no scheduler reserves.
+            #
+            # PER-RESOURCE, not per-pod: k8s takes the max independently for memory
+            # and cpu, so a pod can take its memory from the init side and its cpu
+            # from the app side.
+            #
+            # THE NUMBER DOES NOT MOVE ON THIS CHART -- 3136 MiB / 900 m either way,
+            # because these init containers carry no requests. So the "64 MiB OVER"
+            # finding stands; the method was wrong, the conclusion was not. It also
+            # means the fix is INERT on the real render, which is why the bats
+            # fixture is built so the two formulas disagree.
+            def _req(c, key):
+                return ((c.get('resources', {}) or {}).get('requests') or {}).get(key)
+            apps  = sp.get('containers', []) or []
+            inits = sp.get('initContainers', []) or []
+            csum_m = sum(mib(_req(c, 'memory')) for c in apps)
+            csum_c = sum(milli(_req(c, 'cpu')) for c in apps)
+            imax_m = max([mib(_req(c, 'memory')) for c in inits] or [0.0])
+            imax_c = max([milli(_req(c, 'cpu')) for c in inits] or [0.0])
+            for c in apps + inits:
                 r=(c.get('resources',{}) or {}).get('requests') or {}
                 if r.get('memory') or r.get('cpu'): n+=1
-                mem+=mib(r.get('memory'))*reps; cpu+=milli(r.get('cpu'))*reps
+            mem += max(csum_m, imax_m)*reps
+            cpu += max(csum_c, imax_c)*reps
 except ValueError as exc:
     # FAIL CLOSED: a quantity we cannot read is not a footprint of zero. Refusing
     # is the whole posture of this guard -- a silent 0 would undercount and pass.
