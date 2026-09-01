@@ -3880,7 +3880,14 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
       foreach ($a in $ast.FindAll({
         $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
       }, $true)) {
-        if ($a.Right.Extent.Text -match '\.ExitCode' -and
+        # BOTH SPELLINGS (@saadqbal). This followed `.ExitCode` only, so
+        # `$createRc = $LASTEXITCODE` never became a gate token and
+        # `if ($createRc -ne 0)` was invisible to the walk -- the copy-into-a-local
+        # idiom, which is the same shape round one flagged for `.ExitCode` and which
+        # was then fixed for one spelling only. `$LASTEXITCODE` was added as a DIRECT
+        # token below, catching `if ($LASTEXITCODE -ne 0)` but not the capture. The
+        # live site is install-k8s.ps1:5785-5787.
+        if ($a.Right.Extent.Text -match '\.ExitCode|\$LASTEXITCODE' -and
             $a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
           $codeVars += $a.Left.VariablePath.UserPath
         }
@@ -4027,7 +4034,11 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
     # invisible to an assignment-derived gate, and the commonest spelling here --
     # took it to 8. A floor left at an older number is the thing this test exists
     # to prevent, since it goes on passing over everything the gate newly sees.
-    $sites.Count | Should -BeGreaterOrEqual 8
+    # 8 -> 9: widening the derivation above makes the `$createRc = $LASTEXITCODE`
+    # site at install-k8s.ps1:5785 visible to the walk. The floor moves with it
+    # deliberately -- a floor left at 8 is what made the hole self-concealing: the
+    # test passed either way, so nothing said a site had gone missing.
+    $sites.Count | Should -BeGreaterOrEqual 9
   }
 
   It "no user-facing failure message drops the exit code that decided it" {

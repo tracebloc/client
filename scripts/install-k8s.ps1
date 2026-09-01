@@ -5786,7 +5786,7 @@ function Invoke-ProvisionClient {
     if (Test-Path $createOut) { Get-Content $createOut -ErrorAction SilentlyContinue | ForEach-Object { Log $_ } }
     if ($createRc -ne 0) {
       Print-CreateFailure -OutFile $createOut -Location $clientLocation
-      Err "Couldn't provision the client. Re-run to retry."
+      Err "Couldn't provision the client (tracebloc exited $(Format-ExitCode $createRc)). Re-run to retry."
     }
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
