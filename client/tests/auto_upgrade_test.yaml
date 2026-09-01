@@ -179,6 +179,40 @@ tests:
           path: data["auto-upgrade.sh"]
           pattern: "NOT rolling back"
 
+  # #2908: the age parser gates last_deployed on the SHAPE of its RFC3339 fields,
+  # not their RANGES, so a non-instant (month 00/99, day 00/40, hour 40, …) passed
+  # and computed a garbage epoch — one that could land LARGE POSITIVE, clear the
+  # #2877 age gate, and roll back a release that was never wedged. The range gate
+  # rejects such fields so the age comes back EMPTY ("cannot tell" → skip). The
+  # behavioural proof (out-of-range → skip, mutation-proved) lives in
+  # scripts/tests/auto-upgrade-inflight-vs-wedge.sh; this is the render-level guard
+  # that the gate is present and sits BEFORE the epoch math it protects.
+  - it: the wedge-age parser range-checks the timestamp before trusting it (#2908)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # The range gate itself: month 1-12, day 1-31, hour/min/sec bounded.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: 'mo < 1 \|\| mo > 12 \|\| d < 1 \|\| d > 31 \|\| hh > 23 \|\| mi > 59 \|\| ss > 60'
+      # …plus a fail-safe domain floor on the one field the RFC3339 ranges can't
+      # bound: the year. `0000`/`1970`/`1999` are in-range but impossible for a
+      # real deployment, and would otherwise fabricate a huge positive age.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: 'y < 2000'
+      # It must sit BEFORE the epoch is computed and printed, so a non-instant
+      # `exit`s with no output instead of feeding the civil→days math.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '(?s)mo < 1 \|\| mo > 12.*print now -'
+      # Same class, the zone offset: `+40:00`/`+99:99` are SHAPE-valid but not a
+      # real RFC3339 numoffset, and shift the epoch enough to age a RECENT upgrade
+      # past the threshold. Bound it (hour 0-23, minute 0-59) before it is applied.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: 'oh > 23 \|\| om > 59'
+
   - it: CronJob passes the wedge-age threshold to the upgrade script (#2877)
     template: templates/auto-upgrade-cronjob.yaml
     documentIndex: 1
