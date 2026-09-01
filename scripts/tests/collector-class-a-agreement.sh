@@ -244,7 +244,11 @@ partial="$(helm template t "$CHART" \
 # containers; reading it from the declaration is what keeps this control about
 # the mechanism it names.
 want="$(python3 - <<'WANT'
-import yaml
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
 v = yaml.safe_load(open("client/values.yaml"))["telemetryCollector"]
 print(len(v["classAContainers"]) + len(v["classANodeAgentContainers"]))
 WANT
