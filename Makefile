@@ -389,6 +389,7 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   bash scripts/tests/guards-survive-spaced-paths.sh|\
   bash scripts/tests/auto-upgrade-inflight-vs-wedge.sh|\
   bash scripts/tests/hostpath-reads-guarded.sh|\
+  bash scripts/tests/jobs-manager-waits-for-mysql.sh|\
   bash scripts/tests/control-plane-footprint.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the
