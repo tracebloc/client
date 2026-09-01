@@ -51,7 +51,26 @@ env: {
   # Optional, OFF by default: let jobs-manager size the training-job envelope
   # from node allocatable capacity instead of the literal above --
   # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS).
+  # floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and
+  # CPU is a request-only share weight with NO limit since backend#2418, so the
+  # job pod is BURSTABLE -- not Guaranteed QoS, as this line said until
+  # backend#2872 (`test_pod_envelope_sizing.py` asserts the opposite: "cpu" not
+  # in resource_limits). With this flag OFF -- the default -- jobs-manager uses
+  # its built-in literal on requests AND limits, so a CPU job pod is GUARANTEED.
+  #
+  # THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU (Asad,
+  # review of backend#2872). A GPU job's envelope resolves to nvidia.com/gpu and
+  # ephemeral-storage only; neither is QoS-relevant, so the container sets no
+  # cpu/memory request or limit at all and the pod is BESTEFFORT whichever way
+  # the flag is set. `pod-qos-class.py` already encodes that carve-out
+  # (backend#2871) -- this line asserted the opposite of the chart's own checker.
+  #
+  #   cpu-only + flag off -> GUARANTEED
+  #   cpu-only + flag on  -> BURSTABLE
+  #   GPU                 -> BESTEFFORT, either way
+  #
+  # So do not read "Burstable" as the default, and do not turn this on expecting
+  # to escape Burstable on a GPU node: on that cluster it changes nothing.
   #
   # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
   # an explicit envelope always wins, and this key is then inert (jobs-manager
@@ -1068,8 +1087,16 @@ images:
 
 # -- Container resource requests and limits.
 # Tuned in v1.1.0 after the prod investigation showed mysql being killed
-# every ~12 minutes when jobs-manager (under-resourced, BestEffort QoS in
-# older releases) ate node memory and triggered the kernel OOM killer.
+# every ~12 minutes when jobs-manager, under-resourced, ate node memory and
+# triggered the kernel OOM killer.
+#
+# NOT "BestEffort QoS in older releases", as this comment claimed until
+# backend#2872. Before #66 introduced this block the template hardcoded
+# requests cpu 100m / memory 256Mi and limits cpu 500m / memory 512Mi
+# (`git show 2d9d013^:client/templates/jobs-manager-deployment.yaml`) —
+# requests AND limits set, so Burstable from day one. BestEffort requires
+# neither, and jobs-manager has never had neither. The pod was under-resourced,
+# which is the real cause; the QoS class was never the difference.
 #
 # mysql: requests.memory == limits.memory pins the cgroup memory budget so
 # mysqld is never the largest victim during node-level OOM. CPU limit is
@@ -1084,8 +1111,46 @@ images:
 # 512Mi pods-monitor) to lower each container's oom_score_adj — on a
 # single-node cluster-recovery mass restart they were otherwise the kernel
 # OOM-killer's preferred victims and were exit-137 killed, taking ~9m to
-# recover. The pods stay Burstable (cpu request != limit); pinning memory
-# just makes them less-preferred OOM victims. requests.cpu was also raised so
+# recover. The pods stay Burstable; pinning memory just makes them
+# less-preferred OOM victims.
+#
+# Burstable for TWO reasons, not one — cpu request != limit is the obvious one,
+# and the one every earlier version of this comment stopped at. The other:
+# ComputePodQOS requires requests == limits in EVERY container including INIT
+# containers, and `jobs-manager` renders an unresourced `init-writable-data`
+# whenever hostPath.enabled=true (every installer edge), while `mysql` renders
+# an unresourced `mysql-format-guard` UNCONDITIONALLY plus `init-mysql-data` on
+# hostPath edges.
+#
+# AND SINCE #942, EQUALISING CPU BELOW BUYS GUARANTEED NOWHERE (review on
+# client#922). The claim here used to read "only for jobs-manager on a CSI
+# cluster"; #942 added `wait-for-mysql`, which is UNCONDITIONAL and unequal on
+# BOTH dimensions (cpu 10m/100m, memory 16Mi/64Mi) and has no values key. So
+# Guaranteed is now unreachable through values for t-jobs-manager on EVERY
+# cluster, not just off-CSI. Measured on the merged tree -- hostPath off plus
+# every resources.* knob this chart exposes equalised:
+#
+#   t-jobs-manager  Burstable  wait-for-mysql:cpu(req=10m,lim=100m);
+#                              wait-for-mysql:memory(req=16Mi,lim=64Mi)
+#
+# `wait-for-mysql` is the only blocker left, and nothing in values can move it.
+#
+# THE GUARD STAYED GREEN THROUGH THAT, which is this PR's own subject one turn
+# deeper. The goldens pin the CLASS (still Burstable) and the unresourced-init
+# SET (`wait-for-mysql` is resourced, merely unequal), so a claim about
+# REACHABILITY had nothing asserting it and went stale in silence.
+# `scripts/tests/qos-reachability.sh` now asserts it: see that file for what it
+# derives and what it cannot.
+#
+# TWO routes still clear it, and the earlier "only route" was false (review on
+# client#922). Pod-level resources (KEP-2837, beta 1.34) clear it without
+# touching the init containers. Giving every init container requests == limits
+# also reaches Guaranteed -- but note that is now a CHART edit rather than a
+# values change, because `wait-for-mysql` has no key -- at the cost of reserving
+# that capacity for the pod's whole life, which is why it is not the route taken
+# here.
+#
+# requests.cpu was also raised so
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
@@ -1386,11 +1451,45 @@ autoUpgrade:
     repository: alpine/helm
     tag: "3.16.4"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network + helm I/O.
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. backend#2935:
+  # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
+  # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
+  # container overrunning its own cgroup limit. The helm CLI's peak working set
+  # on this chart is ~50Mi measured (repo update + search + `helm template`
+  # render), a fraction of the 256Mi limit, so no ceiling was ever the binding
+  # constraint. Two independent levers fix the two halves of that:
+  #
+  #  1. The memory REQUEST rising to meet the limit is an honest scheduler
+  #     RESERVATION. It attacks the CAUSE: the node is no longer overcommitted by
+  #     the gap between what these pods reserved and what they use, so it is less
+  #     likely to enter the pressure that triggered the kill. (This is the real
+  #     structural half — NOT an oom_score_adj change: a Burstable pod's
+  #     oom_score_adj is 1000 - 1000*memRequest/nodeCapacity, fixed at start and
+  #     independent of usage, so 128Mi->256Mi barely moves it, ~992->984 on a
+  #     16Gi node, and does nothing on a large node. An earlier revision of this
+  #     comment wrongly credited the memory pin with the victim-preference change
+  #     below — @saadqbal on client#948.)
+  #  2. Pinning CPU too makes the pod GUARANTEED, whose oom_score_adj is -997.
+  #     THAT is what genuinely moves it off the kernel OOM-killer's shortlist
+  #     under pressure, regardless of node size. These two CronJobs (and
+  #     image-refresh) are the only chart pods one line from Guaranteed — zero
+  #     initContainers, memory already equal, cpu the sole blocker. #642 pinned
+  #     jobs-manager's memory but could NOT reach Guaranteed there (it renders an
+  #     unresourced init container); here we can, so we do. auto-upgrade is the
+  #     security-fix delivery path — worth the strongest protection.
+  #
+  # TRADEOFF (reservation vs throttle): Guaranteed reserves the full 500m/256Mi
+  # for the pod's brief hourly run and caps it there (helm is I/O/network-bound,
+  # not CPU-bound, so the 500m cap does not slow a real upgrade). Limits never
+  # moved — only the requests rose to meet them. If a small edge cannot spare the
+  # reservation the pod goes Pending/skipped rather than OOM-looping; `Forbid` +
+  # startingDeadlineSeconds bound that. auto_upgrade_test.yaml pins cpu AND memory
+  # request==limit, which (no initContainers) is the in-manifest proxy for
+  # Guaranteed until client#922's pod-qos-class checker asserts the class directly.
   resources:
     requests:
-      cpu: "50m"
-      memory: "128Mi"
+      cpu: "500m"
+      memory: "256Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -1571,12 +1670,24 @@ imageRefresh:
     repository: alpine/k8s
     tag: "1.30.5"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network I/O for the digest
-  # HEADs and the rollout-status watch.
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. See the fuller
+  # note on autoUpgrade.resources for the mechanism. backend#2935: image-refresh
+  # was OOM-killed in lock-step with auto-upgrade (six paired failures — this Job
+  # runs every 15m, so failing only when it coincides with the hourly upgrade
+  # tick is itself the tell), which is what makes the cause SHARED: a node-level
+  # OOM event, not two independent overruns. kubectl's peak here is ~40-80Mi
+  # measured (one `get deployment -o json` + `rollout status` at a time; the curl
+  # HEADs return headers only, jq ~2Mi) — well under 128Mi, so no ceiling was the
+  # constraint. The memory pin is the honest reservation that reduces node
+  # overcommit; pinning cpu makes the pod Guaranteed (oom_score_adj -997), which
+  # is what actually keeps it off the OOM-killer's shortlist — a memory pin alone
+  # barely moves a Burstable pod's oom_score_adj (on a large node, 64Mi->128Mi
+  # moves 999->998, i.e. nothing). Limits never moved; only requests rose to meet
+  # them. image_refresh_test.yaml pins cpu AND memory request==limit.
   resources:
     requests:
-      cpu: "20m"
-      memory: "64Mi"
+      cpu: "200m"
+      memory: "128Mi"
     limits:
       cpu: "200m"
       memory: "128Mi"

@@ -1,0 +1,28 @@
+# EXPECTED QoS CLASS — hostPath edge with gpu.devicePlugin.enabled + vendor=amd.
+#
+# THIS FILE EXISTS BECAUSE THE SUITE WAS BLIND TO THE ONLY GUARANTEED POD IN THE
+# CHART. `_render` never enabled gpu.devicePlugin, so amdgpu-device-plugin-daemonset
+# was never classified — and it is Guaranteed, which is precisely what client#919
+# bought. Stripping its resources would return it to BestEffort, every GPU training
+# pod would sit Pending, and the guard would have stayed green (Bugbot, review on
+# client#922).
+#
+# It also means the checker's Guaranteed path is now exercised against REAL chart
+# output rather than only synthetic manifests. A classifier that could not produce
+# "Guaranteed" from the chart at all would previously have passed every assertion.
+class  amdgpu-device-plugin-daemonset  Guaranteed
+class  mysql-client                 Burstable
+class  t-auto-upgrade               Guaranteed
+class  t-egress-proxy               Burstable
+class  t-egress-reachability-check  Burstable
+class  t-image-refresh              Guaranteed
+class  t-jobs-manager               Burstable
+class  t-requests-proxy             Burstable
+class  t-resource-monitor           Burstable
+class  t-storage-assertions-check   Burstable
+class  t-telemetry-collector        Burstable
+
+# The device plugin has no init containers at all — which is WHY it can be
+# Guaranteed while jobs-manager cannot.
+init   t-jobs-manager               init-writable-data
+init   mysql-client                 init-mysql-data,mysql-format-guard
