@@ -13,6 +13,7 @@
 class  amdgpu-device-plugin-daemonset  Guaranteed
 class  mysql-client                 Burstable
 class  t-auto-upgrade               Guaranteed
+class  t-egress-enforcement-check      Burstable
 class  t-egress-proxy               Burstable
 class  t-egress-reachability-check  Burstable
 class  t-image-refresh              Guaranteed
