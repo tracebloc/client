@@ -1,0 +1,265 @@
+suite: hostPath PV rename hazard
+# Locks down the facts `values.yaml`'s fullnameOverride block asserts about
+# hostPath storage, and that they are what makes `secrets.yaml`'s standalone PV
+# refusal necessary (backend#2626, Bugbot High).
+#
+# THE HAZARD, in one sentence: the PV OBJECTS follow fullnameOverride and carry
+# no `helm.sh/resource-policy: keep`, while the claims Bound to them are literal
+# names that DO carry `keep` -- so changing the override deletes the volumes out
+# from under retained claims.
+#
+# WHY THIS IS A CHART TEST AND NOT A PROSE GUARD. Every assertion below reads
+# RENDER OUTPUT, so it cannot drift from the templates the way a hand-written
+# claim can. In particular the `notExists` cases are TRIPWIRES, not preferences:
+# the proper fix for the hazard is to annotate the PVs `keep`, and when someone
+# does that those cases go red and force the `values.yaml` paragraph and the
+# `secrets.yaml` guard to be revisited in the same PR. A green run here means
+# "the prose is still true", not "the chart is ideal".
+#
+# WHY EACH FACT IS ASSERTED BOTH WAYS. The override-set cases alone would pass
+# on a chart that named every PV `renamed-*` unconditionally, so each is paired
+# with the override unset. That pairing is the test, not repetition.
+#
+# WHAT THIS SUITE CANNOT SEE, stated rather than implied. `secrets.yaml`'s guard
+# reads the live claim's `spec.volumeName` -- and no template sets that field.
+# The chart declares the binding from the other end (`spec.claimRef` on the PV);
+# `volumeName` is written by the binding controller once the claim is Bound, so
+# it exists on a live cluster and never in a render. Both refusals in
+# `secrets.yaml` are `lookup`-based and inert here for the same reason (no
+# cluster => empty `lookup`); `scripts/tests/` covers the reachable half. What is
+# assertable without a cluster is the naming and annotation asymmetry, which is
+# what this suite pins.
+#
+# NOTE ON SHAPE: these tests select their document BY KIND, not by index. On
+# helm-unittest 0.5.2 a `documentIndex` is silently ignored when the suite scopes
+# more than one template and the test narrows with `template:` -- the assertion
+# is evaluated against document 0 while the report prints `DocumentIndex: 0`, so
+# a claim assertion reads as a failing volume assertion (a *passing* one would
+# have been worse). `documentSelector` says which object it means, so it cannot
+# land on the wrong one. Measured 2026-08-31: under `documentIndex: 1` all six
+# claim tests here ran against the PersistentVolume.
+templates:
+  - templates/mysql-storage-pvc.yaml
+  - templates/logs-pvc.yaml
+  - templates/shared-images-pvc.yaml
+release:
+  name: stg
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  hostPath:
+    enabled: true
+tests:
+  # ---------- MySQL state store ----------
+  - it: the mysql-pv volume follows fullnameOverride, is not retained, and still claims a fixed name
+    template: templates/mysql-storage-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolume
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: renamed-mysql-pv
+      - notExists:
+          path: metadata.annotations["helm.sh/resource-policy"]
+      # The asymmetry inside one object: the volume's own name moved, the claim
+      # it is hard-bound to did not. That is the break, in two adjacent fields.
+      - equal:
+          path: spec.claimRef.name
+          value: mysql-pvc
+      # And the DATA does not move -- the host path keeps the RELEASE name, which
+      # fullnameOverride does not change. This is the half of the `values.yaml`
+      # sentence that was always true, pinned so the correction stays honest.
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/mysql
+
+  - it: the mysql-pv volume is release-named when the override is unset
+    template: templates/mysql-storage-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolume
+    set:
+      fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: stg-mysql-pv
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/mysql
+
+  - it: the mysql-pvc claim keeps its name and its keep annotation under a rename
+    template: templates/mysql-storage-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolumeClaim
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mysql-pvc
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: the mysql-pvc claim renders identically with the override unset
+    template: templates/mysql-storage-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolumeClaim
+    set:
+      fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: mysql-pvc
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  # ---------- client logs ----------
+  - it: the logs-pv volume follows fullnameOverride, is not retained, and still claims a fixed name
+    template: templates/logs-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolume
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: renamed-logs-pv
+      - notExists:
+          path: metadata.annotations["helm.sh/resource-policy"]
+      # The asymmetry inside one object: the volume's own name moved, the claim
+      # it is hard-bound to did not. That is the break, in two adjacent fields.
+      - equal:
+          path: spec.claimRef.name
+          value: client-logs-pvc
+      # And the DATA does not move -- the host path keeps the RELEASE name, which
+      # fullnameOverride does not change. This is the half of the `values.yaml`
+      # sentence that was always true, pinned so the correction stays honest.
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/logs
+
+  - it: the logs-pv volume is release-named when the override is unset
+    template: templates/logs-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolume
+    set:
+      fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: stg-logs-pv
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/logs
+
+  - it: the client-logs-pvc claim keeps its name and its keep annotation under a rename
+    template: templates/logs-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolumeClaim
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: client-logs-pvc
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: the client-logs-pvc claim renders identically with the override unset
+    template: templates/logs-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolumeClaim
+    set:
+      fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: client-logs-pvc
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  # ---------- shared dataset images ----------
+  - it: the data-pv volume follows fullnameOverride, is not retained, and still claims a fixed name
+    template: templates/shared-images-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolume
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: renamed-data-pv
+      - notExists:
+          path: metadata.annotations["helm.sh/resource-policy"]
+      # The asymmetry inside one object: the volume's own name moved, the claim
+      # it is hard-bound to did not. That is the break, in two adjacent fields.
+      - equal:
+          path: spec.claimRef.name
+          value: client-pvc
+      # And the DATA does not move -- the host path keeps the RELEASE name, which
+      # fullnameOverride does not change. This is the half of the `values.yaml`
+      # sentence that was always true, pinned so the correction stays honest.
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/data
+
+  - it: the data-pv volume is release-named when the override is unset
+    template: templates/shared-images-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolume
+    set:
+      fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: stg-data-pv
+      - equal:
+          path: spec.hostPath.path
+          value: /tracebloc/stg/data
+
+  - it: the client-pvc claim keeps its name and its keep annotation under a rename
+    template: templates/shared-images-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolumeClaim
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: client-pvc
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: the client-pvc claim renders identically with the override unset
+    template: templates/shared-images-pvc.yaml
+    documentSelector:
+      path: kind
+      value: PersistentVolumeClaim
+    set:
+      fullnameOverride: ""
+    asserts:
+      - equal:
+          path: metadata.name
+          value: client-pvc
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep

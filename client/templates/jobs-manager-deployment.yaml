@@ -6,7 +6,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-jobs-manager
+  name: {{ include "tracebloc.fullname" . }}-jobs-manager
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -974,5 +974,5 @@ spec:
             claimName: {{ include "tracebloc.clientLogsPvc" . }}
         - name: ingestion-authz
           configMap:
-            name: {{ .Release.Name }}-ingestion-authz
+            name: {{ include "tracebloc.fullname" . }}-ingestion-authz
       restartPolicy: Always

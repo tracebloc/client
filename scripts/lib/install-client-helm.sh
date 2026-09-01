@@ -776,7 +776,7 @@ detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
   has helm || return 0
-  local _gvf _rel _ns _id _list _unreadable=0
+  local _gvf _rel _ns _id _fno _list _unreadable=0
   # A mktemp failure is an environment error, NOT proof of "no client here" — flag
   # UNKNOWN so the guards fail closed rather than skip. Fall back to a path in a
   # dir we own (never a predictable world-writable /tmp path under sudo) before
@@ -808,7 +808,20 @@ detect_installed_client() {
       # clientId in its values, and reading that as "not a match" let the
       # one-client guard wave through an install that re-points the machine.
       # Fall back to where the id now lives.
-      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
+      #
+      # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on
+      # client#911). `tracebloc.secretName` follows `fullnameOverride`, so on a
+      # release installed with one, `<release>-secrets` does not exist and this
+      # fallback reads nothing -- a live client with its id only in the Secret
+      # then reads as UNIDENTIFIABLE, and `diagnose`/`upgrade` treat it as having
+      # no id.
+      #
+      # The override is in the values file already open above, so the effective
+      # prefix costs one more read of the same file rather than a second API
+      # call. Empty or absent -> the release name, which is exactly the chart's
+      # own `default .Release.Name .Values.fullnameOverride`.
+      _fno="$(_extract_yaml_value "$_gvf" fullnameOverride)"
+      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "${_fno:-$_rel}" "$_ns")"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
       # A client-chart release with no id in EITHER place is a client we cannot
       # NAME, not an absent one. Record it and keep scanning; if nothing else

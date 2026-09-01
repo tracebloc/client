@@ -391,6 +391,7 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   bash scripts/tests/hostpath-reads-guarded.sh|\
   bash scripts/tests/jobs-manager-waits-for-mysql.sh|\
   bash scripts/tests/control-plane-footprint.sh|\
+  bash scripts/tests/fullname-override-completeness.sh|\
   bash scripts/tests/qos-reachability.sh
 
 # EXPORTED, not interpolated. The recipe reads $$DRIFT_GUARDS from the

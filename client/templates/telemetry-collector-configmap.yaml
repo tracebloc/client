@@ -121,7 +121,7 @@ data:
             cycle here.)
           */}}
           {{- range $tc.classANodeAgentContainers }}
-          {{- $includes = append $includes (printf "%s/%s_%s-*/%s/*.log" $logs $.Values.nodeAgents.namespace.name $.Release.Name .) }}
+          {{- $includes = append $includes (printf "%s/%s_%s-*/%s/*.log" $logs $.Values.nodeAgents.namespace.name (include "tracebloc.fullname" $) .) }}
           {{- end }}
           {{- /*
             EACH LIST, NOT THE COMBINED ONE. The first version of this guard checked

@@ -4937,6 +4937,54 @@ Describe "Get-InstalledClientInfo API gating (Bugbot)" {
     $info.ListUnknown | Should -BeFalse
     Should -Invoke helm -ParameterFilter { $args -contains "list" }
   }
+
+  # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on
+  # client#911). `tracebloc.secretName` follows `fullnameOverride`, so on a
+  # release installed with one the Secret is `<override>-secrets`. Reading
+  # `<release>-secrets` finds nothing, and a live client whose id lives only in
+  # the Secret reads as UNIDENTIFIABLE -- `diagnose` and `upgrade` then treat it
+  # as having no id. Bash parity: install-client-helm.bats' two #911 cases.
+  It "reads the Secret under fullnameOverride, not the release name (client#911)" {
+    Mock kubectl {
+      $global:LASTEXITCODE = 0
+      # THE ASSERTION lives in the mock: only the overridden name answers.
+      if ($args -contains "zzoverride-secrets") { return "dXVpZC1mcm9tLXNlY3JldA==" }
+      return ""
+    }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"rel","namespace":"tracebloc","chart":"client-1.9.87"}]'; $global:LASTEXITCODE = 0; return }
+      # Values carry the override and NO clientId -- the backend#2571 shape on a
+      # renamed release, which is what this PR makes reachable.
+      if ($args -contains "get")  { '{"fullnameOverride":"zzoverride"}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    $info = Get-InstalledClientInfo
+    $info.Id | Should -Be "uuid-from-secret"
+    $info.ListUnknown | Should -BeFalse
+  }
+
+  It "with NO override still reads the release name (client#911 control)" {
+    # Without this the first case is satisfied by always using the override key,
+    # which would break every ordinary release.
+    # EXIT 0 THROUGHOUT, and that matters: `Get-InstalledClientInfo` opens with a
+    # bounded kubectl probe and degrades to ListUnknown when it fails. A mock that
+    # returns non-zero for "anything but my Secret" fails that probe too, so the
+    # test would pass or fail for the wrong reason. A non-matching Secret read
+    # returns EMPTY instead, which `Get-ClientIdFromSecret` already treats as
+    # "couldn't read".
+    Mock kubectl {
+      $global:LASTEXITCODE = 0
+      if ($args -contains "rel-secrets") { return "dXVpZC1mcm9tLXNlY3JldA==" }
+      return ""
+    }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"rel","namespace":"tracebloc","chart":"client-1.9.87"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get")  { '{"storageClass":{}}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    $info = Get-InstalledClientInfo
+    $info.Id | Should -Be "uuid-from-secret"
+  }
 }
 
 Describe "UNC-safe background jobs (#409)" {
