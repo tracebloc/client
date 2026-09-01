@@ -37,7 +37,7 @@ spec:
         fsGroup: 999
         fsGroupChangePolicy: "OnRootMismatch"
       initContainers:
-      {{- if .Values.hostPath.enabled }}
+      {{- if (default dict .Values.hostPath).enabled }}
       # kubelet does not apply fsGroup to hostPath volumes
       # (kubernetes/kubernetes#138411), so bare-metal installs need a
       # privileged bootstrap to chown /var/lib/mysql to 999:999. CSI-backed
