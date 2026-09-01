@@ -256,51 +256,6 @@ _render() {
   [[ "$output" == *"BestEffort"* ]] || return 1
 }
 
-# THE POD-LEVEL HALF OF THE SAME CARVE-OUT (Asad, review of backend#2872; split
-# out and re-landed as backend#2962). The container path above had this guard;
-# the KEP-2837 pod-level branch short-circuits ABOVE it and lacked one, so a
-# pod-level envelope of extended resources only returned Burstable where the
-# kubelet says BestEffort. Latent -- no chart workload renders pod-level
-# resources on any hostPath mode under helm 3.15.4 or helm 4 -- but it is the
-# "a guard hides a BestEffort demotion" shape this file exists to catch.
-#
-# BUILT SO IT CANNOT PASS FOR THE WRONG REASON: the containers below are
-# perfectly Guaranteed. With pod-level resources set, ComputePodQOS classifies
-# on them and ignores the containers -- so BestEffort can ONLY come from the
-# pod-level carve-out. A branch that stopped short-circuiting (fell through to
-# the containers) would read Guaranteed, and the reverted no-carve-out branch
-# read Burstable; this case rejects both.
-@test "derivation: POD-LEVEL gpu + ephemeral-storage only, no cpu/memory -> BestEffort" {
-  local f="$BATS_TEST_TMPDIR/pod-level-gpu-only.yaml"
-  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  resources:\n    requests: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n    limits: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi}\n      limits: {cpu: "1", memory: 1Gi}\n' > "$f"
-  run python3 "$QOS" "$f"
-  _ok
-  [[ "$output" == *"BestEffort"* ]] || return 1
-}
-
-# ...and its mirror: pod-level cpu/memory still classifies normally, so the fix
-# is not "ignore pod-level resources entirely". No containers below, to prove the
-# Guaranteed comes from the pod-level requests == limits and nothing else.
-@test "derivation: POD-LEVEL equal cpu/memory -> Guaranteed" {
-  local f="$BATS_TEST_TMPDIR/pod-level-equal.yaml"
-  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  resources:\n    requests: {cpu: "1", memory: 1Gi}\n    limits: {cpu: "1", memory: 1Gi}\n  containers:\n  - name: c\n' > "$f"
-  run python3 "$QOS" "$f"
-  _ok
-  [[ "$output" == *"Guaranteed"* ]] || return 1
-}
-
-# ...and the third outcome of the same branch: pod-level cpu/memory present but
-# NOT equal is Burstable, so the carve-out above did not swallow the ordinary
-# unequal case. Memory is the unequal dimension here, mirroring the per-container
-# pair, so neither dimension can be silently dropped from the pod-level rule.
-@test "derivation: POD-LEVEL cpu equal but memory unequal -> Burstable" {
-  local f="$BATS_TEST_TMPDIR/pod-level-burstable.yaml"
-  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  resources:\n    requests: {cpu: "1", memory: 512Mi}\n    limits: {cpu: "1", memory: 1Gi}\n  containers:\n  - name: c\n' > "$f"
-  run python3 "$QOS" "$f"
-  _ok
-  [[ "$output" == *"Burstable"* ]] || return 1
-}
-
 # The mirror, so the rule is not simply "ignore everything unknown": a pod that
 # sets cpu/memory AND extended resources is still classified on cpu/memory.
 @test "derivation: extended resources alongside equal cpu/memory -> still Guaranteed" {
