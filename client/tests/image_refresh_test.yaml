@@ -443,16 +443,23 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
-  - it: CronJob pins requests.memory == limits.memory so a node OOM cannot cull it first (backend#2935)
+  - it: CronJob is Guaranteed QoS (cpu AND memory request==limit) so a node OOM picks it last (backend#2935)
     # backend#2935: image-refresh was exit-137 killed in lock-step with
     # auto-upgrade — the SHARED, node-level OOM cause. kubectl's measured peak
-    # here is ~40-80Mi, well under 128Mi, so the ceiling was never the
-    # constraint; the request/limit gap was. Pin requests.memory == limit to
-    # lower oom_score_adj and keep the pod off the OOM-killer's shortlist
-    # (#642 / backend#1144). Guard against reopening the gap.
+    # here is ~40-80Mi, well under 128Mi, so no ceiling was the constraint. Pin
+    # BOTH cpu and memory request==limit so the pod is Guaranteed (oom_score_adj
+    # -997) — a memory pin alone barely moves a Burstable pod's oom_score_adj
+    # (client#948 review). No initContainers here, so cpu==limit AND memory==limit
+    # is the in-manifest proxy for Guaranteed. Guard against reopening either gap.
     template: templates/image-refresh-cronjob.yaml
     documentIndex: 1
     asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.cpu
+          value: 200m
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.limits.cpu
+          value: 200m
       - equal:
           path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.memory
           value: 128Mi

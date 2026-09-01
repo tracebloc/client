@@ -272,18 +272,26 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop[0]
           value: ALL
 
-  - it: CronJob pins requests.memory == limits.memory so a node OOM cannot cull it first (backend#2935)
+  - it: CronJob is Guaranteed QoS (cpu AND memory request==limit) so a node OOM picks it last (backend#2935)
     # backend#2935: auto-upgrade was exit-137 (SIGKILL) killed hourly on a live
     # edge, together with image-refresh — a node-level OOM signature, not a
     # container-limit overrun (helm's measured peak on this chart is ~50Mi, well
-    # under 256Mi). The fix is to keep the pod Burstable but pin requests.memory
-    # to limits.memory: that reserves the memory and lowers oom_score_adj so the
-    # kernel OOM-killer stops preferring this pod (same remedy as #642 /
-    # backend#1144 for jobs-manager). This guard fails if the request/limit gap
-    # that made it an easy victim is ever silently reopened.
+    # under 256Mi). The fix pins BOTH cpu and memory request==limit so the pod is
+    # Guaranteed QoS (oom_score_adj -997) — a memory pin alone would barely move a
+    # Burstable pod's oom_score_adj (client#948 review). With zero initContainers
+    # on this pod, cpu==limit AND memory==limit is the in-manifest proxy for
+    # Guaranteed (client#922's pod-qos-class checker asserts the class directly
+    # once it lands). This guard fails if either resource's request/limit gap is
+    # reopened — reverting either request reddens the matching assert.
     template: templates/auto-upgrade-cronjob.yaml
     documentIndex: 1
     asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.cpu
+          value: 500m
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].resources.limits.cpu
+          value: 500m
       - equal:
           path: spec.jobTemplate.spec.template.spec.containers[0].resources.requests.memory
           value: 256Mi
