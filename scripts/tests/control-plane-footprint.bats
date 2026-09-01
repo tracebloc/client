@@ -19,8 +19,11 @@ setup() {
 }
 
 # One of each shape, so the exclusions and multipliers all matter: Deployment 1Gi
-# x2 = 2048 MiB / 500m ; DaemonSet 128 MiB / 50m x1 ; Job (512 MiB / 500m) EXCLUDED.
+# x2 = 2048 MiB / 500m ; DaemonSet 128 MiB / 50m x1 DESPITE carrying `replicas: 3`
+# ; Job (512 MiB / 500m) EXCLUDED.
 # Expected steady-state total: 2176 MiB / 550 m across 2 requesting containers.
+# Drop the DaemonSet special case and it becomes 2432 / 650 -- which is what makes
+# the `x1` in this test's name a claim the fixture can actually falsify.
 write_fixture() {
   cat > "$1" <<'YAML'
 apiVersion: apps/v1
@@ -34,6 +37,17 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata: {name: b}
 spec:
+  # A STRAY `replicas`, deliberately (Bugbot, #944). A DaemonSet has no replica
+  # count -- but this fixture carries one so the `x1` arm is actually TESTED.
+  # Without it the guard's DaemonSet branch and its missing-replicas fallback
+  # both yield 1, so deleting the special case changed nothing and the arm the
+  # test name advertises was pinned by nothing at all.
+  #
+  # With `replicas: 3` here the two disagree: the special case still counts the
+  # DaemonSet ONCE (total unchanged at 2176/550), while the fallback would count
+  # it three times (2432 MiB / 650 m). The expected total below is therefore the
+  # assertion that the special case is present and doing the work.
+  replicas: 3
   template: {spec: {containers: [{name: c2, resources: {requests: {memory: 128Mi, cpu: 50m}}}]}}
 ---
 apiVersion: batch/v1
