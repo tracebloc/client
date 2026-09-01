@@ -7625,11 +7625,14 @@ function Test-TraceblocCli {
     $ver = ""
     try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
     $short = if ($ver -match '\s(\S+)') { "v" + $Matches[1] } else { "" }
-    # Prefer the short 'tb' alias; fall back to 'tracebloc' if it isn't on PATH
-    # (the alias wasn't created), so the copy never names a missing command (Bugbot).
-    $cli = if (Has "tb") { "tb" } else { "tracebloc" }
-    if ($short) { Ok "tracebloc CLI ready ($short) -- run '$cli' to use it." }
-    else        { Ok "tracebloc CLI ready -- run '$cli' to use it." }
+    # Name `tracebloc`, the MACHINE-WIDE command — the exe we copied into $TOOL_DIR — NOT
+    # `tb`. `Has tb` is true in THIS process only because RefreshPath pulled in the
+    # installing user's User PATH, where the CLI installer dropped its per-user `tb.cmd`
+    # shim; a fresh or other-user shell (exactly what this verdict is about) has
+    # `tracebloc` on the Machine PATH but no `tb` (Bugbot). Never name a command that
+    # won't resolve in the shell the message is promising works.
+    if ($short) { Ok "tracebloc CLI ready ($short) -- run 'tracebloc' to use it." }
+    else        { Ok "tracebloc CLI ready -- run 'tracebloc' to use it." }
     return
   }
 

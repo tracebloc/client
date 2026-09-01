@@ -1423,7 +1423,11 @@ Describe "Test-TraceblocCli" {
     Mock tracebloc { "tracebloc 0.2.0" }
     Mock Test-Path { $true }                 # the machine-wide $TOOL_DIR\tracebloc.exe is present
     $out = Test-TraceblocCli 6>&1 | Out-String
-    $out | Should -Match "run 'tb'"          # usable-now verdict (was "verified on your PATH")
+    # Name the MACHINE-WIDE command `tracebloc`, never `tb`: `tb` is only the CLI
+    # installer's per-user shim, absent from the fresh/other-user shells this verdict is
+    # about, even though `Has tb` is true in the installer's own process (Bugbot).
+    $out | Should -Match "run 'tracebloc'"
+    $out | Should -Not -Match "run 'tb'"
     $out | Should -Match "0.2.0"             # real proof via `tracebloc version`
     $out | Should -Not -Match "open a new terminal so"   # the old, useless line is gone
   }
