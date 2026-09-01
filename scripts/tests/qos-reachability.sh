@@ -64,28 +64,78 @@ done
 # 3.2.57 it aborts with "SETS[@]: unbound variable".
 python3 - "$CHART/values.schema.json" > "$TMP/knobs.txt" <<'SCHEMAPY'
 import json, sys
+
+# EVERY `resources` NODE IN THE SCHEMA, NOT JUST THE TOP-LEVEL ONE (Bugbot,
+# Medium). This walked `properties.resources.properties` and stopped there, so
+# `autoUpgrade.resources`, `imageRefresh.resources` and `egressProxy.resources`
+# -- all three of which DO expose requests and limits -- were never equalised.
+# Their pods therefore stayed `blocked` in the golden while an operator could
+# already reach Guaranteed through values, and the guard agreed with its own
+# incomplete domain: the exact stale-claim shape this file exists to close.
+#
+# Derived by walking the schema for the NAME `resources` at any depth, so a knob
+# added under a new parent is covered the day it ships rather than when someone
+# remembers to extend a list.
 schema = json.load(open(sys.argv[1]))
-res = schema.get("properties", {}).get("resources", {}).get("properties", {})
 VALUE = {"cpu": "1000m", "memory": "1Gi"}
 out = []
-for group, gspec in sorted(res.items()):
-    props = gspec.get("properties", {})
-    # Only groups exposing BOTH sides can be equalised; one-sided groups are
-    # reported so a schema change cannot silently shrink the domain.
-    if not ({"requests", "limits"} <= set(props)):
-        print(f"#ONESIDED {group}")
-        continue
-    dims = set(props["requests"].get("properties", {})) & set(props["limits"].get("properties", {}))
+
+
+def emit(path, props):
+    """`path` addresses a requests/limits pair; emit one knob per shared dim."""
+    dims = set(props["requests"].get("properties", {})) & \
+           set(props["limits"].get("properties", {}))
     if not dims:
-        print(f"#NODIMS {group}")
-        continue
+        print(f"#NODIMS {path}")
+        return
     for dim in sorted(dims):
         v = VALUE.get(dim)
         if v is None:
-            print(f"#UNKNOWNDIM {group}.{dim}")
+            print(f"#UNKNOWNDIM {path}.{dim}")
             continue
-        out.append(f"resources.{group}.requests.{dim}={v}")
-        out.append(f"resources.{group}.limits.{dim}={v}")
+        out.append(f"{path}.requests.{dim}={v}")
+        out.append(f"{path}.limits.{dim}={v}")
+
+
+def classify(path, node):
+    props = node.get("properties", {})
+    have = {"requests", "limits"} & set(props)
+    if have == {"requests", "limits"}:
+        emit(path, props)                       # egressProxy / autoUpgrade shape
+        return
+    if have:
+        # ONE SIDE ONLY is a real domain shrink -- equalising is impossible and
+        # the verdict below would not be evidence. Stays fatal.
+        print(f"#ONESIDED {path}")
+        return
+    # A container of GROUPS, each its own requests/limits pair (the top-level
+    # `resources` shape). Recurse one level rather than assuming the layout.
+    groups = {g: gs for g, gs in props.items()
+              if isinstance(gs, dict)
+              and {"requests", "limits"} <= set(gs.get("properties", {}))}
+    if groups:
+        for g, gs in sorted(groups.items()):
+            emit(f"{path}.{g}", gs["properties"])
+        return
+    # NOT A requests/limits KNOB AT ALL -- e.g. `gpu.devicePlugin.*.resources`
+    # is a flat cpu/memory spec and `telemetryCollector.resources` is free-form.
+    # Reported so the domain stays visible, but NOT fatal: these were never
+    # equalisable, so reddening on them would be a permanent false alarm rather
+    # than a signal that something shrank.
+    print(f"#NOTAPAIR {path} ({','.join(sorted(props)) or 'no properties'})")
+
+
+def walk(node, path=()):
+    if not isinstance(node, dict):
+        return
+    for k, v in node.get("properties", {}).items():
+        here = path + (k,)
+        if k == "resources" and isinstance(v, dict):
+            classify(".".join(here), v)
+        walk(v, here)
+
+
+walk(schema)
 for line in out:
     print(line)
 SCHEMAPY
@@ -104,9 +154,20 @@ while IFS= read -r line; do
 done < "$TMP/knobs.txt"
 # bash 3.2 under `set -u` treats an EMPTY array as unbound, so this expansion is
 # guarded by the count rather than attempted blindly.
+# TWO KINDS OF NOTE, and conflating them would make this guard permanently red.
+# `#ONESIDED` / `#NODIMS` / `#UNKNOWNDIM` mean a knob that SHOULD be equalisable
+# is not -- the domain shrank, and every `blocked` below is then unproven, so
+# they stay fatal. `#NOTAPAIR` means the node was never a requests/limits knob
+# (a flat cpu/memory spec, or a free-form object); it is printed so the walked
+# domain is visible, but it is not a finding.
 if [ "${#NOTES[@]}" -gt 0 ]; then
   for n in "${NOTES[@]}"; do
-    err "the schema exposes a resources group this guard cannot equalise ($n), so 'unreachable' below would not be evidence"
+    case "$n" in
+      "#NOTAPAIR"*)
+        note "not a requests/limits knob, so nothing to equalise: ${n#\#NOTAPAIR }" ;;
+      *)
+        err "the schema exposes a resources group this guard cannot equalise ($n), so 'unreachable' below would not be evidence" ;;
+    esac
   done
 fi
 # FAIL CLOSED. Zero knobs equalises nothing, so every pod would report blocked
