@@ -153,9 +153,27 @@ for VALUES in "${profiles[@]}"; do
   prof=$(basename "$VALUES" -values.yaml)
   echo "-- profile: $prof"
 
+  # THE DENOMINATOR, forced (Asad + Arturo, review of backend#2626). The four
+  # client/ci profiles at their defaults render neither egress-enforcement-check
+  # (needs networkPolicy.training.allowExternalHttps=false) nor the registry-Secret
+  # family (needs dockerRegistry.create=true), so ~15 routed sites -- one Job name,
+  # one Secret name, thirteen imagePullSecrets[0].name refs -- rendered in 0/4 and
+  # the walk never saw them: "fullnameOverride routes every resource name" was
+  # vacuously true for them, and reverting one to .Release.Name still exited 0.
+  # Forcing these three keys renders both families into every profile so they enter
+  # the walk. The baseline stays 0 -- the chart routes all 15 correctly today, so
+  # this adds a tripwire, not a fix. Set on ALL renders (a/b/explicit/override) so
+  # the no-op diff below still compares like with like.
   render() {
     helm template "$RELEASE" ./client --namespace "$NS" \
-      --set clientId=x --set clientPassword=p -f "$VALUES" "$@"
+      --set clientId=x --set clientPassword=p \
+      --set networkPolicy.training.enabled=true \
+      --set networkPolicy.training.allowExternalHttps=false \
+      --set dockerRegistry.create=true \
+      --set dockerRegistry.server=https://registry.example.com \
+      --set dockerRegistry.username=u --set dockerRegistry.password=p \
+      --set dockerRegistry.email=ci@example.com \
+      -f "$VALUES" "$@"
   }
   render                                    > "$tmp/a.yaml"
   render                                    > "$tmp/b.yaml"
