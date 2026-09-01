@@ -271,21 +271,25 @@ echo "   OK: new defaults flowed in (deny-by-default: gateway routing + external
 echo "   OK: prod ingestor pin reached the installed edge ($WANT_DIGEST)"
 
 echo "── path 3: operator OPTS OUT of the deny-by-default lockdown + opts a canary off the prod pin ──"
-# Both --set values are the OPPOSITE of the chart default on purpose (Bugbot on
-# this PR): now that deny-by-default ships, re-setting allowExternalHttps=false
-# would just match the default, so path 4 could not tell a preserved override
-# from a plain default replay. allowExternalHttps=true is a genuine operator
-# opt-out — it re-opens the direct external-443 rule — so path 4 becomes a real
-# test that --reset-then-reuse-values keeps the opt-out instead of the next
+# Every --set value is the OPPOSITE of the chart default on purpose (Bugbot on
+# this PR): now that deny-by-default ships, re-setting the lockdown values would
+# just match the defaults, so path 4 could not tell a preserved override from a
+# plain default replay. So opt a fleet fully out — routeWorkloads=false (stop
+# routing egress through the gateway) AND allowExternalHttps=true (re-open the
+# direct external-443 rule) — both genuine overrides, so path 4 becomes a real
+# test that --reset-then-reuse-values keeps each opt-out instead of the next
 # hourly auto-upgrade silently re-locking a fleet that deliberately opted out.
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
+  --set egressProxy.routeWorkloads=false \
   --set networkPolicy.training.allowExternalHttps=true \
   --set images.ingestor.prodPin=false
 netpol_has_external_443 \
   || fail "operator opt-out did NOT re-open the external 443 rule (allowExternalHttps=true was ignored)"
+[ -z "$(jm_egress_proxy_url)" ] \
+  || fail "operator opt-out did NOT stop gateway routing (routeWorkloads=false was ignored — EGRESS_PROXY_URL still injected)"
 [ -z "$(jm_ingestor_digest)" ] \
   || fail "prodPin=false did not float the canary edge back onto the ingestor tag (backend#1245)"
-echo "   OK: rule 2 re-opened by the opt-out, canary floats"
+echo "   OK: rule 2 re-opened + gateway routing off by the opt-out, canary floats"
 
 echo "── path 4: the NEXT hourly auto-upgrade must preserve both opt-outs ──"
 # Both overrides are user-supplied and OPPOSITE the chart default, so
@@ -295,9 +299,11 @@ echo "── path 4: the NEXT hourly auto-upgrade must preserve both opt-outs �
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values
 netpol_has_external_443 \
   || fail "auto-upgrade reverted the operator's allowExternalHttps=true opt-out back to the deny-by-default (override lost)"
+[ -z "$(jm_egress_proxy_url)" ] \
+  || fail "auto-upgrade re-injected EGRESS_PROXY_URL, reverting the operator's routeWorkloads=false opt-out (override lost)"
 [ -z "$(jm_ingestor_digest)" ] \
   || fail "auto-upgrade re-pinned an edge the operator had opted out with prodPin=false (override lost)"
-echo "   OK: the operator's egress opt-out and canary opt-out persist across auto-upgrades"
+echo "   OK: the operator's egress opt-outs (routing + external-443) and canary opt-out persist across auto-upgrades"
 
 echo "── path 5: client credentials resolve from the existing Secret (backend#2571) ──"
 #  THE ONLY PLACE THIS MECHANISM CAN BE TESTED. secrets.yaml resolves
