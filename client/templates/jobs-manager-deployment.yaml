@@ -173,9 +173,14 @@ spec:
       # is refused, up to ~480s if a connect hangs) sits above MySQL's own
       # worst-case startup — its startupProbe tolerates ~130s on a fresh datadir
       # (mysql-deployment.yaml: initialDelaySeconds 10 + failureThreshold 24 *
-      # periodSeconds 5). A TCP connect is the right signal: errno 111 is exactly
-      # "not listening yet", and
-      # mysqld binds :3306 only once it is ready to accept connections. Same
+      # periodSeconds 5). A TCP connect through the mysql-client Service is the
+      # right signal, and for a STRUCTURAL reason, not just because errno 111 means
+      # "not listening": mysql-client is a plain selector Service with no
+      # publishNotReadyAddresses, so its EndpointSlice carries ONLY Ready addresses
+      # (mysql-service.yaml). A successful connect therefore proves mysqld passed
+      # its mysqladmin-ping readinessProbe (mysql-deployment.yaml), not merely that
+      # a socket is open — so adding publishNotReadyAddresses to that Service later
+      # would quietly downgrade this gate to a bare TCP probe. Same
       # busybox image as init-writable-data, but non-root — it needs only the
       # network, no writes; busybox has no baked non-root user, so runAsUser is set
       # explicitly to satisfy the pod's runAsNonRoot.
@@ -190,6 +195,26 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+        # requests == limits on BOTH dimensions, deliberately (Saqlain/Asad on
+        # client#941). On CSI this is the pod's FIRST init container
+        # (init-writable-data is hostPath-only), so an UNRESOURCED init here would
+        # silently forbid Guaranteed QoS on a profile whose api/pods-monitor
+        # requests==limits are equalised (e.g. eks-values.yaml): the pod would
+        # render Burstable instead, with no error and no log line — the exact
+        # regression client#922's pod-qos goldens exist to catch. Equalising this
+        # init keeps Guaranteed reachable, leaves the default Burstable (api's cpu
+        # is 250m/1000m regardless), and costs effectively nothing: Kubernetes
+        # takes the MAX of init requests against the SUM of the app containers, and
+        # 10m sits far under api's 250m, so the pod's effective request does not
+        # move. It also keeps the pod admissible under a ResourceQuota on
+        # requests.cpu, which would otherwise reject it outright on CSI.
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "16Mi"
+          limits:
+            cpu: "10m"
+            memory: "16Mi"
         command:
           - 'sh'
           - '-c'
