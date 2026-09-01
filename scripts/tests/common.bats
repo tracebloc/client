@@ -1026,3 +1026,83 @@ EOF
   run _bounded_root 10 docker info
   [ "$output" = "10 sudo docker info" ] || return 1
 }
+# ─────────────────────────────────────────────────────────────────────────────
+#  _dashboard_url — the dashboard link follows CLIENT_ENV (backend#2849)
+#
+#  Lives in common.sh, not install-client-helm.sh: it is CALLED from summary.sh
+#  too, and neither sibling sources the other, so defining it in one made the
+#  other depend on load order nothing enforced (@LukasWodka, client#946).
+#
+#  Hardcoded to production at ten sites across this file and summary.sh, while
+#  `_backend_url` directly above was correctly env-aware — so a CLIENT_ENV=dev
+#  install sent the operator to ai.tracebloc.io for credentials dev-api then
+#  rejects. The PowerShell twin was fixed first; Bugbot caught that this half
+#  was skipped. Hosts come from the backend's own settings
+#  (DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL per environment).
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "_dashboard_url: dev goes to the dev dashboard, not production" {
+  CLIENT_ENV=dev run _dashboard_url
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: staging goes to the staging dashboard" {
+  CLIENT_ENV=staging run _dashboard_url
+  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: prod, unset and unknown all go to production" {
+  CLIENT_ENV=production run _dashboard_url
+  [ "$output" = "https://ai.tracebloc.io/clients" ] || return 1
+  CLIENT_ENV= run _dashboard_url
+  [ "$output" = "https://ai.tracebloc.io/clients" ] || return 1
+  CLIENT_ENV=whatever run _dashboard_url
+  [ "$output" = "https://ai.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: the alias spellings the docs tell people to write" {
+  # backend#1745's class: a raw 'staging' fell through to prod on _backend_url.
+  # Same tb_client_env reduction here, so the two cannot drift apart.
+  CLIENT_ENV=development run _dashboard_url
+  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
+  CLIENT_ENV=stg run _dashboard_url
+  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: takes a path, and an empty path gives the bare host" {
+  CLIENT_ENV=dev run _dashboard_url my-use-cases
+  [ "$output" = "https://dev.tracebloc.io/my-use-cases" ] || return 1
+  CLIENT_ENV=dev run _dashboard_url ""
+  [ "$output" = "https://dev.tracebloc.io" ] || return 1
+}
+
+@test "no LIVE dashboard link is hardcoded to production in either bash file" {
+  # A hardcoded link always carries a PATH (/clients, /my-use-cases); the bare
+  # host with no path is only ever the mapping arm inside _dashboard_url.
+  run bash -c "grep -c 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/install-client-helm.sh' '$BATS_TEST_DIRNAME/../lib/summary.sh' | grep -v ':0$' || true"
+  [ -z "$output" ] || return 1
+}
+
+@test "_dashboard_url is reachable from summary.sh loaded STANDALONE" {
+  # THE REGRESSION THIS GUARDS (client#946). The helper was defined in
+  # install-client-helm.sh and called from summary.sh at four sites, with neither
+  # sourcing the other. Loaded on its own, those four rendered an EMPTY link --
+  # "See it on your dashboard:" followed by nothing -- which is WORSE than the
+  # wrong-environment link being fixed: a reader can recover from a wrong URL and
+  # not from a missing one. common.sh is sourced first by install-k8s.sh and by
+  # load_lib, so this holds by construction now; the test is what keeps it true.
+  run bash -c "LIB_DIR='$BATS_TEST_DIRNAME/../lib'; source \"\$LIB_DIR/common.sh\"; source \"\$LIB_DIR/summary.sh\"; CLIENT_ENV=dev _dashboard_url"
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
+}
+
+@test "no bash lib CALLS _dashboard_url without common.sh guaranteeing it" {
+  # The sharp version: the helper must be defined in common.sh, which is the one
+  # lib every entry path and load_lib sources first. Defined anywhere else and
+  # the caller is one refactor from a blank URL with nothing to catch it.
+  run grep -c '^_dashboard_url()' "$BATS_TEST_DIRNAME/../lib/common.sh"
+  [ "$output" = "1" ] || return 1
+  run bash -c "grep -l '^_dashboard_url()' '$BATS_TEST_DIRNAME/../lib/'*.sh | grep -v 'common.sh' || true"
+  [ -z "$output" ] || return 1
+}
