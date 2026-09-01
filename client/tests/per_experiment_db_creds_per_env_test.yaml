@@ -39,6 +39,13 @@ release:
 set:
   clientId: "test-id"
   clientPassword: "test"
+  # backend#2892: this suite renders dev fleets (dev's ByEnv default turns
+  # rotateMysqlRoot ON) only to assert perExperimentDbCreds resolution. The
+  # fail-closed guard refuses an unpinned rotation-on mint on a CLUSTER-LESS
+  # render (which helm-unittest always is), so pin root's value tier-1 to let the
+  # render through. Nothing here asserts on the root password; the pin is inert to
+  # what this suite tests.
+  mysqlRootPassword: "RotatedRootPw123"
 
 tests:
   - it: "dev edges mint per-experiment credentials — the retired fleet's posture"
@@ -148,7 +155,7 @@ tests:
           content:
             apiGroups: [""]
             resources: ["secrets"]
-            verbs: ["list", "delete"]
+            verbs: ["list", "delete", "patch"]
 
   - it: "prod does not get it — the RBAC follows the same map"
     template: templates/rbac.yaml
@@ -157,9 +164,18 @@ tests:
       clusterScope: true
     documentIndex: 1
     asserts:
+      # THREE shapes guarded since `patch` joined the grant (backend#2795):
+      # a leak on prod would render as the three-verb rule, which the older
+      # two-verb guard alone would not catch.
       - notContains:
           path: rules
           content:
             apiGroups: [""]
             resources: ["secrets"]
             verbs: ["list", "delete"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete", "patch"]
