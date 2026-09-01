@@ -300,15 +300,33 @@ _render() {
   local r
   for mode in "hostpath" "csi" "nvidia" "amd" "lockdown"; do
     r="$BATS_TEST_TMPDIR/cov-$mode.yaml"
+    # EVERY ARM ENDS IN `|| return 1`, like every other `_render` call in this
+    # file. These five were the only ones that did not, so a failed render fell
+    # through and whatever it left in "$r" was measured for coverage (Bugbot,
+    # Medium on client#922).
+    #
+    # THE MECHANISM BUGBOT DESCRIBED DOES NOT REPRODUCE, and that is worth writing
+    # down rather than implying. It said `helm template` streams, so a failed
+    # render can still emit earlier pod documents. Measured on both the pinned
+    # v3.15.4 and v4.1.1, across a late template `fail`, a values-schema
+    # violation, and invalid YAML in the rendered output: helm buffers the whole
+    # manifest and writes **0 bytes** on every failure. With an empty file the
+    # classifier already refuses ("no pod-bearing template in this render") and the
+    # `--sources` call below already carries `|| return 1`.
+    #
+    # It is fixed anyway, because "safe" was resting on two accidents -- helm
+    # buffering, and the classifier's refusal -- neither of which this test
+    # asserts, and a helm that ever did stream would reopen it silently. One word
+    # per arm is cheaper than that dependency.
     case "$mode" in
-      hostpath) _render true  "$r" ;;
-      csi)      _render false "$r" ;;
-      nvidia)   _render true  "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=nvidia ;;
-      amd)      _render true  "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=amd ;;
+      hostpath) _render true  "$r" || return 1 ;;
+      csi)      _render false "$r" || return 1 ;;
+      nvidia)   _render true  "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=nvidia || return 1 ;;
+      amd)      _render true  "$r" --set gpu.devicePlugin.enabled=true --set gpu.devicePlugin.vendor=amd || return 1 ;;
       lockdown) _render true  "$r" \
                   --set networkPolicy.training.enabled=true \
                   --set networkPolicy.training.allowExternalHttps=false \
-                  --set networkPolicy.training.enforcementProbeHost=1.1.1.1 ;;
+                  --set networkPolicy.training.enforcementProbeHost=1.1.1.1 || return 1 ;;
     esac
     python3 "$QOS" "$r" --sources >> "$u" || return 1
   done
