@@ -61,7 +61,7 @@ spec:
       # appended AFTER init-writable-data below, so the hostPath-only perm fix keeps
       # index 0 and only ever runs against the local dirs.
       initContainers:
-      {{- if .Values.hostPath.enabled }}
+      {{- if (default dict .Values.hostPath).enabled }}
       # kubelet does NOT apply fsGroup to hostPath volumes (kubernetes/kubernetes#138411),
       # so /data/shared AND /data/logs are created root-owned and non-root pods can't write
       # to them. Two failures this causes: (1) dataset ingest — `tb data ingest` streams files
