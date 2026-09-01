@@ -40,6 +40,16 @@
 # the named container at all -- honest, and it means adding such a knob flips the
 # row and has to be acknowledged here.
 #
+# t-telemetry-collector IS reachable, and the first version of this file said it
+# was not. `telemetryCollector.resources` is `{"type": "object"}` with no
+# declared keys, so the enumeration derived nothing from it and skipped it -- but
+# the schema does not forbid keys either, and the DaemonSet renders the node with
+# `toYaml $tc.resources`, a wholesale passthrough. Measured: with only that key
+# equalised the pod renders requests == limits on both dimensions and classifies
+# Guaranteed. Skipping it was a `blocked` verdict reached by never having looked,
+# which is the one thing this guard exists to refuse, so the node is probed and
+# the run says the verdict came from a probe.
+#
 # LIMIT, stated so this file is not read as more than it is: `blocked` means "not
 # reachable through VALUES". A chart edit (resourcing the blocker, or pod-level
 # resources under KEP-2837) still reaches Guaranteed. That is the right scope for
@@ -62,5 +72,5 @@ t-resource-monitor	hostPath=false	blocked	tracebloc-resource-monitor
 t-resource-monitor	hostPath=true	blocked	tracebloc-resource-monitor
 t-storage-assertions-check	hostPath=false	blocked	assert
 t-storage-assertions-check	hostPath=true	blocked	assert
-t-telemetry-collector	hostPath=false	blocked	otel-collector
-t-telemetry-collector	hostPath=true	blocked	otel-collector
+t-telemetry-collector	hostPath=false	reachable	-
+t-telemetry-collector	hostPath=true	reachable	-

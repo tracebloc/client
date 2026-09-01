@@ -117,11 +117,28 @@ def classify(path, node):
         for g, gs in sorted(groups.items()):
             emit(f"{path}.{g}", gs["properties"])
         return
-    # NOT A requests/limits KNOB AT ALL -- e.g. `gpu.devicePlugin.*.resources`
-    # is a flat cpu/memory spec and `telemetryCollector.resources` is free-form.
-    # Reported so the domain stays visible, but NOT fatal: these were never
-    # equalisable, so reddening on them would be a permanent false alarm rather
-    # than a signal that something shrank.
+    # FREE-FORM: no declared properties, and additional ones not forbidden. The
+    # schema DERIVES nothing here, but it also permits anything, and
+    # `telemetry-collector-daemonset.yaml` renders the node with
+    # `toYaml $tc.resources` -- a wholesale passthrough -- so a requests/limits
+    # pair set here reaches the pod. Skipping it recorded t-telemetry-collector as
+    # `blocked` when it is reachable: a verdict from never having looked, which is
+    # the shape this guard exists to refuse. Measured -- with ONLY
+    # `telemetryCollector.resources` equalised the pod renders requests == limits
+    # on both dimensions and classifies Guaranteed. So it is PROBED, and the note
+    # records that the verdict came from a probe rather than a declaration.
+    if not props and node.get("additionalProperties") is not False:
+        for dim in sorted(VALUE):
+            out.append(f"{path}.requests.{dim}={VALUE[dim]}")
+            out.append(f"{path}.limits.{dim}={VALUE[dim]}")
+        print(f"#PROBED {path} (free-form; the template passes the object through)")
+        return
+    # NOT A requests/limits KNOB AT ALL -- `gpu.devicePlugin.*.resources` is a flat
+    # cpu/memory spec applied to BOTH sides by construction (client#919 makes the
+    # split shape unexpressible so the pod cannot stop being Guaranteed), so there
+    # is genuinely nothing to equalise. Reported so the domain stays visible, but
+    # NOT fatal: it was never equalisable, so reddening on it would be a permanent
+    # false alarm rather than a signal that something shrank.
     print(f"#NOTAPAIR {path} ({','.join(sorted(props)) or 'no properties'})")
 
 
@@ -165,6 +182,8 @@ if [ "${#NOTES[@]}" -gt 0 ]; then
     case "$n" in
       "#NOTAPAIR"*)
         note "not a requests/limits knob, so nothing to equalise: ${n#\#NOTAPAIR }" ;;
+      "#PROBED"*)
+        note "probed with the canonical cpu/memory pair, since the schema declares no keys but the template passes the object through: ${n#\#PROBED }" ;;
       *)
         err "the schema exposes a resources group this guard cannot equalise ($n), so 'unreachable' below would not be evidence" ;;
     esac
