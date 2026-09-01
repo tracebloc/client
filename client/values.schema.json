@@ -414,8 +414,8 @@
             },
             "allowExternalHttps": {
               "type": "boolean",
-              "default": true,
-              "description": "When false, drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY \u00a78.2 / client-runtime#102). Default true keeps existing behaviour; flip per-fleet after verifying the egress gateway works (G2)."
+              "default": false,
+              "description": "When false (the default, RFC-0003 D6), drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY \u00a78.2 / client-runtime#102). Set true to opt a fleet back out to direct egress. An absent key on a `--reuse-values` upgrade from a release predating it keeps the old permissive behaviour."
             },
             "enforcementProbeHost": {
               "type": "string",
@@ -683,8 +683,8 @@
         },
         "routeWorkloads": {
           "type": "boolean",
-          "default": false,
-          "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default false \u2014 enable per-fleet, verify a run, then drop the direct egress rule (networkPolicy.training.allowExternalHttps=false)."
+          "default": true,
+          "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default true (RFC-0003 D6, deny-by-default); set false to opt a fleet out of gateway routing."
         },
         "port": {
           "type": "integer",

@@ -596,8 +596,9 @@ egressProxy:
 # DaemonSet on every customer node spooling to disk with nothing it can deliver —
 # filling toward the 1 GiB cap per node for no benefit, which is precisely the
 # "telemetry must never be the reason a node fills" risk D7 exists to bound.
-# Same posture as `egressProxy.routeWorkloads`: the component ships inert and is
-# flipped per fleet once its prerequisite is in place.
+# Ships inert and is flipped per fleet once its prerequisite is in place — the
+# posture `egressProxy.routeWorkloads` had before RFC-0003 D6 flipped it on by
+# default.
 #
 # CLASS A ONLY (D12). The receiver is scoped to the control-plane containers this
 # chart owns; training and ingestion pods are Class B and stay out until
