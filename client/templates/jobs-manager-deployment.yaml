@@ -84,8 +84,19 @@ spec:
       - name: wait-for-mysql
         image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
-          runAsUser: 1000
-          runAsNonRoot: true
+          # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
+          # `restricted` SCC assigns a UID from the project's range, and the pod
+          # is built for that -- the pod-level comment above says
+          # "OpenShift arbitrary-UID" in as many words, and neither `api` nor
+          # `pods-monitor-container` pins one. A SINGLE container pinned to 1000
+          # fails SCC admission for the WHOLE pod, so jobs-manager would stay
+          # Pending on OpenShift even once MySQL was up -- turning a startup race
+          # into a permanent stop on one of the four supported platforms.
+          #
+          # `runAsNonRoot` is set at POD level (line ~41) and inherited, so
+          # nothing is loosened by omitting it here: this container still cannot
+          # run as root, it simply does not care WHICH non-root uid it gets.
+          # Opening a TCP socket needs no particular identity.
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:

@@ -66,4 +66,34 @@ else:
   esac
 done
 
+# ── No container may pin a UID on the arbitrary-UID path (Bugbot High, #942) ──
+#
+# OpenShift's `restricted` SCC assigns a uid from the project range, and this pod
+# is built for that: its pod-level comment says "OpenShift arbitrary-UID", and
+# neither `api` nor `pods-monitor-container` pins one. A SINGLE container pinned
+# to a literal uid fails SCC admission for the WHOLE pod -- so `wait-for-mysql`
+# with `runAsUser: 1000` would have turned a startup race into jobs-manager
+# staying Pending forever on one of the four supported platforms.
+#
+# RENDERED WITH hostPath OFF, which is what makes this checkable at all:
+# `init-writable-data` legitimately needs `runAsUser: 0` to chown a hostPath
+# volume, and it renders only when that path is in use. Off, every remaining
+# container is one that must accept an assigned uid.
+out=$(helm template t client "${BASE[@]}" --set hostPath.enabled=false)
+pinned=$(printf '%s' "$out" | python3 -c '
+import sys, re
+for doc in sys.stdin.read().split("\n---\n"):
+    if "kind: Deployment" in doc and "jobs-manager" in doc:
+        print("\n".join(re.findall(r"^\s*runAsUser: .*$", doc, re.M)))
+        break
+')
+if [ -n "$pinned" ]; then
+  echo "FAIL a jobs-manager container pins a uid on the arbitrary-UID path:"
+  printf '     %s\n' "$pinned"
+  echo "     One pinned container fails OpenShift SCC admission for the whole pod."
+  fail=1
+else
+  echo "OK   no jobs-manager container pins a uid when hostPath is off"
+fi
+
 exit "$fail"
