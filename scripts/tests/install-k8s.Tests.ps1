@@ -4206,7 +4206,7 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
         # was then fixed for one spelling only. `$LASTEXITCODE` was added as a DIRECT
         # token below, catching `if ($LASTEXITCODE -ne 0)` but not the capture. The
         # live site is install-k8s.ps1:5785-5787.
-        if ($a.Right.Extent.Text -match '\.ExitCode|\$LASTEXITCODE' -and
+        if ($a.Right.Extent.Text -match '\.ExitCode|\.Code|\$LASTEXITCODE' -and
             $a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
           $codeVars += $a.Left.VariablePath.UserPath
         }
@@ -4227,7 +4227,7 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
       $varAlt = if ($codeVars.Count) {
         '|\$(' + (($codeVars | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*-(eq|ne)\s*0'
       } else { '' }
-      $gateRe = '\.ExitCode\s*-(eq|ne)\s*0' + $varAlt
+      $gateRe = '\.(ExitCode|Code)\s*-(eq|ne)\s*0' + $varAlt
 
       $calls = $ast.FindAll({
         $args[0] -is [System.Management.Automation.Language.CommandAst] -and
@@ -4281,6 +4281,23 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
             # statement, which is the one outcome worse than not checking.
             foreach ($cl in $n.Clauses) {
               if ($cl.Item1.Extent.Text -notmatch $gateRe) { continue }
+              # AND NOT A DISJUNCTION, for the same reason the ELSE and the CATCH
+              # are excluded above: the guard cannot know WHICH disjunct fired, so
+              # demanding the code would demand a possibly-false cause.
+              #
+              # Widening to the `.Code` spelling (Bugbot, Medium) exposed two of
+              # these -- `if ($res.Code -ne 0 -or $out -match "FAIL " -or
+              # $unconfirmed.Count -gt 0)` at install-k8s.ps1:4030 and
+              # `if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx)` at :4544. In both,
+              # a run that failed on the NON-code disjunct has a code of 0, and
+              # "exit 0" printed next to a failure is exactly the wrong-cause-reads-
+              # as-information outcome this Describe already refuses to produce.
+              # @saadqbal flagged the same hazard pre-emptively for the bool-collapsed
+              # sites (:4729, whose code would be a stale apply/rollout probe).
+              #
+              # A site that WANTS to name the code conditionally still can -- this
+              # only stops the guard from requiring it unconditionally.
+              if ($cl.Item1.Extent.Text -match '\s-or\s') { continue }
               # `-ne 0` selects failure in the clause BODY; `-eq 0` selects
               # success there, so failure is the ELSE.
               $failureBlock = if ($cl.Item1.Extent.Text -match '-ne\s*0') { $cl.Item2 } else { $n.ElseClause }
@@ -4303,7 +4320,21 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
           # of the branch's information -- read as compliant. Measured: the
           # mutation that replaced `$buildExit` with `0` there left this green,
           # which is the one-hop degenerating into a blanket pass.
-          $tokens = @('\.ExitCode\b')
+          # BOTH PROPERTY SPELLINGS, AND THE GATE SIDE ALONE IS NOT ENOUGH.
+          # Widening only the gate regex to `.Code` made this guard
+          # UNSATISFIABLE: it demanded the code from five newly-visible sites and
+          # then could not see it when supplied, because compliance still matched
+          # `.ExitCode` only. All five kept failing with the code sitting in the
+          # message text. A guard that cannot be satisfied is worse than one that
+          # does not check -- it trains the reader to edit the guard instead of the
+          # code. The two sides must widen together, which is why they are named
+          # here in one place.
+          #
+          # `\.Code\b` carries the same false-positive risk profile as
+          # `\.ExitCode\b` and no more: the leading dot is what keeps the
+          # parameter-name shape (`-ExitCode 0`) out, and that is the trap the
+          # comment above records.
+          $tokens = @('\.ExitCode\b', '\.Code\b')
           foreach ($v in $codeVars) {
             if ($gate -match ('\$' + [regex]::Escape($v) + '\b')) {
               $tokens += '\$' + [regex]::Escape($v) + '\b'
@@ -4357,7 +4388,18 @@ Describe "A failure reported from an exit-code branch names the code (backend#29
     # site at install-k8s.ps1:5785 visible to the walk. The floor moves with it
     # deliberately -- a floor left at 8 is what made the hole self-concealing: the
     # test passed either way, so nothing said a site had gone missing.
-    $sites.Count | Should -BeGreaterOrEqual 9
+    #
+    # 9 -> 14: the `.Code` spelling (Bugbot, Medium). `Invoke-BoundedProcess` and
+    # `Invoke-DockerCli` return `@{ Code; Output }` -- the house result shape,
+    # documented at install-k8s.ps1:2307-2308 -- so every branch on `$r.Code` was
+    # a gate this walk could not see. 31 such gates exist in the file; 7 of them
+    # carry a user-facing Warn/Err, 2 of those are disjunctions and excluded
+    # above, and 5 were reporting a failure with the code dropped.
+    #
+    # MEASURED BY RAISING THIS FLOOR UNTIL IT FAILED AND READING THE NUMBER BACK,
+    # not by counting the additions by hand -- which is how a floor and a walk
+    # start disagreeing.
+    $sites.Count | Should -BeGreaterOrEqual 14
   }
 
   It "no user-facing failure message drops the exit code that decided it" {

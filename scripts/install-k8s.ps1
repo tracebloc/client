@@ -1599,7 +1599,9 @@ function Confirm-NvidiaDriver {
     # install -- and Find-Gpu now runs before the fast path, so an unbounded nvidia-smi would hang
     # every "nothing to do" re-run too.
     $dr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=driver_version","--format=csv,noheader") -TimeoutSec 15
-    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi failed or timed out) -- GPU checks skipped."; return }
+    # 124 IS THE TIMEOUT, so the code is what separates the two causes this
+    # message names -- "failed or timed out" made the operator guess which.
+    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi exited $(Format-ExitCode $dr.Code); 124 means it timed out) -- GPU checks skipped."; return }
     $driverVer = ($dr.Output -split "`n" | Select-Object -First 1).Trim()
     $majorVer  = [int]($driverVer -replace '\..*', '')
     if ($majorVer -ge 460) {
@@ -4578,7 +4580,7 @@ function New-K3dCluster {
     Hint "cluster kubectl currently points at, so continuing would connect it to the wrong cluster."
     Hint "Fix that (or merge it yourself with the command below), then re-run this installer:"
     Hint "  $mergeCmd"
-    Err "kubectl was not pointed at '$CLUSTER_NAME' - refusing to continue against an unknown cluster." $merge.Output
+    Err "kubectl was not pointed at '$CLUSTER_NAME' (k3d kubeconfig merge exited $(Format-ExitCode $merge.Code)) - refusing to continue against an unknown cluster." $merge.Output
   }
   if ($merge.Output) { Log "k3d kubeconfig merge: $($merge.Output)" }
 
@@ -4602,7 +4604,7 @@ function New-K3dCluster {
   $haveCtx = Get-CurrentContextFromOutput -Output "$($ctx.Output)"
   if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx) {
     if ($ctx.Code -ne 0) {
-      Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current."
+      Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl can't tell us which context is current (kubectl exited $(Format-ExitCode $ctx.Code))."
     } else {
       Warn "k3d merged the '$CLUSTER_NAME' kubeconfig, but kubectl's current context is '$haveCtx', not '$wantCtx'."
     }
@@ -4706,7 +4708,7 @@ function Install-GpuDevicePlugin {
     if ($spec.Code -ne 0) {
       $script:GPU_SKIP_REASON = "the node couldn't generate its WSL GPU (CDI) spec, so pods wouldn't be able to use the GPU -- running CPU-only (see the install log)"
       Log "CDI spec /etc/cdi/nvidia.yaml missing or empty in the node (exit $($spec.Code)): $($spec.Output)"
-      Warn "GPU couldn't be wired into the cluster (CDI spec missing) - continuing in CPU mode."
+      Warn "GPU couldn't be wired into the cluster (CDI spec missing; the probe exited $(Format-ExitCode $spec.Code)) - continuing in CPU mode."
       return $false
     }
     # A spec that EXISTS is not enough: it must also carry libdxcore.so. `nvidia-ctk cdi generate
@@ -4719,7 +4721,7 @@ function Install-GpuDevicePlugin {
     if ($dxc.Code -ne 0) {
       $script:GPU_SKIP_REASON = "the node's WSL GPU (CDI) spec is missing libdxcore, so CUDA would fail inside pods with a misleading 'driver insufficient' error -- running CPU-only (see the install log)"
       Log "CDI spec is present but has no libdxcore mount (exit $($dxc.Code)): $($dxc.Output)"
-      Warn "GPU couldn't be fully wired into the cluster (CDI spec incomplete) - continuing in CPU mode."
+      Warn "GPU couldn't be fully wired into the cluster (CDI spec incomplete; the libdxcore probe exited $(Format-ExitCode $dxc.Code)) - continuing in CPU mode."
       return $false
     }
     # Remove a LEFTOVER NVML device plugin before advertising capacity ourselves (Bugbot, HIGH).
