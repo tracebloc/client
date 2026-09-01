@@ -692,6 +692,21 @@ telemetryCollector:
     - api
     - pods-monitor-container
     - squid
+    # THE UPGRADE PATH'S OWN OUTPUT (backend#2935). `helm` is the auto-upgrade
+    # CronJob's container and `refresh` is image-refresh's. Without them the
+    # collector tails neither, so when a customer's edge stops upgrading we can
+    # see THAT it failed -- the controller reports the pod's exit status -- and
+    # never WHY.
+    #
+    # Measured on a live workspace: 477 failures in 24 hours, 431 of them a bare
+    # `exit code 1` whose reason exists only in these containers' stdout and
+    # reached nothing. An edge that cannot upgrade stops receiving security
+    # fixes, which makes this the least diagnosable failure with the highest
+    # cost -- the worst possible pairing.
+    #
+    # Cheap: both are hourly CronJobs that log a few lines and exit.
+    - helm
+    - refresh
 
   # Class A containers that run in the node-agents namespace rather than the
   # release namespace. Separate list rather than a magic value inside the one
