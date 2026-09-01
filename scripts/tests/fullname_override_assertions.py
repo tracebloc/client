@@ -651,6 +651,68 @@ def identity_env_sites(docs, rel, ns, name_token):
     return out
 
 
+def release_scoped_path_sites(docs, rel, ns, name_token):
+    """`{(kind, normalised-name, doc-path)}` for every path scoped by the RELEASE.
+
+    THE SAME BLIND SPOT AS `identity_env_sites`, ONE CLASS OVER (Bugbot, High on
+    client#911). The PATH class asks that every path still CONTAINING the release
+    name did not follow the override — but a path routed to `tracebloc.fullname`
+    stops containing the release name, so the token scan never classifies it and
+    it LEAVES the class rather than failing it. The class-level check then reports
+    `[OK] N release-scoped path(s) kept the release name` over the sites that
+    remain, and the cross-profile `PATHCLASS` assertion only ever sees a count, so
+    a single routed path keeps every profile's count plausible.
+
+    That single routed path is the one that orphans tenant data: the datadir is
+    keyed by release name today, and a path that follows the override points a
+    fresh install at a directory the old one does not own.
+
+    So the domain is DERIVED from the render that cannot be wrong -- the one with
+    the override UNSET -- and every path site it names must still be scoped by the
+    release name with the override set. Disappearing is the finding.
+
+    Keyed on the doc path rather than the value, because the value legitimately
+    differs between the two renders (the workload name is normalised out of it the
+    same way `identity_env_sites` normalises `metadata.name`).
+
+    THE PREDICATE IS "STILL SCOPED BY `rel`", AND IT HAS TO BE MEASURED ON THE
+    VALUE. `classify` alone is not enough and the first version of this function
+    used it alone: `CLS_PATH` keys on the doc-path SHAPE (`.hostPath.path`, or a
+    `.path` whose value starts with `/`) and never looks at whether the release
+    name is in there -- main()'s loop applies that filter upstream, before it
+    classifies. So classifying without it named every hostPath in both renders,
+    the two sets came out identical, and the set difference was empty by
+    construction. Measured: routing `logs-pvc.yaml`'s path through
+    `tracebloc.fullname` left this guard printing `[OK] all 5` and exiting 0 --
+    the very mutation it was written to catch.
+
+    `rel` is used for BOTH renders on purpose; `name_token` is not the predicate.
+    Under the override the value should still carry the release name, so testing
+    for `ovr` would pass exactly when the path had been routed.
+    """
+    out = set()
+    token = re.compile(
+        rf"(^|[^A-Za-z0-9]){re.escape(name_token)}($|[^A-Za-z0-9])"
+    )
+    scoped = re.compile(rf"(^|[^A-Za-z0-9]){re.escape(rel)}($|[^A-Za-z0-9])")
+    for d in docs:
+        kind = d.get("kind")
+        raw = (d.get("metadata") or {}).get("name") or ""
+        norm = token.sub(r"\1<NAME>\2", raw)
+        envs = env_value_paths(d)
+        for path, val in walk(d):
+            if not isinstance(val, str) or not val.startswith("/"):
+                continue
+            # The same classifier the class arm uses, so the two cannot disagree
+            # about what counts as an on-disk path -- plus the release-scoping test
+            # that arm gets from main()'s token filter.
+            if not scoped.search(val):
+                continue
+            if classify(d, path, val, rel, ns, envs) is CLS_PATH:
+                out.add((kind, norm, path))
+    return out
+
+
 def strip_ansi(text):
     return re.sub(r"\033\[[0-9;]*m", "", text)
 
@@ -843,6 +905,44 @@ def main() -> int:
                 print(f"             {where}  {name or path} = {val!r}")
         else:
             print(f"   [OK] {len(found)} {cls} value(s) still carry the release identity")
+
+    # --- EVERY RELEASE-SCOPED PATH SITE SURVIVED, not just the class ----------
+    # See release_scoped_path_sites: a routed path vanishes from the class instead
+    # of failing it, so the PATHCLASS arm above is blind to the one regression that
+    # orphans tenant data. Same derivation as the env sites below, same reason.
+    want_paths = release_scoped_path_sites(default_docs, rel, ns, rel)
+    have_paths = release_scoped_path_sites(docs, rel, ns, ovr)
+    if not want_paths:
+        # PER-PROFILE EMPTINESS IS NOT A CHART FINDING -- the identical demotion
+        # the PATHCLASS arm already carries, and for the identical reason: a
+        # profile rendering no hostPath-backed workload has no release-scoped
+        # path, and failing here would refuse a complete chart. The count goes
+        # out machine-readably and the shell asserts it across profiles.
+        print(
+            "   [note] the DEFAULT render names no release-scoped path in this "
+            "profile — legitimate when no hostPath-backed workload renders. "
+            "Asserted across profiles, not here."
+        )
+        print("PATHSITES 0")
+    else:
+        gone = sorted(want_paths - have_paths)
+        if gone:
+            fail = True
+            print(
+                f"   [ERROR] {len(gone)} release-scoped path site(s) present with the "
+                f"override UNSET are no longer scoped by the release name under "
+                f"fullnameOverride={ovr!r} — routed away, not merely changed. A path "
+                f"that follows the override points a fresh install at a datadir the "
+                f"old one does not own:"
+            )
+            for kind, name, path in gone:
+                print(f"             {kind}/{name}  {path}")
+        else:
+            print(
+                f"   [OK] all {len(want_paths)} release-scoped path site(s) are still "
+                f"scoped by the release name, site by site"
+            )
+        print(f"PATHSITES {len(want_paths)}")
 
     # --- EVERY IDENTITY ENV SITE SURVIVED, not just the class ----------------
     # See identity_env_sites: a routed site vanishes from the class instead of

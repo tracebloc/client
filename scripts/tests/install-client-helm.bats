@@ -3767,3 +3767,16 @@ PY
   [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT re-derived to cpu=7,memory=29Gi
   [ "$_TB_TRAINING_PROVENANCE" = "user" ] || return 1          # marker preserved, not downgraded to installer
 }
+
+# _dashboard_url lives in common.sh (client#946) and its own tests are in
+# common.bats. THIS one stays here, because it is the only assertion that needs
+# BOTH helpers in scope: `_backend_url` is defined in this file's lib, and the
+# defect being guarded was precisely the two disagreeing about the environment.
+@test "_dashboard_url AGREES with _backend_url about the environment" {
+  # The defect was precisely these two disagreeing, so pair them per
+  # environment rather than asserting each alone.
+  CLIENT_ENV=dev run _backend_url;    [[ "$output" == *"dev-api"* ]] || return 1
+  CLIENT_ENV=dev run _dashboard_url;  [[ "$output" == *"dev."* ]]    || return 1
+  CLIENT_ENV=staging run _backend_url;   [[ "$output" == *"stg-api"* ]] || return 1
+  CLIENT_ENV=staging run _dashboard_url; [[ "$output" == *"stg."* ]]    || return 1
+}

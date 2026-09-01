@@ -190,12 +190,12 @@ print_summary() {
       echo -e "  ${TB_LABEL}Mode${RESET}        : ${mode}"
       echo ""
       echo -e "  ${TB_HEADING}Your secure environment is live${RESET} 🟢"
-      echo -e "    See it on your dashboard:  ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "    See it on your dashboard:  ${TB_LINK}$(_dashboard_url)${RESET}"
       echo ""
       # "What's next" is a heading (cyan) — the primary call to action, not dim.
       echo -e "  ${TB_HEADING}What's next${RESET}"
       echo -e "    1. Ingest your data       ${TB_CMD}tracebloc data ingest${RESET}"
-      echo -e "    2. Create a use case      ${TB_LINK}https://ai.tracebloc.io/my-use-cases${RESET}"
+      echo -e "    2. Create a use case      ${TB_LINK}$(_dashboard_url my-use-cases)${RESET}"
       echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
       echo ""
       if _cli_runnable_now; then
@@ -232,14 +232,14 @@ print_summary() {
       echo -e "  Components are still downloading/starting (first run can take a few minutes)."
       echo -e "  Check progress:   ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
       echo ""
-      echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "  Your client will show as ${BOLD}🟢 Online${RESET} at ${TB_LINK}$(_dashboard_url)${RESET}"
       echo -e "  once it finishes. ${DIM}Re-running this installer is safe.${RESET}"
       ;;
     bad_creds)
       echo -e "  ${TB_ERR}✖ Couldn't connect — your Client ID or password was rejected.${RESET}" >&2
       echo ""
       echo -e "  The environment installed, but tracebloc refused those credentials."
-      echo -e "    1. Re-check them at ${TB_LINK}https://ai.tracebloc.io/clients${RESET}"
+      echo -e "    1. Re-check them at ${TB_LINK}$(_dashboard_url)${RESET}"
       echo -e "    2. Re-run this installer ${DIM}(safe to re-run)${RESET}"
       ;;
     image_pull_ca)

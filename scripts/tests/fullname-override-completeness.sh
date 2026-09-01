@@ -103,8 +103,11 @@ pathclass_missing=0
 env_profiles=0
 envclass_missing=0
 could_not_run=0
+pathsite_profiles=0
+pathsites_missing=0
 path_counts=""
 env_counts=""
+pathsite_counts=""
 
 # NOTES NEEDS ITS OWN RENDER, AND EVERY OBVIOUS ROUTE IS CLOSED. Measured on the
 # CI-pinned helm v3.15.4:
@@ -241,6 +244,14 @@ for VALUES in "${profiles[@]}"; do
   ec=$(grep -E '^ENVCLASS [0-9]+$' "$tmp/out.txt" | awk '{print $2}' | head -1 || true)
   env_counts="${env_counts}${prof}=${ec:-none} "
   case "${ec:-0}" in ''|0) ;; *) env_profiles=$((env_profiles + 1)) ;; esac
+  # The per-SITE path enumeration, on exactly the same terms as the two counts
+  # above. Distinct from PATHCLASS: that one counts what still carries the release
+  # name, this one counts the sites the DEFAULT render named -- which is the domain
+  # a routed path disappears from.
+  ps=$(grep -E '^PATHSITES [0-9]+$' "$tmp/out.txt" | awk '{print $2}' | head -1 || true)
+  pathsite_counts="${pathsite_counts}${prof}=${ps:-none} "
+  case "${ps:-0}" in ''|0) ;; *) pathsite_profiles=$((pathsite_profiles + 1)) ;; esac
+  [ -n "${ps:-}" ] || pathsites_missing=$((pathsites_missing + 1))
   # NO COUNT MEANS NO ANSWER, NOT AN ANSWER OF ZERO (@saadqbal on client#911).
   # A profile that never PRINTED `PATHCLASS` leaves `pc` empty, `path_profiles`
   # unincremented, and assertion 6 below then reports "NO profile rendered a
@@ -406,6 +417,33 @@ elif [ "$env_profiles" -eq 0 ]; then
   failures=$((failures + 1))
 else
   echo "-- Helm-identity envs present in $env_profiles profile(s) [OK]"
+fi
+
+# --- 8. THE PATH SITE ENUMERATION RAN SOMEWHERE -------------------------------
+# The chart-level backstop for the per-site path check, and the exact analogue of
+# assertion 7 for the class assertion 6 covers. `want_paths` is derived from the
+# DEFAULT render, so a chart that stopped scoping paths by release at all names
+# zero sites on both sides and the set difference is empty -- "no path was routed
+# away" reported over a domain that is itself gone.
+echo "-- release-scoped path SITES per profile: ${pathsite_counts% }"
+if [ "$pathsites_missing" -ne 0 ]; then
+  echo "-- release-scoped path sites: NOT CHECKED — $pathsites_missing profile(s)"
+  echo "   produced no PATHSITES count, so this assertion has no input. Not a"
+  echo "   verdict on the chart in either direction; fix the finding(s) above and"
+  echo "   re-run."
+  # `could_not_run`, not `failures` — same vocabulary and the same reason as
+  # assertions 6 and 7: renaming the PATHSITES marker in the sidecar is a pure
+  # refactor that would otherwise print NOT CHECKED and exit 0.
+  could_not_run=1
+elif [ "$pathsite_profiles" -eq 0 ]; then
+  echo "[ERROR] NO profile's DEFAULT render named a release-scoped path site, so"
+  echo "        'no path site was routed away' proves nothing — the set it compares"
+  echo "        is empty on both sides. Either the paths stopped being scoped by"
+  echo "        release or every profile disables both hostPath and the Collector,"
+  echo "        and both are findings."
+  failures=$((failures + 1))
+else
+  echo "-- release-scoped path sites present in $pathsite_profiles profile(s) [OK]"
 fi
 
 if [ "$failures" -ne 0 ]; then
