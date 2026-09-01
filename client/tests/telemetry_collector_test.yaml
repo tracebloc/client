@@ -182,6 +182,25 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '/var/log/pods/tracebloc_[*]/squid/[*][.]log'
+      # THE UPGRADE PATH'S OWN CONTAINERS (backend#2961). `helm` is the
+      # auto-upgrade CronJob and `refresh` the image-refresh Job -- the two
+      # things failing 431 times a day with a bare `exit 1` while being the only
+      # Class A workloads nobody collected.
+      #
+      # THESE ASSERTIONS ARE THE FIX, not the values list. Adding the two names
+      # to `classAContainers` and deriving the guard's expected count from that
+      # same list makes the count move WITH the list, so deleting both entries
+      # left `collector-class-a-agreement.sh` green at 4 globs and all 61
+      # unittests passing -- the change was removable without one leg going red
+      # (@saadqbal on #951). That guard checks AGREEMENT (globs are a subset of
+      # the containers the chart deploys); this checks COVERAGE (these two are
+      # actually collected). Only the second can notice a shrink.
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/helm/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/refresh/[*][.]log'
       # A DIFFERENT NAMESPACE. resource-monitor is a DaemonSet in
       # `nodeAgents.namespace`, so scoping every path to the release namespace
       # missed a whole Class A component while the Collector reported healthy.
@@ -1198,6 +1217,15 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '/var/log/pods/tracebloc_[*]/squid/[*][.]log'
+      # The upgrade path's containers must survive a PARTIAL map too — this is
+      # what a fleet install gets when it sets some Collector keys and not
+      # `classAContainers` (backend#2961).
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/helm/[*][.]log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/tracebloc_[*]/refresh/[*][.]log'
       - matchRegex:
           path: data["config.yaml"]
           pattern: '/var/log/pods/tracebloc-node-agents_edge-[*]/tracebloc-resource-monitor/[*][.]log'
