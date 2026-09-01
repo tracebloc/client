@@ -704,27 +704,26 @@ tests:
       # no fsGroup — no-op on hostPath, and a regression risk on CSI (see template comment)
       - notExists:
           path: spec.template.spec.securityContext.fsGroup
+      - exists:
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")]
       - equal:
-          path: spec.template.spec.initContainers[0].name
-          value: init-writable-data
-      - equal:
-          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].securityContext.runAsUser
           value: 0
       - contains:
-          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].securityContext.capabilities.add
           content: CHOWN
       - contains:
-          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].securityContext.capabilities.add
           content: FOWNER
       # FSETID is required or the kernel strips the setgid bit when chmod runs after
       # the chown to GID 1000 (root without FSETID can't set setgid on a non-owned-group dir)
       - contains:
-          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].securityContext.capabilities.add
           content: FSETID
       # each dir is fixed INDEPENDENTLY (a for-loop): chown 1000:1000 then chmod its OWN mode.
       # (?s) so . spans the newlines of the multi-line script (#672).
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '(?s)for e in /data/shared:2777 /data/logs:3777.*chown 1000:1000.*chmod'
       # /data/shared must NOT be sticky. `data delete` removes a tree the INGEST wrote: the
       # ingestion Job runs as uid 65534 (or HOST_UID), the CLI teardown pod as 65532. Sticky
@@ -732,34 +731,34 @@ tests:
       # teardown is — so sticky here made a documented operation impossible: table dropped, files
       # stranded. fsGroup can't align them either (kubelet ignores it on hostPath, k8s#138411).
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: "/data/shared:2777"
       # ...while /data/logs KEEPS sticky: nothing has to delete another writer's logs, so the
       # /tmp-style protection costs nothing there. Both keep setgid (2) for GID inheritance.
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: "/data/logs:3777"
       # best-effort: a failing chown/chmod is logged, not fatal, so the other dir is still fixed
       # and jobs-manager still starts (e.g. /data/shared on an NFS root_squash export). The
       # per-dir report is an echo per outcome, and the script always exits 0 (#672 replaced the
       # single `|| echo` tail — which was also what swallowed the chmod — with per-dir OK/FAIL).
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'echo "init-writable-data: OK '
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'echo "init-writable-data: FAIL '
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '(?m)^exit 0$'
       # the init must mount BOTH hostPath volumes it chowns, or the chown is a no-op
       - contains:
-          path: spec.template.spec.initContainers[0].volumeMounts
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].volumeMounts
           content:
             name: shared-volume
             mountPath: /data/shared
       - contains:
-          path: spec.template.spec.initContainers[0].volumeMounts
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].volumeMounts
           content:
             name: logs-volume
             mountPath: /data/logs
@@ -786,32 +785,32 @@ tests:
       # command must not contain that shape ANYWHERE, prose included — hence the template
       # describes the old behaviour in words ("chained with a logical AND") rather than in code.
       - notMatchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'chown[^\n]*&&[^\n]*chmod'
       - notMatchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'chmod[^\n]*&&[^\n]*chown'
       # each call is its OWN statement, and each records which one failed rather than sharing a tail
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '(?m)^\s*chown 1000:1000 "\$d" \|\| failed='
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '(?m)^\s*chmod "\$want" "\$d" \|\| failed='
       # the verdict is read back from the OBSERVED mode, not from an exit status: a bind mount can
       # accept a chmod and ignore it, so "the command returned 0" is not evidence the mode landed
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'ls -ldn "\$d"'
       # other-write bit (mode char 9) is what decides OK/FAIL — ownership is NOT a pass condition,
       # since a successful chown with a failed chmod leaves a 0755 dir no writer can use
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '\?{8}w\*\)'
       # `stat -c` is GNU-only and fails SILENTLY on busybox/BSD (empty mode -> spurious FAIL on a
       # perfectly good install), which is why the check is ls -ldn. Keep it that way.
       - notMatchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'stat -c'
       # a partial result must be reported as such, not implied — and the note must not claim the
       # chmod achieved the mode. A dir that was ALREADY other-writable when both calls failed is
@@ -820,14 +819,14 @@ tests:
       # calls refused -> "want 2777 got drwxrwxrwt ... mode applied anyway"). Claim only the
       # observation: the dir is other-writable, whatever refused us.
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '\$failed failed; other-writable regardless'
       - notMatchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: 'mode applied anyway'
       # still non-fatal: jobs-manager must start even when a mount refuses everything
       - matchRegex:
-          path: spec.template.spec.initContainers[0].command[2]
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")].command[2]
           pattern: '(?m)^exit 0$'
 
   - it: "CSI install (hostPath disabled) skips the privileged init and sets no fsGroup (#611)"
@@ -837,8 +836,22 @@ tests:
     asserts:
       - notExists:
           path: spec.template.spec.securityContext.fsGroup
+      # THE CLAIM IS "SKIPS THE PRIVILEGED INIT", NOT "HAS NO INITS" (Bugbot,
+      # High, review on client#942). This asserted `notExists: initContainers`,
+      # a faithful reading of the chart until `wait-for-mysql` became
+      # unconditional -- after which a CSI install has exactly one init container
+      # and the test failed while the property it NAMES still held. Naming the
+      # container states the requirement and survives the next one being added.
       - notExists:
-          path: spec.template.spec.initContainers
+          path: spec.template.spec.initContainers[?(@.name=="init-writable-data")]
+      # AND NOTHING ELSE RUNS AS ROOT, which is what "privileged" meant here. A
+      # future init added with runAsUser 0 would slip past a by-name check alone.
+      - notExists:
+          path: spec.template.spec.initContainers[?(@.securityContext.runAsUser==0)]
+      # Non-vacuity: the wait DOES run on CSI, so the two refusals above are about
+      # a populated list rather than an empty one.
+      - exists:
+          path: spec.template.spec.initContainers[?(@.name=="wait-for-mysql")]
 
   # backend#1528 S1: the tb_meta / tb_ingest env is flag-gated on
   # serviceDbAccounts so a default install is byte-identical.
