@@ -385,6 +385,124 @@ setup() {
   mock_calls | grep -q "helm upgrade --install tracebloc"
 }
 
+# ── The generated values.yaml holds a live clientPassword (backend#2571) ──────
+# The mode was previously right BY ACCIDENT: common.sh sets `umask 077`, so the
+# heredoc happened to create the file 0600 and the chmod after it was a no-op.
+# Nothing tested it, and the installer does not hold 077 everywhere --
+# `_install_userspace_tools` sets `umask 022` (the trap telemetry.bats already
+# documents for the spool). So these run under a HOSTILE umask, which is the only
+# umask under which they can fail.
+
+@test "the generated values.yaml is 0600 under the umask the installer can actually be holding" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+
+  local saved; saved="$(umask)"
+  umask 022
+  # ASSERT THE HOSTILE UMASK TOOK. Without this the test silently measures 077
+  # again and proves nothing -- an inert mutation and real coverage look identical
+  # in a log.
+  [ "$(umask)" = "0022" ] || { umask "$saved"; printf 'umask did not take\n' >&2; return 1; }
+  run install_client_helm <<< $'myid\npw'
+  umask "$saved"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+
+  # The credential really is in there -- otherwise this asserts the mode of a file
+  # that never held a secret, which would pass for the wrong reason.
+  grep -q "clientPassword: 'pw'" "$HOST_DATA_DIR/values.yaml" || return 1
+
+  local mode; mode="$(ls -ldn "$HOST_DATA_DIR/values.yaml" | awk 'NR==1{print $1}')"
+  case "$mode" in
+    -rw-------*) : ;;
+    *) printf 'values.yaml is %s under umask 022, not -rw-------\n' "$mode" >&2; return 1 ;;
+  esac
+}
+
+@test "the mode is set while the file is still EMPTY, not after the credential is in it" {
+  # THE END-STATE MODE CANNOT SEE THIS DEFECT, which is why it needs its own test.
+  # Measured: deleting the pre-heredoc chmod leaves the test above GREEN, because
+  # the trailing chmod still fixes the mode before anything reads it. The bug was
+  # never the final mode -- it was the WINDOW during which a file containing
+  # clientPassword sat at the process umask.
+  #
+  # So observe the size of the target AT THE MOMENT chmod is called. A chmod that
+  # runs while the file is empty (0 bytes) is protection; one that runs after the
+  # heredoc is a mode applied to an already-exposed file.
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+
+  local sizes="$BATS_TEST_TMPDIR/chmod-sizes"
+  : > "$sizes"
+  # Wraps, does not replace: the real chmod still runs, so this observes the
+  # production path rather than a stand-in for it.
+  chmod() {
+    local _t; for _t in "$@"; do :; done          # last argument = the target
+    printf '%s\n' "$(wc -c < "$_t" 2>/dev/null | tr -d ' ' || echo NA)" >> "$sizes"
+    command chmod "$@"
+  }
+
+  run install_client_helm <<< $'myid\npw'
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+
+  # The observer has to have fired, or this test proves nothing.
+  [ -s "$sizes" ] || { printf 'chmod was never called on the values file\n' >&2; return 1; }
+  local first; first="$(head -1 "$sizes")"
+  [ "$first" = "0" ] || {
+    printf 'the first chmod saw a %s-byte file -- the mode was applied AFTER the credential was written\n' "$first" >&2
+    return 1
+  }
+}
+
+@test "a values.yaml whose mode did not take is REPORTED, not passed over in silence" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  verify_credentials() { printf valid; }
+  # The filesystem that cannot honour the mode (exFAT, some WSL mounts): chmod
+  # "succeeds" and the mode stays wide open. This is the case the old
+  # `chmod ... 2>/dev/null || true` swallowed entirely.
+  chmod() { return 0; }
+
+  local saved; saved="$(umask)"
+  umask 022
+  [ "$(umask)" = "0022" ] || { umask "$saved"; printf 'umask did not take\n' >&2; return 1; }
+  run install_client_helm <<< $'myid\npw'
+  umask "$saved"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+
+  # The SPECIFIC message, not merely a non-zero or any warning: a test that accepts
+  # any output cannot tell you which branch it exercised.
+  [[ "$output" == *"not -rw-------"* ]] || { printf 'no mode warning in output:\n%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"chmod 600"* ]] || { printf 'the warning does not say how to fix it\n' >&2; return 1; }
+}
+
+@test "the values.yaml mode is read with POSIX ls -ldn, never GNU-only stat -c" {
+  # Same family as hostpath-prep.bats:181 -- BSD stat rejects -c SILENTLY, so a
+  # wide-open file would be reported as unreadable-mode rather than as a finding.
+  # CODE ONLY, COMMENTS STRIPPED. First cut grepped the whole block and failed --
+  # on the block's own comment saying "never GNU-only stat -c". A detector that
+  # reads the prose describing it is testing itself, which is the trap
+  # CLAUDE.md rule 9's corollary names: it would go on passing after the code
+  # switched to `stat -c`, as long as the comment still said not to.
+  local body; body="$(sed -n '/DEFENCE IN DEPTH, AND THEN A CHECK/,/Values file written to/p' \
+                        "$LIB_DIR/install-client-helm.sh" | grep -v '^[[:space:]]*#')"
+  [ -n "$body" ] || { printf 'anchor not found -- this test is vacuous\n' >&2; return 1; }
+  # And prove the strip left the LINE we care about, not just non-empty text.
+  [[ "$body" == *"_vf_mode="* ]] || { printf 'the mode-read line is not in the extract\n' >&2; return 1; }
+  [[ "$body" == *"ls -ldn"* ]] || return 1
+  [[ "$body" != *"stat -c"* ]] || return 1
+}
+
 # ── GPU chart values: per-vendor request (backend#2033) gated on GPU actually
 # WIRED for NVIDIA (client#835) ───────────────────────────────────────────────
 # The request key must match the vendor (nvidia.com/gpu vs amd.com/gpu), and for
@@ -3595,4 +3713,17 @@ PY
   _resolve_training_size
   [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT re-derived to cpu=7,memory=29Gi
   [ "$_TB_TRAINING_PROVENANCE" = "user" ] || return 1          # marker preserved, not downgraded to installer
+}
+
+# _dashboard_url lives in common.sh (client#946) and its own tests are in
+# common.bats. THIS one stays here, because it is the only assertion that needs
+# BOTH helpers in scope: `_backend_url` is defined in this file's lib, and the
+# defect being guarded was precisely the two disagreeing about the environment.
+@test "_dashboard_url AGREES with _backend_url about the environment" {
+  # The defect was precisely these two disagreeing, so pair them per
+  # environment rather than asserting each alone.
+  CLIENT_ENV=dev run _backend_url;    [[ "$output" == *"dev-api"* ]] || return 1
+  CLIENT_ENV=dev run _dashboard_url;  [[ "$output" == *"dev."* ]]    || return 1
+  CLIENT_ENV=staging run _backend_url;   [[ "$output" == *"stg-api"* ]] || return 1
+  CLIENT_ENV=staging run _dashboard_url; [[ "$output" == *"stg."* ]]    || return 1
 }

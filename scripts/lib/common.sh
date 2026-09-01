@@ -42,6 +42,44 @@ tb_client_env() {
   esac
 }
 
+# The DASHBOARD for this environment — where a human goes to create a client,
+# read their credentials, or see whether it came online (backend#2849).
+#
+# THE BASH TWIN OF Get-TraceblocDashboardUrl. The PowerShell side was fixed
+# first; Bugbot caught that this half still hardcoded production at ten sites
+# while `_backend_url` was correctly env-aware — so a `CLIENT_ENV=dev` install on
+# Linux or macOS still sent the operator to ai.tracebloc.io for credentials
+# `dev-api` then rejects. Same defect, other half of the contract.
+#
+# IT LIVES HERE, NOT IN install-client-helm.sh, and that placement is the whole
+# point (@LukasWodka on client#946). It was defined in install-client-helm.sh and
+# CALLED from summary.sh — sibling libraries where neither sources the other — so
+# summary.sh silently depended on a load order nothing enforced. Standalone (which
+# is exactly what summary.bats does) the four call sites rendered an EMPTY link:
+# `See it on your dashboard:` followed by nothing. That is WORSE than the bug
+# being fixed, because a wrong link a reader can recover from and a missing one
+# they cannot. common.sh is sourced first by install-k8s.sh AND by the bats
+# load_lib, and it already holds `tb_client_env` — which this calls — so both
+# twins get it by construction rather than by accident.
+#
+# The hosts are the backend's OWN per-environment settings, not a guess:
+# DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL in
+# xraybackend/settings/{dev,stg,prod}.py resolve to dev.tracebloc.io,
+# stg.tracebloc.io and ai.tracebloc.io. Same `tb_client_env` alias reduction and
+# the same unknown->prod fallback as `_backend_url`, so the two can never
+# disagree about which environment an install belongs to.
+#
+#   $1 = path under the dashboard (default "clients"; pass "" for the bare host)
+_dashboard_url() {
+  local path="${1-clients}" base
+  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
+    dev) base='https://dev.tracebloc.io' ;;
+    stg) base='https://stg.tracebloc.io' ;;
+    *)   base='https://ai.tracebloc.io' ;;
+  esac
+  if [[ -n "$path" ]]; then printf '%s/%s' "$base" "$path"; else printf '%s' "$base"; fi
+}
+
 # curl_secure — the one way this installer fetches anything.
 #
 # The TLS floor used to be opt-in: every call site had to remember to splice

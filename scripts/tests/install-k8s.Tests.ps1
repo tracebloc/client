@@ -430,13 +430,24 @@ Describe "Resume-after-reboot wiring (#420 source guards)" {
     $script:PSRC | Should -Not -Match "Set-StageComplete"
     $script:PSRC | Should -Not -Match "function Add-CompletedStage"
   }
-  It "gates the fast nothing-to-do path on tools + a CURRENT CLI + running cluster + HEALTHY client" {
+  It "gates the fast nothing-to-do path on tools + a CURRENT + MACHINE-WIDE CLI + running cluster + HEALTHY client" {
     # Test-TraceblocCliCurrent is load-bearing here (client#707): Test-ToolsPresent
     # covers docker/kubectl/k3d/helm only, so without it the fast path shortcuts
     # past Install-TraceblocCli and the CLI is never updated — nor even retried on
     # a machine where its (non-fatal) install had failed.
-    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-TraceblocCliCurrent\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
+    # Test-TraceblocCliMachineWide (backend#2915) is equally load-bearing: a CLI that is
+    # "current" but only on the USER PATH would fast-path out and never get the
+    # machine-wide copy, so a fresh/other-user shell stays broken and re-running fixes
+    # nothing.
+    $script:PSRC | Should -Match '\$script:InstallState\.completed -and \(Test-ToolsPresent\) -and \(Test-TraceblocCliCurrent\) -and \(Test-TraceblocCliMachineWide\) -and \(Test-ClusterRunning\) -and \(Test-ClientHealthy\)'
     $script:PSRC | Should -Match 'already installed and the client is healthy -- nothing to do'
+  }
+  It "refreshes the machine-wide CLI copy on the fast path (so an out-of-band update isn't shadowed)" {
+    # backend#2915 (Bugbot): the fast path is entered when the machine copy is merely
+    # PRESENT, so it must still call Publish (a cheap no-op when in sync) to re-copy a
+    # snapshot a later %LOCALAPPDATA% update left stale — otherwise re-running the
+    # installer never refreshes it.
+    $script:PSRC | Should -Match '(?s)Initialize-ReleaseDataDirs -Release \$fpRelease[\s\S]{0,700}?Publish-TraceblocCliToToolDir[\s\S]{0,400}?force a full reinstall'
   }
   It "names the ACTUAL state-file path in the force-reinstall hint (honours HOST_DATA_DIR)" {
     # Must interpolate Get-InstallStatePath, not hard-code ~\.tracebloc\install-state.json.
@@ -1107,9 +1118,23 @@ Describe "Install-TraceblocCli" {
   # Step 5 of the installer: install the tracebloc CLI via its own released
   # installer, run in a CHILD powershell process. The load-bearing property is
   # NON-FATAL — a failure must Warn (not throw), since the client is already up.
+  BeforeAll {
+    # The Start-Process -PassThru double the tests reuse: a Process whose
+    # WaitForExit(ms) reports "exited in time" and whose Kill is a no-op, so the
+    # function reaches its `$p.ExitCode -eq 0` branch. Defined in BeforeAll (not the
+    # Describe body) so it exists at RUN time, not only during Pester discovery.
+    function New-CliInstallerProc([int]$ExitCode) {
+      $o = [pscustomobject]@{ ExitCode = $ExitCode }
+      $o | Add-Member ScriptProperty Handle { [IntPtr]::Zero }
+      $o | Add-Member ScriptMethod WaitForExit { $true }
+      $o | Add-Member ScriptMethod Kill { }
+      $o
+    }
+  }
   BeforeEach {
     Mock RefreshPath {}
     Mock Has { $false }   # tracebloc not already on PATH
+    Mock Publish-TraceblocCliToToolDir {}   # don't touch the real filesystem from unit tests
   }
   # Fake the System.Diagnostics.Process that Start-Process -PassThru returns:
   # the function caches .Handle, calls .WaitForExit(), then reads .ExitCode.
@@ -1148,6 +1173,163 @@ Describe "Install-TraceblocCli" {
     Mock Has { $true }    # a CLI is already present, but the installer failed…
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "Couldn't install the tracebloc CLI"   # …so it must still warn
+  }
+
+  # backend#2904: a fresh SSM shell (or a different user) can't see the CLI's
+  # USER-scope PATH entry, so on success the exe is published into the admin-only
+  # $TOOL_DIR that is already on the Machine PATH.
+  It "publishes the CLI into the tools dir on success" {
+    Mock Start-Process { New-CliInstallerProc 0 }
+    Install-TraceblocCli 6>&1 | Out-Null
+    Should -Invoke Publish-TraceblocCliToToolDir -Times 1 -Exactly
+  }
+  It "does NOT publish the CLI when the install failed" {
+    Mock Start-Process { New-CliInstallerProc 1 }
+    Install-TraceblocCli 6>&1 | Out-Null
+    Should -Not -Invoke Publish-TraceblocCliToToolDir
+  }
+  It "non-fatal: a publish failure is CONTAINED so the success verify still runs" {
+    # A `Should -Not -Throw` here would be inert: the function-wide catch already
+    # swallows the throw, so it passes even with the inner Publish-TraceblocCliToToolDir
+    # try/catch deleted (Bugbot). Assert the DISCRIMINATING behavior instead: the
+    # inner catch must contain the throw so Test-TraceblocCli still runs and the
+    # CLI is reported installed — NOT bounced to the function-wide catch, which
+    # would misreport the (successful) CLI install as failed and skip the verify.
+    Mock Start-Process { New-CliInstallerProc 0 }
+    Mock Publish-TraceblocCliToToolDir { throw "access denied" }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "tracebloc CLI (ready|installed)"          # verify still ran
+    $out | Should -Not -Match "Couldn't install the tracebloc CLI"  # not the outer catch's failure copy
+  }
+}
+
+Describe "Get-TraceblocExeVersion (guards; drives the no-downgrade refresh)" {
+  It "returns `$null for a missing exe path" {
+    Get-TraceblocExeVersion -ExePath '/no/such/tracebloc.exe' | Should -BeNullOrEmpty
+  }
+  It "returns `$null for an empty/whitespace path (no exec attempted)" {
+    Get-TraceblocExeVersion -ExePath ''   | Should -BeNullOrEmpty
+    Get-TraceblocExeVersion -ExePath '  ' | Should -BeNullOrEmpty
+  }
+}
+
+Describe "Publish-TraceblocCliToToolDir (backend#2904: exe -> admin-only tools dir on the Machine PATH)" {
+  # Copies the freshly-installed CLI exe from its per-user install dir into $TOOL_DIR,
+  # which Initialize-ToolDir already put on the Machine PATH — so a fresh/other-user
+  # shell resolves it WITHOUT a user-writable dir on the system search path (CWE-426).
+  # Args are passed explicitly (the script defaults are "" off-Windows). Relative dir
+  # names (no drive letter / backslash) so Join-Path works on the Linux CI runner too —
+  # the copy LOGIC is path-shape-agnostic. Defined in BeforeEach so they exist at RUN
+  # time, not only during Pester discovery.
+  BeforeEach {
+    $installDir = 'la-programs-tracebloc'
+    $toolDir    = 'pf-tracebloc-bin'
+    Mock Test-Path { $true }   # src exe + dest dir both present by default
+    Mock New-Item {}
+    Mock Copy-Item {}
+    # Distinct hash per path by default (src != dest) -> the staleness check sees them
+    # differ and proceeds to the version gate. Tests that want the in-sync no-op override.
+    Mock Get-FileHash { [pscustomobject]@{ Hash = "$LiteralPath" } }
+    # Default: the SOURCE (%LOCALAPPDATA%) is NEWER than the machine copy -> refresh. Tests
+    # of the no-downgrade guard override this. src == la-programs-tracebloc, dest == pf-.
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'2.0.0' } else { [version]'1.0.0' } }
+  }
+
+  It "copies tracebloc.exe from the install dir into TOOL_DIR" {
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    $expectDest = Join-Path 'pf-tracebloc-bin' 'tracebloc.exe'
+    Should -Invoke Copy-Item -Times 1 -Exactly -ParameterFilter { $Destination -eq $expectDest }
+  }
+
+  It "creates TOOL_DIR first when it doesn't exist yet" {
+    Mock Test-Path { $LiteralPath -ne 'pf-tracebloc-bin' }   # src present, dest dir absent
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Invoke New-Item -Times 1 -Exactly
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+
+  # backend#2915 (Bugbot): the Machine PATH shadows the CLI installer's updatable
+  # %LOCALAPPDATA% copy, so a stale $TOOL_DIR snapshot would mask an out-of-band update.
+  # Being a cheap no-op when in sync is what lets the fast path call this every run.
+  It "skips the copy when the machine copy already matches the source (in sync)" {
+    Mock Get-FileHash { [pscustomobject]@{ Hash = 'SAME' } }   # src == dest
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  # @LukasWodka: the refresh must be DIRECTIONAL. Copying on ANY hash difference would let
+  # a %LOCALAPPDATA% holding an OLDER build (a pinned CLI / partial reinstall) silently
+  # DOWNGRADE the machine-wide CLI for every user. Copy ONLY toward a strictly newer version.
+  It "refreshes UP when the source is a strictly NEWER version" {
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'2.1.0' } else { [version]'2.0.0' } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+  It "does NOT downgrade when the source is an OLDER version (differs but older)" {
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'1.0.0' } else { [version]'2.0.0' } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  It "does NOT copy at equal version even when the build (hash) differs" {
+    Mock Get-TraceblocExeVersion { [version]'2.0.0' }   # same version, different hash
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  It "does NOT copy when the SOURCE version is unreadable (can't vouch — keep the machine copy)" {
+    # src unreadable, dest a valid build -> a partially-failed reinstall must not clobber a
+    # working CLI.
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { $null } else { [version]'2.0.0' } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+  It "REPAIRS a broken machine copy: source readable, DEST version unreadable -> copy (Bugbot)" {
+    # The machine copy exists but won't report a version (corrupt/wrong-arch); the source is
+    # a known-good build. Without this, a corrupt snapshot shadows every user and re-running
+    # never fixes it.
+    Mock Get-TraceblocExeVersion { if ($ExePath -like '*la-programs-tracebloc*') { [version]'2.0.0' } else { $null } }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Invoke Copy-Item -Times 1 -Exactly
+  }
+  It "does NOT copy when BOTH versions are unreadable (unvouchable source)" {
+    Mock Get-TraceblocExeVersion { $null }
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+
+  It "no-op when the install dir is empty/whitespace (the non-Windows placeholder)" {
+    Publish-TraceblocCliToToolDir -InstallDir ''   -ToolDir $toolDir
+    Publish-TraceblocCliToToolDir -InstallDir '  ' -ToolDir $toolDir
+    Should -Not -Invoke Copy-Item
+  }
+
+  It "no-op when TOOL_DIR is empty (Initialize-ToolDir hasn't run)" {
+    Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir ''
+    Should -Not -Invoke Copy-Item
+  }
+
+  It "no-op (no throw) when the source exe isn't where we expect (INSTALL_PREFIX override)" {
+    Mock Test-Path { $false }   # source exe missing
+    { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Not -Throw
+    Should -Not -Invoke Copy-Item
+    Should -Not -Invoke New-Item
+  }
+
+  # backend#2915 (Bugbot/@LukasWodka): the real Copy-Item raises a NON-terminating error
+  # under the installer's default 'Continue', which the caller's try/catch would miss; a
+  # stale dest already present would then pass the post-copy Test-Path and the box would
+  # serve a stale CLI machine-wide. This asserts -ErrorAction Stop is LOAD-BEARING: the
+  # mock emits a NON-terminating error via Write-Error (unlike `throw`, which is terminating
+  # regardless of -ErrorAction and so cannot tell the two apart). With -ErrorAction Stop it
+  # must promote to terminating and THROW; delete the flag and this reddens.
+  It "promotes a NON-terminating copy error to a throw (so -ErrorAction Stop bites)" {
+    Mock Copy-Item { Write-Error "access is denied" }   # non-terminating
+    { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Throw
+  }
+
+  It "throws if the copy 'succeeded' but the artifact isn't there" {
+    # src present, dest dir absent (so New-Item runs, mocked), and the dest exe never
+    # materializes -> the post-copy Test-Path is false -> throw.
+    Mock Test-Path { $LiteralPath -notlike '*pf-tracebloc-bin*' }
+    { Publish-TraceblocCliToToolDir -InstallDir $installDir -ToolDir $toolDir } | Should -Throw
   }
 }
 
@@ -1204,23 +1386,71 @@ Describe "Test-TraceblocCliCurrent" {
   }
 }
 
+Describe "Test-TraceblocCliMachineWide (backend#2915: the fast path must require the machine-wide copy)" {
+  # A CLI that is 'current' but only on the USER PATH must NOT let the fast path
+  # shortcut past Publish-TraceblocCliToToolDir — or re-running the installer, the
+  # documented repair, would never place the machine-wide copy.
+  AfterEach { $script:TOOL_DIR = $null }
+
+  It "true when \$TOOL_DIR\tracebloc.exe is present" {
+    $script:TOOL_DIR = 'pf-tracebloc-bin'
+    Mock Test-Path { $true }
+    Test-TraceblocCliMachineWide | Should -BeTrue
+  }
+  It "false when the machine-wide copy is absent (User-PATH-only CLI)" {
+    $script:TOOL_DIR = 'pf-tracebloc-bin'
+    Mock Test-Path { $false }
+    Test-TraceblocCliMachineWide | Should -BeFalse
+  }
+  It "false when \$TOOL_DIR is unset (Initialize-ToolDir hasn't run)" {
+    $script:TOOL_DIR = $null
+    Test-TraceblocCliMachineWide | Should -BeFalse
+  }
+}
+
 Describe "Test-TraceblocCli" {
   # Post-install self-verification (#738). Proves the CLI is usable from a fresh
   # terminal and prints a VERIFIED next command, or the Windows-correct fix if a
   # new shell wouldn't find it. Load-bearing property: NON-FATAL (never throws).
-  BeforeEach { Mock RefreshPath {} }
+  BeforeEach {
+    Mock RefreshPath {}
+    $script:TOOL_DIR = 'pf-tracebloc-bin'   # machine-wide tools dir (on the Machine PATH)
+  }
+  AfterEach { $script:TOOL_DIR = $null }
 
-  It "fresh-shell success: reports a VERIFIED verdict, not 'open a new terminal so'" {
+  It "machine-wide success: reports a VERIFIED verdict, not 'open a new terminal so'" {
     Mock Has { $true }                       # a fresh shell resolves tracebloc
     Mock tracebloc { "tracebloc 0.2.0" }
+    Mock Test-Path { $true }                 # the machine-wide $TOOL_DIR\tracebloc.exe is present
     $out = Test-TraceblocCli 6>&1 | Out-String
-    $out | Should -Match "run 'tb'"          # usable-now verdict (was "verified on your PATH")
+    # Name the MACHINE-WIDE command `tracebloc`, never `tb`: `tb` is only the CLI
+    # installer's per-user shim, absent from the fresh/other-user shells this verdict is
+    # about, even though `Has tb` is true in the installer's own process (Bugbot).
+    $out | Should -Match "run 'tracebloc'"
+    $out | Should -Not -Match "run 'tb'"
     $out | Should -Match "0.2.0"             # real proof via `tracebloc version`
     $out | Should -Not -Match "open a new terminal so"   # the old, useless line is gone
   }
 
+  # backend#2915 (Bugbot): the installer's OWN process carries the CLI installer's
+  # User-scope entry, so `Has tracebloc` alone must NOT read as "ready" when the
+  # machine-wide copy didn't land — a fresh/other-user shell still fails.
+  It "resolvable only via the user's PATH (machine-wide copy absent): honest, NOT a false 'ready'" {
+    Mock Has { $true }                       # resolves in-process (User-scope LOCALAPPDATA)
+    Mock tracebloc { "tracebloc 0.2.0" }
+    Mock Test-Path { $false }                # but $TOOL_DIR\tracebloc.exe is NOT present
+    $out = Test-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "not machine-wide"          # honest verdict
+    $out | Should -Not -Match "tracebloc CLI ready"  # never a false ready
+    # The hint must name the real cause (failed copy / INSTALL_PREFIX), NOT "re-run as
+    # Administrator" — the installer already self-elevated, so that can't be the fix (Bugbot).
+    $out | Should -Not -Match "as Administrator"
+    $out | Should -Match "didn't land"
+  }
+
   It "CLI-missing-from-fresh-shell: prints an actionable hint (install dir)" {
     Mock Has { $false }                      # installed, but not yet resolvable
+    Mock Test-Path { $false }
     $out = Test-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "open a new PowerShell window"
     $out | Should -Match "Installed to:"     # the exact location, not a vague hint
@@ -1229,7 +1459,96 @@ Describe "Test-TraceblocCli" {
   It "non-fatal: does not throw even if RefreshPath blows up" {
     Mock RefreshPath { throw "registry unavailable" }
     Mock Has { $false }
+    Mock Test-Path { $false }
     { Test-TraceblocCli 6>&1 | Out-Null } | Should -Not -Throw
+  }
+}
+
+Describe "Initialize-ToolDir (persists the tools dir to the Machine PATH)" {
+  # The refactor (backend#2904) routes the tools dir through the same
+  # Add-DirToMachinePath helper the CLI dir uses. Lock that wiring so the Linux
+  # Pester run catches a regression the infrequent self-hosted Windows e2e would.
+  It "creates the tools dir and persists it to the Machine PATH" {
+    Mock Test-Path { $true }          # dir already exists -> New-Item is skipped
+    Mock New-Item {}
+    Mock Add-DirToMachinePath {}
+    Initialize-ToolDir
+    $script:TOOL_DIR | Should -Match 'tracebloc[\\/]bin$'
+    Should -Invoke Add-DirToMachinePath -Times 1 -Exactly -ParameterFilter { $Dir -eq $script:TOOL_DIR }
+  }
+}
+
+Describe "Add-DirToMachinePath (backend#2904: persist a tool dir to the Machine PATH)" {
+  # A fresh, non-interactive shell (the Windows e2e's SSM session) sources no
+  # profile and reads only the PERSISTED env, so a tool dir must be on the MACHINE
+  # PATH — not merely the session or USER PATH — to be resolvable there. These
+  # simulate the Machine-scope registry with a script var (the real static setter
+  # is a no-op off-Windows, and the getter always returns $null), so the
+  # append/dedup logic is covered on the Linux CI run.
+  BeforeEach {
+    $script:FakeMachinePath = "C:\Windows;C:\Windows\System32"
+    Mock Get-MachinePath { $script:FakeMachinePath }
+    Mock Set-MachinePath { $script:FakeMachinePath = $Value }
+    Mock RefreshPath {}
+  }
+
+  It "appends a dir that isn't present yet, and refreshes the session" {
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    $script:FakeMachinePath | Should -Be "C:\Windows;C:\Windows\System32;C:\Program Files\tracebloc\bin"
+    Should -Invoke Set-MachinePath -Times 1 -Exactly
+    Should -Invoke RefreshPath   -Times 1 -Exactly
+  }
+
+  It "is idempotent: a re-install does NOT duplicate an existing entry" {
+    $script:FakeMachinePath = "C:\Windows;C:\Program Files\tracebloc\bin"
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    $script:FakeMachinePath | Should -Be "C:\Windows;C:\Program Files\tracebloc\bin"
+    Should -Not -Invoke Set-MachinePath
+    Should -Not -Invoke RefreshPath
+  }
+
+  It "dedups case-insensitively and tolerant of a trailing separator" {
+    $script:FakeMachinePath = "C:\Program Files\Tracebloc\Bin\"
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    Should -Not -Invoke Set-MachinePath
+  }
+
+  It "seeds PATH from just the dir when the Machine PATH is empty/unset" {
+    Mock Get-MachinePath { $null }
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    Should -Invoke Set-MachinePath -ParameterFilter { $Value -eq 'C:\Program Files\tracebloc\bin' }
+  }
+
+  It "collapses a trailing ';' instead of creating an empty (cwd) PATH entry" {
+    $script:FakeMachinePath = "C:\Windows;"
+    Add-DirToMachinePath -Dir 'C:\Program Files\tracebloc\bin'
+    $script:FakeMachinePath | Should -Be "C:\Windows;C:\Program Files\tracebloc\bin"
+    $script:FakeMachinePath | Should -Not -Match ';;'   # no empty entry == no cwd on PATH
+  }
+
+  It "does nothing for an empty OR whitespace dir (guard matches Test-DirOnPath's trim)" {
+    # '' and '  ' must BOTH early-return: a whitespace dir that slipped the guard would
+    # be trimmed to '' by Test-DirOnPath, judged absent, and appended as junk every run
+    # (backend#2904 review, saadqbal).
+    Add-DirToMachinePath -Dir ''
+    Add-DirToMachinePath -Dir '   '
+    Should -Not -Invoke Get-MachinePath
+    Should -Not -Invoke Set-MachinePath
+  }
+}
+
+Describe "Test-DirOnPath (exact per-entry dedup, not substring)" {
+  It "true when the dir is an exact entry" {
+    Test-DirOnPath -PathValue "C:\a;C:\b" -Dir "C:\b" | Should -BeTrue
+  }
+  # The substring bug the old `-like "*$Dir*"` had: a parent dir must NOT be judged
+  # present just because a child dir is on PATH, or it would never get added.
+  It "false when the dir only appears as a substring of a longer entry" {
+    Test-DirOnPath -PathValue "C:\Program Files\tracebloc\bin" -Dir "C:\Program Files\tracebloc" | Should -BeFalse
+  }
+  It "false for empty inputs" {
+    Test-DirOnPath -PathValue ""      -Dir "C:\b" | Should -BeFalse
+    Test-DirOnPath -PathValue "C:\a"  -Dir ""     | Should -BeFalse
   }
 }
 
@@ -3825,6 +4144,273 @@ Describe "TRACEBLOC_SKIP_REBOOT_PROMPT is the env twin of -NoReboot (backend#267
   It "unset -> -NoReboot stays off (the customer default still asks)" {
     $env:TRACEBLOC_SKIP_REBOOT_PROMPT = $null
     (& { . $script:Ps1; [bool]$NoReboot }) | Should -BeFalse
+  }
+}
+
+Describe "A failure reported from an exit-code branch names the code (backend#2906)" {
+  # THE CLASS, ENFORCED BY WHAT IT DOES RATHER THAN BY WHAT IT LOOKS LIKE.
+  #
+  # client#913 fixed the sites that rendered a code as BLANK -- `wsl exited `,
+  # `installer exited `. It missed the CLI-install branch, which never rendered
+  # one at all. Identical information loss, different spelling, so the search
+  # that found the first shape (`exited $(`) was structurally blind to the
+  # second. A marker per known site cannot close that: it can only be as
+  # complete as the enumeration behind it, and the enumeration is the thing that
+  # was wrong.
+  #
+  # The invariant is checkable directly instead: if you tell the user something
+  # failed, from inside a branch a process exit code decided, name the code.
+  # That found BOTH sites without anyone thinking of either -- verified by
+  # reverting each fix independently and watching this go red.
+  #
+  # AST, NOT REGEX. The question is "which Warn/Err calls are lexically inside a
+  # branch gated on .ExitCode", which is a shape in the tree; a text match cannot
+  # see the nesting and would have to approximate it.
+  # THE DOTTED SPELLING IS NOT THE CLASS (Bugbot, Medium). The first cut matched
+  # only `.ExitCode -eq/-ne 0` in the condition text, so the house idiom after a
+  # wait -- copy the code into a local, then branch on the local -- was invisible.
+  # `$k3dExitCode = $k3dProc.ExitCode` … `if ($k3dExitCode -ne 0) { Err … }` is
+  # exactly that, and it reported a k3d failure without the code while this guard
+  # called the class closed. Restating one spelling is what went wrong the first
+  # time (client#913's `exited $(` search) and restating two is the same mistake
+  # with a larger list, so the variable names are DERIVED: any variable assigned
+  # from an expression mentioning `.ExitCode` becomes a gate token.
+  #
+  # COMPLIANCE FOLLOWS ONE HOP, and that is not a loophole -- it is the
+  # difference between the two sites this now sees. `Warn ("GPU couldn't be
+  # enabled: " + $GPU_SKIP_REASON)` names no code in its own text, but
+  # $GPU_SKIP_REASON is assigned IN THAT BRANCH from
+  # `Get-GpuBuildFailureReason -ExitCode $buildExit`, whose fallback returns
+  # "docker build exit $ExitCode". The code reaches the operator; the classifier
+  # is deliberately preferred over a bare number, and the comment there says so.
+  # The k3d branch has no such hop -- the code is read, tested, and dropped.
+  # Checking only the call's own text would have failed the first and passed
+  # nothing extra; checking the whole branch body would pass a `Log`-only
+  # mention, which the operator never sees. One hop, through the arguments.
+  BeforeAll {
+    $script:ExitCodeScope = {
+      $tok = $null; $perr = $null
+      $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot "../install-k8s.ps1"), [ref]$tok, [ref]$perr)
+
+      # DERIVED, not restated: every variable that takes its value from a
+      # `.ExitCode` read is a legitimate way to spell this gate.
+      $codeVars = @()
+      foreach ($a in $ast.FindAll({
+        $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
+      }, $true)) {
+        # BOTH SPELLINGS (@saadqbal). This followed `.ExitCode` only, so
+        # `$createRc = $LASTEXITCODE` never became a gate token and
+        # `if ($createRc -ne 0)` was invisible to the walk -- the copy-into-a-local
+        # idiom, which is the same shape round one flagged for `.ExitCode` and which
+        # was then fixed for one spelling only. `$LASTEXITCODE` was added as a DIRECT
+        # token below, catching `if ($LASTEXITCODE -ne 0)` but not the capture. The
+        # live site is install-k8s.ps1:5785-5787.
+        if ($a.Right.Extent.Text -match '\.ExitCode|\.Code|\$LASTEXITCODE' -and
+            $a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+          $codeVars += $a.Left.VariablePath.UserPath
+        }
+      }
+      # AND THE ONE THE LANGUAGE ASSIGNS. $LASTEXITCODE is PowerShell's
+      # automatic for the exit status of the last native command -- it is never
+      # the LEFT side of an assignment, so a derivation built purely from
+      # assignment statements cannot see it. It is also the commonest way this
+      # file spells the gate: 21 branch sites, against four derived locals.
+      #
+      # This is not a hand-list creeping back in. $LASTEXITCODE holds an exit
+      # code BY DEFINITION OF THE LANGUAGE, which is the same authority the
+      # derivation above appeals to -- it just reaches it through the automatic
+      # variable table rather than through an assignment. The rule stays "a
+      # variable that holds an exit code"; only the way of knowing differs.
+      $codeVars += 'LASTEXITCODE'
+      $codeVars = @($codeVars | Sort-Object -Unique)
+      $varAlt = if ($codeVars.Count) {
+        '|\$(' + (($codeVars | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*-(eq|ne)\s*0'
+      } else { '' }
+      $gateRe = '\.(ExitCode|Code)\s*-(eq|ne)\s*0' + $varAlt
+
+      $calls = $ast.FindAll({
+        $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+        $args[0].GetCommandName() -in @('Warn','Err')
+      }, $true)
+      $inScope = @()
+      foreach ($c in $calls) {
+        # WHICH BRANCH, AND NOT THROUGH A CATCH (Bugbot, Medium, on this PR).
+        #
+        # The first walk set the gate from any ANCESTOR `if` whose condition
+        # mentioned an exit code, regardless of where the call actually sat. Two
+        # ways that was wrong, and it did not merely over-report -- it FORCED a
+        # misleading number into the product:
+        #
+        #   * `Enable-GpuPlugin`'s existence probe is `if ($LASTEXITCODE -eq 0)`
+        #     at :4697. The CPU-mode Warn is in that if's ELSE, after a download
+        #     and an apply, so the probe's code is long stale by then.
+        #   * The same function's `catch` is entered by an EXCEPTION.
+        #     `Invoke-WebRequest` never sets $LASTEXITCODE, so the value there is
+        #     whatever the last native command left behind.
+        #
+        # Both were "fixed" to name that number, which is worse than naming
+        # none: a wrong cause reads as information. A guard that can demand a
+        # false statement is not a weaker guard, it is a harmful one.
+        #
+        # So: walk up remembering which child we came THROUGH, attribute only
+        # when we arrived via the branch the failing code selects, and abandon
+        # the walk at a catch or finally.
+        $n = $c.Parent; $prev = $c; $gate = $null; $branch = $null
+        while ($n) {
+          if ($n -is [System.Management.Automation.Language.CatchClauseAst] -or
+              $n -is [System.Management.Automation.Language.TrapStatementAst]) {
+            $gate = $null; break
+          }
+          if ($n -is [System.Management.Automation.Language.TryStatementAst] -and
+              $n.Finally -and $prev -eq $n.Finally) {
+            $gate = $null; break
+          }
+          if ($n -is [System.Management.Automation.Language.IfStatementAst]) {
+            # THE NEAREST ENCLOSING `if`, AND THEN STOP. Being somewhere inside a
+            # distant exit-code branch is not the same as being decided by that
+            # code: `Enable-GpuPlugin`'s CPU-mode Warn sits in the ELSE of the
+            # probe at :4697, but a download and a `kubectl apply` run in
+            # between, so $LASTEXITCODE there is nothing to do with the probe.
+            # Attributing it demanded a stale number on screen.
+            #
+            # THE TRADE, STATED: a call nested one level deeper inside a genuine
+            # exit-code branch is now MISSED. That direction is safe -- the guard
+            # under-reports and the floor test below notices if the count
+            # collapses -- whereas over-reporting made the guard demand a false
+            # statement, which is the one outcome worse than not checking.
+            foreach ($cl in $n.Clauses) {
+              if ($cl.Item1.Extent.Text -notmatch $gateRe) { continue }
+              # AND NOT A DISJUNCTION, for the same reason the ELSE and the CATCH
+              # are excluded above: the guard cannot know WHICH disjunct fired, so
+              # demanding the code would demand a possibly-false cause.
+              #
+              # Widening to the `.Code` spelling (Bugbot, Medium) exposed two of
+              # these -- `if ($res.Code -ne 0 -or $out -match "FAIL " -or
+              # $unconfirmed.Count -gt 0)` at install-k8s.ps1:4030 and
+              # `if ($ctx.Code -ne 0 -or $haveCtx -ne $wantCtx)` at :4544. In both,
+              # a run that failed on the NON-code disjunct has a code of 0, and
+              # "exit 0" printed next to a failure is exactly the wrong-cause-reads-
+              # as-information outcome this Describe already refuses to produce.
+              # @saadqbal flagged the same hazard pre-emptively for the bool-collapsed
+              # sites (:4729, whose code would be a stale apply/rollout probe).
+              #
+              # A site that WANTS to name the code conditionally still can -- this
+              # only stops the guard from requiring it unconditionally.
+              if ($cl.Item1.Extent.Text -match '\s-or\s') { continue }
+              # `-ne 0` selects failure in the clause BODY; `-eq 0` selects
+              # success there, so failure is the ELSE.
+              $failureBlock = if ($cl.Item1.Extent.Text -match '-ne\s*0') { $cl.Item2 } else { $n.ElseClause }
+              if ($failureBlock -and $prev -eq $failureBlock) {
+                $gate = $cl.Item1.Extent.Text; $branch = $failureBlock
+              }
+            }
+            break
+          }
+          $prev = $n
+          $n = $n.Parent
+        }
+        if ($gate) {
+          # The token this branch was gated on -- `.ExitCode`, or the derived
+          # local. That, not the literal word "ExitCode", is what has to reach
+          # the operator.
+          # THE PROPERTY READ AND THE VARIABLE, NEVER THE BARE WORD. Matching
+          # `ExitCode` loose also matches the PARAMETER NAME `-ExitCode`, so
+          # `Get-GpuBuildFailureReason -ExitCode 0` -- a constant, carrying none
+          # of the branch's information -- read as compliant. Measured: the
+          # mutation that replaced `$buildExit` with `0` there left this green,
+          # which is the one-hop degenerating into a blanket pass.
+          # BOTH PROPERTY SPELLINGS, AND THE GATE SIDE ALONE IS NOT ENOUGH.
+          # Widening only the gate regex to `.Code` made this guard
+          # UNSATISFIABLE: it demanded the code from five newly-visible sites and
+          # then could not see it when supplied, because compliance still matched
+          # `.ExitCode` only. All five kept failing with the code sitting in the
+          # message text. A guard that cannot be satisfied is worse than one that
+          # does not check -- it trains the reader to edit the guard instead of the
+          # code. The two sides must widen together, which is why they are named
+          # here in one place.
+          #
+          # `\.Code\b` carries the same false-positive risk profile as
+          # `\.ExitCode\b` and no more: the leading dot is what keeps the
+          # parameter-name shape (`-ExitCode 0`) out, and that is the trap the
+          # comment above records.
+          $tokens = @('\.ExitCode\b', '\.Code\b')
+          foreach ($v in $codeVars) {
+            if ($gate -match ('\$' + [regex]::Escape($v) + '\b')) {
+              $tokens += '\$' + [regex]::Escape($v) + '\b'
+            }
+          }
+          $tokRe = '(' + ($tokens -join '|') + ')'
+
+          $names = [bool]($c.Extent.Text -match $tokRe)
+          if (-not $names -and $branch) {
+            # ONE HOP: a variable the call renders, assigned in this branch from
+            # something that carries the code.
+            foreach ($v in $c.CommandElements) {
+              foreach ($ref in $v.FindAll({
+                $args[0] -is [System.Management.Automation.Language.VariableExpressionAst]
+              }, $true)) {
+                $rn = $ref.VariablePath.UserPath -replace '^(script|global|local):', ''
+                foreach ($a in $branch.FindAll({
+                  $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst]
+                }, $true)) {
+                  $ln = $a.Left.Extent.Text -replace '^\$(script|global|local):', '' -replace '^\$', ''
+                  if ($ln -eq $rn -and $a.Right.Extent.Text -match $tokRe) { $names = $true }
+                }
+              }
+            }
+          }
+
+          $inScope += [pscustomobject]@{
+            Line  = $c.Extent.StartLineNumber
+            Gate  = $gate
+            Text  = $c.Extent.Text
+            Names = $names
+          }
+        }
+      }
+      ,$inScope
+    }
+  }
+
+  It "finds the sites at all -- an empty sweep agrees with everything" {
+    # Rule 3. If the AST walk stops matching -- a helper renamed, the gate
+    # written differently -- every assertion below passes vacuously and reports
+    # clean forever. Two is what exists today; a THIRD is fine, a drop to zero
+    # is the finding.
+    $sites = & $script:ExitCodeScope
+    # EIGHT, measured, not carried over. It was 2 for the dotted-only gate and
+    # 4 once the derived locals were added; $LASTEXITCODE -- never assigned, so
+    # invisible to an assignment-derived gate, and the commonest spelling here --
+    # took it to 8. A floor left at an older number is the thing this test exists
+    # to prevent, since it goes on passing over everything the gate newly sees.
+    # 8 -> 9: widening the derivation above makes the `$createRc = $LASTEXITCODE`
+    # site at install-k8s.ps1:5785 visible to the walk. The floor moves with it
+    # deliberately -- a floor left at 8 is what made the hole self-concealing: the
+    # test passed either way, so nothing said a site had gone missing.
+    #
+    # 9 -> 14: the `.Code` spelling (Bugbot, Medium). `Invoke-BoundedProcess` and
+    # `Invoke-DockerCli` return `@{ Code; Output }` -- the house result shape,
+    # documented at install-k8s.ps1:2307-2308 -- so every branch on `$r.Code` was
+    # a gate this walk could not see. 31 such gates exist in the file; 7 of them
+    # carry a user-facing Warn/Err, 2 of those are disjunctions and excluded
+    # above, and 5 were reporting a failure with the code dropped.
+    #
+    # MEASURED BY RAISING THIS FLOOR UNTIL IT FAILED AND READING THE NUMBER BACK,
+    # not by counting the additions by hand -- which is how a floor and a walk
+    # start disagreeing.
+    $sites.Count | Should -BeGreaterOrEqual 14
+  }
+
+  It "no user-facing failure message drops the exit code that decided it" {
+    $sites = & $script:ExitCodeScope
+    $bad = @($sites | Where-Object { -not $_.Names })
+    # The message must NAME the offender, not just count it: a bare count sends
+    # the reader back to re-run the sweep by hand.
+    $detail = ($bad | ForEach-Object {
+      "line $($_.Line) gated on [$($_.Gate)]: $($_.Text)"
+    }) -join "`n"
+    $bad.Count | Should -Be 0 -Because "these report a failure without the one number that says why:`n$detail"
   }
 }
 
