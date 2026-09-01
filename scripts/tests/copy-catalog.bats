@@ -30,6 +30,17 @@ setup() {
   # blank both banner samples in emit_install and drift the golden — clear it
   # so the catalog always renders them (mirrors common.bats).
   unset TRACEBLOC_BANNER_SHOWN
+  # CLIENT_ENV PINS THE DASHBOARD HOST, so it pins the golden (Bugbot on
+  # client#946). print_summary now renders `_dashboard_url`, which maps
+  # dev|stg|prod to three different hosts — so a developer shell carrying
+  # CLIENT_ENV=dev fails this catalog, and regenerating it from that shell would
+  # bake dev.tracebloc.io into the committed golden. Reproduced before fixing:
+  # `CLIENT_ENV=dev bats copy-catalog.bats` -> "not ok 2 ... 01-outcomes".
+  #
+  # prod is the right pin because the golden is the copy a CUSTOMER sees, and
+  # `_dashboard_url` treats unset as prod anyway — this makes that explicit
+  # rather than dependent on the developer's environment being clean.
+  export CLIENT_ENV=prod
   load_lib summary.sh        # common.sh (banner/roadmap/help/step_header) + summary.sh
   # Deterministic env for the copy-emitting functions (values a user never sees
   # under NO_COLOR affect only the silent log(), but set them so `set -u`-style
