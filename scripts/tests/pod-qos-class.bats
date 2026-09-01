@@ -237,6 +237,33 @@ _render() {
   [[ "$output" == *"BestEffort"* ]] || return 1
 }
 
+# THE POD-LEVEL HALF OF THE SAME CARVE-OUT (Asad, review of backend#2872). The
+# container path had this guard; the KEP-2837 pod-level branch short-circuits
+# ABOVE it and had none, so a pod-level envelope of extended resources only
+# returned Burstable where the kubelet says BestEffort. Latent -- nothing in the
+# chart renders pod-level resources -- but it is the "a guard hides a BestEffort
+# demotion" shape this file exists to catch, and half a rule is how it comes back.
+@test "derivation: POD-LEVEL gpu + ephemeral-storage only, no cpu/memory -> BestEffort" {
+  local f="$BATS_TEST_TMPDIR/pod-level-gpu-only.yaml"
+  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  resources:\n    requests: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n    limits: {nvidia.com/gpu: "1", ephemeral-storage: 20Gi}\n  containers:\n  - name: c\n    resources:\n      requests: {cpu: "1", memory: 1Gi}\n      limits: {cpu: "1", memory: 1Gi}\n' > "$f"
+  run python3 "$QOS" "$f"
+  [ "$status" -eq 0 ] || return 1
+  # The containers below are perfectly Guaranteed -- so if the pod-level branch
+  # stopped short-circuiting, this would read Guaranteed and the case would pass
+  # for the wrong reason. BestEffort can only come from the pod-level carve-out.
+  [[ "$output" == *"BestEffort"* ]] || return 1
+}
+
+# ...and its mirror: pod-level cpu/memory still classifies normally, so the fix
+# is not "ignore pod-level resources entirely".
+@test "derivation: POD-LEVEL equal cpu/memory -> Guaranteed" {
+  local f="$BATS_TEST_TMPDIR/pod-level-equal.yaml"
+  printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: g\nspec:\n  resources:\n    requests: {cpu: "1", memory: 1Gi}\n    limits: {cpu: "1", memory: 1Gi}\n  containers:\n  - name: c\n' > "$f"
+  run python3 "$QOS" "$f"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"Guaranteed"* ]] || return 1
+}
+
 # The mirror, so the rule is not simply "ignore everything unknown": a pod that
 # sets cpu/memory AND extended resources is still classified on cpu/memory.
 @test "derivation: extended resources alongside equal cpu/memory -> still Guaranteed" {
