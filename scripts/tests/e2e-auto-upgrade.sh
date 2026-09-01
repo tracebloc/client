@@ -155,16 +155,38 @@ BASELINE_PROD_DIGEST="$(helm get values "$NS" -n "$NS" --all -o json \
   | jq -r '.images.ingestor.prodDigest // ""')"
 echo "   baseline prod ingestor pin: ${BASELINE_PROD_DIGEST:-<none — pre-pin era>}"
 
+# The baseline (published) release's RENDERED egress posture, captured the same
+# way and for the same reason as the prod pin above: path 1's --reuse-values
+# replays the baseline's computed values verbatim, so what it must assert is
+# "unchanged from the baseline", NOT a hardcoded era. While the published
+# baseline is still permissive this is the external-443 rule present + no
+# EGRESS_PROXY_URL; once THIS chart (RFC-0003 D6 deny-by-default defaults) is
+# the published baseline, --reuse-values replays lockdown instead — 443 gone,
+# gateway routed. Read the posture from the installed baseline so the assertion
+# is correct in both eras rather than tripping the moment the default flips
+# (Bugbot on this PR).
+if netpol_has_external_443; then BASELINE_EXTERNAL_443=1; else BASELINE_EXTERNAL_443=0; fi
+BASELINE_EGRESS_PROXY_URL="$(jm_egress_proxy_url)"
+echo "   baseline egress posture: external_443=$([ "$BASELINE_EXTERNAL_443" = 1 ] && echo present || echo absent) egress_proxy_url=${BASELINE_EGRESS_PROXY_URL:-<none>}"
+
 echo "── simulate an image-refresh-managed annotation (must survive upgrades) ──"
 kubectl annotate -n "$NS" "$(jm_deploy)" \
   "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2e-sentinel" --overwrite
 
 echo "── path 1: manual-operator habit — helm upgrade --reuse-values ──"
-# Old stored values replayed against the new chart: every new key is absent.
-# The nil-guards must hold, and the lockdown must NOT engage by accident.
+# Old stored values replayed against the new chart: every new key is absent and
+# the nil-guards must hold. The egress posture must be REPLAYED FROM THE BASELINE
+# VERBATIM — not moved by the new chart's defaults in either direction. That is
+# baseline-derived (like the prod pin below), so the assertion holds whether the
+# baseline is permissive (443 present, no gateway) or already deny-by-default
+# (443 gone, gateway routed) once this chart is published.
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reuse-values
-netpol_has_external_443 || fail "--reuse-values upgrade dropped the external 443 rule (lockdown engaged by accident)"
-[ -z "$(jm_egress_proxy_url)" ] || fail "--reuse-values upgrade injected EGRESS_PROXY_URL (routing engaged by accident)"
+if [ "$BASELINE_EXTERNAL_443" = 1 ]; then
+  netpol_has_external_443 || fail "--reuse-values dropped the baseline's external 443 rule (new deny-by-default default leaked in; --reuse-values must replay the baseline verbatim)"
+else
+  netpol_has_external_443 && fail "--reuse-values added an external 443 rule the deny-by-default baseline did not have (--reuse-values must replay the baseline verbatim)"
+fi
+[ "$(jm_egress_proxy_url)" = "$BASELINE_EGRESS_PROXY_URL" ] || fail "--reuse-values did not replay the baseline EGRESS_PROXY_URL verbatim: got '$(jm_egress_proxy_url)', want '${BASELINE_EGRESS_PROXY_URL:-<none>}' (new routeWorkloads default leaked in on this path)"
 # Documented limitation, asserted so it stays a known quantity: plain
 # --reuse-values replays the old release's COMPUTED values and ignores the new
 # chart's defaults. What that means for the prod ingestor pin depends on the
@@ -181,7 +203,7 @@ else
   [ "$(jm_ingestor_digest)" = "$BASELINE_PROD_DIGEST" ] \
     || fail "--reuse-values did not replay the baseline prod pin verbatim: got '$(jm_ingestor_digest)', want '$BASELINE_PROD_DIGEST' (stored computed values must win over new chart defaults on this path)"
 fi
-echo "   OK: upgrade succeeded, lockdown stayed off, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
+echo "   OK: upgrade succeeded, egress posture replayed from the baseline verbatim, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
 
 echo "── isolate path 2 from path 1's --reuse-values contamination (#459) ──"
 # path 1's --reuse-values rewrote THIS release's recorded values to the baseline's FULL
@@ -215,8 +237,8 @@ echo "   OK: recorded values reset to the genuine overrides — path 2 now tests
 
 echo "── path 2: the fleet auto-upgrade — helm upgrade --reset-then-reuse-values ──"
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values
-netpol_has_external_443 || fail "auto-upgrade dropped the external 443 rule (allowExternalHttps default did not flow)"
-[ -z "$(jm_egress_proxy_url)" ] || fail "auto-upgrade injected EGRESS_PROXY_URL (routeWorkloads should default false)"
+netpol_has_external_443 && fail "auto-upgrade kept the external 443 rule (deny-by-default allowExternalHttps=false did not flow — RFC-0003 D6 / client-runtime#199)"
+[ "$(jm_egress_proxy_url)" = "http://egress-proxy-service:3128" ] || fail "auto-upgrade did not inject EGRESS_PROXY_URL (routeWorkloads=true default did not flow — RFC-0003 D6 / client-runtime#199)"
 kubectl get deploy "${NS}-egress-proxy" -n "$NS" >/dev/null \
   || fail "auto-upgrade did not deploy the egress gateway (new defaults did not flow)"
 ANNOT="$(kubectl get -n "$NS" "$(jm_deploy)" \
@@ -245,32 +267,43 @@ WANT_DIGEST="$(local_prod_digest)"
 GOT_DIGEST="$(jm_ingestor_digest)"
 [ "$GOT_DIGEST" = "$WANT_DIGEST" ] \
   || fail "auto-upgrade did not push the prod ingestor pin onto the installed edge: got '${GOT_DIGEST:-<empty>}', want '$WANT_DIGEST' (backend#1245)"
-echo "   OK: new defaults flowed in (gateway deployed, inert), annotations survived"
+echo "   OK: new defaults flowed in (deny-by-default: gateway routing + external-443 dropped), annotations survived"
 echo "   OK: prod ingestor pin reached the installed edge ($WANT_DIGEST)"
 
-echo "── path 3: operator flips the #102 lockdown + opts a canary off the prod pin ──"
+echo "── path 3: operator OPTS OUT of the deny-by-default lockdown + opts a canary off the prod pin ──"
+# Every --set value is the OPPOSITE of the chart default on purpose (Bugbot on
+# this PR): now that deny-by-default ships, re-setting the lockdown values would
+# just match the defaults, so path 4 could not tell a preserved override from a
+# plain default replay. So opt a fleet fully out — routeWorkloads=false (stop
+# routing egress through the gateway) AND allowExternalHttps=true (re-open the
+# direct external-443 rule) — both genuine overrides, so path 4 becomes a real
+# test that --reset-then-reuse-values keeps each opt-out instead of the next
+# hourly auto-upgrade silently re-locking a fleet that deliberately opted out.
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
-  --set egressProxy.routeWorkloads=true \
-  --set networkPolicy.training.allowExternalHttps=false \
+  --set egressProxy.routeWorkloads=false \
+  --set networkPolicy.training.allowExternalHttps=true \
   --set images.ingestor.prodPin=false
-netpol_has_external_443 && fail "lockdown flip did NOT drop the external 443 rule"
-[ "$(jm_egress_proxy_url)" = "http://egress-proxy-service:3128" ] \
-  || fail "lockdown flip did not point jobs-manager at the egress gateway"
+netpol_has_external_443 \
+  || fail "operator opt-out did NOT re-open the external 443 rule (allowExternalHttps=true was ignored)"
+[ -z "$(jm_egress_proxy_url)" ] \
+  || fail "operator opt-out did NOT stop gateway routing (routeWorkloads=false was ignored — EGRESS_PROXY_URL still injected)"
 [ -z "$(jm_ingestor_digest)" ] \
   || fail "prodPin=false did not float the canary edge back onto the ingestor tag (backend#1245)"
-echo "   OK: rule 2 dropped, training pods route via the gateway, canary floats"
+echo "   OK: rule 2 re-opened + gateway routing off by the opt-out, canary floats"
 
-echo "── path 4: the NEXT hourly auto-upgrade must preserve both overrides ──"
+echo "── path 4: the NEXT hourly auto-upgrade must preserve both opt-outs ──"
+# Both overrides are user-supplied and OPPOSITE the chart default, so
+# --reset-then-reuse-values must replay them: an operator who opted a fleet out
+# of the lockdown (or floated a canary) must not be silently reverted to the
+# deny-by-default / re-pinned by the next hourly upgrade.
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values
-netpol_has_external_443 && fail "auto-upgrade after the flip re-opened the external 443 rule (override lost)"
-[ "$(jm_egress_proxy_url)" = "http://egress-proxy-service:3128" ] \
-  || fail "auto-upgrade after the flip lost EGRESS_PROXY_URL (override lost)"
-# The canary opt-out is user-supplied, so --reset-then-reuse-values must replay
-# it: an edge deliberately floated must not be silently re-pinned by the next
-# hourly upgrade.
+netpol_has_external_443 \
+  || fail "auto-upgrade reverted the operator's allowExternalHttps=true opt-out back to the deny-by-default (override lost)"
+[ -z "$(jm_egress_proxy_url)" ] \
+  || fail "auto-upgrade re-injected EGRESS_PROXY_URL, reverting the operator's routeWorkloads=false opt-out (override lost)"
 [ -z "$(jm_ingestor_digest)" ] \
   || fail "auto-upgrade re-pinned an edge the operator had opted out with prodPin=false (override lost)"
-echo "   OK: the operator's lockdown and canary opt-out persist across auto-upgrades"
+echo "   OK: the operator's egress opt-outs (routing + external-443) and canary opt-out persist across auto-upgrades"
 
 echo "── path 5: client credentials resolve from the existing Secret (backend#2571) ──"
 #  THE ONLY PLACE THIS MECHANISM CAN BE TESTED. secrets.yaml resolves

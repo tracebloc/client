@@ -1,0 +1,78 @@
+# qos-reachability-expect.txt — is Guaranteed QoS REACHABLE through values?
+#
+# Written by scripts/tests/qos-reachability.sh, which equalises EVERY resources.*
+# knob values.schema.json exposes and then classifies. A pod still short of
+# Guaranteed after that cannot be made Guaranteed by an operator, and the names
+# in the last column are why.
+#
+# FORMAT:  <pod>  hostPath=<bool>  reachable|blocked  <blocking containers, or ->
+#
+# The last column holds container NAMES, not quantities, on purpose: bumping a
+# hardcoded cpu limit is not a QoS change and must not redden this file. A new
+# blocker appearing IS, which is the case that went unnoticed (see below).
+#
+# WHY THIS FILE EXISTS. #942 added `wait-for-mysql` to jobs-manager --
+# unconditional, resourced, unequal on both dimensions, and with no values key.
+# Every QoS guard stayed green (they pin the class and the unresourced-init set,
+# neither of which moved), while two comments in the chart that said equalising
+# cpu buys Guaranteed for jobs-manager on a CSI cluster became false. This file
+# is the assertion those claims did not have.
+#
+# t-jobs-manager is `blocked` on BOTH profiles for that reason. Before #942 the
+# hostPath=false row would have read `reachable`, and changing it is exactly the
+# step that should have happened in #942.
+#
+# REACHABLE TODAY: t-requests-proxy, t-auto-upgrade, t-egress-proxy and
+# t-image-refresh. The last three moved from `blocked` when the schema walk was
+# made recursive (Bugbot, Medium): it read only the TOP-LEVEL `resources` object,
+# so `autoUpgrade.resources`, `imageRefresh.resources` and `egressProxy.resources`
+# -- each of which exposes requests AND limits -- were never equalised. Their
+# rows said `blocked` while an operator could already reach Guaranteed through
+# values, so this file was asserting a limitation the chart does not have. That
+# is the same stale-claim shape the file was written to catch, one level up: the
+# guard had been agreeing with its own incomplete domain.
+#
+# Nothing about the chart changed to make these reachable -- only what the guard
+# was able to see. No claim in the chart becomes false; three that were
+# needlessly pessimistic become accurate.
+#
+# Most other rows are `blocked` because the chart exposes no resources knob for
+# the named container at all -- honest, and it means adding such a knob flips the
+# row and has to be acknowledged here.
+#
+# t-telemetry-collector IS reachable, and the first version of this file said it
+# was not. `telemetryCollector.resources` is `{"type": "object"}` with no
+# declared keys, so the enumeration derived nothing from it and skipped it -- but
+# the schema does not forbid keys either, and the DaemonSet renders the node with
+# `toYaml $tc.resources`, a wholesale passthrough. Measured: with only that key
+# equalised the pod renders requests == limits on both dimensions and classifies
+# Guaranteed. Skipping it was a `blocked` verdict reached by never having looked,
+# which is the one thing this guard exists to refuse, so the node is probed and
+# the run says the verdict came from a probe.
+#
+# LIMIT, stated so this file is not read as more than it is: `blocked` means "not
+# reachable through VALUES". A chart edit (resourcing the blocker, or pod-level
+# resources under KEP-2837) still reaches Guaranteed. That is the right scope for
+# the claims it guards, which are claims about what an operator can do.
+mysql-client	hostPath=false	blocked	mysql-format-guard
+mysql-client	hostPath=true	blocked	init-mysql-data,mysql-format-guard
+t-auto-upgrade	hostPath=false	reachable	-
+t-auto-upgrade	hostPath=true	reachable	-
+t-egress-enforcement-check	hostPath=false	blocked	probe
+t-egress-enforcement-check	hostPath=true	blocked	probe
+t-egress-proxy	hostPath=false	reachable	-
+t-egress-proxy	hostPath=true	reachable	-
+t-egress-reachability-check	hostPath=false	blocked	probe
+t-egress-reachability-check	hostPath=true	blocked	probe
+t-image-refresh	hostPath=false	reachable	-
+t-image-refresh	hostPath=true	reachable	-
+t-jobs-manager	hostPath=false	blocked	wait-for-mysql
+t-jobs-manager	hostPath=true	blocked	init-writable-data,wait-for-mysql
+t-requests-proxy	hostPath=false	reachable	-
+t-requests-proxy	hostPath=true	reachable	-
+t-resource-monitor	hostPath=false	blocked	tracebloc-resource-monitor
+t-resource-monitor	hostPath=true	blocked	tracebloc-resource-monitor
+t-storage-assertions-check	hostPath=false	blocked	assert
+t-storage-assertions-check	hostPath=true	blocked	assert
+t-telemetry-collector	hostPath=false	reachable	-
+t-telemetry-collector	hostPath=true	reachable	-

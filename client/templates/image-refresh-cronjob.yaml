@@ -789,7 +789,7 @@ spec:
                 - name: RELEASE_NAMESPACE
                   value: {{ .Release.Namespace | quote }}
                 - name: DEPLOYMENT_NAME
-                  value: {{ printf "%s-jobs-manager" .Release.Name | quote }}
+                  value: {{ printf "%s-jobs-manager" (include "tracebloc.fullname" .) | quote }}
                 # #569: the two additional workloads reconciled by `set image`.
                 - name: REQUESTS_PROXY_DEPLOYMENT
                   value: {{ include "tracebloc.requestsProxyName" . | quote }}

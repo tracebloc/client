@@ -66,7 +66,7 @@
             "off",
             ""
           ],
-          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)), requests == limits. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and both installers write that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on an uncapped multi-node k3d cluster every node over-reports the whole Docker VM, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
+          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and CPU is a request-only share weight with NO limit since backend#2418, so the job pod is Burstable - not Guaranteed QoS, as this description claimed for both dimensions until backend#2872. With the flag OFF (the default) jobs-manager uses its built-in literal on requests AND limits, so a CPU job pod is Guaranteed. THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU: cpu-only + off -> Guaranteed, cpu-only + on -> Burstable, GPU -> BestEffort either way. A GPU job's envelope resolves to nvidia.com/gpu (and ephemeral-storage) only; neither is QoS-relevant, so the container sets no cpu/memory request or limit at all and the flag changes nothing on that cluster (backend#2871). Do not read 'Burstable' as the default, and do not turn this on expecting to escape Burstable on a GPU node. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and both installers write that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on an uncapped multi-node k3d cluster every node over-reports the whole Docker VM, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
         },
         "GPU_REQUESTS": {
           "type": "string",
@@ -414,8 +414,8 @@
             },
             "allowExternalHttps": {
               "type": "boolean",
-              "default": true,
-              "description": "When false, drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY \u00a78.2 / client-runtime#102). Default true keeps existing behaviour; flip per-fleet after verifying the egress gateway works (G2)."
+              "default": false,
+              "description": "When false (the default, RFC-0003 D6), drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY \u00a78.2 / client-runtime#102). Set true to opt a fleet back out to direct egress. An absent key on a `--reuse-values` upgrade from a release predating it keeps the old permissive behaviour."
             },
             "enforcementProbeHost": {
               "type": "string",
@@ -683,8 +683,8 @@
         },
         "routeWorkloads": {
           "type": "boolean",
-          "default": false,
-          "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default false \u2014 enable per-fleet, verify a run, then drop the direct egress rule (networkPolicy.training.allowExternalHttps=false)."
+          "default": true,
+          "description": "Route training-pod outbound HTTPS through the gateway (jobs-manager injects HTTPS_PROXY). Default true (RFC-0003 D6, deny-by-default); set false to opt a fleet out of gateway routing."
         },
         "port": {
           "type": "integer",
@@ -1461,6 +1461,12 @@
       "additionalProperties": {
         "type": "boolean"
       }
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+      "maxLength": 53,
+      "description": "Rename the resources this chart creates without uninstall + reinstall (backend#2626). Unset resolves to .Release.Name verbatim, so leaving it alone is byte-identical to before it existed. Renames RESOURCES, not the Helm release: app.kubernetes.io/instance, meta.helm.sh/release-name and the RELEASE_NAME env keep the release name, and release-scoped on-disk paths keep it too because a path is a location, not a name. Changing it on an existing install is a migration (Helm renames as delete + create), not a config tweak. THE PATTERN AND LENGTH ARE THE ONES HELM ENFORCES ON THE VALUE THIS REPLACES: a release name is a DNS-1123 label capped at 53 characters, so without them this key was a strictly weaker gate than the thing it substitutes for. A value like Bad_Name! templated clean and then failed object-by-object at the API server, mid-install, leaving a partly-created release. Declared here so it fails at template time, by name (reviewer, backend#2626). THE EMPTY STRING IS ACCEPTED EXPLICITLY: the template treats it as unset (default .Release.Name .Values.fullnameOverride) and values.yaml ships `fullnameOverride: \"\"` as its commented example, so a pattern requiring at least one character would reject the chart's own documented line if uncommented verbatim (Arturo). CHANGING IT ON A LIVE RELEASE IS REFUSED at template time by secrets.yaml, not merely discouraged - earlier prose here called it a migration, which invited planning one the chart will not start."
     },
     "telemetryCollector": {
       "type": [

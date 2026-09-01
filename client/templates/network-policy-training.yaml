@@ -34,7 +34,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Release.Name }}-training-egress
+  name: {{ include "tracebloc.fullname" . }}-training-egress
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -61,11 +61,12 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    {{- /* Rule 2 (external HTTPS) is the egress hole SECURITY §8.2 closes. Gated on
-           networkPolicy.training.allowExternalHttps via `dig` with a default of TRUE:
-           an absent key (helm upgrade --reuse-values from a release predating it)
-           keeps the rule — old behaviour — so only an explicit `false` drops it, once
-           an operator has verified the egress gateway on that cluster (#102). */}}
+    {{- /* Rule 2 (external HTTPS) is the egress hole SECURITY §8.2 closes. The
+           shipped default is now `false` (values.yaml — RFC-0003 D6 deny-by-default),
+           so a fresh render drops this rule. The `dig` default of TRUE here is the
+           legacy fallback ONLY: an absent key (helm upgrade --reuse-values from a
+           release predating the key) keeps the rule — old permissive behaviour — and
+           an operator can still opt a fleet back out with an explicit `true` (#102). */}}
     {{- if dig "allowExternalHttps" true .Values.networkPolicy.training }}
     # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
     #    Training pods reach the backend / Azure Service Bus / App Insights directly.

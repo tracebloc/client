@@ -1,0 +1,29 @@
+# EXPECTED QoS CLASS per workload — installer-provisioned edge (hostPath.enabled=true).
+#
+# Compared by SET EQUALITY against what the chart actually renders, in both
+# directions: a new workload with no row here FAILS, and a row naming a workload the
+# chart no longer renders FAILS. The first version of this suite restated six names
+# in a bats file while the chart rendered ten, so auto-upgrade, image-refresh and the
+# two check Jobs were classified and then ignored (Bugbot, review on client#922).
+#
+# Every workload is Burstable today. That is not an aspiration — it is what
+# ComputePodQOS yields, and the `init` rows below record WHY it cannot be Guaranteed
+# for the two people keep trying to fix.
+class  mysql-client                 Burstable
+class  t-auto-upgrade               Guaranteed
+class  t-egress-enforcement-check   Burstable
+class  t-egress-proxy               Burstable
+class  t-egress-reachability-check  Burstable
+class  t-image-refresh              Guaranteed
+class  t-jobs-manager               Burstable
+class  t-requests-proxy             Burstable
+class  t-resource-monitor           Burstable
+class  t-storage-assertions-check   Burstable
+class  t-telemetry-collector        Burstable
+
+# UNRESOURCED INIT CONTAINERS, asserted as an exact set. This is the half that
+# decides whether Guaranteed is reachable at all: ComputePodQOS requires
+# requests == limits in EVERY container, init containers included. One of these
+# disappearing is a behaviour change, and previously nothing would have said so.
+init   t-jobs-manager               init-writable-data
+init   mysql-client                 init-mysql-data,mysql-format-guard

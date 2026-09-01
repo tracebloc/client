@@ -165,8 +165,16 @@ spec:
             {{- /*
               CPU limit is intentionally unset by default (see comment block
               above). Schema permits it, so honour an explicit override here
-              instead of silently dropping it. Operators flipping this on
-              should know what they're doing.
+              instead of silently dropping it.
+
+              An operator flipping this on to buy Guaranteed QoS gets NEITHER
+              half of that trade (backend#2872). They get the CPU throttling the
+              block above warns about — the cause of InnoDB lock-wait timeouts —
+              and no QoS change at all, because ComputePodQOS requires
+              requests == limits in EVERY container including init containers,
+              and `mysql-format-guard` above carries no resources
+              UNCONDITIONALLY. mysql therefore cannot be Guaranteed on any
+              cluster, whatever is set here. Measured, not inferred.
             */}}
             {{- with .Values.resources.mysql.limits.cpu }}
             cpu: {{ . | quote }}

@@ -273,3 +273,56 @@ Every Bugbot review thread gets a reply, then gets resolved:
   leaving it open.
 Unresolved cursor threads HOLD release-train promotions (soft gate) — an
 unaddressed finding blocks the fleet, not just this PR.
+
+## A fix is not fixed until a guard has been seen to fail
+
+backend#2675 and #2849 were both "already fixed". They were not, and nothing in
+CI could say so:
+
+- **#577** shipped a graceful-exit boundary, and PR #588 *did* touch
+  `install.ps1` — but only its message. Every `exit` was untouched, so the
+  bootstrap still closed the user's console for another month. It was reported
+  from a real machine as *"it just closed the PowerShell"*.
+- `install-k8s.ps1`'s own comment promised `WaitForExit()` **"guarantees ExitCode
+  is populated for every caller"**. It did not. Every failure in
+  `Invoke-TrackedInstall` rendered `exited ` with an empty slot, and a Docker
+  install that *succeeded* with 3010 was filed as a failure.
+
+Both were found by a human running the installer. Flag these on review:
+
+1. **A fix in one twin only.** `install.ps1` / `install-k8s.ps1` and the bash
+   `install.sh` / `install-k8s.sh` are four files implementing two contracts. Ask
+   which of the four a fix landed in and why the others are exempt. `exit` is the
+   worked example: `curl | bash` runs bash as a CHILD, so `exit` is free there,
+   while `irm | iex` runs **in the user's session**, where it closes their window.
+   A pattern that is safe on three platforms and fatal on the fourth reviews as
+   safe.
+
+2. **A guard behind `TB_PESTER`.** Both installers wrap main in
+   `if (-not $env:TB_PESTER)` and every suite sets `TB_PESTER=1` — so **no test
+   in this repo has ever executed an `exit`**. If a fix lives on a path the suite
+   cannot reach, say so in the PR and assert it another way (see 4).
+
+3. **A comment asserting a guarantee.** "guarantees", "always", "never" in a
+   comment is a claim with no test behind it unless one is named. The
+   `WaitForExit()` line above is the case in point.
+
+4. **A source-text assertion with no mutation behind it.**
+   `Should -Match 'function Foo'` passes forever once the string drifts — green
+   and no-longer-looking are the same colour. Register the defect in
+   `scripts/tests/mutation-check.ps1`: it reintroduces the bug into a COPY of the
+   tree and requires the suite to go red. `pwsh -File
+   scripts/tests/mutation-check.ps1` (`-Dry` resolves markers only, and is **not**
+   evidence anything still bites).
+
+5. **A number changed without its consumers.** Raising
+   `VERIFY_READY_DEADLINE_S` 180→600 left a registered mutation both STALE *and*
+   a no-op. Changing a constant means re-aiming everything that pins it.
+
+6. **Prefer a pure function to a source grep.** Where a decision ends in `exit`
+   or a throw, lift the decision out and assert its return value —
+   `Read-RebootChoice`, `Get-UnattendedCredentialRefusal`,
+   `Get-TraceblocDashboardUrl`. Three capture strategies were burned trying to
+   assert a message *through* a throwing mock before this was done; they each
+   bound differently on Pester 5.5 (ubuntu CI) versus 6.x (windows CI).
+   **Run both versions locally before pushing.**

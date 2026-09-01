@@ -1163,6 +1163,70 @@ Describe "Install-TraceblocCli" {
     $out = Install-TraceblocCli 6>&1 | Out-String
     $out | Should -Match "tracebloc CLI (ready|installed)"   # happy verdict is "ready", edge is "installed"
   }
+  # THE SUCCESS BRANCH, WHICH NOTHING ABOVE ACTUALLY ENTERS (Bugbot on #931).
+  #
+  # The fakes above give `WaitForExit` a no-arg ScriptMethod that returns
+  # NOTHING, so `if ($p.WaitForExit($cliWaitMs))` is falsy and every one of them
+  # takes the TIMEOUT branch. "reports success only when the installer exits 0"
+  # therefore passes through the kill path -- the right verdict for the wrong
+  # reason -- and the flush this branch exists for is never executed.
+  #
+  # WHAT THE FLUSH IS FOR: `WaitForExit(ms)` waits for the PROCESS; only the
+  # PARAMETERLESS overload also waits for the redirected stdout/stderr readers to
+  # drain, and until they do `.ExitCode` reads back $null. A null then fails
+  # `-eq 0` after a SUCCESSFUL install, Step 4 warns, and Step 5 falls back to
+  # the legacy credential prompt -- the client#611 shape, and the empty-ExitCode
+  # class backend#2849 exists to remove, reappearing inside its own fix.
+  #
+  # So the fake models the REAL contract: ExitCode is $null until the
+  # parameterless overload has been called.
+  It "flushes the streams on the success branch, so ExitCode is readable" {
+    $script:cliFlushed = $false
+    Mock Start-Process {
+      $o = [pscustomobject]@{}
+      $o | Add-Member ScriptProperty Handle   { [IntPtr]::Zero }
+      $o | Add-Member ScriptProperty ExitCode { if ($script:cliFlushed) { 0 } else { $null } }
+      $o | Add-Member ScriptMethod   WaitForExit {
+        if ($args.Count -gt 0) { return $true }      # process exited inside the deadline
+        $script:cliFlushed = $true                    # streams drained
+      }
+      $o
+    }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $script:cliFlushed | Should -BeTrue -Because 'the parameterless WaitForExit() flush was never called'
+    $out | Should -Match "tracebloc CLI (ready|installed)"
+  }
+  It "caches .Handle before the wait, so a reaped child's ExitCode stays readable" {
+    # SOURCE-LEVEL, and deliberately: handle reaping is real .NET behaviour that a
+    # pscustomobject mock cannot reproduce -- `$p.StartTime` on a mock silently
+    # returns $null, so removing the cache is a semantic NO-OP under any fake we
+    # can build. The mutation registry found exactly that: the mutation reddened
+    # the suite via unrelated flaky tests and was reported MISATTRIBUTED rather
+    # than credited, which is the attribution check earning its place.
+    #
+    # Same shape as the Wait-ProcessWithDeadline guard, and the same reason: once
+    # the process is reaped .NET has released the handle and .ExitCode reads back
+    # $null, so Step 4 would warn after a SUCCESSFUL install and Step 5 fall back
+    # to the legacy credential prompt (client#611).
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    $src | Should -Match '(?s)Info "Installing the tracebloc CLI\.\.\."(?:.*?)\$null = \$p\.Handle(?:.*?)\$p\.WaitForExit\(\$cliWaitMs\)'
+  }
+
+  It "a successful install whose streams never drained must NOT report success" {
+    # The other direction, so the test above cannot pass by accident: with the
+    # flush absent ExitCode stays $null, and the function must warn rather than
+    # credit an install it cannot read the verdict of.
+    Mock Start-Process {
+      $o = [pscustomobject]@{}
+      $o | Add-Member ScriptProperty Handle   { [IntPtr]::Zero }
+      $o | Add-Member ScriptProperty ExitCode { $null }
+      $o | Add-Member ScriptMethod   WaitForExit { if ($args.Count -gt 0) { return $true } }
+      $o
+    }
+    $out = Install-TraceblocCli 6>&1 | Out-String
+    $out | Should -Match "Couldn't install the tracebloc CLI"
+  }
+
   It "warns on a failed re-install even when a CLI is already on PATH" {
     Mock Start-Process {
       $o = [pscustomobject]@{ ExitCode = 1 }
@@ -4936,6 +5000,54 @@ Describe "Get-InstalledClientInfo API gating (Bugbot)" {
     $info.Id | Should -Be "acme"
     $info.ListUnknown | Should -BeFalse
     Should -Invoke helm -ParameterFilter { $args -contains "list" }
+  }
+
+  # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on
+  # client#911). `tracebloc.secretName` follows `fullnameOverride`, so on a
+  # release installed with one the Secret is `<override>-secrets`. Reading
+  # `<release>-secrets` finds nothing, and a live client whose id lives only in
+  # the Secret reads as UNIDENTIFIABLE -- `diagnose` and `upgrade` then treat it
+  # as having no id. Bash parity: install-client-helm.bats' two #911 cases.
+  It "reads the Secret under fullnameOverride, not the release name (client#911)" {
+    Mock kubectl {
+      $global:LASTEXITCODE = 0
+      # THE ASSERTION lives in the mock: only the overridden name answers.
+      if ($args -contains "zzoverride-secrets") { return "dXVpZC1mcm9tLXNlY3JldA==" }
+      return ""
+    }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"rel","namespace":"tracebloc","chart":"client-1.9.87"}]'; $global:LASTEXITCODE = 0; return }
+      # Values carry the override and NO clientId -- the backend#2571 shape on a
+      # renamed release, which is what this PR makes reachable.
+      if ($args -contains "get")  { '{"fullnameOverride":"zzoverride"}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    $info = Get-InstalledClientInfo
+    $info.Id | Should -Be "uuid-from-secret"
+    $info.ListUnknown | Should -BeFalse
+  }
+
+  It "with NO override still reads the release name (client#911 control)" {
+    # Without this the first case is satisfied by always using the override key,
+    # which would break every ordinary release.
+    # EXIT 0 THROUGHOUT, and that matters: `Get-InstalledClientInfo` opens with a
+    # bounded kubectl probe and degrades to ListUnknown when it fails. A mock that
+    # returns non-zero for "anything but my Secret" fails that probe too, so the
+    # test would pass or fail for the wrong reason. A non-matching Secret read
+    # returns EMPTY instead, which `Get-ClientIdFromSecret` already treats as
+    # "couldn't read".
+    Mock kubectl {
+      $global:LASTEXITCODE = 0
+      if ($args -contains "rel-secrets") { return "dXVpZC1mcm9tLXNlY3JldA==" }
+      return ""
+    }
+    Mock helm {
+      if ($args -contains "list") { '[{"name":"rel","namespace":"tracebloc","chart":"client-1.9.87"}]'; $global:LASTEXITCODE = 0; return }
+      if ($args -contains "get")  { '{"storageClass":{}}'; $global:LASTEXITCODE = 0; return }
+      $global:LASTEXITCODE = 0
+    }
+    $info = Get-InstalledClientInfo
+    $info.Id | Should -Be "uuid-from-secret"
   }
 }
 

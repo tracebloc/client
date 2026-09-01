@@ -156,7 +156,7 @@ tests:
       networkPolicy:
         training:
           enabled: true
-          allowExternalHttps: true  # pin the default — this asserts the rule-2 hole
+          allowExternalHttps: true  # opt back out (default is now false) — asserts the rule-2 hole still renders on true
           dnsNamespace: kube-system
           dnsSelector:
             k8s-app: kube-dns
@@ -266,8 +266,8 @@ tests:
             port: 8888
             protocol: TCP
       # locked-down egress is exactly 4 rules: DNS + MySQL + requests-proxy +
-      # egress-proxy. NOTE: `egressProxy.enabled` DEFAULTS TRUE (values.yaml —
-      # only `routeWorkloads` defaults false), so the gateway's permit rule
+      # egress-proxy. NOTE: `egressProxy.enabled` and `routeWorkloads` both
+      # DEFAULT TRUE (values.yaml — RFC-0003 D6), so the gateway's permit rule
       # renders here even though this case doesn't set it. The direct length
       # assertion makes the shape unmissable and catches a stray appended rule
       # (Saqlain review on #537).

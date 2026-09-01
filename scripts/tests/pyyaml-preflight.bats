@@ -137,18 +137,42 @@ def snippet_ok(src):
     return imports <= guarded
 
 guards, offenders = [], []
+# `.py` IS IN THE FILTER, and it was the gap that let this class re-open.
+# `extract_python` finds python EMBEDDED in shell — heredocs and `python3 -c`.
+# The moment a guard's python moves into a standalone sidecar, there is no
+# heredoc to find, and a filter of `.sh`/`.bats` never opens the file at all: the
+# first `.py` sidecar in this tree (`fullname_override_assertions.py`,
+# backend#2626) escaped the rule entirely, which is exactly the shape of "a check
+# that is not connected to what it claims to check" this suite exists to stop.
+# Every future sidecar would have got the same free pass.
+#
+# A sidecar needs no extraction — the whole file IS the snippet — so it is fed to
+# `snippet_ok` directly.
 for name in sorted(os.listdir(tests_dir)):
-    if not (name.endswith(".sh") or name.endswith(".bats")):
+    if not (name.endswith(".sh") or name.endswith(".bats") or name.endswith(".py")):
         continue
     if name == self_name:          # this enforcer is not itself a guard-under-test
         continue
-    lines = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read().splitlines()
-    yaml_snips = [s for s in extract_python(lines) if IMPORT_YAML.search(s)]
+    body = open(os.path.join(tests_dir, name), encoding="utf-8", errors="replace").read()
+    lines = body.splitlines()
+    if name.endswith(".py"):
+        # A python guard is not a shell file with python inside it: the whole file
+        # IS the snippet. extract_python finds only EMBEDDED blocks, so feeding a
+        # .py through it yields nothing and the file would land in the "import
+        # present but not captured" branch -- failing closed on a guard that is
+        # correctly wrapped.
+        yaml_snips = [body] if IMPORT_YAML.search(body) else []
+    else:
+        yaml_snips = [s for s in extract_python(lines) if IMPORT_YAML.search(s)]
     raw_import = any(IMPORT_YAML.match(l) for l in lines)
     if not (raw_import or yaml_snips):     # not a yaml-importing guard
         continue
     guards.append(name)
-    if has_shell_gate(lines):      # refused at the shell level, before python — accept
+    # A SIDECAR HAS NO SHELL TO GATE IT. `has_shell_gate` looks for a refusal in
+    # the surrounding script; in a `.py` file the same text would be a comment or
+    # a string, so honouring it here would exempt exactly the files this filter
+    # was extended to cover.
+    if not name.endswith(".py") and has_shell_gate(lines):
         continue
     if not yaml_snips:             # import present in the file but not captured — cannot verify
         offenders.append(name); continue
