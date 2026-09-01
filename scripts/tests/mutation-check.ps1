@@ -59,6 +59,19 @@ param([switch]$Dry)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# pwsh 7.3+ ONLY, and this refuses rather than misleads (@saadqbal on #931).
+# `& pwsh -NoProfile -Command $script` strips the child's double quotes before
+# 7.3, so on 7.0-7.2 the child script is corrupted and every entry fails for a
+# reason that has nothing to do with any guard. CI is on 7.4+, so it passes
+# there and only a local run is affected -- which is the worst shape for it,
+# because the person who hits it has no reason to suspect the harness.
+if ($PSVersionTable.PSVersion -lt [version]'7.3.0') {
+    Write-Host ("Refusing to run: this harness needs pwsh 7.3+ (found $($PSVersionTable.PSVersion)). " +
+                "Before 7.3, ``-Command`` strips the child's double quotes and every entry fails " +
+                "for reasons unrelated to any guard.") -ForegroundColor Red
+    exit 1
+}
+
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 
 # ── the registry ─────────────────────────────────────────────────────────────
@@ -228,6 +241,41 @@ if ($Dry) { Write-Host "--dry: markers only. This is NOT evidence that anything 
 # own verdicts depend on how many times it has already run cannot be trusted to
 # say whether a guard bit. Isolation makes each verdict mean one thing, and it
 # is also how CI runs the suite.
+# ONE SANDBOX BUILDER, USED BY THE BASELINE AND BY EVERY MUTATION -- because
+# measuring the floor in a different tree than the mutations run in is what let
+# the floor stay invisible (@saadqbal on #931, twice).
+#
+# THE WHOLE TREE, NOT JUST scripts/. install-k8s.Tests.ps1 reads six paths above
+# it (../../docker/k3s-cuda/*, ../../client/templates/resource-monitor-daemonset.yaml),
+# so a scripts-only sandbox failed SEVEN drift guards before any mutation applied.
+#
+# AND NOT UNDER GetTempPath(). This is the second floor, and it is subtler:
+# `Get-ElevationCommand` branches on `$ScriptPath -notlike "$temp*"`
+# (install-k8s.ps1:81), so a sandbox living under temp makes the "durable path"
+# arm unreachable and two tests fail that pass at the repo root --
+# `Get-ResumeCommand … durable script path` and `Get-ElevationCommand … QUOTED
+# -File path`. Measured: 890/FAIL=0 at the root, 888/FAIL=2 under temp.
+#
+# I had seen those two fail and written them off as flaky. They are not: they are
+# deterministic, and they are caused by the harness's own choice of location.
+# Asad diagnosed it. Attribution masked it rather than removing it -- when the
+# claiming guard does fail, its failure is credited regardless of the two
+# inherited ones -- so a false green was still constructible with a comment-only
+# mutation, which he demonstrated.
+#
+# The sandbox therefore goes beside the repo, not in temp, and is removed in the
+# caller's `finally`.
+function New-Sandbox {
+    $root = Join-Path (Split-Path $RepoRoot -Parent) (".tb-mut-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    # .git is skipped: 106 MB of the 122, and no suite reads it. Sibling sandboxes
+    # are skipped so a concurrent run cannot copy itself.
+    Get-ChildItem -LiteralPath $RepoRoot -Force |
+      Where-Object { $_.Name -notin @('.git', '.venv', 'node_modules', '.claude') -and $_.Name -notlike '.tb-mut-*' } |
+      ForEach-Object { Copy-Item $_.FullName (Join-Path $root $_.Name) -Recurse -Force }
+    return $root
+}
+
 function Invoke-Suite {
     param([string]$Root, [string]$Suite)
     # PINNED TO THE 5 MAJOR, and the workflow's Install-Module carries the SAME
@@ -252,7 +300,21 @@ Write-Output ("RESULT PASS={0} FAIL={1}" -f `$r.PassedCount, `$r.FailedCount)
     # cause -- and under $ErrorActionPreference='Stop' it killed the run outright
     # on Asad's machine: exit 1, fourteen bytes of red, no diagnostic. A count
     # without a cause, which is the thing this harness exists to stop shipping.
+    # A LOCAL 'Continue', WITHOUT WHICH EVERYTHING BELOW IS DEAD CODE
+    # (@saadqbal on #931). `$ErrorActionPreference = 'Stop'` is set at the top of
+    # this file, and a native command writing to stderr produces an ErrorRecord --
+    # so under Stop the FIRST such record kills this parent at the pipeline, before
+    # `if (-not $line)` can quote the cause, and before FailedCount can ever be -1.
+    #
+    # Which means the CRASHED branch added for Bugbot's finding was unreachable in
+    # precisely the case Bugbot described: a child that cannot import Pester writes
+    # to stderr, so the parent died instead of reporting. It was reachable only for
+    # a SILENT crash -- the rare mode. One scope change fixes the diagnostic AND
+    # makes that branch real, which is why it is the same one-line fix twice over.
     $err = $null
+    $prevEap = $ErrorActionPreference
+    try {
+    $ErrorActionPreference = 'Continue'
     $out = & pwsh -NoProfile -Command $script 2>&1 |
              ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $err = "$err`n$_"; } else { $_ } }
     $line = @($out | Where-Object { $_ -like 'RESULT *' }) | Select-Object -Last 1
@@ -266,10 +328,16 @@ Write-Output ("RESULT PASS={0} FAIL={1}" -f `$r.PassedCount, `$r.FailedCount)
     $failed = [int]([regex]::Match($line, 'FAIL=(\d+)').Groups[1].Value)
     $names  = @($out | Where-Object { $_ -like 'FAILED *' } | ForEach-Object { $_.Substring(7) })
     return @{ PassedCount = $passed; FailedCount = $failed; Failed = $names }
+    } finally { $ErrorActionPreference = $prevEap }
 }
 
+$baseSandbox = New-Sandbox
+try {
 foreach ($suite in ($Mutations.Suite | Sort-Object -Unique)) {
-    $r = Invoke-Suite -Root $RepoRoot -Suite $suite
+    # IN A SANDBOX, NOT AT THE REPO ROOT. The baseline has to be measured under
+    # exactly the conditions the mutations run under, or it certifies a floor
+    # that is not the floor.
+    $r = Invoke-Suite -Root $baseSandbox -Suite $suite
     if ($r.FailedCount -ne 0) {
         # NAME THEM. A bare count sends whoever reads this hunting, which is the
         # defect class this whole harness exists to close.
@@ -277,29 +345,17 @@ foreach ($suite in ($Mutations.Suite | Sort-Object -Unique)) {
         $r.Failed | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
         exit 1
     }
-    Write-Host "baseline green: $suite ($($r.PassedCount) passed)" -ForegroundColor DarkGray
+    Write-Host "baseline green in the sandbox: $suite ($($r.PassedCount) passed)" -ForegroundColor DarkGray
 }
+} finally { Remove-Item $baseSandbox -Recurse -Force -ErrorAction SilentlyContinue }
 
 # ── the real thing ───────────────────────────────────────────────────────────
 $caught = 0; $survived = @(); $misattributed = @(); $crashed = @()
 foreach ($m in $Mutations) {
-    $sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-mut-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $sandbox = $null
     try {
-        New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
-        # THE WHOLE TREE, NOT JUST scripts/ (@saadqbal on #931, and this was the
-        # defect that made the harness a liar). install-k8s.Tests.ps1 reads six
-        # paths ABOVE scripts/ -- ../../docker/k3s-cuda/* and
-        # ../../client/templates/resource-monitor-daemonset.yaml -- so a
-        # scripts-only sandbox failed SEVEN drift guards before any mutation was
-        # applied. With the old `if ($fails -gt 0)` predicate every
-        # install-k8s.ps1 entry then "caught" on inherited failures alone: 11 of
-        # 13 could not fail. Asad proved it by making the dashboard guard vacuous
-        # and watching the run still report 13/13.
-        #
-        # .git is skipped because it is 106 MB of the 122, and no suite reads it.
-        Get-ChildItem -LiteralPath $RepoRoot -Force |
-          Where-Object { $_.Name -notin @('.git', '.venv', 'node_modules', '.claude') } |
-          ForEach-Object { Copy-Item $_.FullName (Join-Path $sandbox $_.Name) -Recurse -Force }
+        $sandbox = New-Sandbox
+        # (sandbox already built by New-Sandbox)
         $target = Join-Path $sandbox $m.File
         $lines  = [System.IO.File]::ReadAllLines($target)
         $idx    = (Get-MarkerIndex -Lines $lines -Find $m.Find `
@@ -336,7 +392,12 @@ foreach ($m in $Mutations) {
         } elseif ($expected.Count -gt 0) {
             $caught++
             Write-Host ("  caught   {0}" -f $m.Name) -ForegroundColor Green
-            Write-Host ("             by: {0}" -f ($expected[0] -replace '^.*?\.', '')) -ForegroundColor DarkGray
+            # THE WHOLE PATH, UNTRIMMED (@saadqbal on #931). This was
+            # `-replace '^.*?\.'`, which cuts at the FIRST period -- so any
+            # Describe carrying one (at least five do today, e.g. "… PS 5.1
+            # progress throttle …") printed mangled, on the harness's main
+            # human-readable line. Nothing is gained by trimming it.
+            Write-Host ("             by: {0}" -f $expected[0]) -ForegroundColor DarkGray
         } elseif ($fails -gt 0) {
             $misattributed += "$($m.Name)  [reddened, but NOT via '$($m.Expect)' -- $fails other failure(s)]"
             Write-Host ("  MISATTRIB {0}" -f $m.Name) -ForegroundColor Red

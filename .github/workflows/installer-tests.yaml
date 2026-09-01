@@ -143,11 +143,60 @@ jobs:
           TB_PESTER: "1"
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
-          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          # PINNED TO THE 5 MAJOR (@saadqbal on client#931). `-MinimumVersion`
+          # alone takes whatever the gallery has newest, so this job silently
+          # drifted onto 6.x while the mutation tier certifies guards under 5.x --
+          # and .cursor/BUGBOT.md rule 6, which the same PR adds, exists because
+          # guards bind DIFFERENTLY across those two majors. An unpinned suite
+          # cannot say which one it proved.
+          #
+          # 6.x is not dropped; it moved to the `Pester next-major` job below, a
+          # NEW context. The name of this one is deliberately unchanged: adding a
+          # matrix dimension here would rename `Pester (<os>)`, and a renamed
+          # required context never reports and blocks every PR in the repo. I
+          # cannot read branch protection to rule that out (404 on my token, as on
+          # Asad's and Arturo's), so this change adds contexts and renames none.
+          Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Force
           $cfg = New-PesterConfiguration
           # The whole tests dir — picks up install-k8s.Tests.ps1 AND install.Tests.ps1
           # (the R8 bootstrap) without needing a per-file edit as suites are added.
+          $cfg.Run.Path = "scripts/tests"
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = "Detailed"
+          Invoke-Pester -Configuration $cfg
+
+  unit-pester-next:
+    timeout-minutes: 20
+    # THE OTHER MAJOR, ON PURPOSE. The suites are asserted to pass on Pester 5.5
+    # (the version the mutation tier certifies against) and on 6.x, because
+    # .cursor/BUGBOT.md rule 6 records that assertions bind differently across
+    # them -- three capture strategies were burned on backend#2849 discovering
+    # exactly that, each green on one major and red on the other.
+    #
+    # A NEW context rather than a matrix dimension on `Pester (<os>)`: renaming an
+    # existing context would break it if it is required, and branch protection is
+    # unreadable from any of our tokens.
+    #
+    # Not fail-fast, and allowed to be the noisier of the two: if 6.x breaks
+    # first, that is the signal this job exists to give.
+    name: Pester next-major (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run Pester on the next major
+        shell: pwsh
+        env:
+          TB_PESTER: "1"
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 6.0.0 -MaximumVersion 6.99.99 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 6.0.0 -MaximumVersion 6.99.99 -Force
+          $cfg = New-PesterConfiguration
           $cfg.Run.Path = "scripts/tests"
           $cfg.Run.Exit = $true
           $cfg.Output.Verbosity = "Detailed"
