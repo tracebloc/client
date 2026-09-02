@@ -71,18 +71,37 @@ mysql_root() {
     mysql -uroot -p"$MYSQL_PW" --ssl-mode=DISABLED -N -e "$1" 2>/dev/null
 }
 
-# ── wait_accepting — block until mysqld actually answers, post-(re)start ──────
-# rollout status returns once the readiness probe (mysqladmin ping) passes, but
-# guard against Service-endpoint propagation lag before we launch the probe Job.
+# ── _dump_mysql_state — diagnostics for a wait/probe failure ──────────────────
+_dump_mysql_state() {
+  echo "── DIAGNOSTICS: mysql-client state ──" >&2
+  kubectl -n "$NS" get pods -l app=mysql-client -o wide >&2 2>&1 || true
+  kubectl -n "$NS" describe pod -l app=mysql-client 2>&1 | sed -n '/Events:/,$p' | head -25 >&2 || true
+  echo "── mysql-client container log (tail) ──" >&2
+  kubectl -n "$NS" logs deploy/mysql-client -c mysql-client --tail=60 >&2 2>&1 || true
+  echo "── previous container log, if it restarted ──" >&2
+  kubectl -n "$NS" logs deploy/mysql-client -c mysql-client --previous --tail=40 >&2 2>&1 || true
+}
+
+# ── wait_accepting — block until mysqld ANSWERS AN AUTHENTICATED QUERY ─────────
+# rollout status returns on the chart's `mysqladmin ping` readiness probe, which
+# answers "alive" against the fresh-init temporary server and even on
+# access-denied — so it can go ready before the real server finishes a cold
+# datadir init (slow on a loaded CI runner). Gate on an actual authenticated
+# SELECT 1 instead, which only succeeds once the real server is up AND the
+# account is usable. Generous window: a first-boot init on a busy runner is far
+# slower than the ~15s it takes locally.
 wait_accepting() {
-  for _ in $(seq 1 30); do
+  local i
+  for i in $(seq 1 60); do
     if kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- \
-        mysqladmin -uroot -p"$MYSQL_PW" ping >/dev/null 2>&1; then
+        mysql -uroot -p"$MYSQL_PW" -N -e "SELECT 1" >/dev/null 2>&1; then
       return 0
     fi
-    sleep 2
+    (( i % 10 == 0 )) && echo "   … still waiting for mysqld to accept authenticated connections (${i}0s)"
+    sleep 3
   done
-  fail "mysqld did not start accepting connections in time"
+  _dump_mysql_state
+  fail "mysqld did not start accepting authenticated connections within 180s"
 }
 
 # ── run_probe <label> — the real-driver auth Job, fresh each call ─────────────
