@@ -1775,12 +1775,14 @@ perExperimentDbCreds:
 # measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
 # companion secret renders clean.
 #
-# `stg: false` still, deliberately. Staging is at REVOKE, not DROP — the soak is
-# not finished, so its posture is not yet a thing to bake.
+# Baked for all fleets now that each is DROPped: staging DROPped 2026-08-31
+# (backend#2776), prod DROPped 2026-09-01 (backend#2800). A retired fleet's
+# posture becomes the default so a fresh install / values-reset is born retired
+# rather than relying on the operator overrides the live edges carry.
 perExperimentDbCredsByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 
 # Narrow edgeuser to USAGE only at every jobs-manager boot (backend#1528 S3
 # close-out). mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser
@@ -1809,8 +1811,8 @@ narrowEdgeuser:
 
 narrowEdgeuserByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
@@ -1870,7 +1872,7 @@ serviceDbAccounts:
 serviceDbAccountsByEnv:
   dev: true
   stg: true
-  prod: false
+  prod: true
 
 # Optional operator pins for the tb_meta / tb_ingest account passwords (each
 # mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist
@@ -1917,8 +1919,8 @@ bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 
 # REQUIRED when the gate above is on: the password jobs-manager authenticates
 # with, as MySQL root, to run the mint DDL. There is NO generated default —
@@ -1979,8 +1981,8 @@ rotateMysqlRoot:
 
 rotateMysqlRootByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 #
 # CLUSTER-LESS DEV NOTE (backend#2892). Because `dev` defaults rotation ON, a dev
 # fleet rendered WITHOUT a live cluster — ArgoCD's default render, Flux
