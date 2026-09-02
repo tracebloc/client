@@ -115,8 +115,10 @@ wait_accepting() {
 # wait_accepting gates the launch. backoffLimit 0 -> a real failure fails fast.
 run_probe() {
   local label="$1"
+  # The probe lives beside e2e-common.sh in scripts/tests/lib/ ($HERE/lib), NOT
+  # $LIB (scripts/lib, the installer libs).
   kubectl -n "$NS" create configmap mysql-auth-probe \
-    --from-file=mysql-auth-probe.py="$LIB/mysql-auth-probe.py" \
+    --from-file=mysql-auth-probe.py="$HERE/lib/mysql-auth-probe.py" \
     --dry-run=client -o yaml | kubectl -n "$NS" apply -f - >/dev/null
   kubectl -n "$NS" delete job mysql-auth-probe --ignore-not-found >/dev/null 2>&1
   kubectl -n "$NS" apply -f - >/dev/null <<EOF
