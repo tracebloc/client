@@ -62,11 +62,29 @@ except ImportError:
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 
 # Side 1: the containers the chart really deploys, as (namespace, container).
+# CRONJOBS AND JOBS COUNT (backend#2935). This enumerated three kinds and
+# looked total; it was not. A CronJob's pod spec is nested one level deeper
+# (`spec.jobTemplate.spec.template.spec`), so `helm` (auto-upgrade) and
+# `refresh` (image-refresh) were invisible here -- and adding either to
+# `classAContainers` was reported as a glob matching nothing, which is the
+# opposite of the truth. The kinds a chart can deploy a container in is the
+# input domain; enumerating a subset of it is the same defect this file
+# exists to catch, one level up.
+def _pod_specs(d):
+    kind = d.get("kind")
+    if kind in ("Deployment", "DaemonSet", "StatefulSet"):
+        return [d["spec"]["template"]["spec"]]
+    if kind == "Job":
+        return [d["spec"]["template"]["spec"]]
+    if kind == "CronJob":
+        return [d["spec"]["jobTemplate"]["spec"]["template"]["spec"]]
+    return []
+
 real = set()
 for d in docs:
-    if d.get("kind") in ("Deployment", "DaemonSet", "StatefulSet"):
-        ns = d["metadata"].get("namespace", "")
-        for c in d["spec"]["template"]["spec"].get("containers", []):
+    ns = d.get("metadata", {}).get("namespace", "")
+    for spec in _pod_specs(d):
+        for c in spec.get("containers", []):
             real.add((ns, c["name"]))
 
 # Side 2: the filelog include globs out of the Collector's own config.
@@ -220,13 +238,28 @@ esac
 partial="$(helm template t "$CHART" \
   --set clientId=x --set clientPassword=y --set storageClass.create=false \
   --set telemetryCollector.enabled=true 2>/dev/null | grep -c '  - "/var/log/pods/')"
-if [ "$partial" -ne 4 ]; then
-  echo "[ERROR] a partial telemetryCollector map rendered $partial include globs, want 4 —" >&2
+# DERIVED, NOT RESTATED (backend#2935). This was hardcoded `4`, so adding a
+# Class A container made the coalescing control fail for a reason that had
+# nothing to do with coalescing. The number of globs IS the number of declared
+# containers; reading it from the declaration is what keeps this control about
+# the mechanism it names.
+want="$(python3 - <<'WANT'
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit("[ERROR] PyYAML required (pip install pyyaml)")
+v = yaml.safe_load(open("client/values.yaml"))["telemetryCollector"]
+print(len(v["classAContainers"]) + len(v["classANodeAgentContainers"]))
+WANT
+)"
+if [ "$partial" -ne "$want" ]; then
+  echo "[ERROR] a partial telemetryCollector map rendered $partial include globs, want $want —" >&2
   echo "        chart defaults are no longer coalescing, which is the failure the" >&2
   echo "        original finding described." >&2
   na_status=1
 else
-  printf '   ok    a partial map still coalesces all 4 Class A globs\n'
+  printf '   ok    a partial map still coalesces all %s Class A globs\n' "$want"
 fi
 
 [ "$na_status" -eq 0 ] || exit 1

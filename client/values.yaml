@@ -51,7 +51,26 @@ env: {
   # Optional, OFF by default: let jobs-manager size the training-job envelope
   # from node allocatable capacity instead of the literal above --
   # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
-  # floor(allocatable*0.75)), requests == limits (Guaranteed QoS).
+  # floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and
+  # CPU is a request-only share weight with NO limit since backend#2418, so the
+  # job pod is BURSTABLE -- not Guaranteed QoS, as this line said until
+  # backend#2872 (`test_pod_envelope_sizing.py` asserts the opposite: "cpu" not
+  # in resource_limits). With this flag OFF -- the default -- jobs-manager uses
+  # its built-in literal on requests AND limits, so a CPU job pod is GUARANTEED.
+  #
+  # THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU (Asad,
+  # review of backend#2872). A GPU job's envelope resolves to nvidia.com/gpu and
+  # ephemeral-storage only; neither is QoS-relevant, so the container sets no
+  # cpu/memory request or limit at all and the pod is BESTEFFORT whichever way
+  # the flag is set. `pod-qos-class.py` already encodes that carve-out
+  # (backend#2871) -- this line asserted the opposite of the chart's own checker.
+  #
+  #   cpu-only + flag off -> GUARANTEED
+  #   cpu-only + flag on  -> BURSTABLE
+  #   GPU                 -> BESTEFFORT, either way
+  #
+  # So do not read "Burstable" as the default, and do not turn this on expecting
+  # to escape Burstable on a GPU node: on that cluster it changes nothing.
   #
   # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
   # an explicit envelope always wins, and this key is then inert (jobs-manager
@@ -351,11 +370,12 @@ networkPolicy:
     # Egress lockdown (SECURITY §8.2 / client-runtime#102). When false, the
     # training NetworkPolicy DROPS the 0.0.0.0/0:443 rule, so training pods can
     # reach only DNS, in-cluster MySQL, the requests-proxy, and the egress
-    # gateway. Default true keeps the fleet unchanged; flip OFF per-fleet AFTER
-    # verifying the egress gateway works on that cluster (G2). The template
+    # gateway. Shipped default is now FALSE — deny-by-default egress (RFC-0003 D6 /
+    # client-runtime#199): new installs are locked down, external HTTPS goes through
+    # the gateway allowlist. Set true only to opt a fleet back out. The template
     # nil-guards this key, so a `helm upgrade --reuse-values` from a release
     # predating it keeps the old behaviour (rule present).
-    allowExternalHttps: true
+    allowExternalHttps: false
     # client-runtime#104: enforcement check, run via `helm test <release>` after
     # flipping the lockdown (allowExternalHttps=false). A training-labelled pod opens a
     # direct TCP connection to this host's :443 and RETRIES until it is blocked (PASS) or
@@ -461,10 +481,11 @@ sealCheck:
 # so the training NetworkPolicy never selects it (it keeps its own egress).
 egressProxy:
   enabled: true
-  # Route training-pod outbound HTTPS through the gateway (Step 1 of #102). Default
-  # FALSE so the gateway ships inert; flip per-fleet to true, verify a real training
-  # run, THEN set networkPolicy.training.allowExternalHttps=false to drop direct egress.
-  routeWorkloads: false
+  # Route training-pod outbound HTTPS through the gateway (Step 1 of #102). Shipped
+  # default is now TRUE — deny-by-default egress (RFC-0003 D6 / client-runtime#199):
+  # training egress flows through the gateway allowlist, paired with
+  # networkPolicy.training.allowExternalHttps=false. Set false only to opt back out.
+  routeWorkloads: true
   # squid image, pinned by multi-arch (amd64+arm64) index digest — tracebloc pins
   # all images by digest. `tag` stays for readability; the digest is authoritative.
   # ubuntu/squid:6.6-24.04_beta (Ubuntu 24.04 LTS base), resolved 2026-06-10.
@@ -493,6 +514,77 @@ egressProxy:
       cpu: "500m"
       memory: "256Mi"
 
+# -- Rename the resources this chart creates, without uninstall + reinstall.
+# backend#2626.
+#
+# UNSET BY DEFAULT, and the default resolves to `.Release.Name` VERBATIM, so
+# leaving it alone renders byte-identical to the chart before this existed. That
+# is asserted, not asserted-in-prose: `scripts/tests/fullname-override-completeness.sh`
+# renders with the override set to the release name and diffs against unset.
+#
+# IT RENAMES RESOURCES, NOT THE RELEASE. The Helm release keeps its name --
+# `helm list`, `helm status` and `helm rollback` are unaffected, and so are
+# `app.kubernetes.io/instance`, Helm's `meta.helm.sh/release-name` bookkeeping,
+# and the RELEASE_NAME env auto-upgrade rolls back with (backend#2620).
+#
+# THE INSTALLER DOES NOT YET UNDERSTAND IT — backend#2888. `helm` renders the
+# overridden names correctly, but the shell and PowerShell installers still derive
+# the client's workload names as `<namespace>-jobs-manager` / `-requests-proxy`
+# (`scripts/lib/common.sh` `_client_workload_deployments`, `scripts/install-k8s.ps1`
+# `Get-ClientDeploymentNames`). So on an overridden release the #420 fast-path
+# health check reads UNHEALTHY and a re-run reinstalls over a working client
+# instead of no-opping. Set this via `helm upgrade` directly until #2888 lands,
+# or accept that the installer's idempotence check is wrong for this release.
+#
+# IT DOES NOT MOVE DATA. Release-scoped on-disk PATHS -- the dataset directory,
+# the hostPath PV's `path`, the Collector's queue -- keep the RELEASE name,
+# because a path is a location: renaming it orphans a tenant's data instead of
+# moving it.
+#
+# A PATH IS NOT AN OBJECT, and this comment used to conflate the two (Bugbot,
+# High). The hostPath PVs' on-disk paths stay put, but the PersistentVolume
+# OBJECTS are named through `tracebloc.fullname` -- `<name>-mysql-pv`,
+# `-data-pv`, `-logs-pv` -- so their names DO follow this key. Unlike the PVCs
+# they carry no `helm.sh/resource-policy: keep`, so on a bare-metal (hostPath)
+# release a rename deletes those PV objects and creates them under the new name
+# while the retained PVCs stay Bound to the ones that just went away.
+#
+# CHANGING IT ON A LIVE RELEASE IS REFUSED, not merely discouraged. Earlier
+# revisions of this comment called it "a migration, not a config tweak", which
+# invited planning a migration the chart will not let you start. `secrets.yaml`
+# now hard-fails at template time when the MySQL PVC is present and no Secret
+# exists under the name this render resolves to -- which is every direction of a
+# rename (unset->A, A->B, A->none) and also a reinstall over a retained PVC. The
+# refusal names the one-command remedy: copy the Secret to the name this render
+# wants. Without it, four credentials would be re-minted while the kept
+# `mysql-pvc` datadir still holds the old ones, the upgrade would report
+# `deployed`, and MySQL would refuse every login.
+#
+# ON hostPath, COPYING THE SECRET IS NOT THE WHOLE REMEDY -- see the PV-object
+# paragraph above, and re-point the PVCs at the new PVs (or keep the old name).
+# The refusal says so too, but only while it FIRES: once a Secret exists under
+# the new name it is skipped, and an operator on their second attempt would
+# otherwise read this remedy with the caveat missing. NOTES.txt repeats it on
+# every hostPath render, which is the path the refusal cannot reach.
+#
+# ON EVERY hostPath RENDER, not only an overridden one -- this sentence said
+# "of an overridden release" and the gate never matched it (Bugbot, Low). The
+# gate is `hostPath.enabled` alone, deliberately: the hazard is the name MOVING,
+# and A->unset moves it just as much as unset->A. Gating the notice on the key
+# being SET would go quiet on exactly the direction where the operator has no
+# override left to look at. The cost is a standing notice on first installs that
+# never rename, so the notice says outright that nothing is wrong yet rather than
+# addressing a reader who just renamed.
+#
+# So: choose it at INSTALL time. On a live release, read the refusal message.
+#
+# The commented example below is the EMPTY STRING, which the template treats as
+# unset (`default .Release.Name .Values.fullnameOverride`) and which
+# values.schema.json therefore accepts explicitly -- an earlier revision of the
+# schema pattern required at least one character and would have rejected this
+# very line if uncommented verbatim (Arturo, review of backend#2626).
+# fullnameOverride: ""
+
 # -- Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906).
 # An OpenTelemetry Collector DaemonSet that reads Class A container stdout with a
 # `filelog` receiver and forwards it to the tracebloc backend's ingest endpoint.
@@ -504,8 +596,9 @@ egressProxy:
 # DaemonSet on every customer node spooling to disk with nothing it can deliver —
 # filling toward the 1 GiB cap per node for no benefit, which is precisely the
 # "telemetry must never be the reason a node fills" risk D7 exists to bound.
-# Same posture as `egressProxy.routeWorkloads`: the component ships inert and is
-# flipped per fleet once its prerequisite is in place.
+# Ships inert and is flipped per fleet once its prerequisite is in place — the
+# posture `egressProxy.routeWorkloads` had before RFC-0003 D6 flipped it on by
+# default.
 #
 # CLASS A ONLY (D12). The receiver is scoped to the control-plane containers this
 # chart owns; training and ingestion pods are Class B and stay out until
@@ -599,6 +692,21 @@ telemetryCollector:
     - api
     - pods-monitor-container
     - squid
+    # THE UPGRADE PATH'S OWN OUTPUT (backend#2935). `helm` is the auto-upgrade
+    # CronJob's container and `refresh` is image-refresh's. Without them the
+    # collector tails neither, so when a customer's edge stops upgrading we can
+    # see THAT it failed -- the controller reports the pod's exit status -- and
+    # never WHY.
+    #
+    # Measured on a live workspace: 477 failures in 24 hours, 431 of them a bare
+    # `exit code 1` whose reason exists only in these containers' stdout and
+    # reached nothing. An edge that cannot upgrade stops receiving security
+    # fixes, which makes this the least diagnosable failure with the highest
+    # cost -- the worst possible pairing.
+    #
+    # Cheap: both are hourly CronJobs that log a few lines and exit.
+    - helm
+    - refresh
 
   # Class A containers that run in the node-agents namespace rather than the
   # release namespace. Separate list rather than a magic value inside the one
@@ -982,8 +1090,16 @@ images:
 
 # -- Container resource requests and limits.
 # Tuned in v1.1.0 after the prod investigation showed mysql being killed
-# every ~12 minutes when jobs-manager (under-resourced, BestEffort QoS in
-# older releases) ate node memory and triggered the kernel OOM killer.
+# every ~12 minutes when jobs-manager, under-resourced, ate node memory and
+# triggered the kernel OOM killer.
+#
+# NOT "BestEffort QoS in older releases", as this comment claimed until
+# backend#2872. Before #66 introduced this block the template hardcoded
+# requests cpu 100m / memory 256Mi and limits cpu 500m / memory 512Mi
+# (`git show 2d9d013^:client/templates/jobs-manager-deployment.yaml`) —
+# requests AND limits set, so Burstable from day one. BestEffort requires
+# neither, and jobs-manager has never had neither. The pod was under-resourced,
+# which is the real cause; the QoS class was never the difference.
 #
 # mysql: requests.memory == limits.memory pins the cgroup memory budget so
 # mysqld is never the largest victim during node-level OOM. CPU limit is
@@ -998,8 +1114,46 @@ images:
 # 512Mi pods-monitor) to lower each container's oom_score_adj — on a
 # single-node cluster-recovery mass restart they were otherwise the kernel
 # OOM-killer's preferred victims and were exit-137 killed, taking ~9m to
-# recover. The pods stay Burstable (cpu request != limit); pinning memory
-# just makes them less-preferred OOM victims. requests.cpu was also raised so
+# recover. The pods stay Burstable; pinning memory just makes them
+# less-preferred OOM victims.
+#
+# Burstable for TWO reasons, not one — cpu request != limit is the obvious one,
+# and the one every earlier version of this comment stopped at. The other:
+# ComputePodQOS requires requests == limits in EVERY container including INIT
+# containers, and `jobs-manager` renders an unresourced `init-writable-data`
+# whenever hostPath.enabled=true (every installer edge), while `mysql` renders
+# an unresourced `mysql-format-guard` UNCONDITIONALLY plus `init-mysql-data` on
+# hostPath edges.
+#
+# AND SINCE #942, EQUALISING CPU BELOW BUYS GUARANTEED NOWHERE (review on
+# client#922). The claim here used to read "only for jobs-manager on a CSI
+# cluster"; #942 added `wait-for-mysql`, which is UNCONDITIONAL and unequal on
+# BOTH dimensions (cpu 10m/100m, memory 16Mi/64Mi) and has no values key. So
+# Guaranteed is now unreachable through values for t-jobs-manager on EVERY
+# cluster, not just off-CSI. Measured on the merged tree -- hostPath off plus
+# every resources.* knob this chart exposes equalised:
+#
+#   t-jobs-manager  Burstable  wait-for-mysql:cpu(req=10m,lim=100m);
+#                              wait-for-mysql:memory(req=16Mi,lim=64Mi)
+#
+# `wait-for-mysql` is the only blocker left, and nothing in values can move it.
+#
+# THE GUARD STAYED GREEN THROUGH THAT, which is this PR's own subject one turn
+# deeper. The goldens pin the CLASS (still Burstable) and the unresourced-init
+# SET (`wait-for-mysql` is resourced, merely unequal), so a claim about
+# REACHABILITY had nothing asserting it and went stale in silence.
+# `scripts/tests/qos-reachability.sh` now asserts it: see that file for what it
+# derives and what it cannot.
+#
+# TWO routes still clear it, and the earlier "only route" was false (review on
+# client#922). Pod-level resources (KEP-2837, beta 1.34) clear it without
+# touching the init containers. Giving every init container requests == limits
+# also reaches Guaranteed -- but note that is now a CHART edit rather than a
+# values change, because `wait-for-mysql` has no key -- at the cost of reserving
+# that capacity for the pod's whole life, which is why it is not the route taken
+# here.
+#
+# requests.cpu was also raised so
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
@@ -1095,7 +1249,16 @@ podDisruptionBudget:
 # already Helm-managed, so there is nothing else to do.
 #
 # BEFORE THE FIRST INSTALL, the Secret has to be adopted, not just created. This
-# chart ALWAYS emits `<release>-secrets`, so a plain `kubectl create secret`
+# chart emits `<release>-secrets` -- or `<fullnameOverride>-secrets` if you set
+# that (see `fullnameOverride` above; `tracebloc.secretName` follows it). USE THE
+# NAME THIS RENDER RESOLVES TO in the three commands below, substituting your
+# override for `<release>` if you have one. Get it from the chart rather than
+# guessing:
+#
+#   helm template <release> ./client -n <ns> --show-only templates/secrets.yaml \
+#     [-f your-values.yaml] | grep -m1 "  name:"
+#
+# Naming the wrong one is not a cosmetic error: a plain `kubectl create secret`
 # leaves an object Helm does not own and `helm install` aborts with
 # `invalid ownership metadata` rather than reading it (Bugbot, #859). Helm adopts
 # a pre-existing object that already carries its three ownership fields, so add
@@ -1291,11 +1454,45 @@ autoUpgrade:
     repository: alpine/helm
     tag: "3.16.4"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network + helm I/O.
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. backend#2935:
+  # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
+  # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
+  # container overrunning its own cgroup limit. The helm CLI's peak working set
+  # on this chart is ~50Mi measured (repo update + search + `helm template`
+  # render), a fraction of the 256Mi limit, so no ceiling was ever the binding
+  # constraint. Two independent levers fix the two halves of that:
+  #
+  #  1. The memory REQUEST rising to meet the limit is an honest scheduler
+  #     RESERVATION. It attacks the CAUSE: the node is no longer overcommitted by
+  #     the gap between what these pods reserved and what they use, so it is less
+  #     likely to enter the pressure that triggered the kill. (This is the real
+  #     structural half — NOT an oom_score_adj change: a Burstable pod's
+  #     oom_score_adj is 1000 - 1000*memRequest/nodeCapacity, fixed at start and
+  #     independent of usage, so 128Mi->256Mi barely moves it, ~992->984 on a
+  #     16Gi node, and does nothing on a large node. An earlier revision of this
+  #     comment wrongly credited the memory pin with the victim-preference change
+  #     below — @saadqbal on client#948.)
+  #  2. Pinning CPU too makes the pod GUARANTEED, whose oom_score_adj is -997.
+  #     THAT is what genuinely moves it off the kernel OOM-killer's shortlist
+  #     under pressure, regardless of node size. These two CronJobs (and
+  #     image-refresh) are the only chart pods one line from Guaranteed — zero
+  #     initContainers, memory already equal, cpu the sole blocker. #642 pinned
+  #     jobs-manager's memory but could NOT reach Guaranteed there (it renders an
+  #     unresourced init container); here we can, so we do. auto-upgrade is the
+  #     security-fix delivery path — worth the strongest protection.
+  #
+  # TRADEOFF (reservation vs throttle): Guaranteed reserves the full 500m/256Mi
+  # for the pod's brief hourly run and caps it there (helm is I/O/network-bound,
+  # not CPU-bound, so the 500m cap does not slow a real upgrade). Limits never
+  # moved — only the requests rose to meet them. If a small edge cannot spare the
+  # reservation the pod goes Pending/skipped rather than OOM-looping; `Forbid` +
+  # startingDeadlineSeconds bound that. auto_upgrade_test.yaml pins cpu AND memory
+  # request==limit, which (no initContainers) is the in-manifest proxy for
+  # Guaranteed until client#922's pod-qos-class checker asserts the class directly.
   resources:
     requests:
-      cpu: "50m"
-      memory: "128Mi"
+      cpu: "500m"
+      memory: "256Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -1476,12 +1673,24 @@ imageRefresh:
     repository: alpine/k8s
     tag: "1.30.5"
     pullPolicy: IfNotPresent
-  # Tiny — the pod is mostly idle waiting on network I/O for the digest
-  # HEADs and the rollout-status watch.
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. See the fuller
+  # note on autoUpgrade.resources for the mechanism. backend#2935: image-refresh
+  # was OOM-killed in lock-step with auto-upgrade (six paired failures — this Job
+  # runs every 15m, so failing only when it coincides with the hourly upgrade
+  # tick is itself the tell), which is what makes the cause SHARED: a node-level
+  # OOM event, not two independent overruns. kubectl's peak here is ~40-80Mi
+  # measured (one `get deployment -o json` + `rollout status` at a time; the curl
+  # HEADs return headers only, jq ~2Mi) — well under 128Mi, so no ceiling was the
+  # constraint. The memory pin is the honest reservation that reduces node
+  # overcommit; pinning cpu makes the pod Guaranteed (oom_score_adj -997), which
+  # is what actually keeps it off the OOM-killer's shortlist — a memory pin alone
+  # barely moves a Burstable pod's oom_score_adj (on a large node, 64Mi->128Mi
+  # moves 999->998, i.e. nothing). Limits never moved; only requests rose to meet
+  # them. image_refresh_test.yaml pins cpu AND memory request==limit.
   resources:
     requests:
-      cpu: "20m"
-      memory: "64Mi"
+      cpu: "200m"
+      memory: "128Mi"
     limits:
       cpu: "200m"
       memory: "128Mi"

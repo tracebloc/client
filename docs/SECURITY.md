@@ -195,7 +195,7 @@ spec:
 
 - DNS lookups (needed to resolve backend + Azure endpoints)
 - In-cluster egress to MySQL (3306), the requests-proxy (8888), and the egress gateway (3128)
-- Outbound HTTPS/443 to the public internet — **only while `networkPolicy.training.allowExternalHttps: true` (the current default).** Set it to `false` and this rule is dropped, so training pods reach external services only through the in-cluster egress gateway (see §8.2).
+- Outbound HTTPS/443 to the public internet — **dropped by default as of 1.9.96 (`networkPolicy.training.allowExternalHttps: false`, deny-by-default).** Training pods reach external services only through the in-cluster egress gateway; set `allowExternalHttps: true` to opt a fleet back out (see §8.2).
 
 **Enforcement prerequisite:** every bullet above is a *request* to the CNI, not a guarantee. It holds only on a CNI that enforces **egress** NetworkPolicy — Calico, Cilium, OpenShift OVN-Kubernetes, Azure CNI created with a network policy, or the **EKS VPC CNI managed add-on with `enableNetworkPolicy=true`**. See [§5.1](#enforcing-cnis) for the full list and the EKS caveat, and §6.2 for how to verify it on a given cluster. On a non-enforcing CNI the policy object exists and blocks nothing.
 
@@ -348,7 +348,9 @@ Anything else — notably **Flannel alone** and a **self-managed AWS VPC CNI** �
 
 **Silent-no-enforcement risk:** If `networkPolicy.training.enabled: true` on a cluster whose CNI does not enforce, the policy is created but ignored. Customers must verify their CNI enforces NetworkPolicy before relying on this layer. We default the EKS `ci/eks-values.yaml` to `enabled: false` for this reason.
 
-> Verified 2026-06 on `tb-client-dev-templates` (EKS, **self-managed** VPC CNI, NetworkPolicy disabled): a DNS-only egress NetworkPolicy did **not** block `https://example.com` — the probe returned `200`. On such a fleet, flipping `allowExternalHttps=false` is **cosmetic**: the rule renders and nothing enforces it.
+> Verified 2026-06 on `tb-client-dev-templates` (then EKS **self-managed** VPC CNI, NetworkPolicy disabled): a DNS-only egress NetworkPolicy did **not** block `https://example.com` — the probe returned `200`. On such a fleet, flipping `allowExternalHttps=false` is **cosmetic**: the rule renders and nothing enforces it.
+>
+> **Updated 2026-08 — both tracebloc EKS fleets now enforce.** `tb-client-dev-templates` (dev/staging) and `tracebloc-clients-prod` (prod) have since moved to the **managed** `vpc-cni` add-on with `enableNetworkPolicy=true` (verified via `aws eks describe-addon --cluster-name <c> --addon-name vpc-cni --query addon.configurationValues` → `{"enableNetworkPolicy":"true"}`). Egress NetworkPolicy is now **enforced** on both — the "cosmetic" caveat above applied to the older self-managed CNI, not to the current state. (Standard-mode reconcile window still applies; the `egress-enforcement` seal check retries across it.)
 
 ### 5.2 Pod Security Admission
 
@@ -643,9 +645,9 @@ Known gaps between the current state and a fully-hardened setup, with the owner 
 
 **Interim mitigation:** with the §8.2 egress lockdown enabled (`networkPolicy.training.allowExternalHttps: false`), a training pod can no longer reach Azure Service Bus directly — SB traffic goes through the in-cluster requests-proxy (which holds the connection strings), and the conn-strings are no longer injected into the pod. Until a fleet enables the lockdown the NetworkPolicy still allows direct outbound HTTPS. The scoped/short-TTL SAS-token plan above remains the durable fix. See §8.2.
 
-### 8.2 Training-pod outbound HTTPS (G2) — **mechanism shipped (1.7.0), gated rollout**
+### 8.2 Training-pod outbound HTTPS (G2) — **deny-by-default shipped (1.9.96); per-fleet enforcement still gated**
 
-By default the NetworkPolicy still allows outbound HTTPS/443 so training pods can reach the backend, Azure Service Bus, and App Insights — so a malicious pod can still `requests.post()` to an arbitrary endpoint until the lockdown is enabled.
+As of chart **1.9.96** the shipped defaults are deny-by-default (`egressProxy.routeWorkloads: true` + `networkPolicy.training.allowExternalHttps: false`, RFC-0003 D6 / client-runtime#199): a new or upgraded install routes training egress through the gateway allowlist and drops the direct external-443 rule, so a malicious pod can no longer `requests.post()` to an arbitrary endpoint. **This is a config default, not a guarantee** — it only *enforces* on a CNI that enforces egress NetworkPolicy (§5.1); on a non-enforcing fleet the rule renders and blocks nothing. Existing fleets and non-enforcing CNIs still require the per-fleet gated rollout below. Charts `≥ 1.7.0` and `< 1.9.96` shipped the mechanism permissive (`routeWorkloads: false`, `allowExternalHttps: true`).
 
 **Mechanism (chart 1.7.0, client-runtime#102):** an in-cluster **egress gateway** (`egressProxy` — a squid forward proxy) permits HTTPS CONNECT only to an FQDN allowlist (backend + App Insights) and chains to a corporate proxy via `cache_peer`. With routing on, jobs-manager injects `HTTPS_PROXY=egress-proxy-service:3128` into each training pod (and drops the raw `HTTP_PROXY_HOST`), so backend + App-Insights traffic flows through the gateway; Service Bus already goes via the requests-proxy. The pod then needs no direct internet, and the external-443 rule can be dropped.
 
@@ -653,7 +655,7 @@ By default the NetworkPolicy still allows outbound HTTPS/443 so training pods ca
 
 **Gate 0 — CNI enforcement pre-flight (required, before anything else).** Run the [§6.2 egress pre-flight probe](#egress-preflight-probe) on this fleet. It must fail to connect. If it returns `200`, this fleet's CNI does **not** enforce egress and steps 1–3 buy nothing: the rule renders, nothing blocks, and the fleet reads as locked down when it is not. Fix the CNI first (§5.1 — on EKS, that usually means moving to the `vpc-cni` managed add-on with `enableNetworkPolicy=true`). Do not proceed on a fleet that fails this gate.
 
-1. Upgrade to ≥ 1.7.0 — the gateway deploys, inert (`egressProxy.routeWorkloads: false`).
+1. Upgrade to ≥ 1.9.96 — the gateway deploys with routing **on** by default (`egressProxy.routeWorkloads: true`). (On `≥ 1.7.0` and `< 1.9.96` it deploys inert; set `routeWorkloads: true` explicitly there.)
 2. Set `egressProxy.routeWorkloads: true`; verify a training run completes via the gateway.
 3. **Drain first.** Wait for in-flight experiments to finish (`kubectl -n <ns> get pods -l tracebloc.io/workload=training`). Step 4 changes the policy for *running* pods too, so a training pod mid-run that still reaches the internet directly — one whose image or user code has not picked up `HTTPS_PROXY` — fails at the moment of the flip rather than at submit time. Select **pods, not Jobs**: jobs-manager sets `tracebloc.io/workload: training` on the pod template only (`job.yaml`, `jobs_manager._prepare_job_config`), never on the Job object — which is all the NetworkPolicy needs, since its `podSelector` matches the pod. `get jobs -l …` therefore returns nothing even mid-run, which reads as a false all-clear.
 4. Set `networkPolicy.training.allowExternalHttps: false` to drop the external-443 rule.
@@ -805,6 +807,7 @@ Cross-reference for reviewers and contributors.
 
 - **2026-04** — Initial version. Documents the training-pod sandbox as shipped in client chart ≥ 1.0.4 and client-runtime images built from `develop` at that date. Reflects the narrow threat model (trusted platform, untrusted external data scientist submissions).
 - **2026-08** — Documented the MySQL database identity model (§4.1.1) and the `edgeuser` root-equivalence retirement (§8.10) — RFC-0003 D10 close-out, backend#1528.
+- **2026-08** — Flipped the shipped chart defaults to **deny-by-default egress** (`egressProxy.routeWorkloads: true` + `networkPolicy.training.allowExternalHttps: false`, chart 1.9.96) so new/upgraded installs are locked down out of the box (RFC-0003 D6 / client-runtime#199). Per-fleet enforcement still follows the §8.2 gated rollout (CNI pre-flight → verify a run → drop the rule → seal-check); non-enforcing CNIs render the rule without blocking.
 - **2026-08** — Sharpened the §8.2 egress-lockdown guidance (tracebloc/client#248): named the enforcing CNIs concretely in §5.1 (including the EKS `vpc-cni` managed add-on `enableNetworkPolicy=true` prerequisite), added the §6.2 egress pre-flight probe as a required gate before the flip, and gave §8.2 a drain → flip → verify → rollback rollout with the probe-host false-pass caveat. Fleet runbook in [SEAL-CHECK.md](SEAL-CHECK.md).
 
 ---
