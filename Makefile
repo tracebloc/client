@@ -513,6 +513,18 @@ drift:
 digest-drift:
 	scripts/check-digest-drift.sh
 
+# check-published: ask ghcr.io whether the GPU node image tag the installers derive
+# (facts.env K8S_VERSION + CUDA_TAG) is actually PUBLISHED (backend#3007). Sibling
+# to digest-drift and NOT in `check`/`drift` for the SAME reason: it needs the
+# network, and a red pre-push tier trains people to skip it. It also would false-red
+# on develop, where a K8S_VERSION bump legitimately precedes the publish from
+# staging (build-k3s-cuda's ref gate). It runs out-of-band as a required-nowhere
+# scheduled watch, .github/workflows/k3s-cuda-published.yml. Three-state: published
+# (0), NOT published / 404 (1), cannot-tell (3) — see check-facts.sh's mode block.
+.PHONY: check-published
+check-published:
+	scripts/check-facts.sh --check-published
+
 # bats: standard-checks.yml `Unit tests` / installer-tests.yaml
 # `unit-bash`. ~2 min serially.
 .PHONY: bats

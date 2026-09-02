@@ -14,8 +14,15 @@
 #    scripts/check-facts.sh --write    # (same)
 #    scripts/check-facts.sh --check    # verify every consumer matches facts.env
 #                                      #   (CI gate; non-zero on drift — the #410 guard)
+#    scripts/check-facts.sh --check-published
+#                                      # ask ghcr.io whether the GPU node image tag
+#                                      #   both installers derive was actually PUBLISHED
+#                                      #   (backend#3007). NETWORK; NOT in --check /
+#                                      #   make drift — see that mode's block below.
 #
-#  Mirrors gen-manifest.sh's write/check split; safe to run anywhere (no secrets).
+#  --check and --write mirror gen-manifest.sh's write/check split and are hermetic
+#  (no network, no secrets). --check-published is the one mode that reaches the
+#  registry (an anonymous public read — still no secrets).
 # =============================================================================
 set -euo pipefail
 
@@ -30,8 +37,17 @@ PS1="scripts/install-k8s.ps1"
 CLUSTER="scripts/lib/cluster.sh"
 # #616: the GPU node image (docker/k3s-cuda) rebuilds the SAME pinned k3s, so its
 # K3S_TAG in the Dockerfile ARG, build.sh, and the workflow input default must all
-# equal facts.env's K8S_VERSION — else a K8S_VERSION bump derives a GPU image tag
-# that was never published and the installer pulls a missing image.
+# equal facts.env's K8S_VERSION — else the build would produce, and the installer
+# derive, DIFFERENT tags.
+#
+# This row set proves those four DECLARATIONS agree. It does NOT — and cannot —
+# prove the agreed tag was ever PUBLISHED: it never asks the registry. backend#3007
+# was exactly that gap. On 2026-08-24 the k3s pin moved to v1.36.3-k3s1, 17 days
+# after the GPU image was last built (build-k3s-cuda is workflow_dispatch-only), so
+# every GPU install derived a tag that 404s and SILENTLY fell back to CPU — while
+# all four declarations agreed and this check stayed green. The four values moving
+# in lockstep is what made it invisible. The publication half is the separate
+# --check-published mode below (do not restate it here).
 CUDA_DOCKERFILE="docker/k3s-cuda/Dockerfile"
 CUDA_BUILD="docker/k3s-cuda/build.sh"
 CUDA_WORKFLOW=".github/workflows/build-k3s-cuda.yaml"
@@ -39,8 +55,9 @@ CUDA_WORKFLOW=".github/workflows/build-k3s-cuda.yaml"
 MODE="write"
 case "${1:-}" in
   --check) MODE="check" ;;
+  --check-published) MODE="check-published" ;;
   --write | "") MODE="write" ;;
-  *) echo "usage: $0 [--write|--check]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--write|--check|--check-published]" >&2; exit 2 ;;
 esac
 
 [[ -f "$SPEC" ]] || { echo "check-facts: spec not found: $SPEC" >&2; exit 2; }
@@ -58,6 +75,151 @@ _spec_get() {
   [[ -n "$val" ]] || { echo "check-facts: '${key}' missing from ${SPEC}" >&2; exit 2; }
   printf '%s' "$val"
 }
+
+# =============================================================================
+#  --check-published — the OTHER half of the GPU-image guard (backend#3007).
+#
+#  The fact table proves the four GPU-image declarations agree; this asks the
+#  REGISTRY whether the tag they all derive was actually published. It derives the
+#  ref the SAME way the installers do — from facts.env's K8S_VERSION and CUDA_TAG,
+#  never a second copy of the tag — and HEADs the manifest on ghcr.io. THREE
+#  outcomes, kept distinct on purpose (the original bug's sin was blaming the wrong
+#  cause — a 404 reported as an access/creds/network problem, downgrading to CPU):
+#    published  (HTTP 2xx) -> exit 0
+#    NOT published (404)   -> exit 1   a real, missing image (hard finding)
+#    CANNOT TELL           -> exit 3   registry unreachable / anon token failed /
+#                                      5xx / 429 / 401 — we could not look; this is
+#                                      NOT a 404 and must never be reported as one.
+#
+#  Network, but no secrets (anonymous pull token — a public read). Deliberately
+#  NOT in --check / make drift: that gate is hermetic and REQUIRED on every PR,
+#  and a K8S_VERSION bump legitimately lands on develop BEFORE the image is
+#  published from staging (build-k3s-cuda's ref gate), so a 404 there is not yet a
+#  fault. It runs out-of-band on a schedule (.github/workflows/k3s-cuda-published.yml),
+#  the same shape as the digest-drift watch, where a persistent 404 IS the alarm.
+# =============================================================================
+
+# The GHCR ref both installers pull for a GPU node (cluster.sh _gpu_node_image /
+# install-k8s.ps1 $K3S_CUDA_IMAGE): ghcr.io/tracebloc/k3s-cuda:<k3s>-cuda-<cuda>.
+# Its VARIABLE halves come from facts.env so there is no third copy of the pins to
+# drift; the structural literal is the one the #835 wiring guard already asserts is
+# present verbatim in both installers, so the three cannot silently diverge.
+_gpu_image_ref() {
+  # Fail CLOSED on a missing pin, EXPLICITLY. Two subtleties, both load-bearing:
+  #   1. do not inline the command subs into printf's args — a command sub in an
+  #      argument list never trips errexit, so a missing pin would print a malformed
+  #      ref (…:-cuda-…) that then 404s, reporting a spec error as a missing image
+  #      (the "blame the wrong cause" sin this mode exists to avoid);
+  #   2. `|| exit $?`, not bare assignment — under `set -e` a failing command-sub
+  #      ASSIGNMENT does not reliably abort (measured: it did not, and printed the
+  #      malformed ref), so lean on _spec_get's own exit rather than errexit.
+  # _spec_get already prints "'<key>' missing from …" before it exits 2.
+  local k8s cuda
+  k8s="$(_spec_get K8S_VERSION)" || exit $?
+  cuda="$(_spec_get CUDA_TAG)" || exit $?
+  printf 'ghcr.io/tracebloc/k3s-cuda:%s-cuda-%s' "$k8s" "$cuda"
+}
+
+# Echo the HTTP status of a manifest HEAD for the image ref $1, or 000 when the
+# registry could not be reached at all (curl prints 000 on a DNS/connect/TLS
+# failure). Anonymous pull token — a public read, no secret, so this watch can
+# never silently stop when a credential rotates (the digest-drift rationale).
+# Host, repo and tag are all parsed FROM the ref, so there is no second hard-coded
+# copy of ghcr.io/tracebloc/k3s-cuda to drift from _gpu_image_ref.
+#
+# TB_REGISTRY_PROBE_STUB is the TEST SEAM (mirrors check-digest-drift.sh's
+# DRIFT_RESOLVE_STUB): a file of  <ref><0x1f><status>  lines that REPLACES the
+# network, so the bats suite can drive all three classifications offline — and
+# prove the ref is derived correctly, since only the exact derived ref matches.
+_manifest_http_status() {
+  local ref="$1"
+  if [[ -n "${TB_REGISTRY_PROBE_STUB:-}" ]]; then
+    [[ -r "$TB_REGISTRY_PROBE_STUB" ]] || { echo "check-facts: TB_REGISTRY_PROBE_STUB set but unreadable: $TB_REGISTRY_PROBE_STUB" >&2; exit 2; }
+    # Capture whole, take the first field with parameter expansion — same
+    # SIGPIPE-avoidance discipline as _spec_get / _extract above.
+    local all st
+    all="$(awk -F"$(printf '\037')" -v want="$ref" '$1 == want { print $2; exit }' "$TB_REGISTRY_PROBE_STUB")"
+    st="${all%%$'\n'*}"
+    printf '%s' "${st:-000}"
+    return 0
+  fi
+  local host rest repo tag base token status accept
+  host="${ref%%/*}"          # ghcr.io
+  rest="${ref#*/}"           # tracebloc/k3s-cuda:<tag>
+  repo="${rest%:*}"          # tracebloc/k3s-cuda
+  tag="${rest##*:}"          # <tag>
+  base="https://${host}"
+  accept='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+  # Anonymous pull token for the public package. `|| true` keeps a network failure
+  # here as an empty token -> 000 (cannot tell) rather than aborting under errexit.
+  token="$(curl -fsS --tlsv1.2 --connect-timeout 15 --max-time 30 \
+             "${base}/token?scope=repository:${repo}:pull" 2>/dev/null || true)"
+  token="$(printf '%s' "$token" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  [[ -n "$token" ]] || { printf '000'; return 0; }
+  # A real HEAD (--head): a manifest existence check needs no body, and ghcr
+  # answers HEAD with the same 200/404 as GET. -w prints the code, and curl itself
+  # prints 000 on a connection failure, so both "reached and got a code" and "could
+  # not reach" collapse to a single value the caller classifies. NO --fail: a 404
+  # is data, not an error.
+  status="$(curl -sS --head -o /dev/null -w '%{http_code}' --tlsv1.2 --connect-timeout 15 --max-time 30 \
+              -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+              "${base}/v2/${repo}/manifests/${tag}" 2>/dev/null || true)"
+  printf '%s' "${status:-000}"
+}
+
+_run_check_published() {
+  local ref status attempt
+  # `|| return $?` for the same reason _gpu_image_ref uses `|| exit $?`: propagate a
+  # spec error (2) or an unreadable-stub error (2) instead of trusting errexit to
+  # abort a failing command-sub assignment.
+  ref="$(_gpu_image_ref)" || return $?
+  status="$(_manifest_http_status "$ref")" || return $?
+  # Retry ONLY a transient "cannot tell", never a clean 404/2xx, so a single ghcr
+  # blip does not turn the daily watch red. The stub path is deterministic and is
+  # skipped here, so tests never sleep or loop.
+  if [[ -z "${TB_REGISTRY_PROBE_STUB:-}" ]]; then
+    attempt=1
+    while [[ "$status" != 2?? && "$status" != 404 && "$attempt" -lt 3 ]]; do
+      sleep 2
+      status="$(_manifest_http_status "$ref")"
+      attempt=$(( attempt + 1 ))
+    done
+  fi
+  case "$status" in
+    2??)
+      echo "check-facts: GPU node image is published: ${ref} (HTTP ${status})."
+      return 0
+      ;;
+    404)
+      {
+        echo "  ✖ GPU node image NOT PUBLISHED: ${ref} (HTTP 404)."
+        echo ""
+        echo "check-facts: the tag both installers derive for a GPU node does not exist on ghcr.io."
+        echo "             A GPU install pulls this by tag at cluster-create; a failed pull is treated"
+        echo "             as a GPU-capability problem and the install SILENTLY falls back to CPU,"
+        echo "             blaming access/creds/network (backend#3007). Publish it: dispatch"
+        echo "             build-k3s-cuda.yaml (push=true) from staging or main."
+      } >&2
+      return 1
+      ;;
+    *)
+      {
+        echo "  ‼ CANNOT TELL whether ${ref} is published (HTTP ${status:-000})."
+        echo ""
+        echo "check-facts: the registry was unreachable, rate-limited, or the anonymous token failed."
+        echo "             This is NOT a 404 — not being able to look is not the same as a missing"
+        echo "             image (backend#3007). Reported distinctly so it is never mistaken for"
+        echo "             either answer."
+      } >&2
+      return 3
+      ;;
+  esac
+}
+
+if [[ "$MODE" == "check-published" ]]; then
+  _run_check_published || exit $?
+  exit 0
+fi
 
 # Each consumer fact: a stable NAME, the FILE, a sed EXTRACTOR that echoes the currently
 # stamped value, and the spec KEY it must equal. Kept as parallel arrays (bash 3.2 — no

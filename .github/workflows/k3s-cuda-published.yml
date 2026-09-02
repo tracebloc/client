@@ -1,0 +1,73 @@
+# Watch that the GPU node image the installers derive is actually PUBLISHED
+# (backend#3007).
+#
+# WHY THIS EXISTS
+# ---------------
+# build-k3s-cuda is workflow_dispatch-only (no push, no schedule), while the k3s
+# pin (facts.env K8S_VERSION) moves on ordinary PRs. On 2026-08-24 the pin moved
+# to v1.36.3-k3s1 seventeen days after the GPU image was last built, so every GPU
+# install derived ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-… which 404s — and
+# the installer treats a failed pull as a GPU-capability problem and SILENTLY
+# falls back to CPU, blaming access/creds/network. check-facts's four-declaration
+# sync stayed green throughout: all four values agreed on a tag nobody published.
+#
+# check-facts.sh --check-published derives that ref the SAME way the installers do
+# and asks ghcr.io whether it exists. Deliberately NOT in the required every-PR
+# drift gate (make drift): it needs the network, and a bump legitimately lands on
+# develop BEFORE the image is published from staging (build-k3s-cuda's ref gate),
+# so a 404 there is not yet a fault. Out-of-band on a schedule it is: a tag the
+# shipped installer derives that 404s is a live customer-facing break.
+#
+# Same shape as digest-drift.yml, the repo's other registry watch. No event
+# payload is read anywhere (schedule + dispatch only), so there is no untrusted
+# input to interpolate into a run: block.
+name: k3s-cuda image published
+
+on:
+  schedule:
+    # Daily. The window that hurt in #3007 was 17 days; a daily ask closes it to
+    # at most one. The cost is one anonymous, unauthenticated registry lookup.
+    # Offset from digest-drift's 06:30 so the two registry watches do not collide.
+    - cron: "45 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k3s-cuda-published
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: k3s-cuda image published
+    runs-on: ubuntu-latest
+    # A bound so a wedged registry/token call fails the run rather than spinning to
+    # the 6h default. The probe itself carries curl --max-time; this is the backstop.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Public read of a public package needs no credential — unauthenticated on
+      # purpose, so this watch cannot silently stop when a secret rotates (the
+      # digest-drift rationale).
+      #
+      # Three-state, and both non-green states RED (backend#3007 + backend#1729):
+      #   0 published  -> green
+      #   1 NOT published (404) -> red: a real missing image
+      #   3 CANNOT TELL (unreachable / rate-limited / token failed) -> also red —
+      #     not being able to look is not agreement — but with a DISTINCT message,
+      #     so a 404 is never reported as a network blip or vice versa (the
+      #     original bug's sin was blaming the wrong cause).
+      - name: Assert the GPU node image tag is published
+        run: |
+          set +e
+          scripts/check-facts.sh --check-published
+          rc=$?
+          set -e
+          case "$rc" in
+            0) exit 0 ;;
+            1) echo "::error::GPU node image for the current k3s pin is NOT published (404): GPU installs silently fall back to CPU (backend#3007). Publish it — dispatch build-k3s-cuda.yaml (push=true) from staging or main."; exit 1 ;;
+            3) echo "::error::Could not determine whether the GPU node image is published (registry unreachable / rate-limited / token failed). Reported distinctly from a 404 (backend#3007); failing closed — not being able to look is not agreement (backend#1729)."; exit 1 ;;
+            *) echo "::error::scripts/check-facts.sh --check-published exited $rc (unexpected)."; exit 1 ;;
+          esac

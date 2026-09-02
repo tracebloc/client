@@ -264,3 +264,97 @@ _set_spec() { local tmp; tmp="$(mktemp)"; sed "s|^$1=.*|$1=$2|" "$REPO/scripts/s
   printf '%s\n' "$output" | grep -qF '${K8S_VERSION}'
   printf '%s\n' "$output" | grep -qF '$K8S_VERSION'
 }
+
+# --- --check-published: the registry half of the GPU-image guard (backend#3007) ---
+# The fact table proves the four GPU-image DECLARATIONS agree; --check-published
+# asks ghcr.io whether the tag they all derive was actually PUBLISHED. #3007: on
+# 2026-08-24 the k3s pin moved 17 days after the image was last built, so every GPU
+# install derived a 404 tag and SILENTLY fell back to CPU while this check stayed
+# green. TB_REGISTRY_PROBE_STUB replaces the network (mirrors check-digest-drift's
+# DRIFT_RESOLVE_STUB) so classification is asserted offline. Because the stub only
+# answers for the EXACT derived ref, these also prove the derivation matches the
+# installers — and, like setup(), they recompute that ref FROM the copied spec so a
+# pin bump can never break them.
+
+# The GPU image ref check-facts must derive, recomputed from the COPIED spec.
+_expected_gpu_ref() {
+  local k8s cuda
+  k8s="$(sed -n 's/^K8S_VERSION=\(.*\)$/\1/p' "$REPO/scripts/spec/facts.env")"
+  cuda="$(sed -n 's/^CUDA_TAG=\(.*\)$/\1/p'   "$REPO/scripts/spec/facts.env")"
+  [[ -n "$k8s" && -n "$cuda" ]] || { echo "could not derive the GPU ref from the copied spec"; return 1; }
+  printf 'ghcr.io/tracebloc/k3s-cuda:%s-cuda-%s' "$k8s" "$cuda"
+}
+# Write a  <ref><0x1f><status>  stub file and echo its path.
+_probe_stub() {
+  local ref="$1" status="$2" f="$BATS_TEST_TMPDIR/probe-stub"
+  printf '%s\037%s\n' "$ref" "$status" > "$f"
+  printf '%s' "$f"
+}
+
+@test "check-facts --check-published: a published tag (HTTP 200) -> pass, names the ref (backend#3007)" {
+  local ref; ref="$(_expected_gpu_ref)"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200)" run _facts --check-published
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"is published"* ]] || return 1
+  [[ "$output" == *"$ref"* ]] || return 1
+}
+
+@test "check-facts --check-published: a 404 is a HARD finding -> exit 1, names the silent-CPU consequence (backend#3007)" {
+  local ref; ref="$(_expected_gpu_ref)"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 404)" run _facts --check-published
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"NOT PUBLISHED"* ]] || return 1
+  [[ "$output" == *"CPU"* ]] || return 1
+}
+
+@test "check-facts --check-published: an unreachable registry is CANNOT TELL -> exit 3, NOT collapsed into 404 (backend#3007)" {
+  local ref; ref="$(_expected_gpu_ref)"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 000)" run _facts --check-published
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"CANNOT TELL"* ]] || return 1
+  [[ "$output" != *"NOT PUBLISHED"* ]] || return 1
+}
+
+@test "check-facts --check-published: 429 / 5xx / 401 are CANNOT TELL, never a false 404 (backend#3007)" {
+  local ref; ref="$(_expected_gpu_ref)"
+  local code
+  for code in 429 503 401; do
+    TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" "$code")" run _facts --check-published
+    [ "$status" -eq 3 ] || { echo "HTTP $code -> exit $status"; echo "$output"; return 1; }
+    [[ "$output" == *"CANNOT TELL"* ]] || return 1
+    [[ "$output" != *"NOT PUBLISHED"* ]] || return 1
+  done
+}
+
+@test "check-facts --check-published: probes the EXACTLY derived ref — a wrong derivation misses the stub (backend#3007)" {
+  # Stub answers 200 only for a DIFFERENT ref; the real derived ref is absent, so
+  # the probe returns 000 -> CANNOT TELL. Proves the check asks about the ref the
+  # installers actually pull, not some other string.
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "ghcr.io/tracebloc/k3s-cuda:v0.0.0-cuda-wrong" 200)" run _facts --check-published
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"CANNOT TELL"* ]] || return 1
+}
+
+@test "check-facts --check-published: the derived ref tracks a K8S_VERSION bump (backend#3007)" {
+  # Bump the spec; the ref the check probes must move with it — no second copy of
+  # the pin. Stub the bumped ref as 200 and the OLD ref would no longer match.
+  _set_spec K8S_VERSION v1.99.0-k3s1
+  local ref; ref="$(_expected_gpu_ref)"
+  [[ "$ref" == *"v1.99.0-k3s1-cuda-"* ]] || { echo "ref did not track the bump: $ref"; return 1; }
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200)" run _facts --check-published
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"v1.99.0-k3s1-cuda-"* ]] || return 1
+}
+
+@test "check-facts --check-published: a missing spec key fails CLOSED (exit 2), never a misleading 404 (backend#3007)" {
+  # Blank CUDA_TAG. _gpu_image_ref must abort with the spec error, not print a
+  # malformed ref (…:-cuda-…) that then 404s — reporting a spec bug as a missing
+  # image is the "blame the wrong cause" sin this mode exists to avoid. Stub is set
+  # so a regression cannot reach the network; it must never be consulted.
+  _set_spec CUDA_TAG ""
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "ghcr.io/whatever:x" 200)" run _facts --check-published
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"missing from"* ]] || return 1
+  [[ "$output" != *"NOT PUBLISHED"* ]] || return 1
+  [[ "$output" != *"CANNOT TELL"* ]] || return 1
+}
