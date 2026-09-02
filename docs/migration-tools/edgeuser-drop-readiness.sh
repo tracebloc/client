@@ -40,6 +40,12 @@
 #      --baseline-identity root|tb_ingest|tb_meta \
 #      [--since 2h] [--phase pre-revoke|post-revoke|post-drop]
 #
+#  DRIVE THE INGESTION FIRST, then run this while it is still going. Criterion 1
+#  needs `kubectl exec` on a live ingestion pod, so the pod must be Running when
+#  the check STARTS. It need not survive to the end: criterion 2 follows that same
+#  pod's logs even after it exits (backend#2992), so the verdict no longer depends
+#  on how many rows the probe happened to have.
+#
 #  The baselines are the S0 silent-shrink reference for THIS fleet, and they are
 #  mandatory. There is no default and no built-in table of per-fleet numbers: a
 #  hardcoded copy of a measurement is the backend#1729 defect this whole ticket
@@ -396,8 +402,8 @@ fi
 # ---------------------------------------------------------------------------
 printf '\nCriterion 2 — zero legacy-identity warnings and zero 1045 across the cycle (--since %s)\n' "$SINCE"
 
-scan_logs() {  # $1 = pod substring, $2 = label
-  local pods matched skipped hits1045 hitslegacy any=0
+scan_logs() {  # $1 = pod substring, $2 = label, $3 = THIS cycle's pod (optional)
+  local pods matched skipped hits1045 hitslegacy any=0 thiscycle="${3:-}"
   # RUNNING PODS ONLY (Bugbot, High). This took every pod whose NAME matched, and
   # combined with the empty-log rule below that made a real fleet permanently NOT
   # DROP-READY: completed ingestion Jobs from earlier cycles linger in the
@@ -421,7 +427,26 @@ scan_logs() {  # $1 = pod substring, $2 = label
   matched=$(K get pods --no-headers -o custom-columns=':metadata.name,:status.phase' 2>/dev/null \
               | grep -iE "$1" || true)
   pods=$(printf '%s\n' "$matched" | awk '$2=="Running"{print $1}')
-  skipped=$(printf '%s\n' "$matched" | awk 'NF && $2!="Running"' | grep -c . || true)
+  # THIS CYCLE'S POD IS NOT "AN EARLIER CYCLE" (backend#2992). The Running-only
+  # filter above is load-bearing and stays: lingering Succeeded Jobs from previous
+  # cycles once made a healthy fleet permanently NOT DROP-READY. But it also
+  # rejected the ONE pod that IS evidence about this cycle -- the pod criterion 1
+  # just exec'd -- whenever that pod exited between the two criteria.
+  #
+  # That made the VERDICT depend on the operator's probe size rather than on the
+  # fleet: measured on prod, a 30k-row ingest (~13s of Running) passed criterion 1
+  # and scored `cannot tell` on criterion 2, while a 150k-row ingest (~50s) cleared
+  # both on the same fleet minutes later. `kubectl logs` reads a terminated pod
+  # perfectly well, so nothing about the log evidence required it to still be up.
+  #
+  # $3 is passed explicitly by the caller rather than read from a global, so the
+  # coupling to criterion 1 is visible at the call site. An unrelated finished Job
+  # is still skipped, which is the property the Running-only filter exists for.
+  if [ -n "$thiscycle" ] && ! grep -qxF "$thiscycle" <<<"$pods"; then
+    pods=$(printf '%s\n%s\n' "$pods" "$thiscycle" | grep -v '^$' || true)
+    note "$2: reading $thiscycle from criterion 1 — it has exited, but it is THIS cycle's pod, not an earlier one"
+  fi
+  skipped=$(printf '%s\n' "$matched" | awk -v tc="$thiscycle" 'NF && $2!="Running" && $1!=tc' | grep -c . || true)
   [ "${skipped:-0}" -gt 0 ] && note "$2: skipped ${skipped} non-Running pod(s) — a finished Job from an earlier cycle is not evidence about this one"
   if [ -z "$pods" ]; then
     untold "$2: no RUNNING pod to read logs from — cannot tell"
@@ -460,7 +485,9 @@ scan_logs() {  # $1 = pod substring, $2 = label
 
 scan_logs jobs-manager   "jobs-manager"
 scan_logs requests-proxy "requests-proxy"
-scan_logs "$INGEST_POD_RE" "ingestion"
+# $ing is criterion 1's pod -- empty when no ingestion was in flight, in which
+# case this behaves exactly as before.
+scan_logs "$INGEST_POD_RE" "ingestion" "${ing:-}"
 
 # ---------------------------------------------------------------------------
 #  Criterion 3 — no silent shrink.
