@@ -65,10 +65,14 @@ MYSQL_PW="Edg9@Tr@ce"
 # Pinned so the run is reproducible; mirrors the runtime clients' 9.x connector.
 CONNECTOR_VERSION="${MYSQL_CONNECTOR_VERSION:-9.4.0}"
 
-# ── mysql_root <sql> — run SQL as root over the plaintext path, no TLS ────────
+# ── mysql_root <sql> — run SQL as root over TCP, plaintext, no TLS ────────────
+# TCP (-h 127.0.0.1), NOT the default socket: on a fresh datadir the server's
+# unix socket lands at /var/lib/mysql/mysql.sock, while the client's compiled
+# default is /var/run/mysqld/mysqld.sock — so a socket connect finds nothing and
+# hangs/fails. 127.0.0.1 is the path the chart's own readiness probe uses.
 mysql_root() {
   kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- \
-    mysql -uroot -p"$MYSQL_PW" --ssl-mode=DISABLED -N -e "$1" 2>/dev/null
+    mysql -h 127.0.0.1 -uroot -p"$MYSQL_PW" --ssl-mode=DISABLED -N -e "$1" 2>/dev/null
 }
 
 # ── _dump_mysql_state — diagnostics for a wait/probe failure ──────────────────
@@ -87,14 +91,14 @@ _dump_mysql_state() {
 # answers "alive" against the fresh-init temporary server and even on
 # access-denied — so it can go ready before the real server finishes a cold
 # datadir init (slow on a loaded CI runner). Gate on an actual authenticated
-# SELECT 1 instead, which only succeeds once the real server is up AND the
-# account is usable. Generous window: a first-boot init on a busy runner is far
-# slower than the ~15s it takes locally.
+# SELECT 1 over TCP (see mysql_root on why not the socket), which only succeeds
+# once the real server is up AND the account is usable. Generous window: a
+# first-boot init on a busy runner is far slower than the ~15s it takes locally.
 wait_accepting() {
   local i
   for i in $(seq 1 60); do
     if kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- \
-        mysql -uroot -p"$MYSQL_PW" -N -e "SELECT 1" >/dev/null 2>&1; then
+        mysql -h 127.0.0.1 -uroot -p"$MYSQL_PW" --ssl-mode=DISABLED -N -e "SELECT 1" >/dev/null 2>&1; then
       return 0
     fi
     (( i % 10 == 0 )) && echo "   … still waiting for mysqld to accept authenticated connections (${i}0s)"
