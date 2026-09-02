@@ -40,10 +40,21 @@ args="$*"
 case "$args" in
   *version*)          [ -f "$S/unreachable" ] && exit 1; exit 0 ;;
   *"get pods"*)
-    # Honour the requested columns: name-only vs name+phase.
+    # A POD THAT EXITS BETWEEN THE TWO CRITERIA MUST BE EXPRESSIBLE (backend#2992).
+    # `pods` is static, so criterion 1 and criterion 2 saw the same phase and the
+    # fixture could not model the real defect at all -- the same limitation
+    # backend#2835 hit with an unreadable Secret. A short ingest is Running when
+    # criterion 1 execs it and Succeeded by the time criterion 2 reads its logs.
+    #
+    # The trigger is the exec itself, not a call counter: "the pod exits after
+    # criterion 1 inspected it" is the actual sequence, and keying on the exec
+    # keeps the fixture from depending on how many `get pods` calls the tool
+    # happens to make.
+    _src="$S/pods"
+    [ -f "$S/pods.flip" ] && [ -f "$S/.execseen" ] && _src="$S/pods.flip"
     case "$args" in
-      *":status.phase"*) cat "$S/pods" 2>/dev/null ;;
-      *)                 awk '{print $1}' "$S/pods" 2>/dev/null ;;
+      *":status.phase"*) cat "$_src" 2>/dev/null ;;
+      *)                 awk '{print $1}' "$_src" 2>/dev/null ;;
     esac
     exit 0 ;;
   # A FAILED FETCH MUST BE EXPRESSIBLE, or the fixture cannot tell the two causes
@@ -59,16 +70,22 @@ case "$args" in
 esac
 case "$args" in
   *logs*)
-    for p in $(cat "$S/pods" 2>/dev/null | awk '{print $1}'); do
+    # Union of both phases: `kubectl logs` reads a terminated pod perfectly well,
+    # which is the whole reason backend#2992's fix is safe.
+    for p in $(cat "$S/pods" "$S/pods.flip" 2>/dev/null | awk '{print $1}' | sort -u); do
       case "$args" in *"$p"*) cat "$S/logs.$p" 2>/dev/null; exit 0 ;; esac
     done
     exit 0 ;;
   *exec*)
     # which pod?
     pod=""
-    for p in $(cat "$S/pods" 2>/dev/null | awk '{print $1}'); do
+    for p in $(cat "$S/pods" "$S/pods.flip" 2>/dev/null | awk '{print $1}' | sort -u); do
       case "$args" in *"$p"*) pod="$p" ;; esac
     done
+    # Criterion 1 has now inspected a pod; a `pods.flip` fixture takes effect from
+    # here on. Only the ingestion exec matters, but marking on any exec is
+    # sufficient and keeps this branch simple.
+    case "$args" in *ingest-job-*) : > "$S/.execseen" ;; esac
     # ORDER MATTERS: the mysql queries are themselves invoked as
     # `-- env MYSQL_PWD=... mysql ...`, so the SQL cases must be tried BEFORE
     # the bare `-- env` case or every query is answered with the pod env.
@@ -268,6 +285,32 @@ D="$TMP/ingest"; clean_fleet "$D"
 echo 'DB_USER=edgeuser' > "$D/env.ingest-job-deadbeef01-x9q2z"
 printf 'DB_PASSWORD=x\n' >> "$D/env.ingest-job-deadbeef01-x9q2z"
 run_case "an ingestion Job on edgeuser is a finding" "$D" 1 "DB_USER=edgeuser"
+
+# 6b. THE VERDICT MUST NOT DEPEND ON THE OPERATOR'S PROBE SIZE (backend#2992).
+# Measured on prod: a 30k-row ingest (~13s Running) cleared criterion 1 and scored
+# `cannot tell` on criterion 2, while a 150k-row ingest (~50s) cleared both on the
+# same fleet minutes later. Criterion 1 execs the pod; criterion 2 reads its logs;
+# they run in sequence, so a short ingest satisfies the first and vanishes before
+# the second. `kubectl logs` reads a terminated pod, so nothing about the evidence
+# needed the pod to still be up.
+D="$TMP/shortingest"; clean_fleet "$D"
+# Running for criterion 1 ...
+# ... Succeeded by the time criterion 2 looks (the flip fires on the ingestion exec)
+sed 's/^ingest-job-deadbeef01-x9q2z Running$/ingest-job-deadbeef01-x9q2z Succeeded/' \
+  "$D/pods" > "$D/pods.flip"
+run_case "a short ingest that exits between the two criteria is still READ, not 'cannot tell'" \
+  "$D" 0 "DROP-READY"
+
+# 6c. AND THE FILTER IT RELAXES MUST STILL HOLD. The Running-only rule exists
+# because lingering Succeeded Jobs from EARLIER cycles once made a healthy fleet
+# permanently NOT DROP-READY (Bugbot, High). Relaxing it for THIS cycle's pod must
+# not relax it for an unrelated one: the stale Job below has no logs fixture at
+# all, so if the tool read it, the empty-log rule would score a `cannot tell` and
+# this case would fail.
+D="$TMP/staleingest"; clean_fleet "$D"
+echo 'ingest-job-00000000-stale Succeeded' >> "$D/pods"
+run_case "a Succeeded ingest Job from an earlier cycle is still skipped, not read" \
+  "$D" 0 "skipped 1 non-Running pod"
 
 # 7. FAIL CLOSED: no driven cycle means we cannot tell, and that is a failure
 D="$TMP/nodriven"; clean_fleet "$D"
