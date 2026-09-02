@@ -196,7 +196,19 @@ plugin="$(mysql_root "SELECT plugin FROM mysql.user WHERE user='edgeuser';" | tr
 [[ "$plugin" == "mysql_native_password" ]] || fail "edgeuser plugin is '${plugin}', not mysql_native_password (D2)"
 
 packet="$(mysql_root 'SELECT @@max_allowed_packet;' | tr -d '[:space:]')"
-[[ "$packet" == "268435456" ]] || fail "max_allowed_packet='${packet}', expected 268435456 (ConfigMap not in effect)"
+if [[ "$packet" != "268435456" ]]; then
+  # Diagnose whether the mysql-client-config ConfigMap (256M) reached the server:
+  # is the file present at the include path, and can the mysqld user read it?
+  echo "── DIAGNOSTICS: max_allowed_packet=${packet}, want 268435456 ──" >&2
+  kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- sh -c '
+    echo "== mysqld user =="; id
+    echo "== /etc/my.cnf includedir =="; grep -n includedir /etc/my.cnf /etc/mysql/my.cnf 2>/dev/null
+    echo "== /etc/mysql/conf.d (numeric owners) =="; ls -lnL /etc/mysql/conf.d/ 2>&1
+    echo "== can the mysqld user read mysql.cnf? =="; cat /etc/mysql/conf.d/mysql.cnf >/dev/null 2>&1 && echo READABLE || echo UNREADABLE
+    echo "== mysql.cnf content =="; cat /etc/mysql/conf.d/mysql.cnf 2>&1 | head -4
+  ' >&2 2>&1 || true
+  fail "max_allowed_packet='${packet}', expected 268435456 (mysql-client-config not in effect — see diagnostics)"
+fi
 
 digest="$(kubectl -n "$NS" get pod -l app=mysql-client -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null)"
 echo "   arch=${container_arch}  version=${version}  plugin=${plugin}  max_allowed_packet=${packet}"
