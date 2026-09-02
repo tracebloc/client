@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  e2e-mysql.sh — native-arm64 MySQL 8.4 install + real-driver auth e2e (backend#723)
+# -----------------------------------------------------------------------------
+#  The gap this closes (backend#723, Option A): the chart/installer ship the
+#  native multi-arch MySQL 8.4 engine for fresh installs, but nothing asserted,
+#  on a real host, that it (a) runs NATIVELY on arm64 (not silently under qemu)
+#  and (b) accepts the clients' cold-cache plaintext connect without ERROR 2061.
+#  The Deployment's only probe is `mysqladmin ping`, which passes regardless of
+#  the auth plugin — so it cannot catch the D2 regression. This does.
+#
+#  It brings up a real k3d cluster via the installer's own create_cluster(),
+#  helm-installs THIS chart with the 8.4 engine on a public-image / hostPath
+#  profile with dummy creds (no registry secret, no backend registration — the
+#  private pods ImagePullBackOff and are ignored; mysql-client is a PUBLIC
+#  image), then asserts against the live server:
+#    * the mysql-format-guard init container passed on the fresh datadir;
+#    * the container runs the host's native arch (aarch64 on an arm64 runner) —
+#      an emulated single-arch pull would mismatch;
+#    * engine is 8.4.x and edgeuser is mysql_native_password (D2);
+#    * max_allowed_packet is the chart ConfigMap's 256M;
+#  and runs the real driver (mysql-connector-python, scripts/tests/lib/
+#  mysql-auth-probe.py) as an in-cluster Job for a cold-cache connect, a
+#  dataset enumeration, and a multi-MB LONGBLOB round-trip — once on first boot
+#  and again after a `rollout restart` (the strategy: Recreate cache-wipe case).
+#
+#  Engine selection: this test installs the 8.4 tag EXPLICITLY. The installer's
+#  arch-driven auto-resolution (fresh arm64 -> 8.4) is exhaustively covered by
+#  the bats suite (_resolve_mysql_engine in install-client-helm.bats); the
+#  unique value here is proving the resolved image actually runs native and
+#  authenticates. On amd64 this also proves the multi-arch 8.4 image runs there.
+#
+#  No secrets; stock GitHub runners (Docker preinstalled), amd64 + arm64.
+#  Usage:  bash scripts/tests/e2e-mysql.sh
+# =============================================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$HERE/../lib"
+CHART_DIR="$HERE/../../client"
+
+# Shared bring-up contract (isolation env + tool-install prereqs).
+# shellcheck source=/dev/null
+source "$HERE/lib/e2e-common.sh"
+e2e_isolate_env tbmysql
+NS="tbmysql"
+
+# shellcheck source=/dev/null
+source "$LIB/common.sh"
+# shellcheck source=/dev/null
+source "$LIB/setup-linux.sh"
+# shellcheck source=/dev/null
+source "$LIB/cluster.sh"
+# shellcheck source=/dev/null
+source "$LIB/preflight.sh"   # provides _pf_recheck_runtime_mem (called by create_cluster)
+
+cleanup() { k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# The baked root credential of tracebloc/mysql-client (public image; a throwaway
+# in-cluster password, see the Dockerfile). Used only to read server state.
+MYSQL_PW="Edg9@Tr@ce"
+# Pinned so the run is reproducible; mirrors the runtime clients' 9.x connector.
+CONNECTOR_VERSION="${MYSQL_CONNECTOR_VERSION:-9.4.0}"
+
+# ── mysql_root <sql> — run SQL as root over the plaintext path, no TLS ────────
+mysql_root() {
+  kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- \
+    mysql -uroot -p"$MYSQL_PW" --ssl-mode=DISABLED -N -e "$1" 2>/dev/null
+}
+
+# ── wait_accepting — block until mysqld actually answers, post-(re)start ──────
+# rollout status returns once the readiness probe (mysqladmin ping) passes, but
+# guard against Service-endpoint propagation lag before we launch the probe Job.
+wait_accepting() {
+  for _ in $(seq 1 30); do
+    if kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- \
+        mysqladmin -uroot -p"$MYSQL_PW" ping >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  fail "mysqld did not start accepting connections in time"
+}
+
+# ── run_probe <label> — the real-driver auth Job, fresh each call ─────────────
+# A fresh pod each time = a genuine cold-cache connect. Under caching_sha2 the
+# plaintext connect throws every attempt (no RSA/TLS ever offered), so retrying
+# transient infra errors cannot mask the D2 regression — but we don't need to:
+# wait_accepting gates the launch. backoffLimit 0 -> a real failure fails fast.
+run_probe() {
+  local label="$1"
+  kubectl -n "$NS" create configmap mysql-auth-probe \
+    --from-file=mysql-auth-probe.py="$LIB/mysql-auth-probe.py" \
+    --dry-run=client -o yaml | kubectl -n "$NS" apply -f - >/dev/null
+  kubectl -n "$NS" delete job mysql-auth-probe --ignore-not-found >/dev/null 2>&1
+  kubectl -n "$NS" apply -f - >/dev/null <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-auth-probe
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: probe
+        image: python:3.12-slim
+        command: ["sh", "-c", "pip install --quiet --no-cache-dir mysql-connector-python==${CONNECTOR_VERSION} && python /probe/mysql-auth-probe.py"]
+        volumeMounts:
+        - name: probe
+          mountPath: /probe
+      volumes:
+      - name: probe
+        configMap:
+          name: mysql-auth-probe
+EOF
+  echo "── auth probe (${label}): real driver mysql-connector-python==${CONNECTOR_VERSION} ──"
+  local s f
+  for _ in $(seq 1 40); do
+    s="$(kubectl -n "$NS" get job mysql-auth-probe -o jsonpath='{.status.succeeded}' 2>/dev/null)"
+    f="$(kubectl -n "$NS" get job mysql-auth-probe -o jsonpath='{.status.failed}' 2>/dev/null)"
+    [[ "$s" == "1" ]] && break
+    [[ "$f" == "1" ]] && break
+    sleep 6
+  done
+  kubectl -n "$NS" logs job/mysql-auth-probe 2>&1 | grep -E '^\[ok\]|^FAIL|AUTH-PROBE-PASS' || true
+  [[ "$(kubectl -n "$NS" get job mysql-auth-probe -o jsonpath='{.status.succeeded}' 2>/dev/null)" == "1" ]] \
+    || fail "auth probe (${label}) did not pass — see the Job logs above"
+}
+
+HOST_ARCH="$(uname -m)"   # aarch64 on an arm64 runner, x86_64 on amd64
+echo "═══════════════════════════════════════════════════════════════════════"
+echo "  E2E mysql 8.4   host arch: ${HOST_ARCH}   kernel: $(uname -r)"
+echo "═══════════════════════════════════════════════════════════════════════"
+
+e2e_install_prereqs
+
+echo "── create_cluster() — the installer's real cluster-bring-up path ──"
+create_cluster
+kubectl wait --for=condition=Ready nodes --all --timeout=180s
+
+echo "── helm install THIS chart on the 8.4 engine (hostPath, dummy creds) ──"
+# hostPath storage sidesteps the dynamic provisioner (no CSI on a stock runner);
+# storageClass.create=false because hostPath needs no dynamic StorageClass. The
+# non-mysql pods pull private images and ImagePullBackOff — expected and ignored.
+helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
+  --set clientId=ci-e2e-mysql --set clientPassword=ci-e2e-mysql \
+  --set hostPath.enabled=true --set storageClass.create=false \
+  --set images.mysqlClient.tag=8.4 --set images.mysqlClient.digest=""
+
+echo "── wait for mysql-client (format-guard init + mysqld) to be Available ──"
+kubectl -n "$NS" rollout status deploy/mysql-client --timeout=300s
+wait_accepting
+
+echo "── assert: the mysql-format-guard init container passed on the fresh datadir ──"
+guard_exit="$(kubectl -n "$NS" get pod -l app=mysql-client \
+  -o jsonpath='{.items[0].status.initContainerStatuses[?(@.name=="mysql-format-guard")].state.terminated.exitCode}' 2>/dev/null)"
+[[ "$guard_exit" == "0" ]] || fail "mysql-format-guard did not complete cleanly (exitCode='${guard_exit}')"
+
+echo "── assert: NATIVE arch, engine 8.4.x, native_password, 256M packet ──"
+container_arch="$(kubectl -n "$NS" exec deploy/mysql-client -c mysql-client -- uname -m 2>/dev/null | tr -d '[:space:]')"
+[[ "$container_arch" == "$HOST_ARCH" ]] \
+  || fail "container arch '${container_arch}' != host '${HOST_ARCH}' — image is emulated, not native"
+
+version="$(mysql_root 'SELECT VERSION();' | tr -d '[:space:]')"
+[[ "$version" == 8.4.* ]] || fail "server version '${version}' is not 8.4.x"
+
+plugin="$(mysql_root "SELECT plugin FROM mysql.user WHERE user='edgeuser';" | tr -d '[:space:]')"
+[[ "$plugin" == "mysql_native_password" ]] || fail "edgeuser plugin is '${plugin}', not mysql_native_password (D2)"
+
+packet="$(mysql_root 'SELECT @@max_allowed_packet;' | tr -d '[:space:]')"
+[[ "$packet" == "268435456" ]] || fail "max_allowed_packet='${packet}', expected 268435456 (ConfigMap not in effect)"
+
+digest="$(kubectl -n "$NS" get pod -l app=mysql-client -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null)"
+echo "   arch=${container_arch}  version=${version}  plugin=${plugin}  max_allowed_packet=${packet}"
+echo "   resolved image: ${digest}"
+
+# The regression surface: cold-cache first connect, then again after the
+# strategy:Recreate cache-wipe.
+run_probe "cold-cache first boot"
+
+echo "── rollout restart (strategy:Recreate wipes the server-side auth cache) ──"
+kubectl -n "$NS" rollout restart deploy/mysql-client
+kubectl -n "$NS" rollout status deploy/mysql-client --timeout=180s
+wait_accepting
+run_probe "post-Recreate"
+
+echo ""
+echo "E2E PASS: native ${HOST_ARCH} MySQL ${version}; edgeuser ${plugin}; cold-cache + post-Recreate real-driver auth OK."
