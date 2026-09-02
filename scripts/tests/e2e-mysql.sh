@@ -168,6 +168,22 @@ echo "── create_cluster() — the installer's real cluster-bring-up path ─
 create_cluster
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
+# Wait for the bundled metrics-server's APIService BEFORE helm renders. The chart's
+# resource-monitor-daemonset template `lookup`s v1beta1.metrics.k8s.io and `fail`s
+# the WHOLE release when it is absent, and k3s applies its bundled metrics-server
+# slightly AFTER the API server reports Ready — so a fast runner can render inside
+# that window and abort before we reach the MySQL assertions. The installer guards
+# its own path with _wait_for_metrics_apiservice (#553/#757); this e2e installs the
+# chart directly (not via install_client_helm), so it needs the same wait. Bounded
+# and non-fatal: fall through and let the chart's own guard speak if metrics-server
+# is genuinely absent.
+echo "── wait for the metrics.k8s.io APIService (resource-monitor render race) ──"
+for _ in $(seq 1 40); do
+  kubectl get apiservice v1beta1.metrics.k8s.io --request-timeout=10s >/dev/null 2>&1 && break
+  sleep 3
+done
+kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=30s >/dev/null 2>&1 || true
+
 echo "── helm install THIS chart on the 8.4 engine (hostPath, dummy creds) ──"
 # hostPath storage sidesteps the dynamic provisioner (no CSI on a stock runner);
 # storageClass.create=false because hostPath needs no dynamic StorageClass. The
