@@ -1,13 +1,20 @@
 # Design proposal — fresh clusters are born retired (backend#947 / backend#1528)
 
-**Status:** proposal, for @LukasWodka's sign-off before implementation.
+**Status:** mechanism **signed off by @LukasWodka (2026-09-02)** and now IMPLEMENTED
+in this PR (`_helpers.tpl` + the stg/prod bake of rotate/reparent). Still a draft:
+the `lookup`-driven behavior is **inert in `helm unittest` and every cluster-less
+render**, so the fresh / already-rotated / fall-back branches are proven only by
+`helm unittest`'s *structure* (via the `mysqlRootPassword` pin and the empty-pin
+fall-back case) — the live datadir behavior needs a **staging rehearsal** (§6)
+before it reaches prod. Getting the cluster-less / already-rotated branch wrong
+regresses a live fleet (§4), which is why the rehearsal gates the merge.
 **Author:** Saqlain (with Claude Code).
-**Why a doc and not a wired-in PR:** the core logic keys off `lookup` (mysql-pvc /
-kube-system / the live Secret), which is **inert in `helm unittest` and every
-cluster-less render**, and getting the cluster-less / already-rotated behavior
-wrong **regresses a live fleet** (see §4). So the mechanism cannot be verified in
-CI — it needs a live/server-side render on staging. This proposal is the thing to
-agree on *before* touching the `#2879`/`#2892`/`#2738` guard.
+
+Lukas's sign-off, in three cases, maps onto §3.1: **new clusters → generated
+Secret** (fresh row); **our own accessible existing clusters → manually rotate**
+(the explicit-override path, unchanged); **blind clusters we cannot reach → fall
+back to the existing password** (existing-un-rotated row). The already-rotated row
+preserves dev and any edge we have already rotated.
 
 ---
 
@@ -105,8 +112,11 @@ The `rotateMysqlRoot` resolver's baked-default branch changes from
 and `bootstrapDbReparent`'s baked branch gates on the same helper. The explicit-
 override branch of both is untouched.
 
-Then, and only then, `values.yaml` bakes `rotateMysqlRootByEnv`,
-`bootstrapDbReparentByEnv` and `narrowEdgeuserByEnv` to `true` for stg and prod.
+Then, and only then, `values.yaml` bakes `rotateMysqlRootByEnv` and
+`bootstrapDbReparentByEnv` to `true` for stg and prod (this PR). The additive gates
+(`serviceDbAccountsByEnv`, `perExperimentDbCredsByEnv`) come from client#964, and
+`narrowEdgeuserByEnv` follows once those predecessors are baked — narrowing resolves
+on only with all three predecessors on, so baking it here would be inert.
 
 ## 4. The subtlety that makes this dangerous (must not regress)
 

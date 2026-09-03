@@ -1450,14 +1450,14 @@
     },
     "bootstrapDbReparentByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is baked ON for dev and false for stg and prod; flip stg/prod only after the earlier flags are verified on that fleet.",
+      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step. Baked ON for dev, stg and prod, but on the baked path it re-parents ONLY a fresh or already-rotated edge (see rotateMysqlRoot / backend#947) so an existing un-rotated edge is left alone rather than wedged; an accessible existing edge is rotated by the explicit override plus the one-time ALTER USER 'root'.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "rotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. True for dev, false for stg and prod; flip stg/prod per fleet during a rotation window (it rolls the mysql pod, and an existing edge still needs the one-time ALTER USER 'root' DDL).",
+      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Baked ON for dev, stg and prod, but the baked default rotates ONLY a fresh datadir on a live cluster (born rotated) or an already-rotated edge (preserved); an existing un-rotated / blind edge falls back to its current password rather than wedging (tracebloc.bakedRootRotationOn, backend#947). An accessible existing edge is rotated by the explicit override plus the one-time ALTER USER 'root' DDL.",
       "additionalProperties": {
         "type": "boolean"
       }
