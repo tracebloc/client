@@ -1006,7 +1006,7 @@ images:
     #            the same change that advances the pin.
     ackDrift:
       line: "0.8"
-      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8) while prod serviceDbAccountsByEnv.prod is still false. Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on."
+      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8) while narrowEdgeuserByEnv.prod is still false -- so existing un-migrated prod edges still hold edgeuser's grants and their ingestion Jobs can still reach for that fallback. (serviceDbAccountsByEnv.prod is now true, so a fresh install injects DB_USER=tb_ingest and does not depend on the fallback; the pin protects the un-migrated edges until they are narrowed/dropped.) Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on."
     prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
