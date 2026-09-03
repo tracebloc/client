@@ -107,15 +107,16 @@ tests:
             name: TB_INGEST_USER
             value: tb_ingest
 
-  - it: "an explicit true turns a prod fleet on"
-    # The path a windowed prod flip takes, so it is exercised before someone
-    # needs it under time pressure.
+  - it: "an explicit false holds a prod fleet back — override beats the baked default"
+    # prod now BAKES serviceDbAccounts on (backend#2800), so the meaningful override
+    # direction is OFF: an operator holding one prod edge back must still win over the
+    # default. (An override-true test would be vacuous now — it matches the default.)
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
-      serviceDbAccounts: true
+      serviceDbAccounts: false
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TB_INGEST_USER

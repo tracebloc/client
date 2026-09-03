@@ -107,16 +107,17 @@ tests:
             name: PER_EXPERIMENT_DB_CREDS
             value: "1"
 
-  - it: "an operator can still switch one prod edge on — the override wins both ways"
-    # Both directions, because an override that only ever turns things ON would
-    # leave "false means unset" indistinguishable from "false means off", which
-    # is precisely the bug the null default exists to avoid.
+  - it: "an operator can still hold a prod edge back — override false beats the baked default"
+    # prod now BAKES perExperimentDbCreds on (backend#2800), so the meaningful override
+    # direction is OFF. Together with the dev override-false case above, this proves the
+    # override wins over the default in the direction that ISN'T already the default —
+    # an override-true test on prod would now be vacuous (it matches the default).
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
-      perExperimentDbCreds: true
+      perExperimentDbCreds: false
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: PER_EXPERIMENT_DB_CREDS
