@@ -1839,8 +1839,9 @@ credmgrPassword: ""
 # service identities tb_meta (owns the metadata DB) and tb_ingest (writes the
 # dataset DB) that replace the root-equivalent edgeuser for jobs-manager,
 # requests-proxy and the ingestor. jobs-manager mints both at startup from the
-# generated Secret below (SERVICE_DB_ACCOUNTS). Additive: nothing consumes them
-# until the S2 consumer switch, so a default install is byte-identical.
+# generated Secret below (SERVICE_DB_ACCOUNTS). S2 has SHIPPED, so wherever this
+# flag is on the consumers authenticate as these dedicated identities; only where
+# an operator overrides it off does the old shared-edgeuser path render byte-for-byte.
 #
 # Flipped per environment, dev first; now ON for dev, stg and prod (see
 # serviceDbAccountsByEnv below) — where an operator overrides it off, behaviour is
