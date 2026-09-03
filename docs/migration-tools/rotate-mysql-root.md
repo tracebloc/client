@@ -80,6 +80,54 @@ reason to prefer the pin or server-side path. Everything below then applies; a
 GitOps fleet commits these values to its overlay instead of running the
 `helm upgrade` shown.
 
+## Pre-flight every step with `--dry-run=server`, never plain `--dry-run`
+
+On this chart a client-side dry-run **fabricates every generated secret**. Helm's
+`lookup` returns nil without a cluster, so the chart's preserve-existing branch is
+skipped and a fresh value is rendered each time.
+
+The practical consequence, measured on the prod run: two consecutive
+`--dry-run` renders produced **different** `POD_TOKEN_SIGNING_SECRET` values,
+which reads as "this upgrade rotates the pod token signing secret on prod". It
+does not. Under `--dry-run=server` the value matched the LIVE Secret exactly and
+was stable across renders.
+
+Use `--dry-run=server` for every pre-flight in this runbook. A client-side
+dry-run here does not just omit information — it invents a change that is not
+going to happen, and the correct reaction to that invented change is to stop.
+
+## Capture `CURPW` BEFORE you flip the gate (backend#2991)
+
+**Do this first, in the window, before the `helm upgrade` in Preconditions 1.**
+
+The rotation needs the fleet's CURRENT root password. Two facts make it
+unavailable later, and neither is obvious until you are stuck:
+
+* the value lives **only** in the mysql-client image's baked env, and the flip
+  renders an `env:` block that OVERRIDES it — so the moment the mysql pod rolls,
+  the running pod no longer knows the old password;
+* "take it from the S0 snapshot" does not work if S0 was taken **correctly**. The
+  S0 discipline for this migration is that a capture never prints a password
+  (`prod-s0.sh` deliberately does not), so a correct S0 does not contain it.
+
+Measured on the prod run (backend#2800): S0 was clean, the value was therefore
+only in the pod, and the flip was ~4 minutes from overwriting it.
+
+```bash
+NS=<ns>
+POD=$(kubectl -n "$NS" get pod -l app=mysql-client -o name | head -1); POD=${POD#pod/}
+export CURPW=$(kubectl -n "$NS" exec "$POD" -c mysql-client -- printenv MYSQL_ROOT_PASSWORD)
+echo "CURPW captured: ${#CURPW} chars, sha256 $(printf %s "$CURPW" | shasum -a 256 | cut -c1-12)"
+```
+
+Keep that shell open until the `ALTER USER` below has run. Record the fingerprint
+(not the value) in the ticket, so the rotation can be verified later without ever
+printing a secret.
+
+**If you have already flipped and lost it:** the literal is recoverable from the
+image config (`docker buildx imagetools inspect <mysql-client digest>`), which is
+the same exposure backend#947 tracks — convenient here, alarming in general.
+
 ## Preconditions (per fleet, do in order)
 
 0. **You can actually reach the fleet, with the permissions these steps need.**
@@ -229,6 +277,20 @@ written and deleted inside the pod, and the new password via `mysql`'s own stdin
 `[A-Za-z0-9]+` on any `mysqlRootPassword` pin precisely because it lands in the
 `ALTER USER … IDENTIFIED BY '…'` below — so the single-quoted SQL is safe.
 
+**Put this in a file and run the file; do not paste it.** It is a heredoc
+containing two nested heredocs, and pasted into an interactive shell it may not
+terminate — measured on the prod run, the shell sat at `>` and nothing executed.
+That particular failure is safe, but a *partially* pasted rotation is not, and
+you cannot tell which one you got from the prompt. Passwords still travel only
+over the exec stdin stream when it runs from a file.
+
+Two refusals worth keeping at the top of that file, beyond the `${var:?}` guards
+below:
+
+* abort if `CURPW` is not exported (you are in the wrong shell);
+* abort if `CURPW == NEWPW` — the no-op case. Without it the rotation "succeeds",
+  prints `rotation applied`, and changes nothing.
+
 ```bash
 NS=<ns>; REL=<release>
 POD=$(kubectl -n "$NS" get pod -l app=mysql-client -o name | head -1); POD=${POD#pod/}
@@ -333,6 +395,45 @@ yourself until the fleet is confirmed healthy; once the `ALTER` has run and
 operation.
 
 ## Notes
+
+### Before you enable `bootstrapDbReparent`, check root's LIVE password (backend#2991)
+
+`scripts/tests/reparent-requires-rotation.sh` refuses the half-baked combination
+`bootstrapDbReparent=true` with `rotateMysqlRoot=false` at review time. That is
+the **gate pairing**, and it cannot know whether the `ALTER USER` above actually
+ran on a given fleet.
+
+If the gate is on but the DDL was skipped, `DB_BOOTSTRAP_PASSWORD` is the
+generated value while root still holds the old one: jobs-manager authenticates as
+root, gets `1045`, and CrashLoops. The chart's own guard protects the *rotation*
+step from that shape; nothing protects the re-parent.
+
+One command closes it — three values, no secrets printed, all three must agree:
+
+```bash
+# rendered by the chart
+helm upgrade <rel> tracebloc/client --version <chart> -n <ns> \
+  --reset-then-reuse-values --set bootstrapDbReparentByEnv.<env>=true --dry-run=server \
+  | grep -E '^\s+(MYSQL_ROOT_PASSWORD|DB_BOOTSTRAP_PASSWORD):' \
+  | sed -E 's/^\s+([A-Z_]+): *"?([A-Za-z0-9+/=]+)"?.*/\1/'   # names only; hash the values yourself
+
+# what root actually authenticates with, live
+kubectl -n <ns> exec <mysql-pod> -c mysql-client -- printenv MYSQL_ROOT_PASSWORD \
+  | tr -d '\n' | shasum -a 256 | cut -c1-12
+```
+
+On the prod run all three were `94aab915ebf4`, which is why the re-parent came up
+clean first time.
+
+### Do not name migration artifacts after the strings your checks grep for
+
+Probe datasets named `edgeuser_cycle_probe_*` produced **49** hits for
+`grep -iE '1045|access denied|edgeuser'` on jobs-manager immediately after the
+REVOKE — every one the token `edgeuser` inside Kubernetes JSON, none of them real.
+`edgeuser-drop-readiness.sh` was not fooled (its pattern matches warning text, not
+the bare token), but an operator's ad-hoc grep is, at exactly the moment they are
+looking hardest for breakage. Name probes something orthogonal — `drop_gate_*`.
+
 
 - The **prod** leg needs `pods/exec` on the release namespace — not everyone's
   token has it. Whoever runs it needs the access checked in precondition 0.
