@@ -2099,58 +2099,34 @@ k3d-tracebloc-agent-0 agent" passthrough
 # GPU-capable k3s-cuda image; the reuse guard must fall back to CPU on a stock
 # node so jobs aren't stranded; and the native CDI spec must be generated in-node.
 
-@test "_gpu_node_image: default -> ghcr.io/tracebloc/k3s-cuda:<k8s>-cuda-<cuda>@<digest> (backend#1867)" {
+@test "_gpu_node_image: default -> ghcr.io/tracebloc/k3s-cuda:<k8s>-cuda-<cuda>" {
   K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
   TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
   unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
   run _gpu_node_image
   [ "$status" -eq 0 ] || return 1
-  [ "$output" = "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04@sha256:1111111111111111111111111111111111111111111111111111111111111111" ] || return 1
-}
-
-# backend#1867, the load-bearing half. The pinned default MUST keep the `k3s-cuda:` substring,
-# because _node_image_gpu_capable fast-paths on exactly that. A digest-ONLY ref
-# (…/k3s-cuda@sha256:…) has no colon after the name, so a reused GPU cluster would be
-# judged only by the exact-match tail against `docker inspect …Config.Image` — and any
-# normalization there reads as "not GPU-capable", stranding jobs Pending behind a silent
-# CPU fallback. Asserted through the real function, not a regex copy of the rule.
-@test "_gpu_node_image: the pinned default is still recognised as GPU-capable (backend#1867)" {
-  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
-  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
-  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
-  local ref; ref="$(_gpu_node_image)"
-  [[ "$ref" == *"@sha256:"* ]] || { echo "not digest-pinned: $ref"; return 1; }
-  [[ "$ref" == *"k3s-cuda:"* ]] || { echo "lost the k3s-cuda: fast path: $ref"; return 1; }
-  _node_image_gpu_capable "$ref" || { echo "pinned default judged NOT GPU-capable: $ref"; return 1; }
-}
-
-# The operator-owned refs are deliberately NOT pinned: a mirror or a renamed copy
-# legitimately carries its own digest, and appending ours would break air-gapped
-# installs. (backend#1867)
-@test "_gpu_node_image: the digest pin is NOT appended to a mirror or an override (backend#1867)" {
-  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
-  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
-  unset TRACEBLOC_K3S_CUDA_IMAGE
-  TRACEBLOC_IMAGE_REGISTRY="https://mirror.corp.example"
-  run _gpu_node_image
-  [ "$output" = "mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
-  unset TRACEBLOC_IMAGE_REGISTRY
-  TRACEBLOC_K3S_CUDA_IMAGE="registry.internal/team/k3s-gpu:v1"
-  run _gpu_node_image
-  [ "$output" = "registry.internal/team/k3s-gpu:v1" ] || return 1
-}
-
-# An unset pin degrades to the pre-backend#1867 tag-only ref rather than emitting a malformed
-# `…@`. That path is the unit harness (cluster.sh sourced without common.sh), never a
-# real install: common.sh stamps TB_K3S_CUDA_DIGEST with no env opt-out and
-# check-facts.sh --check proves it equals facts.env on every PR. Pinned here so the
-# degradation stays deliberate and visible instead of becoming the tested default.
-@test "_gpu_node_image: an unset pin degrades to the tag-only ref, never a trailing @ (backend#1867)" {
-  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
-  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY TB_K3S_CUDA_DIGEST
-  run _gpu_node_image
   [ "$output" = "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
-  [[ "$output" != *"@" ]] || { echo "malformed ref: $output"; return 1; }
+}
+
+# REGRESSION GUARD, backend#1867 / Bugbot High on client#961. The digest pin must NOT be
+# appended to this ref even though it is set. docker resolves a tag@digest ref BY DIGEST
+# and never checks the tag, while _check_existing_cluster_k8s_version and the GPU-capability
+# checks all read the TAG -- so such a ref lets a K8S_VERSION bump with no rebuild run the
+# OLD k3s silently instead of 404ing into the CPU fallback. Verified live on ghcr.io:
+# `k3s-cuda:v9.9.9-k3s1-cuda-does-not-exist@sha256:<existing digest>` resolves rc 0, while
+# the tag alone is "not found". The pin is enforced by the pre-pull instead.
+@test "_gpu_node_image: never embeds the digest in the ref, on any path (backend#1867)" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  local ref
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
+  ref="$(_gpu_node_image)"
+  [[ "$ref" != *"@sha256:"* ]] || { echo "default ref carries a digest: $ref"; return 1; }
+  [[ "$ref" == *"k3s-cuda:"* ]] || { echo "lost the k3s-cuda: tag marker: $ref"; return 1; }
+  _node_image_gpu_capable "$ref" || { echo "default judged NOT GPU-capable: $ref"; return 1; }
+  TRACEBLOC_IMAGE_REGISTRY="https://mirror.corp.example"
+  ref="$(_gpu_node_image)"
+  [[ "$ref" != *"@sha256:"* ]] || { echo "mirror ref carries a digest: $ref"; return 1; }
 }
 
 @test "_gpu_node_image: TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref" {
@@ -2257,7 +2233,93 @@ k3d-tracebloc-agent-0 agent" passthrough
   run _create_new_cluster
   [ "$status" -eq 0 ] || return 1
   run mock_calls
-  [[ "$output" == *"docker pull ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+  # EXACT line, not a substring: "…ubuntu22.04" is also a prefix of
+  # "…ubuntu22.04@sha256:…", so a substring match cannot tell a tag-only pull from a
+  # digest-pinned one -- and that is precisely the distinction backend#1867 turns on.
+  [[ "$output" == *"docker pull ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"$'\n'* \
+     || "$output" == *"docker pull ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ]] || return 1
+  [[ "$output" != *"k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04@"* ]] || { echo "pulled a digest-pinned ref"; return 1; }
+}
+
+# --- backend#1867: the digest pin is enforced HERE, at the pre-pull, not in the ref.
+# Four outcomes, kept distinct because the right action differs for each.
+
+# A helper so each test states only what it varies: what `docker pull` reports.
+_gpu_pull_reports() {
+  # NOT a `local`: the nested docker() is called long after this helper returns, and
+  # bash's dynamic scoping means a local would be gone by then -- the stub would print
+  # nothing and every test would silently exercise the CANNOT-TELL branch instead of the
+  # one it names. (It did, on the first run of these tests.)
+  TB_TEST_PULL_LINE="$1"
+  docker() {
+    record "docker $*"
+    case " $* " in
+      *" pull "*)              [[ -n "${TB_TEST_PULL_LINE:-}" ]] && printf '%s\n' "$TB_TEST_PULL_LINE"
+                               printf 'Status: Downloaded\n' ;;
+      *" run "*" --version"*)  printf 'k3s version v1.36.3+k3s1 (deadbeef)\n' ;;
+    esac
+    return 0
+  }
+}
+
+@test "_create_new_cluster: pre-pull digest MATCHES the pin -> GPU kept, nothing said about pinning (backend#1867)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  _gpu_pull_reports "Digest: sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" != *"CPU-only"* ]] || { echo "fell back to CPU on a MATCHING pin"; return 1; }
+  [[ "$output" != *"UNPINNED"* ]] || { echo "claimed it could not verify a digest it was given"; return 1; }
+  run mock_calls
+  [[ "$output" == *"--image ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+}
+
+# The refusal that is the whole point of the pin: a republished tag must not put
+# unreviewed bytes on a customer's GPU node.
+@test "_create_new_cluster: pre-pull digest DIFFERS from the pin -> CPU fallback, names both digests (backend#1867)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  _gpu_pull_reports "Digest: sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }          # install still succeeds
+  [[ "$output" == *"no longer resolves to the pinned digest"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"sha256:1111111111111111111111111111111111111111111111111111111111111111"* ]] || { echo "did not name the expected digest"; return 1; }
+  [[ "$output" == *"sha256:2222222222222222222222222222222222222222222222222222222222222222"* ]] || { echo "did not name the resolved digest"; return 1; }
+  # NOT reported as a pull/network/creds failure -- that sends people chasing the wrong cause.
+  [[ "$output" != *"Couldn't pull or validate"* ]] || { echo "collapsed into the generic pull failure"; return 1; }
+  run mock_calls
+  [[ "$output" == *"--image rancher/k3s:v1.36.3-k3s1"* ]] || return 1
+  [[ "$output" != *"--gpus=all"* ]] || return 1
+}
+
+# CANNOT TELL. An unreadable digest is not agreement -- but it is not grounds to refuse
+# the GPU either: the pull was BY TAG, so the k3s version is still the validated pin.
+# Run unpinned and say so, rather than claim a check that was not made.
+@test "_create_new_cluster: pre-pull reports no digest -> GPU kept but announced UNPINNED (backend#1867)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  _gpu_pull_reports ""
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"UNPINNED"* ]] || { echo "silently skipped the pin check: $output"; return 1; }
+  [[ "$output" != *"CPU-only"* ]] || { echo "refused the GPU merely for being unable to verify"; return 1; }
+  run mock_calls
+  [[ "$output" == *"--image ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
+}
+
+# An operator's mirror copy legitimately re-pushes under its own digest, so OUR pin does
+# not apply to it. A mismatch there must NOT drop the GPU.
+@test "_create_new_cluster: a mirror ref is not held to our pin (backend#1867)" {
+  GPU_VENDOR="nvidia"; K3D_GPU_FLAGS=("--gpus=all"); K8S_VERSION="v1.36.3-k3s1"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  TRACEBLOC_IMAGE_REGISTRY="mirror.corp.example"
+  _gpu_pull_reports "Digest: sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  run _create_new_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" != *"no longer resolves to the pinned digest"* ]] || { echo "held a mirror to our pin"; return 1; }
+  [[ "$output" != *"CPU-only"* ]] || return 1
+  run mock_calls
+  [[ "$output" == *"--image mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04"* ]] || return 1
 }
 
 # Bugbot Medium: a pulled image that doesn't run k3s (mis-tagged/broken mirror copy)

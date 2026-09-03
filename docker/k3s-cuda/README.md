@@ -139,9 +139,17 @@ alone never did:
   and the installer read the failed pull as a GPU-capability problem and fell back
   to CPU silently.
 * the tag is **mutable**, so a rebuild republishes it. Since backend#1867 the Linux
-  default ref is therefore `tag@digest`, pinned by `K3S_CUDA_DIGEST` — an exact ref
-  for the pull, with the tag kept in it so the `k3s-cuda:` GPU-capability check
-  still matches.
+  pre-pull asserts that the tag resolved to `K3S_CUDA_DIGEST` and falls back to CPU
+  with a specific reason if it did not, so a republished tag cannot put unreviewed
+  bytes on a GPU node.
+
+  The digest is deliberately **not** appended to the pull ref. Docker resolves a
+  `tag@digest` ref by digest and never checks the tag, while everything downstream
+  reads the tag — verified on ghcr.io, where
+  `k3s-cuda:v9.9.9-k3s1-cuda-does-not-exist@sha256:<an existing digest>` resolves
+  fine while that tag alone is `not found`. A pinned ref would therefore turn the
+  first bullet's honest 404 into silently running the *old* k3s under a tag claiming
+  the new one.
 
 Both holes are watched by `scripts/check-facts.sh --check-published`, out-of-band
 (`.github/workflows/k3s-cuda-published.yml`), which asks the registry whether the

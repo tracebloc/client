@@ -99,8 +99,13 @@ _spec_get() {
 #                                      differs: re-resolve the pin (or find out who
 #                                      republished the tag), not "publish the image".
 #
-#  The digest half exists because backend#1867 made the DEFAULT install ref tag@digest. The
-#  tag stays mutable, so the pin is a trust decision with a moving label pointing at
+#  The digest half exists because backend#1867 made the installer REFUSE a GPU node image
+#  whose tag no longer resolves to the pinned digest (cluster.sh's pre-pull drops to CPU).
+#  That refusal is the protection, and it is also the cost: while this drifts, every
+#  Linux GPU install silently installs CPU-only. So exit 4 is not cosmetic bookkeeping —
+#  it is the warning that GPU installs are about to stop being GPU installs.
+#
+#  The tag stays mutable, so the pin is a trust decision with a moving label pointing at
 #  it — the same disease check-digest-drift.sh watches for the chart's images, and the
 #  reason this check, not a second script, owns it: the ref is already derived here
 #  from facts.env, once.
@@ -242,18 +247,17 @@ _run_check_published() {
           echo "      tag now resolves to: ${digest}"
           echo "      facts.env pins:      ${pin}"
           echo ""
-          echo "check-facts: the default GPU node ref is tag@digest, so a Linux GPU install pulls the"
-          echo "             PINNED digest — which is no longer what this tag builds. Two causes, both"
-          echo "             needing a human: the tag was republished (someone rebuilt it — re-verify"
-          echo "             before re-pinning), or K8S_VERSION/CUDA_TAG were bumped without"
-          echo "             re-resolving the pin, in which case installs pull an image built for the"
-          echo "             OLD k3s. Re-resolve with:"
+          echo "check-facts: the installer pulls this tag and then REFUSES it unless it resolves to the"
+          echo "             pinned digest, so while this drifts every Linux GPU install falls back to"
+          echo "             CPU-only. Two causes, both needing a human: the tag was republished"
+          echo "             (someone rebuilt it — re-verify the content before re-pinning), or"
+          echo "             K8S_VERSION/CUDA_TAG moved without re-resolving the pin. Re-resolve with:"
           echo "               docker buildx imagetools inspect ${ref} --format '{{json .Manifest.Digest}}'"
           echo "             then update K3S_CUDA_DIGEST in scripts/spec/facts.env and run --write."
         } >&2
         return 4
       fi
-      echo "check-facts: GPU node image is published and the digest pin matches: ${ref}@${digest} (HTTP ${status})."
+      echo "check-facts: GPU node image is published and the digest pin matches: ${ref} -> ${digest} (HTTP ${status})."
       return 0
       ;;
     404)
