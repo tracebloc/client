@@ -747,16 +747,16 @@ installer, so the bootstrap uses a cosign you already trust. Documented in
 
 ### 8.10 `edgeuser` MySQL root-equivalence (G1) — **security / platform, rollout in progress**
 
-The in-cluster MySQL identity `edgeuser` is provisioned root-equivalent (`ALL PRIVILEGES ON *.* WITH GRANT OPTION`) and is still, by default, the account jobs-manager, requests-proxy, and the ingestion pods authenticate as (§4.1.1). Any of those components compromised while holding `edgeuser` holds the whole MySQL instance — both the metadata DB and every customer's dataset tables.
+The in-cluster MySQL identity `edgeuser` is provisioned root-equivalent (`ALL PRIVILEGES ON *.* WITH GRANT OPTION`). A fresh install on any environment now authenticates the data plane as `tb_meta`/`tb_ingest` (`serviceDbAccounts` is baked on for `dev`/`stg`/`prod`), but existing un-migrated edges — and any edge upgraded with plain `--reuse-values` or carrying an operator-set `serviceDbAccountsByEnv.<env>: false` — still authenticate jobs-manager, requests-proxy, and the ingestion pods as `edgeuser` (§4.1.1). Any of those components compromised while holding `edgeuser` holds the whole MySQL instance — both the metadata DB and every customer's dataset tables.
 
 **Mechanism (backend#1528, RFC-0003 D10 close-out):** dedicated least-privilege identities — `tb_meta` (metadata DB) and `tb_ingest` (dataset DB) — that each own exactly one database, plus the already-shipped `tb_credmgr` (mints per-experiment users) and per-experiment training-pod users. See §4.1.1 for the full model.
 
 **Rollout (per fleet, staged, each step reversible until S3):**
 1. **S1 — mint (done).** jobs-manager mints `tb_meta` + `tb_ingest` at startup under `serviceDbAccounts`.
-2. **S2 — switch consumers (done; on for `dev`/`stg`, off for `prod`).** Move jobs-manager and requests-proxy off the hardcoded `edgeuser` constants onto `tb_meta`/`tb_ingest`; stamp `tb_ingest` onto spawned ingestion Jobs (`DB_USER`/`DB_PASSWORD`); re-parent the `tb_credmgr` bootstrap. Verify heartbeat `information_schema` dataset visibility, not just "no exceptions" — over-revoking degrades silently.
+2. **S2 — switch consumers (done; baked on for `dev`/`stg`/`prod` — prod after backend#2800; existing edges migrate on upgrade).** Move jobs-manager and requests-proxy off the hardcoded `edgeuser` constants onto `tb_meta`/`tb_ingest`; stamp `tb_ingest` onto spawned ingestion Jobs (`DB_USER`/`DB_PASSWORD`); re-parent the `tb_credmgr` bootstrap. Verify heartbeat `information_schema` dataset visibility, not just "no exceptions" — over-revoking degrades silently.
 3. **S3 — retire.** With `perExperimentDbCreds` + `serviceDbAccounts` universally on and S2 shipped, `REVOKE` `edgeuser` to nothing and `DROP USER`. Prod-irreversible; gated on a `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot as the rollback reference. Confirm readiness with [§7.7](#77-no-consumer-resolves-to-the-legacy-shared-mysql-identity) — `docs/migration-tools/edgeuser-drop-readiness.sh` — rather than by eye; it is the machine form of the three-criteria gate and fails closed.
 
-**Residual until S3 completes fleet-wide:** the root-equivalent account still exists, and on `prod` fleets it is still the authentication identity. `edgeuser` intentionally retains `CREATE USER` + `GRANT OPTION` until the `tb_credmgr` bootstrap is re-parented (S2), so the revoke is deliberately the last step.
+**Residual until S3 completes fleet-wide:** the root-equivalent account still exists, and existing un-migrated edges (on any env) — including any upgraded with plain `--reuse-values` or pinned `serviceDbAccountsByEnv.<env>: false` — still authenticate as it. `edgeuser` intentionally retains `CREATE USER` + `GRANT OPTION` until the `tb_credmgr` bootstrap is re-parented (S2), so the revoke is deliberately the last step.
 
 ---
 
