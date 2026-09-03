@@ -1,0 +1,78 @@
+name: E2E mysql
+
+# Native-arm64 MySQL 8.4 install + real-driver auth end-to-end (backend#723,
+# Option A). Brings up a real k3d cluster via the installer's create_cluster(),
+# helm-installs THIS chart with the 8.4 engine on a public-image / hostPath
+# profile (no secrets, no registry, no backend registration), and proves on a
+# real host what nothing asserted before: the multi-arch 8.4 image runs NATIVELY
+# on arm64 (not under qemu), and edgeuser's cold-cache plaintext connect
+# succeeds without ERROR 2061 — on first boot AND after the strategy:Recreate
+# cache-wipe (decision D2). The real driver (mysql-connector-python) is used
+# because the Deployment's `mysqladmin ping` probe passes regardless of auth
+# plugin. Full rationale in scripts/tests/e2e-mysql.sh.
+#
+# WHY ITS OWN FILE (not a job in installer-tests.yaml) — the same reason
+# e2e-auth-proxy.yaml is standalone (backend#2350): installer-tests.yaml is
+# path-filtered on pull_request, and a required check behind a paths filter never
+# reports on a PR that touches nothing under the filter, so GitHub holds the PR
+# at "waiting for status to be reported" forever. This test is the intended
+# GATING evidence for the native-arm64 close condition of backend#723, so it has
+# to be able to become a required check — which means its own workflow with an
+# UNFILTERED pull_request trigger that always reports.
+#
+# NO `paths:` ON pull_request, deliberately (candidate required check on
+# staging/main): a path-filtered required check is unmergeable-forever the moment
+# a PR touches nothing under the filter (a promotion batch, a backmerge). `push`
+# keeps a paths filter — pushes are not gated, so scoping the post-merge signal
+# is free.
+#
+# COST — unlike e2e-auth-proxy's single ~90s runner this is a 2-leg matrix
+# (amd64 + arm64), each ~5-7 min (cluster + helm install + two connector probes).
+# The arm64 leg is the point; arm64 runners are free on this public repo. If the
+# per-PR cost on develop ever bites, the documented lever (e2e-auth-proxy.yaml
+# header) is to scope pull_request to the gating branches only ([main, staging])
+# and lean on the push signal for develop.
+#
+# This workflow does NOT make the check required — that is a branch-protection
+# setting, armed only after a green-watch window per the "arm while green" rule
+# (CLAUDE.md), on staging + main. NOTE for whoever arms it: if it is made a
+# required, branches-filtered gate, add `edited` to the pull_request `types` so a
+# base-branch retarget re-reports instead of hanging pending (backend#2701).
+on:
+  push:
+    branches: [main, staging, develop, openshift]
+    paths:
+      - 'client/**'
+      - 'scripts/**'
+      - '.github/workflows/e2e-mysql.yaml'
+  pull_request:
+    branches: [main, staging, develop, openshift]
+  schedule:
+    # Mondays 03:15 UTC — a weekly canary. This pulls external images
+    # (tracebloc/mysql-client:8.4, python:3.12-slim) and pip-installs the
+    # connector from PyPI, so the canary catches drift in those before it reddens
+    # a promotion.
+    - cron: '15 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded PR runs; never cancel push/schedule.
+  group: e2e-mysql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e-mysql:
+    name: E2E mysql 8.4 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Native 8.4 install + real-driver auth (cold-cache + post-Recreate)
+        run: bash scripts/tests/e2e-mysql.sh

@@ -1775,8 +1775,23 @@ perExperimentDbCreds:
 # measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
 # companion secret renders clean.
 #
-# `stg: false` still, deliberately. Staging is at REVOKE, not DROP — the soak is
-# not finished, so its posture is not yet a thing to bake.
+# `stg: false` and `prod: false` — and NOT because those fleets are unfinished.
+# Staging DROPped edgeuser on 2026-08-31 (backend#2776) and prod's edge 713 on
+# 2026-09-01 (backend#2800), so an earlier version of this comment ("staging is at
+# REVOKE, not DROP") was describing a state that had already moved on.
+#
+# THE DEFAULT IS NOT A POSTURE RECORD, AND CANNOT BE ONE (backend#2994). Whether a
+# fleet has completed this migration depends on manual DDL — the `ALTER USER` in
+# docs/migration-tools/rotate-mysql-root.md, and the REVOKE/DROP — which the chart
+# cannot observe. `dev: true` is safe to bake only because this gate is additive on
+# a fresh datadir; the same is NOT true of the gates whose defaults would fire a
+# render guard or a 1045 on a fleet whose DDL has not run (see rotateMysqlRootByEnv
+# and bootstrapDbReparentByEnv below).
+#
+# So these entries record what a NEW install of that environment should get, not
+# where existing fleets are. Per-fleet state lives in each edge's stored release
+# values and in the migration ticket for that fleet; do not read a `false` here as
+# "that environment is behind".
 perExperimentDbCredsByEnv:
   dev: true
   stg: false
@@ -1861,12 +1876,17 @@ serviceDbAccounts:
 # per-Job credentials, so this is what makes them work again — and it exercises
 # #1528's S2 path where it is supposed to be exercised, before prod.
 #
-# prod: FALSE, deliberately and explicitly. Prod runs v0.8.2 (pinned via
-# `prodDigest`), which still has the fallback — the safe set is v0.8.0…v0.8.4,
-# and v0.8.8 is the first release that dropped it. Flipping prod is a separate
-# windowed decision
-# (#1528 S0 drill), and it must happen BEFORE prod's ingestor is repinned past
-# 0.8.2 — see the note on `prodDigest`.
+# prod: FALSE — for NEW prod installs, whose ingestor is `prodDigest` (v0.8.2,
+# which still has the edgeuser fallback; the safe set is v0.8.0…v0.8.4 and v0.8.8
+# is the first release that dropped it). Flipping a prod fleet stays a separate
+# windowed decision, and it must happen BEFORE that fleet's ingestor is repinned
+# past 0.8.2 — see the note on `prodDigest`.
+#
+# This `false` does NOT mean prod is behind. Edge 713 completed the whole rollout
+# on 2026-09-01 (backend#2800): flipped, repinned to 0.8.16 via the per-edge
+# `images.ingestor.digest`, root rotated, edgeuser DROPped. It carries the flip as
+# a user-supplied value, which is what survives auto-upgrades — see backend#2994
+# on why a chart default cannot record per-fleet migration state.
 serviceDbAccountsByEnv:
   dev: true
   stg: true
