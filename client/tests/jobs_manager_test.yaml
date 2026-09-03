@@ -655,7 +655,9 @@ tests:
             name: PER_DATASET_PVCS
             value: "1"
 
-  - it: does not render per-experiment DB-cred env by default (RFC-0003 D10 knob off)
+  - it: does not render per-experiment DB-cred env when overridden off (RFC-0003 D10 knob off)
+    set:
+      perExperimentDbCreds: false
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env
@@ -883,7 +885,9 @@ tests:
 
   # backend#1528 S1: the tb_meta / tb_ingest env is flag-gated on
   # serviceDbAccounts so a default install is byte-identical.
-  - it: service DB account env absent by default (byte-for-byte off)
+  - it: service DB account env absent when serviceDbAccounts overridden off (byte-for-byte)
+    set:
+      serviceDbAccounts: false
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env

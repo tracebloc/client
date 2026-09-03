@@ -153,7 +153,9 @@ tests:
   # dedicated tb_meta identity (metadata only — the proxy never touches the
   # dataset DB, so no tb_ingest here). Flag-gated on serviceDbAccounts so a
   # default install is byte-identical (mirrors the jobs-manager S1 block).
-  - it: service DB account env absent by default (byte-for-byte off)
+  - it: service DB account env absent when serviceDbAccounts overridden off (byte-for-byte)
+    set:
+      serviceDbAccounts: false
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env

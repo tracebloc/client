@@ -12,10 +12,10 @@ suite: serviceDbAccounts resolves per environment (backend#1752)
 # Config() before reading a byte. Verified by running the published images:
 # :dev and :stg are 0.8.5 and raise; the prod-pinned digest is 0.7.7 and works.
 #
-# So these assert the two things that actually matter: dev/stg get the
-# credentials the ingestor now demands, prod does not change, and a documented
-# ALIAS resolves rather than silently missing its entry — backend#1723 was
-# exactly that failure, one env-name spelling away.
+# So these assert the two things that actually matter: dev/stg/prod get the
+# credentials the ingestor now demands (prod baked after edge 713's DROP,
+# backend#2800), and a documented ALIAS resolves rather than silently missing its
+# entry — backend#1723 was exactly that failure, one env-name spelling away.
 templates:
   - templates/jobs-manager-deployment.yaml
   - templates/secrets.yaml
@@ -71,24 +71,24 @@ tests:
             name: TB_INGEST_USER
             value: tb_ingest
 
-  # ---- prod is deliberately unchanged ----------------------------------
-  - it: "prod stays OFF — flipping it is a separate windowed decision"
+  # ---- prod is baked on too, after edge 713's DROP (backend#2800) -------
+  - it: "prod gets the tb_ingest identity — baked after the DROP"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TB_INGEST_USER
             value: tb_ingest
 
-  - it: "the alias `production` stays off as well"
+  - it: "the alias `production` resolves too — it must not miss its entry"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: production
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TB_INGEST_USER
@@ -107,15 +107,16 @@ tests:
             name: TB_INGEST_USER
             value: tb_ingest
 
-  - it: "an explicit true turns a prod fleet on"
-    # The path a windowed prod flip takes, so it is exercised before someone
-    # needs it under time pressure.
+  - it: "an explicit false holds a prod fleet back — override beats the baked default"
+    # prod now BAKES serviceDbAccounts on (backend#2800), so the meaningful override
+    # direction is OFF: an operator holding one prod edge back must still win over the
+    # default. (An override-true test would be vacuous now — it matches the default.)
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
-      serviceDbAccounts: true
+      serviceDbAccounts: false
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TB_INGEST_USER
@@ -134,11 +135,21 @@ tests:
       - exists:
           path: data.TB_INGEST_PASSWORD
 
-  - it: "prod renders no such Secret"
+  - it: "prod renders the tb_ingest Secret too — the env and Secret stay in lockstep"
     template: templates/secrets.yaml
     documentIndex: 0
     set:
       env.CLIENT_ENV: prod
+    asserts:
+      - exists:
+          path: data.TB_INGEST_PASSWORD
+
+  - it: "an override-off edge renders no such Secret — the gate can still redden"
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: prod
+      serviceDbAccounts: false
     asserts:
       - notExists:
           path: data.TB_INGEST_PASSWORD
