@@ -954,9 +954,11 @@ images:
     #
     # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, and the float has
     # CROSSED THE BOUNDARY. Do not "refresh" this to the float without reading
-    # the ordering constraint in docs/SECURITY.md §4.1.1: prod's
-    # `serviceDbAccountsByEnv.prod` is still `false`, and the boundary is not a
-    # version number — it is whether the release you move to was cut before
+    # the ordering constraint in docs/SECURITY.md §4.1.1: `serviceDbAccountsByEnv.prod`
+    # is now `true` by default, but an existing edge upgraded with plain
+    # `--reuse-values` keeps its stored `false` (the new default is never injected),
+    # so it still gets no DB_USER and still needs the fallback; and the boundary is not
+    # a version number — it is whether the release you move to was cut before
     # data-ingestors#468. `prodPin: true` means this digest, not the float, is
     # what prod spawns, which is exactly the protection being relied on.
     #
@@ -1006,7 +1008,7 @@ images:
     #            the same change that advances the pin.
     ackDrift:
       line: "0.8"
-      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8) while narrowEdgeuserByEnv.prod is still false -- so existing un-migrated prod edges still hold edgeuser's grants and their ingestion Jobs can still reach for that fallback. (serviceDbAccountsByEnv.prod is now true, so a fresh install injects DB_USER=tb_ingest and does not depend on the fallback; the pin protects the un-migrated edges until they are narrowed/dropped.) Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on."
+      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8). serviceDbAccountsByEnv.prod is now true by default, so a fresh 1.9.98+ install injects DB_USER=tb_ingest and needs no fallback -- but a prod edge still on a pre-1.9.98 chart, or upgraded with plain --reuse-values (which replays the edge's stored serviceDbAccountsByEnv.prod: false and never injects the new chart default -- see scripts/tests/e2e-auto-upgrade.sh), keeps that flag off, gets no DB_USER, and genuinely still needs the v0.8.2 fallback. Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on until those edges adopt serviceDbAccounts=true (or a prod-safe 0.8.x is cut) -- NOT until edgeuser is narrowed/dropped, which is the moment the fallback stops working too."
     prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
