@@ -983,6 +983,17 @@ K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
 # other consumers, so a bump can't derive a GPU image tag that was never built.
 # shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
 TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
+# Exact digest of the published k3s-cuda image for the tag those two derive (backend#1867).
+# The tag is mutable; cluster.sh's pre-pull asserts the tag resolved to THIS digest and
+# drops to CPU if it did not. It is deliberately NOT appended to the pull ref -- see the
+# note in scripts/spec/facts.env for why a tag@digest ref is a lie waiting to happen. No
+# TRACEBLOC_* override on purpose -- an operator who wants a different image already
+# has TRACEBLOC_K3S_CUDA_IMAGE, and a second knob for the same thing could pin a
+# digest onto a ref it does not belong to. check-facts.sh keeps it in lockstep with
+# facts.env's K3S_CUDA_DIGEST, and --check-published proves it still equals the live
+# digest of the derived tag.
+# shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
+TB_K3S_CUDA_DIGEST="sha256:fbb1a8cfebcdf32320b493fc614161cd1115603067135c27080ac380e4742e9d"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
 # release at install time instead (an empty value falls back to this pin, like
 # K8S_VERSION above). The binary is fetched directly from the release and

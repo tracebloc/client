@@ -22,20 +22,22 @@ setup() {
   #
   # Heredocs stay QUOTED (the bodies contain ${K8S_VERSION:-…}, which must survive
   # verbatim), so the values go in as @@TOKENS@@ and are substituted afterwards.
-  local _k8s _k3d _helm _cuda _ready _metrics
+  local _k8s _k3d _helm _cuda _ready _metrics _digest
   _k8s="$(sed -n 's/^K8S_VERSION=\(.*\)$/\1/p'          "$REPO/scripts/spec/facts.env")"
   _k3d="$(sed -n 's/^K3D_VERSION=\(.*\)$/\1/p'          "$REPO/scripts/spec/facts.env")"
   _helm="$(sed -n 's/^HELM_VERSION=\(.*\)$/\1/p'        "$REPO/scripts/spec/facts.env")"
   _cuda="$(sed -n 's/^CUDA_TAG=\(.*\)$/\1/p'            "$REPO/scripts/spec/facts.env")"
   _ready="$(sed -n 's/^READY_TIMEOUT=\(.*\)$/\1/p'      "$REPO/scripts/spec/facts.env")"
   _metrics="$(sed -n 's/^METRICS_WAIT_TIMEOUT=\(.*\)$/\1/p' "$REPO/scripts/spec/facts.env")"
+  _digest="$(sed -n 's/^K3S_CUDA_DIGEST=\(.*\)$/\1/p'   "$REPO/scripts/spec/facts.env")"
   # Fail closed: a spec we cannot read must not seed empty consumers that then
   # "agree" with an empty expectation.
-  [[ -n "$_k8s" && -n "$_k3d" && -n "$_helm" && -n "$_cuda" && -n "$_ready" && -n "$_metrics" ]] \
+  [[ -n "$_k8s" && -n "$_k3d" && -n "$_helm" && -n "$_cuda" && -n "$_ready" && -n "$_metrics" && -n "$_digest" ]] \
     || { echo "could not derive facts from the copied spec"; return 1; }
   cat > "$REPO/scripts/lib/common.sh" <<'SH'
 K8S_VERSION="${K8S_VERSION:-@@K8S@@}"
 TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-@@CUDA@@}"
+TB_K3S_CUDA_DIGEST="@@DIGEST@@"
 K3D_VERSION="${K3D_VERSION:-@@K3D@@}"
 HELM_VERSION="${HELM_VERSION:-@@HELM@@}"
   K8S_VERSION    k3s image tag                   (default: @@K8S@@)
@@ -101,7 +103,8 @@ YML
     local tmp; tmp="$(mktemp)"
     sed -e "s|@@K8S@@|${_k8s}|g"   -e "s|@@K3D@@|${_k3d}|g" \
         -e "s|@@HELM@@|${_helm}|g" -e "s|@@CUDA@@|${_cuda}|g" \
-        -e "s|@@READY@@|${_ready}|g" -e "s|@@METRICS@@|${_metrics}|g" "$f" > "$tmp" && mv "$tmp" "$f"
+        -e "s|@@READY@@|${_ready}|g" -e "s|@@METRICS@@|${_metrics}|g" \
+        -e "s|@@DIGEST@@|${_digest}|g" "$f" > "$tmp" && mv "$tmp" "$f"
   done
   # Nothing may be left unsubstituted, or a consumer would "match" a token instead
   # of a value. Scoped to the SEEDED files: a repo-wide grep also matches the
@@ -284,10 +287,20 @@ _expected_gpu_ref() {
   [[ -n "$k8s" && -n "$cuda" ]] || { echo "could not derive the GPU ref from the copied spec"; return 1; }
   printf 'ghcr.io/tracebloc/k3s-cuda:%s-cuda-%s' "$k8s" "$cuda"
 }
-# Write a  <ref><0x1f><status>  stub file and echo its path.
+# The digest pin check-facts must compare against, read from the COPIED spec so a
+# re-pin can never break these tests (same discipline as _expected_gpu_ref).
+_expected_pin() {
+  sed -n 's/^K3S_CUDA_DIGEST=\(.*\)$/\1/p' "$REPO/scripts/spec/facts.env"
+}
+# Write a  <ref><0x1f><status>[<0x1f><digest>]  stub file and echo its path.
+# The digest field defaults to the SPEC'S OWN PIN so a 2-arg call means "published and
+# the pin agrees" — the pre-backend#1867 meaning of these fixtures. Pass "" explicitly to
+# model a registry that returned no readable digest; production reports that as CANNOT
+# TELL, and the test below asserts exactly that rather than letting an absent field
+# quietly stand in for agreement.
 _probe_stub() {
-  local ref="$1" status="$2" f="$BATS_TEST_TMPDIR/probe-stub"
-  printf '%s\037%s\n' "$ref" "$status" > "$f"
+  local ref="$1" status="$2" digest="${3-$(_expected_pin)}" f="$BATS_TEST_TMPDIR/probe-stub"
+  printf '%s\037%s\037%s\n' "$ref" "$status" "$digest" > "$f"
   printf '%s' "$f"
 }
 
@@ -344,6 +357,69 @@ _probe_stub() {
   TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200)" run _facts --check-published
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"v1.99.0-k3s1-cuda-"* ]] || return 1
+}
+
+# --- backend#1867: the digest half. The tag is mutable, and the DEFAULT install ref is now
+# tag@digest, so "the tag exists" is no longer the whole question — "does it still
+# resolve to the digest we pinned" is the other half. Kept as its own exit code (4)
+# because the human action differs from a 404: re-resolve the pin, not publish.
+
+@test "check-facts --check-published: tag resolves to a DIFFERENT digest -> exit 4, names both (backend#1867)" {
+  local ref pin; ref="$(_expected_gpu_ref)"; pin="$(_expected_pin)"
+  local other="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200 "$other")" run _facts --check-published
+  [ "$status" -eq 4 ] || { echo "expected 4 (drift), got $status: $output"; return 1; }
+  [[ "$output" == *"DIGEST PIN DRIFTED"* ]] || return 1
+  [[ "$output" == *"$other"* ]] || { echo "did not name the resolved digest"; return 1; }
+  [[ "$output" == *"$pin"* ]]   || { echo "did not name the pinned digest"; return 1; }
+  # Not collapsed into either neighbouring verdict.
+  [[ "$output" != *"NOT PUBLISHED"* ]] || return 1
+  [[ "$output" != *"CANNOT TELL"* ]]   || return 1
+}
+
+@test "check-facts --check-published: published but NO readable digest -> CANNOT TELL (exit 3), not agreement, not drift (backend#1867)" {
+  local ref; ref="$(_expected_gpu_ref)"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200 "")" run _facts --check-published
+  [ "$status" -eq 3 ] || { echo "expected 3, got $status: $output"; return 1; }
+  [[ "$output" == *"CANNOT TELL which digest"* ]] || return 1
+  [[ "$output" != *"DRIFTED"* ]] || { echo "an unreadable digest was reported as drift"; return 1; }
+}
+
+@test "check-facts --check-published: a spec with no K3S_CUDA_DIGEST fails CLOSED (exit 2), never a false drift (backend#1867)" {
+  local ref; ref="$(_expected_gpu_ref)"
+  # Remove the pin entirely: comparing against an empty string would make EVERY digest
+  # "differ" and report drift, blaming the registry for a broken declaration.
+  local tmp; tmp="$(mktemp)"
+  grep -v '^K3S_CUDA_DIGEST=' "$REPO/scripts/spec/facts.env" > "$tmp" && mv "$tmp" "$REPO/scripts/spec/facts.env"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200 "sha256:1111111111111111111111111111111111111111111111111111111111111111")" run _facts --check-published
+  [ "$status" -eq 2 ] || { echo "expected 2 (spec error), got $status: $output"; return 1; }
+  [[ "$output" == *"K3S_CUDA_DIGEST"* ]] || return 1
+  [[ "$output" != *"DRIFTED"* ]] || { echo "a missing declaration was reported as drift"; return 1; }
+}
+
+# The hazard the pin INTRODUCES, and the reason this check owns it: K3S_CUDA_DIGEST is
+# bound to K8S_VERSION and CUDA_TAG. Bump either without re-resolving the digest and
+# the default ref names an image built for the OLD k3s -- and --check stays green,
+# because every declaration still agrees with the spec. Only the registry can tell.
+@test "check-facts --check-published: a K8S_VERSION bump without re-pinning the digest is caught (backend#1867)" {
+  _set_spec K8S_VERSION v9.9.9-k3s1
+  # Bump it the way a human would: spec, then --write to stamp every consumer. That is
+  # the state this test is about -- every declaration agreeing, --check green, and the
+  # digest pin quietly stale.
+  _facts --write >/dev/null || { echo "--write failed after the bump"; return 1; }
+  local ref; ref="$(_expected_gpu_ref)"
+  [[ "$ref" == *"v9.9.9-k3s1"* ]] || { echo "spec bump did not reach the derived ref: $ref"; return 1; }
+  # The rebuilt image published under the NEW tag has its own digest; the spec still
+  # pins the old one.
+  local rebuilt="sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  TB_REGISTRY_PROBE_STUB="$(_probe_stub "$ref" 200 "$rebuilt")" run _facts --check-published
+  [ "$status" -eq 4 ] || { echo "a stale pin after a K8S_VERSION bump was NOT caught (got $status): $output"; return 1; }
+  # And the hermetic gate cannot see it -- that asymmetry is why this mode exists.
+  # --check compares declarations to the spec; all of them now agree, including the
+  # (stale) digest, so it is GREEN while a GPU install pulls an image built for the
+  # old k3s. Only the registry knows.
+  run _facts --check
+  [ "$status" -eq 0 ] || { echo "--check should be green after --write (declarations agree): $output"; return 1; }
 }
 
 @test "check-facts --check-published: a missing spec key fails CLOSED (exit 2), never a misleading 404 (backend#3007)" {

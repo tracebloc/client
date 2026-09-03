@@ -1077,8 +1077,20 @@ $NVIDIA_DRIVER_VERSION = ""
 $GPU_HOSTS_UNREACHABLE = ""
 # #616: the CUDA base + custom k3s-CUDA node image used when the GPU is enabled. The k3s-CUDA
 # tag encodes both the k3s pin ($K8S_VERSION) and the CUDA base, matching docker/k3s-cuda/build.sh.
-# The installer PULLS this image automatically at cluster-create — the user never builds or pulls
-# anything by hand. TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref; TRACEBLOC_CUDA_BASE_TAG
+# The user does nothing by hand either way, but WHICH way depends on the path, and this comment
+# used to say only "the installer PULLS this image automatically at cluster-create". That was
+# false for the DEFAULT path and it misdirected backend#1867, which opened by quoting it as
+# evidence that customers fetch this ref by mutable tag on Windows. They do not:
+#   • default (neither env var set) -> Build-GpuNodeImage runs `docker build` LOCALLY from the
+#     embedded context and stamps a tracebloc.k3s-cuda-content=<hash> label for reuse detection.
+#     Nothing is pulled, so there is no registry ref to pin — which is why facts.env's
+#     K3S_CUDA_DIGEST has a bash consumer only.
+#   • TRACEBLOC_K3S_CUDA_IMAGE or TRACEBLOC_IMAGE_REGISTRY set -> Confirm-GpuImagePullable PULLS
+#     the ref below. Those refs are operator-owned (a mirror legitimately re-pushes under its own
+#     digest), so they are left exactly as given here too.
+# The mutable-tag pull backend#1867 is about is the LINUX path (cluster.sh::_gpu_node_image),
+# which is digest-pinned there.
+# TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref; TRACEBLOC_CUDA_BASE_TAG
 # overrides just the CUDA base used for the capability probe and the default tag. When a private
 # mirror is configured (TRACEBLOC_IMAGE_REGISTRY, #585) the default re-homes onto it so the one
 # installer command works air-gapped, same as every other image.

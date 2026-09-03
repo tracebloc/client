@@ -1287,6 +1287,22 @@ _gpu_node_image() {
     while [[ "$host" == */ ]]; do host="${host%/}"; done
     printf '%s/%s' "$host" "$repo"
   else
+    # backend#1867 pins the default GPU image, but the digest is NOT put in this ref.
+    # A ref carrying BOTH a tag and a digest is a lie waiting to happen: docker resolves
+    # it by DIGEST and never checks the tag, while everything downstream reads the TAG.
+    # Measured on ghcr.io — `…/k3s-cuda:v9.9.9-k3s1-cuda-does-not-exist@sha256:<an
+    # existing digest>` resolves SUCCESSFULLY, while the same tag alone is `not found`.
+    # So a tag@digest default would turn a K8S_VERSION bump with no rebuild from an
+    # honest 404 (the client#835 CPU fallback) into silently running the OLD k3s, with
+    # _check_existing_cluster_k8s_version reading the new tag off the ref and staying
+    # quiet — a worse failure than the one the pin was added to prevent (Bugbot High on
+    # client#961). Pulling by TAG keeps that 404 honest.
+    #
+    # The pin is therefore enforced where it actually decides what runs: the pre-pull in
+    # _create_new_cluster asserts that this tag resolved to facts.env's K3S_CUDA_DIGEST,
+    # and drops to CPU if it did not. A republished tag can then never run unreviewed
+    # bytes, which is what backend#1867 asked for, without any ref asserting a version
+    # its content does not have.
     printf 'ghcr.io/%s' "$repo"
   fi
 }
@@ -1654,7 +1670,7 @@ _create_new_cluster() {
   # for 'latest' (handled below) and the unit harness (empty K8S_VERSION);
   # TB_SKIP_GPU_IMAGE_PREPULL bypasses it.
   if _gpu_wired && [[ -n "$K8S_VERSION" && "$K8S_VERSION" != "latest" && -z "${TB_SKIP_GPU_IMAGE_PREPULL:-}" ]]; then
-    local _prepull_image _prepull_min _gpu_ok=1
+    local _prepull_image _prepull_min _gpu_ok=1 _gpu_fail_reason="" _pull_log="" _got_digest=""
     _prepull_image="$(_gpu_node_image)"
     _prepull_min="$(tb_minutes_or "${TB_GPU_PULL_TIMEOUT_MIN:-}" 15)"
     # Authenticate the host daemon to the image's registry first (mirrors
@@ -1668,8 +1684,35 @@ _create_new_cluster() {
             --username "${TRACEBLOC_REGISTRY_USERNAME}" --password-stdin >>"${LOG_FILE:-/dev/null}" 2>&1 \
         || warn "docker login to ${_reg_host} for the GPU image didn't succeed — trying an unauthenticated pull."
     fi
-    ( docker pull "$_prepull_image" >>"${LOG_FILE:-/dev/null}" 2>&1 ) &
+    # Capture the pull rather than sending it straight to LOG_FILE: the digest the tag
+    # resolved to is only readable from `docker pull`'s own output on this host's image
+    # store. Measured here: RepoDigests comes back EMPTY under the containerd image
+    # store and `docker images --digests` prints nothing, so neither is usable; the
+    # `Digest:` line is, and it still prints on a cache hit. Appended to LOG_FILE
+    # below, so the log is unchanged.
+    _pull_log="$(mktemp "${TMPDIR:-/tmp}/tracebloc-gpu-pull-XXXXXX" 2>/dev/null || echo /dev/null)"
+    ( docker pull "$_prepull_image" >"$_pull_log" 2>&1 ) &
     spin "$!" "Fetching the GPU-capable runtime (${_prepull_image##*/})…" "$(( _prepull_min * 60 ))" || _gpu_ok=0
+    [[ "$_pull_log" != /dev/null ]] && cat "$_pull_log" >>"${LOG_FILE:-/dev/null}" 2>/dev/null
+    # Assert the tag resolved to the PINNED digest (backend#1867). Only for our own ghcr
+    # default: an operator's TRACEBLOC_K3S_CUDA_IMAGE, or a mirror copy that legitimately
+    # re-pushes under its own digest, has no pin of ours to compare against.
+    if (( _gpu_ok )) && [[ -n "${TB_K3S_CUDA_DIGEST:-}" \
+          && -z "${TRACEBLOC_K3S_CUDA_IMAGE:-}" && -z "${TRACEBLOC_IMAGE_REGISTRY:-}" ]]; then
+      _got_digest="$(sed -n 's/^[Dd]igest: *\(sha256:[0-9a-f]\{64\}\).*/\1/p' "$_pull_log" 2>/dev/null)"
+      _got_digest="${_got_digest%%$'\n'*}"   # first match; never `| head -1` (SIGPIPEs sed)
+      if [[ -z "$_got_digest" ]]; then
+        # CANNOT TELL. An unreadable digest is not agreement — but it is not a reason to
+        # refuse the GPU either: we pulled by TAG, so the k3s version is still the
+        # validated pin. Run unpinned and say so, rather than claim a check we did not make.
+        warn "Couldn't read which digest ${_prepull_image} resolved to — running it UNPINNED this install."
+        hint "The k3s version is still the validated pin; only the content check (facts.env K3S_CUDA_DIGEST) was skipped."
+      elif [[ "$_got_digest" != "$TB_K3S_CUDA_DIGEST" ]]; then
+        _gpu_ok=0
+        _gpu_fail_reason="digest"
+      fi
+    fi
+    [[ -n "$_pull_log" && "$_pull_log" != /dev/null ]] && rm -f "$_pull_log"
     # Verify the pulled image actually runs k3s (mirrors Test-GpuImageRunsK3s): a
     # mis-tagged/broken override or mirror copy passes the pull but then hard-fails
     # cluster-create. Run WITH --gpus so it exercises the exact create path (our image
@@ -1681,7 +1724,17 @@ _create_new_cluster() {
       _ver_out="$(_bounded "${TB_GPU_VERIFY_TIMEOUT:-90}" docker run --rm --gpus all "$_prepull_image" --version 2>/dev/null)" || _ver_out=""
       grep -qi k3s <<<"$_ver_out" || _gpu_ok=0
     fi
-    if (( ! _gpu_ok )); then
+    if (( ! _gpu_ok )) && [[ "$_gpu_fail_reason" == "digest" ]]; then
+      # The tag exists and pulled, but its content is not the reviewed, pinned image.
+      # Refusing it is the POINT of the pin (backend#1867): a republished tag must not
+      # put unreviewed bytes on a customer's GPU node. Kept distinct from a failed pull
+      # so nobody chases network/creds for a supply-chain answer.
+      K3D_GPU_FLAGS=()
+      warn "The GPU node image no longer resolves to the pinned digest — installing CPU-only rather than running an unreviewed image."
+      hint "Expected ${TB_K3S_CUDA_DIGEST}, but ${_prepull_image} resolved to ${_got_digest:-<unknown>}."
+      hint "Either that tag was republished, or K8S_VERSION/CUDA_TAG moved without re-resolving K3S_CUDA_DIGEST in scripts/spec/facts.env."
+      _recreate_cluster_hint
+    elif (( ! _gpu_ok )); then
       K3D_GPU_FLAGS=()
       warn "Couldn't pull or validate the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
       hint "Make sure this host can pull AND run ${_prepull_image} (for a private registry set TRACEBLOC_IMAGE_REGISTRY + TRACEBLOC_REGISTRY_USERNAME/PASSWORD)."
