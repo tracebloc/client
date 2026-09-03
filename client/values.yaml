@@ -1744,10 +1744,11 @@ perDatasetPvcs: false
 # DB's Service Bus strings). jobs-manager provisions the dedicated tb_credmgr
 # minting identity on startup and revokes each user when its Job ends.
 #
-# Flip per environment, dev first. ON for dev, off for stg and prod (see
-# perExperimentDbCredsByEnv below) — where it is off, behaviour is today's
-# shared-credential path, byte-for-byte. Retiring edgeuser is a later step once
-# this is universally on. Needs no per-edge action — the tb_credmgr password is a
+# Flipped per environment, dev first; now ON for dev, stg and prod (see
+# perExperimentDbCredsByEnv below) since staging and prod have DROPped edgeuser —
+# a fresh install comes up on per-experiment credentials rather than the shared
+# path. Where an operator overrides it off, behaviour is the old shared-credential
+# path, byte-for-byte. Needs no per-edge action — the tb_credmgr password is a
 # generated, upgrade-stable Secret value.
 # LEFT NULL ON PURPOSE, matching serviceDbAccounts. The helper distinguishes
 # "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
@@ -1775,27 +1776,26 @@ perExperimentDbCreds:
 # measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
 # companion secret renders clean.
 #
-# `stg: false` and `prod: false` — and NOT because those fleets are unfinished.
-# Staging DROPped edgeuser on 2026-08-31 (backend#2776) and prod's edge 713 on
-# 2026-09-01 (backend#2800), so an earlier version of this comment ("staging is at
-# REVOKE, not DROP") was describing a state that had already moved on.
+# `stg: true` and `prod: true`. Staging DROPped edgeuser on 2026-08-31
+# (backend#2776) and prod's edge 713 on 2026-09-01 (backend#2800), so both fleets
+# are retired and their posture is a thing to bake — a fresh install comes up on
+# per-experiment credentials rather than the shared edgeuser identity.
 #
-# THE DEFAULT IS NOT A POSTURE RECORD, AND CANNOT BE ONE (backend#2994). Whether a
-# fleet has completed this migration depends on manual DDL — the `ALTER USER` in
-# docs/migration-tools/rotate-mysql-root.md, and the REVOKE/DROP — which the chart
-# cannot observe. `dev: true` is safe to bake only because this gate is additive on
-# a fresh datadir; the same is NOT true of the gates whose defaults would fire a
-# render guard or a 1045 on a fleet whose DDL has not run (see rotateMysqlRootByEnv
-# and bootstrapDbReparentByEnv below).
+# SAFE TO BAKE, unlike rotate/reparent below. This gate is ADDITIVE: turning it on
+# mints tb_credmgr (as edgeuser while re-parent stays off) and injects per-Job
+# credentials, adding the per-experiment path without a render guard or a root-
+# password migration. So baking it fires no #2879 guard and no 1045 on an existing
+# fleet whose manual DDL has not run — which is exactly why rotateMysqlRootByEnv and
+# bootstrapDbReparentByEnv below CANNOT be baked the same way (backend#2994).
 #
-# So these entries record what a NEW install of that environment should get, not
-# where existing fleets are. Per-fleet state lives in each edge's stored release
-# values and in the migration ticket for that fleet; do not read a `false` here as
-# "that environment is behind".
+# THE DEFAULT IS STILL NOT A POSTURE RECORD (backend#2994): it records what a NEW
+# install of that environment should get, not where existing fleets are. Per-fleet
+# migration state lives in each edge's stored release values and its migration
+# ticket; do not read this as a claim that every existing edge is already there.
 perExperimentDbCredsByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 
 # Narrow edgeuser to USAGE only at every jobs-manager boot (backend#1528 S3
 # close-out). mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser
@@ -1842,9 +1842,9 @@ credmgrPassword: ""
 # generated Secret below (SERVICE_DB_ACCOUNTS). Additive: nothing consumes them
 # until the S2 consumer switch, so a default install is byte-identical.
 #
-# Flip per environment, dev first. ON for dev and stg, off for prod (see
-# serviceDbAccountsByEnv below) — where it is off, behaviour is today's
-# shared-edgeuser path, byte-for-byte. Needs no per-edge action — the passwords are
+# Flipped per environment, dev first; now ON for dev, stg and prod (see
+# serviceDbAccountsByEnv below) — where an operator overrides it off, behaviour is
+# the old shared-edgeuser path, byte-for-byte. Needs no per-edge action — the passwords are
 # generated, upgrade-stable Secret values.
 # UNSET by default: the effective value comes from `serviceDbAccountsByEnv`
 # below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
@@ -1876,21 +1876,25 @@ serviceDbAccounts:
 # per-Job credentials, so this is what makes them work again — and it exercises
 # #1528's S2 path where it is supposed to be exercised, before prod.
 #
-# prod: FALSE — for NEW prod installs, whose ingestor is `prodDigest` (v0.8.2,
-# which still has the edgeuser fallback; the safe set is v0.8.0…v0.8.4 and v0.8.8
-# is the first release that dropped it). Flipping a prod fleet stays a separate
-# windowed decision, and it must happen BEFORE that fleet's ingestor is repinned
-# past 0.8.2 — see the note on `prodDigest`.
+# prod: TRUE. Staging and prod both completed the full rollout and DROPped
+# edgeuser (backend#2776 2026-08-31, backend#2800 2026-09-01), so the retired
+# posture is a thing to bake: a fresh prod install (or a values-reset) comes up
+# on the per-Job tb_meta/tb_ingest identities rather than relying on the operator
+# override the live edges carry (backend#2994 on why a default cannot record
+# per-fleet migration state).
 #
-# This `false` does NOT mean prod is behind. Edge 713 completed the whole rollout
-# on 2026-09-01 (backend#2800): flipped, repinned to 0.8.16 via the per-edge
-# `images.ingestor.digest`, root rotated, edgeuser DROPped. It carries the flip as
-# a user-supplied value, which is what survives auto-upgrades — see backend#2994
-# on why a chart default cannot record per-fleet migration state.
+# Flipping serviceDbAccounts ON is the SAFE direction of the ingestor coupling.
+# The danger is repinning a fleet's ingestor PAST 0.8.2 — where the edgeuser
+# fallback is gone (v0.8.8 first dropped it; safe set v0.8.0…v0.8.4) — while this
+# is OFF, which strands ingestion with no credential. With it ON, jobs-manager
+# injects DB_USER=tb_ingest into ingestion Jobs, so `prodDigest` (v0.8.2, still in
+# the safe set) keeps working and a later repin past 0.8.2 is safe. On an existing
+# un-migrated edge the mint runs as edgeuser (re-parent stays off by default), so
+# turning this on auto-provisions tb_meta/tb_ingest without a manual step.
 serviceDbAccountsByEnv:
   dev: true
   stg: true
-  prod: false
+  prod: true
 
 # Optional operator pins for the tb_meta / tb_ingest account passwords (each
 # mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist
