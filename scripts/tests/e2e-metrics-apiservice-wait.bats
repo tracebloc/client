@@ -17,9 +17,12 @@
 #  WHAT IS PINNED HERE — the requirement, not one file's wording:
 #    1. Every harness that directly `helm install`s a chart carrying the preflight
 #       calls the wait, and calls it BEFORE its first `helm install`. That is
-#       e2e-seal-check.sh, its secret-ful sibling e2e-full-seal.sh, and
+#       e2e-seal-check.sh, its secret-ful sibling e2e-full-seal.sh,
 #       e2e-auto-upgrade.sh (whose first install is the LAST PUBLISHED chart,
-#       which carries the preflight too). e2e-common.sh's own header records that
+#       which carries the preflight too), and e2e-mysql.sh (which installs THIS
+#       chart directly on the 8.4 engine — backend#3074, added after it shipped an
+#       inline, non-fatal copy of the wait that this list did not yet cover).
+#       e2e-common.sh's own header records that
 #       these copy-pasted bring-up blocks "had to move in lockstep or drift";
 #       dropping the wait from any one of them is exactly that drift, and it
 #       re-opens the race silently. This is the guard for it.
@@ -46,6 +49,7 @@ setup() {
     "$TESTS_DIR/e2e-seal-check.sh"
     "$TESTS_DIR/e2e-full-seal.sh"
     "$TESTS_DIR/e2e-auto-upgrade.sh"
+    "$TESTS_DIR/e2e-mysql.sh"
   )
 }
 
