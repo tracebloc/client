@@ -1,5 +1,5 @@
-# Watch that the GPU node image the installers derive is actually PUBLISHED
-# (backend#3007).
+# Watch that the GPU node image the installers derive is actually PUBLISHED, and that
+# it still resolves to the digest facts.env pins (backend#3007, backend#1867).
 #
 # WHY THIS EXISTS
 # ---------------
@@ -52,13 +52,17 @@ jobs:
       # purpose, so this watch cannot silently stop when a secret rotates (the
       # digest-drift rationale).
       #
-      # Three-state, and both non-green states RED (backend#3007 + backend#1729):
-      #   0 published  -> green
+      # Four-state, and every non-green state RED (backend#3007 + backend#1729 +
+      # backend#1867), each with a DISTINCT message — the original bug's sin was blaming
+      # the wrong cause, so a 404 must never be reported as a network blip, nor drift as
+      # a missing image:
+      #   0 published, digest pin agrees -> green
       #   1 NOT published (404) -> red: a real missing image
-      #   3 CANNOT TELL (unreachable / rate-limited / token failed) -> also red —
-      #     not being able to look is not agreement — but with a DISTINCT message,
-      #     so a 404 is never reported as a network blip or vice versa (the
-      #     original bug's sin was blaming the wrong cause).
+      #   3 CANNOT TELL (unreachable / rate-limited / token failed, or published with no
+      #     readable digest header) -> also red: not being able to look is not agreement
+      #   4 DIGEST PIN DRIFTED -> red: the tag still exists but resolves elsewhere than
+      #     facts.env's K3S_CUDA_DIGEST, which is the ref a Linux GPU install actually
+      #     pulls (backend#1867). Needs a human to re-verify and re-pin.
       - name: Assert the GPU node image tag is published
         run: |
           set +e
@@ -68,6 +72,7 @@ jobs:
           case "$rc" in
             0) exit 0 ;;
             1) echo "::error::GPU node image for the current k3s pin is NOT published (404): GPU installs silently fall back to CPU (backend#3007). Publish it — dispatch build-k3s-cuda.yaml (push=true) from staging or main."; exit 1 ;;
-            3) echo "::error::Could not determine whether the GPU node image is published (registry unreachable / rate-limited / token failed). Reported distinctly from a 404 (backend#3007); failing closed — not being able to look is not agreement (backend#1729)."; exit 1 ;;
+            3) echo "::error::Could not determine whether the GPU node image is published, or which digest its tag resolves to (registry unreachable / rate-limited / token failed / no readable digest header). Reported distinctly from a 404 (backend#3007); failing closed — not being able to look is not agreement (backend#1729)."; exit 1 ;;
+            4) echo "::error::GPU node image DIGEST PIN DRIFTED: the tag resolves to a different digest than facts.env's K3S_CUDA_DIGEST, which is the ref a Linux GPU install pulls (backend#1867). Either the tag was republished (re-verify before re-pinning), or K8S_VERSION/CUDA_TAG were bumped without re-resolving the pin. The job log above names both digests and the re-resolve command."; exit 1 ;;
             *) echo "::error::scripts/check-facts.sh --check-published exited $rc (unexpected)."; exit 1 ;;
           esac

@@ -1287,7 +1287,30 @@ _gpu_node_image() {
     while [[ "$host" == */ ]]; do host="${host%/}"; done
     printf '%s/%s' "$host" "$repo"
   else
-    printf 'ghcr.io/%s' "$repo"
+    # backend#1867: the DEFAULT is an exact ref, not a mutable tag. `repo` still carries
+    # :<tag>, so this emits ghcr.io/tracebloc/k3s-cuda:<tag>@sha256:… — exact for the
+    # pull, with the tag still legible in --image and `docker inspect`. Keeping the
+    # tag is LOAD-BEARING: _node_image_gpu_capable below (and the Windows twin's
+    # Test-NodeImageGpuCapable) fast-path on the substring `k3s-cuda:`, which a
+    # digest-ONLY ref does not contain. Without it a REUSED GPU cluster would be
+    # judged solely by the exact-match tail against `docker inspect …Config.Image`,
+    # and any normalization there reads as "not GPU-capable" — stranding every job
+    # Pending behind a silent CPU fallback, the exact class client#835 fixed.
+    #
+    # Only this branch is pinned. Both branches above are operator-owned refs
+    # (TRACEBLOC_K3S_CUDA_IMAGE, or a mirror copy that legitimately re-pushes under
+    # its own digest), so appending OUR digest to them would break air-gapped installs.
+    #
+    # Empty pin -> the pre-backend#1867 tag-only ref. That is the unit harness (cluster.sh
+    # sourced without common.sh), never a real install: common.sh stamps
+    # TB_K3S_CUDA_DIGEST unconditionally with no env opt-out, and check-facts.sh
+    # --check proves it equals facts.env on every PR. Emitting a malformed `…@` would
+    # fail the pull and be misreported as a GPU-capability problem.
+    if [[ -n "${TB_K3S_CUDA_DIGEST:-}" ]]; then
+      printf 'ghcr.io/%s@%s' "$repo" "$TB_K3S_CUDA_DIGEST"
+    else
+      printf 'ghcr.io/%s' "$repo"
+    fi
   fi
 }
 

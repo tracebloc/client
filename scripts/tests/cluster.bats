@@ -2099,12 +2099,58 @@ k3d-tracebloc-agent-0 agent" passthrough
 # GPU-capable k3s-cuda image; the reuse guard must fall back to CPU on a stock
 # node so jobs aren't stranded; and the native CDI spec must be generated in-node.
 
-@test "_gpu_node_image: default -> ghcr.io/tracebloc/k3s-cuda:<k8s>-cuda-<cuda>" {
+@test "_gpu_node_image: default -> ghcr.io/tracebloc/k3s-cuda:<k8s>-cuda-<cuda>@<digest> (backend#1867)" {
   K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
   unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
   run _gpu_node_image
   [ "$status" -eq 0 ] || return 1
+  [ "$output" = "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04@sha256:1111111111111111111111111111111111111111111111111111111111111111" ] || return 1
+}
+
+# backend#1867, the load-bearing half. The pinned default MUST keep the `k3s-cuda:` substring,
+# because _node_image_gpu_capable fast-paths on exactly that. A digest-ONLY ref
+# (…/k3s-cuda@sha256:…) has no colon after the name, so a reused GPU cluster would be
+# judged only by the exact-match tail against `docker inspect …Config.Image` — and any
+# normalization there reads as "not GPU-capable", stranding jobs Pending behind a silent
+# CPU fallback. Asserted through the real function, not a regex copy of the rule.
+@test "_gpu_node_image: the pinned default is still recognised as GPU-capable (backend#1867)" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY
+  local ref; ref="$(_gpu_node_image)"
+  [[ "$ref" == *"@sha256:"* ]] || { echo "not digest-pinned: $ref"; return 1; }
+  [[ "$ref" == *"k3s-cuda:"* ]] || { echo "lost the k3s-cuda: fast path: $ref"; return 1; }
+  _node_image_gpu_capable "$ref" || { echo "pinned default judged NOT GPU-capable: $ref"; return 1; }
+}
+
+# The operator-owned refs are deliberately NOT pinned: a mirror or a renamed copy
+# legitimately carries its own digest, and appending ours would break air-gapped
+# installs. (backend#1867)
+@test "_gpu_node_image: the digest pin is NOT appended to a mirror or an override (backend#1867)" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  TB_K3S_CUDA_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  unset TRACEBLOC_K3S_CUDA_IMAGE
+  TRACEBLOC_IMAGE_REGISTRY="https://mirror.corp.example"
+  run _gpu_node_image
+  [ "$output" = "mirror.corp.example/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
+  unset TRACEBLOC_IMAGE_REGISTRY
+  TRACEBLOC_K3S_CUDA_IMAGE="registry.internal/team/k3s-gpu:v1"
+  run _gpu_node_image
+  [ "$output" = "registry.internal/team/k3s-gpu:v1" ] || return 1
+}
+
+# An unset pin degrades to the pre-backend#1867 tag-only ref rather than emitting a malformed
+# `…@`. That path is the unit harness (cluster.sh sourced without common.sh), never a
+# real install: common.sh stamps TB_K3S_CUDA_DIGEST with no env opt-out and
+# check-facts.sh --check proves it equals facts.env on every PR. Pinned here so the
+# degradation stays deliberate and visible instead of becoming the tested default.
+@test "_gpu_node_image: an unset pin degrades to the tag-only ref, never a trailing @ (backend#1867)" {
+  K8S_VERSION="v1.36.3-k3s1"; TB_CUDA_BASE_TAG="12.4.1-base-ubuntu22.04"
+  unset TRACEBLOC_K3S_CUDA_IMAGE TRACEBLOC_IMAGE_REGISTRY TB_K3S_CUDA_DIGEST
+  run _gpu_node_image
   [ "$output" = "ghcr.io/tracebloc/k3s-cuda:v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04" ] || return 1
+  [[ "$output" != *"@" ]] || { echo "malformed ref: $output"; return 1; }
 }
 
 @test "_gpu_node_image: TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref" {

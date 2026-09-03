@@ -85,11 +85,25 @@ _spec_get() {
 #  never a second copy of the tag — and HEADs the manifest on ghcr.io. THREE
 #  outcomes, kept distinct on purpose (the original bug's sin was blaming the wrong
 #  cause — a 404 reported as an access/creds/network problem, downgrading to CPU):
-#    published  (HTTP 2xx) -> exit 0
+#    published, pin agrees -> exit 0
 #    NOT published (404)   -> exit 1   a real, missing image (hard finding)
 #    CANNOT TELL           -> exit 3   registry unreachable / anon token failed /
 #                                      5xx / 429 / 401 — we could not look; this is
 #                                      NOT a 404 and must never be reported as one.
+#                                      ALSO: published but no readable digest header —
+#                                      not knowing which digest a tag resolves to is
+#                                      not evidence that the pin agrees.
+#    pin DRIFTED           -> exit 4   published, but the tag resolves to a DIFFERENT
+#                                      digest than facts.env's K3S_CUDA_DIGEST (backend#1867).
+#                                      Distinct from 1 and 3 because the human action
+#                                      differs: re-resolve the pin (or find out who
+#                                      republished the tag), not "publish the image".
+#
+#  The digest half exists because backend#1867 made the DEFAULT install ref tag@digest. The
+#  tag stays mutable, so the pin is a trust decision with a moving label pointing at
+#  it — the same disease check-digest-drift.sh watches for the chart's images, and the
+#  reason this check, not a second script, owns it: the ref is already derived here
+#  from facts.env, once.
 #
 #  Network, but no secrets (anonymous pull token — a public read). Deliberately
 #  NOT in --check / make drift: that gate is hermetic and REQUIRED on every PR,
@@ -131,19 +145,21 @@ _gpu_image_ref() {
 # DRIFT_RESOLVE_STUB): a file of  <ref><0x1f><status>  lines that REPLACES the
 # network, so the bats suite can drive all three classifications offline — and
 # prove the ref is derived correctly, since only the exact derived ref matches.
-_manifest_http_status() {
+_manifest_probe() {
   local ref="$1"
   if [[ -n "${TB_REGISTRY_PROBE_STUB:-}" ]]; then
     [[ -r "$TB_REGISTRY_PROBE_STUB" ]] || { echo "check-facts: TB_REGISTRY_PROBE_STUB set but unreadable: $TB_REGISTRY_PROBE_STUB" >&2; exit 2; }
-    # Capture whole, take the first field with parameter expansion — same
-    # SIGPIPE-avoidance discipline as _spec_get / _extract above.
-    local all st
-    all="$(awk -F"$(printf '\037')" -v want="$ref" '$1 == want { print $2; exit }' "$TB_REGISTRY_PROBE_STUB")"
-    st="${all%%$'\n'*}"
-    printf '%s' "${st:-000}"
+    # Capture whole, split with parameter expansion — same SIGPIPE-avoidance
+    # discipline as _spec_get / _extract above.
+    local all st dg
+    all="$(awk -F"$(printf '\037')" -v want="$ref" '$1 == want { printf "%s\037%s", $2, $3; exit }' "$TB_REGISTRY_PROBE_STUB")"
+    all="${all%%$'\n'*}"
+    st="${all%%$'\037'*}"
+    dg="${all#*$'\037'}"
+    printf '%s\037%s' "${st:-000}" "$dg"
     return 0
   fi
-  local host rest repo tag base token status accept
+  local host rest repo tag base token accept out status digest
   host="${ref%%/*}"          # ghcr.io
   rest="${ref#*/}"           # tracebloc/k3s-cuda:<tag>
   repo="${rest%:*}"          # tracebloc/k3s-cuda
@@ -155,25 +171,44 @@ _manifest_http_status() {
   token="$(curl -fsS --tlsv1.2 --connect-timeout 15 --max-time 30 \
              "${base}/token?scope=repository:${repo}:pull" 2>/dev/null || true)"
   token="$(printf '%s' "$token" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
-  [[ -n "$token" ]] || { printf '000'; return 0; }
-  # A real HEAD (--head): a manifest existence check needs no body, and ghcr
-  # answers HEAD with the same 200/404 as GET. -w prints the code, and curl itself
-  # prints 000 on a connection failure, so both "reached and got a code" and "could
-  # not reach" collapse to a single value the caller classifies. NO --fail: a 404
-  # is data, not an error.
-  status="$(curl -sS --head -o /dev/null -w '%{http_code}' --tlsv1.2 --connect-timeout 15 --max-time 30 \
+  [[ -n "$token" ]] || { printf '000\037'; return 0; }
+  # A real HEAD (--head): a manifest existence check needs no body, and ghcr answers
+  # HEAD with the same 200/404 as GET. NO --fail: a 404 is data, not an error.
+  #
+  # -D - dumps the response HEADERS to stdout (where the digest lives, as
+  # Docker-Content-Digest) while -o /dev/null discards the body --head would otherwise
+  # write there, and -w appends the status to the same capture. One request, both
+  # answers: a separate digest prober would need its own copy of the parsing above and
+  # of the token dance, and that second copy is the defect, not the fix.
+  out="$(curl -sS --head -D - -o /dev/null -w '\ntb_http_code=%{http_code}\n' --tlsv1.2 --connect-timeout 15 --max-time 30 \
               -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
               "${base}/v2/${repo}/manifests/${tag}" 2>/dev/null || true)"
-  printf '%s' "${status:-000}"
+  # curl itself prints 000 on a connection failure, so "reached and got a code" and
+  # "could not reach" collapse to one value the caller classifies.
+  status="$(printf '%s' "$out" | sed -n 's/^tb_http_code=\([0-9][0-9]*\)$/\1/p')"
+  status="${status%%$'\n'*}"
+  # Header names are case-insensitive (RFC 9110) and registries differ in spelling, so
+  # match both; the trailing .* absorbs the CR of the CRLF line ending. A header we
+  # cannot read leaves this EMPTY, which the caller reports as CANNOT TELL — not
+  # knowing the digest is not evidence that the pin agrees.
+  digest="$(printf '%s' "$out" | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\).*/\1/p')"
+  digest="${digest%%$'\n'*}"
+  printf '%s\037%s' "${status:-000}" "$digest"
 }
 
 _run_check_published() {
-  local ref status attempt
+  local ref probe status digest pin attempt
   # `|| return $?` for the same reason _gpu_image_ref uses `|| exit $?`: propagate a
   # spec error (2) or an unreadable-stub error (2) instead of trusting errexit to
   # abort a failing command-sub assignment.
   ref="$(_gpu_image_ref)" || return $?
-  status="$(_manifest_http_status "$ref")" || return $?
+  # The pin is read the same way the ref is derived: from the spec, once. _spec_get
+  # exits 2 on a missing key, so a spec without K3S_CUDA_DIGEST fails CLOSED here
+  # rather than comparing against an empty string — which every digest differs from,
+  # reporting drift when the real fault is the declaration.
+  pin="$(_spec_get K3S_CUDA_DIGEST)" || return $?
+  probe="$(_manifest_probe "$ref")" || return $?
+  status="${probe%%$'\037'*}"; digest="${probe#*$'\037'}"
   # Retry ONLY a transient "cannot tell", never a clean 404/2xx, so a single ghcr
   # blip does not turn the daily watch red. The stub path is deterministic and is
   # skipped here, so tests never sleep or loop.
@@ -181,13 +216,44 @@ _run_check_published() {
     attempt=1
     while [[ "$status" != 2?? && "$status" != 404 && "$attempt" -lt 3 ]]; do
       sleep 2
-      status="$(_manifest_http_status "$ref")"
+      probe="$(_manifest_probe "$ref")"
+      status="${probe%%$'\037'*}"; digest="${probe#*$'\037'}"
       attempt=$(( attempt + 1 ))
     done
   fi
   case "$status" in
     2??)
-      echo "check-facts: GPU node image is published: ${ref} (HTTP ${status})."
+      # Published. Now the backend#1867 half: the DEFAULT install ref is tag@digest, so a tag
+      # that resolves elsewhere means the pin no longer names what this tag builds.
+      if [[ -z "$digest" ]]; then
+        {
+          echo "  ‼ CANNOT TELL which digest ${ref} resolves to (HTTP ${status}, but no readable Docker-Content-Digest)."
+          echo ""
+          echo "check-facts: the tag exists, but the registry returned no digest we could parse, so the"
+          echo "             K3S_CUDA_DIGEST pin could not be compared. Reported as CANNOT TELL, NOT as"
+          echo "             agreement and NOT as drift — an unreadable digest is evidence of neither"
+          echo "             (backend#1867)."
+        } >&2
+        return 3
+      fi
+      if [[ "$digest" != "$pin" ]]; then
+        {
+          echo "  ✖ GPU node image DIGEST PIN DRIFTED for ${ref} (HTTP ${status})."
+          echo "      tag now resolves to: ${digest}"
+          echo "      facts.env pins:      ${pin}"
+          echo ""
+          echo "check-facts: the default GPU node ref is tag@digest, so a Linux GPU install pulls the"
+          echo "             PINNED digest — which is no longer what this tag builds. Two causes, both"
+          echo "             needing a human: the tag was republished (someone rebuilt it — re-verify"
+          echo "             before re-pinning), or K8S_VERSION/CUDA_TAG were bumped without"
+          echo "             re-resolving the pin, in which case installs pull an image built for the"
+          echo "             OLD k3s. Re-resolve with:"
+          echo "               docker buildx imagetools inspect ${ref} --format '{{json .Manifest.Digest}}'"
+          echo "             then update K3S_CUDA_DIGEST in scripts/spec/facts.env and run --write."
+        } >&2
+        return 4
+      fi
+      echo "check-facts: GPU node image is published and the digest pin matches: ${ref}@${digest} (HTTP ${status})."
       return 0
       ;;
     404)
@@ -245,9 +311,10 @@ FACT_NAMES=(
   "k3s-cuda/Dockerfile:CUDA_TAG"
   "k3s-cuda/build.sh:CUDA_TAG"
   "build-k3s-cuda.yaml:cuda_tag"
+  "common.sh:K3S_CUDA_DIGEST"
 )
-FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$HELM_LIB" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$COMMON" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" )
-FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT METRICS_WAIT_TIMEOUT METRICS_WAIT_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG )
+FACT_FILES=( "$COMMON" "$COMMON" "$COMMON" "$COMMON" "$PS1" "$PS1" "$PS1" "$PS1" "$SUMMARY" "$PS1" "$HELM_LIB" "$PS1" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$PS1" "$COMMON" "$CUDA_DOCKERFILE" "$CUDA_BUILD" "$CUDA_WORKFLOW" "$COMMON" )
+FACT_KEYS=( K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION K3D_VERSION HELM_VERSION K8S_VERSION K8S_VERSION READY_TIMEOUT READY_TIMEOUT METRICS_WAIT_TIMEOUT METRICS_WAIT_TIMEOUT K8S_VERSION K8S_VERSION K8S_VERSION CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG CUDA_TAG K3S_CUDA_DIGEST )
 FACT_EXTRACT=(
   's/^K3D_VERSION="\${K3D_VERSION:-\(.*\)}".*/\1/p'
   's/^HELM_VERSION="\${HELM_VERSION:-\(.*\)}".*/\1/p'
@@ -269,6 +336,7 @@ FACT_EXTRACT=(
   's/^ARG CUDA_TAG="\(.*\)".*/\1/p'
   's/^CUDA_TAG="\${CUDA_TAG:-\(.*\)}".*/\1/p'
   's/^ *default: "\([0-9][^"]*ubuntu[^"]*\)".*/\1/p'
+  's/^TB_K3S_CUDA_DIGEST="\(.*\)"$/\1/p'
 )
 # For --write: an sed program that substitutes the OLD value with @@VAL@@ (replaced with
 # the spec value below). Anchored the same way as the extractor so only the pinned token
@@ -294,6 +362,7 @@ FACT_REWRITE=(
   's|^\(ARG CUDA_TAG="\)[^"]*\("\)|\1@@VAL@@\2|'
   's|^\(CUDA_TAG="${CUDA_TAG:-\)[^}]*\(}"\)|\1@@VAL@@\2|'
   's|\(default: "\)[0-9][^"]*ubuntu[^"]*\("\)|\1@@VAL@@\2|'
+  's|^\(TB_K3S_CUDA_DIGEST="\)[^"]*\("\)|\1@@VAL@@\2|'
 )
 
 # Capture whole, then take the first line with `%%$'\n'*` — NOT `… | head -1`, which

@@ -67,7 +67,9 @@ the k3d cluster with `--image <this image> --gpus=all` (instead of
 `rancher/k3s:<K8S_VERSION>`) and set `RUNTIME_CLASS_NAME=nvidia` so every spawned
 training pod runs under the `nvidia` RuntimeClass:
 
-* **Linux** — `scripts/lib/cluster.sh` (`_gpu_node_image` derives the pull ref;
+* **Linux** — `scripts/lib/cluster.sh` (`_gpu_node_image` derives the pull ref —
+  digest-pinned by default since backend#1867, though an operator's
+  `TRACEBLOC_K3S_CUDA_IMAGE` / `TRACEBLOC_IMAGE_REGISTRY` ref is left as given;
   `_create_new_cluster` swaps the image; `_generate_node_cdi_specs` writes the CDI
   spec; the reuse guard falls back to CPU on a stock node).
 * **Windows/WSL2** — `scripts/install-k8s.ps1` (builds this image locally from the
@@ -123,5 +125,26 @@ Or run the **build-k3s-cuda** GitHub workflow (manual `workflow_dispatch`; set
 
 `K3S_TAG` **must** equal the installer's `K8S_VERSION`
 (`scripts/lib/common.sh`). The image tag encodes both the k3s pin and the CUDA
-base — e.g. `v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04` — so a new k8s pin can
-never silently reuse a stale GPU image. Bump both together.
+base — e.g. `v1.36.3-k3s1-cuda-12.4.1-base-ubuntu22.04`. All of these live in
+`scripts/spec/facts.env`; `scripts/check-facts.sh --write` stamps them.
+
+**Three values move together: `K8S_VERSION`, `CUDA_TAG`, and `K3S_CUDA_DIGEST`.**
+The encoded tag means a new k8s pin cannot reuse an image built for a *different*
+k8s — but it does NOT stop it reusing a **stale or republished** one, and the tag
+alone never did:
+
+* the derived tag may simply not exist yet, because this image is built only on
+  `workflow_dispatch` while the k3s pin moves on ordinary PRs. That is backend#3007:
+  the pin moved 17 days ahead of the last build, every GPU install derived a 404,
+  and the installer read the failed pull as a GPU-capability problem and fell back
+  to CPU silently.
+* the tag is **mutable**, so a rebuild republishes it. Since backend#1867 the Linux
+  default ref is therefore `tag@digest`, pinned by `K3S_CUDA_DIGEST` — an exact ref
+  for the pull, with the tag kept in it so the `k3s-cuda:` GPU-capability check
+  still matches.
+
+Both holes are watched by `scripts/check-facts.sh --check-published`, out-of-band
+(`.github/workflows/k3s-cuda-published.yml`), which asks the registry whether the
+derived tag exists *and* whether it still resolves to the pinned digest. Bumping
+`K8S_VERSION` or `CUDA_TAG` without re-resolving the digest is exactly what it
+catches (exit 4) — `--check` cannot, because every declaration still agrees.
