@@ -728,7 +728,16 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- else -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.bootstrapDbReparentByEnv -}}
-{{- if and (get $byEnv $env) (include "tracebloc.bakedRootRotationOn" .) }}true{{ end -}}
+{{- /* Baked reparent follows rotate's RESOLVED value, not bakedRootRotationOn
+       directly: reparent derives DB_BOOTSTRAP_PASSWORD from the rotation
+       (backend#2738), so it must be on iff rotate is on. Gating on
+       bakedRootRotationOn alone left reparent baked-on when an operator explicitly
+       set rotateMysqlRoot=false on an already-rotated edge (Secret still holds
+       MYSQL_ROOT_PASSWORD), and reparent then hard-failed the render with no
+       password to derive -- caught by the k3d auto-upgrade e2e's rotation-off
+       restore. Following the resolved rotate value keeps them in lockstep in every
+       case: fresh->on, blind/un-rotated->off, and explicit rotate-off->off. */ -}}
+{{- if and (get $byEnv $env) (include "tracebloc.rotateMysqlRoot" .) }}true{{ end -}}
 {{- end -}}
 {{- end }}
 
