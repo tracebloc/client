@@ -177,7 +177,7 @@ for good in 0 60 86400 off false no OFF False; do
   expect_render "MULTI_GPU_LEASE_SECONDS=$good" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS=$good"
 done
 expect_render_without "MULTI_GPU_LEASE_SECONDS=''" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS="
-for bad in 1h 60s -1 3.5 on true yes disabled; do
+for bad in 1h 60s -1 3.5 on true yes disabled 00 007; do
   expect_reject "MULTI_GPU_LEASE_SECONDS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_LEASE_SECONDS=$bad"
 done
 

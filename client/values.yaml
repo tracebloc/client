@@ -187,7 +187,11 @@ env: {
   #    cap, so one run cannot hold N GPUs indefinitely; single-GPU and CPU runs
   #    keep today's "bias toward NOT killing". Default inside jobs-manager is
   #    86400 (one day) when this key is UNSET. Digits = seconds; "0", "off",
-  #    "false", "no" DISABLE the lease. RENDERED ONLY WHEN SET, like the two
+  #    "false", "no" DISABLE the lease -- note "off" disables HERE but is
+  #    refused for the TRACEBLOC_*/EMIT_* switches above: each key mirrors its
+  #    own reader's vocabulary and both fail loudly, so do not learn one from
+  #    the other. "00" is refused: it is not in the runtime's falsy set and
+  #    would silently become the default. RENDERED ONLY WHEN SET, like the two
   #    switches above -- an unconditional default here would switch the lease
   #    off fleet-wide, silently, because an empty value is how the runtime reads
   #    "disabled". The schema closes the vocabulary so a typo is refused at
