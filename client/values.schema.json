@@ -83,7 +83,7 @@
         },
         "GPU_VISIBLE_DEVICES": {
           "type": "string",
-          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (Docker Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED \u2014 tracebloc/client#616; the Windows installer sets it automatically there). Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
+          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (Docker Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED — tracebloc/client#616; the Windows installer sets it automatically there). Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
         },
         "SINGLE_NODE": {
           "type": "string",
@@ -138,7 +138,7 @@
                 "resources": {
                   "type": "object",
                   "additionalProperties": false,
-                  "description": "Device-plugin pod resources. ONE cpu/memory pair, applied to BOTH requests and limits, because the pod must be Guaranteed QoS (backend#2871): if it is OOM-killed the node stops advertising its GPU resource and every GPU training pod on it goes Pending. A separate requests/limits shape is deliberately NOT expressible here \u2014 that is how Guaranteed gets lost by accident. system-node-critical does not cover this; it ranks preemption, not the kernel's oom_score_adj.",
+                  "description": "Device-plugin pod resources. ONE cpu/memory pair, applied to BOTH requests and limits, because the pod must be Guaranteed QoS (backend#2871): if it is OOM-killed the node stops advertising its GPU resource and every GPU training pod on it goes Pending. A separate requests/limits shape is deliberately NOT expressible here — that is how Guaranteed gets lost by accident. system-node-critical does not cover this; it ranks preemption, not the kernel's oom_score_adj.",
                   "properties": {
                     "cpu": {
                       "type": "string",
@@ -173,7 +173,7 @@
                 "resources": {
                   "type": "object",
                   "additionalProperties": false,
-                  "description": "Device-plugin pod resources. ONE cpu/memory pair, applied to BOTH requests and limits, because the pod must be Guaranteed QoS (backend#2871): if it is OOM-killed the node stops advertising its GPU resource and every GPU training pod on it goes Pending. A separate requests/limits shape is deliberately NOT expressible here \u2014 that is how Guaranteed gets lost by accident. system-node-critical does not cover this; it ranks preemption, not the kernel's oom_score_adj.",
+                  "description": "Device-plugin pod resources. ONE cpu/memory pair, applied to BOTH requests and limits, because the pod must be Guaranteed QoS (backend#2871): if it is OOM-killed the node stops advertising its GPU resource and every GPU training pod on it goes Pending. A separate requests/limits shape is deliberately NOT expressible here — that is how Guaranteed gets lost by accident. system-node-critical does not cover this; it ranks preemption, not the kernel's oom_score_adj.",
                   "properties": {
                     "cpu": {
                       "type": "string",
@@ -415,11 +415,11 @@
             "allowExternalHttps": {
               "type": "boolean",
               "default": false,
-              "description": "When false (the default, RFC-0003 D6), drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY \u00a78.2 / client-runtime#102). Set true to opt a fleet back out to direct egress. An absent key on a `--reuse-values` upgrade from a release predating it keeps the old permissive behaviour."
+              "description": "When false (the default, RFC-0003 D6), drop the 0.0.0.0/0:443 egress rule so training pods reach only DNS, MySQL, requests-proxy and the egress gateway (SECURITY §8.2 / client-runtime#102). Set true to opt a fleet back out to direct egress. An absent key on a `--reuse-values` upgrade from a release predating it keeps the old permissive behaviour."
             },
             "enforcementProbeHost": {
               "type": "string",
-              "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) \u2014 client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
+              "description": "Host the `helm test` enforcement check curls directly (when allowExternalHttps=false) to verify the CNI blocks egress; non-enforcement fails the test (a test hook never affects install/upgrade) — client-runtime#104. Empty string disables it (e.g. air-gapped clusters)."
             },
             "enforcementProbeTimeoutSeconds": {
               "type": "integer",
@@ -441,7 +441,7 @@
             },
             "clusterCidrs": {
               "type": "array",
-              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs. Must be non-empty when networkPolicy.training.enabled is true \u2014 an empty list renders `except: null` and Kubernetes treats that as no exceptions, silently allowing unrestricted in-cluster egress.",
+              "description": "In-cluster pod+service CIDRs to block pod-to-pod egress on port 443. Override to match your cluster CIDRs. Must be non-empty when networkPolicy.training.enabled is true — an empty list renders `except: null` and Kubernetes treats that as no exceptions, silently allowing unrestricted in-cluster egress.",
               "items": {
                 "type": "string",
                 "pattern": "^[0-9.]+/[0-9]+$"
@@ -488,7 +488,7 @@
     },
     "perExperimentDbCredsByEnv": {
       "type": "object",
-      "description": "Per-environment default for the RFC-0003 D10 per-experiment credential mint (backend#1528), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Every other gate in this rollout had one of these; without it, the flag the ticket's LAST step is gated on was the only one whose fleet posture the chart could not record \u2014 so a values-resetting upgrade silently put the account mint back on edgeuser.",
+      "description": "Per-environment default for the RFC-0003 D10 per-experiment credential mint (backend#1528), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Every other gate in this rollout had one of these; without it, the flag the ticket's LAST step is gated on was the only one whose fleet posture the chart could not record — so a values-resetting upgrade silently put the account mint back on edgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -498,11 +498,11 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#1528 S3 close-out: REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag \u2014 it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists \u2014 so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH ALL THREE PREDECESSORS ON (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds), and that pairing is ENFORCED rather than documented \u2014 the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from narrowEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#1528 S3 close-out: REVOKE the root-equivalent edgeuser to USAGE only at every jobs-manager boot, so a fleet that completed the retirement STAYS retired. mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser its broad privileges at every FRESH datadir init and cannot branch on a runtime flag — it is baked into a digest-frozen image and the mysql entrypoint runs it before jobs-manager exists — so without this a reinstall or a datadir loss silently hands the fleet a root-equivalent account again. It REVOKEs, never DROPs: the account keeps existing with USAGE only, reversible from the S0 SHOW GRANTS snapshot, and DROP USER stays an operator step. ONLY LEGAL WITH ALL THREE PREDECESSORS ON (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds), and that pairing is ENFORCED rather than documented — the render FAILS on a mis-paired combination and jobs-manager refuses it again at startup. Verify a fleet with docs/migration-tools/edgeuser-drop-readiness.sh before flipping it."
     },
     "narrowEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, false for stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- dev's is, so a fresh dev install comes up already retired. Flipping it where any predecessor gate is off fails the render \u2014 see narrowEdgeuser.",
+      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, false for stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- dev's is, so a fresh dev install comes up already retired. Flipping it where any predecessor gate is off fails the render — see narrowEdgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -535,7 +535,7 @@
     },
     "bootstrapDbPassword": {
       "type": "string",
-      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on \u2014 the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the mysql-client image's baked root password (see backend#947 for the value and its rotated replacement). NOT constrained to alphanumeric \u2014 never interpolated into DDL, only a connection parameter."
+      "description": "backend#1528 S3: REQUIRED when bootstrapDbReparent resolves on — the password jobs-manager authenticates with as MySQL root to run the mint DDL. NO generated default (2-tier: operator pin -> existing Secret value -> Helm fails): jobs-manager authenticates as root and never runs ALTER USER root, so a random value would lock the minter out and CrashLoop it. Set to the mysql-client image's baked root password (see backend#947 for the value and its rotated replacement). NOT constrained to alphanumeric — never interpolated into DDL, only a connection parameter."
     },
     "rotateMysqlRoot": {
       "type": [
@@ -546,14 +546,14 @@
     },
     "mysqlRootPassword": {
       "type": "string",
-      "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. Must be alphanumeric ([A-Za-z0-9]+) \u2014 the rotation runbook embeds it in an ALTER USER ... IDENTIFIED BY '...' statement, so metacharacters would break the one-time rotation (generated randAlphaNum already satisfies this). Constrained where bootstrapDbPassword is not: that is only a connection parameter, this also lands in DDL."
+      "description": "backend#947: optional operator pin for the mysql-client root password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist when rotateMysqlRoot is on. Set for DR or to match a root account rotated out-of-band. Must be alphanumeric ([A-Za-z0-9]+) — the rotation runbook embeds it in an ALTER USER ... IDENTIFIED BY '...' statement, so metacharacters would break the one-time rotation (generated randAlphaNum already satisfies this). Constrained where bootstrapDbPassword is not: that is only a connection parameter, this also lands in DDL."
     },
     "mysqlRootRotationAcknowledged": {
       "type": [
         "boolean",
         "null"
       ],
-      "description": "backend#2879: acknowledge the manual root-rotation migration on an EXISTING fleet. Normally unset. When rotateMysqlRoot resolves on and the chart would MINT (no mysqlRootPassword pin, no MYSQL_ROOT_PASSWORD in the live Secret), the render FAILS at template time naming docs/migration-tools/rotate-mysql-root.md unless this is true \u2014 because the mysql entrypoint honours MYSQL_ROOT_PASSWORD only at fresh-datadir init, so root would otherwise authenticate with neither value (helm reports success; jobs-manager CrashLoops on 1045). It clears ALL of the guard's refuse arms: the datadir PVC exists (lookup), mysqlDatadirExists is declared, or (backend#2892, fail-closed) the render cannot see a cluster at all. Set true ONLY as part of that runbook: it asserts you will run the one-time ALTER USER 'root' DDL in the same window; it runs no DDL itself. Self-expiring ONLY on a live/server-side render \u2014 once rotated, tier 2 (a live lookup of the Secret) preserves the value and the mint is never reached again. On a CLUSTER-LESS render tier 2 is empty every render, so it does NOT self-expire there: rotating a cluster-less fleet on the ack alone leaves it permanently set and permanently disarms the guard (and it replays through --reuse-values / --reset-then-reuse-values), so pin mysqlRootPassword or render server-side instead. A FRESH install on a live cluster never needs it."
+      "description": "backend#2879: acknowledge the manual root-rotation migration on an EXISTING fleet. Normally unset. When rotateMysqlRoot resolves on and the chart would MINT (no mysqlRootPassword pin, no MYSQL_ROOT_PASSWORD in the live Secret), the render FAILS at template time naming docs/migration-tools/rotate-mysql-root.md unless this is true — because the mysql entrypoint honours MYSQL_ROOT_PASSWORD only at fresh-datadir init, so root would otherwise authenticate with neither value (helm reports success; jobs-manager CrashLoops on 1045). It clears ALL of the guard's refuse arms: the datadir PVC exists (lookup), mysqlDatadirExists is declared, or (backend#2892, fail-closed) the render cannot see a cluster at all. Set true ONLY as part of that runbook: it asserts you will run the one-time ALTER USER 'root' DDL in the same window; it runs no DDL itself. Self-expiring ONLY on a live/server-side render — once rotated, tier 2 (a live lookup of the Secret) preserves the value and the mint is never reached again. On a CLUSTER-LESS render tier 2 is empty every render, so it does NOT self-expire there: rotating a cluster-less fleet on the ack alone leaves it permanently set and permanently disarms the guard (and it replays through --reuse-values / --reset-then-reuse-values), so pin mysqlRootPassword or render server-side instead. A FRESH install on a live cluster never needs it."
     },
     "mysqlDatadirExists": {
       "type": [
@@ -568,7 +568,7 @@
     },
     "perDatasetPvcs": {
       "type": "boolean",
-      "description": "RFC-0003 D9 Track B (client-runtime#203/#261): stamp PER_DATASET_PVCS=1 into jobs-manager \u2014 training pods get one read-only hostPath PV/PVC per dataset handle instead of a subPath view of the shared PVC. Single-node/hostPath clusters only; requires clusterScope (PVs are cluster-scoped)."
+      "description": "RFC-0003 D9 Track B (client-runtime#203/#261): stamp PER_DATASET_PVCS=1 into jobs-manager — training pods get one read-only hostPath PV/PVC per dataset handle instead of a subPath view of the shared PVC. Single-node/hostPath clusters only; requires clusterScope (PVs are cluster-scoped)."
     },
     "ingestionAuthz": {
       "type": "object",
@@ -619,11 +619,11 @@
     },
     "sealCheck": {
       "type": "object",
-      "description": "Seal check \u2014 the chart's conformance suite (RFC-0003 \u00a78.2 / backend#1184). Every check is a `helm test` hook Job labelled tracebloc.io/seal-check=true + tracebloc.io/seal-check-name=<check> (the enumeration contract the tracebloc CLI consumes, cli#393). See docs/SEAL-CHECK.md.",
+      "description": "Seal check — the chart's conformance suite (RFC-0003 §8.2 / backend#1184). Every check is a `helm test` hook Job labelled tracebloc.io/seal-check=true + tracebloc.io/seal-check-name=<check> (the enumeration contract the tracebloc CLI consumes, cli#393). See docs/SEAL-CHECK.md.",
       "properties": {
         "storageAssertions": {
           "type": "object",
-          "description": "In-cluster storage assertions: release PVCs Bound on the expected StorageClass; in dynamic-PVC mode (hostPath.enabled=false) no release PVC backed by a hostPath PV on an unmanaged host tree (leftover chart hostPath PVs capture claims via claimRef \u2014 RFC-0003 D3/D4).",
+          "description": "In-cluster storage assertions: release PVCs Bound on the expected StorageClass; in dynamic-PVC mode (hostPath.enabled=false) no release PVC backed by a hostPath PV on an unmanaged host tree (leftover chart hostPath PVs capture claims via claimRef — RFC-0003 D3/D4).",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -641,7 +641,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/\u2026; upstream local-path-provisioner: /opt/local-path-provisioner/). Entries match whole path segments (trailing slash optional) \u2014 a prefix admits itself and paths under it, never sibling paths. Any other hostPath backing fails the check."
+              "description": "hostPath prefixes accepted as provisioner-managed node-local storage in dynamic mode (k3s local-path: /var/lib/rancher/…; upstream local-path-provisioner: /opt/local-path-provisioner/). Entries match whole path segments (trailing slash optional) — a prefix admits itself and paths under it, never sibling paths. Any other hostPath backing fails the check."
             },
             "image": {
               "type": "object",
@@ -675,7 +675,7 @@
     },
     "egressProxy": {
       "type": "object",
-      "description": "In-cluster squid egress gateway (SECURITY \u00a78.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
+      "description": "In-cluster squid egress gateway (SECURITY §8.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -805,7 +805,7 @@
         },
         "ingestor": {
           "type": "object",
-          "description": "Image used for spawned ingestion Jobs. jobs-manager resolves one effective digest from these keys (see the tracebloc.ingestorDigest helper) and builds the reference from it (client-runtime submit_ingestion_run): digest set -> repo@digest + IfNotPresent, digest empty -> repo:tag + Always. Prod pins `prodDigest` (a chart default, so a republished pin propagates through the fleet auto-upgrade \u2014 backend#1245); dev/staging float on `tag`, resolving the current published digest at every spawn.",
+          "description": "Image used for spawned ingestion Jobs. jobs-manager resolves one effective digest from these keys (see the tracebloc.ingestorDigest helper) and builds the reference from it (client-runtime submit_ingestion_run): digest set -> repo@digest + IfNotPresent, digest empty -> repo:tag + Always. Prod pins `prodDigest` (a chart default, so a republished pin propagates through the fleet auto-upgrade — backend#1245); dev/staging float on `tag`, resolving the current published digest at every spawn.",
           "properties": {
             "repository": {
               "type": "string",
@@ -817,7 +817,7 @@
               "not": {
                 "const": "latest"
               },
-              "description": "Explicit floating-tag override for the spawned ingestor. EMPTY by default: the effective tag then comes from channelTags[CLIENT_ENV] (backend#1360). `latest` is rejected \u2014 spawn behaviour must not drift. To pin an exact image prefer `digest`, which wins over any tag. Surfaces as INGESTOR_IMAGE_TAG."
+              "description": "Explicit floating-tag override for the spawned ingestor. EMPTY by default: the effective tag then comes from channelTags[CLIENT_ENV] (backend#1360). `latest` is rejected — spawn behaviour must not drift. To pin an exact image prefer `digest`, which wins over any tag. Surfaces as INGESTOR_IMAGE_TAG."
             },
             "channelTags": {
               "type": "object",
@@ -861,7 +861,7 @@
             },
             "ackDrift": {
               "type": "object",
-              "description": "Acknowledged, expected drift for THIS pin (backend#2673). Present only when `prodDigest` is deliberately held behind the `channelTags.prod` float (docs/SECURITY.md \u00a74.1.1). scripts/check-digest-drift.sh then treats the float resolving away from the pin as EXPECTED (job green, printed ACKNOWLEDGED) instead of a finding -- while still re-verifying the pin itself resolves to a healthy multi-arch index, and while ANY OTHER pin drifting still reds. Not consumed by any template; a CI/watch declaration that lives next to the pin and behind CODEOWNERS review. Acknowledge the CLASS, never a specific float digest. Remove this block in the same change that advances the pin off the boundary.",
+              "description": "Acknowledged, expected drift for THIS pin (backend#2673). Present only when `prodDigest` is deliberately held behind the `channelTags.prod` float (docs/SECURITY.md §4.1.1). scripts/check-digest-drift.sh then treats the float resolving away from the pin as EXPECTED (job green, printed ACKNOWLEDGED) instead of a finding -- while still re-verifying the pin itself resolves to a healthy multi-arch index, and while ANY OTHER pin drifting still reds. Not consumed by any template; a CI/watch declaration that lives next to the pin and behind CODEOWNERS review. Acknowledge the CLASS, never a specific float digest. Remove this block in the same change that advances the pin off the boundary.",
               "additionalProperties": false,
               "required": [
                 "line",
@@ -920,6 +920,49 @@
               "pattern": "^(sha256:[a-f0-9]{64})?$"
             }
           }
+        },
+        "training": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES. The chart refuses `capabilities` with an empty `digests`.",
+          "properties": {
+            "pinned": {
+              "enum": [
+                "",
+                "true",
+                "false",
+                true,
+                false
+              ],
+              "description": "\"\" (auto: pin iff CLIENT_ENV resolves to prod), or an explicit true/false override."
+            },
+            "digests": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cpu": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "gpu": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  }
+                }
+              },
+              "description": "task -> arch -> digest. Arch is CLOSED to cpu|gpu (the engine builds exactly Dockerfile.task.cpu / .gpu); task keys are open because the task set is the engine's to declare. Every digest must be canonical sha256:<64 lowercase hex>."
+            },
+            "capabilities": {
+              "type": "string",
+              "pattern": "^([a-z][a-z0-9_-]*(,[a-z][a-z0-9_-]*)*)?$",
+              "description": "Comma-separated engine capability tokens (e.g. `ddp`), DERIVED from the pinned images' io.tracebloc.engine.capabilities label by scripts/resolve-training-digests.sh. Never hand-typed; refused by the template when `digests` is empty."
+            }
+          }
         }
       }
     },
@@ -945,7 +988,7 @@
             },
             "limits": {
               "type": "object",
-              "description": "CPU limit deliberately omitted in defaults \u2014 throttling causes InnoDB lock-wait timeouts.",
+              "description": "CPU limit deliberately omitted in defaults — throttling causes InnoDB lock-wait timeouts.",
               "properties": {
                 "cpu": {
                   "type": "string",
@@ -1056,7 +1099,7 @@
     },
     "priorityClass": {
       "type": "object",
-      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql). An empty `name` disables the priorityClassName reference on the mysql pod entirely (mysql falls back to default priority 0 \u2014 only set this if you explicitly want no OOM protection from the scheduler).",
+      "description": "Cluster-scoped PriorityClass for tracebloc data-plane workloads (mysql). An empty `name` disables the priorityClassName reference on the mysql pod entirely (mysql falls back to default priority 0 — only set this if you explicitly want no OOM protection from the scheduler).",
       "properties": {
         "create": {
           "type": "boolean",
@@ -1075,7 +1118,7 @@
       },
       "allOf": [
         {
-          "$comment": "If we are templating the PriorityClass resource, name must not be empty. `required: [create]` is needed because draft-07 `properties` only validates keys that are present \u2014 without it, omitting `create` passes the `if` vacuously and unconditionally enforces `then`. Same pattern as dockerRegistry below.",
+          "$comment": "If we are templating the PriorityClass resource, name must not be empty. `required: [create]` is needed because draft-07 `properties` only validates keys that are present — without it, omitting `create` passes the `if` vacuously and unconditionally enforces `then`. Same pattern as dockerRegistry below.",
           "if": {
             "properties": {
               "create": {
@@ -1219,7 +1262,7 @@
               "not": {
                 "const": "latest"
               },
-              "description": "Pin the helm version. `latest` is rejected \u2014 auto-upgrade behaviour must not drift."
+              "description": "Pin the helm version. `latest` is rejected — auto-upgrade behaviour must not drift."
             },
             "pullPolicy": {
               "type": "string",
@@ -1266,7 +1309,7 @@
     },
     "imageRefresh": {
       "type": "object",
-      "description": "Image-refresh CronJob (issue tracebloc/client#154; reworked by #569). Polls Docker Hub for the jobs-manager, pods-monitor and resource-monitor digests under the floating CLIENT_ENV tag and, on a change, pins the new digest onto the running workloads with `kubectl set image` (jobs-manager + requests-proxy Deployments and the resource-monitor DaemonSet). It used to `kubectl rollout restart` a single Deployment; the reference change is what lets those pods run imagePullPolicy=IfNotPresent and survive an offline restart. Disable to keep the running image in place until manual restart \u2014 the chart then renders imagePullPolicy=Always on the unpinned control-plane images, because a floating tag plus a restart is the only update path left.",
+      "description": "Image-refresh CronJob (issue tracebloc/client#154; reworked by #569). Polls Docker Hub for the jobs-manager, pods-monitor and resource-monitor digests under the floating CLIENT_ENV tag and, on a change, pins the new digest onto the running workloads with `kubectl set image` (jobs-manager + requests-proxy Deployments and the resource-monitor DaemonSet). It used to `kubectl rollout restart` a single Deployment; the reference change is what lets those pods run imagePullPolicy=IfNotPresent and survive an offline restart. Disable to keep the running image in place until manual restart — the chart then renders imagePullPolicy=Always on the unpinned control-plane images, because a floating tag plus a restart is the only update path left.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -1276,7 +1319,7 @@
         "schedule": {
           "type": "string",
           "minLength": 1,
-          "description": "Cron expression. Keep the tick rate compatible with Docker Hub's 100/6h anonymous pull-rate limit. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two \u2014 at the default 15m that is 12/hr, i.e. 72 per 6h. Widen the schedule on edges that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
+          "description": "Cron expression. Keep the tick rate compatible with Docker Hub's 100/6h anonymous pull-rate limit. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two — at the default 15m that is 12/hr, i.e. 72 per 6h. Widen the schedule on edges that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
         },
         "rolloutTimeout": {
           "type": "string",
@@ -1328,7 +1371,7 @@
               "not": {
                 "const": "latest"
               },
-              "description": "Pin the alpine/k8s version. `latest` is rejected \u2014 image-refresh behaviour must not drift."
+              "description": "Pin the alpine/k8s version. `latest` is rejected — image-refresh behaviour must not drift."
             },
             "pullPolicy": {
               "type": "string",
@@ -1443,21 +1486,21 @@
     },
     "serviceDbAccountsByEnv": {
       "type": "object",
-      "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 documented aliases are normalized first). This is the mechanism behind #1151's 'flip per environment, dev first'; before it, that plan had no implementation and the fleet's posture could not be read in one place. backend#1752.",
+      "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). This is the mechanism behind #1151's 'flip per environment, dev first'; before it, that plan had no implementation and the fleet's posture could not be read in one place. backend#1752.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "bootstrapDbReparentByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is baked ON for dev and false for stg and prod; flip stg/prod only after the earlier flags are verified on that fleet.",
+      "description": "Per-environment default for the backend#1528 S3 bootstrap re-parent (edgeuser -> root for the account-minting DDL), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Mirrors serviceDbAccountsByEnv. This is the LAST, edgeuser-retiring step, so it is baked ON for dev and false for stg and prod; flip stg/prod only after the earlier flags are verified on that fleet.",
       "additionalProperties": {
         "type": "boolean"
       }
     },
     "rotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod \u2014 aliases normalized first). Mirrors serviceDbAccountsByEnv. True for dev, false for stg and prod; flip stg/prod per fleet during a rotation window (it rolls the mysql pod, and an existing edge still needs the one-time ALTER USER 'root' DDL).",
+      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Mirrors serviceDbAccountsByEnv. True for dev, false for stg and prod; flip stg/prod per fleet during a rotation window (it rolls the mysql pod, and an existing edge still needs the one-time ALTER USER 'root' DDL).",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -1518,7 +1561,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Class A containers in nodeAgents.namespace rather than the release namespace \u2014 the namespace is part of the filelog path."
+          "description": "Class A containers in nodeAgents.namespace rather than the release namespace — the namespace is part of the filelog path."
         },
         "hostLogsPath": {
           "type": "string",
@@ -1543,7 +1586,7 @@
             "Token",
             "Bearer"
           ],
-          "description": "`Token` for the edge's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently \u2014 a CLOSED set so a typo cannot pick a third."
+          "description": "`Token` for the edge's DRF user token, which the ingest endpoint accepts via TokenAuthentication. `Bearer` is the ClientAccessToken type and 401s silently — a CLOSED set so a typo cannot pick a third."
         },
         "buffer": {
           "type": "object",
