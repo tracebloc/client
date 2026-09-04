@@ -145,6 +145,25 @@ tests:
             name: MULTI_GPU_LEASE_SECONDS
             value: "off"
 
+  - it: the multi-GPU size floor is delivered verbatim when set (client-runtime#513 @ f42d5e9)
+    set:
+      env:
+        MULTI_GPU_MIN_PARAMETERS: "50000000"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_MIN_PARAMETERS
+            value: "50000000"
+
+  - it: an unset size floor emits nothing, so the runtime's gate stays dark by its own rule
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_MIN_PARAMETERS
+          any: true
+
   - it: the two REPORTING switches travel the same way (EMIT_TOPOLOGY / EMIT_OOM_RESCUE, tracebloc-engine#879 @ 383b0daa)
     set:
       env:
