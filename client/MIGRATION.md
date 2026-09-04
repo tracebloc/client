@@ -2,6 +2,33 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.104 — what the jobs-manager now tells you about GPU admission (RFC-0067 D7)
+
+Nothing to configure, and **nothing in this chart carries the change**: both
+behaviours below live in the jobs-manager image, which this chart does not pin
+to a version (`images.jobsManager.digest` is empty by default, so the running
+image follows your environment's channel and the image-refresh CronJob
+reconciles its digest). They are present on an edge once its jobs-manager image
+is built from client-runtime at or after `a04288f` (client-runtime#514 and
+#516). This entry sits under the next chart version so the note reads in
+order; upgrading the chart neither adds nor removes the behaviour.
+
+- **A queued GPU run says so.** When a training run wants `nvidia.com/gpu`
+  devices another run is holding, the experiment's status shows
+  `waiting_for_capacity` and the run is admitted as a Pending pod that the
+  scheduler places when the device frees. Before, the same run showed no
+  status until it was overdue. On a cluster with `env.SINGLE_NODE: "true"`, a
+  GPU run whose cpu/memory can never fit the node is refused immediately with
+  the same message a CPU run gets ("training needs more than this machine has
+  at all …"); on an elastic cluster (`SINGLE_NODE` false) it waits instead,
+  because an autoscaler may add the node.
+- **`GPU_REQUESTS` and `GPU_LIMITS` are one number.** Setting only one of them
+  now mirrors it into the other (an INFO line names the mirror); Kubernetes
+  requires an extended resource's request to equal its limit, so a pod with
+  only `GPU_LIMITS` set used to be rejected by the API server. Setting both to
+  different values is still written as given and warned about once — it will
+  be rejected; set both to one value, or set only one.
+
 ## Upgrading to 1.9.103 — `env.MULTI_GPU_MIN_PARAMETERS`, the multi-GPU size floor (RFC-0067 D2)
 
 Nothing changes on upgrade: the key is **absent by default**, and absent means
