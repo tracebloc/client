@@ -5024,9 +5024,8 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
       $out   = ($parts.Outside -join "`n")
       $in    = ($parts.Inside  -join "`n")
       foreach ($h in $hosts) {
-        foreach ($m in [regex]::Matches($out, [regex]::Escape($h))) {
-          $leaks += "$(Split-Path $f -Leaf): $h"
-        }
+        $n = ([regex]::Matches($out, [regex]::Escape($h))).Count
+        if ($n -gt 0) { $leaks += "$(Split-Path $f -Leaf): $h x$n" }
         $defined[$h] += ([regex]::Matches($in, [regex]::Escape($h))).Count
       }
     }
