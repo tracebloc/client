@@ -160,3 +160,18 @@ run_resolve() {
   run_resolve
   [[ "$output" == *"NOT a real resolution"* ]] || return 1
 }
+
+@test "--write does not mistake another 2-space training: key for images.training" {
+  # networkPolicy.training exists in the real chart; a bare grep matched it.
+  printf 'images:\n  jobsManager:\n    digest: ""\nnetworkPolicy:\n  training:\n    enabled: true\n' > "$TMP/values.yaml"
+  run_resolve --write
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"no 'images.training' block"* ]] || return 1
+  grep -q '^    enabled: true$' "$TMP/values.yaml" || return 1
+}
+
+@test "--write reads the block back and reports success only when it landed" {
+  run_resolve --write
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"read back and verified"* ]] || return 1
+}

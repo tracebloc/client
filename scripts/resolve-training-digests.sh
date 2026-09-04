@@ -50,6 +50,10 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# curl_secure() carries the repo's TLS floor and timeout bounds (backend#1252);
+# a bare curl here would drop both and fail check-style.sh rule 3.
+# shellcheck source=scripts/lib/common.sh
+. "$here/lib/common.sh"
 chart_values="${CHART_VALUES:-$here/../client/values.yaml}"
 namespace="${TRAINING_NAMESPACE:-tracebloc}"
 tag="prod"
@@ -87,18 +91,24 @@ else
   command -v docker >/dev/null 2>&1 || { echo "ERROR: docker (buildx) is required to resolve digests and read labels" >&2; exit 2; }
 fi
 
-# list_repos — every repository name in the namespace, one per line.
+# list_repos — every repository name in the namespace, one per line, or NOTHING
+# and a non-zero status. ALL OR NOTHING (Bugbot, client#978): a failure on page 2
+# used to leave page 1 on stdout, and a partial listing that looks complete is
+# how `--write` pins a subset of the fleet and exits 0. Pages are accumulated
+# and printed only once every one of them has been fetched and parsed.
 list_repos() {
   if [[ "$stubbed" == 1 ]]; then
     grep -v '^[[:space:]]*$' "$TRAINING_REPOS_STUB" || true
     return 0
   fi
-  local url="https://hub.docker.com/v2/repositories/${namespace}/?page_size=100" page
+  local url="https://hub.docker.com/v2/repositories/${namespace}/?page_size=100" page names="" more=""
   while [[ -n "$url" && "$url" != "null" ]]; do
-    page="$(_tmout 30 curl -fsS "$url")" || return 1
-    jq -r '.results[].name' <<<"$page"
-    url="$(jq -r '.next' <<<"$page")"
+    page="$(curl_secure -fsS "$url")" || { echo "ERROR: registry listing failed at $url" >&2; return 1; }
+    more="$(jq -r '.results[].name' <<<"$page")" || { echo "ERROR: registry listing page is not the expected JSON: $url" >&2; return 1; }
+    names+="${more}"$'\n'
+    url="$(jq -r '.next' <<<"$page")" || { echo "ERROR: registry listing page is not the expected JSON: $url" >&2; return 1; }
   done
+  printf '%s' "$names"
 }
 
 # resolve_index_digest <ns/repo:tag> — the index digest the float points at.
@@ -136,8 +146,9 @@ read_capabilities() {
 }
 
 # --- enumerate ---------------------------------------------------------------
-repos="$(list_repos | grep -E '^client-[a-z][a-z0-9_]*-(cpu|gpu)$' | sort -u || true)"
-[[ -n "$repos" ]] || refuse "no training image repositories found under '${namespace}/client-<task>-<arch>' (registry unreachable, or the namespace moved). Nothing to pin."
+listing="$(list_repos)" || refuse "the registry listing for '${namespace}' could not be fetched in full; a partial listing is not a fleet to pin."
+repos="$(grep -E '^client-[a-z][a-z0-9_]*-(cpu|gpu)$' <<<"$listing" | sort -u || true)"
+[[ -n "$repos" ]] || refuse "no training image repositories found under '${namespace}/client-<task>-<arch>' (the namespace moved, or the naming convention did). Nothing to pin."
 
 tasks="$(sed -E 's/^client-(.*)-(cpu|gpu)$/\1/' <<<"$repos" | sort -u)"
 for task in $tasks; do
@@ -224,7 +235,19 @@ fi
 
 # --- write -------------------------------------------------------------------
 [[ -f "$chart_values" ]] || refuse "--write: ${chart_values} does not exist"
-grep -qE '^  training:[[:space:]]*$' "$chart_values" || refuse "--write: ${chart_values} has no 'images.training' block to replace (chart predates backend#3156)"
+# images_training_block <file> -- the current `  training:` subtree INSIDE images:
+# (networkPolicy.training and any other 2-space `training:` do not count -- Bugbot,
+# client#978). Empty output means the chart has no such block.
+images_training_block() {
+  awk '
+    /^images:[[:space:]]*$/ { in_images = 1; next }
+    /^[^[:space:]#]/        { in_images = 0; in_tr = 0 }
+    in_images && /^  training:[[:space:]]*$/ { in_tr = 1; print; next }
+    in_images && /^  [A-Za-z_]/ { in_tr = 0 }
+    in_tr && (/^    / || /^[[:space:]]*$/) { print }
+  ' "$1"
+}
+[[ -n "$(images_training_block "$chart_values")" ]] || refuse "--write: ${chart_values} has no 'images.training' block to replace (chart predates backend#3156)"
 
 tmp="$(mktemp)"; blockfile="$(mktemp)"
 printf '%s\n' "$block" > "$blockfile"
@@ -246,4 +269,11 @@ awk -v blockfile="$blockfile" '
   { print }
 ' "$chart_values" > "$tmp"
 mv "$tmp" "$chart_values"; rm -f "$blockfile"
-echo "wrote images.training into ${chart_values}. Now bump client/Chart.yaml (version + appVersion) so the pins reach the fleet."
+# READ BACK before claiming success (Bugbot, client#978): the block now in the
+# file must be exactly the block that was rendered, or the write did not land.
+written="$(images_training_block "$chart_values" | sed -e 's/[[:space:]]*$//')"
+if [[ "$written" != "$(printf '%s\n' "$block" | sed -e 's/[[:space:]]*$//')" ]]; then
+  echo "ERROR: --write finished but ${chart_values} does not carry the rendered images.training block; refusing to report success." >&2
+  exit 1
+fi
+echo "wrote images.training into ${chart_values} (read back and verified). Now bump client/Chart.yaml (version + appVersion) so the pins reach the fleet."
