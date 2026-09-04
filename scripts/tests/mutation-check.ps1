@@ -156,6 +156,28 @@ $Mutations = @(
      Find  = '          Hint "Find your credentials at $(Get-TraceblocDashboardUrl)"'
      Repl  = '          Hint "Find your credentials at https://ai.tracebloc.io/clients"' }
 
+  # THE ONE THE CLASS GUARD USED TO MISS (client#930). New-K3dCluster ran
+  # `k3d cluster list -o json` bare, on the MAIN install path, through every
+  # green run of this suite -- because the class guard's tool list said `docker`
+  # and `k3d` talks to the same engine. Registering the mutation is the point:
+  # widening the tool list is only worth something if reintroducing the bare call
+  # actually reddens the widened guard, and "already fixed, never seen to fail"
+  # is exactly the shape this harness exists to refuse.
+  @{ Name  = 'New-K3dCluster goes back to a bare, unbounded k3d cluster list (client#930)'
+     Expect = 'EVERY native docker/k3d call is bounded'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $clusterListJson = Get-ClusterListJson'
+     Repl  = '  $clusterListJson = k3d cluster list -o json 2>&1 | Out-String' }
+
+  # AND THE DEADLINE ITSELF, not just the wrapper's name. A reader that starts
+  # the job and then waits on it forever satisfies "inside Start-Job" while
+  # hanging exactly as the bare call did -- the bounded-looking unbounded wait.
+  @{ Name  = 'the k3d-listing reader starts its job but never reaps it on a deadline (client#930)'
+     Expect = 'there is exactly ONE bounded k3d-listing reader'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {'
+     Repl  = '  if ($job | Wait-Job) {' }
+
   @{ Name  = 'the bootstrap closes the user''s console again (#577 / client#917)'
      Expect = 'must not close the user''s window'
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'

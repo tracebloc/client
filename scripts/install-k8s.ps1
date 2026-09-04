@@ -1407,6 +1407,43 @@ function Test-TraceblocCliMachineWide {
   return (Test-Path -LiteralPath (Join-Path $script:TOOL_DIR "tracebloc.exe"))
 }
 
+# Pure: parse a FULL `k3d cluster list -o json` blob into its entries, or $null
+# when the blob is not a listing at all (empty/whitespace, or k3d wrote its own
+# words instead of JSON). The one parse both readers below share, so "did the
+# listing itself fail?" has a single answer.
+#
+# `$null` vs an EMPTY ARRAY is the load-bearing distinction, and it is the whole
+# reason this returns an array rather than a boolean-ish thing: a SUCCESSFUL full
+# list always emits at least `[]`, so `@()` means "enumerated fine, no clusters"
+# — a definite answer — while $null means "nothing was enumerated". Conflating
+# them is #557 Bugbot 3728714531, which let a genuinely-foreign port-6550
+# listener read as ours.
+#
+# `,@(...)`: the comma keeps a 0- or 1-element array from being unrolled to
+# $null / a bare object on the way out, which would collapse exactly that
+# distinction at the boundary.
+function Get-ClusterListEntries {
+  param([string]$Json)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
+  try { return ,@($Json | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+# Pure: the entry for <Name> from a full listing blob, or $null if it isn't in
+# there (or the blob was not a listing). THE PARSE SEAM for New-K3dCluster's
+# existence check, extracted for the same reason Get-JobsManagerNamespace was
+# (#917 Bugbot, High): BOUNDING A NATIVE CALL CHANGES ITS TYPE, and the consumer
+# of that value is where the change lands. This one's consumer was an inline
+# `ConvertFrom-Json | Where-Object` inside an empty `catch {}` — a parse with no
+# name and no test — which is not somewhere a type change should be discovered
+# (client#930).
+function Find-ClusterInList {
+  param([string]$Json, [string]$Name)
+  $entries = Get-ClusterListEntries -Json $Json
+  if ($null -eq $entries) { return $null }
+  foreach ($c in $entries) { if ($c.name -eq $Name) { return $c } }
+  return $null
+}
+
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
 # output. Distinguishes "confidently not ours" from "can't tell" so callers never
 # conflate an indeterminate read with a definitive answer (#557 Bugbot 3728340365,
@@ -1417,19 +1454,21 @@ function Test-TraceblocCliMachineWide {
 #               stopped, or an empty `[]` = no clusters at all) -> confidently not ours
 #   'unknown' — empty/whitespace or unparseable output; the list itself FAILED (k3d
 #               errored / produced no JSON), so nothing can be concluded
+#
+# It probes parseability and then delegates the SEARCH to Find-ClusterInList
+# rather than keeping its own loop: two copies of "find <Name> in the listing" is
+# how the two readers of this blob would drift, and the blob is under a kilobyte,
+# so parsing it twice buys clarity at no measurable cost.
 function Get-ClusterRunStateFromList {
   param([string]$Json, [string]$Name)
-  if ([string]::IsNullOrWhiteSpace($Json)) { return 'unknown' }
-  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return 'unknown' }
-  foreach ($c in @($clusters)) {
-    if ($c.name -ne $Name) { continue }
-    if ($c.PSObject.Properties.Name -contains 'serversRunning') {
-      if ([int]$c.serversRunning -ge 1) { return 'running' }
-      return 'down'   # present but 0 servers -> stopped
-    }
-    return 'down'     # shape without a running count can't prove the cluster is up
+  if ($null -eq (Get-ClusterListEntries -Json $Json)) { return 'unknown' }
+  $c = Find-ClusterInList -Json $Json -Name $Name
+  if ($null -eq $c) { return 'down' }   # enumerated fine; our cluster isn't running in it
+  if ($c.PSObject.Properties.Name -contains 'serversRunning') {
+    if ([int]$c.serversRunning -ge 1) { return 'running' }
+    return 'down'     # present but 0 servers -> stopped
   }
-  return 'down'       # enumerated fine; our cluster simply isn't in the list
+  return 'down'       # shape without a running count can't prove the cluster is up
 }
 
 # Pure: from `k3d cluster list -o json` output, is <Name> present AND running (>=1
@@ -1448,10 +1487,48 @@ function Test-ClusterRunning {
   return ((Get-ClusterRunState) -eq 'running')
 }
 
-# TRI-STATE, BOUNDED run-state of our k3d cluster, for the port-6550 ownership
-# decision (#557 Bugbot 3728340365, 3728714531). Lists ALL clusters (no name
-# filter) inside a job+deadline (~15s) so a wedged Docker can't hang preflight,
-# then classifies:
+# THE ONE BOUNDED READER of `k3d cluster list -o json` (client#930).
+#
+# `k3d cluster list` talks to the Docker engine, so against a wedged daemon — a
+# half-open `\\.\pipe\docker_engine`, which is what Docker Desktop leaves behind
+# when it starts and then gives up — it does not fail, it BLOCKS. Same failure
+# class as a bare `docker info`, and it has to be bounded the same way: a
+# Start-Job reaped by Wait-JobWithProgress on a ~15s deadline.
+#
+# IT IS A FUNCTION, not a second copy of the job, because this used to be
+# inlined in Get-ClusterRunState while New-K3dCluster ran the SAME command bare,
+# on the MAIN install path, where a hang parks the install with no console output
+# and nothing to kill. One reader means the next call site inherits the deadline
+# instead of having to remember it, and the AST class guard in the Pester suite
+# (widened from `docker` to `docker|k3d` for this) fails the build if one
+# doesn't.
+#
+# Returns the listing as ONE multi-line STRING (`Out-String`, the same shape both
+# call sites already had), or "" when the read timed out or produced nothing —
+# which Get-ClusterListEntries reads as "not a listing", i.e. 'unknown' /
+# no-cluster-found. The timeout also gets its own log line, unchanged, because
+# "k3d cluster list timed out" is itself the finding support needs.
+#
+# `2>$null`, not `2>&1`: k3d's stderr is not JSON, and merging it into the blob
+# is how a healthy-but-chatty k3d turns a good listing into a parse failure.
+function Get-ClusterListJson {
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    (k3d cluster list -o json 2>$null | Out-String)
+  }
+  $out = ""
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
+    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+  } else {
+    Log "k3d cluster list timed out; cluster run-state indeterminate."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return $out
+}
+
+# TRI-STATE run-state of our k3d cluster, over the BOUNDED reader above, for the
+# port-6550 ownership decision (#557 Bugbot 3728340365, 3728714531). Lists ALL
+# clusters (no name filter) inside a job+deadline (~15s) so a wedged Docker can't
+# hang preflight, then classifies:
 #   'running' — our cluster is up (it legitimately owns port 6550 -> reuse)
 #   'down'    — the full list came back and $CLUSTER_NAME isn't running in it
 #               (absent/stopped, or no clusters at all) -> listener is foreign
@@ -1463,19 +1540,9 @@ function Test-ClusterRunning {
 # genuinely-foreign listener proceed (Bugbot 3728714531). The full list always
 # emits at least `[]` on success, so absent-vs-error stays separable.
 function Get-ClusterRunState {
-  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
-    (k3d cluster list -o json 2>$null | Out-String)
-  }
-  $out = ""; $timedOut = $false
-  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
-    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
-  } else {
-    $timedOut = $true
-    Log "k3d cluster list timed out; cluster run-state indeterminate."
-  }
-  Remove-Job $job -Force -ErrorAction SilentlyContinue
-  if ($timedOut) { return 'unknown' }
-  return (Get-ClusterRunStateFromList -Json $out -Name $CLUSTER_NAME)
+  # A timed-out read comes back "" and the classifier calls that 'unknown', which
+  # is the same answer the inlined version returned from its own $timedOut flag.
+  return (Get-ClusterRunStateFromList -Json (Get-ClusterListJson) -Name $CLUSTER_NAME)
 }
 
 # The client's three workload deployments in a namespace. One source for the two
@@ -4132,13 +4199,23 @@ function New-K3dCluster {
   # Docker is up now (unlike at preflight); re-check the runtime's real memory budget.
   Test-PreflightRuntimeMem
 
-  $clusterExists = $false
-  $clusterObj = $null
-  try {
-    $clusterListJson = k3d cluster list -o json 2>&1 | Out-String
-    $clusterObj = $clusterListJson | ConvertFrom-Json | Where-Object { $_.name -eq $CLUSTER_NAME } | Select-Object -First 1
-    $clusterExists = $null -ne $clusterObj
-  } catch {}
+  # BOUNDED (client#930). This was `k3d cluster list -o json 2>&1 | Out-String`,
+  # bare, on the MAIN install path — so against a half-open Docker pipe the
+  # install parked here silently with nothing to kill it. That is the failure
+  # class backend#2849 exists to remove, and this was the last site of it that no
+  # guard named: it is neither a `docker` call nor inside Invoke-DiagnoseBundle,
+  # the two scopes #917's guards cover.
+  #
+  # Get-ClusterListJson is the deadline; Find-ClusterInList is the parse. The
+  # empty `catch {}` that used to stand in for both is gone — not because
+  # swallowing was wrong here (an unreadable listing genuinely means "assume no
+  # cluster and let the create path produce the real error"), but because a
+  # bare `catch {}` cannot say that, and neither helper throws, so there is
+  # nothing left for it to catch. A timed-out read yields "" -> $null -> the
+  # create path, exactly as an unparseable one did before.
+  $clusterListJson = Get-ClusterListJson
+  $clusterObj      = Find-ClusterInList -Json $clusterListJson -Name $CLUSTER_NAME
+  $clusterExists   = $null -ne $clusterObj
 
   if ($clusterExists) {
     $running = $clusterObj.serversRunning

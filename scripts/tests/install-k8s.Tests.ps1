@@ -302,14 +302,79 @@ Describe "Get-ClusterRunState tri-state (#557 Bugbot 3728714531: absent != unkno
       Get-ClusterRunStateFromList -Json '{not json' -Name 'tracebloc' | Should -Be 'unknown'
     }
   }
-  # NOTE: the bounded Get-ClusterRunState wrapper (timeout -> 'unknown',
-  # completed -> classify) is intentionally NOT unit-tested here. Mocking the
-  # Start-Job / Wait-JobWithProgress / Receive-Job machinery is fragile and
-  # environment-dependent (it fails under CI's Pester). Coverage is provided
-  # instead by two stable sources: the pure classifier is exercised directly
-  # above via Get-ClusterRunStateFromList, and the bounded-job wrapping itself
-  # is asserted by the source-of-truth regex guard on Test-ClusterRunning
-  # (Start-Job + Wait-JobWithProgress + deadline). See #557 Bugbot 3728714531.
+  # NOTE: the JOB MACHINERY itself (Start-Job / Wait-JobWithProgress /
+  # Receive-Job) is still intentionally NOT unit-tested here -- mocking it is
+  # fragile and environment-dependent (it failed under CI's Pester). What
+  # client#930 changed is that the machinery now lives behind ONE named seam,
+  # Get-ClusterListJson, so the wrapper's decision logic is mockable without
+  # touching any of it: the two Contexts below drive Get-ClusterRunState and
+  # Find-ClusterInList through that seam, and the bounding itself is asserted by
+  # the AST class guard in "Every Docker/child wait on the install path is
+  # bounded". See #557 Bugbot 3728714531.
+
+  # THE TYPE CHANGE, and this is the second time it has mattered in this file
+  # (the first cost a -Diagnose bundle a namespace called "NAMESPACE").
+  #
+  # New-K3dCluster's read was `k3d cluster list -o json 2>&1 | Out-String` --
+  # already one blob -- and is now a job's Receive-Job output, ALSO one blob but
+  # with two new reachable shapes: "" when the deadline fired, and a leading
+  # blank line from Out-String. Its consumer used to be an inline
+  # `ConvertFrom-Json | Where-Object` inside an empty `catch {}`, i.e. a parse
+  # seam with no test and no name. Find-ClusterInList is that seam, extracted
+  # for exactly the reason Get-JobsManagerNamespace was.
+  Context "Find-ClusterInList (pure: the parse seam bounding the call changed)" {
+    It "returns the named cluster object, with its serversRunning intact" {
+      $c = Find-ClusterInList -Json '[{"name":"tracebloc","serversRunning":1}]' -Name 'tracebloc'
+      $c | Should -Not -BeNullOrEmpty
+      $c.serversRunning | Should -Be 1
+    }
+    It "picks OUR cluster out of a list of several, not the first one" {
+      $json = '[{"name":"other","serversRunning":1},{"name":"tracebloc","serversRunning":0}]'
+      (Find-ClusterInList -Json $json -Name 'tracebloc').serversRunning | Should -Be 0
+    }
+    It "a cluster ABSENT from a successful list is `$null, so the caller creates one" {
+      Find-ClusterInList -Json '[{"name":"other","serversRunning":1}]' -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json '[]' -Name 'tracebloc' | Should -BeNullOrEmpty
+    }
+    It "a TIMED-OUT read ('') is `$null -- never a cluster, and never a throw" {
+      # The shape the deadline produces. Before the extraction this landed in an
+      # empty `catch {}`; the difference is that this is now stated, not implied.
+      Find-ClusterInList -Json ''    -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json '   ' -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json $null -Name 'tracebloc' | Should -BeNullOrEmpty
+    }
+    It "k3d's own words instead of JSON are `$null, not a half-parsed cluster" {
+      # Why the reader uses 2>$null and not 2>&1: k3d's stderr is not JSON, and
+      # merging it into the blob turns a healthy listing into a parse failure.
+      Find-ClusterInList -Json 'time="..." level=fatal msg="docker failed"' -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json '{not json' -Name 'tracebloc' | Should -BeNullOrEmpty
+    }
+    It "survives the blob shape a bounded read actually returns (blank lines, CRLF)" {
+      # Out-String on a job's output brings its own leading/trailing newlines;
+      # a per-line consumer would have choked on these, a whole-blob one must not.
+      $json = "`r`n[{`"name`":`"tracebloc`",`"serversRunning`":2}]`r`n`r`n"
+      (Find-ClusterInList -Json $json -Name 'tracebloc').serversRunning | Should -Be 2
+    }
+  }
+
+  Context "Get-ClusterRunState over the bounded seam (timeout -> 'unknown')" {
+    It "a timed-out read classifies as 'unknown', never as 'down'" {
+      # 'down' means "enumerated fine, ours isn't running" and lets a foreign
+      # port-6550 listener hard-fail the install. A timeout knows neither.
+      Mock Get-ClusterListJson { "" }
+      Get-ClusterRunState | Should -Be 'unknown'
+    }
+    It "a healthy read is classified, not merely passed through" {
+      Mock Get-ClusterListJson { '[{"name":"tracebloc","serversRunning":1}]' }
+      Get-ClusterRunState | Should -Be 'running'
+      Test-ClusterRunning | Should -BeTrue
+    }
+    It "a stopped cluster is 'down' so the fast path cannot skip start/repair" {
+      Mock Get-ClusterListJson { '[{"name":"tracebloc","serversRunning":0}]' }
+      Get-ClusterRunState | Should -Be 'down'
+      Test-ClusterRunning | Should -BeFalse
+    }
+  }
 }
 
 Describe "Test-ClientHealthy (#420 Bugbot: verify workloads Ready, not just cluster)" {
@@ -4515,7 +4580,23 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
   # narrowed until it is an instance guard again, which is exactly the failure
   # being fixed. The PowerShell parser knows a command from a string, so the
   # property can be stated once and stay true.
-  It "EVERY native docker call is bounded -- the class, not just 'docker info' (backend#2849 review)" {
+  # WIDENED FROM `docker` TO `docker|k3d` (client#930).
+  #
+  # The guard below was already the class assertion for `docker`, and the ticket
+  # it came from said so. It was still an INSTANCE guard one level up: the class
+  # is "native call that talks to the Docker engine", and `k3d` is in it. `k3d
+  # cluster list` opens \\.\pipe\docker_engine exactly as `docker` does, so
+  # against the half-open pipe Docker Desktop leaves behind it does not fail --
+  # it blocks. New-K3dCluster ran one bare, on the MAIN install path, through
+  # every green run of this suite since the guard was written.
+  #
+  # So `k3d` joins the same assertion rather than getting a parallel one: a
+  # second guard is a second thing the next tool can be absent from. NOTE there
+  # is deliberately NO allowlist -- both k3d call sites in the file are bounded,
+  # and an allowlist is the mechanism by which a class guard decays back into an
+  # instance guard. If a future site genuinely must be bare, add the entry here
+  # WITH the reason, and expect to defend it.
+  It "EVERY native docker/k3d call is bounded -- the class, not just 'docker info' (backend#2849 review, client#930)" {
     $tokens = $null; $errors = $null
     $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
@@ -4523,8 +4604,9 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $errors.Count | Should -Be 0 -Because "the installer must parse before this property means anything"
     $ast | Should -Not -BeNullOrEmpty -Because "cannot read the installer AST"
 
+    $engineTools = @('docker', 'k3d')
     $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
-      Where-Object { $_.GetCommandName() -eq 'docker' }
+      Where-Object { $_.GetCommandName() -in $engineTools }
 
     # Sanity: this guard must be looking at something. If a refactor moves every
     # docker call behind the wrapper, delete this line -- do not let it pass vacuously.
@@ -4539,7 +4621,39 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       }
       if (-not $inJob) { $unbounded += "line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
     }
-    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker call must go through Invoke-DockerCli or a Wait-JobWithProgress-reaped Start-Job"
+    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker/k3d call must go through Invoke-DockerCli / Invoke-BoundedProcess or a Wait-JobWithProgress-reaped Start-Job"
+  }
+
+  # THE INSTANCE the class guard above was widened to catch (client#930).
+  #
+  # Kept as its own assertion because the class guard names a property while this
+  # names the site and the mechanism: New-K3dCluster must read the listing
+  # through the ONE bounded reader, not through a bare call and not through a
+  # second job of its own. A file with two bounded readers is a file where the
+  # next edit fixes one of them.
+  It "New-K3dCluster reads the cluster listing through the bounded reader, never bare" {
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    $fn  = (($src -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '\$clusterListJson = Get-ClusterListJson'
+    # the bare native form is GONE from this function, in either redirection shape
+    $fn | Should -Not -Match '(?m)^\s*\$?\w*\s*=?\s*k3d cluster list'
+  }
+
+  It "there is exactly ONE bounded k3d-listing reader, and both callers use it" {
+    # The reason the extraction is the fix and not a copy of the job into
+    # New-K3dCluster: two readers drift, and the one on the main install path is
+    # the one nobody runs against a wedged daemon until a customer does.
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    ([regex]::Matches($src, '(?m)^function Get-ClusterListJson\b')).Count |
+      Should -Be 1 -Because "the bounded reader must be defined once"
+    # ...and it carries the deadline + the specific timeout line support greps for
+    $reader = (($src -split 'function Get-ClusterListJson')[1] -split '\nfunction ')[0]
+    $reader | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
+    $reader | Should -Match 'k3d cluster list timed out; cluster run-state indeterminate\.'
+    # Get-ClusterRunState delegates rather than keeping a second job of its own
+    $runState = (($src -split 'function Get-ClusterRunState\b')[1] -split '\nfunction ')[0]
+    $runState | Should -Match 'Get-ClusterListJson'
+    $runState | Should -Not -Match 'Start-Job'
   }
 
   It "the -Diagnose bundle has NO unbounded external read -- it must work when the box does not" {
@@ -4674,17 +4788,23 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     Should -Invoke Invoke-BoundedProcess -Times 0 -Exactly
   }
 
-  It "the Start-Job docker sites are actually reaped on a deadline, not merely in a job" {
+  It "the Start-Job docker/k3d sites are actually reaped on a deadline, not merely in a job" {
     # "inside Start-Job" only bounds the call if something reaps the job. Without
     # this, the guard above could be satisfied by wrapping a hang in a job and
     # then waiting on it forever -- a bounded-looking unbounded wait.
+    #
+    # Same widening as the class guard above (client#930): the tool set has to
+    # match, or a k3d job could satisfy the class guard by being in a job that
+    # nothing ever reaps -- which is the exact fail-open shape this test exists
+    # to close, reintroduced through the tool list instead of the reap logic.
     $tokens = $null; $errors = $null
     $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
     $errors.Count | Should -Be 0
 
+    $engineTools = @('docker', 'k3d')
     $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
-      Where-Object { $_.GetCommandName() -eq 'docker' }
+      Where-Object { $_.GetCommandName() -in $engineTools }
     $native.Count | Should -BeGreaterThan 0
 
     # PER-JOB, not per-function (@LukasWodka's follow-up). The first version of this
@@ -4701,7 +4821,7 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       # the Start-Job this call lives in ...
       $job = $c.Parent
       while ($job -and -not ($job -is [System.Management.Automation.Language.CommandAst] -and $job.GetCommandName() -eq 'Start-Job')) { $job = $job.Parent }
-      $job | Should -Not -BeNullOrEmpty -Because "line $($c.Extent.StartLineNumber) is a native docker call outside Start-Job"
+      $job | Should -Not -BeNullOrEmpty -Because "line $($c.Extent.StartLineNumber) is a native $($c.GetCommandName()) call outside Start-Job"
 
       # ... and the variable it is assigned to. No assignment => nothing can reap it.
       $assign = $job.Parent
@@ -4713,7 +4833,7 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       $var = $varAst.VariablePath.UserPath
 
       $reap = "Wait-JobWithProgress -Job \$" + [regex]::Escape($var) + " -TimeoutSec \d+"
-      $fn.Extent.Text | Should -Match $reap -Because "$($fn.Name) starts docker job '$var' but never reaps THAT job on a deadline"
+      $fn.Extent.Text | Should -Match $reap -Because "$($fn.Name) starts a $($c.GetCommandName()) job '$var' but never reaps THAT job on a deadline"
     }
   }
 
