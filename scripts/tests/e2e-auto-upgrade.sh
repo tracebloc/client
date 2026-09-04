@@ -423,6 +423,37 @@ helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
   || fail "DB_BOOTSTRAP_PASSWORD dropped on a born-rotated edge's baked-default upgrade — jobs-manager would revert to minting as edgeuser (backend#947)"
 echo "   OK: marker present, rotate stayed on under the baked default, root password preserved"
 
+# ── backend#3189: a PRE-MARKER rotated edge STAYS rotated on its baked-default upgrade
+#  The one-way door the born-rotated test above closes assumes the marker is present.
+#  But fleets rotated under the EARLIER serviceDbAccountsByEnv / rotateMysqlRootByEnv
+#  bake did so BEFORE the marker mechanism shipped, so they carry a baked
+#  MYSQL_ROOT_PASSWORD with NO marker. bakedRootRotationOn's marker/PVC/cluster arms
+#  all read "not rotated" for them, so without the backend#3189 Secret-probe arm the
+#  next auto-upgrade drops MYSQL_ROOT_PASSWORD and jobs-manager reverts to the
+#  root-equivalent edgeuser -- a SILENT loss of root on an already-rotated fleet.
+#  Simulate exactly that state by DELETING the marker off the born-rotated edge above
+#  (its Secret still holds the minted root password), then take the same baked-default
+#  path. Deleting the `$secret`/`$bakedRoot` arm of bakedRootRotationOn -- or the
+#  marker-backfill it drives -- reddens HERE.
+echo "── backend#3189: pre-marker rotated edge (baked root, no marker) stays rotated ──"
+_premarker_root="$(secret_key MYSQL_ROOT_PASSWORD)"
+[ -n "$_premarker_root" ] \
+  || fail "precondition: the born-rotated edge must still hold MYSQL_ROOT_PASSWORD before the pre-marker check"
+kubectl -n "$NS" delete configmap mysql-root-rotated >/dev/null 2>&1 \
+  || fail "could not delete the marker to simulate a pre-marker rotated edge (backend#3189)"
+kubectl -n "$NS" get configmap mysql-root-rotated >/dev/null 2>&1 \
+  && fail "precondition: the marker must be absent to simulate a pre-marker rotated edge (backend#3189)"
+helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+  --set storageClass.provisioner=rancher.io/local-path >/dev/null \
+  || fail "the baked-default upgrade of a pre-marker rotated edge was refused (backend#3189)"
+[ "$(secret_key MYSQL_ROOT_PASSWORD)" = "$_premarker_root" ] \
+  || fail "MYSQL_ROOT_PASSWORD changed or was DROPPED on a pre-marker rotated edge's baked-default upgrade (backend#3189 silent root loss): before='$_premarker_root' after='$(secret_key MYSQL_ROOT_PASSWORD)'. The baked root in the live Secret must keep bakedRootRotationOn on and tier-2 must preserve the value."
+[ -n "$(secret_key DB_BOOTSTRAP_PASSWORD)" ] \
+  || fail "DB_BOOTSTRAP_PASSWORD dropped on a pre-marker rotated edge's baked-default upgrade -- jobs-manager would revert to minting as edgeuser (backend#3189)"
+kubectl -n "$NS" get configmap mysql-root-rotated >/dev/null 2>&1 \
+  || fail "the pre-marker upgrade did not BACKFILL the mysql-root-rotated marker (backend#3189); the edge must converge onto the rename-safe marker signal after one rotation-on render"
+echo "   OK: baked root detected, rotate stayed on with no marker, password preserved, marker backfilled"
+
 #  Restore rotation-off so the rest of the run sees the baseline release, mirroring
 #  the empty-key check's restore discipline. An explicit rotateMysqlRoot=false
 #  bypasses the helper/marker (the deliberate operator override), so this still
