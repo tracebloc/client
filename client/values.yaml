@@ -121,6 +121,84 @@ env: {
   # installer. Set explicitly to override (e.g. a fixed multi-node bare-metal
   # cluster that wants the fallback). Must be a quoted string.
   # SINGLE_NODE: "true"
+  # -- Per-edge OPERATOR switches for the training pods (RFC-0067 D8,
+  #    backend#3149; the runtime half is client-runtime#480).
+  #
+  # jobs-manager reads these from its OWN container env -- the generic
+  # passthrough in templates/jobs-manager-deployment.yaml delivers any
+  # `env.<KEY>` there -- and writes an explicit "1" or "0" onto EVERY training
+  # pod it spawns, so the edge setting always wins over whatever the engine
+  # image defaults to. That is what makes this the kill switch AND the
+  # rollback lever: turning multi-GPU (or AMP) off is a values change plus a
+  # jobs-manager restart, not an image rebuild and not a chart release.
+  #
+  # Truthy = "1" | "true" | "yes" (case-insensitive, whitespace-tolerant --
+  # the engine's own _TRUTHY). Everything else, INCLUDING UNSET, is OFF. The
+  # schema closes the vocabulary to those spellings plus "0" / "false" / "no",
+  # so a typo ("ture", "on") is refused at install time instead of silently
+  # reading as off -- the CLIENT_ENV lesson (backend#1723), applied before the
+  # first customer hits it. Empty ("") means unset.
+  #
+  # Per-edge and operator-level, NEVER per-experiment: there is no experiment
+  # field for either, so RFC-0067 D2's "never user-requested" holds by
+  # construction.
+  #
+  #   TRACEBLOC_DDP -- DistributedDataParallel across the GPUs a training pod is
+  #                    given. Default OFF until RFC-0067 D7's precondition bundle
+  #                    holds (backend#3147 tracks it); flipping it on an edge
+  #                    ahead of that is the operator's call, and this is the
+  #                    lever that flips it back.
+  #   TRACEBLOC_AMP -- automatic mixed precision. The ENGINE still chooses
+  #                    bf16-vs-fp16 from the device in front of it (RFC-0067 D4);
+  #                    this only says whether it may. Default OFF (backend#2327).
+  #
+  # Reaches the training pods only through a jobs-manager that forwards it
+  # (client-runtime#480); on an older runtime the value lands on the
+  # jobs-manager container and goes no further -- inert, never harmful.
+  # TRACEBLOC_DDP: "0"
+  # TRACEBLOC_AMP: "0"
+  # -- Per-edge OPERATOR switches for what the training pod REPORTS (same
+  #    mechanism, same vocabulary). Both default OFF because the destination
+  #    columns live in the backend and land per environment on the backend's
+  #    own schedule: an edge that emits a cycle-payload key its backend lacks
+  #    does not get the key ignored -- update_cycle_data splats leftover keys
+  #    into objects.create AFTER deleting the row, so the edge's cycle row is
+  #    DESTROYED. Two explicit steps, in order: deploy the backend that has the
+  #    columns to that environment, THEN set the switch on the edge.
+  #
+  #   EMIT_TOPOLOGY   -- cycle payload carries world_size + effective_batch
+  #                      (backend#3160's columns; RFC-0067 D5/D9). Contract:
+  #                      tracebloc-engine#879 @ 383b0daa -- "Env var
+  #                      EMIT_TOPOLOGY; default off ("false"); truthy 1, true,
+  #                      yes (case-insensitive, whitespace-stripped)".
+  #   EMIT_OOM_RESCUE -- cycle payload carries oom_rescue_rung + oom_rescue_epoch
+  #                      (backend#2175's columns) when a CUDA-OOM rescue fired.
+  #                      Same gate shape; the engine's _emit_oom_rescue_fields.
+  #
+  # Reach the training pod only through a jobs-manager that forwards them
+  # (client-runtime's OPERATOR_TRAINING_SWITCHES carries both since
+  # client-runtime#507); on an older runtime they land on the jobs-manager
+  # container and go no further.
+  # EMIT_TOPOLOGY: "0"
+  # EMIT_OOM_RESCUE: "0"
+  # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
+  #    B7). jobs-manager applies it as the pod-level activeDeadlineSeconds ONLY
+  #    when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet
+  #    cap, so one run cannot hold N GPUs indefinitely; single-GPU and CPU runs
+  #    keep today's "bias toward NOT killing". Default inside jobs-manager is
+  #    86400 (one day) when this key is UNSET. Digits = seconds; "0", "off",
+  #    "false", "no" DISABLE the lease -- note "off" disables HERE but is
+  #    refused for the TRACEBLOC_*/EMIT_* switches above: each key mirrors its
+  #    own reader's vocabulary and both fail loudly, so do not learn one from
+  #    the other. "00" is refused: it is not in the runtime's falsy set and
+  #    would silently become the default. RENDERED ONLY WHEN SET, like the two
+  #    switches above -- an unconditional default here would switch the lease
+  #    off fleet-wide, silently, because an empty value is how the runtime reads
+  #    "disabled". The schema closes the vocabulary so a typo is refused at
+  #    install time rather than falling back to the default unnoticed. The
+  #    controller reports a lease kill as "lease expired" through the pod
+  #    annotation tracebloc.io/lease-seconds.
+  # MULTI_GPU_LEASE_SECONDS: "86400"
 }
 
 # -- GPU device plugin (client#564)

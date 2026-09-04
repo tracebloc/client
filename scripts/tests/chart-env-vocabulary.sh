@@ -83,6 +83,24 @@ expect_reject() {
   fi
 }
 
+# expect_render_without <label> <must-be-absent substring> <helm args...> -- the
+# chart must render AND the string must not appear. The plain expect_render
+# cannot say "emits nothing": every render contains the default image tag, so
+# grepping for it proves only that helm ran (Bugbot, client#975).
+expect_render_without() {
+  local label="$1" absent="$2"; shift 2
+  local out
+  if ! out="$(render "$@")"; then
+    fail "$label: expected a successful render, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+    return
+  fi
+  if grep -qF "$absent" <<<"$out"; then
+    fail "$label: rendered, but '$absent' IS in the output and must not be"
+  else
+    pass "$label -> no '$absent'"
+  fi
+}
+
 SCHEMA_ERR="values don't meet the specifications of the schema"
 
 echo "== env.CLIENT_ENV: the six accepted spellings plus empty all resolve =="
@@ -161,6 +179,37 @@ expect_reject "training pinned=auto"              "$SCHEMA_ERR" --set-string "im
 expect_render "training capabilities with a pin"  "TRAINING_ENGINE_CAPABILITIES" --set-string "images.training.capabilities=ddp" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
 expect_reject "training capabilities WITHOUT a pin is refused by the template, not the schema" "is DERIVED from the pinned digests" --set-string "images.training.capabilities=ddp"
 expect_reject "training capabilities=DDP (uppercase)" "$SCHEMA_ERR" --set-string "images.training.capabilities=DDP" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+echo "== env.TRACEBLOC_DDP / TRACEBLOC_AMP / EMIT_TOPOLOGY / EMIT_OOM_RESCUE: the switch vocabulary is closed =="
+# RFC-0067 D8 (backend#3149): the runtime reads 1|true|yes as ON and EVERYTHING
+# ELSE as OFF, so a misspelling does not error there -- it silently disables the
+# switch the operator believes is on. The schema is the only place the typo can
+# be caught. `--set-string`, not `--set`: helm parses a bare 1 as an integer and
+# the schema would refuse it for the wrong reason (type, not vocabulary).
+# EMIT_TOPOLOGY / EMIT_OOM_RESCUE share the vocabulary (tracebloc-engine#879 @ 383b0daa).
+for key in TRACEBLOC_DDP TRACEBLOC_AMP EMIT_TOPOLOGY EMIT_OOM_RESCUE; do
+  for good in 1 0 true false yes no TRUE False YES nO; do
+    expect_render "$key=$good" "name: $key" --set-string "env.$key=$good"
+  done
+  # Whitespace-tolerant, as the runtime's .strip() is.
+  expect_render "$key=' true '" "name: $key" --set-string "env.$key= true "
+  # Empty is legal and means UNSET: the passthrough emits NOTHING for it --
+  # asserted as the absence of the var, not as "helm rendered".
+  expect_render_without "$key=''" "name: $key" --set-string "env.$key="
+  for bad in ture on off enabled disabled 2 t y; do
+    expect_reject "$key=$bad" "$SCHEMA_ERR" --set-string "env.$key=$bad"
+  done
+done
+
+echo "== env.MULTI_GPU_LEASE_SECONDS: seconds or an explicit disable, nothing else =="
+# client-runtime#486 (B7): the runtime falls back to its 86400 s default on any
+# unrecognised value, so a typo would be indistinguishable from the default.
+for good in 0 60 86400 off false no OFF False; do
+  expect_render "MULTI_GPU_LEASE_SECONDS=$good" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS=$good"
+done
+expect_render_without "MULTI_GPU_LEASE_SECONDS=''" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS="
+for bad in 1h 60s -1 3.5 on true yes disabled 00 007; do
+  expect_reject "MULTI_GPU_LEASE_SECONDS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_LEASE_SECONDS=$bad"
+done
 
 echo "== images.ingestor.channelTags: keys are closed =="
 # The lookup is on the RESOLVED env, so only dev/stg/prod can ever match. An
