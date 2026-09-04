@@ -2,6 +2,31 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.99 — `rotateMysqlRoot` / `bootstrapDbReparent` baked for `stg` and `prod` (datadir-aware)
+
+`rotateMysqlRootByEnv` and `bootstrapDbReparentByEnv` are now baked `true` for
+**`stg` and `prod`** as well as `dev` (backend#947). The bake is **datadir-aware**,
+so what an edge does on upgrade depends on its state — no operator flip required:
+
+* **Fresh install** (no MySQL datadir yet, on a live cluster) → **born rotated**:
+  the chart mints a root password into the Secret, re-parents the account-minting
+  bootstrap onto root, and records a `mysql-root-rotated` ConfigMap so the edge is
+  recognised as rotated on every later render.
+* **An edge already born-rotated by this bake** (the marker is present) → **stays
+  rotated**, and its generated root password is preserved across upgrades.
+* **Existing un-rotated / "blind" edge** (a datadir predating the rotation, no
+  marker) → **left exactly as it is** on its current (image-baked) password. The
+  baked default resolves *off* for it — no wedge, no `1045`. Rotating such an edge
+  is still the deliberate manual path in `docs/migration-tools/rotate-mysql-root.md`
+  (explicit `rotateMysqlRoot=true` + the one-time `ALTER USER 'root'`).
+* **Cluster-less render** (`helm template`, `--dry-run=client`, ArgoCD default /
+  Flux post-render) cannot prove a datadir fresh, so it resolves **off** — pin
+  `mysqlRootPassword` or render server-side to rotate a cluster-less fleet.
+
+Nothing here changes an already-rotated fleet (dev, edge 713) that carries an
+explicit `rotateMysqlRoot=true` override: the override bypasses the datadir gate
+entirely and its posture is unchanged.
+
 ## Upgrading to 1.9.71 — the `rotateMysqlRoot` gate, and one new object outside the release namespace
 
 Two things matter when you cross this version from anything below it.
@@ -11,8 +36,11 @@ Two things matter when you cross this version from anything below it.
 environment when this section was written; **since backend#1528 S3 baked dev's
 retired posture, `rotateMysqlRootByEnv.dev` is `true`** — so on a **dev** fleet
 an upgrade across that version DOES change something: the Secret gains
-`MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. `stg` and
-`prod` remain `false` and are unaffected. The gate is a *precondition* for the
+`MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. Since
+backend#947 `rotateMysqlRootByEnv` is baked `true` for **`stg` and `prod`** too
+(see *Upgrading to 1.9.99* below) — but datadir-aware, so an **existing
+un-rotated** stg/prod edge is left on its current password and is unaffected,
+while only a **fresh** install born-rotates. The gate is a *precondition* for the
 rotation runbook (`docs/migration-tools/rotate-mysql-root.md`), not the rotation
 itself.
 

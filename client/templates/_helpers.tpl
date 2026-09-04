@@ -172,6 +172,20 @@ client-logs-pvc
 mysql-pvc
 {{- end }}
 
+{{/*
+  Name of the "this edge was born rotated" marker (backend#947). A CONSTANT
+  literal, deliberately NOT fullname/override-following -- like tracebloc.mysqlPvc
+  and unlike tracebloc.secretName -- so tracebloc.bakedRootRotationOn may `lookup`
+  it without tripping fullname-override-completeness.sh (backend#2626), which
+  refuses only Secret lookups on the override-following secretName. See the marker
+  template (mysql-root-rotated-marker.yaml) and bakedRootRotationOn for why it
+  exists: the PVC alone cannot tell a born-rotated edge from an existing un-rotated
+  one, and that ambiguity un-rotated a fresh stg/prod install on its next upgrade.
+*/}}
+{{- define "tracebloc.mysqlRootRotatedMarker" -}}
+mysql-root-rotated
+{{- end }}
+
 {{- define "tracebloc.mysqlPvName" -}}
 {{ include "tracebloc.fullname" . }}-mysql-pv
 {{- end }}
@@ -709,13 +723,17 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   root (backend#1528 S3). Resolves identically to tracebloc.serviceDbAccounts —
   operator override first, else the per-environment default — so the fleet's S3
   posture reads out of one place the same way, and the CLIENT_ENV normalization
-  (backend#1723) is shared. This is the LAST, edgeuser-retiring step, so
-  bootstrapDbReparentByEnv is BAKED ON FOR dev and false for stg and prod: dev
-  has run the whole ladder and its posture is verified, so a fresh dev install
-  should come up retired rather than re-walk the flips by hand. stg and prod
-  still opt in per fleet, after serviceDbAccounts + perExperimentDbCreds are
-  verified there. Paired with rotateMysqlRootByEnv -- reparent=true with
-  rotate=false has no password to fall back on and hard-fails the render.
+  (backend#1723) is shared. This is the LAST, edgeuser-retiring step. dev has run
+  the whole ladder and its posture is verified, so a fresh dev install
+  should come up retired rather than re-walk the flips by hand. Now baked ON for
+  dev, stg and prod (all three fleets retired) -- but on the baked path it resolves
+  on ONLY for a fresh or already-rotated edge (tracebloc.bakedRootRotationOn),
+  exactly like rotateMysqlRoot, so a baked default re-parents a fresh install while
+  leaving an existing un-rotated (blind) edge alone rather than hard-failing its
+  render. It MUST move in lockstep with rotate: reparent derives DB_BOOTSTRAP_PASSWORD
+  from the rotation (backend#2738), so gating both on the same helper keeps them
+  consistent -- reparent=true with rotate=false has no password to fall back on and
+  hard-fails the render. An explicit override is unchanged (the manual path).
 */}}
 {{- define "tracebloc.bootstrapDbReparent" -}}
 {{- $override := (default dict .Values).bootstrapDbReparent -}}
@@ -724,7 +742,16 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- else -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.bootstrapDbReparentByEnv -}}
-{{- if get $byEnv $env }}true{{ end -}}
+{{- /* Baked reparent follows rotate's RESOLVED value, not bakedRootRotationOn
+       directly: reparent derives DB_BOOTSTRAP_PASSWORD from the rotation
+       (backend#2738), so it must be on iff rotate is on. Gating on
+       bakedRootRotationOn alone left reparent baked-on when an operator explicitly
+       set rotateMysqlRoot=false on an already-rotated edge (Secret still holds
+       MYSQL_ROOT_PASSWORD), and reparent then hard-failed the render with no
+       password to derive -- caught by the k3d auto-upgrade e2e's rotation-off
+       restore. Following the resolved rotate value keeps them in lockstep in every
+       case: fresh->on, blind/un-rotated->off, and explicit rotate-off->off. */ -}}
+{{- if and (get $byEnv $env) (include "tracebloc.rotateMysqlRoot" .) }}true{{ end -}}
 {{- end -}}
 {{- end }}
 
@@ -830,16 +857,71 @@ true
 {{- end }}
 
 {{/*
+  Whether a BAKED-DEFAULT rotateMysqlRoot / bootstrapDbReparent may resolve ON for
+  THIS render without wedging an existing un-rotated edge (backend#947; @LukasWodka
+  sign-off 2026-09-02). Consulted ONLY on the baked-default path -- an explicit
+  operator override bypasses this and keeps the backend#2879 fail-closed guard (the
+  deliberate manual-rotation path for our own accessible existing clusters).
+
+  The cases, per the sign-off:
+    - ALREADY born rotated -- the marker ConfigMap (tracebloc.mysqlRootRotatedMarker)
+      is present -> ON. This is the case the PVC alone could not see, and getting it
+      wrong is a ONE-WAY DOOR (backend#947, @LukasWodka): a fresh stg/prod install
+      born-rotates and mints root into the Secret, but the chart also CREATES the
+      mysql-pvc on that first install (resource-policy: keep), so a PVC-only freshness
+      test flips OFF on the very next auto-upgrade -- rotate/reparent both resolve off,
+      secrets.yaml stops emitting MYSQL_ROOT_PASSWORD/DB_BOOTSTRAP_PASSWORD, root's
+      generated password is lost and jobs-manager reverts to minting as edgeuser (the
+      posture this PR retires). The marker is written iff rotation resolved on (see
+      mysql-root-rotated-marker.yaml), under a CONSTANT name so this lookup is
+      rename-safe -- which is what lets it stand in for the Secret probe that
+      backend#2626 refuses.
+    - NEW / fresh datadir on a live cluster (no marker yet, no mysql-pvc, kube-system
+      visible) -> ON. The tier-3 mint in secrets.yaml generates root into the Secret,
+      the edge is born rotated, and this same render lays down the marker so every
+      later render stays on.
+    - EXISTING datadir (mysql-pvc present, no marker), OR a BLIND / cluster-less
+      render that cannot prove the datadir fresh -> OFF. Fall back to the edge's
+      existing password (the image-baked literal); no mint, no wedge.
+
+  An accessible existing edge we DO want rotated carries an explicit
+  `rotateMysqlRoot=true` override (the manual-rotation path -- how dev and edge 713
+  hold it), which bypasses this helper entirely, so its rotated posture is preserved
+  by the override, not re-derived here. Deliberately NO Secret `lookup` on the
+  override-following secretName: a miss there would be rename-unsafe, which
+  scripts/tests/fullname-override-completeness.sh (backend#2626) refuses -- the marker
+  (constant name) carries the "already rotated" signal a Secret probe would have.
+
+  A tier-1 `mysqlRootPassword` PIN also resolves ON: it is an explicit operator
+  assertion of root's password (deterministic, no tier-3 mint), so it is the
+  cluster-less/blind way to opt a fleet into rotation and it keeps this decidable
+  under `helm template` / helm-unittest (backend#2892's existing escape hatch).
+*/}}
+{{- define "tracebloc.bakedRootRotationOn" -}}
+{{- if .Values.mysqlRootPassword -}}
+true
+{{- else -}}
+{{- $marker := (lookup "v1" "ConfigMap" .Release.Namespace (include "tracebloc.mysqlRootRotatedMarker" .)) -}}
+{{- $pvc := (lookup "v1" "PersistentVolumeClaim" .Release.Namespace (include "tracebloc.mysqlPvc" .)) -}}
+{{- $clusterVisible := (lookup "v1" "Namespace" "" "kube-system") -}}
+{{- if $marker -}}
+true
+{{- else if and $clusterVisible (not $pvc) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether the chart manages the mysql-client root password from a generated
   Secret instead of the image's baked default (backend#947 / backend#1528 Phase
-  0). Resolves identically to tracebloc.serviceDbAccounts / bootstrapDbReparent —
-  operator override first, else the per-environment default. Only takes effect
-  for a FRESH datadir (the mysql entrypoint reads MYSQL_ROOT_PASSWORD at init and
-  ignores it thereafter); an existing datadir is rotated by the one-time
-  `ALTER USER 'root'` step that reads the same Secret. Default TRUE for dev,
-  false for stg and prod -- dev is baked to the retired posture, while stg and
-  prod flip per fleet during a rotation window (it rolls the mysql pod, and an
-  existing edge still needs the one-time ALTER USER 'root' DDL).
+  0). Operator override first (unchanged -- the manual-rotation path, still guarded
+  by backend#2879); else the per-environment default, AND ONLY on a fresh or
+  already-rotated edge (tracebloc.bakedRootRotationOn). Baked TRUE for dev, stg and
+  prod now that all three fleets are retired -- but the datadir gate means a baked
+  default born-rotates a fresh install while leaving an existing un-rotated (blind)
+  edge on its current password rather than wedging its render. An existing edge we
+  can reach is rotated by the explicit override + the one-time `ALTER USER 'root'`.
 */}}
 {{- define "tracebloc.rotateMysqlRoot" -}}
 {{- $override := (default dict .Values).rotateMysqlRoot -}}
@@ -848,7 +930,7 @@ true
 {{- else -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
 {{- $byEnv := default dict .Values.rotateMysqlRootByEnv -}}
-{{- if get $byEnv $env }}true{{ end -}}
+{{- if and (get $byEnv $env) (include "tracebloc.bakedRootRotationOn" .) }}true{{ end -}}
 {{- end -}}
 {{- end }}
 

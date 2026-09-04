@@ -397,8 +397,36 @@ helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
   || fail "the acknowledged upgrade rendered but minted no MYSQL_ROOT_PASSWORD — the ack path must still generate the value"
 echo "   OK: with the ack, the render passes and a root password is minted"
 
+# ── backend#947: a born-rotated edge STAYS rotated on its next baked-default upgrade
+#  This is the one-way door @LukasWodka caught. The ack upgrade just above rendered
+#  rotation ON, so it also laid down the mysql-root-rotated marker ConfigMap. That
+#  marker is the whole fix: it lets tracebloc.bakedRootRotationOn tell a born-rotated
+#  edge from an existing un-rotated one, which the mysql-pvc alone cannot (the chart
+#  creates that PVC on first install, so it is present from the second render on for
+#  BOTH). Without the marker, the next auto-upgrade under the BAKED default resolves
+#  rotate/reparent OFF, secrets.yaml drops MYSQL_ROOT_PASSWORD, root's generated
+#  password is lost (1045) and the mint reverts to edgeuser — the retirement undone.
+#  --reset-values clears the explicit rotateMysqlRoot=true from the ack step so this
+#  upgrade takes the BAKED path (CLIENT_ENV defaults to prod == rotateMysqlRootByEnv
+#  true); clientId etc. resolve from the live Secret (backend#2571). Deleting the
+#  marker `lookup` arm of bakedRootRotationOn — or the marker template — reddens HERE.
+echo "── backend#947: born-rotated edge stays rotated + keeps its password on baked upgrade ──"
+kubectl -n "$NS" get configmap mysql-root-rotated >/dev/null 2>&1 \
+  || fail "the rotation-on render did not create the mysql-root-rotated marker (backend#947); bakedRootRotationOn cannot then tell a born-rotated edge from an un-rotated one"
+_born="$(secret_key MYSQL_ROOT_PASSWORD)"
+helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+  --set storageClass.provisioner=rancher.io/local-path >/dev/null \
+  || fail "the baked-default upgrade of a born-rotated edge was refused (backend#947)"
+[ "$(secret_key MYSQL_ROOT_PASSWORD)" = "$_born" ] \
+  || fail "MYSQL_ROOT_PASSWORD changed or was dropped on a born-rotated edge's baked-default upgrade (backend#947 one-way door): before='$_born' after='$(secret_key MYSQL_ROOT_PASSWORD)'. The marker must keep rotation on and tier-2 must preserve the value."
+[ -n "$(secret_key DB_BOOTSTRAP_PASSWORD)" ] \
+  || fail "DB_BOOTSTRAP_PASSWORD dropped on a born-rotated edge's baked-default upgrade — jobs-manager would revert to minting as edgeuser (backend#947)"
+echo "   OK: marker present, rotate stayed on under the baked default, root password preserved"
+
 #  Restore rotation-off so the rest of the run sees the baseline release, mirroring
-#  the empty-key check's restore discipline.
+#  the empty-key check's restore discipline. An explicit rotateMysqlRoot=false
+#  bypasses the helper/marker (the deliberate operator override), so this still
+#  clears the key even though the marker persists (resource-policy: keep).
 helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-then-reuse-values \
   --set rotateMysqlRoot=false --set mysqlRootRotationAcknowledged=false >/dev/null \
   || fail "could not restore rotation-off after the backend#2879 guard check"
