@@ -131,6 +131,37 @@ else
   echo "  skip  --skip-schema-validation unsupported by $(helm version --short) — helper backstop not exercised"
 fi
 
+echo "== images.training.digests: the digest grammar and the arch vocabulary are closed =="
+# backend#3156 (RFC-1246 P2). The runtime validates the map at boot and a bad
+# digest there is a CrashLoopBackOff of jobs-manager; the schema catches it one
+# step earlier, at helm upgrade. Arch is closed to cpu|gpu because the engine
+# builds exactly those two; task keys stay open because the task set is the
+# engine's to declare, not the chart's.
+expect_render "training digest, canonical"        "TRAINING_IMAGE_DIGESTS" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_render "training digest, both arches"      "TRAINING_IMAGE_DIGESTS" --set-string "images.training.digests.image_classification.cpu=sha256:0000000000000000000000000000000000000000000000000000000000000000" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training digest, short hex"        "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=sha256:abc"
+expect_reject "training digest, uppercase hex"    "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+expect_reject "training digest, bare hex"         "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training digest, arch=tpu"         "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.tpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training digest, task=Image-Class" "$SCHEMA_ERR" --set-string "images.training.digests.Image-Class.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# The pre-images.training replay: `--set images.training=null` DELETES the key,
+# which is what a --reuse-values upgrade from an older release presents. Asserted
+# as the ABSENCE of the var: an absent `pinned` stringifies to a sentinel, and
+# only a hasKey guard keeps this a no-op (Bugbot, client#976).
+if ! out="$(render --set images.training=null)"; then
+  fail "images.training absent: expected a render, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+elif grep -qF "TRAINING_IMAGE_PINNED" <<<"$out"; then
+  fail "images.training absent: TRAINING_IMAGE_PINNED was rendered from an absent key"
+else
+  pass "images.training absent -> no TRAINING_IMAGE_PINNED"
+fi
+expect_render "training pinned=true (string)"     "TRAINING_IMAGE_PINNED" --set-string "images.training.pinned=true"
+expect_render "training pinned=false (bool)"      "TRAINING_IMAGE_PINNED" --set "images.training.pinned=false"
+expect_reject "training pinned=auto"              "$SCHEMA_ERR" --set-string "images.training.pinned=auto"
+expect_render "training capabilities with a pin"  "TRAINING_ENGINE_CAPABILITIES" --set-string "images.training.capabilities=ddp" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training capabilities WITHOUT a pin is refused by the template, not the schema" "is DERIVED from the pinned digests" --set-string "images.training.capabilities=ddp"
+expect_reject "training capabilities=DDP (uppercase)" "$SCHEMA_ERR" --set-string "images.training.capabilities=DDP" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
 echo "== images.ingestor.channelTags: keys are closed =="
 # The lookup is on the RESOLVED env, so only dev/stg/prod can ever match. An
 # alias key validated fine and was then silently ignored: channelTags.staging
