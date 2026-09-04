@@ -859,9 +859,10 @@ true
 {{/*
   Whether a BAKED-DEFAULT rotateMysqlRoot / bootstrapDbReparent may resolve ON for
   THIS render without wedging an existing un-rotated edge (backend#947; @LukasWodka
-  sign-off 2026-09-02). Consulted ONLY on the baked-default path -- an explicit
-  operator override bypasses this and keeps the backend#2879 fail-closed guard (the
-  deliberate manual-rotation path for our own accessible existing clusters).
+  sign-off 2026-09-02; pre-marker case backend#3189). Consulted ONLY on the
+  baked-default path -- an explicit operator override bypasses this and keeps the
+  backend#2879 fail-closed guard (the deliberate manual-rotation path for our own
+  accessible existing clusters).
 
   The cases, per the sign-off:
     - ALREADY born rotated -- the marker ConfigMap (tracebloc.mysqlRootRotatedMarker)
@@ -874,23 +875,31 @@ true
       generated password is lost and jobs-manager reverts to minting as edgeuser (the
       posture this PR retires). The marker is written iff rotation resolved on (see
       mysql-root-rotated-marker.yaml), under a CONSTANT name so this lookup is
-      rename-safe -- which is what lets it stand in for the Secret probe that
-      backend#2626 refuses.
-    - NEW / fresh datadir on a live cluster (no marker yet, no mysql-pvc, kube-system
-      visible) -> ON. The tier-3 mint in secrets.yaml generates root into the Secret,
-      the edge is born rotated, and this same render lays down the marker so every
-      later render stays on.
-    - EXISTING datadir (mysql-pvc present, no marker), OR a BLIND / cluster-less
-      render that cannot prove the datadir fresh -> OFF. Fall back to the edge's
-      existing password (the image-baked literal); no mint, no wedge.
+      rename-safe.
+    - ALREADY rotated BEFORE the marker shipped (backend#3189) -- the live Secret
+      carries a baked MYSQL_ROOT_PASSWORD, minted under the EARLIER
+      serviceDbAccountsByEnv / rotateMysqlRootByEnv bake, but no marker was ever laid
+      down: that mechanism post-dates the rotation, so those edges never got one.
+      -> ON. The marker `lookup` is blind to them; without this case the marker/PVC/
+      cluster arms all read "not rotated" on their next auto-upgrade and trip the same
+      one-way door described above -- a SILENT loss of root on fleets that were
+      already rotated. The live Secret's MYSQL_ROOT_PASSWORD key is the only signal
+      that separates such an edge from an existing un-rotated one, so it is read here
+      (see the refusal in the define for why that Secret lookup is rename-safe). This
+      render also resolves rotation on, so it lays the marker down -- backfilling it,
+      after which every later render resolves via the rename-safe marker arm instead.
+    - NEW / fresh datadir on a live cluster (no marker yet, no mysql-pvc, no baked
+      root, kube-system visible) -> ON. The tier-3 mint in secrets.yaml generates root
+      into the Secret, the edge is born rotated, and this same render lays down the
+      marker so every later render stays on.
+    - EXISTING datadir (mysql-pvc present, no marker, no baked root in the Secret), OR
+      a BLIND / cluster-less render that cannot prove the datadir fresh -> OFF. Fall
+      back to the edge's existing password (the image-baked literal); no mint, no wedge.
 
   An accessible existing edge we DO want rotated carries an explicit
   `rotateMysqlRoot=true` override (the manual-rotation path -- how dev and edge 713
   hold it), which bypasses this helper entirely, so its rotated posture is preserved
-  by the override, not re-derived here. Deliberately NO Secret `lookup` on the
-  override-following secretName: a miss there would be rename-unsafe, which
-  scripts/tests/fullname-override-completeness.sh (backend#2626) refuses -- the marker
-  (constant name) carries the "already rotated" signal a Secret probe would have.
+  by the override, not re-derived here.
 
   A tier-1 `mysqlRootPassword` PIN also resolves ON: it is an explicit operator
   assertion of root's password (deterministic, no tier-3 mint), so it is the
@@ -904,7 +913,37 @@ true
 {{- $marker := (lookup "v1" "ConfigMap" .Release.Namespace (include "tracebloc.mysqlRootRotatedMarker" .)) -}}
 {{- $pvc := (lookup "v1" "PersistentVolumeClaim" .Release.Namespace (include "tracebloc.mysqlPvc" .)) -}}
 {{- $clusterVisible := (lookup "v1" "Namespace" "" "kube-system") -}}
+{{- $secret := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.secretName" .)) -}}
+{{- /*
+    RENAME-SAFE BY REFUSAL, not by avoidance (backend#3189). The Secret's name
+    follows fullnameOverride, so a rename moves it and a bare `lookup` would MISS
+    and silently read "not rotated" -- exactly the reason the born-rotated signal
+    was first recorded in a constant-named marker instead of the Secret. The
+    pre-marker rotated edges below have no marker, so the Secret is the only signal
+    left; it is read WITH the refusal that turns that silent miss into a loud fail.
+    If the fixed-name mysql-pvc datadir is present but no Secret resolves under the
+    current name, that is a rename or a reinstall over a kept datadir: fail, naming
+    the same copy-the-Secret remedy secrets.yaml gives for the credentials it mints.
+    This is also what scripts/tests/fullname-override-completeness.sh (backend#2626)
+    requires of any Secret lookup keyed on the override-following name. Inert on
+    every legitimate render: a fresh install has no PVC, an ordinary upgrade has the
+    Secret, and a cluster-less render (helm template / helm-unittest / GitOps) has
+    neither the PVC nor the Secret, so none of them fail here.
+*/ -}}
+{{- if and $pvc (not $secret) -}}
+{{-   fail (printf "release %q in namespace %q has MySQL data (PersistentVolumeClaim %q) but no Secret named %q -- the name this render resolves to. bakedRootRotationOn cannot read root's rotation state from a Secret that is not there, and treating the miss as \"not rotated\" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. This is a rename (fullnameOverride changed on a live release) or a reinstall over a kept datadir. FIX: copy the existing Secret to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command); or set fullnameOverride back to the value this release was last rendered with. See docs/MIGRATIONS.md." .Release.Name .Release.Namespace (include "tracebloc.mysqlPvc" .) (include "tracebloc.secretName" .)) -}}
+{{- end -}}
+{{- /*
+    PRE-MARKER ROTATED (backend#3189): the live Secret already carries a baked
+    MYSQL_ROOT_PASSWORD, minted under the EARLIER serviceDbAccountsByEnv /
+    rotateMysqlRootByEnv bake, but no marker was ever laid down -- that mechanism
+    post-dates the rotation. Same `and $secret $secret.data (hasKey ...)` shape as
+    secrets.yaml's tier-2 reads, so an empty offline lookup is nil-safe.
+*/ -}}
+{{- $bakedRoot := (and $secret $secret.data (hasKey $secret.data "MYSQL_ROOT_PASSWORD")) -}}
 {{- if $marker -}}
+true
+{{- else if $bakedRoot -}}
 true
 {{- else if and $clusterVisible (not $pvc) -}}
 true
