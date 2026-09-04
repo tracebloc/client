@@ -14,11 +14,16 @@
   edgeuser this epic retires. That is a one-way door on a live fleet (@LukasWodka,
   backend#947).
 
-  The Secret WOULD be the natural "already rotated" signal, but its name follows
-  fullnameOverride and fullname-override-completeness.sh (backend#2626) refuses a
-  lookup on it (a rename miss silently reads the wrong Secret). So the born-rotated
-  fact is recorded here instead, in a resource under a CONSTANT name -- exactly the
-  rename-safe shape mysql-pvc already has -- which bakedRootRotationOn may look up.
+  The Secret's baked MYSQL_ROOT_PASSWORD is the OTHER "already rotated" signal, but
+  its name follows fullnameOverride, so a rename moves it and a bare lookup silently
+  reads the wrong (missing) Secret. So the born-rotated fact is recorded here too, in
+  a resource under a CONSTANT name -- exactly the rename-safe shape mysql-pvc already
+  has -- which bakedRootRotationOn looks up FIRST. The Secret probe is a fallback for
+  the pre-marker rotated edges this marker cannot see (rotated before it shipped,
+  backend#3189); bakedRootRotationOn reads it under a refusal that turns a rename miss
+  into a loud fail rather than a silent un-rotation (fullname-override-completeness.sh,
+  backend#2626). A render that resolves on via that Secret probe lays this marker
+  down, so the edge converges onto the rename-safe signal from then on.
 
   Rendered IFF rotation resolves on (fresh install, marker/PVC-driven upgrades, an
   explicit override, or a pin). resource-policy: keep so it survives a helm
