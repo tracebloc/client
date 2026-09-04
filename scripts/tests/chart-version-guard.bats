@@ -45,7 +45,18 @@ seed_workflow() {
 }
 
 commit()  { git add -A && git commit -qm change; }
-bump()    { sed -i.bak 's/^version: .*/version: 99.0.0/' "$1/Chart.yaml" && rm -f "$1/Chart.yaml.bak"; }
+# A real release bumps version:, and appVersion: too WHEN the two are already in
+# lockstep — the client chart moves both together, while ingestor (version 0.2.0
+# / appVersion 0.3.0) versions chart and app independently and moves version
+# alone. This keeps `bump ingestor` a version-only bump, exactly as before.
+bump() {
+  local f="$1/Chart.yaml" v a
+  v="$(sed -n 's/^version: //p'    "$f")"
+  a="$(sed -n 's/^appVersion: //p' "$f" | tr -d '"')"
+  sed -i.bak 's/^version: .*/version: 99.0.0/' "$f"
+  [ "$v" = "$a" ] && sed -i.bak 's/^appVersion: .*/appVersion: "99.0.0"/' "$f"
+  rm -f "$f.bak"
+}
 guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
 
 # ── the client#519 regression: ingestor is a published chart too ─────────────
@@ -124,6 +135,70 @@ guard()   { run env BASE_SHA="$BASE" bash "$GUARD_SH"; }
   commit
   guard
   [ "$status" -eq 1 ] || return 1
+}
+
+# ── appVersion lockstep: version and appVersion move together on a locked chart
+#    (client#964: version: 1.9.98 shipped with appVersion: "1.9.97", green here) ─
+
+@test "client version bumped but appVersion left behind REDS (client#964)" {
+  printf 'kind: Deployment\nnew: true\n' >client/templates/app.yaml
+  sed -i.bak 's/^version: .*/version: 1.9.10/' client/Chart.yaml && rm -f client/Chart.yaml.bak
+  # appVersion deliberately left at "1.9.9" — the exact 1.9.98-vs-1.9.97 shape.
+  commit
+  guard
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"appVersion"* ]] || return 1
+  # The version-bump requirement itself is met — ONLY the lockstep check reds,
+  # which is what proves the new gate (not the old one) is doing the work here.
+  [[ "$output" == *"client chart content changed and client/Chart.yaml 'version:' was bumped"* ]] || return 1
+}
+
+@test "an appVersion left stale REDS even with no chart-content change" {
+  sed -i.bak 's/^version: .*/version: 1.9.10/' client/Chart.yaml && rm -f client/Chart.yaml.bak
+  # Only Chart.yaml is touched (content check is N/A), appVersion stays "1.9.9":
+  # the lockstep gate runs unconditionally and must still red.
+  commit
+  guard
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"appVersion"* ]] || return 1
+}
+
+@test "client version and appVersion bumped together stays GREEN" {
+  printf 'kind: Deployment\nnew: true\n' >client/templates/app.yaml
+  bump client                       # lockstep-aware: moves version AND appVersion
+  commit
+  guard
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "ingestor version moves without appVersion and stays GREEN (independent versioning)" {
+  printf 'kind: Job\nnew: true\n' >ingestor/templates/job.yaml
+  sed -i.bak 's/^version: .*/version: 0.2.1/' ingestor/Chart.yaml && rm -f ingestor/Chart.yaml.bak
+  # appVersion stays "0.3.0"; base was 0.2.0 / 0.3.0, never in lockstep, so the
+  # gate exempts it. A blanket `version == appVersion` would false-positive here.
+  commit
+  guard
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "an inline comment on version does not spuriously red a locked chart" {
+  printf 'kind: Deployment\nnew: true\n' >client/templates/app.yaml
+  # version carries a trailing YAML comment; appVersion is the same value, plain.
+  sed -i.bak 's/^version: .*/version: 1.9.10  # cut for the hotfix/' client/Chart.yaml && rm -f client/Chart.yaml.bak
+  sed -i.bak 's/^appVersion: .*/appVersion: "1.9.10"/' client/Chart.yaml && rm -f client/Chart.yaml.bak
+  commit
+  guard
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "removing appVersion from a lockstep chart REDS" {
+  printf 'kind: Deployment\nnew: true\n' >client/templates/app.yaml
+  bump client
+  sed -i.bak '/^appVersion:/d' client/Chart.yaml && rm -f client/Chart.yaml.bak
+  commit
+  guard
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"appVersion"* ]] || return 1
 }
 
 # ── both charts in one PR ────────────────────────────────────────────────────

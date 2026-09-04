@@ -111,6 +111,81 @@ version_bumped() { # $1 = chart
   return 1
 }
 
+# ── appVersion must stay in lockstep with version, where it already is ────────
+#
+# `version:` gates publication (above); `appVersion:` does not — but _helpers.tpl
+# feeds appVersion straight into app.kubernetes.io/version, so an appVersion left
+# behind a bumped version makes the install self-report the WRONG release.
+# client#964 shipped `version: 1.9.98` with `appVersion: "1.9.97"` — green
+# through this guard because it only ever read `version:`; caught by Bugbot and
+# review, not here.
+#
+# The client chart has kept version == appVersion on every bump since ~1.9.58, so
+# for it any divergence is a mistake. But the two are NOT universally locked:
+# ingestor versions the chart (`version:`) and the app it deploys (`appVersion:`)
+# independently — 0.2.0 / 0.3.0 today, and they moved apart on separate releases.
+# So the rule is NOT a blanket `version == appVersion` (that would red every
+# ingestor PR); it is "a chart that WAS in lockstep at the PR base must STAY in
+# lockstep." That self-scopes to client with no hardcoded chart name, exempts
+# ingestor, and covers a future lockstep chart the day it starts matching.
+#
+# Values are compared after stripping any trailing inline comment, surrounding
+# quotes, and whitespace, because `version:` is written unquoted (1.9.97) and
+# `appVersion:` quoted ("1.9.97"): equal in value, and a raw string compare
+# would read them as divergent.
+chart_field() { # $1 = key; Chart.yaml on stdin → prints first value, rc 1 if absent
+  local key="$1" line val found=1
+  # Read to EOF even after the match — an early `break` would close a feeding
+  # pipe and SIGPIPE its writer, the class version_bumped documents above.
+  while IFS= read -r line; do
+    if [[ "$found" -eq 1 ]]; then
+      case "$line" in
+        "$key":*)
+          val="${line#"$key":}"
+          # Drop a trailing YAML inline comment (whitespace + #…) before trimming,
+          # as the repo's other portable readers do; a version/appVersion value
+          # never contains '#', so this only ever strips a comment.
+          case "$val" in *[[:space:]]"#"*) val="${val%%[[:space:]]"#"*}" ;; esac
+          val="${val#"${val%%[![:space:]]*}"}"   # ltrim
+          val="${val%"${val##*[![:space:]]}"}"    # rtrim
+          case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+          esac
+          found=0
+          ;;
+      esac
+    fi
+  done
+  [[ "$found" -eq 0 ]] && printf '%s' "$val"
+  return "$found"
+}
+
+# rc is shared with the version-bump loop below, so an appVersion failure reds the
+# guard even on a PR whose content-change check turns out N/A.
+rc=0
+for chart in $charts; do
+  file="$chart/Chart.yaml"
+
+  # "In lockstep" is read from the PR BASE. A chart whose base Chart.yaml is
+  # missing/unreadable, is missing either key, or already had the two diverged is
+  # not a lockstep chart here — leave it to the version-bump check.
+  if ! base_yaml="$(git show "${BASE_SHA}:${file}" 2>/dev/null)"; then
+    continue
+  fi
+  base_ver="$(chart_field version    <<< "$base_yaml")" || continue
+  base_app="$(chart_field appVersion <<< "$base_yaml")" || continue
+  [[ "$base_ver" == "$base_app" ]] || continue
+
+  # Locked at base ⇒ must be locked at HEAD.
+  head_ver="$(chart_field version    < "$file")" || head_ver=''
+  head_app="$(chart_field appVersion < "$file")" || head_app=''
+  if [[ "$head_ver" != "$head_app" ]]; then
+    echo "::error::${file} has version: '${head_ver}' but appVersion: '${head_app}'. ${chart}'s version and appVersion have moved in lockstep on every bump, and _helpers.tpl feeds appVersion into app.kubernetes.io/version — so a version bumped without appVersion (client#964: 1.9.98 vs 1.9.97) makes the install self-report the wrong release. Set ${file} appVersion equal to version in this PR."
+    rc=1
+  fi
+done
+
 # Classify every changed path per chart. One `case` per chart, and `case` with no
 # matching pattern exits 0 — a `[[ … ]] && var=1` tail would itself trip `set -e`
 # on a non-match.
@@ -126,14 +201,15 @@ while IFS= read -r path; do
   done
 done <<< "$changed"
 
+# Report EVERY unbumped chart, not just the first: a PR touching both charts
+# should see both in one run rather than one per push. rc may already be 1 from
+# the appVersion lockstep check above, so a content-change N/A must exit "$rc",
+# not 0 — otherwise an appVersion-only failure would be swallowed.
 if [[ -z "${touched// /}" ]]; then
   echo "No packaged chart content changed in this PR — guard N/A."
-  exit 0
+  exit "$rc"
 fi
 
-# Report EVERY unbumped chart, not just the first: a PR touching both charts
-# should see both in one run rather than one per push.
-rc=0
 for chart in $touched; do
   if version_bumped "$chart"; then
     echo "${chart} chart content changed and ${chart}/Chart.yaml 'version:' was bumped. ✓"

@@ -184,9 +184,10 @@ tests:
   # orphan reaper LISTs cred Secrets before deleting them, so the grant is
   # `list` + `delete` — a delete-only rule 403s on the enumeration and can
   # never reap an orphan.
-  - it: default-off grants nothing extra on configmaps/secrets (byte-for-byte)
+  - it: override-off grants nothing extra on configmaps/secrets (byte-for-byte)
     set:
       clusterScope: true
+      perExperimentDbCreds: false
     documentIndex: 1
     asserts:
       - contains:
@@ -267,9 +268,10 @@ tests:
             resources: ["secrets"]
             verbs: ["delete"]
 
-  - it: default-off (Role branch) grants nothing extra on secrets (byte-for-byte)
+  - it: override-off (Role branch) grants nothing extra on secrets (byte-for-byte)
     set:
       clusterScope: false
+      perExperimentDbCreds: false
     documentIndex: 1
     asserts:
       # The flag guards the namespaced Role branch too, so a default install
