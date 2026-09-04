@@ -156,6 +156,24 @@ $Mutations = @(
      Find  = '          Hint "Find your credentials at $(Get-TraceblocDashboardUrl)"'
      Repl  = '          Hint "Find your credentials at https://ai.tracebloc.io/clients"' }
 
+  # THE OTHER HALF OF THAT ONE (client#935). The entry above mutates the
+  # PowerShell installer, and the guard it credits only ever read the PowerShell
+  # installer -- so between them they certified a property of ONE file while
+  # claiming the installer. The bash twin hardcoded production at ten sites and
+  # both stayed green (fixed in client#946). This entry aims the same defect at a
+  # bash lib that no dashboard test has ever named, which is the only way to show
+  # the widened guard actually reaches the class rather than a longer list.
+  #
+  # It also lands in cluster.sh rather than in summary.sh or
+  # install-client-helm.sh deliberately: those two are the files the old guard
+  # enumerated, so a mutation there would be caught by the narrow guard too and
+  # prove nothing about the widening.
+  @{ Name  = 'a bash lib hardcodes the production dashboard, in a file no dashboard test named (client#935)'
+     Expect = 'every dashboard host lives ONLY in the mapping'
+     File  = 'scripts/lib/cluster.sh'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '_cluster_exists() {'
+     Repl  = '_cluster_exists() {  : "See it on your dashboard: https://ai.tracebloc.io/clients"' }
+
   # THE ONE THE CLASS GUARD USED TO MISS (client#930). New-K3dCluster ran
   # `k3d cluster list -o json` bare, on the MAIN install path, through every
   # green run of this suite -- because the class guard's tool list said `docker`

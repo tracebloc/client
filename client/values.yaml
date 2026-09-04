@@ -121,6 +121,84 @@ env: {
   # installer. Set explicitly to override (e.g. a fixed multi-node bare-metal
   # cluster that wants the fallback). Must be a quoted string.
   # SINGLE_NODE: "true"
+  # -- Per-edge OPERATOR switches for the training pods (RFC-0067 D8,
+  #    backend#3149; the runtime half is client-runtime#480).
+  #
+  # jobs-manager reads these from its OWN container env -- the generic
+  # passthrough in templates/jobs-manager-deployment.yaml delivers any
+  # `env.<KEY>` there -- and writes an explicit "1" or "0" onto EVERY training
+  # pod it spawns, so the edge setting always wins over whatever the engine
+  # image defaults to. That is what makes this the kill switch AND the
+  # rollback lever: turning multi-GPU (or AMP) off is a values change plus a
+  # jobs-manager restart, not an image rebuild and not a chart release.
+  #
+  # Truthy = "1" | "true" | "yes" (case-insensitive, whitespace-tolerant --
+  # the engine's own _TRUTHY). Everything else, INCLUDING UNSET, is OFF. The
+  # schema closes the vocabulary to those spellings plus "0" / "false" / "no",
+  # so a typo ("ture", "on") is refused at install time instead of silently
+  # reading as off -- the CLIENT_ENV lesson (backend#1723), applied before the
+  # first customer hits it. Empty ("") means unset.
+  #
+  # Per-edge and operator-level, NEVER per-experiment: there is no experiment
+  # field for either, so RFC-0067 D2's "never user-requested" holds by
+  # construction.
+  #
+  #   TRACEBLOC_DDP -- DistributedDataParallel across the GPUs a training pod is
+  #                    given. Default OFF until RFC-0067 D7's precondition bundle
+  #                    holds (backend#3147 tracks it); flipping it on an edge
+  #                    ahead of that is the operator's call, and this is the
+  #                    lever that flips it back.
+  #   TRACEBLOC_AMP -- automatic mixed precision. The ENGINE still chooses
+  #                    bf16-vs-fp16 from the device in front of it (RFC-0067 D4);
+  #                    this only says whether it may. Default OFF (backend#2327).
+  #
+  # Reaches the training pods only through a jobs-manager that forwards it
+  # (client-runtime#480); on an older runtime the value lands on the
+  # jobs-manager container and goes no further -- inert, never harmful.
+  # TRACEBLOC_DDP: "0"
+  # TRACEBLOC_AMP: "0"
+  # -- Per-edge OPERATOR switches for what the training pod REPORTS (same
+  #    mechanism, same vocabulary). Both default OFF because the destination
+  #    columns live in the backend and land per environment on the backend's
+  #    own schedule: an edge that emits a cycle-payload key its backend lacks
+  #    does not get the key ignored -- update_cycle_data splats leftover keys
+  #    into objects.create AFTER deleting the row, so the edge's cycle row is
+  #    DESTROYED. Two explicit steps, in order: deploy the backend that has the
+  #    columns to that environment, THEN set the switch on the edge.
+  #
+  #   EMIT_TOPOLOGY   -- cycle payload carries world_size + effective_batch
+  #                      (backend#3160's columns; RFC-0067 D5/D9). Contract:
+  #                      tracebloc-engine#879 @ 383b0daa -- "Env var
+  #                      EMIT_TOPOLOGY; default off ("false"); truthy 1, true,
+  #                      yes (case-insensitive, whitespace-stripped)".
+  #   EMIT_OOM_RESCUE -- cycle payload carries oom_rescue_rung + oom_rescue_epoch
+  #                      (backend#2175's columns) when a CUDA-OOM rescue fired.
+  #                      Same gate shape; the engine's _emit_oom_rescue_fields.
+  #
+  # Reach the training pod only through a jobs-manager that forwards them
+  # (client-runtime's OPERATOR_TRAINING_SWITCHES carries both since
+  # client-runtime#507); on an older runtime they land on the jobs-manager
+  # container and go no further.
+  # EMIT_TOPOLOGY: "0"
+  # EMIT_OOM_RESCUE: "0"
+  # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
+  #    B7). jobs-manager applies it as the pod-level activeDeadlineSeconds ONLY
+  #    when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet
+  #    cap, so one run cannot hold N GPUs indefinitely; single-GPU and CPU runs
+  #    keep today's "bias toward NOT killing". Default inside jobs-manager is
+  #    86400 (one day) when this key is UNSET. Digits = seconds; "0", "off",
+  #    "false", "no" DISABLE the lease -- note "off" disables HERE but is
+  #    refused for the TRACEBLOC_*/EMIT_* switches above: each key mirrors its
+  #    own reader's vocabulary and both fail loudly, so do not learn one from
+  #    the other. "00" is refused: it is not in the runtime's falsy set and
+  #    would silently become the default. RENDERED ONLY WHEN SET, like the two
+  #    switches above -- an unconditional default here would switch the lease
+  #    off fleet-wide, silently, because an empty value is how the runtime reads
+  #    "disabled". The schema closes the vocabulary so a typo is refused at
+  #    install time rather than falling back to the default unnoticed. The
+  #    controller reports a lease kill as "lease expired" through the pod
+  #    annotation tracebloc.io/lease-seconds.
+  # MULTI_GPU_LEASE_SECONDS: "86400"
 }
 
 # -- GPU device plugin (client#564)
@@ -807,6 +885,65 @@ telemetryCollector:
 images:
   jobsManager:
     digest: ""
+  # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
+  #    RFC-0067 D8 by backend#3156). The READER shipped first, in client-runtime
+  #    (jobs_manager.load_training_image_digests / training_image_reference), and
+  #    is INERT until this map is populated -- which is the hop order
+  #    backend#2473 exists to enforce, and why this block can land empty.
+  #
+  # WHY. Training pods are spawned from the floating `tracebloc/client-<task>-
+  # <arch>:<CLIENT_ENV>` tag with imagePullPolicy=Always, so cycle k and k+1 of
+  # ONE experiment can be different engine bytes, and with RFC-0067 that means
+  # the DDP state can flip inside one experiment. A digest pin is what stops it.
+  #
+  # THE SHAPE the runtime reads (rendered onto jobs-manager as
+  # TRAINING_IMAGE_DIGESTS via `toJson`; an env var and not a ConfigMap on
+  # purpose -- the value is in the pod template, so a promotion rolls the pod and
+  # the pins are live on upgrade completion):
+  #
+  #   digests:
+  #     image_classification: { cpu: "sha256:...", gpu: "sha256:..." }
+  #     tabular_classification: { cpu: "sha256:...", gpu: "sha256:..." }
+  #     # ... one entry per task the engine publishes, x {cpu, gpu}
+  #
+  # Every digest MUST be canonical `sha256:` + 64 lowercase hex; the schema
+  # refuses anything else here and the runtime refuses it again at boot (a
+  # CrashLoopBackOff rather than per-spawn InvalidImageName pods). A map that
+  # exists but lacks a (task, arch) is a PROMOTION BUG, not a choice: the runtime
+  # warns and spawns the floating tag for that one.
+  #
+  # `pinned` -- "" (default) = AUTO: pin iff CLIENT_ENV resolves to prod, so dev
+  # and staging edges keep floating with zero per-edge action (they carry
+  # env.CLIENT_ENV in user-supplied values). true / false = explicit override for
+  # canary edges and transition windows. Rendered as TRAINING_IMAGE_PINNED only
+  # when set; absent means auto on the runtime side too.
+  #
+  # `capabilities` -- what the PINNED engine can do, as the engine itself
+  # declares it: the comma-separated OCI label `io.tracebloc.engine.capabilities`
+  # on the pinned GPU images (tracebloc-engine#857 adds `ddp`). Rendered onto
+  # jobs-manager as TRAINING_ENGINE_CAPABILITIES; client-runtime requests N>1
+  # GPUs ONLY when `ddp` is present (RFC-0067 D8's skew guard), so an edge whose
+  # pinned engine predates DDP stays at one GPU by construction.
+  #
+  # NEVER HAND-TYPE `capabilities`. It is DERIVED from the pinned digests by the
+  # same step that writes them (scripts/resolve-training-digests.sh, backend#3156
+  # follow-up): the resolver reads the label off each pinned image's config, once,
+  # at pin time, refuses to write when the label cannot be read (unreadable is
+  # not empty), and writes the two keys together. A capability typed beside a pin
+  # is a restated fact that drifts the first time the pin moves -- the chart
+  # therefore REFUSES to render `capabilities` with an empty `digests` (see the
+  # template), because there is nothing it could have been derived from.
+  #
+  # Populating the map is the release train's promotion step, not a hand edit:
+  # it moves prod edges from "whatever :prod points at right now" to a fixed
+  # engine, and the map must then be advanced on every engine promotion or prod
+  # freezes on today's bytes. Until that step exists the map stays EMPTY here,
+  # every edge floats exactly as today, and this block is documentation plus a
+  # tested render path.
+  training:
+    pinned: ""
+    digests: {}
+    capabilities: ""
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns

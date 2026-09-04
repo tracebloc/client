@@ -700,6 +700,41 @@ spec:
         {{- end }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
+        {{- /* Digest-pinned training images (RFC-1246 P2; backend#3156 for
+             RFC-0067 D8). Read by jobs_manager.load_training_image_digests /
+             training_pinning_enabled, which run in THIS container only -- the
+             pods-monitor container spawns nothing, so it gets none of these.
+
+             Env vars, not a ConfigMap: the map is in the pod template, so a
+             promotion that changes it rolls this pod and the pins are live on
+             upgrade completion (a subPath ConfigMap is not hot-reloaded here).
+
+             Each is OMITTED when unset, so an edge that never pinned keeps a
+             byte-identical pod spec -- and the runtime reads absence as exactly
+             today: floating tag, auto-pin gate, no capabilities => N=1.
+
+             Nil-guarded through `default dict` so a `--reuse-values` upgrade
+             from a release predating `images.training` still renders. */}}
+        {{- $training := default dict (default dict .Values.images).training }}
+        {{- if and $training.capabilities (not $training.digests) }}
+        {{- fail "images.training.capabilities is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together." }}
+        {{- end }}
+        {{- if $training.digests }}
+        - name: TRAINING_IMAGE_DIGESTS
+          value: {{ $training.digests | toJson | quote }}
+        {{- end }}
+        {{- /* `hasKey` first: on a --reuse-values upgrade from a release that
+             predates images.training the key is ABSENT, and `toString` of an
+             absent value is a non-empty sentinel that would emit the var and
+             turn a no-op upgrade into a pod roll (Bugbot, client#976). */}}
+        {{- if and (hasKey $training "pinned") (ne (toString $training.pinned) "") }}
+        - name: TRAINING_IMAGE_PINNED
+          value: {{ $training.pinned | toString | quote }}
+        {{- end }}
+        {{- if $training.capabilities }}
+        - name: TRAINING_ENGINE_CAPABILITIES
+          value: {{ $training.capabilities | quote }}
+        {{- end }}
         # Where the resource-monitor DaemonSet lives, for the heartbeat version
         # inventory. EMPTY when resourceMonitor is off, and that empty value is
         # load-bearing: the runtime reads unset as "use the built-in default"
