@@ -183,9 +183,18 @@ echo "── helm install THIS chart on the 8.4 engine (hostPath, dummy creds) �
 # hostPath storage sidesteps the dynamic provisioner (no CSI on a stock runner);
 # storageClass.create=false because hostPath needs no dynamic StorageClass. The
 # non-mysql pods pull private images and ImagePullBackOff — expected and ignored.
+#
+# rotateMysqlRoot=false is REQUIRED here (backend#947): CLIENT_ENV defaults to prod,
+# whose ByEnv default now bakes root rotation ON, so a fresh install on this live
+# k3d cluster would be born-rotated to a generated root password. This e2e's charter
+# is the 8.4 image + mysql_native_password auth (#723) — it reads server state as
+# root using the image's baked `Edg9@Tr@ce` literal (MYSQL_PW below), so it must opt
+# OUT of rotation to keep testing that baked-credential path. Rotation has its own
+# coverage in the auto-upgrade e2e; this override isolates the image/auth concern.
 helm install "$NS" "$CHART_DIR" --namespace "$NS" --create-namespace \
   --set clientId=ci-e2e-mysql --set clientPassword=ci-e2e-mysql \
   --set hostPath.enabled=true --set storageClass.create=false \
+  --set rotateMysqlRoot=false \
   --set images.mysqlClient.tag=8.4 --set images.mysqlClient.digest=""
 
 echo "── wait for mysql-client (format-guard init + mysqld) to be Available ──"

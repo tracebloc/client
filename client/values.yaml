@@ -1968,11 +1968,13 @@ tbIngestPassword: ""
 # retiring edgeuser. Additive to the data plane: it changes only which identity
 # runs the mint, never which the scoped accounts hold.
 #
-# This is the LAST, prod-irreversible-adjacent step of the rollout. It is ON for
-# dev (baked under backend#1528 S3, once dev's posture was verified and its S0
-# snapshot captured) and OFF for stg and prod. Flip the remaining environments
-# one at a time, only once serviceDbAccounts + perExperimentDbCreds are verified
-# on that fleet and the S0 `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured
+# This is the LAST, prod-irreversible-adjacent step of the rollout. Baked ON for
+# dev, stg and prod (all three fleets retired) — but the baked default re-parents
+# ONLY a fresh or already-rotated edge (tracebloc.bakedRootRotationOn, backend#947),
+# in lockstep with rotateMysqlRoot, so an existing un-rotated / blind edge falls
+# back to its current mint identity rather than wedging its render. An accessible
+# existing edge is re-parented by the explicit override once its root is rotated
+# (ALTER USER) and its S0 `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured
 # (the rollback reference).
 #
 # UNSET by default: the effective value comes from bootstrapDbReparentByEnv
@@ -1994,8 +1996,8 @@ bootstrapDbReparent:
 
 bootstrapDbReparentByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 
 # REQUIRED when the gate above is on: the password jobs-manager authenticates
 # with, as MySQL root, to run the mint DDL. There is NO generated default —
@@ -2056,8 +2058,8 @@ rotateMysqlRoot:
 
 rotateMysqlRootByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 #
 # CLUSTER-LESS DEV NOTE (backend#2892). Because `dev` defaults rotation ON, a dev
 # fleet rendered WITHOUT a live cluster — ArgoCD's default render, Flux
