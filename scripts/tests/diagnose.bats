@@ -113,6 +113,66 @@ setup() {
   ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'get manifest' || return 1
 }
 
+# ── the k3d listing in the bundle is bounded, and says so (client#974) ───────
+# The worst of #974's seven sites. The bundle is collected BECAUSE the machine is
+# already broken, so a wedged Docker engine is the EXPECTED input here, not a
+# hypothetical one — and `{ … } > 01-docker.txt` waits for the whole group, so one
+# unbounded read meant no bundle at all from the one run where the bundle is the
+# entire point. (Its PowerShell twin was a Bugbot High on client#917 for this.)
+#
+# Both bounds are driven, because `_bounded` alone is a NO-OP on a stock Mac (no
+# timeout/gtimeout — both are GNU coreutils) and --diagnose is Darwin-reachable.
+
+@test "run_diagnose: a live k3d listing lands in the bundle (the happy path still collects)" {
+  has() { return 0; }
+  docker() { printf 'docker %s\n' "$*"; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  k3d() { printf 'tracebloc 1/1 1/1 true\n'; }
+  run run_diagnose
+  [ "$status" -eq 0 ] || return 1
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'tracebloc 1/1 1/1 true' || return 1
+}
+
+@test "run_diagnose: a daemon that never answers SKIPS the k3d read, with a note, and still writes a bundle" {
+  # The coreutils-free gate (_docker_answers_bounded, #744) — the half that holds
+  # on a stock Mac. A non-answer must leave an attributable line, because silence
+  # in this file reads as "the machine has no clusters".
+  has() { return 0; }
+  docker() { printf 'docker %s\n' "$*"; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  _docker_answers_bounded() { return 124; }
+  # `cluster list` only: the bundle's other k3d call is `k3d version`, a local read
+  # that never touches the engine and is deliberately outside #974's scope.
+  k3d() { case "$*" in *"cluster list"*) echo "K3D-LIST-WAS-CALLED" ;; *) echo "k3d $*" ;; esac; }
+  run run_diagnose
+  [ "$status" -eq 0 ] || return 1
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'would have hung this bundle' || return 1
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'K3D-LIST-WAS-CALLED' || return 1
+}
+
+@test "run_diagnose: a k3d read that times out leaves a named finding, not a blank section" {
+  # The `_bounded` half: the daemon answers `docker info` but k3d's own call still
+  # stalls. "did not complete" IS the finding support needs.
+  has() { return 0; }
+  docker() { printf 'docker %s\n' "$*"; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  _docker_answers_bounded() { return 0; }
+  timeout() { return 124; }            # the deadline fires (setup's passthrough overridden)
+  gtimeout() { return 124; }
+  run run_diagnose
+  [ "$status" -eq 0 ] || return 1
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'k3d cluster list did not complete' || return 1
+}
+
 @test "run_diagnose: surfaces + records the client version" {
   has() { case "$1" in helm) return 0 ;; *) return 1 ;; esac; }   # only helm present
   helm() { echo "tracebloc tracebloc 1 now deployed client-1.4.4 1.4.4"; }

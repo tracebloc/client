@@ -19,23 +19,73 @@
 # never shells out — the k3d call count is exactly what it was before this fix,
 # and the common re-run (jq present, cluster found by probe 1) still costs one
 # call. (Asad: an eager capture at the top made that path cost two.)
+#
+# EVERY probe here is BOUNDED (client#974, the bash twin of client#930). Each one
+# already carried `2>/dev/null || true`, which handles k3d FAILING — and a WEDGED
+# Docker daemon does not fail `k3d cluster list`, it BLOCKS, so that `|| true` was
+# never reached. This function sits on the MAIN install path (create_cluster below
+# calls it twice), so the pre-fix shape parked a headless install right here with
+# no output and nothing to kill it: exactly #930's shape, on the platform most
+# internal installs use. Same distinction _docker_answers' header draws for a bare
+# `docker info` (#741/#744): stopped fails, wedged hangs.
+#
+# THREE PROBES OF ONE QUESTION would have made a per-probe deadline TRIPLE the
+# worst case, so the chain is tightened in the same breath:
+#   * probe 3's looser matcher now runs against the text probe 2 ALREADY captured.
+#     It tolerates a different table LAYOUT, not a different daemon, so it never
+#     needed its own engine round-trip.
+#   * probe 3 spends a real second read only when probe 2's read itself ERRORED —
+#     an older k3d that does not know --no-headers — and never when it TIMED OUT
+#     (124): the same wedged daemon cannot answer a retry, it can only eat another
+#     deadline. A timeout ends the chain with a log line naming itself, which is
+#     the finding support needs (the Windows twin keeps the same line).
+# Worst case: 2 bounded reads with jq present, 1 without. Before: unbounded.
+#
+# NOTE ON macOS. `_bounded` runs the BARE command when neither timeout(1) nor
+# gtimeout(1) is on PATH, and neither ships on a stock Mac (both are GNU
+# coreutils) — so on such a box these probes are documented-degraded, not bounded.
+# That is deliberate here rather than routed through spin (which bounds via a
+# background PID): _cluster_exists is called from the stop-and-check gate
+# (assess.sh) inside `if` conditions where a spinner cannot be drawn, and macOS
+# reaches this only AFTER _assess_runtime_down has already classified the daemon
+# through a coreutils-free probe. The site where that was NOT true — the
+# --diagnose bundle — is gated on _docker_answers_bounded instead (diagnose.sh).
 _cluster_exists() {
+  local _rc=0
   # 1) JSON output (exact name match) when jq is available
   if command -v jq &>/dev/null; then
     local _json
-    _json="$(k3d cluster list -o json 2>/dev/null || true)"
+    # `|| _rc=$?` (not a bare `; _rc=$?`) so a non-zero probe under the installer's
+    # `set -e` captures the code instead of aborting (the #431 Bugbot form).
+    _json="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -eq 124 ]]; then
+      log "k3d cluster list timed out after ${TB_PROBE_TIMEOUT:-5}s; cluster presence indeterminate (is the Docker daemon responding?)."
+      return 1
+    fi
     if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
       return 0
     fi
   fi
   # 2) Table format: first column is cluster name (--no-headers)
-  local _list
-  _list="$(k3d cluster list --no-headers 2>/dev/null || true)"
+  local _list _lrc=0
+  _list="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || _lrc=$?
+  if [[ "$_lrc" -eq 124 ]]; then
+    log "k3d cluster list timed out after ${TB_PROBE_TIMEOUT:-5}s; cluster presence indeterminate (is the Docker daemon responding?)."
+    return 1
+  fi
+  # 3) A READ error (not an empty answer) is the one case worth a second engine
+  #    round-trip: `--no-headers` is unsupported on some older k3d builds, and the
+  #    header-ful listing still answers the question.
+  if [[ "$_lrc" -ne 0 ]]; then
+    _list="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list 2>/dev/null)" || _list=""
+  fi
   if awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }' <<<"$_list"; then
     return 0
   fi
-  # 3) Fallback: any line whose first column equals CLUSTER_NAME (handles varying table layout)
-  if grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]" <<<"$(k3d cluster list 2>/dev/null || true)"; then
+  # Layout-tolerant fallback matcher: any line whose first column equals
+  # CLUSTER_NAME (handles a header row / varying table layout). Runs on the text
+  # already in hand — no extra call.
+  if grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]" <<<"$_list"; then
     return 0
   fi
   return 1
@@ -882,14 +932,20 @@ ensure_cluster_autostart() {
 
 _handle_existing_cluster() {
   CLUSTER_STATUS="0"
+  # BOUNDED (client#974): both reads talk to the Docker engine, and a wedged
+  # daemon blocks rather than fails them, so the `2>/dev/null || true` /
+  # `|| echo "0"` fallbacks were unreachable. On a timeout the read yields nothing,
+  # CLUSTER_STATUS normalises to "0", and the stopped-cluster branch below takes
+  # over — whose `k3d cluster start --wait --timeout 5m` is itself bounded and
+  # fails into a curated message. Slow, honest, and finite; before it was a hang.
   if command -v jq &>/dev/null; then
-    CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
+    CLUSTER_STATUS=$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
   else
     # Capture-then-match (#680): awk's `exit` closes the pipe on our cluster's
     # row, so k3d can take SIGPIPE and pipefail would abort the installer here —
     # mid-reconcile, with no message. Mirrors _assess_cluster_servers_running.
     local line _tbl
-    _tbl="$(k3d cluster list --no-headers 2>/dev/null || true)"
+    _tbl="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || _tbl=""
     line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
     if [[ -n "$line" ]]; then
       CLUSTER_STATUS="${line%%/*}"

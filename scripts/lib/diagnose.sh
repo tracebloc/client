@@ -123,7 +123,33 @@ run_diagnose() {
     echo "## docker ps -a (k3d nodes)"
     has docker && docker ps -a --filter "name=k3d-${cn}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
     echo; echo "## k3d cluster list"
-    has k3d && k3d cluster list
+    # THE WORST SITE OF client#974, and the reason the PowerShell twin was fixed
+    # for it first (Bugbot High on client#917): the support bundle is the thing a
+    # user collects BECAUSE the machine is already broken, so the wedged-daemon
+    # input is not hypothetical here — it is the expected one. `k3d cluster list`
+    # talks to the Docker engine, `{ … } > 01-docker.txt` waits for the WHOLE
+    # group, and the bundle is written at the end: one unbounded read meant NO
+    # BUNDLE AT ALL, from the one run where the bundle is the entire point.
+    #
+    # Bounded TWICE over, because --diagnose is Darwin-reachable and `_bounded` is
+    # a no-op on a stock Mac (no timeout/gtimeout — both are GNU coreutils):
+    #   1. the coreutils-free liveness gate (_docker_answers_bounded bounds via
+    #      spin's background PID + kill, #744) — the same gate the `docker info`
+    #      read above already sits behind, and it answers about the SAME daemon;
+    #   2. `_bounded` on the read itself, for the Linux/coreutils case where the
+    #      daemon answers `docker info` but k3d's own call still stalls.
+    # Silenced gate (>/dev/null) so its spinner doesn't land in the bundle file.
+    # On a non-answer say so IN the bundle: "did not complete" is itself the
+    # finding, where silence reads as "the machine has no clusters". `set +e`
+    # (run_diagnose top) means neither `||` can abort the collection.
+    if has k3d; then
+      if _docker_answers_bounded "collecting k3d cluster list" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
+        _bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list \
+          || echo "(k3d cluster list did not complete within ${TB_PROBE_TIMEOUT:-5}s — the Docker engine is not answering)"
+      else
+        echo "(skipped: the Docker daemon did not answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s, so 'k3d cluster list' would have hung this bundle)"
+      fi
+    fi
     echo; echo "## node restart policy + proxy env"
     if has docker; then
       for c in $(docker ps -a --filter "name=k3d-${cn}-" --format '{{.Names}}' 2>/dev/null); do

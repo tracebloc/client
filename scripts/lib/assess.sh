@@ -83,12 +83,24 @@
 # ("running/total") for an EXACT name match with awk. Echoes an integer; 0 on any
 # error / when the cluster is absent.
 _assess_cluster_servers_running() {
-  local running="0" line
-  # `|| line=""`: awk's `exit` closes the pipe, so under `set -o pipefail` a
-  # SIGPIPE from k3d (141) — or any k3d failure — would otherwise propagate
-  # non-zero out of the assignment and abort the installer under `set -e`.
-  line="$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')" \
-    || line=""
+  local running="0" line _tbl _rc=0
+  # BOUNDED (client#974). `k3d cluster list` talks to the Docker engine, and a
+  # WEDGED daemon does not FAIL it — it BLOCKS — so the `|| line=""` this line
+  # already carried handled only k3d failing and was never reached on the input
+  # that matters. This probe runs at the stop-and-check gate on EVERY re-run, so
+  # unbounded it parked the installer before it printed anything. Same distinction
+  # _docker_answers' header draws for a bare `docker info` (#741/#744).
+  #
+  # CAPTURE-THEN-MATCH, not a pipe (#680): awk's `exit` closes the pipe on our
+  # cluster's row — usually row one — so the producer takes SIGPIPE, `pipefail`
+  # makes the pipeline 141, and `|| line=""` then DISCARDED a value we had
+  # successfully read, reporting a running cluster as 0 servers. cluster.sh's
+  # _handle_existing_cluster already made exactly this transform and its comment
+  # points here as the mirror; this is that mirror actually being one.
+  # `|| _rc=$?` keeps a non-zero read from aborting under `set -e`.
+  _tbl="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
+  (( _rc == 0 )) || _tbl=""
+  line="$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")"
   [[ -n "$line" ]] && running="${line%%/*}"
   [[ "$running" =~ ^[0-9]+$ ]] || running="0"
   printf '%s' "$running"

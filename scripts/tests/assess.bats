@@ -71,7 +71,16 @@ _depname() {
 # ── _assess_cluster_servers_running (read-only serversRunning, jq-free) ──────
 # Single jq-free path (jq is not a guaranteed installer prerequisite, Bugbot
 # #284): the k3d table's SERVERS column ("running/total"), read with awk.
+#
+# `_bounded() { shift; "$@"; }` in every one of these (this file's convention for
+# probe tests) is LOAD-BEARING since client#974 bounded the read. _bounded execs
+# `timeout`, a BINARY, which cannot see a `k3d` shell-function mock — so on any
+# machine that HAS coreutils (all of Linux CI) the mock is bypassed and the probe
+# reads the REAL k3d. Verified, not assumed: with a `timeout` on PATH and a real
+# `tracebloc` cluster up on the dev box, "stopped cluster -> 0" and "k3d error ->
+# 0" both went red with "1" — the live cluster answering instead of the mock.
 @test "_assess_cluster_servers_running: running cluster -> >=1" {
+  _bounded() { shift; "$@"; }
   k3d() { printf 'tracebloc 1/1 0/0\n'; }
   run _assess_cluster_servers_running
   [ "$status" -eq 0 ] || return 1
@@ -79,15 +88,48 @@ _depname() {
 }
 
 @test "_assess_cluster_servers_running: stopped cluster -> 0" {
+  _bounded() { shift; "$@"; }
   k3d() { printf 'tracebloc 0/1 0/0\n'; }
   run _assess_cluster_servers_running
   [ "$output" = "0" ] || return 1
 }
 
 @test "_assess_cluster_servers_running: k3d error -> 0 (never non-numeric)" {
+  _bounded() { shift; "$@"; }
   k3d() { return 1; }
   run _assess_cluster_servers_running
   [ "$output" = "0" ] || return 1
+}
+
+# client#974: the read is BOUNDED, and a deadline that fires must read as "cannot
+# tell" (0 -> degrade toward the normal flow), never as a number scraped from a
+# half-written table.
+@test "_assess_cluster_servers_running: a TIMED-OUT read -> 0 (bounded, client#974)" {
+  _bounded() { return 124; }
+  k3d() { printf 'tracebloc 1/1 0/0\n'; }   # would say "1" if the bound were bypassed
+  run _assess_cluster_servers_running
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "0" ] || return 1
+}
+
+# client#974 / #680 at THIS site. The pre-fix line piped k3d into `awk … {exit}`:
+# awk closes the pipe on our cluster's row — usually row one — the producer takes
+# SIGPIPE, `pipefail` makes the pipeline 141, and the `|| line=""` fallback then
+# DISCARDED a value that had been read successfully, reporting a running cluster
+# as 0 servers. cluster.sh made this transform in #680 and its comment names this
+# function as the mirror; capture-then-match is that mirror actually being one.
+# Position is the trigger, so the match must be on line 1 with far more than the
+# 64KB pipe buffer behind it.
+@test "_assess_cluster_servers_running: our cluster FIRST in a long listing is not discarded (#680 at this site)" {
+  set -o pipefail
+  _bounded() { shift; "$@"; }
+  k3d() {
+    printf 'tracebloc 1/1 0/0\n'
+    printf 'other-%s 1/1 0/0\n' $(seq 1 8000)
+  }
+  run _assess_cluster_servers_running
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "1" ] || return 1
 }
 
 # ── _assess_workload_ready (ALL shared workloads; bounded, read-only) ───────

@@ -46,7 +46,17 @@ for *what the operator sees and can act on*, not code elegance.
   On Linux (coreutils present) `docker` daemon probes route through
   `_docker_answers()` (yes/no) or `_bounded()` (needs output); `check-style.sh`
   rule 5 fails CI on any unbounded `docker info` under `scripts/lib/`, so the class
-  is a gate, not a repeated review comment (#744). Two edges when you bound one:
+  is a gate, not a repeated review comment (#744).
+  **`docker info` is not the only call that talks to that daemon.** `k3d cluster
+  list` does too, so a wedged engine blocks it identically — and all seven bash call
+  sites carried `2>/dev/null || true`, which handles k3d *failing* and is therefore
+  never reached (client#974, the twin of client#930). `check-style.sh` **rule 6**
+  gates that one the same way, and **rule 7** is rule 6's census: a text scan that
+  matches nothing prints as clean as one that checked everything, so the rule
+  asserts it found at least the sites known to exist. Prefer that pairing for any
+  new grep-class gate here. `k3d cluster start`/`create` take `--wait --timeout`;
+  `k3d cluster delete` takes neither, so bound it with `_bounded` and check for 124
+  (`scripts/tests/e2e-windows.ps1` does this for its pre-clean). Two edges when you bound one:
   (a) the #741 **test trap** — `_bounded` runs the command through `timeout` as an
   *external* process, so a `docker() { … }` shell-function stub stops intercepting;
   stub at `_docker_answers`/`_bounded`, or shadow `timeout`/`gtimeout` with a

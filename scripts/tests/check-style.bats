@@ -301,6 +301,124 @@ _brand_rgbs() {
   [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
 }
 
+# ── rule 6: unbounded 'k3d cluster list' in scripts/lib/ (client#974) ────────
+# The bash twin of client#930, and rule 5's rule for the same daemon. Driven BOTH
+# ways for the same reason rule 5 is: a regex that stopped matching invocations
+# passes every clean-side assertion while enforcing nothing.
+#
+# The discriminator this rule carries and rule 5 does not is the LINE-CONTINUATION
+# arm. assess.sh:90 — one of the seven sites #974 bounded — is a continued
+# statement, and a rule that only knew rule 5's follow-set would have called the
+# tree clean with a fresh unbounded call in it.
+
+@test "rule 6: an unbounded 'k3d cluster list' invocation is caught" {
+  fixture '  _list="$(k3d cluster list --no-headers)"'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
+}
+
+@test "rule 6: '2>/dev/null || true' is NOT a bound (the whole finding of client#974)" {
+  # This is the exact shape all seven pre-fix sites carried. `|| true` handles k3d
+  # FAILING; a wedged Docker daemon does not fail the call, it blocks, so the
+  # fallback is never reached. A rule that accepted this spelling would have
+  # reported the pre-fix tree clean.
+  fixture '  _json="$(k3d cluster list -o json 2>/dev/null || true)"'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
+}
+
+@test "rule 6: a bare 'k3d cluster list' at end of line is caught (the diagnose-bundle shape)" {
+  # diagnose.sh:126 pre-fix, inside the support bundle — the worst of the seven.
+  fixture '  has k3d && k3d cluster list'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
+}
+
+@test "rule 6: a LINE-CONTINUED invocation is caught (the arm rule 5 does not have)" {
+  # assess.sh:90's shape. With rule 5's follow-set alone the next char after
+  # `list` is a backslash, which matches no alternative — so this call would have
+  # been invisible to the rule that exists to find it.
+  fixture \
+    '  line="$(k3d cluster list --no-headers 2>/dev/null | awk "{print}")" \' \
+    '    || line=""'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
+}
+
+@test "rule 6: routed through _bounded is clean (the rule is satisfiable)" {
+  # gpu-nvidia.sh:102's shape — the in-tree precedent the seven were written
+  # against — plus the continued and piped spellings the fix actually uses.
+  fixture \
+    '  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || rc=$?' \
+    '  s=$(_bounded 5 k3d cluster list -o json 2>/dev/null | jq -r ".[]" || echo "0")' \
+    '  _bounded 5 k3d cluster list \' \
+    '    || echo "(did not complete)"'
+  run run_style
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "rule 6: string mentions and comments are NOT invocations (the discriminator)" {
+  # Each line contains the literal 'k3d cluster list' and none is a call: the
+  # bundle's section heading, the timeout note the fix prints, a hint in prose, a
+  # comment. All four must be left alone or the rule is unsatisfiable without
+  # littering the tree with markers.
+  fixture \
+    '  echo "## k3d cluster list"' \
+    '  echo "(k3d cluster list did not complete within 5s)"' \
+    "  hint \"run 'k3d cluster list' by hand, then re-run\"" \
+    '  # a bare k3d cluster list against a wedged daemon blocks; that is why we bound it'
+  run run_style
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "rule 6: 'timeout' in a trailing comment does NOT excuse an unbounded call" {
+  fixture '  k3d cluster list --no-headers   # TODO: add a timeout later'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
+}
+
+# ── rule 7: rule 6's census (backend#2849's house rule) ──────────────────────
+# "A check that cannot distinguish 'clean' from 'didn't look'." Rule 6 is a text
+# scan over scripts/lib/, so the moment it stops matching — a renamed file, an
+# extension the --include misses, a nudged regex — it prints the same "ok: style +
+# terminology clean" as a rule that checked every site. Rule 7 is the separate
+# assertion that it FOUND something.
+
+@test "rule 7: the census fires when rule 6 goes vacuous (a lib file the scan can no longer see)" {
+  # Rename the file holding five of the eight known call sites so `--include='*.sh'`
+  # misses it. Rule 6 then has nothing to complain about and would report clean;
+  # rule 7 is what turns that into a red.
+  mv "$WORK/scripts/lib/cluster.sh" "$WORK/scripts/lib/cluster.bash"
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"rule 6 went VACUOUS"* ]] || return 1
+  [[ "$output" == *"floor is 8"* ]] || return 1
+}
+
+@test "rule 7: the floor is HONEST — the real tree meets it with no slack to spare" {
+  # A floor set below the truth is the same vacuity one step removed: it would
+  # survive four of the eight sites disappearing. Derive the count the way rule 6
+  # does and assert the declared floor is not lower than what is actually there.
+  local re floor found
+  re="$(grep -m1 '^k3d_list_probe=' "$CS")" || return 1
+  re="${re#k3d_list_probe=\'}"; re="${re%\'}"
+  [ -n "$re" ] || return 1
+  floor="$(grep -m1 '^K3D_LIST_SITES_FLOOR=' "$CS" | cut -d= -f2)"
+  [[ "$floor" =~ ^[0-9]+$ ]] || return 1
+  found="$( ( cd "$WORK" && grep -rnE --include='*.sh' --include='*.ps1' \
+                --exclude='check-style.sh' --exclude-dir='tests' "$re" scripts/lib/ ) \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -c . || true)"
+  [ "$found" -eq "$floor" ] || {
+    echo "rule 6 finds $found call site(s) but K3D_LIST_SITES_FLOOR is $floor — a floor below the truth lets sites vanish unnoticed; a floor above it is unsatisfiable"
+    return 1
+  }
+}
+
 # ── the opt-out marker ───────────────────────────────────────────────────────
 # The header promises it works on ANY check. Tested per rule, because the marker
 # is applied in one shared place (scan) and a regression would silently un-exempt
@@ -312,7 +430,8 @@ _brand_rgbs() {
     '  echo "your workspace"   # style-guard: allow' \
     '  curl -fsSL "$url"   # style-guard: allow' \
     '  echo "Tracebloc"   # style-guard: allow' \
-    '  docker info >/dev/null 2>&1   # style-guard: allow'
+    '  docker info >/dev/null 2>&1   # style-guard: allow' \
+    '  k3d cluster list --no-headers   # style-guard: allow'
   run run_style
   [ "$status" -eq 0 ] || return 1
 }
@@ -387,9 +506,10 @@ _brand_rgbs() {
   # it is how a rule gets dropped without anyone noticing.
   local implemented declared
   implemented="$(grep -c '^report ' "$CS")"
-  declared="$(grep -oE '^#  (Three|Four|Five|Six) mechanical checks' "$CS" | awk '{print $2}')"
+  declared="$(grep -oE '^#  (Three|Four|Five|Six|Seven|Eight) mechanical checks' "$CS" | awk '{print $2}')"
   case "$declared" in
     Three) declared=3 ;; Four) declared=4 ;; Five) declared=5 ;; Six) declared=6 ;;
+    Seven) declared=7 ;; Eight) declared=8 ;;
     *) return 1 ;;                       # unparsed header is a finding, not a pass
   esac
   [ "$implemented" -eq "$declared" ] || return 1

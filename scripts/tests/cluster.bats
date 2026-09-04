@@ -530,6 +530,82 @@ _require_setgid_sticky() {
   [ "$status" -ne 0 ] || return 1
 }
 
+# ── _cluster_exists is BOUNDED, and the chain does not triple the deadline ───
+# client#974 (the bash twin of client#930). Every probe here talks to the Docker
+# engine; a WEDGED daemon does not FAIL `k3d cluster list`, it BLOCKS, so the
+# `2>/dev/null || true` each probe carried was never reached. This function is on
+# the MAIN install path, so unbounded it parked a headless install with no output.
+#
+# Three probes of one question would have TRIPLED the worst case under a naive
+# per-probe deadline, so these pin the economy of the chain as well as the bound:
+# a probe-2 read that SUCCEEDS is not re-read, and a read that TIMES OUT ends the
+# chain rather than spending another deadline on the same wedged daemon. Both are
+# what keeps the fix from trading a hang for a 15-second stall.
+
+@test "_cluster_exists: probe 3 does NOT spend a second read when probe 2 succeeded (client#974)" {
+  # `--no-headers` answered cleanly and said "absent". The layout-tolerant matcher
+  # then runs on the text already in hand — asking the same daemon again would cost
+  # a round-trip and learn nothing.
+  local tally="$BATS_TEST_TMPDIR/list-calls"
+  k3d() { echo "$*" >> "$tally"; printf 'somethingelse 1/1 0/0\n'; }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_exists
+  [ "$status" -ne 0 ] || return 1
+  [ "$(grep -c 'cluster list' "$tally")" -eq 1 ] || { cat "$tally"; return 1; }
+}
+
+@test "_cluster_exists: an OLD k3d that rejects --no-headers still gets its header-ful read (client#974)" {
+  # The one case a second engine round-trip is worth paying for: probe 2's read
+  # ERRORED (unsupported flag), which is not the same as "answered, and empty".
+  local tally="$BATS_TEST_TMPDIR/list-calls"
+  k3d() {
+    echo "$*" >> "$tally"
+    case "$*" in
+      *--no-headers*) echo "unknown flag: --no-headers" >&2; return 1 ;;
+      *)              printf 'NAME SERVERS AGENTS LOADBALANCER\ntracebloc 1/1 0/0 true\n' ;;
+    esac
+  }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_exists
+  [ "$status" -eq 0 ] || { cat "$tally"; return 1; }
+  [ "$(grep -c 'cluster list' "$tally")" -eq 2 ] || { cat "$tally"; return 1; }
+}
+
+@test "_cluster_exists: a TIMED-OUT read ends the chain (no second deadline on a wedged daemon)" {
+  # The pre-fix shape hung here forever. The post-fix shape must not swap that for
+  # 3x the deadline: 124 from the first read means the engine is not answering, so
+  # further reads can only wait, not learn.
+  local tally="$BATS_TEST_TMPDIR/list-calls"
+  _bounded() { echo "bounded $*" >> "$tally"; return 124; }
+  k3d() { echo "raw $*" >> "$tally"; printf 'tracebloc 1/1 0/0\n'; }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_exists
+  [ "$status" -ne 0 ] || return 1                       # indeterminate -> degrade
+  [ "$(grep -c 'bounded' "$tally")" -eq 1 ] || { cat "$tally"; return 1; }
+  ! grep -q '^raw ' "$tally" || { cat "$tally"; return 1; }   # never unbounded
+}
+
+@test "_cluster_exists: every probe goes through _bounded (no unbounded k3d read left)" {
+  # The per-site half of check-style.sh rule 6, asserted against THIS function's
+  # body rather than the whole file, so a fresh bare read added inside
+  # _cluster_exists is caught here too. The count is the assertion that the
+  # extraction actually looked (backend#2849's house rule).
+  # The invocation regex is DERIVED from check-style.sh's own rule 6, not restated:
+  # a second hand-written copy would agree with itself while the rule drifted, and
+  # it would also count the `log "k3d cluster list timed out…"` strings this
+  # function prints as if they were calls. Fail closed if the marker is gone.
+  local cs="$BATS_TEST_DIRNAME/../check-style.sh" re body total bounded
+  re="$(grep -m1 '^k3d_list_probe=' "$cs")" || return 1
+  re="${re#k3d_list_probe=\'}"; re="${re%\'}"
+  [ -n "$re" ] || return 1
+  body="$(awk '/^_cluster_exists\(\)/{f=1} f{print} f&&/^}$/{exit}' "$BATS_TEST_DIRNAME/../lib/cluster.sh")"
+  [ -n "$body" ] || return 1
+  total="$(printf '%s\n' "$body" | grep -cE "$re" || true)"
+  bounded="$(printf '%s\n' "$body" | grep -cE '_bounded[[:space:]]+"[^"]*"[[:space:]]+k3d cluster list' || true)"
+  [ "$total" -eq 3 ] || { echo "expected 3 k3d cluster list reads in _cluster_exists, found $total"; return 1; }
+  [ "$bounded" -eq "$total" ] || { echo "$total reads, only $bounded bounded"; return 1; }
+}
+
 # ── _check_existing_cluster_dataset_mount (backend#743) ─────────────────────
 @test "_check_existing_cluster_dataset_mount: HOST_DATASET_DIR unset -> no-op" {
   unset HOST_DATASET_DIR
