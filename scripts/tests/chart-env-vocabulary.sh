@@ -131,6 +131,25 @@ else
   echo "  skip  --skip-schema-validation unsupported by $(helm version --short) — helper backstop not exercised"
 fi
 
+echo "== env.TRACEBLOC_DDP / env.TRACEBLOC_AMP: the switch vocabulary is closed =="
+# RFC-0067 D8 (backend#3149): the runtime reads 1|true|yes as ON and EVERYTHING
+# ELSE as OFF, so a misspelling does not error there -- it silently disables the
+# switch the operator believes is on. The schema is the only place the typo can
+# be caught. `--set-string`, not `--set`: helm parses a bare 1 as an integer and
+# the schema would refuse it for the wrong reason (type, not vocabulary).
+for key in TRACEBLOC_DDP TRACEBLOC_AMP; do
+  for good in 1 0 true false yes no TRUE False YES nO; do
+    expect_render "$key=$good" "name: $key" --set-string "env.$key=$good"
+  done
+  # Whitespace-tolerant, as the runtime's .strip() is.
+  expect_render "$key=' true '" "name: $key" --set-string "env.$key= true "
+  # Empty is legal and means UNSET: the passthrough emits nothing for it.
+  expect_render "$key=''" "tracebloc/jobs-manager:prod" --set-string "env.$key="
+  for bad in ture on off enabled disabled 2 t y; do
+    expect_reject "$key=$bad" "$SCHEMA_ERR" --set-string "env.$key=$bad"
+  done
+done
+
 echo "== images.ingestor.channelTags: keys are closed =="
 # The lookup is on the RESOLVED env, so only dev/stg/prod can ever match. An
 # alias key validated fine and was then silently ignored: channelTags.staging

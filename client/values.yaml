@@ -121,6 +121,42 @@ env: {
   # installer. Set explicitly to override (e.g. a fixed multi-node bare-metal
   # cluster that wants the fallback). Must be a quoted string.
   # SINGLE_NODE: "true"
+  # -- Per-edge OPERATOR switches for the training pods (RFC-0067 D8,
+  #    backend#3149; the runtime half is client-runtime#480).
+  #
+  # jobs-manager reads these from its OWN container env -- the generic
+  # passthrough in templates/jobs-manager-deployment.yaml delivers any
+  # `env.<KEY>` there -- and writes an explicit "1" or "0" onto EVERY training
+  # pod it spawns, so the edge setting always wins over whatever the engine
+  # image defaults to. That is what makes this the kill switch AND the
+  # rollback lever: turning multi-GPU (or AMP) off is a values change plus a
+  # jobs-manager restart, not an image rebuild and not a chart release.
+  #
+  # Truthy = "1" | "true" | "yes" (case-insensitive, whitespace-tolerant --
+  # the engine's own _TRUTHY). Everything else, INCLUDING UNSET, is OFF. The
+  # schema closes the vocabulary to those spellings plus "0" / "false" / "no",
+  # so a typo ("ture", "on") is refused at install time instead of silently
+  # reading as off -- the CLIENT_ENV lesson (backend#1723), applied before the
+  # first customer hits it. Empty ("") means unset.
+  #
+  # Per-edge and operator-level, NEVER per-experiment: there is no experiment
+  # field for either, so RFC-0067 D2's "never user-requested" holds by
+  # construction.
+  #
+  #   TRACEBLOC_DDP -- DistributedDataParallel across the GPUs a training pod is
+  #                    given. Default OFF until RFC-0067 D7's precondition bundle
+  #                    holds (backend#3147 tracks it); flipping it on an edge
+  #                    ahead of that is the operator's call, and this is the
+  #                    lever that flips it back.
+  #   TRACEBLOC_AMP -- automatic mixed precision. The ENGINE still chooses
+  #                    bf16-vs-fp16 from the device in front of it (RFC-0067 D4);
+  #                    this only says whether it may. Default OFF (backend#2327).
+  #
+  # Reaches the training pods only through a jobs-manager that forwards it
+  # (client-runtime#480); on an older runtime the value lands on the
+  # jobs-manager container and goes no further -- inert, never harmful.
+  # TRACEBLOC_DDP: "0"
+  # TRACEBLOC_AMP: "0"
 }
 
 # -- GPU device plugin (client#564)

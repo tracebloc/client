@@ -2,6 +2,24 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.99 — per-edge `TRACEBLOC_DDP` / `TRACEBLOC_AMP` switches (RFC-0067 D8)
+
+Nothing changes on upgrade: both keys are **absent by default**, and absent
+means OFF. This release only teaches the chart the two operator switches that
+RFC-0067 makes the kill switch and the rollback lever for automatic multi-GPU
+training (backend#3149), so that setting them is a schema-checked values change:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.TRACEBLOC_DDP=1
+```
+
+The value reaches the training pods only through a jobs-manager that forwards
+it (client-runtime#480, `client-runtime` on or after that change). On an older
+runtime it lands on the jobs-manager container and goes no further — inert.
+The vocabulary is closed (`1|0|true|false|yes|no`, case-insensitive, empty =
+unset); any other spelling is refused at `helm upgrade` time rather than
+silently read as off.
+
 ## Upgrading to 1.9.71 — the `rotateMysqlRoot` gate, and one new object outside the release namespace
 
 Two things matter when you cross this version from anything below it.

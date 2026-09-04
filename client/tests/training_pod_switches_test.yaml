@@ -1,0 +1,87 @@
+suite: Per-edge TRACEBLOC_DDP / TRACEBLOC_AMP operator switches reach jobs-manager (backend#3149)
+# RFC-0067 D8: the kill switch for automatic multi-GPU training is a PER-EDGE,
+# OPERATOR-LEVEL env that jobs-manager reads from its own container and writes
+# onto every training pod it spawns (client-runtime#480). The chart's job is the
+# first hop -- `env.<KEY>` onto the jobs-manager container -- through the same
+# generic passthrough every other `env.*` key takes. That passthrough is gated on
+# a non-empty value, which is why an EXPLICIT "0" is pinned here separately from
+# an absent key: "0" must travel (the operator said OFF), "" must not (unset).
+#
+# Nothing here proves the second hop. That the value lands on a TRAINING pod is
+# client-runtime#480's test to write, against its own spawn code.
+templates:
+  - templates/jobs-manager-deployment.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: an enabled TRACEBLOC_DDP lands on the jobs-manager container verbatim
+    set:
+      env:
+        TRACEBLOC_DDP: "1"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "1"
+
+  - it: an explicit "0" travels too -- the operator saying OFF is a statement, not silence
+    set:
+      env:
+        TRACEBLOC_DDP: "0"
+        TRACEBLOC_AMP: "0"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "0"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+            value: "0"
+
+  - it: the accepted spellings are delivered as written, never normalised by the chart
+    # Normalisation is the runtime's job (its _TRUTHY is case-insensitive). A
+    # chart that rewrote "yes" to "1" would be a second reader of that rule.
+    set:
+      env:
+        TRACEBLOC_DDP: "yes"
+        TRACEBLOC_AMP: "True"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "yes"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+            value: "True"
+
+  - it: an absent key emits nothing -- unset is OFF on the runtime side, and the pod spec stays byte-identical for every edge that never set it
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+          any: true
+
+  - it: the default values.yaml ships both switches OFF (absent), so no edge is armed by a chart upgrade
+    # The keys exist in values.yaml only as documentation comments. If someone
+    # uncomments a default, every auto-upgrading edge turns DDP on overnight
+    # with none of RFC-0067 D7's preconditions checked -- this is the guard.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+          any: true
