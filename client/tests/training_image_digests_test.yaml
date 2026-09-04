@@ -120,8 +120,11 @@ tests:
         training:
           capabilities: "ddp"
     asserts:
+      # `errorMessage` with the EXACT string, never `errorPattern`: helm-unittest
+      # 0.5.2 silently ignores errorPattern, so it would be a bare any-failure
+      # check (scripts/tests/helm-unittest-error-assertions.sh).
       - failedTemplate:
-          errorPattern: "images.training.capabilities is DERIVED from the pinned digests"
+          errorMessage: "images.training.capabilities is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together."
 
   - it: a map without capabilities renders the map and no capabilities var -- the runtime reads that as N=1
     set:
@@ -132,6 +135,31 @@ tests:
               gpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     asserts:
       - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_DIGESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_ENGINE_CAPABILITIES
+          any: true
+
+  - it: a --reuse-values upgrade from a release that predates images.training renders none of the vars
+    # `null` removes the key entirely, which is what a stored-values replay from
+    # an older release looks like: no `images.training` at all, not an empty
+    # one. `toString` of an absent `pinned` is a non-empty sentinel; only a
+    # `hasKey` guard keeps the upgrade a no-op (Bugbot, client#976).
+    set:
+      images:
+        training: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_PINNED
+          any: true
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TRAINING_IMAGE_DIGESTS

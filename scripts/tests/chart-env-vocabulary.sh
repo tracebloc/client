@@ -144,6 +144,17 @@ expect_reject "training digest, uppercase hex"    "$SCHEMA_ERR" --set-string "im
 expect_reject "training digest, bare hex"         "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=0000000000000000000000000000000000000000000000000000000000000000"
 expect_reject "training digest, arch=tpu"         "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.tpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
 expect_reject "training digest, task=Image-Class" "$SCHEMA_ERR" --set-string "images.training.digests.Image-Class.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# The pre-images.training replay: `--set images.training=null` DELETES the key,
+# which is what a --reuse-values upgrade from an older release presents. Asserted
+# as the ABSENCE of the var: an absent `pinned` stringifies to a sentinel, and
+# only a hasKey guard keeps this a no-op (Bugbot, client#976).
+if ! out="$(render --set images.training=null)"; then
+  fail "images.training absent: expected a render, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+elif grep -qF "TRAINING_IMAGE_PINNED" <<<"$out"; then
+  fail "images.training absent: TRAINING_IMAGE_PINNED was rendered from an absent key"
+else
+  pass "images.training absent -> no TRAINING_IMAGE_PINNED"
+fi
 expect_render "training pinned=true (string)"     "TRAINING_IMAGE_PINNED" --set-string "images.training.pinned=true"
 expect_render "training pinned=false (bool)"      "TRAINING_IMAGE_PINNED" --set "images.training.pinned=false"
 expect_reject "training pinned=auto"              "$SCHEMA_ERR" --set-string "images.training.pinned=auto"

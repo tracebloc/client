@@ -723,7 +723,11 @@ spec:
         - name: TRAINING_IMAGE_DIGESTS
           value: {{ $training.digests | toJson | quote }}
         {{- end }}
-        {{- if not (eq (toString $training.pinned) "") }}
+        {{- /* `hasKey` first: on a --reuse-values upgrade from a release that
+             predates images.training the key is ABSENT, and `toString` of an
+             absent value is a non-empty sentinel that would emit the var and
+             turn a no-op upgrade into a pod roll (Bugbot, client#976). */}}
+        {{- if and (hasKey $training "pinned") (ne (toString $training.pinned) "") }}
         - name: TRAINING_IMAGE_PINNED
           value: {{ $training.pinned | toString | quote }}
         {{- end }}
