@@ -232,6 +232,20 @@ $Mutations = @(
      Find  = '      Log "k3d cluster list returned no output$why (job state: $($job.State)); cluster run-state indeterminate."'
      Repl  = '      $null = $why' }
 
+  # THE VALUE THE WHOLE FAIL-CLOSED PROPERTY RESTS ON (@saadqbal / @LukasWodka on
+  # client#973). The three entries above certify the DECISION; none of them
+  # touches what the reader RETURNS when the deadline fires. `[]` is the perfect
+  # mutation because it is a HEALTHY empty listing: the refusal passes it,
+  # Find-ClusterInList yields $null, and the install is back on the create path
+  # over a live cluster -- with the AST ordering guard and all three entries above
+  # still green. `$out = ""` appears three times in the file, hence the anchor.
+  @{ Name  = 'a timed-out read returns a healthy-looking empty listing instead of nothing (client#973)'
+     Expect = 'a FIRED DEADLINE returns empty'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     After = 'function Get-ClusterListJson {'; Within = 5
+     Find  = '  $out = ""'
+     Repl  = '  $out = "[]"' }
+
   @{ Name  = 'the bootstrap closes the user''s console again (#577 / client#917)'
      Expect = 'must not close the user''s window'
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'

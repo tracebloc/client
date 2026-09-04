@@ -410,6 +410,88 @@ Describe "Get-ClusterRunState tri-state (#557 Bugbot 3728714531: absent != unkno
     }
   }
 
+  # THE READER'S RETURN CONTRACT, which everything above rests on (@saadqbal,
+  # confirmed by @LukasWodka on client#973). Every other test here reaches the
+  # tri-state through `Mock Get-ClusterListJson { "" }` — i.e. they assert what
+  # the CONSUMERS do with "", and assume the reader produces it. The source
+  # guards grep for `-TimeoutSec 15` and the log strings but say nothing about
+  # what the timeout branch RETURNS, so the one value the fail-closed property
+  # depends on had no machine check behind it, only prose in a comment.
+  #
+  # Why that is load-bearing now rather than merely untidy: change `$out = ""`
+  # to `$out = "[]"` and a fired deadline becomes a healthy empty listing —
+  # Assert-ClusterListingReadable passes it, Find-ClusterInList yields $null, and
+  # the install is back on the create path over a live cluster, which is the exact
+  # regression this PR exists to block. The AST ordering guard, all three new
+  # mutation entries and both behavioural Contexts stay green through that edit.
+  # Registered as a fourth mutation so it stays closed.
+  #
+  # The job machinery is mocked at its OWN seams (Start-Job / Wait-JobWithProgress
+  # / Receive-Job / Remove-Job) rather than executed. The note above about not
+  # unit-testing the machinery stands for the machinery's behaviour; this asserts
+  # only the function's return value per branch, which is what the callers read.
+  Context "Get-ClusterListJson return contract per branch (client#973)" {
+    BeforeAll {
+      # A REAL Job object, and it has to be: Receive-Job and Remove-Job
+      # TYPE-CHECK their -Job parameter even when mocked, so a
+      # [pscustomobject] stand-in fails argument binding before any mock body
+      # runs ("Cannot convert ... to type System.Management.Automation.Job[]").
+      # This job runs an empty scriptblock, is never waited on and never
+      # received from -- Wait-JobWithProgress and Receive-Job are mocked in
+      # every test below -- so nothing here depends on job timing, k3d, or
+      # Docker. It exists only to satisfy the parameter binder.
+      $script:tbInertJob = Start-Job -ScriptBlock { }
+    }
+    AfterAll {
+      # Real Remove-Job: mocks are only in force inside It blocks.
+      if ($script:tbInertJob) { Remove-Job $script:tbInertJob -Force -ErrorAction SilentlyContinue }
+      $script:tbInertJob = $null
+    }
+    BeforeEach {
+      Mock Start-Job  { $script:tbInertJob }
+      Mock Remove-Job { }
+      Mock Log        { }
+    }
+
+    It "a FIRED DEADLINE returns empty -- never '[]', which the refusal would wave through" {
+      Mock Wait-JobWithProgress { $false }
+      # Deliberately a HEALTHY listing: if the timeout branch ever started
+      # consulting the job, this is the value that would sail past the refusal.
+      Mock Receive-Job { '[{"name":"tracebloc","serversRunning":1}]' }
+      $out = Get-ClusterListJson
+      [string]::IsNullOrEmpty($out) | Should -BeTrue -Because "the fail-closed refusal fires on an EMPTY blob; any listing-shaped return defeats it"
+      Should -Invoke Receive-Job -Times 0 -Exactly -Because "a timed-out job's output is not an answer"
+      Should -Invoke Remove-Job  -Times 1 -Exactly -Because "the job must still be reaped on the timeout path"
+    }
+
+    It "and that return is the value Assert-ClusterListingReadable refuses -- end to end, no mocked seam between them" {
+      # The two halves joined: reader -> refusal, with nothing stubbed in between.
+      # This is the assertion that would have caught `$out = "[]"`.
+      Mock Wait-JobWithProgress { $false }
+      Mock Receive-Job { '[]' }
+      Mock Hint { }
+      Mock Err  { throw "refused" }
+      { Assert-ClusterListingReadable -Json (Get-ClusterListJson) } | Should -Throw
+    }
+
+    It "a FAIL-FAST job (not Running, no output) returns empty too, and leaves the breadcrumb" {
+      Mock Wait-JobWithProgress { $true }
+      Mock Receive-Job { }
+      $out = Get-ClusterListJson
+      [string]::IsNullOrWhiteSpace($out) | Should -BeTrue
+      Should -Invoke Log -Times 1 -Exactly -ParameterFilter { $m -match 'returned no output' }
+    }
+
+    It "a HEALTHY read is passed through -- the contract is not 'always empty'" {
+      # Anti-vacuity: without this, `return ""` unconditionally would satisfy
+      # every assertion above and break every install instead.
+      Mock Wait-JobWithProgress { $true }
+      Mock Receive-Job { '[{"name":"tracebloc","serversRunning":1}]' }
+      Get-ClusterListJson | Should -Match '"name":"tracebloc"'
+      Should -Invoke Log -Times 0 -Exactly -ParameterFilter { $m -match 'returned no output' }
+    }
+  }
+
   Context "Get-ClusterRunState over the bounded seam (timeout -> 'unknown')" {
     It "a timed-out read classifies as 'unknown', never as 'down'" {
       # 'down' means "enumerated fine, ours isn't running" and lets a foreign

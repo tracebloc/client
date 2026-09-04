@@ -1475,7 +1475,14 @@ function Assert-ClusterListingReadable {
   Hint "Stopping here on purpose: a listing that fails can't tell 'no cluster yet' from"
   Hint "'Docker isn't answering', and creating a second '$CLUSTER_NAME' over one that already"
   Hint "exists would fail the install -- or get the cluster you have deleted as a partial one."
-  Err "Couldn't list your existing compute environments (Docker didn't answer within 15s). Check Docker is running -- 'docker ps' should answer -- then re-run this installer."
+  # THE COPY NAMES WHAT WE OBSERVED, NOT A CAUSE WE GUESSED (reviewer nit,
+  # client#973). It fires on all six failed shapes — a fired deadline, a job that
+  # died fast, and k3d answering with its own words instead of JSON — and in the
+  # last two Docker answered immediately. "Didn't answer within 15s" would be
+  # false there, and it also hardcoded the deadline a SECOND time, so changing
+  # `-TimeoutSec` would have made customer-facing abort copy lie. The number
+  # stays in the log line, which is where it is a fact rather than a claim.
+  Err "Couldn't list your existing compute environments -- k3d gave no readable answer. Check Docker is running ('docker ps' should answer), then re-run this installer."
 }
 
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
