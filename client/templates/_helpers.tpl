@@ -849,17 +849,21 @@ true
   operator override bypasses this and keeps the backend#2879 fail-closed guard (the
   deliberate manual-rotation path for our own accessible existing clusters).
 
-  The three cases, per the sign-off:
+  The cases, per the sign-off:
     - NEW / fresh datadir on a live cluster (no mysql-pvc, kube-system visible)
         -> ON. The tier-3 mint in secrets.yaml generates root into the Secret and
            the edge is born rotated.
-    - EXISTING, already rotated (the live Secret already holds MYSQL_ROOT_PASSWORD)
-        -> ON. Preserve it -- this is dev's baked edge and any accessible edge we
-           have manually rotated. Flipping it off here would drop the Secret key and
-           break bootstrapDbPassword's derive-from-rotation, 1045-ing the minter.
-    - EXISTING and NOT yet rotated, OR a BLIND / cluster-less render that cannot
-      prove either of the above -> OFF. Fall back to the edge's existing password
-      (the image-baked literal); no mint, no wedge.
+    - EXISTING datadir (mysql-pvc present), OR a BLIND / cluster-less render that
+      cannot prove the datadir fresh -> OFF. Fall back to the edge's existing
+      password (the image-baked literal); no mint, no wedge.
+
+  An accessible existing edge we DO want rotated carries an explicit
+  `rotateMysqlRoot=true` override (the manual-rotation path -- how dev and edge 713
+  hold it), which bypasses this helper entirely, so its rotated posture is preserved
+  by the override, not re-derived here. Deliberately NO Secret `lookup` on the
+  override-following secretName: a miss there would be rename-unsafe, which
+  scripts/tests/fullname-override-completeness.sh (backend#2626) refuses -- and the
+  override already carries the one case a Secret probe would have.
 
   A tier-1 `mysqlRootPassword` PIN also resolves ON: it is an explicit operator
   assertion of root's password (deterministic, no tier-3 mint), so it is the
@@ -872,11 +876,7 @@ true
 {{- else -}}
 {{- $pvc := (lookup "v1" "PersistentVolumeClaim" .Release.Namespace (include "tracebloc.mysqlPvc" .)) -}}
 {{- $clusterVisible := (lookup "v1" "Namespace" "" "kube-system") -}}
-{{- $secret := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.secretName" .)) -}}
-{{- $alreadyRotated := and $secret $secret.data (hasKey $secret.data "MYSQL_ROOT_PASSWORD") -}}
-{{- if $clusterVisible -}}
-{{- if or (not $pvc) $alreadyRotated }}true{{ end -}}
-{{- end -}}
+{{- if and $clusterVisible (not $pvc) }}true{{ end -}}
 {{- end -}}
 {{- end }}
 

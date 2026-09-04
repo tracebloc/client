@@ -13,8 +13,17 @@ regresses a live fleet (§4), which is why the rehearsal gates the merge.
 Lukas's sign-off, in three cases, maps onto §3.1: **new clusters → generated
 Secret** (fresh row); **our own accessible existing clusters → manually rotate**
 (the explicit-override path, unchanged); **blind clusters we cannot reach → fall
-back to the existing password** (existing-un-rotated row). The already-rotated row
-preserves dev and any edge we have already rotated.
+back to the existing password** (existing-un-rotated row).
+
+> **IMPLEMENTATION NOTE (final — supersedes the "already rotated" row in §3.1/§3.2/§4
+> below).** The shipped `tracebloc.bakedRootRotationOn` does **not** probe the live
+> Secret for `MYSQL_ROOT_PASSWORD`: `scripts/tests/fullname-override-completeness.sh`
+> (backend#2626) refuses a rename-unsafe `lookup` on the override-following
+> `secretName`. So the helper resolves on for a **pin** or a **fresh datadir on a
+> live cluster** only. Already-rotated edges (dev, edge 713) keep rotation on via
+> their explicit `rotateMysqlRoot=true` **override**, which bypasses the helper — so
+> the preservation the §4 subtlety describes is delivered by the override path, not a
+> Secret probe. The remaining sections are kept as the design record.
 
 ---
 
