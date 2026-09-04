@@ -166,6 +166,17 @@ find "$D/client" "$D/docs" -name '*.md' -type f -delete
 # a stale on-polarity claim naming a still-off env did not redden while its
 # off-polarity twin did. These three cases are the missing direction, and each
 # FAILED against the pre-fix guard.
+#
+# DEPENDENCY, deliberately (LukasWodka on #965, backend#947): these three cases
+# use `narrowEdgeuserByEnv` as the example gate precisely because it still ships
+# `stg:false / prod:false` -- so an on-polarity claim naming stg/prod is FALSE and
+# must redden. They moved here from `rotateMysqlRootByEnv` when backend#947 baked
+# rotate true for stg/prod (that gate is no longer false-for-stg/prod, so it can no
+# longer carry an "env ships false" case). narrowEdgeuser is the NEXT gate to bake;
+# when `narrowEdgeuserByEnv.{stg,prod}` flips true, these claims become TRUE, stop
+# reddening, and the cases go inert with the suite still green. The author baking
+# narrowing must repoint them at whatever gate is still off then -- there must
+# always be one, since the whole point is a staged rollout.
 
 # (a) list form, on-polarity, naming an env that ships false.
 D="$TMP/onlist"; mkfixture "$D"

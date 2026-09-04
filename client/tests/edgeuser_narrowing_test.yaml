@@ -153,9 +153,23 @@ tests:
   # ---- prod is baked (backend#2800), gated on a fresh/rotated datadir --------
   # rotateMysqlRootByEnv.prod / bootstrapDbReparentByEnv.prod are now true, but the
   # baked path resolves on ONLY via tracebloc.bakedRootRotationOn: a mysqlRootPassword
-  # pin (this suite sets one), an already-rotated Secret, or a fresh datadir on a live
-  # cluster. With the suite pin, prod renders the rotation; the fall-back case below
-  # drops the pin to prove a blind prod edge is NOT rotated (backend#947, Lukas 2026-09-02).
+  # pin (this suite sets one), an already-rotated edge (the mysql-root-rotated marker),
+  # or a fresh datadir on a live cluster. With the suite pin, prod renders the rotation;
+  # the fall-back case below drops the pin to prove a blind prod edge is NOT rotated
+  # (backend#947, Lukas 2026-09-02).
+  #
+  # COVERAGE BOUNDARY (LukasWodka on #965 — read before trusting a green run here).
+  # helm-unittest cannot mock `lookup`, so of bakedRootRotationOn's inputs this suite
+  # only exercises the two that need no cluster: the tier-1 PIN path (resolves ON,
+  # the case just below) and the cluster-less-no-pin path (resolves OFF, the "BLIND
+  # prod edge" case). The `lookup`-driven branches -- the mysql-root-rotated MARKER
+  # (already born-rotated -> stay ON) and the mysql-pvc datadir probe -- are INERT
+  # here (an empty lookup makes both false), so a constant-false marker/PVC test
+  # would pass this suite identically. Those branches, and the one-way-door regression
+  # they close, are proven live in scripts/tests/e2e-auto-upgrade.sh
+  # ("born-rotated edge stays rotated ... on baked upgrade") plus the staging
+  # rehearsal, NOT by helm-unittest. Do not read this suite's green as proof of the
+  # datadir behaviour.
   - it: "prod is rotated by the bake — the Secret carries both keys (pinned/fresh)"
     template: templates/secrets.yaml
     documentIndex: 0

@@ -172,6 +172,20 @@ client-logs-pvc
 mysql-pvc
 {{- end }}
 
+{{/*
+  Name of the "this edge was born rotated" marker (backend#947). A CONSTANT
+  literal, deliberately NOT fullname/override-following -- like tracebloc.mysqlPvc
+  and unlike tracebloc.secretName -- so tracebloc.bakedRootRotationOn may `lookup`
+  it without tripping fullname-override-completeness.sh (backend#2626), which
+  refuses only Secret lookups on the override-following secretName. See the marker
+  template (mysql-root-rotated-marker.yaml) and bakedRootRotationOn for why it
+  exists: the PVC alone cannot tell a born-rotated edge from an existing un-rotated
+  one, and that ambiguity un-rotated a fresh stg/prod install on its next upgrade.
+*/}}
+{{- define "tracebloc.mysqlRootRotatedMarker" -}}
+mysql-root-rotated
+{{- end }}
+
 {{- define "tracebloc.mysqlPvName" -}}
 {{ include "tracebloc.fullname" . }}-mysql-pv
 {{- end }}
@@ -850,20 +864,33 @@ true
   deliberate manual-rotation path for our own accessible existing clusters).
 
   The cases, per the sign-off:
-    - NEW / fresh datadir on a live cluster (no mysql-pvc, kube-system visible)
-        -> ON. The tier-3 mint in secrets.yaml generates root into the Secret and
-           the edge is born rotated.
-    - EXISTING datadir (mysql-pvc present), OR a BLIND / cluster-less render that
-      cannot prove the datadir fresh -> OFF. Fall back to the edge's existing
-      password (the image-baked literal); no mint, no wedge.
+    - ALREADY born rotated -- the marker ConfigMap (tracebloc.mysqlRootRotatedMarker)
+      is present -> ON. This is the case the PVC alone could not see, and getting it
+      wrong is a ONE-WAY DOOR (backend#947, @LukasWodka): a fresh stg/prod install
+      born-rotates and mints root into the Secret, but the chart also CREATES the
+      mysql-pvc on that first install (resource-policy: keep), so a PVC-only freshness
+      test flips OFF on the very next auto-upgrade -- rotate/reparent both resolve off,
+      secrets.yaml stops emitting MYSQL_ROOT_PASSWORD/DB_BOOTSTRAP_PASSWORD, root's
+      generated password is lost and jobs-manager reverts to minting as edgeuser (the
+      posture this PR retires). The marker is written iff rotation resolved on (see
+      mysql-root-rotated-marker.yaml), under a CONSTANT name so this lookup is
+      rename-safe -- which is what lets it stand in for the Secret probe that
+      backend#2626 refuses.
+    - NEW / fresh datadir on a live cluster (no marker yet, no mysql-pvc, kube-system
+      visible) -> ON. The tier-3 mint in secrets.yaml generates root into the Secret,
+      the edge is born rotated, and this same render lays down the marker so every
+      later render stays on.
+    - EXISTING datadir (mysql-pvc present, no marker), OR a BLIND / cluster-less
+      render that cannot prove the datadir fresh -> OFF. Fall back to the edge's
+      existing password (the image-baked literal); no mint, no wedge.
 
   An accessible existing edge we DO want rotated carries an explicit
   `rotateMysqlRoot=true` override (the manual-rotation path -- how dev and edge 713
   hold it), which bypasses this helper entirely, so its rotated posture is preserved
   by the override, not re-derived here. Deliberately NO Secret `lookup` on the
   override-following secretName: a miss there would be rename-unsafe, which
-  scripts/tests/fullname-override-completeness.sh (backend#2626) refuses -- and the
-  override already carries the one case a Secret probe would have.
+  scripts/tests/fullname-override-completeness.sh (backend#2626) refuses -- the marker
+  (constant name) carries the "already rotated" signal a Secret probe would have.
 
   A tier-1 `mysqlRootPassword` PIN also resolves ON: it is an explicit operator
   assertion of root's password (deterministic, no tier-3 mint), so it is the
@@ -874,9 +901,14 @@ true
 {{- if .Values.mysqlRootPassword -}}
 true
 {{- else -}}
+{{- $marker := (lookup "v1" "ConfigMap" .Release.Namespace (include "tracebloc.mysqlRootRotatedMarker" .)) -}}
 {{- $pvc := (lookup "v1" "PersistentVolumeClaim" .Release.Namespace (include "tracebloc.mysqlPvc" .)) -}}
 {{- $clusterVisible := (lookup "v1" "Namespace" "" "kube-system") -}}
-{{- if and $clusterVisible (not $pvc) }}true{{ end -}}
+{{- if $marker -}}
+true
+{{- else if and $clusterVisible (not $pvc) -}}
+true
+{{- end -}}
 {{- end -}}
 {{- end }}
 
