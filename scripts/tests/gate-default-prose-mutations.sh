@@ -100,7 +100,7 @@ D="$TMP/vals"; mkfixture "$D"
 python3 - "$D/client/values.yaml" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "# This is the LAST, prod-irreversible-adjacent step of the rollout. It is ON for"
+old = "# This is the LAST, prod-irreversible-adjacent step of the rollout. Baked ON for"
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
@@ -176,8 +176,8 @@ old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`; it is `true` for `dev`, "
-    "`stg` and `prod`, so every fleet rotates on upgrade."))
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is `true` for `dev`, "
+    "`stg` and `prod`, so every fleet narrows on upgrade."))
 PY2
 run_case "an ON-polarity claim in LIST form is caught (stg/prod ship false)" 1   "MIGRATION.md" "$D"
 
@@ -190,7 +190,7 @@ old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`; it is baked `on` for `dev`, "
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is baked `on` for `dev`, "
     "`stg` and `prod`."))
 PY2
 run_case "an ON-polarity 'baked on for <list>' claim is caught too" 1   "MIGRATION.md" "$D"
@@ -210,8 +210,8 @@ old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`; it is `true` for `dev` and "
-    "`false` for `stg` and `prod`, which is what the chart ships."))
+    "`rotateMysqlRootByEnv` were added in `1.9.71`.\n\n`narrowEdgeuserByEnv` is `true` for `dev` and "
+    "`false` for `stg` and `prod`, which is what the chart ships.\n\n"))
 PY2
 run_case "a sentence stating BOTH polarities correctly is NOT a finding" 0   "no document contradicts" "$D"
 
