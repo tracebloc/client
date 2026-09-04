@@ -208,15 +208,15 @@ env: {
   #    which: unset or empty is one INFO line at jobs-manager startup naming
   #    the gate as UNSET (_log_size_gate_mode -- grep INFO, not WARN); a
   #    malformed value is one WARNING from the shared positive-int reader.
-  #    Multi-GPU therefore needs TWO keys set on the edge: TRACEBLOC_DDP=1
-  #    above AND this floor; with either missing an opted-in edge still gets
-  #    one GPU per run, with the gate's reason (GPU_COUNT_SIZE_FLOOR_UNSET) in
-  #    the log. Vocabulary: a positive integer in its canonical spelling. The
-  #    runtime would accept "007" (int() reads it as 7, no warning) -- the
-  #    schema refuses it so two values files cannot spell one floor two ways,
-  #    not because it would fall back to anything. RENDERED ONLY WHEN SET, so
-  #    absence keeps the gate dark exactly as the runtime intends rather than
-  #    delivering a chart guess.
+  #    Multi-GPU therefore needs BOTH of two values set on the edge --
+  #    TRACEBLOC_DDP=1 above AND this floor; with either missing an opted-in
+  #    edge still gets one GPU per run, with the gate's reason
+  #    (GPU_COUNT_SIZE_FLOOR_UNSET) in the log. Vocabulary: a positive integer
+  #    in its canonical spelling. The runtime would accept "007" (int() reads
+  #    it as 7, no warning) -- the schema refuses it so two values files
+  #    cannot spell one floor two ways, not because it would fall back to
+  #    anything. RENDERED ONLY WHEN SET, so absence keeps the gate dark
+  #    exactly as the runtime intends rather than delivering a chart guess.
   # MULTI_GPU_MIN_PARAMETERS: "50000000"
 }
 
