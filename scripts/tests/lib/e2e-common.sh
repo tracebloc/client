@@ -279,3 +279,41 @@ e2e_cleanup_cluster() {
   # ALWAYS 0: cleanup is a note, never the outcome. See defect 3 above.
   return 0
 }
+
+# ── e2e_reap_path PATH… ──────────────────────────────────────────────────────
+# Remove files/directories from inside an EXIT trap without ever being able to
+# change the harness's verdict. THE ONE implementation, so an eighth harness
+# inherits the guarantee instead of having to remember it.
+#
+# WHY THIS EXISTS (client#979, LukasWodka + saqlainsyed007 both drove it).
+# e2e-full-seal.sh's cleanup read:
+#
+#     [ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"
+#
+# and `rm -f` is the LAST command of that `&&` list, so `set -e` is NOT exempt
+# from it — the exemption covers every command in a `&&`/`||` list EXCEPT the
+# last. A failing `rm -f` (a read-only mount, a mode-500 parent directory) aborts
+# the trap. Driven, harness exiting 7:
+#
+#     CREDS_FILE=""                 -> rm not reached   -> exit 7   reap ran
+#     CREDS_FILE=<removable>        -> rm succeeds      -> exit 7   reap ran
+#     CREDS_FILE=<in a 0500 dir>    -> rm FAILS         -> exit 1   reap SKIPPED
+#
+# Two losses from one line, and the second is worse than the first: the harness's
+# verdict is replaced by the `rm`'s status — the exact overwrite this change
+# exists to stop — and the abort also skips e2e_cleanup_cluster, so the k3d
+# cluster leaks as well.
+#
+# `rm -f` already ignores a missing path, so the only thing left to neutralise is
+# a permission/read-only failure. Empty arguments are skipped rather than passed
+# on: `rm -f ""` is a no-op on GNU but noisy elsewhere, and an unset variable
+# reaching here is a caller bug worth not hiding behind a redirect.
+e2e_reap_path() {
+  local p
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    rm -rf -- "$p" 2>/dev/null || echo "cleanup: could not remove ${p} — it may remain on this runner." >&2
+  done
+  # ALWAYS 0: a reap that could not complete is a note, never the outcome.
+  return 0
+}

@@ -74,7 +74,7 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/tb-e2e-journey-XXXXXX")"
 cleanup() {
   local _status=$?
   e2e_cleanup_cluster
-  rm -rf "$WORKDIR" 2>/dev/null || true
+  e2e_reap_path "$WORKDIR"
   return "$_status"
 }
 trap cleanup EXIT

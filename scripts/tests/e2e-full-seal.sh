@@ -70,7 +70,7 @@ CREDS_FILE=""
 # mode-0600 secret must not outlive this process even if the cluster delete stalls.
 cleanup() {
   local _status=$?
-  [ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"
+  e2e_reap_path "$CREDS_FILE"
   e2e_cleanup_cluster
   return "$_status"
 }

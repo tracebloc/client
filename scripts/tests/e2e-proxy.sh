@@ -85,7 +85,7 @@ cleanup() {
   # ending the trap non-zero.
   _bounded "${TB_E2E_DELETE_TIMEOUT:-120}" docker rm -f "$SQUID_NAME" >/dev/null \
     || echo "cleanup: could not remove the squid container ${SQUID_NAME} within ${TB_E2E_DELETE_TIMEOUT:-120}s — it may remain on this runner." >&2
-  rm -rf "$WORK" 2>/dev/null || true
+  e2e_reap_path "$WORK"
   return "$_status"
 }
 trap cleanup EXIT

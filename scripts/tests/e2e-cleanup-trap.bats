@@ -143,6 +143,48 @@ _count_cleanup_engine_calls() {
     | grep -cE '(^|[|;&(]|[[:space:]])(docker|k3d)[[:space:]]' || true
 }
 
+# NO STATEMENT IN A CLEANUP MAY BE ABLE TO END NON-ZERO. This is the rule the
+# `local _status=$?` / `return "$_status"` pair depends on, and the one
+# e2e-full-seal.sh broke: errexit is LIVE inside an EXIT trap, so a command that
+# fails ABORTS the trap — skipping both the `return` and everything after it.
+#
+# The shape that hid it: `[ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"`. There is a
+# standing note in this repo that `A && B` mid-script does not abort under set -e,
+# and it does NOT apply here — the exemption covers every command in a `&&`/`||`
+# list EXCEPT THE LAST, and `rm` is last, so it is fully subject to errexit. A
+# failing `rm -f` (read-only mount, mode-500 parent) cost the verdict AND leaked
+# the cluster, because e2e_cleanup_cluster never ran (LukasWodka + saqlainsyed007,
+# both driven).
+#
+# So every statement must be terminated by `|| true` / `|| :` / `|| echo …`, or be
+# a call to an `e2e_*` helper that this file separately proves always returns 0.
+_check_cleanup_statements_cannot_fail() {
+  local f="$1" body offenders
+  body="$(_cleanup_body "$f")"
+  [ -n "$body" ] || { echo "$f has no cleanup() function to inspect"; return 1; }
+  # JOIN CONTINUATIONS FIRST. e2e-proxy.sh's bounded `docker rm -f` carries its
+  # `|| echo …` on the next line, so a line-at-a-time check reads the first half as
+  # a statement that can fail. A checker that cannot see a statement whole reports
+  # violations that are not there — and would miss real ones spelled the other way.
+  offenders="$(printf '%s\n' "$body" \
+    | awk '{ if (buf != "") { $0 = buf " " $0; buf = "" }
+             if (sub(/\\[[:space:]]*$/, "")) { buf = $0; next }
+             print }' \
+    | grep -vE '^[[:space:]]*(#|\}|$)' \
+    | grep -vE '^cleanup\(\)' \
+    | grep -vE '^[[:space:]]*local[[:space:]]+_status=\$\?[[:space:]]*$' \
+    | grep -vE '^[[:space:]]*return[[:space:]]+"\$_status"[[:space:]]*$' \
+    | grep -vE '^[[:space:]]*(if|fi|then|else|elif|for|done|do|case|esac|\{|\})' \
+    | grep -vE '^[[:space:]]*e2e_[a-z_]+([[:space:]]|$)' \
+    | grep -vE '\|\|[[:space:]]*(true|:|echo|printf)' || true)"
+  [ -z "$offenders" ] || {
+    echo "$f's cleanup() has statement(s) that can end non-zero — errexit is live in an EXIT trap, so a failure there aborts it, discarding the harness's verdict AND skipping every later reap (client#979):"
+    printf '%s\n' "$offenders"
+    echo "Route file/dir removal through e2e_reap_path, or terminate the statement with '|| true'."
+    return 1
+  }
+}
+
 # The verdict discipline: `local _status=$?` FIRST (before anything can move $?)
 # and `return "$_status"` LAST. Position is the whole assertion — a capture after
 # the first command captures the wrong value, and a `return` that is not last
@@ -234,6 +276,15 @@ _check_cleanup_preserves_status() {
   }
 }
 
+@test "no cleanup statement can end non-zero (errexit is live in an EXIT trap)" {
+  local f rc=0
+  while read -r f; do
+    [ -n "$f" ] || continue
+    _check_cleanup_statements_cannot_fail "$f" || rc=1
+  done <<< "$(_harnesses)"
+  [ "$rc" -eq 0 ] || return 1
+}
+
 @test "every harness's cleanup preserves the script's exit status (verdict, not outcome)" {
   local f rc=0
   while read -r f; do
@@ -271,6 +322,13 @@ _check_cleanup_preserves_status() {
       # exercise a "command not found", not a failing docker.
       printf '_bounded() { shift; "$@"; }\n'
       printf 'docker() { return 1; }\n'
+      # SOURCE THE REAL e2e-common.sh, then override only the cluster reap. The
+      # first version stubbed both helpers, so a cleanup calling a helper that did
+      # not exist would have passed — and a missing helper inside an errexit trap
+      # is a 127 that overwrites the verdict exactly like a failing `rm`. Driven
+      # here rather than trusted: every harness sources this file strictly before
+      # `trap cleanup EXIT`, which is what makes that impossible in a real run.
+      printf 'source "%s"\n' "$COMMON"
       printf 'e2e_cleanup_cluster() { echo "reaped" >&2; return 0; }\n'
       printf '%s\n' "$body"
       printf 'trap cleanup EXIT\n'
@@ -285,6 +343,66 @@ _check_cleanup_preserves_status() {
     n=$((n + 1))
   done <<< "$(_harnesses)"
   [ "$n" -ge "$HARNESS_FLOOR" ] || { echo "drove only $n cleanup(s); the loop went vacuous"; return 1; }
+}
+
+# THE CASE THIS GUARD WAS MISSING, and the reason it is worth naming: the test
+# above drove every real cleanup with `CREDS_FILE=""`, i.e. in the one state where
+# the `rm` never runs — so the failing-rm branch was never exercised for
+# e2e-full-seal.sh and the guard reported coverage it did not have. A test that
+# drives the right function in a state where the bug cannot occur is not a test.
+@test "every harness's cleanup survives a HOSTILE filesystem (verdict AND reap both intact)" {
+  # Every path variable points somewhere unremovable: a file inside a mode-0500
+  # directory, which is exactly what a read-only mount or a root-owned parent looks
+  # like. `rm` fails, and the harness's exit 7 must still come out the other side
+  # WITH the cluster reap having run — the pre-fix shape lost both at once.
+  local locked="$BATS_TEST_TMPDIR/locked"
+  mkdir -p "$locked"
+  : > "$locked/creds"
+  : > "$locked/work"
+  chmod 500 "$locked"
+
+  local f n=0
+  while read -r f; do
+    [ -n "$f" ] || continue
+    local body script out
+    body="$(_cleanup_body "$f")"
+    [ -n "$body" ] || { echo "no cleanup() in $f"; return 1; }
+    script="$BATS_TEST_TMPDIR/hostile-$(basename "$f")"
+    {
+      printf 'set -euo pipefail\n'
+      printf 'CLUSTER_NAME=throwaway\n'
+      # THE POINT: non-empty, and unremovable.
+      printf 'CREDS_FILE="%s/creds"\n' "$locked"
+      printf 'WORKDIR="%s/work"\n' "$locked"
+      printf 'WORK="%s/work"\n' "$locked"
+      printf 'SQUID_NAME=squid-absent\n'
+      printf '_bounded() { shift; "$@"; }\n'
+      printf 'docker() { return 1; }\n'
+      # The REAL e2e_reap_path, from the real file — a re-implementation here would
+      # only prove the copy in this test always returns 0.
+      printf 'source "%s"\n' "$COMMON"
+      printf 'e2e_cleanup_cluster() { echo "REAP-RAN" >&2; return 0; }\n'
+      printf '%s\n' "$body"
+      printf 'trap cleanup EXIT\n'
+      printf 'exit 7\n'
+    } > "$script"
+    run bash "$script"
+    [ "$status" -eq 7 ] || {
+      chmod 700 "$locked"
+      echo "$f: an unremovable path turned exit 7 into $status — the harness's verdict was replaced by the rm's status (client#979)"
+      echo "$output"
+      return 1
+    }
+    printf '%s\n' "$output" | grep -q REAP-RAN || {
+      chmod 700 "$locked"
+      echo "$f: the cluster reap did NOT run after the failing rm — the trap aborted early, so the cluster leaks as well as the verdict"
+      echo "$output"
+      return 1
+    }
+    n=$((n + 1))
+  done <<< "$(_harnesses)"
+  chmod 700 "$locked"
+  [ "$n" -ge "$HARNESS_FLOOR" ] || { echo "drove only $n cleanup(s) — the loop went vacuous"; return 1; }
 }
 
 # ── the shared helper itself ────────────────────────────────────────────────
@@ -334,6 +452,37 @@ _check_cleanup_preserves_status() {
     echo "e2e_cleanup_cluster did not return 0 on a failing delete (got: ${out:-<aborted>})"
     return 1
   }
+}
+
+@test "e2e_reap_path always returns 0, and says what it could not remove" {
+  # The helper the hostile-filesystem case relies on. Driven against a real
+  # unremovable path, not a mock: `rm -rf` on a file inside a mode-0500 directory.
+  local locked="$BATS_TEST_TMPDIR/reap-locked" out rc=0
+  mkdir -p "$locked"; : > "$locked/f"; chmod 500 "$locked"
+  out="$(bash -c '
+    set -euo pipefail
+    source "'"$COMMON"'"
+    e2e_reap_path "'"$locked"'/f"
+    echo RETURNED-0
+  ' 2>&1)" || rc=$?
+  chmod 700 "$locked"
+  [ "$rc" -eq 0 ] || { echo "e2e_reap_path aborted under set -e (rc=$rc): $out"; return 1; }
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0: $out"; return 1 ;; esac
+  case "$out" in *"could not remove"*) ;; *) echo "removed nothing and said nothing: $out"; return 1 ;; esac
+}
+
+@test "e2e_reap_path removes what it CAN, and is quiet about a path that was never there" {
+  local d="$BATS_TEST_TMPDIR/reap-ok" out
+  mkdir -p "$d"; : > "$d/gone"
+  out="$(bash -c '
+    set -euo pipefail
+    source "'"$COMMON"'"
+    e2e_reap_path "'"$d"'/gone" "" "'"$d"'/never-existed"
+    echo RETURNED-0
+  ' 2>&1)"
+  [ ! -e "$d/gone" ] || { echo "did not remove a removable file"; return 1; }
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0: $out"; return 1 ;; esac
+  case "$out" in *"could not remove"*) echo "complained about an absent path or an empty arg: $out"; return 1 ;; esac
 }
 
 @test "e2e_cleanup_cluster refuses to run the delete UNBOUNDED when _bounded is missing" {
