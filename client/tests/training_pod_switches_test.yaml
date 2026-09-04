@@ -85,3 +85,35 @@ tests:
           content:
             name: TRACEBLOC_DDP
           any: true
+
+  - it: the multi-GPU lease travels only when an operator set it (client-runtime#486, B7)
+    # An unconditional empty default would read as DISABLED on the runtime side
+    # and switch the lease off fleet-wide, silently. Same shape as the switches.
+    set:
+      env:
+        MULTI_GPU_LEASE_SECONDS: "3600"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_LEASE_SECONDS
+            value: "3600"
+
+  - it: an unset lease emits nothing, so jobs-manager's own default stands
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_LEASE_SECONDS
+          any: true
+
+  - it: an explicit disable spelling is delivered verbatim
+    set:
+      env:
+        MULTI_GPU_LEASE_SECONDS: "off"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_LEASE_SECONDS
+            value: "off"

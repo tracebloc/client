@@ -150,6 +150,17 @@ for key in TRACEBLOC_DDP TRACEBLOC_AMP; do
   done
 done
 
+echo "== env.MULTI_GPU_LEASE_SECONDS: seconds or an explicit disable, nothing else =="
+# client-runtime#486 (B7): the runtime falls back to its 86400 s default on any
+# unrecognised value, so a typo would be indistinguishable from the default.
+for good in 0 60 86400 off false no OFF False; do
+  expect_render "MULTI_GPU_LEASE_SECONDS=$good" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS=$good"
+done
+expect_render "MULTI_GPU_LEASE_SECONDS=''" "tracebloc/jobs-manager:prod" --set-string "env.MULTI_GPU_LEASE_SECONDS="
+for bad in 1h 60s -1 3.5 on true yes disabled; do
+  expect_reject "MULTI_GPU_LEASE_SECONDS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_LEASE_SECONDS=$bad"
+done
+
 echo "== images.ingestor.channelTags: keys are closed =="
 # The lookup is on the RESOLVED env, so only dev/stg/prod can ever match. An
 # alias key validated fine and was then silently ignored: channelTags.staging

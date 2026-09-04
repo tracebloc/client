@@ -98,6 +98,11 @@
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
           "description": "Per-edge OPERATOR switch: automatic mixed precision (the engine still picks bf16-vs-fp16 from the device, RFC-0067 D4). RFC-0067 D8 kill switch / rollback lever (backend#3149; runtime half client-runtime#480). jobs-manager reads it from its own container env and writes an explicit \"1\" or \"0\" onto every training pod it spawns. Truthy = 1 | true | yes (case-insensitive, whitespace-tolerant); everything else, including unset, is OFF. THE VOCABULARY IS CLOSED to those spellings plus 0 / false / no (and empty = unset): the runtime treats any unrecognised value as off, so without this a typo such as 'ture' or 'on' would silently disable the very thing the operator believed they had enabled."
+        },
+        "MULTI_GPU_LEASE_SECONDS": {
+          "type": "string",
+          "pattern": "^\\s*([0-9]+|[Oo][Ff][Ff]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo])?\\s*$",
+          "description": "Per-run lease for MULTI-GPU runs (RFC-0067 D7/H4; client-runtime#486): applied by jobs-manager as the pod-level activeDeadlineSeconds only when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet cap. Digits = seconds (jobs-manager defaults to 86400 when unset); 0 / off / false / no disable it. Rendered only when set: the runtime reads an empty value as DISABLED, so an unconditional chart default would switch the lease off fleet-wide. THE VOCABULARY IS CLOSED because the runtime falls back to its default on anything unrecognised, which would make a typo indistinguishable from the default."
         }
       },
       "additionalProperties": {

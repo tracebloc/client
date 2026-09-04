@@ -20,6 +20,12 @@ The vocabulary is closed (`1|0|true|false|yes|no`, case-insensitive, empty =
 unset); any other spelling is refused at `helm upgrade` time rather than
 silently read as off.
 
+The same release documents `env.MULTI_GPU_LEASE_SECONDS` (client-runtime#486),
+the per-run lease jobs-manager applies as `activeDeadlineSeconds` to
+**multi-GPU** pods only. Also absent by default — jobs-manager's own 86400 s
+default stands — and also rendered only when set, because the runtime reads an
+empty value as *disabled*. Digits, or `0`/`off`/`false`/`no` to disable.
+
 ## Upgrading to 1.9.71 — the `rotateMysqlRoot` gate, and one new object outside the release namespace
 
 Two things matter when you cross this version from anything below it.

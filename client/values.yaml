@@ -157,6 +157,20 @@ env: {
   # jobs-manager container and goes no further -- inert, never harmful.
   # TRACEBLOC_DDP: "0"
   # TRACEBLOC_AMP: "0"
+  # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
+  #    B7). jobs-manager applies it as the pod-level activeDeadlineSeconds ONLY
+  #    when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet
+  #    cap, so one run cannot hold N GPUs indefinitely; single-GPU and CPU runs
+  #    keep today's "bias toward NOT killing". Default inside jobs-manager is
+  #    86400 (one day) when this key is UNSET. Digits = seconds; "0", "off",
+  #    "false", "no" DISABLE the lease. RENDERED ONLY WHEN SET, like the two
+  #    switches above -- an unconditional default here would switch the lease
+  #    off fleet-wide, silently, because an empty value is how the runtime reads
+  #    "disabled". The schema closes the vocabulary so a typo is refused at
+  #    install time rather than falling back to the default unnoticed. The
+  #    controller reports a lease kill as "lease expired" through the pod
+  #    annotation tracebloc.io/lease-seconds.
+  # MULTI_GPU_LEASE_SECONDS: "86400"
 }
 
 # -- GPU device plugin (client#564)
