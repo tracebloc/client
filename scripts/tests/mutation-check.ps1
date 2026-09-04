@@ -174,6 +174,78 @@ $Mutations = @(
      Find  = '_cluster_exists() {'
      Repl  = '_cluster_exists() {  : "See it on your dashboard: https://ai.tracebloc.io/clients"' }
 
+  # THE ONE THE CLASS GUARD USED TO MISS (client#930). New-K3dCluster ran
+  # `k3d cluster list -o json` bare, on the MAIN install path, through every
+  # green run of this suite -- because the class guard's tool list said `docker`
+  # and `k3d` talks to the same engine. Registering the mutation is the point:
+  # widening the tool list is only worth something if reintroducing the bare call
+  # actually reddens the widened guard, and "already fixed, never seen to fail"
+  # is exactly the shape this harness exists to refuse.
+  @{ Name  = 'New-K3dCluster goes back to a bare, unbounded k3d cluster list (client#930)'
+     Expect = 'EVERY native docker/k3d call is bounded'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $clusterListJson = Get-ClusterListJson'
+     Repl  = '  $clusterListJson = k3d cluster list -o json 2>&1 | Out-String' }
+
+  # AND THE DEADLINE ITSELF, not just the wrapper's name. A reader that starts
+  # the job and then waits on it forever satisfies "inside Start-Job" while
+  # hanging exactly as the bare call did -- the bounded-looking unbounded wait.
+  @{ Name  = 'the k3d-listing reader starts its job but never reaps it on a deadline (client#930)'
+     Expect = 'there is exactly ONE bounded k3d-listing reader'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {'
+     Repl  = '  if ($job | Wait-Job) {' }
+
+  # AND THE DECISION AT THE CONSUMER (client#973 review). The two entries above
+  # aim at the BOUND; this one aims at what the bound made reachable. Bounding
+  # the read turned "" from "the listing was garbage" into "the listing was
+  # garbage OR the deadline fired OR the job died", and New-K3dCluster mapped all
+  # of them onto `$clusterExists = $false` -- `k3d cluster create` over a cluster
+  # that may well exist, whose create-timeout branch then deletes it as a
+  # "partial". Deleting this call is a silent regression to exactly that, so it
+  # is the mutation the guard has to catch.
+  @{ Name  = 'the main install path guesses "absent" from a failed listing again (client#973)'
+     Expect = 'BEFORE deciding the cluster is absent'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  Assert-ClusterListingReadable -Json $clusterListJson'
+     Repl  = '  # Assert-ClusterListingReadable -Json $clusterListJson' }
+
+  # ...AND ITS SENSE, not just its presence. An inverted predicate keeps the call
+  # site, the name and the ordering guard all green while refusing every HEALTHY
+  # listing and waving the failed ones through -- the same fail-open, now with a
+  # guard vouching for it. This is why the refusal has a behavioural test and not
+  # only a source-text one.
+  @{ Name  = 'the listing-readable predicate is inverted, so only healthy reads are refused (client#973)'
+     Expect = 'refuses EVERY shape a failed listing produces'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($null -ne (Get-ClusterListEntries -Json $Json)) { return }'
+     Repl  = '  if ($null -eq (Get-ClusterListEntries -Json $Json)) { return }' }
+
+  # THE FAIL-FAST BREADCRUMB (client#973 review). Only the timeout branch logged,
+  # and the `if` it sits opposite is not "succeeded" -- Wait-JobWithProgress
+  # returns $true for Failed too. So the case that actually reaches support (a
+  # daemon refusing the socket: empty stdout, k3d's reason already dropped by
+  # `2>$null`) was the one with no witness in the support bundle.
+  @{ Name  = 'the empty-listing read goes back to leaving no trace in the log (client#973)'
+     Expect = 'exactly ONE bounded k3d-listing reader'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '      Log "k3d cluster list returned no output$why (job state: $($job.State)); cluster run-state indeterminate."'
+     Repl  = '      $null = $why' }
+
+  # THE VALUE THE WHOLE FAIL-CLOSED PROPERTY RESTS ON (@saadqbal / @LukasWodka on
+  # client#973). The three entries above certify the DECISION; none of them
+  # touches what the reader RETURNS when the deadline fires. `[]` is the perfect
+  # mutation because it is a HEALTHY empty listing: the refusal passes it,
+  # Find-ClusterInList yields $null, and the install is back on the create path
+  # over a live cluster -- with the AST ordering guard and all three entries above
+  # still green. `$out = ""` appears three times in the file, hence the anchor.
+  @{ Name  = 'a timed-out read returns a healthy-looking empty listing instead of nothing (client#973)'
+     Expect = 'a FIRED DEADLINE returns empty'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     After = 'function Get-ClusterListJson {'; Within = 5
+     Find  = '  $out = ""'
+     Repl  = '  $out = "[]"' }
+
   @{ Name  = 'the bootstrap closes the user''s console again (#577 / client#917)'
      Expect = 'must not close the user''s window'
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'
