@@ -1,0 +1,46 @@
+{{/*
+  "This edge was born rotated" marker (backend#947 / backend#1528 Phase 0).
+
+  WHY THIS EXISTS. tracebloc.bakedRootRotationOn has to tell three edge states
+  apart on a live render: a FRESH install (born rotate), an edge THIS chart already
+  born-rotated (stay rotated -- preserve the minted password), and an EXISTING
+  un-rotated / blind edge (leave alone -- no wedge). The mysql-pvc cannot separate
+  the middle two: this chart creates that PVC on the first install with
+  resource-policy: keep, so "PVC present" is true for a born-rotated edge from its
+  SECOND render onward, identically to an existing un-rotated edge. A PVC-only
+  freshness test therefore flips rotate/reparent OFF on a born-rotated edge's next
+  auto-upgrade -- secrets.yaml stops emitting MYSQL_ROOT_PASSWORD, the generated
+  root password is lost, and jobs-manager reverts to minting as the root-equivalent
+  edgeuser this epic retires. That is a one-way door on a live fleet (@LukasWodka,
+  backend#947).
+
+  The Secret WOULD be the natural "already rotated" signal, but its name follows
+  fullnameOverride and fullname-override-completeness.sh (backend#2626) refuses a
+  lookup on it (a rename miss silently reads the wrong Secret). So the born-rotated
+  fact is recorded here instead, in a resource under a CONSTANT name -- exactly the
+  rename-safe shape mysql-pvc already has -- which bakedRootRotationOn may look up.
+
+  Rendered IFF rotation resolves on (fresh install, marker/PVC-driven upgrades, an
+  explicit override, or a pin). resource-policy: keep so it survives a helm
+  uninstall the way the datadir PVC does -- the datadir and its "is rotated" bit
+  must persist or perish together, never diverge. An existing un-rotated edge never
+  renders this (rotation is off there), so no marker is ever laid down for it and it
+  keeps resolving off -- rotating it stays the deliberate manual override + one-time
+  ALTER USER path.
+*/}}
+{{- if (include "tracebloc.rotateMysqlRoot" .) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.mysqlRootRotatedMarker" . }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+data:
+  # Presence is the whole signal; the body is documentation for an operator who
+  # finds it with `kubectl get cm`. Do NOT gate anything on these values.
+  rotated: "true"
+  issue: "backend#947"
+{{- end }}
