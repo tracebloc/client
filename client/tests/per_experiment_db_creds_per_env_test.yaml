@@ -13,10 +13,11 @@ suite: perExperimentDbCreds resolves per environment (backend#1528)
 # that account `CREATE USER … WITH GRANT OPTION` plus `ALL PRIVILEGES` on both
 # databases. The retirement undoes itself, and nothing says so.
 #
-# `dev: true` here records a posture already achieved — dev was fully retired on
-# 2026-08-26, edgeuser DROPped and verified under a driven experiment. `stg` is
-# deliberately still false: staging is at REVOKE, not DROP, so there is no
-# settled posture to bake yet.
+# `dev`/`stg`/`prod: true` here record postures already achieved — dev retired
+# 2026-08-26, staging DROPped 2026-08-31 (backend#2776), prod edge 713 DROPped
+# 2026-09-01 (backend#2800). This gate is additive, so a fresh install of any of
+# the three comes up on per-experiment credentials; an operator override still
+# holds a single edge back (tested below).
 # ALL THREE CALL SITES, not just the one that sets the env var.
 #
 # The first version of this suite listed `jobs-manager-deployment.yaml` alone.
@@ -72,23 +73,23 @@ tests:
             name: PER_EXPERIMENT_DB_CREDS
             value: "1"
 
-  - it: "stg is NOT flipped by this change — staging is at REVOKE, not DROP"
+  - it: "stg mints per-experiment credentials — baked after the DROP (backend#2776)"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: stg
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: PER_EXPERIMENT_DB_CREDS
             value: "1"
 
-  - it: "prod is untouched"
+  - it: "prod mints per-experiment credentials — baked after edge 713's DROP (backend#2800)"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: PER_EXPERIMENT_DB_CREDS
@@ -106,16 +107,17 @@ tests:
             name: PER_EXPERIMENT_DB_CREDS
             value: "1"
 
-  - it: "an operator can still switch one prod edge on — the override wins both ways"
-    # Both directions, because an override that only ever turns things ON would
-    # leave "false means unset" indistinguishable from "false means off", which
-    # is precisely the bug the null default exists to avoid.
+  - it: "an operator can still hold a prod edge back — override false beats the baked default"
+    # prod now BAKES perExperimentDbCreds on (backend#2800), so the meaningful override
+    # direction is OFF. Together with the dev override-false case above, this proves the
+    # override wins over the default in the direction that ISN'T already the default —
+    # an override-true test on prod would now be vacuous (it matches the default).
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
-      perExperimentDbCreds: true
+      perExperimentDbCreds: false
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: PER_EXPERIMENT_DB_CREDS
@@ -132,10 +134,20 @@ tests:
           path: data.TB_CREDMGR_PASSWORD
         documentIndex: 0
 
-  - it: "prod does not — the Secret follows the same map"
+  - it: "prod gets the tb_credmgr Secret too — the map is baked on (backend#2800)"
     template: templates/secrets.yaml
     set:
       env.CLIENT_ENV: prod
+    asserts:
+      - isNotEmpty:
+          path: data.TB_CREDMGR_PASSWORD
+        documentIndex: 0
+
+  - it: "an override-off edge renders no such Secret — the gate can still redden"
+    template: templates/secrets.yaml
+    set:
+      env.CLIENT_ENV: prod
+      perExperimentDbCreds: false
     asserts:
       - isNull:
           path: data.TB_CREDMGR_PASSWORD
@@ -157,16 +169,31 @@ tests:
             resources: ["secrets"]
             verbs: ["list", "delete", "patch"]
 
-  - it: "prod does not get it — the RBAC follows the same map"
+  - it: "prod gets the reaping RBAC too — the map is baked on (backend#2800)"
     template: templates/rbac.yaml
     set:
       env.CLIENT_ENV: prod
       clusterScope: true
     documentIndex: 1
     asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["list", "delete", "patch"]
+
+  - it: "an override-off edge gets no reaping RBAC — the gate can still redden"
+    template: templates/rbac.yaml
+    set:
+      env.CLIENT_ENV: prod
+      perExperimentDbCreds: false
+      clusterScope: true
+    documentIndex: 1
+    asserts:
       # THREE shapes guarded since `patch` joined the grant (backend#2795):
-      # a leak on prod would render as the three-verb rule, which the older
-      # two-verb guard alone would not catch.
+      # a leak would render as the three-verb rule, which the older two-verb
+      # guard alone would not catch.
       - notContains:
           path: rules
           content:

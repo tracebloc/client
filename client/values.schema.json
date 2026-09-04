@@ -516,7 +516,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from serviceDbAccountsByEnv keyed on the resolved CLIENT_ENV (backend#1752). Set true/false to force one answer on this edge regardless of environment. backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. Additive \u2014 jobs-manager mints them at startup but nothing consumes them until S2, so a default install is byte-identical. Flip per environment, dev first."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from serviceDbAccountsByEnv keyed on the resolved CLIENT_ENV (backend#1752). Set true/false to force one answer on this edge regardless of environment. backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL service identities tb_meta (metadata DB) and tb_ingest (dataset DB) that replace the root-equivalent edgeuser. S2 has shipped, so wherever this is on the consumers authenticate as the dedicated identities; only an explicit override-off renders the shared-edgeuser path byte-for-byte. Flip per environment, dev first."
     },
     "tbMetaPassword": {
       "type": "string",

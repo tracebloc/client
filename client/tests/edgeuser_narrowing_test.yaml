@@ -371,6 +371,9 @@ tests:
       bootstrapDbReparent: true
       bootstrapDbPassword: "root-pw"
       perExperimentDbCreds: true
+      # prod now bakes serviceDbAccounts on, so force it off to reconstruct the
+      # "data plane still edgeuser" blocker this case asserts (backend#2800).
+      serviceDbAccounts: false
     asserts:
       - failedTemplate:
           errorMessage: |-
@@ -384,6 +387,9 @@ tests:
       bootstrapDbReparent: true
       bootstrapDbPassword: "root-pw"
       serviceDbAccounts: true
+      # prod now bakes perExperimentDbCreds on, so force it off to reconstruct the
+      # "training pods still share the credential" blocker this case asserts.
+      perExperimentDbCreds: false
     asserts:
       - failedTemplate:
           errorMessage: |-
@@ -394,9 +400,12 @@ tests:
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
-      # prod now bakes reparent on (suite pin); force it off so all three
-      # predecessors are missing and the full three-reason refusal is reachable.
+      # prod now bakes reparent + serviceDbAccounts + perExperimentDbCreds on
+      # (backend#947 + backend#2800); force ALL THREE off so every predecessor is
+      # missing and the full three-reason refusal is reachable.
       bootstrapDbReparent: false
+      serviceDbAccounts: false
+      perExperimentDbCreds: false
     asserts:
       - failedTemplate:
           errorMessage: |-
@@ -408,6 +417,8 @@ tests:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
       bootstrapDbReparent: false
+      serviceDbAccounts: false
+      perExperimentDbCreds: false
     asserts:
       - failedTemplate:
           errorMessage: |-
@@ -419,6 +430,8 @@ tests:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
       bootstrapDbReparent: false
+      serviceDbAccounts: false
+      perExperimentDbCreds: false
     asserts:
       - failedTemplate:
           errorMessage: |-
