@@ -18,7 +18,12 @@
 #      journey call create_cluster without preflight is a pre-existing
 #      inconsistency worth a separate look — NOT changed here.)
 #    * the `cleanup`/`trap` body — each reaps its own extra resources
-#      (a squid container, work dirs) beyond the k3d cluster.
+#      (a squid container, work dirs) beyond the k3d cluster. The `k3d cluster
+#      delete` HALF of it is extracted (e2e_cleanup_cluster, client#979): it was
+#      byte-identical in all seven harnesses and identically wrong in all seven,
+#      so it is exactly the drift this note warns about. Each cleanup still owns
+#      its own extras — and its own exit-status discipline, which the guard
+#      scripts/tests/e2e-cleanup-trap.bats pins per harness.
 #    * CHART_DIR — only the chart-installing scripts set it.
 #
 #  Sourcing contract: source this file, then call the functions AFTER
@@ -205,4 +210,110 @@ while :; do
   sleep @@DELAY@@
 done
 SNIP
+}
+
+# ── e2e_cleanup_cluster [seconds] ────────────────────────────────────────────
+# Reap the throwaway k3d cluster: BOUNDED, LOUD, and incapable of changing the
+# harness's verdict. THE ONE implementation, so an eighth harness inherits all
+# three properties instead of having to remember them.
+#
+# WHY THIS EXISTS (client#979). All seven harnesses carried the identical line:
+#
+#     cleanup() { k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true; }
+#     trap cleanup EXIT
+#
+# and it cost a reviewer-visible false signal on client#977, a test-only diff.
+# Measured from the job log: `E2E mysql 8.4 (ubuntu-24.04-arm)` aborted CORRECTLY
+# at 09:15:44 on a rollout `--timeout=300s`, then produced NO OUTPUT AT ALL for
+# ~24 minutes until the job's own `timeout-minutes: 30` killed it at 09:39:23 —
+# "Terminate orphan process: pid (4358) (k3d)" is that hung child.
+#
+# Three separate defects in that one line, and fixing fewer than three leaves the
+# failure mode intact:
+#
+#  1. UNBOUNDED. `k3d cluster delete` talks to the Docker engine and takes no
+#     `--timeout` of its own (unlike `k3d cluster start`/`create`, which accept
+#     `--wait --timeout`). On a runner whose engine is already unhappy — precisely
+#     what a failed pod rollout suggests — it blocks. `_bounded` (common.sh) puts a
+#     deadline on it and reports 124 when the deadline fires. The macOS no-op
+#     caveat on `_bounded` genuinely does not apply: every job that runs these
+#     harnesses is on an `ubuntu-*` GitHub runner, where coreutils `timeout` is
+#     present — asserted from the workflow files by e2e-cleanup-trap.bats rather
+#     than assumed, since that caveat is real elsewhere in this repo.
+#  2. SILENCED. `>/dev/null 2>&1` is what made 24 minutes invisible: there was no
+#     line in the log to attribute the stall to, so it read as "the test hung"
+#     rather than "cleanup hung after the test already failed". Output is no longer
+#     redirected, and a bound that fires prints one line naming itself.
+#  3. VERDICT-DESTROYING. `set -e` worked — the body aborted with a correct
+#     non-zero status and a named reason — and the trap-hang converted that into
+#     GitHub's `cancelled`, which is neither pass nor fail (backend#1758: "a job
+#     timeout destroys the verdict artifact"; client#753 / client#920 are the same
+#     class at other sites). Note the mechanism carefully: errexit is LIVE inside
+#     an EXIT trap, so any command there that ends non-zero aborts the trap and
+#     OVERWRITES the script's exit status — verified, `exit 7` plus a trap whose
+#     last command is `false` exits 1. The old `|| true` happened to neutralise
+#     that; removing it without care would have introduced a new way to lose the
+#     verdict. So this function ALWAYS returns 0, and each caller captures `$?`
+#     first and returns it last.
+#
+# A leftover throwaway cluster on an ephemeral runner costs nothing. The stall
+# cost a 30-minute job and a reviewer's afternoon, so on the deadline we give up
+# and say so rather than wait.
+e2e_cleanup_cluster() {
+  local secs="${1:-${TB_E2E_DELETE_TIMEOUT:-120}}" rc=0
+  [ -n "${CLUSTER_NAME:-}" ] || return 0
+  # Fail toward "don't hang": running the delete UNBOUNDED is the defect itself,
+  # so if common.sh was never sourced we skip it and say so. Every harness sets its
+  # trap AFTER sourcing common.sh, so this branch is a belt, not the trousers.
+  if ! declare -F _bounded >/dev/null 2>&1; then
+    echo "cleanup: _bounded is unavailable (common.sh not sourced) — SKIPPING 'k3d cluster delete ${CLUSTER_NAME}' rather than running it unbounded (client#979). Delete it by hand if this was not an ephemeral runner." >&2
+    return 0
+  fi
+  echo "cleanup: deleting k3d cluster '${CLUSTER_NAME}' (bounded at ${secs}s)…" >&2
+  _bounded "$secs" k3d cluster delete "$CLUSTER_NAME" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "cleanup: 'k3d cluster delete ${CLUSTER_NAME}' TIMED OUT after ${secs}s — the Docker engine is not answering. Giving up so the harness's own verdict above is the one this job reports (client#979). A leftover cluster / orphan k3d process may remain on this runner." >&2
+  elif [ "$rc" -ne 0 ]; then
+    echo "cleanup: 'k3d cluster delete ${CLUSTER_NAME}' exited ${rc} — a leftover cluster may remain on this runner." >&2
+  fi
+  # ALWAYS 0: cleanup is a note, never the outcome. See defect 3 above.
+  return 0
+}
+
+# ── e2e_reap_path PATH… ──────────────────────────────────────────────────────
+# Remove files/directories from inside an EXIT trap without ever being able to
+# change the harness's verdict. THE ONE implementation, so an eighth harness
+# inherits the guarantee instead of having to remember it.
+#
+# WHY THIS EXISTS (client#979, LukasWodka + saqlainsyed007 both drove it).
+# e2e-full-seal.sh's cleanup read:
+#
+#     [ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"
+#
+# and `rm -f` is the LAST command of that `&&` list, so `set -e` is NOT exempt
+# from it — the exemption covers every command in a `&&`/`||` list EXCEPT the
+# last. A failing `rm -f` (a read-only mount, a mode-500 parent directory) aborts
+# the trap. Driven, harness exiting 7:
+#
+#     CREDS_FILE=""                 -> rm not reached   -> exit 7   reap ran
+#     CREDS_FILE=<removable>        -> rm succeeds      -> exit 7   reap ran
+#     CREDS_FILE=<in a 0500 dir>    -> rm FAILS         -> exit 1   reap SKIPPED
+#
+# Two losses from one line, and the second is worse than the first: the harness's
+# verdict is replaced by the `rm`'s status — the exact overwrite this change
+# exists to stop — and the abort also skips e2e_cleanup_cluster, so the k3d
+# cluster leaks as well.
+#
+# `rm -f` already ignores a missing path, so the only thing left to neutralise is
+# a permission/read-only failure. Empty arguments are skipped rather than passed
+# on: `rm -f ""` is a no-op on GNU but noisy elsewhere, and an unset variable
+# reaching here is a caller bug worth not hiding behind a redirect.
+e2e_reap_path() {
+  local p
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    rm -rf -- "$p" 2>/dev/null || echo "cleanup: could not remove ${p} — it may remain on this runner." >&2
+  done
+  # ALWAYS 0: a reap that could not complete is a note, never the outcome.
+  return 0
 }

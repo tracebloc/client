@@ -43,7 +43,16 @@ source "$LIB/cluster.sh"
 # shellcheck source=/dev/null
 source "$LIB/preflight.sh" # provides _pf_recheck_runtime_mem (called by create_cluster)
 
-cleanup() { k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true; }
+# The harness's verdict is captured FIRST and returned LAST: errexit is live
+# inside an EXIT trap, so any command here that ends non-zero aborts the trap and
+# overwrites the script's exit status (client#979 — that is how a correct `set -e`
+# abort became GitHub's `cancelled`). e2e_cleanup_cluster is bounded, prints what
+# it did, and always returns 0.
+cleanup() {
+  local _status=$?
+  e2e_cleanup_cluster
+  return "$_status"
+}
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
