@@ -77,13 +77,40 @@ tests:
 
   - it: the default values.yaml ships both switches OFF (absent), so no edge is armed by a chart upgrade
     # The keys exist in values.yaml only as documentation comments. If someone
-    # uncomments a default, every auto-upgrading edge turns DDP on overnight
-    # with none of RFC-0067 D7's preconditions checked -- this is the guard.
+    # uncomments a default, every auto-upgrading edge turns DDP (or AMP) on
+    # overnight with none of RFC-0067 D7's preconditions checked -- this is the
+    # guard, and it covers BOTH switches (Bugbot, client#975).
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TRACEBLOC_DDP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+          any: true
+
+  - it: an EXPLICIT empty string is the third state -- unset -- and must not travel either
+    # "" is how a values file says "I have no opinion"; the runtime reads an
+    # absent var as OFF, and the passthrough's non-empty gate is what keeps ""
+    # from becoming a rendered empty var. Pinned so that gate cannot be relaxed
+    # without this reddening (Bugbot, client#975).
+    set:
+      env:
+        TRACEBLOC_DDP: ""
+        TRACEBLOC_AMP: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
           any: true
 
   - it: the multi-GPU lease travels only when an operator set it (client-runtime#486, B7)

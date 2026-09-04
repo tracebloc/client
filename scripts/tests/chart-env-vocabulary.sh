@@ -83,6 +83,24 @@ expect_reject() {
   fi
 }
 
+# expect_render_without <label> <must-be-absent substring> <helm args...> -- the
+# chart must render AND the string must not appear. The plain expect_render
+# cannot say "emits nothing": every render contains the default image tag, so
+# grepping for it proves only that helm ran (Bugbot, client#975).
+expect_render_without() {
+  local label="$1" absent="$2"; shift 2
+  local out
+  if ! out="$(render "$@")"; then
+    fail "$label: expected a successful render, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+    return
+  fi
+  if grep -qF "$absent" <<<"$out"; then
+    fail "$label: rendered, but '$absent' IS in the output and must not be"
+  else
+    pass "$label -> no '$absent'"
+  fi
+}
+
 SCHEMA_ERR="values don't meet the specifications of the schema"
 
 echo "== env.CLIENT_ENV: the six accepted spellings plus empty all resolve =="
@@ -143,8 +161,9 @@ for key in TRACEBLOC_DDP TRACEBLOC_AMP; do
   done
   # Whitespace-tolerant, as the runtime's .strip() is.
   expect_render "$key=' true '" "name: $key" --set-string "env.$key= true "
-  # Empty is legal and means UNSET: the passthrough emits nothing for it.
-  expect_render "$key=''" "tracebloc/jobs-manager:prod" --set-string "env.$key="
+  # Empty is legal and means UNSET: the passthrough emits NOTHING for it --
+  # asserted as the absence of the var, not as "helm rendered".
+  expect_render_without "$key=''" "name: $key" --set-string "env.$key="
   for bad in ture on off enabled disabled 2 t y; do
     expect_reject "$key=$bad" "$SCHEMA_ERR" --set-string "env.$key=$bad"
   done
@@ -156,7 +175,7 @@ echo "== env.MULTI_GPU_LEASE_SECONDS: seconds or an explicit disable, nothing el
 for good in 0 60 86400 off false no OFF False; do
   expect_render "MULTI_GPU_LEASE_SECONDS=$good" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS=$good"
 done
-expect_render "MULTI_GPU_LEASE_SECONDS=''" "tracebloc/jobs-manager:prod" --set-string "env.MULTI_GPU_LEASE_SECONDS="
+expect_render_without "MULTI_GPU_LEASE_SECONDS=''" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS="
 for bad in 1h 60s -1 3.5 on true yes disabled; do
   expect_reject "MULTI_GPU_LEASE_SECONDS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_LEASE_SECONDS=$bad"
 done
