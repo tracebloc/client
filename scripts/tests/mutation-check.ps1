@@ -196,6 +196,42 @@ $Mutations = @(
      Find  = '  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {'
      Repl  = '  if ($job | Wait-Job) {' }
 
+  # AND THE DECISION AT THE CONSUMER (client#973 review). The two entries above
+  # aim at the BOUND; this one aims at what the bound made reachable. Bounding
+  # the read turned "" from "the listing was garbage" into "the listing was
+  # garbage OR the deadline fired OR the job died", and New-K3dCluster mapped all
+  # of them onto `$clusterExists = $false` -- `k3d cluster create` over a cluster
+  # that may well exist, whose create-timeout branch then deletes it as a
+  # "partial". Deleting this call is a silent regression to exactly that, so it
+  # is the mutation the guard has to catch.
+  @{ Name  = 'the main install path guesses "absent" from a failed listing again (client#973)'
+     Expect = 'BEFORE deciding the cluster is absent'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  Assert-ClusterListingReadable -Json $clusterListJson'
+     Repl  = '  # Assert-ClusterListingReadable -Json $clusterListJson' }
+
+  # ...AND ITS SENSE, not just its presence. An inverted predicate keeps the call
+  # site, the name and the ordering guard all green while refusing every HEALTHY
+  # listing and waving the failed ones through -- the same fail-open, now with a
+  # guard vouching for it. This is why the refusal has a behavioural test and not
+  # only a source-text one.
+  @{ Name  = 'the listing-readable predicate is inverted, so only healthy reads are refused (client#973)'
+     Expect = 'refuses EVERY shape a failed listing produces'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($null -ne (Get-ClusterListEntries -Json $Json)) { return }'
+     Repl  = '  if ($null -eq (Get-ClusterListEntries -Json $Json)) { return }' }
+
+  # THE FAIL-FAST BREADCRUMB (client#973 review). Only the timeout branch logged,
+  # and the `if` it sits opposite is not "succeeded" -- Wait-JobWithProgress
+  # returns $true for Failed too. So the case that actually reaches support (a
+  # daemon refusing the socket: empty stdout, k3d's reason already dropped by
+  # `2>$null`) was the one with no witness in the support bundle.
+  @{ Name  = 'the empty-listing read goes back to leaving no trace in the log (client#973)'
+     Expect = 'exactly ONE bounded k3d-listing reader'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '      Log "k3d cluster list returned no output$why (job state: $($job.State)); cluster run-state indeterminate."'
+     Repl  = '      $null = $why' }
+
   @{ Name  = 'the bootstrap closes the user''s console again (#577 / client#917)'
      Expect = 'must not close the user''s window'
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'

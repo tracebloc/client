@@ -357,6 +357,59 @@ Describe "Get-ClusterRunState tri-state (#557 Bugbot 3728714531: absent != unkno
     }
   }
 
+  # THE DECISION, not just the tri-state (client#973 review). Everything above
+  # this point establishes that an indeterminate listing is DISTINGUISHABLE; the
+  # gap the reviewer named is that the main install path was the one consumer
+  # that did not act on the distinction — "" went to `$clusterExists = $false`,
+  # i.e. `k3d cluster create` over a cluster that may well exist.
+  #
+  # There was no test for what New-K3dCluster does with an indeterminate listing
+  # because the decision had no name. Assert-ClusterListingReadable is that name,
+  # which is what makes the property assertable rather than only reviewable.
+  Context "Assert-ClusterListingReadable (the main install path refuses to guess)" {
+    BeforeEach {
+      Mock Hint { }
+      Mock Err  { param($m, $Detail) $script:lastErr = "$m`n$Detail"; throw "err" }
+    }
+
+    It "refuses EVERY shape a failed listing produces -- never 'assume absent, create one'" {
+      # '' is now reachable three ways (deadline fired, job died fast, empty
+      # read) and all three mean the same thing: nothing was enumerated.
+      foreach ($blob in @('', '   ', $null, "`r`n", '{not json', 'time="x" level=fatal msg="docker failed"')) {
+        { Assert-ClusterListingReadable -Json $blob } | Should -Throw -Because "an unreadable listing must stop the install, not create a cluster over an existing one"
+      }
+      Should -Invoke Err -Times 6 -Exactly
+    }
+
+    It "a SUCCESSFUL EMPTY listing '[]' passes -- a fresh install must NOT be blocked" {
+      # The line between this and the case above is the whole point, and it is
+      # measured, not assumed: k3d v5.9.0 against a healthy engine holding zero
+      # k3d containers prints exactly `[]` and exits 0; against a daemon that
+      # will not answer it prints NOTHING on stdout and exits 1. If k3d ever
+      # regressed to an empty stdout for an empty list, this assertion is what
+      # says so before every first-time install starts erroring.
+      { Assert-ClusterListingReadable -Json '[]' }      | Should -Not -Throw
+      { Assert-ClusterListingReadable -Json "`r`n[]`r`n" } | Should -Not -Throw
+      Should -Invoke Err -Times 0 -Exactly
+    }
+
+    It "a real listing passes, whether or not OUR cluster is in it" {
+      { Assert-ClusterListingReadable -Json '[{"name":"tracebloc","serversRunning":1}]' } | Should -Not -Throw
+      { Assert-ClusterListingReadable -Json '[{"name":"other","serversRunning":1}]' }     | Should -Not -Throw
+      Should -Invoke Err -Times 0 -Exactly
+    }
+
+    It "names the thing it could not do, and that a re-run is the fix" {
+      # The failure a stranger sees has to be the one fact that tells them what
+      # to fix. Falling through to create told them about image pulls and Docker
+      # health after a 15-minute wait; this says the listing failed, up front.
+      { Assert-ClusterListingReadable -Json '' } | Should -Throw
+      $script:lastErr | Should -Match "(?i)couldn't list"
+      $script:lastErr | Should -Match "(?i)docker"
+      $script:lastErr | Should -Match "(?i)re-run"
+    }
+  }
+
   Context "Get-ClusterRunState over the bounded seam (timeout -> 'unknown')" {
     It "a timed-out read classifies as 'unknown', never as 'down'" {
       # 'down' means "enumerated fine, ours isn't running" and lets a foreign
@@ -4639,6 +4692,24 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $fn | Should -Not -Match '(?m)^\s*\$?\w*\s*=?\s*k3d cluster list'
   }
 
+  # THE ORDER, which is the whole property (client#973 review). The behavioural
+  # test above proves Assert-ClusterListingReadable refuses an indeterminate
+  # blob; this proves the install path consults it BEFORE it decides existence.
+  # An assert placed after `$clusterExists` would pass every unit test and still
+  # let the create path win the race with it.
+  It "New-K3dCluster refuses an indeterminate listing BEFORE deciding the cluster is absent" {
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    $fn  = (($src -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $iRead   = $fn.IndexOf('$clusterListJson = Get-ClusterListJson')
+    $iAssert = $fn.IndexOf('Assert-ClusterListingReadable -Json $clusterListJson')
+    $iDecide = $fn.IndexOf('$clusterExists   = $null -ne $clusterObj')
+    $iRead   | Should -BeGreaterThan -1 -Because "the bounded read must still be here"
+    $iAssert | Should -BeGreaterThan -1 -Because "a bounded read with no decision at its consumer is the client#973 blocker"
+    $iDecide | Should -BeGreaterThan -1 -Because "the existence decision must still be here"
+    $iAssert | Should -BeGreaterThan $iRead   -Because "it judges the blob the reader returned"
+    $iDecide | Should -BeGreaterThan $iAssert -Because "an unreadable listing must never reach the absent/create decision"
+  }
+
   It "there is exactly ONE bounded k3d-listing reader, and both callers use it" {
     # The reason the extraction is the fix and not a copy of the job into
     # New-K3dCluster: two readers drift, and the one on the main install path is
@@ -4650,6 +4721,14 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $reader = (($src -split 'function Get-ClusterListJson')[1] -split '\nfunction ')[0]
     $reader | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
     $reader | Should -Match 'k3d cluster list timed out; cluster run-state indeterminate\.'
+    # BOTH empty-read branches leave a breadcrumb (client#973 review). The `if`
+    # is not "succeeded": Wait-JobWithProgress returns $true for any non-Running
+    # state, Failed included, so a listing that dies immediately lands there with
+    # an empty $out -- and `2>$null` has already dropped k3d's own reason, so
+    # without this line the support bundle records nothing at all for the failure
+    # mode that actually reaches support.
+    $reader | Should -Match 'k3d cluster list returned no output'
+    $reader | Should -Match '\$job\.State'
     # Get-ClusterRunState delegates rather than keeping a second job of its own
     $runState = (($src -split 'function Get-ClusterRunState\b')[1] -split '\nfunction ')[0]
     $runState | Should -Match 'Get-ClusterListJson'

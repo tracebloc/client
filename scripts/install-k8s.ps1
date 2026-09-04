@@ -1444,6 +1444,40 @@ function Find-ClusterInList {
   return $null
 }
 
+# FAIL CLOSED on an indeterminate listing, for the ONE consumer that acts on it
+# (client#973 review). The tri-state the readers above pay for was preserved
+# everywhere except at the site where getting it wrong is destructive:
+# New-K3dCluster mapped "the listing failed" onto `$clusterExists = $false`, i.e.
+# straight to `k3d cluster create`.
+#
+# BOUNDING THE READ IS WHAT MADE THAT REACHABLE. The bare call used to park the
+# install on a wedged daemon instead of returning, so "" was only ever an
+# unparseable blob; now it is also "the deadline fired" and "the job died fast".
+# A deadline needs a decision at its consumer, not just a bound.
+#
+# WHY THIS CANNOT FIRE ON A HEALTHY FIRST INSTALL, measured against the PINNED
+# k3d (v5.9.0, $script:K3dVersion) rather than assumed: a healthy engine holding
+# ZERO k3d containers prints exactly `[]` and exits 0, while a daemon that will
+# not answer prints NOTHING on stdout and exits 1. So an empty/unparseable blob
+# is never "no clusters yet" — it is always a failed listing. `[]` parses to an
+# empty array, which is a definite answer and passes straight through here.
+#
+# WHY REFUSING BEATS GUESSING. Guessing "absent" over a live cluster costs the
+# user that cluster: `k3d cluster create` exits non-zero ("a cluster with that
+# name already exists") and aborts with a message about Docker health and image
+# pulls — and if the same sluggish daemon also makes create reach ITS 15-minute
+# deadline, that branch runs `k3d cluster delete $CLUSTER_NAME` against the real
+# cluster and, when that fails too, tells the customer to run it by hand.
+# Refusing costs a re-run.
+function Assert-ClusterListingReadable {
+  param([string]$Json)
+  if ($null -ne (Get-ClusterListEntries -Json $Json)) { return }
+  Hint "Stopping here on purpose: a listing that fails can't tell 'no cluster yet' from"
+  Hint "'Docker isn't answering', and creating a second '$CLUSTER_NAME' over one that already"
+  Hint "exists would fail the install -- or get the cluster you have deleted as a partial one."
+  Err "Couldn't list your existing compute environments (Docker didn't answer within 15s). Check Docker is running -- 'docker ps' should answer -- then re-run this installer."
+}
+
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
 # output. Distinguishes "confidently not ours" from "can't tell" so callers never
 # conflate an indeterminate read with a definitive answer (#557 Bugbot 3728340365,
@@ -1517,7 +1551,20 @@ function Get-ClusterListJson {
   }
   $out = ""
   if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
-    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
+    $out = (Receive-Job $job -ErrorVariable recvErr -ErrorAction SilentlyContinue | Out-String)
+    # THE FAIL-FAST BRANCH NEEDS A WITNESS TOO (client#973 review). This `if` is
+    # NOT "the read succeeded": Wait-JobWithProgress returns $true for any state
+    # that is not Running, Failed included, so a listing that dies IMMEDIATELY
+    # (daemon refuses the socket, k3d exits non-zero, the runspace dies) lands
+    # here rather than in the else. Measured against k3d v5.9.0: a daemon that
+    # will not answer writes its reason to stderr and NOTHING to stdout, so with
+    # `2>$null` doing its job on the JSON, an empty $out was the whole of the
+    # evidence — and it was recorded nowhere. Only the timeout had a log line, so
+    # the one case that reaches support as "it just failed" was the silent one.
+    if ([string]::IsNullOrWhiteSpace($out)) {
+      $why = if ($recvErr) { " ($($recvErr -join '; '))" } else { "" }
+      Log "k3d cluster list returned no output$why (job state: $($job.State)); cluster run-state indeterminate."
+    }
   } else {
     Log "k3d cluster list timed out; cluster run-state indeterminate."
   }
@@ -4206,14 +4253,22 @@ function New-K3dCluster {
   # guard named: it is neither a `docker` call nor inside Invoke-DiagnoseBundle,
   # the two scopes #917's guards cover.
   #
-  # Get-ClusterListJson is the deadline; Find-ClusterInList is the parse. The
-  # empty `catch {}` that used to stand in for both is gone — not because
-  # swallowing was wrong here (an unreadable listing genuinely means "assume no
-  # cluster and let the create path produce the real error"), but because a
-  # bare `catch {}` cannot say that, and neither helper throws, so there is
-  # nothing left for it to catch. A timed-out read yields "" -> $null -> the
-  # create path, exactly as an unparseable one did before.
+  # Get-ClusterListJson is the deadline; Find-ClusterInList is the parse;
+  # Assert-ClusterListingReadable is the DECISION between them. The empty
+  # `catch {}` that used to stand in for all three is gone: it could not say
+  # which of "timed out", "died fast" and "genuinely empty" it was swallowing,
+  # and neither helper throws, so there is nothing left for it to catch.
+  #
+  # The first pass of this PR let a failed listing fall through to the create
+  # path "exactly as an unparseable one did before". That was true and still
+  # wrong (reviewer, client#973): before the bound, a slow-but-alive daemon
+  # COMPLETED here and the install reused the cluster: the fall-through was only
+  # ever reached by a listing that had really failed. Bounding the read adds a
+  # deadline to the same "" and hands the create path a cluster that exists — so
+  # the tri-state has to be honoured at this one site, where guessing "absent"
+  # over a live cluster is what deletes it.
   $clusterListJson = Get-ClusterListJson
+  Assert-ClusterListingReadable -Json $clusterListJson
   $clusterObj      = Find-ClusterInList -Json $clusterListJson -Name $CLUSTER_NAME
   $clusterExists   = $null -ne $clusterObj
 
