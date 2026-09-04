@@ -257,7 +257,11 @@ images_training_block() {
     /^[^[:space:]#]/        { in_images = 0; in_tr = 0 }
     in_images && /^  training:[[:space:]]*$/ { in_tr = 1; print; next }
     in_images && /^  [A-Za-z_]/ { in_tr = 0 }
-    in_tr && (/^    / || /^[[:space:]]*$/) { print }
+    # A blank line belongs to the subtree only if more 4-space content follows;
+    # a blank that ends the block is a separator of the FILE, not of the block.
+    in_tr && /^[[:space:]]*$/ { held = held $0 "\n"; next }
+    in_tr && /^    /          { printf "%s", held; held = ""; print; next }
+    { held = "" }
   ' "$1"
 }
 [[ -n "$(images_training_block "$chart_values")" ]] || refuse "--write: ${chart_values} has no 'images.training' block to replace (chart predates backend#3156)"
@@ -275,9 +279,12 @@ awk -v blockfile="$blockfile" '
     skipping = 1; next
   }
   skipping {
-    # The subtree is every line indented 4+ spaces (and blank lines) that follows.
-    if ($0 ~ /^    / || $0 ~ /^[[:space:]]*$/) next
-    skipping = 0
+    # The subtree is every line indented 4+ spaces that follows. A blank line is
+    # held: dropped if more subtree follows, kept if it was the trailing
+    # separator (Saqlain, client#978 -- --write must not eat the blank line of the file).
+    if ($0 ~ /^    /)           { held = ""; next }
+    if ($0 ~ /^[[:space:]]*$/)  { held = held $0 "\n"; next }
+    printf "%s", held; held = ""; skipping = 0
   }
   { print }
 ' "$chart_values" > "$tmp"

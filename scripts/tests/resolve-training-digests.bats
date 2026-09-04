@@ -190,6 +190,23 @@ run_resolve() {
   diff <(strip "$TMP/before.yaml") <(strip "$TMP/values.yaml") || return 1
 }
 
+@test "--write keeps a blank line that follows the training block -- it is the file's separator, not the block's" {
+  python3 - "$TMP/values.yaml" <<'PY'
+import sys; p=sys.argv[1]; s=open(p).read()
+s=s.replace('    capabilities: ""\n  ingestor:', '    capabilities: ""\n\n  ingestor:', 1)
+open(p,'w').write(s)
+PY
+  grep -c '' "$TMP/values.yaml" > "$TMP/lines.before"
+  run_resolve --write
+  [ "$status" -eq 0 ] || return 1
+  # The blank line is still there, and still directly above `  ingestor:`.
+  awk 'prev ~ /^[[:space:]]*$/ && /^  ingestor:/ { found = 1 } { prev = $0 } END { exit !found }' "$TMP/values.yaml" || return 1
+  # Everything outside the block is byte-identical, blank line included.
+  grep -v -e '^    ' -e '^  training:' -e '^  # -- the training block' "$TMP/values.yaml" > "$TMP/after"
+  printf 'global:\n  imageRegistry: ""\nimages:\n  jobsManager:\n    digest: ""\n\n  ingestor:\n    repository: "ghcr.io/tracebloc/ingestor"\n    tag: ""\nresources:\n  limits: {}\n' | grep -v '^    ' > "$TMP/expect"
+  diff "$TMP/expect" "$TMP/after" || return 1
+}
+
 @test "--write is idempotent" {
   run_resolve --write
   [ "$status" -eq 0 ] || return 1
