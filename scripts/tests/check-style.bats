@@ -250,14 +250,14 @@ _brand_rgbs() {
   fixture '  if docker info >/dev/null 2>&1; then :; fi'
   run run_style
   [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
 }
 
 @test "rule 5: a bare 'docker info' at end of line is caught (the next silent footgun)" {
   fixture '  docker info'
   run run_style
   [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
 }
 
 @test "rule 5: routed through _bounded / _docker_answers is clean" {
@@ -289,7 +289,7 @@ _brand_rgbs() {
   fixture '  docker info >/dev/null 2>&1   # TODO: add a timeout later'
   run run_style
   [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
 }
 
 @test "rule 5: a bare 'docker info' followed ONLY by a comment is caught (#744, Bugbot/LukasWodka)" {
@@ -298,7 +298,90 @@ _brand_rgbs() {
   fixture '  docker info   # check the daemon'
   run run_style
   [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"unbounded 'docker info'"* ]] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+}
+
+# ── rule 5, WIDENED past `docker info` (client#984) ──────────────────────────
+# `docker info` was never the only subcommand that talks to the daemon, and the
+# gap was measured, not imagined: the first cut of client#974 bounded a
+# `k3d cluster list` inside the --diagnose bundle while a bare `docker ps -a` two
+# lines ABOVE it kept the whole group hanging, and this rule could not see it —
+# rule 5 matched only `info`, rule 6 only `k3d cluster list`. Each newly covered
+# subcommand is driven separately: a single fixture naming all of them would pass
+# with three of the four alternatives deleted.
+
+@test "rule 5: an unbounded 'docker ps' is caught (the client#984 gap)" {
+  fixture '  nodes=$(docker ps -a --filter "name=k3d-x-" --format "{{.Names}}" 2>/dev/null) || return 0'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+}
+
+@test "rule 5: an unbounded 'docker inspect' with a QUOTED first arg is caught" {
+  # Five of this tree's inspects are spelled `docker inspect "k3d-…-server-0"`, so
+  # a flag-only follow-set walked straight past every one of them.
+  fixture '  mounts=$(docker inspect "k3d-x-server-0" --format "{{range .Mounts}}{{println .Destination}}{{end}}" 2>/dev/null) || return 0'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+}
+
+@test "rule 5: an unbounded 'docker inspect' with an EXPANDED first arg is caught" {
+  fixture '  cluster_env=$(docker inspect "$server_container" --format "{{.Config.Image}}" 2>/dev/null) || return 0'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+}
+
+@test "rule 5: an unbounded 'docker version' is caught (it reports the SERVER version)" {
+  fixture '  ver="$(docker version --format "{{.Server.Version}}" 2>/dev/null)"'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+}
+
+@test "rule 5: a LINE-CONTINUED daemon read is caught" {
+  fixture \
+    '  binds=$(docker inspect "k3d-x-serverlb" \' \
+    '    --format "{{range .NetworkSettings.Ports}}{{end}}" 2>/dev/null) || return 0'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+}
+
+@test "rule 5: the widened set is satisfiable — every subcommand is clean via _bounded" {
+  fixture \
+    '  a=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --format "{{.Names}}" 2>/dev/null)' \
+    '  b=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-x-server-0" --format "{{.Config.Image}}" 2>/dev/null)' \
+    '  c=$(_bounded 10 docker version --format "{{.Server.Version}}" 2>/dev/null)' \
+    '  _bounded_root 10 docker info >/dev/null 2>&1'
+  run run_style
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "rule 5: MUTATING subcommands are deliberately NOT in the rule" {
+  # run/exec/pull/update carry their own, very different budgets (a GPU verify runs
+  # for 90s by design). Flagging them would make the rule unsatisfiable and would
+  # push authors toward markers instead of bounds.
+  fixture \
+    '  docker run --rm hello-world >/dev/null 2>&1' \
+    '  docker exec "$node" cat /tracebloc/marker' \
+    '  docker pull "$image"' \
+    '  docker update --restart unless-stopped "$node"'
+  run run_style
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "rule 5: the diagnose bundle's own timeout NOTES are not invocations" {
+  # The fix prints lines that name the calls it gave up on. Those must not trip the
+  # rule, or the rule would forbid explaining itself.
+  fixture \
+    '  echo "## docker containers (k3d nodes)"' \
+    '  echo "(the container listing did not complete within 10s)"' \
+    '  echo "(the container inspect for $c did not complete)"' \
+    '  echo "(the docker server-version read did not complete within 10s)"'
+  run run_style
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 # ── rule 6: unbounded 'k3d cluster list' in scripts/lib/ (client#974) ────────

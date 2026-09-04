@@ -136,6 +136,82 @@ setup() {
   tar -xzOf "$tgz" 2>/dev/null | grep -q 'tracebloc 1/1 1/1 true' || return 1
 }
 
+# THE GUARD FOR THE FINDING THAT RE-OPENED THIS (Bugbot High + LukasWodka,
+# client#984). The first cut gated only the `k3d cluster list` — and left a bare
+# `docker ps -a` as the FIRST command of the same `{ … } > 01-docker.txt` group,
+# two lines above the gate. On the wedged daemon this section exists for, the
+# group blocked at that line, never reached the gate, and the file was never
+# written. The gate has to be on the GROUP, and the assertion has to be that NO
+# daemon call is reached — not that one particular call is bounded.
+@test "run_diagnose: a wedged daemon reaches NO docker call at all, and the bundle is still written" {
+  has() { return 0; }
+  _docker_answers_bounded() { return 124; }        # the daemon never answers
+  # Any docker invocation at all is a finding: on a real wedged engine this mock
+  # stands in for a call that would never return.
+  docker() { echo "DOCKER-CALLED: $*" >> "$BATS_TEST_TMPDIR/docker-calls"; return 0; }
+  k3d() { echo "k3d $*"; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -f "$BATS_TEST_TMPDIR/docker-calls" ] || {
+    echo "reached a docker call past the liveness gate — on a real wedged engine that call never returns and the bundle is lost:"
+    cat "$BATS_TEST_TMPDIR/docker-calls"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || { echo "no bundle written"; return 1; }
+  # and BOTH groups that read the daemon are present, each saying why
+  tar -tzf "$tgz" 2>/dev/null | grep -q '00-host.txt'   || return 1
+  tar -tzf "$tgz" 2>/dev/null | grep -q '01-docker.txt' || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'NOT COLLECTED' || {
+    echo "the bundle is silent about why the docker section is missing"; return 1; }
+}
+
+@test "run_diagnose: with a live daemon EVERY docker section is still collected (the gate is not a mute button)" {
+  # The other half. Without this, the test above passes just as well against a
+  # run_diagnose that never collects docker state at all.
+  has() { return 0; }
+  _docker_answers_bounded() { return 0; }
+  # `docker info` is piped through a `grep -iE 'Server Version|…'` field filter, so
+  # its mock has to emit a line that filter keeps — otherwise this test would pass
+  # for the wrong reason on a run that collected nothing.
+  docker() {
+    case "$*" in
+      info*) printf 'docker-said info\n Server Version: 27.0.0\n' ;;
+      *)     printf 'docker-said %s\n' "$*" ;;
+    esac
+  }
+  k3d() { echo "k3d $*"; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'docker-said version'   || { echo "00-host lost its docker version read"; return 1; }
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'Server Version: 27.0.0' || { echo "00-host lost its docker info read"; return 1; }
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'docker-said ps -a'     || { echo "01-docker lost its container listing"; return 1; }
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'NOT COLLECTED'       || { echo "claimed nothing was collected on a LIVE daemon"; return 1; }
+}
+
+# The per-file half of check-style.sh rule 5, asserted against this file with a
+# CENSUS, because rule 5 is a text scan over scripts/lib/ and a text scan that
+# stops matching prints as clean as one that checked everything. Here the count is
+# the point: this file is where an unbounded daemon read costs the whole artifact.
+@test "every daemon read in diagnose.sh is bounded, and there are as many as we think" {
+  local f="$BATS_TEST_DIRNAME/../lib/diagnose.sh" calls bounded
+  # Invocation-shaped docker reads (the shape rule 5 matches), comments dropped.
+  calls="$(grep -nE '(^|[|;&(`]|[[:space:]])docker[[:space:]]+(info|ps|inspect|version)([[:space:]]+[-&>|;12#"'"'"'$]|[[:space:]]*[)]|[[:space:]]+\\[[:space:]]*$|[[:space:]]*$)' "$f" \
+            | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  [ -n "$calls" ] || { echo "found NO docker reads in diagnose.sh — the scan went vacuous"; return 1; }
+  [ "$(printf '%s\n' "$calls" | grep -c .)" -ge 5 ] || {
+    echo "expected at least 5 docker reads in diagnose.sh, found $(printf '%s\n' "$calls" | grep -c .):"
+    printf '%s\n' "$calls"; return 1; }
+  bounded="$(printf '%s\n' "$calls" | grep -cE '_bounded[[:space:]]+"[^"]*"[[:space:]]+docker' || true)"
+  [ "$bounded" -eq "$(printf '%s\n' "$calls" | grep -c .)" ] || {
+    echo "not every docker read is bounded:"
+    printf '%s\n' "$calls" | grep -vE '_bounded[[:space:]]+"[^"]*"[[:space:]]+docker'; return 1; }
+}
+
 @test "run_diagnose: a daemon that never answers SKIPS the k3d read, with a note, and still writes a bundle" {
   # The coreutils-free gate (_docker_answers_bounded, #744) — the half that holds
   # on a stock Mac. A non-answer must leave an attributable line, because silence

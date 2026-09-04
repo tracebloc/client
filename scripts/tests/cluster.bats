@@ -499,7 +499,7 @@ _require_setgid_sticky() {
   [[ "$output" == *"HOST Docker daemon"* ]] || return 1
 }
 
-# ── _cluster_exists under pipefail (client#682 / #680 hazard) ───────────────
+# ── _cluster_presence under pipefail (client#682 / #680 hazard) ─────────────
 # The consumers here stop at the FIRST matching line, and our own cluster is
 # usually that line — so a piped k3d took SIGPIPE, pipefail made the pipeline
 # 141, and inside the `if`s that read as "no such cluster". The stop-and-check
@@ -509,7 +509,7 @@ _require_setgid_sticky() {
 # Mutation-real, but only against the WHOLE pre-fix function: reverting probe 2
 # alone still passes, because probe 3's grep fallback then finds the cluster
 # anyway. Verify this test by restoring all three probes to their piped form.
-@test "_cluster_exists: long k3d listing with our cluster FIRST is still found (#680 hazard)" {
+@test "_cluster_presence: long k3d listing with our cluster FIRST is still found (#680 hazard)" {
   set -o pipefail
   # Match on line 1, then far more than the 64KB pipe buffer behind it, so the
   # consumer closes the pipe while k3d is still writing. Position is the trigger.
@@ -518,19 +518,19 @@ _require_setgid_sticky() {
     printf 'other-%s 1/1 0/0\n' $(seq 1 8000)
   }
   command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
-  run _cluster_exists
+  run _cluster_presence
   [ "$status" -eq 0 ] || return 1
 }
 
-@test "_cluster_exists: a genuinely absent cluster is still absent" {
+@test "_cluster_presence: a genuinely absent cluster is still absent" {
   set -o pipefail
   k3d() { printf 'somethingelse 1/1 0/0\n'; }
   command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
-  run _cluster_exists
+  run _cluster_presence
   [ "$status" -ne 0 ] || return 1
 }
 
-# ── _cluster_exists is BOUNDED, and the chain does not triple the deadline ───
+# ── _cluster_presence is BOUNDED, and the chain does not triple the deadline ─
 # client#974 (the bash twin of client#930). Every probe here talks to the Docker
 # engine; a WEDGED daemon does not FAIL `k3d cluster list`, it BLOCKS, so the
 # `2>/dev/null || true` each probe carried was never reached. This function is on
@@ -542,19 +542,19 @@ _require_setgid_sticky() {
 # chain rather than spending another deadline on the same wedged daemon. Both are
 # what keeps the fix from trading a hang for a 15-second stall.
 
-@test "_cluster_exists: probe 3 does NOT spend a second read when probe 2 succeeded (client#974)" {
+@test "_cluster_presence: probe 3 does NOT spend a second read when probe 2 succeeded (client#974)" {
   # `--no-headers` answered cleanly and said "absent". The layout-tolerant matcher
   # then runs on the text already in hand — asking the same daemon again would cost
   # a round-trip and learn nothing.
   local tally="$BATS_TEST_TMPDIR/list-calls"
   k3d() { echo "$*" >> "$tally"; printf 'somethingelse 1/1 0/0\n'; }
   command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
-  run _cluster_exists
+  run _cluster_presence
   [ "$status" -ne 0 ] || return 1
   [ "$(grep -c 'cluster list' "$tally")" -eq 1 ] || { cat "$tally"; return 1; }
 }
 
-@test "_cluster_exists: an OLD k3d that rejects --no-headers still gets its header-ful read (client#974)" {
+@test "_cluster_presence: an OLD k3d that rejects --no-headers still gets its header-ful read (client#974)" {
   # The one case a second engine round-trip is worth paying for: probe 2's read
   # ERRORED (unsupported flag), which is not the same as "answered, and empty".
   local tally="$BATS_TEST_TMPDIR/list-calls"
@@ -566,29 +566,153 @@ _require_setgid_sticky() {
     esac
   }
   command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
-  run _cluster_exists
+  run _cluster_presence
   [ "$status" -eq 0 ] || { cat "$tally"; return 1; }
   [ "$(grep -c 'cluster list' "$tally")" -eq 2 ] || { cat "$tally"; return 1; }
 }
 
-@test "_cluster_exists: a TIMED-OUT read ends the chain (no second deadline on a wedged daemon)" {
+# ── A TIMEOUT IS ITS OWN ANSWER, and what the caller DOES with it ────────────
+# Bugbot High + LukasWodka BLOCKING on client#984. The first cut of #974 bounded
+# these reads and then folded the bounded call's THIRD outcome — "the engine did
+# not answer" — into `return 1`, the same value as "there is no such cluster".
+# What that costs is not a bad log line: `create_cluster` runs
+# `guard_leftover_data`, which warns about existing data and PROMPTS with delete
+# among the options, and then `_create_new_cluster`, both against a cluster that
+# is probably still running; and assess's gate reports `fresh`, i.e. "first time
+# on this machine", over a live install. That is strictly worse than the hang #974
+# removed, and it is client#682's misclassification arriving through the new bound.
+#
+# These tests assert the OUTCOME, not the existence of a bound. "Is the call
+# bounded?" is exactly the question that passed while this was broken — the
+# _bounded census below was green on the shipped bug.
+
+@test "_cluster_presence: a read that answers and matches -> PRESENT (0)" {
+  k3d() { printf 'tracebloc 1/1 0/0\n'; }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_presence
+  [ "$status" -eq 0 ] || return 1
+}
+
+@test "_cluster_presence: a read that answers and does NOT match -> ABSENT (1)" {
+  k3d() { printf 'somethingelse 1/1 0/0\n'; }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_presence
+  [ "$status" -eq 1 ] || return 1
+}
+
+@test "_cluster_presence: a TIMED-OUT read -> UNKNOWN (2), never ABSENT (client#984)" {
+  # The tri-state contract _k3d_cluster_running (gpu-nvidia.sh) already carries:
+  # "a probe TIMEOUT isn't mistaken for 'not running'". 2 is the whole fix.
+  _bounded() { return 124; }
+  k3d() { printf 'tracebloc 1/1 0/0\n'; }   # would say PRESENT if the bound were bypassed
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_presence
+  [ "$status" -eq 2 ] || { echo "expected UNKNOWN(2), got $status"; return 1; }
+}
+
+@test "_cluster_presence: a k3d that fails on EVERY read -> UNKNOWN (2), not an empty listing" {
+  # The same collapse through a different door: no k3d on PATH, a permission
+  # error, a k3d that dies on every invocation. Nothing READ, so nothing may be
+  # reported as "the cluster list came back and your cluster wasn't in it".
+  _bounded() { shift; "$@"; }
+  k3d() { return 127; }
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  run _cluster_presence
+  [ "$status" -eq 2 ] || { echo "expected UNKNOWN(2), got $status"; return 1; }
+}
+
+
+# ── what create_cluster DOES on each of the three answers ───────────────────
+# The decision site, driven. `_presence` is read once and used for both the
+# leftover-data guard and the create/reuse branch, so both are asserted here.
+_cc_mocks() {
+  # Everything create_cluster touches after the presence read, stubbed to record.
+  _rootless_active()            { return 1; }
+  guard_leftover_data()         { record "guard_leftover_data"; }
+  _ensure_tracebloc_dirs()      { record "_ensure_tracebloc_dirs"; }
+  _handle_existing_cluster()    { record "_handle_existing_cluster"; }
+  _create_new_cluster()         { record "_create_new_cluster"; }
+  ensure_cluster_autostart()    { record "ensure_cluster_autostart"; }
+  _merge_kubeconfig()           { record "_merge_kubeconfig"; }
+  _export_host_no_proxy()       { record "_export_host_no_proxy"; }
+  _pf_recheck_runtime_mem()     { return 0; }
+  TB_STORAGE_MODE=node-local
+}
+
+@test "create_cluster: an UNANSWERED listing NEVER prompts about data and NEVER creates (client#984)" {
+  _cc_mocks
+  _cluster_presence() { return 2; }          # the engine did not answer
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  ! grep -q 'guard_leftover_data' "$MOCK_CALLS" || {
+    echo "ran the leftover-data guard on an UNREADABLE machine — that guard warns about existing data and prompts with delete among the options"
+    mock_calls; return 1; }
+  ! grep -q '_create_new_cluster' "$MOCK_CALLS" || {
+    echo "tried to CREATE a cluster on a machine whose cluster list could not be read"
+    mock_calls; return 1; }
+  grep -q '_handle_existing_cluster' "$MOCK_CALLS" || {
+    echo "took neither branch — UNKNOWN must take the reuse/repair path"; mock_calls; return 1; }
+}
+
+@test "create_cluster: a DEFINITE absent still guards leftover data and still creates (not vacuous)" {
+  # Without this, the test above passes just as well against a create_cluster that
+  # never creates anything at all.
+  _cc_mocks
+  _cluster_presence() { return 1; }
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'guard_leftover_data' "$MOCK_CALLS" || { mock_calls; return 1; }
+  grep -q '_create_new_cluster'  "$MOCK_CALLS" || { mock_calls; return 1; }
+  ! grep -q '_handle_existing_cluster' "$MOCK_CALLS" || { mock_calls; return 1; }
+}
+
+@test "create_cluster: a PRESENT cluster reuses and does not guard leftover data" {
+  _cc_mocks
+  _cluster_presence() { return 0; }
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '_handle_existing_cluster' "$MOCK_CALLS" || { mock_calls; return 1; }
+  ! grep -q '_create_new_cluster'  "$MOCK_CALLS" || { mock_calls; return 1; }
+  ! grep -q 'guard_leftover_data'  "$MOCK_CALLS" || { mock_calls; return 1; }
+}
+
+@test "create_cluster: the presence read happens ONCE, not once per decision" {
+  # It used to be two `_cluster_exists` calls — two engine round-trips, and two
+  # separate places for the third outcome to disappear into a boolean.
+  _cc_mocks
+  local n=0
+  _cluster_presence() { n=$((n + 1)); echo "$n" > "$BATS_TEST_TMPDIR/presence-calls"; return 0; }
+  create_cluster >/dev/null 2>&1 || true
+  [ "$(cat "$BATS_TEST_TMPDIR/presence-calls")" = "1" ] || {
+    echo "presence was read $(cat "$BATS_TEST_TMPDIR/presence-calls") times"; return 1; }
+}
+
+@test "_cluster_presence: a TIMED-OUT read ends the chain (no second deadline on a wedged daemon)" {
   # The pre-fix shape hung here forever. The post-fix shape must not swap that for
   # 3x the deadline: 124 from the first read means the engine is not answering, so
   # further reads can only wait, not learn.
+  #
+  # This test used to assert `_cluster_exists` was FALSE on a timeout. That
+  # assertion was the client#984 bug written down as a test, which is why it is
+  # retargeted at the tri-state rather than deleted: the economy claim it makes is
+  # still worth pinning, the verdict claim it made was wrong.
   local tally="$BATS_TEST_TMPDIR/list-calls"
   _bounded() { echo "bounded $*" >> "$tally"; return 124; }
   k3d() { echo "raw $*" >> "$tally"; printf 'tracebloc 1/1 0/0\n'; }
   command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
-  run _cluster_exists
-  [ "$status" -ne 0 ] || return 1                       # indeterminate -> degrade
+  run _cluster_presence
+  [ "$status" -eq 2 ] || return 1                       # UNKNOWN, not ABSENT
   [ "$(grep -c 'bounded' "$tally")" -eq 1 ] || { cat "$tally"; return 1; }
   ! grep -q '^raw ' "$tally" || { cat "$tally"; return 1; }   # never unbounded
 }
 
-@test "_cluster_exists: every probe goes through _bounded (no unbounded k3d read left)" {
+@test "_cluster_presence: every probe goes through _bounded (no unbounded k3d read left)" {
   # The per-site half of check-style.sh rule 6, asserted against THIS function's
   # body rather than the whole file, so a fresh bare read added inside
-  # _cluster_exists is caught here too. The count is the assertion that the
+  # _cluster_presence is caught here too. NOTE what this does NOT prove: it was
+  # GREEN on the shipped client#984 bug, because "is the call bounded?" says
+  # nothing about what the bound's outcome then does. The tri-state and
+  # create_cluster tests above are the half that catches that. The count is the assertion that the
   # extraction actually looked (backend#2849's house rule).
   # The invocation regex is DERIVED from check-style.sh's own rule 6, not restated:
   # a second hand-written copy would agree with itself while the rule drifted, and
@@ -598,11 +722,11 @@ _require_setgid_sticky() {
   re="$(grep -m1 '^k3d_list_probe=' "$cs")" || return 1
   re="${re#k3d_list_probe=\'}"; re="${re%\'}"
   [ -n "$re" ] || return 1
-  body="$(awk '/^_cluster_exists\(\)/{f=1} f{print} f&&/^}$/{exit}' "$BATS_TEST_DIRNAME/../lib/cluster.sh")"
+  body="$(awk '/^_cluster_presence\(\)/{f=1} f{print} f&&/^}$/{exit}' "$BATS_TEST_DIRNAME/../lib/cluster.sh")"
   [ -n "$body" ] || return 1
   total="$(printf '%s\n' "$body" | grep -cE "$re" || true)"
   bounded="$(printf '%s\n' "$body" | grep -cE '_bounded[[:space:]]+"[^"]*"[[:space:]]+k3d cluster list' || true)"
-  [ "$total" -eq 3 ] || { echo "expected 3 k3d cluster list reads in _cluster_exists, found $total"; return 1; }
+  [ "$total" -eq 3 ] || { echo "expected 3 k3d cluster list reads in _cluster_presence, found $total"; return 1; }
   [ "$bounded" -eq "$total" ] || { echo "$total reads, only $bounded bounded"; return 1; }
 }
 
@@ -935,7 +1059,7 @@ _require_setgid_sticky() {
 # create_cluster calls EXCEPT the DOCKER_HOST export under test.
 _stub_create_cluster_deps() {
   TB_STORAGE_MODE=node-local            # skip _ensure_tracebloc_dirs (host dirs)
-  _cluster_exists()          { return 1; }   # NEW-cluster path
+  _cluster_presence()        { return 1; }   # NEW-cluster path
   guard_leftover_data()      { :; }
   ensure_cluster_autostart() { :; }
   _merge_kubeconfig()        { :; }

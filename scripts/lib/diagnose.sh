@@ -75,6 +75,34 @@ run_diagnose() {
     host_audit
   fi
 
+  # ── ONE liveness answer for every daemon read in this bundle (client#984) ────
+  # Bugbot High on the first cut of #974: it bounded the `k3d cluster list` inside
+  # the 01-docker group but left `docker ps -a` ABOVE it bare, so a wedged engine
+  # blocked before the gate could run and `{ … } > 01-docker.txt` still wrote
+  # nothing. The bundle was lost for exactly the reason the ticket was filed — and
+  # the same hole was in 00-host.txt, whose `docker version` reads the SERVER
+  # version and therefore talks to the daemon too, ahead of that group's own gate.
+  #
+  # Every one of those reads asks about the same daemon, so the question is asked
+  # ONCE, here, before any group opens, through the coreutils-free probe
+  # (_docker_answers_bounded bounds via spin's background PID + kill, #744 — and
+  # --diagnose is Darwin-reachable, where `_bounded` alone is a no-op). Silenced so
+  # the spinner does not land in a bundle file. Each read is ALSO wrapped in
+  # `_bounded` for the case where the daemon answers `docker info` but one specific
+  # call still stalls.
+  #
+  # A non-answering engine is not a gap in the bundle — it IS the finding, and each
+  # group says so in place of the section it could not collect.
+  local _docker_live=0
+  if has docker; then
+    if _docker_answers_bounded "checking the container runtime" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
+      _docker_live=1
+    else
+      warn "The Docker daemon didn't answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s — the bundle will record that instead of the docker/k3d sections (collecting them would hang)."
+    fi
+  fi
+  local _docker_dead_note="(NOT COLLECTED: the Docker daemon did not answer 'docker info' within ${TB_DOCKER_PROBE_TIMEOUT:-10}s. Every read in this section talks to that daemon, so collecting them would have hung this bundle and produced no file at all. A non-answering engine is itself the finding — see 00-host.txt.)"
+
   # ── host / versions ──
   {
     echo "# tracebloc diagnose ($ts)"
@@ -86,7 +114,14 @@ run_diagnose() {
     has k3d     && k3d version
     has kubectl && kubectl version --client 2>/dev/null
     has helm    && helm version --short 2>/dev/null
-    has docker  && docker version 2>/dev/null
+    # `docker version` reports the SERVER version, so it talks to the daemon and
+    # can stall exactly like `docker info` — gated and bounded (client#984).
+    if (( _docker_live )); then
+      _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker version 2>/dev/null \
+        || echo "(the docker server-version read did not complete within ${TB_DOCKER_PROBE_TIMEOUT:-10}s)"
+    elif has docker; then
+      echo "docker: installed, but the daemon did not answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s"
+    fi
     echo; echo "## cpu / mem / disk"
     if [[ "$(uname -s)" == "Darwin" ]]; then
       echo "ncpu=$(sysctl -n hw.ncpu 2>/dev/null)  memsize=$(sysctl -n hw.memsize 2>/dev/null)"
@@ -106,9 +141,16 @@ run_diagnose() {
     # is silenced (>/dev/null) so its spinner doesn't land in the bundle file; once it
     # confirms the daemon answers, the read below can't hang. `set +e` (run_diagnose
     # top) keeps the intentional pipe from tripping pipefail (backend#1778).
-    if has docker && _docker_answers_bounded "collecting docker info" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
+    # Reuses the ONE liveness answer computed above (client#984) instead of asking
+    # the same question a second time — same gate, one probe, and now every other
+    # daemon read in this bundle sits behind the same answer rather than only this
+    # one.
+    if (( _docker_live )); then
       echo; echo "## docker info"
       _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
+    elif has docker; then
+      echo; echo "## docker info"
+      echo "$_docker_dead_note"
     fi
     # RFC 0001 install-tier readout (set by host_audit above; plain for the bundle).
     if declare -F run_host_probes >/dev/null 2>&1; then
@@ -119,44 +161,49 @@ run_diagnose() {
   } > "$d/00-host.txt" 2>&1
 
   # ── docker / k3d ──
+  # THE WORST SITE OF client#974, and the site Bugbot re-opened on client#984: the
+  # support bundle is the thing a user collects BECAUSE the machine is already
+  # broken, so a wedged Docker engine is the EXPECTED input here, not a
+  # hypothetical one. `{ … } > 01-docker.txt` waits for the WHOLE group and the
+  # file is written at the end, so ONE unbounded read in it means NO SECTION AT
+  # ALL, from the one run where the bundle is the entire point. (Its PowerShell
+  # twin was a Bugbot High on client#917 for precisely this.)
+  #
+  # So the gate is on the GROUP, not on one call inside it — the first cut gated
+  # only the k3d read and left `docker ps -a` above it bare, which defeated the
+  # gate entirely. Every read below is additionally `_bounded`, and each prints a
+  # named line rather than nothing when its deadline fires: silence in this file
+  # reads as "the machine has no clusters", which is a different and wrong finding.
   {
-    echo "## docker ps -a (k3d nodes)"
-    has docker && docker ps -a --filter "name=k3d-${cn}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-    echo; echo "## k3d cluster list"
-    # THE WORST SITE OF client#974, and the reason the PowerShell twin was fixed
-    # for it first (Bugbot High on client#917): the support bundle is the thing a
-    # user collects BECAUSE the machine is already broken, so the wedged-daemon
-    # input is not hypothetical here — it is the expected one. `k3d cluster list`
-    # talks to the Docker engine, `{ … } > 01-docker.txt` waits for the WHOLE
-    # group, and the bundle is written at the end: one unbounded read meant NO
-    # BUNDLE AT ALL, from the one run where the bundle is the entire point.
-    #
-    # Bounded TWICE over, because --diagnose is Darwin-reachable and `_bounded` is
-    # a no-op on a stock Mac (no timeout/gtimeout — both are GNU coreutils):
-    #   1. the coreutils-free liveness gate (_docker_answers_bounded bounds via
-    #      spin's background PID + kill, #744) — the same gate the `docker info`
-    #      read above already sits behind, and it answers about the SAME daemon;
-    #   2. `_bounded` on the read itself, for the Linux/coreutils case where the
-    #      daemon answers `docker info` but k3d's own call still stalls.
-    # Silenced gate (>/dev/null) so its spinner doesn't land in the bundle file.
-    # On a non-answer say so IN the bundle: "did not complete" is itself the
-    # finding, where silence reads as "the machine has no clusters". `set +e`
-    # (run_diagnose top) means neither `||` can abort the collection.
-    if has k3d; then
-      if _docker_answers_bounded "collecting k3d cluster list" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
-        _bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list \
-          || echo "(k3d cluster list did not complete within ${TB_PROBE_TIMEOUT:-5}s — the Docker engine is not answering)"
-      else
-        echo "(skipped: the Docker daemon did not answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s, so 'k3d cluster list' would have hung this bundle)"
+    if (( _docker_live )) || { ! has docker && has k3d; }; then
+      echo "## docker containers (k3d nodes)"
+      if (( _docker_live )); then
+        _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${cn}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' \
+          || echo "(the container listing did not complete within ${TB_DOCKER_PROBE_TIMEOUT:-10}s)"
       fi
-    fi
-    echo; echo "## node restart policy + proxy env"
-    if has docker; then
-      for c in $(docker ps -a --filter "name=k3d-${cn}-" --format '{{.Names}}' 2>/dev/null); do
-        echo "### $c"
-        docker inspect "$c" --format 'RestartPolicy={{.HostConfig.RestartPolicy.Name}}' 2>/dev/null
-        docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -iE 'PROXY'
-      done
+      echo; echo "## k3d cluster list"
+      if has k3d; then
+        _bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list \
+          || echo "(k3d cluster list did not complete within ${TB_K3D_LIST_TIMEOUT:-15}s — the Docker engine is not answering)"
+      fi
+      echo; echo "## node restart policy + proxy env"
+      if (( _docker_live )); then
+        # The `for c in $(…)` list itself is a daemon read, so it is bounded too —
+        # an unbounded one here would hang the group after the sections above had
+        # already been produced but before the file was written, i.e. still no file.
+        local _names
+        _names="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${cn}-" --format '{{.Names}}' 2>/dev/null)" \
+          || _names=""
+        for c in $_names; do
+          echo "### $c"
+          _bounded "${TB_PROBE_TIMEOUT:-5}" docker inspect "$c" --format 'RestartPolicy={{.HostConfig.RestartPolicy.Name}}' 2>/dev/null \
+            || echo "(the container inspect for $c did not complete)"
+          _bounded "${TB_PROBE_TIMEOUT:-5}" docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -iE 'PROXY'
+        done
+      fi
+    else
+      echo "## docker / k3d state"
+      echo "$_docker_dead_note"
     fi
   } > "$d/01-docker.txt" 2>&1
 

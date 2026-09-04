@@ -355,6 +355,20 @@ _bounded() {
   else "$@"; fi
 }
 
+# Deadline for `k3d cluster list` (seconds). Its OWN knob, deliberately LOOSER
+# than TB_DOCKER_PROBE_TIMEOUT's 10s, because it is strictly more engine work:
+# `docker info` asks the daemon about itself, while `k3d cluster list` enumerates
+# AND inspects the cluster's containers. The first cut of client#974 gave it
+# TB_PROBE_TIMEOUT's 5s — the tightest bound in the tree on the slowest call, and
+# half the budget of the daemon probe that gates it (LukasWodka, client#984).
+#
+# 15s matches the PowerShell twin's identical read (install-k8s.ps1's
+# Get-ClusterListJson job deadline), so the two installers agree on how long this
+# question is allowed to take. It also narrows the window the tri-state has to
+# resolve: a busy-but-healthy engine that answers in 6s is now PRESENT/ABSENT
+# rather than UNKNOWN.
+: "${TB_K3D_LIST_TIMEOUT:=15}"
+
 # _bounded_root SECONDS CMD… — like _bounded, but for a command that would
 # otherwise be prefixed with `sudo`. `_bounded` execs `timeout`, a BINARY, which
 # resolves `sudo` from PATH and so bypasses the root-aware `sudo()` shadow below —

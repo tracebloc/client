@@ -171,8 +171,8 @@ $Mutations = @(
   @{ Name  = 'a bash lib hardcodes the production dashboard, in a file no dashboard test named (client#935)'
      Expect = 'every dashboard host lives ONLY in the mapping'
      File  = 'scripts/lib/cluster.sh'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
-     Find  = '_cluster_exists() {'
-     Repl  = '_cluster_exists() {  : "See it on your dashboard: https://ai.tracebloc.io/clients"' }
+     Find  = '_cluster_presence() {'
+     Repl  = '_cluster_presence() {  : "See it on your dashboard: https://ai.tracebloc.io/clients"' }
 
   # THE ONE THE CLASS GUARD USED TO MISS (client#930). New-K3dCluster ran
   # `k3d cluster list -o json` bare, on the MAIN install path, through every

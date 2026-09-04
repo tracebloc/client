@@ -23,61 +23,109 @@
 # EVERY probe here is BOUNDED (client#974, the bash twin of client#930). Each one
 # already carried `2>/dev/null || true`, which handles k3d FAILING — and a WEDGED
 # Docker daemon does not fail `k3d cluster list`, it BLOCKS, so that `|| true` was
-# never reached. This function sits on the MAIN install path (create_cluster below
-# calls it twice), so the pre-fix shape parked a headless install right here with
-# no output and nothing to kill it: exactly #930's shape, on the platform most
-# internal installs use. Same distinction _docker_answers' header draws for a bare
-# `docker info` (#741/#744): stopped fails, wedged hangs.
+# never reached. These probes sit on the MAIN install path, so the pre-fix shape
+# parked a headless install right here with no output and nothing to kill it:
+# exactly #930's shape, on the platform most internal installs use. Same
+# distinction _docker_answers' header draws for a bare `docker info` (#741/#744):
+# stopped fails, wedged hangs.
+#
+# BOUNDING A CALL CHANGES ITS TYPE, and this is where that bites (Bugbot High on
+# client#984). Before the bound there were two outcomes — present, absent. After
+# it there are THREE — present, absent, COULDN'T TELL — and the first cut of this
+# fix collapsed the third into "absent". That is materially worse than the hang it
+# replaced: `create_cluster` would then run `guard_leftover_data`, which PROMPTS
+# about deleting an existing install's data, and `_create_new_cluster`, against a
+# cluster that may still be running; and assess's gate would label the machine
+# `fresh` and offer a first-time install over it. That is client#682's
+# misclassification, which the header above was written about, and it is the same
+# question LukasWodka blocked the PowerShell twin (#973) on: what does the main
+# install path DO when the deadline fires?
+#
+# So the primitive is TRI-STATE, with the contract _k3d_cluster_running
+# (gpu-nvidia.sh) already established in this codebase for the same reason —
+# "a probe TIMEOUT isn't mistaken for 'not running'":
+#   0 = PRESENT     (a probe answered and matched CLUSTER_NAME)
+#   1 = ABSENT      (a probe answered and did not match)
+#   2 = UNKNOWN     (every probe's READ failed — timed out, or k3d itself broke)
+# Callers must decide what UNKNOWN means for THEM; nothing here decides for them.
 #
 # THREE PROBES OF ONE QUESTION would have made a per-probe deadline TRIPLE the
 # worst case, so the chain is tightened in the same breath:
-#   * probe 3's looser matcher now runs against the text probe 2 ALREADY captured.
-#     It tolerates a different table LAYOUT, not a different daemon, so it never
+#   * probe 3's looser matcher runs against the text probe 2 ALREADY captured. It
+#     tolerates a different table LAYOUT, not a different daemon, so it never
 #     needed its own engine round-trip.
-#   * probe 3 spends a real second read only when probe 2's read itself ERRORED —
-#     an older k3d that does not know --no-headers — and never when it TIMED OUT
+#   * probe 3 spends a real second read only when probe 2's read ERRORED — an
+#     older k3d that does not know --no-headers — and never when it TIMED OUT
 #     (124): the same wedged daemon cannot answer a retry, it can only eat another
 #     deadline. A timeout ends the chain with a log line naming itself, which is
 #     the finding support needs (the Windows twin keeps the same line).
 # Worst case: 2 bounded reads with jq present, 1 without. Before: unbounded.
 #
-# NOTE ON macOS. `_bounded` runs the BARE command when neither timeout(1) nor
-# gtimeout(1) is on PATH, and neither ships on a stock Mac (both are GNU
-# coreutils) — so on such a box these probes are documented-degraded, not bounded.
-# That is deliberate here rather than routed through spin (which bounds via a
-# background PID): _cluster_exists is called from the stop-and-check gate
-# (assess.sh) inside `if` conditions where a spinner cannot be drawn, and macOS
-# reaches this only AFTER _assess_runtime_down has already classified the daemon
-# through a coreutils-free probe. The site where that was NOT true — the
-# --diagnose bundle — is gated on _docker_answers_bounded instead (diagnose.sh).
-_cluster_exists() {
-  local _rc=0
+# NOTE ON macOS — A KNOWN LIMITATION, not a covered case. `_bounded` runs the
+# BARE command when neither timeout(1) nor gtimeout(1) is on PATH, and neither
+# ships on a stock Mac (both are GNU coreutils), so on such a box these probes are
+# documented-degraded rather than bounded.
+#
+# An earlier version of this comment claimed macOS was covered because
+# _assess_runtime_down had already classified the daemon "through a coreutils-free
+# probe". THAT WAS FALSE (LukasWodka, client#984) and worth recording, because a
+# wrong comment is how the next author concludes the platform is handled:
+# _assess_runtime_down classifies via `_bounded "$TB_ASSESS_DOCKER_TIMEOUT" docker
+# info`, which is the coreutils-DEPENDENT probe and the documented no-op on a
+# stock Mac. The genuinely coreutils-free gates are in preflight.sh (137/144/343,
+# via _docker_answers_bounded / spin's background-PID kill), and install-k8s.sh
+# calls assess_existing_install BEFORE run_preflight — so on a stock Mac nothing
+# coreutils-free runs ahead of this point.
+#
+# Not a regression: before #974 a wedged Mac hung here unbounded, and it still
+# would. It is left this way rather than routed through spin because this is
+# called from inside `if` conditions (create_cluster, assess's classifier) where
+# a spinner cannot be drawn, and because the tri-state above means a stock Mac
+# that DOES have coreutils now degrades safely instead of misclassifying. The one
+# site where the cost was the whole artifact rather than a stall — the --diagnose
+# bundle — is gated on _docker_answers_bounded, which needs no coreutils
+# (diagnose.sh). Closing this properly means a coreutils-free bound usable from a
+# boolean context, which is its own change.
+_cluster_presence() {
+  local _read_ok=0            # did ANY probe's read actually answer?
   # 1) JSON output (exact name match) when jq is available
   if command -v jq &>/dev/null; then
-    local _json
+    local _json _rc=0
     # `|| _rc=$?` (not a bare `; _rc=$?`) so a non-zero probe under the installer's
     # `set -e` captures the code instead of aborting (the #431 Bugbot form).
-    _json="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
-    if [[ "$_rc" -eq 124 ]]; then
-      log "k3d cluster list timed out after ${TB_PROBE_TIMEOUT:-5}s; cluster presence indeterminate (is the Docker daemon responding?)."
-      return 1
-    fi
-    if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
-      return 0
+    _json="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -eq 0 ]]; then
+      _read_ok=1
+      if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
+        return 0
+      fi
+    elif [[ "$_rc" -eq 124 ]]; then
+      log "The k3d cluster listing (JSON form) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
+      # A wedged engine cannot answer the table probes either, and each would cost
+      # another full deadline. Report UNKNOWN now and let the caller decide.
+      return 2
     fi
   fi
   # 2) Table format: first column is cluster name (--no-headers)
   local _list _lrc=0
-  _list="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || _lrc=$?
+  _list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _lrc=$?
   if [[ "$_lrc" -eq 124 ]]; then
-    log "k3d cluster list timed out after ${TB_PROBE_TIMEOUT:-5}s; cluster presence indeterminate (is the Docker daemon responding?)."
-    return 1
+    log "The k3d cluster listing (table form) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
+    return 2
   fi
   # 3) A READ error (not an empty answer) is the one case worth a second engine
   #    round-trip: `--no-headers` is unsupported on some older k3d builds, and the
   #    header-ful listing still answers the question.
   if [[ "$_lrc" -ne 0 ]]; then
-    _list="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list 2>/dev/null)" || _list=""
+    local _trc=0
+    _list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list 2>/dev/null)" || _trc=$?
+    if [[ "$_trc" -eq 0 ]]; then _read_ok=1; else _list=""; fi
+    if [[ "$_trc" -eq 124 ]]; then
+      log "The k3d cluster listing (header-ful fallback) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
+      return 2
+    fi
+  else
+    _read_ok=1
   fi
   if awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }' <<<"$_list"; then
     return 0
@@ -88,8 +136,26 @@ _cluster_exists() {
   if grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]" <<<"$_list"; then
     return 0
   fi
+  # NOT MATCHED is only ABSENT if something actually READ. Every probe failing for
+  # a non-timeout reason (no k3d on PATH, a permission error, a k3d that dies on
+  # every invocation) is still "couldn't tell", and must not be reported as an
+  # empty cluster list — that is the same collapse as the timeout, arriving
+  # through a different door.
+  (( _read_ok )) || {
+    log "No k3d cluster listing could be read; cluster presence indeterminate."
+    return 2
+  }
   return 1
 }
+
+# NO `_cluster_exists` BOOLEAN. There was one, and re-adding it is how this bug
+# comes back: a boolean has two values and this question has three, so every
+# caller that takes `if _cluster_exists` inherits somebody else's answer to "what
+# does an unreadable engine mean here?" — and `! _cluster_exists` silently spells
+# that answer "absent", which is the client#984 defect exactly. The two decision
+# sites (create_cluster's leftover-data guard + create/reuse branch, assess's
+# classifier) each read _cluster_presence and say out loud what UNKNOWN means for
+# them. One seam, no parallel primitive (LukasWodka, client#984).
 
 # Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
 # Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
@@ -793,10 +859,23 @@ create_cluster() {
     export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
   fi
 
+  # ONE tri-state read, used for BOTH decisions below (client#984). It used to be
+  # two `_cluster_exists` calls, which cost two engine round-trips and — worse —
+  # let a bounded read's THIRD outcome disappear into a boolean twice over.
+  #   0 = present, 1 = absent, 2 = the engine did not answer.
+  local _presence=0
+  _cluster_presence || _presence=$?
+
   # Leftover-data guard (RFC-0003 D3, #376): a NEW cluster must not silently
   # adopt data from an earlier install. Skipped when the cluster already exists
   # — that path is an in-place reuse/upgrade and keeps its data by design (§3.3).
-  if ! _cluster_exists; then
+  #
+  # ONLY on a DEFINITE absent (Bugbot High, client#984). This guard warns about
+  # existing data and then PROMPTS — with delete among the options — so running it
+  # because a listing timed out is the one outcome strictly worse than the hang
+  # #974 removed: it offers to destroy the data of an install that is probably
+  # still there. UNKNOWN skips it, exactly as a present cluster does.
+  if [[ "$_presence" -eq 1 ]]; then
     guard_leftover_data
   fi
 
@@ -814,11 +893,20 @@ create_cluster() {
   # Guarded: cluster.sh can be sourced without preflight.sh (e.g. the e2e harness).
   if declare -F _pf_recheck_runtime_mem >/dev/null 2>&1; then _pf_recheck_runtime_mem || true; fi
 
-  if _cluster_exists; then
-    _handle_existing_cluster
-  else
-    _create_new_cluster
-  fi
+  # UNKNOWN takes the REUSE path, never the create path (Bugbot High, client#984).
+  # `_create_new_cluster` runs `k3d cluster create` against a name that may already
+  # be in use, on a machine we could not read; `_handle_existing_cluster` only
+  # reads and, at worst, issues an idempotent `k3d cluster start --wait --timeout
+  # 5m` that fails into "Couldn't start your existing secure environment. Check
+  # Docker is running, then re-run." — bounded, and the right sentence for a wedged
+  # engine. Explicit `case`, not `if _cluster_exists`, so the third outcome is
+  # visible at the decision site instead of hidden inside a boolean.
+  case "$_presence" in
+    0) _handle_existing_cluster ;;
+    2) warn "Couldn't read the k3d cluster list — the Docker engine isn't answering. Treating the '$CLUSTER_NAME' environment as EXISTING rather than creating a new one, so nothing is created or removed on a machine we can't see."
+       _handle_existing_cluster ;;
+    *) _create_new_cluster ;;
+  esac
 
   ensure_cluster_autostart
   _merge_kubeconfig
@@ -850,7 +938,12 @@ ensure_cluster_autostart() {
   if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then return 0; fi
 
   local nodes node
-  nodes=$(docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
+  # BOUNDED (client#984, LukasWodka): this is a daemon read on the main install
+  # path, and it ran unbounded while its `docker info` neighbours did not — the gap
+  # check-style rule 5 could not see until it was widened past `info`. `|| return 0`
+  # already treats an unreadable engine as "nothing to autostart", so a 124 lands in
+  # the branch this function was written for.
+  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
   if [[ -n "$nodes" ]]; then
     for node in $nodes; do
       docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true
@@ -939,13 +1032,13 @@ _handle_existing_cluster() {
   # over — whose `k3d cluster start --wait --timeout 5m` is itself bounded and
   # fails into a curated message. Slow, honest, and finite; before it was a hang.
   if command -v jq &>/dev/null; then
-    CLUSTER_STATUS=$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
+    CLUSTER_STATUS=$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
   else
     # Capture-then-match (#680): awk's `exit` closes the pipe on our cluster's
     # row, so k3d can take SIGPIPE and pipefail would abort the installer here —
     # mid-reconcile, with no message. Mirrors _assess_cluster_servers_running.
     local line _tbl
-    _tbl="$(_bounded "${TB_PROBE_TIMEOUT:-5}" k3d cluster list --no-headers 2>/dev/null)" || _tbl=""
+    _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _tbl=""
     line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
     if [[ -n "$line" ]]; then
       CLUSTER_STATUS="${line%%/*}"
@@ -1094,7 +1187,10 @@ _check_existing_cluster_proxy() {
 
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local cluster_env
-  cluster_env=$(docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
+  # BOUNDED (client#984): same daemon, same hazard as the four sibling inspects in
+  # this file that already carry TB_DOCKER_INSPECT_TIMEOUT. `|| return 0` keeps an
+  # unreadable node a silent no-op, which is this check's documented behaviour.
+  cluster_env=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$cluster_env" ]] && return 0
 
   local missing=()
@@ -1124,7 +1220,7 @@ _check_existing_cluster_ca() {
   [[ -n "${TRACEBLOC_CA_BUNDLE:-}" || -n "${CURL_CA_BUNDLE:-}" ]] || return 0
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local mounts
-  mounts=$(docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
   # Exact whole-line match (mounts is newline-separated destinations): a longer
   # path that merely embeds the CA path as a substring is NOT our mount. Mirrors
@@ -1185,7 +1281,7 @@ _host_ca_create_hint() {
 # intercepts external kubectl. Silent no-op if the serverlb can't be inspected.
 _check_existing_cluster_bind() {
   local binds
-  binds=$(docker inspect "k3d-${CLUSTER_NAME}-serverlb" \
+  binds=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-serverlb" \
     --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}} {{end}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$binds" ]] && return 0
   if grep -qw '0\.0\.0\.0' <<<"$binds" && ! grep -qw '127\.0\.0\.1' <<<"$binds"; then
@@ -1251,7 +1347,7 @@ _check_existing_cluster_kubelet_config() {
 _check_existing_cluster_dataset_mount() {
   [[ -z "${HOST_DATASET_DIR:-}" ]] && return 0
   local mounts
-  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" \
     --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
   if ! grep -qx '/tracebloc-data' <<<"$mounts"; then
@@ -1279,7 +1375,7 @@ _check_existing_cluster_dataset_mount() {
 # remedy. No-op when the node can't be inspected.
 _check_existing_cluster_storage_mode() {
   local mounts
-  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" \
     --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
 

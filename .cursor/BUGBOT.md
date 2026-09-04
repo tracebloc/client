@@ -50,13 +50,44 @@ for *what the operator sees and can act on*, not code elegance.
   **`docker info` is not the only call that talks to that daemon.** `k3d cluster
   list` does too, so a wedged engine blocks it identically — and all seven bash call
   sites carried `2>/dev/null || true`, which handles k3d *failing* and is therefore
-  never reached (client#974, the twin of client#930). `check-style.sh` **rule 6**
-  gates that one the same way, and **rule 7** is rule 6's census: a text scan that
-  matches nothing prints as clean as one that checked everything, so the rule
-  asserts it found at least the sites known to exist. Prefer that pairing for any
-  new grep-class gate here. `k3d cluster start`/`create` take `--wait --timeout`;
+  never reached (client#974, the twin of client#930). `check-style.sh` **rule 5**
+  now covers `docker info|ps|inspect|version` (widened in client#984, where a bare
+  `docker ps` sat two lines above a new gate and defeated it), **rule 6** covers
+  `k3d cluster list`, and **rule 7** is rule 6's census: a text scan that matches
+  nothing prints as clean as one that checked everything, so the rule asserts it
+  found at least the sites known to exist. Prefer that pairing for any new
+  grep-class gate here. `k3d cluster start`/`create` take `--wait --timeout`;
   `k3d cluster delete` takes neither, so bound it with `_bounded` and check for 124
-  (`scripts/tests/e2e-windows.ps1` does this for its pre-clean). Two edges when you bound one:
+  (`scripts/tests/e2e-windows.ps1` does this for its pre-clean).
+
+- **Bounding a call ADDS AN OUTCOME — decide what it means, per caller.** This is the
+  half that is easy to miss, and it cost client#984 two High findings and a
+  BLOCKING review on a PR whose only purpose was adding the bounds. Before a bound
+  a probe answers yes/no; after it there are three answers, and *couldn't tell* is
+  not a flavour of *no*. Folding it into the boolean gave `_cluster_exists` one
+  return value for "there is no cluster" and "the engine did not answer", so a
+  timed-out listing sent `create_cluster` into `guard_leftover_data` — which prompts,
+  with delete among the options — and made assess report `fresh`, offering a
+  first-time install over a live machine. That is **worse than the hang the bound
+  removed**. Two rules follow:
+  (a) **Tri-state at the primitive** (`0` yes / `1` no / `2` UNKNOWN), the contract
+  `_k3d_cluster_running` and `install-k8s.ps1`'s `Get-ClusterRunStateFromList` already
+  carry, and **no boolean wrapper** — a wrapper makes every `if fn` caller inherit
+  somebody else's answer, and `! fn` silently spells it "no".
+  (b) **The guard must assert the OUTCOME, not the bound.** "Is this call bounded?"
+  was green on the shipped bug. Assert what the timeout branch DOES: which function
+  it calls, which state it sets — and pair it with the definite-answer case, or the
+  test passes against code that can never take the branch at all.
+  Ordering another daemon probe ahead of the read does not close this: the guard and
+  the read have different budgets (`TB_ASSESS_DOCKER_TIMEOUT` 10s vs
+  `TB_K3D_LIST_TIMEOUT` 15s), so a daemon that answers fast with a slow k3d read
+  passes the guard and times out anyway.
+
+- **Give a slow call its own budget.** `TB_PROBE_TIMEOUT`'s 5s is for cheap
+  skip-gate probes. `k3d cluster list` enumerates *and* inspects containers — more
+  engine work than `docker info` — so it has `TB_K3D_LIST_TIMEOUT` (15s, matching
+  the PowerShell twin's identical read). Reusing the tightest knob in the tree on
+  the slowest call widens the UNKNOWN window for no reason (client#984). Two edges when you bound one:
   (a) the #741 **test trap** — `_bounded` runs the command through `timeout` as an
   *external* process, so a `docker() { … }` shell-function stub stops intercepting;
   stub at `_docker_answers`/`_bounded`, or shadow `timeout`/`gtimeout` with a
