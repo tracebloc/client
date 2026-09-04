@@ -4986,7 +4986,24 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
     # pins CLIENT_ENV=prod for golden stability (client#946) -- and a recorded
     # rendering is not a hardcoded link. README.md's dashboard link is
     # documentation, not installer code; neither is in this property's domain.
-    $script:DashFiles = @((Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path) +
+    # BOTH ENTRY POINTS, NOT JUST THE POWERSHELL ONE (@saqlainsyed007 on this PR).
+    # The first version was `install-k8s.ps1` + `scripts/lib/*`, which is
+    # asymmetric: the PowerShell installer IS its own entry point, so its
+    # user-facing text was covered, while the symmetric bash entry point
+    # `scripts/install-k8s.sh` was not -- and that file prints user-facing text,
+    # sources the libs, and already carries a bare `https://tracebloc.io/i.sh`.
+    # It is exactly where a future "just print the link" edit lands, and it
+    # passed both widened guards green. Measured: a hardcoded
+    # `https://ai.tracebloc.io/clients` in install-k8s.sh left all 9 tests here
+    # passing. That is this PR's own instance-vs-class shape, one level up.
+    #
+    # The outer bootstrappers are in too, for the same reason. None of the three
+    # names a dashboard host today (only the bootstrap host `tracebloc.io/i.sh`,
+    # which is not in the mapping's vocabulary), so this adds coverage without
+    # adding a single exemption.
+    $script:DashFiles =
+      @('../install-k8s.ps1', '../install-k8s.sh', '../install.sh', '../install.ps1' |
+          ForEach-Object { (Resolve-Path (Join-Path $PSScriptRoot $_)).Path }) +
       @(Get-ChildItem -Path (Join-Path $PSScriptRoot "../lib") -File |
           Where-Object { $_.Extension -in @('.sh', '.ps1') } |
           ForEach-Object { $_.FullName })
@@ -5013,9 +5030,32 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
   It "every dashboard host lives ONLY in the mapping -- in EVERY lib, not just install-k8s.ps1 (client#935)" {
     # Sanity on the derivation itself: a glob that resolves to one file would
     # make this the single-file guard it is replacing.
-    $script:DashFiles.Count | Should -BeGreaterThan 3 -Because "the file set must span the installer AND the bash libs"
+    $script:DashFiles.Count | Should -BeGreaterThan 3 -Because "the file set must span both entry points AND the bash libs"
 
-    $hosts   = @('https://dev.tracebloc.io', 'https://stg.tracebloc.io', 'https://ai.tracebloc.io')
+    # THE HOST SET IS DERIVED TOO (@saqlainsyed007 on this PR). It was a literal
+    # triple here, which left one restated axis on a PR whose thesis is "derive,
+    # don't restate" -- and the axis was reachable, not theoretical. Measured:
+    # add a fourth arm to BOTH mappings (`qa) base='https://qa.tracebloc.io'`),
+    # hardcode `https://qa.tracebloc.io/clients` in a lib, and all 9 tests here
+    # passed -- the new host was in neither the scanned list nor the required
+    # mapping, so it was neither flagged as a leak nor demanded inside.
+    #
+    # So the hosts come from the mapping ARMS: whatever the two helpers define IS
+    # the set, and a fifth environment is covered the day it is added. This also
+    # turns the count assertion below into a TWIN-PARITY check for free -- a host
+    # added to one mapping and not the other is defined once, not twice, which is
+    # precisely the defect client#946 fixed.
+    $inside = ($script:DashFiles | ForEach-Object {
+      (& $script:DashSplit (Get-Content -LiteralPath $_)).Inside
+    }) -join "`n"
+    $hosts = @([regex]::Matches($inside, 'https://[A-Za-z0-9.-]+\.tracebloc\.io') |
+      ForEach-Object { $_.Value } | Sort-Object -Unique)
+
+    # The derivation must have found the mapping. Empty means the declaration
+    # stopped matching and the whole property would pass vacuously -- the same
+    # failure the old hardcoded triple could not have detected.
+    $hosts.Count | Should -BeGreaterOrEqual 3 -Because "the host set must be derived from the mapping arms, and the mapping defines at least dev/stg/prod"
+
     $leaks   = @()
     $defined = @{}; foreach ($h in $hosts) { $defined[$h] = 0 }
 
@@ -5032,14 +5072,12 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
 
     $leaks -join "`n" | Should -BeNullOrEmpty -Because "a dashboard host outside the mapping is a site that went back to hardcoding"
 
-    # NON-VACUOUS, and this half is the guard on the guard. Excising the mapping
-    # is how the definitions are tolerated, so a rename that stops matching the
-    # declaration would excise NOTHING, find no leaks, and pass -- greener than
-    # before while checking less. Each host must be defined exactly TWICE: once
-    # per twin. That number also fails if one twin loses its mapping, which is
-    # the original defect.
+    # TWIN PARITY. Each derived host must appear exactly TWICE -- once in
+    # Get-TraceblocDashboardUrl, once in _dashboard_url. Now that the set is
+    # derived, this catches the one-twin-only edit directly: a host added to bash
+    # alone is defined once and fails here, naming which host drifted.
     foreach ($h in $hosts) {
-      $defined[$h] | Should -Be 2 -Because "$h must be defined once in Get-TraceblocDashboardUrl and once in _dashboard_url"
+      $defined[$h] | Should -Be 2 -Because "$h must be defined once in Get-TraceblocDashboardUrl and once in _dashboard_url -- a host in one twin only is the client#946 defect"
     }
   }
 

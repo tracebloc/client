@@ -1086,7 +1086,12 @@ EOF
   # that had the bug -- which made it an instance guard wearing a class name, the
   # same shape #935 was filed for. The next hardcoded host lands in a third lib
   # and this stays green. `lib/*.sh` is the class.
-  run bash -c "grep -l 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/'*.sh || true"
+  # AND THE ENTRY POINTS (@saqlainsyed007 on client#977). `lib/*.sh` skipped
+  # `scripts/install-k8s.sh` -- the bash installer's own entry point, which prints
+  # user-facing text and sources these libs. Its PowerShell twin was covered
+  # because that installer IS its entry point, so the class was asymmetric.
+  # Measured: a hardcoded prod link in install-k8s.sh left this test green.
+  run bash -c "grep -l 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/'*.sh '$BATS_TEST_DIRNAME/../install-k8s.sh' '$BATS_TEST_DIRNAME/../install.sh' || true"
   [ -z "$output" ] || return 1
   # NON-VACUOUS: a glob that matched one file would be the guard being replaced.
   run bash -c "ls '$BATS_TEST_DIRNAME/../lib/'*.sh | wc -l | tr -d ' '"
@@ -1110,37 +1115,32 @@ EOF
   # that merely counted them would trip on the mapping itself (#935 says so
   # explicitly). Excising the helper body and then demanding ZERO is one rule
   # that survives a re-quote, a re-indent, or a fourth environment.
-  local f line leaks="" defined=0 inmap=0
-  for f in "$BATS_TEST_DIRNAME/../lib"/*.sh; do
-    inmap=0
-    # `|| [ -n "$line" ]` is load-bearing, not idiom. A file whose LAST line has
-    # no trailing newline loses that line to a plain `read`, so a host hardcoded
-    # there would be scanned right past -- a guard failing open on the one shape
-    # nobody notices. Measured on a two-line fixture with no final newline:
-    # plain read saw 1 line, this saw 2.
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        '_dashboard_url() {'*) inmap=1; continue ;;
-      esac
-      if [ "$inmap" -eq 1 ]; then
-        case "$line" in
-          '}'*) inmap=0 ;;
-          *https://dev.tracebloc.io*|*https://stg.tracebloc.io*|*https://ai.tracebloc.io*)
-            defined=$((defined + 1)) ;;
-        esac
-        continue
-      fi
-      case "$line" in
-        *https://dev.tracebloc.io*|*https://stg.tracebloc.io*|*https://ai.tracebloc.io*)
-          leaks="$leaks $f" ;;
-      esac
-    done < "$f"
+  # THE HOST SET IS DERIVED FROM THE MAPPING'S OWN ARMS (@saqlainsyed007 on
+  # client#977). It was a literal triple in the `case` patterns below, which is
+  # the one axis this test still restated -- and it was reachable: add a fourth
+  # arm to both mappings and hardcode that host in a lib, and this test stayed
+  # green, because the new host was in neither the scanned list nor the required
+  # set. Whatever `_dashboard_url` defines IS the set now.
+  local libdir="$BATS_TEST_DIRNAME/../lib" hosts n_hosts f body h leaks=""
+  hosts="$(sed -n '/^_dashboard_url() {/,/^}/p' "$libdir/common.sh" \
+            | grep -oE 'https://[A-Za-z0-9.-]+\.tracebloc\.io' | sort -u)"
+  # The derivation must have found the mapping: empty means the declaration
+  # stopped matching and every assertion below would pass vacuously.
+  [ -n "$hosts" ] || return 1
+  n_hosts="$(printf '%s\n' "$hosts" | grep -c .)"
+  [ "$n_hosts" -ge 3 ] || return 1
+
+  # `sed` to excise the mapping body, not a read loop. It also fixes the
+  # newline-less-last-line fail-open the read loop needed `|| [ -n "$line" ]`
+  # for: a plain `read` drops a final line with no trailing newline (measured:
+  # 1 line seen of 2), while `sed` emits it. Verified on the same fixture.
+  for f in "$libdir"/*.sh "$BATS_TEST_DIRNAME/../install-k8s.sh" "$BATS_TEST_DIRNAME/../install.sh"; do
+    body="$(sed '/^_dashboard_url() {/,/^}/d' "$f")"
+    for h in $hosts; do
+      case "$body" in *"$h"*) leaks="$leaks $f:$h" ;; esac
+    done
   done
   [ -z "$leaks" ] || return 1
-  # ...and the excision must have actually found the three arms. A rename that
-  # stopped matching the declaration would excise NOTHING, find no leaks, and
-  # pass -- greener than before while checking less.
-  [ "$defined" -eq 3 ] || return 1
 }
 
 @test "_dashboard_url is reachable from summary.sh loaded STANDALONE" {
