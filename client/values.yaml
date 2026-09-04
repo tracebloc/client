@@ -504,7 +504,6 @@ egressProxy:
     - stg-api.tracebloc.io
     - api.tracebloc.io
     - xray-backend.azurewebsites.net
-    - .in.applicationinsights.azure.com
     - dc.services.visualstudio.com
   resources:
     requests:
@@ -600,10 +599,20 @@ egressProxy:
 # posture `egressProxy.routeWorkloads` had before RFC-0003 D6 flipped it on by
 # default.
 #
-# CLASS A ONLY (D12). The receiver is scoped to the control-plane containers this
-# chart owns; training and ingestion pods are Class B and stay out until
-# backend#1908 lands content redaction. Widening `classAContainers` is not a
-# config tweak — it changes what leaves a customer's cluster.
+# CLASS A ONLY (D12), AND PERMANENTLY SO. The receiver is scoped to the
+# control-plane containers this chart owns; training and ingestion pods are
+# Class B and stay out.
+#
+# This used to read "until backend#1908 lands content redaction", which is now
+# false in both directions: #1908 was closed **NOT_PLANNED** on 2026-08-24, and
+# the decision was reaffirmed on 2026-09-03 (backend#1908) — Class B is not
+# collected because the volume is not worth collecting, not because redaction is
+# pending. Nothing is waiting on anything.
+#
+# So widening `classAContainers` is not a config tweak and not a scheduling
+# question: it reverses a product decision about what leaves a customer's
+# cluster. Per-incident Class B diagnosis is the operator-triggered support
+# bundle instead.
 telemetryCollector:
   # -- `enabled` HAS NO DEFAULT HERE ON PURPOSE. It is deliberately absent, not
   # forgotten, and setting it back to `false` would undo backend#1906.
