@@ -272,7 +272,10 @@ printf '%s\n' "$block" > "$blockfile"
 # value that contains a newline ("newline in string"), and the block is many.
 awk -v blockfile="$blockfile" '
   /^images:[[:space:]]*$/ { in_images = 1; print; next }
-  /^[^[:space:]#]/        { in_images = 0; skipping = 0 }
+  # A top-level key ends the subtree too: flush the held blank FIRST, or the
+  # separator before the next section is eaten when training: is the last key
+  # under images: (Bugbot, client#978).
+  /^[^[:space:]#]/        { if (skipping) { printf "%s", held; held = "" }; in_images = 0; skipping = 0 }
   in_images && /^  training:[[:space:]]*$/ {
     while ((getline l < blockfile) > 0) print l
     close(blockfile)

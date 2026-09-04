@@ -207,6 +207,17 @@ PY
   diff "$TMP/expect" "$TMP/after" || return 1
 }
 
+@test "--write keeps the blank line when training: is the LAST key under images: and a top-level key follows" {
+  printf '%s\n' 'global:' '  imageRegistry: ""' 'images:' '  jobsManager:' '    digest: ""' \
+                 '  training:' '    pinned: ""' '    digests: {}' '    capabilities: ""' '' \
+                 'resources:' '  limits: {}' > "$TMP/values.yaml"
+  run_resolve --write
+  [ "$status" -eq 0 ] || return 1
+  awk 'prev ~ /^[[:space:]]*$/ && /^resources:/ { found = 1 } { prev = $0 } END { exit !found }' "$TMP/values.yaml" || return 1
+  # And exactly one blank line: nothing duplicated either.
+  [ "$(grep -c '^[[:space:]]*$' "$TMP/values.yaml")" -eq 1 ] || return 1
+}
+
 @test "--write is idempotent" {
   run_resolve --write
   [ "$status" -eq 0 ] || return 1
