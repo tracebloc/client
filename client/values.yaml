@@ -199,6 +199,25 @@ env: {
   #    controller reports a lease kill as "lease expired" through the pod
   #    annotation tracebloc.io/lease-seconds.
   # MULTI_GPU_LEASE_SECONDS: "86400"
+  # -- Multi-GPU SIZE FLOOR (RFC-0067 D2 gate 2; client-runtime#513 @ f42d5e9,
+  #    B9): the smallest server-computed parameter_count (backend#3171) that
+  #    jobs-manager will expand into more than one GPU. NO DEFAULT, ON PURPOSE:
+  #    RFC-0067 OQ3 says the floor is unmeasured (G6 produces it), so the
+  #    runtime guesses nothing -- UNSET means the size gate REFUSES every run,
+  #    and so does an empty, non-numeric or non-positive value. The log says
+  #    which: unset or empty is one INFO line at jobs-manager startup naming
+  #    the gate as UNSET (_log_size_gate_mode -- grep INFO, not WARN); a
+  #    malformed value is one WARNING from the shared positive-int reader.
+  #    Multi-GPU therefore needs BOTH of two values set on the edge --
+  #    TRACEBLOC_DDP=1 above AND this floor; with either missing an opted-in
+  #    edge still gets one GPU per run, with the gate's reason
+  #    (GPU_COUNT_SIZE_FLOOR_UNSET) in the log. Vocabulary: a positive integer
+  #    in its canonical spelling. The runtime would accept "007" (int() reads
+  #    it as 7, no warning) -- the schema refuses it so two values files
+  #    cannot spell one floor two ways, not because it would fall back to
+  #    anything. RENDERED ONLY WHEN SET, so absence keeps the gate dark
+  #    exactly as the runtime intends rather than delivering a chart guess.
+  # MULTI_GPU_MIN_PARAMETERS: "50000000"
 }
 
 # -- GPU device plugin (client#564)
