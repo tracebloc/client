@@ -213,8 +213,11 @@ done
 
 echo "== env.MULTI_GPU_MIN_PARAMETERS: a positive integer, or unset -- nothing else =="
 # client-runtime#513 @ f42d5e9 (B9): the runtime reads empty, non-numeric or
-# non-positive as UNSET and then refuses every run with one warning, so a typo
-# would be indistinguishable from the deliberate dark default. Closed here.
+# non-positive as UNSET and then refuses every run (WARNING for a malformed
+# value, INFO at startup for unset/empty), so a typo would be indistinguishable
+# from the deliberate dark default. Closed here. Leading zeros (007) are refused
+# for a different reason: int() would read them as a valid floor of 7 with no
+# warning, so the schema keeps one canonical spelling per floor.
 for good in 1 50000000 123456789012; do
   expect_render "MULTI_GPU_MIN_PARAMETERS=$good" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS=$good"
 done

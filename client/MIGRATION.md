@@ -16,9 +16,14 @@ change:
 helm upgrade <release> tracebloc/client --reuse-values --set-string env.MULTI_GPU_MIN_PARAMETERS=50000000
 ```
 
-The vocabulary is closed to a positive integer with no leading zeros; the
-runtime reads anything else as unset (with one warning), so a typo would be
-indistinguishable from the deliberate dark default. Multi-GPU expansion needs
+The vocabulary is closed to a positive integer. A non-numeric or non-positive
+value reads as unset with one WARNING and then the same refusal as the dark
+default, so a typo would be indistinguishable from never setting the key; unset
+or empty itself logs one INFO line at jobs-manager startup, not a warning, so
+grep the log for `Multi-GPU size gate`, not for WARN. Leading zeros are refused
+for a different reason: the runtime parses `int(value.strip())`, so `007` would
+read as a valid floor of 7 -- the schema admits one canonical spelling per floor
+so two values files cannot disagree about the same number. Multi-GPU expansion needs
 **both** `env.TRACEBLOC_DDP=1` (1.9.101) **and** this floor; the parameter count
 it compares against is the backend's server-computed one (backend#3171), so the
 backend carrying that column must be deployed to the edge's environment first.
