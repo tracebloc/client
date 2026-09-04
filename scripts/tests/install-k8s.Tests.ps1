@@ -4951,22 +4951,110 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
       (Get-TraceblocDashboardUrl)  | Should -Match ([regex]::Escape($pair[2]))
     }
   }
-  It "every dashboard host lives ONLY in the mapping" {
-    # The three hosts must appear exactly once each -- as the switch arms of
-    # Get-TraceblocDashboardUrl. A second occurrence is a site that went back to
-    # hardcoding, which is the whole defect.
-    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
-    foreach ($h in @('https://dev.tracebloc.io', 'https://stg.tracebloc.io', 'https://ai.tracebloc.io')) {
-      ([regex]::Matches($src, '"' + [regex]::Escape($h) + '"')).Count |
-        Should -Be 1 -Because "$h should be written once, in the mapping"
+  # ─────────────────────────────────────────────────────────────────────────
+  #  THE CLASS, NOT ONE FILE (client#935)
+  #
+  # The two assertions below used to read `install-k8s.ps1` and nothing else,
+  # while their names claimed a property of "the installer". That is the same
+  # instance-vs-class shape #917 was held for, and it did not stay theoretical:
+  # the bash twin hardcoded the production dashboard at TEN sites in
+  # `lib/summary.sh` and `lib/install-client-helm.sh` -- fixed in client#946 --
+  # and both of these tests were green the entire time, because neither had ever
+  # looked at a `.sh` file.
+  #
+  # So the file set is DERIVED from the tree (the PowerShell installer plus
+  # every bash lib), not enumerated. An enumerated list is exactly how the bash
+  # guard #946 added ended up naming two files: correct on the day, silent about
+  # the third.
+  #
+  # AND THE MAPPING IS EXCLUDED BY NAME, not by quote-parity luck. Each helper's
+  # own arms are the LEGITIMATE definition of each host -- PowerShell's
+  # `default { "https://ai.tracebloc.io" }` and bash's `*) base='https://...'`.
+  # A guard that keyed on double quotes would score every bash arm as clean
+  # (they are single-quoted) and pass vacuously on the very files it was widened
+  # to cover; one that counted occurrences would trip on the definitions. Cutting
+  # the mapping bodies out and then demanding ZERO leaves one rule that means the
+  # same thing in both languages.
+  BeforeAll {
+    # The file set: install-k8s.ps1 + EVERY script under scripts/lib, in either
+    # language. `*.sh` alone would have been a smaller version of the same
+    # mistake -- `scripts/lib/` also holds `telemetry.ps1`, so a `.sh`-only glob
+    # reads as "every lib" while skipping one. Both extensions, derived.
+    #
+    # NOT scripts/testdata/: `golden/01-outcomes.golden` legitimately contains
+    # `https://ai.tracebloc.io/clients` as EXPECTED OUTPUT -- copy-catalog.bats
+    # pins CLIENT_ENV=prod for golden stability (client#946) -- and a recorded
+    # rendering is not a hardcoded link. README.md's dashboard link is
+    # documentation, not installer code; neither is in this property's domain.
+    $script:DashFiles = @((Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path) +
+      @(Get-ChildItem -Path (Join-Path $PSScriptRoot "../lib") -File |
+          Where-Object { $_.Extension -in @('.sh', '.ps1') } |
+          ForEach-Object { $_.FullName })
+
+    # Lines OUTSIDE the two mapping helpers. A helper opens with its declaration
+    # and closes at the next column-0 `}` -- true of both files, and asserted
+    # below by requiring the arms to have been found.
+    $script:DashSplit = {
+      param([string[]]$Lines)
+      $outside = @(); $inside = @(); $inMap = $false
+      foreach ($l in $Lines) {
+        if (-not $inMap -and ($l -match '^\s*function Get-TraceblocDashboardUrl\s*\{' -or
+                              $l -match '^_dashboard_url\(\)\s*\{')) { $inMap = $true; continue }
+        if ($inMap) {
+          if ($l -match '^\}') { $inMap = $false } else { $inside += $l }
+          continue
+        }
+        $outside += $l
+      }
+      return @{ Outside = $outside; Inside = $inside }
     }
   }
-  It "no LIVE dashboard link is hardcoded to production" {
+
+  It "every dashboard host lives ONLY in the mapping -- in EVERY lib, not just install-k8s.ps1 (client#935)" {
+    # Sanity on the derivation itself: a glob that resolves to one file would
+    # make this the single-file guard it is replacing.
+    $script:DashFiles.Count | Should -BeGreaterThan 3 -Because "the file set must span the installer AND the bash libs"
+
+    $hosts   = @('https://dev.tracebloc.io', 'https://stg.tracebloc.io', 'https://ai.tracebloc.io')
+    $leaks   = @()
+    $defined = @{}; foreach ($h in $hosts) { $defined[$h] = 0 }
+
+    foreach ($f in $script:DashFiles) {
+      $parts = & $script:DashSplit (Get-Content -LiteralPath $f)
+      $out   = ($parts.Outside -join "`n")
+      $in    = ($parts.Inside  -join "`n")
+      foreach ($h in $hosts) {
+        foreach ($m in [regex]::Matches($out, [regex]::Escape($h))) {
+          $leaks += "$(Split-Path $f -Leaf): $h"
+        }
+        $defined[$h] += ([regex]::Matches($in, [regex]::Escape($h))).Count
+      }
+    }
+
+    $leaks -join "`n" | Should -BeNullOrEmpty -Because "a dashboard host outside the mapping is a site that went back to hardcoding"
+
+    # NON-VACUOUS, and this half is the guard on the guard. Excising the mapping
+    # is how the definitions are tolerated, so a rename that stops matching the
+    # declaration would excise NOTHING, find no leaks, and pass -- greener than
+    # before while checking less. Each host must be defined exactly TWICE: once
+    # per twin. That number also fails if one twin loses its mapping, which is
+    # the original defect.
+    foreach ($h in $hosts) {
+      $defined[$h] | Should -Be 2 -Because "$h must be defined once in Get-TraceblocDashboardUrl and once in _dashboard_url"
+    }
+  }
+
+  It "no LIVE dashboard link is hardcoded to production -- across the installer AND the bash libs" {
     # The sharp one: a hardcoded link always carries a PATH (/clients,
-    # /my-use-cases). The bare host with no path is only ever the mapping arm.
-    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
-    ([regex]::Matches($src, 'https://ai\.tracebloc\.io/[a-z-]')).Count |
-      Should -Be 0 -Because 'every live dashboard link must go through Get-TraceblocDashboardUrl'
+    # /my-use-cases). The bare host with no path is only ever the mapping arm,
+    # so this one needs no excision and stands on its own if the split above
+    # ever breaks.
+    $offenders = @()
+    foreach ($f in $script:DashFiles) {
+      $n = ([regex]::Matches((Get-Content -LiteralPath $f -Raw), 'https://ai\.tracebloc\.io/[a-z-]')).Count
+      if ($n -gt 0) { $offenders += "$(Split-Path $f -Leaf) ($n)" }
+    }
+    $offenders -join ', ' | Should -BeNullOrEmpty -Because 'every live dashboard link must go through Get-TraceblocDashboardUrl / _dashboard_url'
   }
 }
 

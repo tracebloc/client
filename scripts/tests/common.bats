@@ -1077,11 +1077,70 @@ EOF
   [ "$output" = "https://dev.tracebloc.io" ] || return 1
 }
 
-@test "no LIVE dashboard link is hardcoded to production in either bash file" {
+@test "no LIVE dashboard link is hardcoded to production in ANY bash lib" {
   # A hardcoded link always carries a PATH (/clients, /my-use-cases); the bare
   # host with no path is only ever the mapping arm inside _dashboard_url.
-  run bash -c "grep -c 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/install-client-helm.sh' '$BATS_TEST_DIRNAME/../lib/summary.sh' | grep -v ':0$' || true"
+  #
+  # WIDENED FROM TWO NAMED FILES TO THE GLOB (client#935). This test shipped
+  # with client#946 naming install-client-helm.sh and summary.sh -- the two files
+  # that had the bug -- which made it an instance guard wearing a class name, the
+  # same shape #935 was filed for. The next hardcoded host lands in a third lib
+  # and this stays green. `lib/*.sh` is the class.
+  run bash -c "grep -l 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/'*.sh || true"
   [ -z "$output" ] || return 1
+  # NON-VACUOUS: a glob that matched one file would be the guard being replaced.
+  run bash -c "ls '$BATS_TEST_DIRNAME/../lib/'*.sh | wc -l | tr -d ' '"
+  [ "$output" -gt 2 ] || return 1
+}
+
+@test "no bash lib names a dashboard host OUTSIDE the _dashboard_url mapping" {
+  # The class property in full, and the sharper half of the pair above. That one
+  # keys on a PATH, so it catches `https://ai.tracebloc.io/clients` and misses a
+  # bare `base='https://ai.tracebloc.io'` re-hardcoded in some other lib -- which
+  # is what a well-meaning "just inline it" edit produces.
+  #
+  # SCOPE SPLIT, on purpose: this covers the BASH libs, and the Pester twin
+  # ("every dashboard host lives ONLY in the mapping -- in EVERY lib")
+  # covers install-k8s.ps1 plus every scripts/lib script in either language.
+  # Two guards, one from each language's suite, so a repo running only one of
+  # them still catches a leak in the bash half.
+  #
+  # THE MAPPING IS EXCLUDED BY NAME, not by quote style. `_dashboard_url`'s three
+  # `case` arms are the LEGITIMATE definition of these hosts, and a text guard
+  # that merely counted them would trip on the mapping itself (#935 says so
+  # explicitly). Excising the helper body and then demanding ZERO is one rule
+  # that survives a re-quote, a re-indent, or a fourth environment.
+  local f line leaks="" defined=0 inmap=0
+  for f in "$BATS_TEST_DIRNAME/../lib"/*.sh; do
+    inmap=0
+    # `|| [ -n "$line" ]` is load-bearing, not idiom. A file whose LAST line has
+    # no trailing newline loses that line to a plain `read`, so a host hardcoded
+    # there would be scanned right past -- a guard failing open on the one shape
+    # nobody notices. Measured on a two-line fixture with no final newline:
+    # plain read saw 1 line, this saw 2.
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        '_dashboard_url() {'*) inmap=1; continue ;;
+      esac
+      if [ "$inmap" -eq 1 ]; then
+        case "$line" in
+          '}'*) inmap=0 ;;
+          *https://dev.tracebloc.io*|*https://stg.tracebloc.io*|*https://ai.tracebloc.io*)
+            defined=$((defined + 1)) ;;
+        esac
+        continue
+      fi
+      case "$line" in
+        *https://dev.tracebloc.io*|*https://stg.tracebloc.io*|*https://ai.tracebloc.io*)
+          leaks="$leaks $f" ;;
+      esac
+    done < "$f"
+  done
+  [ -z "$leaks" ] || return 1
+  # ...and the excision must have actually found the three arms. A rename that
+  # stopped matching the declaration would excise NOTHING, find no leaks, and
+  # pass -- greener than before while checking less.
+  [ "$defined" -eq 3 ] || return 1
 }
 
 @test "_dashboard_url is reachable from summary.sh loaded STANDALONE" {
