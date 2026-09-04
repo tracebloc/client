@@ -176,9 +176,9 @@ env: {
   #                      Same gate shape; the engine's _emit_oom_rescue_fields.
   #
   # Reach the training pod only through a jobs-manager that forwards them
-  # (client-runtime's OPERATOR_TRAINING_SWITCHES, extended for both by Track B
-  # of backend#3147); on an older runtime they land on the jobs-manager
-  # container and go no further -- inert, never harmful.
+  # (client-runtime's OPERATOR_TRAINING_SWITCHES carries both since
+  # client-runtime#507); on an older runtime they land on the jobs-manager
+  # container and go no further.
   # EMIT_TOPOLOGY: "0"
   # EMIT_OOM_RESCUE: "0"
   # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
