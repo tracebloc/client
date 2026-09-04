@@ -885,6 +885,65 @@ telemetryCollector:
 images:
   jobsManager:
     digest: ""
+  # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
+  #    RFC-0067 D8 by backend#3156). The READER shipped first, in client-runtime
+  #    (jobs_manager.load_training_image_digests / training_image_reference), and
+  #    is INERT until this map is populated -- which is the hop order
+  #    backend#2473 exists to enforce, and why this block can land empty.
+  #
+  # WHY. Training pods are spawned from the floating `tracebloc/client-<task>-
+  # <arch>:<CLIENT_ENV>` tag with imagePullPolicy=Always, so cycle k and k+1 of
+  # ONE experiment can be different engine bytes, and with RFC-0067 that means
+  # the DDP state can flip inside one experiment. A digest pin is what stops it.
+  #
+  # THE SHAPE the runtime reads (rendered onto jobs-manager as
+  # TRAINING_IMAGE_DIGESTS via `toJson`; an env var and not a ConfigMap on
+  # purpose -- the value is in the pod template, so a promotion rolls the pod and
+  # the pins are live on upgrade completion):
+  #
+  #   digests:
+  #     image_classification: { cpu: "sha256:...", gpu: "sha256:..." }
+  #     tabular_classification: { cpu: "sha256:...", gpu: "sha256:..." }
+  #     # ... one entry per task the engine publishes, x {cpu, gpu}
+  #
+  # Every digest MUST be canonical `sha256:` + 64 lowercase hex; the schema
+  # refuses anything else here and the runtime refuses it again at boot (a
+  # CrashLoopBackOff rather than per-spawn InvalidImageName pods). A map that
+  # exists but lacks a (task, arch) is a PROMOTION BUG, not a choice: the runtime
+  # warns and spawns the floating tag for that one.
+  #
+  # `pinned` -- "" (default) = AUTO: pin iff CLIENT_ENV resolves to prod, so dev
+  # and staging edges keep floating with zero per-edge action (they carry
+  # env.CLIENT_ENV in user-supplied values). true / false = explicit override for
+  # canary edges and transition windows. Rendered as TRAINING_IMAGE_PINNED only
+  # when set; absent means auto on the runtime side too.
+  #
+  # `capabilities` -- what the PINNED engine can do, as the engine itself
+  # declares it: the comma-separated OCI label `io.tracebloc.engine.capabilities`
+  # on the pinned GPU images (tracebloc-engine#857 adds `ddp`). Rendered onto
+  # jobs-manager as TRAINING_ENGINE_CAPABILITIES; client-runtime requests N>1
+  # GPUs ONLY when `ddp` is present (RFC-0067 D8's skew guard), so an edge whose
+  # pinned engine predates DDP stays at one GPU by construction.
+  #
+  # NEVER HAND-TYPE `capabilities`. It is DERIVED from the pinned digests by the
+  # same step that writes them (scripts/resolve-training-digests.sh, backend#3156
+  # follow-up): the resolver reads the label off each pinned image's config, once,
+  # at pin time, refuses to write when the label cannot be read (unreadable is
+  # not empty), and writes the two keys together. A capability typed beside a pin
+  # is a restated fact that drifts the first time the pin moves -- the chart
+  # therefore REFUSES to render `capabilities` with an empty `digests` (see the
+  # template), because there is nothing it could have been derived from.
+  #
+  # Populating the map is the release train's promotion step, not a hand edit:
+  # it moves prod edges from "whatever :prod points at right now" to a fixed
+  # engine, and the map must then be advanced on every engine promotion or prod
+  # freezes on today's bytes. Until that step exists the map stays EMPTY here,
+  # every edge floats exactly as today, and this block is documentation plus a
+  # tested render path.
+  training:
+    pinned: ""
+    digests: {}
+    capabilities: ""
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns

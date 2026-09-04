@@ -945,6 +945,49 @@
               "pattern": "^(sha256:[a-f0-9]{64})?$"
             }
           }
+        },
+        "training": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES. The chart refuses `capabilities` with an empty `digests`.",
+          "properties": {
+            "pinned": {
+              "enum": [
+                "",
+                "true",
+                "false",
+                true,
+                false
+              ],
+              "description": "\"\" (auto: pin iff CLIENT_ENV resolves to prod), or an explicit true/false override."
+            },
+            "digests": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cpu": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "gpu": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  }
+                }
+              },
+              "description": "task -> arch -> digest. Arch is CLOSED to cpu|gpu (the engine builds exactly Dockerfile.task.cpu / .gpu); task keys are open because the task set is the engine's to declare. Every digest must be canonical sha256:<64 lowercase hex>."
+            },
+            "capabilities": {
+              "type": "string",
+              "pattern": "^([a-z][a-z0-9_-]*(,[a-z][a-z0-9_-]*)*)?$",
+              "description": "Comma-separated engine capability tokens (e.g. `ddp`), DERIVED from the pinned images' io.tracebloc.engine.capabilities label by scripts/resolve-training-digests.sh. Never hand-typed; refused by the template when `digests` is empty."
+            }
+          }
         }
       }
     },

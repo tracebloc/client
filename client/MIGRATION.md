@@ -2,7 +2,7 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
-## Upgrading to 1.9.100 — per-edge `TRACEBLOC_DDP` / `TRACEBLOC_AMP` switches (RFC-0067 D8)
+## Upgrading to 1.9.101 — per-edge `TRACEBLOC_DDP` / `TRACEBLOC_AMP` switches (RFC-0067 D8)
 
 Nothing changes on upgrade: both keys are **absent by default**, and absent
 means OFF. This release only teaches the chart the two operator switches that
@@ -32,6 +32,25 @@ the per-run lease jobs-manager applies as `activeDeadlineSeconds` to
 **multi-GPU** pods only. Also absent by default — jobs-manager's own 86400 s
 default stands — and also rendered only when set, because the runtime reads an
 empty value as *disabled*. Digits, or `0`/`off`/`false`/`no` to disable.
+## Upgrading to 1.9.100 — `images.training`: the digest-pinned engine image half (RFC-1246 P2, RFC-0067 D8)
+
+Nothing changes on upgrade: `images.training.digests` ships **empty**, so no
+`TRAINING_IMAGE_DIGESTS` / `TRAINING_IMAGE_PINNED` / `TRAINING_ENGINE_CAPABILITIES`
+is rendered and every edge keeps spawning the floating `:<CLIENT_ENV>` tag
+exactly as before (backend#3156). What lands is the render path and its
+contract, so that populating the map is a values change the release train can
+make rather than a template change:
+
+- `digests` — task → `{cpu, gpu}` → canonical `sha256:` digest, rendered onto
+  jobs-manager as JSON; the runtime (client-runtime `jobs_manager.py`) validates
+  it at boot and spawns `repo@digest` with `IfNotPresent` where it applies.
+- `pinned` — `""` (auto: prod only), or an explicit `true`/`false`.
+- `capabilities` — the engine's own `io.tracebloc.engine.capabilities` label
+  read off the pinned images; **written only by the resolver that writes the
+  digests, never by hand.** The chart refuses to render it with an empty map.
+
+Do **not** populate `digests` by hand on an edge: a hand-pinned edge stops
+following engine promotions until someone advances the pin.
 ## Upgrading to 1.9.99 — `rotateMysqlRoot` / `bootstrapDbReparent` baked for `stg` and `prod` (datadir-aware)
 
 `rotateMysqlRootByEnv` and `bootstrapDbReparentByEnv` are now baked `true` for
