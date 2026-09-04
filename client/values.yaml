@@ -157,6 +157,30 @@ env: {
   # jobs-manager container and goes no further -- inert, never harmful.
   # TRACEBLOC_DDP: "0"
   # TRACEBLOC_AMP: "0"
+  # -- Per-edge OPERATOR switches for what the training pod REPORTS (same
+  #    mechanism, same vocabulary). Both default OFF because the destination
+  #    columns live in the backend and land per environment on the backend's
+  #    own schedule: an edge that emits a cycle-payload key its backend lacks
+  #    does not get the key ignored -- update_cycle_data splats leftover keys
+  #    into objects.create AFTER deleting the row, so the edge's cycle row is
+  #    DESTROYED. Two explicit steps, in order: deploy the backend that has the
+  #    columns to that environment, THEN set the switch on the edge.
+  #
+  #   EMIT_TOPOLOGY   -- cycle payload carries world_size + effective_batch
+  #                      (backend#3160's columns; RFC-0067 D5/D9). Contract:
+  #                      tracebloc-engine#879 @ 383b0daa -- "Env var
+  #                      EMIT_TOPOLOGY; default off ("false"); truthy 1, true,
+  #                      yes (case-insensitive, whitespace-stripped)".
+  #   EMIT_OOM_RESCUE -- cycle payload carries oom_rescue_rung + oom_rescue_epoch
+  #                      (backend#2175's columns) when a CUDA-OOM rescue fired.
+  #                      Same gate shape; the engine's _emit_oom_rescue_fields.
+  #
+  # Reach the training pod only through a jobs-manager that forwards them
+  # (client-runtime's OPERATOR_TRAINING_SWITCHES, extended for both by Track B
+  # of backend#3147); on an older runtime they land on the jobs-manager
+  # container and go no further -- inert, never harmful.
+  # EMIT_TOPOLOGY: "0"
+  # EMIT_OOM_RESCUE: "0"
   # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
   #    B7). jobs-manager applies it as the pod-level activeDeadlineSeconds ONLY
   #    when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet

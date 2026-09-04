@@ -20,6 +20,13 @@ The vocabulary is closed (`1|0|true|false|yes|no`, case-insensitive, empty =
 unset); any other spelling is refused at `helm upgrade` time rather than
 silently read as off.
 
+It also documents the two **reporting** switches, `env.EMIT_TOPOLOGY` and
+`env.EMIT_OOM_RESCUE` (contract: tracebloc-engine#879 @ 383b0daa), with the same
+vocabulary and the same absent-by-default rule — and one ordering rule of their
+own: **deploy the backend that has the destination columns to that environment
+first**, then set the switch. An emitted cycle-payload key the backend lacks
+destroys the edge's cycle row rather than being ignored.
+
 The same release documents `env.MULTI_GPU_LEASE_SECONDS` (client-runtime#486),
 the per-run lease jobs-manager applies as `activeDeadlineSeconds` to
 **multi-GPU** pods only. Also absent by default — jobs-manager's own 86400 s

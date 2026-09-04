@@ -103,6 +103,16 @@
           "type": "string",
           "pattern": "^\\s*([0-9]+|[Oo][Ff][Ff]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo])?\\s*$",
           "description": "Per-run lease for MULTI-GPU runs (RFC-0067 D7/H4; client-runtime#486): applied by jobs-manager as the pod-level activeDeadlineSeconds only when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet cap. Digits = seconds (jobs-manager defaults to 86400 when unset); 0 / off / false / no disable it. Rendered only when set: the runtime reads an empty value as DISABLED, so an unconditional chart default would switch the lease off fleet-wide. THE VOCABULARY IS CLOSED because the runtime falls back to its default on anything unrecognised, which would make a typo indistinguishable from the default."
+        },
+        "EMIT_TOPOLOGY": {
+          "type": "string",
+          "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
+          "description": "Per-edge OPERATOR switch: the training pod records world_size + effective_batch in its cycle payload (backend#3160's columns; RFC-0067 D5/D9). Contract: tracebloc-engine#879 @ 383b0daa — default off, truthy 1|true|yes (case-insensitive, whitespace-stripped). ORDER MATTERS: the backend carrying #3160 must be deployed to the edge's environment first, or the emitted key destroys the cycle row (update_cycle_data deletes before it creates). Forwarded to the pod by client-runtime's OPERATOR_TRAINING_SWITCHES. The vocabulary is closed for the same reason as TRACEBLOC_DDP: the engine reads anything unrecognised as off."
+        },
+        "EMIT_OOM_RESCUE": {
+          "type": "string",
+          "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
+          "description": "Per-edge OPERATOR switch: the training pod records oom_rescue_rung + oom_rescue_epoch in its cycle payload when a CUDA-OOM rescue fired (backend#2175's columns; the engine's _emit_oom_rescue_fields gate). Default off, truthy 1|true|yes; same ordering rule as EMIT_TOPOLOGY — backend with the columns first. Forwarded by client-runtime's OPERATOR_TRAINING_SWITCHES. Closed vocabulary, same reason as TRACEBLOC_DDP."
         }
       },
       "additionalProperties": {
