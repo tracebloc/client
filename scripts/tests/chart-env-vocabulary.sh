@@ -211,6 +211,19 @@ for bad in 1h 60s -1 3.5 on true yes disabled 00 007; do
   expect_reject "MULTI_GPU_LEASE_SECONDS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_LEASE_SECONDS=$bad"
 done
 
+echo "== env.MULTI_GPU_MIN_PARAMETERS: a positive integer, or unset -- nothing else =="
+# client-runtime#513 @ f42d5e9 (B9): the runtime reads empty, non-numeric or
+# non-positive as UNSET and then refuses every run with one warning, so a typo
+# would be indistinguishable from the deliberate dark default. Closed here.
+for good in 1 50000000 123456789012; do
+  expect_render "MULTI_GPU_MIN_PARAMETERS=$good" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS=$good"
+done
+expect_render "MULTI_GPU_MIN_PARAMETERS=' 42 '" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS= 42 "
+expect_render_without "MULTI_GPU_MIN_PARAMETERS=''" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS="
+for bad in 0 -1 007 1e6 50M 3.5 off none unset; do
+  expect_reject "MULTI_GPU_MIN_PARAMETERS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_MIN_PARAMETERS=$bad"
+done
+
 echo "== images.ingestor.channelTags: keys are closed =="
 # The lookup is on the RESOLVED env, so only dev/stg/prod can ever match. An
 # alias key validated fine and was then silently ignored: channelTags.staging

@@ -104,6 +104,11 @@
           "pattern": "^\\s*([1-9][0-9]*|0|[Oo][Ff][Ff]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo])?\\s*$",
           "description": "Per-run lease for MULTI-GPU runs (RFC-0067 D7/H4; client-runtime#486): applied by jobs-manager as the pod-level activeDeadlineSeconds only when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet cap. Digits = seconds (jobs-manager defaults to 86400 when unset); 0 / off / false / no disable it. Rendered only when set: the runtime reads an empty value as DISABLED, so an unconditional chart default would switch the lease off fleet-wide. THE VOCABULARY IS CLOSED because the runtime falls back to its default on anything unrecognised, which would make a typo indistinguishable from the default. Digits are canonical (no leading zeros): `00` is not in the runtime's falsy set, would parse to 0, trip its <= 0 guard and silently become the default — the one spelling that does what the closed vocabulary exists to prevent."
         },
+        "MULTI_GPU_MIN_PARAMETERS": {
+          "type": "string",
+          "pattern": "^\\s*([1-9][0-9]*)?\\s*$",
+          "description": "Multi-GPU size floor (RFC-0067 D2 gate 2; client-runtime#513 @ f42d5e9): the smallest server-computed parameter_count (backend#3171) jobs-manager expands into more than one GPU. NO DEFAULT: unset, empty, non-numeric or non-positive all read as unset and the size gate REFUSES every run (GPU_COUNT_SIZE_FLOOR_UNSET), so multi-GPU needs BOTH TRACEBLOC_DDP=1 and this floor. Rendered only when set. THE VOCABULARY IS CLOSED to a positive integer without leading zeros because the runtime reads anything else as unset with one warning, which would make a typo indistinguishable from the deliberate dark default."
+        },
         "EMIT_TOPOLOGY": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
