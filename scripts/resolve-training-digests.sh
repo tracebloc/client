@@ -45,6 +45,9 @@
 #   TRAINING_RESOLVE_STUB  file of `key<0x1f>value` lines — replaces the registry:
 #                            ns/repo:tag<0x1f>sha256:…        the float's index digest
 #                            ns/repo@sha256:…<0x1f>caps=<v>   the pinned image's label
+#                            ns/repo@sha256:…<0x1f>inspect=<file>  a captured
+#                                 `imagetools inspect --format '{{json .Image}}'`
+#                                 document, run through the REAL label extraction
 #                          A pin with NO caps line is UNREADABLE (the refusal);
 #                          `caps=` with an empty value is readable-and-unlabelled.
 set -euo pipefail
@@ -130,18 +133,28 @@ read_capabilities() {
   local repo="$1" digest="$2" ref="$1@$2" line="" raw="" n
   if [[ "$stubbed" == 1 ]]; then
     line="$(awk -F"$SEP" -v want="$ref" '$1 == want { print $2; exit }' "$TRAINING_RESOLVE_STUB")"
-    [[ "$line" == caps=* ]] || return 1
-    printf '%s\n' "${line#caps=}"
-    return 0
+    case "$line" in
+      caps=*)    printf '%s\n' "${line#caps=}"; return 0 ;;
+      inspect=*) raw="$(cat -- "${line#inspect=}")" || return 1 ;;   # falls through to the real extraction
+      *)         return 1 ;;
+    esac
+  else
+    raw="$(_tmout 30 docker buildx imagetools inspect "$ref" --format '{{json .Image}}' 2>/dev/null)" || return 1
   fi
-  raw="$(_tmout 30 docker buildx imagetools inspect "$ref" --format '{{json .Image}}' 2>/dev/null)" || return 1
   [[ -n "$raw" ]] || return 1
   # A single-platform image is one config; an index is a platform -> config map.
   # Every platform under one digest must agree; disagreement inside ONE image is
   # reported as a distinct value so the caller's agreement check catches it.
+  # buildx lists a provenance/SBOM attestation manifest as the platform
+  # `unknown/unknown`, and its "config" carries no Labels -- so without this
+  # filter every attested image reads as `<caps>|` and is refused as a
+  # disagreement it does not have (client#978). Same filter as
+  # check-digest-drift.sh and resolve-ingestor-digest.sh apply to `Platform:`.
   n="$(jq -r --arg l "$LABEL" '
-        (if has("config") then [.] else [.[]] end)
-        | map((.config.Labels // {})[$l] // "") | unique | join("|")' <<<"$raw")" || return 1
+        (if has("config") then [{key: "", value: .}] else to_entries end)
+        | map(select((.key | startswith("unknown")) | not))
+        | map(select((.value.os // "") != "unknown" and (.value.architecture // "") != "unknown"))
+        | map((.value.config.Labels // {})[$l] // "") | unique | join("|")' <<<"$raw")" || return 1
   printf '%s\n' "$n"
 }
 

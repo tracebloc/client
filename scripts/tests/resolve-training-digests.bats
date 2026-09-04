@@ -33,6 +33,20 @@ teardown() { rm -rf "$TMP"; }
 digest_line() { printf '%s%s%s\n' "$1" "$SEP" "$2" >> "$TMP/stub"; }
 caps_line()   { printf '%s@%s%scaps=%s\n' "$1" "$2" "$SEP" "$3" >> "$TMP/stub"; }
 drop_caps()   { grep -v "^$1@" "$TMP/stub" > "$TMP/stub.new" && mv "$TMP/stub.new" "$TMP/stub"; }
+inspect_line(){ printf '%s@%s%sinspect=%s\n' "$1" "$2" "$SEP" "$3" >> "$TMP/stub"; }
+# A captured `{{json .Image}}` shape: one entry per manifest of the index, keyed by
+# platform. $1..$n are `platform=caps` pairs; caps `-` means the config carries no
+# Labels at all (what the attestation manifest looks like).
+image_json() {
+  local out="{" sep="" pair plat caps os arch
+  for pair in "$@"; do
+    plat="${pair%%=*}"; caps="${pair#*=}"; os="${plat%%/*}"; arch="${plat#*/}"
+    out+="$sep\"$plat\": {\"architecture\": \"$arch\", \"os\": \"$os\", \"config\": {"
+    [[ "$caps" == "-" ]] || out+="\"Labels\": {\"io.tracebloc.engine.capabilities\": \"$caps\"}"
+    out+="}}"; sep=", "
+  done
+  printf '%s}\n' "$out"
+}
 values_fixture() {  # <pinned literal>
   cat > "$TMP/values.yaml" <<EOF
 global:
@@ -102,6 +116,42 @@ run_resolve() {
   [[ "$output" == *"DISAGREE"* ]] || return 1
   [[ "$output" == *"image_classification"*"ddp"* ]] || return 1
   [[ "$output" == *"tabular_classification"*"(no label)"* ]] || return 1
+}
+
+@test "an attestation manifest (unknown/unknown) is filtered out of the label, not read as a disagreement" {
+  drop_caps "tracebloc/client-image_classification-gpu"
+  drop_caps "tracebloc/client-tabular_classification-gpu"
+  image_json "linux/amd64=ddp" "linux/arm64=ddp" "unknown/unknown=-" > "$TMP/ic.json"
+  image_json "linux/amd64=ddp" "unknown/unknown=-" > "$TMP/tc.json"
+  inspect_line "tracebloc/client-image_classification-gpu" "$D_IC_GPU" "$TMP/ic.json"
+  inspect_line "tracebloc/client-tabular_classification-gpu" "$D_TC_GPU" "$TMP/tc.json"
+  run_resolve
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"across its platforms"* ]] || return 1
+  [[ "$output" == *"    capabilities: \"ddp\""* ]] || return 1
+}
+
+@test "the attestation filter does not swallow a REAL disagreement between platforms of one image" {
+  # Both GPU images carry the SAME split (amd64 labelled, arm64 not), so the
+  # cross-task agreement check passes and the intra-image refusal is what fires.
+  drop_caps "tracebloc/client-image_classification-gpu"
+  drop_caps "tracebloc/client-tabular_classification-gpu"
+  image_json "linux/amd64=ddp" "linux/arm64=-" "unknown/unknown=-" > "$TMP/split.json"
+  inspect_line "tracebloc/client-image_classification-gpu" "$D_IC_GPU" "$TMP/split.json"
+  inspect_line "tracebloc/client-tabular_classification-gpu" "$D_TC_GPU" "$TMP/split.json"
+  run_resolve
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"REFUSED"* ]] || return 1
+  [[ "$output" == *"across its platforms"* ]] || return 1
+}
+
+@test "a single-platform image (one config, no platform map) still reads its label" {
+  drop_caps "tracebloc/client-tabular_classification-gpu"
+  printf '{"architecture": "amd64", "os": "linux", "config": {"Labels": {"io.tracebloc.engine.capabilities": "ddp"}}}\n' > "$TMP/tc.json"
+  inspect_line "tracebloc/client-tabular_classification-gpu" "$D_TC_GPU" "$TMP/tc.json"
+  run_resolve
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"    capabilities: \"ddp\""* ]] || return 1
 }
 
 @test "a task with only one arch is REFUSED as a promotion bug" {
