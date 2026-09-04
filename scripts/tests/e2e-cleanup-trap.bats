@@ -449,7 +449,15 @@ _check_cleanup_preserves_status() {
   # The two near-misses a looser 'does it contain the strings' check would pass.
   # Both were real risks here: e2e-proxy.sh's trap ended with `rm -rf "$WORK"`,
   # whose status WAS the one the job reported.
-  local dir="$BATS_TEST_TMPDIR/nearmiss" late="$dir/e2e-late.sh" early="$dir/e2e-early.sh"
+  # SEPARATE `local` statements, not `local dir=… late="$dir/…"`: in one `local`
+  # every name is created before any value is expanded, so `$dir` is EMPTY on the
+  # right-hand side of a later assignment in the SAME statement — the paths came
+  # out as `/e2e-late.sh` and the mkdir died with "Permission denied". Local bash
+  # 3.2 tolerated it and Linux CI did not, which is the direction this repo's
+  # macOS-vs-CI blindspot usually runs.
+  local dir="$BATS_TEST_TMPDIR/nearmiss"
+  local late="$dir/e2e-late.sh"
+  local early="$dir/e2e-early.sh"
   mkdir -p "$dir"
   {
     printf 'create_cluster\n'
