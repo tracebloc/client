@@ -95,10 +95,29 @@ _cluster_presence() {
     # `set -e` captures the code instead of aborting (the #431 Bugbot form).
     _json="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
     if [[ "$_rc" -eq 0 ]]; then
-      _read_ok=1
-      if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
-        return 0
+      # A READ THAT SUCCEEDED AND PARSES IS AUTHORITATIVE — BOTH WAYS, and it
+      # RETURNS. Falling through on "parsed fine, no match" let probe 2's TIMEOUT
+      # overwrite a definite ABSENT we already held, so a first-time install with
+      # jq present reported UNKNOWN, took the reuse branch, and tried to START a
+      # cluster the listing had just proved absent instead of creating one
+      # (Bugbot High, client#984 round 2).
+      #
+      # The general rule this is an instance of: a definite answer from a read that
+      # COMPLETED always wins over "couldn't tell" from a read that did not. Only
+      # an UNPARSEABLE payload is inconclusive and falls through — which is the
+      # reason the table probes exist at all (SUSE-era k3d whose JSON shape or
+      # jq availability differed), and `jq -e` alone cannot tell "no match" from
+      # "not JSON": both are non-zero. So the shape is checked first.
+      if jq -e 'type == "array"' >/dev/null 2>&1 <<<"$_json"; then
+        if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
+          return 0
+        fi
+        return 1
       fi
+      # Parsed as something other than an array (or not at all): inconclusive, not
+      # empty. Fall through to the table probes rather than call the cluster absent.
+      _read_ok=1
+      log "k3d answered the JSON cluster listing with a payload that is not an array; falling back to the table listing."
     elif [[ "$_rc" -eq 124 ]]; then
       log "The k3d cluster listing (JSON form) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
       # A wedged engine cannot answer the table probes either, and each would cost
@@ -119,11 +138,11 @@ _cluster_presence() {
   if [[ "$_lrc" -ne 0 ]]; then
     local _trc=0
     _list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list 2>/dev/null)" || _trc=$?
-    if [[ "$_trc" -eq 0 ]]; then _read_ok=1; else _list=""; fi
     if [[ "$_trc" -eq 124 ]]; then
       log "The k3d cluster listing (header-ful fallback) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
       return 2
     fi
+    if [[ "$_trc" -eq 0 ]]; then _read_ok=1; else _list=""; fi
   else
     _read_ok=1
   fi

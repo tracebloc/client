@@ -166,6 +166,21 @@ setup() {
     echo "the bundle is silent about why the docker section is missing"; return 1; }
 }
 
+@test "run_diagnose: with NO docker installed the bundle says so, not 'the daemon did not answer'" {
+  # A support bundle that claims a daemon timed out on a host with no Docker is a
+  # false statement about the machine — the same class of defect as the silence
+  # this fix replaced, just louder.
+  has() { return 1; }                              # nothing installed
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'docker is not installed on this host' || {
+    echo "did not say docker is absent"; return 1; }
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'daemon did not answer' || {
+    echo "claimed the daemon timed out on a host with no docker"; return 1; }
+}
+
 @test "run_diagnose: with a live daemon EVERY docker section is still collected (the gate is not a mute button)" {
   # The other half. Without this, the test above passes just as well against a
   # run_diagnose that never collects docker state at all.
@@ -197,19 +212,36 @@ setup() {
 # CENSUS, because rule 5 is a text scan over scripts/lib/ and a text scan that
 # stops matching prints as clean as one that checked everything. Here the count is
 # the point: this file is where an unbounded daemon read costs the whole artifact.
-@test "every daemon read in diagnose.sh is bounded, and there are as many as we think" {
-  local f="$BATS_TEST_DIRNAME/../lib/diagnose.sh" calls bounded
-  # Invocation-shaped docker reads (the shape rule 5 matches), comments dropped.
-  calls="$(grep -nE '(^|[|;&(`]|[[:space:]])docker[[:space:]]+(info|ps|inspect|version)([[:space:]]+[-&>|;12#"'"'"'$]|[[:space:]]*[)]|[[:space:]]+\\[[:space:]]*$|[[:space:]]*$)' "$f" \
-            | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
-  [ -n "$calls" ] || { echo "found NO docker reads in diagnose.sh — the scan went vacuous"; return 1; }
-  [ "$(printf '%s\n' "$calls" | grep -c .)" -ge 5 ] || {
-    echo "expected at least 5 docker reads in diagnose.sh, found $(printf '%s\n' "$calls" | grep -c .):"
+@test "every daemon read in diagnose.sh uses the CORE-UTILS-FREE reader, and there are as many as we think" {
+  # The per-file half of check-style rule 5, with two things the rule cannot say.
+  #
+  # (a) THE CENSUS. Rule 5 is a text scan and a text scan that stops matching
+  #     prints as clean as one that checked everything. Here the count is the
+  #     point: this file is where an unbounded daemon read costs the whole
+  #     artifact, not a stall.
+  # (b) `_bounded` IS NOT ENOUGH IN THIS FILE. --diagnose is Darwin-reachable and
+  #     `_bounded` is a documented no-op without coreutils, so every read here must
+  #     go through `_bounded_capture`, whose deadline comes from the child PID
+  #     (Bugbot High, client#984). Rule 5 accepts either, correctly — it governs
+  #     the whole tree. This file is stricter.
+  #
+  # The invocation regex is DERIVED from check-style.sh's own rule 5 rather than
+  # restated: a second copy would agree with itself while the rule drifted, and it
+  # would also count this file's timeout NOTES as if they were calls.
+  local f="$BATS_TEST_DIRNAME/../lib/diagnose.sh" cs="$BATS_TEST_DIRNAME/../check-style.sh"
+  local re calls n bad
+  re="$(grep -m1 '^docker_probe=' "$cs")" || return 1
+  re="${re#docker_probe=\'}"; re="${re%\'}"
+  [ -n "$re" ] || return 1
+  calls="$(grep -nE "$re" "$f" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  n="$(printf '%s\n' "$calls" | grep -c . || true)"
+  [ "$n" -ge 5 ] || {
+    echo "expected at least 5 docker reads in diagnose.sh, found $n — the scan or the file has changed shape:"
     printf '%s\n' "$calls"; return 1; }
-  bounded="$(printf '%s\n' "$calls" | grep -cE '_bounded[[:space:]]+"[^"]*"[[:space:]]+docker' || true)"
-  [ "$bounded" -eq "$(printf '%s\n' "$calls" | grep -c .)" ] || {
-    echo "not every docker read is bounded:"
-    printf '%s\n' "$calls" | grep -vE '_bounded[[:space:]]+"[^"]*"[[:space:]]+docker'; return 1; }
+  bad="$(printf '%s\n' "$calls" | grep -vE '_bounded_capture[[:space:]]+"[^"]*"[[:space:]]+"\$_cap"[[:space:]]+docker' || true)"
+  [ -z "$bad" ] || {
+    echo "daemon read(s) in diagnose.sh not routed through _bounded_capture — on a stock Mac these are unbounded, and one that never returns means no bundle at all:"
+    printf '%s\n' "$bad"; return 1; }
 }
 
 @test "run_diagnose: a daemon that never answers SKIPS the k3d read, with a note, and still writes a bundle" {
@@ -233,20 +265,27 @@ setup() {
 }
 
 @test "run_diagnose: a k3d read that times out leaves a named finding, not a blank section" {
-  # The `_bounded` half: the daemon answers `docker info` but k3d's own call still
-  # stalls. "did not complete" IS the finding support needs.
+  # The daemon answers `docker info` but the k3d listing still stalls — a reachable
+  # state, because the gate's budget and this read's budget are different
+  # (TB_DOCKER_PROBE_TIMEOUT 10s vs TB_K3D_LIST_TIMEOUT 15s). "did not complete" IS
+  # the finding support needs; an empty section would read as "no clusters here".
   has() { return 0; }
   docker() { printf 'docker %s\n' "$*"; }
   kubectl() { printf 'kubectl %s\n' "$*"; }
   helm() { printf 'helm %s\n' "$*"; }
   _docker_answers_bounded() { return 0; }
-  timeout() { return 124; }            # the deadline fires (setup's passthrough overridden)
-  gtimeout() { return 124; }
+  _bounded_capture() {
+    local secs="$1" out="$2"; shift 2
+    case "$*" in
+      *"cluster list"*) : > "$out"; return 124 ;;      # the deadline fires
+      *)                printf 'ok\n' > "$out"; return 0 ;;
+    esac
+  }
   run run_diagnose
   [ "$status" -eq 0 ] || return 1
   tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
   [ -n "$tgz" ] || return 1
-  tar -xzOf "$tgz" 2>/dev/null | grep -q 'k3d cluster list did not complete' || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'k3d cluster listing did not complete' || return 1
 }
 
 @test "run_diagnose: surfaces + records the client version" {

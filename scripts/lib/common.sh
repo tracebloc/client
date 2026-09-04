@@ -355,6 +355,59 @@ _bounded() {
   else "$@"; fi
 }
 
+# _bounded_capture SECONDS OUTFILE CMD… — run CMD with stdout+stderr captured to
+# OUTFILE, bounded on EVERY platform. Returns CMD's status, or 124 when the
+# deadline fired. THREE OUTCOMES, all distinguishable by the caller: 0 (answered),
+# 124 (did not answer in time), anything else (CMD's own failure).
+#
+# WHY IT EXISTS ALONGSIDE _bounded (client#984). `_bounded` execs timeout(1)/
+# gtimeout(1) and runs the BARE command when neither is on PATH — and neither ships
+# on a stock Mac (both are GNU coreutils), which is the caveat #741/#832/backend#2521
+# have each paid for. `_docker_answers_bounded` already solves that for a yes/no
+# probe by backgrounding it and letting `spin` kill it on a deadline, but spin
+# writes UI and discards the command's OUTPUT, so it cannot serve a read whose
+# output is the point.
+#
+# The --diagnose bundle is exactly that case and the one where the cost is the
+# whole artifact rather than a stall: every read in it goes into a `{ … } > file`
+# group, so ONE call that never returns means no file at all, from the one run
+# collected BECAUSE the machine is already broken. A `docker info` gate passing in
+# 10s does not make a 15s `k3d cluster list` safe — more engine work, different
+# budget (Bugbot High, client#984).
+#
+# Same background-PID + kill mechanism as spin (#426), no coreutils. TERM first,
+# then KILL, so a well-behaved child can clean up. The poll tick is 0.1s where
+# `sleep` accepts fractions and 1s otherwise, detected once per shell — a
+# 1-second floor would have charged the --diagnose bundle a full second for every
+# read that answered instantly.
+_bounded_capture() {
+  local secs="$1" out="$2"; shift 2
+  : > "$out" 2>/dev/null || return 2      # cannot capture => "could not tell", not "empty"
+  # Poll granularity, detected ONCE per shell and cached: a fast call must not cost
+  # a whole tick. GNU and BSD/macOS `sleep` both take fractions; a strictly POSIX
+  # one does not, so fall back to 1s rather than spin or fail.
+  if [ -z "${_TB_CAPTURE_TICK:-}" ]; then
+    if sleep 0.1 2>/dev/null; then _TB_CAPTURE_TICK=0.1; _TB_CAPTURE_PER_SEC=10
+    else                           _TB_CAPTURE_TICK=1;   _TB_CAPTURE_PER_SEC=1; fi
+  fi
+  "$@" >"$out" 2>&1 &
+  local pid=$! rc=0 waited=0
+  local limit=$(( secs * _TB_CAPTURE_PER_SEC ))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$limit" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      # Detached, so a child that ignores TERM cannot hold us either.
+      ( sleep 2; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep "$_TB_CAPTURE_TICK"
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null || rc=$?
+  return "$rc"
+}
+
 # Deadline for `k3d cluster list` (seconds). Its OWN knob, deliberately LOOSER
 # than TB_DOCKER_PROBE_TIMEOUT's 10s, because it is strictly more engine work:
 # `docker info` asks the daemon about itself, while `k3d cluster list` enumerates

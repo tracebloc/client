@@ -384,7 +384,59 @@ _brand_rgbs() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-# ── rule 6: unbounded 'k3d cluster list' in scripts/lib/ (client#974) ────────
+# ── rule 6: rule 5's census, and the regression that earned it ───────────────
+
+@test "rule 6: the census fires when rule 5 goes vacuous (a lib file the scan can no longer see)" {
+  # Rename the file holding most of the daemon reads so `--include='*.sh'` misses
+  # it. Rule 5 then has nothing to complain about and would report clean.
+  mv "$WORK/scripts/lib/cluster.sh" "$WORK/scripts/lib/cluster.bash"
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"rule 5 went VACUOUS"* ]] || return 1
+}
+
+@test "rule 6: the floor is HONEST — the real tree meets it with no slack to spare" {
+  # A floor below the truth is the same vacuity one step removed. Derive the count
+  # the way rule 5 does and require the declared floor to match it exactly.
+  local re floor found
+  re="$(grep -m1 '^docker_probe=' "$CS")" || return 1
+  re="${re#docker_probe=\'}"; re="${re%\'}"
+  [ -n "$re" ] || return 1
+  floor="$(grep -m1 '^DOCKER_READ_SITES_FLOOR=' "$CS" | cut -d= -f2)"
+  [[ "$floor" =~ ^[0-9]+$ ]] || return 1
+  found="$( ( cd "$WORK" && grep -rnE --include='*.sh' --include='*.ps1' \
+                --exclude='check-style.sh' --exclude-dir='tests' "$re" scripts/lib/ ) \
+            | grep -vE '# *style-guard: *allow' \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -c . || true)"
+  [ "$found" -eq "$floor" ] || {
+    echo "rule 5 finds $found daemon read(s) but DOCKER_READ_SITES_FLOOR is $floor"
+    return 1
+  }
+}
+
+@test "rules 5+7: the 'cmd;' invocation shape is in scope (the spelling that slipped)" {
+  # `if _bounded_capture … docker version; then` — a semicolon with no space before
+  # it. Both follow-sets missed this shape, so four --diagnose reads silently left
+  # rule 5's scan mid-review while it kept reporting clean. Driven unbounded, so it
+  # asserts the shape is MATCHED, not merely tolerated.
+  fixture \
+    '  if docker version; then :; fi' \
+    '  if k3d cluster list; then :; fi'
+  run run_style
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"unbounded daemon read"* ]] || return 1
+  [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
+}
+
+@test "rules 5+7: _bounded_capture counts as a bound (the coreutils-free reader)" {
+  fixture \
+    '  if _bounded_capture "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$_cap" docker version; then cat "$_cap"; fi' \
+    '  if _bounded_capture "${TB_K3D_LIST_TIMEOUT:-15}" "$_cap" k3d cluster list; then cat "$_cap"; fi'
+  run run_style
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+# ── rule 7: unbounded 'k3d cluster list' in scripts/lib/ (client#974) ────────
 # The bash twin of client#930, and rule 5's rule for the same daemon. Driven BOTH
 # ways for the same reason rule 5 is: a regex that stopped matching invocations
 # passes every clean-side assertion while enforcing nothing.
@@ -394,14 +446,14 @@ _brand_rgbs() {
 # statement, and a rule that only knew rule 5's follow-set would have called the
 # tree clean with a fresh unbounded call in it.
 
-@test "rule 6: an unbounded 'k3d cluster list' invocation is caught" {
+@test "rule 7: an unbounded 'k3d cluster list' invocation is caught" {
   fixture '  _list="$(k3d cluster list --no-headers)"'
   run run_style
   [ "$status" -eq 1 ] || return 1
   [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
 }
 
-@test "rule 6: '2>/dev/null || true' is NOT a bound (the whole finding of client#974)" {
+@test "rule 7: '2>/dev/null || true' is NOT a bound (the whole finding of client#974)" {
   # This is the exact shape all seven pre-fix sites carried. `|| true` handles k3d
   # FAILING; a wedged Docker daemon does not fail the call, it blocks, so the
   # fallback is never reached. A rule that accepted this spelling would have
@@ -412,7 +464,7 @@ _brand_rgbs() {
   [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
 }
 
-@test "rule 6: a bare 'k3d cluster list' at end of line is caught (the diagnose-bundle shape)" {
+@test "rule 7: a bare 'k3d cluster list' at end of line is caught (the diagnose-bundle shape)" {
   # diagnose.sh:126 pre-fix, inside the support bundle — the worst of the seven.
   fixture '  has k3d && k3d cluster list'
   run run_style
@@ -420,7 +472,7 @@ _brand_rgbs() {
   [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
 }
 
-@test "rule 6: a LINE-CONTINUED invocation is caught (the arm rule 5 does not have)" {
+@test "rule 7: a LINE-CONTINUED invocation is caught (the arm rule 5 does not have)" {
   # assess.sh:90's shape. With rule 5's follow-set alone the next char after
   # `list` is a backslash, which matches no alternative — so this call would have
   # been invisible to the rule that exists to find it.
@@ -432,7 +484,7 @@ _brand_rgbs() {
   [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
 }
 
-@test "rule 6: routed through _bounded is clean (the rule is satisfiable)" {
+@test "rule 7: routed through _bounded is clean (the rule is satisfiable)" {
   # gpu-nvidia.sh:102's shape — the in-tree precedent the seven were written
   # against — plus the continued and piped spellings the fix actually uses.
   fixture \
@@ -444,7 +496,7 @@ _brand_rgbs() {
   [ "$status" -eq 0 ] || return 1
 }
 
-@test "rule 6: string mentions and comments are NOT invocations (the discriminator)" {
+@test "rule 7: string mentions and comments are NOT invocations (the discriminator)" {
   # Each line contains the literal 'k3d cluster list' and none is a call: the
   # bundle's section heading, the timeout note the fix prints, a hint in prose, a
   # comment. All four must be left alone or the rule is unsatisfiable without
@@ -458,32 +510,32 @@ _brand_rgbs() {
   [ "$status" -eq 0 ] || return 1
 }
 
-@test "rule 6: 'timeout' in a trailing comment does NOT excuse an unbounded call" {
+@test "rule 7: 'timeout' in a trailing comment does NOT excuse an unbounded call" {
   fixture '  k3d cluster list --no-headers   # TODO: add a timeout later'
   run run_style
   [ "$status" -eq 1 ] || return 1
   [[ "$output" == *"unbounded 'k3d cluster list'"* ]] || return 1
 }
 
-# ── rule 7: rule 6's census (backend#2849's house rule) ──────────────────────
+# ── rule 8: rule 7's census (backend#2849's house rule) ──────────────────────
 # "A check that cannot distinguish 'clean' from 'didn't look'." Rule 6 is a text
 # scan over scripts/lib/, so the moment it stops matching — a renamed file, an
 # extension the --include misses, a nudged regex — it prints the same "ok: style +
 # terminology clean" as a rule that checked every site. Rule 7 is the separate
 # assertion that it FOUND something.
 
-@test "rule 7: the census fires when rule 6 goes vacuous (a lib file the scan can no longer see)" {
+@test "rule 8: the census fires when rule 7 goes vacuous (a lib file the scan can no longer see)" {
   # Rename the file holding five of the eight known call sites so `--include='*.sh'`
   # misses it. Rule 6 then has nothing to complain about and would report clean;
   # rule 7 is what turns that into a red.
   mv "$WORK/scripts/lib/cluster.sh" "$WORK/scripts/lib/cluster.bash"
   run run_style
   [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"rule 6 went VACUOUS"* ]] || return 1
+  [[ "$output" == *"rule 7 went VACUOUS"* ]] || return 1
   [[ "$output" == *"floor is 8"* ]] || return 1
 }
 
-@test "rule 7: the floor is HONEST — the real tree meets it with no slack to spare" {
+@test "rule 8: the floor is HONEST — the real tree meets it with no slack to spare" {
   # A floor set below the truth is the same vacuity one step removed: it would
   # survive four of the eight sites disappearing. Derive the count the way rule 6
   # does and assert the declared floor is not lower than what is actually there.
@@ -495,9 +547,10 @@ _brand_rgbs() {
   [[ "$floor" =~ ^[0-9]+$ ]] || return 1
   found="$( ( cd "$WORK" && grep -rnE --include='*.sh' --include='*.ps1' \
                 --exclude='check-style.sh' --exclude-dir='tests' "$re" scripts/lib/ ) \
+            | grep -vE '# *style-guard: *allow' \
             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -c . || true)"
   [ "$found" -eq "$floor" ] || {
-    echo "rule 6 finds $found call site(s) but K3D_LIST_SITES_FLOOR is $floor — a floor below the truth lets sites vanish unnoticed; a floor above it is unsatisfiable"
+    echo "rule 7 finds $found call site(s) but K3D_LIST_SITES_FLOOR is $floor — a floor below the truth lets sites vanish unnoticed; a floor above it is unsatisfiable"
     return 1
   }
 }

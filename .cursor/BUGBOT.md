@@ -53,10 +53,11 @@ for *what the operator sees and can act on*, not code elegance.
   never reached (client#974, the twin of client#930). `check-style.sh` **rule 5**
   now covers `docker info|ps|inspect|version` (widened in client#984, where a bare
   `docker ps` sat two lines above a new gate and defeated it), **rule 6** covers
-  `k3d cluster list`, and **rule 7** is rule 6's census: a text scan that matches
-  nothing prints as clean as one that checked everything, so the rule asserts it
-  found at least the sites known to exist. Prefer that pairing for any new
-  grep-class gate here. `k3d cluster start`/`create` take `--wait --timeout`;
+  `k3d cluster list`, and **rules 6 and 8 are their censuses**: a text scan that
+  matches nothing prints as clean as one that checked everything, so each rule
+  asserts it found at least the sites known to exist, with a floor a test proves
+  honest. Pair every new grep-class gate here with a census — rule 5 shipped
+  without one and silently stopped covering four reads when their spelling changed. `k3d cluster start`/`create` take `--wait --timeout`;
   `k3d cluster delete` takes neither, so bound it with `_bounded` and check for 124
   (`scripts/tests/e2e-windows.ps1` does this for its pre-clean).
 
@@ -74,14 +75,43 @@ for *what the operator sees and can act on*, not code elegance.
   `_k3d_cluster_running` and `install-k8s.ps1`'s `Get-ClusterRunStateFromList` already
   carry, and **no boolean wrapper** — a wrapper makes every `if fn` caller inherit
   somebody else's answer, and `! fn` silently spells it "no".
-  (b) **The guard must assert the OUTCOME, not the bound.** "Is this call bounded?"
-  was green on the shipped bug. Assert what the timeout branch DOES: which function
-  it calls, which state it sets — and pair it with the definite-answer case, or the
-  test passes against code that can never take the branch at all.
+  (b) **An AUTHORITATIVE answer beats a later probe's "couldn't tell".** A probe
+  chain must RETURN on the first read that completed and parsed, both ways. Letting
+  it fall through cost a second High finding on the same PR: a successful JSON
+  listing proved the cluster absent, the table probe below it then timed out, and a
+  first-time install with `jq` present tried to *start* a cluster the listing had
+  just proved absent. `jq -e` cannot tell "no match" from "not JSON" — both are
+  non-zero — so check the payload SHAPE before treating a non-match as an answer.
+  (c) **Never pipe a bounded read straight into a filter.** `read | grep -iE PROXY`
+  turns a fired deadline into empty output, i.e. "this node has no proxy env" — on a
+  machine being diagnosed *for* a proxy problem. Capture, check the status, then
+  filter, and say "UNKNOWN for this node, not absent" when the read did not finish.
+  (d) **The guard must assert the OUTCOME, not the bound.** "Is this call bounded?"
+  was green on the shipped bug, and `check-style.sh` was green on the second round
+  too — boundedness and outcome-propagation are different properties.
+  `scripts/tests/bounded-reads-propagate.bats` is the class guard for the second:
+  it derives every bounded daemon read from check-style's own regexes, requires the
+  enclosing function to be driven three ways (or to sit in an explicitly named,
+  **ratcheted** exemption list), and asserts the three outcomes are DISTINCT.
+  Assert what the timeout branch DOES — which function it calls, which state it
+  sets — and pair it with the definite-answer case, or the test passes against code
+  that can never take the branch at all.
   Ordering another daemon probe ahead of the read does not close this: the guard and
   the read have different budgets (`TB_ASSESS_DOCKER_TIMEOUT` 10s vs
   `TB_K3D_LIST_TIMEOUT` 15s), so a daemon that answers fast with a slow k3d read
   passes the guard and times out anyway.
+
+- **`_bounded` is not a bound on macOS; `_bounded_capture` is.** `_bounded` execs
+  timeout(1)/gtimeout(1) and runs the BARE command when neither is present, and
+  neither ships on a stock Mac. `_docker_answers_bounded` solves that for a yes/no
+  probe but discards output, so a read whose OUTPUT is the point had nothing —
+  which is how the `--diagnose` bundle stayed hangable through two review rounds.
+  `_bounded_capture SECONDS OUTFILE CMD…` (common.sh) bounds via the child PID, needs
+  no coreutils, and returns 124 distinguishably. **A liveness gate is not a
+  substitute:** proving `docker info` answers in 10s says nothing about a 15s
+  `k3d cluster list`, which is more engine work on a longer budget. Every read in
+  `diagnose.sh` uses `_bounded_capture`, and `diagnose.bats` enforces that for that
+  file specifically (rule 5 accepts either, correctly — it governs the whole tree).
 
 - **Give a slow call its own budget.** `TB_PROBE_TIMEOUT`'s 5s is for cheap
   skip-gate probes. `k3d cluster list` enumerates *and* inspects containers — more
