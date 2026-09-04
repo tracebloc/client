@@ -4697,15 +4697,42 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
   # blob; this proves the install path consults it BEFORE it decides existence.
   # An assert placed after `$clusterExists` would pass every unit test and still
   # let the create path win the race with it.
+  #
+  # IT READS THE AST, NOT THE SOURCE TEXT, and that is not a stylistic
+  # preference — it is a MEASURED correction. The first version of this test did
+  # `$fn.IndexOf('Assert-ClusterListingReadable -Json $clusterListJson')`, and
+  # mutation-check reported SURVIVED for the mutation that comments that very
+  # call out: `# Assert-ClusterListingReadable …` still CONTAINS the string the
+  # test searched for, so a source-text guard cannot tell a live call from a dead
+  # one and this guard would have certified an installer that had gone back to
+  # guessing. The parser knows a command from a comment; nothing else here does.
   It "New-K3dCluster refuses an indeterminate listing BEFORE deciding the cluster is absent" {
-    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
-    $fn  = (($src -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
-    $iRead   = $fn.IndexOf('$clusterListJson = Get-ClusterListJson')
-    $iAssert = $fn.IndexOf('Assert-ClusterListingReadable -Json $clusterListJson')
-    $iDecide = $fn.IndexOf('$clusterExists   = $null -ne $clusterObj')
-    $iRead   | Should -BeGreaterThan -1 -Because "the bounded read must still be here"
-    $iAssert | Should -BeGreaterThan -1 -Because "a bounded read with no decision at its consumer is the client#973 blocker"
-    $iDecide | Should -BeGreaterThan -1 -Because "the existence decision must still be here"
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    # Fail CLOSED: an unparseable file must not read as "the order is fine".
+    $errors.Count | Should -Be 0 -Because "the installer must parse before this property means anything"
+    $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-K3dCluster' }, $true) |
+      Select-Object -First 1
+    $fn | Should -Not -BeNullOrEmpty -Because "cannot find New-K3dCluster in the AST"
+
+    $calls = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+    $lineOfCall = {
+      param($name)
+      $c = @($calls | Where-Object { $_.GetCommandName() -eq $name }) | Select-Object -First 1
+      if ($c) { $c.Extent.StartLineNumber } else { 0 }   # 0 = not CALLED at all
+    }
+    $iRead   = & $lineOfCall 'Get-ClusterListJson'
+    $iAssert = & $lineOfCall 'Assert-ClusterListingReadable'
+
+    # The decision itself is an assignment, not a call.
+    $assign = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) |
+      Where-Object { $_.Left.Extent.Text -eq '$clusterExists' }) | Select-Object -First 1
+    $assign | Should -Not -BeNullOrEmpty -Because "the existence decision must still be here"
+    $iDecide = $assign.Extent.StartLineNumber
+
+    $iRead   | Should -BeGreaterThan 0 -Because "the bounded read must still be CALLED, not merely mentioned"
+    $iAssert | Should -BeGreaterThan 0 -Because "a bounded read with no decision at its consumer is the client#973 blocker"
     $iAssert | Should -BeGreaterThan $iRead   -Because "it judges the blob the reader returned"
     $iDecide | Should -BeGreaterThan $iAssert -Because "an unreadable listing must never reach the absent/create decision"
   }
