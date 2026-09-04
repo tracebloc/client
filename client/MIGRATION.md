@@ -2,7 +2,7 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
-## Upgrading to 1.9.102 — `env.MULTI_GPU_MIN_PARAMETERS`, the multi-GPU size floor (RFC-0067 D2)
+## Upgrading to 1.9.103 — `env.MULTI_GPU_MIN_PARAMETERS`, the multi-GPU size floor (RFC-0067 D2)
 
 Nothing changes on upgrade: the key is **absent by default**, and absent means
 the runtime's size gate **refuses every run** (`GPU_COUNT_SIZE_FLOOR_UNSET`), so
