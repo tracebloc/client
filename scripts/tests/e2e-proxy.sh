@@ -68,10 +68,25 @@ source "$LIB/setup-linux.sh"
 # shellcheck source=/dev/null
 source "$LIB/cluster.sh"
 
+# The harness's verdict is captured FIRST and returned LAST: errexit is live
+# inside an EXIT trap, so any command here that ends non-zero aborts the trap and
+# overwrites the script's exit status (client#979 — that is how a correct `set -e`
+# abort became GitHub's `cancelled`). This file had a SECOND route to the same
+# loss: `rm -rf "$WORK"` was the trap's last statement, so its status was the one
+# the job reported. e2e_cleanup_cluster is bounded, prints what it did, and always
+# returns 0.
 cleanup() {
-  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
-  docker rm -f "$SQUID_NAME" >/dev/null 2>&1 || true
-  rm -rf "$WORK"
+  local _status=$?
+  e2e_cleanup_cluster
+  # SAME CLASS, adjacent site (client#979): `docker rm -f` talks to the same engine
+  # e2e_cleanup_cluster was stalling on, and was equally unbounded and equally
+  # silenced — a second route to the same 24 invisible minutes in the same trap.
+  # stderr is kept so a real docker error is visible; the `|| echo` keeps this from
+  # ending the trap non-zero.
+  _bounded "${TB_E2E_DELETE_TIMEOUT:-120}" docker rm -f "$SQUID_NAME" >/dev/null \
+    || echo "cleanup: could not remove the squid container ${SQUID_NAME} within ${TB_E2E_DELETE_TIMEOUT:-120}s — it may remain on this runner." >&2
+  rm -rf "$WORK" 2>/dev/null || true
+  return "$_status"
 }
 trap cleanup EXIT
 

@@ -62,9 +62,17 @@ source "$LIB/preflight.sh" # provides _pf_recheck_runtime_mem (called by create_
 # braces a password may contain) — same stance as the installer's generated
 # values.yaml. Removed on every exit path together with the cluster.
 CREDS_FILE=""
+# The harness's verdict is captured FIRST and returned LAST: errexit is live
+# inside an EXIT trap, so any command here that ends non-zero aborts the trap and
+# overwrites the script's exit status (client#979 — that is how a correct `set -e`
+# abort became GitHub's `cancelled`). e2e_cleanup_cluster is bounded, prints what
+# it did, and always returns 0. The credentials file is still reaped FIRST: a
+# mode-0600 secret must not outlive this process even if the cluster delete stalls.
 cleanup() {
+  local _status=$?
   [ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"
-  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  e2e_cleanup_cluster
+  return "$_status"
 }
 trap cleanup EXIT
 
