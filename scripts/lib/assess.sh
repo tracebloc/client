@@ -83,12 +83,24 @@
 # ("running/total") for an EXACT name match with awk. Echoes an integer; 0 on any
 # error / when the cluster is absent.
 _assess_cluster_servers_running() {
-  local running="0" line
-  # `|| line=""`: awk's `exit` closes the pipe, so under `set -o pipefail` a
-  # SIGPIPE from k3d (141) — or any k3d failure — would otherwise propagate
-  # non-zero out of the assignment and abort the installer under `set -e`.
-  line="$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')" \
-    || line=""
+  local running="0" line _tbl _rc=0
+  # BOUNDED (client#974). `k3d cluster list` talks to the Docker engine, and a
+  # WEDGED daemon does not FAIL it — it BLOCKS — so the `|| line=""` this line
+  # already carried handled only k3d failing and was never reached on the input
+  # that matters. This probe runs at the stop-and-check gate on EVERY re-run, so
+  # unbounded it parked the installer before it printed anything. Same distinction
+  # _docker_answers' header draws for a bare `docker info` (#741/#744).
+  #
+  # CAPTURE-THEN-MATCH, not a pipe (#680): awk's `exit` closes the pipe on our
+  # cluster's row — usually row one — so the producer takes SIGPIPE, `pipefail`
+  # makes the pipeline 141, and `|| line=""` then DISCARDED a value we had
+  # successfully read, reporting a running cluster as 0 servers. cluster.sh's
+  # _handle_existing_cluster already made exactly this transform and its comment
+  # points here as the mirror; this is that mirror actually being one.
+  # `|| _rc=$?` keeps a non-zero read from aborting under `set -e`.
+  _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
+  (( _rc == 0 )) || _tbl=""
+  line="$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")"
   [[ -n "$line" ]] && running="${line%%/*}"
   [[ "$running" =~ ^[0-9]+$ ]] || running="0"
   printf '%s' "$running"
@@ -269,11 +281,20 @@ _assess_classify() {
   INSTALL_STATE_REASON="no-cluster"
 
   # Is the container runtime even reachable? This MUST come before the cluster
-  # probe (client#682). `_cluster_exists` is a boolean whose three probes all
-  # swallow stderr and return 1, so a down daemon is indistinguishable from an
-  # empty machine — and a laptop that merely needs Docker started was told it had
-  # nothing installed and offered a full first-time install. install-k8s.ps1 has
-  # carried the tri-state version of this contract since #557; bash never did.
+  # probe (client#682). The cluster probe used to be a BOOLEAN whose three reads
+  # all swallowed stderr and returned 1, so a down daemon was indistinguishable
+  # from an empty machine — and a laptop that merely needs Docker started was told
+  # it had nothing installed and offered a full first-time install. install-k8s.ps1
+  # has carried the tri-state version of this contract since #557; bash finally
+  # does too (_cluster_presence, client#984).
+  #
+  # THIS ORDERING IS NOT ENOUGH ON ITS OWN, and it is worth being precise about
+  # why, because the ordering used to be cited as the whole answer: this guard
+  # tests the DAEMON (`docker info`, TB_ASSESS_DOCKER_TIMEOUT = 10s) while the
+  # cluster read tests k3d (TB_K3D_LIST_TIMEOUT = 15s). A daemon that answers
+  # `docker info` in 2s while `k3d cluster list` takes 20s passes here and times
+  # out below — the window is arithmetic, not hypothetical (LukasWodka,
+  # client#984). The tri-state below is what closes it.
   # DEGRADED, not blocked: the normal flow already knows how to start a stopped
   # runtime (install_docker_desktop launches Docker Desktop and waits;
   # install_docker_engine brings up the Linux service), and create_cluster then
@@ -287,11 +308,26 @@ _assess_classify() {
   fi
 
   # No engine or no cluster => first-time setup. (has k3d short-circuits before
-  # _cluster_exists so a machine without k3d doesn't shell out at all.)
-  if ! has k3d || ! _cluster_exists; then
+  # the cluster probe so a machine without k3d doesn't shell out at all.)
+  #
+  # `fresh` is the one verdict this gate must never reach on a GUESS: it offers a
+  # first-time install, over whatever is actually on the machine. The cluster probe
+  # is bounded (client#974), so it has a third answer — the engine didn't respond —
+  # and reading that as "no cluster" is client#682's misclassification arriving
+  # through the new bound (Bugbot High, client#984). UNKNOWN degrades instead, which
+  # is this gate's documented direction on uncertainty: never a false healthy, never
+  # a false fresh, always fall through to the normal flow.
+  if ! has k3d; then
     INSTALL_STATE="fresh"; INSTALL_STATE_REASON="no-cluster"
     return 0
   fi
+  # `|| _presence=$?` — a bare non-zero return would abort under `set -e`.
+  local _presence=0
+  _cluster_presence || _presence=$?
+  case "$_presence" in
+    1) INSTALL_STATE="fresh";    INSTALL_STATE_REASON="no-cluster"           ; return 0 ;;
+    2) INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0 ;;
+  esac
 
   # A cluster exists — but is it RUNNING? Check this via the cheap read-only k3d
   # probe BEFORE any Helm call. detect_installed_client below runs `helm list -A`

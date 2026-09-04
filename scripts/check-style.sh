@@ -9,7 +9,7 @@
 #  so until 2026-08-19 a violation here printed red and merged anyway.
 #  Exit 0 = clean, 1 = violations found, 2 = the guard itself errored (fail-closed).
 #
-#  Five mechanical checks (semantic calls — role misuse, judgement-y wording —
+#  Eight mechanical checks (semantic calls — role misuse, judgement-y wording —
 #  stay with CODEOWNERS review + STYLE.md; a grep can't police those). Emoji are
 #  intentionally NOT policed — they're welcome (see STYLE.md):
 #    1. No hardcoded brand colour outside the colour engine (scripts/lib/common.sh).
@@ -19,9 +19,19 @@
 #       see the note on the check itself.
 #    4. No capital-T 'Tracebloc' in user-facing text — the product name is
 #       lowercase. Comments and PascalCase identifiers are exempt.
-#    5. No unbounded 'docker info' in scripts/lib/ — every daemon probe routes
-#       through _docker_answers / _bounded (common.sh) so a wedged daemon can't
-#       hang the installer (#741, #744).
+#    5. No unbounded DAEMON READ in scripts/lib/ — 'docker info|ps|inspect|version'
+#       all route through _docker_answers / _bounded (common.sh) so a wedged daemon
+#       can't hang the installer (#741, #744; widened past 'info' in client#984,
+#       where a bare `docker ps` sat two lines above a gate and defeated it).
+#    6. Rule 5's CENSUS — see 8; rule 5 lacked one and silently stopped covering
+#       four reads when their spelling changed (client#984).
+#    7. No unbounded 'k3d cluster list' in scripts/lib/ — same daemon, same rule;
+#       a wedged engine blocks the call rather than failing it, so `|| true` is
+#       not a bound (client#974, the bash twin of client#930).
+#    8. Rule 7's CENSUS — a text-scan rule must find at least the call sites known
+#       to exist, so a scan gone vacuous (a renamed file, a nudged regex, a changed
+#       call spelling) reddens instead of reporting coverage it no longer has
+#       (backend#2849's house rule).
 #
 #  This count is asserted by scripts/tests/check-style.bats: it said "Three" while
 #  four rules were live (backend#1924). A gate whose own description undercounts
@@ -150,12 +160,94 @@ report "capital-T 'Tracebloc' in user-facing text — the product name is lowerc
 #    _bounded / timeout / gtimeout appears BEFORE the probe on it (`…[^#]*docker …info`), so
 #    a stray "timeout" in a trailing comment can't mask an unbounded call;
 #    `# style-guard: allow` opts out a genuine edge.
-docker_probe='docker[[:space:]]+info([[:space:]]+[-&>|;12#]|[[:space:]]*[)]|[[:space:]]*$)'
+#    WIDENED PAST `info` (LukasWodka, client#984). `docker info` was never the only
+#    subcommand that talks to the daemon, and the gap was not theoretical: the first
+#    cut of client#974 bounded a `k3d cluster list` inside the --diagnose bundle
+#    while a bare `docker ps -a` two lines ABOVE it kept the whole group hanging, and
+#    this rule could not see it — rule 5 matched only `info`, rule 6 only
+#    `k3d cluster list`. The set is the daemon READS on the installer's probe paths:
+#    info, ps, inspect, version (`docker version` reports the SERVER version, so it
+#    blocks like the others). Mutating subcommands (run/exec/pull/update) carry
+#    their own, very different budgets and are deliberately out of this rule.
+#    The follow-set includes a QUOTED or EXPANDED first argument (`"` `'` `$`), which
+#    is how five of this tree's `docker inspect "k3d-…-server-0"` reads are spelled —
+#    a flag-only follow-set walked straight past every one of them. It also includes a
+#    line-continuation backslash, the arm rule 6 documents.
+docker_probe='docker[[:space:]]+(info|ps|inspect|version)([[:space:]]+[-&>|;12#"'"'"'$]|[[:space:]]*[);]|[[:space:]]+\\[[:space:]]*$|[[:space:]]*$)'
 scan "$docker_probe" '' 'scripts/lib/'
-report "unbounded 'docker info' in scripts/lib/ — route it through _docker_answers (yes/no) or _bounded (needs output) from ${ENGINE} so a wedged daemon can't hang the installer (#744)" \
-  "$(printf '%s' "$hits" \
-      | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
-      | grep -vE '(_bounded|timeout|gtimeout)[^#]*docker[[:space:]]+info' || true)"
+docker_read_sites="$(printf '%s' "$hits" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+report "unbounded daemon read in scripts/lib/ — route 'docker info|ps|inspect|version' through _docker_answers (yes/no), _bounded (needs output) or _bounded_capture (needs output AND a bound that survives a Mac) from ${ENGINE} so a wedged daemon can't hang the installer (#744, client#984)" \
+  "$(printf '%s' "$docker_read_sites" \
+      | grep -vE '(_bounded|_bounded_capture|_bounded_root|timeout|gtimeout)[^#]*docker[[:space:]]+(info|ps|inspect|version)' || true)"
+
+# 6) THE CENSUS FOR RULE 5 — did rule 5 actually LOOK?
+#
+#    Same house rule as rule 8 below (backend#2849), and it earned its place the hard
+#    way: rule 5's sibling census caught a real regression mid-review. Moving the
+#    --diagnose reads from `_bounded` to `_bounded_capture` changed their spelling to
+#    `if _bounded_capture … docker version; then`, and the follow-set did not know the
+#    `cmd;` shape — so those sites silently LEFT the scan and rule 5 reported clean
+#    while covering fewer files than the round before. Rule 7 reddened on exactly that
+#    for its own reads; rule 5 had no census and said nothing.
+#
+#    A FLOOR, not an equality: check-style.bats plants fixture files under scripts/lib/
+#    to drive rule 5 both ways. Raise it deliberately when a read lands; never lower it
+#    to make this green, which is the vacuity it exists to catch.
+DOCKER_READ_SITES_FLOOR=30
+docker_reads_found="$(printf '%s' "$docker_read_sites" | grep -c . || true)"
+report "rule 5 went VACUOUS — it found ${docker_reads_found} 'docker info|ps|inspect|version' call site(s) under scripts/lib/ but at least ${DOCKER_READ_SITES_FLOOR} are known to exist. A scan that matches nothing reports 'clean' identically to one that checked everything; fix the scan (or lower the floor only if reads were genuinely removed) rather than trusting this" \
+  "$( [[ "$docker_reads_found" -lt "$DOCKER_READ_SITES_FLOOR" ]] && printf 'found %s call site(s), floor is %s\n' "$docker_reads_found" "$DOCKER_READ_SITES_FLOOR" || true )"
+
+# 7) Unbounded `k3d cluster list` in scripts/lib/ — the same rule as 5, for the same
+#    daemon (client#974, the bash twin of client#930). `k3d cluster list` talks to the
+#    Docker engine, so a WEDGED daemon does not FAIL it, it BLOCKS — and every one of
+#    the seven pre-fix call sites carried `2>/dev/null || true`, which handles k3d
+#    FAILING and was therefore never reached on the input that matters. Three of them
+#    were on the main install path (_cluster_presence) and one was inside the --diagnose
+#    support bundle, the run collected BECAUSE the machine is already broken.
+#    client#973 widened the PowerShell AST guard from `docker` to `docker|k3d`; this is
+#    the bash half of that widening, kept as its own rule so rule 5's message stays
+#    exactly as specific as it is.
+#
+#    Mechanics mirror rule 5's: match an INVOCATION — `k3d cluster list` followed by
+#    whitespace-then-flag/redirection/pipe/comment, a closing paren, a line-continuation
+#    backslash, or end of line. Mentions we must NOT flag all have a quote, a backtick
+#    or a letter as the next char ("## k3d cluster list", 'k3d cluster list' in prose,
+#    "k3d cluster list did not complete"). The continuation arm is deliberate: rule 5
+#    has no such arm, so a `docker info \` spanning two lines would slip it — a `k3d
+#    cluster list \` here does not. A line counts as bounded only when _bounded /
+#    timeout / gtimeout appears BEFORE the call on it, so a "timeout" in a trailing
+#    comment cannot excuse it; `# style-guard: allow` opts out a genuine edge.
+k3d_list_probe='k3d[[:space:]]+cluster[[:space:]]+list([[:space:]]+[-&>|;12#]|[[:space:]]*[);]|[[:space:]]+\\[[:space:]]*$|[[:space:]]*$)'
+scan "$k3d_list_probe" '' 'scripts/lib/'
+k3d_list_sites="$(printf '%s' "$hits" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+report "unbounded 'k3d cluster list' in scripts/lib/ — wrap it in _bounded (see gpu-nvidia.sh) so a wedged Docker daemon can't hang the installer or the support bundle (client#974)" \
+  "$(printf '%s' "$k3d_list_sites" \
+      | grep -vE '(_bounded|_bounded_capture|timeout|gtimeout)[^#]*k3d[[:space:]]+cluster[[:space:]]+list' || true)"
+
+# 8) THE CENSUS FOR RULE 7 — did rule 7 actually LOOK?
+#
+#    This is the house rule of backend#2849 applied to this file: a check that cannot
+#    distinguish "clean" from "didn't look" is the dominant defect class here. Rule 6
+#    is a text scan, and a text scan that matches NOTHING prints exactly as clean as
+#    one that matched every site and found them all bounded. Rename scripts/lib/cluster.sh,
+#    move _cluster_presence into a file the `--include` misses, or nudge the invocation
+#    regex, and rule 7 goes vacuous while still reporting coverage it structurally
+#    cannot provide — which is worse than having no rule, because it is believed.
+#
+#    So rule 7 must also find AT LEAST the sites known to exist. A FLOOR, not an
+#    equality: check-style.bats plants extra fixture files under scripts/lib/ to drive
+#    rule 6 both ways, and an equality would redden on its own tests. Raise the floor
+#    deliberately when a new call site lands — never lower it to make this green, that
+#    is the vacuity this rule exists to catch.
+#
+#    The 8: seven bounded by client#974 (cluster.sh ×5, assess.sh, diagnose.sh) plus
+#    gpu-nvidia.sh's, which #431 had already bounded and which is the in-tree precedent
+#    the seven were written against.
+K3D_LIST_SITES_FLOOR=8
+k3d_list_found="$(printf '%s' "$k3d_list_sites" | grep -c . || true)"
+report "rule 7 went VACUOUS — it found ${k3d_list_found} 'k3d cluster list' call site(s) under scripts/lib/ but at least ${K3D_LIST_SITES_FLOOR} are known to exist. A scan that matches nothing reports 'clean' identically to one that checked everything; fix the scan (or raise the floor if a site was legitimately removed) rather than trusting this" \
+  "$( [[ "$k3d_list_found" -lt "$K3D_LIST_SITES_FLOOR" ]] && printf 'found %s call site(s), floor is %s\n' "$k3d_list_found" "$K3D_LIST_SITES_FLOOR" || true )"
 
 if [[ "$guard_error" -ne 0 ]]; then
   echo "  [!] the guard hit an internal error — failing closed (exit 2)" >&2

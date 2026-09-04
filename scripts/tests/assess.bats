@@ -20,7 +20,7 @@ bats_require_minimum_version 1.7.0   # `run -<code>` flags
 load test_helper
 
 setup() {
-  load_lib cluster.sh                          # common.sh + cluster.sh (_cluster_exists)
+  load_lib cluster.sh                          # common.sh + cluster.sh (_cluster_presence)
   # shellcheck source=/dev/null
   source "${LIB_DIR}/install-client-helm.sh"   # detect_installed_client
   # shellcheck source=/dev/null
@@ -71,7 +71,16 @@ _depname() {
 # ── _assess_cluster_servers_running (read-only serversRunning, jq-free) ──────
 # Single jq-free path (jq is not a guaranteed installer prerequisite, Bugbot
 # #284): the k3d table's SERVERS column ("running/total"), read with awk.
+#
+# `_bounded() { shift; "$@"; }` in every one of these (this file's convention for
+# probe tests) is LOAD-BEARING since client#974 bounded the read. _bounded execs
+# `timeout`, a BINARY, which cannot see a `k3d` shell-function mock — so on any
+# machine that HAS coreutils (all of Linux CI) the mock is bypassed and the probe
+# reads the REAL k3d. Verified, not assumed: with a `timeout` on PATH and a real
+# `tracebloc` cluster up on the dev box, "stopped cluster -> 0" and "k3d error ->
+# 0" both went red with "1" — the live cluster answering instead of the mock.
 @test "_assess_cluster_servers_running: running cluster -> >=1" {
+  _bounded() { shift; "$@"; }
   k3d() { printf 'tracebloc 1/1 0/0\n'; }
   run _assess_cluster_servers_running
   [ "$status" -eq 0 ] || return 1
@@ -79,15 +88,48 @@ _depname() {
 }
 
 @test "_assess_cluster_servers_running: stopped cluster -> 0" {
+  _bounded() { shift; "$@"; }
   k3d() { printf 'tracebloc 0/1 0/0\n'; }
   run _assess_cluster_servers_running
   [ "$output" = "0" ] || return 1
 }
 
 @test "_assess_cluster_servers_running: k3d error -> 0 (never non-numeric)" {
+  _bounded() { shift; "$@"; }
   k3d() { return 1; }
   run _assess_cluster_servers_running
   [ "$output" = "0" ] || return 1
+}
+
+# client#974: the read is BOUNDED, and a deadline that fires must read as "cannot
+# tell" (0 -> degrade toward the normal flow), never as a number scraped from a
+# half-written table.
+@test "_assess_cluster_servers_running: a TIMED-OUT read -> 0 (bounded, client#974)" {
+  _bounded() { return 124; }
+  k3d() { printf 'tracebloc 1/1 0/0\n'; }   # would say "1" if the bound were bypassed
+  run _assess_cluster_servers_running
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "0" ] || return 1
+}
+
+# client#974 / #680 at THIS site. The pre-fix line piped k3d into `awk … {exit}`:
+# awk closes the pipe on our cluster's row — usually row one — the producer takes
+# SIGPIPE, `pipefail` makes the pipeline 141, and the `|| line=""` fallback then
+# DISCARDED a value that had been read successfully, reporting a running cluster
+# as 0 servers. cluster.sh made this transform in #680 and its comment names this
+# function as the mirror; capture-then-match is that mirror actually being one.
+# Position is the trigger, so the match must be on line 1 with far more than the
+# 64KB pipe buffer behind it.
+@test "_assess_cluster_servers_running: our cluster FIRST in a long listing is not discarded (#680 at this site)" {
+  set -o pipefail
+  _bounded() { shift; "$@"; }
+  k3d() {
+    printf 'tracebloc 1/1 0/0\n'
+    printf 'other-%s 1/1 0/0\n' $(seq 1 8000)
+  }
+  run _assess_cluster_servers_running
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "1" ] || return 1
 }
 
 # ── _assess_workload_ready (ALL shared workloads; bounded, read-only) ───────
@@ -300,7 +342,7 @@ _depname() {
 # straight to healthy on any CLI that merely existed.
 @test "_assess_classify: a stale CLI is degraded/cli-outdated, NEVER healthy" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 1; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_release_pending() { return 1; }
@@ -314,7 +356,7 @@ _depname() {
 
 @test "_assess_classify: a current CLI still reaches healthy (floor doesn't over-fire)" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 1; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_release_pending() { return 1; }
@@ -332,7 +374,7 @@ _depname() {
 # _assess_cli_behind_latest branch and this classifies healthy again.
 @test "_assess_classify: upgrade intent + CLI behind latest -> degraded (cli-behind-latest)" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 1; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_release_pending() { return 1; }
@@ -352,7 +394,7 @@ _depname() {
 # path, so a routine re-run is unchanged and pays no "what is latest?" cost.
 @test "_assess_classify: NO upgrade intent + CLI behind latest -> still healthy (branch inert)" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 1; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_release_pending() { return 1; }
@@ -371,7 +413,7 @@ _depname() {
 # ordered after the floor check, so it never masks it.
 @test "_assess_classify: upgrade intent + BELOW-floor CLI -> cli-outdated (floor still wins)" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 1; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_release_pending() { return 1; }
@@ -413,7 +455,7 @@ _use_real_runtime_probe() {
 
 # The gate must separate "Docker isn't installed" (a genuinely fresh machine)
 # from "Docker is installed but not answering" (one sentence fixes it). Before
-# this both collapsed into _cluster_exists returning 1 -> fresh/no-cluster, so a
+# this both collapsed into the cluster probe returning "absent" -> fresh/no-cluster, so a
 # laptop that had only to start Docker was told it had nothing installed.
 @test "_assess_runtime_down: no docker binary -> NOT down (genuinely fresh)" {
   _use_real_runtime_probe
@@ -493,7 +535,7 @@ _use_real_runtime_probe() {
 @test "_assess_classify: runtime down -> degraded (runtime-down), never fresh" {
   has() { return 0; }
   _assess_runtime_down() { return 0; }
-  _cluster_exists() { touch "$BATS_TEST_TMPDIR/cluster-probed"; return 1; }
+  _cluster_presence() { touch "$BATS_TEST_TMPDIR/cluster-probed"; return 1; }
   _assess_classify
   [ "$INSTALL_STATE" = degraded ] || return 1
   [ "$INSTALL_STATE_REASON" = runtime-down ] || return 1
@@ -506,14 +548,72 @@ _use_real_runtime_probe() {
 @test "_assess_classify: runtime down is NOT reported as a first-time machine" {
   has() { return 0; }
   _assess_runtime_down() { return 0; }
-  _cluster_exists() { return 1; }        # exactly what a down daemon looks like
+  _cluster_presence() { return 1; }        # exactly what a down daemon looks like
   _assess_classify
   [ "$INSTALL_STATE_REASON" != no-cluster ] || return 1
 }
 
+# ── the cluster probe's THIRD answer, and what classify does with it ────────
+# Bugbot High + LukasWodka BLOCKING on client#984. `fresh` is the one verdict this
+# gate must never reach on a guess — it means "first time on this machine" and
+# offers a full first-time install over whatever is actually there. The cluster
+# read is bounded (client#974), so it has a third answer, and the first cut of
+# that fix let the third answer BE `fresh`.
+#
+# Note what makes the window real rather than theoretical: the `_assess_runtime_down`
+# guard above is often cited as covering this, but it tests the DAEMON at
+# TB_ASSESS_DOCKER_TIMEOUT (10s) while the cluster read tests k3d at
+# TB_K3D_LIST_TIMEOUT (15s). A daemon answering in 2s with a k3d read that takes
+# 20s passes that guard and times out here.
+@test "_assess_classify: an UNREADABLE cluster list is NEVER 'fresh' (client#984)" {
+  has() { return 0; }
+  _assess_runtime_down() { return 1; }        # the daemon DID answer — the real window
+  _cluster_presence() { return 2; }           # ...but the k3d read did not
+  _assess_classify
+  [ "$INSTALL_STATE" != fresh ] || {
+    echo "reported 'fresh' — a first-time install offered over a machine we could not read"; return 1; }
+  [ "$INSTALL_STATE_REASON" != no-cluster ] || return 1
+  [ "$INSTALL_STATE" = degraded ] || { echo "state=$INSTALL_STATE"; return 1; }
+  [ "$INSTALL_STATE_REASON" = cluster-indeterminate ] || { echo "reason=$INSTALL_STATE_REASON"; return 1; }
+}
+
+@test "_assess_classify: an UNREADABLE cluster list is NEVER 'healthy' either" {
+  # The other verdict that short-circuits. `degraded` falls through to the normal
+  # flow, which is this gate's documented direction on uncertainty.
+  has() { return 0; }
+  _assess_runtime_down() { return 1; }
+  _cluster_presence() { return 2; }
+  _assess_classify
+  [ "$INSTALL_STATE" != healthy ] || return 1
+}
+
+@test "_assess_classify: an UNREADABLE cluster list stops before any Helm call" {
+  # Helm's reads are unbounded and talk to the k8s API. The point of degrading
+  # here is to not spend them on a machine whose engine is not answering.
+  has() { return 0; }
+  _assess_runtime_down() { return 1; }
+  _cluster_presence() { return 2; }
+  _assess_cluster_servers_running() { touch "$BATS_TEST_TMPDIR/servers-probed"; echo 1; }
+  detect_installed_client() { touch "$BATS_TEST_TMPDIR/helm-probed"; INSTALLED_CLIENT_NS="tracebloc"; }
+  _assess_classify
+  [ ! -f "$BATS_TEST_TMPDIR/helm-probed" ] || { echo "ran the Helm probe on an unreadable machine"; return 1; }
+  [ ! -f "$BATS_TEST_TMPDIR/servers-probed" ] || { echo "kept probing past the indeterminate read"; return 1; }
+}
+
+@test "_assess_classify: a DEFINITE absent cluster is still 'fresh' (the guard above is not vacuous)" {
+  # Without this, the three tests above pass just as well against a classify that
+  # can never say `fresh` at all.
+  has() { return 0; }
+  _assess_runtime_down() { return 1; }
+  _cluster_presence() { return 1; }
+  _assess_classify
+  [ "$INSTALL_STATE" = fresh ] || { echo "state=$INSTALL_STATE"; return 1; }
+  [ "$INSTALL_STATE_REASON" = no-cluster ] || return 1
+}
+
 @test "_assess_classify: no k3d / no cluster -> fresh (no-cluster)" {
   has() { return 1; }                          # no k3d
-  _cluster_exists() { return 1; }
+  _cluster_presence() { return 1; }
   _assess_classify
   [ "$INSTALL_STATE" = fresh ] || return 1
   [ "$INSTALL_STATE_REASON" = no-cluster ] || return 1
@@ -521,7 +621,7 @@ _use_real_runtime_probe() {
 
 @test "_assess_classify: running cluster but no tracebloc release -> fresh (cluster-no-release)" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 1; }  # running: reached only after the servers check
   detect_installed_client() { INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; }
   _assess_classify
@@ -531,7 +631,7 @@ _use_real_runtime_probe() {
 
 @test "_assess_classify: release present but cluster stopped -> degraded (cluster-stopped)" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 0; }
   _assess_classify
@@ -544,7 +644,7 @@ _use_real_runtime_probe() {
 # Helm probe — otherwise Helm hangs on a dead API and the box is mislabeled fresh.
 @test "_assess_classify: stopped cluster short-circuits BEFORE the Helm probe" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   _assess_cluster_servers_running() { echo 0; }               # stopped
   detect_installed_client() { touch "$BATS_TEST_TMPDIR/helm-probed"; }  # must NOT run
   _assess_classify
@@ -556,7 +656,7 @@ _use_real_runtime_probe() {
 # driven per-deployment, one workload down at the classify level -> degraded.
 @test "_assess_classify: one workload down (requests-proxy) -> degraded (workload-not-ready)" {
   has() { return 0; }                            # k3d, kubectl, tracebloc present
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 1; }
   _assess_release_pending() { return 1; }        # not wedged
@@ -569,7 +669,7 @@ _use_real_runtime_probe() {
 
 @test "_assess_classify: up + all workloads Ready but CLI missing -> degraded (cli-missing)" {
   has() { case "$1" in tracebloc) return 1;; *) return 0;; esac; }   # k3d+kubectl present, CLI absent
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=tracebloc; }
   _assess_cluster_servers_running() { echo 1; }
   _assess_release_pending() { return 1; }        # not wedged
@@ -582,7 +682,7 @@ _use_real_runtime_probe() {
 
 @test "_assess_classify: all signals true (all three workloads Ready + CLI) -> healthy" {
   has() { return 0; }                            # k3d, kubectl, tracebloc all present
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=munich; }
   _assess_cluster_servers_running() { echo 1; }
   _assess_release_pending() { return 1; }        # not wedged
@@ -603,7 +703,7 @@ _use_real_runtime_probe() {
 # degrade to the normal flow that clears the wedge.
 @test "_assess_classify: release present but WEDGED in pending-* -> degraded (pending-wedge), never healthy" {
   has() { return 0; }
-  _cluster_exists() { return 0; }
+  _cluster_presence() { return 0; }
   detect_installed_client() { INSTALLED_CLIENT_ID=uuid; INSTALLED_CLIENT_NS=munich; }
   _assess_cluster_servers_running() { echo 1; }
   _assess_release_pending() { return 0; }        # a pending wedge is present
