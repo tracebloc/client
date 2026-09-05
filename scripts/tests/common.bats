@@ -1077,11 +1077,70 @@ EOF
   [ "$output" = "https://dev.tracebloc.io" ] || return 1
 }
 
-@test "no LIVE dashboard link is hardcoded to production in either bash file" {
+@test "no LIVE dashboard link is hardcoded to production in ANY bash lib" {
   # A hardcoded link always carries a PATH (/clients, /my-use-cases); the bare
   # host with no path is only ever the mapping arm inside _dashboard_url.
-  run bash -c "grep -c 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/install-client-helm.sh' '$BATS_TEST_DIRNAME/../lib/summary.sh' | grep -v ':0$' || true"
+  #
+  # WIDENED FROM TWO NAMED FILES TO THE GLOB (client#935). This test shipped
+  # with client#946 naming install-client-helm.sh and summary.sh -- the two files
+  # that had the bug -- which made it an instance guard wearing a class name, the
+  # same shape #935 was filed for. The next hardcoded host lands in a third lib
+  # and this stays green. `lib/*.sh` is the class.
+  # AND THE ENTRY POINTS (@saqlainsyed007 on client#977). `lib/*.sh` skipped
+  # `scripts/install-k8s.sh` -- the bash installer's own entry point, which prints
+  # user-facing text and sources these libs. Its PowerShell twin was covered
+  # because that installer IS its entry point, so the class was asymmetric.
+  # Measured: a hardcoded prod link in install-k8s.sh left this test green.
+  run bash -c "grep -l 'https://ai\.tracebloc\.io/[a-z-]' '$BATS_TEST_DIRNAME/../lib/'*.sh '$BATS_TEST_DIRNAME/../install-k8s.sh' '$BATS_TEST_DIRNAME/../install.sh' || true"
   [ -z "$output" ] || return 1
+  # NON-VACUOUS: a glob that matched one file would be the guard being replaced.
+  run bash -c "ls '$BATS_TEST_DIRNAME/../lib/'*.sh | wc -l | tr -d ' '"
+  [ "$output" -gt 2 ] || return 1
+}
+
+@test "no bash lib names a dashboard host OUTSIDE the _dashboard_url mapping" {
+  # The class property in full, and the sharper half of the pair above. That one
+  # keys on a PATH, so it catches `https://ai.tracebloc.io/clients` and misses a
+  # bare `base='https://ai.tracebloc.io'` re-hardcoded in some other lib -- which
+  # is what a well-meaning "just inline it" edit produces.
+  #
+  # SCOPE SPLIT, on purpose: this covers the BASH libs, and the Pester twin
+  # ("every dashboard host lives ONLY in the mapping -- in EVERY lib")
+  # covers install-k8s.ps1 plus every scripts/lib script in either language.
+  # Two guards, one from each language's suite, so a repo running only one of
+  # them still catches a leak in the bash half.
+  #
+  # THE MAPPING IS EXCLUDED BY NAME, not by quote style. `_dashboard_url`'s three
+  # `case` arms are the LEGITIMATE definition of these hosts, and a text guard
+  # that merely counted them would trip on the mapping itself (#935 says so
+  # explicitly). Excising the helper body and then demanding ZERO is one rule
+  # that survives a re-quote, a re-indent, or a fourth environment.
+  # THE HOST SET IS DERIVED FROM THE MAPPING'S OWN ARMS (@saqlainsyed007 on
+  # client#977). It was a literal triple in the `case` patterns below, which is
+  # the one axis this test still restated -- and it was reachable: add a fourth
+  # arm to both mappings and hardcode that host in a lib, and this test stayed
+  # green, because the new host was in neither the scanned list nor the required
+  # set. Whatever `_dashboard_url` defines IS the set now.
+  local libdir="$BATS_TEST_DIRNAME/../lib" hosts n_hosts f body h leaks=""
+  hosts="$(sed -n '/^_dashboard_url() {/,/^}/p' "$libdir/common.sh" \
+            | grep -oE 'https://[A-Za-z0-9.-]+\.tracebloc\.io' | sort -u)"
+  # The derivation must have found the mapping: empty means the declaration
+  # stopped matching and every assertion below would pass vacuously.
+  [ -n "$hosts" ] || return 1
+  n_hosts="$(printf '%s\n' "$hosts" | grep -c .)"
+  [ "$n_hosts" -ge 3 ] || return 1
+
+  # `sed` to excise the mapping body, not a read loop. It also fixes the
+  # newline-less-last-line fail-open the read loop needed `|| [ -n "$line" ]`
+  # for: a plain `read` drops a final line with no trailing newline (measured:
+  # 1 line seen of 2), while `sed` emits it. Verified on the same fixture.
+  for f in "$libdir"/*.sh "$BATS_TEST_DIRNAME/../install-k8s.sh" "$BATS_TEST_DIRNAME/../install.sh"; do
+    body="$(sed '/^_dashboard_url() {/,/^}/d' "$f")"
+    for h in $hosts; do
+      case "$body" in *"$h"*) leaks="$leaks $f:$h" ;; esac
+    done
+  done
+  [ -z "$leaks" ] || return 1
 }
 
 @test "_dashboard_url is reachable from summary.sh loaded STANDALONE" {
