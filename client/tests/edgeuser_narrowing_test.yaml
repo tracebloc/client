@@ -27,9 +27,11 @@ suite: narrowEdgeuser — a retired fleet stays retired, and a half-migrated one
 #
 # The environment matters and is stated per case. At CLIENT_ENV=dev,
 # serviceDbAccountsByEnv and perExperimentDbCredsByEnv are ALREADY true, so a dev
-# render exercises only the re-parent. prod defaults all three false, which is the
-# only environment where the full three-reason refusal is reachable. A suite
-# written entirely at dev would have missed two of the three blockers.
+# render exercises only the re-parent. As of backend#947, prod/stg bake
+# rotateMysqlRoot + bootstrapDbReparent on (datadir-gated), so the full
+# three-reason refusal now forces `bootstrapDbReparent: false` explicitly to make
+# the re-parent blocker reachable — serviceDbAccounts + perExperimentDbCreds still
+# default false for prod, so the other two blockers come from the env default.
 #
 # THE SUITE RENDERS THREE TEMPLATES, because the posture it calls "whole" spans
 # three (Bugbot, #900). The bake flips five gates; two of them -- rotateMysqlRoot
@@ -148,42 +150,75 @@ tests:
                 name: narrow-secrets
                 key: MYSQL_ROOT_PASSWORD
 
-  - it: "prod is untouched by the rotation — no key, and nothing consuming one"
-    # The bake follows retirement one fleet at a time; prod has none of the
-    # posture. Asserted on BOTH halves so a one-sided revert cannot pass.
+  # ---- prod is baked (backend#2800), gated on a fresh/rotated datadir --------
+  # rotateMysqlRootByEnv.prod / bootstrapDbReparentByEnv.prod are now true, but the
+  # baked path resolves on ONLY via tracebloc.bakedRootRotationOn: a mysqlRootPassword
+  # pin (this suite sets one), an already-rotated edge (the mysql-root-rotated marker),
+  # or a fresh datadir on a live cluster. With the suite pin, prod renders the rotation;
+  # the fall-back case below drops the pin to prove a blind prod edge is NOT rotated
+  # (backend#947, Lukas 2026-09-02).
+  #
+  # COVERAGE BOUNDARY (LukasWodka on #965 — read before trusting a green run here).
+  # helm-unittest cannot mock `lookup`, so of bakedRootRotationOn's inputs this suite
+  # only exercises the two that need no cluster: the tier-1 PIN path (resolves ON,
+  # the case just below) and the cluster-less-no-pin path (resolves OFF, the "BLIND
+  # prod edge" case). The `lookup`-driven branches -- the mysql-root-rotated MARKER
+  # (already born-rotated -> stay ON) and the mysql-pvc datadir probe -- are INERT
+  # here (an empty lookup makes both false), so a constant-false marker/PVC test
+  # would pass this suite identically. Those branches, and the one-way-door regression
+  # they close, are proven live in scripts/tests/e2e-auto-upgrade.sh
+  # ("born-rotated edge stays rotated ... on baked upgrade") plus the staging
+  # rehearsal, NOT by helm-unittest. Do not read this suite's green as proof of the
+  # datadir behaviour.
+  - it: "prod is rotated by the bake — the Secret carries both keys (pinned/fresh)"
     template: templates/secrets.yaml
     documentIndex: 0
     set:
       env.CLIENT_ENV: prod
     asserts:
-      - notExists:
+      - exists:
           path: data.MYSQL_ROOT_PASSWORD
-      - notExists:
+      - exists:
           path: data.DB_BOOTSTRAP_PASSWORD
 
-  - it: "prod's mysql pod injects no MYSQL_ROOT_PASSWORD"
-    # `notExists` on the whole env key, not `notContains` on the entry: with the
-    # gate off the mysql container renders NO env at all, and helm-unittest
-    # 0.5.2 ERRORS on `notContains` against a path that does not exist rather
-    # than treating absence as satisfaction. Measured here, not assumed. The
-    # rotation is that container's only env today, so this says exactly what it
-    # means; if an unrelated env is ever added to it, narrow this back to the
-    # entry and drop the surrounding case's dependence on emptiness.
+  - it: "prod's mysql pod injects MYSQL_ROOT_PASSWORD from the Secret"
     template: templates/mysql-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
-      - notExists:
+      - contains:
           path: spec.template.spec.containers[0].env
+          content:
+            name: MYSQL_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: narrow-secrets
+                key: MYSQL_ROOT_PASSWORD
 
-  - it: "prod's jobs-manager is not re-parented either"
+  - it: "prod's jobs-manager is re-parented onto root (baked)"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content: {name: DB_BOOTSTRAP_USER, value: "root"}
+
+  - it: "a BLIND prod edge falls back to its existing password — baked rotation resolves OFF"
+    # The core of the datadir gate: cluster-less (helm-unittest) with NO
+    # mysqlRootPassword pin cannot prove the datadir fresh or already-rotated, so
+    # the baked default resolves OFF and the edge keeps its current password rather
+    # than wedging. Empty pin overrides the suite-level pin to reach this path.
+    template: templates/secrets.yaml
+    documentIndex: 0
+    set:
+      env.CLIENT_ENV: prod
+      mysqlRootPassword: ""
+    asserts:
+      - notExists:
+          path: data.MYSQL_ROOT_PASSWORD
+      - notExists:
+          path: data.DB_BOOTSTRAP_PASSWORD
 
   - it: "renders no NARROW_EDGEUSER by default on prod"
     template: templates/jobs-manager-deployment.yaml
@@ -228,34 +263,37 @@ tests:
             name: NARROW_EDGEUSER
             value: "1"
 
-  - it: "stg bakes no root rotation — no Secret key, and nothing consuming one"
+  - it: "stg is rotated by the bake — the Secret carries both keys (pinned/fresh)"
     template: templates/secrets.yaml
     documentIndex: 0
     set:
       env.CLIENT_ENV: stg
     asserts:
-      - notExists:
+      - exists:
           path: data.MYSQL_ROOT_PASSWORD
-      - notExists:
+      - exists:
           path: data.DB_BOOTSTRAP_PASSWORD
 
-  - it: "stg's mysql pod injects no MYSQL_ROOT_PASSWORD"
-    # `notExists` on the env key for the same measured reason as prod's case:
-    # with the gate off this container renders no env at all, and
-    # helm-unittest 0.5.2 errors on `notContains` against a missing path.
+  - it: "stg's mysql pod injects MYSQL_ROOT_PASSWORD from the Secret"
     template: templates/mysql-deployment.yaml
     set:
       env.CLIENT_ENV: stg
     asserts:
-      - notExists:
+      - contains:
           path: spec.template.spec.containers[0].env
+          content:
+            name: MYSQL_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: narrow-secrets
+                key: MYSQL_ROOT_PASSWORD
 
-  - it: "stg's jobs-manager is not re-parented either"
+  - it: "stg's jobs-manager is re-parented onto root (baked)"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: stg
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content: {name: DB_BOOTSTRAP_USER, value: "root"}
 
@@ -331,6 +369,9 @@ tests:
       narrowEdgeuser: true
       serviceDbAccounts: true
       perExperimentDbCreds: true
+      # prod now bakes reparent on (via the suite's mysqlRootPassword pin); force it
+      # off so the mid-flight-self-revoke blocker this case asserts is reachable.
+      bootstrapDbReparent: false
     asserts:
       - failedTemplate:
           errorMessage: |-
@@ -373,8 +414,10 @@ tests:
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
-      # prod now bakes serviceDbAccounts + perExperimentDbCreds on; force both off
-      # so all three predecessors are missing (re-parent stays off by default).
+      # prod now bakes reparent + serviceDbAccounts + perExperimentDbCreds on
+      # (backend#947 + backend#2800); force ALL THREE off so every predecessor is
+      # missing and the full three-reason refusal is reachable.
+      bootstrapDbReparent: false
       serviceDbAccounts: false
       perExperimentDbCreds: false
     asserts:
@@ -387,6 +430,7 @@ tests:
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
+      bootstrapDbReparent: false
       serviceDbAccounts: false
       perExperimentDbCreds: false
     asserts:
@@ -399,6 +443,7 @@ tests:
     set:
       env.CLIENT_ENV: prod
       narrowEdgeuser: true
+      bootstrapDbReparent: false
       serviceDbAccounts: false
       perExperimentDbCreds: false
     asserts:

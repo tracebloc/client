@@ -2,6 +2,106 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.103 — `env.MULTI_GPU_MIN_PARAMETERS`, the multi-GPU size floor (RFC-0067 D2)
+
+Nothing changes on upgrade: the key is **absent by default**, and absent means
+the runtime's size gate **refuses every run** (`GPU_COUNT_SIZE_FLOOR_UNSET`), so
+an edge that has `TRACEBLOC_DDP=1` still gets one GPU per run until an operator
+also sets this floor. That is client-runtime#513 (@ f42d5e9) by design: RFC-0067
+OQ3 says the floor is unmeasured (G6 produces it), so neither the runtime nor the
+chart guesses one. This release only makes the key a schema-checked values
+change:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.MULTI_GPU_MIN_PARAMETERS=50000000
+```
+
+The vocabulary is closed to a positive integer. A non-numeric or non-positive
+value reads as unset with one WARNING and then the same refusal as the dark
+default, so a typo would be indistinguishable from never setting the key; unset
+or empty itself logs one INFO line at jobs-manager startup, not a warning, so
+grep the log for `Multi-GPU size gate`, not for WARN. Leading zeros are refused
+for a different reason: the runtime parses `int(value.strip())`, so `007` would
+read as a valid floor of 7 -- the schema admits one canonical spelling per floor
+so two values files cannot disagree about the same number. Multi-GPU expansion needs
+**both** `env.TRACEBLOC_DDP=1` (1.9.101) **and** this floor; the parameter count
+it compares against is the backend's server-computed one (backend#3171), so the
+backend carrying that column must be deployed to the edge's environment first.
+
+## Upgrading to 1.9.101 — per-edge `TRACEBLOC_DDP` / `TRACEBLOC_AMP` switches (RFC-0067 D8)
+
+Nothing changes on upgrade: both keys are **absent by default**, and absent
+means OFF. This release only teaches the chart the two operator switches that
+RFC-0067 makes the kill switch and the rollback lever for automatic multi-GPU
+training (backend#3149), so that setting them is a schema-checked values change:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.TRACEBLOC_DDP=1
+```
+
+The value reaches the training pods only through a jobs-manager that forwards
+it (client-runtime#480, `client-runtime` on or after that change). On an older
+runtime it lands on the jobs-manager container and goes no further — inert.
+The vocabulary is closed (`1|0|true|false|yes|no`, case-insensitive, empty =
+unset); any other spelling is refused at `helm upgrade` time rather than
+silently read as off.
+
+It also documents the two **reporting** switches, `env.EMIT_TOPOLOGY` and
+`env.EMIT_OOM_RESCUE` (contract: tracebloc-engine#879 @ 383b0daa), with the same
+vocabulary and the same absent-by-default rule — and one ordering rule of their
+own: **deploy the backend that has the destination columns to that environment
+first**, then set the switch. An emitted cycle-payload key the backend lacks
+destroys the edge's cycle row rather than being ignored.
+
+The same release documents `env.MULTI_GPU_LEASE_SECONDS` (client-runtime#486),
+the per-run lease jobs-manager applies as `activeDeadlineSeconds` to
+**multi-GPU** pods only. Also absent by default — jobs-manager's own 86400 s
+default stands — and also rendered only when set, because the runtime reads an
+empty value as *disabled*. Digits, or `0`/`off`/`false`/`no` to disable.
+## Upgrading to 1.9.100 — `images.training`: the digest-pinned engine image half (RFC-1246 P2, RFC-0067 D8)
+
+Nothing changes on upgrade: `images.training.digests` ships **empty**, so no
+`TRAINING_IMAGE_DIGESTS` / `TRAINING_IMAGE_PINNED` / `TRAINING_ENGINE_CAPABILITIES`
+is rendered and every edge keeps spawning the floating `:<CLIENT_ENV>` tag
+exactly as before (backend#3156). What lands is the render path and its
+contract, so that populating the map is a values change the release train can
+make rather than a template change:
+
+- `digests` — task → `{cpu, gpu}` → canonical `sha256:` digest, rendered onto
+  jobs-manager as JSON; the runtime (client-runtime `jobs_manager.py`) validates
+  it at boot and spawns `repo@digest` with `IfNotPresent` where it applies.
+- `pinned` — `""` (auto: prod only), or an explicit `true`/`false`.
+- `capabilities` — the engine's own `io.tracebloc.engine.capabilities` label
+  read off the pinned images; **written only by the resolver that writes the
+  digests, never by hand.** The chart refuses to render it with an empty map.
+
+Do **not** populate `digests` by hand on an edge: a hand-pinned edge stops
+following engine promotions until someone advances the pin.
+## Upgrading to 1.9.99 — `rotateMysqlRoot` / `bootstrapDbReparent` baked for `stg` and `prod` (datadir-aware)
+
+`rotateMysqlRootByEnv` and `bootstrapDbReparentByEnv` are now baked `true` for
+**`stg` and `prod`** as well as `dev` (backend#947). The bake is **datadir-aware**,
+so what an edge does on upgrade depends on its state — no operator flip required:
+
+* **Fresh install** (no MySQL datadir yet, on a live cluster) → **born rotated**:
+  the chart mints a root password into the Secret, re-parents the account-minting
+  bootstrap onto root, and records a `mysql-root-rotated` ConfigMap so the edge is
+  recognised as rotated on every later render.
+* **An edge already born-rotated by this bake** (the marker is present) → **stays
+  rotated**, and its generated root password is preserved across upgrades.
+* **Existing un-rotated / "blind" edge** (a datadir predating the rotation, no
+  marker) → **left exactly as it is** on its current (image-baked) password. The
+  baked default resolves *off* for it — no wedge, no `1045`. Rotating such an edge
+  is still the deliberate manual path in `docs/migration-tools/rotate-mysql-root.md`
+  (explicit `rotateMysqlRoot=true` + the one-time `ALTER USER 'root'`).
+* **Cluster-less render** (`helm template`, `--dry-run=client`, ArgoCD default /
+  Flux post-render) cannot prove a datadir fresh, so it resolves **off** — pin
+  `mysqlRootPassword` or render server-side to rotate a cluster-less fleet.
+
+Nothing here changes an already-rotated fleet (dev, edge 713) that carries an
+explicit `rotateMysqlRoot=true` override: the override bypasses the datadir gate
+entirely and its posture is unchanged.
+
 ## Upgrading to 1.9.71 — the `rotateMysqlRoot` gate, and one new object outside the release namespace
 
 Two things matter when you cross this version from anything below it.
@@ -11,8 +111,11 @@ Two things matter when you cross this version from anything below it.
 environment when this section was written; **since backend#1528 S3 baked dev's
 retired posture, `rotateMysqlRootByEnv.dev` is `true`** — so on a **dev** fleet
 an upgrade across that version DOES change something: the Secret gains
-`MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. `stg` and
-`prod` remain `false` and are unaffected. The gate is a *precondition* for the
+`MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. Since
+backend#947 `rotateMysqlRootByEnv` is baked `true` for **`stg` and `prod`** too
+(see *Upgrading to 1.9.99* below) — but datadir-aware, so an **existing
+un-rotated** stg/prod edge is left on its current password and is unaffected,
+while only a **fresh** install born-rotates. The gate is a *precondition* for the
 rotation runbook (`docs/migration-tools/rotate-mysql-root.md`), not the rotation
 itself.
 
