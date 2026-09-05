@@ -116,15 +116,22 @@ tests:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
 
-  - it: allowlists the backend + App Insights and fails closed
+  - it: allowlists the backend, fails closed, and no longer permits App Insights
     template: templates/egress-proxy-configmap.yaml
     asserts:
       - matchRegex:
           path: data["squid.conf"]
           pattern: "acl allowed_fqdns dstdomain .*api\\.tracebloc\\.io"
-      - matchRegex:
+      # THE ABSENCE IS THE ASSERTION NOW. This used to require the App Insights
+      # FQDN to be present -- correctly, while the edge exported there. The edge
+      # stopped (client-runtime#471) and the backend stopped handing out the
+      # credential (backend#3078), so the egress permission outlives its only
+      # user. Asserting its ABSENCE is what stops it being re-added without a
+      # decision; dropping the assertion entirely would leave the allowlist free
+      # to regrow silently.
+      - notMatchRegex:
           path: data["squid.conf"]
-          pattern: "\\.in\\.applicationinsights\\.azure\\.com"
+          pattern: "applicationinsights\\.azure\\.com"
       - matchRegex:
           path: data["squid.conf"]
           pattern: "http_access deny all"

@@ -34,7 +34,7 @@ data:
     acl SSL_ports port 443
     acl CONNECT method CONNECT
     {{- with .Values.egressProxy.allowlist }}
-    # dstdomain: a leading dot matches subdomains (e.g. .in.applicationinsights.azure.com),
+    # dstdomain: a leading dot matches subdomains (e.g. .s3.eu-central-1.amazonaws.com),
     # a bare host is an exact match (e.g. api.tracebloc.io).
     acl allowed_fqdns dstdomain {{ join " " . }}
     http_access deny CONNECT !SSL_ports
