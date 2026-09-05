@@ -43,6 +43,21 @@
 #
 set -euo pipefail
 
+# --print-footprint (backend#2870, DoD part 1): the same render and the same
+# ratchet, but the ONLY thing on stdout is `<mem MiB> <cpu m>` for the worst
+# profile. That pair is what scripts/gen-footprint-embed.sh embeds into the
+# installer and what scripts/tests/envelope-schedulability.sh verifies every
+# golden vector against -- so the installer's footprint is DERIVED from this
+# render, never typed. Everything informational moves to stderr so a caller can
+# `read -r mem cpu` without parsing prose; a breached ratchet still exits 1 and
+# prints nothing on stdout, so a caller cannot read a refused run as a number.
+PRINT=0
+case "${1:-}" in
+  '') ;;
+  --print-footprint) PRINT=1; exec 3>&1 1>&2 ;;
+  *) echo "usage: $0 [--print-footprint]" >&2; exit 2 ;;
+esac
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # TB_CP_FOOTPRINT_ROOT lets this guard's own test point it at a fixture tree.
 root="${TB_CP_FOOTPRINT_ROOT:-$(cd "$here/../.." && pwd)}"
@@ -249,6 +264,13 @@ if (( worst_cpu > CPU_CEIL_MILLI )); then
   fail=1
 fi
 [ "$fail" -eq 0 ] || exit 1
+
+# The machine-readable answer, on the stdout saved above -- and ONLY after the
+# ratchet, so a footprint that breached it is never handed out as a number.
+if (( PRINT )); then
+  printf '%s %s\n' "$worst_mem" "$worst_cpu" >&3
+  exit 0
+fi
 
 # THE GAP, reported not asserted (see the header). Positive = the control plane
 # already out-requests its reserve; that overshoot is what backend#2460 (measured
