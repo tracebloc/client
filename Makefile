@@ -391,6 +391,9 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   bash scripts/tests/hostpath-reads-guarded.sh|\
   bash scripts/tests/jobs-manager-waits-for-mysql.sh|\
   bash scripts/tests/control-plane-footprint.sh|\
+  scripts/gen-footprint-embed.sh --check|\
+  bash scripts/tests/envelope-schedulability.sh|\
+  bash scripts/tests/envelope-schedulability-mutations.sh|\
   bash scripts/tests/fullname-override-completeness.sh|\
   bash scripts/tests/qos-reachability.sh
 

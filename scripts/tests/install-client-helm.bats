@@ -1369,7 +1369,94 @@ _override_release_ctx() {
   # which exceeded a default Docker Desktop); only the limits half loses cpu
   # (backend#2418).
   grep -q 'RESOURCE_LIMITS: "memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
-  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml"
+  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=2Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  # backend#2870: and it is no longer written SILENTLY. The installer could not
+  # check that even the floor schedules here, and says so -- an operator who
+  # later sees `Pending` has the reason in the install output.
+  [[ "$output" == *"UNVERIFIED"* ]] || return 1
+}
+
+# ── the envelope is checked against what the node can actually schedule (backend#2870) ──
+#
+# The resolver sizes against ALLOCATABLE. The chart's own control plane requests
+# 3136 MiB / 900 m (from the render) and k3s's system pods ~140 MiB / 200 m, so
+# `allocatable - 3 GiB` over-asked on every machine and the training pod sat
+# Pending. These three drive the WHOLE install flow so the written values file
+# is what is asserted -- the unit-level arithmetic lives in
+# scripts/tests/envelope-schedulability.sh and .bats.
+_sched_cluster() {   # $1 = node line(s)
+  kubectl() {
+    case "$*" in
+      *"get nodes"*--request-timeout=*)      printf '%s\n' "$_SCHED_NODES" ;;
+      *"get namespaces"*--request-timeout=*) printf 'kube-system|\ntracebloc|tracebloc\n' ;;
+      *"get pods"*--request-timeout=*)       printf 'kube-system|Running|n|100m/70Mi,|\nkube-system|Running|n|100m/70Mi,|\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  _SCHED_NODES="$1"
+}
+
+@test "install_client_helm: an envelope that over-asks is REDUCED in the written values, with the arithmetic (backend#2870)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  has() { return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # The ticket's reproduction: an 8 GiB node. The resolver says cpu=3,memory=5Gi;
+  # 5120 + 3136 + 140 = 8396 MiB > 8192, and 3000 + 900 + 200 = 4100 m > 4000.
+  _sched_cluster '4 8Gi'
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=4Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'RESOURCE_LIMITS: "memory=4Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_PROVENANCE: "installer"' "$HOST_DATA_DIR/values.yaml" || return 1
+  # The arithmetic is on screen, not just the verdict.
+  [[ "$output" == *"204 MiB OVER"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"reduced cpu=3,memory=5Gi -> cpu=2,memory=4Gi"* ]] || { echo "$output"; return 1; }
+}
+
+@test "install_client_helm: REFUSES to write an envelope when not even a 1-core/1-GiB run fits (backend#2870)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  has() { return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # 4 GiB allocatable: 4096 - 3136 - 140 = 820 MiB is all that is left.
+  _sched_cluster '4 4Gi'
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"Refusing to write a training envelope"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"not even a 1-core / 1-GiB run"* ]] || { echo "$output"; return 1; }
+  # Refused BEFORE the values file was created: nothing half-written to run on.
+  [ ! -e "$HOST_DATA_DIR/values.yaml" ] || return 1
+  # And helm was never asked to install anything.
+  ! mock_calls | grep -q '^helm upgrade' || return 1
+}
+
+@test "install_client_helm: a human's TRACEBLOC_TRAINING_RESOURCES that over-asks is written as-is and WARNED (backend#2870)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  has() { return 0; }
+  verify_credentials() { printf valid; }
+  export TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"
+  _sched_cluster '4 8Gi'
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # Precedence rule 1: a human choice survives, even a wrong one.
+  grep -q 'RESOURCE_REQUESTS: "cpu=4,memory=16Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_PROVENANCE: "user"' "$HOST_DATA_DIR/values.yaml" || return 1
+  [[ "$output" == *"does not fit beside the platform"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"chosen by a human (user)"* ]] || { echo "$output"; return 1; }
+  unset TRACEBLOC_TRAINING_RESOURCES
 }
 
 # ── _training_resources (backend#1236, option A) ─────────────────────────────
