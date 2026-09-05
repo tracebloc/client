@@ -9354,6 +9354,23 @@ Describe "Protect-TraceblocValuesFile (backend#2931)" {
     } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
   }
 
+  It "returns FALSE when it could not restrict, so the caller cannot claim it did" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -le 5) {
+    # The verdict is the whole point of Bugbot's finding on client#990: the helper is
+    # best-effort, and a caller that assumes success tells the operator the credential
+    # is protected on exactly the paths where it is not.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-e-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try { (Protect-TraceblocValuesFile -Path $p) | Should -BeFalse }
+    finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "returns TRUE when it verifiably restricted the file" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-f-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "x" -Encoding UTF8
+      (Protect-TraceblocValuesFile -Path $p) | Should -BeTrue
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
   It "warns instead of throwing when the platform has no Windows ACLs" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -le 5) {
     # Runs on the Linux/macOS Pester legs. The installer must never abort here: a
     # credential file it cannot chmod is still better than no install at all.
@@ -9387,6 +9404,23 @@ Describe "The values file is protected BEFORE the credential is written (backend
     # inherited ACL an installer predating this left behind. Fixing only the
     # generating site is the .github#300 shape: covering one member of a pair.
     $script:ProtectLines.Count | Should -BeGreaterOrEqual 2 -Because 'the generating write and the clientId heal both need it'
+  }
+
+  It "only claims the file is restricted when the helper said so" {
+    # Bugbot, client#990: the Hint used to assert "restricted to you and
+    # Administrators" unconditionally, including on the degraded paths the helper
+    # warns about. A reassurance that outlives the thing it describes is worse than
+    # no message.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Match '\$valuesProtected\s*=\s*Protect-TraceblocValuesFile'
+    $src | Should -Match 'if\s*\(\$valuesProtected\)'
+    $lines  = Get-Content "$PSScriptRoot/../install-k8s.ps1"
+    $claim  = @(for ($i=0; $i -lt $lines.Count; $i++) { if ($lines[$i] -like '*restricted to you and Administrators*') { $i } })
+    $claim.Count | Should -Be 1
+    # the nearest preceding non-blank line must be the verdict branch
+    $j = $claim[0] - 1
+    while ($j -ge 0 -and [string]::IsNullOrWhiteSpace($lines[$j])) { $j-- }
+    $lines[$j] | Should -BeLike '*if ($valuesProtected)*'
   }
 
   It "calls it above the Set-Content that carries clientPassword" {

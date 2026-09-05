@@ -78,6 +78,24 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 # One entry per FIXED defect. `Find` must match exactly one line in `File`.
 # `Suite` is the Pester file that claims to cover it.
 $Mutations = @(
+  @{ Name  = 'the values file is protected AFTER the credential is written (backend#2931)'
+     Expect = 'calls it above the Set-Content that carries clientPassword'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $valuesProtected = Protect-TraceblocValuesFile -Path $valuesFile'
+     Repl  = '  $valuesProtected = $true  # MUTATION: the pre-write protect is gone' }
+
+  @{ Name  = 'only the generating write site is protected, the clientId heal is not (backend#2931)'
+     Expect = 'protects BOTH write sites'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '      $null = Protect-TraceblocValuesFile -Path $valuesFile'
+     Repl  = '      # MUTATION: the clientId heal no longer protects the file' }
+
+  @{ Name  = 'the Hint claims restriction even when the helper could not restrict (backend#2931)'
+     Expect = 'only claims the file is restricted when the helper said so'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($valuesProtected) {'
+     Repl  = '  if ($true) {  # MUTATION: reassure unconditionally' }
+
   @{ Name  = 'the reboot prompt asks even with nobody at the console (backend#2675)'
      Expect = 'Read-RebootChoice'
      File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'

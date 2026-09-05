@@ -6119,6 +6119,9 @@ function Get-UnattendedCredentialRefusal {
 # act on silence. And WARN rather than Err, deliberately: ACLs genuinely cannot apply
 # on some mounts (exFAT, a mapped drive, a UNC share), and refusing to install there
 # would trade a readable file for no tracebloc at all.
+# RETURNS $true only when the file is verifiably restricted -- read back, not assumed.
+# Every degraded path returns $false after warning, because the CALLER must not go on
+# to tell the operator the credential is protected when it is not (Bugbot, client#990).
 function Protect-TraceblocValuesFile {
   param([Parameter(Mandatory=$true)][string]$Path)
 
@@ -6126,7 +6129,7 @@ function Protect-TraceblocValuesFile {
     try { New-Item -ItemType File -Path $Path -Force -ErrorAction Stop | Out-Null }
     catch {
       Warn "Could not create $Path to restrict it before writing your clientPassword: $($_.Exception.Message)"
-      return
+      return $false
     }
   }
 
@@ -6137,7 +6140,7 @@ function Protect-TraceblocValuesFile {
   $onWindows = ($PSVersionTable.PSVersion.Major -le 5) -or $IsWindows
   if (-not $onWindows) {
     Warn "$Path holds a live clientPassword and this platform has no Windows ACLs -- restrict it yourself (chmod 600 $Path)."
-    return
+    return $false
   }
 
   $me     = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -6157,7 +6160,7 @@ function Protect-TraceblocValuesFile {
     Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
   } catch {
     Warn "Could not restrict $Path (it holds your clientPassword in cleartext): $($_.Exception.Message)"
-    return
+    return $false
   }
 
   # READ IT BACK. Anything beyond the two identities we granted is reported, by name,
@@ -6173,11 +6176,13 @@ function Protect-TraceblocValuesFile {
     )
     if ($extra.Count -gt 0) {
       Warn "$Path is still readable by: $($extra -join ', '). It holds your clientPassword in cleartext."
-    } else {
-      Log "values file ACL restricted to the invoking user and Administrators: $Path"
+      return $false
     }
+    Log "values file ACL restricted to the invoking user and Administrators: $Path"
+    return $true
   } catch {
     Warn "Could not read back the ACL of $Path -- it holds a live credential; check that other users cannot read it."
+    return $false
   }
 }
 
@@ -6544,14 +6549,22 @@ clientPassword: '$passwordEscaped'
 $envBlock
 "@
   # BEFORE, not after: $valuesContent already contains the clientPassword.
-  Protect-TraceblocValuesFile -Path $valuesFile
+  $valuesProtected = Protect-TraceblocValuesFile -Path $valuesFile
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
   # SAY WHAT IT HOLDS AND FOR HOW LONG (backend#2931, item 2). The mode is set above;
   # this is the half an operator can act on. Deliberately Hint, not Warn: the file is
   # in its intended state, and crying wolf on a correct install is how real warnings
   # stop being read.
-  Hint "$valuesFile holds your clientPassword in cleartext (restricted to you and Administrators)."
+  # The helper is best-effort by design (exFAT, UNC, a mapped drive), so this must
+  # report what HAPPENED. Saying "restricted" on a path where the helper just warned
+  # that it could not restrict is worse than silence: it tells the operator the
+  # credential is safe at exactly the moment it is not (Bugbot, client#990).
+  if ($valuesProtected) {
+    Hint "$valuesFile holds your clientPassword in cleartext (restricted to you and Administrators)."
+  } else {
+    Warn "$valuesFile holds your clientPassword in cleartext and could NOT be restricted -- see the warning above. Anyone who can read this path can read the credential."
+  }
   Hint "It is read back on re-runs to offer your previous answers as defaults. Delete it once you no longer want that, and rotate the credential if it was ever readable by others."
   }   # end -not $adoptedReuse (values regeneration)
 
@@ -6644,7 +6657,7 @@ $envBlock
       # buys nothing here -- but it may carry the inherited ACL an installer before
       # backend#2931 left it with. Heal it rather than only protecting files this
       # version happens to create.
-      Protect-TraceblocValuesFile -Path $valuesFile
+      $null = Protect-TraceblocValuesFile -Path $valuesFile
     }
   } else {
     Log "Installing $TB_NAMESPACE from $chartRef in namespace '$TB_NAMESPACE'..."
