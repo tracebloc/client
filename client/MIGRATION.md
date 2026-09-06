@@ -2,6 +2,32 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.105 — `env.GPU_LIMITS` alone now renders an equal `GPU_REQUESTS` (client#995)
+
+Nothing to do if your values set both keys, or neither — that is every edge the
+installers provisioned, since both installers write the pair with one value.
+
+If your values file set **only `env.GPU_LIMITS`** (say `nvidia.com/gpu=2`), the
+chart used to fill the absent `GPU_REQUESTS` with a literal `nvidia.com/gpu=1`,
+so the jobs-manager received *requests=1, limits=2*. Kubernetes requires an
+extended resource's request to equal its limit, so every training pod on that
+edge was rejected by the API server — and the runtime's own mirror ("setting
+only one of them now mirrors it into the other", 1.9.104 above) could not help,
+because from values both keys always arrived set. From this version the chart
+renders an absent `GPU_REQUESTS` **with `GPU_LIMITS`' own value**, so a lone
+`GPU_LIMITS` gives an equal pair. Both set to different values are still written
+as given — the runtime warns once and the pod is rejected; set both to one
+value, or set only `GPU_LIMITS`.
+
+`GPU_LIMITS` stays the **only** gate, exactly as before: `GPU_LIMITS: ""` still
+means "no GPU on this cluster" and renders both keys empty; `GPU_LIMITS` absent
+still renders nothing (the runtime's legacy assume-a-GPU default) — **including
+when `GPU_REQUESTS` alone is set, empty or not**, so an edge carrying a lone
+`GPU_REQUESTS` keeps its behaviour on upgrade. The chart test
+`gpu_env_declaration_test.yaml` asserts `requests == limits` on both containers
+for every rendering that sets `GPU_LIMITS`, and that a lone `GPU_REQUESTS`
+renders neither.
+
 ## Upgrading to 1.9.104 — what the jobs-manager now tells you about GPU admission (RFC-0067 D7)
 
 Nothing to configure, and **nothing in this chart carries the change**: both
