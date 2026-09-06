@@ -26,6 +26,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 GUARD="scripts/tests/control-plane-footprint.sh"
 BASH_FILE="scripts/lib/install-client-helm.sh"
+PS1_FILE="scripts/install-k8s.ps1"
 
 CHECK=0
 case "${1:-}" in
@@ -36,6 +37,7 @@ esac
 
 [[ -f "$GUARD" ]] || { echo "[ERROR] $GUARD is missing -- nothing to derive the footprint from" >&2; exit 1; }
 [[ -f "$BASH_FILE" ]] || { echo "[ERROR] $BASH_FILE is missing -- nothing to embed into" >&2; exit 1; }
+[[ -f "$PS1_FILE" ]] || { echo "[ERROR] $PS1_FILE is missing -- nothing to embed into" >&2; exit 1; }
 # helm + python3 are build/CI-time dependencies only -- NEVER required on a
 # customer machine, which is the whole reason the pair is embedded. The guard
 # checks for both and refuses by name; we only need python3 for the rewrite.
@@ -64,6 +66,10 @@ _fail=0
 # anchored on the whole line. The same shape as gen-envelope-embed.sh's _set, for
 # the same reason it does the whole job in python3 against a literal key: one
 # escaping domain, so the string is never both an ERE and a Python literal.
+# Tolerant of the spaced `=` the PowerShell block uses ($script:TbCpFootprint*),
+# so BOTH twins are embedded from the one render (client#992): a footprint that
+# moved in one installer and not the other is exactly the divergence the parity
+# fixture exists to end.
 # Exit codes: 0 = already correct or rewritten, 2 = no such assignment,
 # 3 = present but wrong (only under --check).
 _set() {
@@ -79,7 +85,7 @@ check = os.environ.get("CHECK") == "1"
 with open(path, encoding="utf-8") as handle:
     src = handle.read()
 
-pattern = re.compile(rf"^({re.escape(key)}=)(\S+)$", re.MULTILINE)
+pattern = re.compile(rf"^({re.escape(key)}[ \t]*=[ \t]*)(\S+)$", re.MULTILINE)
 match = pattern.search(src)
 if match is None:
     sys.exit(2)
@@ -108,12 +114,14 @@ PY
 
 _set "$BASH_FILE" "_TB_CP_FOOTPRINT_MEM_BYTES" "$MEM_BYTES"
 _set "$BASH_FILE" "_TB_CP_FOOTPRINT_CPU_MILLI" "$CPU_MILLI"
+_set "$PS1_FILE" '$script:TbCpFootprintMemBytes' "$MEM_BYTES"
+_set "$PS1_FILE" '$script:TbCpFootprintCpuMilli' "$CPU_MILLI"
 
 if (( _fail )); then
   if (( CHECK )); then
     echo "" >&2
     echo "The chart's control-plane footprint moved. Run scripts/gen-footprint-embed.sh" >&2
-    echo "to re-embed, then scripts/gen-manifest.sh, and commit both -- and weigh what" >&2
+    echo "to re-embed (both installers), then scripts/gen-manifest.sh, and commit all -- and weigh what" >&2
     echo "the change costs the training envelope on every edge (backend#2870)." >&2
   fi
   exit 1

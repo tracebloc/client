@@ -275,6 +275,64 @@ $Mutations = @(
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'
      Find  = '    if (-not ($usingBranch -and $AllowUnverified)) {'
      Repl  = '    if ($true) {' }
+
+  # ENVELOPE SCHEDULABILITY, PowerShell twin (backend#2870, client#992). The bash
+  # side has envelope-schedulability-mutations.sh proving each of these against
+  # install-client-helm.sh; the same nine bugs must redden here, or the Windows
+  # installer's fit step is a copy of the rule that nothing has ever seen fail.
+  @{ Name  = 'the chart footprint drops out of the sum (client#992)'
+     Expect = 'is REDUCED, arithmetic printed'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $needMemB = $fpMemB + $sysMemB'
+     Repl  = '  $needMemB = $sysMemB' }
+
+  @{ Name  = 'cpu can never fail the fit (client#992)'
+     Expect = 'cpu-only overshoot reduces cpu alone'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $memFits = ($memOver -le 0); $cpuFits = ($cpuOver -le 0)'
+     Repl  = '  $memFits = ($memOver -le 0); $cpuFits = $true' }
+
+  @{ Name  = 'the reduction is computed but the original size is written (client#992)'
+     Expect = 'is REDUCED, arithmetic printed'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $out.Size = "cpu=$newCores,memory=${newGib}Gi"'
+     Repl  = '  $null = $newCores' }
+
+  @{ Name  = 'a refusal is downgraded to a reduction that writes 0 cores (client#992)'
+     Expect = 'REFUSED when not even 1 core'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($newCores -lt 1 -or $newGib -lt 1) {'
+     Repl  = '  if ($false) {' }
+
+  @{ Name  = 'a human''s pin is silently reduced (client#992)'
+     Expect = 'pin is warned, never altered'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if (-not $ours) {'
+     Repl  = '  if ($false) {' }
+
+  @{ Name  = 'the release''s own pods are counted as system load (client#992)'
+     Expect = 'excludes the release namespace'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '    if ($ownNs -contains $ns) { continue }'
+     Repl  = '    if ($false) { continue }' }
+
+  @{ Name  = 'terminal pods are counted as system load (client#992)'
+     Expect = 'excludes the release namespace'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '    if ($phase -eq ''Succeeded'' -or $phase -eq ''Failed'') { continue }'
+     Repl  = '    if ($false) { continue }' }
+
+  @{ Name  = 'a blank footprint constant no longer refuses (client#992)'
+     Expect = 'FAIL CLOSED: a blank footprint constant refuses'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ("$($script:TbCpFootprintMemBytes)" -notmatch ''^\d+$'' -or "$($script:TbCpFootprintCpuMilli)" -notmatch ''^\d+$'') {'
+     Repl  = '  if ($false) {' }
+
+  @{ Name  = 'an unreadable cluster writes an installer-chosen non-floor size anyway (client#992)'
+     Expect = 'cluster unreadable: REFUSED'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '    if ($ours -and $Size -ne $floor) {'
+     Repl  = '    if ($false) {' }
 )
 
 # BYTE-IDENTICAL LINES CANNOT BE AIMED AT INDIVIDUALLY, so a mutation may name an

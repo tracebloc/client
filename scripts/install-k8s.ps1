@@ -5128,6 +5128,26 @@ $script:TbEnvelopeNodeMinCpuMilli   = 2000
 $script:TbEnvelopeNodeMinMemBytes   = 5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
+# ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
+#
+# backend#2870 / client#992. What the chart's steady-state control plane REQUESTS
+# -- every Deployment/StatefulSet/DaemonSet container, the scheduler's
+# max(sum(app), max(init)) per pod, one-shot hook Jobs excluded -- summed from
+# `helm template` by scripts/tests/control-plane-footprint.sh and embedded here by
+# scripts/gen-footprint-embed.sh, the same two constants the bash twin carries as
+# _TB_CP_FOOTPRINT_MEM_BYTES / _TB_CP_FOOTPRINT_CPU_MILLI. Resolve-TbTrainingFit
+# compares the envelope against allocatable minus THIS (plus the system pods it
+# can measure), so a chart change that raises a request shrinks the envelope on
+# the next install instead of leaving the training pod Pending.
+#
+# Embedded, not summed at install time, for the same reason as the block above:
+# this bootstrap is signed and guarantees neither helm nor python3. What keeps it
+# honest is `scripts/gen-footprint-embed.sh --check` in `make drift`: both
+# installers' values must equal a fresh render of the chart in the same tree.
+$script:TbCpFootprintMemBytes = 3288334336
+$script:TbCpFootprintCpuMilli = 900
+# ── end generated footprint ─────────────────────────────────────────────────
+
 # Set by Get-TrainingResources when the machine is readable but below the
 # training floor. The WARNING lives in the caller, so Get-TrainingResources keeps
 # returning nothing but the size -- its Pester suite compares the whole return.
@@ -5238,6 +5258,353 @@ function Get-TrainingProvenance {
   return "installer"
 }
 
+# ── envelope schedulability (backend#2870, client#992) ───────────────────────
+#
+# Bash twin: lib/install-client-helm.sh::_fit_training_envelope and the readers it
+# rests on (_cpu_to_milli, _mem_to_bytes, _envelope_dimension,
+# _pod_effective_requests, _measured_system_requests). Same rules, same words in
+# the printed arithmetic, so an operator reading either installer's log sees one
+# vocabulary. The bash side is asserted by scripts/tests/envelope-schedulability.sh
+# in the drift tier; this side by install-k8s.Tests.ps1, which replays the SAME
+# contract vectors and canned cluster through these functions.
+
+# A Kubernetes cpu quantity -> millicores as [long], or $null when it is not one
+# this installer can read. Grammar mirrors the bash reader: whole cores, `Nm`,
+# and a decimal core count FLOORED to the millicore (1.2345 -> 1234, never up).
+function ConvertTo-TbCpuMilli {
+  param([string]$Quantity)
+  $q = "$Quantity".Trim()
+  if ($q -match '^(\d+)$')        { return [long]$Matches[1] * 1000 }
+  if ($q -match '^(\d+)m$')       { return [long]$Matches[1] }
+  if ($q -match '^(\d+)\.(\d+)$') {
+    $frac = ($Matches[2] + '000').Substring(0, 3)
+    return [long]$Matches[1] * 1000 + [long]$frac
+  }
+  return $null
+}
+
+# A Kubernetes memory quantity -> bytes as [long], or $null when unreadable.
+# Binary suffixes (Ki Mi Gi Ti Pi), decimal SI (k M G T P) and bare bytes; whole
+# numbers only, as the bash twin: a `1.5Gi` is a quantity neither twin speaks,
+# and both say so rather than guess.
+function ConvertTo-TbMemBytes {
+  param([string]$Quantity)
+  $q = "$Quantity".Trim()
+  if ($q -match '^(\d+)$')   { return [long]$Matches[1] }
+  if ($q -match '^(\d+)Ki$') { return [long]$Matches[1] * 1KB }
+  if ($q -match '^(\d+)Mi$') { return [long]$Matches[1] * 1MB }
+  if ($q -match '^(\d+)Gi$') { return [long]$Matches[1] * 1GB }
+  if ($q -match '^(\d+)Ti$') { return [long]$Matches[1] * 1TB }
+  if ($q -match '^(\d+)Pi$') { return [long]$Matches[1] * 1PB }
+  if ($q -match '^(\d+)k$')  { return [long]$Matches[1] * 1000 }
+  if ($q -match '^(\d+)M$')  { return [long]$Matches[1] * 1000000 }
+  if ($q -match '^(\d+)G$')  { return [long]$Matches[1] * 1000000000 }
+  if ($q -match '^(\d+)T$')  { return [long]$Matches[1] * 1000000000000 }
+  if ($q -match '^(\d+)P$')  { return [long]$Matches[1] * 1000000000000000 }
+  return $null
+}
+
+# The raw value of ONE dimension of an envelope string (`cpu=7,memory=29Gi`):
+# case-insensitive key, trimmed pairs, "" when the key is absent. `cpuset=7` is
+# not cpu -- the key must match whole. Bash twin: _envelope_dimension.
+function Get-TbEnvelopeDimension {
+  param([string]$Size, [string]$Key)
+  foreach ($pair in ("$Size" -split ',')) {
+    $t = $pair.Trim()
+    if ($t -eq '') { continue }
+    $eq = $t.IndexOf('=')
+    if ($eq -lt 1) { continue }
+    if ($t.Substring(0, $eq).Trim().ToLowerInvariant() -eq $Key.ToLowerInvariant()) {
+      return $t.Substring($eq + 1).Trim()
+    }
+  }
+  return ''
+}
+
+# The largest schedulable node's allocatable, as @{ CpuMilli; MemBytes }, or
+# $null when the cluster cannot be read or no node parses. ONE reader for the
+# node contract: Get-TrainingResources sizes against this and Resolve-TbTrainingFit
+# verifies against this, so the two cannot anchor on different nodes.
+#
+# THREE fields per node since backend#2237: allocatable cpu, allocatable memory,
+# and .spec.unschedulable. The bash twin carries the same jsonpath in
+# lib/install-client-helm.sh::_TB_NODE_JSONPATH; the two are pinned to agree by
+# the shared cluster-state fixture, tests/fixtures/installer_parity.json.
+# Bounded (--request-timeout): a wedged API server must degrade, never hang.
+function Get-TbAnchorAllocatable {
+  $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $lines) { return $null }
+  $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
+  foreach ($ln in @($lines)) {
+    $parts = "$ln".Trim() -split '\s+'
+    if ($parts.Count -lt 2) { continue }
+    # Cordoned nodes are SKIPPED before any ranking (contract skipped_nodes:
+    # "spec.unschedulable (cordoned)"). Kubernetes declares Unschedulable with
+    # `omitempty`, so a schedulable node emits an EMPTY third field and .Trim()
+    # drops it -- Count -lt 3 is the normal case, and only the literal 'true'
+    # means cordoned (never non-emptiness; an explicit `false` must not read as
+    # cordoned).
+    if ($parts.Count -ge 3 -and $parts[2] -eq 'true') { continue }
+    # $null, NOT 0, for a quantity we cannot parse: the contract says unparseable
+    # allocatable is SKIPPED, exactly as the bash twin's `|| continue`.
+    $cpuM = ConvertTo-TbCpuMilli $parts[0]
+    $memB = ConvertTo-TbMemBytes $parts[1]
+    if ($null -eq $cpuM -or $null -eq $memB) { continue }
+    # Contract ANCHOR_LARGEST, tie-break (cpu, memory) -- one order for every
+    # reader (backend#2220).
+    if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
+      $bestMemB = $memB; $bestCpuM = $cpuM
+    }
+    $seen = $true
+  }
+  if (-not $seen) { return $null }
+  return @{ CpuMilli = $bestCpuM; MemBytes = $bestMemB }
+}
+
+# One pod's effective requests: sum(app containers) and max(init containers) per
+# resource, then the max of the two -- the scheduler's formula, the same one
+# control-plane-footprint.sh applies to the render. Input is the jsonpath shape
+# `cpu/mem,cpu/mem,` per list. Returns @{ MemBytes; CpuMilli }, or $null when a
+# quantity is present but unreadable -- which the caller must treat as "this
+# measurement is unusable", never as zero. Bash twin: _pod_effective_requests.
+function Get-TbPodEffectiveRequests {
+  param([string]$Apps, [string]$Inits)
+  $appM = [long]0; $appC = [long]0; $initM = [long]0; $initC = [long]0
+  foreach ($field in ("$Apps" -split ',')) {
+    if ($field -eq '') { continue }
+    $slash = $field.IndexOf('/'); if ($slash -lt 0) { return $null }
+    $c = $field.Substring(0, $slash); $m = $field.Substring($slash + 1)
+    $cm = [long]0; $mm = [long]0
+    if ($c -ne '') { $cm = ConvertTo-TbCpuMilli $c; if ($null -eq $cm) { return $null } }
+    if ($m -ne '') { $mm = ConvertTo-TbMemBytes $m; if ($null -eq $mm) { return $null } }
+    $appC += $cm; $appM += $mm
+  }
+  foreach ($field in ("$Inits" -split ',')) {
+    if ($field -eq '') { continue }
+    $slash = $field.IndexOf('/'); if ($slash -lt 0) { return $null }
+    $c = $field.Substring(0, $slash); $m = $field.Substring($slash + 1)
+    $cm = [long]0; $mm = [long]0
+    if ($c -ne '') { $cm = ConvertTo-TbCpuMilli $c; if ($null -eq $cm) { return $null } }
+    if ($m -ne '') { $mm = ConvertTo-TbMemBytes $m; if ($null -eq $mm) { return $null } }
+    if ($cm -gt $initC) { $initC = $cm }
+    if ($mm -gt $initM) { $initM = $mm }
+  }
+  if ($initM -gt $appM) { $appM = $initM }
+  if ($initC -gt $appC) { $appC = $initC }
+  return @{ MemBytes = $appM; CpuMilli = $appC }
+}
+
+# What the pods ALREADY ON THE CLUSTER request, that the chart derivation does not
+# already count. Returns @{ Measured = $true; MemBytes; CpuMilli; Note } when
+# measured, or @{ Measured = $false; Note } when the cluster could not be read or
+# a quantity could not be parsed. The caller then verifies against the chart
+# derivation alone AND SAYS SO: an unreadable pod list is not a footprint of
+# zero, but it is not a reason to refuse an install on a cluster whose nodes we
+# could read either.
+#
+# EXCLUDED, because the chart derivation already counts them: every pod in the
+# release namespace (the chart's own workloads AND the training pods jobs-manager
+# spawns there, the very envelope being sized) and every pod in a namespace whose
+# `meta.helm.sh/release-name` annotation names this release. Terminal pods hold no
+# reservation; a pod with no nodeName is not on any node yet.
+#
+# PER NODE, then the MAX across nodes: a training pod takes everything from ONE
+# node. On the single-node edge the two are the same number; on a multi-node
+# cluster the max is conservative -- it only ever makes the envelope smaller.
+# Bash twin: _measured_system_requests.
+function Get-TbMeasuredSystemRequests {
+  $note = ''
+  $ownNs = @()
+  if ($TB_NAMESPACE) { $ownNs += "$TB_NAMESPACE" }
+  # Namespaces this release owns. Failing to read them is NOT fatal: only the
+  # release namespace is then excluded (the conservative direction), and the note
+  # says so.
+  $nsLines = kubectl get namespaces --request-timeout=10s -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}' 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    foreach ($ln in @($nsLines)) {
+      $f = "$ln" -split '\|', 2
+      if ($f.Count -lt 2 -or $f[0] -eq '') { continue }
+      if ($TB_NAMESPACE -and $f[1] -eq "$TB_NAMESPACE") { $ownNs += $f[0] }
+    }
+  } else {
+    $note = 'namespace ownership unreadable; only the release namespace was excluded'
+  }
+
+  $podLines = kubectl get pods --all-namespaces --request-timeout=10s -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.status.phase}{"|"}{.spec.nodeName}{"|"}{range .spec.containers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"|"}{range .spec.initContainers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"\n"}{end}' 2>$null
+  if ($LASTEXITCODE -ne 0) { return @{ Measured = $false; Note = 'the pod list could not be read' } }
+  $podArr = @($podLines | Where-Object { "$_".Trim() -ne '' })
+  if ($podArr.Count -eq 0) { return @{ Measured = $false; Note = 'the pod list was empty' } }
+
+  $nodeMem = @{}; $nodeCpu = @{}; $pods = 0
+  foreach ($ln in $podArr) {
+    $f = "$ln" -split '\|', 5
+    if ($f.Count -lt 3) { continue }
+    $ns = $f[0]; $phase = $f[1]; $node = $f[2]
+    $apps  = if ($f.Count -ge 4) { $f[3] } else { '' }
+    $inits = if ($f.Count -ge 5) { $f[4] } else { '' }
+    if ($ns -eq '' -or $node -eq '') { continue }
+    if ($ownNs -contains $ns) { continue }
+    if ($phase -eq 'Succeeded' -or $phase -eq 'Failed') { continue }
+    $eff = Get-TbPodEffectiveRequests -Apps $apps -Inits $inits
+    if ($null -eq $eff) {
+      return @{ Measured = $false; Note = "a pod in $ns carries a request quantity this installer cannot parse ($apps$inits)" }
+    }
+    if (-not $nodeMem.ContainsKey($node)) { $nodeMem[$node] = [long]0; $nodeCpu[$node] = [long]0 }
+    $nodeMem[$node] += $eff.MemBytes
+    $nodeCpu[$node] += $eff.CpuMilli
+    $pods++
+  }
+  if ($pods -eq 0) { return @{ Measured = $false; Note = 'no pod outside this release is scheduled yet' } }
+  $maxM = [long]0; $maxC = [long]0
+  foreach ($k in $nodeMem.Keys) {
+    if ($nodeMem[$k] -gt $maxM) { $maxM = $nodeMem[$k] }
+    if ($nodeCpu[$k] -gt $maxC) { $maxC = $nodeCpu[$k] }
+  }
+  if ($note -eq '') { $note = "measured from $pods pod(s) across $($nodeMem.Count) node(s)" }
+  return @{ Measured = $true; MemBytes = $maxM; CpuMilli = $maxC; Note = $note }
+}
+
+# The contract floor rendered exactly as Get-TrainingResources' fallback renders
+# it, so the two cannot drift.
+function Get-TbEnvelopeFloorString {
+  return "cpu=$([math]::Floor($script:TbEnvelopeFloorCpuMilli / 1000)),memory=$([math]::Floor($script:TbEnvelopeFloorMemBytes / 1GB))Gi"
+}
+
+# Verify -- and if it is ours, correct -- the envelope Get-TrainingResources chose,
+# against what this machine can actually schedule beside the platform.
+#
+# Returns @{ Verdict; Lines; Size; Undersized }:
+#   Verdict     fits | reduced | refused | pinned-over | unverified
+#   Lines       the arithmetic, one fact per line, for the caller to print
+#   Size        what to WRITE: the input, or on `reduced` the largest whole-core /
+#               whole-GiB envelope that fits (never larger than what was chosen)
+#   Undersized  $true when a reduction landed below the contract floor while
+#               still being a requestable shape (>= 1 core, >= 1 GiB)
+#
+# The verdicts, and who they apply to:
+#   * installer-chosen (fresh or carried): fits, or reduced with the arithmetic,
+#     or REFUSED when not even a 1-core/1-GiB run fits -- the caller must not
+#     write the envelope. Refused too when the footprint constants are unreadable,
+#     or when the cluster cannot be read and the chosen size is anything but the
+#     contract floor: an envelope this installer picked and cannot verify is not
+#     written (fail closed).
+#   * the contract floor with an unreadable cluster: `unverified`. The caller
+#     warns rather than refusing, so a cluster whose nodes the installer may not
+#     list (restricted RBAC on a BYO cluster) still installs, loudly.
+#   * a human's choice (TRACEBLOC_TRAINING_RESOURCES, `tracebloc resources set`,
+#     or an unattributable carry): never altered. A pin that does not fit is
+#     `pinned-over`, warned with the arithmetic; one the installer cannot verify
+#     is `unverified`.
+# Bash twin: _fit_training_envelope. Emits nothing itself; printing is the
+# caller's job, so the Pester suite can compare the whole return.
+function Resolve-TbTrainingFit {
+  param([string]$Size, [string]$Provenance)
+  $ours = ($Provenance -eq 'installer')
+  $out = @{ Verdict = ''; Lines = @(); Size = $Size; Undersized = $false }
+
+  # FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
+  # installer, and nothing sensible can be verified against it.
+  if ("$($script:TbCpFootprintMemBytes)" -notmatch '^\d+$' -or "$($script:TbCpFootprintCpuMilli)" -notmatch '^\d+$') {
+    $out.Verdict = 'refused'
+    $out.Lines = @('the chart footprint constants ($script:TbCpFootprint*) are missing or not numeric -- this installer cannot verify any envelope')
+    return $out
+  }
+  $fpMemB = [long]$script:TbCpFootprintMemBytes; $fpCpuM = [long]$script:TbCpFootprintCpuMilli
+  $floor = Get-TbEnvelopeFloorString
+
+  $envCpuM = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $Size -Key 'cpu')
+  $envMemB = ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $Size -Key 'memory')
+
+  # The machine. Unreadable is decided by who chose the size (see the header).
+  $anchor = Get-TbAnchorAllocatable
+  if ($null -eq $anchor) {
+    if ($ours -and $Size -ne $floor) {
+      $out.Verdict = 'refused'
+      $out.Lines = @("node allocatable could not be read, and $Size is an installer-chosen envelope that cannot be verified without it")
+    } else {
+      $out.Verdict = 'unverified'
+      $out.Lines = @("node allocatable could not be read; $Size was written without checking that it can schedule beside the platform")
+    }
+    return $out
+  }
+  $allocMemB = [long]$anchor.MemBytes; $allocCpuM = [long]$anchor.CpuMilli
+
+  if ($null -eq $envCpuM -or $null -eq $envMemB) {
+    if ($ours) {
+      $out.Verdict = 'refused'
+      $out.Lines = @("the installer-chosen envelope '$Size' has no readable cpu and memory pair -- refusing to write what cannot be verified")
+    } else {
+      $out.Verdict = 'unverified'
+      $out.Lines = @("'$Size' has no readable cpu and memory pair, so its fit on this machine was not checked")
+    }
+    return $out
+  }
+
+  # What else the node must hold: the chart's control plane, plus whatever system
+  # pods are already scheduled and are not the chart's.
+  $sysMemB = [long]0; $sysCpuM = [long]0
+  $sys = Get-TbMeasuredSystemRequests
+  if ($sys.Measured) {
+    $sysMemB = [long]$sys.MemBytes; $sysCpuM = [long]$sys.CpuMilli
+    $sysHow = "measured: $($sys.Note)"
+  } else {
+    $sysHow = "NOT measured ($($sys.Note)); verified against the chart derivation only"
+  }
+  $needMemB = $fpMemB + $sysMemB
+  $needCpuM = $fpCpuM + $sysCpuM
+  $mib = [long]1MB; $gib = [long]1GB
+  $lines = @()
+  $lines += "allocatable on the largest schedulable node: $([math]::Floor($allocMemB / $mib)) MiB / $allocCpuM m"
+  $lines += "control plane (chart) $([math]::Floor($fpMemB / $mib)) MiB / $fpCpuM m + system pods $([math]::Floor($sysMemB / $mib)) MiB / $sysCpuM m = $([math]::Floor($needMemB / $mib)) MiB / $needCpuM m ($sysHow)"
+  $lines += "envelope $Size = $([math]::Floor($envMemB / $mib)) MiB / $envCpuM m"
+
+  $memOver = $envMemB + $needMemB - $allocMemB
+  $cpuOver = $envCpuM + $needCpuM - $allocCpuM
+  $memFits = ($memOver -le 0); $cpuFits = ($cpuOver -le 0)
+  if ($memFits) {
+    $lines += "memory: $([math]::Floor($envMemB / $mib)) + $([math]::Floor($needMemB / $mib)) = $([math]::Floor(($envMemB + $needMemB) / $mib)) MiB <= $([math]::Floor($allocMemB / $mib)) MiB ($([math]::Floor(-$memOver / $mib)) MiB headroom)"
+  } else {
+    $lines += "memory: $([math]::Floor($envMemB / $mib)) + $([math]::Floor($needMemB / $mib)) = $([math]::Floor(($envMemB + $needMemB) / $mib)) MiB > $([math]::Floor($allocMemB / $mib)) MiB ($([math]::Floor($memOver / $mib)) MiB OVER)"
+  }
+  if ($cpuFits) {
+    $lines += "cpu: $envCpuM + $needCpuM = $($envCpuM + $needCpuM) m <= $allocCpuM m ($(-$cpuOver) m headroom)"
+  } else {
+    $lines += "cpu: $envCpuM + $needCpuM = $($envCpuM + $needCpuM) m > $allocCpuM m ($cpuOver m OVER)"
+  }
+  $out.Lines = $lines
+
+  if ($memFits -and $cpuFits) { $out.Verdict = 'fits'; return $out }
+
+  if (-not $ours) {
+    $out.Verdict = 'pinned-over'
+    $out.Lines += "this size was chosen by a human ($Provenance), so it is written as-is; training pods will stay Pending on this machine until it is lowered"
+    return $out
+  }
+
+  # Ours, and it does not fit: the largest whole-core / whole-GiB envelope that
+  # does -- floored, and never larger than what was chosen in either dimension.
+  $fitMemB = $allocMemB - $needMemB; if ($fitMemB -lt 0) { $fitMemB = [long]0 }
+  $fitCpuM = $allocCpuM - $needCpuM; if ($fitCpuM -lt 0) { $fitCpuM = [long]0 }
+  $newGib   = [long][math]::Floor($fitMemB / $gib); $newCores = [long][math]::Floor($fitCpuM / 1000)
+  $oldGib   = [long][math]::Floor($envMemB / $gib); $oldCores = [long][math]::Floor($envCpuM / 1000)
+  if ($newGib -gt $oldGib) { $newGib = $oldGib }
+  if ($newCores -gt $oldCores) { $newCores = $oldCores }
+
+  if ($newCores -lt 1 -or $newGib -lt 1) {
+    $out.Verdict = 'refused'
+    $out.Lines += "what fits is $([math]::Floor($fitMemB / $mib)) MiB / $fitCpuM m -- not even a 1-core / 1-GiB run; there is no honest envelope to write"
+    return $out
+  }
+
+  $out.Size = "cpu=$newCores,memory=${newGib}Gi"
+  $out.Verdict = 'reduced'
+  $out.Lines += "reduced $Size -> $($out.Size): $([math]::Floor($allocMemB / $mib)) - $([math]::Floor($needMemB / $mib)) = $([math]::Floor($fitMemB / $mib)) MiB -> $newGib GiB; $allocCpuM - $needCpuM = $fitCpuM m -> $newCores core(s)"
+  if (($newCores * 1000) -lt $script:TbEnvelopeFloorCpuMilli -or ($newGib * $gib) -lt $script:TbEnvelopeFloorMemBytes) {
+    $out.Undersized = $true
+  }
+  return $out
+}
+
 function Get-TrainingResources {
   param([hashtable]$Carried, [switch]$CarriedResolved)
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
@@ -5257,58 +5624,15 @@ function Get-TrainingResources {
     # memory, and .spec.unschedulable. The bash twin carries the same jsonpath in
     # lib/install-client-helm.sh::_TB_NODE_JSONPATH; the two are pinned to agree
     # by the shared cluster-state fixture, tests/fixtures/installer_parity.json.
-    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $lines) {
-      $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
-      foreach ($ln in @($lines)) {
-        $parts = "$ln".Trim() -split '\s+'
-        if ($parts.Count -lt 2) { continue }
-        $cpuRaw = $parts[0]
-        $memRaw = $parts[1]
-        # Cordoned nodes are SKIPPED, before any ranking (contract
-        # skipped_nodes: "spec.unschedulable (cordoned)"). A cordoned node
-        # accepts no new pods, so anchoring on one writes an envelope that
-        # cannot schedule -- and on a heterogeneous cluster a cordoned LARGE
-        # node wins the anchor outright, leaving every training pod Pending
-        # with no obvious cause (backend#2237).
-        #
-        # Kubernetes declares Unschedulable with `omitempty`, so a schedulable
-        # node emits an EMPTY third field and .Trim() drops it entirely --
-        # hence Count -lt 3 is the normal case, and only the literal 'true'
-        # means cordoned. Testing for 'true' rather than for non-emptiness is
-        # what keeps a future explicit `unschedulable: false` from being read
-        # as cordoned.
-        if ($parts.Count -ge 3 -and $parts[2] -eq 'true') { continue }
-        # $null, NOT 0, for a quantity we cannot parse. The contract's
-        # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
-        # twin does exactly that with an explicit `|| continue`. Coercing to 0
-        # and ranking the node anyway was a real bug the old memory-first order
-        # happened to hide -- a memB of 0 could never win. Ranking cpu-first
-        # exposes it: a node with a good core count and a memory unit we do not
-        # speak would take the anchor, fail the memory floor, and drop the whole
-        # machine to the literal while a sibling node was perfectly sizeable
-        # (Bugbot #766).
-        $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
-                elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
-                else { $null }
-        $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
-                elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
-                elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
-                elseif ($memRaw -match '^\d+$') { [long]$memRaw }
-                else { $null }
-        if ($null -eq $cpuM -or $null -eq $memB) { continue }
-        # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
-        # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
-        # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
-        # NOT a field no-op because clusters are single-node -- they are not
-        # (backend#2221: SERVERS=1 AGENTS=1 is the default, so two nodes). It is
-        # a no-op only because both k3d node containers report IDENTICAL
-        # figures, each reporting the whole Docker VM -- the #2221 bug itself.
-        if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
-          $bestMemB = $memB; $bestCpuM = $cpuM
-        }
-        $seen = $true
-      }
+    # The anchor comes from the ONE node reader (Get-TbAnchorAllocatable), the
+    # same one Resolve-TbTrainingFit verifies against, so sizing and fit cannot
+    # anchor on different nodes. $null covers both "the API could not be read"
+    # and "no node parsed" -- either way the machine was not measured.
+    $anchor = Get-TbAnchorAllocatable
+    $seen = ($null -ne $anchor)
+    $bestMemB = [long]0; $bestCpuM = [long]0
+    if ($seen) { $bestMemB = [long]$anchor.MemBytes; $bestCpuM = [long]$anchor.CpuMilli }
+    if ($seen) {
       # No usable node: bestCpuM stays 0, so the floor check below fails and we
       # fall through to the single literal return at the end of the function --
       # deliberately NOT an early return with its own copy of that literal.
@@ -6496,6 +6820,40 @@ function Install-ClientHelm {
   $carried = Get-CarriedTrainingValues
   $trainingSize = Get-TrainingResources -Carried $carried -CarriedResolved
   $trainingProvenance = Get-TrainingProvenance -Carried $carried -CarriedResolved
+  # backend#2870 / client#992: and only now, is what was chosen schedulable HERE --
+  # beside the chart's control plane and the system pods already on the node?
+  # Ours gets reduced or refused; a human's gets warned. The arithmetic is printed
+  # in every case that changes or blocks anything, because an operator reading
+  # `Pending / Insufficient memory` later needs the numbers, not the verdict.
+  # Mirrors the bash twin's _fit_training_envelope call site word for word.
+  $fit = Resolve-TbTrainingFit -Size $trainingSize -Provenance $trainingProvenance
+  switch ($fit.Verdict) {
+    'refused' {
+      Warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
+      foreach ($l in $fit.Lines) { Hint "  $l" }
+      Hint "  The client needs ~$([math]::Floor(($script:TbCpFootprintMemBytes + $script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $($script:TbCpFootprintCpuMilli + $script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+      Err "Refusing to write a training envelope that cannot be scheduled on this machine (backend#2870)."
+    }
+    'reduced' {
+      Info "Training envelope reduced to fit beside the platform on this machine:"
+      foreach ($l in $fit.Lines) { Hint "  $l" }
+    }
+    'pinned-over' {
+      Warn "The chosen training size does not fit beside the platform on this machine; training pods will stay Pending until it is lowered:"
+      foreach ($l in $fit.Lines) { Hint "  $l" }
+    }
+    'unverified' {
+      Warn "Training envelope UNVERIFIED: $($fit.Lines -join ' ')"
+      Hint "  Grant the installer 'get nodes' and 'list pods' to have it checked, or set TRACEBLOC_TRAINING_RESOURCES to a size you know fits."
+    }
+    default {
+      # Fits: the arithmetic goes to the log file only, so a re-read later can
+      # still see what was checked without it cluttering a clean install.
+      foreach ($l in $fit.Lines) { Log "envelope fit: $l" }
+    }
+  }
+  $trainingSize = $fit.Size
+  if ($fit.Undersized) { $script:TbTrainingUndersized = $true }
   # Mirrors the bash twin's warning, and lives HERE for the same reason: the
   # sizing functions' returns are compared whole by their tests.
   if ($script:TbTrainingUndersized) {

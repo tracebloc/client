@@ -88,6 +88,7 @@ YAML
   mkdir -p "$td/scripts/lib" "$td/scripts/tests"
   cp -R "$HERE/../../client" "$td/client"
   cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../install-k8s.ps1" "$td/scripts/"
   cp "$FOOTPRINT" "$td/scripts/tests/"
   sed 's/^_TB_CP_FOOTPRINT_MEM_BYTES=.*/_TB_CP_FOOTPRINT_MEM_BYTES=1/' "$HERE/../lib/install-client-helm.sh" > "$td/scripts/lib/install-client-helm.sh"
   run bash "$td/scripts/gen-footprint-embed.sh" --check
@@ -107,11 +108,52 @@ YAML
   [ "$want" = "$got" ] || { echo "want '$want' got '$got'"; return 1; }
 }
 
+@test "gen-footprint-embed.sh --check: a drifted PowerShell embed is EMBED DRIFT too, and write mode repairs it (client#992)" {
+  # The same render feeds BOTH installers. A footprint that moved in the bash
+  # twin and not the PowerShell one is exactly the divergence the parity fixture
+  # exists to end, so the ps1 constants are checked by the same generator.
+  local td; td="$(mktemp -d)"
+  mkdir -p "$td/scripts/lib" "$td/scripts/tests"
+  cp -R "$HERE/../../client" "$td/client"
+  cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../lib/install-client-helm.sh" "$td/scripts/lib/"
+  cp "$FOOTPRINT" "$td/scripts/tests/"
+  sed 's/^\$script:TbCpFootprintCpuMilli = .*/$script:TbCpFootprintCpuMilli = 1/' "$HERE/../install-k8s.ps1" > "$td/scripts/install-k8s.ps1"
+  grep -q '^\$script:TbCpFootprintCpuMilli = 1$' "$td/scripts/install-k8s.ps1" || { echo "mutation did not apply"; rm -rf "$td"; return 1; }
+  run bash "$td/scripts/gen-footprint-embed.sh" --check
+  [ "$status" -eq 1 ] || { echo "$output"; rm -rf "$td"; return 1; }
+  [[ "$output" == *"EMBED DRIFT"*'$script:TbCpFootprintCpuMilli=1'* ]] || { echo "$output"; rm -rf "$td"; return 1; }
+  run bash "$td/scripts/gen-footprint-embed.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$td"; return 1; }
+  run bash "$td/scripts/gen-footprint-embed.sh" --check
+  [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$td"; return 1; }
+  local want got
+  want="$(grep '^\$script:TbCpFootprintCpuMilli = ' "$HERE/../install-k8s.ps1")"
+  got="$(grep '^\$script:TbCpFootprintCpuMilli = ' "$td/scripts/install-k8s.ps1")"
+  rm -rf "$td"
+  [ "$want" = "$got" ] || { echo "want '$want' got '$got'"; return 1; }
+}
+
+@test "gen-footprint-embed.sh: a missing PowerShell assignment is reported, not silently skipped (client#992)" {
+  local td; td="$(mktemp -d)"
+  mkdir -p "$td/scripts/lib" "$td/scripts/tests"
+  cp -R "$HERE/../../client" "$td/client"
+  cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../lib/install-client-helm.sh" "$td/scripts/lib/"
+  cp "$FOOTPRINT" "$td/scripts/tests/"
+  grep -v '^\$script:TbCpFootprintMemBytes = ' "$HERE/../install-k8s.ps1" > "$td/scripts/install-k8s.ps1"
+  run bash "$td/scripts/gen-footprint-embed.sh" --check
+  rm -rf "$td"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'no $script:TbCpFootprintMemBytes assignment'* ]] || { echo "$output"; return 1; }
+}
+
 @test "gen-footprint-embed.sh: a missing assignment is reported, not silently skipped" {
   local td; td="$(mktemp -d)"
   mkdir -p "$td/scripts/lib" "$td/scripts/tests"
   cp -R "$HERE/../../client" "$td/client"
   cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../install-k8s.ps1" "$td/scripts/"
   cp "$FOOTPRINT" "$td/scripts/tests/"
   grep -v '^_TB_CP_FOOTPRINT_CPU_MILLI=' "$HERE/../lib/install-client-helm.sh" > "$td/scripts/lib/install-client-helm.sh"
   run bash "$td/scripts/gen-footprint-embed.sh" --check
