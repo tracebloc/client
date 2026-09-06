@@ -276,23 +276,21 @@ jobs:
       # package-manager calls, yet on 2026-09-04 a Prereqs leg still ran to the
       # job cap and reported `cancelled` with nothing readable in its log (#986):
       # a job-level timeout-minutes kills the step before it can say what it was
-      # doing. `timeout` here FAILS the step instead, so the script's own last
-      # output stays in the log and names the command that stalled. Sized so the
-      # worst-case pull above (~5.5 min) plus this bound still ends inside the
-      # 20-minute job with room to spare; a healthy leg finishes in under 3.
+      # doing. The wrapper FAILS the step instead, so the script's own last
+      # output stays in the log and names the command that stalled -- and it
+      # owns the exit-code contract (124 AND 137: a PID-1 shell ignores SIGTERM,
+      # so the likely stall path ends in SIGKILL), in one place for both jobs.
+      # Sized so the worst-case pull above (~5.5 min) plus this bound still ends
+      # inside the 20-minute job with room to spare; a healthy leg finishes in
+      # under 3.
       - name: Install prerequisites in ${{ matrix.distro }}
         env:
           DISTRO: ${{ matrix.distro }}
           BOUND: 12m
         run: |
-          set +e
-          timeout --kill-after=30s "$BOUND" docker run --rm -v "$PWD:/src:ro" -w /src "$DISTRO" \
-            bash scripts/tests/distro-prereqs.sh
-          rc=$?
-          if [ "$rc" -eq 124 ]; then
-            echo "::error::prerequisite install in $DISTRO exceeded the $BOUND step bound - the last lines above name the command that stalled (mirror connectivity, not this PR). Re-run this job."
-          fi
-          exit "$rc"
+          bash scripts/tests/bounded-docker-run.sh "$BOUND" "prerequisite install in $DISTRO" \
+            docker run --rm -v "$PWD:/src:ro" -w /src "$DISTRO" \
+              bash scripts/tests/distro-prereqs.sh
 
   e2e-cluster:
     timeout-minutes: 30
@@ -389,19 +387,14 @@ jobs:
           # dies at init before line 1). Bootstrap bash via a POSIX `sh -c` wrapper:
           # `command -v bash` short-circuits on every glibc distro (they already
           # have it), and the apk branch only fires on Alpine. Then exec the script.
-          # Bounded for the same reason as the Prereqs job (#986): a stalled
+          # Bounded through the same wrapper as the Prereqs job (#986): a stalled
           # mirror inside the container must end as a FAILED step with the
           # script's last output in the log, not a `cancelled` job at the cap.
-          set +e
-          timeout --kill-after=30s "$BOUND" docker run --rm \
-            -e TRACEBLOC_CLI_REF \
-            -v "$PWD:/src:ro" -w /src "$DISTRO" \
-            sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1; exec bash scripts/tests/path-persist.sh'
-          rc=$?
-          if [ "$rc" -eq 124 ]; then
-            echo "::error::PATH-persist check in $DISTRO exceeded the $BOUND step bound - the last lines above name the command that stalled (mirror connectivity, not this PR). Re-run this job."
-          fi
-          exit "$rc"
+          bash scripts/tests/bounded-docker-run.sh "$BOUND" "PATH-persist check in $DISTRO" \
+            docker run --rm \
+              -e TRACEBLOC_CLI_REF \
+              -v "$PWD:/src:ro" -w /src "$DISTRO" \
+              sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1; exec bash scripts/tests/path-persist.sh'
 
   e2e-journey:
     timeout-minutes: 30
