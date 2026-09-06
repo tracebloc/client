@@ -1,0 +1,81 @@
+suite: bakedRootRotationOn — a reinstall over a kept datadir is not wedged (backend#3226)
+# tracebloc.bakedRootRotationOn refuses to read root's rotation state from a
+# missing Secret when the datadir is present (backend#3189). The refusal used to
+# fire UNCONDITIONALLY on `and $pvc (not $secret)`, so a `helm uninstall` (which
+# keeps the datadir PVC and the born-rotated marker under resource-policy: keep,
+# but DELETES the Secret) followed by a reuse-data reinstall wedged the render:
+# the case the helper is meant to leave on the image-baked password never started,
+# and the error named a copy-the-Secret remedy that does not exist after an
+# uninstall. backend#3226 gates the refusal on mysqlRootRotationAcknowledged (the
+# same flag that clears secrets.yaml's three mint arms) and consults the
+# rename-safe marker FIRST.
+#
+# helm-unittest cannot mock `lookup`, so the live PVC / Secret / marker probes are
+# all empty here. The datadir is asserted through `mysqlDatadirExists` — the same
+# values-level surrogate secrets.yaml's mint guard uses (backend#2892) — which is
+# exactly what makes this arm provable off-cluster. The baked-default path is
+# reached by leaving rotateMysqlRoot unset (an explicit override bypasses the
+# helper) at CLIENT_ENV=prod, where rotateMysqlRootByEnv.prod is true.
+templates:
+  - templates/mysql-root-rotated-marker.yaml
+tests:
+  # (1) THE BUG, unfixed shape: datadir present (declared), Secret absent, no ack,
+  # no marker → the refusal fires. Exact errorMessage: helm-unittest 0.5.2 ignores
+  # errorPattern (scripts/tests/helm-unittest-error-assertions.sh), and this is the
+  # backend#3226 message. Reword the fail and this reddens.
+  - it: refuses a reinstall over a kept datadir when the Secret is gone and rotation is unacknowledged
+    template: templates/mysql-root-rotated-marker.yaml
+    set:
+      env.CLIENT_ENV: prod
+      mysqlDatadirExists: true
+    asserts:
+      - failedTemplate:
+          errorMessage: 'release "RELEASE-NAME" in namespace "NAMESPACE" has MySQL data (PersistentVolumeClaim "mysql-pvc") but no Secret named "RELEASE-NAME-secrets" -- the name this render resolves to -- and no born-rotated marker. bakedRootRotationOn cannot read root''s rotation state from a Secret that is not there, and treating the miss as "not rotated" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. TWO CAUSES look like this. (1) A RENAME (fullnameOverride changed on a live release): the Secret still exists under the OLD name -- copy it to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command), or put fullnameOverride back to the value this release was last rendered with. (2) A REINSTALL over a kept datadir whose uninstall DELETED the Secret (docs/MIGRATIONS.md): there is no Secret to copy. A born-rotated edge keeps its marker across the uninstall and this render resolves rotated from it; an un-rotated edge has no marker, so set mysqlRootRotationAcknowledged=true to proceed on the image-baked password -- the ack clears this arm the same way it clears the secrets.yaml mint arms. See docs/MIGRATIONS.md.'
+
+  # (2) THE FIX: the acknowledgement clears this arm exactly as its values.yaml
+  # contract promises ("clears ALL of the guard's refuse arms"). With the datadir
+  # declared but the rotation acknowledged, bakedRootRotationOn falls through to
+  # OFF (image-baked password) instead of failing — so rotation resolves off and
+  # the born-rotated marker is NOT laid down. Drop the `not ack` term from the
+  # refusal and this render FAILS instead of emitting zero documents.
+  - it: mysqlRootRotationAcknowledged clears the datadir refusal and leaves the edge on the image-baked password
+    template: templates/mysql-root-rotated-marker.yaml
+    set:
+      env.CLIENT_ENV: prod
+      mysqlDatadirExists: true
+      mysqlRootRotationAcknowledged: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # (3) Inert on a legitimate cluster-less render: no datadir declared, nothing
+  # pinned → no refusal and rotation stays off (marker not rendered). Proves the
+  # guard does not fire on `helm template` / GitOps renders. Revert the datadir
+  # detection to the bare `$pvc` lookup and test (1) stops failing — this one is
+  # unaffected, so the pair localises the mutation to the surrogate.
+  - it: does not fire on an ordinary cluster-less render with no datadir declared
+    template: templates/mysql-root-rotated-marker.yaml
+    set:
+      env.CLIENT_ENV: prod
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # (4) Positive control: an explicit mysqlRootPassword pin (tier 1) resolves
+  # bakedRootRotationOn ON even with the datadir declared, so the born-rotated
+  # marker IS written under its constant name. Proves the fix did not break the
+  # rotation-on path and that the datadir gate does not suppress a pinned rotation.
+  - it: a mysqlRootPassword pin still lays the born-rotated marker down over an existing datadir
+    template: templates/mysql-root-rotated-marker.yaml
+    set:
+      env.CLIENT_ENV: prod
+      mysqlDatadirExists: true
+      mysqlRootPassword: "RotatedRootPw123"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: mysql-root-rotated
