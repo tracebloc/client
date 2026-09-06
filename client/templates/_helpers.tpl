@@ -1431,3 +1431,33 @@ https://api.tracebloc.io/
 */ -}}
 {{- if or (ne .Values.resourceMonitor false) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
 {{- end -}}
+
+{{/*
+tracebloc.gpuEnv -- the jobs-manager's GPU_REQUESTS / GPU_LIMITS env pair, rendered
+ONCE for both containers (api and pods-monitor) so the request == limit invariant
+lives in one place (Saqlain, client#996). Three situations, not two (backend#2216):
+
+  * `env.GPU_LIMITS` absent            -> emits NEITHER var; the runtime keeps its
+                                          legacy assume-a-GPU default. A lone
+                                          `env.GPU_REQUESTS` is IGNORED here on
+                                          purpose: GPU_LIMITS is the gate, and an
+                                          edge that carried a lone empty
+                                          GPU_REQUESTS on an older chart must not
+                                          flip to CPU-only on upgrade.
+  * `env.GPU_LIMITS: ""`               -> both empty: the operator declared CPU-only.
+  * `env.GPU_LIMITS: nvidia.com/gpu=N` -> both set; GPU_REQUESTS takes the
+                                          operator's value when given, else
+                                          GPU_LIMITS' own (client#995: it used to
+                                          take a literal "nvidia.com/gpu=1", which
+                                          the API server rejects beside any other
+                                          limit). Two different explicit values are
+                                          written as given; the runtime warns once.
+*/}}
+{{- define "tracebloc.gpuEnv" -}}
+{{- if hasKey .Values.env "GPU_LIMITS" }}
+- name: GPU_REQUESTS
+  value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | default "" | quote }}{{ else }}{{ .Values.env.GPU_LIMITS | default "" | quote }}{{ end }}
+- name: GPU_LIMITS
+  value: {{ .Values.env.GPU_LIMITS | default "" | quote }}
+{{- end }}
+{{- end }}
