@@ -29,7 +29,7 @@
     "Regenerate the bash companion after editing: scripts/gen-installer-parity.sh"
   ],
   "verdict_fields": {
-    "size": "what the installer writes to RESOURCE_LIMITS / RESOURCE_REQUESTS",
+    "size": "what _resolve_training_size / Get-TrainingResources choose for RESOURCE_REQUESTS. Since backend#2870 the bash installer runs a SECOND step after this, _fit_training_envelope, which may REDUCE an installer-chosen size (or refuse the install) so it schedules beside the chart's control plane -- so on bash the value WRITTEN can be smaller than this field. That step is bash-only for now and is asserted by scripts/tests/envelope-schedulability.sh, not here; the ps1 twin does not have it yet (follow-up on backend#2870), which is a known, recorded divergence rather than one this fixture can catch.",
     "provenance": "installer | user | unknown -- who chose that size",
     "undersized": "machine measured, below the training floor, honest remainder written",
     "unschedulable": "machine measured, cannot host even a 1-core/1-GiB run",

@@ -74,23 +74,50 @@ _ensure_helm_runnable() {
 #      backend#2254 floored it. _TRAINING_DEFAULT is DERIVED from the embedded
 #      floor constants (below, so it cannot drift from the contract).
 
-# k8s cpu quantity -> millicores ("12" -> 12000, "11500m" -> 11500); empty on junk.
+# k8s cpu quantity -> millicores ("12" -> 12000, "11500m" -> 11500, "0.5" -> 500);
+# empty on junk.
+#
+# The fractional-cores arm exists for _measured_system_requests (backend#2870):
+# node allocatable is always serialised as whole cores or `m`, but a third-party
+# system pod may request `0.5`, and a quantity this cannot read makes the whole
+# measurement unusable rather than silently counting as zero. Digits after the
+# point beyond the third are truncated (floored), never rounded up.
 _cpu_to_milli() {
-  case "$1" in
-    *m) printf '%s' "${1%m}" ;;
+  local v="$1" whole frac
+  case "$v" in
+    *m) case "${v%m}" in ''|*[!0-9]*) : ;; *) printf '%s' "${v%m}" ;; esac ;;
+    [0-9]*.[0-9]*)
+      whole="${v%%.*}"; frac="${v#*.}"
+      case "$whole$frac" in *[!0-9]*) return 0 ;; esac
+      frac="${frac}000"; frac="${frac:0:3}"
+      # `10#` -- a fraction like 050 would otherwise be read as octal.
+      printf '%s' "$(( whole * 1000 + 10#$frac ))" ;;
     ''|*[!0-9]*) : ;;
-    *) printf '%s' "$(( $1 * 1000 ))" ;;
+    *) printf '%s' "$(( v * 1000 ))" ;;
   esac
 }
-# k8s memory quantity -> bytes (Ki/Mi/Gi or plain bytes); empty on junk.
+# k8s memory quantity -> bytes (binary Ki/Mi/Gi/Ti, decimal k/M/G/T, or plain
+# bytes); empty on junk. The decimal arms were added for the same reason as the
+# fractional-cores arm above: the chart and kubelet speak `Mi`, but a system pod
+# may say `250M`, and an unreadable quantity must be a refusal, not a zero.
 _mem_to_bytes() {
-  local v="$1"
+  local v="$1" n
   case "$v" in
-    *Ki) printf '%s' "$(( ${v%Ki} * 1024 ))" ;;
-    *Mi) printf '%s' "$(( ${v%Mi} * 1024 * 1024 ))" ;;
-    *Gi) printf '%s' "$(( ${v%Gi} * 1024 * 1024 * 1024 ))" ;;
-    ''|*[!0-9]*) : ;;
-    *) printf '%s' "$v" ;;
+    *Ki|*Mi|*Gi|*Ti) n="${v%??}" ;;
+    *k|*M|*G|*T)     n="${v%?}" ;;
+    *)               n="$v" ;;
+  esac
+  case "$n" in ''|*[!0-9]*) return 0 ;; esac
+  case "$v" in
+    *Ki) printf '%s' "$(( n * 1024 ))" ;;
+    *Mi) printf '%s' "$(( n * 1024 * 1024 ))" ;;
+    *Gi) printf '%s' "$(( n * 1024 * 1024 * 1024 ))" ;;
+    *Ti) printf '%s' "$(( n * 1024 * 1024 * 1024 * 1024 ))" ;;
+    *k)  printf '%s' "$(( n * 1000 ))" ;;
+    *M)  printf '%s' "$(( n * 1000 * 1000 ))" ;;
+    *G)  printf '%s' "$(( n * 1000 * 1000 * 1000 ))" ;;
+    *T)  printf '%s' "$(( n * 1000 * 1000 * 1000 * 1000 ))" ;;
+    *)   printf '%s' "$n" ;;
   esac
 }
 
@@ -205,6 +232,28 @@ _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
 _TB_ENVELOPE_VM_RESERVE_MEM_BYTES=1073741824
 _TB_ENVELOPE_NODE_MIN_CPU_MILLI=2000
 _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
+# ── end generated ───────────────────────────────────────────────────────────
+
+# ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
+#
+# backend#2870. What the chart's steady-state control plane REQUESTS -- every
+# Deployment/StatefulSet/DaemonSet container, the scheduler's max(sum(app),
+# max(init)) per pod, one-shot hook Jobs excluded -- summed from `helm template`
+# by scripts/tests/control-plane-footprint.sh and embedded here by
+# scripts/gen-footprint-embed.sh. The overhead constant above is what the
+# envelope SUBTRACTS for the platform; this is what the platform actually ASKS
+# the scheduler for, and since 2026-09 the two disagree (the footprint is larger).
+# _fit_training_envelope compares the envelope against allocatable minus THIS,
+# so a chart change that raises a request shrinks the envelope on the next
+# install instead of leaving the training pod Pending.
+#
+# Embedded, not summed at install time, for the same reason as the block above:
+# the runtime installer guarantees neither jq nor python3, and the bootstrap is
+# signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
+# `make drift` (the required Source-of-truth drift job): the value below must
+# equal a fresh render of the chart in the same tree, or CI reddens.
+_TB_CP_FOOTPRINT_MEM_BYTES=3288334336
+_TB_CP_FOOTPRINT_CPU_MILLI=900
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the fallback training envelope (precedence step 4) ──────────────────────
@@ -658,6 +707,336 @@ _training_resources() {
 _training_provenance() {
   _resolve_training_size
   printf '%s' "$_TB_TRAINING_PROVENANCE"
+}
+
+# ── is the envelope actually schedulable here? (backend#2870) ────────────────
+#
+# Everything above sizes the envelope against ALLOCATABLE and stops. Nothing then
+# asked whether the number written can be scheduled beside what else runs on the
+# node: the chart's own control plane (3136 MiB / 900 m, from the render) plus
+# the distribution's system pods (~140 MiB / 200 m of coredns and metrics-server
+# on k3s). Measured on a real single-node install, the platform out-requests the
+# 3 GiB reserve the envelope subtracts, so `allocatable - 3 GiB` over-asked at
+# EVERY machine size and the training pod sat `Pending / Insufficient memory`
+# while the installer printed `Training size: ...` and cli doctor said OK.
+#
+# The two functions below make the installer own that question at the moment it
+# writes the envelope. The 3 GiB constant itself is not touched here: fixing the
+# number is backend#2460; this is the check that makes a wrong number visible.
+
+# The pod lines contract for _measured_system_requests. `|`-separated, NOT
+# whitespace: a Pending pod has no nodeName, and `read` would collapse the empty
+# field and shift every column right. Per pod:
+#   <namespace>|<phase>|<nodeName>|<app requests>|<init requests>
+# where each requests field is `cpu/memory,` repeated per container -- an empty
+# cpu or memory reads as "no request", which is what Kubernetes means by it.
+_TB_PODS_JSONPATH='{range .items[*]}{.metadata.namespace}{"|"}{.status.phase}{"|"}{.spec.nodeName}{"|"}{range .spec.containers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"|"}{range .spec.initContainers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"\n"}{end}'
+# Namespaces and who owns them: `<name>|<meta.helm.sh/release-name>` per line.
+_TB_NAMESPACES_JSONPATH='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}'
+
+# The raw value of ONE dimension of an envelope string: `_envelope_dimension
+# "cpu=7, Memory=29Gi" memory` -> `29Gi`. Keys match case-insensitively and pairs
+# are trimmed, the same tolerance _training_limits extends to a human-typed
+# override. Echoes nothing when the key is absent. IFS is local to this function
+# on purpose: a `local IFS` in the caller would leak into every `read` in the
+# functions it calls next (bash scoping is dynamic).
+_envelope_dimension() {
+  local size="$1" want="$2" pair k
+  local IFS=,
+  for pair in $size; do
+    pair="${pair#"${pair%%[![:space:]]*}"}"; pair="${pair%"${pair##*[![:space:]]}"}"
+    k="${pair%%=*}"
+    case "$want:$k" in
+      cpu:[Cc][Pp][Uu]|memory:[Mm][Ee][Mm][Oo][Rr][Yy]) printf '%s' "${pair#*=}"; return 0 ;;
+    esac
+  done
+}
+
+# The effective request of ONE pod's worth of `cpu/memory,` container fields:
+# sum(app containers) for the first argument, max(init containers) for the
+# second, per resource -- the scheduler's formula, the same one
+# control-plane-footprint.sh applies to the render. Echoes "<mem bytes> <cpu m>"
+# or NOTHING when a quantity is present but unreadable, which the caller must
+# treat as "this measurement is unusable", never as zero.
+_pod_effective_requests() {
+  local apps="$1" inits="$2" field c m cm mm
+  local app_m=0 app_c=0 init_m=0 init_c=0
+  local IFS=,
+  for field in $apps; do
+    [[ -n "$field" ]] || continue
+    c="${field%%/*}"; m="${field#*/}"
+    cm=0; mm=0
+    if [[ -n "$c" ]]; then cm="$(_cpu_to_milli "$c")"; [[ -n "$cm" ]] || return 0; fi
+    if [[ -n "$m" ]]; then mm="$(_mem_to_bytes "$m")"; [[ -n "$mm" ]] || return 0; fi
+    app_c=$(( app_c + cm )); app_m=$(( app_m + mm ))
+  done
+  for field in $inits; do
+    [[ -n "$field" ]] || continue
+    c="${field%%/*}"; m="${field#*/}"
+    cm=0; mm=0
+    if [[ -n "$c" ]]; then cm="$(_cpu_to_milli "$c")"; [[ -n "$cm" ]] || return 0; fi
+    if [[ -n "$m" ]]; then mm="$(_mem_to_bytes "$m")"; [[ -n "$mm" ]] || return 0; fi
+    # `if`, never `(( )) && x=`, as the last command of a loop body: the false
+    # arm leaves the loop with status 1 (see _print_fit_lines).
+    if (( cm > init_c )); then init_c=$cm; fi
+    if (( mm > init_m )); then init_m=$mm; fi
+  done
+  if (( init_m > app_m )); then app_m=$init_m; fi
+  if (( init_c > app_c )); then app_c=$init_c; fi
+  printf '%s %s' "$app_m" "$app_c"
+}
+
+# What the pods ALREADY ON THE CLUSTER request, that the chart derivation does
+# not already count. Sets _TB_SYS_MEM_BYTES / _TB_SYS_CPU_MILLI / _TB_SYS_NOTE and
+# returns 0 when measured; returns 1 (and sets _TB_SYS_NOTE to say why) when the
+# cluster could not be read or a quantity could not be parsed. The caller then
+# verifies against the chart derivation alone AND SAYS SO -- an unreadable pod
+# list is not a footprint of zero, but it is also not a reason to refuse an
+# install on a cluster whose nodes we could read.
+#
+# EXCLUDED, because the chart derivation already counts them (a re-install would
+# otherwise count the control plane twice): every pod in the release namespace
+# -- the chart's own workloads AND the training pods jobs-manager spawns there,
+# which are the very envelope being sized -- and every pod in a namespace whose
+# `meta.helm.sh/release-name` annotation names this release (the node-agents
+# namespace the chart creates for its DaemonSets). Pod templates carry only an
+# `app` label, so ownership is read off the NAMESPACE, not the pod. Terminal
+# pods (Succeeded/Failed) hold no reservation and are skipped; a pod with no
+# nodeName is not on any node yet.
+#
+# PER NODE, then the MAX across nodes. A training pod takes everything from ONE
+# node and this reader does not know which node the anchor is by name (the node
+# contract is pinned to three fields by the ps1 twin, backend#2237). On the
+# single-node edge this ticket is about the two are the same number; on a
+# multi-node cluster the max is conservative -- it can only make the envelope
+# smaller than strictly necessary, never larger than what schedules.
+_measured_system_requests() {
+  _TB_SYS_MEM_BYTES=0
+  _TB_SYS_CPU_MILLI=0
+  _TB_SYS_NOTE=""
+  has kubectl || { _TB_SYS_NOTE="kubectl is not available"; return 1; }
+
+  # Namespaces this release owns. Failing to read them is NOT fatal to the
+  # measurement: only the release namespace is then excluded, which on a
+  # re-install can over-count the node-agents DaemonSets -- the conservative
+  # direction -- and the note says so.
+  local own_ns="${TB_NAMESPACE:-}" ns_lines ns owner
+  if ns_lines="$(kubectl get namespaces --request-timeout=10s -o jsonpath="$_TB_NAMESPACES_JSONPATH" 2>/dev/null)"; then
+    while IFS='|' read -r ns owner; do
+      [[ -n "$ns" ]] || continue
+      [[ "$owner" == "${TB_NAMESPACE:-}" && -n "$owner" ]] || continue
+      own_ns="$own_ns $ns"
+    done <<< "$ns_lines"
+  else
+    _TB_SYS_NOTE="namespace ownership unreadable; only the release namespace was excluded"
+  fi
+
+  local lines
+  lines="$(kubectl get pods --all-namespaces --request-timeout=10s -o jsonpath="$_TB_PODS_JSONPATH" 2>/dev/null)" \
+    || { _TB_SYS_NOTE="the pod list could not be read"; return 1; }
+  [[ -n "$lines" ]] || { _TB_SYS_NOTE="the pod list was empty"; return 1; }
+
+  # Two parallel indexed arrays, not an associative one -- this must run under
+  # macOS bash 3.2.
+  local -a node_names=() node_mem=() node_cpu=()
+  local phase node apps inits eff em ec i found pods=0
+  while IFS='|' read -r ns phase node apps inits; do
+    [[ -n "$ns" && -n "$node" ]] || continue
+    case " $own_ns " in *" $ns "*) continue ;; esac
+    case "$phase" in Succeeded|Failed) continue ;; esac
+    eff="$(_pod_effective_requests "$apps" "$inits")"
+    if [[ -z "$eff" ]]; then
+      _TB_SYS_NOTE="a pod in ${ns} carries a request quantity this installer cannot parse (${apps}${inits})"
+      return 1
+    fi
+    read -r em ec <<< "$eff"
+    found=-1
+    for i in "${!node_names[@]}"; do
+      if [[ "${node_names[$i]}" == "$node" ]]; then found=$i; break; fi
+    done
+    if (( found < 0 )); then
+      node_names+=("$node"); node_mem+=("$em"); node_cpu+=("$ec")
+    else
+      node_mem[$found]=$(( ${node_mem[$found]} + em ))
+      node_cpu[$found]=$(( ${node_cpu[$found]} + ec ))
+    fi
+    pods=$(( pods + 1 ))
+  done <<< "$lines"
+  (( pods > 0 )) || { _TB_SYS_NOTE="no pod outside this release is scheduled yet"; return 1; }
+
+  for i in "${!node_names[@]}"; do
+    if (( ${node_mem[$i]} > _TB_SYS_MEM_BYTES )); then _TB_SYS_MEM_BYTES=${node_mem[$i]}; fi
+    if (( ${node_cpu[$i]} > _TB_SYS_CPU_MILLI )); then _TB_SYS_CPU_MILLI=${node_cpu[$i]}; fi
+  done
+  [[ -n "$_TB_SYS_NOTE" ]] || _TB_SYS_NOTE="measured from ${pods} pod(s) across ${#node_names[@]} node(s)"
+  return 0
+}
+
+# Verify -- and if it is ours, correct -- the envelope _resolve_training_size
+# chose, against what this machine can actually schedule beside the platform.
+#
+# Reads _TB_TRAINING_SIZE and _TB_TRAINING_PROVENANCE. Sets, in the caller's
+# scope:
+#   _TB_FIT_VERDICT   fits | reduced | refused | pinned-over | unverified
+#   _TB_FIT_LINES     the arithmetic, one fact per line, for the caller to print
+# and on `reduced` REWRITES _TB_TRAINING_SIZE to the largest whole-core /
+# whole-GiB envelope that fits (never larger than what was chosen). The
+# reduction can land below the contract floor while still being a requestable
+# shape (>= 1 core, >= 1 GiB); that keeps the existing `undersized` semantics
+# (backend#2254) and sets _TB_TRAINING_UNDERSIZED so the caller warns.
+#
+# The verdicts, and who they apply to:
+#   * installer-chosen (fresh or carried): fits, or reduced with the arithmetic,
+#     or REFUSED when not even a 1-core/1-GiB run fits -- the caller must not
+#     write the envelope. Refused too when the machine WAS measured but the
+#     footprint constants are unreadable, or when the cluster cannot be read
+#     and the chosen size is anything but the contract floor: an envelope this
+#     installer picked and cannot verify is not written (fail closed).
+#   * the contract floor with an unreadable cluster: `unverified`. It is the
+#     smallest envelope the platform supports and the fallback that existed
+#     before this check; the caller warns rather than refusing, so a cluster
+#     whose nodes the installer may not list (restricted RBAC on a BYO cluster)
+#     still installs, loudly.
+#   * a human's choice (TRACEBLOC_TRAINING_RESOURCES, `tracebloc resources
+#     set`, or an unattributable carry): never altered -- precedence rules 1
+#     and 2 say a human choice survives. A pin that does not fit is
+#     `pinned-over`, warned with the arithmetic; one the installer cannot
+#     verify is `unverified`.
+#
+# Like the resolver, this emits NOTHING on stdout: _training_resources is
+# captured with $(...), and text here would end up inside the value.
+#
+# Printing is the caller's job, through _print_fit_lines. That helper uses an
+# `if`, not `[[ -n ]] && printer`, and ends in `return 0`: _TB_FIT_LINES can end
+# in a newline, so the last `read` yields an empty line and a `&&` list leaves
+# the loop with status 1. MEASURED on bash 3.2 and 5: such a loop survives
+# `set -e` inline, but as the LAST statement of a function it makes the function
+# return 1 and the caller's errexit fires -- here, on a machine whose envelope
+# FITS, on the way to saying so. Same trap _anchor_largest_schedulable records.
+_print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only)
+  local _l
+  while IFS= read -r _l; do
+    if [[ -n "$_l" ]]; then
+      if [[ "$1" == "log" ]]; then log "envelope fit: $_l"; else "$1" "  $_l"; fi
+    fi
+  done <<< "$_TB_FIT_LINES"
+  return 0
+}
+
+_fit_training_envelope() {
+  _TB_FIT_VERDICT=""
+  _TB_FIT_LINES=""
+  local size="${_TB_TRAINING_SIZE:-}" prov="${_TB_TRAINING_PROVENANCE:-}"
+  local ours=0
+  [[ "$prov" == "installer" ]] && ours=1
+
+  # FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
+  # installer, and nothing sensible can be verified against it.
+  if [[ ! "${_TB_CP_FOOTPRINT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_FOOTPRINT_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
+    _TB_FIT_VERDICT="refused"
+    _TB_FIT_LINES="the chart footprint constants (_TB_CP_FOOTPRINT_*) are missing or not numeric -- this installer cannot verify any envelope"
+    return 0
+  fi
+  local fp_mem_b="$_TB_CP_FOOTPRINT_MEM_BYTES" fp_cpu_m="$_TB_CP_FOOTPRINT_CPU_MILLI"
+
+  # The envelope's own two dimensions. Case-insensitive keys, trimmed pairs --
+  # the same tolerance _training_limits extends to a human-typed override.
+  local env_cpu_m env_mem_b
+  env_cpu_m="$(_cpu_to_milli "$(_envelope_dimension "$size" cpu)")"
+  env_mem_b="$(_mem_to_bytes "$(_envelope_dimension "$size" memory)")"
+
+  # The machine. Unreadable is decided by who chose the size (see the header).
+  if ! _anchor_largest_schedulable; then
+    if (( ours )) && [[ "$size" != "$_TRAINING_DEFAULT" ]]; then
+      _TB_FIT_VERDICT="refused"
+      _TB_FIT_LINES="node allocatable could not be read, and ${size} is an installer-chosen envelope that cannot be verified without it"
+    else
+      _TB_FIT_VERDICT="unverified"
+      _TB_FIT_LINES="node allocatable could not be read; ${size} was written without checking that it can schedule beside the platform"
+    fi
+    return 0
+  fi
+  local alloc_mem_b="$_TB_ANCHOR_MEM_BYTES" alloc_cpu_m="$_TB_ANCHOR_CPU_MILLI"
+
+  if [[ -z "$env_cpu_m" || -z "$env_mem_b" ]]; then
+    if (( ours )); then
+      _TB_FIT_VERDICT="refused"
+      _TB_FIT_LINES="the installer-chosen envelope '${size}' has no readable cpu and memory pair -- refusing to write what cannot be verified"
+    else
+      _TB_FIT_VERDICT="unverified"
+      _TB_FIT_LINES="'${size}' has no readable cpu and memory pair, so its fit on this machine was not checked"
+    fi
+    return 0
+  fi
+
+  # What else the node must hold: the chart's control plane, plus whatever
+  # system pods are already scheduled and are not the chart's.
+  local sys_mem_b=0 sys_cpu_m=0 sys_how
+  if _measured_system_requests; then
+    sys_mem_b="$_TB_SYS_MEM_BYTES"; sys_cpu_m="$_TB_SYS_CPU_MILLI"
+    sys_how="measured: ${_TB_SYS_NOTE}"
+  else
+    sys_how="NOT measured (${_TB_SYS_NOTE}); verified against the chart derivation only"
+  fi
+  local need_mem_b=$(( fp_mem_b + sys_mem_b ))
+  local need_cpu_m=$(( fp_cpu_m + sys_cpu_m ))
+  local mib=$(( 1024 * 1024 )) gib=$(( 1024 * 1024 * 1024 ))
+
+  _TB_FIT_LINES="allocatable on the largest schedulable node: $(( alloc_mem_b / mib )) MiB / ${alloc_cpu_m} m"$'\n'
+  _TB_FIT_LINES+="control plane (chart) $(( fp_mem_b / mib )) MiB / ${fp_cpu_m} m + system pods $(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m = $(( need_mem_b / mib )) MiB / ${need_cpu_m} m (${sys_how})"$'\n'
+  _TB_FIT_LINES+="envelope ${size} = $(( env_mem_b / mib )) MiB / ${env_cpu_m} m"$'\n'
+
+  local mem_over=$(( env_mem_b + need_mem_b - alloc_mem_b ))
+  local cpu_over=$(( env_cpu_m + need_cpu_m - alloc_cpu_m ))
+  local mem_fits=0 cpu_fits=0
+  (( mem_over <= 0 )) && mem_fits=1
+  (( cpu_over <= 0 )) && cpu_fits=1
+  if (( mem_fits )); then
+    _TB_FIT_LINES+="memory: $(( env_mem_b / mib )) + $(( need_mem_b / mib )) = $(( (env_mem_b + need_mem_b) / mib )) MiB <= $(( alloc_mem_b / mib )) MiB ($(( -mem_over / mib )) MiB headroom)"$'\n'
+  else
+    _TB_FIT_LINES+="memory: $(( env_mem_b / mib )) + $(( need_mem_b / mib )) = $(( (env_mem_b + need_mem_b) / mib )) MiB > $(( alloc_mem_b / mib )) MiB ($(( mem_over / mib )) MiB OVER)"$'\n'
+  fi
+  if (( cpu_fits )); then
+    _TB_FIT_LINES+="cpu: ${env_cpu_m} + ${need_cpu_m} = $(( env_cpu_m + need_cpu_m )) m <= ${alloc_cpu_m} m ($(( -cpu_over )) m headroom)"$'\n'
+  else
+    _TB_FIT_LINES+="cpu: ${env_cpu_m} + ${need_cpu_m} = $(( env_cpu_m + need_cpu_m )) m > ${alloc_cpu_m} m (${cpu_over} m OVER)"$'\n'
+  fi
+
+  if (( mem_fits && cpu_fits )); then
+    _TB_FIT_VERDICT="fits"
+    return 0
+  fi
+
+  if (( ! ours )); then
+    _TB_FIT_VERDICT="pinned-over"
+    _TB_FIT_LINES+="this size was chosen by a human (${prov}), so it is written as-is; training pods will stay Pending on this machine until it is lowered"
+    return 0
+  fi
+
+  # Ours, and it does not fit: the largest whole-core / whole-GiB envelope that
+  # does -- floored (a ceiling that rounds up is not a ceiling), and never
+  # larger than what was chosen in either dimension.
+  local fit_mem_b=$(( alloc_mem_b - need_mem_b )) fit_cpu_m=$(( alloc_cpu_m - need_cpu_m ))
+  (( fit_mem_b < 0 )) && fit_mem_b=0
+  (( fit_cpu_m < 0 )) && fit_cpu_m=0
+  local new_gib=$(( fit_mem_b / gib )) new_cores=$(( fit_cpu_m / 1000 ))
+  local old_gib=$(( env_mem_b / gib )) old_cores=$(( env_cpu_m / 1000 ))
+  (( new_gib > old_gib )) && new_gib=$old_gib
+  (( new_cores > old_cores )) && new_cores=$old_cores
+
+  if (( new_cores < 1 || new_gib < 1 )); then
+    _TB_FIT_VERDICT="refused"
+    _TB_FIT_LINES+="what fits is $(( fit_mem_b / mib )) MiB / ${fit_cpu_m} m -- not even a 1-core / 1-GiB run; there is no honest envelope to write"
+    return 0
+  fi
+
+  _TB_TRAINING_SIZE="cpu=${new_cores},memory=${new_gib}Gi"
+  _TB_FIT_VERDICT="reduced"
+  _TB_FIT_LINES+="reduced ${size} -> ${_TB_TRAINING_SIZE}: $(( alloc_mem_b / mib )) - $(( need_mem_b / mib )) = $(( fit_mem_b / mib )) MiB -> ${new_gib} GiB; ${alloc_cpu_m} - ${need_cpu_m} = ${fit_cpu_m} m -> ${new_cores} core(s)"
+  if (( new_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || new_gib * gib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
+    _TB_TRAINING_UNDERSIZED=1
+  fi
+  return 0
 }
 
 # YAML single-quoted-scalar escaping, in one place (Saqlain review, #443).
@@ -2208,6 +2587,37 @@ install_client_helm() {
   # and calling the two wrappers separately would run them twice.
   local training_size training_provenance
   _resolve_training_size
+  # backend#2870: and only now, is what was chosen schedulable HERE -- beside the
+  # chart's control plane and the system pods already on the node? Ours gets
+  # reduced or refused; a human's gets warned. The arithmetic is printed in every
+  # case that changes or blocks anything, because an operator reading `Pending /
+  # Insufficient memory` later needs the numbers, not the verdict.
+  _fit_training_envelope
+  case "$_TB_FIT_VERDICT" in
+    refused)
+      warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
+      _print_fit_lines hint
+      hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+      error "Refusing to write a training envelope that cannot be scheduled on this machine (backend#2870)."
+      ;;
+    reduced)
+      info "Training envelope reduced to fit beside the platform on this machine:"
+      _print_fit_lines hint
+      ;;
+    pinned-over)
+      warn "The chosen training size does not fit beside the platform on this machine; training pods will stay Pending until it is lowered:"
+      _print_fit_lines hint
+      ;;
+    unverified)
+      warn "Training envelope UNVERIFIED: ${_TB_FIT_LINES}"
+      hint "  Grant the installer 'get nodes' and 'list pods' to have it checked, or set TRACEBLOC_TRAINING_RESOURCES to a size you know fits."
+      ;;
+    *)
+      # Fits: the arithmetic goes to the log file only, so a re-read later can
+      # still see what was checked without it cluttering a clean install.
+      _print_fit_lines log
+      ;;
+  esac
   training_size="$_TB_TRAINING_SIZE"
   training_provenance="$_TB_TRAINING_PROVENANCE"
   log "Training size: ${training_size} (adjust any time with 'tracebloc resources set')"
