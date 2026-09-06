@@ -303,6 +303,38 @@ YAML
   [ -z "$(_envelope_dimension 'cpuset=7,memory=29Gi' cpu)" ] || return 1
 }
 
+@test "_cpu_to_milli / _mem_to_bytes agree with the PowerShell twin on every shared quantity vector" {
+  # ONE vectors file, TWO readers (Saqlain on client#994): the grammars used to
+  # be held together by a comment and diverged on `.5`, `5.`, `Pi`, `P`. Every
+  # (input, expected) pair is replayed here and in install-k8s.Tests.ps1; `null`
+  # means the reader must refuse (print nothing), never a zero.
+  local vec="$HERE/fixtures/quantity_vectors.json" n=0 kind input want got rows
+  [ -r "$vec" ] || return 1
+  rows="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for key, kind in (("cpu_to_milli", "cpu"), ("mem_to_bytes", "mem")):
+    for k, v in d[key]:
+        print("%s\t%s\t%s" % (kind, k, "null" if v is None else v))
+' "$vec")" || return 1
+  while IFS=$'\t' read -r kind input want; do
+    case "$kind" in
+      cpu) got="$(_cpu_to_milli "$input")" ;;
+      mem) got="$(_mem_to_bytes "$input")" ;;
+      *) echo "unknown kind $kind"; return 1 ;;
+    esac
+    if [ "$want" = "null" ]; then
+      [ -z "$got" ] || { echo "$kind '$input': expected refusal, got '$got'"; return 1; }
+    else
+      [ "$got" = "$want" ] || { echo "$kind '$input': expected $want, got '$got'"; return 1; }
+    fi
+    n=$((n + 1))
+  done <<< "$rows"
+  # Not vacuous: the file carries both grammars' edge cases, and a reader that
+  # read zero rows would compare equal to nothing.
+  [ "$n" -ge 30 ] || { echo "only $n vectors replayed"; return 1; }
+}
+
 @test "_cpu_to_milli / _mem_to_bytes: the extended grammar, and junk is still empty" {
   [ "$(_cpu_to_milli 0.5)" = "500" ] || return 1
   [ "$(_cpu_to_milli 1.2345)" = "1234" ] || return 1     # floored, never rounded up

@@ -280,6 +280,12 @@ $Mutations = @(
   # side has envelope-schedulability-mutations.sh proving each of these against
   # install-client-helm.sh; the same nine bugs must redden here, or the Windows
   # installer's fit step is a copy of the rule that nothing has ever seen fail.
+  @{ Name  = 'the fractional-core grammar refuses `.5` / `5.` again, diverging from the bash twin (client#994)'
+     Expect = 'agree with the bash twin on every shared quantity vector'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($q -match ''^(\d*)\.(\d*)$'' -and ($Matches[1] -ne '''' -or $Matches[2] -ne '''')) {'
+     Repl  = '  if ($q -match ''^(\d+)\.(\d+)$'') {' }
+
   @{ Name  = 'the chart footprint drops out of the sum (client#992)'
      Expect = 'is REDUCED, arithmetic printed'
      File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'

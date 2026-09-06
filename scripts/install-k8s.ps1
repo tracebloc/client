@@ -5269,24 +5269,30 @@ function Get-TrainingProvenance {
 # contract vectors and canned cluster through these functions.
 
 # A Kubernetes cpu quantity -> millicores as [long], or $null when it is not one
-# this installer can read. Grammar mirrors the bash reader: whole cores, `Nm`,
-# and a decimal core count FLOORED to the millicore (1.2345 -> 1234, never up).
+# this installer can read: whole cores, `Nm`, and a decimal core count FLOORED to
+# the millicore (1.2345 -> 1234, never up). `.5` and `5.` are valid quantities
+# and read as 500 and 5000, as the bash twin reads them. The grammar is not
+# "mirrored" by this comment: BOTH readers replay
+# scripts/tests/fixtures/quantity_vectors.json (Saqlain, client#994), so a
+# spelling one side accepts and the other refuses is a red test, not a comment.
 function ConvertTo-TbCpuMilli {
   param([string]$Quantity)
   $q = "$Quantity".Trim()
   if ($q -match '^(\d+)$')        { return [long]$Matches[1] * 1000 }
   if ($q -match '^(\d+)m$')       { return [long]$Matches[1] }
-  if ($q -match '^(\d+)\.(\d+)$') {
+  if ($q -match '^(\d*)\.(\d*)$' -and ($Matches[1] -ne '' -or $Matches[2] -ne '')) {
+    $whole = if ($Matches[1] -eq '') { 0 } else { [long]$Matches[1] }
     $frac = ($Matches[2] + '000').Substring(0, 3)
-    return [long]$Matches[1] * 1000 + [long]$frac
+    return [long]$whole * 1000 + [long]$frac
   }
   return $null
 }
 
 # A Kubernetes memory quantity -> bytes as [long], or $null when unreadable.
 # Binary suffixes (Ki Mi Gi Ti Pi), decimal SI (k M G T P) and bare bytes; whole
-# numbers only, as the bash twin: a `1.5Gi` is a quantity neither twin speaks,
-# and both say so rather than guess.
+# numbers only: a `1.5Gi` is a quantity neither twin speaks, and both say so
+# rather than guess. Same vectors file as the cpu reader above holds the two
+# grammars together.
 function ConvertTo-TbMemBytes {
   param([string]$Quantity)
   $q = "$Quantity".Trim()

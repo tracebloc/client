@@ -9470,6 +9470,25 @@ Describe "Envelope schedulability readers (client#992)" {
     ConvertTo-TbMemBytes 'Gi'   | Should -BeNullOrEmpty
     ConvertTo-TbMemBytes '1.5Gi' | Should -BeNullOrEmpty
   }
+  It "ConvertTo-TbCpuMilli / ConvertTo-TbMemBytes agree with the bash twin on every shared quantity vector" {
+    # ONE vectors file, TWO readers (Saqlain on client#994): see the fixture's
+    # description. null means the reader must return $null, never a zero.
+    $vec = Get-Content (Join-Path $PSScriptRoot "fixtures/quantity_vectors.json") -Raw | ConvertFrom-Json
+    $n = 0
+    foreach ($pair in @($vec.cpu_to_milli)) {
+      $got = ConvertTo-TbCpuMilli ([string]$pair[0])
+      if ($null -eq $pair[1]) { $got | Should -BeNullOrEmpty -Because "cpu '$($pair[0])' must be refused" }
+      else { $got | Should -Be ([long]$pair[1]) -Because "cpu '$($pair[0])'" }
+      $n++
+    }
+    foreach ($pair in @($vec.mem_to_bytes)) {
+      $got = ConvertTo-TbMemBytes ([string]$pair[0])
+      if ($null -eq $pair[1]) { $got | Should -BeNullOrEmpty -Because "mem '$($pair[0])' must be refused" }
+      else { $got | Should -Be ([long]$pair[1]) -Because "mem '$($pair[0])'" }
+      $n++
+    }
+    $n | Should -BeGreaterOrEqual 30 -Because "the vectors file must carry both grammars' edge cases"
+  }
   It "Get-TbEnvelopeDimension: case-insensitive keys, trimmed pairs, absent is empty, prefix is not a match" {
     Get-TbEnvelopeDimension -Size 'cpu=7, Memory=29Gi' -Key memory | Should -Be '29Gi'
     Get-TbEnvelopeDimension -Size ' CPU=7 ,memory=29Gi' -Key cpu   | Should -Be '7'
