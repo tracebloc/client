@@ -9588,9 +9588,12 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     # The bash twin's embed, read off its source: gen-footprint-embed.sh --check
     # (make drift) proves BOTH equal the render; this pins that they equal each
     # other, so a hand-edit to either installer is visible from a Pester-only run.
+    # `\r?$`, not `$`: a Windows checkout may carry CRLF, and `(?m)$` matches
+    # before `\n` only, so the anchored read came back $null on windows-latest and
+    # the pin failed as "unreadable" rather than "unequal" (client#994 CI).
     $bashLib = Get-Content (Join-Path $PSScriptRoot "../lib/install-client-helm.sh") -Raw
-    $script:BashFpMem = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_MEM_BYTES=(\d+)$') { [long]$Matches[1] } else { $null }
-    $script:BashFpCpu = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_CPU_MILLI=(\d+)$') { [long]$Matches[1] } else { $null }
+    $script:BashFpMem = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_MEM_BYTES=(\d+)\r?$') { [long]$Matches[1] } else { $null }
+    $script:BashFpCpu = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_CPU_MILLI=(\d+)\r?$') { [long]$Matches[1] } else { $null }
     # Drive the installer's two steps on a cluster state. $Nodes = the node
     # jsonpath lines; '' = nodes unreadable. $PodsReadable = $false makes the pod
     # list unreadable while nodes still read.
