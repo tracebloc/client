@@ -705,7 +705,7 @@
     },
     "egressProxy": {
       "type": "object",
-      "description": "In-cluster squid egress gateway (SECURITY §8.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend + App Insights and nothing else.",
+      "description": "In-cluster squid egress gateway (SECURITY §8.2 / client-runtime#102). Forward proxy that permits HTTPS CONNECT only to the allowlist, so a locked-down training pod can reach the backend and nothing else.",
       "properties": {
         "enabled": {
           "type": "boolean",

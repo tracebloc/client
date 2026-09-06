@@ -574,7 +574,7 @@ sealCheck:
 
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
-# allowlist (backend + App Insights) and nothing else. Labelled app=egress-proxy
+# allowlist (backend) and nothing else. Labelled app=egress-proxy
 # so the training NetworkPolicy never selects it (it keeps its own egress).
 egressProxy:
   enabled: true
@@ -601,7 +601,6 @@ egressProxy:
     - stg-api.tracebloc.io
     - api.tracebloc.io
     - xray-backend.azurewebsites.net
-    - dc.services.visualstudio.com
   resources:
     requests:
       cpu: "50m"
