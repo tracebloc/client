@@ -29,7 +29,7 @@
     "Regenerate the bash companion after editing: scripts/gen-installer-parity.sh"
   ],
   "verdict_fields": {
-    "size": "what _resolve_training_size / Get-TrainingResources choose for RESOURCE_REQUESTS. Since backend#2870 the bash installer runs a SECOND step after this, _fit_training_envelope, which may REDUCE an installer-chosen size (or refuse the install) so it schedules beside the chart's control plane -- so on bash the value WRITTEN can be smaller than this field. That step is bash-only for now and is asserted by scripts/tests/envelope-schedulability.sh, not here; the ps1 twin does not have it yet (follow-up on backend#2870), which is a known, recorded divergence rather than one this fixture can catch.",
+    "size": "what _resolve_training_size / Get-TrainingResources choose for RESOURCE_REQUESTS. Since backend#2870 BOTH installers run a SECOND step after this -- _fit_training_envelope on bash, Resolve-TbTrainingFit on PowerShell (client#992) -- which may REDUCE an installer-chosen size (or refuse the install) so it schedules beside the chart's control plane, so the value WRITTEN can be smaller than this field on either twin. That step is asserted against the derived chart footprint by scripts/tests/envelope-schedulability.sh (bash) and by the envelope-schedulability Describe blocks in scripts/tests/install-k8s.Tests.ps1 (PowerShell), both replaying the same contract vectors and the same canned cluster; this fixture pins the resolver's choice BEFORE the fit.",
     "provenance": "installer | user | unknown -- who chose that size",
     "undersized": "machine measured, below the training floor, honest remainder written",
     "unschedulable": "machine measured, cannot host even a 1-core/1-GiB run",

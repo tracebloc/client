@@ -86,26 +86,35 @@ _cpu_to_milli() {
   local v="$1" whole frac
   case "$v" in
     *m) case "${v%m}" in ''|*[!0-9]*) : ;; *) printf '%s' "${v%m}" ;; esac ;;
-    [0-9]*.[0-9]*)
+    *.*)
+      # `.5` and `5.` are valid quantities (Kubernetes reads them as 0.5 and 5),
+      # so either side of the dot may be empty but not both -- and a glob
+      # `[0-9]*` means ONE digit then anything, which is how the old arm
+      # refused `.5` while its comment said otherwise (client#994, measured).
       whole="${v%%.*}"; frac="${v#*.}"
-      case "$whole$frac" in *[!0-9]*) return 0 ;; esac
+      case "$whole$frac" in ''|*[!0-9]*|*.*) return 0 ;; esac
       frac="${frac}000"; frac="${frac:0:3}"
-      # `10#` -- a fraction like 050 would otherwise be read as octal.
-      printf '%s' "$(( whole * 1000 + 10#$frac ))" ;;
+      # `10#` -- a fraction like 050 would otherwise be read as octal; an empty
+      # whole is 0.
+      printf '%s' "$(( 10#${whole:-0} * 1000 + 10#$frac ))" ;;
     ''|*[!0-9]*) : ;;
     *) printf '%s' "$(( v * 1000 ))" ;;
   esac
 }
-# k8s memory quantity -> bytes (binary Ki/Mi/Gi/Ti, decimal k/M/G/T, or plain
-# bytes); empty on junk. The decimal arms were added for the same reason as the
-# fractional-cores arm above: the chart and kubelet speak `Mi`, but a system pod
-# may say `250M`, and an unreadable quantity must be a refusal, not a zero.
+# k8s memory quantity -> bytes (binary Ki/Mi/Gi/Ti/Pi, decimal k/M/G/T/P, or
+# plain bytes); empty on junk. The decimal arms were added for the same reason as
+# the fractional-cores arm above: the chart and kubelet speak `Mi`, but a system
+# pod may say `250M`, and an unreadable quantity must be a refusal, not a zero.
+# The Pi/P arms exist because the PowerShell twin had them and this did not
+# (Saqlain, client#994): both readers replay
+# scripts/tests/fixtures/quantity_vectors.json, so the grammars are held
+# together by a test, not by a comment claiming they match.
 _mem_to_bytes() {
   local v="$1" n
   case "$v" in
-    *Ki|*Mi|*Gi|*Ti) n="${v%??}" ;;
-    *k|*M|*G|*T)     n="${v%?}" ;;
-    *)               n="$v" ;;
+    *Ki|*Mi|*Gi|*Ti|*Pi) n="${v%??}" ;;
+    *k|*M|*G|*T|*P)      n="${v%?}" ;;
+    *)                   n="$v" ;;
   esac
   case "$n" in ''|*[!0-9]*) return 0 ;; esac
   case "$v" in
@@ -113,10 +122,12 @@ _mem_to_bytes() {
     *Mi) printf '%s' "$(( n * 1024 * 1024 ))" ;;
     *Gi) printf '%s' "$(( n * 1024 * 1024 * 1024 ))" ;;
     *Ti) printf '%s' "$(( n * 1024 * 1024 * 1024 * 1024 ))" ;;
+    *Pi) printf '%s' "$(( n * 1024 * 1024 * 1024 * 1024 * 1024 ))" ;;
     *k)  printf '%s' "$(( n * 1000 ))" ;;
     *M)  printf '%s' "$(( n * 1000 * 1000 ))" ;;
     *G)  printf '%s' "$(( n * 1000 * 1000 * 1000 ))" ;;
     *T)  printf '%s' "$(( n * 1000 * 1000 * 1000 * 1000 ))" ;;
+    *P)  printf '%s' "$(( n * 1000 * 1000 * 1000 * 1000 * 1000 ))" ;;
     *)   printf '%s' "$n" ;;
   esac
 }

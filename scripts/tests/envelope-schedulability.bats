@@ -88,6 +88,7 @@ YAML
   mkdir -p "$td/scripts/lib" "$td/scripts/tests"
   cp -R "$HERE/../../client" "$td/client"
   cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../install-k8s.ps1" "$td/scripts/"
   cp "$FOOTPRINT" "$td/scripts/tests/"
   sed 's/^_TB_CP_FOOTPRINT_MEM_BYTES=.*/_TB_CP_FOOTPRINT_MEM_BYTES=1/' "$HERE/../lib/install-client-helm.sh" > "$td/scripts/lib/install-client-helm.sh"
   run bash "$td/scripts/gen-footprint-embed.sh" --check
@@ -107,11 +108,52 @@ YAML
   [ "$want" = "$got" ] || { echo "want '$want' got '$got'"; return 1; }
 }
 
+@test "gen-footprint-embed.sh --check: a drifted PowerShell embed is EMBED DRIFT too, and write mode repairs it (client#992)" {
+  # The same render feeds BOTH installers. A footprint that moved in the bash
+  # twin and not the PowerShell one is exactly the divergence the parity fixture
+  # exists to end, so the ps1 constants are checked by the same generator.
+  local td; td="$(mktemp -d)"
+  mkdir -p "$td/scripts/lib" "$td/scripts/tests"
+  cp -R "$HERE/../../client" "$td/client"
+  cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../lib/install-client-helm.sh" "$td/scripts/lib/"
+  cp "$FOOTPRINT" "$td/scripts/tests/"
+  sed 's/^\$script:TbCpFootprintCpuMilli = .*/$script:TbCpFootprintCpuMilli = 1/' "$HERE/../install-k8s.ps1" > "$td/scripts/install-k8s.ps1"
+  grep -q '^\$script:TbCpFootprintCpuMilli = 1$' "$td/scripts/install-k8s.ps1" || { echo "mutation did not apply"; rm -rf "$td"; return 1; }
+  run bash "$td/scripts/gen-footprint-embed.sh" --check
+  [ "$status" -eq 1 ] || { echo "$output"; rm -rf "$td"; return 1; }
+  [[ "$output" == *"EMBED DRIFT"*'$script:TbCpFootprintCpuMilli=1'* ]] || { echo "$output"; rm -rf "$td"; return 1; }
+  run bash "$td/scripts/gen-footprint-embed.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$td"; return 1; }
+  run bash "$td/scripts/gen-footprint-embed.sh" --check
+  [ "$status" -eq 0 ] || { echo "$output"; rm -rf "$td"; return 1; }
+  local want got
+  want="$(grep '^\$script:TbCpFootprintCpuMilli = ' "$HERE/../install-k8s.ps1")"
+  got="$(grep '^\$script:TbCpFootprintCpuMilli = ' "$td/scripts/install-k8s.ps1")"
+  rm -rf "$td"
+  [ "$want" = "$got" ] || { echo "want '$want' got '$got'"; return 1; }
+}
+
+@test "gen-footprint-embed.sh: a missing PowerShell assignment is reported, not silently skipped (client#992)" {
+  local td; td="$(mktemp -d)"
+  mkdir -p "$td/scripts/lib" "$td/scripts/tests"
+  cp -R "$HERE/../../client" "$td/client"
+  cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../lib/install-client-helm.sh" "$td/scripts/lib/"
+  cp "$FOOTPRINT" "$td/scripts/tests/"
+  grep -v '^\$script:TbCpFootprintMemBytes = ' "$HERE/../install-k8s.ps1" > "$td/scripts/install-k8s.ps1"
+  run bash "$td/scripts/gen-footprint-embed.sh" --check
+  rm -rf "$td"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'no $script:TbCpFootprintMemBytes assignment'* ]] || { echo "$output"; return 1; }
+}
+
 @test "gen-footprint-embed.sh: a missing assignment is reported, not silently skipped" {
   local td; td="$(mktemp -d)"
   mkdir -p "$td/scripts/lib" "$td/scripts/tests"
   cp -R "$HERE/../../client" "$td/client"
   cp "$HERE/../gen-footprint-embed.sh" "$td/scripts/"
+  cp "$HERE/../install-k8s.ps1" "$td/scripts/"
   cp "$FOOTPRINT" "$td/scripts/tests/"
   grep -v '^_TB_CP_FOOTPRINT_CPU_MILLI=' "$HERE/../lib/install-client-helm.sh" > "$td/scripts/lib/install-client-helm.sh"
   run bash "$td/scripts/gen-footprint-embed.sh" --check
@@ -259,6 +301,38 @@ YAML
   [ -z "$(_envelope_dimension 'memory=29Gi' cpu)" ] || return 1
   # A dimension that merely STARTS with cpu is not cpu.
   [ -z "$(_envelope_dimension 'cpuset=7,memory=29Gi' cpu)" ] || return 1
+}
+
+@test "_cpu_to_milli / _mem_to_bytes agree with the PowerShell twin on every shared quantity vector" {
+  # ONE vectors file, TWO readers (Saqlain on client#994): the grammars used to
+  # be held together by a comment and diverged on `.5`, `5.`, `Pi`, `P`. Every
+  # (input, expected) pair is replayed here and in install-k8s.Tests.ps1; `null`
+  # means the reader must refuse (print nothing), never a zero.
+  local vec="$HERE/fixtures/quantity_vectors.json" n=0 kind input want got rows
+  [ -r "$vec" ] || return 1
+  rows="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for key, kind in (("cpu_to_milli", "cpu"), ("mem_to_bytes", "mem")):
+    for k, v in d[key]:
+        print("%s\t%s\t%s" % (kind, k, "null" if v is None else v))
+' "$vec")" || return 1
+  while IFS=$'\t' read -r kind input want; do
+    case "$kind" in
+      cpu) got="$(_cpu_to_milli "$input")" ;;
+      mem) got="$(_mem_to_bytes "$input")" ;;
+      *) echo "unknown kind $kind"; return 1 ;;
+    esac
+    if [ "$want" = "null" ]; then
+      [ -z "$got" ] || { echo "$kind '$input': expected refusal, got '$got'"; return 1; }
+    else
+      [ "$got" = "$want" ] || { echo "$kind '$input': expected $want, got '$got'"; return 1; }
+    fi
+    n=$((n + 1))
+  done <<< "$rows"
+  # Not vacuous: the file carries both grammars' edge cases, and a reader that
+  # read zero rows would compare equal to nothing.
+  [ "$n" -ge 30 ] || { echo "only $n vectors replayed"; return 1; }
 }
 
 @test "_cpu_to_milli / _mem_to_bytes: the extended grammar, and junk is still empty" {

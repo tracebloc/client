@@ -9432,3 +9432,378 @@ Describe "The values file is protected BEFORE the credential is written (backend
     $before.Count | Should -BeGreaterThan 0 -Because 'the file must be restricted before the clientPassword lands in it'
   }
 }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Envelope schedulability -- the PowerShell twin of scripts/tests/
+# envelope-schedulability.sh (backend#2870, client#992).
+#
+# The bash guard derives the chart footprint from a fresh render (helm + python3)
+# and drives the REAL installer functions across the contract's golden vectors and
+# a canned cluster. Pester cannot render the chart on a Windows runner, so the
+# derivation step is owned by scripts/gen-footprint-embed.sh --check (in `make
+# drift`), which embeds ONE render into BOTH installers; this suite pins that the
+# two embeds agree (a hand-edit to either shows here) and then replays the same
+# vectors and the same canned cluster through Resolve-TbTrainingFit, asserting
+# the same eight properties the bash guard asserts. Every mutation registered for
+# it in mutation-check.ps1 mirrors one in envelope-schedulability-mutations.sh.
+# ═══════════════════════════════════════════════════════════════════════════
+
+Describe "Envelope schedulability readers (client#992)" {
+  It "ConvertTo-TbCpuMilli: whole cores, millicores, decimals FLOORED, junk is null" {
+    ConvertTo-TbCpuMilli '4'      | Should -Be 4000
+    ConvertTo-TbCpuMilli '500m'   | Should -Be 500
+    ConvertTo-TbCpuMilli '0.5'    | Should -Be 500
+    ConvertTo-TbCpuMilli '1.2345' | Should -Be 1234
+    ConvertTo-TbCpuMilli '1.05'   | Should -Be 1050
+    ConvertTo-TbCpuMilli 'eight'  | Should -BeNullOrEmpty
+    ConvertTo-TbCpuMilli '1.x'    | Should -BeNullOrEmpty
+  }
+  It "ConvertTo-TbMemBytes: binary and decimal suffixes, bare bytes, junk is null" {
+    ConvertTo-TbMemBytes '8Gi'  | Should -Be 8589934592
+    ConvertTo-TbMemBytes '70Mi' | Should -Be 73400320
+    ConvertTo-TbMemBytes '250M' | Should -Be 250000000
+    ConvertTo-TbMemBytes '5k'   | Should -Be 5000
+    ConvertTo-TbMemBytes '1Ti'  | Should -Be 1099511627776
+    ConvertTo-TbMemBytes '1024' | Should -Be 1024
+    ConvertTo-TbMemBytes 'lots' | Should -BeNullOrEmpty
+    ConvertTo-TbMemBytes '64GB' | Should -BeNullOrEmpty
+    ConvertTo-TbMemBytes 'Gi'   | Should -BeNullOrEmpty
+    ConvertTo-TbMemBytes '1.5Gi' | Should -BeNullOrEmpty
+  }
+  It "ConvertTo-TbCpuMilli / ConvertTo-TbMemBytes agree with the bash twin on every shared quantity vector" {
+    # ONE vectors file, TWO readers (Saqlain on client#994): see the fixture's
+    # description. null means the reader must return $null, never a zero.
+    $vec = Get-Content (Join-Path $PSScriptRoot "fixtures/quantity_vectors.json") -Raw | ConvertFrom-Json
+    $n = 0
+    foreach ($pair in @($vec.cpu_to_milli)) {
+      $got = ConvertTo-TbCpuMilli ([string]$pair[0])
+      if ($null -eq $pair[1]) { $got | Should -BeNullOrEmpty -Because "cpu '$($pair[0])' must be refused" }
+      else { $got | Should -Be ([long]$pair[1]) -Because "cpu '$($pair[0])'" }
+      $n++
+    }
+    foreach ($pair in @($vec.mem_to_bytes)) {
+      $got = ConvertTo-TbMemBytes ([string]$pair[0])
+      if ($null -eq $pair[1]) { $got | Should -BeNullOrEmpty -Because "mem '$($pair[0])' must be refused" }
+      else { $got | Should -Be ([long]$pair[1]) -Because "mem '$($pair[0])'" }
+      $n++
+    }
+    $n | Should -BeGreaterOrEqual 30 -Because "the vectors file must carry both grammars' edge cases"
+  }
+  It "Get-TbEnvelopeDimension: case-insensitive keys, trimmed pairs, absent is empty, prefix is not a match" {
+    Get-TbEnvelopeDimension -Size 'cpu=7, Memory=29Gi' -Key memory | Should -Be '29Gi'
+    Get-TbEnvelopeDimension -Size ' CPU=7 ,memory=29Gi' -Key cpu   | Should -Be '7'
+    Get-TbEnvelopeDimension -Size 'memory=29Gi' -Key cpu           | Should -Be ''
+    Get-TbEnvelopeDimension -Size 'cpuset=7,memory=29Gi' -Key cpu  | Should -Be ''
+  }
+  It "Get-TbPodEffectiveRequests: sum(app) vs max(init) per resource, the scheduler's formula" {
+    # apps 100Mi+200Mi=300Mi, 100m+100m=200m; inits max(1000Mi,50Mi)=1000Mi, max(50m,500m)=500m
+    $e = Get-TbPodEffectiveRequests -Apps '100m/100Mi,100m/200Mi,' -Inits '50m/1000Mi,500m/50Mi,'
+    $e.MemBytes | Should -Be (1000 * 1MB)
+    $e.CpuMilli | Should -Be 500
+    # init smaller than the app sum in memory only: memory from apps, cpu from init
+    $e = Get-TbPodEffectiveRequests -Apps '100m/300Mi,' -Inits '900m/10Mi,'
+    $e.MemBytes | Should -Be (300 * 1MB)
+    $e.CpuMilli | Should -Be 900
+  }
+  It "Get-TbPodEffectiveRequests: an unparseable quantity yields null, never zero; absent requests ARE zero" {
+    Get-TbPodEffectiveRequests -Apps '100m/lots,' -Inits '' | Should -BeNullOrEmpty
+    Get-TbPodEffectiveRequests -Apps 'many/70Mi,' -Inits '' | Should -BeNullOrEmpty
+    $e = Get-TbPodEffectiveRequests -Apps '/,' -Inits ''
+    $e.MemBytes | Should -Be 0
+    $e.CpuMilli | Should -Be 0
+    $e = Get-TbPodEffectiveRequests -Apps '0.5/250M,' -Inits ''
+    $e.MemBytes | Should -Be 250000000
+    $e.CpuMilli | Should -Be 500
+  }
+}
+
+Describe "Get-TbMeasuredSystemRequests (client#992)" {
+  BeforeEach { $script:TB_NAMESPACE = "tracebloc" }
+  It "per-node sums, MAX across nodes" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|', 'tracebloc|tracebloc') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'kube-system|Running|b|100m/70Mi,|', 'kube-system|Running|b|100m/70Mi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    # node b carries two pods (140Mi / 200m); the max is b, not the cluster total.
+    $r.MemBytes | Should -Be (140 * 1MB)
+    $r.CpuMilli | Should -Be 200
+    $r.Note | Should -BeLike '*3 pod(s) across 2 node(s)*'
+  }
+  It "excludes the release namespace, release-owned namespaces, terminal and unscheduled pods" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|', 'tracebloc|tracebloc', 'tracebloc-node-agents|tracebloc', 'other|someone-else') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'tracebloc|Running|a|1/4Gi,|', 'tracebloc-node-agents|Running|a|1/1Gi,|', 'kube-system|Succeeded|a|1/1Gi,|', 'kube-system|Failed|a|1/1Gi,|', 'kube-system|Pending||1/1Gi,|', 'other|Running|a|100m/30Mi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    # kube-system 70Mi + `other` 30Mi (a DIFFERENT release, so it counts) = 100Mi / 200m
+    $r.MemBytes | Should -Be (100 * 1MB)
+    $r.CpuMilli | Should -Be 200
+  }
+  It "init containers of a running pod still count via max()" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|200m/500Mi,') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.MemBytes | Should -Be (500 * 1MB)
+    $r.CpuMilli | Should -Be 200
+  }
+  It "an unreadable pod list is NOT a footprint of zero" {
+    Mock kubectl { if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|') } else { $global:LASTEXITCODE = 1 } }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeFalse
+    $r.Note | Should -BeLike '*pod list could not be read*'
+  }
+  It "a quantity it cannot parse makes the measurement unusable, and names the pod's namespace" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'weird-ns|Running|a|100m/1.5Gi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeFalse
+    $r.Note | Should -BeLike '*weird-ns*cannot parse*'
+  }
+  It "unreadable namespace ownership still measures, excluding only the release namespace, and says so" {
+    Mock kubectl {
+      if ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'tracebloc|Running|a|1/4Gi,|', 'tracebloc-node-agents|Running|a|100m/512Mi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    # node-agents can no longer be attributed to the release, so it is COUNTED (70Mi + 512Mi)
+    $r.MemBytes | Should -Be (582 * 1MB)
+    $r.Note | Should -BeLike '*namespace ownership unreadable*'
+  }
+}
+
+Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client#992)" {
+  BeforeAll {
+    # THE CANNED CLUSTER, written down independently of the code that reads it
+    # (rule 9's corollary) and byte-for-byte the bash guard's: two k3s system pods
+    # on the one node (100m/70Mi each), one with no requests, and four that MUST
+    # NOT count -- the chart's own jobs-manager in the release namespace, its
+    # DaemonSet in the release-owned node-agents namespace, a Succeeded hook, and
+    # a Pending pod not on any node. Counted correctly the system sum is
+    # 140 MiB / 200 m.
+    $script:SysMib = 140; $script:SysM = 200
+    $script:CannedPods = @(
+      'kube-system|Running|node-a|100m/70Mi,|',
+      'kube-system|Running|node-a|100m/70Mi,|',
+      'kube-system|Running|node-a|/,|',
+      'tracebloc|Running|node-a|500m/1Gi,|',
+      'tracebloc-node-agents|Running|node-a|100m/512Mi,|',
+      'kube-system|Succeeded|node-a|1/2Gi,|',
+      'kube-system|Pending||1/2Gi,|'
+    )
+    $script:CannedNamespaces = @('default|', 'kube-system|', 'tracebloc|tracebloc', 'tracebloc-node-agents|tracebloc')
+    $script:Contract = Get-Content (Join-Path $PSScriptRoot "fixtures/envelope_contract.json") -Raw | ConvertFrom-Json
+    # The bash twin's embed, read off its source: gen-footprint-embed.sh --check
+    # (make drift) proves BOTH equal the render; this pins that they equal each
+    # other, so a hand-edit to either installer is visible from a Pester-only run.
+    # `\r?$`, not `$`: a Windows checkout may carry CRLF, and `(?m)$` matches
+    # before `\n` only, so the anchored read came back $null on windows-latest and
+    # the pin failed as "unreadable" rather than "unequal" (client#994 CI).
+    $bashLib = Get-Content (Join-Path $PSScriptRoot "../lib/install-client-helm.sh") -Raw
+    $script:BashFpMem = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_MEM_BYTES=(\d+)\r?$') { [long]$Matches[1] } else { $null }
+    $script:BashFpCpu = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_CPU_MILLI=(\d+)\r?$') { [long]$Matches[1] } else { $null }
+    # Drive the installer's two steps on a cluster state. $Nodes = the node
+    # jsonpath lines; '' = nodes unreadable. $PodsReadable = $false makes the pod
+    # list unreadable while nodes still read.
+    function script:Invoke-FitOn {
+      param([string[]]$Nodes, [string]$Override = '', [bool]$PodsReadable = $true, [hashtable]$Carried = $null)
+      $env:TRACEBLOC_TRAINING_RESOURCES = if ($Override) { $Override } else { $null }
+      # Captured as LOCALS: inside a GetNewClosure() mock `$script:` is the closure
+      # module's scope, where the canned arrays do not exist -- an empty pod list
+      # would read as "NOT measured" and every cpu assertion below would pass on
+      # the wrong number (measured while writing this suite).
+      $nodesCopy = $Nodes; $podsOk = $PodsReadable
+      $pods = $script:CannedPods; $nss = $script:CannedNamespaces
+      Mock kubectl {
+        if ($args -contains 'nodes') {
+          if ($nodesCopy.Count -eq 0) { $global:LASTEXITCODE = 1; '' } else { $global:LASTEXITCODE = 0; $nodesCopy }
+        } elseif ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; $nss }
+        elseif ($args -contains 'pods') {
+          if ($podsOk) { $global:LASTEXITCODE = 0; $pods } else { $global:LASTEXITCODE = 1; '' }
+        } elseif ($args -contains 'namespace') { $global:LASTEXITCODE = 0; '' }
+        else { $global:LASTEXITCODE = 1; '' }
+      }.GetNewClosure()
+      $size = Get-TrainingResources -Carried $Carried -CarriedResolved
+      $prov = Get-TrainingProvenance -Carried $Carried -CarriedResolved
+      $fit  = Resolve-TbTrainingFit -Size $size -Provenance $prov
+      return @{ Before = $size; Prov = $prov; Fit = $fit }
+    }
+  }
+  BeforeEach {
+    $script:TB_NAMESPACE = "tracebloc"
+    $env:TRACEBLOC_TRAINING_RESOURCES = $null
+    $script:TbTrainingUndersized = $false
+    $script:TbTrainingUnschedulable = $false
+    Mock helm { $global:LASTEXITCODE = 1; "" }   # no installed release: nothing is carried
+  }
+  AfterEach { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+
+  It "1. the embedded footprint equals the bash twin's (one render, two installers)" {
+    $script:BashFpMem | Should -Not -BeNullOrEmpty -Because "the bash embed must be readable, or this pin is vacuous"
+    $script:TbCpFootprintMemBytes | Should -Be $script:BashFpMem
+    $script:TbCpFootprintCpuMilli | Should -Be $script:BashFpCpu
+  }
+
+  It "2. every single-node golden vector fits after the fit, with the positive control" {
+    $needB = [long]$script:TbCpFootprintMemBytes + [long]($script:SysMib * 1MB)
+    $needM = [long]$script:TbCpFootprintCpuMilli + [long]$script:SysM
+    $failures = @(); $checked = 0; $overBefore = 0
+    foreach ($v in $script:Contract.vectors.single_node) {
+      $r = Invoke-FitOn -Nodes @("$($v.allocatable_cpu) $($v.allocatable_memory)")
+      $allocM = ConvertTo-TbCpuMilli "$($v.allocatable_cpu)"; $allocB = ConvertTo-TbMemBytes "$($v.allocatable_memory)"
+      if ($null -eq $allocM -or $null -eq $allocB) {
+        # unmeasurable node: floor written UNVERIFIED -- not refused, not a claimed fit
+        if (-not ($r.Fit.Verdict -eq 'unverified' -and $r.Fit.Size -eq (Get-TbEnvelopeFloorString))) {
+          $failures += "$($v.label): unmeasurable -> '$($r.Fit.Verdict)' '$($r.Fit.Size)' (want unverified floor)"
+        }
+        continue
+      }
+      $checked++
+      $bMem = ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $r.Before -Key memory)
+      $bCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Before -Key cpu)
+      if (($bMem + $needB) -gt $allocB -or ($bCpu + $needM) -gt $allocM) { $overBefore++ }
+      switch ($r.Fit.Verdict) {
+        'refused' {
+          if (-not (($allocB - $needB) -lt 1GB -or ($allocM - $needM) -lt 1000)) {
+            $failures += "$($v.label): refused although $([math]::Floor(($allocB - $needB)/1MB)) MiB / $($allocM - $needM) m would fit"
+          }
+        }
+        { $_ -eq 'fits' -or $_ -eq 'reduced' } {
+          $aMem = ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key memory)
+          $aCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key cpu)
+          if ($null -eq $aMem -or $null -eq $aCpu) { $failures += "$($v.label): written size '$($r.Fit.Size)' unparseable"; break }
+          if (-not (($aMem + $needB) -le $allocB -and ($aCpu + $needM) -le $allocM -and $aMem -ge 1GB -and $aCpu -ge 1000 -and $aMem -le $bMem -and $aCpu -le $bCpu)) {
+            $failures += "$($v.label): $($r.Before) -> $($r.Fit.Size) [$($r.Fit.Verdict)] does NOT fit"
+          }
+        }
+        default { $failures += "$($v.label): unexpected verdict '$($r.Fit.Verdict)' on a measured node" }
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+    $checked | Should -BeGreaterOrEqual 10 -Because "a guard that checked almost nothing proves almost nothing"
+    # POSITIVE CONTROL: the platform out-requests the reserve today, so at least
+    # one vector must over-ask BEFORE the fit -- else this suite could never have
+    # seen the defect it exists for.
+    if ($needB -gt $script:TbEnvelopeOverheadMemBytes -or $needM -gt $script:TbEnvelopeOverheadCpuMilli) {
+      $overBefore | Should -BeGreaterThan 0 -Because "the platform out-requests the reserve, yet no vector over-asked before the fit"
+    }
+  }
+
+  It "3. the ticket's reproduction: an 8 GiB node is REDUCED, arithmetic printed" {
+    $r = Invoke-FitOn -Nodes @('4 8Gi')
+    $r.Fit.Verdict | Should -Be 'reduced'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*OVER*'
+    ($r.Fit.Lines -join "`n") | Should -BeLike "*reduced $($r.Before) -> $($r.Fit.Size)*"
+    # The numbers on this node against the canned cluster: cpu 3000+900+200 = 4100
+    # > 4000 -> 2 cores; memory 5120+3136+140 = 8396 > 8192 -> 8192-3276 = 4916 MiB
+    # -> 4 GiB. Both dimensions over-asked, both reduced.
+    $r.Fit.Size | Should -Be 'cpu=2,memory=4Gi'
+  }
+
+  It "4. REFUSED when not even 1 core / 1 GiB fits, with the arithmetic" {
+    $r = Invoke-FitOn -Nodes @('4 4Gi')
+    $r.Fit.Verdict | Should -Be 'refused'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*not even a 1-core / 1-GiB run*'
+  }
+
+  It "5. cpu-only overshoot reduces cpu alone (memory kept)" {
+    $r = Invoke-FitOn -Nodes @('8 63928Mi')
+    $r.Fit.Verdict | Should -Be 'reduced'
+    (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key memory) | Should -Be (Get-TbEnvelopeDimension -Size $r.Before -Key memory)
+    $aCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key cpu)
+    $bCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Before -Key cpu)
+    $aCpu | Should -BeLessThan $bCpu
+    ($aCpu + $script:TbCpFootprintCpuMilli + $script:SysM) | Should -BeLessOrEqual 8000
+  }
+
+  It "6. a human's pin is warned, never altered (pinned-over)" {
+    $r = Invoke-FitOn -Nodes @('4 8Gi') -Override 'cpu=4,memory=16Gi'
+    $r.Prov | Should -Be 'user'
+    $r.Fit.Verdict | Should -Be 'pinned-over'
+    $r.Fit.Size | Should -Be 'cpu=4,memory=16Gi'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*chosen by a human (user)*'
+  }
+
+  It "7. the release's own pods are excluded from the measured sum" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; $script:CannedNamespaces }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; $script:CannedPods }
+      else { $global:LASTEXITCODE = 1; '' }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    $r.MemBytes | Should -Be ($script:SysMib * 1MB)
+    $r.CpuMilli | Should -Be $script:SysM
+  }
+
+  It "7b. pods unreadable: verified against the chart derivation only, and it SAYS so; still reduces" {
+    $r = Invoke-FitOn -Nodes @('4 8Gi') -PodsReadable $false
+    $r.Fit.Verdict | Should -Be 'reduced'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*NOT measured*chart derivation only*'
+  }
+
+  It "8a. FAIL CLOSED: a blank footprint constant refuses" {
+    $saved = $script:TbCpFootprintMemBytes
+    try {
+      $script:TbCpFootprintMemBytes = ''
+      $r = Invoke-FitOn -Nodes @('4 8Gi')
+      $r.Fit.Verdict | Should -Be 'refused'
+      ($r.Fit.Lines -join "`n") | Should -BeLike '*TbCpFootprint*'
+    } finally { $script:TbCpFootprintMemBytes = $saved }
+  }
+
+  It "8b. unreadable cluster, floor fallback: written UNVERIFIED" {
+    $r = Invoke-FitOn -Nodes @()
+    $r.Before | Should -Be (Get-TbEnvelopeFloorString)
+    $r.Fit.Verdict | Should -Be 'unverified'
+    $r.Fit.Size | Should -Be (Get-TbEnvelopeFloorString)
+  }
+
+  It "8c. a carried installer-chosen size above the floor, cluster unreadable: REFUSED (cannot verify)" {
+    $carried = @{ Size = 'cpu=7,memory=29Gi'; Provenance = 'installer' }
+    $r = Invoke-FitOn -Nodes @() -Carried $carried
+    $r.Before | Should -Be 'cpu=7,memory=29Gi'
+    $r.Prov | Should -Be 'installer'
+    $r.Fit.Verdict | Should -Be 'refused'
+  }
+
+  It "the reduction below the contract floor flags Undersized, and a fit does not" {
+    # 4c/5Gi: the resolver leaves cpu=3,memory=2Gi (5120-3072 = 2048 MiB, the
+    # floor exactly). Memory: 2048+3136+140 > 5120 -> 5120-3276 = 1844 MiB -> 1 GiB,
+    # below the 2 GiB floor -> Undersized. Cpu: 4000-1100 = 2900 m -> 2 cores, so
+    # the run is still a requestable shape and is REDUCED, not refused. (On a
+    # 2-core node the same memory would reduce but cpu would leave 900 m -- under
+    # one core -- and the verdict is refused; that is case 4's territory.)
+    $r = Invoke-FitOn -Nodes @('4 5Gi')
+    $r.Fit.Verdict | Should -Be 'reduced'
+    $r.Fit.Size | Should -Be 'cpu=2,memory=1Gi'
+    $r.Fit.Undersized | Should -BeTrue
+    # A genuine fit: an installer-sized envelope ALWAYS over-asks today (the
+    # resolver leaves 3 GiB and the platform asks 3136 MiB plus system pods -- the
+    # positive control above), so use a carried installer size that fits.
+    $r2 = Invoke-FitOn -Nodes @('16 64Gi') -Carried @{ Size = 'cpu=4,memory=12Gi'; Provenance = 'installer' }
+    $r2.Before | Should -Be 'cpu=4,memory=12Gi'
+    $r2.Fit.Verdict | Should -Be 'fits'
+    $r2.Fit.Undersized | Should -BeFalse
+    $r2.Fit.Size | Should -Be $r2.Before
+    ($r2.Fit.Lines -join "`n") | Should -BeLike '*headroom*'
+  }
+
+  It "Get-TrainingResources still sizes through the ONE anchor reader (extraction did not change the answer)" {
+    Mock kubectl { if ($args -contains 'nodes') { $global:LASTEXITCODE = 0; @('12 6924Mi', '12 6924Mi') } else { $global:LASTEXITCODE = 1; '' } }
+    Get-TrainingResources | Should -Be 'cpu=11,memory=3Gi'
+    Mock kubectl { if ($args -contains 'nodes') { $global:LASTEXITCODE = 0; @('16 64Gi true', '4 16Gi') } else { $global:LASTEXITCODE = 1; '' } }
+    Get-TrainingResources | Should -Be 'cpu=3,memory=13Gi'
+  }
+}
