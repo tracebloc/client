@@ -9299,3 +9299,136 @@ Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
     $bash | Should -Match 'no kubelet config mount'
   }
 }
+
+
+Describe "Protect-TraceblocValuesFile (backend#2931)" {
+  # THE ACL IS READ BACK, never "was Set-Acl called". The ticket asked for exactly
+  # that distinction: a mock that records the call passes while the ACL does not
+  # apply, which is the silent-best-effort failure this helper exists to remove.
+  #
+  # Windows-only by nature, not by preference: Set-Acl is unimplemented off Windows,
+  # so these run in `Pester (windows-latest)` and are skipped elsewhere. The
+  # non-Windows path has its own case below, which DOES run everywhere.
+
+  It "creates the file when absent, so the mode can land before any credential" {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-a-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Test-Path -LiteralPath $p | Should -BeFalse
+      Protect-TraceblocValuesFile -Path $p
+      Test-Path -LiteralPath $p | Should -BeTrue -Because "the helper must create it empty so the caller writes into an already-protected file"
+      (Get-Item -LiteralPath $p).Length | Should -Be 0 -Because "the window the ordering fix leaves must be on an EMPTY file"
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "grants only the invoking user and Administrators, read back from the filesystem" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-b-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "clientPassword: 'not-a-real-secret'" -Encoding UTF8
+      Protect-TraceblocValuesFile -Path $p
+
+      $me      = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+      $admins  = (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544').Value
+      $allowed = @($me, $admins)
+
+      $acl  = Get-Acl -LiteralPath $p
+      $sids = @(foreach ($ace in $acl.Access) {
+        try   { $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+        catch { $ace.IdentityReference.Value }
+      })
+      $sids.Count | Should -BeGreaterThan 0 -Because "an empty ACL would deny the installer its own file"
+      foreach ($sid in $sids) { $allowed | Should -Contain $sid }
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "breaks inheritance, or the directory's grants survive every rule removed" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    # The load-bearing half. Removing ACEs without SetAccessRuleProtection leaves the
+    # INHERITED grants in place, which is how the file was readable to begin with --
+    # so a test that only counted explicit ACEs would pass on the broken version.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-c-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "x" -Encoding UTF8
+      Protect-TraceblocValuesFile -Path $p
+      $acl = Get-Acl -LiteralPath $p
+      $acl.AreAccessRulesProtected | Should -BeTrue -Because "inherited ACEs must not survive"
+      @($acl.Access | Where-Object { $_.IsInherited }).Count | Should -Be 0
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "returns FALSE when it could not restrict, so the caller cannot claim it did" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -le 5) {
+    # The verdict is the whole point of Bugbot's finding on client#990: the helper is
+    # best-effort, and a caller that assumes success tells the operator the credential
+    # is protected on exactly the paths where it is not.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-e-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try { (Protect-TraceblocValuesFile -Path $p) | Should -BeFalse }
+    finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "returns TRUE when it verifiably restricted the file" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-f-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "x" -Encoding UTF8
+      (Protect-TraceblocValuesFile -Path $p) | Should -BeTrue
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "warns instead of throwing when the platform has no Windows ACLs" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -le 5) {
+    # Runs on the Linux/macOS Pester legs. The installer must never abort here: a
+    # credential file it cannot chmod is still better than no install at all.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-d-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      { Protect-TraceblocValuesFile -Path $p } | Should -Not -Throw
+      Test-Path -LiteralPath $p | Should -BeTrue
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+Describe "The values file is protected BEFORE the credential is written (backend#2931 source guard)" {
+  BeforeAll {
+    # ONE derivation, used by both cases. They were computed separately at first and
+    # the ordering case then passed on a file with NO call in it at all -- a guard
+    # that cannot see its subject's absence. Deriving both from the same line list
+    # makes "absent" impossible to read as "in the right order".
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1"
+    $script:ProtectLines = @(
+      for ($i = 0; $i -lt $src.Count; $i++) {
+        if ($src[$i] -like '*Protect-TraceblocValuesFile -Path $valuesFile*') { $i + 1 }
+      })
+    $script:WriteLines = @(
+      for ($i = 0; $i -lt $src.Count; $i++) {
+        if ($src[$i] -like '*Set-Content -Path $valuesFile -Value $valuesContent*') { $i + 1 }
+      })
+  }
+
+  It "protects BOTH write sites, not just the one that generates the file" {
+    # The clientId heal rewrites a PRE-EXISTING values file, which can carry the
+    # inherited ACL an installer predating this left behind. Fixing only the
+    # generating site is the .github#300 shape: covering one member of a pair.
+    $script:ProtectLines.Count | Should -BeGreaterOrEqual 2 -Because 'the generating write and the clientId heal both need it'
+  }
+
+  It "only claims the file is restricted when the helper said so" {
+    # Bugbot, client#990: the Hint used to assert "restricted to you and
+    # Administrators" unconditionally, including on the degraded paths the helper
+    # warns about. A reassurance that outlives the thing it describes is worse than
+    # no message.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Match '\$valuesProtected\s*=\s*Protect-TraceblocValuesFile'
+    $src | Should -Match 'if\s*\(\$valuesProtected\)'
+    $lines  = Get-Content "$PSScriptRoot/../install-k8s.ps1"
+    $claim  = @(for ($i=0; $i -lt $lines.Count; $i++) { if ($lines[$i] -like '*restricted to you and Administrators*') { $i } })
+    $claim.Count | Should -Be 1
+    # the nearest preceding non-blank line must be the verdict branch
+    $j = $claim[0] - 1
+    while ($j -ge 0 -and [string]::IsNullOrWhiteSpace($lines[$j])) { $j-- }
+    $lines[$j] | Should -BeLike '*if ($valuesProtected)*'
+  }
+
+  It "calls it above the Set-Content that carries clientPassword" {
+    # Ordering is the entire defect client#945 named on the bash side: "a mode fixed
+    # one line too late is not a mode."
+    $script:WriteLines.Count   | Should -Be 1 -Because 'this asserts about one specific write'
+    $script:ProtectLines.Count | Should -BeGreaterThan 0 -Because 'an absent call must not read as a correctly-ordered one'
+    $before = @($script:ProtectLines | Where-Object { $_ -lt $script:WriteLines[0] })
+    $before.Count | Should -BeGreaterThan 0 -Because 'the file must be restricted before the clientPassword lands in it'
+  }
+}
