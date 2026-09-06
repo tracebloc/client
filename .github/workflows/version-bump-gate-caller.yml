@@ -26,5 +26,5 @@ jobs:
     uses: tracebloc/.github/.github/workflows/version-bump-gate.yml@main
     with:
       version-file: "client/Chart.yaml"
-      publish-paths: "client/*"
+      publish-paths: "client/* ingestor/*"
       soft-fail: false
