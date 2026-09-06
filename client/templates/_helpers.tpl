@@ -915,23 +915,46 @@ true
 {{- $clusterVisible := (lookup "v1" "Namespace" "" "kube-system") -}}
 {{- $secret := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.secretName" .)) -}}
 {{- /*
+    The datadir's presence, live OR declared. `mysqlDatadirExists` is the same
+    values-level surrogate secrets.yaml's root-mint guard uses (backend#2892): it
+    OR-s the live PVC `lookup` so this arm is provable under `helm template` /
+    helm-unittest and also covers a LIVE render whose PVC `lookup` cannot see the
+    datadir (a not-yet-bound or renamed claim the operator knows exists).
+*/ -}}
+{{- $datadirPresent := (or $pvc .Values.mysqlDatadirExists) -}}
+{{- if $marker -}}
+{{- /*
+    BORN-ROTATED, looked up FIRST (backend#947, backend#3226). The marker is
+    written under a CONSTANT name and kept across a helm uninstall
+    (resource-policy: keep), so it is the rename-safe "already rotated" signal.
+    Consulting it BEFORE the datadir/Secret refusal below means a reinstall over a
+    kept datadir whose marker survived resolves ON from the marker and never trips
+    the refusal on the Secret that the uninstall deleted.
+*/ -}}
+true
+{{- else -}}
+{{- /*
     RENAME-SAFE BY REFUSAL, not by avoidance (backend#3189). The Secret's name
     follows fullnameOverride, so a rename moves it and a bare `lookup` would MISS
     and silently read "not rotated" -- exactly the reason the born-rotated signal
-    was first recorded in a constant-named marker instead of the Secret. The
-    pre-marker rotated edges below have no marker, so the Secret is the only signal
-    left; it is read WITH the refusal that turns that silent miss into a loud fail.
-    If the fixed-name mysql-pvc datadir is present but no Secret resolves under the
-    current name, that is a rename or a reinstall over a kept datadir: fail, naming
-    the same copy-the-Secret remedy secrets.yaml gives for the credentials it mints.
+    was first recorded in a constant-named marker instead of the Secret. With no
+    marker (a pre-marker rotated edge, or a genuinely un-rotated one) the Secret is
+    the only signal left; it is read WITH the refusal that turns that silent miss
+    into a loud fail. If the datadir is present but no Secret resolves under the
+    current name, that is a rename, or a reinstall over a kept datadir whose
+    uninstall deleted the Secret. GATED ON `mysqlRootRotationAcknowledged`: that
+    flag clears ALL of the guard's refuse arms (values.yaml -- the same three in
+    secrets.yaml's mint), this one included, so an operator reinstalling over a kept
+    datadir of an UN-ROTATED edge (no marker, Secret gone) can acknowledge and
+    proceed on the image-baked password instead of being wedged (backend#3226).
     This is also what scripts/tests/fullname-override-completeness.sh (backend#2626)
     requires of any Secret lookup keyed on the override-following name. Inert on
-    every legitimate render: a fresh install has no PVC, an ordinary upgrade has the
-    Secret, and a cluster-less render (helm template / helm-unittest / GitOps) has
-    neither the PVC nor the Secret, so none of them fail here.
+    every legitimate render: a fresh install has no datadir, an ordinary upgrade has
+    the Secret, and a cluster-less render (helm template / helm-unittest / GitOps)
+    has neither the PVC nor the Secret, so none of them fail here.
 */ -}}
-{{- if and $pvc (not $secret) -}}
-{{-   fail (printf "release %q in namespace %q has MySQL data (PersistentVolumeClaim %q) but no Secret named %q -- the name this render resolves to. bakedRootRotationOn cannot read root's rotation state from a Secret that is not there, and treating the miss as \"not rotated\" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. This is a rename (fullnameOverride changed on a live release) or a reinstall over a kept datadir. FIX: copy the existing Secret to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command); or set fullnameOverride back to the value this release was last rendered with. See docs/MIGRATIONS.md." .Release.Name .Release.Namespace (include "tracebloc.mysqlPvc" .) (include "tracebloc.secretName" .)) -}}
+{{- if and $datadirPresent (not $secret) (not .Values.mysqlRootRotationAcknowledged) -}}
+{{-   fail (printf "release %q in namespace %q has MySQL data (PersistentVolumeClaim %q) but no Secret named %q -- the name this render resolves to -- and no born-rotated marker. bakedRootRotationOn cannot read root's rotation state from a Secret that is not there, and treating the miss as \"not rotated\" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. TWO CAUSES look like this. (1) A RENAME (fullnameOverride changed on a live release): the Secret still exists under the OLD name -- copy it to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command), or put fullnameOverride back to the value this release was last rendered with. (2) A REINSTALL over a kept datadir whose uninstall DELETED the Secret (docs/MIGRATIONS.md): there is no Secret to copy. A born-rotated edge keeps its marker across the uninstall and this render resolves rotated from it; an un-rotated edge has no marker, so set mysqlRootRotationAcknowledged=true to proceed on the image-baked password -- the ack clears this arm the same way it clears the secrets.yaml mint arms. See docs/MIGRATIONS.md." .Release.Name .Release.Namespace (include "tracebloc.mysqlPvc" .) (include "tracebloc.secretName" .)) -}}
 {{- end -}}
 {{- /*
     PRE-MARKER ROTATED (backend#3189): the live Secret already carries a baked
@@ -941,12 +964,11 @@ true
     secrets.yaml's tier-2 reads, so an empty offline lookup is nil-safe.
 */ -}}
 {{- $bakedRoot := (and $secret $secret.data (hasKey $secret.data "MYSQL_ROOT_PASSWORD")) -}}
-{{- if $marker -}}
+{{- if $bakedRoot -}}
 true
-{{- else if $bakedRoot -}}
+{{- else if and $clusterVisible (not $datadirPresent) -}}
 true
-{{- else if and $clusterVisible (not $pvc) -}}
-true
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

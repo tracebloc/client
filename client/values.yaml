@@ -2209,6 +2209,12 @@ mysqlRootPassword: ""
 # `ALTER USER 'root'` DDL to align root's live password to the Secret value in the
 # same maintenance window. It clears ALL of the guard's refuse arms (existing
 # datadir, declared, and the offline fail-closed one), and it runs no DDL itself.
+# It ALSO clears tracebloc.bakedRootRotationOn's datadir-present-but-Secret-absent
+# refusal (backend#3226): a reinstall over a kept datadir whose `helm uninstall`
+# deleted the Secret — but not the resource-policy: keep datadir PVC — would
+# otherwise wedge the render even though the intent is to leave an un-rotated edge
+# on its image-baked password. A born-rotated edge needs no ack: its marker
+# survives the uninstall and is consulted first.
 #
 # SELF-EXPIRING ONLY ON A LIVE OR SERVER-SIDE RENDER (backend#2892): once rotated,
 # tier 2 (a live `lookup` of the Secret) preserves MYSQL_ROOT_PASSWORD and the mint
