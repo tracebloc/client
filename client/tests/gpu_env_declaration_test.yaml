@@ -56,28 +56,62 @@ tests:
             name: GPU_LIMITS
             value: "nvidia.com/gpu=2"
 
-  - it: a lone GPU_REQUESTS renders an equal GPU_LIMITS (it used to render NEITHER)
-    # The other direction of client#995. The gate opens on either key, so "one
-    # number" holds whichever key the operator happened to write.
+  - it: a lone GPU_REQUESTS still renders NEITHER var -- GPU_LIMITS is the only gate
+    # Pinned in BOTH containers and for BOTH an empty and a non-empty value
+    # (Saqlain, client#996): a first cut of client#995 opened the gate on either
+    # key, which would have turned an edge carrying a lone `GPU_REQUESTS: ""` from
+    # assume-a-GPU into a declared CPU-only cluster on upgrade, silently. The
+    # empty-string CPU-only meaning stays attached to GPU_LIMITS alone.
     set:
       env:
         GPU_REQUESTS: "nvidia.com/gpu=3"
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: GPU_REQUESTS
-            value: "nvidia.com/gpu=3"
-      - contains:
+          any: true
+      - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: GPU_LIMITS
-            value: "nvidia.com/gpu=3"
-      - contains:
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_REQUESTS
+          any: true
+      - notContains:
           path: spec.template.spec.containers[1].env
           content:
             name: GPU_LIMITS
-            value: "nvidia.com/gpu=3"
+          any: true
+
+  - it: a lone EMPTY GPU_REQUESTS still renders NEITHER var, so it does not declare CPU-only
+    set:
+      env:
+        GPU_REQUESTS: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_LIMITS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_REQUESTS
+          any: true
 
   - it: both keys set to DIFFERENT values are written as given, not silently equalised
     # The chart does not overrule an explicit pair: the runtime warns once and
@@ -96,6 +130,11 @@ tests:
             value: "nvidia.com/gpu=2"
       - contains:
           path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=1"
+      - contains:
+          path: spec.template.spec.containers[1].env
           content:
             name: GPU_REQUESTS
             value: "nvidia.com/gpu=1"

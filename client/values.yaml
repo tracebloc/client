@@ -93,11 +93,12 @@ env: {
   # (case-insensitive). Anything else -- including "" -- is off.
   # DERIVE_JOB_ENVELOPE: "true"
   # Optional: GPU requests / limits for spawned jobs. The two are ONE number
-  # (client#995): set either key alone and the chart renders the other with the
-  # same value, because Kubernetes requires an extended resource's request to
-  # equal its limit. With neither set nothing is rendered and the runtime's
-  # legacy default ("nvidia.com/gpu=1") applies; `GPU_LIMITS: ""` declares a
-  # CPU-only cluster (backend#2216).
+  # (client#995) and GPU_LIMITS is the gate: set it alone and the chart renders
+  # GPU_REQUESTS with the same value, because Kubernetes requires an extended
+  # resource's request to equal its limit. GPU_REQUESTS alone renders nothing.
+  # With GPU_LIMITS absent nothing is rendered and the runtime's legacy default
+  # ("nvidia.com/gpu=1") applies; `GPU_LIMITS: ""` declares a CPU-only cluster
+  # (backend#2216).
   # GPU_REQUESTS: "nvidia.com/gpu=1"
   # GPU_LIMITS: "nvidia.com/gpu=1"
   # Optional: runtime class for GPU jobs (defaults to "" if not provided)

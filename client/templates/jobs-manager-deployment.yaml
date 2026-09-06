@@ -859,18 +859,15 @@ spec:
         # file carrying only `GPU_LIMITS: nvidia.com/gpu=2` reached jobs-manager
         # as requests=1 / limits=2, which the API server rejects, and the
         # runtime's own mirror (client-runtime#515/#516) could never be reached
-        # from values because both keys always arrived set. Now whichever key is
-        # absent takes the other's value, in EITHER direction, so a lone key of
-        # either name renders an equal pair; the gate opens on either key. Both
-        # set to different values is written as given: the operator asked for
-        # it, the runtime warns once, and the pod is rejected -- the chart does
-        # not silently overrule an explicit pair.
-        {{- if or (hasKey .Values.env "GPU_LIMITS") (hasKey .Values.env "GPU_REQUESTS") }}
-        - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | default "" | quote }}{{ else }}{{ .Values.env.GPU_LIMITS | default "" | quote }}{{ end }}
-        - name: GPU_LIMITS
-          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | default "" | quote }}{{ else }}{{ .Values.env.GPU_REQUESTS | default "" | quote }}{{ end }}
-        {{- end }}
+        # from values because both keys always arrived set. An absent
+        # GPU_REQUESTS now takes GPU_LIMITS' value. GPU_LIMITS stays the ONLY
+        # gate: a lone GPU_REQUESTS still renders neither var, so an edge that
+        # carried one on an older chart keeps its behaviour on upgrade (Saqlain,
+        # client#996). Both set to different values is written as given: the
+        # operator asked for it, the runtime warns once, the pod is rejected --
+        # the chart does not silently overrule an explicit pair. The pair is
+        # rendered by ONE helper (`tracebloc.gpuEnv`) for both containers.
+        {{- include "tracebloc.gpuEnv" . | nindent 8 }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
@@ -989,14 +986,9 @@ spec:
         # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate,
         # `hasKey` since backend#2216 (see the api container for why)
         # so a CPU-only install emits neither (no phantom GPU in the CLI view)
-        # and a GPU install emits both (request == limit). An absent key takes
-        # the other's value in either direction (client#995, see above).
-        {{- if or (hasKey .Values.env "GPU_LIMITS") (hasKey .Values.env "GPU_REQUESTS") }}
-        - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | default "" | quote }}{{ else }}{{ .Values.env.GPU_LIMITS | default "" | quote }}{{ end }}
-        - name: GPU_LIMITS
-          value: {{ if hasKey .Values.env "GPU_LIMITS" }}{{ .Values.env.GPU_LIMITS | default "" | quote }}{{ else }}{{ .Values.env.GPU_REQUESTS | default "" | quote }}{{ end }}
-        {{- end }}
+        # and a GPU install emits both (request == limit). Rendered by the same
+        # helper as the api container (client#995, see above).
+        {{- include "tracebloc.gpuEnv" . | nindent 8 }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # Kept in sync with the api container (client-runtime#92). pods-monitor

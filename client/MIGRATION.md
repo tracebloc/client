@@ -14,16 +14,19 @@ extended resource's request to equal its limit, so every training pod on that
 edge was rejected by the API server — and the runtime's own mirror ("setting
 only one of them now mirrors it into the other", 1.9.104 above) could not help,
 because from values both keys always arrived set. From this version the chart
-renders the absent key **with the other's value, in either direction**: a lone
-`GPU_LIMITS` gives an equal `GPU_REQUESTS`, and a lone `GPU_REQUESTS` (which used
-to render *neither* variable) gives an equal `GPU_LIMITS`. Both set to different
-values are still written as given — the runtime warns once and the pod is
-rejected; set both to one value, or set only one.
+renders an absent `GPU_REQUESTS` **with `GPU_LIMITS`' own value**, so a lone
+`GPU_LIMITS` gives an equal pair. Both set to different values are still written
+as given — the runtime warns once and the pod is rejected; set both to one
+value, or set only `GPU_LIMITS`.
 
-`GPU_LIMITS: ""` still means "no GPU on this cluster" and renders both keys
-empty; leaving both keys absent still renders nothing (the runtime's legacy
-assume-a-GPU default). The chart test `gpu_env_declaration_test.yaml` now asserts
-`requests == limits` for every rendering that sets one key.
+`GPU_LIMITS` stays the **only** gate, exactly as before: `GPU_LIMITS: ""` still
+means "no GPU on this cluster" and renders both keys empty; `GPU_LIMITS` absent
+still renders nothing (the runtime's legacy assume-a-GPU default) — **including
+when `GPU_REQUESTS` alone is set, empty or not**, so an edge carrying a lone
+`GPU_REQUESTS` keeps its behaviour on upgrade. The chart test
+`gpu_env_declaration_test.yaml` asserts `requests == limits` on both containers
+for every rendering that sets `GPU_LIMITS`, and that a lone `GPU_REQUESTS`
+renders neither.
 
 ## Upgrading to 1.9.104 — what the jobs-manager now tells you about GPU admission (RFC-0067 D7)
 
