@@ -395,10 +395,32 @@ _bounded_capture() {
   local limit=$(( secs * _TB_CAPTURE_PER_SEC ))
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$limit" ]; then
-      kill -TERM "$pid" 2>/dev/null
-      # Detached, so a child that ignores TERM cannot hold us either.
-      ( sleep 2; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-      wait "$pid" 2>/dev/null
+      # EVERY LINE FAILURE-PROOFED (`|| true`), exactly as spin's deadline path is
+      # and for the reason recorded there (Bugbot #442 r3, and again here on
+      # client#984): `wait` on a TERM'd child reports 143 and `kill` fails outright
+      # on an already-exited pid, so under `set -e` either aborted this arm BEFORE
+      # `return 124` and the caller saw a fired deadline as "the command failed
+      # with 143". That is the stall/failure conflation this PR exists to remove,
+      # leaking out of the primitive every other branch keys on. Measured:
+      #   bash -c 'set -e; source common.sh; _bounded_capture 1 f sleep 30' -> 143
+      # (Not reproducible through `( set -e; … ) || rc=$?` — bash inherits the
+      # AND-OR errexit suppression into subshells, which is why the first draft of
+      # the guard passed against this bug.)
+      kill -TERM "$pid" 2>/dev/null || true
+      # ESCALATE IN-LINE, not from a detached subshell that races `wait`: a child
+      # ignoring TERM otherwise decides how long the installer waits, and a KILL
+      # arriving after `wait` has reaped the child can signal a REUSED pid. While
+      # the child is still our own unreaped child its pid cannot be recycled, so
+      # escalating here is both bounded and safe.
+      local _kwait=0 _klimit=$(( 2 * _TB_CAPTURE_PER_SEC ))
+      while kill -0 "$pid" 2>/dev/null && [ "$_kwait" -lt "$_klimit" ]; do
+        sleep "$_TB_CAPTURE_TICK" || true
+        _kwait=$(( _kwait + 1 ))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+      wait "$pid" 2>/dev/null || true
       return 124
     fi
     sleep "$_TB_CAPTURE_TICK"

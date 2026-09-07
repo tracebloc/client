@@ -32,6 +32,11 @@
 #       `_docker_answers_bounded`'s caller, which skipped every docker/k3d section
 #       and claimed a hang when the daemon had answered and failed fast (Bugbot
 #       High, round 4). Group D's last two tests.
+#    7. And the PRIMITIVE's own deadline arm: `kill`/`wait` unguarded, so under
+#       errexit it exited with the TERM's 143 instead of reaching `return 124` —
+#       the conflation leaking out of the one function every branch above keys on
+#       (Bugbot, round 6). Two tests in group B, run in a real subprocess because
+#       bash inherits AND-OR errexit suppression into subshells.
 #
 #  Fixing sites was not converging, so this pins the SHAPE:
 #
@@ -402,6 +407,45 @@ _enclosing_function() {   # $1 = file, $2 = line
   [ "$rc" -eq 1 ] || { echo "command failure -> $rc"; return 1; }
   rc=0; _bounded_capture 1 "$out" sleep 30 || rc=$?
   [ "$rc" -eq 124 ] || { echo "deadline -> $rc (must be 124, distinct from 0 and from the command's own status)"; return 1; }
+}
+
+@test "B. _bounded_capture: the deadline returns 124 even under errexit, not the kill signal" {
+  # Bugbot Medium, client#984. The deadline arm ran `kill -TERM`, a detached
+  # `kill -KILL` and `wait` UNGUARDED, so under `set -e` any of them could abort
+  # the function before `return 124`: `wait` on a TERM'd child reports 143, and
+  # `kill` fails outright on an already-exited pid. The caller then sees a fired
+  # deadline as "the command failed with 143" — which is exactly the stall/failure
+  # conflation this whole file guards, arriving from inside the primitive every
+  # other branch keys on. `spin`'s deadline path documents the same abort and
+  # guards every line with `|| true` (Bugbot #442 r3); this one now does too.
+  #
+  # A BARE call inside an errexit subshell: writing `_bounded_capture … || rc=$?`
+  # makes the entire call exempt from errexit, which is why the existing
+  # three-outcome test above never caught this.
+  # A REAL SUBPROCESS, not `( set -e; … ) || rc=$?`. Bash's "errexit is suppressed
+  # for a command in an AND-OR list" flag is INHERITED BY SUBSHELLS, so the
+  # obvious-looking form silently disables the very errexit it means to test and
+  # passes against the unguarded code. Verified:
+  #   bash -c 'set -e; source common.sh; _bounded_capture 1 f sleep 30; echo REACHED'
+  #   -> rc=143, REACHED never printed.
+  local out="$BATS_TEST_TMPDIR/cap-errexit"
+  run bash -c "set -e; source '${LIB_DIR}/common.sh'; _bounded_capture 1 '$out' sleep 30"
+  [ "$status" -eq 124 ] || {
+    echo "deadline under errexit -> $status (143 means the TERM leaked out as the function's status; every branch keyed on 124 then reads a stall as the command's own failure)"
+    return 1; }
+}
+
+@test "B. _bounded_capture: a child that IGNORES TERM still reports 124, and stays bounded" {
+  # The escalation half. If the KILL only ever arrives from a detached subshell
+  # that races `wait`, a child which ignores TERM decides how long the installer
+  # waits.
+  local out="$BATS_TEST_TMPDIR/cap-term" t0 t1
+  t0="$(date +%s)"
+  run bash -c "set -e; source '${LIB_DIR}/common.sh'; _bounded_capture 1 '$out' bash -c 'trap \"\" TERM; sleep 30'"
+  t1="$(date +%s)"
+  [ "$status" -eq 124 ] || { echo "TERM-ignoring child -> $status"; return 1; }
+  [ "$(( t1 - t0 ))" -le 10 ] || {
+    echo "took $(( t1 - t0 ))s for a 1s deadline — the KILL escalation is not bounding it"; return 1; }
 }
 
 @test "B. _bounded_capture's bound needs NO coreutils (the macOS half of the finding)" {

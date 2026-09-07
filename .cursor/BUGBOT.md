@@ -125,6 +125,18 @@ for *what the operator sees and can act on*, not code elegance.
   docker/k3d section and claim a hang. Only the deadline may skip; a gate that
   ANSWERED and failed should still collect, because each read is individually
   bounded and records its own error.
+  (f) **THE DEADLINE ARM ITSELF MUST NOT ABORT.** `wait` on a TERM'd child reports
+  143 and `kill` fails outright on an already-exited pid, so under `set -e` an
+  unguarded deadline arm exits with THAT status instead of reaching `return 124` —
+  and every branch keyed on 124 then reads a stall as the command's own failure.
+  Failure-proof every line (`|| true`), as `spin` does (Bugbot #442 r3) and as
+  `_bounded_capture` now does (client#984). Escalate TERM→KILL IN-LINE rather than
+  from a detached subshell racing `wait`: a KILL landing after `wait` has reaped
+  the child can signal a REUSED pid, and a child that ignores TERM otherwise
+  decides how long the installer waits. **Test it in a real subprocess** — bash
+  inherits the AND-OR errexit suppression into subshells, so
+  `( set -e; f ) || rc=$?` disables the very errexit it looks like it is testing
+  and passes against the bug; use `bash -c 'set -e; source …; f'`.
 
 - **`_bounded` is not a bound on macOS; `_bounded_capture` is.** `_bounded` execs
   timeout(1)/gtimeout(1) and runs the BARE command when neither is present, and
