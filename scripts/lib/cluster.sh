@@ -116,7 +116,17 @@ _cluster_presence() {
       fi
       # Parsed as something other than an array (or not at all): inconclusive, not
       # empty. Fall through to the table probes rather than call the cluster absent.
-      _read_ok=1
+      #
+      # AND IT DOES NOT SET `_read_ok` (Bugbot Medium, client#984 round 5). It used
+      # to, which quietly re-armed the very collapse the final `(( _read_ok ))`
+      # exists to prevent: this payload is INCONCLUSIVE — that is the whole reason
+      # we fall through — so with both table reads then failing for a non-timeout
+      # reason (k3d 127, a permission error), the function reached that test
+      # holding a 1 it had not earned and returned ABSENT. Callers then ran
+      # guard_leftover_data — which prompts, with delete among the options — and
+      # _create_new_cluster, against a machine whose listing never once parsed.
+      # `_read_ok` means "a read answered THE QUESTION", not "the engine emitted
+      # bytes".
       log "k3d answered the JSON cluster listing with a payload that is not an array; falling back to the table listing."
     elif [[ "$_rc" -eq 124 ]]; then
       log "The k3d cluster listing (JSON form) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
@@ -920,12 +930,25 @@ create_cluster() {
   # Docker is running, then re-run." — bounded, and the right sentence for a wedged
   # engine. Explicit `case`, not `if _cluster_exists`, so the third outcome is
   # visible at the decision site instead of hidden inside a boolean.
+  local _hrc=0
   case "$_presence" in
-    0) _handle_existing_cluster ;;
+    0) _handle_existing_cluster || _hrc=$? ;;
     2) warn "Couldn't read the k3d cluster list — the Docker engine isn't answering. Treating the '$CLUSTER_NAME' environment as EXISTING rather than creating a new one, so nothing is created or removed on a machine we can't see."
-       _handle_existing_cluster ;;
+       _handle_existing_cluster || _hrc=$? ;;
     *) _create_new_cluster ;;
   esac
+
+  # rc 3 = the reuse path's OWN listing answered and proved the cluster ABSENT
+  # (Bugbot High, client#984 round 5). Without this, an UNKNOWN first read locked
+  # the run into "start a cluster that isn't there" — which fails, and `error`
+  # exits — so a first-time machine with one slow listing could never install.
+  # The leftover-data guard runs here exactly as it does for a first-read ABSENT:
+  # this IS that case, learned one read later, and a new cluster must not silently
+  # adopt an earlier install's data.
+  if [[ "$_hrc" -eq 3 ]]; then
+    guard_leftover_data
+    _create_new_cluster
+  fi
 
   ensure_cluster_autostart
   _merge_kubeconfig
@@ -1055,14 +1078,29 @@ _handle_existing_cluster() {
   # this branch is safe either way — `k3d cluster start` is idempotent on a running
   # cluster and bounded — so the fix is to keep the action and stop making the
   # claim. `_status_read_ok` carries the third state to the message below.
-  local _status_read_ok=1 _rc=0
+  # THREE read states, not two (Bugbot Medium, client#984 round 5): `answered`,
+  # `stalled` (124 — the deadline), `failed` (anything else — the read COMPLETED
+  # and k3d said no: permission denied, an unsupported flag, a broken kubeconfig).
+  # Collapsing the last two wrote a millisecond failure up as a listing that
+  # "didn't complete", which is the same defect as the one above with the sign
+  # flipped, and the one saadqbal found across diagnose.sh's seven sites.
+  #
+  # `_row_found` is the fourth thing this read knows and used to throw away: a
+  # listing that ANSWERED and contains no row for this cluster says the cluster is
+  # ABSENT — authoritatively. See the AUTHORITATIVE ABSENT block below.
+  local _status_read=answered _row_found=0 _rc=0
   if command -v jq &>/dev/null; then
     local _json
     _json="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
-    if [[ "$_rc" -ne 0 ]]; then
-      _status_read_ok=0
+    if [[ "$_rc" -eq 124 ]]; then
+      _status_read=stalled
+    elif [[ "$_rc" -ne 0 ]]; then
+      _status_read=failed
     else
-      CLUSTER_STATUS=$(jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null <<<"$_json" || echo "0")
+      if jq -e --arg n "$CLUSTER_NAME" 'any(.[]; .name == $n)' >/dev/null 2>&1 <<<"$_json"; then
+        _row_found=1
+        CLUSTER_STATUS=$(jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null <<<"$_json" || echo "0")
+      fi
     fi
   else
     # Capture-then-match (#680): awk's `exit` closes the pipe on our cluster's
@@ -1070,16 +1108,48 @@ _handle_existing_cluster() {
     # mid-reconcile, with no message. Mirrors _assess_cluster_servers_running.
     local line _tbl
     _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
-    if [[ "$_rc" -ne 0 ]]; then
-      _status_read_ok=0
+    if [[ "$_rc" -eq 124 ]]; then
+      _status_read=stalled
+    elif [[ "$_rc" -ne 0 ]]; then
+      _status_read=failed
     else
-      line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
-      if [[ -n "$line" ]]; then
-        CLUSTER_STATUS="${line%%/*}"
+      # The ROW's existence and its server count are two different questions: a row
+      # with `0/1` servers is a stopped cluster, no row at all is no cluster.
+      #
+      # `{ found = 1 } END { exit(...) }`, NOT `{ exit 0 } END { exit 1 }`: awk's
+      # `exit` RUNS the END action, and END's own `exit 1` then wins — so the
+      # familiar-looking form reports "no row" on a listing that plainly contains
+      # one. (The same idiom sits in _cluster_presence, where it is masked by the
+      # layout-tolerant `grep` immediately after it and therefore never noticed.)
+      if awk -v n="$CLUSTER_NAME" '$1 == n { found = 1 } END { exit(found ? 0 : 1) }' <<<"$_tbl"; then
+        _row_found=1
+        line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
+        if [[ -n "$line" ]]; then
+          CLUSTER_STATUS="${line%%/*}"
+        fi
       fi
     fi
   fi
   CLUSTER_STATUS="${CLUSTER_STATUS:-0}"
+
+  # ── AN AUTHORITATIVE ABSENT SUPERSEDES THE EARLIER "COULDN'T TELL" ──────────
+  # Bugbot HIGH, client#984 round 5. create_cluster routes UNKNOWN here on
+  # purpose — reuse is the direction that destroys nothing — but this function's
+  # OWN listing may then answer, and "no row for this cluster" was normalised into
+  # CLUSTER_STATUS=0, i.e. "exists but is stopped". `k3d cluster start` on a name
+  # that does not exist fails, and `error` EXITS the installer. Net effect: a
+  # first-time machine whose very first listing exceeded TB_K3D_LIST_TIMEOUT could
+  # never install, however authoritatively the next read proved the cluster absent.
+  #
+  # This is BUGBOT.md rule (b) in the other order — a definite answer from a read
+  # that COMPLETED beats "couldn't tell" from one that did not, whichever arrives
+  # first. Reported to the caller (rc 3) rather than acted on here, because
+  # creating a cluster is create_cluster's decision to make and it owes the
+  # leftover-data guard on that path.
+  if [[ "$_status_read" == "answered" && "$_row_found" -eq 0 ]]; then
+    log "The k3d listing answered and this machine has no '$CLUSTER_NAME' cluster — a definite ABSENT, which supersedes the earlier listing that could not be read. Creating the environment instead of starting one that isn't there."
+    return 3
+  fi
 
   if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
     success "Secure environment already running."
@@ -1091,11 +1161,14 @@ _handle_existing_cluster() {
     # the wrong place. `k3d cluster start` is idempotent on a running cluster and
     # bounded, so the safe action is identical either way — only the sentence
     # changes.
-    if [[ "$_status_read_ok" -eq 0 ]]; then
-      log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing didn't complete) — attempting a start, which is a no-op if it is already up..."
-    else
-      log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
-    fi
+    case "$_status_read" in
+      stalled)
+        log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing didn't complete within ${TB_K3D_LIST_TIMEOUT:-15}s) — attempting a start, which is a no-op if it is already up..." ;;
+      failed)
+        log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing failed, exit $_rc — it answered, so this is k3d's own error and not a timeout; see the install log) — attempting a start, which is a no-op if it is already up..." ;;
+      *)
+        log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..." ;;
+    esac
     # Capture the tool's raw stderr to the log and surface only a curated line on
     # failure — graceful failure, not a raw k3d dump before the closer (#577).
     # Bounded start (Bugbot): `k3d cluster start` waits for the server with no

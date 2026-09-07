@@ -625,12 +625,18 @@ _require_setgid_sticky() {
 # ── what create_cluster DOES on each of the three answers ───────────────────
 # The decision site, driven. `_presence` is read once and used for both the
 # leftover-data guard and the create/reuse branch, so both are asserted here.
-_cc_mocks() {
+_cc_mocks() {   # $1 = "real-handle" to leave _handle_existing_cluster UNstubbed
   # Everything create_cluster touches after the presence read, stubbed to record.
   _rootless_active()            { return 1; }
   guard_leftover_data()         { record "guard_leftover_data"; }
   _ensure_tracebloc_dirs()      { record "_ensure_tracebloc_dirs"; }
-  _handle_existing_cluster()    { record "_handle_existing_cluster"; }
+  # Optional, because two tests below drive the REAL _handle_existing_cluster to
+  # assert what create_cluster does with ITS verdict. `unset -f` cannot serve that:
+  # bash has no shadow stack, so unsetting the stub deletes the name outright and
+  # the call returns 127 instead of revealing the sourced original.
+  if [ "${1:-}" != "real-handle" ]; then
+    _handle_existing_cluster()  { record "_handle_existing_cluster"; }
+  fi
   _create_new_cluster()         { record "_create_new_cluster"; }
   ensure_cluster_autostart()    { record "ensure_cluster_autostart"; }
   _merge_kubeconfig()           { record "_merge_kubeconfig"; }
@@ -2761,4 +2767,124 @@ _hcgc_helm_lists_gpu_release() {   # helm mock: one deployed release that reques
   run _check_existing_cluster_k8s_version
   [[ "$output" == *"v1.29.4-k3s1"* ]] || return 1
   [[ "$output" == *"not the validated pin"* ]] || return 1
+}
+
+# ── the three round-5 Bugbot findings, all one class: a read that FAILED is not
+#    a read that STALLED, and an authoritative answer supersedes an earlier
+#    "couldn't tell" whichever order they arrive in ────────────────────────────
+
+@test "_cluster_presence: an UNPARSEABLE payload + table reads that FAIL is UNKNOWN, never ABSENT (client#984)" {
+  # Bugbot Medium. The non-array JSON branch set `_read_ok=1` — but an unparseable
+  # payload is documented INCONCLUSIVE, which is why it falls through to the table
+  # probes at all. With both table reads then failing for a non-timeout reason
+  # (k3d 127: no PATH entry, permission error, a k3d that dies every time), the
+  # function reached its final `(( _read_ok ))` holding a 1 it had not earned and
+  # returned ABSENT — so callers ran guard_leftover_data (which PROMPTS, with
+  # delete among the options) and _create_new_cluster against a machine whose
+  # listing never once parsed.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed on this host"
+  local rc=0
+  _bounded() {
+    shift
+    case "$*" in
+      *"-o json"*) printf 'FATA[0000] not json at all\n' ;;   # answered, unparseable
+      *)           return 127 ;;                              # every table read FAILS
+    esac
+  }
+  _cluster_presence || rc=$?
+  [ "$rc" -eq 2 ] || {
+    echo "expected UNKNOWN(2) — nothing ever parsed — got $rc"
+    [ "$rc" -eq 1 ] && echo "reported ABSENT off an unparseable payload plus two failed reads"
+    return 1; }
+}
+
+@test "_cluster_presence: an unparseable payload + a table read that ANSWERS is still authoritative (the pair)" {
+  # So the test above cannot pass by making everything UNKNOWN. When a table read
+  # genuinely answers, its answer stands.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed on this host"
+  local rc=0
+  _bounded() {
+    shift
+    case "$*" in
+      *"-o json"*) printf 'FATA[0000] not json at all\n' ;;
+      *)           printf 'tracebloc 1/1 0/0\n' ;;
+    esac
+  }
+  _cluster_presence || rc=$?
+  [ "$rc" -eq 0 ] || { echo "expected PRESENT(0) from the table read, got $rc"; return 1; }
+}
+
+_hec_mocks() {
+  _check_existing_cluster_proxy() { :; };  _check_existing_cluster_ca() { :; }
+  _check_existing_cluster_bind() { :; };   _check_existing_cluster_dataset_mount() { :; }
+  _check_existing_cluster_kubelet_config() { :; }
+  _check_existing_cluster_storage_mode() { :; }
+  _check_existing_cluster_k8s_version() { :; }; _check_existing_cluster_gpu() { :; }
+}
+
+@test "_handle_existing_cluster: a listing that FAILED is not reported as one that didn't complete (client#984)" {
+  # Bugbot Medium, and the same finding saadqbal made about diagnose.sh, in the
+  # code this PR added on the previous round. Only 124 is a deadline; a fast k3d
+  # failure (permission denied, an unsupported flag) was written up as a stall.
+  local stalled failed
+  _drive() {   # $1 = the bounded read's rc
+    local rc="$1"
+    ( command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+      _bounded() { return "$rc"; }
+      k3d() { return 0; }
+      success() { echo "SUCCESS: $*"; }; log() { echo "LOG: $*"; }
+      error() { echo "ERROR: $*"; return 1; }
+      _hec_mocks
+      _handle_existing_cluster 2>&1 )
+  }
+  stalled="$(_drive 124)"
+  failed="$(_drive 1)"
+  printf '%s\n' "$stalled" | grep -qE "didn't complete|did not complete" || {
+    echo "a real deadline lost its wording: $stalled"; return 1; }
+  printf '%s\n' "$failed" | grep -qE "didn't complete|did not complete" && {
+    echo "a k3d that FAILED in milliseconds was reported as a listing that didn't complete: $failed"; return 1; }
+  printf '%s\n' "$failed" | grep -qE 'failed|exit 1' || {
+    echo "the failure was not named as a failure: $failed"; return 1; }
+  [ "$stalled" != "$failed" ] || return 1
+}
+
+@test "create_cluster: an UNKNOWN first read then an AUTHORITATIVE absent CREATES, never 'start' (client#984)" {
+  # Bugbot HIGH. create_cluster locks UNKNOWN into the reuse path — correct, that
+  # is the non-destructive direction — but _handle_existing_cluster's OWN listing
+  # then succeeds and shows no row for this cluster, and "no row" was normalised to
+  # CLUSTER_STATUS=0, i.e. "exists but is stopped". `k3d cluster start` on a name
+  # that does not exist fails, and `error` exits the installer. Net effect: a
+  # first-time machine whose very first listing exceeds TB_K3D_LIST_TIMEOUT can
+  # NEVER install, however authoritatively the next read proves the cluster absent.
+  #
+  # BUGBOT.md rule (b) both ways round: a definite answer from a read that
+  # COMPLETED beats "couldn't tell", whichever order the two arrive in.
+  _cc_mocks real-handle    # the REAL _handle_existing_cluster, not the recording stub
+  _hec_mocks
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  _bounded() { shift; case "$*" in *"cluster list"*) printf 'someother 1/1 0/0\n' ;; *) return 0 ;; esac; }
+  k3d() { record "k3d $*"; return 0; }
+  _cluster_presence() { return 2; }          # the FIRST read could not be read
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  ! grep -q 'k3d cluster start' "$MOCK_CALLS" || {
+    echo "tried to START a cluster the listing had just proved absent"; mock_calls; return 1; }
+  grep -q '_create_new_cluster' "$MOCK_CALLS" || {
+    echo "never created the cluster, so a first-time machine with one slow listing can never install"
+    mock_calls; return 1; }
+}
+
+@test "create_cluster: UNKNOWN then a listing showing the cluster PRESENT still reuses (the pair)" {
+  # The pair, so the test above cannot pass against a create_cluster that always
+  # creates. A row for this cluster means reuse, exactly as before.
+  _cc_mocks real-handle
+  _hec_mocks
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  _bounded() { shift; case "$*" in *"cluster list"*) printf 'tracebloc 1/1 0/0\n' ;; *) return 0 ;; esac; }
+  k3d() { record "k3d $*"; return 0; }
+  _cluster_presence() { return 2; }
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  ! grep -q '_create_new_cluster' "$MOCK_CALLS" || {
+    echo "created a cluster although the listing showed it present"; mock_calls; return 1; }
 }
