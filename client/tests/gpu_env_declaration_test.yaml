@@ -18,7 +18,12 @@ set:
   clientId: "test-id"
   clientPassword: "test"
 tests:
-  - it: a GPU install emits both vars with the configured value
+  - it: a GPU install emits both vars with the configured value, requests EQUAL to limits
+    # client#995. This case used to pin `GPU_REQUESTS: "nvidia.com/gpu=1"` beside
+    # `GPU_LIMITS: "nvidia.com/gpu=2"` -- the defect itself, asserted as if it
+    # were the contract. Kubernetes requires an extended resource's request to
+    # equal its limit, so that pair is rejected by the API server on every
+    # training pod; the absent key now takes the other's value.
     set:
       env:
         GPU_LIMITS: "nvidia.com/gpu=2"
@@ -30,6 +35,106 @@ tests:
             value: "nvidia.com/gpu=2"
       - contains:
           path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=2"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=1"
+      # The pods-monitor container carries its own copy of the gate; asserted
+      # rather than assumed to agree.
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=2"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_LIMITS
+            value: "nvidia.com/gpu=2"
+
+  - it: a lone GPU_REQUESTS still renders NEITHER var -- GPU_LIMITS is the only gate
+    # Pinned in BOTH containers and for BOTH an empty and a non-empty value
+    # (Saqlain, client#996): a first cut of client#995 opened the gate on either
+    # key, which would have turned an edge carrying a lone `GPU_REQUESTS: ""` from
+    # assume-a-GPU into a declared CPU-only cluster on upgrade, silently. The
+    # empty-string CPU-only meaning stays attached to GPU_LIMITS alone.
+    set:
+      env:
+        GPU_REQUESTS: "nvidia.com/gpu=3"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_REQUESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_LIMITS
+          any: true
+
+  - it: a lone EMPTY GPU_REQUESTS still renders NEITHER var, so it does not declare CPU-only
+    set:
+      env:
+        GPU_REQUESTS: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_LIMITS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GPU_REQUESTS
+          any: true
+
+  - it: both keys set to DIFFERENT values are written as given, not silently equalised
+    # The chart does not overrule an explicit pair: the runtime warns once and
+    # the API server rejects the pod, which is the operator's own choice to see.
+    # Pinned so a future "fix" cannot make the chart guess which of the two the
+    # operator meant.
+    set:
+      env:
+        GPU_LIMITS: "nvidia.com/gpu=2"
+        GPU_REQUESTS: "nvidia.com/gpu=1"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_LIMITS
+            value: "nvidia.com/gpu=2"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GPU_REQUESTS
+            value: "nvidia.com/gpu=1"
+      - contains:
+          path: spec.template.spec.containers[1].env
           content:
             name: GPU_REQUESTS
             value: "nvidia.com/gpu=1"

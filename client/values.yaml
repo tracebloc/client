@@ -92,9 +92,14 @@ env: {
   # Truthy spellings jobs-manager accepts: "1", "true", "yes", "on"
   # (case-insensitive). Anything else -- including "" -- is off.
   # DERIVE_JOB_ENVELOPE: "true"
-  # Optional: GPU requests for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
+  # Optional: GPU requests / limits for spawned jobs. The two are ONE number
+  # (client#995) and GPU_LIMITS is the gate: set it alone and the chart renders
+  # GPU_REQUESTS with the same value, because Kubernetes requires an extended
+  # resource's request to equal its limit. GPU_REQUESTS alone renders nothing.
+  # With GPU_LIMITS absent nothing is rendered and the runtime's legacy default
+  # ("nvidia.com/gpu=1") applies; `GPU_LIMITS: ""` declares a CPU-only cluster
+  # (backend#2216).
   # GPU_REQUESTS: "nvidia.com/gpu=1"
-  # Optional: GPU limits for spawned jobs (defaults to "nvidia.com/gpu=1" if not provided)
   # GPU_LIMITS: "nvidia.com/gpu=1"
   # Optional: runtime class for GPU jobs (defaults to "" if not provided)
   # RUNTIME_CLASS_NAME: ""
@@ -574,7 +579,7 @@ sealCheck:
 
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
-# allowlist (backend + App Insights) and nothing else. Labelled app=egress-proxy
+# allowlist (backend) and nothing else. Labelled app=egress-proxy
 # so the training NetworkPolicy never selects it (it keeps its own egress).
 egressProxy:
   enabled: true
@@ -601,8 +606,6 @@ egressProxy:
     - stg-api.tracebloc.io
     - api.tracebloc.io
     - xray-backend.azurewebsites.net
-    - .in.applicationinsights.azure.com
-    - dc.services.visualstudio.com
   resources:
     requests:
       cpu: "50m"
@@ -697,10 +700,20 @@ egressProxy:
 # posture `egressProxy.routeWorkloads` had before RFC-0003 D6 flipped it on by
 # default.
 #
-# CLASS A ONLY (D12). The receiver is scoped to the control-plane containers this
-# chart owns; training and ingestion pods are Class B and stay out until
-# backend#1908 lands content redaction. Widening `classAContainers` is not a
-# config tweak — it changes what leaves a customer's cluster.
+# CLASS A ONLY (D12), AND PERMANENTLY SO. The receiver is scoped to the
+# control-plane containers this chart owns; training and ingestion pods are
+# Class B and stay out.
+#
+# This used to read "until backend#1908 lands content redaction", which is now
+# false in both directions: #1908 was closed **NOT_PLANNED** on 2026-08-24, and
+# the decision was reaffirmed on 2026-09-03 (backend#1908) — Class B is not
+# collected because the volume is not worth collecting, not because redaction is
+# pending. Nothing is waiting on anything.
+#
+# So widening `classAContainers` is not a config tweak and not a scheduling
+# question: it reverses a product decision about what leaves a customer's
+# cluster. Per-incident Class B diagnosis is the operator-triggered support
+# bundle instead.
 telemetryCollector:
   # -- `enabled` HAS NO DEFAULT HERE ON PURPOSE. It is deliberately absent, not
   # forgotten, and setting it back to `false` would undo backend#1906.
@@ -2196,6 +2209,12 @@ mysqlRootPassword: ""
 # `ALTER USER 'root'` DDL to align root's live password to the Secret value in the
 # same maintenance window. It clears ALL of the guard's refuse arms (existing
 # datadir, declared, and the offline fail-closed one), and it runs no DDL itself.
+# It ALSO clears tracebloc.bakedRootRotationOn's datadir-present-but-Secret-absent
+# refusal (backend#3226): a reinstall over a kept datadir whose `helm uninstall`
+# deleted the Secret — but not the resource-policy: keep datadir PVC — would
+# otherwise wedge the render even though the intent is to leave an un-rotated edge
+# on its image-baked password. A born-rotated edge needs no ack: its marker
+# survives the uninstall and is consulted first.
 #
 # SELF-EXPIRING ONLY ON A LIVE OR SERVER-SIDE RENDER (backend#2892): once rotated,
 # tier 2 (a live `lookup` of the Secret) preserves MYSQL_ROOT_PASSWORD and the mint
