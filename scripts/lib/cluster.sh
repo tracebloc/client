@@ -933,7 +933,15 @@ create_cluster() {
   local _hrc=0
   case "$_presence" in
     0) _handle_existing_cluster || _hrc=$? ;;
-    2) warn "Couldn't read the k3d cluster list — the Docker engine isn't answering. Treating the '$CLUSTER_NAME' environment as EXISTING rather than creating a new one, so nothing is created or removed on a machine we can't see."
+    # NEUTRAL, AND IT PROMISES NOTHING ABOUT WHAT HAPPENS NEXT (saadqbal,
+    # client#984 round 6). Two over-claims: _cluster_presence returns 2 for a
+    # DEADLINE *and* for "every read failed" (`_read_ok=0`), so blaming the Docker
+    # engine tells a user with a broken $HOME/.k3d or an unreadable kubeconfig to
+    # go and look at a daemon that is perfectly healthy; and "nothing is created or
+    # removed" is falsified by the rc-3 path below, which prompts about leftover
+    # data and creates. `_cluster_presence`'s own L164 line and assess.sh's
+    # `cluster-indeterminate` copy already word this condition neutrally.
+    2) warn "Couldn't read the k3d cluster list for '$CLUSTER_NAME' — the listing either didn't complete or k3d couldn't answer it. Not assuming the environment is either present or absent: taking the path that reads again before it acts."
        _handle_existing_cluster || _hrc=$? ;;
     *) _create_new_cluster ;;
   esac
@@ -1096,6 +1104,22 @@ _handle_existing_cluster() {
       _status_read=stalled
     elif [[ "$_rc" -ne 0 ]]; then
       _status_read=failed
+    elif ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$_json"; then
+      # THE SHAPE IS CHECKED FIRST, for the reason written out at _cluster_presence
+      # L106-110 (saadqbal, client#984 round 6): `jq -e` cannot tell "no match"
+      # from "not JSON" — `{}` exits 1, `null` 5, garbage 4, `[]` 1, all non-zero.
+      # Without this gate every one of those landed as "the listing answered and
+      # your cluster is not in it", with `_rc` 0 keeping `_status_read=answered` —
+      # exactly the pair the AUTHORITATIVE ABSENT block below fires on. It would
+      # then prompt about leftover data (delete among the options) and run
+      # `k3d cluster create` against a name that may already exist, off a payload
+      # that never parsed. Reachable without anything exotic: stdout carrying a k3d
+      # notice ahead of the array, or an older k3d emitting `null` rather than `[]`.
+      # _cluster_presence calls this same payload inconclusive; the two functions
+      # must not reach opposite verdicts on one payload, least of all with this one
+      # taking the destructive direction.
+      _status_read=unparseable
+      log "k3d answered the JSON cluster listing with a payload that is not an array; treating this machine's cluster state as unread rather than as absent."
     else
       if jq -e --arg n "$CLUSTER_NAME" 'any(.[]; .name == $n)' >/dev/null 2>&1 <<<"$_json"; then
         _row_found=1
@@ -1166,6 +1190,8 @@ _handle_existing_cluster() {
         log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing didn't complete within ${TB_K3D_LIST_TIMEOUT:-15}s) — attempting a start, which is a no-op if it is already up..." ;;
       failed)
         log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing failed, exit $_rc — it answered, so this is k3d's own error and not a timeout; see the install log) — attempting a start, which is a no-op if it is already up..." ;;
+      unparseable)
+        log "Couldn't read whether '$CLUSTER_NAME' is running (k3d's JSON listing was not an array, so nothing could be concluded from it) — attempting a start, which is a no-op if it is already up..." ;;
       *)
         log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..." ;;
     esac

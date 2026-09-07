@@ -2888,3 +2888,70 @@ _hec_mocks() {
   ! grep -q '_create_new_cluster' "$MOCK_CALLS" || {
     echo "created a cluster although the listing showed it present"; mock_calls; return 1; }
 }
+
+@test "create_cluster: an UNPARSEABLE json payload on the reuse path is NOT a definite absent (client#984)" {
+  # saadqbal, round 6, on the rc-3 path the round-5 fix added — and the
+  # destructive direction. `jq -e` cannot tell "no match" from "not JSON": `{}`
+  # exits 1, `null` 5, garbage 4, `[]` 1 — all non-zero, so all of them landed as
+  # `_row_found=0` while `_rc` was 0, i.e. "the listing answered and your cluster
+  # is not in it". The rc-3 block then fired: guard_leftover_data (which PROMPTS,
+  # with delete among the options) and `k3d cluster create` against a name that
+  # may well already exist.
+  #
+  # Reachable without anything exotic: stdout carrying a k3d notice ahead of the
+  # array, or an older k3d emitting `null` instead of `[]`. _cluster_presence calls
+  # exactly this payload inconclusive and falls through — two functions, one
+  # payload, opposite verdicts. The shape is checked first here too.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed on this host"
+  _cc_mocks real-handle
+  _hec_mocks
+  _bounded() { shift; case "$*" in *"cluster list"*) printf 'null\n' ;; *) return 0 ;; esac; }
+  k3d() { record "k3d $*"; return 0; }
+  _cluster_presence() { return 2; }          # the first read could not be read
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  ! grep -q 'guard_leftover_data' "$MOCK_CALLS" || {
+    echo "offered to delete the user's data off a payload that never parsed"; mock_calls; return 1; }
+  ! grep -q '_create_new_cluster' "$MOCK_CALLS" || {
+    echo "created a cluster off a payload that never parsed"; mock_calls; return 1; }
+  # The safe action for "couldn't read it" is the idempotent start, as before.
+  grep -q 'k3d cluster start' "$MOCK_CALLS" || {
+    echo "took neither the safe start nor any other action"; mock_calls; return 1; }
+}
+
+@test "create_cluster: a WELL-FORMED empty array on the reuse path IS a definite absent (the pair)" {
+  # So the shape gate cannot be satisfied by treating every jq payload as
+  # inconclusive: `[]` is a real, parseable, empty listing and still supersedes the
+  # earlier unreadable one.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed on this host"
+  _cc_mocks real-handle
+  _hec_mocks
+  _bounded() { shift; case "$*" in *"cluster list"*) printf '[]\n' ;; *) return 0 ;; esac; }
+  k3d() { record "k3d $*"; return 0; }
+  _cluster_presence() { return 2; }
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  grep -q '_create_new_cluster' "$MOCK_CALLS" || {
+    echo "a parseable empty listing did not supersede the earlier unreadable one"; mock_calls; return 1; }
+}
+
+@test "create_cluster: the UNKNOWN warning claims neither a wedged engine nor 'nothing is created' (client#984)" {
+  # saadqbal, round 6. _cluster_presence returns 2 for a DEADLINE *and* for
+  # "every read failed" (`_read_ok=0`) — so a k3d that errors on every invocation
+  # against a perfectly healthy daemon (broken $HOME/.k3d, unreadable kubeconfig)
+  # was told the Docker engine isn't answering. And the sentence promised "nothing
+  # is created or removed", which the rc-3 path directly below falsifies: it
+  # prompts about leftover data and creates. L164 already words the same condition
+  # neutrally, and assess.sh has the `cluster-indeterminate` shape.
+  _cc_mocks
+  _cluster_presence() { return 2; }
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -qiE "engine isn't answering|engine is not answering" && {
+    echo "blamed the Docker engine for a verdict that is also reached when k3d itself fails: $output"; return 1; }
+  printf '%s\n' "$output" | grep -qi "nothing is created or removed" && {
+    echo "promised nothing is created or removed, which the authoritative-absent path falsifies: $output"; return 1; }
+  # It must still SAY the listing could not be read — neutral, not silent.
+  printf '%s\n' "$output" | grep -qiE "couldn't read|could not read" || {
+    echo "said nothing about the unreadable listing: $output"; return 1; }
+}

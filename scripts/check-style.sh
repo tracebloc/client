@@ -164,7 +164,7 @@ report "capital-T 'Tracebloc' in user-facing text — the product name is lowerc
 #    subcommand that talks to the daemon, and the gap was not theoretical: the first
 #    cut of client#974 bounded a `k3d cluster list` inside the --diagnose bundle
 #    while a bare `docker ps -a` two lines ABOVE it kept the whole group hanging, and
-#    this rule could not see it — rule 5 matched only `info`, rule 6 only
+#    this rule could not see it — rule 5 matched only `info`, rule 7 only
 #    `k3d cluster list`. The set is the daemon READS on the installer's probe paths:
 #    info, ps, inspect, version (`docker version` reports the SERVER version, so it
 #    blocks like the others). Mutating subcommands (run/exec/pull/update) carry
@@ -172,7 +172,7 @@ report "capital-T 'Tracebloc' in user-facing text — the product name is lowerc
 #    The follow-set includes a QUOTED or EXPANDED first argument (`"` `'` `$`), which
 #    is how five of this tree's `docker inspect "k3d-…-server-0"` reads are spelled —
 #    a flag-only follow-set walked straight past every one of them. It also includes a
-#    line-continuation backslash, the arm rule 6 documents.
+#    line-continuation backslash, the arm rule 7 documents.
 docker_probe='docker[[:space:]]+(info|ps|inspect|version)([[:space:]]+[-&>|;12#"'"'"'$]|[[:space:]]*[);]|[[:space:]]+\\[[:space:]]*$|[[:space:]]*$)'
 scan "$docker_probe" '' 'scripts/lib/'
 docker_read_sites="$(printf '%s' "$hits" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
@@ -213,9 +213,12 @@ report "rule 5 went VACUOUS — it found ${docker_reads_found} 'docker info|ps|i
 #    whitespace-then-flag/redirection/pipe/comment, a closing paren, a line-continuation
 #    backslash, or end of line. Mentions we must NOT flag all have a quote, a backtick
 #    or a letter as the next char ("## k3d cluster list", 'k3d cluster list' in prose,
-#    "k3d cluster list did not complete"). The continuation arm is deliberate: rule 5
-#    has no such arm, so a `docker info \` spanning two lines would slip it — a `k3d
-#    cluster list \` here does not. A line counts as bounded only when _bounded /
+#    "k3d cluster list did not complete"). The continuation arm is deliberate, and
+#    rule 5 carries the same one (see its regex above, and the line documenting it),
+#    so neither a `docker info \` nor a `k3d cluster list \` spanning two lines slips
+#    its rule. This block used to claim rule 5 had no such arm; it did, which made the
+#    two descriptions contradict each other (saadqbal, client#984). A line counts as
+#    bounded only when _bounded /
 #    timeout / gtimeout appears BEFORE the call on it, so a "timeout" in a trailing
 #    comment cannot excuse it; `# style-guard: allow` opts out a genuine edge.
 k3d_list_probe='k3d[[:space:]]+cluster[[:space:]]+list([[:space:]]+[-&>|;12#]|[[:space:]]*[);]|[[:space:]]+\\[[:space:]]*$|[[:space:]]*$)'
@@ -228,7 +231,7 @@ report "unbounded 'k3d cluster list' in scripts/lib/ — wrap it in _bounded (se
 # 8) THE CENSUS FOR RULE 7 — did rule 7 actually LOOK?
 #
 #    This is the house rule of backend#2849 applied to this file: a check that cannot
-#    distinguish "clean" from "didn't look" is the dominant defect class here. Rule 6
+#    distinguish "clean" from "didn't look" is the dominant defect class here. Rule 7
 #    is a text scan, and a text scan that matches NOTHING prints exactly as clean as
 #    one that matched every site and found them all bounded. Rename scripts/lib/cluster.sh,
 #    move _cluster_presence into a file the `--include` misses, or nudge the invocation
@@ -237,7 +240,7 @@ report "unbounded 'k3d cluster list' in scripts/lib/ — wrap it in _bounded (se
 #
 #    So rule 7 must also find AT LEAST the sites known to exist. A FLOOR, not an
 #    equality: check-style.bats plants extra fixture files under scripts/lib/ to drive
-#    rule 6 both ways, and an equality would redden on its own tests. Raise the floor
+#    rule 7 both ways, and an equality would redden on its own tests. Raise the floor
 #    deliberately when a new call site lands — never lower it to make this green, that
 #    is the vacuity this rule exists to catch.
 #
@@ -246,7 +249,7 @@ report "unbounded 'k3d cluster list' in scripts/lib/ — wrap it in _bounded (se
 #    the seven were written against.
 K3D_LIST_SITES_FLOOR=8
 k3d_list_found="$(printf '%s' "$k3d_list_sites" | grep -c . || true)"
-report "rule 7 went VACUOUS — it found ${k3d_list_found} 'k3d cluster list' call site(s) under scripts/lib/ but at least ${K3D_LIST_SITES_FLOOR} are known to exist. A scan that matches nothing reports 'clean' identically to one that checked everything; fix the scan (or raise the floor if a site was legitimately removed) rather than trusting this" \
+report "rule 7 went VACUOUS — it found ${k3d_list_found} 'k3d cluster list' call site(s) under scripts/lib/ but at least ${K3D_LIST_SITES_FLOOR} are known to exist. A scan that matches nothing reports 'clean' identically to one that checked everything; fix the scan (or lower the floor only if sites were genuinely removed) rather than trusting this" \
   "$( [[ "$k3d_list_found" -lt "$K3D_LIST_SITES_FLOOR" ]] && printf 'found %s call site(s), floor is %s\n' "$k3d_list_found" "$K3D_LIST_SITES_FLOOR" || true )"
 
 if [[ "$guard_error" -ne 0 ]]; then
