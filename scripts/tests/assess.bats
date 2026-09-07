@@ -1112,3 +1112,33 @@ _use_real_runtime_probe() {
   _version_lt "v1.36.3" "1.31.0" || return 1     # the trap: TRUE, though 1.36 > 1.31
   ! _version_lt "1.36.3" "1.31.0" || return 1    # stripped: correct
 }
+
+@test "assess_existing_install: cluster-indeterminate says the listing was unreadable, not 'only partly set up' (client#984)" {
+  # Bugbot Medium. _assess_classify grew a `degraded/cluster-indeterminate` verdict
+  # for "the k3d listing could not be read", but this gate had no arm for it, so it
+  # fell through to the generic "your secure environment is only partly set up" —
+  # a claim that an environment EXISTS on a machine whose listing never answered.
+  # The exact false-claim shape this PR exists to remove, and it also contradicted
+  # the `create_cluster` warning printed moments later on the same run.
+  _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=cluster-indeterminate; }
+  tracebloc() { echo "HOME_SCREEN"; }
+  run assess_existing_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  refute_has "only partly set up" "$output"
+  refute_has "HOME_SCREEN" "$output"
+  assert_has "read" "$output"
+  # It must name the unreadable listing rather than describe the install's state.
+  printf '%s\n' "$output" | grep -qiE "couldn't read|could not read" || {
+    echo "did not say the listing could not be read: $output"; return 1; }
+}
+
+@test "assess_existing_install: an UNRECOGNISED degraded reason still gets the generic line (the pair)" {
+  # So the test above cannot pass against a gate that simply stopped printing the
+  # generic copy. The fallback is still the fallback — for reasons that really are
+  # "partly set up", not for "we could not read the machine".
+  _assess_classify() { INSTALL_STATE=degraded; INSTALL_STATE_REASON=some-new-reason; }
+  tracebloc() { echo "HOME_SCREEN"; }
+  run assess_existing_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  assert_has "only partly set up" "$output"
+}

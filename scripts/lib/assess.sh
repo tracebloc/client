@@ -563,6 +563,16 @@ assess_existing_install() {
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
         cli-outdated)       info "Your tracebloc CLI is out of date — updating it." ;;
         pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
+        # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (Bugbot Medium, client#984).
+        # _assess_classify degrades to this when the k3d listing does not answer, and
+        # without its own arm it fell into the generic line below — which claims an
+        # environment EXISTS and is partly built, about a machine nobody could read.
+        # That is the false claim this whole change removes, and it also contradicted
+        # the create_cluster warning printed seconds later on the same run. The
+        # wording deliberately agrees with that warning: the read failed, and setup
+        # continues in the direction that creates and removes nothing.
+        cluster-indeterminate)
+                            info "Couldn't read the k3d cluster list on this machine — the Docker engine isn't answering. Continuing without assuming your secure environment is either present or absent; nothing will be created or removed until that read succeeds." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
       echo ""
