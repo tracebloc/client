@@ -3,7 +3,7 @@
   Egress gateway (squid) config — SECURITY §8.2 / client-runtime#102.
   A forward proxy that ONLY permits HTTPS CONNECT to an FQDN allowlist, so that
   once the training NetworkPolicy drops the 0.0.0.0/0:443 rule, a locked-down
-  training pod can still reach the tracebloc backend + App Insights through this
+  training pod can still reach the tracebloc backend through this
   gateway — and nothing else. Service Bus is NOT here; it stays on the
   requests-proxy:8888 path. The allowlist falls CLOSED: an empty list renders no
   allow rule, so everything is denied.
@@ -34,7 +34,7 @@ data:
     acl SSL_ports port 443
     acl CONNECT method CONNECT
     {{- with .Values.egressProxy.allowlist }}
-    # dstdomain: a leading dot matches subdomains (e.g. .in.applicationinsights.azure.com),
+    # dstdomain: a leading dot matches subdomains (e.g. .s3.eu-central-1.amazonaws.com),
     # a bare host is an exact match (e.g. api.tracebloc.io).
     acl allowed_fqdns dstdomain {{ join " " . }}
     http_access deny CONNECT !SSL_ports

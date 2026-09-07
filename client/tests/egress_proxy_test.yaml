@@ -1,6 +1,6 @@
 suite: Egress gateway (squid)
 # SECURITY §8.2 / client-runtime#102. The egress gateway lets a locked-down
-# training pod reach an FQDN allowlist (backend + App Insights) and nothing
+# training pod reach an FQDN allowlist (backend) and nothing
 # else. These guards pin: the on/off flag, the fail-closed allowlist, the
 # PSA-restricted security context, the nil-guards against `helm upgrade
 # --reuse-values` from a release predating egressProxy, and — critically — that
@@ -116,15 +116,27 @@ tests:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
 
-  - it: allowlists the backend + App Insights and fails closed
+  - it: allowlists the backend, fails closed, and no longer permits App Insights
     template: templates/egress-proxy-configmap.yaml
     asserts:
       - matchRegex:
           path: data["squid.conf"]
           pattern: "acl allowed_fqdns dstdomain .*api\\.tracebloc\\.io"
-      - matchRegex:
+      # THE ABSENCE IS THE ASSERTION NOW. This used to require the App Insights
+      # FQDNs to be present -- correctly, while the edge exported there. The edge
+      # stopped (client-runtime#471) and the backend stopped handing out the
+      # credential (backend#3078), so the egress permission outlives its only
+      # user. Asserting their ABSENCE is what stops them being re-added without a
+      # decision; dropping the assertion entirely would leave the allowlist free
+      # to regrow silently. App Insights had TWO ingestion FQDNs on the allowlist
+      # -- the regional `.in.applicationinsights.azure.com` AND the classic
+      # global collector `dc.services.visualstudio.com` -- so both are pinned out.
+      - notMatchRegex:
           path: data["squid.conf"]
-          pattern: "\\.in\\.applicationinsights\\.azure\\.com"
+          pattern: "applicationinsights\\.azure\\.com"
+      - notMatchRegex:
+          path: data["squid.conf"]
+          pattern: "visualstudio\\.com"
       - matchRegex:
           path: data["squid.conf"]
           pattern: "http_access deny all"

@@ -68,10 +68,30 @@ source "$LIB/setup-linux.sh"
 # shellcheck source=/dev/null
 source "$LIB/cluster.sh"
 
+# The harness's verdict is captured FIRST and returned LAST: errexit is live
+# inside an EXIT trap, so any command here that ends non-zero aborts the trap and
+# overwrites the script's exit status (client#979 — that is how a correct `set -e`
+# abort became GitHub's `cancelled`). This file had a SECOND route to the same
+# loss: `rm -rf "$WORK"` was the trap's last statement, so its status was the one
+# the job reported. e2e_cleanup_cluster is bounded, prints what it did, and always
+# returns 0.
 cleanup() {
-  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
-  docker rm -f "$SQUID_NAME" >/dev/null 2>&1 || true
-  rm -rf "$WORK"
+  local _status=$?
+  e2e_cleanup_cluster
+  # SAME CLASS, adjacent site (client#979): `docker rm -f` talks to the same engine
+  # e2e_cleanup_cluster was stalling on, and was equally unbounded and equally
+  # silenced — a second route to the same 24 invisible minutes in the same trap.
+  #
+  # It went through a bounded one-liner with `|| echo "… within Ns …"` first, and
+  # that carried the ticket's OWN defect: the `|| echo` fires for any non-zero rc,
+  # so a container that was never created (the common case — the harness died
+  # before `docker run`) was reported as a timeout that never happened
+  # (saqlainsyed007). e2e_reap_container distinguishes rc 124 from every other
+  # non-zero and treats "not there" as no failure at all, so this reap and the
+  # cluster reap above now report the same class of failure the same way.
+  e2e_reap_container "$SQUID_NAME"
+  e2e_reap_path "$WORK"
+  return "$_status"
 }
 trap cleanup EXIT
 

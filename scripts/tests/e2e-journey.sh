@@ -66,9 +66,16 @@ source "$LIB/setup-linux.sh"
 source "$LIB/cluster.sh"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/tb-e2e-journey-XXXXXX")"
+# The harness's verdict is captured FIRST and returned LAST: errexit is live
+# inside an EXIT trap, so any command here that ends non-zero aborts the trap and
+# overwrites the script's exit status (client#979 — that is how a correct `set -e`
+# abort became GitHub's `cancelled`). e2e_cleanup_cluster is bounded, prints what
+# it did, and always returns 0.
 cleanup() {
-  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true
-  rm -rf "$WORKDIR" 2>/dev/null || true
+  local _status=$?
+  e2e_cleanup_cluster
+  e2e_reap_path "$WORKDIR"
+  return "$_status"
 }
 trap cleanup EXIT
 
