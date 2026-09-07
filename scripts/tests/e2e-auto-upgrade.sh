@@ -63,7 +63,16 @@ source "$LIB/cluster.sh"
 # shellcheck source=/dev/null
 source "$LIB/preflight.sh"   # provides _pf_recheck_runtime_mem (called by create_cluster)
 
-cleanup() { k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true; }
+# The harness's verdict is captured FIRST and returned LAST: errexit is live
+# inside an EXIT trap, so any command here that ends non-zero aborts the trap and
+# overwrites the script's exit status (client#979 — that is how a correct `set -e`
+# abort became GitHub's `cancelled`). e2e_cleanup_cluster is bounded, prints what
+# it did, and always returns 0.
+cleanup() {
+  local _status=$?
+  e2e_cleanup_cluster
+  return "$_status"
+}
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -454,6 +463,63 @@ kubectl -n "$NS" get configmap mysql-root-rotated >/dev/null 2>&1 \
   || fail "the pre-marker upgrade did not BACKFILL the mysql-root-rotated marker (backend#3189); the edge must converge onto the rename-safe marker signal after one rotation-on render"
 echo "   OK: baked root detected, rotate stayed on with no marker, password preserved, marker backfilled"
 
+# ── backend#3255: an ACKNOWLEDGED render over a kept datadir + a SURVIVING marker
+#  whose Secret no longer carries the root stays on the image-baked password ─────
+#  backend#3226 made the marker the FIRST, absolute "rotated" signal (`if $marker ->
+#  ON`). But the marker (resource-policy: keep) can OUTLIVE the rotation it recorded:
+#  an operator who restores an OLD, pre-rotation credentials Secret over a datadir
+#  whose marker survived then has marker present + Secret present but NO
+#  MYSQL_ROOT_PASSWORD. The absolute marker armed rotation the ack could not clear,
+#  and secrets.yaml minted a root password the live DB never accepted (1045). The fix
+#  GATES the marker arm on the ack: SET, bakedRootRotationOn yields the marker and
+#  resolves OFF (image-baked, no mint); UNSET, the marker still wins and the
+#  existing-datadir mint guard refuses LOUD (naming the runbook).
+#
+#  NOTE the DELETED-Secret reinstall the finding first described is a DIFFERENT
+#  guard: secrets.yaml's credential-collision refusal (backend#2571) already refuses
+#  a live render with mysql-pvc present and the Secret GONE, regardless of the ack —
+#  copy the Secret back or delete the datadir (it names both). So this test keeps the
+#  Secret PRESENT and removes only its root key, which is the exact state the
+#  marker-arm gate governs; the whole-Secret-gone path belongs to that guard.
+#
+#  Live-only: helm-unittest cannot mock the marker/Secret lookups. Dropping the
+#  `not .Values.mysqlRootRotationAcknowledged` term from the marker arm reddens the
+#  ack assertion HERE — rotation would arm and mint over the leftover marker.
+echo "── backend#3255: acknowledged render over a kept datadir + stale marker (Secret has no root) stays image-baked ──"
+kubectl -n "$NS" get configmap mysql-root-rotated >/dev/null 2>&1 \
+  || fail "precondition: the marker must be present to simulate a leftover-marker state (backend#3255)"
+[ -n "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
+  || fail "precondition: the born-rotated edge must still hold MYSQL_ROOT_PASSWORD before the backend#3255 check"
+kubectl -n "$NS" patch secret "${NS}-secrets" --type=json \
+  -p '[{"op":"remove","path":"/data/MYSQL_ROOT_PASSWORD"}]' >/dev/null 2>&1 \
+  || fail "could not drop MYSQL_ROOT_PASSWORD from the Secret to simulate a stale-marker edge (backend#3255)"
+
+# UNACKNOWLEDGED: the surviving marker keeps rotation ON, and with no root in the
+# Secret secrets.yaml's existing-datadir mint guard REFUSES (naming the runbook) —
+# the safe loud fail, not a silent mint. The Secret is present (only its root key is
+# gone), so clientId/clientPassword resolve from it (tier 2) and the ONLY thing that
+# can fail is the rotation guard.
+_reinstall_err="$(mktemp)"
+if helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+     --set storageClass.provisioner=rancher.io/local-path >/dev/null 2>"$_reinstall_err"; then
+  fail "a stale-marker render with no root in the Secret and NO ack was accepted — it must refuse rather than mint over the leftover marker (backend#3255)"
+fi
+grep -q "rotate-mysql-root.md" "$_reinstall_err" \
+  || fail "the un-acknowledged render failed for the WRONG reason (it must name the runbook): $(tr -d '\n' < "$_reinstall_err")"
+rm -f "$_reinstall_err"
+
+# ACKNOWLEDGED: the marker arm yields, bakedRootRotationOn resolves OFF, rotation is
+# NOT armed, NO root is minted, and the render succeeds — the edge is left on its
+# image-baked password. (The marker persists under resource-policy: keep; values.yaml
+# has the operator also delete it so the edge is durable without pinning the ack.)
+helm upgrade "$NS" "$CHART_DIR" --namespace "$NS" --reset-values \
+  --set mysqlRootRotationAcknowledged=true \
+  --set storageClass.provisioner=rancher.io/local-path >/dev/null \
+  || fail "the ACKNOWLEDGED render over a kept datadir + stale marker was refused — the ack must clear the marker arm and resolve OFF (backend#3255)"
+[ -z "$(secret_key MYSQL_ROOT_PASSWORD)" ] \
+  || fail "the acknowledged render MINTED a root password (armed rotation) — with a surviving marker but no root in the Secret the ack must resolve bakedRootRotationOn OFF and leave the edge image-baked (backend#3255)"
+echo "   OK: stale marker + rootless Secret, ack resolved rotation OFF, no root minted — edge left on image-baked"
+
 #  Restore rotation-off so the rest of the run sees the baseline release, mirroring
 #  the empty-key check's restore discipline. An explicit rotateMysqlRoot=false
 #  bypasses the helper/marker (the deliberate operator override), so this still
@@ -485,4 +551,5 @@ echo ""
 echo "E2E PASS: ${PREV} -> ${LOCAL_VERSION} upgrades safe on both flag paths; #102 flip engages and persists;"
 echo "          prod ingestor pin propagates to an installed edge and honours the prodPin opt-out;"
 echo "          client credentials resolve from the existing Secret with no values supplied (#2571);"
+echo "          an acknowledged render over a kept datadir + stale marker (Secret has no root) stays image-baked (#3255);"
 echo "          the release-scoped token rename accepts the legacy name mid-migration (#2625)."
