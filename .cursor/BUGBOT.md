@@ -100,6 +100,24 @@ for *what the operator sees and can act on*, not code elegance.
   the read have different budgets (`TB_ASSESS_DOCKER_TIMEOUT` 10s vs
   `TB_K3D_LIST_TIMEOUT` 15s), so a daemon that answers fast with a slow k3d read
   passes the guard and times out anyway.
+  (e) **AND THE MIRROR IMAGE: a read that FAILED did not time out.** The same
+  conflation runs both ways, and this direction came back three review rounds
+  running on one PR (@saadqbal, client#984). A bounded reader returns the child's
+  REAL exit code on completion and `124` only on the deadline, so
+  `if _bounded_capture …; then cat "$_cap"; else echo "(… did not complete within
+  Ns)"; fi` writes a fabricated hang for every non-zero — and discards `$_cap`,
+  where the error text is. Daemon live but the socket not permitting this user,
+  `docker version` exits 1 in milliseconds printing `permission denied while trying
+  to connect to the Docker daemon socket`, and the bundle recorded a 10s stall; the
+  k3d site went on to blame "the engine is not answering" on a run where the engine
+  had answered. Branch on **`0` / `124` / any other non-zero**, print the captured
+  text on the last, and do it in ONE classifier — seven call sites each spelling the
+  branch is how it got reintroduced three times. `diagnose.sh`'s
+  `_bounded_capture_read` is that classifier; group D of
+  `bounded-reads-propagate.bats` is its guard, including a census that reddens if
+  any site open-codes the branch again. Also keep `2` ("could not create the
+  capture file") off the `cat` path: there the command never ran and the file may
+  still hold the PREVIOUS read's output.
 
 - **`_bounded` is not a bound on macOS; `_bounded_capture` is.** `_bounded` execs
   timeout(1)/gtimeout(1) and runs the BARE command when neither is present, and
@@ -110,8 +128,11 @@ for *what the operator sees and can act on*, not code elegance.
   no coreutils, and returns 124 distinguishably. **A liveness gate is not a
   substitute:** proving `docker info` answers in 10s says nothing about a 15s
   `k3d cluster list`, which is more engine work on a longer budget. Every read in
-  `diagnose.sh` uses `_bounded_capture`, and `diagnose.bats` enforces that for that
-  file specifically (rule 5 accepts either, correctly — it governs the whole tree).
+  `diagnose.sh` reaches `_bounded_capture` through `_bounded_capture_read`, the
+  three-outcome classifier rule (e) above requires, and `diagnose.bats` enforces
+  that spelling for that file specifically — label included, since the honest
+  stall/failure line is built from it (rule 5 accepts either, correctly — it
+  governs the whole tree).
 
 - **Give a slow call its own budget.** `TB_PROBE_TIMEOUT`'s 5s is for cheap
   skip-gate probes. `k3d cluster list` enumerates *and* inspects containers — more
