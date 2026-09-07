@@ -1044,23 +1044,39 @@ ensure_cluster_autostart() {
 
 _handle_existing_cluster() {
   CLUSTER_STATUS="0"
-  # BOUNDED (client#974): both reads talk to the Docker engine, and a wedged
-  # daemon blocks rather than fails them, so the `2>/dev/null || true` /
-  # `|| echo "0"` fallbacks were unreachable. On a timeout the read yields nothing,
-  # CLUSTER_STATUS normalises to "0", and the stopped-cluster branch below takes
-  # over — whose `k3d cluster start --wait --timeout 5m` is itself bounded and
-  # fails into a curated message. Slow, honest, and finite; before it was a hang.
+  # BOUNDED (client#974) and TRI-STATE (client#984). Both reads talk to the Docker
+  # engine, and a wedged daemon blocks rather than fails them, so the
+  # `2>/dev/null || true` / `|| echo "0"` fallbacks were unreachable.
+  #
+  # And a timeout is not "0 servers running". Collapsing it into that number is the
+  # same defect as the one that cost this PR two rounds of review: it made the
+  # installer PRINT "Cluster 'x' exists but is stopped", a claim about a machine it
+  # could not read, on a run where the cluster is quite possibly up. The ACTION on
+  # this branch is safe either way — `k3d cluster start` is idempotent on a running
+  # cluster and bounded — so the fix is to keep the action and stop making the
+  # claim. `_status_read_ok` carries the third state to the message below.
+  local _status_read_ok=1 _rc=0
   if command -v jq &>/dev/null; then
-    CLUSTER_STATUS=$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
+    local _json
+    _json="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -ne 0 ]]; then
+      _status_read_ok=0
+    else
+      CLUSTER_STATUS=$(jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null <<<"$_json" || echo "0")
+    fi
   else
     # Capture-then-match (#680): awk's `exit` closes the pipe on our cluster's
     # row, so k3d can take SIGPIPE and pipefail would abort the installer here —
     # mid-reconcile, with no message. Mirrors _assess_cluster_servers_running.
     local line _tbl
-    _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _tbl=""
-    line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
-    if [[ -n "$line" ]]; then
-      CLUSTER_STATUS="${line%%/*}"
+    _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -ne 0 ]]; then
+      _status_read_ok=0
+    else
+      line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
+      if [[ -n "$line" ]]; then
+        CLUSTER_STATUS="${line%%/*}"
+      fi
     fi
   fi
   CLUSTER_STATUS="${CLUSTER_STATUS:-0}"
@@ -1068,7 +1084,18 @@ _handle_existing_cluster() {
   if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
     success "Secure environment already running."
   else
-    log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
+    # THE MESSAGE distinguishes the three states even though the ACTION does not
+    # need to (client#984). "exists but is stopped" is a CLAIM about the machine;
+    # making it off an unreadable listing is the same defect this PR is about, and
+    # on a run where the cluster may well be up it sends the operator looking in
+    # the wrong place. `k3d cluster start` is idempotent on a running cluster and
+    # bounded, so the safe action is identical either way — only the sentence
+    # changes.
+    if [[ "$_status_read_ok" -eq 0 ]]; then
+      log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing didn't complete) — attempting a start, which is a no-op if it is already up..."
+    else
+      log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
+    fi
     # Capture the tool's raw stderr to the log and surface only a curated line on
     # failure — graceful failure, not a raw k3d dump before the closer (#577).
     # Bounded start (Bugbot): `k3d cluster start` waits for the server with no

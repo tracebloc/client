@@ -67,6 +67,7 @@ setup() {
   # catch, so the list is short on purpose and grows only with a test.
   COVERED_FUNCTIONS="
 _cluster_presence
+_handle_existing_cluster
 create_cluster
 _assess_classify
 _assess_cluster_servers_running
@@ -107,7 +108,6 @@ _check_healthy_cluster_gpu_consistent
 _docker_answers
 _docker_default_runtime_is_nvidia
 _generate_node_cdi_specs
-_handle_existing_cluster
 _k3d_cluster_running
 _pf_docker_root
 _pf_runtime_mem_kb
@@ -119,7 +119,7 @@ install_docker_engine
 install_rootless_docker
 render_host_audit
 "
-  PRE_EXISTING_CEILING=24
+  PRE_EXISTING_CEILING=23
 }
 
 
@@ -299,6 +299,41 @@ _enclosing_function() {   # $1 = file, $2 = line
   printf '%s\n' "$unknown" | grep -qx CREATE && { echo "unknown created a cluster"; return 1; }
   # C. the safe side is also VISIBLE — a caller-inspectable line, not just a log.
   [ "$absent" != "$unknown" ] || return 1
+}
+
+@test "B. _handle_existing_cluster: an unreadable status says so, and still takes the safe action" {
+  # The action is the same for "stopped" and "couldn't tell" — `k3d cluster start`
+  # is idempotent and bounded — so the outcome that must differ is the CLAIM. Saying
+  # "exists but is stopped" off a listing that never completed is the same defect
+  # this PR is about, and it points the operator at the wrong thing on a run where
+  # the cluster may well be up.
+  local running stopped unknown
+  _drive() {   # $1 = read rc, $2 = servers text
+    local rc="$1" txt="$2"
+    ( command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+      _bounded() { [ "$rc" -eq 0 ] || return "$rc"; printf '%s\n' "$txt"; }
+      k3d() { return 0; }
+      success() { echo "SUCCESS: $*"; }
+      log() { echo "LOG: $*"; }
+      error() { echo "ERROR: $*"; return 1; }
+      _check_existing_cluster_proxy() { :; };  _check_existing_cluster_ca() { :; }
+      _check_existing_cluster_bind() { :; };   _check_existing_cluster_dataset_mount() { :; }
+      _check_existing_cluster_kubelet_config() { :; }
+      _check_existing_cluster_storage_mode() { :; }
+      _check_existing_cluster_k8s_version() { :; }; _check_existing_cluster_gpu() { :; }
+      _handle_existing_cluster 2>&1 )
+  }
+  running="$(_drive 0 'tracebloc 1/1 0/0')"
+  stopped="$(_drive 0 'tracebloc 0/1 0/0')"
+  unknown="$(_drive 124 'tracebloc 1/1 0/0')"
+  printf '%s\n' "$running" | grep -q 'already running' || { echo "running -> $running"; return 1; }
+  printf '%s\n' "$stopped" | grep -q 'exists but is stopped' || { echo "stopped -> $stopped"; return 1; }
+  printf '%s\n' "$unknown" | grep -q "Couldn't read whether" || { echo "unknown -> $unknown"; return 1; }
+  # THE ASSERTION THAT MATTERS: the unreadable case must not CLAIM it is stopped...
+  printf '%s\n' "$unknown" | grep -q 'exists but is stopped' && { echo "claimed 'stopped' off an unreadable listing"; return 1; }
+  # ...and must still take the safe, idempotent action.
+  printf '%s\n' "$unknown" | grep -q 'Secure environment started' || { echo "unknown skipped the start: $unknown"; return 1; }
+  [ "$running" != "$stopped" ] && [ "$stopped" != "$unknown" ] || return 1
 }
 
 @test "B. _assess_classify: the three outcomes reach three DIFFERENT verdicts" {
