@@ -22,6 +22,16 @@
 #       deadline yields empty grep output, indistinguishable from "this node has
 #       no proxy env" — on a machine being diagnosed FOR a proxy problem.
 #    4. `docker info … | grep -iE 'Server Version|…'`: same shape, same file.
+#    5. THE MIRROR IMAGE, all seven --diagnose sites at once: `_bounded_capture`
+#       returns 124 only on the deadline and the child's REAL status otherwise, but
+#       every site wrote the timeout sentence for ANY non-zero and discarded the
+#       captured error text — so a `docker version` that answered in milliseconds
+#       with "permission denied …" went into the bundle as a 10s hang, and a failing
+#       k3d read as "the engine is not answering" (saadqbal, round 3). Group D.
+#    6. The LIVENESS GATE itself, one level up: same collapse in
+#       `_docker_answers_bounded`'s caller, which skipped every docker/k3d section
+#       and claimed a hang when the daemon had answered and failed fast (Bugbot
+#       High, round 4). Group D's last two tests.
 #
 #  Fixing sites was not converging, so this pins the SHAPE:
 #
@@ -647,4 +657,59 @@ _enclosing_function() {   # $1 = file, $2 = line
     echo "the k3d error text was discarded"; return 1; }
   ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'k3d cluster listing did not complete' || {
     echo "a k3d read that ANSWERED with an error was reported as a timeout"; return 1; }
+}
+
+@test "D. run_diagnose: the liveness GATE is tri-state too — a daemon that FAILED fast is not a hang" {
+  # Bugbot High, round 4, and the same conflation one level UP from group D's
+  # other tests. `_docker_answers_bounded` is itself tri-state — `spin` returns 124
+  # on the deadline and the child's REAL status otherwise — but the gate treated
+  # any non-zero as "didn't answer within 10s" and skipped EVERY docker/k3d
+  # section. A stopped daemon or a socket that denies this user fails in
+  # milliseconds, so the bundle claimed a hang that never happened AND threw away
+  # the sections, on the run collected because the machine is broken.
+  #
+  # The other group-D tests cannot catch this: they stub the gate as SUCCESS.
+  has() { return 0; }
+  _docker_answers_bounded() { return 1; }        # ANSWERED, and failed — in ms
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  k3d() { echo "k3d $*"; }
+  _bounded_capture() {
+    local secs="$1" out="$2"; shift 2
+    printf 'permission denied while trying to connect to the Docker daemon socket\n' > "$out"
+    return 1
+  }
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  # It must not claim a stall...
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'would have hung this bundle' || {
+    echo "claimed collecting would have hung, on a daemon that answered in milliseconds"; return 1; }
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'did not answer .docker info. within' || {
+    echo "claimed the daemon did not answer, when it answered with an error"; return 1; }
+  # ...and it must still COLLECT the sections, each carrying the real cause.
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'NOT COLLECTED' || {
+    echo "skipped the docker/k3d sections although nothing was stalled"; return 1; }
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'permission denied while trying to connect' || {
+    echo "the sections were collected but the actual cause is not in the bundle"; return 1; }
+}
+
+@test "D. run_diagnose: a gate that truly STALLED still skips the sections (the pair)" {
+  # The definite-answer half, so the test above cannot pass against a gate that
+  # simply stopped skipping anything. 124 from the gate means the daemon really is
+  # not answering, and THEN "collecting them would have hung" is a true statement.
+  has() { return 0; }
+  _docker_answers_bounded() { return 124; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  k3d() { case "$*" in *"cluster list"*) echo "K3D-LIST-WAS-CALLED" ;; *) echo "k3d $*" ;; esac; }
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'would have hung this bundle' || {
+    echo "a genuinely stalled daemon lost its explanation"; return 1; }
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'K3D-LIST-WAS-CALLED' || {
+    echo "read the engine anyway after the gate timed out"; return 1; }
 }

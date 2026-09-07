@@ -117,7 +117,14 @@ for *what the operator sees and can act on*, not code elegance.
   `bounded-reads-propagate.bats` is its guard, including a census that reddens if
   any site open-codes the branch again. Also keep `2` ("could not create the
   capture file") off the `cat` path: there the command never ran and the file may
-  still hold the PREVIOUS read's output.
+  still hold the PREVIOUS read's output. **A LIVENESS GATE IS NOT EXEMPT** — the
+  round-4 High on the same PR was `_docker_answers_bounded`, which is tri-state for
+  the same reason (`spin` returns 124 on the deadline, the child's status
+  otherwise): treating any non-zero as "the daemon didn't answer within Ns" made a
+  stopped daemon or a denied socket — both millisecond failures — skip every
+  docker/k3d section and claim a hang. Only the deadline may skip; a gate that
+  ANSWERED and failed should still collect, because each read is individually
+  bounded and records its own error.
 
 - **`_bounded` is not a bound on macOS; `_bounded_capture` is.** `_bounded` execs
   timeout(1)/gtimeout(1) and runs the BARE command when neither is present, and

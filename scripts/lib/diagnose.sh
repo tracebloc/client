@@ -170,19 +170,51 @@ run_diagnose() {
   #
   # A non-answering engine is not a gap in the bundle — it IS the finding, and each
   # group says so in place of the section it could not collect.
-  local _docker_live=0
+  # AND THE GATE IS TRI-STATE TOO (Bugbot High, client#984 round 4). The same
+  # conflation as group D's, one level up: `_docker_answers_bounded` returns 124 on
+  # the deadline and the child's REAL status otherwise (`spin` propagates it), but
+  # this gate treated ANY non-zero as "the daemon didn't answer within Ns" and
+  # skipped every docker/k3d section. A stopped daemon, or a socket that does not
+  # permit this user, fails `docker info` in MILLISECONDS — so the bundle claimed a
+  # hang that never happened AND dropped the sections, on the run collected because
+  # the machine is already broken.
+  #
+  # Three states, and only ONE of them is a reason to skip:
+  #   live    — collect normally.
+  #   failed  — the daemon ANSWERED and said no. Nothing is stalled, so the
+  #             sections are still collected and each read records its own error
+  #             through _bounded_capture_read. This is safe by construction now:
+  #             every read in this function is INDIVIDUALLY bounded on every
+  #             platform, so the group gate is an economy, not the thing keeping
+  #             the bundle writable — and a daemon that fails in milliseconds
+  #             fails the next read in milliseconds too.
+  #   stalled — the deadline fired. Only here is "collecting them would have hung"
+  #             a true sentence, and only here are the sections skipped.
+  local _docker_gate=absent _gate_rc=0
   if has docker; then
-    if _docker_answers_bounded "checking the container runtime" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
-      _docker_live=1
-    else
+    _docker_gate=live
+    _docker_answers_bounded "checking the container runtime" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || _gate_rc=$?
+    if [[ "$_gate_rc" -eq 124 ]]; then
+      _docker_gate=stalled
       warn "The Docker daemon didn't answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s — the bundle will record that instead of the docker/k3d sections (collecting them would hang)."
+    elif [[ "$_gate_rc" -ne 0 ]]; then
+      _docker_gate=failed
+      warn "The Docker daemon ANSWERED but 'docker info' failed (exit $_gate_rc) — it is not stalled, so the bundle still collects the docker/k3d sections and records each read's own error."
     fi
   fi
-  # The note says WHICH of the two reasons applied. "The daemon did not answer" on
-  # a machine with no Docker installed at all would be a false claim in a support
-  # bundle, which is the same class of defect as the silence this fix replaced.
+  # Attempt the reads unless the daemon is STALLED — see above for why "failed" is
+  # collected rather than skipped.
+  local _docker_live=0
+  if [[ "$_docker_gate" == "live" || "$_docker_gate" == "failed" ]]; then
+    _docker_live=1
+  fi
+  # The note says WHICH reason applied, and it is only ever reached on the two
+  # states that skip. "The daemon did not answer" on a machine with no Docker
+  # installed at all — or on one whose daemon answered with an error — would be a
+  # false claim in a support bundle, which is the same class of defect as the
+  # silence this fix replaced.
   local _docker_dead_note
-  if has docker; then
+  if [[ "$_docker_gate" == "stalled" ]]; then
     _docker_dead_note="(NOT COLLECTED: the Docker daemon did not answer 'docker info' within ${TB_DOCKER_PROBE_TIMEOUT:-10}s. Every read in this section talks to that daemon, so collecting them would have hung this bundle and produced no file at all. A non-answering engine is itself the finding — see 00-host.txt.)"
   else
     _docker_dead_note="(NOT COLLECTED: docker is not installed on this host, so there is no engine to read. See the versions section of 00-host.txt.)"
