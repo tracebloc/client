@@ -1204,3 +1204,124 @@ YAML
   case "$out" in *"e2e-journey	RUNNER	ubuntu-24.04"*) ;; *) echo "did not strip the brackets off a single-element runs-on list: $out"; return 1 ;; esac
   [ "$(printf '%s\n' "$out" | grep -c '	RUNNER	')" -eq 4 ] || { echo "expected 4 resolved runners, got: $out"; return 1; }
 }
+
+# ── the two checkers that had NO fail-path fixture ──────────────────────────
+# Bugbot, client#979: `_check_cleanup_statements_cannot_fail` was only ever run
+# against the already-FIXED harnesses, so a no-op or too-loose checker still
+# passed — and it is the check that exists to catch a last-of-`&&` `rm` aborting
+# the EXIT trap, the defect that cost this PR a round. Confirmed by reducing it
+# to `return 0`: the file stayed 30/30 green.
+#
+# `_check_cleanup_engine_calls_bounded` had the same gap, and its version is
+# WORSE, which is why it is covered here too rather than left for a follow-up.
+# Now that both reaps are extracted, no harness cleanup contains an engine call
+# at all, so over the real tree that checker inspects NOTHING BY CONSTRUCTION —
+# these fixtures are the only thing that exercises it, and without them it was a
+# function that could not fail and could not be noticed not failing. Reducing it
+# to `return 0` also left the file 30/30 green.
+#
+# Both are driven through the SAME functions CI calls, on planted cleanups.
+
+# Write a one-file harness fixture whose cleanup() body is $2, and echo the path.
+_plant_cleanup() {
+  local name="$1" body="$2" f="$BATS_TEST_TMPDIR/cl-$name.sh"
+  {
+    printf 'set -euo pipefail\n'
+    printf 'create_cluster\n'
+    printf 'cleanup() {\n'
+    printf '  local _status=$?\n'
+    printf '%s\n' "$body"
+    printf '  return "$_status"\n'
+    printf '}\n'
+    printf 'trap cleanup EXIT\n'
+  } > "$f"
+  printf '%s\n' "$f"
+}
+
+@test "the statements-cannot-fail check FIRES on each shape that can abort a trap" {
+  local f
+  # 1. THE ORIGINAL DEFECT: `rm -f` as the LAST command of an `&&` list. errexit
+  #    is NOT exempt from the last command of such a list, which is the whole
+  #    reason this check exists.
+  f="$(_plant_cleanup andrm '  [ -n "$CREDS_FILE" ] && rm -f "$CREDS_FILE"')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -ne 0 ] || { echo "the pre-fix '[ -n X ] && rm -f X' shape PASSED: $output"; return 1; }
+  case "$output" in *"rm -f"*) ;; *) echo "failed without naming the offending line: $output"; return 1 ;; esac
+
+  # 2. A bare command with no terminator at all.
+  f="$(_plant_cleanup bare '  rm -rf "$WORK"')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -ne 0 ] || { echo "an unguarded 'rm -rf' PASSED: $output"; return 1; }
+
+  # 3. A non-e2e_ helper call, which the exemption must NOT cover: only helpers
+  #    this file separately proves always return 0 are exempt.
+  f="$(_plant_cleanup otherfn '  my_custom_reap "$WORK"')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -ne 0 ] || { echo "an arbitrary function call was treated as always-0: $output"; return 1; }
+
+  # 4. AN `||` LIST WHOSE LAST COMMAND CAN STILL FAIL. Bugbot's finding named a
+  #    "no-op or TOO-LOOSE" checker, and the three cases above only catch the
+  #    no-op: none of them contains `||`, so widening the exemption from
+  #    `|| true|:|echo|printf` to any `||` at all passes them unchanged. Verified
+  #    — that mutation left the file green until this case existed. The exemption
+  #    is about the FALLBACK being infallible, not about `||` being present.
+  f="$(_plant_cleanup orfallible '  rm -rf "$WORK" || rm -rf "$WORK_ALT"')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -ne 0 ] || { echo "an '|| <fallible command>' list PASSED — the exemption is matching '||' rather than an infallible fallback: $output"; return 1; }
+}
+
+@test "the statements-cannot-fail check SPARES the fixed shapes, continuation included" {
+  local f
+  # Every terminator the rule accepts, plus a delegating helper call.
+  f="$(_plant_cleanup okforms '  e2e_cleanup_cluster
+  e2e_reap_container "$SQUID_NAME"
+  e2e_reap_path "$WORK"
+  rm -rf "$TMPD" || true
+  chmod 0700 "$D" || :
+  kubectl delete ns x || printf "note\n" >&2')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -eq 0 ] || { echo "a correctly-terminated cleanup FAILED: $output"; return 1; }
+
+  # THE CONTINUATION, which nothing in the real tree exercises any more: the
+  # bounded `docker rm -f` that carried its `|| echo` on the NEXT line moved into
+  # e2e_reap_container, so the checker's join-continuations-first step is now
+  # covered by this fixture alone. Without the join, line 1 reads as a statement
+  # that can fail and the checker reports a violation that is not there.
+  f="$(_plant_cleanup cont '  _bounded "120" docker rm -f "$SQUID_NAME" >/dev/null \
+    || echo "cleanup: could not remove it" >&2')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -eq 0 ] || { echo "a statement whose '|| echo' is on the next line was misread as unguarded: $output"; return 1; }
+}
+
+@test "the engine-bounded check FIRES on an unbounded docker/k3d call in a cleanup" {
+  local f
+  # Terminated with `|| true`, so it PASSES the statements check — the two are
+  # independent, and only this one can see a missing deadline.
+  f="$(_plant_cleanup baredocker '  docker rm -f "$SQUID_NAME" || true')"
+  run _check_cleanup_statements_cannot_fail "$f"
+  [ "$status" -eq 0 ] || { echo "fixture is wrong: it should satisfy the statements check: $output"; return 1; }
+  run _check_cleanup_engine_calls_bounded "$f"
+  [ "$status" -ne 0 ] || { echo "an unbounded 'docker rm -f' in a cleanup PASSED: $output"; return 1; }
+  case "$output" in *"docker rm -f"*) ;; *) echo "failed without naming the offending line: $output"; return 1 ;; esac
+
+  # The original client#979 line itself.
+  f="$(_plant_cleanup barek3d '  k3d cluster delete "$CLUSTER_NAME" >/dev/null 2>&1 || true')"
+  run _check_cleanup_engine_calls_bounded "$f"
+  [ "$status" -ne 0 ] || { echo "the original unbounded 'k3d cluster delete' PASSED: $output"; return 1; }
+}
+
+@test "the engine-bounded check SPARES a bounded call and a delegating cleanup" {
+  local f
+  f="$(_plant_cleanup boundeddocker '  _bounded "120" docker rm -f "$SQUID_NAME" || true')"
+  run _check_cleanup_engine_calls_bounded "$f"
+  [ "$status" -eq 0 ] || { echo "a bounded engine call FAILED: $output"; return 1; }
+
+  # The shape all seven harnesses now have: no engine call in the trap at all.
+  f="$(_plant_cleanup delegating '  e2e_cleanup_cluster
+  e2e_reap_container "$SQUID_NAME"')"
+  run _check_cleanup_engine_calls_bounded "$f"
+  [ "$status" -eq 0 ] || { echo "a fully delegating cleanup FAILED: $output"; return 1; }
+  # And it really does contain zero engine calls, so the assertion above is about
+  # delegation rather than about a call the extractor happened to miss.
+  [ "$(_count_cleanup_engine_calls "$f")" -eq 0 ] || { echo "expected 0 engine calls in a delegating cleanup, got $(_count_cleanup_engine_calls "$f")"; return 1; }
+}
