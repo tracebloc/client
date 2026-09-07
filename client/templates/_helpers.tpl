@@ -922,7 +922,7 @@ true
     datadir (a not-yet-bound or renamed claim the operator knows exists).
 */ -}}
 {{- $datadirPresent := (or $pvc .Values.mysqlDatadirExists) -}}
-{{- if $marker -}}
+{{- if and $marker (not .Values.mysqlRootRotationAcknowledged) -}}
 {{- /*
     BORN-ROTATED, looked up FIRST (backend#947, backend#3226). The marker is
     written under a CONSTANT name and kept across a helm uninstall
@@ -930,6 +930,27 @@ true
     Consulting it BEFORE the datadir/Secret refusal below means a reinstall over a
     kept datadir whose marker survived resolves ON from the marker and never trips
     the refusal on the Secret that the uninstall deleted.
+
+    GATED ON `mysqlRootRotationAcknowledged` (backend#3255). A helm uninstall keeps
+    BOTH the datadir PVC and this marker (resource-policy: keep) while deleting the
+    Secret, so a reuse-data reinstall can present a SURVIVING marker over a datadir
+    the operator means to leave on its image-baked password -- a partial cleanup, or
+    a datadir restored under a stale marker. Treating the marker as absolute there
+    armed rotation the ack could not clear, and secrets.yaml then minted a NEW root
+    password the live database never accepted (1045). With the ack SET the marker no
+    longer forces ON: control falls through to the Secret-evidence arms below, which
+    keep a still-provably-rotated edge ON (its baked Secret) but resolve OFF when the
+    marker is the only rotation signal left -- leaving that edge on the image-baked
+    password, the ack's documented meaning. UNSET, the marker still wins (the safe
+    born-rotated default: a reinstall whose Secret is genuinely gone fails loud in
+    secrets.yaml's existing-datadir mint guard rather than silently dropping root),
+    so the backend#947 / backend#3189 upgrade paths are unchanged.
+
+    The ack makes the SURVIVING marker yield; it does NOT delete it (keep). So the
+    image-baked edge is durable only while the ack stays set -- a later no-ack render
+    re-arms off the stale marker and wedges again. The reinstall should also delete
+    the leftover marker (values.yaml documents the kubectl) to leave a genuinely
+    un-rotated edge that resolves OFF on its own.
 */ -}}
 true
 {{- else -}}
