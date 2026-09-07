@@ -571,8 +571,18 @@ assess_existing_install() {
         # the create_cluster warning printed seconds later on the same run. The
         # wording deliberately agrees with that warning: the read failed, and setup
         # continues in the direction that creates and removes nothing.
+        # NEUTRAL, AND IT PROMISES NOTHING ABOUT WHAT FOLLOWS (Bugbot Medium,
+        # client#984 round 6 — the sibling of the create_cluster warning, which the
+        # first sweep of this fixed and this one missed). Two claims this arm
+        # cannot support: _cluster_presence returns 2 for a DEADLINE *and* for
+        # "every read failed", so naming the Docker engine sends a user with a
+        # broken $HOME/.k3d or an unreadable kubeconfig to inspect a perfectly
+        # healthy daemon; and "nothing will be created or removed" is the opposite
+        # of what happens next, since create_cluster runs after this gate, can
+        # prompt in guard_leftover_data, and can create through the
+        # authoritative-absent path once its own listing answers.
         cluster-indeterminate)
-                            info "Couldn't read the k3d cluster list on this machine — the Docker engine isn't answering. Continuing without assuming your secure environment is either present or absent; nothing will be created or removed until that read succeeds." ;;
+                            info "Couldn't read the k3d cluster list on this machine — the listing either didn't complete or k3d couldn't answer it. Continuing without assuming your secure environment is either present or absent; setup reads again before it acts." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
       echo ""

@@ -1130,6 +1130,24 @@ _use_real_runtime_probe() {
   # It must name the unreadable listing rather than describe the install's state.
   printf '%s\n' "$output" | grep -qiE "couldn't read|could not read" || {
     echo "did not say the listing could not be read: $output"; return 1; }
+  # ...AND IT MUST NOT OVER-CLAIM WHILE DOING SO (Bugbot Medium, round 6). Two
+  # claims the first cut of this arm made and neither of which it can support:
+  # _cluster_presence returns 2 for a DEADLINE *and* for "every read failed", so
+  # blaming the Docker engine sends a user with a broken k3d to look at a healthy
+  # daemon; and "nothing will be created or removed" is the opposite of what
+  # happens next, because create_cluster runs after this, can prompt in
+  # guard_leftover_data, and can create through the authoritative-absent path.
+  # Same over-claim, same wording, as the create_cluster warning — this is the
+  # sibling site that fix missed.
+  # `refute_has`, not a trailing `grep … && { … }`: a negative grep as the LAST
+  # command in a test body makes the body's exit status the grep's own non-zero,
+  # so the assertion fails exactly when it is satisfied. (bats-hygiene does not
+  # catch it — the `&& { …; return 1; }` form IS enforcing; it is the trailing
+  # POSITION that breaks it.)
+  refute_has "engine isn't answering" "$output"
+  refute_has "engine is not answering" "$output"
+  refute_has "nothing will be created" "$output"
+  refute_has "nothing is created or removed" "$output"
 }
 
 @test "assess_existing_install: an UNRECOGNISED degraded reason still gets the generic line (the pair)" {
