@@ -2225,9 +2225,14 @@ mysqlRootPassword: ""
 #   this ack — copy the Secret back to the name this render wants, or delete the
 #   datadir (that guard names both). The ack governs root's rotation state, not that
 #   guard. Once past it on the image-baked path, ALSO delete the leftover marker
-#   (`kubectl -n <ns> delete configmap mysql-root-rotated`) so the edge is durable
-#   WITHOUT pinning this ack: the ack makes the SURVIVING marker yield but does not
-#   remove it, so a later render that omits the ack would re-arm off the stale marker.
+#   (`kubectl -n <ns> delete configmap mysql-root-rotated`) AND then UNSET this ack
+#   (clear it from your values — it does NOT self-expire and replays through the
+#   CronJob's `--reset-then-reuse-values`). Both matter: the ack makes the SURVIVING
+#   marker yield but does not remove it, so with the marker still there a later
+#   render that omits the ack would re-arm off the stale marker; and while the ack
+#   stays SET the marker is yielded rather than enforced, so it no longer backstops a
+#   later loss of the root key. Marker deleted + ack cleared leaves a clean un-rotated
+#   edge where the normal marker / bakedRoot guards apply again.
 #
 # SELF-EXPIRING ONLY ON A LIVE OR SERVER-SIDE RENDER (backend#2892): once rotated,
 # tier 2 (a live `lookup` of the Secret) preserves MYSQL_ROOT_PASSWORD and the mint

@@ -948,8 +948,10 @@ true
     present and the Secret GONE (copy it back to the name this render wants, or delete
     the datadir), independently of this ack. And the ack makes the SURVIVING marker
     yield WITHOUT deleting it, so an image-baked edge is durable only while the ack
-    stays set unless the operator also deletes the leftover marker (values.yaml
-    documents the kubectl).
+    stays set unless the operator also deletes the leftover marker AND clears the ack
+    afterwards (it does not self-expire and replays through --reset-then-reuse-values;
+    values.yaml documents both, and why a left-set ack stops the marker backstopping
+    a later root-key loss).
 */ -}}
 true
 {{- else -}}
