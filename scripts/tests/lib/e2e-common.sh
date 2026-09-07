@@ -17,13 +17,20 @@
 #      source preflight (which has top-level PF_* side effects). (That proxy /
 #      journey call create_cluster without preflight is a pre-existing
 #      inconsistency worth a separate look — NOT changed here.)
-#    * the `cleanup`/`trap` body — each reaps its own extra resources
-#      (a squid container, work dirs) beyond the k3d cluster. The `k3d cluster
-#      delete` HALF of it is extracted (e2e_cleanup_cluster, client#979): it was
-#      byte-identical in all seven harnesses and identically wrong in all seven,
-#      so it is exactly the drift this note warns about. Each cleanup still owns
-#      its own extras — and its own exit-status discipline, which the guard
-#      scripts/tests/e2e-cleanup-trap.bats pins per harness.
+#    * the `cleanup`/`trap` body — each still decides WHAT it reaps and in what
+#      order. What is no longer per-script is HOW each resource is reaped: the
+#      three reap MECHANISMS are extracted (client#979), because each was
+#      byte-identical across the harnesses that had it and identically wrong in
+#      every copy — exactly the drift this note warns about:
+#        - e2e_cleanup_cluster  the `k3d cluster delete` (all seven)
+#        - e2e_reap_container   the squid `docker rm -f` (e2e-proxy)
+#        - e2e_reap_path        work dirs / credential files
+#      So no cleanup spells an engine call or an `rm` itself any more, and an
+#      eighth harness inherits the bound, the logging and the always-0 contract
+#      instead of having to remember them. Each cleanup still owns its own
+#      exit-status discipline, which the guard scripts/tests/e2e-cleanup-trap.bats
+#      pins per harness — along with the rule that every statement in a cleanup
+#      must be incapable of ending non-zero.
 #    * CHART_DIR — only the chart-installing scripts set it.
 #
 #  Sourcing contract: source this file, then call the functions AFTER
