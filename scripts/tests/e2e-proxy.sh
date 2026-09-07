@@ -81,10 +81,15 @@ cleanup() {
   # SAME CLASS, adjacent site (client#979): `docker rm -f` talks to the same engine
   # e2e_cleanup_cluster was stalling on, and was equally unbounded and equally
   # silenced — a second route to the same 24 invisible minutes in the same trap.
-  # stderr is kept so a real docker error is visible; the `|| echo` keeps this from
-  # ending the trap non-zero.
-  _bounded "${TB_E2E_DELETE_TIMEOUT:-120}" docker rm -f "$SQUID_NAME" >/dev/null \
-    || echo "cleanup: could not remove the squid container ${SQUID_NAME} within ${TB_E2E_DELETE_TIMEOUT:-120}s — it may remain on this runner." >&2
+  #
+  # It went through a bounded one-liner with `|| echo "… within Ns …"` first, and
+  # that carried the ticket's OWN defect: the `|| echo` fires for any non-zero rc,
+  # so a container that was never created (the common case — the harness died
+  # before `docker run`) was reported as a timeout that never happened
+  # (saqlainsyed007). e2e_reap_container distinguishes rc 124 from every other
+  # non-zero and treats "not there" as no failure at all, so this reap and the
+  # cluster reap above now report the same class of failure the same way.
+  e2e_reap_container "$SQUID_NAME"
   e2e_reap_path "$WORK"
   return "$_status"
 }

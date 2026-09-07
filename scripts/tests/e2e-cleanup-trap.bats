@@ -143,6 +143,64 @@ _count_cleanup_engine_calls() {
     | grep -cE '(^|[|;&(]|[[:space:]])(docker|k3d)[[:space:]]' || true
 }
 
+# The body of a named top-level function in e2e-common.sh, brace to brace.
+_helper_body() {
+  awk -v fn="$1" '
+    $0 ~ "^" fn "\\(\\)" { print; if ($0 ~ /\}[[:space:]]*$/) exit; f = 1; next }
+    f                    { print; if ($0 ~ /^\}/) exit }
+  ' "$COMMON"
+}
+
+# Lines in a helper that actually INVOKE the engine.
+#
+# NOT a bare grep for `docker|k3d`, which is what the cleanup-body checker can
+# afford to be. These helpers are the loud ones — their whole job is to print
+# lines like `'k3d cluster delete X' TIMED OUT after 120s` — so a bare grep
+# reports every message ABOUT the engine as a call TO it. Written that way first
+# and it was red on a clean tree, then a mutation that removed a real `_bounded`
+# "fired" on those echoes rather than on the mutation: a check that is already
+# failing cannot tell you anything, which is this repo's dominant defect class
+# wearing the opposite face. So: drop echo/printf statements, blank out quoted
+# spans, and only then look for a command.
+_helper_engine_lines() {
+  _helper_body "$1" \
+    | grep -vE '^[[:space:]]*#' \
+    | grep -vE '^[[:space:]]*(echo|printf)[[:space:]]' \
+    | awk '
+        BEGIN { q = sprintf("%c", 39); sq = q "[^" q "]*" q
+                eng = "(^|[|;&(]|[[:space:]])(docker|k3d)[[:space:]]" }
+        { orig = $0; d = $0
+          gsub(/"[^"]*"/, "", d); gsub(sq, "", d)
+          if (d ~ eng) print orig }'
+}
+
+# THE SAME RULE, one level down. Both reaps now live in e2e-common.sh, so that is
+# where "every docker/k3d call carries a deadline" has to be enforced — a helper
+# that dropped its `_bounded` would silently un-bound all seven traps at once,
+# which is a worse version of the copy-paste drift the extraction removed.
+# `docker inspect` counts: an existence probe against a wedged engine hangs
+# exactly like the removal it precedes.
+_check_helper_engine_calls_bounded() {
+  local fn="$1" body offenders
+  body="$(_helper_body "$fn")"
+  [ -n "$body" ] || { echo "$COMMON has no ${fn}() body to inspect"; return 1; }
+  # Whitelist matched on the ORIGINAL text, so the `"$secs"` deadline argument is
+  # still there to be seen (the detection above works on a de-quoted copy).
+  offenders="$(_helper_engine_lines "$fn" \
+    | grep -vE '_bounded[[:space:]]+"[^"]*"[[:space:]]+(docker|k3d)[[:space:]]' || true)"
+  [ -z "$offenders" ] || {
+    echo "${fn}() in $COMMON calls the Docker engine with no deadline — every harness trap delegates to this one copy, so an unbounded call here re-creates the client#979 stall in all of them at once:"
+    printf '%s\n' "$offenders"
+    return 1
+  }
+}
+
+# How many engine calls the helper check actually inspected. Same extraction, so
+# the census counts exactly what the check examined and cannot drift from it.
+_count_helper_engine_calls() {
+  _helper_engine_lines "$1" | grep -c . || true
+}
+
 # NO STATEMENT IN A CLEANUP MAY BE ABLE TO END NON-ZERO. This is the rule the
 # `local _status=$?` / `return "$_status"` pair depends on, and the one
 # e2e-full-seal.sh broke: errexit is LIVE inside an EXIT trap, so a command that
@@ -260,18 +318,38 @@ _check_cleanup_preserves_status() {
 }
 
 @test "no cleanup calls the Docker engine without a deadline (the class, not just the k3d delete)" {
-  local f rc=0 seen=0
+  local f rc=0 seen=0 hf hseen=0
   while read -r f; do
     [ -n "$f" ] || continue
     _check_cleanup_engine_calls_bounded "$f" || rc=1
     seen=$(( seen + $(_count_cleanup_engine_calls "$f") ))
   done <<< "$(_harnesses)"
   [ "$rc" -eq 0 ] || return 1
-  # The census for THIS check: with the cluster reap extracted, the remaining
-  # engine calls in these traps are e2e-proxy's squid removal. If the extraction
-  # ever finds zero, the loop above is asserting nothing and must not read green.
-  [ "$seen" -ge 1 ] || {
-    echo "inspected 0 docker/k3d call(s) across the harness cleanups — the extraction went vacuous"
+
+  # ── THE CENSUS, POINTED AT WHERE THE ENGINE CALLS ACTUALLY LIVE ─────────────
+  # This used to require `seen >= 1`, on the premise that "the remaining engine
+  # calls in these traps are e2e-proxy's squid removal". That premise expired
+  # when the squid reap moved into e2e_reap_container (saqlainsyed007's rc-124
+  # finding): with BOTH reaps extracted, `seen` is legitimately 0 — which is the
+  # goal, not a regression, since a harness spelling an engine call inline is
+  # exactly what the loop above forbids.
+  #
+  # A census whose subject has moved must follow it, not be relaxed. So `seen`
+  # keeps its floor of ZERO deliberately — the loop above is the guard, and it is
+  # driven against planted fixtures below — and the "did it look?" assertion moves
+  # to the shared helpers, where every engine call in these traps now is. That is
+  # strictly more coverage than before: it inspects the cluster delete too, which
+  # the old `seen >= 1` never reached.
+  for hf in e2e_cleanup_cluster e2e_reap_container; do
+    grep -qE "^${hf}\(\)" "$COMMON" || {
+      echo "$COMMON has no ${hf}() — the harness cleanups delegate every engine call to these helpers, so a missing one means the bound is nowhere"
+      return 1
+    }
+    _check_helper_engine_calls_bounded "$hf" || return 1
+    hseen=$(( hseen + $(_count_helper_engine_calls "$hf") ))
+  done
+  [ "$hseen" -ge 2 ] || {
+    echo "inspected $hseen docker/k3d call(s) across the shared reap helpers, expected at least 2 (the k3d delete + the docker removal) — the extraction went vacuous, so this check passed while examining nothing"
     return 1
   }
 }
@@ -485,6 +563,108 @@ _check_cleanup_preserves_status() {
   case "$out" in *"could not remove"*) echo "complained about an absent path or an empty arg: $out"; return 1 ;; esac
 }
 
+@test "e2e_reap_container DISTINGUISHES the deadline (124) from any other failure" {
+  # THE FINDING (saqlainsyed007, client#979). The one-line form this replaced said
+  # "could not remove … within ${TB_E2E_DELETE_TIMEOUT:-120}s" for ANY non-zero rc,
+  # so the common case — the harness dying before `docker run`, leaving no
+  # container — was logged as a timeout that never happened. Driven, all three
+  # outcomes, because a message is the ENTIRE deliverable of this helper: it
+  # cannot fix anything, it can only say what happened.
+  local out
+
+  # 1. THE DEADLINE ACTUALLY FIRED. Must name the timeout.
+  out="$(bash -c '
+    _bounded() { if [ "$3" = "inspect" ]; then return 0; fi; return 124; }
+    source "'"$COMMON"'"
+    e2e_reap_container squid 5
+    echo RETURNED-0
+  ' 2>&1)"
+  case "$out" in *"TIMED OUT"*) ;; *) echo "a real deadline hit did not say TIMED OUT: $out"; return 1 ;; esac
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0 on a timeout: $out"; return 1 ;; esac
+
+  # 2. A DOCKER ERROR ON AN EXISTING CONTAINER. Must NOT claim a timeout, and must
+  #    say the deadline did not fire — otherwise it is the old conflation again.
+  out="$(bash -c '
+    _bounded() { if [ "$3" = "inspect" ]; then return 0; fi; return 1; }
+    source "'"$COMMON"'"
+    e2e_reap_container squid 5
+    echo RETURNED-0
+  ' 2>&1)"
+  case "$out" in *"TIMED OUT"*) echo "reported a TIMEOUT for rc=1, which is the exact conflation this fixes: $out"; return 1 ;; esac
+  case "$out" in *"within 5s"*) echo "still says 'within Ns' for a non-timeout failure: $out"; return 1 ;; esac
+  case "$out" in *"exited 1"*) ;; *) echo "did not name the actual exit code: $out"; return 1 ;; esac
+  case "$out" in *"did NOT fire"*) ;; *) echo "did not say the deadline was not the cause: $out"; return 1 ;; esac
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0 on a docker error: $out"; return 1 ;; esac
+
+  # 3. THE CONTAINER WAS NEVER CREATED. Not a failure at all — and above all not a
+  #    timeout. This is the case the old line got wrong most of the time.
+  out="$(bash -c '
+    _bounded() { if [ "$3" = "inspect" ]; then return 1; fi; echo "REMOVE-ATTEMPTED"; return 0; }
+    source "'"$COMMON"'"
+    e2e_reap_container squid 5
+    echo RETURNED-0
+  ' 2>&1)"
+  case "$out" in *"TIMED OUT"*) echo "reported a TIMEOUT for an absent container: $out"; return 1 ;; esac
+  case "$out" in *"within 5s"*) echo "reported a deadline for an absent container: $out"; return 1 ;; esac
+  case "$out" in *REMOVE-ATTEMPTED*) echo "ran 'docker rm -f' against a container it had just found absent: $out"; return 1 ;; esac
+  case "$out" in *"never created"*) ;; *) echo "did not explain that there was nothing to remove: $out"; return 1 ;; esac
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0 for an absent container: $out"; return 1 ;; esac
+
+  # 4. THE ENGINE IS WEDGED, so the EXISTENCE PROBE is what times out. The probe
+  #    carries the same trap as the removal: "inspect said non-zero" is not the
+  #    same fact as "the container is not there", and collapsing the two would
+  #    announce "it was never created" about a container that exists on an engine
+  #    that has stopped talking — silently skipping the removal, and saying
+  #    nothing about the stall that is the entire subject of client#979.
+  out="$(bash -c '
+    _bounded() { return 124; }
+    source "'"$COMMON"'"
+    e2e_reap_container squid 5
+    echo RETURNED-0
+  ' 2>&1)"
+  case "$out" in *"never created"*) echo "a TIMED-OUT existence probe was reported as an absent container: $out"; return 1 ;; esac
+  case "$out" in *"already gone"*) echo "a TIMED-OUT existence probe was reported as already gone: $out"; return 1 ;; esac
+  case "$out" in *"TIMED OUT"*) ;; *) echo "a wedged engine on the existence probe produced no stall report: $out"; return 1 ;; esac
+  case "$out" in *UNKNOWN*) ;; *) echo "did not say the container's existence was undetermined: $out"; return 1 ;; esac
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0 when the probe timed out: $out"; return 1 ;; esac
+}
+
+@test "e2e_reap_container always returns 0, and refuses to run UNBOUNDED" {
+  # The two properties it shares with e2e_cleanup_cluster: a non-zero escaping a
+  # helper called from an EXIT trap would abort the trap and discard the verdict,
+  # and running the removal with no deadline is the defect itself.
+  local out
+  out="$(bash -c '
+    set -euo pipefail
+    _bounded() { return 1; }
+    source "'"$COMMON"'"
+    e2e_reap_container squid 5
+    echo RETURNED-0
+  ' 2>/dev/null)"
+  [ "$out" = "RETURNED-0" ] || { echo "did not return 0 under errexit with everything failing (got: ${out:-<aborted>})"; return 1; }
+
+  # No _bounded on PATH (common.sh unsourced) -> skip and say so, never run bare.
+  out="$(bash -c '
+    set -euo pipefail
+    docker() { echo "DOCKER-RAN-UNBOUNDED"; }
+    source "'"$COMMON"'"
+    e2e_reap_container squid 5
+  ' 2>&1)"
+  case "$out" in *DOCKER-RAN-UNBOUNDED*) echo "ran the removal with no bound: $out"; return 1 ;; esac
+  case "$out" in *SKIPPING*) ;; *) echo "no skip note emitted: $out"; return 1 ;; esac
+
+  # And an empty name is a no-op, not a `docker rm -f ""`.
+  out="$(bash -c '
+    set -euo pipefail
+    _bounded() { echo "BOUNDED-RAN"; }
+    source "'"$COMMON"'"
+    e2e_reap_container ""
+    echo RETURNED-0
+  ' 2>&1)"
+  case "$out" in *BOUNDED-RAN*) echo "acted on an empty container name: $out"; return 1 ;; esac
+  case "$out" in *RETURNED-0*) ;; *) echo "did not return 0 for an empty name: $out"; return 1 ;; esac
+}
+
 @test "e2e_cleanup_cluster refuses to run the delete UNBOUNDED when _bounded is missing" {
   # Fail toward "don't hang". A leftover throwaway cluster on an ephemeral runner
   # costs nothing; running the delete with no bound is the defect itself.
@@ -508,27 +688,219 @@ _check_cleanup_preserves_status() {
 # about the workflows, so it is read FROM the workflows: the moment someone adds
 # a macos-*/windows-* job that runs a harness, this reddens and the bound has to
 # be re-derived from a coreutils-free mechanism.
+#
+# THE FIRST SHAPE OF THIS CHECK COULD NOT DEFEND THAT PREMISE (Bugbot Medium +
+# LukasWodka, both driven against the real workflow files). It grepped runner
+# declarations out of the WHOLE workflow and tested each captured LINE against
+# `*ubuntu*`, which lost the premise two separate ways:
+#
+#   1. A MIXED ARRAY SATISFIED IT. `os: [ubuntu-latest, windows-latest]` — the
+#      literal shape installer-tests.yaml already declares, in the very workflow
+#      that runs e2e-cluster.sh — contains `ubuntu`, so the line passed while the
+#      windows leg went unexamined. A macos e2e leg would hide identically.
+#   2. A BRACKETED `runs-on:` WAS INVISIBLE. `[` is outside the capture regex's
+#      `[A-Za-z0-9._-]` class, so `runs-on: [self-hosted, macOS, arm64]` yielded
+#      no line at all — no finding AND no increment of the vacuity counter, so
+#      the `>= 4` floor stayed satisfied by the other legs. That half is the
+#      worse of the two: a check that cannot tell "clean" from "didn't look",
+#      inside the guard whose whole job was to look.
+#
+# So runners are now RESOLVED PER JOB and expanded ONE ENTRY PER MATRIX ELEMENT,
+# and a declaration the resolver cannot read is reported as UNRESOLVED rather
+# than dropped. Per JOB and not per workflow, because whole-workflow scoping
+# stops being merely "strictly stronger" the moment the array is split: it
+# becomes UNSATISFIABLE, since installer-tests.yaml legitimately runs Pester on
+# `windows-latest` in a job that runs no harness at all. Job scoping is what
+# makes this assertion both true and enforceable.
 
-@test "every workflow job that runs an e2e harness is on an ubuntu runner (so _bounded really bounds)" {
-  local wf line jobs_seen=0 h
-  for wf in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+# ── _wf_harness_runners <workflow> ──────────────────────────────────────────
+# Emit tab-separated `<job>\t<kind>\t<value>` records for every job in
+# <workflow> that runs an e2e harness:
+#
+#   <job>  HARNESS     e2e-cluster.sh[,e2e-…]   the harness(es) that job invokes
+#   <job>  RUNNER      ubuntu-24.04-arm         ONE record per resolved runner
+#   <job>  UNRESOLVED  <why>                    a declaration it cannot read
+#
+# Job blocks are tracked by indentation under `jobs:` — enough structure for
+# exactly these three keys, and no YAML parser to add to the repo. Resolution
+# covers a scalar `runs-on:`, a bracketed `runs-on: [a, b]`, and
+# `runs-on: ${{ matrix.KEY }}` against that job's own `matrix:` block in either
+# inline (`KEY: [a, b]`) or block (`KEY:` / `- a`) form. Anything else — an
+# unknown matrix key, a `fromJSON(...)`, a job with no `runs-on:` at all — is
+# emitted as UNRESOLVED, never silently omitted: omission is what made the
+# bracketed form pass twice over. Comment lines are skipped, so a commented-out
+# harness invocation does not conjure a job.
+_wf_harness_runners() {
+  awk '
+    function ind_of(s) { match(s, /^ */); return RLENGTH }
+    function emit(j, csv,    parts, m, i, t, cnt, q) {
+      q = sprintf("%c", 39)
+      cnt = 0
+      m = split(csv, parts, ",")
+      for (i = 1; i <= m; i++) {
+        t = parts[i]
+        gsub("[" q "\"]", "", t)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+        if (t == "") continue
+        print j "\tRUNNER\t" t
+        cnt++
+      }
+      if (cnt == 0) print j "\tUNRESOLVED\trunner list parsed to zero entries: [" csv "]"
+    }
+    BEGIN { job_indent = -1; cur = ""; in_jobs = 0; matrix_indent = -1; mkey = ""; mkey_indent = -1; n = 0 }
+    {
+      line = $0
+      if (line ~ /^[[:space:]]*$/) next
+      if (line ~ /^[[:space:]]*#/) next
+      ind = ind_of(line)
+      if (line ~ /^jobs:[[:space:]]*$/) { in_jobs = 1; next }
+      if (in_jobs && ind == 0) { in_jobs = 0; cur = ""; next }
+      if (!in_jobs) next
+      if (job_indent < 0) job_indent = ind
+      if (ind <= job_indent) {
+        if (ind == job_indent && line ~ /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*$/) {
+          cur = line; sub(/^[[:space:]]*/, "", cur); sub(/:[[:space:]]*$/, "", cur)
+          order[++n] = cur
+          matrix_indent = -1; mkey = ""; mkey_indent = -1
+        }
+        next
+      }
+      if (cur == "") next
+      if (match(line, /bash[[:space:]]+scripts\/tests\/e2e-[a-z-]+\.sh/)) {
+        h = substr(line, RSTART, RLENGTH); sub(/^.*\//, "", h)
+        harness[cur] = 1
+        if (!((cur SUBSEP h) in hseen)) { hseen[cur SUBSEP h] = 1; hn[cur] = hn[cur] "," h }
+      }
+      if (matrix_indent >= 0 && ind <= matrix_indent) { matrix_indent = -1; mkey = ""; mkey_indent = -1 }
+      if (line ~ /^[[:space:]]*matrix:[[:space:]]*$/) { matrix_indent = ind; mkey = ""; mkey_indent = -1; next }
+      if (matrix_indent >= 0 && ind > matrix_indent) {
+        if (match(line, /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*\[[^]]*\]/)) {
+          k = line; sub(/^[[:space:]]*/, "", k); sub(/:.*$/, "", k)
+          v = line; sub(/^[^[]*\[/, "", v); sub(/\].*$/, "", v)
+          mv[cur SUBSEP k] = v; mkey = ""; mkey_indent = -1; next
+        }
+        if (line ~ /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*$/) {
+          mkey = line; sub(/^[[:space:]]*/, "", mkey); sub(/:[[:space:]]*$/, "", mkey)
+          mkey_indent = ind; next
+        }
+        if (mkey != "" && ind > mkey_indent && line ~ /^[[:space:]]*-[[:space:]]*[^[:space:]]/) {
+          v = line; sub(/^[[:space:]]*-[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+          if (mv[cur SUBSEP mkey] == "") mv[cur SUBSEP mkey] = v
+          else mv[cur SUBSEP mkey] = mv[cur SUBSEP mkey] "," v
+          next
+        }
+      }
+      if (match(line, /^[[:space:]]*runs-on:[[:space:]]*/)) {
+        v = line; sub(/^[[:space:]]*runs-on:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+        ro[cur] = v
+      }
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        j = order[i]
+        if (!(j in harness)) continue
+        hl = hn[j]; sub(/^,/, "", hl)
+        print j "\tHARNESS\t" hl
+        if (!(j in ro) || ro[j] == "") { print j "\tUNRESOLVED\tno runs-on: found in this job"; continue }
+        v = ro[j]
+        if (v ~ /^\[/) { sub(/^\[/, "", v); sub(/\].*$/, "", v); emit(j, v); continue }
+        if (v ~ /\$\{\{/) {
+          if (match(v, /matrix\.[A-Za-z0-9_.-]+/)) {
+            key = substr(v, RSTART + 7, RLENGTH - 7)
+            if ((j SUBSEP key) in mv) { emit(j, mv[j SUBSEP key]); continue }
+            print j "\tUNRESOLVED\truns-on is matrix." key " but no matrix." key " values were parsed for this job"
+            continue
+          }
+          print j "\tUNRESOLVED\truns-on is an expression this check cannot resolve: " v
+          continue
+        }
+        emit(j, v)
+      }
+    }
+  ' "$1"
+}
+
+# ── _check_ubuntu_runners <workflows_dir> ───────────────────────────────────
+# The enforcement half, as a FUNCTION so the not-vacuous self-tests below can
+# drive the same code CI trusts against planted workflow fixtures — an @test
+# body cannot be called, and a paraphrase of it in a fixture is exactly the
+# "measures a copy, not the code" trap this file already pins elsewhere.
+# Sets RUNNERS_SEEN and HARNESSES_COVERED for the caller's census.
+_check_ubuntu_runners() {
+  local dir="$1" wf out job kind val wf_jobs tab
+  tab="$(printf '\t')"
+  RUNNERS_SEEN=0
+  HARNESSES_COVERED=","
+  for wf in "$dir"/*.yaml "$dir"/*.yml; do
     [ -f "$wf" ] || continue
     grep -qE 'bash scripts/tests/e2e-[a-z-]+\.sh' "$wf" || continue
-    # Every runner this workflow declares, matrix values included. Scoping to the
-    # exact job would need a YAML parser; asserting it for the WHOLE workflow is
-    # strictly stronger and needs none.
-    while read -r line; do
-      [ -n "$line" ] || continue
-      jobs_seen=$((jobs_seen + 1))
-      case "$line" in
-        *ubuntu*) ;;
-        *) echo "$wf runs an e2e harness but declares a non-ubuntu runner: $line — _bounded is a NO-OP without coreutils timeout(1), so the client#979 bound would not exist there"; return 1 ;;
+    out="$(_wf_harness_runners "$wf")"
+    wf_jobs=0
+    while IFS="$tab" read -r job kind val; do
+      [ -n "$job" ] || continue
+      case "$kind" in
+        HARNESS)
+          wf_jobs=$((wf_jobs + 1))
+          HARNESSES_COVERED="${HARNESSES_COVERED}${val},"
+          ;;
+        UNRESOLVED)
+          echo "$(basename "$wf") job '$job' runs an e2e harness but its runner could not be resolved — $val. An unreadable runner declaration is NOT a pass: a bracketed 'runs-on: [self-hosted, macOS, arm64]' being invisible is how a non-ubuntu e2e leg previously went both unreported and uncounted (client#979 review). Teach the resolver that shape, or move the leg to ubuntu-*."
+          return 1
+          ;;
+        RUNNER)
+          RUNNERS_SEEN=$((RUNNERS_SEEN + 1))
+          # PREFIX-anchored, not `*ubuntu*`: the substring form also accepts a
+          # label that merely mentions ubuntu (`macos-ubuntu-builder`), the same
+          # "close enough to pass" slack that let the mixed array through one
+          # level up.
+          case "$val" in
+            ubuntu*) ;;
+            *)
+              echo "$(basename "$wf") job '$job' runs an e2e harness on runner '$val', which is not an ubuntu-* runner — _bounded is a NO-OP where neither timeout(1) nor gtimeout(1) is on PATH (a stock Mac has neither), so the client#979 bound would not exist on that leg and the 24-minute trap stall comes back unbounded."
+              return 1
+              ;;
+          esac
+          ;;
       esac
-    done <<< "$(grep -hoE '(runs-on:[[:space:]]*[A-Za-z0-9._-]+|os:[[:space:]]*\[[^]]*\])' "$wf" \
-                 | grep -vE 'runs-on:[[:space:]]*\$\{\{')"
+    done <<< "$out"
+    [ "$wf_jobs" -ge 1 ] || {
+      echo "$(basename "$wf") invokes an e2e harness but the job resolver found NO harness-running job in it — the parse went vacuous, so every assertion in this check examined nothing for this workflow"
+      return 1
+    }
   done
-  [ "$jobs_seen" -ge 4 ] || {
-    echo "found only $jobs_seen runner declaration(s) across the harness workflows — the scan went vacuous, so this test would pass while asserting nothing"
+  return 0
+}
+
+@test "every workflow job that runs an e2e harness is on an ubuntu runner (so _bounded really bounds)" {
+  local h missing=""
+  # Called DIRECTLY, not through a command substitution: a subshell would keep
+  # RUNNERS_SEEN / HARNESSES_COVERED from reaching the census below, and this
+  # file has already lost a guard to a `local`-plus-substitution swallowing an
+  # exit status (see the `local`-splitting commit on this branch). bats prints
+  # the check's own stdout when the test fails, so the reason still surfaces.
+  _check_ubuntu_runners "$REPO/.github/workflows" || return 1
+
+  # ── NON-VACUITY, asserted rather than inferred ──────────────────────────────
+  # A floor on the NUMBER of runner declarations — what this test used to assert
+  # — cannot tell "all seven legs examined" from "one leg silently unparsed and
+  # the others made up the count". That is exactly how the bracketed `runs-on:`
+  # slipped through, so the floor is replaced by a per-harness CENSUS: every
+  # harness this file derives must have been resolved to at least one job.
+  for h in $(_harnesses); do
+    case "$HARNESSES_COVERED" in
+      *",$(basename "$h"),"*) ;;
+      *) missing="$missing $(basename "$h")" ;;
+    esac
+  done
+  [ -z "$missing" ] || {
+    echo "these e2e harnesses were resolved to NO workflow job by this check:$missing — either CI no longer runs them (then the ubuntu premise above is unasserted for them and _bounded's macOS no-op is back in play) or the resolver stopped seeing their job. Both are failures; neither is a pass."
+    return 1
+  }
+  # And every resolved job must have yielded at least one RUNNER record, so a
+  # resolver that emits HARNESS lines while silently dropping runners cannot
+  # satisfy the census above while checking nothing.
+  [ "$RUNNERS_SEEN" -ge "$HARNESS_FLOOR" ] || {
+    echo "resolved $RUNNERS_SEEN runner declaration(s) across the harness workflows but the census knows of at least $HARNESS_FLOOR harnesses — fewer runners than harnesses means at least one job contributed none"
     return 1
   }
 }
@@ -645,4 +1017,190 @@ _check_cleanup_preserves_status() {
   printf 'set -euo pipefail\ncleanup() { local s=$?; true; return "$s"; }\ntrap cleanup EXIT\nexit 7\n' > "$script"
   run bash "$script"
   [ "$status" -eq 7 ] || { echo "expected 7 to survive the trap, got $status"; return 1; }
+}
+
+# ── the runner resolver, proven rather than asserted ────────────────────────
+# The check above replaced a line-at-a-time `*ubuntu*` grep that could be
+# SATISFIED by a mixed matrix and was BLIND to a bracketed `runs-on:` (Bugbot
+# Medium + LukasWodka on client#979). A replacement nobody has watched fail is
+# just a different unwatched grep, so each shape from that review is planted
+# here and driven through the SAME functions CI calls.
+
+# Write a workflow fixture into its own directory and echo the directory.
+_plant_wf() {
+  local name="$1" dir="$BATS_TEST_TMPDIR/wf-$name"
+  mkdir -p "$dir"
+  cat > "$dir/planted.yaml"
+  printf '%s\n' "$dir"
+}
+
+@test "the runner resolver EXPANDS a mixed matrix per element (the shape that satisfied the old check)" {
+  local dir out
+  dir="$(_plant_wf mixed <<'YAML'
+jobs:
+  pester:
+    name: Pester
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: pwsh -c 1
+  e2e-cluster:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: bash scripts/tests/e2e-cluster.sh
+YAML
+)"
+  out="$(_wf_harness_runners "$dir/planted.yaml")"
+  # The non-ubuntu leg is now a record of its own — the old extractor emitted the
+  # whole `os: [...]` line, which contained `ubuntu` and therefore passed.
+  case "$out" in *"e2e-cluster	RUNNER	macos-14"*) ;; *) echo "did not expand the mixed matrix to its macos leg: $out"; return 1 ;; esac
+  case "$out" in *"e2e-cluster	RUNNER	ubuntu-latest"*) ;; *) echo "lost the ubuntu leg of the mixed matrix: $out"; return 1 ;; esac
+  # And the Pester job's windows leg is NOT reported: it runs no harness, which
+  # is why whole-workflow scoping had to give way to per-job scoping (that job's
+  # `windows-latest` is legitimate and must not be able to fail this check).
+  case "$out" in *"pester	"*) echo "reported a job that runs no e2e harness: $out"; return 1 ;; esac
+  # The enforcement half must actually FAIL on it.
+  run _check_ubuntu_runners "$dir"
+  [ "$status" -ne 0 ] || { echo "a mixed ubuntu/macos e2e matrix PASSED the check: $output"; return 1; }
+  case "$output" in *macos-14*) ;; *) echo "failed for the wrong reason: $output"; return 1 ;; esac
+}
+
+@test "the runner resolver SEES a bracketed runs-on: (the shape the old capture regex could not see at all)" {
+  local dir out
+  dir="$(_plant_wf bracket <<'YAML'
+jobs:
+  e2e-journey:
+    runs-on: [self-hosted, macOS, arm64]
+    steps:
+      - run: bash scripts/tests/e2e-journey.sh
+YAML
+)"
+  out="$(_wf_harness_runners "$dir/planted.yaml")"
+  case "$out" in *"e2e-journey	RUNNER	macOS"*) ;; *) echo "did not see the bracketed runs-on list: $out"; return 1 ;; esac
+  run _check_ubuntu_runners "$dir"
+  [ "$status" -ne 0 ] || { echo "a bracketed self-hosted/macOS e2e runner PASSED the check: $output"; return 1; }
+  # It reports the FIRST offending element (`self-hosted`) and stops, so accept
+  # either name — but insist it names one of them rather than failing for some
+  # unrelated reason, which is how a green-for-the-wrong-reason guard is born.
+  case "$output" in *self-hosted*|*macOS*) ;; *) echo "failed for the wrong reason: $output"; return 1 ;; esac
+}
+
+@test "the runner resolver expands a BLOCK-form matrix list too" {
+  local dir out
+  dir="$(_plant_wf blocklist <<'YAML'
+jobs:
+  e2e-seal:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: bash scripts/tests/e2e-seal-check.sh
+YAML
+)"
+  out="$(_wf_harness_runners "$dir/planted.yaml")"
+  case "$out" in *"e2e-seal	RUNNER	windows-2022"*) ;; *) echo "did not expand the block-form matrix: $out"; return 1 ;; esac
+  run _check_ubuntu_runners "$dir"
+  [ "$status" -ne 0 ] || { echo "a block-form windows e2e leg PASSED the check: $output"; return 1; }
+}
+
+@test "a runner the resolver CANNOT read fails loudly instead of vanishing" {
+  # The house rule, applied to this check's own empty case: 'could not determine'
+  # must never be spelled the same way as 'determined it was ubuntu'. Each of
+  # these three shapes produced NO output at all under the old extractor, so the
+  # job was neither reported nor counted toward its vacuity floor.
+  local dir shape
+  for shape in unknown-key fromjson no-runs-on; do
+    case "$shape" in
+      unknown-key) dir="$(_plant_wf uk <<'YAML'
+jobs:
+  e2e-proxy:
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: bash scripts/tests/e2e-proxy.sh
+YAML
+)" ;;
+      fromjson) dir="$(_plant_wf fj <<'YAML'
+jobs:
+  e2e-mysql:
+    runs-on: ${{ fromJSON(needs.pick.outputs.r) }}
+    steps:
+      - run: bash scripts/tests/e2e-mysql.sh
+YAML
+)" ;;
+      no-runs-on) dir="$(_plant_wf nr <<'YAML'
+jobs:
+  e2e-full-seal:
+    steps:
+      - run: bash scripts/tests/e2e-full-seal.sh
+YAML
+)" ;;
+    esac
+    run _wf_harness_runners "$dir/planted.yaml"
+    case "$output" in *UNRESOLVED*) ;; *) echo "$shape was dropped silently rather than reported UNRESOLVED: $output"; return 1 ;; esac
+    run _check_ubuntu_runners "$dir"
+    [ "$status" -ne 0 ] || { echo "$shape PASSED the check while its runner was unknown: $output"; return 1; }
+  done
+}
+
+@test "a workflow that invokes a harness but yields NO resolvable job fails the check" {
+  # The per-workflow vacuity floor. A `jobs:` mapping the tracker cannot walk
+  # (here: the invocation lives outside any job) must not read as 'all clean'.
+  local dir
+  dir="$(_plant_wf vacuous <<'YAML'
+not-jobs:
+  e2e-cluster:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash scripts/tests/e2e-cluster.sh
+YAML
+)"
+  run _check_ubuntu_runners "$dir"
+  [ "$status" -ne 0 ] || { echo "a workflow whose jobs could not be walked PASSED the check: $output"; return 1; }
+  case "$output" in *vacuous*) ;; *) echo "failed for the wrong reason: $output"; return 1 ;; esac
+}
+
+@test "the runner resolver PASSES the real workflows, and a commented-out invocation conjures no job" {
+  # The positive control: the shapes above must not be failing for a reason that
+  # would also redden a legitimate tree. Plus the inverse of the census — a
+  # commented invocation must not be counted as a covered harness.
+  local dir out
+  dir="$(_plant_wf ok <<'YAML'
+jobs:
+  e2e-cluster:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: bash scripts/tests/e2e-cluster.sh
+  e2e-journey:
+    runs-on: [ubuntu-24.04]
+    steps:
+      - run: bash scripts/tests/e2e-journey.sh
+  commented-out:
+    runs-on: macos-14
+    steps:
+      # - run: bash scripts/tests/e2e-journey.sh
+      - run: true
+YAML
+)"
+  run _check_ubuntu_runners "$dir"
+  [ "$status" -eq 0 ] || { echo "an all-ubuntu e2e matrix FAILED the check: $output"; return 1; }
+  out="$(_wf_harness_runners "$dir/planted.yaml")"
+  case "$out" in *"commented-out	"*) echo "a commented-out invocation was counted as a harness job: $out"; return 1 ;; esac
+  # The bracketed form must resolve to the BARE label. Without the bracket strip
+  # the entries read `[ubuntu-24.04]`, which fails the `ubuntu*` prefix test and
+  # turns a legitimate single-element list into a false finding — so this is the
+  # assertion that makes the bracket handling load-bearing in the PASSING
+  # direction too, not only when it catches a macOS leg.
+  case "$out" in *"e2e-journey	RUNNER	ubuntu-24.04"*) ;; *) echo "did not strip the brackets off a single-element runs-on list: $out"; return 1 ;; esac
+  [ "$(printf '%s\n' "$out" | grep -c '	RUNNER	')" -eq 4 ] || { echo "expected 4 resolved runners, got: $out"; return 1; }
 }

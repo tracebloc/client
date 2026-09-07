@@ -317,3 +317,83 @@ e2e_reap_path() {
   # ALWAYS 0: a reap that could not complete is a note, never the outcome.
   return 0
 }
+
+# ── e2e_reap_container <name> [seconds] ──────────────────────────────────────
+# Reap a throwaway docker container from inside an EXIT trap: BOUNDED, LOUD,
+# incapable of changing the harness's verdict — and HONEST about which of those
+# things went wrong. The container sibling of e2e_cleanup_cluster, deliberately
+# the same shape, so the two reaps in one trap report the same class of failure
+# the same way.
+#
+# WHY THIS EXISTS (client#979, saqlainsyed007). e2e-proxy.sh's squid reap read:
+#
+#     _bounded "${TB_E2E_DELETE_TIMEOUT:-120}" docker rm -f "$SQUID_NAME" >/dev/null \
+#       || echo "cleanup: could not remove … within ${TB_E2E_DELETE_TIMEOUT:-120}s …"
+#
+# and that `|| echo` fires for ANY non-zero rc while the message says only one
+# thing. So it CONFLATED "failed" with "timed out" — which is the very defect
+# client#979 exists to remove, one line below where it removes it, and the third
+# time this class surfaced on this PR series. Driven, both outcomes:
+#
+#     rc=1   (container never created — the COMMON case, the harness
+#             died before `docker run`)   -> "…within 120s…"   + docker's own
+#                                             "No such container" on stderr
+#     rc=124 (the deadline actually fired)  -> "…within 120s…"
+#
+# Byte-identical. A reader of that log cannot tell a wedged Docker engine — the
+# thing worth a 30-minute job — from a container that simply was not there.
+#
+# So rc is captured and the outcomes are spelled differently: 124 names the
+# deadline, any other non-zero names the rc and says the deadline did NOT fire,
+# and an absent container is not an error at all (checked first with a bounded
+# `docker inspect`, so the common case emits nothing rather than a scary pair of
+# lines). stderr is NOT redirected on the removal itself — silencing it is defect
+# 2 of the three (see e2e_cleanup_cluster) — but the existence probe is quiet,
+# since its whole job is to answer a question we are about to report on.
+#
+# THE PROBE HAS THE SAME TRAP IN IT, and writing it without noticing that is how
+# this class keeps recurring: `docker inspect` against a WEDGED engine does not
+# answer either, so treating every non-zero probe as "absent" would announce "it
+# was never created" about a container that exists on an engine that has stopped
+# talking — a fresh instance of the exact conflation two paragraphs up, and a
+# silent one, since it would then skip the removal and say nothing about the
+# stall. The probe's 124 is therefore separated from its other failures too.
+#
+# Worst case is two deadlines, so 2×secs (240s by default) — bounded, loud, and
+# three orders of magnitude inside the 24 unattributable minutes that opened
+# client#979.
+#
+# ALWAYS returns 0. See defect 3 on e2e_cleanup_cluster: errexit is live inside an
+# EXIT trap, so a non-zero escaping here would abort the trap, discard the
+# harness's verdict and skip every later reap.
+e2e_reap_container() {
+  local name="${1:-}" secs="${2:-${TB_E2E_DELETE_TIMEOUT:-120}}" rc=0 prc=0
+  [ -n "$name" ] || return 0
+  # Fail toward "don't hang", exactly as the cluster reap does: running the
+  # removal UNBOUNDED is the defect itself, so with no _bounded we skip and say so.
+  if ! declare -F _bounded >/dev/null 2>&1; then
+    echo "cleanup: _bounded is unavailable (common.sh not sourced) — SKIPPING 'docker rm -f ${name}' rather than running it unbounded (client#979). Remove it by hand if this was not an ephemeral runner." >&2
+    return 0
+  fi
+  # NOT THERE IS NOT A FAILURE. The harness routinely dies before `docker run`,
+  # and `docker rm -f` on an absent container exits non-zero — which is how the
+  # old one-line form reported a timeout that never happened.
+  _bounded "$secs" docker inspect "$name" >/dev/null 2>&1 || prc=$?
+  if [ "$prc" -eq 124 ]; then
+    echo "cleanup: 'docker inspect ${name}' TIMED OUT after ${secs}s — the Docker engine is not answering, so whether the container exists is UNKNOWN and it is not being removed. Giving up so the harness's own verdict above is the one this job reports (client#979). A leftover container may remain on this runner." >&2
+    return 0
+  fi
+  if [ "$prc" -ne 0 ]; then
+    echo "cleanup: no container named '${name}' to remove (it was never created, or is already gone)." >&2
+    return 0
+  fi
+  echo "cleanup: removing container '${name}' (bounded at ${secs}s)…" >&2
+  _bounded "$secs" docker rm -f "$name" >/dev/null || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "cleanup: 'docker rm -f ${name}' TIMED OUT after ${secs}s — the Docker engine is not answering. Giving up so the harness's own verdict above is the one this job reports (client#979). A leftover container may remain on this runner." >&2
+  elif [ "$rc" -ne 0 ]; then
+    echo "cleanup: 'docker rm -f ${name}' exited ${rc} — the ${secs}s deadline did NOT fire, so this is a docker error and not a stall (its own message is above). A leftover container may remain on this runner." >&2
+  fi
+  # ALWAYS 0: cleanup is a note, never the outcome. See defect 3 above.
+  return 0
+}
