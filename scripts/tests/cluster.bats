@@ -636,6 +636,14 @@ _cc_mocks() {
   _merge_kubeconfig()           { record "_merge_kubeconfig"; }
   _export_host_no_proxy()       { record "_export_host_no_proxy"; }
   _pf_recheck_runtime_mem()     { return 0; }
+  # The TAIL of create_cluster, past the branch these tests are about. Unmocked,
+  # `_wait_for_api` ran for real against a cluster that does not exist: 180 seconds
+  # of `kubectl cluster-info` per drive, and then a non-zero return that failed the
+  # UNKNOWN test on `[ "$status" -eq 0 ]` — a red with nothing to do with the branch
+  # under test, four times over, at 3 minutes each.
+  _wait_for_api()               { record "_wait_for_api"; }
+  _verify_nodes_see_host_data() { record "_verify_nodes_see_host_data"; }
+  _generate_node_cdi_specs()    { record "_generate_node_cdi_specs"; }
   TB_STORAGE_MODE=node-local
 }
 

@@ -73,6 +73,7 @@ _assess_classify
 _assess_cluster_servers_running
 run_diagnose
 _bounded_capture
+_bounded_capture_read
 "
 
   # ── the explicitly-named, RATCHETED remainder ──────────────────────────────
@@ -279,6 +280,15 @@ _enclosing_function() {   # $1 = file, $2 = line
     ensure_cluster_autostart() { :; }
     _merge_kubeconfig() { :; }
     _export_host_no_proxy() { :; }
+    # EVERYTHING create_cluster calls AFTER the branch under test, too. Left
+    # unmocked, `_wait_for_api` ran for real against no cluster: 180s of `kubectl
+    # cluster-info` per drive, then a non-zero return that errexit turned into an
+    # aborted test — so this test spent nine minutes proving nothing and then
+    # reported the abort at the FIRST drive, before a single branch was compared.
+    # A test that cannot reach its own assertions is not a guard.
+    _wait_for_api() { :; }
+    _verify_nodes_see_host_data() { :; }
+    _generate_node_cdi_specs() { :; }
     TB_STORAGE_MODE=node-local
   }
   present="$( _mocks; guard_leftover_data() { echo GUARD; }; _handle_existing_cluster() { echo REUSE; }
@@ -484,4 +494,157 @@ _enclosing_function() {   # $1 = file, $2 = line
   [ -n "$tgz" ] || return 1
   tar -xzOf "$tgz" 2>/dev/null | grep -q 'docker info read did not complete' || {
     echo "an empty section stood in for a timed-out docker info"; return 1; }
+}
+
+# ── D. THE OTHER DIRECTION: a read that COMPLETED AND FAILED ────────────────
+#
+# saadqbal, client#984, and the third round of the same shape. Everything above
+# guards "couldn't tell" being converted into an answer. This guards the mirror
+# image: an answer converted into "couldn't tell". `_bounded_capture` returns the
+# child's REAL exit code on completion and 124 only on the deadline, but all seven
+# --diagnose call sites tested `if _bounded_capture …; then` and wrote the timeout
+# sentence for ANY non-zero — discarding $_cap, which holds the error text.
+#
+# With the daemon live but the socket not permitting this user, `docker version`
+# exits 1 in milliseconds printing "permission denied while trying to connect to
+# the Docker daemon socket", and 00-host.txt recorded "(the docker server-version
+# read did not complete within 10s)". The cause was in hand and thrown away.
+
+@test "D. _bounded_capture_read: answered / deadline / FAILED are three different sections" {
+  local out="$BATS_TEST_TMPDIR/d-cap" answered deadline failed
+  # answered: prints NOTHING and returns 0 — the caller renders the capture.
+  answered="$(_bounded_capture() { printf 'CONTENT\n' > "$2"; return 0; }
+              _bounded_capture_read 10 "$out" "docker info read" docker info)" || {
+    echo "a successful read must return 0"; return 1; }
+  [ -z "$answered" ] || { echo "a successful read printed prose: $answered"; return 1; }
+
+  local rc=0
+  deadline="$( _bounded_capture() { : > "$2"; return 124; }
+               _bounded_capture_read 10 "$out" "docker info read" docker info )" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a fired deadline must not return 0"; return 1; }
+
+  rc=0
+  printf 'permission denied while trying to connect to the Docker daemon socket\n' > "$out"
+  failed="$( _bounded_capture() { return 1; }
+             _bounded_capture_read 10 "$out" "docker info read" docker info )" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a failed read must not return 0"; return 1; }
+
+  # THE ASSERTION THAT MATTERS: the failure is not reported as a timeout, and it
+  # carries the tool's own error text.
+  printf '%s\n' "$deadline" | grep -q 'did not complete within' \
+    || { echo "deadline -> $deadline"; return 1; }
+  printf '%s\n' "$failed" | grep -q 'did not complete within' \
+    && { echo "a read that ANSWERED with an error was reported as a timeout: $failed"; return 1; }
+  printf '%s\n' "$failed" | grep -q 'permission denied while trying to connect' \
+    || { echo "the error text was discarded: $failed"; return 1; }
+  [ "$answered" != "$deadline" ] && [ "$deadline" != "$failed" ] || return 1
+}
+
+@test "D. _bounded_capture_read: 'could not capture' never renders the PREVIOUS read's output" {
+  # _bounded_capture returns 2 when it cannot create the capture file — the command
+  # never ran, and $_cap may still hold the output of the read before it. Printing
+  # that would attribute one read's answer to another, in the artifact support reads
+  # first. Disambiguated by whether the file is ours to write, so a command's own
+  # exit 2 still gets its text printed.
+  local out="$BATS_TEST_TMPDIR/d-nocap" got
+  printf 'STALE-OUTPUT-FROM-THE-PREVIOUS-READ\n' > "$out"
+  local rc=0
+  got="$( _bounded_capture() { return 2; }
+          _bounded_capture_read 10 "$out/unwritable" "k3d cluster listing" k3d cluster list )" || rc=$?
+  [ "$rc" -ne 0 ] || { echo "an uncapturable read must not return 0"; return 1; }
+  printf '%s\n' "$got" | grep -q 'STALE-OUTPUT' \
+    && { echo "printed a previous read's output: $got"; return 1; }
+  printf '%s\n' "$got" | grep -q 'did not complete within' \
+    && { echo "an unattempted read was reported as a timeout: $got"; return 1; }
+  # A command's OWN exit 2, on a writable capture, still surfaces its text.
+  rc=0
+  printf 'k3d: broken kubeconfig\n' > "$out"
+  got="$( _bounded_capture() { return 2; }
+          _bounded_capture_read 10 "$out" "k3d cluster listing" k3d cluster list )" || rc=$?
+  printf '%s\n' "$got" | grep -q 'k3d: broken kubeconfig' \
+    || { echo "a command's own exit 2 lost its error text: $got"; return 1; }
+}
+
+@test "D. _bounded_capture_read really is BOUNDED (the name is not the guarantee)" {
+  # The name carries the word check-style rule 5 looks for, so it must delegate to
+  # the coreutils-free primitive rather than merely be spelled like it does.
+  local body
+  body="$(awk '/^_bounded_capture_read\(\)/{f=1} f{print} f&&/^\}/{exit}' "${LIB_DIR}/diagnose.sh")"
+  [ -n "$body" ] || { echo "_bounded_capture_read not found in diagnose.sh"; return 1; }
+  printf '%s\n' "$body" | grep -qE '(^|[^_[:alnum:]])_bounded_capture[[:space:]]' \
+    || { echo "_bounded_capture_read does not call _bounded_capture — the bound is a name only"; return 1; }
+}
+
+@test "D. census: EVERY --diagnose read site handles all three states, none open-codes the branch" {
+  # The structural half. Fixing sites did not converge — the same conflation came
+  # back three review rounds running — so the classification lives in ONE function
+  # and this asserts that no call site is allowed to spell it again. If a new read
+  # lands with its own `if _bounded_capture …; then … else "did not complete" fi`,
+  # this reddens.
+  local f="${LIB_DIR}/diagnose.sh" bad n
+  bad="$(grep -nE '(^|[^_[:alnum:]])_bounded_capture[[:space:]]+"' "$f" \
+         | grep -vE '_bounded_capture[[:space:]]+"\$secs"' || true)"
+  [ -z "$bad" ] || {
+    echo "read site(s) calling _bounded_capture directly instead of _bounded_capture_read — each one gets to collapse the three outcomes again:"
+    printf '%s\n' "$bad"; return 1; }
+  # …and the classifier is reached by as many sites as we think it is.
+  n="$(grep -cE '(^|[^_[:alnum:]])_bounded_capture_read[[:space:]]' "$f" || true)"
+  [ "$n" -ge 7 ] || {
+    echo "only $n call site(s) route through _bounded_capture_read; 7 are known to exist, so this census has gone vacuous"
+    grep -nE '_bounded_capture_read' "$f"; return 1; }
+}
+
+@test "D. run_diagnose: a socket-permission failure is recorded as the ERROR, not as a hang" {
+  # saadqbal's concrete case, end to end through the real bundle. Daemon live, socket
+  # not permitting this user: every read exits 1 in milliseconds with the reason on
+  # stderr. The bundle must carry the reason.
+  has() { return 0; }
+  _docker_answers_bounded() { return 0; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  k3d() { echo "k3d $*"; }
+  _bounded_capture() {
+    local secs="$1" out="$2"; shift 2
+    printf 'permission denied while trying to connect to the Docker daemon socket\n' > "$out"
+    return 1
+  }
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'permission denied while trying to connect' || {
+    echo "the bundle threw away the actual cause"
+    tar -xzOf "$tgz" 2>/dev/null | grep -n 'server-version\|did not complete' || true
+    return 1; }
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'did not complete within' || {
+    echo "a read that answered in milliseconds was written into the bundle as a hang:"
+    tar -xzOf "$tgz" 2>/dev/null | grep -n 'did not complete within'
+    return 1; }
+}
+
+@test "D. run_diagnose: a k3d read that FAILS does not blame the engine" {
+  # The worst of the seven. A k3d that exits non-zero on a broken kubeconfig or an
+  # unreadable \$HOME/.k3d used to be written up as "the engine is not answering" —
+  # a confident, wrong claim in the artifact support reads first.
+  has() { return 0; }
+  _docker_answers_bounded() { return 0; }
+  kubectl() { printf 'kubectl %s\n' "$*"; }
+  helm() { printf 'helm %s\n' "$*"; }
+  k3d() { echo "k3d $*"; }
+  _bounded_capture() {
+    local secs="$1" out="$2"; shift 2
+    case "$*" in
+      *"cluster list"*) printf 'FATA[0000] unable to read kubeconfig\n' > "$out"; return 1 ;;
+      *"ps -a"*)        printf 'k3d-tracebloc-server-0\n' > "$out"; return 0 ;;
+      *)                printf 'ok\n' > "$out"; return 0 ;;
+    esac
+  }
+  run run_diagnose
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  tgz="$(ls "$HOST_DATA_DIR"/tracebloc-diagnose-*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || return 1
+  tar -xzOf "$tgz" 2>/dev/null | grep -q 'unable to read kubeconfig' || {
+    echo "the k3d error text was discarded"; return 1; }
+  ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'k3d cluster listing did not complete' || {
+    echo "a k3d read that ANSWERED with an error was reported as a timeout"; return 1; }
 }

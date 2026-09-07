@@ -238,9 +238,16 @@ setup() {
   [ "$n" -ge 5 ] || {
     echo "expected at least 5 docker reads in diagnose.sh, found $n — the scan or the file has changed shape:"
     printf '%s\n' "$calls"; return 1; }
-  bad="$(printf '%s\n' "$calls" | grep -vE '_bounded_capture[[:space:]]+"[^"]*"[[:space:]]+"\$_cap"[[:space:]]+docker' || true)"
+  # The spelling is `_bounded_capture_read SECS "$_cap" "WHAT" docker …` — the
+  # reader that classifies the read's three outcomes in one place and delegates the
+  # bound to _bounded_capture (saadqbal, client#984). STRICTER than the previous
+  # `_bounded_capture … "$_cap" docker …`: the label is now mandatory too, because
+  # it is what the honest failure/stall line is built from. A site that calls
+  # `_bounded_capture` directly is still unbounded-on-a-Mac's worth of wrong AND
+  # gets to collapse the outcomes again, so it fails here either way.
+  bad="$(printf '%s\n' "$calls" | grep -vE '_bounded_capture_read[[:space:]]+"[^"]*"[[:space:]]+"\$_cap"[[:space:]]+"[^"]*"[[:space:]]+docker' || true)"
   [ -z "$bad" ] || {
-    echo "daemon read(s) in diagnose.sh not routed through _bounded_capture — on a stock Mac these are unbounded, and one that never returns means no bundle at all:"
+    echo "daemon read(s) in diagnose.sh not routed through _bounded_capture_read — on a stock Mac these are unbounded (one that never returns means no bundle at all), and a hand-rolled branch re-collapses the three outcomes:"
     printf '%s\n' "$bad"; return 1; }
 }
 
