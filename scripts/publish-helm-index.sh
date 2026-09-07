@@ -27,6 +27,13 @@
 #  so the only thing lost is self-healing a .tgz that is on disk but absent from
 #  the index — a state this pipeline never produces.
 #
+#  ONE RESIDUAL `created` FLOAT, since this file is about `created` fidelity: a
+#  workflow RE-RUN of the same release re-stamps just THAT version's `created` to
+#  the re-run instant (helm regenerates it for the charts it indexes; every other
+#  entry is carried untouched by --merge). Harmless — versions are immutable and
+#  the version-bump gate makes a same-version re-publish rare — but it is the one
+#  timestamp this approach does not pin.
+#
 #  Usage:
 #    NEW_CHARTS_DIR=<dir with ONLY the just-built .tgz> \
 #    REPO_URL=<https://owner.github.io/repo> \
@@ -60,9 +67,15 @@ new_charts=("$NEW_CHARTS_DIR"/*.tgz)
 shopt -u nullglob
 [ "${#new_charts[@]}" -gt 0 ] || fail "publish-helm-index: no .tgz found in ${NEW_CHARTS_DIR} — nothing to publish."
 
-# Merge only when there is a real existing index to preserve; the first publish
-# has none. An empty/missing MERGE_INDEX is the first-publish path, not an error.
-if [ -n "$MERGE_INDEX" ] && [ -s "$MERGE_INDEX" ]; then
+# MERGE_INDEX unset/empty is the genuine first publish (no catalog yet). But a
+# NAMED merge target that turns out missing/empty is NOT a first publish — it is
+# a broken state, and silently falling back to a no-merge publish would re-index
+# only the new charts and DROP the entire existing catalog (still on disk, now
+# unlisted): the worst outcome, and indistinguishable from a real first publish.
+# Fail closed on that direction — the same instinct the empty-NEW_CHARTS_DIR
+# guard above applies. Mirrors the workflow's index_exists guard (Asad, #1001).
+if [ -n "$MERGE_INDEX" ]; then
+  [ -s "$MERGE_INDEX" ] || fail "publish-helm-index: MERGE_INDEX=${MERGE_INDEX} is set but missing/empty — refusing to first-publish over an existing catalog and drop it."
   helm repo index "$NEW_CHARTS_DIR" --url "$REPO_URL" --merge "$MERGE_INDEX"
 else
   helm repo index "$NEW_CHARTS_DIR" --url "$REPO_URL"
@@ -73,4 +86,4 @@ fi
 [ -f "${NEW_CHARTS_DIR}/index.yaml" ] || fail "publish-helm-index: helm did not produce ${NEW_CHARTS_DIR}/index.yaml."
 mv "${NEW_CHARTS_DIR}/index.yaml" "$OUT_INDEX"
 
-echo "publish-helm-index: wrote ${OUT_INDEX} (indexed ${#new_charts[@]} new chart(s), merged=$([ -n "$MERGE_INDEX" ] && [ -s "$MERGE_INDEX" ] && echo yes || echo no))."
+echo "publish-helm-index: wrote ${OUT_INDEX} (indexed ${#new_charts[@]} new chart(s), merged=$([ -n "$MERGE_INDEX" ] && echo yes || echo no))."

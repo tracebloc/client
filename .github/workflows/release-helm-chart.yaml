@@ -203,7 +203,13 @@ jobs:
           # shared index. Logic + rationale: scripts/publish-helm-index.sh
           # (covered by scripts/tests/publish-helm-index.bats under `Unit tests`);
           # it was copied to $RUNNER_TEMP before the gh-pages checkout.
-          if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ] && [ -f index.yaml ]; then
+          if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ]; then
+            # gh-pages existed, so there IS a catalog to preserve. If index.yaml is
+            # somehow missing/empty, FAIL rather than fall through to a no-merge
+            # publish — that would re-index only the new charts and DROP the entire
+            # historical catalog (still on disk, unlisted), reading identically to a
+            # real first publish. `verify-index` would not catch it (Asad, #1001).
+            [ -s index.yaml ] || { echo "::error::gh-pages exists but index.yaml is missing/empty — refusing to publish an index that would drop the historical catalog."; exit 1; }
             MERGE_INDEX=index.yaml
           else
             MERGE_INDEX=

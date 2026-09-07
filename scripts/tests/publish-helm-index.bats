@@ -66,6 +66,13 @@ created_for() { # $1 = version
   first="$(created_for 1.0.0)"
   [ -n "$first" ] || return 1
 
+  # MOVE the published chart to the index root, exactly as the workflow does
+  # after indexing. gh-pages accumulates every historical .tgz at the root, and
+  # that on-disk presence is the whole reason the bug existed: `helm repo index .`
+  # re-stamps it. Without this move the mutant (`index .`) sees nothing at root
+  # and this test stays green against it — it must not (Asad, client#1001).
+  mv _new/*.tgz .
+
   # A distinct wall-clock second, so a re-stamp to "now" would be visible.
   sleep 2
   rm -rf _new
@@ -76,7 +83,9 @@ created_for() { # $1 = version
   grep -q 'version: 1.0.0' index.yaml || return 1   # the old one is still there
   local kept
   kept="$(created_for 1.0.0)"
-  # ...and its created did NOT move — the whole point of the fix.
+  # ...and its created did NOT move — the whole point of the fix. Against the
+  # pre-PR `helm repo index .` this reddens: 1.0.0.tgz now sits at root and gets
+  # re-stamped.
   [ "$kept" = "$first" ] || return 1
 }
 
@@ -97,4 +106,16 @@ created_for() { # $1 = version
   run env NEW_CHARTS_DIR=_empty REPO_URL="$REPO_URL" OUT_INDEX=index.yaml MERGE_INDEX= bash "$PUB"
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"nothing to publish"* ]] || return 1
+}
+
+@test "a NAMED but missing/empty merge target fails closed (won't drop the catalog)" {
+  # The drop-the-catalog hazard: gh-pages exists (so a merge is intended) but the
+  # index is gone/empty. Falling through to a no-merge publish would re-index only
+  # the new chart and un-publish everything else. MERGE_INDEX names a target, so
+  # the script must FAIL, not silently first-publish (Asad, client#1001).
+  package_into _new client 1.0.1
+  : > empty-index.yaml   # a named target that is present but empty
+  run env NEW_CHARTS_DIR=_new REPO_URL="$REPO_URL" OUT_INDEX=index.yaml MERGE_INDEX=empty-index.yaml bash "$PUB"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"missing/empty"* ]] || return 1
 }
