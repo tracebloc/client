@@ -84,8 +84,29 @@
 # that DOES have coreutils now degrades safely instead of misclassifying. The one
 # site where the cost was the whole artifact rather than a stall — the --diagnose
 # bundle — is gated on _docker_answers_bounded, which needs no coreutils
-# (diagnose.sh). Closing this properly means a coreutils-free bound usable from a
-# boolean context, which is its own change.
+# (diagnose.sh).
+#
+# THE TOOL FOR CLOSING IT NOW EXISTS, IN THIS DIFF. This sentence used to end
+# "closing this properly means a coreutils-free bound usable from a boolean
+# context, which is its own change" — and then that change shipped here, so the
+# comment was telling the next author to go and build something already on the
+# shelf (LukasWodka, client#984). It is `common.sh`'s `_bounded_capture`:
+# coreutils-free by construction (it backgrounds the child and kills it off its
+# own deadline, the `spin` mechanism), it returns the child's real status or 124,
+# it CAPTURES — which is what `_cluster_presence` needs and what `spin` and
+# `_docker_answers_bounded` cannot give — and `_bounded_capture_read` already
+# drives it from a boolean context. `common.sh` is sourced before `cluster.sh`
+# (install-k8s.sh:65/:81), so it is in scope here.
+#
+# What is deferred is the APPLICATION, and for one concrete reason:
+# `_bounded_capture` writes through a caller-supplied scratch FILE, so every
+# probe below would need a writable path chosen on the install path — before
+# HOST_DATA_DIR is validated, on a machine whose disk state is one of the things
+# being assessed — plus its cleanup, on a function called from inside `if`
+# conditions. That is a real change with its own failure modes, not a
+# find-and-replace, so it is a follow-up rather than a fourth thing bolted onto
+# this diff. The tri-state above is what makes deferring it safe: a stock Mac
+# that stalls here degrades to UNKNOWN rather than misclassifying.
 _cluster_presence() {
   local _read_ok=0            # did ANY probe's read actually answer?
   # 1) JSON output (exact name match) when jq is available
@@ -873,6 +894,37 @@ guard_leftover_data() {
   esac
 }
 
+# THE ORDER IS THE CONTRACT: guard_leftover_data FIRST, the host data dirs
+# SECOND, and only then _create_new_cluster (LukasWodka, client#984 round 7).
+#
+# Extracted so both paths into `_create_new_cluster` run the SAME step rather
+# than one of them re-deriving it. The rc-3 path ran the two the other way round
+# — `_ensure_tracebloc_dirs` had already fired above the `case` — while its own
+# comment claimed it ran "exactly as it does for a first-read ABSENT". Both of
+# the guard's mutating arms are falsified by that order:
+#
+#   * WIPE. `_leftover_data_dirs` yields `$base/mysql` and `$base/data`, and
+#     `_wipe_leftover_data` does `rm -rf "$d"` — the DIRECTORY, not its contents.
+#     The definite-absent path re-creates and re-`chmod 777`s them afterwards; on
+#     the rc-3 path nothing did, so `_create_new_cluster` bind-mounted a
+#     HOST_DATA_DIR whose `mysql` and `data` were gone.
+#   * NEWDIR. That arm sets `HOST_DATA_DIR="$newdir"`, calls `validate_config`
+#     and recurses. `validate_config` has no `mkdir` and no `chmod`, so on the
+#     rc-3 path the dirs step had already run against the OLD path and the new
+#     one got neither before the mount.
+#
+# Hostpath only. node-local (RFC-0003 Option C) has no host data dirs, no
+# bind-mount and no chmod — datasets live on k3s local-path inside the node — so
+# there is nothing to create and calling it twice there is a no-op either way.
+# The mode's log line stays at the single decision point in create_cluster so it
+# is printed once, not once per path.
+_ensure_host_data_dirs() {
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+    return 0
+  fi
+  _ensure_tracebloc_dirs
+}
+
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -913,9 +965,8 @@ create_cluster() {
   # the pre-created world-writable ~/.tracebloc dirs.
   if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     log "Storage mode: node-local — datasets live inside the cluster node (k3s local-path), not ~/.tracebloc; they are wiped on 'cluster delete'."
-  else
-    _ensure_tracebloc_dirs
   fi
+  _ensure_host_data_dirs
 
   # Docker is up now (unlike at preflight time), so re-check the runtime's real
   # memory budget — a too-small Docker VM (Mac/Win) surfaces before we build out.
@@ -943,20 +994,46 @@ create_cluster() {
     # `cluster-indeterminate` copy already word this condition neutrally.
     2) warn "Couldn't read the k3d cluster list for '$CLUSTER_NAME' — the listing either didn't complete or k3d couldn't answer it. Not assuming the environment is either present or absent: taking the path that reads again before it acts."
        _handle_existing_cluster || _hrc=$? ;;
-    *) _create_new_cluster ;;
+    # `1)`, NOT `*)`. Creating was the DEFAULT arm, so any value the contract
+    # grows next would land on the one branch that runs `k3d cluster create`
+    # against a machine nobody classified — the destructive direction, reached by
+    # default, which is this PR's own subject one level up (LukasWodka/saadqbal
+    # nit, client#984). An unrecognised code now takes the same neutral route as
+    # UNKNOWN, because that is exactly what it is.
+    1) _create_new_cluster ;;
+    *) warn "Couldn't classify this machine's k3d cluster state (the presence probe returned an unrecognised code $_presence) — treating it as unread and taking the path that reads again before it acts."
+       _handle_existing_cluster || _hrc=$? ;;
   esac
 
   # rc 3 = the reuse path's OWN listing answered and proved the cluster ABSENT
   # (Bugbot High, client#984 round 5). Without this, an UNKNOWN first read locked
   # the run into "start a cluster that isn't there" — which fails, and `error`
   # exits — so a first-time machine with one slow listing could never install.
-  # The leftover-data guard runs here exactly as it does for a first-read ABSENT:
-  # this IS that case, learned one read later, and a new cluster must not silently
-  # adopt an earlier install's data.
-  if [[ "$_hrc" -eq 3 ]]; then
-    guard_leftover_data
-    _create_new_cluster
-  fi
+  # This IS a first-read ABSENT, learned one read later, so it runs the SAME two
+  # steps in the SAME order the definite-absent path above does — the guard first
+  # (a new cluster must not silently adopt an earlier install's data), the host
+  # data dirs second.
+  #
+  # THE DIRS STEP HAS TO RUN AGAIN HERE, and an earlier version of this block
+  # asserted the invariant in a comment while inverting it in the code
+  # (LukasWodka, client#984 round 7). `_ensure_host_data_dirs` already ran above
+  # the `case`, against whatever HOST_DATA_DIR held then; `guard_leftover_data`
+  # may have `rm -rf`'d those very directories (wipe) or re-pointed
+  # HOST_DATA_DIR at a path nothing has created yet (newdir). Its own header
+  # carries the mechanism for both.
+  #
+  # EXHAUSTIVE over _handle_existing_cluster's contract (0 and 3; it `error`s out
+  # rather than returning on a failed start). `if [[ … -eq 3 ]]` alone let every
+  # OTHER non-zero fall silently through to the reconcile tail below, which is
+  # the same "an outcome nobody wrote code for" shape as the bare call site this
+  # round fixed — so an unrecognised code stops here instead.
+  case "$_hrc" in
+    0) ;;
+    3) guard_leftover_data
+       _ensure_host_data_dirs
+       _create_new_cluster ;;
+    *) error "The existing-cluster step returned an unrecognised status ($_hrc) and this run can't tell whether your secure environment is ready. Nothing further was changed; see the install log and re-run." ;;
+  esac
 
   ensure_cluster_autostart
   _merge_kubeconfig
@@ -1202,6 +1279,20 @@ _handle_existing_cluster() {
     # headless install forever instead of reaching the curated error below. --wait
     # --timeout bounds it (parity with the Windows installer's 5-minute start
     # deadline) so a stuck start fails cleanly into that message.
+    #
+    # THE DOCKER ATTRIBUTION HERE IS DELIBERATE, and stays after `:944`'s was
+    # dropped (LukasWodka, client#984 round 7, raised so the choice is visible
+    # rather than reading as an oversight). The two sentences are about different
+    # events. `:944` reports a failed *listing* — a read, which a broken
+    # `$HOME/.k3d` or an unreadable kubeconfig fails just as readily as a wedged
+    # engine, so naming Docker there sent people to inspect a healthy daemon.
+    # This is a failed *start*: an ACTION, attempted with `--wait --timeout 5m`,
+    # against containers that only the engine can bring up. A wedged or stopped
+    # engine is the overwhelmingly common cause and the one the operator can do
+    # something about, which is the same judgement `:929-931` records for
+    # choosing this branch on UNKNOWN in the first place. "Check Docker is
+    # running" is also advice rather than a diagnosis — it does not claim the
+    # daemon is down, and the raw k3d stderr is in the install log either way.
     k3d cluster start "$CLUSTER_NAME" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1 \
       || error "Couldn't start your existing secure environment. Check Docker is running, then re-run."
     success "Secure environment started."
@@ -2143,7 +2234,40 @@ _create_new_cluster() {
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
       log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
       rm -f "$create_out"
-      _handle_existing_cluster
+      # THE THIRD CALL SITE OF _handle_existing_cluster (LukasWodka, client#984
+      # round 7). It grew rc 3 — "my own listing answered and there is no such
+      # cluster" — in this change; the two sites in create_cluster (`:958`,
+      # `:968`) were updated and this one was left bare. Under the installer's
+      # `set -euo pipefail` that is not benign: install-k8s.sh:49 sets errexit,
+      # nothing in the chain down to here is a condition context, and an `if`
+      # BODY is not exempt — so a 3 exited the whole run with status 3 and no
+      # curated message.
+      #
+      # AND CATCHING IT IS NOT ENOUGH: a bare `|| true` would fall through to the
+      # `return 0` below, and create_cluster would then run
+      # ensure_cluster_autostart, _merge_kubeconfig and _wait_for_api against a
+      # cluster the listing just proved absent — 180s of `kubectl cluster-info`
+      # ending in a bare failure.
+      local _hrc=0
+      _handle_existing_cluster || _hrc=$?
+      if [[ "$_hrc" -ne 0 && "$_hrc" -ne 3 ]]; then
+        # Exhaustive over the contract, for the same reason the create_cluster
+        # `case` is: an outcome this site has no branch for must stop the run,
+        # not slip through the `return 0` below into the reconcile tail.
+        error "Adopting the existing '$CLUSTER_NAME' environment returned an unrecognised status ($_hrc); this run can't tell whether it is ready. See the install log and re-run."
+      fi
+      if [[ "$_hrc" -eq 3 ]]; then
+        # This site cannot answer a 3 the way create_cluster does — by creating.
+        # The create we JUST ran is the thing that said the name is taken, so a
+        # retry gets the same refusal, forever. "create refuses the name" plus
+        # "the listing has no row for it" is the half-created leftover this
+        # function already documents two branches down (`:2200`): a stray
+        # `k3d-$CLUSTER_NAME` network or volume outlives the cluster and keeps
+        # holding the name. Same remedy, named here instead of guessed at.
+        warn "k3d wouldn't create '$CLUSTER_NAME' because that name is already in use, but the k3d cluster listing has no '$CLUSTER_NAME' in it — leftovers from a half-created environment (usually a stray docker network or volume) are holding the name."
+        _recreate_cluster_hint
+        error "Couldn't create your secure environment: the name '$CLUSTER_NAME' is held by leftovers from an earlier attempt. Clear them with the k3d line above, then re-run."
+      fi
       return 0
     fi
     if [[ "$create_rc" -eq 124 ]]; then

@@ -101,15 +101,20 @@ _depname() {
   [ "$output" = "0" ] || return 1
 }
 
-# client#974: the read is BOUNDED, and a deadline that fires must read as "cannot
-# tell" (0 -> degrade toward the normal flow), never as a number scraped from a
-# half-written table.
-@test "_assess_cluster_servers_running: a TIMED-OUT read -> 0 (bounded, client#974)" {
+# client#974: the read is BOUNDED, and a deadline that fires must never read as a
+# number scraped from a half-written table.
+#
+# The `[ "$status" -eq 0 ]` this test used to carry was asserting the defect
+# LukasWodka's round-7 finding is about: rc 0 is precisely what let the caller
+# read a blanked table as "0 servers running" and print "your secure environment
+# is stopped". The ORIGINAL point — a fired deadline never yields a scraped
+# count — is kept and the status assertion is inverted to the tri-state contract.
+@test "_assess_cluster_servers_running: a TIMED-OUT read -> 0 and rc 2 (bounded, client#974/#984)" {
   _bounded() { return 124; }
   k3d() { printf 'tracebloc 1/1 0/0\n'; }   # would say "1" if the bound were bypassed
   run _assess_cluster_servers_running
-  [ "$status" -eq 0 ] || return 1
   [ "$output" = "0" ] || return 1
+  [ "$status" -eq 2 ] || { echo "a fired deadline returned rc $status — indistinguishable from a real 0"; return 1; }
 }
 
 # client#974 / #680 at THIS site. The pre-fix line piped k3d into `awk … {exit}`:
@@ -1159,4 +1164,86 @@ _use_real_runtime_probe() {
   run assess_existing_install
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   assert_has "only partly set up" "$output"
+}
+
+# ── THE SECOND k3d READ (LukasWodka round 7 / Bugbot, client#984) ────────────
+# `_cluster_presence` running first narrows this and does not close it: the two
+# are SEPARATE `k3d cluster list` invocations, each with its own 15s bound, and
+# read 1 answering in 6s says nothing about read 2. This file already makes that
+# arithmetic argument about a different pair of bounds at `:291-297`.
+#
+# `(( _rc == 0 )) || _tbl=""` blanked BOTH halves — a fired deadline and a k3d
+# that exits 127 or on a permission error — into "0 servers running", which
+# classify mapped to `cluster-stopped` and `assess_existing_install` printed as
+# "Your secure environment is stopped — starting it and finishing setup", about a
+# machine whose listing never answered.
+@test "_assess_cluster_servers_running: a STALLED read is distinguishable from 0 servers (client#984)" {
+  local n rc
+  # 0 servers, read ANSWERED: a genuinely stopped cluster.
+  rc=0; n="$( _bounded() { shift; "$@"; }; k3d() { printf 'tracebloc 0/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$n" = "0" ] || { echo "stopped -> '$n'"; return 1; }
+  [ "$rc" -eq 0 ] || { echo "a read that ANSWERED reported rc $rc"; return 1; }
+  # The deadline.
+  rc=0; n="$( _bounded() { return 124; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$rc" -eq 2 ] || { echo "a STALLED read is still indistinguishable from 0 servers (rc $rc, n '$n')"; return 1; }
+  # And the other half of the collapse: k3d answered, and answered with an error.
+  rc=0; n="$( _bounded() { return 127; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$rc" -eq 2 ] || { echo "a FAILED read is still indistinguishable from 0 servers (rc $rc, n '$n')"; return 1; }
+  # Non-vacuous the other way: a running cluster still reports its count, rc 0.
+  rc=0; n="$( _bounded() { shift; "$@"; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$n" = "1" ] && [ "$rc" -eq 0 ] || { echo "running -> '$n' rc $rc"; return 1; }
+}
+
+@test "_assess_classify: a PRESENT cluster whose SERVER read stalls is indeterminate, not 'stopped' (client#984)" {
+  has() { return 0; }
+  _assess_runtime_down() { return 1; }
+  _cluster_presence() { return 0; }                  # read 1 answered: the cluster IS there
+  _assess_cluster_servers_running() { echo 0; return 2; }   # read 2 did not answer
+  detect_installed_client() { touch "$BATS_TEST_TMPDIR/helm-probed"; INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || { echo "state=$INSTALL_STATE"; return 1; }
+  [ "$INSTALL_STATE_REASON" != cluster-stopped ] || {
+    echo "claimed the environment is STOPPED off a listing that never answered"; return 1; }
+  [ "$INSTALL_STATE_REASON" = cluster-indeterminate ] || { echo "reason=$INSTALL_STATE_REASON"; return 1; }
+  # Same reason `presence == 2` short-circuits: Helm's reads are unbounded and
+  # talk to an API we have no evidence is up.
+  [ ! -f "$BATS_TEST_TMPDIR/helm-probed" ] || { echo "ran the Helm probe past an unreadable server count"; return 1; }
+}
+
+@test "_assess_classify: a PRESENT cluster with 0 servers is still 'cluster-stopped' (the pair)" {
+  # Without this the test above passes just as well against a classify that can
+  # never reach cluster-stopped at all — and that state is the common re-run case.
+  has() { return 0; }
+  _assess_runtime_down() { return 1; }
+  _cluster_presence() { return 0; }
+  _assess_cluster_servers_running() { echo 0; return 0; }    # answered: genuinely stopped
+  detect_installed_client() { INSTALLED_CLIENT_NS=tracebloc; }
+  _assess_classify
+  [ "$INSTALL_STATE" = degraded ] || { echo "state=$INSTALL_STATE"; return 1; }
+  [ "$INSTALL_STATE_REASON" = cluster-stopped ] || { echo "reason=$INSTALL_STATE_REASON"; return 1; }
+}
+
+@test "assess_existing_install: an unreadable listing never prints 'your environment is stopped' (client#984)" {
+  # The sentence is the finding: `:561` is what an operator actually sees, and it
+  # was reached from a read that never answered. Driven through the real copy so
+  # a future re-route to a differently-worded arm cannot pass this silently.
+  local out
+  out="$( has() { return 0; }
+          _assess_runtime_down() { return 1; }
+          _cluster_presence() { return 0; }
+          _assess_cluster_servers_running() { echo 0; return 2; }
+          detect_installed_client() { INSTALLED_CLIENT_NS=tracebloc; }
+          _assess_handoff() { echo "HANDOFF"; }
+          assess_existing_install 2>&1 )"
+  printf '%s\n' "$out" | grep -qi 'is stopped' && {
+    echo "printed the 'stopped' line about a machine whose listing never answered: $out"; return 1; }
+  printf '%s\n' "$out" | grep -qi 'only partly set up' && {
+    echo "fell through to the generic 'partly set up' line: $out"; return 1; }
+  # NON-VACUOUS: it must still say something, and say it is the READ that failed.
+  printf '%s\n' "$out" | grep -qiE "couldn't read|could not read" || {
+    echo "said nothing at all about the unreadable listing: $out"; return 1; }
 }

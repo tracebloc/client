@@ -52,8 +52,11 @@ for *what the operator sees and can act on*, not code elegance.
   sites carried `2>/dev/null || true`, which handles k3d *failing* and is therefore
   never reached (client#974, the twin of client#930). `check-style.sh` **rule 5**
   now covers `docker info|ps|inspect|version` (widened in client#984, where a bare
-  `docker ps` sat two lines above a new gate and defeated it), **rule 6** covers
-  `k3d cluster list`, and **rules 6 and 8 are their censuses**: a text scan that
+  `docker ps` sat two lines above a new gate and defeated it), **rule 7** covers
+  `k3d cluster list`, and **rules 6 and 8 are their censuses** (6 for 5, 8 for 7 —
+  this sentence said "rule 6 covers `k3d cluster list`, and rules 6 and 8 are
+  their censuses", contradicting itself, because the renumbering that moved k3d
+  from 6 to 7 only landed in the second half of it): a text scan that
   matches nothing prints as clean as one that checked everything, so each rule
   asserts it found at least the sites known to exist, with a floor a test proves
   honest. Pair every new grep-class gate here with a census — rule 5 shipped
@@ -137,6 +140,32 @@ for *what the operator sees and can act on*, not code elegance.
   inherits the AND-OR errexit suppression into subshells, so
   `( set -e; f ) || rc=$?` disables the very errexit it looks like it is testing
   and passes against the bug; use `bash -c 'set -e; source …; f'`.
+  (g) **A CONTRACT THAT GAINS AN OUTCOME MUST BE SWEPT AT ITS *EXISTING* CALL
+  SITES.** The one that outlasted every rule above it: client#984 needed seven
+  rounds, and each round changed a return contract, swept the code it was
+  writing, and left a site written *before* that value existed to receive it —
+  @LukasWodka's summary, *"the site was safe until the contract changed."*
+  `_cluster_presence` gained `2`, `_handle_existing_cluster` gained `3`,
+  `_bounded_capture_read` gained the failed/stalled split, and each time the
+  misses were in untouched code, so a diff review could not find them.
+  `_handle_existing_cluster`'s third call site — `_create_new_cluster`'s "already
+  exists" recovery, `|| _hrc=$?` at the other two — stayed bare, and under
+  `set -euo pipefail` a bare non-zero in an `if` **body** is not exempt: `return
+  3` exited the installer with status 3 and no message. **"The caller ignores the
+  value" is never benign here.** So: `grep` the identifier, enumerate EVERY call
+  site mechanically rather than from the diff, and show that each handles EVERY
+  documented value — a `case` with an explicit `*)` that takes the
+  non-destructive direction, not an implicit fall-through, and never a `*)` that
+  lands on the branch which creates or deletes. Two related traps: a
+  `local x; x="$(f)"` split declaration propagates a non-zero under errexit where
+  the single-statement `local x="$(f)"` does not, so the two forms are not
+  interchangeable at a multi-outcome call; and a producer's *string* outputs
+  (`INSTALL_STATE_REASON`) are the same class — a new value with no arm at the
+  consuming `case` falls into whatever generic sentence sits at `*)`. Group E of
+  `bounded-reads-propagate.bats` is the census: it enumerates the call sites of
+  every function in `MULTI_OUTCOME_FUNCTIONS` and reddens on any that does not
+  capture the status, with a per-function floor so a grep that stopped matching
+  cannot read as clean.
 
 - **`_bounded` is not a bound on macOS; `_bounded_capture` is.** `_bounded` execs
   timeout(1)/gtimeout(1) and runs the BARE command when neither is present, and

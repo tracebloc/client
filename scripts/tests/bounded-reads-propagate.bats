@@ -136,6 +136,20 @@ install_rootless_docker
 render_host_audit
 "
   PRE_EXISTING_CEILING=23
+
+  # ── THE CONSUMER TABLE (group E) ───────────────────────────────────────────
+  # Functions with a documented return OUTSIDE {0,1} — the ones a caller cannot
+  # consume as a boolean, and therefore the ones whose call sites have to be
+  # re-swept whenever the contract gains an outcome. Grows with every such
+  # contract; see group E's header for why this is a census and not a memory.
+  MULTI_OUTCOME_FUNCTIONS="
+_cluster_presence
+_handle_existing_cluster
+_assess_cluster_servers_running
+_bounded_capture
+_resolve_ca_bundle
+"
+  MULTI_OUTCOME_SITE_FLOOR=6
 }
 
 
@@ -386,14 +400,32 @@ _enclosing_function() {   # $1 = file, $2 = line
   [ "$p_state" != "$a_state" ] && [ "$a_state" != "$u_state" ] || { echo "$p_state / $a_state / $u_state"; return 1; }
 }
 
-@test "B. _assess_cluster_servers_running: a timeout is 0, and 0 degrades (never 'healthy')" {
-  local n
-  n="$( _bounded() { return 124; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
-        _assess_cluster_servers_running )"
-  [ "$n" = "0" ] || { echo "timeout -> $n"; return 1; }
-  n="$( _bounded() { shift; "$@"; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
-        _assess_cluster_servers_running )"
-  [ "$n" = "1" ] || { echo "running -> $n"; return 1; }
+@test "B. _assess_cluster_servers_running: running / stopped / couldn't-tell are three DISTINCT results" {
+  # THREE, not two. This test drove only running-vs-timeout and asserted the
+  # timeout as `0` with no status check — which is exactly the collapse
+  # LukasWodka's round-7 finding is about, sitting inside the file that exists to
+  # catch it: rc 0 on a fired deadline is what let `_assess_classify` read a
+  # blanked table as "0 servers running" and print "your secure environment is
+  # stopped" about a machine whose listing never answered. The count is still
+  # asserted; the STATUS is what now separates the three.
+  local n rc
+  # 1. running — a real count, and the read answered.
+  rc=0; n="$( _bounded() { shift; "$@"; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$n" = "1" ] && [ "$rc" -eq 0 ] || { echo "running -> '$n' rc $rc"; return 1; }
+  # 2. stopped — a real 0, and the read answered.
+  rc=0; n="$( _bounded() { shift; "$@"; }; k3d() { printf 'tracebloc 0/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$n" = "0" ] && [ "$rc" -eq 0 ] || { echo "stopped -> '$n' rc $rc"; return 1; }
+  # 3. couldn't tell — the count is a placeholder and says so.
+  rc=0; n="$( _bounded() { return 124; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$n" = "0" ] || { echo "timeout -> '$n' (a count scraped past the bound)"; return 1; }
+  [ "$rc" -eq 2 ] || { echo "timeout -> rc $rc, indistinguishable from a genuine 0"; return 1; }
+  # ...and the FAILED half of that state, which was blanked identically.
+  rc=0; n="$( _bounded() { return 127; }; k3d() { printf 'tracebloc 1/1 0/0\n'; }
+              _assess_cluster_servers_running )" || rc=$?
+  [ "$rc" -eq 2 ] || { echo "k3d exit 127 -> rc $rc, read as a genuine 0"; return 1; }
 }
 
 @test "B. _bounded_capture itself reports three outcomes distinguishably" {
@@ -756,4 +788,192 @@ _enclosing_function() {   # $1 = file, $2 = line
     echo "a genuinely stalled daemon lost its explanation"; return 1; }
   ! tar -xzOf "$tgz" 2>/dev/null | grep -q 'K3D-LIST-WAS-CALLED' || {
     echo "read the engine anyway after the gate timed out"; return 1; }
+}
+
+# ── E. THE CONSUMERS ────────────────────────────────────────────────────────
+#  A, B and D all look at the PRODUCER: does a bounded read reach its caller as
+#  three distinguishable outcomes. Six rounds of review on client#984 kept
+#  finding the same defect one step further out — the producer grew a NEW
+#  documented return and an EXISTING call site, written before that return
+#  existed, was left to receive it. LukasWodka's diagnosis, round 7: *"the site
+#  was safe until the contract changed."*
+#
+#    * `_cluster_presence` gained 2 (UNKNOWN). Its two call sites both had to
+#      grow an arm, and the assess classifier's is what keeps a stalled listing
+#      out of `fresh`.
+#    * `_handle_existing_cluster` gained 3 (AUTHORITATIVE ABSENT). Two of its
+#      three call sites were updated; the third — `_create_new_cluster`'s
+#      "already exists" recovery — stayed bare, so under the installer's
+#      `set -euo pipefail` a 3 aborted the whole run with status 3 and no
+#      curated message.
+#    * `_assess_cluster_servers_running` gained 2 ("the listing did not
+#      answer"). Its one caller had to stop reading a blanked table as
+#      "0 servers running" and printing "your environment is stopped".
+#
+#  Every one of those was found by a human reading the diff, and the same class
+#  came back the next round. So this is mechanical: enumerate every production
+#  call site by grep and require each to CAPTURE the status. A bare invocation
+#  of a multi-outcome function is the defect whatever the code around it does,
+#  because under errexit an unhandled non-zero ABORTS — "the caller ignores the
+#  value" is never benign here.
+#
+#  What this CANNOT prove is that each site does the right thing with each
+#  value; that is what group B's per-outcome drives and the PR's call-site table
+#  are for. It proves the weaker thing that kept being missed: no site receives
+#  an outcome nobody wrote code for.
+
+# Every production invocation of $1 in scripts/lib, as "file:line:statement".
+#
+# Statement-level, not line-level, because `local x="$(f)"` and `local x;
+# x="$(f)"` differ under errexit — `local` is the command in the first and its
+# own status wins, while the second is a plain assignment that propagates. A
+# whole-line view cannot tell those apart, and the split form is exactly the one
+# probe.sh:257 adopted deliberately.
+#
+# Line continuations are joined first: `f \` + `  || rc=$?` is a guarded site
+# that a per-line scan would report as bare. (check-style rule 5 carried the
+# mirror of this gap — saadqbal, round 6.)
+_call_statements() {   # $1 = function name, $2.. = files (default: every installer lib)
+  local fn="$1"; shift
+  [ "$#" -gt 0 ] || set -- "${BATS_TEST_DIRNAME}/../lib/"*.sh
+  awk -v fn="$fn" '
+    {
+      start = FNR
+      line  = $0
+      while (line ~ /\\[[:space:]]*$/) {
+        sub(/\\[[:space:]]*$/, "", line)
+        if ((getline nxt) <= 0) break
+        sub(/^[[:space:]]+/, "", nxt)
+        line = line " " nxt
+      }
+      if (line ~ /^[[:space:]]*#/)   next       # a comment, however long
+      if (line ~ "^" fn "\\(\\)")    next       # the definition itself
+      sub(/[[:space:]]+#[^"'\''`]*$/, "", line) # a trailing comment
+      n = split(line, st, ";")
+      for (i = 1; i <= n; i++) {
+        s = st[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+        if (s !~ "(^|[^[:alnum:]_])" fn "([[:space:]]|$|\\)|`)") continue
+        printf "%s:%d:%s\n", FILENAME, start, s
+      }
+    }
+  ' "$@"
+}
+
+# Does this statement CONSUME the callee's status instead of leaving it to
+# errexit? Deliberately syntactic and deliberately generous: anything that even
+# looks at the value passes, so a failure here is unambiguous.
+_statement_guards_status() {   # $1 = statement text
+  case "$1" in
+    *'||'*|*'&&'*)                            return 0 ;;  # `f || rc=$?`, `f && …`
+    'if '*|'elif '*|'while '*|'until '*|'!'*) return 0 ;;  # a condition context
+    'return '*|'exit '*)                      return 0 ;;  # the value IS the answer
+    # `local x="$(f)"` — `local` is the command and its status wins, so errexit
+    # never sees the substitution's. NOT the same as `local x; x="$(f)"`, which
+    # the `;` split above keeps as its own, unguarded statement.
+    'local '*|'declare '*|'export '*|'typeset '*) return 0 ;;
+  esac
+  return 1
+}
+
+@test "E. consumers: the derivation is not vacuous — it finds a planted BARE site and clears a guarded one" {
+  # Asserted against a FIXTURE before the census below is trusted on real code:
+  # a _statement_guards_status that returned 0 for everything, or a
+  # _call_statements that matched nothing, would both print "clean" over any tree
+  # at all. Same shape as rule 7's census-with-a-floor.
+  local fx="$BATS_TEST_TMPDIR/fixture.sh"
+  cat > "$fx" <<'FX'
+_probe() { return 2; }
+# _probe is only mentioned here, in prose
+_bare_caller() {
+  _probe
+}
+_guarded_caller() {
+  local rc=0
+  _probe || rc=$?
+  if _probe; then :; fi
+  _probe \
+    || rc=$?
+  local out="$(_probe)"
+  out2="$(_probe)" || rc=$?
+}
+_split_declaration_caller() {
+  local out; out="$(_probe)"
+}
+FX
+  local sites st n bare=""
+  sites="$(_call_statements _probe "$fx")"
+  n="$(printf '%s\n' "$sites" | grep -c . || true)"
+  # 7 real call statements; the definition line, the comment and the trailing-
+  # comment prose must all be excluded, and the continuation must be JOINED into
+  # one guarded statement rather than counted as a bare line plus an orphan.
+  [ "$n" -eq 7 ] || { echo "expected 7 call statements in the fixture, found $n:"; printf '%s\n' "$sites"; return 1; }
+  while read -r site; do
+    [ -n "$site" ] || continue
+    st="${site#*:}"; st="${st#*:}"
+    _statement_guards_status "$st" && continue
+    bare="$bare|$st"
+  done <<< "$sites"
+  # EXACTLY the two unguarded shapes, and no others: the bare call, and the
+  # SPLIT declaration `local out; out="$(_probe)"` — which propagates under
+  # errexit where the single-statement `local out="$(_probe)"` does not.
+  [ "$bare" = '|_probe|out="$(_probe)"' ] || {
+    echo "the classifier did not pick out exactly the two unguarded fixture sites; got: ${bare:-<none>}"
+    return 1
+  }
+}
+
+@test "E. consumers: every MULTI-OUTCOME function still exists (the table cannot rot)" {
+  # A stale name is a census over nothing, and it hides the contract that
+  # replaced it.
+  local fn missing=""
+  while read -r fn; do
+    [ -n "$fn" ] || continue
+    grep -rqE "^${fn}\(\)[[:space:]]*\{" "${BATS_TEST_DIRNAME}/../lib/"*.sh \
+      || missing="$missing $fn"
+  done <<< "$MULTI_OUTCOME_FUNCTIONS"
+  [ -z "$missing" ] || {
+    echo "MULTI_OUTCOME_FUNCTIONS names function(s) that no longer exist:$missing"
+    return 1
+  }
+}
+
+@test "E. consumers: every call site of a MULTI-OUTCOME function CAPTURES its status" {
+  local fn sites site file line st n total=0 bare=""
+  while read -r fn; do
+    [ -n "$fn" ] || continue
+    sites="$(_call_statements "$fn")"
+    n="$(printf '%s\n' "$sites" | grep -c . || true)"
+    # NON-VACUOUS PER FUNCTION. An enumeration that finds nothing means the grep
+    # stopped matching — a rename, a moved file, a changed call shape — not that
+    # the contract is safe, and every assertion below would then pass having
+    # inspected nothing.
+    [ "$n" -ge 1 ] || {
+      echo "found NO call sites for $fn in scripts/lib — the enumeration has gone vacuous"
+      return 1
+    }
+    total=$(( total + n ))
+    while read -r site; do
+      [ -n "$site" ] || continue
+      file="${site%%:*}"; site="${site#*:}"; line="${site%%:*}"; st="${site#*:}"
+      _statement_guards_status "$st" && continue
+      bare="$bare
+  ${fn}  ($(basename "$file"):${line})  ->  ${st}"
+    done <<< "$sites"
+  done <<< "$MULTI_OUTCOME_FUNCTIONS"
+
+  # AND A FLOOR ON THE TOTAL, so a table of names that all resolve to one call
+  # each cannot pass as a sweep.
+  [ "$total" -ge "$MULTI_OUTCOME_SITE_FLOOR" ] || {
+    echo "only $total call site(s) found across the table — floor is $MULTI_OUTCOME_SITE_FLOOR; the derivation has narrowed"
+    return 1
+  }
+  [ -z "$bare" ] || {
+    echo "call site(s) of a MULTI-OUTCOME function that do not capture its status:$bare"
+    echo
+    echo "Under the installer's 'set -euo pipefail' an unhandled non-zero ABORTS the"
+    echo "run, so 'the caller ignores the value' is never benign. Capture it"
+    echo "(f || rc=\$?) and decide what EVERY documented return means at that site."
+    return 1
+  }
 }

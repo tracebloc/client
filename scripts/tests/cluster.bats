@@ -2955,3 +2955,205 @@ _hec_mocks() {
   printf '%s\n' "$output" | grep -qiE "couldn't read|could not read" || {
     echo "said nothing about the unreadable listing: $output"; return 1; }
 }
+
+# ── rc 3 AT THE THIRD CALL SITE (LukasWodka round 7, client#984) ─────────────
+# `_handle_existing_cluster` gained rc 3 in this PR. Two of its three call sites
+# were updated — `create_cluster`'s two `case` arms, both `|| _hrc=$?` — and the
+# third, `_create_new_cluster`'s "already exists" recovery, was left bare. Under
+# the installer's `set -euo pipefail` a bare non-zero in an `if` BODY is not
+# exempt, so rc 3 exited the run with status 3 and no curated message.
+#
+# Driven in a REAL errexit subprocess. bats' `run` executes its command with
+# errexit OFF, so the abort this pair is about cannot happen inside `run` — a
+# `run _create_new_cluster` guard here would be vacuous by construction, which is
+# the same trap group B's `_bounded_capture` deadline tests are run in a
+# subprocess to avoid.
+_rc3_recovery_script() {   # $1 = what _handle_existing_cluster returns
+  local hrc="$1" script="$BATS_TEST_TMPDIR/rc3-recovery-${hrc}.sh"
+  cat > "$script" <<SH
+set -euo pipefail
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/cluster.sh"
+LOG_FILE=/dev/null
+CLUSTER_NAME=tracebloc
+HOST_DATA_DIR="${BATS_TEST_TMPDIR}/rc3-data"; mkdir -p "\$HOST_DATA_DIR"
+SERVERS=1; AGENTS=0; K8S_VERSION=""; K3D_GPU_FLAGS=()
+TB_STORAGE_MODE=node-local
+# k3d refuses the create because the name is already taken...
+k3d() { echo "Failed to create cluster: a cluster with that name already exists"; return 1; }
+# ...and then the reuse path's OWN listing answers with this verdict.
+_handle_existing_cluster() { return ${hrc}; }
+_wait_for_metrics_apiservice() { return 0; }
+_create_new_cluster
+echo "REACHED-RETURN-0"
+SH
+  printf '%s' "$script"
+}
+
+@test "_create_new_cluster: rc 3 from the 'already exists' recovery is HANDLED, not left to errexit (client#984)" {
+  run bash "$(_rc3_recovery_script 3)"
+  # It must not fall through to `return 0`: create_cluster would then run
+  # ensure_cluster_autostart / _merge_kubeconfig / _wait_for_api against a cluster
+  # the listing just proved absent — a 180s kubectl wait ending in a bare failure.
+  printf '%s\n' "$output" | grep -q 'REACHED-RETURN-0' && {
+    echo "swallowed the authoritative-absent signal and reported success:"; echo "$output"; return 1; }
+  # And it must not be the RAW propagated 3 either — that is the unhandled abort.
+  [ "$status" -ne 3 ] || {
+    echo "rc 3 propagated uncaught: the installer exited with status 3 and no curated message:"
+    echo "$output"; return 1; }
+  [ "$status" -ne 0 ] || { echo "reported success on a create that never happened: $output"; return 1; }
+  # THE CLAIM: say what the pair "create refuses the name / the listing has no row
+  # for it" actually is — leftovers holding the name — and give the remedy. This
+  # site cannot retry the create the way create_cluster's rc-3 block does: the
+  # create we just ran is the thing that said the name is taken, so a retry loops.
+  printf '%s\n' "$output" | grep -qiE 'leftover|already taken|half-created' || {
+    echo "aborted without naming the leftover state that holds the name:"; echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'k3d cluster delete tracebloc' || {
+    echo "gave no remedy for the leftovers:"; echo "$output"; return 1; }
+}
+
+@test "_create_new_cluster: rc 0 from the same recovery still returns 0 (the pair)" {
+  # Without this the test above passes just as well against a recovery branch that
+  # refuses every "already exists", which would break the ordinary adopt path.
+  run bash "$(_rc3_recovery_script 0)"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'REACHED-RETURN-0' || {
+    echo "an adoptable existing cluster no longer completes the recovery:"; echo "$output"; return 1; }
+}
+
+# ── THE ORDERING INVARIANT ON THE rc-3 PATH (LukasWodka round 7) ─────────────
+# Every path that reaches `_create_new_cluster` must have run
+# `guard_leftover_data` FIRST and created the host data dirs SECOND. The
+# definite-absent path does (`:908` then `:917`); the rc-3 block ran them the
+# other way round, because `_ensure_tracebloc_dirs` had already fired above the
+# `case`. Two real consequences, both asserted below rather than described:
+# `_wipe_leftover_data` does `rm -rf` on the DIRECTORY, and the guard's newdir
+# arm re-points HOST_DATA_DIR at a path `validate_config` neither mkdirs nor
+# chmods. Hostpath only — node-local has no host dirs to create.
+_rc3_order_mocks() {
+  _rootless_active()            { return 1; }
+  _pf_recheck_runtime_mem()     { return 0; }
+  ensure_cluster_autostart()    { record "ensure_cluster_autostart"; }
+  _merge_kubeconfig()           { record "_merge_kubeconfig"; }
+  _export_host_no_proxy()       { record "_export_host_no_proxy"; }
+  _wait_for_api()               { record "_wait_for_api"; }
+  _verify_nodes_see_host_data() { record "_verify_nodes_see_host_data"; }
+  _generate_node_cdi_specs()    { record "_generate_node_cdi_specs"; }
+  _cluster_presence()           { return 2; }    # first read unreadable...
+  _handle_existing_cluster()    { record "_handle_existing_cluster"; return 3; }   # ...then a definite ABSENT
+  TB_STORAGE_MODE=hostpath
+  TB_LEFTOVER_ACTION=wipe
+}
+
+@test "create_cluster: on the rc-3 path the leftover-data guard runs BEFORE the dirs are created (client#984)" {
+  _rc3_order_mocks
+  guard_leftover_data() { record "guard_leftover_data"; }
+  _ensure_tracebloc_dirs() { record "_ensure_tracebloc_dirs"; }
+  _create_new_cluster() { record "_create_new_cluster"; }
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  # The order that matters, read off the recording: the LAST dirs call must sit
+  # between the guard and the create. Anything else means _create_new_cluster
+  # bind-mounts a HOST_DATA_DIR the guard has since wiped or re-pointed.
+  local order
+  order="$(grep -nE 'guard_leftover_data|_ensure_tracebloc_dirs|_create_new_cluster' "$MOCK_CALLS" | tr '\n' ' ')"
+  local g d c
+  g="$(grep -nx 'guard_leftover_data'    "$MOCK_CALLS" | tail -1 | cut -d: -f1)"
+  d="$(grep -nx '_ensure_tracebloc_dirs' "$MOCK_CALLS" | tail -1 | cut -d: -f1)"
+  c="$(grep -nx '_create_new_cluster'    "$MOCK_CALLS" | tail -1 | cut -d: -f1)"
+  # NON-VACUOUS: all three must actually have been recorded. An empty $g/$d/$c
+  # would make the comparisons below silently true.
+  [ -n "$g" ] && [ -n "$d" ] && [ -n "$c" ] || {
+    echo "one of guard/dirs/create never ran on the rc-3 path — the guard is checking nothing"
+    echo "order: $order"; mock_calls; return 1; }
+  [ "$g" -lt "$d" ] || {
+    echo "the dirs were created BEFORE the leftover-data guard ran (order: $order)"
+    echo "guard=$g dirs=$d create=$c"; return 1; }
+  [ "$d" -lt "$c" ] || {
+    echo "the cluster was created before the dirs it bind-mounts (order: $order)"
+    echo "guard=$g dirs=$d create=$c"; return 1; }
+}
+
+@test "create_cluster: rc-3 + a WIPE leaves the bind-mounted dirs on disk (client#984)" {
+  # The consequence, not the ordering. `_leftover_data_dirs` returns
+  # \$base/mysql and \$base/data and `_wipe_leftover_data` does `rm -rf "\$d"` —
+  # the directory itself. The definite-absent path re-creates and re-chmods them
+  # afterwards; on the rc-3 path nothing did, so _create_new_cluster bind-mounted
+  # a HOST_DATA_DIR whose mysql and data were gone.
+  # A throwaway HOME, so nothing in this test can reach the real one:
+  # _wipe_leftover_data deliberately refuses any HOST_DATA_DIR outside $HOME.
+  HOME="$BATS_TEST_TMPDIR/home"; mkdir -p "$HOME"
+  HOST_DATA_DIR="$HOME/.tracebloc"
+  mkdir -p "$HOST_DATA_DIR/mysql" "$HOST_DATA_DIR/data"
+  : > "$HOST_DATA_DIR/mysql/ibdata1"
+  : > "$HOST_DATA_DIR/data/old.csv"
+  _rc3_order_mocks
+  # The REAL guard_leftover_data and the REAL _ensure_tracebloc_dirs.
+  _tty_usable() { return 1; }                  # non-interactive; TB_LEFTOVER_ACTION=wipe decides
+  _create_new_cluster() {
+    record "_create_new_cluster"
+    # Snapshot what the bind mount would see, at the moment it is taken.
+    [ -d "$HOST_DATA_DIR/mysql" ] && record "mount-sees mysql"
+    [ -d "$HOST_DATA_DIR/data" ]  && record "mount-sees data"
+    return 0
+  }
+  run create_cluster
+  local rc="$status"
+  # Assert BEFORE cleaning up, but clean up either way.
+  local sawmysql=0 sawdata=0 wiped=0
+  grep -qx 'mount-sees mysql' "$MOCK_CALLS" && sawmysql=1
+  grep -qx 'mount-sees data'  "$MOCK_CALLS" && sawdata=1
+  [ -e "$HOST_DATA_DIR/mysql/ibdata1" ] || wiped=1
+  rm -rf "$HOST_DATA_DIR"
+  [ "$rc" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  # NON-VACUOUS: the wipe must actually have happened, or "the dirs still exist"
+  # proves nothing at all.
+  [ "$wiped" -eq 1 ] || {
+    echo "the leftover data was never wiped, so this test is not exercising the wipe arm"
+    mock_calls; return 1; }
+  [ "$sawmysql" -eq 1 ] || { echo "_create_new_cluster would bind-mount a HOST_DATA_DIR with no mysql/ dir"; mock_calls; return 1; }
+  [ "$sawdata"  -eq 1 ] || { echo "_create_new_cluster would bind-mount a HOST_DATA_DIR with no data/ dir";  mock_calls; return 1; }
+}
+
+@test "create_cluster: rc-3 + a NEWDIR creates the dirs under the NEW path (client#984)" {
+  # The guard's newdir arm sets HOST_DATA_DIR="\$newdir", calls validate_config —
+  # which contains no mkdir and no chmod — and recurses. On the definite-absent
+  # path the dirs step then runs against the new path; on the rc-3 path it had
+  # already run against the OLD one.
+  # `_test_newdir`, NOT `newdir`: guard_leftover_data declares its own
+  # `local newdir=""`, and bash's dynamic scoping means a same-named local in the
+  # test body is SHADOWED by it inside the stub — the answer came back empty and
+  # the guard aborted, which looked like a product failure and was a harness one.
+  local olddir="$BATS_TEST_TMPDIR/old" _test_newdir="$BATS_TEST_TMPDIR/new"
+  mkdir -p "$olddir/mysql"; : > "$olddir/mysql/ibdata1"
+  HOST_DATA_DIR="$olddir"
+  _rc3_order_mocks
+  TB_LEFTOVER_ACTION=""                        # the interactive prompt, answered "n"
+  _tty_usable() { return 0; }
+  # Answers the two real prompts by their text: the action choice, then the path.
+  # `_test_newdir` is a `local` of THIS test body and bash scopes dynamically, so
+  # the stub sees it when create_cluster calls down into the guard.
+  _read_sanitized() {
+    case "$1" in
+      *Choice*)    eval "$2=n" ;;
+      *directory*) eval "$2=\"\$_test_newdir\"" ;;
+      *)           eval "$2=" ;;
+    esac
+  }
+  validate_config() { :; }                     # as in production: no mkdir, no chmod
+  _create_new_cluster() {
+    record "_create_new_cluster HOST_DATA_DIR=$HOST_DATA_DIR"
+    [ -d "$HOST_DATA_DIR/mysql" ] && record "mount-sees mysql"
+    [ -d "$HOST_DATA_DIR/data" ]  && record "mount-sees data"
+    return 0
+  }
+  # Second pass of the recursive guard must not prompt again: the new dir is empty.
+  run create_cluster
+  [ "$status" -eq 0 ] || { echo "$output"; mock_calls; return 1; }
+  grep -q "_create_new_cluster HOST_DATA_DIR=$_test_newdir" "$MOCK_CALLS" 2>/dev/null || {
+    # The prompt path only reaches the new dir if the answer was fed through; if
+    # this fails the test is not exercising the newdir arm at all.
+    echo "the newdir arm was not exercised (HOST_DATA_DIR never became $_test_newdir)"; mock_calls; return 1; }
+  grep -qx 'mount-sees mysql' "$MOCK_CALLS" || { echo "the NEW directory got no mysql/ before the mount"; mock_calls; return 1; }
+  grep -qx 'mount-sees data'  "$MOCK_CALLS" || { echo "the NEW directory got no data/ before the mount";  mock_calls; return 1; }
+}
