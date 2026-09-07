@@ -2209,25 +2209,25 @@ mysqlRootPassword: ""
 # `ALTER USER 'root'` DDL to align root's live password to the Secret value in the
 # same maintenance window. It clears ALL of the guard's refuse arms (existing
 # datadir, declared, and the offline fail-closed one), and it runs no DDL itself.
-# It ALSO clears tracebloc.bakedRootRotationOn's datadir-present-but-Secret-absent
-# refusal (backend#3226) AND, over a SURVIVING mysql-root-rotated marker, its
-# marker-forces-ON arm (backend#3255): a `helm uninstall` keeps BOTH the
-# resource-policy: keep datadir PVC and the marker while deleting the Secret, so a
-# reuse-data reinstall would otherwise either wedge the render or ARM rotation off
-# the leftover marker — minting a root password the live database never accepted
-# (1045) — even though the intent is to leave the edge on its image-baked password.
-# UNSET, a surviving marker still keeps rotation ON (the safe born-rotated default:
-# a reinstall whose Secret is genuinely gone fails loud rather than silently
-# dropping root); SET, the marker yields and the edge resolves OFF onto the
-# image-baked password. A born-rotated edge on a NORMAL upgrade (Secret intact)
-# still needs no ack — its marker is consulted first, unchanged.
-#   For that image-baked reinstall, ALSO delete the leftover marker
+# It ALSO clears tracebloc.bakedRootRotationOn's own refuse arms and, over a
+# SURVIVING mysql-root-rotated marker whose rotation the Secret no longer backs, its
+# marker-forces-ON arm (backend#3226 / backend#3255). The marker (resource-policy:
+# keep) can OUTLIVE the rotation it recorded — an old, pre-rotation Secret restored
+# over a datadir whose marker survived leaves marker present + Secret present but no
+# MYSQL_ROOT_PASSWORD — and #3226 made the marker force rotation ON there, minting a
+# root password the live database never accepted (1045). SET, the marker yields and
+# bakedRootRotationOn resolves OFF onto the image-baked password; UNSET, the marker
+# still wins (the safe born-rotated default). A born-rotated edge on a NORMAL upgrade
+# (its Secret still carries the root) needs no ack — bakedRoot keeps it ON either way.
+#   This does NOT bypass the SEPARATE credential-collision guard in secrets.yaml
+#   (backend#2571): a reinstall whose `helm uninstall` deleted the WHOLE Secret while
+#   the resource-policy: keep datadir PVC survived is refused THERE, regardless of
+#   this ack — copy the Secret back to the name this render wants, or delete the
+#   datadir (that guard names both). The ack governs root's rotation state, not that
+#   guard. Once past it on the image-baked path, ALSO delete the leftover marker
 #   (`kubectl -n <ns> delete configmap mysql-root-rotated`) so the edge is durable
-#   WITHOUT pinning this ack: the ack only makes the SURVIVING marker yield, it does
-#   not remove it (resource-policy: keep), so a later render that omits the ack would
-#   re-arm rotation off the stale marker and wedge again in the existing-datadir mint
-#   guard. Deleting the marker leaves a genuinely un-rotated edge (no marker, no root
-#   in the Secret) that resolves OFF on its own, ack or no ack.
+#   WITHOUT pinning this ack: the ack makes the SURVIVING marker yield but does not
+#   remove it, so a later render that omits the ack would re-arm off the stale marker.
 #
 # SELF-EXPIRING ONLY ON A LIVE OR SERVER-SIDE RENDER (backend#2892): once rotated,
 # tier 2 (a live `lookup` of the Secret) preserves MYSQL_ROOT_PASSWORD and the mint

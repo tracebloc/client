@@ -931,26 +931,25 @@ true
     kept datadir whose marker survived resolves ON from the marker and never trips
     the refusal on the Secret that the uninstall deleted.
 
-    GATED ON `mysqlRootRotationAcknowledged` (backend#3255). A helm uninstall keeps
-    BOTH the datadir PVC and this marker (resource-policy: keep) while deleting the
-    Secret, so a reuse-data reinstall can present a SURVIVING marker over a datadir
-    the operator means to leave on its image-baked password -- a partial cleanup, or
-    a datadir restored under a stale marker. Treating the marker as absolute there
-    armed rotation the ack could not clear, and secrets.yaml then minted a NEW root
-    password the live database never accepted (1045). With the ack SET the marker no
-    longer forces ON: control falls through to the Secret-evidence arms below, which
-    keep a still-provably-rotated edge ON (its baked Secret) but resolve OFF when the
-    marker is the only rotation signal left -- leaving that edge on the image-baked
-    password, the ack's documented meaning. UNSET, the marker still wins (the safe
-    born-rotated default: a reinstall whose Secret is genuinely gone fails loud in
-    secrets.yaml's existing-datadir mint guard rather than silently dropping root),
-    so the backend#947 / backend#3189 upgrade paths are unchanged.
+    GATED ON `mysqlRootRotationAcknowledged` (backend#3255). This marker
+    (resource-policy: keep) can OUTLIVE the rotation it recorded: an old,
+    pre-rotation Secret restored over a datadir whose marker survived leaves the
+    marker present but the Secret without MYSQL_ROOT_PASSWORD. Treating the marker as
+    absolute there armed rotation the ack could not clear, and secrets.yaml then
+    minted a root password the live database never accepted (1045). With the ack SET
+    the marker no longer forces ON: control falls through to the Secret-evidence arms
+    below, which keep a still-provably-rotated edge ON (its baked Secret) but resolve
+    OFF when the marker's rotation is no longer backed by the Secret -- leaving that
+    edge image-baked, the ack's documented meaning. UNSET, the marker still wins (the
+    safe born-rotated default), so backend#947 / backend#3189 are unchanged.
 
-    The ack makes the SURVIVING marker yield; it does NOT delete it (keep). So the
-    image-baked edge is durable only while the ack stays set -- a later no-ack render
-    re-arms off the stale marker and wedges again. The reinstall should also delete
-    the leftover marker (values.yaml documents the kubectl) to leave a genuinely
-    un-rotated edge that resolves OFF on its own.
+    This is NOT the deleted-Secret reinstall guard: secrets.yaml's credential-
+    collision refusal (backend#2571) already owns a LIVE render with mysql-pvc
+    present and the Secret GONE (copy it back to the name this render wants, or delete
+    the datadir), independently of this ack. And the ack makes the SURVIVING marker
+    yield WITHOUT deleting it, so an image-baked edge is durable only while the ack
+    stays set unless the operator also deletes the leftover marker (values.yaml
+    documents the kubectl).
 */ -}}
 true
 {{- else -}}
