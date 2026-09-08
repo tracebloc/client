@@ -19,27 +19,193 @@
 # never shells out — the k3d call count is exactly what it was before this fix,
 # and the common re-run (jq present, cluster found by probe 1) still costs one
 # call. (Asad: an eager capture at the top made that path cost two.)
-_cluster_exists() {
+#
+# EVERY probe here is BOUNDED (client#974, the bash twin of client#930). Each one
+# already carried `2>/dev/null || true`, which handles k3d FAILING — and a WEDGED
+# Docker daemon does not fail `k3d cluster list`, it BLOCKS, so that `|| true` was
+# never reached. These probes sit on the MAIN install path, so the pre-fix shape
+# parked a headless install right here with no output and nothing to kill it:
+# exactly #930's shape, on the platform most internal installs use. Same
+# distinction _docker_answers' header draws for a bare `docker info` (#741/#744):
+# stopped fails, wedged hangs.
+#
+# BOUNDING A CALL CHANGES ITS TYPE, and this is where that bites (Bugbot High on
+# client#984). Before the bound there were two outcomes — present, absent. After
+# it there are THREE — present, absent, COULDN'T TELL — and the first cut of this
+# fix collapsed the third into "absent". That is materially worse than the hang it
+# replaced: `create_cluster` would then run `guard_leftover_data`, which PROMPTS
+# about deleting an existing install's data, and `_create_new_cluster`, against a
+# cluster that may still be running; and assess's gate would label the machine
+# `fresh` and offer a first-time install over it. That is client#682's
+# misclassification, which the header above was written about, and it is the same
+# question LukasWodka blocked the PowerShell twin (#973) on: what does the main
+# install path DO when the deadline fires?
+#
+# So the primitive is TRI-STATE, with the contract _k3d_cluster_running
+# (gpu-nvidia.sh) already established in this codebase for the same reason —
+# "a probe TIMEOUT isn't mistaken for 'not running'":
+#   0 = PRESENT     (a probe answered and matched CLUSTER_NAME)
+#   1 = ABSENT      (a probe answered and did not match)
+#   2 = UNKNOWN     (every probe's READ failed — timed out, or k3d itself broke)
+# Callers must decide what UNKNOWN means for THEM; nothing here decides for them.
+#
+# THREE PROBES OF ONE QUESTION would have made a per-probe deadline TRIPLE the
+# worst case, so the chain is tightened in the same breath:
+#   * probe 3's looser matcher runs against the text probe 2 ALREADY captured. It
+#     tolerates a different table LAYOUT, not a different daemon, so it never
+#     needed its own engine round-trip.
+#   * probe 3 spends a real second read only when probe 2's read ERRORED — an
+#     older k3d that does not know --no-headers — and never when it TIMED OUT
+#     (124): the same wedged daemon cannot answer a retry, it can only eat another
+#     deadline. A timeout ends the chain with a log line naming itself, which is
+#     the finding support needs (the Windows twin keeps the same line).
+# Worst case: 2 bounded reads with jq present, 1 without. Before: unbounded.
+#
+# NOTE ON macOS — A KNOWN LIMITATION, not a covered case. `_bounded` runs the
+# BARE command when neither timeout(1) nor gtimeout(1) is on PATH, and neither
+# ships on a stock Mac (both are GNU coreutils), so on such a box these probes are
+# documented-degraded rather than bounded.
+#
+# An earlier version of this comment claimed macOS was covered because
+# _assess_runtime_down had already classified the daemon "through a coreutils-free
+# probe". THAT WAS FALSE (LukasWodka, client#984) and worth recording, because a
+# wrong comment is how the next author concludes the platform is handled:
+# _assess_runtime_down classifies via `_bounded "$TB_ASSESS_DOCKER_TIMEOUT" docker
+# info`, which is the coreutils-DEPENDENT probe and the documented no-op on a
+# stock Mac. The genuinely coreutils-free gates are in preflight.sh (137/144/343,
+# via _docker_answers_bounded / spin's background-PID kill), and install-k8s.sh
+# calls assess_existing_install BEFORE run_preflight — so on a stock Mac nothing
+# coreutils-free runs ahead of this point.
+#
+# Not a regression: before #974 a wedged Mac hung here unbounded, and it still
+# would. It is left this way rather than routed through spin because this is
+# called from inside `if` conditions (create_cluster, assess's classifier) where
+# a spinner cannot be drawn, and because the tri-state above means a stock Mac
+# that DOES have coreutils now degrades safely instead of misclassifying. The one
+# site where the cost was the whole artifact rather than a stall — the --diagnose
+# bundle — is gated on _docker_answers_bounded, which needs no coreutils
+# (diagnose.sh).
+#
+# THE TOOL FOR CLOSING IT NOW EXISTS, IN THIS DIFF. This sentence used to end
+# "closing this properly means a coreutils-free bound usable from a boolean
+# context, which is its own change" — and then that change shipped here, so the
+# comment was telling the next author to go and build something already on the
+# shelf (LukasWodka, client#984). It is `common.sh`'s `_bounded_capture`:
+# coreutils-free by construction (it backgrounds the child and kills it off its
+# own deadline, the `spin` mechanism), it returns the child's real status or 124,
+# it CAPTURES — which is what `_cluster_presence` needs and what `spin` and
+# `_docker_answers_bounded` cannot give — and `_bounded_capture_read` already
+# drives it from a boolean context. `common.sh` is sourced before `cluster.sh`
+# (install-k8s.sh:65/:81), so it is in scope here.
+#
+# What is deferred is the APPLICATION, and for one concrete reason:
+# `_bounded_capture` writes through a caller-supplied scratch FILE, so every
+# probe below would need a writable path chosen on the install path — before
+# HOST_DATA_DIR is validated, on a machine whose disk state is one of the things
+# being assessed — plus its cleanup, on a function called from inside `if`
+# conditions. That is a real change with its own failure modes, not a
+# find-and-replace, so it is a follow-up rather than a fourth thing bolted onto
+# this diff. The tri-state above is what makes deferring it safe: a stock Mac
+# that stalls here degrades to UNKNOWN rather than misclassifying.
+_cluster_presence() {
+  local _read_ok=0            # did ANY probe's read actually answer?
   # 1) JSON output (exact name match) when jq is available
   if command -v jq &>/dev/null; then
-    local _json
-    _json="$(k3d cluster list -o json 2>/dev/null || true)"
-    if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
-      return 0
+    local _json _rc=0
+    # `|| _rc=$?` (not a bare `; _rc=$?`) so a non-zero probe under the installer's
+    # `set -e` captures the code instead of aborting (the #431 Bugbot form).
+    _json="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -eq 0 ]]; then
+      # A READ THAT SUCCEEDED AND PARSES IS AUTHORITATIVE — BOTH WAYS, and it
+      # RETURNS. Falling through on "parsed fine, no match" let probe 2's TIMEOUT
+      # overwrite a definite ABSENT we already held, so a first-time install with
+      # jq present reported UNKNOWN, took the reuse branch, and tried to START a
+      # cluster the listing had just proved absent instead of creating one
+      # (Bugbot High, client#984 round 2).
+      #
+      # The general rule this is an instance of: a definite answer from a read that
+      # COMPLETED always wins over "couldn't tell" from a read that did not. Only
+      # an UNPARSEABLE payload is inconclusive and falls through — which is the
+      # reason the table probes exist at all (SUSE-era k3d whose JSON shape or
+      # jq availability differed), and `jq -e` alone cannot tell "no match" from
+      # "not JSON": both are non-zero. So the shape is checked first.
+      if jq -e 'type == "array"' >/dev/null 2>&1 <<<"$_json"; then
+        if jq -e --arg n "$CLUSTER_NAME" '(.[] | select(.name == $n)) != null' >/dev/null 2>&1 <<<"$_json"; then
+          return 0
+        fi
+        return 1
+      fi
+      # Parsed as something other than an array (or not at all): inconclusive, not
+      # empty. Fall through to the table probes rather than call the cluster absent.
+      #
+      # AND IT DOES NOT SET `_read_ok` (Bugbot Medium, client#984 round 5). It used
+      # to, which quietly re-armed the very collapse the final `(( _read_ok ))`
+      # exists to prevent: this payload is INCONCLUSIVE — that is the whole reason
+      # we fall through — so with both table reads then failing for a non-timeout
+      # reason (k3d 127, a permission error), the function reached that test
+      # holding a 1 it had not earned and returned ABSENT. Callers then ran
+      # guard_leftover_data — which prompts, with delete among the options — and
+      # _create_new_cluster, against a machine whose listing never once parsed.
+      # `_read_ok` means "a read answered THE QUESTION", not "the engine emitted
+      # bytes".
+      log "k3d answered the JSON cluster listing with a payload that is not an array; falling back to the table listing."
+    elif [[ "$_rc" -eq 124 ]]; then
+      log "The k3d cluster listing (JSON form) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
+      # A wedged engine cannot answer the table probes either, and each would cost
+      # another full deadline. Report UNKNOWN now and let the caller decide.
+      return 2
     fi
   fi
   # 2) Table format: first column is cluster name (--no-headers)
-  local _list
-  _list="$(k3d cluster list --no-headers 2>/dev/null || true)"
+  local _list _lrc=0
+  _list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _lrc=$?
+  if [[ "$_lrc" -eq 124 ]]; then
+    log "The k3d cluster listing (table form) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
+    return 2
+  fi
+  # 3) A READ error (not an empty answer) is the one case worth a second engine
+  #    round-trip: `--no-headers` is unsupported on some older k3d builds, and the
+  #    header-ful listing still answers the question.
+  if [[ "$_lrc" -ne 0 ]]; then
+    local _trc=0
+    _list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list 2>/dev/null)" || _trc=$?
+    if [[ "$_trc" -eq 124 ]]; then
+      log "The k3d cluster listing (header-ful fallback) timed out after ${TB_K3D_LIST_TIMEOUT:-15}s (is the Docker daemon responding?)."
+      return 2
+    fi
+    if [[ "$_trc" -eq 0 ]]; then _read_ok=1; else _list=""; fi
+  else
+    _read_ok=1
+  fi
   if awk -v n="$CLUSTER_NAME" '$1 == n { exit 0 } END { exit 1 }' <<<"$_list"; then
     return 0
   fi
-  # 3) Fallback: any line whose first column equals CLUSTER_NAME (handles varying table layout)
-  if grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]" <<<"$(k3d cluster list 2>/dev/null || true)"; then
+  # Layout-tolerant fallback matcher: any line whose first column equals
+  # CLUSTER_NAME (handles a header row / varying table layout). Runs on the text
+  # already in hand — no extra call.
+  if grep -qE "^[[:space:]]*${CLUSTER_NAME}[[:space:]]" <<<"$_list"; then
     return 0
   fi
+  # NOT MATCHED is only ABSENT if something actually READ. Every probe failing for
+  # a non-timeout reason (no k3d on PATH, a permission error, a k3d that dies on
+  # every invocation) is still "couldn't tell", and must not be reported as an
+  # empty cluster list — that is the same collapse as the timeout, arriving
+  # through a different door.
+  (( _read_ok )) || {
+    log "No k3d cluster listing could be read; cluster presence indeterminate."
+    return 2
+  }
   return 1
 }
+
+# NO `_cluster_exists` BOOLEAN. There was one, and re-adding it is how this bug
+# comes back: a boolean has two values and this question has three, so every
+# caller that takes `if _cluster_exists` inherits somebody else's answer to "what
+# does an unreadable engine mean here?" — and `! _cluster_exists` silently spells
+# that answer "absent", which is the client#984 defect exactly. The two decision
+# sites (create_cluster's leftover-data guard + create/reuse branch, assess's
+# classifier) each read _cluster_presence and say out loud what UNKNOWN means for
+# them. One seam, no parallel primitive (LukasWodka, client#984).
 
 # Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
 # Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
@@ -728,6 +894,37 @@ guard_leftover_data() {
   esac
 }
 
+# THE ORDER IS THE CONTRACT: guard_leftover_data FIRST, the host data dirs
+# SECOND, and only then _create_new_cluster (LukasWodka, client#984 round 7).
+#
+# Extracted so both paths into `_create_new_cluster` run the SAME step rather
+# than one of them re-deriving it. The rc-3 path ran the two the other way round
+# — `_ensure_tracebloc_dirs` had already fired above the `case` — while its own
+# comment claimed it ran "exactly as it does for a first-read ABSENT". Both of
+# the guard's mutating arms are falsified by that order:
+#
+#   * WIPE. `_leftover_data_dirs` yields `$base/mysql` and `$base/data`, and
+#     `_wipe_leftover_data` does `rm -rf "$d"` — the DIRECTORY, not its contents.
+#     The definite-absent path re-creates and re-`chmod 777`s them afterwards; on
+#     the rc-3 path nothing did, so `_create_new_cluster` bind-mounted a
+#     HOST_DATA_DIR whose `mysql` and `data` were gone.
+#   * NEWDIR. That arm sets `HOST_DATA_DIR="$newdir"`, calls `validate_config`
+#     and recurses. `validate_config` has no `mkdir` and no `chmod`, so on the
+#     rc-3 path the dirs step had already run against the OLD path and the new
+#     one got neither before the mount.
+#
+# Hostpath only. node-local (RFC-0003 Option C) has no host data dirs, no
+# bind-mount and no chmod — datasets live on k3s local-path inside the node — so
+# there is nothing to create and calling it twice there is a no-op either way.
+# The mode's log line stays at the single decision point in create_cluster so it
+# is printed once, not once per path.
+_ensure_host_data_dirs() {
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+    return 0
+  fi
+  _ensure_tracebloc_dirs
+}
+
 create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
@@ -743,10 +940,23 @@ create_cluster() {
     export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
   fi
 
+  # ONE tri-state read, used for BOTH decisions below (client#984). It used to be
+  # two `_cluster_exists` calls, which cost two engine round-trips and — worse —
+  # let a bounded read's THIRD outcome disappear into a boolean twice over.
+  #   0 = present, 1 = absent, 2 = the engine did not answer.
+  local _presence=0
+  _cluster_presence || _presence=$?
+
   # Leftover-data guard (RFC-0003 D3, #376): a NEW cluster must not silently
   # adopt data from an earlier install. Skipped when the cluster already exists
   # — that path is an in-place reuse/upgrade and keeps its data by design (§3.3).
-  if ! _cluster_exists; then
+  #
+  # ONLY on a DEFINITE absent (Bugbot High, client#984). This guard warns about
+  # existing data and then PROMPTS — with delete among the options — so running it
+  # because a listing timed out is the one outcome strictly worse than the hang
+  # #974 removed: it offers to destroy the data of an install that is probably
+  # still there. UNKNOWN skips it, exactly as a present cluster does.
+  if [[ "$_presence" -eq 1 ]]; then
     guard_leftover_data
   fi
 
@@ -755,20 +965,75 @@ create_cluster() {
   # the pre-created world-writable ~/.tracebloc dirs.
   if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     log "Storage mode: node-local — datasets live inside the cluster node (k3s local-path), not ~/.tracebloc; they are wiped on 'cluster delete'."
-  else
-    _ensure_tracebloc_dirs
   fi
+  _ensure_host_data_dirs
 
   # Docker is up now (unlike at preflight time), so re-check the runtime's real
   # memory budget — a too-small Docker VM (Mac/Win) surfaces before we build out.
   # Guarded: cluster.sh can be sourced without preflight.sh (e.g. the e2e harness).
   if declare -F _pf_recheck_runtime_mem >/dev/null 2>&1; then _pf_recheck_runtime_mem || true; fi
 
-  if _cluster_exists; then
-    _handle_existing_cluster
-  else
-    _create_new_cluster
-  fi
+  # UNKNOWN takes the REUSE path, never the create path (Bugbot High, client#984).
+  # `_create_new_cluster` runs `k3d cluster create` against a name that may already
+  # be in use, on a machine we could not read; `_handle_existing_cluster` only
+  # reads and, at worst, issues an idempotent `k3d cluster start --wait --timeout
+  # 5m` that fails into "Couldn't start your existing secure environment. Check
+  # Docker is running, then re-run." — bounded, and the right sentence for a wedged
+  # engine. Explicit `case`, not `if _cluster_exists`, so the third outcome is
+  # visible at the decision site instead of hidden inside a boolean.
+  local _hrc=0
+  case "$_presence" in
+    0) _handle_existing_cluster || _hrc=$? ;;
+    # NEUTRAL, AND IT PROMISES NOTHING ABOUT WHAT HAPPENS NEXT (saadqbal,
+    # client#984 round 6). Two over-claims: _cluster_presence returns 2 for a
+    # DEADLINE *and* for "every read failed" (`_read_ok=0`), so blaming the Docker
+    # engine tells a user with a broken $HOME/.k3d or an unreadable kubeconfig to
+    # go and look at a daemon that is perfectly healthy; and "nothing is created or
+    # removed" is falsified by the rc-3 path below, which prompts about leftover
+    # data and creates. `_cluster_presence`'s own L164 line and assess.sh's
+    # `cluster-indeterminate` copy already word this condition neutrally.
+    2) warn "Couldn't read the k3d cluster list for '$CLUSTER_NAME' — the listing either didn't complete or k3d couldn't answer it. Not assuming the environment is either present or absent: taking the path that reads again before it acts."
+       _handle_existing_cluster || _hrc=$? ;;
+    # `1)`, NOT `*)`. Creating was the DEFAULT arm, so any value the contract
+    # grows next would land on the one branch that runs `k3d cluster create`
+    # against a machine nobody classified — the destructive direction, reached by
+    # default, which is this PR's own subject one level up (LukasWodka/saadqbal
+    # nit, client#984). An unrecognised code now takes the same neutral route as
+    # UNKNOWN, because that is exactly what it is.
+    1) _create_new_cluster ;;
+    *) warn "Couldn't classify this machine's k3d cluster state (the presence probe returned an unrecognised code $_presence) — treating it as unread and taking the path that reads again before it acts."
+       _handle_existing_cluster || _hrc=$? ;;
+  esac
+
+  # rc 3 = the reuse path's OWN listing answered and proved the cluster ABSENT
+  # (Bugbot High, client#984 round 5). Without this, an UNKNOWN first read locked
+  # the run into "start a cluster that isn't there" — which fails, and `error`
+  # exits — so a first-time machine with one slow listing could never install.
+  # This IS a first-read ABSENT, learned one read later, so it runs the SAME two
+  # steps in the SAME order the definite-absent path above does — the guard first
+  # (a new cluster must not silently adopt an earlier install's data), the host
+  # data dirs second.
+  #
+  # THE DIRS STEP HAS TO RUN AGAIN HERE, and an earlier version of this block
+  # asserted the invariant in a comment while inverting it in the code
+  # (LukasWodka, client#984 round 7). `_ensure_host_data_dirs` already ran above
+  # the `case`, against whatever HOST_DATA_DIR held then; `guard_leftover_data`
+  # may have `rm -rf`'d those very directories (wipe) or re-pointed
+  # HOST_DATA_DIR at a path nothing has created yet (newdir). Its own header
+  # carries the mechanism for both.
+  #
+  # EXHAUSTIVE over _handle_existing_cluster's contract (0 and 3; it `error`s out
+  # rather than returning on a failed start). `if [[ … -eq 3 ]]` alone let every
+  # OTHER non-zero fall silently through to the reconcile tail below, which is
+  # the same "an outcome nobody wrote code for" shape as the bare call site this
+  # round fixed — so an unrecognised code stops here instead.
+  case "$_hrc" in
+    0) ;;
+    3) guard_leftover_data
+       _ensure_host_data_dirs
+       _create_new_cluster ;;
+    *) error "The existing-cluster step returned an unrecognised status ($_hrc) and this run can't tell whether your secure environment is ready. Nothing further was changed; see the install log and re-run." ;;
+  esac
 
   ensure_cluster_autostart
   _merge_kubeconfig
@@ -800,7 +1065,12 @@ ensure_cluster_autostart() {
   if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then return 0; fi
 
   local nodes node
-  nodes=$(docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
+  # BOUNDED (client#984, LukasWodka): this is a daemon read on the main install
+  # path, and it ran unbounded while its `docker info` neighbours did not — the gap
+  # check-style rule 5 could not see until it was widened past `info`. `|| return 0`
+  # already treats an unreadable engine as "nothing to autostart", so a 124 lands in
+  # the branch this function was written for.
+  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
   if [[ -n "$nodes" ]]; then
     for node in $nodes; do
       docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true
@@ -882,25 +1152,126 @@ ensure_cluster_autostart() {
 
 _handle_existing_cluster() {
   CLUSTER_STATUS="0"
+  # BOUNDED (client#974) and TRI-STATE (client#984). Both reads talk to the Docker
+  # engine, and a wedged daemon blocks rather than fails them, so the
+  # `2>/dev/null || true` / `|| echo "0"` fallbacks were unreachable.
+  #
+  # And a timeout is not "0 servers running". Collapsing it into that number is the
+  # same defect as the one that cost this PR two rounds of review: it made the
+  # installer PRINT "Cluster 'x' exists but is stopped", a claim about a machine it
+  # could not read, on a run where the cluster is quite possibly up. The ACTION on
+  # this branch is safe either way — `k3d cluster start` is idempotent on a running
+  # cluster and bounded — so the fix is to keep the action and stop making the
+  # claim. `_status_read_ok` carries the third state to the message below.
+  # THREE read states, not two (Bugbot Medium, client#984 round 5): `answered`,
+  # `stalled` (124 — the deadline), `failed` (anything else — the read COMPLETED
+  # and k3d said no: permission denied, an unsupported flag, a broken kubeconfig).
+  # Collapsing the last two wrote a millisecond failure up as a listing that
+  # "didn't complete", which is the same defect as the one above with the sign
+  # flipped, and the one saadqbal found across diagnose.sh's seven sites.
+  #
+  # `_row_found` is the fourth thing this read knows and used to throw away: a
+  # listing that ANSWERED and contains no row for this cluster says the cluster is
+  # ABSENT — authoritatively. See the AUTHORITATIVE ABSENT block below.
+  local _status_read=answered _row_found=0 _rc=0
   if command -v jq &>/dev/null; then
-    CLUSTER_STATUS=$(k3d cluster list -o json 2>/dev/null | jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null || echo "0")
+    local _json
+    _json="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list -o json 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -eq 124 ]]; then
+      _status_read=stalled
+    elif [[ "$_rc" -ne 0 ]]; then
+      _status_read=failed
+    elif ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$_json"; then
+      # THE SHAPE IS CHECKED FIRST, for the reason written out at _cluster_presence
+      # L106-110 (saadqbal, client#984 round 6): `jq -e` cannot tell "no match"
+      # from "not JSON" — `{}` exits 1, `null` 5, garbage 4, `[]` 1, all non-zero.
+      # Without this gate every one of those landed as "the listing answered and
+      # your cluster is not in it", with `_rc` 0 keeping `_status_read=answered` —
+      # exactly the pair the AUTHORITATIVE ABSENT block below fires on. It would
+      # then prompt about leftover data (delete among the options) and run
+      # `k3d cluster create` against a name that may already exist, off a payload
+      # that never parsed. Reachable without anything exotic: stdout carrying a k3d
+      # notice ahead of the array, or an older k3d emitting `null` rather than `[]`.
+      # _cluster_presence calls this same payload inconclusive; the two functions
+      # must not reach opposite verdicts on one payload, least of all with this one
+      # taking the destructive direction.
+      _status_read=unparseable
+      log "k3d answered the JSON cluster listing with a payload that is not an array; treating this machine's cluster state as unread rather than as absent."
+    else
+      if jq -e --arg n "$CLUSTER_NAME" 'any(.[]; .name == $n)' >/dev/null 2>&1 <<<"$_json"; then
+        _row_found=1
+        CLUSTER_STATUS=$(jq -r --arg n "$CLUSTER_NAME" '.[] | select(.name == $n) | .serversRunning // 0' 2>/dev/null <<<"$_json" || echo "0")
+      fi
+    fi
   else
     # Capture-then-match (#680): awk's `exit` closes the pipe on our cluster's
     # row, so k3d can take SIGPIPE and pipefail would abort the installer here —
     # mid-reconcile, with no message. Mirrors _assess_cluster_servers_running.
     local line _tbl
-    _tbl="$(k3d cluster list --no-headers 2>/dev/null || true)"
-    line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
-    if [[ -n "$line" ]]; then
-      CLUSTER_STATUS="${line%%/*}"
+    _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
+    if [[ "$_rc" -eq 124 ]]; then
+      _status_read=stalled
+    elif [[ "$_rc" -ne 0 ]]; then
+      _status_read=failed
+    else
+      # The ROW's existence and its server count are two different questions: a row
+      # with `0/1` servers is a stopped cluster, no row at all is no cluster.
+      #
+      # `{ found = 1 } END { exit(...) }`, NOT `{ exit 0 } END { exit 1 }`: awk's
+      # `exit` RUNS the END action, and END's own `exit 1` then wins — so the
+      # familiar-looking form reports "no row" on a listing that plainly contains
+      # one. (The same idiom sits in _cluster_presence, where it is masked by the
+      # layout-tolerant `grep` immediately after it and therefore never noticed.)
+      if awk -v n="$CLUSTER_NAME" '$1 == n { found = 1 } END { exit(found ? 0 : 1) }' <<<"$_tbl"; then
+        _row_found=1
+        line=$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")
+        if [[ -n "$line" ]]; then
+          CLUSTER_STATUS="${line%%/*}"
+        fi
+      fi
     fi
   fi
   CLUSTER_STATUS="${CLUSTER_STATUS:-0}"
 
+  # ── AN AUTHORITATIVE ABSENT SUPERSEDES THE EARLIER "COULDN'T TELL" ──────────
+  # Bugbot HIGH, client#984 round 5. create_cluster routes UNKNOWN here on
+  # purpose — reuse is the direction that destroys nothing — but this function's
+  # OWN listing may then answer, and "no row for this cluster" was normalised into
+  # CLUSTER_STATUS=0, i.e. "exists but is stopped". `k3d cluster start` on a name
+  # that does not exist fails, and `error` EXITS the installer. Net effect: a
+  # first-time machine whose very first listing exceeded TB_K3D_LIST_TIMEOUT could
+  # never install, however authoritatively the next read proved the cluster absent.
+  #
+  # This is BUGBOT.md rule (b) in the other order — a definite answer from a read
+  # that COMPLETED beats "couldn't tell" from one that did not, whichever arrives
+  # first. Reported to the caller (rc 3) rather than acted on here, because
+  # creating a cluster is create_cluster's decision to make and it owes the
+  # leftover-data guard on that path.
+  if [[ "$_status_read" == "answered" && "$_row_found" -eq 0 ]]; then
+    log "The k3d listing answered and this machine has no '$CLUSTER_NAME' cluster — a definite ABSENT, which supersedes the earlier listing that could not be read. Creating the environment instead of starting one that isn't there."
+    return 3
+  fi
+
   if [[ "$CLUSTER_STATUS" -gt "0" ]]; then
     success "Secure environment already running."
   else
-    log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..."
+    # THE MESSAGE distinguishes the three states even though the ACTION does not
+    # need to (client#984). "exists but is stopped" is a CLAIM about the machine;
+    # making it off an unreadable listing is the same defect this PR is about, and
+    # on a run where the cluster may well be up it sends the operator looking in
+    # the wrong place. `k3d cluster start` is idempotent on a running cluster and
+    # bounded, so the safe action is identical either way — only the sentence
+    # changes.
+    case "$_status_read" in
+      stalled)
+        log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing didn't complete within ${TB_K3D_LIST_TIMEOUT:-15}s) — attempting a start, which is a no-op if it is already up..." ;;
+      failed)
+        log "Couldn't read whether '$CLUSTER_NAME' is running (the k3d listing failed, exit $_rc — it answered, so this is k3d's own error and not a timeout; see the install log) — attempting a start, which is a no-op if it is already up..." ;;
+      unparseable)
+        log "Couldn't read whether '$CLUSTER_NAME' is running (k3d's JSON listing was not an array, so nothing could be concluded from it) — attempting a start, which is a no-op if it is already up..." ;;
+      *)
+        log "Cluster '$CLUSTER_NAME' exists but is stopped — starting it..." ;;
+    esac
     # Capture the tool's raw stderr to the log and surface only a curated line on
     # failure — graceful failure, not a raw k3d dump before the closer (#577).
     # Bounded start (Bugbot): `k3d cluster start` waits for the server with no
@@ -908,6 +1279,20 @@ _handle_existing_cluster() {
     # headless install forever instead of reaching the curated error below. --wait
     # --timeout bounds it (parity with the Windows installer's 5-minute start
     # deadline) so a stuck start fails cleanly into that message.
+    #
+    # THE DOCKER ATTRIBUTION HERE IS DELIBERATE, and stays after `:944`'s was
+    # dropped (LukasWodka, client#984 round 7, raised so the choice is visible
+    # rather than reading as an oversight). The two sentences are about different
+    # events. `:944` reports a failed *listing* — a read, which a broken
+    # `$HOME/.k3d` or an unreadable kubeconfig fails just as readily as a wedged
+    # engine, so naming Docker there sent people to inspect a healthy daemon.
+    # This is a failed *start*: an ACTION, attempted with `--wait --timeout 5m`,
+    # against containers that only the engine can bring up. A wedged or stopped
+    # engine is the overwhelmingly common cause and the one the operator can do
+    # something about, which is the same judgement `:929-931` records for
+    # choosing this branch on UNKNOWN in the first place. "Check Docker is
+    # running" is also advice rather than a diagnosis — it does not claim the
+    # daemon is down, and the raw k3d stderr is in the install log either way.
     k3d cluster start "$CLUSTER_NAME" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1 \
       || error "Couldn't start your existing secure environment. Check Docker is running, then re-run."
     success "Secure environment started."
@@ -1038,7 +1423,10 @@ _check_existing_cluster_proxy() {
 
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local cluster_env
-  cluster_env=$(docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
+  # BOUNDED (client#984): same daemon, same hazard as the four sibling inspects in
+  # this file that already carry TB_DOCKER_INSPECT_TIMEOUT. `|| return 0` keeps an
+  # unreadable node a silent no-op, which is this check's documented behaviour.
+  cluster_env=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$cluster_env" ]] && return 0
 
   local missing=()
@@ -1068,7 +1456,7 @@ _check_existing_cluster_ca() {
   [[ -n "${TRACEBLOC_CA_BUNDLE:-}" || -n "${CURL_CA_BUNDLE:-}" ]] || return 0
   local server_container="k3d-${CLUSTER_NAME}-server-0"
   local mounts
-  mounts=$(docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "$server_container" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
   # Exact whole-line match (mounts is newline-separated destinations): a longer
   # path that merely embeds the CA path as a substring is NOT our mount. Mirrors
@@ -1129,7 +1517,7 @@ _host_ca_create_hint() {
 # intercepts external kubectl. Silent no-op if the serverlb can't be inspected.
 _check_existing_cluster_bind() {
   local binds
-  binds=$(docker inspect "k3d-${CLUSTER_NAME}-serverlb" \
+  binds=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-serverlb" \
     --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}} {{end}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$binds" ]] && return 0
   if grep -qw '0\.0\.0\.0' <<<"$binds" && ! grep -qw '127\.0\.0\.1' <<<"$binds"; then
@@ -1195,7 +1583,7 @@ _check_existing_cluster_kubelet_config() {
 _check_existing_cluster_dataset_mount() {
   [[ -z "${HOST_DATASET_DIR:-}" ]] && return 0
   local mounts
-  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" \
     --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
   if ! grep -qx '/tracebloc-data' <<<"$mounts"; then
@@ -1223,7 +1611,7 @@ _check_existing_cluster_dataset_mount() {
 # remedy. No-op when the node can't be inspected.
 _check_existing_cluster_storage_mode() {
   local mounts
-  mounts=$(docker inspect "k3d-${CLUSTER_NAME}-server-0" \
+  mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" \
     --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null) || return 0
   [[ -z "$mounts" ]] && return 0
 
@@ -1846,7 +2234,40 @@ _create_new_cluster() {
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
       log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
       rm -f "$create_out"
-      _handle_existing_cluster
+      # THE THIRD CALL SITE OF _handle_existing_cluster (LukasWodka, client#984
+      # round 7). It grew rc 3 — "my own listing answered and there is no such
+      # cluster" — in this change; the two sites in create_cluster (`:958`,
+      # `:968`) were updated and this one was left bare. Under the installer's
+      # `set -euo pipefail` that is not benign: install-k8s.sh:49 sets errexit,
+      # nothing in the chain down to here is a condition context, and an `if`
+      # BODY is not exempt — so a 3 exited the whole run with status 3 and no
+      # curated message.
+      #
+      # AND CATCHING IT IS NOT ENOUGH: a bare `|| true` would fall through to the
+      # `return 0` below, and create_cluster would then run
+      # ensure_cluster_autostart, _merge_kubeconfig and _wait_for_api against a
+      # cluster the listing just proved absent — 180s of `kubectl cluster-info`
+      # ending in a bare failure.
+      local _hrc=0
+      _handle_existing_cluster || _hrc=$?
+      if [[ "$_hrc" -ne 0 && "$_hrc" -ne 3 ]]; then
+        # Exhaustive over the contract, for the same reason the create_cluster
+        # `case` is: an outcome this site has no branch for must stop the run,
+        # not slip through the `return 0` below into the reconcile tail.
+        error "Adopting the existing '$CLUSTER_NAME' environment returned an unrecognised status ($_hrc); this run can't tell whether it is ready. See the install log and re-run."
+      fi
+      if [[ "$_hrc" -eq 3 ]]; then
+        # This site cannot answer a 3 the way create_cluster does — by creating.
+        # The create we JUST ran is the thing that said the name is taken, so a
+        # retry gets the same refusal, forever. "create refuses the name" plus
+        # "the listing has no row for it" is the half-created leftover this
+        # function already documents two branches down (`:2200`): a stray
+        # `k3d-$CLUSTER_NAME` network or volume outlives the cluster and keeps
+        # holding the name. Same remedy, named here instead of guessed at.
+        warn "k3d wouldn't create '$CLUSTER_NAME' because that name is already in use, but the k3d cluster listing has no '$CLUSTER_NAME' in it — leftovers from a half-created environment (usually a stray docker network or volume) are holding the name."
+        _recreate_cluster_hint
+        error "Couldn't create your secure environment: the name '$CLUSTER_NAME' is held by leftovers from an earlier attempt. Clear them with the k3d line above, then re-run."
+      fi
       return 0
     fi
     if [[ "$create_rc" -eq 124 ]]; then

@@ -38,6 +38,74 @@ _redact_tree() {
   while IFS= read -r f; do _redact_file "$f"; done < <(find "$1" -type f 2>/dev/null)
 }
 
+# _bounded_capture_read SECONDS OUTFILE WHAT CMD… — ONE bounded read for the
+# bundle, with its outcome classified in ONE place.
+#
+# WHY THIS IS A FUNCTION AND NOT A SHAPE WRITTEN OUT SEVEN TIMES (saadqbal,
+# client#984). `_bounded_capture` distinguishes three outcomes on purpose — 0 the
+# read answered, 124 the deadline fired, any other non-zero the command's OWN
+# failure — plus 2 for "the capture file could not be created". Every one of the
+# seven read sites below spelled it `if _bounded_capture …; then cat; else echo
+# "(… did not complete within Ns)"; fi`, which folds all of those into the timeout
+# sentence and DISCARDS $_cap, where the error text is.
+#
+# The cost is not hypothetical. Daemon live but the socket not permitting this
+# user: `docker version` exits 1 in milliseconds printing "permission denied while
+# trying to connect to the Docker daemon socket", and 00-host.txt recorded "(the
+# docker server-version read did not complete within 10s)" — the cause in hand and
+# thrown away, replaced by a hang that never happened. The k3d site went further
+# and blamed "the engine is not answering", a confident wrong claim about the
+# machine in the artifact support reads first.
+#
+# That is THIS TICKET'S OWN DEFECT running backwards: #974 exists because a read
+# that could not complete was converted into a definite answer; this converted a
+# definite answer into "couldn't tell". It had been reintroduced per-site in three
+# consecutive review rounds, so the classification is centralised and the census in
+# bounded-reads-propagate.bats fails if any site open-codes the branch again.
+#
+# CONTRACT. Returns 0 and prints NOTHING when the read answered — the caller then
+# renders OUTFILE however its section needs (cat, grep, capture into a variable).
+# On every other outcome it prints the honest line ITSELF and returns non-zero, so
+# no caller can render a read that failed as though it were content.
+#
+# The 124 line deliberately no longer speculates about WHICH component stalled.
+# "the engine is not answering" was the same over-claim one level up: a k3d
+# listing can hit its deadline on a lock or a slow inspect with a perfectly
+# healthy daemon, and 00-host.txt already carries the daemon-liveness verdict from
+# the single gate above.
+_bounded_capture_read() {
+  local secs="$1" out="$2" what="$3"; shift 3
+  local rc=0
+  _bounded_capture "$secs" "$out" "$@" || rc=$?
+  # An explicit `if`, not `[[ … ]] && return 0`: an AND-OR list is exempt from
+  # errexit only for its non-final command, and this function is driven from bats
+  # test bodies that DO run under errexit.
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "$rc" -eq 124 ]]; then
+    echo "(the $what did not complete within ${secs}s — the read was killed on its deadline, so this is a STALL and not an answer)"
+    return 1
+  fi
+
+  # Not the deadline ⇒ the read COMPLETED, and its own error text is the finding.
+  #
+  # Except for _bounded_capture's rc 2, "could not create the capture file": there
+  # the command never ran and OUTFILE may still hold the PREVIOUS read's output, so
+  # printing it would attribute one read's answer to another. Disambiguated by
+  # whether the file is ours to write rather than by the code alone — a command's
+  # own exit 2 is also 2, and it still deserves to have its text surfaced.
+  if [[ "$rc" -eq 2 && ! -w "$out" ]]; then
+    echo "(the $what was NOT ATTEMPTED — the bundle could not create its scratch capture file, so nothing is known about this read either way)"
+    return 1
+  fi
+
+  echo "(the $what FAILED, exit $rc — it ANSWERED within ${secs}s, so this is the tool's own error and not a timeout):"
+  cat "$out" 2>/dev/null
+  return 1
+}
+
 run_diagnose() {
   set +e   # every step is best-effort — never abort the bundle mid-collection
 
@@ -48,6 +116,9 @@ run_diagnose() {
   outdir="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-diag-XXXXXX" 2>/dev/null)"
   if [[ -z "$outdir" || ! -d "$outdir" ]]; then echo "  diagnose: cannot create a temp directory" >&2; return 1; fi
   d="$outdir/tracebloc-diagnose-$ts"; mkdir -p "$d/logs"
+  # Scratch for _bounded_capture, deliberately in $outdir and NOT in $d — $d is
+  # what gets archived, and a probe capture is not part of the bundle.
+  local _cap="$outdir/.probe-capture"
 
   # Namespace discovery — TB_NAMESPACE isn't set on a standalone diagnose run,
   # so find the namespace of the jobs-manager pod (falls back to "default").
@@ -75,6 +146,80 @@ run_diagnose() {
     host_audit
   fi
 
+  # ── ONE liveness answer for every daemon read in this bundle (client#984) ────
+  # Bugbot High on the first cut of #974: it bounded the `k3d cluster list` inside
+  # the 01-docker group but left `docker ps -a` ABOVE it bare, so a wedged engine
+  # blocked before the gate could run and `{ … } > 01-docker.txt` still wrote
+  # nothing. The bundle was lost for exactly the reason the ticket was filed — and
+  # the same hole was in 00-host.txt, whose `docker version` reads the SERVER
+  # version and therefore talks to the daemon too, ahead of that group's own gate.
+  #
+  # Every one of those reads asks about the same daemon, so the question is asked
+  # ONCE, here, before any group opens, through the coreutils-free probe
+  # (_docker_answers_bounded bounds via spin's background PID + kill, #744 — and
+  # --diagnose is Darwin-reachable, where `_bounded` alone is a no-op). Silenced so
+  # the spinner does not land in a bundle file.
+  #
+  # AND EVERY READ IN THIS FUNCTION GOES THROUGH _bounded_capture, not `_bounded`.
+  # This gate proves `docker info` answers within ${TB_DOCKER_PROBE_TIMEOUT:-10}s;
+  # it does NOT make a 15s `k3d cluster list` safe, and `_bounded` is a NO-OP on a
+  # stock Mac — so "info answers, one later read stalls" left the group waiting
+  # forever and the bundle unwritten (Bugbot High, client#984). _bounded_capture
+  # kills on a deadline via the child PID, needs no coreutils, and reports 124
+  # distinguishably so each section can say what it could not collect.
+  #
+  # A non-answering engine is not a gap in the bundle — it IS the finding, and each
+  # group says so in place of the section it could not collect.
+  # AND THE GATE IS TRI-STATE TOO (Bugbot High, client#984 round 4). The same
+  # conflation as group D's, one level up: `_docker_answers_bounded` returns 124 on
+  # the deadline and the child's REAL status otherwise (`spin` propagates it), but
+  # this gate treated ANY non-zero as "the daemon didn't answer within Ns" and
+  # skipped every docker/k3d section. A stopped daemon, or a socket that does not
+  # permit this user, fails `docker info` in MILLISECONDS — so the bundle claimed a
+  # hang that never happened AND dropped the sections, on the run collected because
+  # the machine is already broken.
+  #
+  # Three states, and only ONE of them is a reason to skip:
+  #   live    — collect normally.
+  #   failed  — the daemon ANSWERED and said no. Nothing is stalled, so the
+  #             sections are still collected and each read records its own error
+  #             through _bounded_capture_read. This is safe by construction now:
+  #             every read in this function is INDIVIDUALLY bounded on every
+  #             platform, so the group gate is an economy, not the thing keeping
+  #             the bundle writable — and a daemon that fails in milliseconds
+  #             fails the next read in milliseconds too.
+  #   stalled — the deadline fired. Only here is "collecting them would have hung"
+  #             a true sentence, and only here are the sections skipped.
+  local _docker_gate=absent _gate_rc=0
+  if has docker; then
+    _docker_gate=live
+    _docker_answers_bounded "checking the container runtime" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || _gate_rc=$?
+    if [[ "$_gate_rc" -eq 124 ]]; then
+      _docker_gate=stalled
+      warn "The Docker daemon didn't answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s — the bundle will record that instead of the docker/k3d sections (collecting them would hang)."
+    elif [[ "$_gate_rc" -ne 0 ]]; then
+      _docker_gate=failed
+      warn "The Docker daemon ANSWERED but 'docker info' failed (exit $_gate_rc) — it is not stalled, so the bundle still collects the docker/k3d sections and records each read's own error."
+    fi
+  fi
+  # Attempt the reads unless the daemon is STALLED — see above for why "failed" is
+  # collected rather than skipped.
+  local _docker_live=0
+  if [[ "$_docker_gate" == "live" || "$_docker_gate" == "failed" ]]; then
+    _docker_live=1
+  fi
+  # The note says WHICH reason applied, and it is only ever reached on the two
+  # states that skip. "The daemon did not answer" on a machine with no Docker
+  # installed at all — or on one whose daemon answered with an error — would be a
+  # false claim in a support bundle, which is the same class of defect as the
+  # silence this fix replaced.
+  local _docker_dead_note
+  if [[ "$_docker_gate" == "stalled" ]]; then
+    _docker_dead_note="(NOT COLLECTED: the Docker daemon did not answer 'docker info' within ${TB_DOCKER_PROBE_TIMEOUT:-10}s. Every read in this section talks to that daemon, so collecting them would have hung this bundle and produced no file at all. A non-answering engine is itself the finding — see 00-host.txt.)"
+  else
+    _docker_dead_note="(NOT COLLECTED: docker is not installed on this host, so there is no engine to read. See the versions section of 00-host.txt.)"
+  fi
+
   # ── host / versions ──
   {
     echo "# tracebloc diagnose ($ts)"
@@ -86,7 +231,16 @@ run_diagnose() {
     has k3d     && k3d version
     has kubectl && kubectl version --client 2>/dev/null
     has helm    && helm version --short 2>/dev/null
-    has docker  && docker version 2>/dev/null
+    # `docker version` reports the SERVER version, so it talks to the daemon and
+    # can stall exactly like `docker info` — gated, and bounded through
+    # _bounded_capture so the bound holds on a stock Mac too (client#984).
+    if (( _docker_live )); then
+      if _bounded_capture_read "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$_cap" "docker server-version read" docker version; then
+        cat "$_cap"
+      fi
+    elif has docker; then
+      echo "docker: installed, but the daemon did not answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s"
+    fi
     echo; echo "## cpu / mem / disk"
     if [[ "$(uname -s)" == "Darwin" ]]; then
       echo "ncpu=$(sysctl -n hw.ncpu 2>/dev/null)  memsize=$(sysctl -n hw.memsize 2>/dev/null)"
@@ -106,9 +260,22 @@ run_diagnose() {
     # is silenced (>/dev/null) so its spinner doesn't land in the bundle file; once it
     # confirms the daemon answers, the read below can't hang. `set +e` (run_diagnose
     # top) keeps the intentional pipe from tripping pipefail (backend#1778).
-    if has docker && _docker_answers_bounded "collecting docker info" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then
+    # Reuses the ONE liveness answer computed above (client#984) instead of asking
+    # the same question a second time — same gate, one probe, and now every other
+    # daemon read in this bundle sits behind the same answer rather than only this
+    # one.
+    if (( _docker_live )); then
       echo; echo "## docker info"
-      _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info 2>/dev/null | grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup'
+      # Capture THEN filter. Piping the read straight into grep gives an empty
+      # section on a fired deadline, which reads as "the daemon reported none of
+      # these fields" — a different and wrong finding (client#984, same shape as
+      # the proxy-env grep below).
+      if _bounded_capture_read "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$_cap" "docker info read" docker info; then
+        grep -iE 'Server Version|Storage Driver|Docker Root|Operating System|Total Memory|CPUs|Cgroup' "$_cap"
+      fi
+    elif has docker; then
+      echo; echo "## docker info"
+      echo "$_docker_dead_note"
     fi
     # RFC 0001 install-tier readout (set by host_audit above; plain for the bundle).
     if declare -F run_host_probes >/dev/null 2>&1; then
@@ -119,18 +286,74 @@ run_diagnose() {
   } > "$d/00-host.txt" 2>&1
 
   # ── docker / k3d ──
+  # THE WORST SITE OF client#974, and the site Bugbot re-opened on client#984: the
+  # support bundle is the thing a user collects BECAUSE the machine is already
+  # broken, so a wedged Docker engine is the EXPECTED input here, not a
+  # hypothetical one. `{ … } > 01-docker.txt` waits for the WHOLE group and the
+  # file is written at the end, so ONE unbounded read in it means NO SECTION AT
+  # ALL, from the one run where the bundle is the entire point. (Its PowerShell
+  # twin was a Bugbot High on client#917 for precisely this.)
+  #
+  # So the gate is on the GROUP, not on one call inside it — the first cut gated
+  # only the k3d read and left `docker ps -a` above it bare, which defeated the
+  # gate entirely. Every read below is additionally `_bounded`, and each prints a
+  # named line rather than nothing when its deadline fires: silence in this file
+  # reads as "the machine has no clusters", which is a different and wrong finding.
   {
-    echo "## docker ps -a (k3d nodes)"
-    has docker && docker ps -a --filter "name=k3d-${cn}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-    echo; echo "## k3d cluster list"
-    has k3d && k3d cluster list
-    echo; echo "## node restart policy + proxy env"
-    if has docker; then
-      for c in $(docker ps -a --filter "name=k3d-${cn}-" --format '{{.Names}}' 2>/dev/null); do
-        echo "### $c"
-        docker inspect "$c" --format 'RestartPolicy={{.HostConfig.RestartPolicy.Name}}' 2>/dev/null
-        docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -iE 'PROXY'
-      done
+    if (( _docker_live )) || { ! has docker && has k3d; }; then
+      echo "## docker containers (k3d nodes)"
+      if (( _docker_live )); then
+        if _bounded_capture_read "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$_cap" "container listing" docker ps -a --filter "name=k3d-${cn}-" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'; then
+          cat "$_cap"
+        fi
+      fi
+      echo; echo "## k3d cluster list"
+      if has k3d; then
+        # _bounded_capture, NOT _bounded: the group gate only proves `docker info`
+        # answers within ${TB_DOCKER_PROBE_TIMEOUT:-10}s, and this call is more
+        # engine work on a longer budget — so "info answers, the listing stalls" is
+        # a reachable state, and on a stock Mac `_bounded` is a no-op, so the group
+        # would wait forever and the bundle would never be written (Bugbot High,
+        # client#984). This bound needs no coreutils.
+        if _bounded_capture_read "${TB_K3D_LIST_TIMEOUT:-15}" "$_cap" "k3d cluster listing" k3d cluster list; then
+          cat "$_cap"
+        fi
+      fi
+      echo; echo "## node restart policy + proxy env"
+      if (( _docker_live )); then
+        # The `for c in $(…)` list itself is a daemon read, so it is bounded too —
+        # an unbounded one here would hang the group after the sections above had
+        # already been produced but before the file was written, i.e. still no file.
+        local _names=""
+        if _bounded_capture_read "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$_cap" "node listing" docker ps -a --filter "name=k3d-${cn}-" --format '{{.Names}}'; then
+          _names="$(cat "$_cap")"
+        else
+          echo "(per-node detail below is therefore INCOMPLETE — the nodes were never enumerated, so an empty per-node section is not 'this cluster has no nodes')"
+        fi
+        for c in $_names; do
+          echo "### $c"
+          if _bounded_capture_read "${TB_PROBE_TIMEOUT:-5}" "$_cap" "restart-policy inspect for $c" docker inspect "$c" --format 'RestartPolicy={{.HostConfig.RestartPolicy.Name}}'; then
+            cat "$_cap"
+          fi
+          # CAPTURE THEN GREP (Bugbot, client#984). Piping the inspect straight into
+          # `grep -iE PROXY` made a fired deadline indistinguishable from "this node
+          # carries no proxy env" — an empty grep either way. On a machine being
+          # diagnosed FOR a proxy problem that is the worst possible confusion, so
+          # the read's outcome is reported separately from its content.
+          if _bounded_capture_read "${TB_PROBE_TIMEOUT:-5}" "$_cap" "environment inspect for $c" docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}'; then
+            grep -iE 'PROXY' "$_cap" || echo "(no PROXY variables in this node's environment)"
+          else
+            # The line above says WHY the read produced nothing (stalled, or failed
+            # with the tool's own error). This says what that means for the question
+            # the section is answering, for ANY of those reasons: proxy env UNKNOWN
+            # for this node, not absent.
+            echo "(proxy env UNKNOWN for this node, not absent)"
+          fi
+        done
+      fi
+    else
+      echo "## docker / k3d state"
+      echo "$_docker_dead_note"
     fi
   } > "$d/01-docker.txt" 2>&1
 

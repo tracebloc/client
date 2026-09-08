@@ -80,15 +80,61 @@
 # (it starts a stopped cluster and runs drift checks). Single jq-free path — jq
 # is NOT a guaranteed installer prerequisite (same rule as common.sh /
 # install-client-helm.sh, Bugbot #284): read the k3d table's SERVERS column
-# ("running/total") for an EXACT name match with awk. Echoes an integer; 0 on any
-# error / when the cluster is absent.
+# ("running/total") for an EXACT name match with awk.
+#
+# CONTRACT (tri-state since client#984, same shape as _cluster_presence):
+#   echoes an integer, ALWAYS, and
+#   rc 0 = the listing ANSWERED — the integer is the server count (0 = stopped,
+#          0 also when the cluster is absent, which the presence read has already
+#          ruled out before this is called)
+#   rc 2 = the listing did NOT answer (deadline, or k3d's own error) — the
+#          integer is a placeholder and says nothing about the machine
+# Callers MUST read the status: `local n; n="$(...)"` is the split-declaration
+# form, so a bare call also ABORTS the installer under `set -e`.
 _assess_cluster_servers_running() {
-  local running="0" line
-  # `|| line=""`: awk's `exit` closes the pipe, so under `set -o pipefail` a
-  # SIGPIPE from k3d (141) — or any k3d failure — would otherwise propagate
-  # non-zero out of the assignment and abort the installer under `set -e`.
-  line="$(k3d cluster list --no-headers 2>/dev/null | awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }')" \
-    || line=""
+  local running="0" line _tbl _rc=0
+  # BOUNDED (client#974). `k3d cluster list` talks to the Docker engine, and a
+  # WEDGED daemon does not FAIL it — it BLOCKS — so the `|| line=""` this line
+  # already carried handled only k3d failing and was never reached on the input
+  # that matters. This probe runs at the stop-and-check gate on EVERY re-run, so
+  # unbounded it parked the installer before it printed anything. Same distinction
+  # _docker_answers' header draws for a bare `docker info` (#741/#744).
+  #
+  # CAPTURE-THEN-MATCH, not a pipe (#680): awk's `exit` closes the pipe on our
+  # cluster's row — usually row one — so the producer takes SIGPIPE, `pipefail`
+  # makes the pipeline 141, and `|| line=""` then DISCARDED a value we had
+  # successfully read, reporting a running cluster as 0 servers. cluster.sh's
+  # _handle_existing_cluster already made exactly this transform and its comment
+  # points here as the mirror. That mirroring is what made this the LAST holdout
+  # of the tri-state: the #680 SIGPIPE transform and the tri-state transform
+  # touch the same line, this function faithfully copied the first, and the two
+  # then got conflated (LukasWodka, client#984 round 7).
+  # `|| _rc=$?` keeps a non-zero read from aborting under `set -e`.
+  _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
+  # AND A NON-ZERO READ IS NOT "0 SERVERS RUNNING". `(( _rc == 0 )) || _tbl=""`
+  # blanked the table and let the count fall out as 0, which _assess_classify
+  # mapped to `cluster-stopped` and assess_existing_install printed as "Your
+  # secure environment is stopped — starting it and finishing setup" — a claim
+  # about a machine whose listing never answered.
+  #
+  # _cluster_presence running first NARROWS this without closing it. These are
+  # two SEPARATE `k3d cluster list` invocations, each with its own 15s bound; read
+  # 1 answering in 6s says nothing about read 2. That is the same arithmetic this
+  # file already spells out about the docker/k3d pair at L291-297 — "the window is
+  # arithmetic, not hypothetical".
+  #
+  # It collapsed the FAILED half identically: a k3d exiting 127, or on a
+  # permission error, was blanked exactly like a 124. So the caller gets rc 2 for
+  # either, which is the same "couldn't tell" _cluster_presence returns and which
+  # _assess_classify routes to the already-worded `cluster-indeterminate`. The
+  # integer is still printed (0) so the contract stays "echoes an integer"; the
+  # STATUS is what says whether that integer means anything.
+  if (( _rc != 0 )); then
+    log "The k3d cluster listing (server count) did not answer (exit ${_rc}); cluster run-state indeterminate."
+    printf '%s' "0"
+    return 2
+  fi
+  line="$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")"
   [[ -n "$line" ]] && running="${line%%/*}"
   [[ "$running" =~ ^[0-9]+$ ]] || running="0"
   printf '%s' "$running"
@@ -269,11 +315,20 @@ _assess_classify() {
   INSTALL_STATE_REASON="no-cluster"
 
   # Is the container runtime even reachable? This MUST come before the cluster
-  # probe (client#682). `_cluster_exists` is a boolean whose three probes all
-  # swallow stderr and return 1, so a down daemon is indistinguishable from an
-  # empty machine — and a laptop that merely needs Docker started was told it had
-  # nothing installed and offered a full first-time install. install-k8s.ps1 has
-  # carried the tri-state version of this contract since #557; bash never did.
+  # probe (client#682). The cluster probe used to be a BOOLEAN whose three reads
+  # all swallowed stderr and returned 1, so a down daemon was indistinguishable
+  # from an empty machine — and a laptop that merely needs Docker started was told
+  # it had nothing installed and offered a full first-time install. install-k8s.ps1
+  # has carried the tri-state version of this contract since #557; bash finally
+  # does too (_cluster_presence, client#984).
+  #
+  # THIS ORDERING IS NOT ENOUGH ON ITS OWN, and it is worth being precise about
+  # why, because the ordering used to be cited as the whole answer: this guard
+  # tests the DAEMON (`docker info`, TB_ASSESS_DOCKER_TIMEOUT = 10s) while the
+  # cluster read tests k3d (TB_K3D_LIST_TIMEOUT = 15s). A daemon that answers
+  # `docker info` in 2s while `k3d cluster list` takes 20s passes here and times
+  # out below — the window is arithmetic, not hypothetical (LukasWodka,
+  # client#984). The tri-state below is what closes it.
   # DEGRADED, not blocked: the normal flow already knows how to start a stopped
   # runtime (install_docker_desktop launches Docker Desktop and waits;
   # install_docker_engine brings up the Linux service), and create_cluster then
@@ -287,11 +342,33 @@ _assess_classify() {
   fi
 
   # No engine or no cluster => first-time setup. (has k3d short-circuits before
-  # _cluster_exists so a machine without k3d doesn't shell out at all.)
-  if ! has k3d || ! _cluster_exists; then
+  # the cluster probe so a machine without k3d doesn't shell out at all.)
+  #
+  # `fresh` is the one verdict this gate must never reach on a GUESS: it offers a
+  # first-time install, over whatever is actually on the machine. The cluster probe
+  # is bounded (client#974), so it has a third answer — the engine didn't respond —
+  # and reading that as "no cluster" is client#682's misclassification arriving
+  # through the new bound (Bugbot High, client#984). UNKNOWN degrades instead, which
+  # is this gate's documented direction on uncertainty: never a false healthy, never
+  # a false fresh, always fall through to the normal flow.
+  if ! has k3d; then
     INSTALL_STATE="fresh"; INSTALL_STATE_REASON="no-cluster"
     return 0
   fi
+  # `|| _presence=$?` — a bare non-zero return would abort under `set -e`.
+  local _presence=0
+  _cluster_presence || _presence=$?
+  # EXHAUSTIVE, including a `*` that degrades rather than falling through
+  # (client#984 round 7): 0 = PRESENT and continues to the run-state read below,
+  # 1 and 2 short-circuit, and any code the contract grows next is "couldn't
+  # tell" — never a silent PRESENT, which is what an implicit fall-through made
+  # it.
+  case "$_presence" in
+    0) : ;;                    # a cluster exists — keep going, is it RUNNING?
+    1) INSTALL_STATE="fresh";    INSTALL_STATE_REASON="no-cluster"           ; return 0 ;;
+    2) INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0 ;;
+    *) INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0 ;;
+  esac
 
   # A cluster exists — but is it RUNNING? Check this via the cheap read-only k3d
   # probe BEFORE any Helm call. detect_installed_client below runs `helm list -A`
@@ -301,7 +378,29 @@ _assess_classify() {
   # contract) and, when it finally failed, mislabel the machine as
   # `fresh`/`cluster-no-release`. Probing servers first keeps Helm off a dead API
   # and makes `cluster-stopped` actually reachable on real re-runs.
-  local servers; servers="$(_assess_cluster_servers_running)"
+  # TRI-STATE, like the presence read above (client#984 round 7). `|| _srv_rc=$?`
+  # for two reasons: the split-declaration `local servers; servers="$(…)"` form
+  # propagates a non-zero under `set -e` and would abort the gate outright; and
+  # rc 2 means "the listing did not answer", which must NOT become
+  # `cluster-stopped` — that reason prints "Your secure environment is stopped —
+  # starting it and finishing setup" about a machine nobody could read.
+  #
+  # It routes to `cluster-indeterminate`, the arm the presence read's own UNKNOWN
+  # already uses: same cause (a k3d listing that didn't answer), same neutral
+  # copy, same "fall through and read again before acting" direction. A separate
+  # reason would need its own arm at :559 and its own sentence to say the same
+  # thing — and this file's own L566-583 records what happens to a degraded
+  # reason with no arm: it falls into the generic "only partly set up" line.
+  local servers _srv_rc=0
+  servers="$(_assess_cluster_servers_running)" || _srv_rc=$?
+  # `-ne 0`, not `-eq 2`: rc 2 is the only non-zero the contract documents today,
+  # and anything else it grows is still a read that did not answer. The safe
+  # direction is the same one, so it is taken by default rather than by
+  # enumeration.
+  if [[ "$_srv_rc" -ne 0 ]]; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"
+    return 0
+  fi
   if [[ "$servers" -lt 1 ]]; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-stopped"
     return 0
@@ -527,6 +626,35 @@ assess_existing_install() {
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
         cli-outdated)       info "Your tracebloc CLI is out of date — updating it." ;;
         pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
+        # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (Bugbot Medium, client#984).
+        # _assess_classify degrades to this when the k3d listing does not answer, and
+        # without its own arm it fell into the generic line below — which claims an
+        # environment EXISTS and is partly built, about a machine nobody could read.
+        # That is the false claim this whole change removes, and it also contradicted
+        # the create_cluster warning printed seconds later on the same run. The
+        # wording deliberately agrees with that warning: the read failed, and setup
+        # continues in the direction that creates and removes nothing.
+        # NEUTRAL, AND IT PROMISES NOTHING ABOUT WHAT FOLLOWS (Bugbot Medium,
+        # client#984 round 6 — the sibling of the create_cluster warning, which the
+        # first sweep of this fixed and this one missed). Two claims this arm
+        # cannot support: _cluster_presence returns 2 for a DEADLINE *and* for
+        # "every read failed", so naming the Docker engine sends a user with a
+        # broken $HOME/.k3d or an unreadable kubeconfig to inspect a perfectly
+        # healthy daemon; and "nothing will be created or removed" is the opposite
+        # of what happens next, since create_cluster runs after this gate, can
+        # prompt in guard_leftover_data, and can create through the
+        # authoritative-absent path once its own listing answers.
+        # AND IT IS NOW REACHED FROM TWO READS, so it must not name the question
+        # (client#984 round 7). `_assess_classify` routes here on presence == 2
+        # (nothing is known about the cluster at all) AND on a server-count read
+        # that didn't answer (the cluster IS present; whether it is RUNNING is
+        # unknown). The old wording said "without assuming your secure
+        # environment is either present or absent", which is false on the second
+        # path — a small over-claim, but exactly the kind this whole change
+        # removes. What both paths share is the only thing this line now claims:
+        # a k3d listing did not answer, and nothing is being concluded from it.
+        cluster-indeterminate)
+                            info "Couldn't read the k3d cluster listing on this machine — it either didn't complete or k3d couldn't answer it. Continuing without drawing a conclusion from a read that didn't answer; setup reads the listing again before it acts." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
       echo ""
