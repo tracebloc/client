@@ -300,6 +300,38 @@ data:
       printf '%s\n' "$_json" | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
+    # The image reference the LIVE workload currently runs for $repo's primary
+    # container. Used to detect when `helm upgrade --reset-then-reuse-values`
+    # (the hourly auto-upgrade) has re-rendered the workload back to the
+    # chart's `repo:tag` and so DISCARDED an earlier `set image repo@digest`
+    # pin. That revert is invisible to the digest comparison below -- the
+    # annotation still equals the registry digest, so `recorded == latest`
+    # reads "unchanged" and never re-pins -- while the workload sits on the
+    # bare tag (IfNotPresent per tracebloc.controlPlanePullPolicy). On a node
+    # whose `:tag` layer is stale that silently runs an OLD control-plane image
+    # (backend#2896-adjacent; it ran a pre-#416 jobs-manager under a sealed
+    # egress netpol on the stg/prod fleets, client-runtime#199). Container
+    # names are contractual with the deployment/daemonset templates -- keep in
+    # sync with the `case` block in the reconcile loop below. An empty result
+    # (read error / container absent) makes the caller re-assert the pin rather
+    # than assume agreement (fail-safe, same stance as get_annotation).
+    workload_image_for_repo() {
+      case "$1" in
+        tracebloc/jobs-manager)
+          kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="api")].image}' \
+            --request-timeout=15s 2>/dev/null ;;
+        tracebloc/pods-monitor)
+          kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="pods-monitor-container")].image}' \
+            --request-timeout=15s 2>/dev/null ;;
+        tracebloc/resource-monitor)
+          kubectl get daemonset -n "$NODE_AGENTS_NAMESPACE" "$RESOURCE_MONITOR_DAEMONSET" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="tracebloc-resource-monitor")].image}' \
+            --request-timeout=15s 2>/dev/null ;;
+      esac
+    }
+
     # Skip the whole tick if the deployment isn't currently SETTLED (#546). A rollout
     # already in progress, or a pod stuck (e.g. Pending on volume binding), means a restart
     # can't help — it only churns ReplicaSets, and on a single-node local-path cluster that
@@ -525,11 +557,39 @@ data:
       fi
 
       if [ "$recorded" = "$latest" ]; then
-        log "  digest unchanged since last refresh; no-op"
-        continue
+        # The registry digest has not moved since we recorded it -- but that
+        # alone does NOT prove the workload is running it. A `helm upgrade
+        # --reset-then-reuse-values` (the hourly auto-upgrade) re-renders the
+        # Deployment back to `repo:tag` and discards our `set image repo@digest`
+        # pin; with `recorded == latest` this used to no-op, leaving the workload
+        # on the bare tag until the NEXT registry publish -- and on a node whose
+        # `:tag` layer is stale that silently runs an OLD image (client-runtime#199:
+        # a pre-#416 jobs-manager under a sealed egress netpol). So re-assert the
+        # pin whenever the live workload is not already on `repo@latest`.
+        #
+        # DESIGN NOTE (for review): this also converges a FRESH install to a
+        # digest pin on the first tick where `recorded == latest` but the
+        # workload is still on `:tag` (i.e. ~one interval post-install, one extra
+        # rollout). That is a deliberate widening of the header's "first-tick
+        # contract" -- which recorded-without-re-imaging to avoid install churn,
+        # but by staying on `:tag` left exactly the steady-state stale-`:tag`
+        # exposure this fix closes. If the install-churn cost is unwanted, gate
+        # this re-pin on a per-image "have we ever applied a digest here?" marker
+        # so it fires only on genuine reverts (see PR discussion).
+        want="${IMAGE_REGISTRY}/${repo}@${latest}"
+        have="$(workload_image_for_repo "$repo" || true)"
+        if [ "$have" = "$want" ]; then
+          log "  digest unchanged and workload already on the pinned digest; no-op"
+          continue
+        fi
+        log "  digest unchanged, but the workload runs '${have:-<unreadable>}', not '${want}'"
+        log "        -- a helm re-render reverted the pin onto :${IMAGE_TAG}; re-pinning the digest"
+        # Fall through to the re-image path (ref + case block) with recorded
+        # already == latest: the annotate below is an idempotent re-write, and
+        # restart_needed drives the rollout that puts the digest back on.
+      else
+        log "  digest changed (${recorded} -> ${latest}); re-image needed"
       fi
-
-      log "  digest changed (${recorded} -> ${latest}); re-image needed"
       annotate_args="$annotate_args ${key}=${latest}"
       restart_needed=1
 
