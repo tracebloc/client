@@ -220,36 +220,30 @@ tests:
       - notExists:
           path: data.DB_BOOTSTRAP_PASSWORD
 
-  - it: "renders no NARROW_EDGEUSER by default on prod"
+  - it: "prod narrows by default now — its posture is verified (backend#947)"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: NARROW_EDGEUSER
             value: "1"
 
-  # ---- stg is unbaked, and asserted so it can FAIL ---------------------
-  # THE OLD CASE HERE WAS VACUOUS (Arturo, #900), and measured: with
-  # `narrowEdgeuserByEnv.stg: true` the whole suite still passed 22/22. A bare
-  # `notContains NARROW_EDGEUSER` at a plain stg render cannot fail, because
-  # the resolver declines stg narrowing on the PREDECESSORS regardless of the
-  # ByEnv map -- so the assertion was reading the predecessors and reporting on
-  # the map. The bake follows RETIREMENT one fleet at a time (staging is
-  # REVOKEd but not DROPped), so stg needs the same three negatives prod has,
-  # and each has to be able to redden.
+  # ---- stg narrows via the ByEnv map, asserted so it can FAIL ----------
+  # stg is now baked (backend#947): its consumer migration off edgeuser is
+  # verified live, so `narrowEdgeuserByEnv.stg: true`. This case forces the full
+  # posture ON so the predecessors cannot be what DRIVES the result, leaving
+  # `narrowEdgeuserByEnv.stg` as the only remaining input -- so it reads the map,
+  # not the predecessors (the vacuity Arturo caught on #900, where a plain stg
+  # render declined on the predecessors regardless of the map). `rotateMysqlRoot`
+  # is forced too because it is not optional company for the re-parent: without it
+  # (or an explicit bootstrapDbPassword pin) secrets.yaml FAILS the render. Flip
+  # `narrowEdgeuserByEnv.stg` back to false and this reddens.
 
-  - it: "stg does not narrow, and it is the ByEnv map saying so — not the posture"
+  - it: "stg narrows via the ByEnv map — not merely the posture (backend#947)"
     template: templates/jobs-manager-deployment.yaml
-    # The full posture is FORCED ON here so the predecessors cannot be what
-    # declines. `rotateMysqlRoot` is forced too because it is not optional
-    # company for the re-parent on an unbaked fleet: without it (or an explicit
-    # bootstrapDbPassword pin) secrets.yaml FAILS the render outright, so a
-    # posture-forced stg case that omits it tests the refusal, not the map.
-    # With this set, `narrowEdgeuserByEnv.stg` is the only remaining input --
-    # flip it and NARROW_EDGEUSER appears.
     set:
       env.CLIENT_ENV: stg
       serviceDbAccounts: true
@@ -257,7 +251,7 @@ tests:
       bootstrapDbReparent: true
       rotateMysqlRoot: true
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: NARROW_EDGEUSER
@@ -297,12 +291,18 @@ tests:
           path: spec.template.spec.containers[0].env
           content: {name: DB_BOOTSTRAP_USER, value: "root"}
 
-  - it: "prod still defaults OFF too"
+  # Now that narrowEdgeuserByEnv is true for every env (backend#947), the
+  # reddenable NEGATIVE is no longer "the map says off" but "the POSTURE is
+  # incomplete": the baked default still DECLINES (silently, the safe direction)
+  # on any edge missing a predecessor, so a single-gate step-back does not narrow
+  # even though the map says to. Here perExperimentDbCreds is off while the rest
+  # are forced on; flip it back on and NARROW_EDGEUSER appears.
+  - it: "prod does NOT narrow when a predecessor is off, despite the ByEnv map"
     template: templates/jobs-manager-deployment.yaml
     set:
       env.CLIENT_ENV: prod
       serviceDbAccounts: true
-      perExperimentDbCreds: true
+      perExperimentDbCreds: false
       bootstrapDbReparent: true
       rotateMysqlRoot: true
     asserts:
