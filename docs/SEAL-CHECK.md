@@ -256,8 +256,8 @@ of that run).
 | Fleet | Cluster / namespace | Sealed (netpol) | Probe (direct :443) | Real run |
 |---|---|---|---|---|
 | dev | `tb-client-dev-templates` / `tracebloc-templates` | ✅ no direct `0.0.0.0/0:443` | BLOCKED after ~≤16 s; HF 403 via squid | `image_classification` → COMPLETED |
-| staging | `tracebloc-clients-prod` / `tracebloc-templates-stg` | ✅ | BLOCKED; HF 403 via squid | COMPLETED |
-| prod | `tracebloc-clients-prod` / `tracebloc-templates-prod` | ✅ | BLOCKED; HF 403 via squid | COMPLETED |
+| staging | `tracebloc-clients-prod` / `tracebloc-templates-stg` | ✅ | BLOCKED; HF 403 via squid | `image_classification` → COMPLETED |
+| prod | `tracebloc-clients-prod` / `tracebloc-templates-prod` | ✅ | BLOCKED; HF 403 via squid | `image_classification` → COMPLETED |
 
 On each fleet the rendered training NetworkPolicy allows egress only to DNS +
 mysql(3306) + requests-proxy(8888) + egress-proxy(3128). A training-labelled
@@ -286,7 +286,7 @@ client-runtime#199.
 **Image durability note (client-runtime#199):** the jobs-manager on a fleet must
 run a build carrying client-runtime#416 (the HF-offline injection) *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
-On this cluster the chart renders control-plane images as `repository:tag` +
+On each cluster the chart renders control-plane images as `repository:tag` +
 `IfNotPresent`, and the `image-refresh` CronJob pins the live digest. dev now
 tracks its `:dev` tag (auto-refresh); staging/prod **pin the #416 digest** in
 values (`images.jobsManager.digest`) because their tag node-caches were stale
