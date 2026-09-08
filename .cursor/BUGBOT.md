@@ -46,7 +46,147 @@ for *what the operator sees and can act on*, not code elegance.
   On Linux (coreutils present) `docker` daemon probes route through
   `_docker_answers()` (yes/no) or `_bounded()` (needs output); `check-style.sh`
   rule 5 fails CI on any unbounded `docker info` under `scripts/lib/`, so the class
-  is a gate, not a repeated review comment (#744). Two edges when you bound one:
+  is a gate, not a repeated review comment (#744).
+  **`docker info` is not the only call that talks to that daemon.** `k3d cluster
+  list` does too, so a wedged engine blocks it identically — and all seven bash call
+  sites carried `2>/dev/null || true`, which handles k3d *failing* and is therefore
+  never reached (client#974, the twin of client#930). `check-style.sh` **rule 5**
+  now covers `docker info|ps|inspect|version` (widened in client#984, where a bare
+  `docker ps` sat two lines above a new gate and defeated it), **rule 7** covers
+  `k3d cluster list`, and **rules 6 and 8 are their censuses** (6 for 5, 8 for 7 —
+  this sentence said "rule 6 covers `k3d cluster list`, and rules 6 and 8 are
+  their censuses", contradicting itself, because the renumbering that moved k3d
+  from 6 to 7 only landed in the second half of it): a text scan that
+  matches nothing prints as clean as one that checked everything, so each rule
+  asserts it found at least the sites known to exist, with a floor a test proves
+  honest. Pair every new grep-class gate here with a census — rule 5 shipped
+  without one and silently stopped covering four reads when their spelling changed. `k3d cluster start`/`create` take `--wait --timeout`;
+  `k3d cluster delete` takes neither, so bound it with `_bounded` and check for 124
+  (`scripts/tests/e2e-windows.ps1` does this for its pre-clean).
+
+- **Bounding a call ADDS AN OUTCOME — decide what it means, per caller.** This is the
+  half that is easy to miss, and it cost client#984 two High findings and a
+  BLOCKING review on a PR whose only purpose was adding the bounds. Before a bound
+  a probe answers yes/no; after it there are three answers, and *couldn't tell* is
+  not a flavour of *no*. Folding it into the boolean gave `_cluster_exists` one
+  return value for "there is no cluster" and "the engine did not answer", so a
+  timed-out listing sent `create_cluster` into `guard_leftover_data` — which prompts,
+  with delete among the options — and made assess report `fresh`, offering a
+  first-time install over a live machine. That is **worse than the hang the bound
+  removed**. Two rules follow:
+  (a) **Tri-state at the primitive** (`0` yes / `1` no / `2` UNKNOWN), the contract
+  `_k3d_cluster_running` and `install-k8s.ps1`'s `Get-ClusterRunStateFromList` already
+  carry, and **no boolean wrapper** — a wrapper makes every `if fn` caller inherit
+  somebody else's answer, and `! fn` silently spells it "no".
+  (b) **An AUTHORITATIVE answer beats a later probe's "couldn't tell".** A probe
+  chain must RETURN on the first read that completed and parsed, both ways. Letting
+  it fall through cost a second High finding on the same PR: a successful JSON
+  listing proved the cluster absent, the table probe below it then timed out, and a
+  first-time install with `jq` present tried to *start* a cluster the listing had
+  just proved absent. `jq -e` cannot tell "no match" from "not JSON" — both are
+  non-zero — so check the payload SHAPE before treating a non-match as an answer.
+  (c) **Never pipe a bounded read straight into a filter.** `read | grep -iE PROXY`
+  turns a fired deadline into empty output, i.e. "this node has no proxy env" — on a
+  machine being diagnosed *for* a proxy problem. Capture, check the status, then
+  filter, and say "UNKNOWN for this node, not absent" when the read did not finish.
+  (d) **The guard must assert the OUTCOME, not the bound.** "Is this call bounded?"
+  was green on the shipped bug, and `check-style.sh` was green on the second round
+  too — boundedness and outcome-propagation are different properties.
+  `scripts/tests/bounded-reads-propagate.bats` is the class guard for the second:
+  it derives every bounded daemon read from check-style's own regexes, requires the
+  enclosing function to be driven three ways (or to sit in an explicitly named,
+  **ratcheted** exemption list), and asserts the three outcomes are DISTINCT.
+  Assert what the timeout branch DOES — which function it calls, which state it
+  sets — and pair it with the definite-answer case, or the test passes against code
+  that can never take the branch at all.
+  Ordering another daemon probe ahead of the read does not close this: the guard and
+  the read have different budgets (`TB_ASSESS_DOCKER_TIMEOUT` 10s vs
+  `TB_K3D_LIST_TIMEOUT` 15s), so a daemon that answers fast with a slow k3d read
+  passes the guard and times out anyway.
+  (e) **AND THE MIRROR IMAGE: a read that FAILED did not time out.** The same
+  conflation runs both ways, and this direction came back three review rounds
+  running on one PR (@saadqbal, client#984). A bounded reader returns the child's
+  REAL exit code on completion and `124` only on the deadline, so
+  `if _bounded_capture …; then cat "$_cap"; else echo "(… did not complete within
+  Ns)"; fi` writes a fabricated hang for every non-zero — and discards `$_cap`,
+  where the error text is. Daemon live but the socket not permitting this user,
+  `docker version` exits 1 in milliseconds printing `permission denied while trying
+  to connect to the Docker daemon socket`, and the bundle recorded a 10s stall; the
+  k3d site went on to blame "the engine is not answering" on a run where the engine
+  had answered. Branch on **`0` / `124` / any other non-zero**, print the captured
+  text on the last, and do it in ONE classifier — seven call sites each spelling the
+  branch is how it got reintroduced three times. `diagnose.sh`'s
+  `_bounded_capture_read` is that classifier; group D of
+  `bounded-reads-propagate.bats` is its guard, including a census that reddens if
+  any site open-codes the branch again. Also keep `2` ("could not create the
+  capture file") off the `cat` path: there the command never ran and the file may
+  still hold the PREVIOUS read's output. **A LIVENESS GATE IS NOT EXEMPT** — the
+  round-4 High on the same PR was `_docker_answers_bounded`, which is tri-state for
+  the same reason (`spin` returns 124 on the deadline, the child's status
+  otherwise): treating any non-zero as "the daemon didn't answer within Ns" made a
+  stopped daemon or a denied socket — both millisecond failures — skip every
+  docker/k3d section and claim a hang. Only the deadline may skip; a gate that
+  ANSWERED and failed should still collect, because each read is individually
+  bounded and records its own error.
+  (f) **THE DEADLINE ARM ITSELF MUST NOT ABORT.** `wait` on a TERM'd child reports
+  143 and `kill` fails outright on an already-exited pid, so under `set -e` an
+  unguarded deadline arm exits with THAT status instead of reaching `return 124` —
+  and every branch keyed on 124 then reads a stall as the command's own failure.
+  Failure-proof every line (`|| true`), as `spin` does (Bugbot #442 r3) and as
+  `_bounded_capture` now does (client#984). Escalate TERM→KILL IN-LINE rather than
+  from a detached subshell racing `wait`: a KILL landing after `wait` has reaped
+  the child can signal a REUSED pid, and a child that ignores TERM otherwise
+  decides how long the installer waits. **Test it in a real subprocess** — bash
+  inherits the AND-OR errexit suppression into subshells, so
+  `( set -e; f ) || rc=$?` disables the very errexit it looks like it is testing
+  and passes against the bug; use `bash -c 'set -e; source …; f'`.
+  (g) **A CONTRACT THAT GAINS AN OUTCOME MUST BE SWEPT AT ITS *EXISTING* CALL
+  SITES.** The one that outlasted every rule above it: client#984 needed seven
+  rounds, and each round changed a return contract, swept the code it was
+  writing, and left a site written *before* that value existed to receive it —
+  @LukasWodka's summary, *"the site was safe until the contract changed."*
+  `_cluster_presence` gained `2`, `_handle_existing_cluster` gained `3`,
+  `_bounded_capture_read` gained the failed/stalled split, and each time the
+  misses were in untouched code, so a diff review could not find them.
+  `_handle_existing_cluster`'s third call site — `_create_new_cluster`'s "already
+  exists" recovery, `|| _hrc=$?` at the other two — stayed bare, and under
+  `set -euo pipefail` a bare non-zero in an `if` **body** is not exempt: `return
+  3` exited the installer with status 3 and no message. **"The caller ignores the
+  value" is never benign here.** So: `grep` the identifier, enumerate EVERY call
+  site mechanically rather than from the diff, and show that each handles EVERY
+  documented value — a `case` with an explicit `*)` that takes the
+  non-destructive direction, not an implicit fall-through, and never a `*)` that
+  lands on the branch which creates or deletes. Two related traps: a
+  `local x; x="$(f)"` split declaration propagates a non-zero under errexit where
+  the single-statement `local x="$(f)"` does not, so the two forms are not
+  interchangeable at a multi-outcome call; and a producer's *string* outputs
+  (`INSTALL_STATE_REASON`) are the same class — a new value with no arm at the
+  consuming `case` falls into whatever generic sentence sits at `*)`. Group E of
+  `bounded-reads-propagate.bats` is the census: it enumerates the call sites of
+  every function in `MULTI_OUTCOME_FUNCTIONS` and reddens on any that does not
+  capture the status, with a per-function floor so a grep that stopped matching
+  cannot read as clean.
+
+- **`_bounded` is not a bound on macOS; `_bounded_capture` is.** `_bounded` execs
+  timeout(1)/gtimeout(1) and runs the BARE command when neither is present, and
+  neither ships on a stock Mac. `_docker_answers_bounded` solves that for a yes/no
+  probe but discards output, so a read whose OUTPUT is the point had nothing —
+  which is how the `--diagnose` bundle stayed hangable through two review rounds.
+  `_bounded_capture SECONDS OUTFILE CMD…` (common.sh) bounds via the child PID, needs
+  no coreutils, and returns 124 distinguishably. **A liveness gate is not a
+  substitute:** proving `docker info` answers in 10s says nothing about a 15s
+  `k3d cluster list`, which is more engine work on a longer budget. Every read in
+  `diagnose.sh` reaches `_bounded_capture` through `_bounded_capture_read`, the
+  three-outcome classifier rule (e) above requires, and `diagnose.bats` enforces
+  that spelling for that file specifically — label included, since the honest
+  stall/failure line is built from it (rule 5 accepts either, correctly — it
+  governs the whole tree).
+
+- **Give a slow call its own budget.** `TB_PROBE_TIMEOUT`'s 5s is for cheap
+  skip-gate probes. `k3d cluster list` enumerates *and* inspects containers — more
+  engine work than `docker info` — so it has `TB_K3D_LIST_TIMEOUT` (15s, matching
+  the PowerShell twin's identical read). Reusing the tightest knob in the tree on
+  the slowest call widens the UNKNOWN window for no reason (client#984). Two edges when you bound one:
   (a) the #741 **test trap** — `_bounded` runs the command through `timeout` as an
   *external* process, so a `docker() { … }` shell-function stub stops intercepting;
   stub at `_docker_answers`/`_bounded`, or shadow `timeout`/`gtimeout` with a
