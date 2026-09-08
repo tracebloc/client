@@ -248,9 +248,11 @@ echo "── isolate path 2 from path 1's --reuse-values contamination (#459) �
 # so re-set it here. On the current chart the existing (un-rotated) datadir would
 # keep the ByEnv default gated off anyway — bakedRootRotationOn sees the PVC with
 # no marker and no baked root — but re-setting the override makes this re-based
-# baseline DETERMINISTICALLY un-rotated for paths 2-5 and the backend#2879
-# precondition regardless of the published $PREV era, rather than un-rotated only
-# because that gate happens to hold.
+# baseline DETERMINISTICALLY un-rotated for paths 2-4 (they inherit it via
+# --reset-then-reuse-values) regardless of the published $PREV era, rather than
+# un-rotated only because that gate happens to hold. Path 5's --reset-values
+# discards this override and DOES rely on the gate resolving OFF — see its NOTE
+# below; the precondition holds because the whole window stays marker-free.
 helm upgrade "$NS" "${REPO_NAME}/client" --version "$PREV" --namespace "$NS" --reset-values \
   --set clientId=ci-e2e-upgrade \
   --set clientPassword=ci-e2e-upgrade \
