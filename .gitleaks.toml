@@ -53,3 +53,16 @@ description = "Fabricated helm-unittest fixture for the bootstrapDbPassword expl
 regexes = [
   '''^OperatorPinned456$''',
 ]
+
+# client/values.yaml's MULTI_GPU_MIN_PARAMETERS comment (backend#3147, client#983)
+# was reflowed so that the prose "keys set on the edge: TRACEBLOC_DDP=1" landed
+# on one line, and gitleaks 8.30.1 reads that as `generic-api-key` at entropy
+# 3.64 -- a documented operator switch with the value 1, not a secret. The line
+# was reworded in the next commit, but as with the entry above the gate scans
+# COMMIT HISTORY, so the finding stays attached to f03b08f42 until history is
+# rewritten, which it will not be. Anchored to the exact literal.
+[[allowlists]]
+description = "TRACEBLOC_DDP=1 is the documented multi-GPU on-switch quoted in a values.yaml comment (backend#3147); the reflowed prose matched generic-api-key once in commit history."
+regexes = [
+  '''^TRACEBLOC_DDP=1$''',
+]

@@ -302,14 +302,214 @@ Describe "Get-ClusterRunState tri-state (#557 Bugbot 3728714531: absent != unkno
       Get-ClusterRunStateFromList -Json '{not json' -Name 'tracebloc' | Should -Be 'unknown'
     }
   }
-  # NOTE: the bounded Get-ClusterRunState wrapper (timeout -> 'unknown',
-  # completed -> classify) is intentionally NOT unit-tested here. Mocking the
-  # Start-Job / Wait-JobWithProgress / Receive-Job machinery is fragile and
-  # environment-dependent (it fails under CI's Pester). Coverage is provided
-  # instead by two stable sources: the pure classifier is exercised directly
-  # above via Get-ClusterRunStateFromList, and the bounded-job wrapping itself
-  # is asserted by the source-of-truth regex guard on Test-ClusterRunning
-  # (Start-Job + Wait-JobWithProgress + deadline). See #557 Bugbot 3728714531.
+  # NOTE: the JOB MACHINERY itself (Start-Job / Wait-JobWithProgress /
+  # Receive-Job) is still intentionally NOT unit-tested here -- mocking it is
+  # fragile and environment-dependent (it failed under CI's Pester). What
+  # client#930 changed is that the machinery now lives behind ONE named seam,
+  # Get-ClusterListJson, so the wrapper's decision logic is mockable without
+  # touching any of it: the two Contexts below drive Get-ClusterRunState and
+  # Find-ClusterInList through that seam, and the bounding itself is asserted by
+  # the AST class guard in "Every Docker/child wait on the install path is
+  # bounded". See #557 Bugbot 3728714531.
+
+  # THE TYPE CHANGE, and this is the second time it has mattered in this file
+  # (the first cost a -Diagnose bundle a namespace called "NAMESPACE").
+  #
+  # New-K3dCluster's read was `k3d cluster list -o json 2>&1 | Out-String` --
+  # already one blob -- and is now a job's Receive-Job output, ALSO one blob but
+  # with two new reachable shapes: "" when the deadline fired, and a leading
+  # blank line from Out-String. Its consumer used to be an inline
+  # `ConvertFrom-Json | Where-Object` inside an empty `catch {}`, i.e. a parse
+  # seam with no test and no name. Find-ClusterInList is that seam, extracted
+  # for exactly the reason Get-JobsManagerNamespace was.
+  Context "Find-ClusterInList (pure: the parse seam bounding the call changed)" {
+    It "returns the named cluster object, with its serversRunning intact" {
+      $c = Find-ClusterInList -Json '[{"name":"tracebloc","serversRunning":1}]' -Name 'tracebloc'
+      $c | Should -Not -BeNullOrEmpty
+      $c.serversRunning | Should -Be 1
+    }
+    It "picks OUR cluster out of a list of several, not the first one" {
+      $json = '[{"name":"other","serversRunning":1},{"name":"tracebloc","serversRunning":0}]'
+      (Find-ClusterInList -Json $json -Name 'tracebloc').serversRunning | Should -Be 0
+    }
+    It "a cluster ABSENT from a successful list is `$null, so the caller creates one" {
+      Find-ClusterInList -Json '[{"name":"other","serversRunning":1}]' -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json '[]' -Name 'tracebloc' | Should -BeNullOrEmpty
+    }
+    It "a TIMED-OUT read ('') is `$null -- never a cluster, and never a throw" {
+      # The shape the deadline produces. Before the extraction this landed in an
+      # empty `catch {}`; the difference is that this is now stated, not implied.
+      Find-ClusterInList -Json ''    -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json '   ' -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json $null -Name 'tracebloc' | Should -BeNullOrEmpty
+    }
+    It "k3d's own words instead of JSON are `$null, not a half-parsed cluster" {
+      # Why the reader uses 2>$null and not 2>&1: k3d's stderr is not JSON, and
+      # merging it into the blob turns a healthy listing into a parse failure.
+      Find-ClusterInList -Json 'time="..." level=fatal msg="docker failed"' -Name 'tracebloc' | Should -BeNullOrEmpty
+      Find-ClusterInList -Json '{not json' -Name 'tracebloc' | Should -BeNullOrEmpty
+    }
+    It "survives the blob shape a bounded read actually returns (blank lines, CRLF)" {
+      # Out-String on a job's output brings its own leading/trailing newlines;
+      # a per-line consumer would have choked on these, a whole-blob one must not.
+      $json = "`r`n[{`"name`":`"tracebloc`",`"serversRunning`":2}]`r`n`r`n"
+      (Find-ClusterInList -Json $json -Name 'tracebloc').serversRunning | Should -Be 2
+    }
+  }
+
+  # THE DECISION, not just the tri-state (client#973 review). Everything above
+  # this point establishes that an indeterminate listing is DISTINGUISHABLE; the
+  # gap the reviewer named is that the main install path was the one consumer
+  # that did not act on the distinction — "" went to `$clusterExists = $false`,
+  # i.e. `k3d cluster create` over a cluster that may well exist.
+  #
+  # There was no test for what New-K3dCluster does with an indeterminate listing
+  # because the decision had no name. Assert-ClusterListingReadable is that name,
+  # which is what makes the property assertable rather than only reviewable.
+  Context "Assert-ClusterListingReadable (the main install path refuses to guess)" {
+    BeforeEach {
+      Mock Hint { }
+      Mock Err  { param($m, $Detail) $script:lastErr = "$m`n$Detail"; throw "err" }
+    }
+
+    It "refuses EVERY shape a failed listing produces -- never 'assume absent, create one'" {
+      # '' is now reachable three ways (deadline fired, job died fast, empty
+      # read) and all three mean the same thing: nothing was enumerated.
+      foreach ($blob in @('', '   ', $null, "`r`n", '{not json', 'time="x" level=fatal msg="docker failed"')) {
+        { Assert-ClusterListingReadable -Json $blob } | Should -Throw -Because "an unreadable listing must stop the install, not create a cluster over an existing one"
+      }
+      Should -Invoke Err -Times 6 -Exactly
+    }
+
+    It "a SUCCESSFUL EMPTY listing '[]' passes -- a fresh install must NOT be blocked" {
+      # The line between this and the case above is the whole point, and it is
+      # measured, not assumed: k3d v5.9.0 against a healthy engine holding zero
+      # k3d containers prints exactly `[]` and exits 0; against a daemon that
+      # will not answer it prints NOTHING on stdout and exits 1. If k3d ever
+      # regressed to an empty stdout for an empty list, this assertion is what
+      # says so before every first-time install starts erroring.
+      { Assert-ClusterListingReadable -Json '[]' }      | Should -Not -Throw
+      { Assert-ClusterListingReadable -Json "`r`n[]`r`n" } | Should -Not -Throw
+      Should -Invoke Err -Times 0 -Exactly
+    }
+
+    It "a real listing passes, whether or not OUR cluster is in it" {
+      { Assert-ClusterListingReadable -Json '[{"name":"tracebloc","serversRunning":1}]' } | Should -Not -Throw
+      { Assert-ClusterListingReadable -Json '[{"name":"other","serversRunning":1}]' }     | Should -Not -Throw
+      Should -Invoke Err -Times 0 -Exactly
+    }
+
+    It "names the thing it could not do, and that a re-run is the fix" {
+      # The failure a stranger sees has to be the one fact that tells them what
+      # to fix. Falling through to create told them about image pulls and Docker
+      # health after a 15-minute wait; this says the listing failed, up front.
+      { Assert-ClusterListingReadable -Json '' } | Should -Throw
+      $script:lastErr | Should -Match "(?i)couldn't list"
+      $script:lastErr | Should -Match "(?i)docker"
+      $script:lastErr | Should -Match "(?i)re-run"
+    }
+  }
+
+  # THE READER'S RETURN CONTRACT, which everything above rests on (@saadqbal,
+  # confirmed by @LukasWodka on client#973). Every other test here reaches the
+  # tri-state through `Mock Get-ClusterListJson { "" }` — i.e. they assert what
+  # the CONSUMERS do with "", and assume the reader produces it. The source
+  # guards grep for `-TimeoutSec 15` and the log strings but say nothing about
+  # what the timeout branch RETURNS, so the one value the fail-closed property
+  # depends on had no machine check behind it, only prose in a comment.
+  #
+  # Why that is load-bearing now rather than merely untidy: change `$out = ""`
+  # to `$out = "[]"` and a fired deadline becomes a healthy empty listing —
+  # Assert-ClusterListingReadable passes it, Find-ClusterInList yields $null, and
+  # the install is back on the create path over a live cluster, which is the exact
+  # regression this PR exists to block. The AST ordering guard, all three new
+  # mutation entries and both behavioural Contexts stay green through that edit.
+  # Registered as a fourth mutation so it stays closed.
+  #
+  # The job machinery is mocked at its OWN seams (Start-Job / Wait-JobWithProgress
+  # / Receive-Job / Remove-Job) rather than executed. The note above about not
+  # unit-testing the machinery stands for the machinery's behaviour; this asserts
+  # only the function's return value per branch, which is what the callers read.
+  Context "Get-ClusterListJson return contract per branch (client#973)" {
+    BeforeAll {
+      # A REAL Job object, and it has to be: Receive-Job and Remove-Job
+      # TYPE-CHECK their -Job parameter even when mocked, so a
+      # [pscustomobject] stand-in fails argument binding before any mock body
+      # runs ("Cannot convert ... to type System.Management.Automation.Job[]").
+      # This job runs an empty scriptblock, is never waited on and never
+      # received from -- Wait-JobWithProgress and Receive-Job are mocked in
+      # every test below -- so nothing here depends on job timing, k3d, or
+      # Docker. It exists only to satisfy the parameter binder.
+      $script:tbInertJob = Start-Job -ScriptBlock { }
+    }
+    AfterAll {
+      # Real Remove-Job: mocks are only in force inside It blocks.
+      if ($script:tbInertJob) { Remove-Job $script:tbInertJob -Force -ErrorAction SilentlyContinue }
+      $script:tbInertJob = $null
+    }
+    BeforeEach {
+      Mock Start-Job  { $script:tbInertJob }
+      Mock Remove-Job { }
+      Mock Log        { }
+    }
+
+    It "a FIRED DEADLINE returns empty -- never '[]', which the refusal would wave through" {
+      Mock Wait-JobWithProgress { $false }
+      # Deliberately a HEALTHY listing: if the timeout branch ever started
+      # consulting the job, this is the value that would sail past the refusal.
+      Mock Receive-Job { '[{"name":"tracebloc","serversRunning":1}]' }
+      $out = Get-ClusterListJson
+      [string]::IsNullOrEmpty($out) | Should -BeTrue -Because "the fail-closed refusal fires on an EMPTY blob; any listing-shaped return defeats it"
+      Should -Invoke Receive-Job -Times 0 -Exactly -Because "a timed-out job's output is not an answer"
+      Should -Invoke Remove-Job  -Times 1 -Exactly -Because "the job must still be reaped on the timeout path"
+    }
+
+    It "and that return is the value Assert-ClusterListingReadable refuses -- end to end, no mocked seam between them" {
+      # The two halves joined: reader -> refusal, with nothing stubbed in between.
+      # This is the assertion that would have caught `$out = "[]"`.
+      Mock Wait-JobWithProgress { $false }
+      Mock Receive-Job { '[]' }
+      Mock Hint { }
+      Mock Err  { throw "refused" }
+      { Assert-ClusterListingReadable -Json (Get-ClusterListJson) } | Should -Throw
+    }
+
+    It "a FAIL-FAST job (not Running, no output) returns empty too, and leaves the breadcrumb" {
+      Mock Wait-JobWithProgress { $true }
+      Mock Receive-Job { }
+      $out = Get-ClusterListJson
+      [string]::IsNullOrWhiteSpace($out) | Should -BeTrue
+      Should -Invoke Log -Times 1 -Exactly -ParameterFilter { $m -match 'returned no output' }
+    }
+
+    It "a HEALTHY read is passed through -- the contract is not 'always empty'" {
+      # Anti-vacuity: without this, `return ""` unconditionally would satisfy
+      # every assertion above and break every install instead.
+      Mock Wait-JobWithProgress { $true }
+      Mock Receive-Job { '[{"name":"tracebloc","serversRunning":1}]' }
+      Get-ClusterListJson | Should -Match '"name":"tracebloc"'
+      Should -Invoke Log -Times 0 -Exactly -ParameterFilter { $m -match 'returned no output' }
+    }
+  }
+
+  Context "Get-ClusterRunState over the bounded seam (timeout -> 'unknown')" {
+    It "a timed-out read classifies as 'unknown', never as 'down'" {
+      # 'down' means "enumerated fine, ours isn't running" and lets a foreign
+      # port-6550 listener hard-fail the install. A timeout knows neither.
+      Mock Get-ClusterListJson { "" }
+      Get-ClusterRunState | Should -Be 'unknown'
+    }
+    It "a healthy read is classified, not merely passed through" {
+      Mock Get-ClusterListJson { '[{"name":"tracebloc","serversRunning":1}]' }
+      Get-ClusterRunState | Should -Be 'running'
+      Test-ClusterRunning | Should -BeTrue
+    }
+    It "a stopped cluster is 'down' so the fast path cannot skip start/repair" {
+      Mock Get-ClusterListJson { '[{"name":"tracebloc","serversRunning":0}]' }
+      Get-ClusterRunState | Should -Be 'down'
+      Test-ClusterRunning | Should -BeFalse
+    }
+  }
 }
 
 Describe "Test-ClientHealthy (#420 Bugbot: verify workloads Ready, not just cluster)" {
@@ -4515,7 +4715,23 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
   # narrowed until it is an instance guard again, which is exactly the failure
   # being fixed. The PowerShell parser knows a command from a string, so the
   # property can be stated once and stay true.
-  It "EVERY native docker call is bounded -- the class, not just 'docker info' (backend#2849 review)" {
+  # WIDENED FROM `docker` TO `docker|k3d` (client#930).
+  #
+  # The guard below was already the class assertion for `docker`, and the ticket
+  # it came from said so. It was still an INSTANCE guard one level up: the class
+  # is "native call that talks to the Docker engine", and `k3d` is in it. `k3d
+  # cluster list` opens \\.\pipe\docker_engine exactly as `docker` does, so
+  # against the half-open pipe Docker Desktop leaves behind it does not fail --
+  # it blocks. New-K3dCluster ran one bare, on the MAIN install path, through
+  # every green run of this suite since the guard was written.
+  #
+  # So `k3d` joins the same assertion rather than getting a parallel one: a
+  # second guard is a second thing the next tool can be absent from. NOTE there
+  # is deliberately NO allowlist -- both k3d call sites in the file are bounded,
+  # and an allowlist is the mechanism by which a class guard decays back into an
+  # instance guard. If a future site genuinely must be bare, add the entry here
+  # WITH the reason, and expect to defend it.
+  It "EVERY native docker/k3d call is bounded -- the class, not just 'docker info' (backend#2849 review, client#930)" {
     $tokens = $null; $errors = $null
     $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
@@ -4523,8 +4739,9 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     $errors.Count | Should -Be 0 -Because "the installer must parse before this property means anything"
     $ast | Should -Not -BeNullOrEmpty -Because "cannot read the installer AST"
 
+    $engineTools = @('docker', 'k3d')
     $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
-      Where-Object { $_.GetCommandName() -eq 'docker' }
+      Where-Object { $_.GetCommandName() -in $engineTools }
 
     # Sanity: this guard must be looking at something. If a refactor moves every
     # docker call behind the wrapper, delete this line -- do not let it pass vacuously.
@@ -4539,7 +4756,92 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       }
       if (-not $inJob) { $unbounded += "line $($c.Extent.StartLineNumber): $($c.Extent.Text)" }
     }
-    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker call must go through Invoke-DockerCli or a Wait-JobWithProgress-reaped Start-Job"
+    $unbounded -join "`n" | Should -BeNullOrEmpty -Because "every native docker/k3d call must go through Invoke-DockerCli / Invoke-BoundedProcess or a Wait-JobWithProgress-reaped Start-Job"
+  }
+
+  # THE INSTANCE the class guard above was widened to catch (client#930).
+  #
+  # Kept as its own assertion because the class guard names a property while this
+  # names the site and the mechanism: New-K3dCluster must read the listing
+  # through the ONE bounded reader, not through a bare call and not through a
+  # second job of its own. A file with two bounded readers is a file where the
+  # next edit fixes one of them.
+  It "New-K3dCluster reads the cluster listing through the bounded reader, never bare" {
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    $fn  = (($src -split 'function New-K3dCluster')[1] -split '\nfunction ')[0]
+    $fn | Should -Match '\$clusterListJson = Get-ClusterListJson'
+    # the bare native form is GONE from this function, in either redirection shape
+    $fn | Should -Not -Match '(?m)^\s*\$?\w*\s*=?\s*k3d cluster list'
+  }
+
+  # THE ORDER, which is the whole property (client#973 review). The behavioural
+  # test above proves Assert-ClusterListingReadable refuses an indeterminate
+  # blob; this proves the install path consults it BEFORE it decides existence.
+  # An assert placed after `$clusterExists` would pass every unit test and still
+  # let the create path win the race with it.
+  #
+  # IT READS THE AST, NOT THE SOURCE TEXT, and that is not a stylistic
+  # preference — it is a MEASURED correction. The first version of this test did
+  # `$fn.IndexOf('Assert-ClusterListingReadable -Json $clusterListJson')`, and
+  # mutation-check reported SURVIVED for the mutation that comments that very
+  # call out: `# Assert-ClusterListingReadable …` still CONTAINS the string the
+  # test searched for, so a source-text guard cannot tell a live call from a dead
+  # one and this guard would have certified an installer that had gone back to
+  # guessing. The parser knows a command from a comment; nothing else here does.
+  It "New-K3dCluster refuses an indeterminate listing BEFORE deciding the cluster is absent" {
+    $tokens = $null; $errors = $null
+    $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+    # Fail CLOSED: an unparseable file must not read as "the order is fine".
+    $errors.Count | Should -Be 0 -Because "the installer must parse before this property means anything"
+    $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-K3dCluster' }, $true) |
+      Select-Object -First 1
+    $fn | Should -Not -BeNullOrEmpty -Because "cannot find New-K3dCluster in the AST"
+
+    $calls = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+    $lineOfCall = {
+      param($name)
+      $c = @($calls | Where-Object { $_.GetCommandName() -eq $name }) | Select-Object -First 1
+      if ($c) { $c.Extent.StartLineNumber } else { 0 }   # 0 = not CALLED at all
+    }
+    $iRead   = & $lineOfCall 'Get-ClusterListJson'
+    $iAssert = & $lineOfCall 'Assert-ClusterListingReadable'
+
+    # The decision itself is an assignment, not a call.
+    $assign = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) |
+      Where-Object { $_.Left.Extent.Text -eq '$clusterExists' }) | Select-Object -First 1
+    $assign | Should -Not -BeNullOrEmpty -Because "the existence decision must still be here"
+    $iDecide = $assign.Extent.StartLineNumber
+
+    $iRead   | Should -BeGreaterThan 0 -Because "the bounded read must still be CALLED, not merely mentioned"
+    $iAssert | Should -BeGreaterThan 0 -Because "a bounded read with no decision at its consumer is the client#973 blocker"
+    $iAssert | Should -BeGreaterThan $iRead   -Because "it judges the blob the reader returned"
+    $iDecide | Should -BeGreaterThan $iAssert -Because "an unreadable listing must never reach the absent/create decision"
+  }
+
+  It "there is exactly ONE bounded k3d-listing reader, and both callers use it" {
+    # The reason the extraction is the fix and not a copy of the job into
+    # New-K3dCluster: two readers drift, and the one on the main install path is
+    # the one nobody runs against a wedged daemon until a customer does.
+    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
+    ([regex]::Matches($src, '(?m)^function Get-ClusterListJson\b')).Count |
+      Should -Be 1 -Because "the bounded reader must be defined once"
+    # ...and it carries the deadline + the specific timeout line support greps for
+    $reader = (($src -split 'function Get-ClusterListJson')[1] -split '\nfunction ')[0]
+    $reader | Should -Match 'Wait-JobWithProgress -Job \$job -TimeoutSec 15'
+    $reader | Should -Match 'k3d cluster list timed out; cluster run-state indeterminate\.'
+    # BOTH empty-read branches leave a breadcrumb (client#973 review). The `if`
+    # is not "succeeded": Wait-JobWithProgress returns $true for any non-Running
+    # state, Failed included, so a listing that dies immediately lands there with
+    # an empty $out -- and `2>$null` has already dropped k3d's own reason, so
+    # without this line the support bundle records nothing at all for the failure
+    # mode that actually reaches support.
+    $reader | Should -Match 'k3d cluster list returned no output'
+    $reader | Should -Match '\$job\.State'
+    # Get-ClusterRunState delegates rather than keeping a second job of its own
+    $runState = (($src -split 'function Get-ClusterRunState\b')[1] -split '\nfunction ')[0]
+    $runState | Should -Match 'Get-ClusterListJson'
+    $runState | Should -Not -Match 'Start-Job'
   }
 
   It "the -Diagnose bundle has NO unbounded external read -- it must work when the box does not" {
@@ -4674,17 +4976,23 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
     Should -Invoke Invoke-BoundedProcess -Times 0 -Exactly
   }
 
-  It "the Start-Job docker sites are actually reaped on a deadline, not merely in a job" {
+  It "the Start-Job docker/k3d sites are actually reaped on a deadline, not merely in a job" {
     # "inside Start-Job" only bounds the call if something reaps the job. Without
     # this, the guard above could be satisfied by wrapping a hang in a job and
     # then waiting on it forever -- a bounded-looking unbounded wait.
+    #
+    # Same widening as the class guard above (client#930): the tool set has to
+    # match, or a k3d job could satisfy the class guard by being in a job that
+    # nothing ever reaps -- which is the exact fail-open shape this test exists
+    # to close, reintroduced through the tool list instead of the reap logic.
     $tokens = $null; $errors = $null
     $file = (Resolve-Path (Join-Path $PSScriptRoot "../install-k8s.ps1")).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
     $errors.Count | Should -Be 0
 
+    $engineTools = @('docker', 'k3d')
     $native = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
-      Where-Object { $_.GetCommandName() -eq 'docker' }
+      Where-Object { $_.GetCommandName() -in $engineTools }
     $native.Count | Should -BeGreaterThan 0
 
     # PER-JOB, not per-function (@LukasWodka's follow-up). The first version of this
@@ -4701,7 +5009,7 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       # the Start-Job this call lives in ...
       $job = $c.Parent
       while ($job -and -not ($job -is [System.Management.Automation.Language.CommandAst] -and $job.GetCommandName() -eq 'Start-Job')) { $job = $job.Parent }
-      $job | Should -Not -BeNullOrEmpty -Because "line $($c.Extent.StartLineNumber) is a native docker call outside Start-Job"
+      $job | Should -Not -BeNullOrEmpty -Because "line $($c.Extent.StartLineNumber) is a native $($c.GetCommandName()) call outside Start-Job"
 
       # ... and the variable it is assigned to. No assignment => nothing can reap it.
       $assign = $job.Parent
@@ -4713,7 +5021,7 @@ Describe "Every Docker/child wait on the install path is bounded (backend#2849)"
       $var = $varAst.VariablePath.UserPath
 
       $reap = "Wait-JobWithProgress -Job \$" + [regex]::Escape($var) + " -TimeoutSec \d+"
-      $fn.Extent.Text | Should -Match $reap -Because "$($fn.Name) starts docker job '$var' but never reaps THAT job on a deadline"
+      $fn.Extent.Text | Should -Match $reap -Because "$($fn.Name) starts a $($c.GetCommandName()) job '$var' but never reaps THAT job on a deadline"
     }
   }
 
@@ -4951,22 +5259,147 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
       (Get-TraceblocDashboardUrl)  | Should -Match ([regex]::Escape($pair[2]))
     }
   }
-  It "every dashboard host lives ONLY in the mapping" {
-    # The three hosts must appear exactly once each -- as the switch arms of
-    # Get-TraceblocDashboardUrl. A second occurrence is a site that went back to
-    # hardcoding, which is the whole defect.
-    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
-    foreach ($h in @('https://dev.tracebloc.io', 'https://stg.tracebloc.io', 'https://ai.tracebloc.io')) {
-      ([regex]::Matches($src, '"' + [regex]::Escape($h) + '"')).Count |
-        Should -Be 1 -Because "$h should be written once, in the mapping"
+  # ─────────────────────────────────────────────────────────────────────────
+  #  THE CLASS, NOT ONE FILE (client#935)
+  #
+  # The two assertions below used to read `install-k8s.ps1` and nothing else,
+  # while their names claimed a property of "the installer". That is the same
+  # instance-vs-class shape #917 was held for, and it did not stay theoretical:
+  # the bash twin hardcoded the production dashboard at TEN sites in
+  # `lib/summary.sh` and `lib/install-client-helm.sh` -- fixed in client#946 --
+  # and both of these tests were green the entire time, because neither had ever
+  # looked at a `.sh` file.
+  #
+  # So the file set is DERIVED from the tree (the PowerShell installer plus
+  # every bash lib), not enumerated. An enumerated list is exactly how the bash
+  # guard #946 added ended up naming two files: correct on the day, silent about
+  # the third.
+  #
+  # AND THE MAPPING IS EXCLUDED BY NAME, not by quote-parity luck. Each helper's
+  # own arms are the LEGITIMATE definition of each host -- PowerShell's
+  # `default { "https://ai.tracebloc.io" }` and bash's `*) base='https://...'`.
+  # A guard that keyed on double quotes would score every bash arm as clean
+  # (they are single-quoted) and pass vacuously on the very files it was widened
+  # to cover; one that counted occurrences would trip on the definitions. Cutting
+  # the mapping bodies out and then demanding ZERO leaves one rule that means the
+  # same thing in both languages.
+  BeforeAll {
+    # The file set: install-k8s.ps1 + EVERY script under scripts/lib, in either
+    # language. `*.sh` alone would have been a smaller version of the same
+    # mistake -- `scripts/lib/` also holds `telemetry.ps1`, so a `.sh`-only glob
+    # reads as "every lib" while skipping one. Both extensions, derived.
+    #
+    # NOT scripts/testdata/: `golden/01-outcomes.golden` legitimately contains
+    # `https://ai.tracebloc.io/clients` as EXPECTED OUTPUT -- copy-catalog.bats
+    # pins CLIENT_ENV=prod for golden stability (client#946) -- and a recorded
+    # rendering is not a hardcoded link. README.md's dashboard link is
+    # documentation, not installer code; neither is in this property's domain.
+    # BOTH ENTRY POINTS, NOT JUST THE POWERSHELL ONE (@saqlainsyed007 on this PR).
+    # The first version was `install-k8s.ps1` + `scripts/lib/*`, which is
+    # asymmetric: the PowerShell installer IS its own entry point, so its
+    # user-facing text was covered, while the symmetric bash entry point
+    # `scripts/install-k8s.sh` was not -- and that file prints user-facing text,
+    # sources the libs, and already carries a bare `https://tracebloc.io/i.sh`.
+    # It is exactly where a future "just print the link" edit lands, and it
+    # passed both widened guards green. Measured: a hardcoded
+    # `https://ai.tracebloc.io/clients` in install-k8s.sh left all 9 tests here
+    # passing. That is this PR's own instance-vs-class shape, one level up.
+    #
+    # The outer bootstrappers are in too, for the same reason. None of the three
+    # names a dashboard host today (only the bootstrap host `tracebloc.io/i.sh`,
+    # which is not in the mapping's vocabulary), so this adds coverage without
+    # adding a single exemption.
+    $script:DashFiles =
+      @('../install-k8s.ps1', '../install-k8s.sh', '../install.sh', '../install.ps1' |
+          ForEach-Object { (Resolve-Path (Join-Path $PSScriptRoot $_)).Path }) +
+      @(Get-ChildItem -Path (Join-Path $PSScriptRoot "../lib") -File |
+          Where-Object { $_.Extension -in @('.sh', '.ps1') } |
+          ForEach-Object { $_.FullName })
+
+    # Lines OUTSIDE the two mapping helpers. A helper opens with its declaration
+    # and closes at the next column-0 `}` -- true of both files, and asserted
+    # below by requiring the arms to have been found.
+    $script:DashSplit = {
+      param([string[]]$Lines)
+      $outside = @(); $inside = @(); $inMap = $false
+      foreach ($l in $Lines) {
+        if (-not $inMap -and ($l -match '^\s*function Get-TraceblocDashboardUrl\s*\{' -or
+                              $l -match '^_dashboard_url\(\)\s*\{')) { $inMap = $true; continue }
+        if ($inMap) {
+          if ($l -match '^\}') { $inMap = $false } else { $inside += $l }
+          continue
+        }
+        $outside += $l
+      }
+      return @{ Outside = $outside; Inside = $inside }
     }
   }
-  It "no LIVE dashboard link is hardcoded to production" {
+
+  It "every dashboard host lives ONLY in the mapping -- in EVERY lib, not just install-k8s.ps1 (client#935)" {
+    # Sanity on the derivation itself: a glob that resolves to one file would
+    # make this the single-file guard it is replacing.
+    $script:DashFiles.Count | Should -BeGreaterThan 3 -Because "the file set must span both entry points AND the bash libs"
+
+    # THE HOST SET IS DERIVED TOO (@saqlainsyed007 on this PR). It was a literal
+    # triple here, which left one restated axis on a PR whose thesis is "derive,
+    # don't restate" -- and the axis was reachable, not theoretical. Measured:
+    # add a fourth arm to BOTH mappings (`qa) base='https://qa.tracebloc.io'`),
+    # hardcode `https://qa.tracebloc.io/clients` in a lib, and all 9 tests here
+    # passed -- the new host was in neither the scanned list nor the required
+    # mapping, so it was neither flagged as a leak nor demanded inside.
+    #
+    # So the hosts come from the mapping ARMS: whatever the two helpers define IS
+    # the set, and a fifth environment is covered the day it is added. This also
+    # turns the count assertion below into a TWIN-PARITY check for free -- a host
+    # added to one mapping and not the other is defined once, not twice, which is
+    # precisely the defect client#946 fixed.
+    $inside = ($script:DashFiles | ForEach-Object {
+      (& $script:DashSplit (Get-Content -LiteralPath $_)).Inside
+    }) -join "`n"
+    $hosts = @([regex]::Matches($inside, 'https://[A-Za-z0-9.-]+\.tracebloc\.io') |
+      ForEach-Object { $_.Value } | Sort-Object -Unique)
+
+    # The derivation must have found the mapping. Empty means the declaration
+    # stopped matching and the whole property would pass vacuously -- the same
+    # failure the old hardcoded triple could not have detected.
+    $hosts.Count | Should -BeGreaterOrEqual 3 -Because "the host set must be derived from the mapping arms, and the mapping defines at least dev/stg/prod"
+
+    $leaks   = @()
+    $defined = @{}; foreach ($h in $hosts) { $defined[$h] = 0 }
+
+    foreach ($f in $script:DashFiles) {
+      $parts = & $script:DashSplit (Get-Content -LiteralPath $f)
+      $out   = ($parts.Outside -join "`n")
+      $in    = ($parts.Inside  -join "`n")
+      foreach ($h in $hosts) {
+        $n = ([regex]::Matches($out, [regex]::Escape($h))).Count
+        if ($n -gt 0) { $leaks += "$(Split-Path $f -Leaf): $h x$n" }
+        $defined[$h] += ([regex]::Matches($in, [regex]::Escape($h))).Count
+      }
+    }
+
+    $leaks -join "`n" | Should -BeNullOrEmpty -Because "a dashboard host outside the mapping is a site that went back to hardcoding"
+
+    # TWIN PARITY. Each derived host must appear exactly TWICE -- once in
+    # Get-TraceblocDashboardUrl, once in _dashboard_url. Now that the set is
+    # derived, this catches the one-twin-only edit directly: a host added to bash
+    # alone is defined once and fails here, naming which host drifted.
+    foreach ($h in $hosts) {
+      $defined[$h] | Should -Be 2 -Because "$h must be defined once in Get-TraceblocDashboardUrl and once in _dashboard_url -- a host in one twin only is the client#946 defect"
+    }
+  }
+
+  It "no LIVE dashboard link is hardcoded to production -- across the installer AND the bash libs" {
     # The sharp one: a hardcoded link always carries a PATH (/clients,
-    # /my-use-cases). The bare host with no path is only ever the mapping arm.
-    $src = Get-Content (Join-Path $PSScriptRoot "../install-k8s.ps1") -Raw
-    ([regex]::Matches($src, 'https://ai\.tracebloc\.io/[a-z-]')).Count |
-      Should -Be 0 -Because 'every live dashboard link must go through Get-TraceblocDashboardUrl'
+    # /my-use-cases). The bare host with no path is only ever the mapping arm,
+    # so this one needs no excision and stands on its own if the split above
+    # ever breaks.
+    $offenders = @()
+    foreach ($f in $script:DashFiles) {
+      $n = ([regex]::Matches((Get-Content -LiteralPath $f -Raw), 'https://ai\.tracebloc\.io/[a-z-]')).Count
+      if ($n -gt 0) { $offenders += "$(Split-Path $f -Leaf) ($n)" }
+    }
+    $offenders -join ', ' | Should -BeNullOrEmpty -Because 'every live dashboard link must go through Get-TraceblocDashboardUrl / _dashboard_url'
   }
 }
 
@@ -8864,5 +9297,513 @@ Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
     # rewords it, the guard stops tying them together and this catches it here.
     $bash = Get-Content "$PSScriptRoot/../lib/cluster.sh" -Raw
     $bash | Should -Match 'no kubelet config mount'
+  }
+}
+
+
+Describe "Protect-TraceblocValuesFile (backend#2931)" {
+  # THE ACL IS READ BACK, never "was Set-Acl called". The ticket asked for exactly
+  # that distinction: a mock that records the call passes while the ACL does not
+  # apply, which is the silent-best-effort failure this helper exists to remove.
+  #
+  # Windows-only by nature, not by preference: Set-Acl is unimplemented off Windows,
+  # so these run in `Pester (windows-latest)` and are skipped elsewhere. The
+  # non-Windows path has its own case below, which DOES run everywhere.
+
+  It "creates the file when absent, so the mode can land before any credential" {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-a-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Test-Path -LiteralPath $p | Should -BeFalse
+      Protect-TraceblocValuesFile -Path $p
+      Test-Path -LiteralPath $p | Should -BeTrue -Because "the helper must create it empty so the caller writes into an already-protected file"
+      (Get-Item -LiteralPath $p).Length | Should -Be 0 -Because "the window the ordering fix leaves must be on an EMPTY file"
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "grants only the invoking user and Administrators, read back from the filesystem" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-b-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "clientPassword: 'not-a-real-secret'" -Encoding UTF8
+      Protect-TraceblocValuesFile -Path $p
+
+      $me      = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+      $admins  = (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544').Value
+      $allowed = @($me, $admins)
+
+      $acl  = Get-Acl -LiteralPath $p
+      $sids = @(foreach ($ace in $acl.Access) {
+        try   { $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+        catch { $ace.IdentityReference.Value }
+      })
+      $sids.Count | Should -BeGreaterThan 0 -Because "an empty ACL would deny the installer its own file"
+      foreach ($sid in $sids) { $allowed | Should -Contain $sid }
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "breaks inheritance, or the directory's grants survive every rule removed" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    # The load-bearing half. Removing ACEs without SetAccessRuleProtection leaves the
+    # INHERITED grants in place, which is how the file was readable to begin with --
+    # so a test that only counted explicit ACEs would pass on the broken version.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-c-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "x" -Encoding UTF8
+      Protect-TraceblocValuesFile -Path $p
+      $acl = Get-Acl -LiteralPath $p
+      $acl.AreAccessRulesProtected | Should -BeTrue -Because "inherited ACEs must not survive"
+      @($acl.Access | Where-Object { $_.IsInherited }).Count | Should -Be 0
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "returns FALSE when it could not restrict, so the caller cannot claim it did" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -le 5) {
+    # The verdict is the whole point of Bugbot's finding on client#990: the helper is
+    # best-effort, and a caller that assumes success tells the operator the credential
+    # is protected on exactly the paths where it is not.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-e-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try { (Protect-TraceblocValuesFile -Path $p) | Should -BeFalse }
+    finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "returns TRUE when it verifiably restricted the file" -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -le 5)) {
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-f-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      Set-Content -LiteralPath $p -Value "x" -Encoding UTF8
+      (Protect-TraceblocValuesFile -Path $p) | Should -BeTrue
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+
+  It "warns instead of throwing when the platform has no Windows ACLs" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -le 5) {
+    # Runs on the Linux/macOS Pester legs. The installer must never abort here: a
+    # credential file it cannot chmod is still better than no install at all.
+    $p = Join-Path ([System.IO.Path]::GetTempPath()) ("tb-2931-d-" + [guid]::NewGuid().ToString('N') + ".yaml")
+    try {
+      { Protect-TraceblocValuesFile -Path $p } | Should -Not -Throw
+      Test-Path -LiteralPath $p | Should -BeTrue
+    } finally { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+Describe "The values file is protected BEFORE the credential is written (backend#2931 source guard)" {
+  BeforeAll {
+    # ONE derivation, used by both cases. They were computed separately at first and
+    # the ordering case then passed on a file with NO call in it at all -- a guard
+    # that cannot see its subject's absence. Deriving both from the same line list
+    # makes "absent" impossible to read as "in the right order".
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1"
+    $script:ProtectLines = @(
+      for ($i = 0; $i -lt $src.Count; $i++) {
+        if ($src[$i] -like '*Protect-TraceblocValuesFile -Path $valuesFile*') { $i + 1 }
+      })
+    $script:WriteLines = @(
+      for ($i = 0; $i -lt $src.Count; $i++) {
+        if ($src[$i] -like '*Set-Content -Path $valuesFile -Value $valuesContent*') { $i + 1 }
+      })
+  }
+
+  It "protects BOTH write sites, not just the one that generates the file" {
+    # The clientId heal rewrites a PRE-EXISTING values file, which can carry the
+    # inherited ACL an installer predating this left behind. Fixing only the
+    # generating site is the .github#300 shape: covering one member of a pair.
+    $script:ProtectLines.Count | Should -BeGreaterOrEqual 2 -Because 'the generating write and the clientId heal both need it'
+  }
+
+  It "only claims the file is restricted when the helper said so" {
+    # Bugbot, client#990: the Hint used to assert "restricted to you and
+    # Administrators" unconditionally, including on the degraded paths the helper
+    # warns about. A reassurance that outlives the thing it describes is worse than
+    # no message.
+    $src = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $src | Should -Match '\$valuesProtected\s*=\s*Protect-TraceblocValuesFile'
+    $src | Should -Match 'if\s*\(\$valuesProtected\)'
+    $lines  = Get-Content "$PSScriptRoot/../install-k8s.ps1"
+    $claim  = @(for ($i=0; $i -lt $lines.Count; $i++) { if ($lines[$i] -like '*restricted to you and Administrators*') { $i } })
+    $claim.Count | Should -Be 1
+    # the nearest preceding non-blank line must be the verdict branch
+    $j = $claim[0] - 1
+    while ($j -ge 0 -and [string]::IsNullOrWhiteSpace($lines[$j])) { $j-- }
+    $lines[$j] | Should -BeLike '*if ($valuesProtected)*'
+  }
+
+  It "calls it above the Set-Content that carries clientPassword" {
+    # Ordering is the entire defect client#945 named on the bash side: "a mode fixed
+    # one line too late is not a mode."
+    $script:WriteLines.Count   | Should -Be 1 -Because 'this asserts about one specific write'
+    $script:ProtectLines.Count | Should -BeGreaterThan 0 -Because 'an absent call must not read as a correctly-ordered one'
+    $before = @($script:ProtectLines | Where-Object { $_ -lt $script:WriteLines[0] })
+    $before.Count | Should -BeGreaterThan 0 -Because 'the file must be restricted before the clientPassword lands in it'
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Envelope schedulability -- the PowerShell twin of scripts/tests/
+# envelope-schedulability.sh (backend#2870, client#992).
+#
+# The bash guard derives the chart footprint from a fresh render (helm + python3)
+# and drives the REAL installer functions across the contract's golden vectors and
+# a canned cluster. Pester cannot render the chart on a Windows runner, so the
+# derivation step is owned by scripts/gen-footprint-embed.sh --check (in `make
+# drift`), which embeds ONE render into BOTH installers; this suite pins that the
+# two embeds agree (a hand-edit to either shows here) and then replays the same
+# vectors and the same canned cluster through Resolve-TbTrainingFit, asserting
+# the same eight properties the bash guard asserts. Every mutation registered for
+# it in mutation-check.ps1 mirrors one in envelope-schedulability-mutations.sh.
+# ═══════════════════════════════════════════════════════════════════════════
+
+Describe "Envelope schedulability readers (client#992)" {
+  It "ConvertTo-TbCpuMilli: whole cores, millicores, decimals FLOORED, junk is null" {
+    ConvertTo-TbCpuMilli '4'      | Should -Be 4000
+    ConvertTo-TbCpuMilli '500m'   | Should -Be 500
+    ConvertTo-TbCpuMilli '0.5'    | Should -Be 500
+    ConvertTo-TbCpuMilli '1.2345' | Should -Be 1234
+    ConvertTo-TbCpuMilli '1.05'   | Should -Be 1050
+    ConvertTo-TbCpuMilli 'eight'  | Should -BeNullOrEmpty
+    ConvertTo-TbCpuMilli '1.x'    | Should -BeNullOrEmpty
+  }
+  It "ConvertTo-TbMemBytes: binary and decimal suffixes, bare bytes, junk is null" {
+    ConvertTo-TbMemBytes '8Gi'  | Should -Be 8589934592
+    ConvertTo-TbMemBytes '70Mi' | Should -Be 73400320
+    ConvertTo-TbMemBytes '250M' | Should -Be 250000000
+    ConvertTo-TbMemBytes '5k'   | Should -Be 5000
+    ConvertTo-TbMemBytes '1Ti'  | Should -Be 1099511627776
+    ConvertTo-TbMemBytes '1024' | Should -Be 1024
+    ConvertTo-TbMemBytes 'lots' | Should -BeNullOrEmpty
+    ConvertTo-TbMemBytes '64GB' | Should -BeNullOrEmpty
+    ConvertTo-TbMemBytes 'Gi'   | Should -BeNullOrEmpty
+    ConvertTo-TbMemBytes '1.5Gi' | Should -BeNullOrEmpty
+  }
+  It "ConvertTo-TbCpuMilli / ConvertTo-TbMemBytes agree with the bash twin on every shared quantity vector" {
+    # ONE vectors file, TWO readers (Saqlain on client#994): see the fixture's
+    # description. null means the reader must return $null, never a zero.
+    $vec = Get-Content (Join-Path $PSScriptRoot "fixtures/quantity_vectors.json") -Raw | ConvertFrom-Json
+    $n = 0
+    foreach ($pair in @($vec.cpu_to_milli)) {
+      $got = ConvertTo-TbCpuMilli ([string]$pair[0])
+      if ($null -eq $pair[1]) { $got | Should -BeNullOrEmpty -Because "cpu '$($pair[0])' must be refused" }
+      else { $got | Should -Be ([long]$pair[1]) -Because "cpu '$($pair[0])'" }
+      $n++
+    }
+    foreach ($pair in @($vec.mem_to_bytes)) {
+      $got = ConvertTo-TbMemBytes ([string]$pair[0])
+      if ($null -eq $pair[1]) { $got | Should -BeNullOrEmpty -Because "mem '$($pair[0])' must be refused" }
+      else { $got | Should -Be ([long]$pair[1]) -Because "mem '$($pair[0])'" }
+      $n++
+    }
+    $n | Should -BeGreaterOrEqual 30 -Because "the vectors file must carry both grammars' edge cases"
+  }
+  It "Get-TbEnvelopeDimension: case-insensitive keys, trimmed pairs, absent is empty, prefix is not a match" {
+    Get-TbEnvelopeDimension -Size 'cpu=7, Memory=29Gi' -Key memory | Should -Be '29Gi'
+    Get-TbEnvelopeDimension -Size ' CPU=7 ,memory=29Gi' -Key cpu   | Should -Be '7'
+    Get-TbEnvelopeDimension -Size 'memory=29Gi' -Key cpu           | Should -Be ''
+    Get-TbEnvelopeDimension -Size 'cpuset=7,memory=29Gi' -Key cpu  | Should -Be ''
+  }
+  It "Get-TbPodEffectiveRequests: sum(app) vs max(init) per resource, the scheduler's formula" {
+    # apps 100Mi+200Mi=300Mi, 100m+100m=200m; inits max(1000Mi,50Mi)=1000Mi, max(50m,500m)=500m
+    $e = Get-TbPodEffectiveRequests -Apps '100m/100Mi,100m/200Mi,' -Inits '50m/1000Mi,500m/50Mi,'
+    $e.MemBytes | Should -Be (1000 * 1MB)
+    $e.CpuMilli | Should -Be 500
+    # init smaller than the app sum in memory only: memory from apps, cpu from init
+    $e = Get-TbPodEffectiveRequests -Apps '100m/300Mi,' -Inits '900m/10Mi,'
+    $e.MemBytes | Should -Be (300 * 1MB)
+    $e.CpuMilli | Should -Be 900
+  }
+  It "Get-TbPodEffectiveRequests: an unparseable quantity yields null, never zero; absent requests ARE zero" {
+    Get-TbPodEffectiveRequests -Apps '100m/lots,' -Inits '' | Should -BeNullOrEmpty
+    Get-TbPodEffectiveRequests -Apps 'many/70Mi,' -Inits '' | Should -BeNullOrEmpty
+    $e = Get-TbPodEffectiveRequests -Apps '/,' -Inits ''
+    $e.MemBytes | Should -Be 0
+    $e.CpuMilli | Should -Be 0
+    $e = Get-TbPodEffectiveRequests -Apps '0.5/250M,' -Inits ''
+    $e.MemBytes | Should -Be 250000000
+    $e.CpuMilli | Should -Be 500
+  }
+}
+
+Describe "Get-TbMeasuredSystemRequests (client#992)" {
+  BeforeEach { $script:TB_NAMESPACE = "tracebloc" }
+  It "per-node sums, MAX across nodes" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|', 'tracebloc|tracebloc') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'kube-system|Running|b|100m/70Mi,|', 'kube-system|Running|b|100m/70Mi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    # node b carries two pods (140Mi / 200m); the max is b, not the cluster total.
+    $r.MemBytes | Should -Be (140 * 1MB)
+    $r.CpuMilli | Should -Be 200
+    $r.Note | Should -BeLike '*3 pod(s) across 2 node(s)*'
+  }
+  It "excludes the release namespace, release-owned namespaces, terminal and unscheduled pods" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|', 'tracebloc|tracebloc', 'tracebloc-node-agents|tracebloc', 'other|someone-else') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'tracebloc|Running|a|1/4Gi,|', 'tracebloc-node-agents|Running|a|1/1Gi,|', 'kube-system|Succeeded|a|1/1Gi,|', 'kube-system|Failed|a|1/1Gi,|', 'kube-system|Pending||1/1Gi,|', 'other|Running|a|100m/30Mi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    # kube-system 70Mi + `other` 30Mi (a DIFFERENT release, so it counts) = 100Mi / 200m
+    $r.MemBytes | Should -Be (100 * 1MB)
+    $r.CpuMilli | Should -Be 200
+  }
+  It "init containers of a running pod still count via max()" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|200m/500Mi,') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.MemBytes | Should -Be (500 * 1MB)
+    $r.CpuMilli | Should -Be 200
+  }
+  It "an unreadable pod list is NOT a footprint of zero" {
+    Mock kubectl { if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|') } else { $global:LASTEXITCODE = 1 } }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeFalse
+    $r.Note | Should -BeLike '*pod list could not be read*'
+  }
+  It "a quantity it cannot parse makes the measurement unusable, and names the pod's namespace" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; @('kube-system|') }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'weird-ns|Running|a|100m/1.5Gi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeFalse
+    $r.Note | Should -BeLike '*weird-ns*cannot parse*'
+  }
+  It "unreadable namespace ownership still measures, excluding only the release namespace, and says so" {
+    Mock kubectl {
+      if ($args -contains 'pods') { $global:LASTEXITCODE = 0; @('kube-system|Running|a|100m/70Mi,|', 'tracebloc|Running|a|1/4Gi,|', 'tracebloc-node-agents|Running|a|100m/512Mi,|') }
+      else { $global:LASTEXITCODE = 1 }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    # node-agents can no longer be attributed to the release, so it is COUNTED (70Mi + 512Mi)
+    $r.MemBytes | Should -Be (582 * 1MB)
+    $r.Note | Should -BeLike '*namespace ownership unreadable*'
+  }
+}
+
+Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client#992)" {
+  BeforeAll {
+    # THE CANNED CLUSTER, written down independently of the code that reads it
+    # (rule 9's corollary) and byte-for-byte the bash guard's: two k3s system pods
+    # on the one node (100m/70Mi each), one with no requests, and four that MUST
+    # NOT count -- the chart's own jobs-manager in the release namespace, its
+    # DaemonSet in the release-owned node-agents namespace, a Succeeded hook, and
+    # a Pending pod not on any node. Counted correctly the system sum is
+    # 140 MiB / 200 m.
+    $script:SysMib = 140; $script:SysM = 200
+    $script:CannedPods = @(
+      'kube-system|Running|node-a|100m/70Mi,|',
+      'kube-system|Running|node-a|100m/70Mi,|',
+      'kube-system|Running|node-a|/,|',
+      'tracebloc|Running|node-a|500m/1Gi,|',
+      'tracebloc-node-agents|Running|node-a|100m/512Mi,|',
+      'kube-system|Succeeded|node-a|1/2Gi,|',
+      'kube-system|Pending||1/2Gi,|'
+    )
+    $script:CannedNamespaces = @('default|', 'kube-system|', 'tracebloc|tracebloc', 'tracebloc-node-agents|tracebloc')
+    $script:Contract = Get-Content (Join-Path $PSScriptRoot "fixtures/envelope_contract.json") -Raw | ConvertFrom-Json
+    # The bash twin's embed, read off its source: gen-footprint-embed.sh --check
+    # (make drift) proves BOTH equal the render; this pins that they equal each
+    # other, so a hand-edit to either installer is visible from a Pester-only run.
+    # `\r?$`, not `$`: a Windows checkout may carry CRLF, and `(?m)$` matches
+    # before `\n` only, so the anchored read came back $null on windows-latest and
+    # the pin failed as "unreadable" rather than "unequal" (client#994 CI).
+    $bashLib = Get-Content (Join-Path $PSScriptRoot "../lib/install-client-helm.sh") -Raw
+    $script:BashFpMem = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_MEM_BYTES=(\d+)\r?$') { [long]$Matches[1] } else { $null }
+    $script:BashFpCpu = if ($bashLib -match '(?m)^_TB_CP_FOOTPRINT_CPU_MILLI=(\d+)\r?$') { [long]$Matches[1] } else { $null }
+    # Drive the installer's two steps on a cluster state. $Nodes = the node
+    # jsonpath lines; '' = nodes unreadable. $PodsReadable = $false makes the pod
+    # list unreadable while nodes still read.
+    function script:Invoke-FitOn {
+      param([string[]]$Nodes, [string]$Override = '', [bool]$PodsReadable = $true, [hashtable]$Carried = $null)
+      $env:TRACEBLOC_TRAINING_RESOURCES = if ($Override) { $Override } else { $null }
+      # Captured as LOCALS: inside a GetNewClosure() mock `$script:` is the closure
+      # module's scope, where the canned arrays do not exist -- an empty pod list
+      # would read as "NOT measured" and every cpu assertion below would pass on
+      # the wrong number (measured while writing this suite).
+      $nodesCopy = $Nodes; $podsOk = $PodsReadable
+      $pods = $script:CannedPods; $nss = $script:CannedNamespaces
+      Mock kubectl {
+        if ($args -contains 'nodes') {
+          if ($nodesCopy.Count -eq 0) { $global:LASTEXITCODE = 1; '' } else { $global:LASTEXITCODE = 0; $nodesCopy }
+        } elseif ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; $nss }
+        elseif ($args -contains 'pods') {
+          if ($podsOk) { $global:LASTEXITCODE = 0; $pods } else { $global:LASTEXITCODE = 1; '' }
+        } elseif ($args -contains 'namespace') { $global:LASTEXITCODE = 0; '' }
+        else { $global:LASTEXITCODE = 1; '' }
+      }.GetNewClosure()
+      $size = Get-TrainingResources -Carried $Carried -CarriedResolved
+      $prov = Get-TrainingProvenance -Carried $Carried -CarriedResolved
+      $fit  = Resolve-TbTrainingFit -Size $size -Provenance $prov
+      return @{ Before = $size; Prov = $prov; Fit = $fit }
+    }
+  }
+  BeforeEach {
+    $script:TB_NAMESPACE = "tracebloc"
+    $env:TRACEBLOC_TRAINING_RESOURCES = $null
+    $script:TbTrainingUndersized = $false
+    $script:TbTrainingUnschedulable = $false
+    Mock helm { $global:LASTEXITCODE = 1; "" }   # no installed release: nothing is carried
+  }
+  AfterEach { $env:TRACEBLOC_TRAINING_RESOURCES = $null }
+
+  It "1. the embedded footprint equals the bash twin's (one render, two installers)" {
+    $script:BashFpMem | Should -Not -BeNullOrEmpty -Because "the bash embed must be readable, or this pin is vacuous"
+    $script:TbCpFootprintMemBytes | Should -Be $script:BashFpMem
+    $script:TbCpFootprintCpuMilli | Should -Be $script:BashFpCpu
+  }
+
+  It "2. every single-node golden vector fits after the fit, with the positive control" {
+    $needB = [long]$script:TbCpFootprintMemBytes + [long]($script:SysMib * 1MB)
+    $needM = [long]$script:TbCpFootprintCpuMilli + [long]$script:SysM
+    $failures = @(); $checked = 0; $overBefore = 0
+    foreach ($v in $script:Contract.vectors.single_node) {
+      $r = Invoke-FitOn -Nodes @("$($v.allocatable_cpu) $($v.allocatable_memory)")
+      $allocM = ConvertTo-TbCpuMilli "$($v.allocatable_cpu)"; $allocB = ConvertTo-TbMemBytes "$($v.allocatable_memory)"
+      if ($null -eq $allocM -or $null -eq $allocB) {
+        # unmeasurable node: floor written UNVERIFIED -- not refused, not a claimed fit
+        if (-not ($r.Fit.Verdict -eq 'unverified' -and $r.Fit.Size -eq (Get-TbEnvelopeFloorString))) {
+          $failures += "$($v.label): unmeasurable -> '$($r.Fit.Verdict)' '$($r.Fit.Size)' (want unverified floor)"
+        }
+        continue
+      }
+      $checked++
+      $bMem = ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $r.Before -Key memory)
+      $bCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Before -Key cpu)
+      if (($bMem + $needB) -gt $allocB -or ($bCpu + $needM) -gt $allocM) { $overBefore++ }
+      switch ($r.Fit.Verdict) {
+        'refused' {
+          if (-not (($allocB - $needB) -lt 1GB -or ($allocM - $needM) -lt 1000)) {
+            $failures += "$($v.label): refused although $([math]::Floor(($allocB - $needB)/1MB)) MiB / $($allocM - $needM) m would fit"
+          }
+        }
+        { $_ -eq 'fits' -or $_ -eq 'reduced' } {
+          $aMem = ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key memory)
+          $aCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key cpu)
+          if ($null -eq $aMem -or $null -eq $aCpu) { $failures += "$($v.label): written size '$($r.Fit.Size)' unparseable"; break }
+          if (-not (($aMem + $needB) -le $allocB -and ($aCpu + $needM) -le $allocM -and $aMem -ge 1GB -and $aCpu -ge 1000 -and $aMem -le $bMem -and $aCpu -le $bCpu)) {
+            $failures += "$($v.label): $($r.Before) -> $($r.Fit.Size) [$($r.Fit.Verdict)] does NOT fit"
+          }
+        }
+        default { $failures += "$($v.label): unexpected verdict '$($r.Fit.Verdict)' on a measured node" }
+      }
+    }
+    $failures -join "`n" | Should -BeNullOrEmpty
+    $checked | Should -BeGreaterOrEqual 10 -Because "a guard that checked almost nothing proves almost nothing"
+    # POSITIVE CONTROL: the platform out-requests the reserve today, so at least
+    # one vector must over-ask BEFORE the fit -- else this suite could never have
+    # seen the defect it exists for.
+    if ($needB -gt $script:TbEnvelopeOverheadMemBytes -or $needM -gt $script:TbEnvelopeOverheadCpuMilli) {
+      $overBefore | Should -BeGreaterThan 0 -Because "the platform out-requests the reserve, yet no vector over-asked before the fit"
+    }
+  }
+
+  It "3. the ticket's reproduction: an 8 GiB node is REDUCED, arithmetic printed" {
+    $r = Invoke-FitOn -Nodes @('4 8Gi')
+    $r.Fit.Verdict | Should -Be 'reduced'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*OVER*'
+    ($r.Fit.Lines -join "`n") | Should -BeLike "*reduced $($r.Before) -> $($r.Fit.Size)*"
+    # The numbers on this node against the canned cluster: cpu 3000+900+200 = 4100
+    # > 4000 -> 2 cores; memory 5120+3136+140 = 8396 > 8192 -> 8192-3276 = 4916 MiB
+    # -> 4 GiB. Both dimensions over-asked, both reduced.
+    $r.Fit.Size | Should -Be 'cpu=2,memory=4Gi'
+  }
+
+  It "4. REFUSED when not even 1 core / 1 GiB fits, with the arithmetic" {
+    $r = Invoke-FitOn -Nodes @('4 4Gi')
+    $r.Fit.Verdict | Should -Be 'refused'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*not even a 1-core / 1-GiB run*'
+  }
+
+  It "5. cpu-only overshoot reduces cpu alone (memory kept)" {
+    $r = Invoke-FitOn -Nodes @('8 63928Mi')
+    $r.Fit.Verdict | Should -Be 'reduced'
+    (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key memory) | Should -Be (Get-TbEnvelopeDimension -Size $r.Before -Key memory)
+    $aCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key cpu)
+    $bCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Before -Key cpu)
+    $aCpu | Should -BeLessThan $bCpu
+    ($aCpu + $script:TbCpFootprintCpuMilli + $script:SysM) | Should -BeLessOrEqual 8000
+  }
+
+  It "6. a human's pin is warned, never altered (pinned-over)" {
+    $r = Invoke-FitOn -Nodes @('4 8Gi') -Override 'cpu=4,memory=16Gi'
+    $r.Prov | Should -Be 'user'
+    $r.Fit.Verdict | Should -Be 'pinned-over'
+    $r.Fit.Size | Should -Be 'cpu=4,memory=16Gi'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*chosen by a human (user)*'
+  }
+
+  It "7. the release's own pods are excluded from the measured sum" {
+    Mock kubectl {
+      if ($args -contains 'namespaces') { $global:LASTEXITCODE = 0; $script:CannedNamespaces }
+      elseif ($args -contains 'pods') { $global:LASTEXITCODE = 0; $script:CannedPods }
+      else { $global:LASTEXITCODE = 1; '' }
+    }
+    $r = Get-TbMeasuredSystemRequests
+    $r.Measured | Should -BeTrue
+    $r.MemBytes | Should -Be ($script:SysMib * 1MB)
+    $r.CpuMilli | Should -Be $script:SysM
+  }
+
+  It "7b. pods unreadable: verified against the chart derivation only, and it SAYS so; still reduces" {
+    $r = Invoke-FitOn -Nodes @('4 8Gi') -PodsReadable $false
+    $r.Fit.Verdict | Should -Be 'reduced'
+    ($r.Fit.Lines -join "`n") | Should -BeLike '*NOT measured*chart derivation only*'
+  }
+
+  It "8a. FAIL CLOSED: a blank footprint constant refuses" {
+    $saved = $script:TbCpFootprintMemBytes
+    try {
+      $script:TbCpFootprintMemBytes = ''
+      $r = Invoke-FitOn -Nodes @('4 8Gi')
+      $r.Fit.Verdict | Should -Be 'refused'
+      ($r.Fit.Lines -join "`n") | Should -BeLike '*TbCpFootprint*'
+    } finally { $script:TbCpFootprintMemBytes = $saved }
+  }
+
+  It "8b. unreadable cluster, floor fallback: written UNVERIFIED" {
+    $r = Invoke-FitOn -Nodes @()
+    $r.Before | Should -Be (Get-TbEnvelopeFloorString)
+    $r.Fit.Verdict | Should -Be 'unverified'
+    $r.Fit.Size | Should -Be (Get-TbEnvelopeFloorString)
+  }
+
+  It "8c. a carried installer-chosen size above the floor, cluster unreadable: REFUSED (cannot verify)" {
+    $carried = @{ Size = 'cpu=7,memory=29Gi'; Provenance = 'installer' }
+    $r = Invoke-FitOn -Nodes @() -Carried $carried
+    $r.Before | Should -Be 'cpu=7,memory=29Gi'
+    $r.Prov | Should -Be 'installer'
+    $r.Fit.Verdict | Should -Be 'refused'
+  }
+
+  It "the reduction below the contract floor flags Undersized, and a fit does not" {
+    # 4c/5Gi: the resolver leaves cpu=3,memory=2Gi (5120-3072 = 2048 MiB, the
+    # floor exactly). Memory: 2048+3136+140 > 5120 -> 5120-3276 = 1844 MiB -> 1 GiB,
+    # below the 2 GiB floor -> Undersized. Cpu: 4000-1100 = 2900 m -> 2 cores, so
+    # the run is still a requestable shape and is REDUCED, not refused. (On a
+    # 2-core node the same memory would reduce but cpu would leave 900 m -- under
+    # one core -- and the verdict is refused; that is case 4's territory.)
+    $r = Invoke-FitOn -Nodes @('4 5Gi')
+    $r.Fit.Verdict | Should -Be 'reduced'
+    $r.Fit.Size | Should -Be 'cpu=2,memory=1Gi'
+    $r.Fit.Undersized | Should -BeTrue
+    # A genuine fit: an installer-sized envelope ALWAYS over-asks today (the
+    # resolver leaves 3 GiB and the platform asks 3136 MiB plus system pods -- the
+    # positive control above), so use a carried installer size that fits.
+    $r2 = Invoke-FitOn -Nodes @('16 64Gi') -Carried @{ Size = 'cpu=4,memory=12Gi'; Provenance = 'installer' }
+    $r2.Before | Should -Be 'cpu=4,memory=12Gi'
+    $r2.Fit.Verdict | Should -Be 'fits'
+    $r2.Fit.Undersized | Should -BeFalse
+    $r2.Fit.Size | Should -Be $r2.Before
+    ($r2.Fit.Lines -join "`n") | Should -BeLike '*headroom*'
+  }
+
+  It "Get-TrainingResources still sizes through the ONE anchor reader (extraction did not change the answer)" {
+    Mock kubectl { if ($args -contains 'nodes') { $global:LASTEXITCODE = 0; @('12 6924Mi', '12 6924Mi') } else { $global:LASTEXITCODE = 1; '' } }
+    Get-TrainingResources | Should -Be 'cpu=11,memory=3Gi'
+    Mock kubectl { if ($args -contains 'nodes') { $global:LASTEXITCODE = 0; @('16 64Gi true', '4 16Gi') } else { $global:LASTEXITCODE = 1; '' } }
+    Get-TrainingResources | Should -Be 'cpu=3,memory=13Gi'
   }
 }

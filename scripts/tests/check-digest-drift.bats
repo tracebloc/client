@@ -537,3 +537,64 @@ EOF
   [[ "$output" == *"ACKNOWLEDGED"* ]] || return 1
   [[ "$output" == *"heldbackonpurposeXYZZY"* ]] || return 1
 }
+
+# --- images.training.digests (backend#3156) ----------------------------------
+# The training map's leaves are cpu:/gpu: under a task, not digest:, so the
+# generic pin rule cannot see them. Pins that the watcher cannot see are the
+# "watched 1 of 3" failure this file opens with, one more time.
+
+training_values() {  # <cpu-digest> <gpu-digest>
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  jobsManager:
+    digest: ""
+  training:
+    pinned: ""
+    digests:
+      image_classification:
+        cpu: "$1"
+        gpu: "$2"
+    capabilities: "ddp"
+EOF
+}
+
+@test "training image pins are discovered and watched against their prod float" {
+  training_values "$D_TRUST" "$D_TRUST"
+  printf '%s%s%s\n%s%s%s\n' \
+    "tracebloc/client-image_classification-cpu:prod" "$SEP" "$D_TRUST" \
+    "tracebloc/client-image_classification-gpu:prod" "$SEP" "$D_TRUST" > "$TMP/stub"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"tracebloc/client-image_classification-cpu:prod"* ]] || return 1
+  [[ "$output" == *"tracebloc/client-image_classification-gpu:prod"* ]] || return 1
+  [[ "$output" == *"2 of 2 pinned label(s) checked"* ]] || return 1
+}
+
+@test "a training image whose prod float moved is DRIFT, named by task and arch" {
+  training_values "$D_TRUST" "$D_TRUST"
+  printf '%s%s%s\n%s%s%s\n' \
+    "tracebloc/client-image_classification-cpu:prod" "$SEP" "$D_TRUST" \
+    "tracebloc/client-image_classification-gpu:prod" "$SEP" "$D_MOVED" > "$TMP/stub"
+  run_check
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"DRIFT: images.training.digests.image_classification.gpu"* ]] || return 1
+  [[ "$output" == *"$D_MOVED"* ]] || return 1
+}
+
+@test "an empty training map contributes no pins and no findings" {
+  cat > "$TMP/values.yaml" <<EOF
+images:
+  widget:
+    repository: example/widget
+    tag: "1.0"
+    digest: "$D_TRUST"
+  training:
+    pinned: ""
+    digests: {}
+    capabilities: ""
+EOF
+  stub "example/widget:1.0" "$D_TRUST"
+  run_check
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"1 of 1 pinned label(s) checked"* ]] || return 1
+}

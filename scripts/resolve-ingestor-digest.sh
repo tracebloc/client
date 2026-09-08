@@ -123,6 +123,42 @@ read_prod_service_db_accounts() {
   ' "$file"
 }
 
+# Portable, yq-free reader for `images.ingestor.ackDrift.line` — the channel
+# line an ACKNOWLEDGED-DRIFT hold is declared against (backend#2673). A non-empty
+# result means the prod pin is DELIBERATELY parked behind its float across a
+# compatibility boundary and must NOT be advanced to the float. Same scoping
+# discipline as read_ingestor_prod_channel: only the 6-space `line:` leaf inside
+# images: -> ingestor: -> ackDrift: can match, so a sibling `line:`/`prod:` cannot
+# be picked up by mistake. Prints nothing when no hold is declared. macOS-safe.
+read_prod_pin_ackdrift_line() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk '
+    /^images:[[:space:]]*$/ { in_images = 1; next }
+    /^[^[:space:]#]/        { in_images = 0; in_ingestor = 0; in_ack = 0 }
+    in_images {
+      if ($0 ~ /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
+        in_ingestor = ($0 ~ /^  ingestor:[[:space:]]*$/) ? 1 : 0
+        in_ack = 0
+        next
+      }
+      if (in_ingestor && $0 ~ /^    [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) {
+        in_ack = ($0 ~ /^    ackDrift:[[:space:]]*$/) ? 1 : 0
+        next
+      }
+      if (in_ack && $0 ~ /^      line:[[:space:]]*/) {
+        line = $0
+        sub(/^      line:[[:space:]]*/, "", line)      # drop the key
+        sub(/[[:space:]]+#.*$/, "", line)              # drop a trailing comment
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)  # trim
+        gsub(/^"|"$/, "", line)                        # unwrap double quotes
+        gsub(/^'\''|'\''$/, "", line)                  # unwrap single quotes
+        if (line != "") { print line; exit }
+      }
+    }
+  ' "$file"
+}
+
 if [[ -z "$tag" ]]; then
   # No explicit TAG arg → default to the chart's images.ingestor.tag so this
   # helper always resolves the SAME line the chart ships. NEVER hardcode a
@@ -166,43 +202,83 @@ ref="${repo}:${tag}"
 # Fail fast, BEFORE any registry work: refusing after resolution wastes the
 # round-trip and hides the reason behind network output.
 if [[ "$write" == 1 ]]; then
-  # THE ORDERING CEILING (backend#1528). While prod still runs the shared
-  # `edgeuser`, the ingestor it runs must be a release that still HAS the
-  # edgeuser fallback. data-ingestors#468 removed that fallback, so a prod pin
-  # refreshed past it authenticates as an account prod has not minted yet and
-  # ingestion fails on every prod edge.
+  # THE ORDERING CEILING (backend#1528, tightened backend#3142). While ANY prod
+  # edge still authenticates as the shared `edgeuser`, the ingestor it runs must
+  # be a release that still HAS the edgeuser fallback. data-ingestors#468 removed
+  # that fallback, so a prod pin refreshed past it authenticates as an account
+  # that edge has not minted and ingestion fails there at Config().
   #
   # This helper resolves a CHANNEL FLOAT and knows nothing about that ceiling,
   # so following values.yaml's own "use the helper, never pin by hand" advice
-  # silently produces the wrong answer while prod is pre-flag. That nearly
-  # shipped in client#490. Fail closed instead.
+  # silently produces the wrong answer while the boundary is still active. That
+  # nearly shipped in client#490. Fail closed instead.
   #
-  # Read the flag from values.yaml rather than hardcoding a version, so the
-  # guard tracks the real state: once prod flips to `true` the ceiling is gone
-  # and this stops firing on its own. Anything that is not a definite `true`
-  # fails CLOSED — an absent or unparseable flag is not evidence the ceiling
-  # lifted, and treating it as permission would let a chart edit silently
-  # disarm the guard.
+  # The disarm requires TWO definite positives, both read from values.yaml so the
+  # guard tracks real state rather than a hardcoded version:
+  #
+  #   1. serviceDbAccountsByEnv.prod is a definite `true` — the DB-identity path
+  #      is baked on by default. Anything else (false, absent, unparseable) fails
+  #      CLOSED: absence is not evidence the ceiling lifted (backend#1528).
+  #
+  #   2. NO ackDrift hold stands on the prod pin. The flag flipping to `true` only
+  #      changed the chart DEFAULT — a fresh install mints tb_ingest and needs no
+  #      fallback — but it does NOT migrate the durable population that stored the
+  #      old value: an edge upgraded with plain `--reuse-values`, or carrying an
+  #      operator-set serviceDbAccountsByEnv.prod: false, keeps the flag off, gets
+  #      no DB_USER, and still authenticates as edgeuser (docs/SECURITY.md §8.10).
+  #      The ackDrift block (backend#2673) is the chart's machine-readable record
+  #      that the boundary is STILL active and the pin is parked in the safe set
+  #      on purpose; while it stands, resolving the float here would pin PAST the
+  #      ceiling and strand those edges (backend#3142). It lifts when the boundary
+  #      is resolved and the block is deleted in the same change that advances the
+  #      pin — see the ackDrift note in client/values.yaml. Keying the disarm on
+  #      the flag alone read the default as if it were the fleet's state.
+  #
+  # INGESTOR_PIN_ALLOW_PRE_FLAG=1 overrides BOTH, for a target release you have
+  # VERIFIED still carries the fallback.
   prod_flag="$(read_prod_service_db_accounts "$chart_values" || true)"
-  if [[ "$prod_flag" != "true" && "${INGESTOR_PIN_ALLOW_PRE_FLAG:-0}" != "1" ]]; then
-    if [[ -n "$prod_flag" ]]; then
-      echo "ERROR: refusing to refresh the prod pin while serviceDbAccountsByEnv.prod is $prod_flag." >&2
-    else
-      echo "ERROR: refusing to refresh the prod pin: could not read serviceDbAccountsByEnv.prod" >&2
-      echo "       from $chart_values, so the ordering ceiling below cannot be ruled out." >&2
+  ack_hold="$(read_prod_pin_ackdrift_line "$chart_values" || true)"
+  if [[ "${INGESTOR_PIN_ALLOW_PRE_FLAG:-0}" != "1" ]]; then
+    if [[ "$prod_flag" != "true" ]]; then
+      if [[ -n "$prod_flag" ]]; then
+        echo "ERROR: refusing to refresh the prod pin while serviceDbAccountsByEnv.prod is $prod_flag." >&2
+      else
+        echo "ERROR: refusing to refresh the prod pin: could not read serviceDbAccountsByEnv.prod" >&2
+        echo "       from $chart_values, so the ordering ceiling below cannot be ruled out." >&2
+      fi
+      echo "       Prod authenticates as the shared edgeuser, so its ingestor must be a release" >&2
+      echo "       that still carries the edgeuser fallback (data-ingestors#468 removed it)." >&2
+      echo "       Resolving the channel float here can pin past that ceiling and break ingestion" >&2
+      echo "       on every prod edge — client#490 nearly shipped exactly this." >&2
+      echo "" >&2
+      echo "       Do ONE of:" >&2
+      echo "         1. Flip serviceDbAccountsByEnv.prod to true first (the #1528 S0 windowed" >&2
+      echo "            drill), confirm jobs-manager mints tb_ingest and stamps the creds onto" >&2
+      echo "            spawned Jobs, then re-run." >&2
+      echo "         2. If you have VERIFIED the target release still has the fallback, re-run" >&2
+      echo "            with INGESTOR_PIN_ALLOW_PRE_FLAG=1 and say so in the PR." >&2
+      exit 1
     fi
-    echo "       Prod authenticates as the shared edgeuser, so its ingestor must be a release" >&2
-    echo "       that still carries the edgeuser fallback (data-ingestors#468 removed it)." >&2
-    echo "       Resolving the channel float here can pin past that ceiling and break ingestion" >&2
-    echo "       on every prod edge — client#490 nearly shipped exactly this." >&2
-    echo "" >&2
-    echo "       Do ONE of:" >&2
-    echo "         1. Flip serviceDbAccountsByEnv.prod to true first (the #1528 S0 windowed" >&2
-    echo "            drill), confirm jobs-manager mints tb_ingest and stamps the creds onto" >&2
-    echo "            spawned Jobs, then re-run — this guard disappears on its own." >&2
-    echo "         2. If you have VERIFIED the target release still has the fallback, re-run" >&2
-    echo "            with INGESTOR_PIN_ALLOW_PRE_FLAG=1 and say so in the PR." >&2
-    exit 1
+    if [[ -n "$ack_hold" ]]; then
+      echo "ERROR: refusing to refresh the prod pin: images.ingestor.ackDrift holds it behind" >&2
+      echo "       the \"$ack_hold\" float ON PURPOSE (backend#2673)." >&2
+      echo "       serviceDbAccountsByEnv.prod being true only flipped the chart DEFAULT: a fresh" >&2
+      echo "       install mints tb_ingest and needs no fallback. It does NOT migrate the durable" >&2
+      echo "       population that still authenticates as edgeuser — an edge upgraded with plain" >&2
+      echo "       --reuse-values, or carrying an operator-set serviceDbAccountsByEnv.prod: false," >&2
+      echo "       keeps the flag off and still needs the fallback (docs/SECURITY.md §8.10). The" >&2
+      echo "       ackDrift hold is the chart's record that the data-ingestors#468 boundary is" >&2
+      echo "       still active, so resolving the float here can pin PAST it and break ingestion" >&2
+      echo "       on those edges at Config() (backend#3142)." >&2
+      echo "" >&2
+      echo "       Do ONE of:" >&2
+      echo "         1. Once those edges have adopted serviceDbAccounts (or a prod-safe 0.8.x is" >&2
+      echo "            cut), delete the images.ingestor.ackDrift block in the SAME change that" >&2
+      echo "            advances the pin — values.yaml says so next to it — then re-run." >&2
+      echo "         2. If you have VERIFIED the target release still has the fallback, re-run" >&2
+      echo "            with INGESTOR_PIN_ALLOW_PRE_FLAG=1 and say so in the PR." >&2
+      exit 1
+    fi
   fi
 fi
 

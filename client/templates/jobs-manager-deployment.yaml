@@ -700,6 +700,41 @@ spec:
         {{- end }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
+        {{- /* Digest-pinned training images (RFC-1246 P2; backend#3156 for
+             RFC-0067 D8). Read by jobs_manager.load_training_image_digests /
+             training_pinning_enabled, which run in THIS container only -- the
+             pods-monitor container spawns nothing, so it gets none of these.
+
+             Env vars, not a ConfigMap: the map is in the pod template, so a
+             promotion that changes it rolls this pod and the pins are live on
+             upgrade completion (a subPath ConfigMap is not hot-reloaded here).
+
+             Each is OMITTED when unset, so an edge that never pinned keeps a
+             byte-identical pod spec -- and the runtime reads absence as exactly
+             today: floating tag, auto-pin gate, no capabilities => N=1.
+
+             Nil-guarded through `default dict` so a `--reuse-values` upgrade
+             from a release predating `images.training` still renders. */}}
+        {{- $training := default dict (default dict .Values.images).training }}
+        {{- if and $training.capabilities (not $training.digests) }}
+        {{- fail "images.training.capabilities is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together." }}
+        {{- end }}
+        {{- if $training.digests }}
+        - name: TRAINING_IMAGE_DIGESTS
+          value: {{ $training.digests | toJson | quote }}
+        {{- end }}
+        {{- /* `hasKey` first: on a --reuse-values upgrade from a release that
+             predates images.training the key is ABSENT, and `toString` of an
+             absent value is a non-empty sentinel that would emit the var and
+             turn a no-op upgrade into a pod roll (Bugbot, client#976). */}}
+        {{- if and (hasKey $training "pinned") (ne (toString $training.pinned) "") }}
+        - name: TRAINING_IMAGE_PINNED
+          value: {{ $training.pinned | toString | quote }}
+        {{- end }}
+        {{- if $training.capabilities }}
+        - name: TRAINING_ENGINE_CAPABILITIES
+          value: {{ $training.capabilities | quote }}
+        {{- end }}
         # Where the resource-monitor DaemonSet lives, for the heartbeat version
         # inventory. EMPTY when resourceMonitor is off, and that empty value is
         # load-bearing: the runtime reads unset as "use the built-in default"
@@ -817,12 +852,22 @@ spec:
         # neither, which is still "can't tell" and still the legacy default.
         # The phantom GPU stays fixed either way, because what caused it was
         # the "nvidia.com/gpu=1" DEFAULT, and an explicit empty is not that.
-        {{- if hasKey .Values.env "GPU_LIMITS" }}
-        - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else if (default "" .Values.env.GPU_LIMITS) }}"nvidia.com/gpu=1"{{ else }}""{{ end }}
-        - name: GPU_LIMITS
-          value: {{ .Values.env.GPU_LIMITS | default "" | quote }}
-        {{- end }}
+        #
+        # client#995: THE TWO ARE ONE NUMBER. Kubernetes requires an extended
+        # resource's request to equal its limit, and this block used to fill an
+        # absent GPU_REQUESTS with a literal "nvidia.com/gpu=1" -- so a values
+        # file carrying only `GPU_LIMITS: nvidia.com/gpu=2` reached jobs-manager
+        # as requests=1 / limits=2, which the API server rejects, and the
+        # runtime's own mirror (client-runtime#515/#516) could never be reached
+        # from values because both keys always arrived set. An absent
+        # GPU_REQUESTS now takes GPU_LIMITS' value. GPU_LIMITS stays the ONLY
+        # gate: a lone GPU_REQUESTS still renders neither var, so an edge that
+        # carried one on an older chart keeps its behaviour on upgrade (Saqlain,
+        # client#996). Both set to different values is written as given: the
+        # operator asked for it, the runtime warns once, the pod is rejected --
+        # the chart does not silently overrule an explicit pair. The pair is
+        # rendered by ONE helper (`tracebloc.gpuEnv`) for both containers.
+        {{- include "tracebloc.gpuEnv" . | nindent 8 }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
@@ -941,13 +986,9 @@ spec:
         # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate,
         # `hasKey` since backend#2216 (see the api container for why)
         # so a CPU-only install emits neither (no phantom GPU in the CLI view)
-        # and a GPU install emits both (request == limit).
-        {{- if hasKey .Values.env "GPU_LIMITS" }}
-        - name: GPU_REQUESTS
-          value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | quote }}{{ else if (default "" .Values.env.GPU_LIMITS) }}"nvidia.com/gpu=1"{{ else }}""{{ end }}
-        - name: GPU_LIMITS
-          value: {{ .Values.env.GPU_LIMITS | default "" | quote }}
-        {{- end }}
+        # and a GPU install emits both (request == limit). Rendered by the same
+        # helper as the api container (client#995, see above).
+        {{- include "tracebloc.gpuEnv" . | nindent 8 }}
         - name: RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # Kept in sync with the api container (client-runtime#92). pods-monitor

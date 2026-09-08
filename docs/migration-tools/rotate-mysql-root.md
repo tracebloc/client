@@ -176,10 +176,16 @@ the same exposure backend#947 tracks — convenient here, alarming in general.
    kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | wc -c   # non-zero
    ```
    If it is zero **and the version check above passed**, enable the gate first.
-   `rotateMysqlRootByEnv` is `true` for **dev** (baked under backend#1528 S3) and
-   `false` for **stg** and **prod** — so a zero read on a dev fleet means
-   something is wrong with the install rather than that the gate is simply off,
-   while on stg/prod it is the expected default. On an unrotated fleet the mysql-client container has
+   `rotateMysqlRootByEnv` is `true` for **dev**, **stg** and **prod** (baked under
+   backend#1528 S3 / backend#947), but **datadir-aware**: the baked default resolves
+   *on* only for a fresh install or an edge this chart already born-rotated (it
+   carries a `mysql-root-rotated` ConfigMap), and *off* for an **existing un-rotated**
+   edge — precisely so its render is not wedged. So a zero read on an **existing**
+   edge with no explicit override is the **expected** output of the new gate (it is
+   deliberately leaving that edge on its current password), **not** evidence the
+   install is broken — this is exactly the edge the manual rotation below is for. A
+   zero read on a **fresh** install that came up on a live cluster, by contrast, means
+   something is wrong. On an unrotated fleet the mysql-client container has
    **no `env:` block at all**, so an empty read there is the correct "gate off"
    signal, not a broken query. `--set` persists across the fleet's hourly
    auto-upgrade, which uses `--reset-then-reuse-values`

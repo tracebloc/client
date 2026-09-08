@@ -1407,6 +1407,84 @@ function Test-TraceblocCliMachineWide {
   return (Test-Path -LiteralPath (Join-Path $script:TOOL_DIR "tracebloc.exe"))
 }
 
+# Pure: parse a FULL `k3d cluster list -o json` blob into its entries, or $null
+# when the blob is not a listing at all (empty/whitespace, or k3d wrote its own
+# words instead of JSON). The one parse both readers below share, so "did the
+# listing itself fail?" has a single answer.
+#
+# `$null` vs an EMPTY ARRAY is the load-bearing distinction, and it is the whole
+# reason this returns an array rather than a boolean-ish thing: a SUCCESSFUL full
+# list always emits at least `[]`, so `@()` means "enumerated fine, no clusters"
+# — a definite answer — while $null means "nothing was enumerated". Conflating
+# them is #557 Bugbot 3728714531, which let a genuinely-foreign port-6550
+# listener read as ours.
+#
+# `,@(...)`: the comma keeps a 0- or 1-element array from being unrolled to
+# $null / a bare object on the way out, which would collapse exactly that
+# distinction at the boundary.
+function Get-ClusterListEntries {
+  param([string]$Json)
+  if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
+  try { return ,@($Json | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+# Pure: the entry for <Name> from a full listing blob, or $null if it isn't in
+# there (or the blob was not a listing). THE PARSE SEAM for New-K3dCluster's
+# existence check, extracted for the same reason Get-JobsManagerNamespace was
+# (#917 Bugbot, High): BOUNDING A NATIVE CALL CHANGES ITS TYPE, and the consumer
+# of that value is where the change lands. This one's consumer was an inline
+# `ConvertFrom-Json | Where-Object` inside an empty `catch {}` — a parse with no
+# name and no test — which is not somewhere a type change should be discovered
+# (client#930).
+function Find-ClusterInList {
+  param([string]$Json, [string]$Name)
+  $entries = Get-ClusterListEntries -Json $Json
+  if ($null -eq $entries) { return $null }
+  foreach ($c in $entries) { if ($c.name -eq $Name) { return $c } }
+  return $null
+}
+
+# FAIL CLOSED on an indeterminate listing, for the ONE consumer that acts on it
+# (client#973 review). The tri-state the readers above pay for was preserved
+# everywhere except at the site where getting it wrong is destructive:
+# New-K3dCluster mapped "the listing failed" onto `$clusterExists = $false`, i.e.
+# straight to `k3d cluster create`.
+#
+# BOUNDING THE READ IS WHAT MADE THAT REACHABLE. The bare call used to park the
+# install on a wedged daemon instead of returning, so "" was only ever an
+# unparseable blob; now it is also "the deadline fired" and "the job died fast".
+# A deadline needs a decision at its consumer, not just a bound.
+#
+# WHY THIS CANNOT FIRE ON A HEALTHY FIRST INSTALL, measured against the PINNED
+# k3d (v5.9.0, $script:K3dVersion) rather than assumed: a healthy engine holding
+# ZERO k3d containers prints exactly `[]` and exits 0, while a daemon that will
+# not answer prints NOTHING on stdout and exits 1. So an empty/unparseable blob
+# is never "no clusters yet" — it is always a failed listing. `[]` parses to an
+# empty array, which is a definite answer and passes straight through here.
+#
+# WHY REFUSING BEATS GUESSING. Guessing "absent" over a live cluster costs the
+# user that cluster: `k3d cluster create` exits non-zero ("a cluster with that
+# name already exists") and aborts with a message about Docker health and image
+# pulls — and if the same sluggish daemon also makes create reach ITS 15-minute
+# deadline, that branch runs `k3d cluster delete $CLUSTER_NAME` against the real
+# cluster and, when that fails too, tells the customer to run it by hand.
+# Refusing costs a re-run.
+function Assert-ClusterListingReadable {
+  param([string]$Json)
+  if ($null -ne (Get-ClusterListEntries -Json $Json)) { return }
+  Hint "Stopping here on purpose: a listing that fails can't tell 'no cluster yet' from"
+  Hint "'Docker isn't answering', and creating a second '$CLUSTER_NAME' over one that already"
+  Hint "exists would fail the install -- or get the cluster you have deleted as a partial one."
+  # THE COPY NAMES WHAT WE OBSERVED, NOT A CAUSE WE GUESSED (reviewer nit,
+  # client#973). It fires on all six failed shapes — a fired deadline, a job that
+  # died fast, and k3d answering with its own words instead of JSON — and in the
+  # last two Docker answered immediately. "Didn't answer within 15s" would be
+  # false there, and it also hardcoded the deadline a SECOND time, so changing
+  # `-TimeoutSec` would have made customer-facing abort copy lie. The number
+  # stays in the log line, which is where it is a fact rather than a claim.
+  Err "Couldn't list your existing compute environments -- k3d gave no readable answer. Check Docker is running ('docker ps' should answer), then re-run this installer."
+}
+
 # Pure TRI-STATE classifier from a FULL `k3d cluster list -o json` (no name filter)
 # output. Distinguishes "confidently not ours" from "can't tell" so callers never
 # conflate an indeterminate read with a definitive answer (#557 Bugbot 3728340365,
@@ -1417,19 +1495,21 @@ function Test-TraceblocCliMachineWide {
 #               stopped, or an empty `[]` = no clusters at all) -> confidently not ours
 #   'unknown' — empty/whitespace or unparseable output; the list itself FAILED (k3d
 #               errored / produced no JSON), so nothing can be concluded
+#
+# It probes parseability and then delegates the SEARCH to Find-ClusterInList
+# rather than keeping its own loop: two copies of "find <Name> in the listing" is
+# how the two readers of this blob would drift, and the blob is under a kilobyte,
+# so parsing it twice buys clarity at no measurable cost.
 function Get-ClusterRunStateFromList {
   param([string]$Json, [string]$Name)
-  if ([string]::IsNullOrWhiteSpace($Json)) { return 'unknown' }
-  try { $clusters = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return 'unknown' }
-  foreach ($c in @($clusters)) {
-    if ($c.name -ne $Name) { continue }
-    if ($c.PSObject.Properties.Name -contains 'serversRunning') {
-      if ([int]$c.serversRunning -ge 1) { return 'running' }
-      return 'down'   # present but 0 servers -> stopped
-    }
-    return 'down'     # shape without a running count can't prove the cluster is up
+  if ($null -eq (Get-ClusterListEntries -Json $Json)) { return 'unknown' }
+  $c = Find-ClusterInList -Json $Json -Name $Name
+  if ($null -eq $c) { return 'down' }   # enumerated fine; our cluster isn't running in it
+  if ($c.PSObject.Properties.Name -contains 'serversRunning') {
+    if ([int]$c.serversRunning -ge 1) { return 'running' }
+    return 'down'     # present but 0 servers -> stopped
   }
-  return 'down'       # enumerated fine; our cluster simply isn't in the list
+  return 'down'       # shape without a running count can't prove the cluster is up
 }
 
 # Pure: from `k3d cluster list -o json` output, is <Name> present AND running (>=1
@@ -1448,10 +1528,61 @@ function Test-ClusterRunning {
   return ((Get-ClusterRunState) -eq 'running')
 }
 
-# TRI-STATE, BOUNDED run-state of our k3d cluster, for the port-6550 ownership
-# decision (#557 Bugbot 3728340365, 3728714531). Lists ALL clusters (no name
-# filter) inside a job+deadline (~15s) so a wedged Docker can't hang preflight,
-# then classifies:
+# THE ONE BOUNDED READER of `k3d cluster list -o json` (client#930).
+#
+# `k3d cluster list` talks to the Docker engine, so against a wedged daemon — a
+# half-open `\\.\pipe\docker_engine`, which is what Docker Desktop leaves behind
+# when it starts and then gives up — it does not fail, it BLOCKS. Same failure
+# class as a bare `docker info`, and it has to be bounded the same way: a
+# Start-Job reaped by Wait-JobWithProgress on a ~15s deadline.
+#
+# IT IS A FUNCTION, not a second copy of the job, because this used to be
+# inlined in Get-ClusterRunState while New-K3dCluster ran the SAME command bare,
+# on the MAIN install path, where a hang parks the install with no console output
+# and nothing to kill. One reader means the next call site inherits the deadline
+# instead of having to remember it, and the AST class guard in the Pester suite
+# (widened from `docker` to `docker|k3d` for this) fails the build if one
+# doesn't.
+#
+# Returns the listing as ONE multi-line STRING (`Out-String`, the same shape both
+# call sites already had), or "" when the read timed out or produced nothing —
+# which Get-ClusterListEntries reads as "not a listing", i.e. 'unknown' /
+# no-cluster-found. The timeout also gets its own log line, unchanged, because
+# "k3d cluster list timed out" is itself the finding support needs.
+#
+# `2>$null`, not `2>&1`: k3d's stderr is not JSON, and merging it into the blob
+# is how a healthy-but-chatty k3d turns a good listing into a parse failure.
+function Get-ClusterListJson {
+  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
+    (k3d cluster list -o json 2>$null | Out-String)
+  }
+  $out = ""
+  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
+    $out = (Receive-Job $job -ErrorVariable recvErr -ErrorAction SilentlyContinue | Out-String)
+    # THE FAIL-FAST BRANCH NEEDS A WITNESS TOO (client#973 review). This `if` is
+    # NOT "the read succeeded": Wait-JobWithProgress returns $true for any state
+    # that is not Running, Failed included, so a listing that dies IMMEDIATELY
+    # (daemon refuses the socket, k3d exits non-zero, the runspace dies) lands
+    # here rather than in the else. Measured against k3d v5.9.0: a daemon that
+    # will not answer writes its reason to stderr and NOTHING to stdout, so with
+    # `2>$null` doing its job on the JSON, an empty $out was the whole of the
+    # evidence — and it was recorded nowhere. Only the timeout had a log line, so
+    # the one case that reaches support as "it just failed" was the silent one.
+    if ([string]::IsNullOrWhiteSpace($out)) {
+      $why = if ($recvErr) { " ($($recvErr -join '; '))" } else { "" }
+      Log "k3d cluster list returned no output$why (job state: $($job.State)); cluster run-state indeterminate."
+    }
+  } else {
+    Log "k3d cluster list timed out; cluster run-state indeterminate."
+  }
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  return $out
+}
+
+# TRI-STATE run-state of our k3d cluster, over the BOUNDED reader above, for the
+# port-6550 ownership decision (#557 Bugbot 3728340365, 3728714531). Lists ALL
+# clusters (no name filter) inside a job+deadline (~15s) so a wedged Docker can't
+# hang preflight, then classifies:
 #   'running' — our cluster is up (it legitimately owns port 6550 -> reuse)
 #   'down'    — the full list came back and $CLUSTER_NAME isn't running in it
 #               (absent/stopped, or no clusters at all) -> listener is foreign
@@ -1463,19 +1594,9 @@ function Test-ClusterRunning {
 # genuinely-foreign listener proceed (Bugbot 3728714531). The full list always
 # emits at least `[]` on success, so absent-vs-error stays separable.
 function Get-ClusterRunState {
-  $job = Start-Job -InitializationScript $JobInit -ScriptBlock {
-    (k3d cluster list -o json 2>$null | Out-String)
-  }
-  $out = ""; $timedOut = $false
-  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {
-    $out = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String)
-  } else {
-    $timedOut = $true
-    Log "k3d cluster list timed out; cluster run-state indeterminate."
-  }
-  Remove-Job $job -Force -ErrorAction SilentlyContinue
-  if ($timedOut) { return 'unknown' }
-  return (Get-ClusterRunStateFromList -Json $out -Name $CLUSTER_NAME)
+  # A timed-out read comes back "" and the classifier calls that 'unknown', which
+  # is the same answer the inlined version returned from its own $timedOut flag.
+  return (Get-ClusterRunStateFromList -Json (Get-ClusterListJson) -Name $CLUSTER_NAME)
 }
 
 # The client's three workload deployments in a namespace. One source for the two
@@ -4132,13 +4253,31 @@ function New-K3dCluster {
   # Docker is up now (unlike at preflight); re-check the runtime's real memory budget.
   Test-PreflightRuntimeMem
 
-  $clusterExists = $false
-  $clusterObj = $null
-  try {
-    $clusterListJson = k3d cluster list -o json 2>&1 | Out-String
-    $clusterObj = $clusterListJson | ConvertFrom-Json | Where-Object { $_.name -eq $CLUSTER_NAME } | Select-Object -First 1
-    $clusterExists = $null -ne $clusterObj
-  } catch {}
+  # BOUNDED (client#930). This was `k3d cluster list -o json 2>&1 | Out-String`,
+  # bare, on the MAIN install path — so against a half-open Docker pipe the
+  # install parked here silently with nothing to kill it. That is the failure
+  # class backend#2849 exists to remove, and this was the last site of it that no
+  # guard named: it is neither a `docker` call nor inside Invoke-DiagnoseBundle,
+  # the two scopes #917's guards cover.
+  #
+  # Get-ClusterListJson is the deadline; Find-ClusterInList is the parse;
+  # Assert-ClusterListingReadable is the DECISION between them. The empty
+  # `catch {}` that used to stand in for all three is gone: it could not say
+  # which of "timed out", "died fast" and "genuinely empty" it was swallowing,
+  # and neither helper throws, so there is nothing left for it to catch.
+  #
+  # The first pass of this PR let a failed listing fall through to the create
+  # path "exactly as an unparseable one did before". That was true and still
+  # wrong (reviewer, client#973): before the bound, a slow-but-alive daemon
+  # COMPLETED here and the install reused the cluster: the fall-through was only
+  # ever reached by a listing that had really failed. Bounding the read adds a
+  # deadline to the same "" and hands the create path a cluster that exists — so
+  # the tri-state has to be honoured at this one site, where guessing "absent"
+  # over a live cluster is what deletes it.
+  $clusterListJson = Get-ClusterListJson
+  Assert-ClusterListingReadable -Json $clusterListJson
+  $clusterObj      = Find-ClusterInList -Json $clusterListJson -Name $CLUSTER_NAME
+  $clusterExists   = $null -ne $clusterObj
 
   if ($clusterExists) {
     $running = $clusterObj.serversRunning
@@ -4989,6 +5128,26 @@ $script:TbEnvelopeNodeMinCpuMilli   = 2000
 $script:TbEnvelopeNodeMinMemBytes   = 5368709120
 # ── end generated ───────────────────────────────────────────────────────────
 
+# ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
+#
+# backend#2870 / client#992. What the chart's steady-state control plane REQUESTS
+# -- every Deployment/StatefulSet/DaemonSet container, the scheduler's
+# max(sum(app), max(init)) per pod, one-shot hook Jobs excluded -- summed from
+# `helm template` by scripts/tests/control-plane-footprint.sh and embedded here by
+# scripts/gen-footprint-embed.sh, the same two constants the bash twin carries as
+# _TB_CP_FOOTPRINT_MEM_BYTES / _TB_CP_FOOTPRINT_CPU_MILLI. Resolve-TbTrainingFit
+# compares the envelope against allocatable minus THIS (plus the system pods it
+# can measure), so a chart change that raises a request shrinks the envelope on
+# the next install instead of leaving the training pod Pending.
+#
+# Embedded, not summed at install time, for the same reason as the block above:
+# this bootstrap is signed and guarantees neither helm nor python3. What keeps it
+# honest is `scripts/gen-footprint-embed.sh --check` in `make drift`: both
+# installers' values must equal a fresh render of the chart in the same tree.
+$script:TbCpFootprintMemBytes = 3288334336
+$script:TbCpFootprintCpuMilli = 900
+# ── end generated footprint ─────────────────────────────────────────────────
+
 # Set by Get-TrainingResources when the machine is readable but below the
 # training floor. The WARNING lives in the caller, so Get-TrainingResources keeps
 # returning nothing but the size -- its Pester suite compares the whole return.
@@ -5099,6 +5258,359 @@ function Get-TrainingProvenance {
   return "installer"
 }
 
+# ── envelope schedulability (backend#2870, client#992) ───────────────────────
+#
+# Bash twin: lib/install-client-helm.sh::_fit_training_envelope and the readers it
+# rests on (_cpu_to_milli, _mem_to_bytes, _envelope_dimension,
+# _pod_effective_requests, _measured_system_requests). Same rules, same words in
+# the printed arithmetic, so an operator reading either installer's log sees one
+# vocabulary. The bash side is asserted by scripts/tests/envelope-schedulability.sh
+# in the drift tier; this side by install-k8s.Tests.ps1, which replays the SAME
+# contract vectors and canned cluster through these functions.
+
+# A Kubernetes cpu quantity -> millicores as [long], or $null when it is not one
+# this installer can read: whole cores, `Nm`, and a decimal core count FLOORED to
+# the millicore (1.2345 -> 1234, never up). `.5` and `5.` are valid quantities
+# and read as 500 and 5000, as the bash twin reads them. The grammar is not
+# "mirrored" by this comment: BOTH readers replay
+# scripts/tests/fixtures/quantity_vectors.json (Saqlain, client#994), so a
+# spelling one side accepts and the other refuses is a red test, not a comment.
+function ConvertTo-TbCpuMilli {
+  param([string]$Quantity)
+  $q = "$Quantity".Trim()
+  if ($q -match '^(\d+)$')        { return [long]$Matches[1] * 1000 }
+  if ($q -match '^(\d+)m$')       { return [long]$Matches[1] }
+  if ($q -match '^(\d*)\.(\d*)$' -and ($Matches[1] -ne '' -or $Matches[2] -ne '')) {
+    $whole = if ($Matches[1] -eq '') { 0 } else { [long]$Matches[1] }
+    $frac = ($Matches[2] + '000').Substring(0, 3)
+    return [long]$whole * 1000 + [long]$frac
+  }
+  return $null
+}
+
+# A Kubernetes memory quantity -> bytes as [long], or $null when unreadable.
+# Binary suffixes (Ki Mi Gi Ti Pi), decimal SI (k M G T P) and bare bytes; whole
+# numbers only: a `1.5Gi` is a quantity neither twin speaks, and both say so
+# rather than guess. Same vectors file as the cpu reader above holds the two
+# grammars together.
+function ConvertTo-TbMemBytes {
+  param([string]$Quantity)
+  $q = "$Quantity".Trim()
+  if ($q -match '^(\d+)$')   { return [long]$Matches[1] }
+  if ($q -match '^(\d+)Ki$') { return [long]$Matches[1] * 1KB }
+  if ($q -match '^(\d+)Mi$') { return [long]$Matches[1] * 1MB }
+  if ($q -match '^(\d+)Gi$') { return [long]$Matches[1] * 1GB }
+  if ($q -match '^(\d+)Ti$') { return [long]$Matches[1] * 1TB }
+  if ($q -match '^(\d+)Pi$') { return [long]$Matches[1] * 1PB }
+  if ($q -match '^(\d+)k$')  { return [long]$Matches[1] * 1000 }
+  if ($q -match '^(\d+)M$')  { return [long]$Matches[1] * 1000000 }
+  if ($q -match '^(\d+)G$')  { return [long]$Matches[1] * 1000000000 }
+  if ($q -match '^(\d+)T$')  { return [long]$Matches[1] * 1000000000000 }
+  if ($q -match '^(\d+)P$')  { return [long]$Matches[1] * 1000000000000000 }
+  return $null
+}
+
+# The raw value of ONE dimension of an envelope string (`cpu=7,memory=29Gi`):
+# case-insensitive key, trimmed pairs, "" when the key is absent. `cpuset=7` is
+# not cpu -- the key must match whole. Bash twin: _envelope_dimension.
+function Get-TbEnvelopeDimension {
+  param([string]$Size, [string]$Key)
+  foreach ($pair in ("$Size" -split ',')) {
+    $t = $pair.Trim()
+    if ($t -eq '') { continue }
+    $eq = $t.IndexOf('=')
+    if ($eq -lt 1) { continue }
+    if ($t.Substring(0, $eq).Trim().ToLowerInvariant() -eq $Key.ToLowerInvariant()) {
+      return $t.Substring($eq + 1).Trim()
+    }
+  }
+  return ''
+}
+
+# The largest schedulable node's allocatable, as @{ CpuMilli; MemBytes }, or
+# $null when the cluster cannot be read or no node parses. ONE reader for the
+# node contract: Get-TrainingResources sizes against this and Resolve-TbTrainingFit
+# verifies against this, so the two cannot anchor on different nodes.
+#
+# THREE fields per node since backend#2237: allocatable cpu, allocatable memory,
+# and .spec.unschedulable. The bash twin carries the same jsonpath in
+# lib/install-client-helm.sh::_TB_NODE_JSONPATH; the two are pinned to agree by
+# the shared cluster-state fixture, tests/fixtures/installer_parity.json.
+# Bounded (--request-timeout): a wedged API server must degrade, never hang.
+function Get-TbAnchorAllocatable {
+  $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $lines) { return $null }
+  $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
+  foreach ($ln in @($lines)) {
+    $parts = "$ln".Trim() -split '\s+'
+    if ($parts.Count -lt 2) { continue }
+    # Cordoned nodes are SKIPPED before any ranking (contract skipped_nodes:
+    # "spec.unschedulable (cordoned)"). Kubernetes declares Unschedulable with
+    # `omitempty`, so a schedulable node emits an EMPTY third field and .Trim()
+    # drops it -- Count -lt 3 is the normal case, and only the literal 'true'
+    # means cordoned (never non-emptiness; an explicit `false` must not read as
+    # cordoned).
+    if ($parts.Count -ge 3 -and $parts[2] -eq 'true') { continue }
+    # $null, NOT 0, for a quantity we cannot parse: the contract says unparseable
+    # allocatable is SKIPPED, exactly as the bash twin's `|| continue`.
+    $cpuM = ConvertTo-TbCpuMilli $parts[0]
+    $memB = ConvertTo-TbMemBytes $parts[1]
+    if ($null -eq $cpuM -or $null -eq $memB) { continue }
+    # Contract ANCHOR_LARGEST, tie-break (cpu, memory) -- one order for every
+    # reader (backend#2220).
+    if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
+      $bestMemB = $memB; $bestCpuM = $cpuM
+    }
+    $seen = $true
+  }
+  if (-not $seen) { return $null }
+  return @{ CpuMilli = $bestCpuM; MemBytes = $bestMemB }
+}
+
+# One pod's effective requests: sum(app containers) and max(init containers) per
+# resource, then the max of the two -- the scheduler's formula, the same one
+# control-plane-footprint.sh applies to the render. Input is the jsonpath shape
+# `cpu/mem,cpu/mem,` per list. Returns @{ MemBytes; CpuMilli }, or $null when a
+# quantity is present but unreadable -- which the caller must treat as "this
+# measurement is unusable", never as zero. Bash twin: _pod_effective_requests.
+function Get-TbPodEffectiveRequests {
+  param([string]$Apps, [string]$Inits)
+  $appM = [long]0; $appC = [long]0; $initM = [long]0; $initC = [long]0
+  foreach ($field in ("$Apps" -split ',')) {
+    if ($field -eq '') { continue }
+    $slash = $field.IndexOf('/'); if ($slash -lt 0) { return $null }
+    $c = $field.Substring(0, $slash); $m = $field.Substring($slash + 1)
+    $cm = [long]0; $mm = [long]0
+    if ($c -ne '') { $cm = ConvertTo-TbCpuMilli $c; if ($null -eq $cm) { return $null } }
+    if ($m -ne '') { $mm = ConvertTo-TbMemBytes $m; if ($null -eq $mm) { return $null } }
+    $appC += $cm; $appM += $mm
+  }
+  foreach ($field in ("$Inits" -split ',')) {
+    if ($field -eq '') { continue }
+    $slash = $field.IndexOf('/'); if ($slash -lt 0) { return $null }
+    $c = $field.Substring(0, $slash); $m = $field.Substring($slash + 1)
+    $cm = [long]0; $mm = [long]0
+    if ($c -ne '') { $cm = ConvertTo-TbCpuMilli $c; if ($null -eq $cm) { return $null } }
+    if ($m -ne '') { $mm = ConvertTo-TbMemBytes $m; if ($null -eq $mm) { return $null } }
+    if ($cm -gt $initC) { $initC = $cm }
+    if ($mm -gt $initM) { $initM = $mm }
+  }
+  if ($initM -gt $appM) { $appM = $initM }
+  if ($initC -gt $appC) { $appC = $initC }
+  return @{ MemBytes = $appM; CpuMilli = $appC }
+}
+
+# What the pods ALREADY ON THE CLUSTER request, that the chart derivation does not
+# already count. Returns @{ Measured = $true; MemBytes; CpuMilli; Note } when
+# measured, or @{ Measured = $false; Note } when the cluster could not be read or
+# a quantity could not be parsed. The caller then verifies against the chart
+# derivation alone AND SAYS SO: an unreadable pod list is not a footprint of
+# zero, but it is not a reason to refuse an install on a cluster whose nodes we
+# could read either.
+#
+# EXCLUDED, because the chart derivation already counts them: every pod in the
+# release namespace (the chart's own workloads AND the training pods jobs-manager
+# spawns there, the very envelope being sized) and every pod in a namespace whose
+# `meta.helm.sh/release-name` annotation names this release. Terminal pods hold no
+# reservation; a pod with no nodeName is not on any node yet.
+#
+# PER NODE, then the MAX across nodes: a training pod takes everything from ONE
+# node. On the single-node edge the two are the same number; on a multi-node
+# cluster the max is conservative -- it only ever makes the envelope smaller.
+# Bash twin: _measured_system_requests.
+function Get-TbMeasuredSystemRequests {
+  $note = ''
+  $ownNs = @()
+  if ($TB_NAMESPACE) { $ownNs += "$TB_NAMESPACE" }
+  # Namespaces this release owns. Failing to read them is NOT fatal: only the
+  # release namespace is then excluded (the conservative direction), and the note
+  # says so.
+  $nsLines = kubectl get namespaces --request-timeout=10s -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}' 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    foreach ($ln in @($nsLines)) {
+      $f = "$ln" -split '\|', 2
+      if ($f.Count -lt 2 -or $f[0] -eq '') { continue }
+      if ($TB_NAMESPACE -and $f[1] -eq "$TB_NAMESPACE") { $ownNs += $f[0] }
+    }
+  } else {
+    $note = 'namespace ownership unreadable; only the release namespace was excluded'
+  }
+
+  $podLines = kubectl get pods --all-namespaces --request-timeout=10s -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.status.phase}{"|"}{.spec.nodeName}{"|"}{range .spec.containers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"|"}{range .spec.initContainers[*]}{.resources.requests.cpu}{"/"}{.resources.requests.memory}{","}{end}{"\n"}{end}' 2>$null
+  if ($LASTEXITCODE -ne 0) { return @{ Measured = $false; Note = 'the pod list could not be read' } }
+  $podArr = @($podLines | Where-Object { "$_".Trim() -ne '' })
+  if ($podArr.Count -eq 0) { return @{ Measured = $false; Note = 'the pod list was empty' } }
+
+  $nodeMem = @{}; $nodeCpu = @{}; $pods = 0
+  foreach ($ln in $podArr) {
+    $f = "$ln" -split '\|', 5
+    if ($f.Count -lt 3) { continue }
+    $ns = $f[0]; $phase = $f[1]; $node = $f[2]
+    $apps  = if ($f.Count -ge 4) { $f[3] } else { '' }
+    $inits = if ($f.Count -ge 5) { $f[4] } else { '' }
+    if ($ns -eq '' -or $node -eq '') { continue }
+    if ($ownNs -contains $ns) { continue }
+    if ($phase -eq 'Succeeded' -or $phase -eq 'Failed') { continue }
+    $eff = Get-TbPodEffectiveRequests -Apps $apps -Inits $inits
+    if ($null -eq $eff) {
+      return @{ Measured = $false; Note = "a pod in $ns carries a request quantity this installer cannot parse ($apps$inits)" }
+    }
+    if (-not $nodeMem.ContainsKey($node)) { $nodeMem[$node] = [long]0; $nodeCpu[$node] = [long]0 }
+    $nodeMem[$node] += $eff.MemBytes
+    $nodeCpu[$node] += $eff.CpuMilli
+    $pods++
+  }
+  if ($pods -eq 0) { return @{ Measured = $false; Note = 'no pod outside this release is scheduled yet' } }
+  $maxM = [long]0; $maxC = [long]0
+  foreach ($k in $nodeMem.Keys) {
+    if ($nodeMem[$k] -gt $maxM) { $maxM = $nodeMem[$k] }
+    if ($nodeCpu[$k] -gt $maxC) { $maxC = $nodeCpu[$k] }
+  }
+  if ($note -eq '') { $note = "measured from $pods pod(s) across $($nodeMem.Count) node(s)" }
+  return @{ Measured = $true; MemBytes = $maxM; CpuMilli = $maxC; Note = $note }
+}
+
+# The contract floor rendered exactly as Get-TrainingResources' fallback renders
+# it, so the two cannot drift.
+function Get-TbEnvelopeFloorString {
+  return "cpu=$([math]::Floor($script:TbEnvelopeFloorCpuMilli / 1000)),memory=$([math]::Floor($script:TbEnvelopeFloorMemBytes / 1GB))Gi"
+}
+
+# Verify -- and if it is ours, correct -- the envelope Get-TrainingResources chose,
+# against what this machine can actually schedule beside the platform.
+#
+# Returns @{ Verdict; Lines; Size; Undersized }:
+#   Verdict     fits | reduced | refused | pinned-over | unverified
+#   Lines       the arithmetic, one fact per line, for the caller to print
+#   Size        what to WRITE: the input, or on `reduced` the largest whole-core /
+#               whole-GiB envelope that fits (never larger than what was chosen)
+#   Undersized  $true when a reduction landed below the contract floor while
+#               still being a requestable shape (>= 1 core, >= 1 GiB)
+#
+# The verdicts, and who they apply to:
+#   * installer-chosen (fresh or carried): fits, or reduced with the arithmetic,
+#     or REFUSED when not even a 1-core/1-GiB run fits -- the caller must not
+#     write the envelope. Refused too when the footprint constants are unreadable,
+#     or when the cluster cannot be read and the chosen size is anything but the
+#     contract floor: an envelope this installer picked and cannot verify is not
+#     written (fail closed).
+#   * the contract floor with an unreadable cluster: `unverified`. The caller
+#     warns rather than refusing, so a cluster whose nodes the installer may not
+#     list (restricted RBAC on a BYO cluster) still installs, loudly.
+#   * a human's choice (TRACEBLOC_TRAINING_RESOURCES, `tracebloc resources set`,
+#     or an unattributable carry): never altered. A pin that does not fit is
+#     `pinned-over`, warned with the arithmetic; one the installer cannot verify
+#     is `unverified`.
+# Bash twin: _fit_training_envelope. Emits nothing itself; printing is the
+# caller's job, so the Pester suite can compare the whole return.
+function Resolve-TbTrainingFit {
+  param([string]$Size, [string]$Provenance)
+  $ours = ($Provenance -eq 'installer')
+  $out = @{ Verdict = ''; Lines = @(); Size = $Size; Undersized = $false }
+
+  # FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
+  # installer, and nothing sensible can be verified against it.
+  if ("$($script:TbCpFootprintMemBytes)" -notmatch '^\d+$' -or "$($script:TbCpFootprintCpuMilli)" -notmatch '^\d+$') {
+    $out.Verdict = 'refused'
+    $out.Lines = @('the chart footprint constants ($script:TbCpFootprint*) are missing or not numeric -- this installer cannot verify any envelope')
+    return $out
+  }
+  $fpMemB = [long]$script:TbCpFootprintMemBytes; $fpCpuM = [long]$script:TbCpFootprintCpuMilli
+  $floor = Get-TbEnvelopeFloorString
+
+  $envCpuM = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $Size -Key 'cpu')
+  $envMemB = ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $Size -Key 'memory')
+
+  # The machine. Unreadable is decided by who chose the size (see the header).
+  $anchor = Get-TbAnchorAllocatable
+  if ($null -eq $anchor) {
+    if ($ours -and $Size -ne $floor) {
+      $out.Verdict = 'refused'
+      $out.Lines = @("node allocatable could not be read, and $Size is an installer-chosen envelope that cannot be verified without it")
+    } else {
+      $out.Verdict = 'unverified'
+      $out.Lines = @("node allocatable could not be read; $Size was written without checking that it can schedule beside the platform")
+    }
+    return $out
+  }
+  $allocMemB = [long]$anchor.MemBytes; $allocCpuM = [long]$anchor.CpuMilli
+
+  if ($null -eq $envCpuM -or $null -eq $envMemB) {
+    if ($ours) {
+      $out.Verdict = 'refused'
+      $out.Lines = @("the installer-chosen envelope '$Size' has no readable cpu and memory pair -- refusing to write what cannot be verified")
+    } else {
+      $out.Verdict = 'unverified'
+      $out.Lines = @("'$Size' has no readable cpu and memory pair, so its fit on this machine was not checked")
+    }
+    return $out
+  }
+
+  # What else the node must hold: the chart's control plane, plus whatever system
+  # pods are already scheduled and are not the chart's.
+  $sysMemB = [long]0; $sysCpuM = [long]0
+  $sys = Get-TbMeasuredSystemRequests
+  if ($sys.Measured) {
+    $sysMemB = [long]$sys.MemBytes; $sysCpuM = [long]$sys.CpuMilli
+    $sysHow = "measured: $($sys.Note)"
+  } else {
+    $sysHow = "NOT measured ($($sys.Note)); verified against the chart derivation only"
+  }
+  $needMemB = $fpMemB + $sysMemB
+  $needCpuM = $fpCpuM + $sysCpuM
+  $mib = [long]1MB; $gib = [long]1GB
+  $lines = @()
+  $lines += "allocatable on the largest schedulable node: $([math]::Floor($allocMemB / $mib)) MiB / $allocCpuM m"
+  $lines += "control plane (chart) $([math]::Floor($fpMemB / $mib)) MiB / $fpCpuM m + system pods $([math]::Floor($sysMemB / $mib)) MiB / $sysCpuM m = $([math]::Floor($needMemB / $mib)) MiB / $needCpuM m ($sysHow)"
+  $lines += "envelope $Size = $([math]::Floor($envMemB / $mib)) MiB / $envCpuM m"
+
+  $memOver = $envMemB + $needMemB - $allocMemB
+  $cpuOver = $envCpuM + $needCpuM - $allocCpuM
+  $memFits = ($memOver -le 0); $cpuFits = ($cpuOver -le 0)
+  if ($memFits) {
+    $lines += "memory: $([math]::Floor($envMemB / $mib)) + $([math]::Floor($needMemB / $mib)) = $([math]::Floor(($envMemB + $needMemB) / $mib)) MiB <= $([math]::Floor($allocMemB / $mib)) MiB ($([math]::Floor(-$memOver / $mib)) MiB headroom)"
+  } else {
+    $lines += "memory: $([math]::Floor($envMemB / $mib)) + $([math]::Floor($needMemB / $mib)) = $([math]::Floor(($envMemB + $needMemB) / $mib)) MiB > $([math]::Floor($allocMemB / $mib)) MiB ($([math]::Floor($memOver / $mib)) MiB OVER)"
+  }
+  if ($cpuFits) {
+    $lines += "cpu: $envCpuM + $needCpuM = $($envCpuM + $needCpuM) m <= $allocCpuM m ($(-$cpuOver) m headroom)"
+  } else {
+    $lines += "cpu: $envCpuM + $needCpuM = $($envCpuM + $needCpuM) m > $allocCpuM m ($cpuOver m OVER)"
+  }
+  $out.Lines = $lines
+
+  if ($memFits -and $cpuFits) { $out.Verdict = 'fits'; return $out }
+
+  if (-not $ours) {
+    $out.Verdict = 'pinned-over'
+    $out.Lines += "this size was chosen by a human ($Provenance), so it is written as-is; training pods will stay Pending on this machine until it is lowered"
+    return $out
+  }
+
+  # Ours, and it does not fit: the largest whole-core / whole-GiB envelope that
+  # does -- floored, and never larger than what was chosen in either dimension.
+  $fitMemB = $allocMemB - $needMemB; if ($fitMemB -lt 0) { $fitMemB = [long]0 }
+  $fitCpuM = $allocCpuM - $needCpuM; if ($fitCpuM -lt 0) { $fitCpuM = [long]0 }
+  $newGib   = [long][math]::Floor($fitMemB / $gib); $newCores = [long][math]::Floor($fitCpuM / 1000)
+  $oldGib   = [long][math]::Floor($envMemB / $gib); $oldCores = [long][math]::Floor($envCpuM / 1000)
+  if ($newGib -gt $oldGib) { $newGib = $oldGib }
+  if ($newCores -gt $oldCores) { $newCores = $oldCores }
+
+  if ($newCores -lt 1 -or $newGib -lt 1) {
+    $out.Verdict = 'refused'
+    $out.Lines += "what fits is $([math]::Floor($fitMemB / $mib)) MiB / $fitCpuM m -- not even a 1-core / 1-GiB run; there is no honest envelope to write"
+    return $out
+  }
+
+  $out.Size = "cpu=$newCores,memory=${newGib}Gi"
+  $out.Verdict = 'reduced'
+  $out.Lines += "reduced $Size -> $($out.Size): $([math]::Floor($allocMemB / $mib)) - $([math]::Floor($needMemB / $mib)) = $([math]::Floor($fitMemB / $mib)) MiB -> $newGib GiB; $allocCpuM - $needCpuM = $fitCpuM m -> $newCores core(s)"
+  if (($newCores * 1000) -lt $script:TbEnvelopeFloorCpuMilli -or ($newGib * $gib) -lt $script:TbEnvelopeFloorMemBytes) {
+    $out.Undersized = $true
+  }
+  return $out
+}
+
 function Get-TrainingResources {
   param([hashtable]$Carried, [switch]$CarriedResolved)
   if ($env:TRACEBLOC_TRAINING_RESOURCES) { return $env:TRACEBLOC_TRAINING_RESOURCES }
@@ -5118,58 +5630,15 @@ function Get-TrainingResources {
     # memory, and .spec.unschedulable. The bash twin carries the same jsonpath in
     # lib/install-client-helm.sh::_TB_NODE_JSONPATH; the two are pinned to agree
     # by the shared cluster-state fixture, tests/fixtures/installer_parity.json.
-    $lines = kubectl get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $lines) {
-      $bestMemB = [long]0; $bestCpuM = [long]0; $seen = $false
-      foreach ($ln in @($lines)) {
-        $parts = "$ln".Trim() -split '\s+'
-        if ($parts.Count -lt 2) { continue }
-        $cpuRaw = $parts[0]
-        $memRaw = $parts[1]
-        # Cordoned nodes are SKIPPED, before any ranking (contract
-        # skipped_nodes: "spec.unschedulable (cordoned)"). A cordoned node
-        # accepts no new pods, so anchoring on one writes an envelope that
-        # cannot schedule -- and on a heterogeneous cluster a cordoned LARGE
-        # node wins the anchor outright, leaving every training pod Pending
-        # with no obvious cause (backend#2237).
-        #
-        # Kubernetes declares Unschedulable with `omitempty`, so a schedulable
-        # node emits an EMPTY third field and .Trim() drops it entirely --
-        # hence Count -lt 3 is the normal case, and only the literal 'true'
-        # means cordoned. Testing for 'true' rather than for non-emptiness is
-        # what keeps a future explicit `unschedulable: false` from being read
-        # as cordoned.
-        if ($parts.Count -ge 3 -and $parts[2] -eq 'true') { continue }
-        # $null, NOT 0, for a quantity we cannot parse. The contract's
-        # skipped_nodes says unparseable allocatable is SKIPPED, and the bash
-        # twin does exactly that with an explicit `|| continue`. Coercing to 0
-        # and ranking the node anyway was a real bug the old memory-first order
-        # happened to hide -- a memB of 0 could never win. Ranking cpu-first
-        # exposes it: a node with a good core count and a memory unit we do not
-        # speak would take the anchor, fail the memory floor, and drop the whole
-        # machine to the literal while a sibling node was perfectly sizeable
-        # (Bugbot #766).
-        $cpuM = if ($cpuRaw -match '^(\d+)m$') { [long]$Matches[1] }
-                elseif ($cpuRaw -match '^\d+$') { [long]$cpuRaw * 1000 }
-                else { $null }
-        $memB = if ($memRaw -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
-                elseif ($memRaw -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
-                elseif ($memRaw -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
-                elseif ($memRaw -match '^\d+$') { [long]$memRaw }
-                else { $null }
-        if ($null -eq $cpuM -or $null -eq $memB) { continue }
-        # Contract ANCHOR_LARGEST, tie-break (cpu, memory). This used to rank
-        # (memory, cpu) while cli's nodeLarger ranked (cpu, memory), so the two
-        # anchored on DIFFERENT nodes on a heterogeneous cluster. One order now.
-        # NOT a field no-op because clusters are single-node -- they are not
-        # (backend#2221: SERVERS=1 AGENTS=1 is the default, so two nodes). It is
-        # a no-op only because both k3d node containers report IDENTICAL
-        # figures, each reporting the whole Docker VM -- the #2221 bug itself.
-        if (-not $seen -or $cpuM -gt $bestCpuM -or ($cpuM -eq $bestCpuM -and $memB -gt $bestMemB)) {
-          $bestMemB = $memB; $bestCpuM = $cpuM
-        }
-        $seen = $true
-      }
+    # The anchor comes from the ONE node reader (Get-TbAnchorAllocatable), the
+    # same one Resolve-TbTrainingFit verifies against, so sizing and fit cannot
+    # anchor on different nodes. $null covers both "the API could not be read"
+    # and "no node parsed" -- either way the machine was not measured.
+    $anchor = Get-TbAnchorAllocatable
+    $seen = ($null -ne $anchor)
+    $bestMemB = [long]0; $bestCpuM = [long]0
+    if ($seen) { $bestMemB = [long]$anchor.MemBytes; $bestCpuM = [long]$anchor.CpuMilli }
+    if ($seen) {
       # No usable node: bestCpuM stays 0, so the floor check below fails and we
       # fall through to the single literal return at the end of the function --
       # deliberately NOT an early return with its own copy of that literal.
@@ -5955,6 +6424,98 @@ function Get-UnattendedCredentialRefusal {
           "  Find them at $(Get-TraceblocDashboardUrl)")
 }
 
+# RESTRICT THE GENERATED VALUES FILE BEFORE THE CREDENTIAL GOES IN (backend#2931).
+#
+# $HOST_DATA_DIR/values.yaml holds a live `clientPassword` in cleartext. Until this,
+# NOTHING in this script restricted it -- `Set-Acl`, `icacls` and `SetAccessControl`
+# returned zero hits across the whole file -- so it inherited whatever ACL
+# $HOST_DATA_DIR happened to carry, on every operator and customer machine.
+#
+# The bash installer got this under client#945; this is the Windows half, which that
+# PR did not touch. That asymmetry is the exact class scripts/spec/facts.env exists
+# to prevent: a change landed in bash and not PowerShell (#382 vs #410) once failed a
+# real customer install. A security property applied to one OS path is not applied.
+#
+# ORDERING IS THE POINT, and it is the whole of client#945's finding: a mode fixed one
+# line too late is not a mode. So the file is created EMPTY and protected first, and
+# the caller then writes into an already-restricted file. `Set-Content` on an existing
+# file truncates without touching its ACL -- the same property `>` has in bash -- so
+# the only window left is on an empty file, which is what makes it harmless rather
+# than merely shorter.
+#
+# VERIFY, THEN WARN -- never a silent best-effort. A `Set-Acl` that did not apply
+# would otherwise leave a live credential broadly readable and say nothing, which is
+# the shape the bash side called out: an operator can act on a named ACE, they cannot
+# act on silence. And WARN rather than Err, deliberately: ACLs genuinely cannot apply
+# on some mounts (exFAT, a mapped drive, a UNC share), and refusing to install there
+# would trade a readable file for no tracebloc at all.
+# RETURNS $true only when the file is verifiably restricted -- read back, not assumed.
+# Every degraded path returns $false after warning, because the CALLER must not go on
+# to tell the operator the credential is protected when it is not (Bugbot, client#990).
+function Protect-TraceblocValuesFile {
+  param([Parameter(Mandatory=$true)][string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    try { New-Item -ItemType File -Path $Path -Force -ErrorAction Stop | Out-Null }
+    catch {
+      Warn "Could not create $Path to restrict it before writing your clientPassword: $($_.Exception.Message)"
+      return $false
+    }
+  }
+
+  # $IsWindows does not exist on Windows PowerShell 5.1, which this script supports --
+  # and on 5.1 the platform is Windows by construction, so the version test IS the
+  # platform test. Reading $IsWindows alone would make 5.1 take the non-Windows path
+  # and skip the ACL entirely on the very platform it is for.
+  $onWindows = ($PSVersionTable.PSVersion.Major -le 5) -or $IsWindows
+  if (-not $onWindows) {
+    Warn "$Path holds a live clientPassword and this platform has no Windows ACLs -- restrict it yourself (chmod 600 $Path)."
+    return $false
+  }
+
+  $me     = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  $admins = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+
+  try {
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    # Protect FIRST and do not copy inherited ACEs: without this the directory's
+    # inherited grants survive every rule we remove below, which is precisely how the
+    # file came to be readable in the first place.
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+    foreach ($sid in @($me, $admins)) {
+      $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $sid, 'FullControl', 'Allow')))
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+  } catch {
+    Warn "Could not restrict $Path (it holds your clientPassword in cleartext): $($_.Exception.Message)"
+    return $false
+  }
+
+  # READ IT BACK. Anything beyond the two identities we granted is reported, by name,
+  # so the operator has something to act on.
+  try {
+    $allowed = @($me.Value, $admins.Value)
+    $extra = @(
+      foreach ($ace in (Get-Acl -LiteralPath $Path -ErrorAction Stop).Access) {
+        try   { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+        catch { $sid = $ace.IdentityReference.Value }
+        if ($allowed -notcontains $sid) { $ace.IdentityReference.Value }
+      }
+    )
+    if ($extra.Count -gt 0) {
+      Warn "$Path is still readable by: $($extra -join ', '). It holds your clientPassword in cleartext."
+      return $false
+    }
+    Log "values file ACL restricted to the invoking user and Administrators: $Path"
+    return $true
+  } catch {
+    Warn "Could not read back the ACL of $Path -- it holds a live credential; check that other users cannot read it."
+    return $false
+  }
+}
+
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
   Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client" "e"
@@ -6265,6 +6826,40 @@ function Install-ClientHelm {
   $carried = Get-CarriedTrainingValues
   $trainingSize = Get-TrainingResources -Carried $carried -CarriedResolved
   $trainingProvenance = Get-TrainingProvenance -Carried $carried -CarriedResolved
+  # backend#2870 / client#992: and only now, is what was chosen schedulable HERE --
+  # beside the chart's control plane and the system pods already on the node?
+  # Ours gets reduced or refused; a human's gets warned. The arithmetic is printed
+  # in every case that changes or blocks anything, because an operator reading
+  # `Pending / Insufficient memory` later needs the numbers, not the verdict.
+  # Mirrors the bash twin's _fit_training_envelope call site word for word.
+  $fit = Resolve-TbTrainingFit -Size $trainingSize -Provenance $trainingProvenance
+  switch ($fit.Verdict) {
+    'refused' {
+      Warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
+      foreach ($l in $fit.Lines) { Hint "  $l" }
+      Hint "  The client needs ~$([math]::Floor(($script:TbCpFootprintMemBytes + $script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $($script:TbCpFootprintCpuMilli + $script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+      Err "Refusing to write a training envelope that cannot be scheduled on this machine (backend#2870)."
+    }
+    'reduced' {
+      Info "Training envelope reduced to fit beside the platform on this machine:"
+      foreach ($l in $fit.Lines) { Hint "  $l" }
+    }
+    'pinned-over' {
+      Warn "The chosen training size does not fit beside the platform on this machine; training pods will stay Pending until it is lowered:"
+      foreach ($l in $fit.Lines) { Hint "  $l" }
+    }
+    'unverified' {
+      Warn "Training envelope UNVERIFIED: $($fit.Lines -join ' ')"
+      Hint "  Grant the installer 'get nodes' and 'list pods' to have it checked, or set TRACEBLOC_TRAINING_RESOURCES to a size you know fits."
+    }
+    default {
+      # Fits: the arithmetic goes to the log file only, so a re-read later can
+      # still see what was checked without it cluttering a clean install.
+      foreach ($l in $fit.Lines) { Log "envelope fit: $l" }
+    }
+  }
+  $trainingSize = $fit.Size
+  if ($fit.Undersized) { $script:TbTrainingUndersized = $true }
   # Mirrors the bash twin's warning, and lives HERE for the same reason: the
   # sizing functions' returns are compared whole by their tests.
   if ($script:TbTrainingUndersized) {
@@ -6317,8 +6912,24 @@ clientPassword: '$passwordEscaped'
 
 $envBlock
 "@
+  # BEFORE, not after: $valuesContent already contains the clientPassword.
+  $valuesProtected = Protect-TraceblocValuesFile -Path $valuesFile
   Set-Content -Path $valuesFile -Value $valuesContent -Encoding UTF8
   Log "Values file written to $valuesFile"
+  # SAY WHAT IT HOLDS AND FOR HOW LONG (backend#2931, item 2). The mode is set above;
+  # this is the half an operator can act on. Deliberately Hint, not Warn: the file is
+  # in its intended state, and crying wolf on a correct install is how real warnings
+  # stop being read.
+  # The helper is best-effort by design (exFAT, UNC, a mapped drive), so this must
+  # report what HAPPENED. Saying "restricted" on a path where the helper just warned
+  # that it could not restrict is worse than silence: it tells the operator the
+  # credential is safe at exactly the moment it is not (Bugbot, client#990).
+  if ($valuesProtected) {
+    Hint "$valuesFile holds your clientPassword in cleartext (restricted to you and Administrators)."
+  } else {
+    Warn "$valuesFile holds your clientPassword in cleartext and could NOT be restricted -- see the warning above. Anyone who can read this path can read the credential."
+  }
+  Hint "It is read back on re-runs to offer your previous answers as defaults. Delete it once you no longer want that, and rotate the credential if it was ever readable by others."
   }   # end -not $adoptedReuse (values regeneration)
 
   # Register the chart repo unconditionally. `--force-update` is idempotent, heals
@@ -6406,6 +7017,11 @@ $envBlock
       $vals = Get-Content $valuesFile -Raw
       $vals = $vals -replace '(?m)^clientId:\s*.*$', "clientId: `"$TB_CLIENT_ID`""
       Set-Content -Path $valuesFile -Value $vals -Encoding UTF8
+      # This file PRE-DATES this run and already holds the credential, so ordering
+      # buys nothing here -- but it may carry the inherited ACL an installer before
+      # backend#2931 left it with. Heal it rather than only protecting files this
+      # version happens to create.
+      $null = Protect-TraceblocValuesFile -Path $valuesFile
     }
   } else {
     Log "Installing $TB_NAMESPACE from $chartRef in namespace '$TB_NAMESPACE'..."

@@ -1,0 +1,171 @@
+suite: Digest-pinned training images reach jobs-manager (backend#3156, RFC-1246 P2)
+# The runtime half (client-runtime jobs_manager.load_training_image_digests /
+# training_image_reference / training_pinning_enabled) landed first and is inert
+# until the chart renders the map. This suite pins the chart half of that
+# contract: WHAT is rendered, WHERE (the api container only), and -- the part an
+# upgrade depends on -- that an edge which never pinned renders NOTHING new.
+templates:
+  - templates/jobs-manager-deployment.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: the default values render none of the three vars -- every edge keeps floating, byte-identical pod spec
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_DIGESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_PINNED
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_ENGINE_CAPABILITIES
+          any: true
+
+  - it: a populated map is rendered as the JSON object the runtime parses
+    set:
+      images:
+        training:
+          digests:
+            image_classification:
+              cpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              gpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_DIGESTS
+            value: '{"image_classification":{"cpu":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gpu":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+
+  - it: the map goes to the api container only -- pods-monitor spawns nothing
+    set:
+      images:
+        training:
+          digests:
+            image_classification:
+              gpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: TRAINING_IMAGE_DIGESTS
+          any: true
+
+  - it: pinned="" (auto) renders no TRAINING_IMAGE_PINNED, so the runtime's own prod-only gate decides
+    set:
+      images:
+        training:
+          pinned: ""
+          digests:
+            image_classification:
+              gpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_PINNED
+          any: true
+
+  - it: an explicit boolean override is rendered as the string the runtime reads
+    set:
+      images:
+        training:
+          pinned: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_PINNED
+            value: "false"
+
+  - it: an explicit string override is rendered verbatim too
+    set:
+      images:
+        training:
+          pinned: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_PINNED
+            value: "true"
+
+  - it: the derived engine capabilities travel beside the pins they were read from
+    set:
+      images:
+        training:
+          capabilities: "ddp"
+          digests:
+            image_classification:
+              gpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_ENGINE_CAPABILITIES
+            value: "ddp"
+
+  - it: capabilities with an EMPTY digest map is refused -- a capability nothing was derived from is a hand-typed fact
+    # RFC-0067 D8's skew guard reads TRAINING_ENGINE_CAPABILITIES to decide
+    # whether the engine can use N>1 GPUs. A value typed beside no pin would
+    # claim a capability for whatever :prod happens to point at tomorrow.
+    set:
+      images:
+        training:
+          capabilities: "ddp"
+    asserts:
+      # `errorMessage` with the EXACT string, never `errorPattern`: helm-unittest
+      # 0.5.2 silently ignores errorPattern, so it would be a bare any-failure
+      # check (scripts/tests/helm-unittest-error-assertions.sh).
+      - failedTemplate:
+          errorMessage: "images.training.capabilities is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together."
+
+  - it: a map without capabilities renders the map and no capabilities var -- the runtime reads that as N=1
+    set:
+      images:
+        training:
+          digests:
+            image_classification:
+              gpu: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_DIGESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_ENGINE_CAPABILITIES
+          any: true
+
+  - it: a --reuse-values upgrade from a release that predates images.training renders none of the vars
+    # `null` removes the key entirely, which is what a stored-values replay from
+    # an older release looks like: no `images.training` at all, not an empty
+    # one. `toString` of an absent `pinned` is a non-empty sentinel; only a
+    # `hasKey` guard keeps the upgrade a no-op (Bugbot, client#976).
+    set:
+      images:
+        training: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_PINNED
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_IMAGE_DIGESTS
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRAINING_ENGINE_CAPABILITIES
+          any: true

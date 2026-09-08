@@ -199,13 +199,13 @@ discover_pins() {
     /^[A-Za-z_][A-Za-z0-9_]*:/ {
       flush_prod()
       top = $0; sub(/:.*$/, "", top); mid = ""; blk_repo = ""; blk_tag = ""
-      ack_line = ""; ack_reason = ""; in_ack = 0
+      ack_line = ""; ack_reason = ""; in_ack = 0; in_trd = 0; tr_task = ""
     }
     /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
       flush_prod()
       mid = $0; sub(/^  /, "", mid); sub(/:[[:space:]]*$/, "", mid)
       blk_repo = ""; blk_tag = ""; ch_prod = ""
-      ack_line = ""; ack_reason = ""; in_ack = 0
+      ack_line = ""; ack_reason = ""; in_ack = 0; in_trd = 0; tr_task = ""
     }
     # A 4-space BARE key (no inline value): channelTags:, ackDrift:, … . Arm the
     # acknowledged-drift scope only inside ackDrift:, disarm on any other bare
@@ -213,6 +213,28 @@ discover_pins() {
     # match here. (backend#2673)
     /^    [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
       in_ack = ($0 ~ /^    ackDrift:[[:space:]]*$/) ? 1 : 0
+      # images.training.digests (backend#3156): a task -> arch -> digest map whose
+      # leaves are cpu:/gpu: rather than digest:, so the generic pin rule below
+      # never sees them. Armed only inside images: -> training: -> digests:.
+      in_trd = (top == "images" && mid == "training" && $0 ~ /^    digests:[[:space:]]*$/) ? 1 : 0
+      tr_task = ""
+    }
+    # A 6-space bare key inside the training digest map is a TASK name.
+    /^      [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
+      if (in_trd) { tr_task = $0; sub(/^      /, "", tr_task); sub(/:[[:space:]]*$/, "", tr_task) }
+    }
+    # An 8-space cpu:/gpu: digest under a task is a training image pin. Its
+    # repository is derived from the task and arch -- tracebloc/client-<task>-<arch>
+    # is the engine build convention the map is keyed on -- and its float is
+    # prod, because RFC-1246 P2 pins iff CLIENT_ENV resolves to prod. Emitted
+    # inline, never with an ack: there is no held-back-on-purpose story here.
+    /^        (cpu|gpu):[[:space:]]*["\047]?sha256:[a-f0-9]/ {
+      if (in_trd && tr_task != "") {
+        arch = $0; sub(/^[[:space:]]*/, "", arch); sub(/:.*$/, "", arch)
+        v = $0; sub(/^[[:space:]]*(cpu|gpu):[[:space:]]*/, "", v); pin = trim(v)
+        name = "images.training.digests." tr_task "." arch
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", name, SEP, "tracebloc/client-" tr_task "-" arch, SEP, "prod", SEP, pin, SEP, "", SEP, ""
+      }
     }
     # Leaves of the current block. Only the FIRST of each kind, so a commented
     # example further down cannot overwrite the live value.

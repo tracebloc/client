@@ -156,6 +156,12 @@ jobs:
         if: ${{ needs.verify.outputs.prerelease != 'true' }}
         id: fetch
         run: |
+          # Stash the index publisher OUT of the source tree before we switch to
+          # gh-pages. gh-pages holds only index.yaml + .tgz, not scripts/, so the
+          # `git checkout gh-pages` below would take it away; $RUNNER_TEMP is
+          # outside the repo and survives the branch switch. The Update step runs
+          # it from there.
+          install -m 0755 scripts/publish-helm-index.sh "$RUNNER_TEMP/publish-helm-index.sh"
           # Remove any local chart packages before switching branches to avoid
           # "untracked working tree files would be overwritten" checkout errors.
           # Cover both chart name prefixes — see Package step above.
@@ -173,6 +179,10 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: helm-charts
+          # Into an ISOLATED dir, NOT the gh-pages root (which already holds every
+          # historical .tgz). The index step indexes only this dir so helm
+          # regenerates `created` for the new versions alone — see below.
+          path: _new_charts
 
       - name: Update index and push to gh-pages
         # Pre-releases are FR artifacts: they ship as release assets only and
@@ -180,16 +190,35 @@ jobs:
         if: ${{ needs.verify.outputs.prerelease != 'true' }}
         env:
           REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          NEW_CHARTS_DIR: _new_charts
         run: |
-          # `helm repo index .` indexes every .tgz in the working dir, so both
-          # client-*.tgz and ingestor-*.tgz get listed in the shared
-          # index.yaml. Customers then resolve `tracebloc/client` and
-          # `tracebloc/ingestor` from the same repo URL.
-          if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ] && [ -f index.yaml ]; then
-            helm repo index . --url "$REPO_URL" --merge index.yaml
+          # Index ONLY the newly-built charts (in $NEW_CHARTS_DIR) and merge them
+          # into the existing index, so `created` is regenerated for the new
+          # versions alone and every existing entry keeps its real publish time.
+          # Indexing the whole gh-pages working dir — all historical .tgz are
+          # present after the checkout above — re-stamped every entry's `created`
+          # to the release instant and blinded the edge-chart-staleness monitor
+          # (backend#3281, surfaced by backend#3261). Both client-*.tgz and
+          # ingestor-*.tgz are in $NEW_CHARTS_DIR, so both still land in the
+          # shared index. Logic + rationale: scripts/publish-helm-index.sh
+          # (covered by scripts/tests/publish-helm-index.bats under `Unit tests`);
+          # it was copied to $RUNNER_TEMP before the gh-pages checkout.
+          if [ "${{ steps.fetch.outputs.index_exists }}" = "true" ]; then
+            # gh-pages existed, so there IS a catalog to preserve. If index.yaml is
+            # somehow missing/empty, FAIL rather than fall through to a no-merge
+            # publish — that would re-index only the new charts and DROP the entire
+            # historical catalog (still on disk, unlisted), reading identically to a
+            # real first publish. `verify-index` would not catch it (Asad, #1001).
+            [ -s index.yaml ] || { echo "::error::gh-pages exists but index.yaml is missing/empty — refusing to publish an index that would drop the historical catalog."; exit 1; }
+            MERGE_INDEX=index.yaml
           else
-            helm repo index . --url "$REPO_URL"
+            MERGE_INDEX=
           fi
+          MERGE_INDEX="$MERGE_INDEX" OUT_INDEX=index.yaml \
+            bash "$RUNNER_TEMP/publish-helm-index.sh"
+          # Move the new charts to the gh-pages root, alongside the historical
+          # ones, so their (root-relative) index URLs resolve for customers.
+          mv "$NEW_CHARTS_DIR"/*.tgz .
           git add index.yaml client-*.tgz ingestor-*.tgz
           git status
           if git diff --staged --quiet; then

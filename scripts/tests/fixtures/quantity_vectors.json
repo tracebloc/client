@@ -1,0 +1,168 @@
+{
+  "description": [
+    "Kubernetes quantity spellings both installers' readers must agree on",
+    "(client#994 review, @saqlainsyed007): the bash _cpu_to_milli/_mem_to_bytes and",
+    "the PowerShell ConvertTo-TbCpuMilli/ConvertTo-TbMemBytes used to CLAIM one",
+    "grammar in a comment and diverge on `.5`, `5.`, `Pi` and `P` -- so the two",
+    "installers could reach opposite schedulability verdicts from one cluster",
+    "state (the backend#2220 twin-divergence class). A comment cannot hold two",
+    "readers together; this file is replayed through BOTH suites, so a grammar",
+    "change on one side reddens the other. `null` means 'unreadable': the reader",
+    "must refuse (empty on bash, $null on PowerShell), never guess a zero.",
+    "Hand-authored, deliberately: the inputs are written down independently of",
+    "either reader (repo rule 9's corollary). Pairs, not an object: Windows",
+    "PowerShell's ConvertFrom-Json cannot read an empty-string property name."
+  ],
+  "cpu_to_milli": [
+    [
+      "4",
+      4000
+    ],
+    [
+      "0",
+      0
+    ],
+    [
+      "500m",
+      500
+    ],
+    [
+      "0m",
+      0
+    ],
+    [
+      "0.5",
+      500
+    ],
+    [
+      ".5",
+      500
+    ],
+    [
+      "5.",
+      5000
+    ],
+    [
+      "1.2345",
+      1234
+    ],
+    [
+      "1.05",
+      1050
+    ],
+    [
+      "2.",
+      2000
+    ],
+    [
+      ".",
+      null
+    ],
+    [
+      "eight",
+      null
+    ],
+    [
+      "1.x",
+      null
+    ],
+    [
+      "m",
+      null
+    ],
+    [
+      "1.5m",
+      null
+    ],
+    [
+      "",
+      null
+    ],
+    [
+      "-1",
+      null
+    ],
+    [
+      "1.2.3",
+      null
+    ]
+  ],
+  "mem_to_bytes": [
+    [
+      "1024",
+      1024
+    ],
+    [
+      "0",
+      0
+    ],
+    [
+      "1Ki",
+      1024
+    ],
+    [
+      "70Mi",
+      73400320
+    ],
+    [
+      "8Gi",
+      8589934592
+    ],
+    [
+      "1Ti",
+      1099511627776
+    ],
+    [
+      "1Pi",
+      1125899906842624
+    ],
+    [
+      "5k",
+      5000
+    ],
+    [
+      "250M",
+      250000000
+    ],
+    [
+      "2G",
+      2000000000
+    ],
+    [
+      "1T",
+      1000000000000
+    ],
+    [
+      "1P",
+      1000000000000000
+    ],
+    [
+      "1.5Gi",
+      null
+    ],
+    [
+      "64GB",
+      null
+    ],
+    [
+      "Gi",
+      null
+    ],
+    [
+      "lots",
+      null
+    ],
+    [
+      "",
+      null
+    ],
+    [
+      "1e3",
+      null
+    ],
+    [
+      "1Ei",
+      null
+    ]
+  ]
+}

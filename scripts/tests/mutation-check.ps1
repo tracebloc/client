@@ -78,6 +78,24 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 # One entry per FIXED defect. `Find` must match exactly one line in `File`.
 # `Suite` is the Pester file that claims to cover it.
 $Mutations = @(
+  @{ Name  = 'the values file is protected AFTER the credential is written (backend#2931)'
+     Expect = 'calls it above the Set-Content that carries clientPassword'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $valuesProtected = Protect-TraceblocValuesFile -Path $valuesFile'
+     Repl  = '  $valuesProtected = $true  # MUTATION: the pre-write protect is gone' }
+
+  @{ Name  = 'only the generating write site is protected, the clientId heal is not (backend#2931)'
+     Expect = 'protects BOTH write sites'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '      $null = Protect-TraceblocValuesFile -Path $valuesFile'
+     Repl  = '      # MUTATION: the clientId heal no longer protects the file' }
+
+  @{ Name  = 'the Hint claims restriction even when the helper could not restrict (backend#2931)'
+     Expect = 'only claims the file is restricted when the helper said so'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($valuesProtected) {'
+     Repl  = '  if ($true) {  # MUTATION: reassure unconditionally' }
+
   @{ Name  = 'the reboot prompt asks even with nobody at the console (backend#2675)'
      Expect = 'Read-RebootChoice'
      File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
@@ -156,6 +174,96 @@ $Mutations = @(
      Find  = '          Hint "Find your credentials at $(Get-TraceblocDashboardUrl)"'
      Repl  = '          Hint "Find your credentials at https://ai.tracebloc.io/clients"' }
 
+  # THE OTHER HALF OF THAT ONE (client#935). The entry above mutates the
+  # PowerShell installer, and the guard it credits only ever read the PowerShell
+  # installer -- so between them they certified a property of ONE file while
+  # claiming the installer. The bash twin hardcoded production at ten sites and
+  # both stayed green (fixed in client#946). This entry aims the same defect at a
+  # bash lib that no dashboard test has ever named, which is the only way to show
+  # the widened guard actually reaches the class rather than a longer list.
+  #
+  # It also lands in cluster.sh rather than in summary.sh or
+  # install-client-helm.sh deliberately: those two are the files the old guard
+  # enumerated, so a mutation there would be caught by the narrow guard too and
+  # prove nothing about the widening.
+  @{ Name  = 'a bash lib hardcodes the production dashboard, in a file no dashboard test named (client#935)'
+     Expect = 'every dashboard host lives ONLY in the mapping'
+     File  = 'scripts/lib/cluster.sh'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '_cluster_exists() {'
+     Repl  = '_cluster_exists() {  : "See it on your dashboard: https://ai.tracebloc.io/clients"' }
+
+  # THE ONE THE CLASS GUARD USED TO MISS (client#930). New-K3dCluster ran
+  # `k3d cluster list -o json` bare, on the MAIN install path, through every
+  # green run of this suite -- because the class guard's tool list said `docker`
+  # and `k3d` talks to the same engine. Registering the mutation is the point:
+  # widening the tool list is only worth something if reintroducing the bare call
+  # actually reddens the widened guard, and "already fixed, never seen to fail"
+  # is exactly the shape this harness exists to refuse.
+  @{ Name  = 'New-K3dCluster goes back to a bare, unbounded k3d cluster list (client#930)'
+     Expect = 'EVERY native docker/k3d call is bounded'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $clusterListJson = Get-ClusterListJson'
+     Repl  = '  $clusterListJson = k3d cluster list -o json 2>&1 | Out-String' }
+
+  # AND THE DEADLINE ITSELF, not just the wrapper's name. A reader that starts
+  # the job and then waits on it forever satisfies "inside Start-Job" while
+  # hanging exactly as the bare call did -- the bounded-looking unbounded wait.
+  @{ Name  = 'the k3d-listing reader starts its job but never reaps it on a deadline (client#930)'
+     Expect = 'there is exactly ONE bounded k3d-listing reader'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if (Wait-JobWithProgress -Job $job -TimeoutSec 15 -Message "Checking cluster") {'
+     Repl  = '  if ($job | Wait-Job) {' }
+
+  # AND THE DECISION AT THE CONSUMER (client#973 review). The two entries above
+  # aim at the BOUND; this one aims at what the bound made reachable. Bounding
+  # the read turned "" from "the listing was garbage" into "the listing was
+  # garbage OR the deadline fired OR the job died", and New-K3dCluster mapped all
+  # of them onto `$clusterExists = $false` -- `k3d cluster create` over a cluster
+  # that may well exist, whose create-timeout branch then deletes it as a
+  # "partial". Deleting this call is a silent regression to exactly that, so it
+  # is the mutation the guard has to catch.
+  @{ Name  = 'the main install path guesses "absent" from a failed listing again (client#973)'
+     Expect = 'BEFORE deciding the cluster is absent'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  Assert-ClusterListingReadable -Json $clusterListJson'
+     Repl  = '  # Assert-ClusterListingReadable -Json $clusterListJson' }
+
+  # ...AND ITS SENSE, not just its presence. An inverted predicate keeps the call
+  # site, the name and the ordering guard all green while refusing every HEALTHY
+  # listing and waving the failed ones through -- the same fail-open, now with a
+  # guard vouching for it. This is why the refusal has a behavioural test and not
+  # only a source-text one.
+  @{ Name  = 'the listing-readable predicate is inverted, so only healthy reads are refused (client#973)'
+     Expect = 'refuses EVERY shape a failed listing produces'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($null -ne (Get-ClusterListEntries -Json $Json)) { return }'
+     Repl  = '  if ($null -eq (Get-ClusterListEntries -Json $Json)) { return }' }
+
+  # THE FAIL-FAST BREADCRUMB (client#973 review). Only the timeout branch logged,
+  # and the `if` it sits opposite is not "succeeded" -- Wait-JobWithProgress
+  # returns $true for Failed too. So the case that actually reaches support (a
+  # daemon refusing the socket: empty stdout, k3d's reason already dropped by
+  # `2>$null`) was the one with no witness in the support bundle.
+  @{ Name  = 'the empty-listing read goes back to leaving no trace in the log (client#973)'
+     Expect = 'exactly ONE bounded k3d-listing reader'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '      Log "k3d cluster list returned no output$why (job state: $($job.State)); cluster run-state indeterminate."'
+     Repl  = '      $null = $why' }
+
+  # THE VALUE THE WHOLE FAIL-CLOSED PROPERTY RESTS ON (@saadqbal / @LukasWodka on
+  # client#973). The three entries above certify the DECISION; none of them
+  # touches what the reader RETURNS when the deadline fires. `[]` is the perfect
+  # mutation because it is a HEALTHY empty listing: the refusal passes it,
+  # Find-ClusterInList yields $null, and the install is back on the create path
+  # over a live cluster -- with the AST ordering guard and all three entries above
+  # still green. `$out = ""` appears three times in the file, hence the anchor.
+  @{ Name  = 'a timed-out read returns a healthy-looking empty listing instead of nothing (client#973)'
+     Expect = 'a FIRED DEADLINE returns empty'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     After = 'function Get-ClusterListJson {'; Within = 5
+     Find  = '  $out = ""'
+     Repl  = '  $out = "[]"' }
+
   @{ Name  = 'the bootstrap closes the user''s console again (#577 / client#917)'
      Expect = 'must not close the user''s window'
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'
@@ -167,6 +275,70 @@ $Mutations = @(
      File  = 'scripts/install.ps1'; Suite = 'scripts/tests/install.Tests.ps1'
      Find  = '    if (-not ($usingBranch -and $AllowUnverified)) {'
      Repl  = '    if ($true) {' }
+
+  # ENVELOPE SCHEDULABILITY, PowerShell twin (backend#2870, client#992). The bash
+  # side has envelope-schedulability-mutations.sh proving each of these against
+  # install-client-helm.sh; the same nine bugs must redden here, or the Windows
+  # installer's fit step is a copy of the rule that nothing has ever seen fail.
+  @{ Name  = 'the fractional-core grammar refuses `.5` / `5.` again, diverging from the bash twin (client#994)'
+     Expect = 'agree with the bash twin on every shared quantity vector'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($q -match ''^(\d*)\.(\d*)$'' -and ($Matches[1] -ne '''' -or $Matches[2] -ne '''')) {'
+     Repl  = '  if ($q -match ''^(\d+)\.(\d+)$'') {' }
+
+  @{ Name  = 'the chart footprint drops out of the sum (client#992)'
+     Expect = 'is REDUCED, arithmetic printed'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $needMemB = $fpMemB + $sysMemB'
+     Repl  = '  $needMemB = $sysMemB' }
+
+  @{ Name  = 'cpu can never fail the fit (client#992)'
+     Expect = 'cpu-only overshoot reduces cpu alone'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $memFits = ($memOver -le 0); $cpuFits = ($cpuOver -le 0)'
+     Repl  = '  $memFits = ($memOver -le 0); $cpuFits = $true' }
+
+  @{ Name  = 'the reduction is computed but the original size is written (client#992)'
+     Expect = 'is REDUCED, arithmetic printed'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  $out.Size = "cpu=$newCores,memory=${newGib}Gi"'
+     Repl  = '  $null = $newCores' }
+
+  @{ Name  = 'a refusal is downgraded to a reduction that writes 0 cores (client#992)'
+     Expect = 'REFUSED when not even 1 core'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ($newCores -lt 1 -or $newGib -lt 1) {'
+     Repl  = '  if ($false) {' }
+
+  @{ Name  = 'a human''s pin is silently reduced (client#992)'
+     Expect = 'pin is warned, never altered'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if (-not $ours) {'
+     Repl  = '  if ($false) {' }
+
+  @{ Name  = 'the release''s own pods are counted as system load (client#992)'
+     Expect = 'excludes the release namespace'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '    if ($ownNs -contains $ns) { continue }'
+     Repl  = '    if ($false) { continue }' }
+
+  @{ Name  = 'terminal pods are counted as system load (client#992)'
+     Expect = 'excludes the release namespace'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '    if ($phase -eq ''Succeeded'' -or $phase -eq ''Failed'') { continue }'
+     Repl  = '    if ($false) { continue }' }
+
+  @{ Name  = 'a blank footprint constant no longer refuses (client#992)'
+     Expect = 'FAIL CLOSED: a blank footprint constant refuses'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '  if ("$($script:TbCpFootprintMemBytes)" -notmatch ''^\d+$'' -or "$($script:TbCpFootprintCpuMilli)" -notmatch ''^\d+$'') {'
+     Repl  = '  if ($false) {' }
+
+  @{ Name  = 'an unreadable cluster writes an installer-chosen non-floor size anyway (client#992)'
+     Expect = 'cluster unreadable: REFUSED'
+     File  = 'scripts/install-k8s.ps1'; Suite = 'scripts/tests/install-k8s.Tests.ps1'
+     Find  = '    if ($ours -and $Size -ne $floor) {'
+     Repl  = '    if ($false) {' }
 )
 
 # BYTE-IDENTICAL LINES CANNOT BE AIMED AT INDIVIDUALLY, so a mutation may name an

@@ -1,0 +1,197 @@
+suite: Per-edge TRACEBLOC_DDP / TRACEBLOC_AMP operator switches reach jobs-manager (backend#3149)
+# RFC-0067 D8: the kill switch for automatic multi-GPU training is a PER-EDGE,
+# OPERATOR-LEVEL env that jobs-manager reads from its own container and writes
+# onto every training pod it spawns (client-runtime#480). The chart's job is the
+# first hop -- `env.<KEY>` onto the jobs-manager container -- through the same
+# generic passthrough every other `env.*` key takes. That passthrough is gated on
+# a non-empty value, which is why an EXPLICIT "0" is pinned here separately from
+# an absent key: "0" must travel (the operator said OFF), "" must not (unset).
+#
+# Nothing here proves the second hop. That the value lands on a TRAINING pod is
+# client-runtime#480's test to write, against its own spawn code.
+templates:
+  - templates/jobs-manager-deployment.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: an enabled TRACEBLOC_DDP lands on the jobs-manager container verbatim
+    set:
+      env:
+        TRACEBLOC_DDP: "1"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "1"
+
+  - it: an explicit "0" travels too -- the operator saying OFF is a statement, not silence
+    set:
+      env:
+        TRACEBLOC_DDP: "0"
+        TRACEBLOC_AMP: "0"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "0"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+            value: "0"
+
+  - it: the accepted spellings are delivered as written, never normalised by the chart
+    # Normalisation is the runtime's job (its _TRUTHY is case-insensitive). A
+    # chart that rewrote "yes" to "1" would be a second reader of that rule.
+    set:
+      env:
+        TRACEBLOC_DDP: "yes"
+        TRACEBLOC_AMP: "True"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "yes"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+            value: "True"
+
+  - it: an absent key emits nothing -- unset is OFF on the runtime side, and the pod spec stays byte-identical for every edge that never set it
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+          any: true
+
+  - it: the default values.yaml ships both switches OFF (absent), so no edge is armed by a chart upgrade
+    # The keys exist in values.yaml only as documentation comments. If someone
+    # uncomments a default, every auto-upgrading edge turns DDP (or AMP) on
+    # overnight with none of RFC-0067 D7's preconditions checked -- this is the
+    # guard, and it covers BOTH switches (Bugbot, client#975).
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+          any: true
+
+  - it: an EXPLICIT empty string is the third state -- unset -- and must not travel either
+    # "" is how a values file says "I have no opinion"; the runtime reads an
+    # absent var as OFF, and the passthrough's non-empty gate is what keeps ""
+    # from becoming a rendered empty var. Pinned so that gate cannot be relaxed
+    # without this reddening (Bugbot, client#975).
+    set:
+      env:
+        TRACEBLOC_DDP: ""
+        TRACEBLOC_AMP: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_AMP
+          any: true
+
+  - it: the multi-GPU lease travels only when an operator set it (client-runtime#486, B7)
+    # An unconditional empty default would read as DISABLED on the runtime side
+    # and switch the lease off fleet-wide, silently. Same shape as the switches.
+    set:
+      env:
+        MULTI_GPU_LEASE_SECONDS: "3600"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_LEASE_SECONDS
+            value: "3600"
+
+  - it: an unset lease emits nothing, so jobs-manager's own default stands
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_LEASE_SECONDS
+          any: true
+
+  - it: an explicit disable spelling is delivered verbatim
+    set:
+      env:
+        MULTI_GPU_LEASE_SECONDS: "off"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_LEASE_SECONDS
+            value: "off"
+
+  - it: the multi-GPU size floor is delivered verbatim when set (client-runtime#513 @ f42d5e9)
+    set:
+      env:
+        MULTI_GPU_MIN_PARAMETERS: "50000000"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_MIN_PARAMETERS
+            value: "50000000"
+
+  - it: an unset size floor emits nothing, so the runtime's gate stays dark by its own rule
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_MIN_PARAMETERS
+          any: true
+
+  - it: the two REPORTING switches travel the same way (EMIT_TOPOLOGY / EMIT_OOM_RESCUE, tracebloc-engine#879 @ 383b0daa)
+    set:
+      env:
+        EMIT_TOPOLOGY: "1"
+        EMIT_OOM_RESCUE: "true"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EMIT_TOPOLOGY
+            value: "1"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EMIT_OOM_RESCUE
+            value: "true"
+
+  - it: the reporting switches are absent by default -- a chart upgrade must not start emitting keys a backend may lack
+    # The failure mode is worse than an armed feature: an emitted cycle-payload
+    # key the backend has no column for DESTROYS the edge's cycle row.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EMIT_TOPOLOGY
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: EMIT_OOM_RESCUE
+          any: true

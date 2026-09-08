@@ -83,6 +83,24 @@ expect_reject() {
   fi
 }
 
+# expect_render_without <label> <must-be-absent substring> <helm args...> -- the
+# chart must render AND the string must not appear. The plain expect_render
+# cannot say "emits nothing": every render contains the default image tag, so
+# grepping for it proves only that helm ran (Bugbot, client#975).
+expect_render_without() {
+  local label="$1" absent="$2"; shift 2
+  local out
+  if ! out="$(render "$@")"; then
+    fail "$label: expected a successful render, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+    return
+  fi
+  if grep -qF "$absent" <<<"$out"; then
+    fail "$label: rendered, but '$absent' IS in the output and must not be"
+  else
+    pass "$label -> no '$absent'"
+  fi
+}
+
 SCHEMA_ERR="values don't meet the specifications of the schema"
 
 echo "== env.CLIENT_ENV: the six accepted spellings plus empty all resolve =="
@@ -130,6 +148,84 @@ if grep -q -- '--skip-schema-validation' <<<"$_helm_help"; then
 else
   echo "  skip  --skip-schema-validation unsupported by $(helm version --short) — helper backstop not exercised"
 fi
+
+echo "== images.training.digests: the digest grammar and the arch vocabulary are closed =="
+# backend#3156 (RFC-1246 P2). The runtime validates the map at boot and a bad
+# digest there is a CrashLoopBackOff of jobs-manager; the schema catches it one
+# step earlier, at helm upgrade. Arch is closed to cpu|gpu because the engine
+# builds exactly those two; task keys stay open because the task set is the
+# engine's to declare, not the chart's.
+expect_render "training digest, canonical"        "TRAINING_IMAGE_DIGESTS" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_render "training digest, both arches"      "TRAINING_IMAGE_DIGESTS" --set-string "images.training.digests.image_classification.cpu=sha256:0000000000000000000000000000000000000000000000000000000000000000" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training digest, short hex"        "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=sha256:abc"
+expect_reject "training digest, uppercase hex"    "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+expect_reject "training digest, bare hex"         "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.gpu=0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training digest, arch=tpu"         "$SCHEMA_ERR" --set-string "images.training.digests.image_classification.tpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training digest, task=Image-Class" "$SCHEMA_ERR" --set-string "images.training.digests.Image-Class.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# The pre-images.training replay: `--set images.training=null` DELETES the key,
+# which is what a --reuse-values upgrade from an older release presents. Asserted
+# as the ABSENCE of the var: an absent `pinned` stringifies to a sentinel, and
+# only a hasKey guard keeps this a no-op (Bugbot, client#976).
+if ! out="$(render --set images.training=null)"; then
+  fail "images.training absent: expected a render, got: $(head -3 <<<"$out" | tr '\n' ' ')"
+elif grep -qF "TRAINING_IMAGE_PINNED" <<<"$out"; then
+  fail "images.training absent: TRAINING_IMAGE_PINNED was rendered from an absent key"
+else
+  pass "images.training absent -> no TRAINING_IMAGE_PINNED"
+fi
+expect_render "training pinned=true (string)"     "TRAINING_IMAGE_PINNED" --set-string "images.training.pinned=true"
+expect_render "training pinned=false (bool)"      "TRAINING_IMAGE_PINNED" --set "images.training.pinned=false"
+expect_reject "training pinned=auto"              "$SCHEMA_ERR" --set-string "images.training.pinned=auto"
+expect_render "training capabilities with a pin"  "TRAINING_ENGINE_CAPABILITIES" --set-string "images.training.capabilities=ddp" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+expect_reject "training capabilities WITHOUT a pin is refused by the template, not the schema" "is DERIVED from the pinned digests" --set-string "images.training.capabilities=ddp"
+expect_reject "training capabilities=DDP (uppercase)" "$SCHEMA_ERR" --set-string "images.training.capabilities=DDP" --set-string "images.training.digests.image_classification.gpu=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+echo "== env.TRACEBLOC_DDP / TRACEBLOC_AMP / EMIT_TOPOLOGY / EMIT_OOM_RESCUE: the switch vocabulary is closed =="
+# RFC-0067 D8 (backend#3149): the runtime reads 1|true|yes as ON and EVERYTHING
+# ELSE as OFF, so a misspelling does not error there -- it silently disables the
+# switch the operator believes is on. The schema is the only place the typo can
+# be caught. `--set-string`, not `--set`: helm parses a bare 1 as an integer and
+# the schema would refuse it for the wrong reason (type, not vocabulary).
+# EMIT_TOPOLOGY / EMIT_OOM_RESCUE share the vocabulary (tracebloc-engine#879 @ 383b0daa).
+for key in TRACEBLOC_DDP TRACEBLOC_AMP EMIT_TOPOLOGY EMIT_OOM_RESCUE; do
+  for good in 1 0 true false yes no TRUE False YES nO; do
+    expect_render "$key=$good" "name: $key" --set-string "env.$key=$good"
+  done
+  # Whitespace-tolerant, as the runtime's .strip() is.
+  expect_render "$key=' true '" "name: $key" --set-string "env.$key= true "
+  # Empty is legal and means UNSET: the passthrough emits NOTHING for it --
+  # asserted as the absence of the var, not as "helm rendered".
+  expect_render_without "$key=''" "name: $key" --set-string "env.$key="
+  for bad in ture on off enabled disabled 2 t y; do
+    expect_reject "$key=$bad" "$SCHEMA_ERR" --set-string "env.$key=$bad"
+  done
+done
+
+echo "== env.MULTI_GPU_LEASE_SECONDS: seconds or an explicit disable, nothing else =="
+# client-runtime#486 (B7): the runtime falls back to its 86400 s default on any
+# unrecognised value, so a typo would be indistinguishable from the default.
+for good in 0 60 86400 off false no OFF False; do
+  expect_render "MULTI_GPU_LEASE_SECONDS=$good" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS=$good"
+done
+expect_render_without "MULTI_GPU_LEASE_SECONDS=''" "name: MULTI_GPU_LEASE_SECONDS" --set-string "env.MULTI_GPU_LEASE_SECONDS="
+for bad in 1h 60s -1 3.5 on true yes disabled 00 007; do
+  expect_reject "MULTI_GPU_LEASE_SECONDS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_LEASE_SECONDS=$bad"
+done
+
+echo "== env.MULTI_GPU_MIN_PARAMETERS: a positive integer, or unset -- nothing else =="
+# client-runtime#513 @ f42d5e9 (B9): the runtime reads empty, non-numeric or
+# non-positive as UNSET and then refuses every run (WARNING for a malformed
+# value, INFO at startup for unset/empty), so a typo would be indistinguishable
+# from the deliberate dark default. Closed here. Leading zeros (007) are refused
+# for a different reason: int() would read them as a valid floor of 7 with no
+# warning, so the schema keeps one canonical spelling per floor.
+for good in 1 50000000 123456789012; do
+  expect_render "MULTI_GPU_MIN_PARAMETERS=$good" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS=$good"
+done
+expect_render "MULTI_GPU_MIN_PARAMETERS=' 42 '" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS= 42 "
+expect_render_without "MULTI_GPU_MIN_PARAMETERS=''" "name: MULTI_GPU_MIN_PARAMETERS" --set-string "env.MULTI_GPU_MIN_PARAMETERS="
+for bad in 0 -1 007 1e6 50M 3.5 off none unset; do
+  expect_reject "MULTI_GPU_MIN_PARAMETERS=$bad" "$SCHEMA_ERR" --set-string "env.MULTI_GPU_MIN_PARAMETERS=$bad"
+done
 
 echo "== images.ingestor.channelTags: keys are closed =="
 # The lookup is on the RESOLVED env, so only dev/stg/prod can ever match. An
