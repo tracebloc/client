@@ -111,8 +111,6 @@ cleanup() {
   fi
   return "$rc"
 }
-trap cleanup EXIT
-
 command -v jq >/dev/null 2>&1 || { echo "measure: jq is required" >&2; exit 2; }
 has docker || { echo "measure: docker is required" >&2; exit 2; }
 if ! has kubectl || ! has k3d; then
@@ -123,6 +121,38 @@ fi
 
 SAMPLES="$WORK/samples.jsonl"
 : > "$SAMPLES"
+
+# Every fragment that reaches `jq --argjson` goes through this first: a read that
+# came back empty, truncated, or as an error message becomes JSON `null` with a
+# note, instead of aborting the whole run at the summary step. The first CI run
+# did exactly that -- 37 sample rounds on three Linux runners, then "invalid JSON
+# text passed to --argjson" and an empty record, because one fragment was not
+# JSON. The samples are the evidence; the summary must never be able to lose them.
+json_or_null() {
+  local candidate="$1" what="$2"
+  if [[ -n "$candidate" ]] && jq -e . >/dev/null 2>&1 <<<"$candidate"; then
+    printf '%s' "$candidate"
+  else
+    echo "   note: ${what} was not JSON (recorded as null): ${candidate:0:120}" >&2
+    printf 'null'
+  fi
+}
+
+# If anything after the sampling fails, the raw samples still get written to OUT
+# as a partial record, so a broken summary costs a re-run of the summary, not of
+# the measurement.
+RECORD_WRITTEN=0
+save_partial() {
+  local rc=$?
+  if [[ "$RECORD_WRITTEN" -eq 0 && -s "$SAMPLES" ]]; then
+    jq -n --arg platform "$(uname -s)" --arg arch "$(uname -m)" --arg why "the run aborted before the summary (exit $rc); raw samples preserved" \
+      --slurpfile samples "$SAMPLES" '{schema_version: 1, partial: true, why: $why, platform: {os: $platform, arch: $arch}, samples: $samples}' > "$OUT" 2>/dev/null || cp "$SAMPLES" "${OUT%.json}.samples.jsonl"
+    echo "PARTIAL RECORD (samples only): $OUT" >&2
+  fi
+  cleanup
+  return "$rc"
+}
+trap save_partial EXIT
 
 echo "═══════════════════════════════════════════════════════════════════════"
 echo "  node reservation measurement   $(uname -s)/$(uname -m)   idle ${IDLE_S}s  load ${LOAD_S}s  every ${INTERVAL_S}s"
@@ -140,19 +170,22 @@ sample() {
   local phase="$1" node stats cg dstats now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   for node in $nodes; do
-    stats="$(kubectl get --raw "/api/v1/nodes/${node}/proxy/stats/summary" 2>/dev/null || echo '{}')"
+    stats="$(kubectl get --raw "/api/v1/nodes/${node}/proxy/stats/summary" 2>/dev/null || true)"
+    stats="$(json_or_null "$stats" "stats/summary on $node")"
     # Top-level cgroups inside the node container: `<name> <memory.current>`.
     cg="$(docker exec "$node" sh -c 'for d in /sys/fs/cgroup/*/; do n=$(basename "$d"); v=$(cat "$d/memory.current" 2>/dev/null || echo -); printf "%s %s\n" "$n" "$v"; done' 2>/dev/null \
           | jq -R -s 'split("\n") | map(select(length>0) | split(" ") | {key: .[0], value: (.[1] | tonumber? // null)}) | from_entries')"
-    dstats="$(docker stats --no-stream --format '{{json .}}' "$node" 2>/dev/null | jq -c '{mem_usage: .MemUsage, cpu_perc: .CPUPerc}' || echo '{}')"
+    dstats="$(docker stats --no-stream --format '{{json .}}' "$node" 2>/dev/null | jq -c '{mem_usage: .MemUsage, cpu_perc: .CPUPerc}' 2>/dev/null || true)"
+    cg="$(json_or_null "$cg" "cgroups on $node")"
+    dstats="$(json_or_null "$dstats" "docker stats on $node")"
     jq -cn --arg phase "$phase" --arg node "$node" --arg t "$now" \
-      --argjson stats "$stats" --argjson cg "${cg:-{\}}" --argjson dstats "$dstats" '
+      --argjson stats "$stats" --argjson cg "$cg" --argjson dstats "$dstats" '
       {phase: $phase, node: $node, t: $t,
        system_containers: ($stats.node.systemContainers // [] | map({name, ws: .memory.workingSetBytes, rss: .memory.rssBytes, cpu_nano: .cpu.usageNanoCores})),
        node_memory: {ws: $stats.node.memory.workingSetBytes, available: $stats.node.memory.availableBytes, rss: $stats.node.memory.rssBytes},
        node_cpu_nano: $stats.node.cpu.usageNanoCores,
        pods: ($stats.pods // [] | length),
-       cgroups: $cg, docker: $dstats}' >> "$SAMPLES"
+       cgroups: ($cg // {}), docker: ($dstats // {})}' >> "$SAMPLES" || echo "   note: a sample for $node could not be written" >&2
   done
 }
 
@@ -217,18 +250,21 @@ kubectl delete pod measure-load --ignore-not-found --wait=false >/dev/null 2>&1 
 
 echo "── node facts: capacity vs allocatable, live /configz ──"
 node_facts="$(for node in $nodes; do
-  cfg="$(kubectl get --raw "/api/v1/nodes/${node}/proxy/configz" 2>/dev/null || echo '{}')"
-  kubectl get node "$node" -o json | jq -c --arg node "$node" --argjson cfg "$cfg" '
+  cfg="$(kubectl get --raw "/api/v1/nodes/${node}/proxy/configz" 2>/dev/null || true)"
+  cfg="$(json_or_null "$cfg" "configz on $node")"
+  nodejson="$(kubectl get node "$node" -o json 2>/dev/null || true)"
+  nodejson="$(json_or_null "$nodejson" "node object $node")"
+  jq -c --arg node "$node" --argjson cfg "$cfg" <<<"$nodejson" '
     {node: $node,
      capacity: .status.capacity, allocatable: .status.allocatable,
      kubelet_version: .status.nodeInfo.kubeletVersion, runtime: .status.nodeInfo.containerRuntimeVersion,
      os_image: .status.nodeInfo.osImage, kernel: .status.nodeInfo.kernelVersion, arch: .status.nodeInfo.architecture,
-     configz: {evictionHard: $cfg.kubeletconfig.evictionHard, evictionSoft: $cfg.kubeletconfig.evictionSoft,
-               evictionMinimumReclaim: $cfg.kubeletconfig.evictionMinimumReclaim,
-               kubeReserved: $cfg.kubeletconfig.kubeReserved, systemReserved: $cfg.kubeletconfig.systemReserved,
-               enforceNodeAllocatable: $cfg.kubeletconfig.enforceNodeAllocatable,
-               kubeletCgroups: $cfg.kubeletconfig.kubeletCgroups, runtimeCgroups: $cfg.kubeletconfig.systemCgroups,
-               imageGCHighThresholdPercent: $cfg.kubeletconfig.imageGCHighThresholdPercent}}'
+     configz: ($cfg // {} | {evictionHard: .kubeletconfig.evictionHard, evictionSoft: .kubeletconfig.evictionSoft,
+               evictionMinimumReclaim: .kubeletconfig.evictionMinimumReclaim,
+               kubeReserved: .kubeletconfig.kubeReserved, systemReserved: .kubeletconfig.systemReserved,
+               enforceNodeAllocatable: .kubeletconfig.enforceNodeAllocatable,
+               kubeletCgroups: .kubeletconfig.kubeletCgroups, runtimeCgroups: .kubeletconfig.systemCgroups,
+               imageGCHighThresholdPercent: .kubeletconfig.imageGCHighThresholdPercent})}'
 done | jq -s .)"
 
 # How k3s wires the kubelet on THIS version: its own drop-in directory (if any),
@@ -248,7 +284,9 @@ wiring="$(for node in $nodes; do
   cmdlines="$(docker exec "$node" sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < "$p/cmdline" 2>/dev/null; echo; done' 2>/dev/null || echo unreadable)"
   cmdline="$(awk '/--config/ && /kubelet/ {print; exit}' <<<"$cmdlines")"
   jq -cn --arg node "$node" --arg confd "$confd" --arg cmdline "$cmdline" '{node: $node, kubelet_conf_d: $confd, k3s_cmdline: $cmdline}'
-done | jq -s .)"
+done | jq -s . 2>/dev/null || true)"
+wiring="$(json_or_null "$wiring" "kubelet wiring")"
+node_facts="$(json_or_null "$node_facts" "node facts")"
 
 # The VM (macOS/WSL2) or host (Linux) beneath the nodes: what is used OUTSIDE
 # every node container. MemTotal - MemAvailable is what the kernel says is in
@@ -257,31 +295,40 @@ done | jq -s .)"
 vm_raw="$(docker run --rm --pid=host alpine:3.20 sh -c 'grep -E "^(MemTotal|MemAvailable|MemFree)" /proc/meminfo; echo ---; ps -o pid,rss,comm 2>/dev/null | sort -k2 -n -r' 2>/dev/null || true)"
 # The top 15 processes by RSS, sliced from the capture rather than piped into head.
 vm_raw="$(awk 'NR<=19' <<<"$vm_raw")"
-vm_view="$(jq -R -s '{raw: .}' <<<"$vm_raw" || echo '{}')"
+vm_view="$(jq -R -s '{raw: .}' <<<"$vm_raw" 2>/dev/null || true)"
+vm_view="$(json_or_null "$vm_view" "vm view")"
 
 k3d_version_all="$(k3d version 2>/dev/null || true)"
 k3d_version="${k3d_version_all%%$'\n'*}"
-vm_info="$(docker info --format '{"ncpu": {{.NCPU}}, "mem_total": {{.MemTotal}}, "server_version": "{{.ServerVersion}}", "operating_system": "{{.OperatingSystem}}", "kernel": "{{.KernelVersion}}"}' 2>/dev/null || echo '{}')"
-sidecars="$(docker stats --no-stream --format '{{json .}}' "k3d-${CLUSTER_NAME}-serverlb" "k3d-${CLUSTER_NAME}-tools" 2>/dev/null | jq -s 'map({name: .Name, mem_usage: .MemUsage})' || echo '[]')"
+# docker info fields are rendered by Go templates into a JSON literal by hand,
+# so a value with a quote or a newline in it (an OperatingSystem string on some
+# distros) would break it -- validated like everything else.
+vm_info="$(docker info --format '{"ncpu": {{.NCPU}}, "mem_total": {{.MemTotal}}, "server_version": "{{.ServerVersion}}", "operating_system": "{{.OperatingSystem}}", "kernel": "{{.KernelVersion}}"}' 2>/dev/null || true)"
+vm_info="$(json_or_null "$vm_info" "docker info")"
+sidecars="$(docker stats --no-stream --format '{{json .}}' "k3d-${CLUSTER_NAME}-serverlb" "k3d-${CLUSTER_NAME}-tools" 2>/dev/null | jq -s 'map({name: .Name, mem_usage: .MemUsage})' 2>/dev/null || true)"
+sidecars="$(json_or_null "$sidecars" "sidecar stats")"
 # EVERY container on the engine, so a second cluster sharing the VM shows up in
 # the record instead of silently inflating the outside-the-nodes cross-check.
-all_containers="$(docker stats --no-stream --format '{{json .}}' 2>/dev/null | jq -s 'map({name: .Name, mem_usage: .MemUsage, cpu_perc: .CPUPerc})' || echo '[]')"
+all_containers="$(docker stats --no-stream --format '{{json .}}' 2>/dev/null | jq -s 'map({name: .Name, mem_usage: .MemUsage, cpu_perc: .CPUPerc})' 2>/dev/null || true)"
+all_containers="$(json_or_null "$all_containers" "all-container stats")"
 
 # Percentiles over the raw samples, per phase / node / systemContainer.
 summary="$(jq -s '
   def pct(p): sort | if length == 0 then null else .[(length - 1) * p / 100 | floor] end;
   def stats: {n: length, p50: pct(50), p95: pct(95), max: (max // null)};
-  [ .[] | . as $s | .system_containers[] | {phase: $s.phase, node: $s.node, name, ws, cpu_nano} ]
+  [ .[] | . as $s | (.system_containers // [])[] | {phase: $s.phase, node: $s.node, name, ws, cpu_nano} ]
   | group_by([.phase, .node, .name])
   | map({phase: .[0].phase, node: .[0].node, container: .[0].name,
          working_set_bytes: (map(.ws | select(. != null)) | stats),
-         cpu_nanocores: (map(.cpu_nano | select(. != null)) | stats)})' "$SAMPLES")"
+         cpu_nanocores: (map(.cpu_nano | select(. != null)) | stats)})' "$SAMPLES" 2>/dev/null || true)"
 cg_summary="$(jq -s '
   def pct(p): sort | if length == 0 then null else .[(length - 1) * p / 100 | floor] end;
-  [ .[] | . as $s | (.cgroups | to_entries[]) | {phase: $s.phase, node: $s.node, cgroup: .key, v: .value} ]
+  [ .[] | . as $s | ((.cgroups // {}) | to_entries[]) | {phase: $s.phase, node: $s.node, cgroup: .key, v: .value} ]
   | map(select(.v != null))
   | group_by([.phase, .node, .cgroup])
-  | map({phase: .[0].phase, node: .[0].node, cgroup: .[0].cgroup, memory_current_bytes: {n: length, p50: (map(.v) | pct(50)), p95: (map(.v) | pct(95)), max: (map(.v) | max)}})' "$SAMPLES")"
+  | map({phase: .[0].phase, node: .[0].node, cgroup: .[0].cgroup, memory_current_bytes: {n: length, p50: (map(.v) | pct(50)), p95: (map(.v) | pct(95)), max: (map(.v) | max)}})' "$SAMPLES" 2>/dev/null || true)"
+summary="$(json_or_null "$summary" "system-container summary")"
+cg_summary="$(json_or_null "$cg_summary" "cgroup summary")"
 
 jq -n \
   --arg platform "$(uname -s)" --arg arch "$(uname -m)" --arg host_kernel "$(uname -r)" \
@@ -309,6 +356,7 @@ jq -n \
    k3s_kubelet_wiring: $wiring,
    summary: {system_containers: $summary, cgroups: $cg_summary},
    samples: $samples}' > "$OUT"
+RECORD_WRITTEN=1
 
 echo ""
 echo "── summary (working set bytes, per phase / node / container) ──"
