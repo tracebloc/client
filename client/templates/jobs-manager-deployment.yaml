@@ -100,7 +100,7 @@ spec:
         #
         # It also removes an image: busybox was a second pull on every edge, for a
         # TCP connect the app image can already do.
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" (include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" .Values.images.jobsManager.digest "annotationImage" "jobs-manager")) "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
           # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
           # `restricted` SCC assigns a UID from the project's range, and the pod
@@ -265,7 +265,7 @@ spec:
       {{- end }}
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" (include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" .Values.images.jobsManager.digest "annotationImage" "jobs-manager")) "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         # #569: IfNotPresent wherever an update path exists without `Always` --
         # a pinned digest, or the image-refresh reconcile. `Always` forced a
         # registry round-trip on every (re)start, so an offline Docker Desktop /
@@ -274,7 +274,7 @@ spec:
         # is NOT unconditional: on an edge the reconcile cannot reach (private
         # mirror, or imageRefresh disabled) a floating tag plus a restart is the
         # only update path there is, so it stays Always.
-        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.jobsManager.digest "root" $) }}
+        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" (include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" .Values.images.jobsManager.digest "annotationImage" "jobs-manager")) "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -906,10 +906,10 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" (include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" .Values.images.podsMonitor.digest "annotationImage" "pods-monitor")) "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         # #569: same policy as the api container above -- see
         # tracebloc.controlPlanePullPolicy.
-        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.podsMonitor.digest "root" $) }}
+        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" (include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" .Values.images.podsMonitor.digest "annotationImage" "pods-monitor")) "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

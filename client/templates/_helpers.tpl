@@ -494,6 +494,47 @@ Always
 {{- end }}
 
 {{/*
+  tracebloc.controlPlaneDigest — the EFFECTIVE digest for a control-plane image,
+  resolved in priority order:
+
+    1. an operator's explicit values pin (`images.<name>.digest`) — wins,
+       behaviour unchanged;
+    2. else, when image-refresh is the update path (enabled AND the docker.io
+       mirror), the digest image-refresh last APPLIED, read from the
+       jobs-manager Deployment's `tracebloc.io/last-refreshed-<annotationImage>-digest`
+       annotation via `lookup`. This is what makes a `helm upgrade` RENDER
+       `repo@digest` instead of reverting to the bare `:tag` and dropping
+       image-refresh's out-of-band `kubectl set image` pin — the revert that let
+       a stale-`:tag` node cache silently run an OLD control-plane image
+       (client-runtime#199). `lookup` returns empty during `helm template` /
+       `helm diff` / the FIRST install (no Deployment yet), so it degrades to
+       `""` → `:tag` there, which is correct: nothing is pinned yet and the
+       node's fresh tag pull is the right image.
+    3. else `""` (bare `:tag`; `Always` via controlPlanePullPolicy is then the
+       update path — the non-refresh / mirror edges #569 protects).
+
+  The lookup targets ONLY the jobs-manager Deployment (where image-refresh writes
+  every last-refreshed annotation) in the release namespace — a read the
+  auto-upgrade SA already holds (its release-ns Role grants all verbs on all
+  resources in that namespace), so this adds no RBAC and does not hit the
+  backend#2469 bootstrap lockout.
+
+  Args: (dict "root" $ "operatorDigest" <values digest for this image>
+              "annotationImage" <"jobs-manager"|"pods-monitor"|"resource-monitor">)
+*/}}
+{{- define "tracebloc.controlPlaneDigest" -}}
+{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- if .operatorDigest -}}
+{{- .operatorDigest -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+{{- $dep := lookup "apps/v1" "Deployment" .root.Release.Namespace (printf "%s-jobs-manager" (include "tracebloc.fullname" .root)) -}}
+{{- if $dep -}}
+{{- index (($dep.metadata).annotations | default dict) (printf "tracebloc.io/last-refreshed-%s-digest" .annotationImage) | default "" -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   StorageClass name: when storageClass.create is true, use a release-unique name
   so each release gets its own StorageClass (avoids Helm ownership conflicts).
   When create is false, use the user-provided storageClass.name for an existing class.
