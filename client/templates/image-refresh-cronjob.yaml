@@ -100,10 +100,23 @@ data:
     # resource-monitor DaemonSet that is a rollout across every node. So the
     # first tick only RECORDS. The NEXT tick, seeing `recorded == latest` but the
     # workload still on `:tag`, pins the digest (backend#199) — so a fresh edge
-    # becomes reproducible ~one interval post-install (one rollout), NOT "at the
-    # next upstream release". Between the two it is still restart-safe offline
-    # (IfNotPresent); offline-safety is what #569 fixed, reproducibility is what
-    # this completes.
+    # becomes reproducible ~one interval post-install, NOT "at the next upstream
+    # release". Between the two it is still restart-safe offline (IfNotPresent).
+    #
+    # COST, stated honestly (@shujaatTracebloc / @LukasWodka on #1008): that
+    # re-pin is not "one cheap rollout". It enters the shared #563 flap path —
+    # `rollout status` on the resource-monitor DaemonSet, whose
+    # `desiredNumberScheduled` counts every node (tolerations: Exists), so it can
+    # never settle on a fleet with one NotReady/cordoned node; three such ticks
+    # (~45 min at the default 15m schedule) latch the SHARED MAX_REFRESH_ATTEMPTS
+    # lockout and stop refresh for ALL control-plane images until a human clears
+    # ATTEMPT_KEY, while the CronJob stays green. And jobs-manager is
+    # `strategy: Recreate`, so its extra rollout is full downtime + wait-for-mysql
+    # for byte-identical content, on every fresh install and again after each
+    # chart-version bump. The widening is kept deliberately — it also repairs a
+    # reinstall onto a node whose `:tag` layer is already stale — but that is the
+    # price, and a follow-up may gate the re-pin on "have we ever applied a digest
+    # here?" so a genuine fresh install skips the flap path entirely.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure
@@ -656,7 +669,17 @@ data:
           [ "${rp_have##*@}" = "$latest" ] || proxy_on_digest=0
         fi
         if [ "$api_on_digest" = "1" ] && [ "$proxy_on_digest" = "1" ]; then
-          if [ "$pending_attempt" -gt 0 ]; then
+          if [ "$pending_attempt" -gt 0 ] && [ "$pending_attempt" -lt "$MAX_REFRESH_ATTEMPTS" ]; then
+            # Only re-enter the rollout while there is budget left to resolve it.
+            # Once ATTEMPT_KEY has reached MAX_REFRESH_ATTEMPTS the flap guard below
+            # annotates FLAP_KEY and `exit 0`s BEFORE any `set image`/`rollout status`
+            # runs, so a latched forced-retry resolves nothing and surfaces nothing --
+            # it only forces restart_needed=1 and skips the rest of the tick, dropping
+            # the annotation write (first-observation records, stale-pin clears) every
+            # tick, forever. Gating on `< MAX` lets a latched image fall to the no-op
+            # branch so the tick completes and its annotations land (@shujaatTracebloc
+            # on #1008, blocking 1 & 2).
+            #
             # The SPEC reads on-digest, but a prior re-image attempt never reached
             # its success-reset (ATTEMPT_KEY is raised): its rollout timed out and
             # `set image` had already moved the spec, so this "on digest" can be a

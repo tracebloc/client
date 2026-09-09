@@ -91,6 +91,7 @@ recorded="sha256:aaa"
 STUB_API="\${1:-}"
 STUB_PROXY="\${2:-}"
 pending_attempt="\${4:-0}"
+MAX_REFRESH_ATTEMPTS=3
 restart_needed=0
 annotate_args=""
 jm_set_args=""
@@ -147,6 +148,20 @@ EOF
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"; no-op"* ]] || return 1
   [[ "$output" == *"RESTART:0"* ]] || return 1
+}
+
+@test "on-digest with a LATCHED attempt (>= MAX) is a no-op, not a forced re-run" {
+  # Once ATTEMPT_KEY has reached MAX_REFRESH_ATTEMPTS the flap guard downstream
+  # annotates FLAP_KEY and exit 0s BEFORE any set image / rollout status, so a
+  # forced re-run there resolves nothing and, worse, skips the tick's annotation
+  # write forever. The branch must fall to the no-op path instead
+  # (@shujaatTracebloc on #1008, blocking 1 & 2). MAX is 3, so pending=3 latches.
+  run run_branch "docker.io/tracebloc/jobs-manager@sha256:aaa" \
+                 "docker.io/tracebloc/jobs-manager@sha256:aaa" "0" "3"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"; no-op"* ]] || return 1
+  [[ "$output" == *"RESTART:0"* ]] || return 1
+  [[ "$output" != *"unfinished re-image"* ]] || return 1
 }
 
 @test "api on digest but proxy reverted re-pins the PROXY, not the api" {
