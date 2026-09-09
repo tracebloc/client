@@ -1,0 +1,2041 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-09-09T13:18:45Z",
+  "platform": {
+    "os": "Linux",
+    "arch": "x86_64",
+    "host_kernel": "6.8.0-1064-azure",
+    "docker": {
+      "ncpu": 4,
+      "mem_total": 16765411328,
+      "server_version": "28.0.4",
+      "operating_system": "Ubuntu 22.04.5 LTS",
+      "kernel": "6.8.0-1064-azure"
+    }
+  },
+  "cluster": {
+    "k3d": "k3d version v5.9.0",
+    "k3s_image_tag": "v1.36.3-k3s1",
+    "servers": 1,
+    "agents": 0
+  },
+  "method": {
+    "idle_s": 180,
+    "load_s": 240,
+    "interval_s": 10,
+    "load": "training-shaped, not a real experiment: pull + unpack of the task image below, then a pod holding 1 GiB, one spinning process per CPU, ~2 log lines/s",
+    "load_image": "docker.io/tracebloc/client-image_classification-cpu:prod",
+    "load_image_pulled": true,
+    "load_started": "2026-09-09T13:13:45Z",
+    "pull_finished": "2026-09-09T13:14:36Z"
+  },
+  "nodes": [
+    {
+      "node": "k3d-tbmeasure-server-0",
+      "capacity": {
+        "cpu": "4",
+        "ephemeral-storage": "152243760Ki",
+        "hugepages-1Gi": "0",
+        "hugepages-2Mi": "0",
+        "memory": "16372472Ki",
+        "pods": "110"
+      },
+      "allocatable": {
+        "cpu": "4",
+        "ephemeral-storage": "148102729612",
+        "hugepages-1Gi": "0",
+        "hugepages-2Mi": "0",
+        "memory": "16372472Ki",
+        "pods": "110"
+      },
+      "kubelet_version": "v1.36.3+k3s1",
+      "runtime": "containerd://2.3.2-k3s2",
+      "os_image": "K3s v1.36.3+k3s1",
+      "kernel": "6.8.0-1064-azure",
+      "arch": "amd64",
+      "configz": {
+        "evictionHard": {
+          "imagefs.available": "5%",
+          "nodefs.available": "5%"
+        },
+        "evictionSoft": null,
+        "evictionMinimumReclaim": {
+          "imagefs.available": "10%",
+          "nodefs.available": "10%"
+        },
+        "kubeReserved": null,
+        "systemReserved": null,
+        "enforceNodeAllocatable": [
+          "pods"
+        ],
+        "kubeletCgroups": "/k3s",
+        "runtimeCgroups": null,
+        "imageGCHighThresholdPercent": 75
+      }
+    }
+  ],
+  "vm_sidecars_outside_nodes": [],
+  "vm_view_outside_nodes": {
+    "raw": "MemTotal:       16372472 kB\nMemFree:         3201320 kB\nMemAvailable:   14863176 kB\n---\n  870 9728 systemd\n  797 9216 sshd\n  499 8320 systemd-network\n  765 8192 systemd-logind\n 2101 6784 bash\n  208 6596 systemd-udevd\n  878 5768 (sd-pam)\n  736 5760 rsyslogd\n 1769 5504 sudo\n 7866 5068 bash\n  413 4836 haveged\n 3133 4736 nginx\n 2924 4736 docker-proxy\n  720 4608 dbus-daemon\n 1622 4480 dbus-daemon\n"
+  },
+  "every_container_on_the_engine": [
+    {
+      "name": "k3d-tbmeasure-serverlb",
+      "mem_usage": "7.555MiB / 15.61GiB",
+      "cpu_perc": "0.00%"
+    },
+    {
+      "name": "k3d-tbmeasure-server-0",
+      "mem_usage": "861.4MiB / 15.61GiB",
+      "cpu_perc": "4.80%"
+    }
+  ],
+  "k3s_kubelet_wiring": [
+    {
+      "node": "k3d-tbmeasure-server-0",
+      "kubelet_conf_d": "=== /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/00-k3s-defaults.conf\naddress: 0.0.0.0\napiVersion: kubelet.config.k8s.io/v1beta1\nauthentication:\n  anonymous:\n    enabled: false\n  webhook:\n    cacheTTL: 2m0s\n    enabled: true\n  x509:\n    clientCAFile: /var/lib/rancher/k3s/agent/client-ca.crt\nauthorization:\n  mode: Webhook\n  webhook:\n    cacheAuthorizedTTL: 5m0s\n    cacheUnauthorizedTTL: 30s\ncgroupDriver: cgroupfs\nclusterDNS:\n- 10.43.0.10\nclusterDomain: cluster.local\ncontainerRuntimeEndpoint: unix:///run/k3s/containerd/containerd.sock\ncpuManagerReconcilePeriod: 10s\ncrashLoopBackOff: {}\nevictionHard:\n  imagefs.available: 5%\n  nodefs.available: 5%\nevictionMinimumReclaim:\n  imagefs.available: 10%\n  nodefs.available: 10%\nevictionPressureTransitionPeriod: 5m0s\nfailSwapOn: false\nfileCheckFrequency: 20s\nhealthzBindAddress: 127.0.0.1\nhttpCheckFrequency: 20s\nimageMaximumGCAge: 0s\nimageMinimumGCAge: 2m0s\nkind: KubeletConfiguration\nkubeletCgroups: /k3s\nlogging:\n  flushFrequency: 5s\n  format: text\n  options:\n    json:\n      infoBufferSize: \"0\"\n    text:\n      infoBufferSize: \"0\"\n  verbosity: 0\nmemorySwap: {}\nnodeStatusReportFrequency: 5m0s\nnodeStatusUpdateFrequency: 10s\nresolvConf: /etc/resolv.conf\nruntimeRequestTimeout: 2m0s\nserializeImagePulls: false\nshutdownGracePeriod: 0s\nshutdownGracePeriodCriticalPods: 0s\nstaticPodPath: /var/lib/rancher/k3s/agent/pod-manifests\nstreamingConnectionIdleTimeout: 4h0m0s\nsyncFrequency: 1m0s\ntlsCertFile: /var/lib/rancher/k3s/agent/serving-kubelet.crt\ntlsPrivateKeyFile: /var/lib/rancher/k3s/agent/serving-kubelet.key\nvolumeStatsAggPeriod: 1m0s\n=== /var/lib/rancher/k3s/agent/etc/kubelet.conf.d/10-cli-config.conf\napiVersion: kubelet.config.k8s.io/v1beta1\nkind: KubeletConfiguration\nimageGCHighThresholdPercent: 75\nimageGCLowThresholdPercent: 60\nimageMinimumGCAge: 2m",
+      "k3s_cmdline": ""
+    }
+  ],
+  "summary": {
+    "system_containers": [
+      {
+        "phase": "idle",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "kubelet",
+        "working_set_bytes": {
+          "n": 16,
+          "p50": 117522432,
+          "p95": 125497344,
+          "max": 125595648
+        },
+        "cpu_nanocores": {
+          "n": 16,
+          "p50": 34532460,
+          "p95": 42033415,
+          "max": 47875333
+        }
+      },
+      {
+        "phase": "idle",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "pods",
+        "working_set_bytes": {
+          "n": 16,
+          "p50": 41431040,
+          "p95": 42680320,
+          "max": 42823680
+        },
+        "cpu_nanocores": {
+          "n": 16,
+          "p50": 4457889,
+          "p95": 5485376,
+          "max": 6072372
+        }
+      },
+      {
+        "phase": "idle",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "runtime",
+        "working_set_bytes": {
+          "n": 16,
+          "p50": 117522432,
+          "p95": 125497344,
+          "max": 125595648
+        },
+        "cpu_nanocores": {
+          "n": 16,
+          "p50": 34532460,
+          "p95": 42033415,
+          "max": 47875333
+        }
+      },
+      {
+        "phase": "load",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "kubelet",
+        "working_set_bytes": {
+          "n": 20,
+          "p50": 117710848,
+          "p95": 119623680,
+          "max": 119623680
+        },
+        "cpu_nanocores": {
+          "n": 20,
+          "p50": 32973648,
+          "p95": 42109448,
+          "max": 50274542
+        }
+      },
+      {
+        "phase": "load",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "pods",
+        "working_set_bytes": {
+          "n": 20,
+          "p50": 1143648256,
+          "p95": 1143869440,
+          "max": 1143918592
+        },
+        "cpu_nanocores": {
+          "n": 20,
+          "p50": 3893098076,
+          "p95": 3926593351,
+          "max": 3930507725
+        }
+      },
+      {
+        "phase": "load",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "runtime",
+        "working_set_bytes": {
+          "n": 20,
+          "p50": 117710848,
+          "p95": 119623680,
+          "max": 119623680
+        },
+        "cpu_nanocores": {
+          "n": 20,
+          "p50": 32973648,
+          "p95": 42109448,
+          "max": 50274542
+        }
+      },
+      {
+        "phase": "load-pull",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "kubelet",
+        "working_set_bytes": {
+          "n": 5,
+          "p50": 117809152,
+          "p95": 117813248,
+          "max": 117821440
+        },
+        "cpu_nanocores": {
+          "n": 5,
+          "p50": 36833339,
+          "p95": 37479153,
+          "max": 44929416
+        }
+      },
+      {
+        "phase": "load-pull",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "pods",
+        "working_set_bytes": {
+          "n": 5,
+          "p50": 42991616,
+          "p95": 43003904,
+          "max": 43008000
+        },
+        "cpu_nanocores": {
+          "n": 5,
+          "p50": 5304501,
+          "p95": 5840073,
+          "max": 8608525
+        }
+      },
+      {
+        "phase": "load-pull",
+        "node": "k3d-tbmeasure-server-0",
+        "container": "runtime",
+        "working_set_bytes": {
+          "n": 5,
+          "p50": 117809152,
+          "p95": 117813248,
+          "max": 117821440
+        },
+        "cpu_nanocores": {
+          "n": 5,
+          "p50": 36833339,
+          "p95": 37479153,
+          "max": 44929416
+        }
+      }
+    ],
+    "cgroups": [
+      {
+        "phase": "idle",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "init",
+        "memory_current_bytes": {
+          "n": 16,
+          "p50": 1007460352,
+          "p95": 1012781056,
+          "max": 1013374976
+        }
+      },
+      {
+        "phase": "idle",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "k3s",
+        "memory_current_bytes": {
+          "n": 16,
+          "p50": 118927360,
+          "p95": 126857216,
+          "max": 127258624
+        }
+      },
+      {
+        "phase": "idle",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "kubepods",
+        "memory_current_bytes": {
+          "n": 16,
+          "p50": 41914368,
+          "p95": 42905600,
+          "max": 43110400
+        }
+      },
+      {
+        "phase": "load",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "init",
+        "memory_current_bytes": {
+          "n": 20,
+          "p50": 9410125824,
+          "p95": 9413111808,
+          "max": 9413574656
+        }
+      },
+      {
+        "phase": "load",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "k3s",
+        "memory_current_bytes": {
+          "n": 20,
+          "p50": 119873536,
+          "p95": 121495552,
+          "max": 121565184
+        }
+      },
+      {
+        "phase": "load",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "kubepods",
+        "memory_current_bytes": {
+          "n": 20,
+          "p50": 1143816192,
+          "p95": 1143873536,
+          "max": 1143885824
+        }
+      },
+      {
+        "phase": "load-pull",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "init",
+        "memory_current_bytes": {
+          "n": 5,
+          "p50": 6015119360,
+          "p95": 8270852096,
+          "max": 9412251648
+        }
+      },
+      {
+        "phase": "load-pull",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "k3s",
+        "memory_current_bytes": {
+          "n": 5,
+          "p50": 119717888,
+          "p95": 119738368,
+          "max": 119853056
+        }
+      },
+      {
+        "phase": "load-pull",
+        "node": "k3d-tbmeasure-server-0",
+        "cgroup": "kubepods",
+        "memory_current_bytes": {
+          "n": 5,
+          "p50": 43147264,
+          "p95": 43159552,
+          "max": 1143857152
+        }
+      }
+    ]
+  },
+  "samples": [
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:10:37Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 125497344,
+          "rss": 123363328,
+          "cpu_nano": 35986938
+        },
+        {
+          "name": "runtime",
+          "ws": 125497344,
+          "rss": 123363328,
+          "cpu_nano": 35986938
+        },
+        {
+          "name": "pods",
+          "ws": 36868096,
+          "rss": 34131968,
+          "cpu_nano": 4234490
+        }
+      ],
+      "node_memory": {
+        "ws": 506998784,
+        "available": 16258412544,
+        "rss": 443904000
+      },
+      "node_cpu_nano": 47177633,
+      "pods": 3,
+      "cgroups": {
+        "init": 1011900416,
+        "k3s": 126595072,
+        "kubepods": 37060608
+      },
+      "docker": {
+        "mem_usage": "483.9MiB / 15.61GiB",
+        "cpu_perc": "4.05%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:10:49Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 125370368,
+          "rss": 123490304,
+          "cpu_nano": 35634454
+        },
+        {
+          "name": "runtime",
+          "ws": 125370368,
+          "rss": 123490304,
+          "cpu_nano": 35634454
+        },
+        {
+          "name": "pods",
+          "ws": 37064704,
+          "rss": 34320384,
+          "cpu_nano": 3848303
+        }
+      ],
+      "node_memory": {
+        "ws": 508624896,
+        "available": 16256786432,
+        "rss": 445214720
+      },
+      "node_cpu_nano": 50869291,
+      "pods": 3,
+      "cgroups": {
+        "init": 1012781056,
+        "k3s": 126676992,
+        "kubepods": 37257216
+      },
+      "docker": {
+        "mem_usage": "484.7MiB / 15.61GiB",
+        "cpu_perc": "3.88%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:11:01Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 37183488,
+          "rss": 34443264,
+          "cpu_nano": 4100788
+        },
+        {
+          "name": "kubelet",
+          "ws": 125403136,
+          "rss": 123514880,
+          "cpu_nano": 35801085
+        },
+        {
+          "name": "runtime",
+          "ws": 125403136,
+          "rss": 123514880,
+          "cpu_nano": 35801085
+        }
+      ],
+      "node_memory": {
+        "ws": 509075456,
+        "available": 16256335872,
+        "rss": 445923328
+      },
+      "node_cpu_nano": 49590762,
+      "pods": 3,
+      "cgroups": {
+        "init": 1010864128,
+        "k3s": 126857216,
+        "kubepods": 37453824
+      },
+      "docker": {
+        "mem_usage": "483.4MiB / 15.61GiB",
+        "cpu_perc": "5.43%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:11:12Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 37560320,
+          "rss": 34816000,
+          "cpu_nano": 4593180
+        },
+        {
+          "name": "kubelet",
+          "ws": 125595648,
+          "rss": 123707392,
+          "cpu_nano": 33210866
+        },
+        {
+          "name": "runtime",
+          "ws": 125595648,
+          "rss": 123707392,
+          "cpu_nano": 33210866
+        }
+      ],
+      "node_memory": {
+        "ws": 508653568,
+        "available": 16256757760,
+        "rss": 445300736
+      },
+      "node_cpu_nano": 47929461,
+      "pods": 3,
+      "cgroups": {
+        "init": 1012658176,
+        "k3s": 127258624,
+        "kubepods": 38338560
+      },
+      "docker": {
+        "mem_usage": "485.6MiB / 15.61GiB",
+        "cpu_perc": "4.10%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:11:24Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117800960,
+          "rss": 115376128,
+          "cpu_nano": 42033415
+        },
+        {
+          "name": "runtime",
+          "ws": 117800960,
+          "rss": 115376128,
+          "cpu_nano": 42033415
+        },
+        {
+          "name": "pods",
+          "ws": 38260736,
+          "rss": 35516416,
+          "cpu_nano": 4457889
+        }
+      ],
+      "node_memory": {
+        "ws": 502951936,
+        "available": 16262459392,
+        "rss": 439570432
+      },
+      "node_cpu_nano": 60372742,
+      "pods": 3,
+      "cgroups": {
+        "init": 1013374976,
+        "k3s": 118915072,
+        "kubepods": 39317504
+      },
+      "docker": {
+        "mem_usage": "479.5MiB / 15.61GiB",
+        "cpu_perc": "5.79%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:11:36Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 40034304,
+          "rss": 37281792,
+          "cpu_nano": 4805524
+        },
+        {
+          "name": "kubelet",
+          "ws": 117030912,
+          "rss": 115388416,
+          "cpu_nano": 31527453
+        },
+        {
+          "name": "runtime",
+          "ws": 117030912,
+          "rss": 115388416,
+          "cpu_nano": 31527453
+        }
+      ],
+      "node_memory": {
+        "ws": 497467392,
+        "available": 16267943936,
+        "rss": 434802688
+      },
+      "node_cpu_nano": 48863957,
+      "pods": 3,
+      "cgroups": {
+        "init": 1007460352,
+        "k3s": 118923264,
+        "kubepods": 40214528
+      },
+      "docker": {
+        "mem_usage": "475.3MiB / 15.61GiB",
+        "cpu_perc": "4.91%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:11:48Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117284864,
+          "rss": 115396608,
+          "cpu_nano": 36074345
+        },
+        {
+          "name": "runtime",
+          "ws": 117284864,
+          "rss": 115396608,
+          "cpu_nano": 36074345
+        },
+        {
+          "name": "pods",
+          "ws": 40714240,
+          "rss": 37961728,
+          "cpu_nano": 4328247
+        }
+      ],
+      "node_memory": {
+        "ws": 499912704,
+        "available": 16265498624,
+        "rss": 436998144
+      },
+      "node_cpu_nano": 47460323,
+      "pods": 3,
+      "cgroups": {
+        "init": 1008427008,
+        "k3s": 118927360,
+        "kubepods": 41152512
+      },
+      "docker": {
+        "mem_usage": "476.3MiB / 15.61GiB",
+        "cpu_perc": "4.18%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:12:00Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117321728,
+          "rss": 115417088,
+          "cpu_nano": 32164974
+        },
+        {
+          "name": "runtime",
+          "ws": 117321728,
+          "rss": 115417088,
+          "cpu_nano": 32164974
+        },
+        {
+          "name": "pods",
+          "ws": 41431040,
+          "rss": 38682624,
+          "cpu_nano": 4484429
+        }
+      ],
+      "node_memory": {
+        "ws": 500314112,
+        "available": 16265097216,
+        "rss": 437399552
+      },
+      "node_cpu_nano": 48177055,
+      "pods": 3,
+      "cgroups": {
+        "init": 1006088192,
+        "k3s": 118951936,
+        "kubepods": 41914368
+      },
+      "docker": {
+        "mem_usage": "474.7MiB / 15.61GiB",
+        "cpu_perc": "5.87%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:12:11Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117321728,
+          "rss": 115417088,
+          "cpu_nano": 32164974
+        },
+        {
+          "name": "runtime",
+          "ws": 117321728,
+          "rss": 115417088,
+          "cpu_nano": 32164974
+        },
+        {
+          "name": "pods",
+          "ws": 41828352,
+          "rss": 39075840,
+          "cpu_nano": 6072372
+        }
+      ],
+      "node_memory": {
+        "ws": 498900992,
+        "available": 16266510336,
+        "rss": 435982336
+      },
+      "node_cpu_nano": 49053640,
+      "pods": 3,
+      "cgroups": {
+        "init": 1007349760,
+        "k3s": 118714368,
+        "kubepods": 42045440
+      },
+      "docker": {
+        "mem_usage": "475.9MiB / 15.61GiB",
+        "cpu_perc": "4.17%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:12:23Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 116822016,
+          "rss": 115179520,
+          "cpu_nano": 34520495
+        },
+        {
+          "name": "runtime",
+          "ws": 116822016,
+          "rss": 115179520,
+          "cpu_nano": 34520495
+        },
+        {
+          "name": "pods",
+          "ws": 41955328,
+          "rss": 39202816,
+          "cpu_nano": 4461622
+        }
+      ],
+      "node_memory": {
+        "ws": 499904512,
+        "available": 16265506816,
+        "rss": 436731904
+      },
+      "node_cpu_nano": 48615206,
+      "pods": 3,
+      "cgroups": {
+        "init": 1007927296,
+        "k3s": 118730752,
+        "kubepods": 42401792
+      },
+      "docker": {
+        "mem_usage": "476.7MiB / 15.61GiB",
+        "cpu_perc": "4.35%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:12:35Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 116854784,
+          "rss": 115200000,
+          "cpu_nano": 33143283
+        },
+        {
+          "name": "runtime",
+          "ws": 116854784,
+          "rss": 115200000,
+          "cpu_nano": 33143283
+        },
+        {
+          "name": "pods",
+          "ws": 42283008,
+          "rss": 39526400,
+          "cpu_nano": 5024317
+        }
+      ],
+      "node_memory": {
+        "ws": 500633600,
+        "available": 16264777728,
+        "rss": 437456896
+      },
+      "node_cpu_nano": 49481779,
+      "pods": 3,
+      "cgroups": {
+        "init": 1006317568,
+        "k3s": 118751232,
+        "kubepods": 42549248
+      },
+      "docker": {
+        "mem_usage": "476MiB / 15.61GiB",
+        "cpu_perc": "6.34%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:12:47Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117653504,
+          "rss": 115228672,
+          "cpu_nano": 36879397
+        },
+        {
+          "name": "runtime",
+          "ws": 117653504,
+          "rss": 115228672,
+          "cpu_nano": 36879397
+        },
+        {
+          "name": "pods",
+          "ws": 42504192,
+          "rss": 39747584,
+          "cpu_nano": 4454758
+        }
+      ],
+      "node_memory": {
+        "ws": 500408320,
+        "available": 16265003008,
+        "rss": 437485568
+      },
+      "node_cpu_nano": 47581903,
+      "pods": 3,
+      "cgroups": {
+        "init": 1007656960,
+        "k3s": 118763520,
+        "kubepods": 42672128
+      },
+      "docker": {
+        "mem_usage": "477.2MiB / 15.61GiB",
+        "cpu_perc": "4.92%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:12:58Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117653504,
+          "rss": 115228672,
+          "cpu_nano": 36879397
+        },
+        {
+          "name": "runtime",
+          "ws": 117653504,
+          "rss": 115228672,
+          "cpu_nano": 36879397
+        },
+        {
+          "name": "pods",
+          "ws": 42565632,
+          "rss": 39804928,
+          "cpu_nano": 4426084
+        }
+      ],
+      "node_memory": {
+        "ws": 500547584,
+        "available": 16264863744,
+        "rss": 437882880
+      },
+      "node_cpu_nano": 51273271,
+      "pods": 3,
+      "cgroups": {
+        "init": 1005445120,
+        "k3s": 118779904,
+        "kubepods": 42729472
+      },
+      "docker": {
+        "mem_usage": "475.1MiB / 15.61GiB",
+        "cpu_perc": "4.69%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:13:10Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117473280,
+          "rss": 115314688,
+          "cpu_nano": 34517062
+        },
+        {
+          "name": "runtime",
+          "ws": 117473280,
+          "rss": 115314688,
+          "cpu_nano": 34517062
+        },
+        {
+          "name": "pods",
+          "ws": 42680320,
+          "rss": 39923712,
+          "cpu_nano": 5010084
+        }
+      ],
+      "node_memory": {
+        "ws": 499757056,
+        "available": 16265654272,
+        "rss": 436838400
+      },
+      "node_cpu_nano": 48911652,
+      "pods": 3,
+      "cgroups": {
+        "init": 1007439872,
+        "k3s": 119132160,
+        "kubepods": 42905600
+      },
+      "docker": {
+        "mem_usage": "477.5MiB / 15.61GiB",
+        "cpu_perc": "5.10%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:13:22Z",
+      "system_containers": [
+        {
+          "name": "runtime",
+          "ws": 117522432,
+          "rss": 115605504,
+          "cpu_nano": 47875333
+        },
+        {
+          "name": "pods",
+          "ws": 42823680,
+          "rss": 40067072,
+          "cpu_nano": 4443552
+        },
+        {
+          "name": "kubelet",
+          "ws": 117522432,
+          "rss": 115605504,
+          "cpu_nano": 47875333
+        }
+      ],
+      "node_memory": {
+        "ws": 502222848,
+        "available": 16263188480,
+        "rss": 438812672
+      },
+      "node_cpu_nano": 63361030,
+      "pods": 3,
+      "cgroups": {
+        "init": 1007202304,
+        "k3s": 119144448,
+        "kubepods": 43110400
+      },
+      "docker": {
+        "mem_usage": "477.9MiB / 15.61GiB",
+        "cpu_perc": "3.91%"
+      }
+    },
+    {
+      "phase": "idle",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:13:34Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 42577920,
+          "rss": 39825408,
+          "cpu_nano": 5485376
+        },
+        {
+          "name": "kubelet",
+          "ws": 117788672,
+          "rss": 115621888,
+          "cpu_nano": 34532460
+        },
+        {
+          "name": "runtime",
+          "ws": 117788672,
+          "rss": 115621888,
+          "cpu_nano": 34532460
+        }
+      ],
+      "node_memory": {
+        "ws": 501141504,
+        "available": 16264269824,
+        "rss": 437972992
+      },
+      "node_cpu_nano": 50827619,
+      "pods": 3,
+      "cgroups": {
+        "init": 1006231552,
+        "k3s": 119156736,
+        "kubepods": 42774528
+      },
+      "docker": {
+        "mem_usage": "476.2MiB / 15.61GiB",
+        "cpu_perc": "4.61%"
+      }
+    },
+    {
+      "phase": "load-pull",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:13:46Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117809152,
+          "rss": 115638272,
+          "cpu_nano": 36833339
+        },
+        {
+          "name": "runtime",
+          "ws": 117809152,
+          "rss": 115638272,
+          "cpu_nano": 36833339
+        },
+        {
+          "name": "pods",
+          "ws": 42713088,
+          "rss": 39952384,
+          "cpu_nano": 4345352
+        }
+      ],
+      "node_memory": {
+        "ws": 502018048,
+        "available": 16263393280,
+        "rss": 438595584
+      },
+      "node_cpu_nano": 48512577,
+      "pods": 3,
+      "cgroups": {
+        "init": 1008152576,
+        "k3s": 119382016,
+        "kubepods": 42876928
+      },
+      "docker": {
+        "mem_usage": "480.6MiB / 15.61GiB",
+        "cpu_perc": "7.66%"
+      }
+    },
+    {
+      "phase": "load-pull",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:13:57Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117809152,
+          "rss": 115638272,
+          "cpu_nano": 36833339
+        },
+        {
+          "name": "runtime",
+          "ws": 117809152,
+          "rss": 115638272,
+          "cpu_nano": 36833339
+        },
+        {
+          "name": "pods",
+          "ws": 42975232,
+          "rss": 40022016,
+          "cpu_nano": 8608525
+        }
+      ],
+      "node_memory": {
+        "ws": 611160064,
+        "available": 16154251264,
+        "rss": 452063232
+      },
+      "node_cpu_nano": 1428510090,
+      "pods": 3,
+      "cgroups": {
+        "init": 3782086656,
+        "k3s": 119566336,
+        "kubepods": 43139072
+      },
+      "docker": {
+        "mem_usage": "619.7MiB / 15.61GiB",
+        "cpu_perc": "168.73%"
+      }
+    },
+    {
+      "phase": "load-pull",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:14:10Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117645312,
+          "rss": 115920896,
+          "cpu_nano": 44929416
+        },
+        {
+          "name": "runtime",
+          "ws": 117645312,
+          "rss": 115920896,
+          "cpu_nano": 44929416
+        },
+        {
+          "name": "pods",
+          "ws": 42991616,
+          "rss": 40009728,
+          "cpu_nano": 5840073
+        }
+      ],
+      "node_memory": {
+        "ws": 711049216,
+        "available": 16054362112,
+        "rss": 453201920
+      },
+      "node_cpu_nano": 2094175793,
+      "pods": 3,
+      "cgroups": {
+        "init": 6015119360,
+        "k3s": 119717888,
+        "kubepods": 43147264
+      },
+      "docker": {
+        "mem_usage": "737.2MiB / 15.61GiB",
+        "cpu_perc": "263.76%"
+      }
+    },
+    {
+      "phase": "load-pull",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:14:22Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 43003904,
+          "rss": 40022016,
+          "cpu_nano": 4635022
+        },
+        {
+          "name": "kubelet",
+          "ws": 117813248,
+          "rss": 116084736,
+          "cpu_nano": 37479153
+        },
+        {
+          "name": "runtime",
+          "ws": 117813248,
+          "rss": 116084736,
+          "cpu_nano": 37479153
+        }
+      ],
+      "node_memory": {
+        "ws": 799297536,
+        "available": 15966113792,
+        "rss": 449331200
+      },
+      "node_cpu_nano": 1945511171,
+      "pods": 3,
+      "cgroups": {
+        "init": 8270852096,
+        "k3s": 119738368,
+        "kubepods": 43159552
+      },
+      "docker": {
+        "mem_usage": "825.7MiB / 15.61GiB",
+        "cpu_perc": "253.50%"
+      }
+    },
+    {
+      "phase": "load-pull",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:14:34Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117821440,
+          "rss": 116092928,
+          "cpu_nano": 34589691
+        },
+        {
+          "name": "runtime",
+          "ws": 117821440,
+          "rss": 116092928,
+          "cpu_nano": 34589691
+        },
+        {
+          "name": "pods",
+          "ws": 43008000,
+          "rss": 40026112,
+          "cpu_nano": 5304501
+        }
+      ],
+      "node_memory": {
+        "ws": 891465728,
+        "available": 15873945600,
+        "rss": 461201408
+      },
+      "node_cpu_nano": 1922292518,
+      "pods": 4,
+      "cgroups": {
+        "init": 9412251648,
+        "k3s": 119853056,
+        "kubepods": 1143857152
+      },
+      "docker": {
+        "mem_usage": "1.874GiB / 15.61GiB",
+        "cpu_perc": "396.90%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:14:36Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 117821440,
+          "rss": 116092928,
+          "cpu_nano": 34589691
+        },
+        {
+          "name": "runtime",
+          "ws": 117821440,
+          "rss": 116092928,
+          "cpu_nano": 34589691
+        },
+        {
+          "name": "pods",
+          "ws": 1143672832,
+          "rss": 1129132032,
+          "cpu_nano": 1782596962
+        }
+      ],
+      "node_memory": {
+        "ws": 2011758592,
+        "available": 14753652736,
+        "rss": 1537376256
+      },
+      "node_cpu_nano": 2563877990,
+      "pods": 4,
+      "cgroups": {
+        "init": 9413111808,
+        "k3s": 119873536,
+        "kubepods": 1143853056
+      },
+      "docker": {
+        "mem_usage": "1.874GiB / 15.61GiB",
+        "cpu_perc": "396.82%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:14:48Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 115478528,
+          "rss": 113426432,
+          "cpu_nano": 50274542
+        },
+        {
+          "name": "runtime",
+          "ws": 115478528,
+          "rss": 113426432,
+          "cpu_nano": 50274542
+        },
+        {
+          "name": "pods",
+          "ws": 1143369728,
+          "rss": 1128824832,
+          "cpu_nano": 3826262593
+        }
+      ],
+      "node_memory": {
+        "ws": 2010071040,
+        "available": 14755340288,
+        "rss": 1535954944
+      },
+      "node_cpu_nano": 3888704049,
+      "pods": 4,
+      "cgroups": {
+        "init": 9413574656,
+        "k3s": 117411840,
+        "kubepods": 1143554048
+      },
+      "docker": {
+        "mem_usage": "1.872GiB / 15.61GiB",
+        "cpu_perc": "398.22%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:15:00Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 115470336,
+          "rss": 113635328,
+          "cpu_nano": 37086610
+        },
+        {
+          "name": "runtime",
+          "ws": 115470336,
+          "rss": 113635328,
+          "cpu_nano": 37086610
+        },
+        {
+          "name": "pods",
+          "ws": 1143382016,
+          "rss": 1128841216,
+          "cpu_nano": 3882874144
+        }
+      ],
+      "node_memory": {
+        "ws": 2010599424,
+        "available": 14754811904,
+        "rss": 1536163840
+      },
+      "node_cpu_nano": 3938867066,
+      "pods": 4,
+      "cgroups": {
+        "init": 9412599808,
+        "k3s": 117411840,
+        "kubepods": 1143578624
+      },
+      "docker": {
+        "mem_usage": "1.871GiB / 15.61GiB",
+        "cpu_perc": "357.38%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:15:12Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 115589120,
+          "rss": 113741824,
+          "cpu_nano": 30681004
+        },
+        {
+          "name": "runtime",
+          "ws": 115589120,
+          "rss": 113741824,
+          "cpu_nano": 30681004
+        },
+        {
+          "name": "pods",
+          "ws": 1143410688,
+          "rss": 1128869888,
+          "cpu_nano": 3847999035
+        }
+      ],
+      "node_memory": {
+        "ws": 2010247168,
+        "available": 14755164160,
+        "rss": 1535799296
+      },
+      "node_cpu_nano": 3892270453,
+      "pods": 4,
+      "cgroups": {
+        "init": 9411354624,
+        "k3s": 117784576,
+        "kubepods": 1143607296
+      },
+      "docker": {
+        "mem_usage": "1.87GiB / 15.61GiB",
+        "cpu_perc": "398.58%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:15:24Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 115703808,
+          "rss": 113856512,
+          "cpu_nano": 32290455
+        },
+        {
+          "name": "runtime",
+          "ws": 115703808,
+          "rss": 113856512,
+          "cpu_nano": 32290455
+        },
+        {
+          "name": "pods",
+          "ws": 1143435264,
+          "rss": 1128890368,
+          "cpu_nano": 3895965377
+        }
+      ],
+      "node_memory": {
+        "ws": 2007449600,
+        "available": 14757961728,
+        "rss": 1533501440
+      },
+      "node_cpu_nano": 3942388604,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410674688,
+        "k3s": 117805056,
+        "kubepods": 1143640064
+      },
+      "docker": {
+        "mem_usage": "1.869GiB / 15.61GiB",
+        "cpu_perc": "389.08%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:15:37Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 1143463936,
+          "rss": 1128923136,
+          "cpu_nano": 3922295702
+        },
+        {
+          "name": "kubelet",
+          "ws": 115703808,
+          "rss": 113856512,
+          "cpu_nano": 32290455
+        },
+        {
+          "name": "runtime",
+          "ws": 115703808,
+          "rss": 113856512,
+          "cpu_nano": 32290455
+        }
+      ],
+      "node_memory": {
+        "ws": 2006024192,
+        "available": 14759387136,
+        "rss": 1532047360
+      },
+      "node_cpu_nano": 3962696535,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410125824,
+        "k3s": 117870592,
+        "kubepods": 1143644160
+      },
+      "docker": {
+        "mem_usage": "1.869GiB / 15.61GiB",
+        "cpu_perc": "396.95%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:15:49Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 116064256,
+          "rss": 113950720,
+          "cpu_nano": 32247444
+        },
+        {
+          "name": "runtime",
+          "ws": 116064256,
+          "rss": 113950720,
+          "cpu_nano": 32247444
+        },
+        {
+          "name": "pods",
+          "ws": 1143476224,
+          "rss": 1128935424,
+          "cpu_nano": 3894489280
+        }
+      ],
+      "node_memory": {
+        "ws": 2007822336,
+        "available": 14757588992,
+        "rss": 1532997632
+      },
+      "node_cpu_nano": 3941410561,
+      "pods": 4,
+      "cgroups": {
+        "init": 9409867776,
+        "k3s": 117567488,
+        "kubepods": 1143664640
+      },
+      "docker": {
+        "mem_usage": "1.868GiB / 15.61GiB",
+        "cpu_perc": "397.82%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:16:01Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 115630080,
+          "rss": 113778688,
+          "cpu_nano": 32282542
+        },
+        {
+          "name": "runtime",
+          "ws": 115630080,
+          "rss": 113778688,
+          "cpu_nano": 32282542
+        },
+        {
+          "name": "pods",
+          "ws": 1143488512,
+          "rss": 1128947712,
+          "cpu_nano": 3891000035
+        }
+      ],
+      "node_memory": {
+        "ws": 2006667264,
+        "available": 14758744064,
+        "rss": 1532375040
+      },
+      "node_cpu_nano": 3938839033,
+      "pods": 4,
+      "cgroups": {
+        "init": 9408831488,
+        "k3s": 117739520,
+        "kubepods": 1143676928
+      },
+      "docker": {
+        "mem_usage": "1.868GiB / 15.61GiB",
+        "cpu_perc": "397.04%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:16:13Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 1143832576,
+          "rss": 1129025536,
+          "cpu_nano": 3896200262
+        },
+        {
+          "name": "kubelet",
+          "ws": 116891648,
+          "rss": 115040256,
+          "cpu_nano": 32343686
+        },
+        {
+          "name": "runtime",
+          "ws": 116891648,
+          "rss": 115040256,
+          "cpu_nano": 32343686
+        }
+      ],
+      "node_memory": {
+        "ws": 2007453696,
+        "available": 14757957632,
+        "rss": 1532891136
+      },
+      "node_cpu_nano": 3939911723,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410805760,
+        "k3s": 119025664,
+        "kubepods": 1143783424
+      },
+      "docker": {
+        "mem_usage": "1.87GiB / 15.61GiB",
+        "cpu_perc": "396.93%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:16:25Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 116891648,
+          "rss": 115040256,
+          "cpu_nano": 32343686
+        },
+        {
+          "name": "runtime",
+          "ws": 116891648,
+          "rss": 115040256,
+          "cpu_nano": 32343686
+        },
+        {
+          "name": "pods",
+          "ws": 1143869440,
+          "rss": 1129062400,
+          "cpu_nano": 3899793739
+        }
+      ],
+      "node_memory": {
+        "ws": 2008567808,
+        "available": 14756843520,
+        "rss": 1534238720
+      },
+      "node_cpu_nano": 3942538778,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410134016,
+        "k3s": 119488512,
+        "kubepods": 1143787520
+      },
+      "docker": {
+        "mem_usage": "1.868GiB / 15.61GiB",
+        "cpu_perc": "387.96%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:16:37Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 1143640064,
+          "rss": 1129095168,
+          "cpu_nano": 3930507725
+        },
+        {
+          "name": "kubelet",
+          "ws": 117710848,
+          "rss": 115605504,
+          "cpu_nano": 30866431
+        },
+        {
+          "name": "runtime",
+          "ws": 117710848,
+          "rss": 115605504,
+          "cpu_nano": 30866431
+        }
+      ],
+      "node_memory": {
+        "ws": 2007994368,
+        "available": 14757416960,
+        "rss": 1533652992
+      },
+      "node_cpu_nano": 3976129531,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410019328,
+        "k3s": 119967744,
+        "kubepods": 1143816192
+      },
+      "docker": {
+        "mem_usage": "1.87GiB / 15.61GiB",
+        "cpu_perc": "398.67%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:16:49Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 1143640064,
+          "rss": 1129099264,
+          "cpu_nano": 3881102376
+        },
+        {
+          "name": "kubelet",
+          "ws": 119332864,
+          "rss": 117477376,
+          "cpu_nano": 42109448
+        },
+        {
+          "name": "runtime",
+          "ws": 119332864,
+          "rss": 117477376,
+          "cpu_nano": 42109448
+        }
+      ],
+      "node_memory": {
+        "ws": 2010058752,
+        "available": 14755352576,
+        "rss": 1535729664
+      },
+      "node_cpu_nano": 3941279214,
+      "pods": 4,
+      "cgroups": {
+        "init": 9409433600,
+        "k3s": 121434112,
+        "kubepods": 1143828480
+      },
+      "docker": {
+        "mem_usage": "1.872GiB / 15.61GiB",
+        "cpu_perc": "396.72%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:17:01Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 1143648256,
+          "rss": 1129103360,
+          "cpu_nano": 3891908242
+        },
+        {
+          "name": "kubelet",
+          "ws": 119332864,
+          "rss": 117477376,
+          "cpu_nano": 42109448
+        },
+        {
+          "name": "runtime",
+          "ws": 119332864,
+          "rss": 117477376,
+          "cpu_nano": 42109448
+        }
+      ],
+      "node_memory": {
+        "ws": 2010251264,
+        "available": 14755160064,
+        "rss": 1535918080
+      },
+      "node_cpu_nano": 3939167121,
+      "pods": 4,
+      "cgroups": {
+        "init": 9409110016,
+        "k3s": 121454592,
+        "kubepods": 1143832576
+      },
+      "docker": {
+        "mem_usage": "1.871GiB / 15.61GiB",
+        "cpu_perc": "396.81%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:17:13Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 119357440,
+          "rss": 117501952,
+          "cpu_nano": 33154412
+        },
+        {
+          "name": "runtime",
+          "ws": 119357440,
+          "rss": 117501952,
+          "cpu_nano": 33154412
+        },
+        {
+          "name": "pods",
+          "ws": 1143660544,
+          "rss": 1129115648,
+          "cpu_nano": 3893015230
+        }
+      ],
+      "node_memory": {
+        "ws": 2009985024,
+        "available": 14755426304,
+        "rss": 1535647744
+      },
+      "node_cpu_nano": 3939681815,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410850816,
+        "k3s": 121462784,
+        "kubepods": 1143840768
+      },
+      "docker": {
+        "mem_usage": "1.872GiB / 15.61GiB",
+        "cpu_perc": "394.94%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:17:25Z",
+      "system_containers": [
+        {
+          "name": "runtime",
+          "ws": 119623680,
+          "rss": 117506048,
+          "cpu_nano": 33419321
+        },
+        {
+          "name": "pods",
+          "ws": 1143918592,
+          "rss": 1129115648,
+          "cpu_nano": 3893175294
+        },
+        {
+          "name": "kubelet",
+          "ws": 119623680,
+          "rss": 117506048,
+          "cpu_nano": 33419321
+        }
+      ],
+      "node_memory": {
+        "ws": 2011209728,
+        "available": 14754201600,
+        "rss": 1536626688
+      },
+      "node_cpu_nano": 3939555705,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410203648,
+        "k3s": 121470976,
+        "kubepods": 1143840768
+      },
+      "docker": {
+        "mem_usage": "1.87GiB / 15.61GiB",
+        "cpu_perc": "397.30%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:17:37Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 119623680,
+          "rss": 117506048,
+          "cpu_nano": 33419321
+        },
+        {
+          "name": "runtime",
+          "ws": 119623680,
+          "rss": 117506048,
+          "cpu_nano": 33419321
+        },
+        {
+          "name": "pods",
+          "ws": 1143676928,
+          "rss": 1129136128,
+          "cpu_nano": 3926593351
+        }
+      ],
+      "node_memory": {
+        "ws": 2010075136,
+        "available": 14755336192,
+        "rss": 1535299584
+      },
+      "node_cpu_nano": 3973068550,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410023424,
+        "k3s": 121495552,
+        "kubepods": 1143857152
+      },
+      "docker": {
+        "mem_usage": "1.872GiB / 15.61GiB",
+        "cpu_perc": "397.51%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:17:49Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 119394304,
+          "rss": 117538816,
+          "cpu_nano": 32735539
+        },
+        {
+          "name": "runtime",
+          "ws": 119394304,
+          "rss": 117538816,
+          "cpu_nano": 32735539
+        },
+        {
+          "name": "pods",
+          "ws": 1143676928,
+          "rss": 1129136128,
+          "cpu_nano": 3893409802
+        }
+      ],
+      "node_memory": {
+        "ws": 2011062272,
+        "available": 14754349056,
+        "rss": 1536466944
+      },
+      "node_cpu_nano": 3940942098,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410052096,
+        "k3s": 121565184,
+        "kubepods": 1143857152
+      },
+      "docker": {
+        "mem_usage": "1.872GiB / 15.61GiB",
+        "cpu_perc": "398.53%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:18:01Z",
+      "system_containers": [
+        {
+          "name": "kubelet",
+          "ws": 119349248,
+          "rss": 117493760,
+          "cpu_nano": 34360232
+        },
+        {
+          "name": "runtime",
+          "ws": 119349248,
+          "rss": 117493760,
+          "cpu_nano": 34360232
+        },
+        {
+          "name": "pods",
+          "ws": 1143689216,
+          "rss": 1129136128,
+          "cpu_nano": 3893098076
+        }
+      ],
+      "node_memory": {
+        "ws": 2009931776,
+        "available": 14755479552,
+        "rss": 1536102400
+      },
+      "node_cpu_nano": 3940811253,
+      "pods": 4,
+      "cgroups": {
+        "init": 9408585728,
+        "k3s": 121450496,
+        "kubepods": 1143865344
+      },
+      "docker": {
+        "mem_usage": "1.871GiB / 15.61GiB",
+        "cpu_perc": "398.49%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:18:13Z",
+      "system_containers": [
+        {
+          "name": "runtime",
+          "ws": 119422976,
+          "rss": 117510144,
+          "cpu_nano": 33206343
+        },
+        {
+          "name": "pods",
+          "ws": 1143693312,
+          "rss": 1129148416,
+          "cpu_nano": 3891646599
+        },
+        {
+          "name": "kubelet",
+          "ws": 119422976,
+          "rss": 117510144,
+          "cpu_nano": 33206343
+        }
+      ],
+      "node_memory": {
+        "ws": 2009460736,
+        "available": 14755950592,
+        "rss": 1535348736
+      },
+      "node_cpu_nano": 3937628935,
+      "pods": 4,
+      "cgroups": {
+        "init": 9409949696,
+        "k3s": 121466880,
+        "kubepods": 1143873536
+      },
+      "docker": {
+        "mem_usage": "1.872GiB / 15.61GiB",
+        "cpu_perc": "398.84%"
+      }
+    },
+    {
+      "phase": "load",
+      "node": "k3d-tbmeasure-server-0",
+      "t": "2026-09-09T13:18:25Z",
+      "system_containers": [
+        {
+          "name": "pods",
+          "ws": 1143693312,
+          "rss": 1129152512,
+          "cpu_nano": 3895318304
+        },
+        {
+          "name": "kubelet",
+          "ws": 119386112,
+          "rss": 117526528,
+          "cpu_nano": 32973648
+        },
+        {
+          "name": "runtime",
+          "ws": 119386112,
+          "rss": 117526528,
+          "cpu_nano": 32973648
+        }
+      ],
+      "node_memory": {
+        "ws": 2010165248,
+        "available": 14755246080,
+        "rss": 1536094208
+      },
+      "node_cpu_nano": 3941063866,
+      "pods": 4,
+      "cgroups": {
+        "init": 9410142208,
+        "k3s": 121483264,
+        "kubepods": 1143885824
+      },
+      "docker": {
+        "mem_usage": "1.869GiB / 15.61GiB",
+        "cpu_perc": "397.18%"
+      }
+    }
+  ]
+}
