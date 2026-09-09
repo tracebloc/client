@@ -150,9 +150,19 @@ for f in $shipped; do
     *.ps1) line_re="$ps_line_re" ;;
     *)     guard_error "shipped file with an unknown language, cannot pick a vocabulary: $f" ;;
   esac
-  hits="$(grep -nE "$line_re" "$ROOT/$f" | sed -E "s/[[:space:]]+#[^\"']*$//" | grep -E "$TOKEN_RE")"
-  rc=$?
-  [ "$rc" -le 1 ] || guard_error "grep failed ($rc) scanning $f"
+  # THREE STAGES, EACH THROUGH A FILE WITH ITS OWN STATUS -- never one pipeline.
+  # Under `pipefail` a pipeline's status is the RIGHTMOST non-zero one, so
+  # `grep | sed | grep` turned a first-grep failure (2: a bad line regex, an
+  # unreadable path) into the trailing grep's no-match (1) and reported the
+  # file clean (Bugbot on client#1020). Each stage's own exit code is checked
+  # before the next runs; only grep's 1 (no match) may pass.
+  stage1="$(mktemp)"; stage2="$(mktemp)"
+  grep -nE "$line_re" "$ROOT/$f" >"$stage1"; rc=$?
+  [ "$rc" -le 1 ] || { rm -f "$stage1" "$stage2"; guard_error "grep failed ($rc) selecting copy lines in $f"; }
+  sed -E "s/[[:space:]]+#[^\"']*$//" "$stage1" >"$stage2" || { rm -f "$stage1" "$stage2"; guard_error "sed failed stripping trailing comments in $f"; }
+  hits="$(grep -E "$TOKEN_RE" "$stage2")"; rc=$?
+  rm -f "$stage1" "$stage2"
+  [ "$rc" -le 1 ] || guard_error "grep failed ($rc) scanning $f for tracker identifiers"
   if [ -n "$hits" ]; then
     printf '%s\n' "$hits" | sed "s|^|$f:|"
     offenders=$((offenders + $(printf '%s\n' "$hits" | wc -l)))

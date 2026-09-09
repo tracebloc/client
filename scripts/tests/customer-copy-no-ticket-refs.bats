@@ -140,6 +140,19 @@ plant() {
   [[ "$output" == *"zero files"* ]] || { echo "$output"; return 1; }
 }
 
+@test "fail closed: a scan stage that fails is a guard error, not a clean file" {
+  # A manifest-listed path that is a DIRECTORY passes the readability check but
+  # makes the first grep exit 2 ("Is a directory"). Under one `grep | sed | grep`
+  # pipeline with pipefail, the trailing grep's no-match (1) masked that 2 and the
+  # file read as clean; staged, the 2 is a guard error (Bugbot on client#1020).
+  mv "$WORK/scripts/lib/probe.sh" "$WORK/scripts/lib/probe.sh.bak"
+  mkdir "$WORK/scripts/lib/probe.sh"
+  [ -d "$WORK/scripts/lib/probe.sh" ] || return 1   # anchor applied
+  run run_guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"grep failed (2) selecting copy lines in scripts/lib/probe.sh"* ]] || { echo "$output"; return 1; }
+}
+
 @test "fail closed: a manifest entry with no file behind it is a guard error" {
   plant scripts/manifest.sha256 'deadbeef  scripts/lib/not-there.sh'
   run run_guard
