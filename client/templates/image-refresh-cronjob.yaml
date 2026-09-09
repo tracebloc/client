@@ -463,6 +463,23 @@ data:
     rp_set_args=""
     rm_set_args=""
 
+    # An UNFINISHED re-image attempt (backend#199, Bugbot High on #1008). The
+    # restart block below increments ATTEMPT_KEY BEFORE the rollout and only
+    # resets it on a settled one; a rollout that times out exits the tick under
+    # set -e with the counter still raised. `kubectl set image` has by then
+    # updated the SPEC to repo@digest, so the live-image check reads "on digest"
+    # even though the rollout never completed -- and requests-proxy /
+    # resource-monitor sit OUTSIDE the top-of-tick settled guard, so a stuck
+    # rollout on either would no-op here forever, the counter raised and stale
+    # :tag pods still running. Read the counter once up front: a raised value
+    # forces the no-op branch to re-enter the re-image path so `rollout status`
+    # is retried -- resolving it (success resets the counter) or advancing it to
+    # the #563 flap lockout, which SURFACES the stuck rollout rather than hiding
+    # it. Best-effort: an unreadable/absent counter is treated as 0 (no forced
+    # retry), since the restart block's own read is the fail-closed authority.
+    pending_attempt="$(get_annotation "$ATTEMPT_KEY" || true)"
+    case "$pending_attempt" in ''|*[!0-9]*) pending_attempt=0 ;; esac
+
     # Each entry: "<docker-hub-repo>|<annotation-key>|<pin-flag>|<pin-digest>".
     set -- \
       "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}|${JOBS_MANAGER_PIN:-}" \
@@ -639,10 +656,23 @@ data:
           [ "${rp_have##*@}" = "$latest" ] || proxy_on_digest=0
         fi
         if [ "$api_on_digest" = "1" ] && [ "$proxy_on_digest" = "1" ]; then
-          log "  digest unchanged and workload already on the pinned digest; no-op"
-          continue
-        fi
-        if [ "$api_on_digest" = "1" ]; then
+          if [ "$pending_attempt" -gt 0 ]; then
+            # The SPEC reads on-digest, but a prior re-image attempt never reached
+            # its success-reset (ATTEMPT_KEY is raised): its rollout timed out and
+            # `set image` had already moved the spec, so this "on digest" can be a
+            # rollout that never settled -- and for requests-proxy / resource-monitor
+            # nothing else would catch it (they are outside the settled guard).
+            # Re-enter the re-image path so `rollout status` runs again: a settled
+            # workload resets the counter, a stuck one advances it to the #563 flap
+            # lockout, which surfaces it (Bugbot High on #1008). Re-`set image` with
+            # the same ref is an idempotent no-op patch, so a genuinely-settled
+            # workload pays only one fast `rollout status`.
+            log "  workload spec is on the pinned digest, but ATTEMPT_KEY=${pending_attempt} marks an unfinished re-image (a rollout that never settled) -- re-running the rollout to resolve it or surface it via the flap guard"
+          else
+            log "  digest unchanged and workload already on the pinned digest; no-op"
+            continue
+          fi
+        elif [ "$api_on_digest" = "1" ]; then
           log "  digest unchanged and jobs-manager already on the pinned digest, but"
           log "        deployment/${REQUESTS_PROXY_DEPLOYMENT} runs '${rp_have}', not digest ${latest}"
           log "        -- re-pinning the requests-proxy digest"

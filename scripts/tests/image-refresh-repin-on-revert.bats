@@ -73,6 +73,7 @@ teardown() { rm -rf "$TMP"; }
 #   $1 = STUB_API   what workload_image_for_repo returns ("" = unreadable)
 #   $2 = STUB_PROXY what requests_proxy_image returns   ("" = unreadable)
 #   $3 = RP_PINNED  "1" opts the requests-proxy out of following the digest
+#   $4 = PENDING    the ATTEMPT_KEY value carried in (0 = no unfinished re-image)
 #
 # The branch is wrapped in a ONE-ITERATION loop so its `continue` statements run
 # as they ship, rather than being stripped (which would change control flow).
@@ -89,6 +90,7 @@ latest="sha256:aaa"
 recorded="sha256:aaa"
 STUB_API="\${1:-}"
 STUB_PROXY="\${2:-}"
+pending_attempt="\${4:-0}"
 restart_needed=0
 annotate_args=""
 jm_set_args=""
@@ -105,7 +107,7 @@ printf 'JM:%s\n' "\$jm_set_args"
 printf 'RP:%s\n' "\$rp_set_args"
 printf 'ANNOTATE:%s\n' "\$annotate_args"
 EOF
-  sh "$TMP/harness.sh" "${1:-}" "${2:-}" "${3:-}"
+  sh "$TMP/harness.sh" "${1:-}" "${2:-}" "${3:-}" "${4:-0}"
 }
 
 @test "workload reverted to :tag re-pins the digest (restart_needed=1)" {
@@ -124,6 +126,27 @@ EOF
   [[ "$output" == *"RESTART:0"* ]] || return 1
   # nothing queued for a rollout
   [[ "$output" == *"JM:"* ]] && [[ "$output" != *"JM:api="* ]] || return 1
+}
+
+@test "on-digest with an UNFINISHED attempt re-runs the rollout, not a silent no-op" {
+  # A prior re-pin's rollout timed out on requests-proxy / resource-monitor (both
+  # outside the settled guard): the spec reads on-digest but ATTEMPT_KEY is still
+  # raised. This must re-enter the re-image path so rollout status retries and the
+  # flap guard can surface a genuinely-stuck rollout (Bugbot High on #1008).
+  run run_branch "docker.io/tracebloc/jobs-manager@sha256:aaa" \
+                 "docker.io/tracebloc/jobs-manager@sha256:aaa" "0" "2"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"unfinished re-image"* ]] || return 1
+  [[ "$output" == *"RESTART:1"* ]] || return 1
+  [[ "$output" != *"; no-op"* ]] || return 1
+}
+
+@test "on-digest with NO pending attempt is still a clean no-op" {
+  run run_branch "docker.io/tracebloc/jobs-manager@sha256:aaa" \
+                 "docker.io/tracebloc/jobs-manager@sha256:aaa" "0" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"; no-op"* ]] || return 1
+  [[ "$output" == *"RESTART:0"* ]] || return 1
 }
 
 @test "api on digest but proxy reverted re-pins the PROXY, not the api" {
