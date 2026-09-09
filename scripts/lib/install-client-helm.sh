@@ -2609,7 +2609,7 @@ install_client_helm() {
       warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
       _print_fit_lines hint
       hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-      error "Refusing to write a training envelope that cannot be scheduled on this machine (backend#2870)."
+      error "Refusing to write a training envelope that cannot be scheduled on this machine."
       ;;
     reduced)
       info "Training envelope reduced to fit beside the platform on this machine:"
