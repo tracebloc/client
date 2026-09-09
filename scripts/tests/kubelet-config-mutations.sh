@@ -132,6 +132,25 @@ run_case "only ps1 checks an existing cluster" "$CS" \
 run_case "the bash check is DEFINED but never called" "$CS" \
   "  _check_existing_cluster_kubelet_config" "  : # unwired" 1
 
+printf '\nthe node reservation block (backend#2460):\n'
+run_case "twins diverge on a platform's kubeReserved memory" "$PS" \
+  '$TB_KUBELET_KUBE_RESERVED_MEM_MIB_DARWIN = 1120' '$TB_KUBELET_KUBE_RESERVED_MEM_MIB_DARWIN = 1100' 1
+run_case "twins diverge on the platforms list" "$PS" \
+  '$TB_KUBELET_RESERVATION_PLATFORMS = "darwin"' '$TB_KUBELET_RESERVATION_PLATFORMS = ""' 1
+run_case "a measured platform's value deleted from one twin" "$CS" \
+  'TB_KUBELET_KUBE_RESERVED_CPU_MILLI_DARWIN=' 'TB_KUBELET_KUBE_RESERVED_CPU_MILLI_DARWIN_X=' 1
+run_case "a value blanked (the kubelet would read \`memory: Mi\`)" "$CS" \
+  'TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_DARWIN=1024' 'TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_DARWIN=0' 1
+run_case "a platform listed as measured with no values behind it" "$CS" \
+  'TB_KUBELET_RESERVATION_PLATFORMS="darwin"' 'TB_KUBELET_RESERVATION_PLATFORMS="darwin linux"' 1
+run_case "eviction threshold looser than the kubelet default 100Mi" "$CS" \
+  'TB_KUBELET_EVICTION_MEM_MIB=256' 'TB_KUBELET_EVICTION_MEM_MIB=64' 1
+run_case "bash writer stops emitting kubeReserved" "$CS" \
+  "      printf 'kubeReserved:\\n  cpu: %sm\\n  memory: %sMi\\n' \"\$cpu\" \"\$mem\"" \
+  "      :" 1
+run_case "ps1 writer stops emitting the eviction key" "$PS" \
+  '      "  memory.available: $($r.EvictionMib)Mi"' '      "  memory.availabl: $($r.EvictionMib)Mi"' 1
+
 printf '\nfail closed — "cannot tell" must never read as agreement:\n'
 run_case "cluster.sh unreadable" "" "" "" 2 unreadable
 run_case "install-k8s.ps1 absent" "" "" "" 2 missing

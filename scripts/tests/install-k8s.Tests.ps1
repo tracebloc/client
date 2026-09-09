@@ -9200,6 +9200,96 @@ Describe "Get-TrainingResources carry path (backend#2418)" {
   }
 }
 
+Describe 'kubelet node reservation in the drop-in (backend#2460)' {
+  # Write-KubeletConfig is a FUNCTION (extracted from New-K3dCluster under this
+  # ticket) so it can be driven here without a live k3d: once as a measured
+  # platform, once as one with no record, once with a broken embed. The VALUES a
+  # measured platform writes are read from this twin's own generated block by the
+  # same indirection the writer uses -- never typed here; that the two twins hold
+  # the SAME values is kubelet-config-agreement.sh's job, in the required drift job.
+  BeforeAll {
+    $script:Raw  = Get-Content "$PSScriptRoot/../install-k8s.ps1" -Raw
+    $script:Code = ($script:Raw -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    $script:Measured = @("$TB_KUBELET_RESERVATION_PLATFORMS".Trim() -split '\s+' | Where-Object { $_ })
+  }
+
+  It 'a measured platform writes kubeReserved / systemReserved / evictionHard from the embed, LF-only, no BOM' {
+    if ($script:Measured.Count -eq 0) { Set-ItResult -Skipped -Because 'no platform has a measured record in this tree'; return }
+    $plat = $script:Measured[0]; $key = $plat.ToUpper()
+    $cpu = Get-Variable -Name "TB_KUBELET_KUBE_RESERVED_CPU_MILLI_$key" -Scope Script -ValueOnly
+    $mem = Get-Variable -Name "TB_KUBELET_KUBE_RESERVED_MEM_MIB_$key" -Scope Script -ValueOnly
+    $sys = Get-Variable -Name "TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_$key" -Scope Script -ValueOnly
+    $path = Join-Path $TestDrive "m/kubelet.yaml"
+    (Write-KubeletConfig -Path $path -Platform $plat) | Should -Be $path
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB) | Should -BeFalse -Because 'the kubelet rejects a UTF-8 BOM'
+    $yaml = [System.Text.Encoding]::UTF8.GetString($bytes)
+    $yaml | Should -Not -Match "`r" -Because 'CRLF in a KubeletConfiguration fails the node'
+    $yaml | Should -Match "(?m)^enforceNodeAllocatable:`n- pods`n"
+    $yaml | Should -Match "(?m)^kubeReserved:`n  cpu: ${cpu}m`n  memory: ${mem}Mi`n"
+    $yaml | Should -Match "(?m)^systemReserved:`n  memory: ${sys}Mi`n"
+    $yaml | Should -Match "(?m)^evictionHard:`n  memory.available: ${TB_KUBELET_EVICTION_MEM_MIB}Mi`n"
+    # ONLY memory.available: k3s's disk keys are merged in from its own drop-in.
+    $yaml | Should -Not -Match 'imagefs.available'
+    $yaml | Should -Not -Match 'nodefs.available'
+    # The image-GC half is still written -- one file, both tickets.
+    $yaml | Should -Match "imageGCHighThresholdPercent: $TB_KUBELET_IMAGE_GC_HIGH_PERCENT"
+  }
+
+  It 'a platform with NO record writes no reservation at all -- never a borrowed one' {
+    $path = Join-Path $TestDrive "u/kubelet.yaml"
+    $null = Write-KubeletConfig -Path $path -Platform 'nowhere'
+    $yaml = Get-Content -LiteralPath $path -Raw
+    $yaml | Should -Not -Match 'kubeReserved'
+    $yaml | Should -Not -Match 'systemReserved'
+    $yaml | Should -Not -Match 'evictionHard'
+    $yaml | Should -Not -Match 'enforceNodeAllocatable'
+    $yaml | Should -Match "imageGCHighThresholdPercent: $TB_KUBELET_IMAGE_GC_HIGH_PERCENT"
+  }
+
+  It 'windows is the platform this installer writes for, and it is unmeasured until a WSL2 record exists' {
+    Get-KubeletReservationPlatform | Should -Be 'windows'
+    # Not an assertion that it stays unmeasured: an assertion that the two agree.
+    # When a record lands, the generator adds `windows` to the list and this stays true.
+    (Test-KubeletReservationMeasured 'windows') | Should -Be ($script:Measured -contains 'windows')
+  }
+
+  It 'a measured platform whose embed is broken THROWS rather than writing `memory: Mi` (fail closed)' {
+    $saved = $TB_KUBELET_RESERVATION_PLATFORMS
+    try {
+      Set-Variable -Name TB_KUBELET_RESERVATION_PLATFORMS -Scope Script -Value 'broken'
+      Set-Variable -Name TB_KUBELET_KUBE_RESERVED_CPU_MILLI_BROKEN -Scope Script -Value 100
+      Set-Variable -Name TB_KUBELET_KUBE_RESERVED_MEM_MIB_BROKEN -Scope Script -Value ''
+      Set-Variable -Name TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_BROKEN -Scope Script -Value 1024
+      $path = Join-Path $TestDrive "b/kubelet.yaml"
+      { Write-KubeletConfig -Path $path -Platform 'broken' } | Should -Throw -ExpectedMessage '*cannot be read*'
+      Set-Variable -Name TB_KUBELET_KUBE_RESERVED_MEM_MIB_BROKEN -Scope Script -Value 0
+      { Write-KubeletConfig -Path $path -Platform 'broken' } | Should -Throw -ExpectedMessage '*cannot be read*'
+    } finally {
+      Set-Variable -Name TB_KUBELET_RESERVATION_PLATFORMS -Scope Script -Value $saved
+    }
+  }
+
+  It 'New-K3dCluster writes the drop-in through Write-KubeletConfig and warns when the platform is unmeasured' {
+    # Source-level, like the sibling Describe below: New-K3dCluster needs a live
+    # k3d + docker. The create path must call the one writer (not inline a second
+    # copy of the YAML) and must SAY when the platform has no record.
+    $script:Code | Should -Match 'Write-KubeletConfig -Path \$kubeletCfgPath'
+    $script:Code | Should -Match 'No measured node reservation exists for Windows/WSL2'
+    ([regex]::Matches($script:Code, 'imageGCHighThresholdPercent: \$TB_KUBELET_IMAGE_GC_HIGH_PERCENT')).Count | Should -Be 1 -Because 'the YAML is authored in exactly one place'
+  }
+
+  It 'the existing-cluster advisory also flags a mounted drop-in that predates the reservation, only on a measured platform, and never rewrites it' {
+    $fn = [regex]::Match($script:Code, '(?s)function Test-ExistingClusterKubeletConfig \{.*?\n\}').Value
+    $fn | Should -Not -BeNullOrEmpty
+    $fn | Should -Match 'carries no node reservation'
+    $fn | Should -Match 'Test-KubeletReservationMeasured'
+    $fn | Should -Match "kubeReserved:"
+    $fn | Should -Not -Match 'Write-KubeletConfig' -Because 'rewriting the host file would arm a smaller allocatable on the next node restart under pods sized against the old one'
+    $fn | Should -Not -Match 'WriteAllText'
+  }
+}
+
 Describe 'kubelet image-GC bound on an EXISTING cluster (backend#2634)' {
   # Bugbot Medium on client#912: the bash twin warned when a reused cluster had no
   # kubelet config mount and this twin did not, so every Windows/WSL2 edge created
