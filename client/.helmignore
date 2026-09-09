@@ -11,3 +11,15 @@
 .hg
 .hgignore
 .svn
+
+# Test suites and CI-only values. `helm package` packs everything not listed
+# here, and the published client-1.9.107.tgz carried 41 helm-unittest suites
+# plus ci/*-values.yaml -- 45 of its 96 entries, 39 % of its bytes. Nothing
+# reads them from the tarball: `helm unittest ./client` and the ct/lint jobs
+# run on the source checkout (helm-unittest's own README says to list `tests`
+# here). scripts/check-chart-contents.sh refuses a packaged chart that carries
+# either directory, so this rule is held by the artefact, not by this comment.
+# Helm's own `templates/tests/` hook convention is unaffected: only the
+# chart-root directories are listed.
+tests/
+ci/
