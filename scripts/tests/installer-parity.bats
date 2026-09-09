@@ -170,3 +170,60 @@ _drive_row() {
     esac
   done
 }
+
+# ── the kubelet drop-in's reservation shape (backend#2460) ───────────────────
+#
+# Driven through the REAL writer with the platform overridden: once as the first
+# platform in this twin's own measured list, once as the fixture's unmeasured
+# probe. The Pester half does the same against Write-KubeletConfig. The keys a
+# measured platform must emit, an unmeasured one must not, and neither may
+# restate from k3s, come from the fixture -- one declaration, two writers.
+
+_reservation_setup() {
+  # common.sh is already loaded by setup() and declares readonly variables, so
+  # only the cluster lib is sourced here.
+  # shellcheck source=/dev/null
+  source "${LIB_DIR}/cluster.sh"
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"
+}
+
+@test "parity: the fixture declares the reservation shape" {
+  [ -n "$TB_PARITY_RESERVATION_PLATFORMS_VAR" ] || return 1
+  [ -n "$TB_PARITY_RESERVATION_UNMEASURED_PROBE" ] || return 1
+  [ "${#TB_PARITY_RESERVATION_EMITTED_MEASURED[@]}" -ge 4 ] || return 1
+  [ "${#TB_PARITY_RESERVATION_NEVER_UNMEASURED[@]}" -ge 4 ] || return 1
+  [ "${#TB_PARITY_RESERVATION_NEVER_RESTATED[@]}" -ge 2 ] || return 1
+  [ "${#TB_PARITY_RESERVATION_ALWAYS[@]}" -ge 3 ] || return 1
+}
+
+@test "parity: a measured platform's drop-in carries every key the fixture names, and none it forbids" {
+  _reservation_setup
+  local plat; set -- ${!TB_PARITY_RESERVATION_PLATFORMS_VAR}; plat="${1:-}"
+  [ -n "$plat" ] || skip "no platform has a measured record in this tree"
+  _kubelet_reservation_platform() { printf '%s' "$plat"; }
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local yaml; yaml="$(cat "$output")"
+  local k
+  for k in "${TB_PARITY_RESERVATION_EMITTED_MEASURED[@]}" "${TB_PARITY_RESERVATION_ALWAYS[@]}"; do
+    [[ "$yaml" == *"$k"* ]] || { echo "measured platform '$plat' did not emit '$k':"; echo "$yaml"; return 1; }
+  done
+  for k in "${TB_PARITY_RESERVATION_NEVER_RESTATED[@]}"; do
+    [[ "$yaml" != *"$k"* ]] || { echo "restated k3s's '$k':"; echo "$yaml"; return 1; }
+  done
+}
+
+@test "parity: an unmeasured platform's drop-in carries none of the reservation keys, and all of the always-keys" {
+  _reservation_setup
+  _kubelet_reservation_platform() { printf '%s' "$TB_PARITY_RESERVATION_UNMEASURED_PROBE"; }
+  run _write_kubelet_config
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local yaml; yaml="$(cat "$output")"
+  local k
+  for k in "${TB_PARITY_RESERVATION_NEVER_UNMEASURED[@]}"; do
+    [[ "$yaml" != *"$k"* ]] || { echo "unmeasured platform emitted '$k':"; echo "$yaml"; return 1; }
+  done
+  for k in "${TB_PARITY_RESERVATION_ALWAYS[@]}"; do
+    [[ "$yaml" == *"$k"* ]] || { echo "unmeasured platform dropped '$k':"; echo "$yaml"; return 1; }
+  done
+}
