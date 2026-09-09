@@ -367,8 +367,14 @@ clusterScope: true
 #   OC:        uses the built-in OpenShift metrics stack.
 #   kubeadm / bare-metal: install metrics-server manually; add
 #              --kubelet-insecure-tls on clusters with self-signed kubelet certs.
-# Set to false on clusters where metrics-server cannot be installed.
-resourceMonitor: true
+# Set enabled to false on clusters where metrics-server cannot be installed.
+#
+# RFC-0076 (D2): this was the scalar `resourceMonitor: <bool>` and is now
+# `resourceMonitor.enabled: <bool>`. The chart still honours the legacy scalar
+# (and `--set resourceMonitor=true|false`) through the alias window
+# (remove_by: 2026-12-31) — see tracebloc.resourceMonitorEnabled in _helpers.tpl.
+resourceMonitor:
+  enabled: true
 
 # -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
 # The resource-monitor needs hostPath /proc and /sys to read node metrics,
