@@ -116,6 +116,19 @@ local_prod_digest() {
   awk -F'"' '/^[[:space:]]*prodDigest:[[:space:]]*"/ {print $2; exit}' "$CHART_DIR/values.yaml"
 }
 
+# The control-plane image DIGEST the jobs-manager container is ACTUALLY running,
+# read off the LIVE Deployment and extracted from `image:` (repo@sha256:…). This
+# is what `tracebloc.controlPlaneDigest` must render from the last-refreshed
+# annotation (client-runtime#199) — assert the rendered image, not merely that
+# the annotation survived: the annotation is a k8s object helm never touches, so
+# it survives even if the helper is removed and the image reverts to a floating
+# `:tag`. Empty output means no digest is pinned on `image:` (the revert).
+jm_controlplane_image_digest() {
+  kubectl get -n "$NS" "$(jm_deploy)" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' \
+    | sed -n 's/.*@\(sha256:[a-f0-9]\{64\}\).*/\1/p'
+}
+
 echo "═══════════════════════════════════════════════════════════════════════"
 echo "  E2E auto-upgrade gate   arch: $(uname -m)   kernel: $(uname -r)"
 echo "═══════════════════════════════════════════════════════════════════════"
@@ -191,12 +204,14 @@ BASELINE_EGRESS_PROXY_URL="$(jm_egress_proxy_url)"
 echo "   baseline egress posture: external_443=$([ "$BASELINE_EXTERNAL_443" = 1 ] && echo present || echo absent) egress_proxy_url=${BASELINE_EGRESS_PROXY_URL:-<none>}"
 
 echo "── simulate an image-refresh-managed annotation (must survive upgrades) ──"
-# A VALID sha256 digest (64 hex): tracebloc.controlPlaneDigest now validates the
+# A VALID sha256 digest (64 hex): tracebloc.controlPlaneDigest validates the
 # annotation against `^sha256:[a-f0-9]{64}$` before rendering it onto `image:`, so
 # a placeholder like `sha256:e2e-sentinel` would degrade to `:tag` and stop
-# exercising branch 2 (the digest render this test exists to protect).
+# exercising branch 2 (the digest render this test exists to protect). Bound once
+# and reused by both the survival check and the rendered-image check in path 2.
+E2E_REFRESH_DIGEST="sha256:e2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee"
 kubectl annotate -n "$NS" "$(jm_deploy)" \
-  "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee" --overwrite
+  "tracebloc.io/last-refreshed-jobs-manager-digest=$E2E_REFRESH_DIGEST" --overwrite
 
 echo "── path 1: manual-operator habit — helm upgrade --reuse-values ──"
 # Old stored values replayed against the new chart: every new key is absent and
@@ -279,7 +294,19 @@ kubectl get deploy "${NS}-egress-proxy" -n "$NS" >/dev/null \
   || fail "auto-upgrade did not deploy the egress gateway (new defaults did not flow)"
 ANNOT="$(kubectl get -n "$NS" "$(jm_deploy)" \
   -o jsonpath='{.metadata.annotations.tracebloc\.io/last-refreshed-jobs-manager-digest}')"
-[ "$ANNOT" = "sha256:e2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee" ] || fail "image-refresh annotation was clobbered by the upgrade"
+[ "$ANNOT" = "$E2E_REFRESH_DIGEST" ] || fail "image-refresh annotation was clobbered by the upgrade"
+# THE #1013 CONTRACT: the auto-upgrade must SEED the control-plane image from that
+# annotation, so the jobs-manager container renders repo@<digest> instead of the
+# floating :tag a stale node would run old (client-runtime#199). The annotation
+# check above is necessary but not sufficient — helm never touches the annotation,
+# so it survives even if tracebloc.controlPlaneDigest is removed or always returns
+# empty and the image silently reverts to :tag. Assert the RENDERED image digest,
+# which is what actually protects the pin: this is the assertion that reddens if
+# the helper is dropped. (Fleet auto-upgrade E2E confirms later paths tolerate the
+# unpullable sentinel digest — no --wait on this upgrade, spec-only reads here.)
+CP_DIGEST="$(jm_controlplane_image_digest)"
+[ "$CP_DIGEST" = "$E2E_REFRESH_DIGEST" ] \
+  || fail "auto-upgrade did not seed the jobs-manager control-plane image from the last-refreshed digest: got '${CP_DIGEST:-<none — reverted to floating :tag>}', want '$E2E_REFRESH_DIGEST' (tracebloc.controlPlaneDigest did not render the pin — client-runtime#199 revert not prevented)"
 DEPLOYED="$(helm list -n "$NS" --filter "^${NS}\$" -o yaml \
   | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
 [ "$DEPLOYED" = "client-${LOCAL_VERSION}" ] || fail "deployed chart is $DEPLOYED, expected client-${LOCAL_VERSION}"
