@@ -2001,8 +2001,8 @@ narrowEdgeuser:
 
 narrowEdgeuserByEnv:
   dev: true
-  stg: false
-  prod: false
+  stg: true
+  prod: true
 
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist

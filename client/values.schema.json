@@ -540,7 +540,7 @@
     },
     "narrowEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, false for stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- dev's is, so a fresh dev install comes up already retired. Flipping it where any predecessor gate is off fails the render — see narrowEdgeuser.",
+      "description": "Per-environment default for narrowEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev, stg and prod: this is the last step of backend#1528's last stage, so a fleet opts in only once its posture is verified -- all three are (backend#947, the consumer migration off edgeuser verified live), so a fresh install comes up already retired. The baked default still declines on any edge whose posture is incomplete, and an explicit flip where any predecessor gate is off fails the render — see narrowEdgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }

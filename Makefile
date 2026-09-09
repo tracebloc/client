@@ -528,8 +528,8 @@ digest-drift:
 check-published:
 	scripts/check-facts.sh --check-published
 
-# bats: standard-checks.yml `Unit tests` / installer-tests.yaml
-# `unit-bash`. ~2 min serially.
+# bats: standard-checks.yml `Unit tests` (the only CI job that runs the suite
+# since 2026-09-09). ~2 min serially.
 .PHONY: bats
 bats:
 	bats scripts/tests/*.bats

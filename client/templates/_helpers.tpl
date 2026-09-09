@@ -810,10 +810,13 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
   It REVOKES; it never DROPs. The account keeps existing with USAGE only, which is
   reversible from the S0 SHOW GRANTS snapshot. DROP USER stays an operator step.
 
-  BAKED ON FOR dev, FALSE FOR stg AND prod, and the pairing below is enforced
+  BAKED ON FOR dev, stg AND prod, and the pairing below is enforced
   rather than documented: this is the last step of the last stage, so it is only
-  legal where every predecessor gate is already on -- which is exactly why dev
-  can carry it as a default and stg/prod cannot yet.
+  legal where every predecessor gate is already on -- which every fleet now is
+  (backend#947, the consumer migration off edgeuser verified live on stg and prod),
+  so all three carry it as a default. The conditional below still declines the
+  default on any edge whose posture is incomplete, so a single-gate override does
+  not hard-fail the render.
 */}}
 {{- define "tracebloc.narrowEdgeuser" -}}
 {{- $override := (default dict .Values).narrowEdgeuser -}}

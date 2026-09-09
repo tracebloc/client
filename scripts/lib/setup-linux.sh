@@ -20,8 +20,10 @@ setup_pm() {
   # opens an interactive "restart services?" prompt that `-y` does NOT suppress.
   # Run inside spin_cmd (stdout/stderr redirected, process backgrounded) that
   # prompt is invisible and blocks reading the TTY → SIGTTIN → the install hangs
-  # forever ("still pulling conntrack"). DEBIAN_FRONTEND=noninteractive +
-  # NEEDRESTART_MODE=a make apt fully non-interactive; they are passed *through*
+  # forever (the symptom was a spinner stuck on "still pulling conntrack" — a
+  # package the installer no longer installs; the hang class is what matters).
+  # DEBIAN_FRONTEND=noninteractive + NEEDRESTART_MODE=a make apt fully
+  # non-interactive; they are passed *through*
   # `sudo env` because sudo resets the environment by default.
   #
   # apt also waits *indefinitely* on the dpkg lock while apt-daily / unattended-
@@ -409,18 +411,20 @@ install_docker_engine() {
 
 # ── System dependencies ─────────────────────────────────────────────────────
 install_system_deps() {
-  # conntrack binary ships under different package names per distro:
-  #   Debian/Ubuntu (apt) → "conntrack";  RHEL/SUSE/Arch (dnf/yum/zypper/pacman) → "conntrack-tools"
-  local conntrack_pkg="conntrack-tools"
-  has apt-get && conntrack_pkg="conntrack"
+  # conntrack is deliberately NOT here any more (removed 2026-09-09). It was
+  # installed on every host from the first k3d-based installer onward and
+  # invoked by nothing: the cluster is k3s INSIDE k3d (Docker), and the k3s
+  # image ships its own conntrack for kube-proxy. The host package only cost an
+  # index refresh plus one install per distro — and a per-distro package-name
+  # split (#720) to keep right. If a host-side need ever appears, cite the
+  # caller here rather than re-adding it on faith.
   MISSING_PKGS=()
   has curl      || MISSING_PKGS+=(curl)
-  has conntrack || MISSING_PKGS+=("$conntrack_pkg")
   # Helm's release tarball is unpacked with tar + gzip; minimal cloud images
   # (Amazon Linux 2023, minimal RHEL) ship neither. openssl is NOT needed any
   # more — the Helm download is verified with sha256sum since get-helm-3 was
   # replaced by a direct fetch (#395; see _fetch_helm_release). Package names
-  # are uniform across apt/dnf/yum/zypper/pacman, unlike conntrack.
+  # are uniform across apt/dnf/yum/zypper/pacman.
   has tar       || MISSING_PKGS+=(tar)
   has gzip      || MISSING_PKGS+=(gzip)
   if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
