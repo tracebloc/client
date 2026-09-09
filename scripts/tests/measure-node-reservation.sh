@@ -238,7 +238,10 @@ done | jq -s .)"
 # whichever holds k3s's defaults wins over the other for the same map.
 wiring="$(for node in $nodes; do
   confd="$(docker exec "$node" sh -c 'd=/var/lib/rancher/k3s/agent/etc/kubelet.conf.d; if [ -d "$d" ]; then for f in "$d"/*; do echo "=== $f"; cat "$f"; done; else echo "no kubelet.conf.d"; fi' 2>/dev/null || echo unreadable)"
-  cmdline="$(docker exec "$node" sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < "$p/cmdline" 2>/dev/null | grep -m1 -- "--kubelet-arg\|kubelet" ; done | grep -m1 -- "--config" || true' 2>/dev/null || echo unreadable)"
+  # Capture-then-slice, never `| grep -m1`: under errexit+pipefail an early-closing
+  # reader can SIGPIPE its writer and fail the pipeline (the repo's early-close guard).
+  cmdlines="$(docker exec "$node" sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < "$p/cmdline" 2>/dev/null; echo; done' 2>/dev/null || echo unreadable)"
+  cmdline="$(awk '/--config/ && /kubelet/ {print; exit}' <<<"$cmdlines")"
   jq -cn --arg node "$node" --arg confd "$confd" --arg cmdline "$cmdline" '{node: $node, kubelet_conf_d: $confd, k3s_cmdline: $cmdline}'
 done | jq -s .)"
 
@@ -246,9 +249,13 @@ done | jq -s .)"
 # every node container. MemTotal - MemAvailable is what the kernel says is in
 # use; minus the node containers' cgroups that is dockerd, the k3d sidecars, the
 # guest kernel and (on Linux) the host OS -- the system-reserved population.
-vm_view="$(docker run --rm --pid=host alpine:3.20 sh -c 'grep -E "^(MemTotal|MemAvailable|MemFree)" /proc/meminfo; echo ---; ps -o pid,rss,comm 2>/dev/null | sort -k2 -n -r | head -15' 2>/dev/null \
-  | jq -R -s '{raw: .}' || echo '{}')"
+vm_raw="$(docker run --rm --pid=host alpine:3.20 sh -c 'grep -E "^(MemTotal|MemAvailable|MemFree)" /proc/meminfo; echo ---; ps -o pid,rss,comm 2>/dev/null | sort -k2 -n -r' 2>/dev/null || true)"
+# The top 15 processes by RSS, sliced from the capture rather than piped into head.
+vm_raw="$(awk 'NR<=19' <<<"$vm_raw")"
+vm_view="$(jq -R -s '{raw: .}' <<<"$vm_raw" || echo '{}')"
 
+k3d_version_all="$(k3d version 2>/dev/null || true)"
+k3d_version="${k3d_version_all%%$'\n'*}"
 vm_info="$(docker info --format '{"ncpu": {{.NCPU}}, "mem_total": {{.MemTotal}}, "server_version": "{{.ServerVersion}}", "operating_system": "{{.OperatingSystem}}", "kernel": "{{.KernelVersion}}"}' 2>/dev/null || echo '{}')"
 sidecars="$(docker stats --no-stream --format '{{json .}}' "k3d-${CLUSTER_NAME}-serverlb" "k3d-${CLUSTER_NAME}-tools" 2>/dev/null | jq -s 'map({name: .Name, mem_usage: .MemUsage})' || echo '[]')"
 # EVERY container on the engine, so a second cluster sharing the VM shows up in
@@ -273,7 +280,7 @@ cg_summary="$(jq -s '
 
 jq -n \
   --arg platform "$(uname -s)" --arg arch "$(uname -m)" --arg host_kernel "$(uname -r)" \
-  --arg k3d "$(k3d version 2>/dev/null | head -1)" --arg k3s "$K8S_VERSION" \
+  --arg k3d "$k3d_version" --arg k3s "$K8S_VERSION" \
   --arg servers "${SERVERS:-1}" --arg agents "${AGENTS:-1}" \
   --arg load_image "$LOAD_IMAGE" --argjson pull_ok "$pull_ok" \
   --arg load_started "$load_started" --arg pull_finished "$pull_finished" \
