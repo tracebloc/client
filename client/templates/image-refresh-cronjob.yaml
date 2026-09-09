@@ -332,6 +332,21 @@ data:
       esac
     }
 
+    # The requests-proxy is a SEPARATE deployment that runs the SAME
+    # tracebloc/jobs-manager image (container `proxy`). `workload_image_for_repo`
+    # above reads only the jobs-manager `api` container, so the no-op decision
+    # below cannot see the proxy on its own. Read it here so a proxy left on
+    # `:tag` -- a tick that pinned `api` then died before the rp rollout, or a
+    # helm re-render that reverted only the proxy -- is still re-pinned instead
+    # of being declared "unchanged" forever because `api` happens to match
+    # (Bugbot on #1008). Empty (read error / absent) re-asserts the pin, same
+    # fail-safe stance as `workload_image_for_repo`.
+    requests_proxy_image() {
+      kubectl get deployment -n "$RELEASE_NAMESPACE" "$REQUESTS_PROXY_DEPLOYMENT" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="proxy")].image}' \
+        --request-timeout=15s 2>/dev/null
+    }
+
     # Skip the whole tick if the deployment isn't currently SETTLED (#546). A rollout
     # already in progress, or a pod stuck (e.g. Pending on volume binding), means a restart
     # can't help — it only churns ReplicaSets, and on a single-node local-path cluster that
@@ -578,12 +593,29 @@ data:
         # so it fires only on genuine reverts (see PR discussion).
         want="${IMAGE_REGISTRY}/${repo}@${latest}"
         have="$(workload_image_for_repo "$repo" || true)"
-        if [ "$have" = "$want" ]; then
+        # jobs-manager: the requests-proxy runs this SAME image and is its own
+        # deployment. When it follows this digest (not operator-pinned) it must
+        # ALSO be on `want`, or a partial re-pin (api pinned, proxy still on
+        # :tag) is declared no-op forever off the api match alone and never
+        # retried (Bugbot on #1008). Any mismatch falls through to the re-image
+        # path, whose `case` block re-derives BOTH `jm_set_args`/`rp_set_args`.
+        proxy_off_digest=0
+        if [ "$repo" = "tracebloc/jobs-manager" ] && [ "$REQUESTS_PROXY_PINNED" != "1" ]; then
+          rp_have="$(requests_proxy_image || true)"
+          [ "$rp_have" = "$want" ] || proxy_off_digest=1
+        fi
+        if [ "$have" = "$want" ] && [ "$proxy_off_digest" = "0" ]; then
           log "  digest unchanged and workload already on the pinned digest; no-op"
           continue
         fi
-        log "  digest unchanged, but the workload runs '${have:-<unreadable>}', not '${want}'"
-        log "        -- a helm re-render reverted the pin onto :${IMAGE_TAG}; re-pinning the digest"
+        if [ "$have" = "$want" ] && [ "$proxy_off_digest" = "1" ]; then
+          log "  digest unchanged and jobs-manager already on the pinned digest, but"
+          log "        deployment/${REQUESTS_PROXY_DEPLOYMENT} runs '${rp_have:-<unreadable>}', not '${want}'"
+          log "        -- re-pinning the requests-proxy digest"
+        elif [ "$have" != "$want" ]; then
+          log "  digest unchanged, but the workload runs '${have:-<unreadable>}', not '${want}'"
+          log "        -- a helm re-render reverted the pin onto :${IMAGE_TAG}; re-pinning the digest"
+        fi
         # Fall through to the re-image path (ref + case block) with recorded
         # already == latest: the annotate below is an idempotent re-write, and
         # restart_needed drives the rollout that puts the digest back on.
