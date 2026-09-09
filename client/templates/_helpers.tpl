@@ -484,9 +484,10 @@ true
 */}}
 {{- define "tracebloc.controlPlanePullPolicy" -}}
 {{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- $ir := .root.Values.imageRefresh | default dict -}}
 {{- if .digest -}}
 IfNotPresent
-{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") (not $ir.suspend) -}}
 IfNotPresent
 {{- else -}}
 Always
@@ -524,12 +525,28 @@ Always
 */}}
 {{- define "tracebloc.controlPlaneDigest" -}}
 {{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- $ir := .root.Values.imageRefresh | default dict -}}
 {{- if .operatorDigest -}}
 {{- .operatorDigest -}}
-{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") (not $ir.suspend) -}}
 {{- $dep := lookup "apps/v1" "Deployment" .root.Release.Namespace (printf "%s-jobs-manager" (include "tracebloc.fullname" .root)) -}}
 {{- if $dep -}}
-{{- index (($dep.metadata).annotations | default dict) (printf "tracebloc.io/last-refreshed-%s-digest" .annotationImage) | default "" -}}
+{{- $ann := index (($dep.metadata).annotations | default dict) (printf "tracebloc.io/last-refreshed-%s-digest" .annotationImage) | default "" -}}
+{{/*
+  VALIDATE before rendering: the 11 values digest keys are schema-guarded by
+  `^(sha256:[a-f0-9]{64})?$`, but this annotation is written out-of-band by
+  image-refresh (kubectl) and reaches an `image:` field unchecked. A malformed
+  value (`tracebloc.image` drops the tag when a digest is present) renders an
+  unstartable ref helm cannot detect — the kubelet reports InvalidImageName
+  while the apiserver accepts the spec. Require a full sha256 digest; anything
+  else degrades to `""` → `:tag`, the safe fallback (@shujaatTracebloc on #1013).
+  `suspend` is honoured above: a suspended CronJob never runs, so its last
+  annotation is frozen and must NOT pin the render — a newly joined node would
+  otherwise pull a stale digest instead of the current tag.
+*/}}
+{{- if regexMatch "^sha256:[a-f0-9]{64}$" $ann -}}
+{{- $ann -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

@@ -191,8 +191,12 @@ BASELINE_EGRESS_PROXY_URL="$(jm_egress_proxy_url)"
 echo "   baseline egress posture: external_443=$([ "$BASELINE_EXTERNAL_443" = 1 ] && echo present || echo absent) egress_proxy_url=${BASELINE_EGRESS_PROXY_URL:-<none>}"
 
 echo "── simulate an image-refresh-managed annotation (must survive upgrades) ──"
+# A VALID sha256 digest (64 hex): tracebloc.controlPlaneDigest now validates the
+# annotation against `^sha256:[a-f0-9]{64}$` before rendering it onto `image:`, so
+# a placeholder like `sha256:e2e-sentinel` would degrade to `:tag` and stop
+# exercising branch 2 (the digest render this test exists to protect).
 kubectl annotate -n "$NS" "$(jm_deploy)" \
-  "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2e-sentinel" --overwrite
+  "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee" --overwrite
 
 echo "── path 1: manual-operator habit — helm upgrade --reuse-values ──"
 # Old stored values replayed against the new chart: every new key is absent and
@@ -275,7 +279,7 @@ kubectl get deploy "${NS}-egress-proxy" -n "$NS" >/dev/null \
   || fail "auto-upgrade did not deploy the egress gateway (new defaults did not flow)"
 ANNOT="$(kubectl get -n "$NS" "$(jm_deploy)" \
   -o jsonpath='{.metadata.annotations.tracebloc\.io/last-refreshed-jobs-manager-digest}')"
-[ "$ANNOT" = "sha256:e2e-sentinel" ] || fail "image-refresh annotation was clobbered by the upgrade"
+[ "$ANNOT" = "sha256:e2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee" ] || fail "image-refresh annotation was clobbered by the upgrade"
 DEPLOYED="$(helm list -n "$NS" --filter "^${NS}\$" -o yaml \
   | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
 [ "$DEPLOYED" = "client-${LOCAL_VERSION}" ] || fail "deployed chart is $DEPLOYED, expected client-${LOCAL_VERSION}"

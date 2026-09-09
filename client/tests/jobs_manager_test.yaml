@@ -1227,3 +1227,22 @@ tests:
           content:
             name: NODE_AGENTS_NAMESPACE
             value: ""
+
+  # backend#199 / client-runtime#199 (@shujaatTracebloc on #1013): a suspended
+  # image-refresh CronJob never re-pins, so its last last-refreshed annotation is
+  # frozen. tracebloc.controlPlaneDigest must then NOT render that digest, and
+  # controlPlanePullPolicy must fall back to Always so a stale :tag layer on a
+  # newly joined node is re-pulled instead of silently running an old build.
+  - it: control-plane pullPolicy is IfNotPresent when image-refresh is active
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+  - it: control-plane pullPolicy falls back to Always when image-refresh is suspended
+    set:
+      imageRefresh:
+        suspend: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
