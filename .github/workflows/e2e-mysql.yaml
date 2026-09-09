@@ -17,36 +17,48 @@ name: E2E mysql
 # reports on a PR that touches nothing under the filter, so GitHub holds the PR
 # at "waiting for status to be reported" forever. This test is the intended
 # GATING evidence for the native-arm64 close condition of backend#723, so it has
-# to be able to become a required check — which means its own workflow with an
-# UNFILTERED pull_request trigger that always reports.
+# to be able to become a required check — which means its own workflow, whose
+# pull_request trigger can be made unfiltered (so it always reports) the day it
+# is armed, without dragging the whole installer matrix along.
 #
-# NO `paths:` ON pull_request, deliberately (candidate required check on
-# staging/main): a path-filtered required check is unmergeable-forever the moment
-# a PR touches nothing under the filter (a promotion batch, a backmerge). `push`
-# keeps a paths filter — pushes are not gated, so scoping the post-merge signal
-# is free.
+# `paths:` ON pull_request TOO, since 2026-09-09 — the same filter `push` has.
+# The paragraph above is still why this is its own file: a path-filtered
+# REQUIRED check is unmergeable-forever the moment a PR touches nothing under
+# the filter (a promotion batch, a backmerge). That hazard exists only once the
+# context IS required, and `E2E mysql 8.4 (...)` is required on no branch —
+# read
+#   gh api repos/tracebloc/client/branches/<b>/protection/required_status_checks
+# for develop, staging and main before touching this block. Unarmed, a 2-leg
+# matrix on every docs-only or workflow-only PR bought nothing, so it is scoped.
 #
-# COST — unlike e2e-auth-proxy's single ~90s runner this is a 2-leg matrix
-# (amd64 + arm64), each ~5-7 min (cluster + helm install + two connector probes).
-# The arm64 leg is the point; arm64 runners are free on this public repo. If the
-# per-PR cost on develop ever bites, the documented lever (e2e-auth-proxy.yaml
-# header) is to scope pull_request to the gating branches only ([main, staging])
-# and lean on the push signal for develop.
+# ARMING PRE-CONDITION — two halves that move together. Whoever makes this
+# check required MUST, in the same PR, delete the `paths:` under pull_request
+# and add `edited` to its `types:` so a base-branch retarget re-reports instead
+# of hanging pending (backend#2701) — or the first PR outside the filter is
+# unmergeable. Arm on staging + main only after a green-watch window per the
+# "arm while green" rule (CLAUDE.md). This workflow does NOT make the check
+# required — that is a branch-protection setting.
 #
-# This workflow does NOT make the check required — that is a branch-protection
-# setting, armed only after a green-watch window per the "arm while green" rule
-# (CLAUDE.md), on staging + main. NOTE for whoever arms it: if it is made a
-# required, branches-filtered gate, add `edited` to the pull_request `types` so a
-# base-branch retarget re-reports instead of hanging pending (backend#2701).
+# COST — a 2-leg matrix (amd64 + arm64), each ~2.5-3 min measured (cluster +
+# helm install + two connector probes). The arm64 leg is the point; arm64
+# runners are free on this public repo. The filter drops both legs from PRs
+# that touch neither client/ nor scripts/ nor this file; the weekly cron and the
+# push signal on the gated branches are unchanged.
 on:
   push:
-    branches: [main, staging, develop, openshift]
+    branches: [main, staging, develop]
     paths:
       - 'client/**'
       - 'scripts/**'
       - '.github/workflows/e2e-mysql.yaml'
   pull_request:
-    branches: [main, staging, develop, openshift]
+    branches: [main, staging, develop]
+    # Same filter as `push` — see the header for why, and for what MUST change
+    # here before this context is ever made a required check.
+    paths:
+      - 'client/**'
+      - 'scripts/**'
+      - '.github/workflows/e2e-mysql.yaml'
   schedule:
     # Mondays 03:15 UTC — a weekly canary. This pulls external images
     # (tracebloc/mysql-client:8.4, python:3.12-slim) and pip-installs the

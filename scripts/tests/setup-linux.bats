@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Tests for scripts/lib/setup-linux.sh — RHEL Docker (#719), k3d secure_path
-# (#718), conntrack package name (#720), package-manager detection.
+# (#718), system-deps list (conntrack retired 2026-09-09), package-manager detection.
 load test_helper
 
 setup() {
@@ -9,7 +9,7 @@ setup() {
   # so _assert_download_size does not reject them (real floor applies in prod).
   export TB_MIN_DOWNLOAD_BYTES=0
   MOCK_CALLS="$(mktemp)"
-  PRESENT_CMDS="curl conntrack"
+  PRESENT_CMDS="curl"
   TEST_DISTRO=ubuntu
   USER=testuser
   PM_UPDATE="pmupdate"; PM_INSTALL="pminstall"
@@ -90,32 +90,33 @@ setup() {
   [[ "$output" == *"No supported package manager"* ]] || return 1
 }
 
-# ── install_system_deps: conntrack package name (#720) ─────────────────────
-@test "install_system_deps: apt uses 'conntrack'" {
-  PRESENT_CMDS="apt-get curl"      # apt present, conntrack binary absent
+# ── install_system_deps: conntrack is NOT a prerequisite (retired 2026-09-09) ──
+# The cluster is k3s inside k3d (Docker) and the k3s image ships its own
+# conntrack, so the host package — installed since the first k3d installer and
+# invoked by nothing — is gone, together with its per-distro name split (#720).
+# Guard the removal on both package-manager branches. The binary is ABSENT in
+# both cases and tar/gzip are absent too, so the install loop demonstrably runs
+# (the "Installing tar" anchor) and a re-added conntrack line would be recorded.
+@test "install_system_deps: absent conntrack is NOT installed on apt" {
+  PRESENT_CMDS="apt-get curl"      # apt present; conntrack, tar, gzip absent
   run install_system_deps
   run mock_calls
-  [[ "$output" == *"conntrack"* ]] || return 1
-  [[ "$output" != *"conntrack-tools"* ]] || return 1
+  [[ "$output" == *"Installing tar"* ]] || return 1     # the loop ran
+  [[ "$output" != *"conntrack"* ]] || return 1
 }
-@test "install_system_deps: dnf uses 'conntrack-tools'" {
-  PRESENT_CMDS="dnf curl"          # no apt-get, conntrack binary absent
+@test "install_system_deps: absent conntrack is NOT installed on dnf" {
+  PRESENT_CMDS="dnf curl"          # no apt-get; conntrack, tar, gzip absent
   run install_system_deps
   run mock_calls
-  [[ "$output" == *"conntrack-tools"* ]] || return 1
-}
-@test "install_system_deps: conntrack present -> not installed" {
-  PRESENT_CMDS="apt-get curl conntrack"
-  run install_system_deps
-  run mock_calls
-  [[ "$output" != *"Installing conntrack"* ]] || return 1
+  [[ "$output" == *"Installing tar"* ]] || return 1     # the loop ran
+  [[ "$output" != *"conntrack"* ]] || return 1
 }
 # Caught by the cross-distro CI matrix on Amazon Linux 2023: the Helm tarball
 # needs tar + gzip to unpack, absent on minimal cloud images. openssl is no
 # longer a dependency — the Helm download verifies with sha256sum since
 # get-helm-3 was replaced by a direct fetch (#395).
 @test "install_system_deps: ensures tar + gzip (helm unpack on minimal images), NOT openssl (#395)" {
-  PRESENT_CMDS="dnf curl conntrack"   # tar + gzip absent
+  PRESENT_CMDS="dnf curl"   # tar + gzip absent
   run install_system_deps
   run mock_calls
   [[ "$output" == *"Installing tar"* ]] || return 1
@@ -123,7 +124,7 @@ setup() {
   [[ "$output" != *"Installing openssl"* ]] || return 1
 }
 @test "install_system_deps: tar + gzip already present -> not reinstalled" {
-  PRESENT_CMDS="apt-get curl conntrack tar gzip"
+  PRESENT_CMDS="apt-get curl tar gzip"
   run install_system_deps
   run mock_calls
   [[ "$output" != *"Installing tar"* ]] || return 1
@@ -1504,35 +1505,35 @@ _stub_install_steps() {
 
 # ── #427: docker-group grant is not gated on a fresh install ────────────────
 @test "install_docker_engine: pre-installed Docker + user NOT in group -> still grants (#427)" {
-  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  PRESENT_CMDS="docker curl"; TEST_DISTRO=ubuntu
   id() { echo "testuser"; }                 # NOT yet in the docker group
   run install_docker_engine
   [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "sudo usermod -aG docker testuser"
 }
 @test "install_docker_engine: pre-installed Docker + user already in group -> no redundant grant (#427)" {
-  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  PRESENT_CMDS="docker curl"; TEST_DISTRO=ubuntu
   id() { echo "testuser docker"; }          # already a member
   run install_docker_engine
   [ "$status" -eq 0 ] || return 1
   ! mock_calls | grep -q "usermod -aG docker" || return 1
 }
 @test "install_docker_engine: fresh install still grants the invoking user (#427 regression)" {
-  PRESENT_CMDS="curl conntrack"; TEST_DISTRO=ubuntu   # docker ABSENT -> fresh install
+  PRESENT_CMDS="curl"; TEST_DISTRO=ubuntu   # docker ABSENT -> fresh install
   id() { echo "testuser"; }
   run install_docker_engine
   [ "$status" -eq 0 ] || return 1
   mock_calls | grep -q "sudo usermod -aG docker testuser"
 }
 @test "install_docker_engine: prepare-host mode never grants the invoking admin (#427/#381)" {
-  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  PRESENT_CMDS="docker curl"; TEST_DISTRO=ubuntu
   TB_PREPARE_HOST_MODE=1
   id() { echo "admin"; }
   run install_docker_engine
   ! mock_calls | grep -q "usermod -aG docker admin" || return 1
 }
 @test "install_docker_engine: grants the INVOKING user, not TB_PREPARE_USER (#427 Bugbot)" {
-  PRESENT_CMDS="docker curl conntrack"; TEST_DISTRO=ubuntu
+  PRESENT_CMDS="docker curl"; TEST_DISTRO=ubuntu
   TB_PREPARE_USER=researcher                # a leftover export must NOT redirect the grant
   id() { echo "testuser"; }                 # invoker ($USER) not in group
   run install_docker_engine
