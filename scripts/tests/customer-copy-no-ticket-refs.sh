@@ -237,11 +237,29 @@ strip_trailing_comment() {
   }'
 }
 
-# heredoc_body_lines FILE — print `NNN:<line>` for every line inside a bash
-# here-document. Operator detected on quote-stripped code (so a `<<` inside a
-# string does not count, and `<<<` here-strings are excluded); delimiter taken
-# from the raw line, quoted or not -- the same rule derive_emitters applies.
+# heredoc_body_lines LANG FILE — print `NNN:<line>` for every line inside a
+# bash here-document (LANG=bash) or a PowerShell here-string (LANG=ps).
+# Bash: operator detected on quote-stripped code (so a `<<` inside a string does
+# not count, and `<<<` here-strings are excluded); delimiter taken from the raw
+# line, quoted or not -- the same rule derive_emitters applies.
+# PowerShell: an opener is an at-sign followed by a double or single quote at the
+# end of a line (Write-Host, throw, or an assignment), the closer is that quote
+# followed by an at-sign at the start of a line
+# (Bugbot on client#1020, fourth round: Print-Help and the data-directory
+# `throw` are here-strings a customer reads). Assignments are scanned too --
+# over-inclusive on purpose, the guard accepts that bias.
 heredoc_body_lines() {
+  local lang="$1" file="$2"
+  if [ "$lang" = ps ]; then
+    awk '
+      BEGIN { closer = "" }
+      {
+        if (closer != "") { if ($0 ~ ("^[ \t]*" closer)) closer = ""; else printf("%d:%s\n", NR, $0); next }
+        if ($0 ~ /@"[ \t]*$/) closer = "\"@"; else if ($0 ~ /@\047[ \t]*$/) closer = "\047@"
+      }
+    ' "$file"
+    return
+  fi
   awk '
     function code_only(line,   out, i, c, q) {
       out = ""; q = ""
@@ -264,7 +282,7 @@ heredoc_body_lines() {
         if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) heredoc = h
       }
     }
-  ' "$1"
+  ' "$file"
 }
 
 offenders=0
@@ -283,12 +301,13 @@ for f in $shipped; do
   stage1="$(mktemp)"; stage2="$(mktemp)"
   grep -nE "$line_re" "$ROOT/$f" >"$stage1"; rc=$?
   [ "$rc" -le 1 ] || { rm -f "$stage1" "$stage2"; guard_error "grep failed ($rc) selecting copy lines in $f"; }
-  # HERE-DOCUMENT BODIES ARE COPY TOO (bash only): `cat <<'HELP' … HELP` is how the
-  # installers print help and multi-line notices, and none of those lines starts
-  # with an emitter, so the grep above never sees them. Append every body line of
-  # every here-document (same operator/delimiter rule as the derivation).
-  case "$f" in *.sh)
-    heredoc_body_lines "$ROOT/$f" >>"$stage1" || { rm -f "$stage1" "$stage2"; guard_error "could not list here-document bodies in $f"; }
+  # HERE-DOCUMENT / HERE-STRING BODIES ARE COPY TOO: `cat <<'HELP' … HELP` and
+  # `Write-Host @" … "@` are how the installers print help and multi-line notices,
+  # and none of those body lines starts with an emitter, so the grep above never
+  # sees them. Append every body line (same operator/delimiter rule as the derivation).
+  case "$f" in
+    *.sh)  heredoc_body_lines bash "$ROOT/$f" >>"$stage1" || { rm -f "$stage1" "$stage2"; guard_error "could not list here-document bodies in $f"; } ;;
+    *.ps1) heredoc_body_lines ps   "$ROOT/$f" >>"$stage1" || { rm -f "$stage1" "$stage2"; guard_error "could not list here-string bodies in $f"; } ;;
   esac
   strip_trailing_comment <"$stage1" >"$stage2" || { rm -f "$stage1" "$stage2"; guard_error "comment stripping failed in $f"; }
   hits="$(grep -E "$TOKEN_RE" "$stage2")"; rc=$?

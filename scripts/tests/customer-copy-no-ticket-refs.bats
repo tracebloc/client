@@ -186,6 +186,18 @@ plant() {
   [[ "$output" == *"migration notes (backend#12)"* ]] || return 1
 }
 
+@test "mutation: an identifier inside a PowerShell here-string (Write-Host @\"…\"@) is copy too" {
+  printf 'function Show-Planted {\n  Write-Host @"\n  Set up your environment.\n  See the migration notes (backend#14) first.\n"@\n}\n' >> "$WORK/scripts/install-k8s.ps1"
+  grep -q 'migration notes (backend#14)' "$WORK/scripts/install-k8s.ps1" || return 1   # anchor applied
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"scripts/install-k8s.ps1:"*"migration notes (backend#14)"* ]] || return 1
+}
+
+@test "the guard is a named DRIFT_GUARDS entry, so make drift and the drift job run it" {
+  grep -qE '^[[:space:]]*bash scripts/tests/customer-copy-no-ticket-refs\.sh\|\\$' "$REPO/Makefile" || return 1
+}
+
 @test "fail closed: a helper whose braces never balance is a guard error, not a shorter vocabulary" {
   printf 'broken_open() {\n  echo "never closed"\n' >> "$WORK/scripts/lib/cluster.sh"
   grep -q '^broken_open() {' "$WORK/scripts/lib/cluster.sh" || return 1   # anchor applied
