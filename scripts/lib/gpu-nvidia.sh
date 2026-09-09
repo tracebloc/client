@@ -88,7 +88,7 @@ _docker_default_runtime_is_nvidia() {
 }
 
 # k3d cluster state, jq-free (parses the SERVERS "running/total" column, mirroring
-# _cluster_exists' awk approach) and bounded so a wedged daemon can't hang the probe.
+# _cluster_presence' awk approach) and bounded so a wedged daemon can't hang the probe.
 # Tri-state so a probe TIMEOUT isn't mistaken for "not running" — otherwise a live
 # cluster could be left down after the Docker restart with no recovery (#431 Bugbot):
 #   0 = running (>=1 server up)

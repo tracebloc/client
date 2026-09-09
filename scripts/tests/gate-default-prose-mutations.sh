@@ -161,25 +161,31 @@ run_case "a checkout path containing a space still resolves the corpus" 0 \
 # ---- 7. fail closed on an empty corpus --------------------------------------
 D="$TMP/nomd"; mkfixture "$D"
 find "$D/client" "$D/docs" -name '*.md' -type f -delete
-# ---- the ON-polarity mirror, which the guard could not catch ----------------
+# ---- the LIST-form mirror, which the guard could not catch ------------------
 # saqlainsyed007 on #900: TRUE_CLAIMS lacked the LIST form and `default on`, so
-# a stale on-polarity claim naming a still-off env did not redden while its
-# off-polarity twin did. These three cases are the missing direction, and each
-# FAILED against the pre-fix guard.
+# a stale claim naming a list of envs did not redden while its scalar twin did.
+# These three cases are that direction, and each FAILED against the pre-fix guard.
 #
-# DEPENDENCY, deliberately (LukasWodka on #965, backend#947): these three cases
-# use `narrowEdgeuserByEnv` as the example gate precisely because it still ships
-# `stg:false / prod:false` -- so an on-polarity claim naming stg/prod is FALSE and
-# must redden. They moved here from `rotateMysqlRootByEnv` when backend#947 baked
-# rotate true for stg/prod (that gate is no longer false-for-stg/prod, so it can no
-# longer carry an "env ships false" case). narrowEdgeuser is the NEXT gate to bake;
-# when `narrowEdgeuserByEnv.{stg,prod}` flips true, these claims become TRUE, stop
-# reddening, and the cases go inert with the suite still green. The author baking
-# narrowing must repoint them at whatever gate is still off then -- there must
-# always be one, since the whole point is a staged rollout.
+# POLARITY AFTER THE ROLLOUT COMPLETED (backend#947). backend#947 baked
+# `narrowEdgeuserByEnv.{stg,prod}` true -- the LAST gate shipping `false` anywhere
+# -- so ALL five `*ByEnv` gates now ship `true` for dev, stg and prod. Against the
+# REAL chart an ON-polarity over-claim (prose saying `true` where the chart ships
+# `false`) is no longer constructible: nothing ships false to over-claim. The
+# drift that CAN happen against the real chart is now the OPPOSITE -- a stale doc
+# still saying `false` for a gate since baked true -- which cases (a)/(b) assert
+# against `narrowEdgeuserByEnv` (now true everywhere).
+#
+# But the ON direction (TRUE_CLAIMS) must stay exercised, or deleting those guard
+# patterns would leave the suite green (@saadqbal / @cursor Bugbot on this PR).
+# Rather than repointing an on-polarity case at "whichever gate still ships false"
+# -- a maintenance treadmill that has already moved twice (rotateMysqlRootByEnv ->
+# narrowEdgeuserByEnv -> nothing) -- case (a-on) patches the FIXTURE's OWN
+# values.yaml to reintroduce a per-env `false`, so the over-claim is against the
+# fixture's chart and reddens PERMANENTLY, with no dependency on the real rollout
+# state. (c) keeps the correct-claim-not-a-finding check.
 
-# (a) list form, on-polarity, naming an env that ships false.
-D="$TMP/onlist"; mkfixture "$D"
+# (a) list form, off-polarity, naming envs that ship true.
+D="$TMP/offlist"; mkfixture "$D"
 python3 - "$D/client/MIGRATION.md" <<'PY2'
 import sys
 p = sys.argv[1]; s = open(p).read()
@@ -187,10 +193,10 @@ old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is `true` for `dev`, "
-    "`stg` and `prod`, so every fleet narrows on upgrade."))
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is `false` for `stg` "
+    "and `prod`, so those fleets never narrow."))
 PY2
-run_case "an ON-polarity claim in LIST form is caught (stg/prod ship false)" 1   "MIGRATION.md" "$D"
+run_case "an OFF-polarity claim in LIST form is caught (stg/prod ship true)" 1   "MIGRATION.md" "$D"
 
 # (b) the `baked on` prefix in list form -- the same shape via the other prefix.
 D="$TMP/onbaked"; mkfixture "$D"
@@ -201,18 +207,50 @@ old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is baked `on` for `dev`, "
-    "`stg` and `prod`."))
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is baked `off` for `stg` "
+    "and `prod`."))
 PY2
-run_case "an ON-polarity 'baked on for <list>' claim is caught too" 1   "MIGRATION.md" "$D"
+run_case "an OFF-polarity 'baked off for <list>' claim is caught too" 1   "MIGRATION.md" "$D"
 
-# (c) THE FALSE-POSITIVE GUARD, which the fix for (a) needed and which the
-# shipped off-side patterns would also have failed. Every one of these documents
-# states BOTH polarities in one sentence; a greedy list span crosses the other
-# polarity word and reports "says true for stg" about a sentence that says
-# exactly the opposite. 18 such findings appeared the moment the on-side was
-# completed. This case is the CORRECT sentence and must stay GREEN -- it is the
-# only thing standing between the guard and a wall of false findings.
+# (a-on) THE ON-POLARITY LIST DIRECTION, exercised permanently. The guard reads
+# `bad = TRUE_CLAIMS if not shipped` -- so to keep TRUE_CLAIMS live we need a gate
+# that ships `false` in the fixture the guard reads. Patch the FIXTURE's OWN
+# values.yaml (a throwaway temp copy, never the shipped chart) to flip
+# narrowEdgeuserByEnv.{stg,prod} back to false, then a doc claiming `true` for
+# stg/prod is a genuine over-claim against that fixture and must redden -- forever,
+# regardless of what the real chart ships (@saadqbal / @cursor Bugbot on this PR).
+D="$TMP/onlist"; mkfixture "$D"
+python3 - "$D/client/values.yaml" <<'PY2'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+m = re.search(r"narrowEdgeuserByEnv:\n(?:  \w+: \w+\n)+", s)
+assert m, "fixture lost the narrowEdgeuserByEnv block"
+block = m.group(0)
+patched = block.replace("  stg: true\n", "  stg: false\n").replace(
+    "  prod: true\n", "  prod: false\n")
+assert patched.count(": false\n") >= 2, "expected stg+prod to flip to false in the fixture"
+open(p, "w").write(s[: m.start()] + patched + s[m.end() :])
+PY2
+python3 - "$D/client/MIGRATION.md" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
+assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(
+    old,
+    "`rotateMysqlRootByEnv` were added in `1.9.71`; `narrowEdgeuserByEnv` is `true` for `stg` "
+    "and `prod`, so those fleets always narrow."))
+PY2
+run_case "an ON-polarity claim in LIST form is caught (fixture ships stg/prod false)" 1   "MIGRATION.md" "$D"
+
+# (c) THE FALSE-POSITIVE GUARD: a CORRECT claim must stay GREEN. Now that every
+# gate ships true for every env, the correct claim is the all-true LIST form; the
+# guard must read it as agreement, not misfire on the list span. (Before the
+# rollout completed this case stated BOTH polarities in one sentence -- `true` for
+# dev, `false` for stg/prod -- to prove a greedy list span did not cross the other
+# polarity word and mis-report it; that mixed sentence is no longer a correct
+# statement of any real gate, so the check is now the all-true claim. It is still
+# the thing standing between the guard and a wall of false findings.)
 D="$TMP/mixed"; mkfixture "$D"
 python3 - "$D/client/MIGRATION.md" <<'PY2'
 import sys
@@ -221,10 +259,10 @@ old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
 assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
     old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`.\n\n`narrowEdgeuserByEnv` is `true` for `dev` and "
-    "`false` for `stg` and `prod`, which is what the chart ships.\n\n"))
+    "`rotateMysqlRootByEnv` were added in `1.9.71`.\n\n`narrowEdgeuserByEnv` is `true` for `dev`, `stg` "
+    "and `prod`, which is what the chart ships.\n\n"))
 PY2
-run_case "a sentence stating BOTH polarities correctly is NOT a finding" 0   "no document contradicts" "$D"
+run_case "a correct all-true LIST claim is NOT a finding" 0   "no document contradicts" "$D"
 
 # Re-established here rather than relying on the `$D` set above: the cases
 # inserted between that setup and this assertion silently repointed `$D`, and

@@ -254,7 +254,11 @@ render_host_audit() {
   echo -e "  ${BOLD}Host check${RESET}"
 
   if [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
-    local ver; ver="$(docker version --format '{{.Server.Version}}' 2>/dev/null)"
+    # BOUNDED (client#984): `docker version` reports the SERVER version, so it
+    # talks to the daemon and blocks on a wedged one exactly like `docker info`.
+    # This renders the host-audit panel, so an unbounded read froze the panel that
+    # exists to tell the operator what is wrong. Empty falls back to "(running)".
+    local ver; ver="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker version --format '{{.Server.Version}}' 2>/dev/null)" || ver=""
     _audit_row "Container runtime" "Docker ${ver:-(running)} — docker info OK" ok
   else
     _audit_row "Container runtime" "none usable as this user" note
