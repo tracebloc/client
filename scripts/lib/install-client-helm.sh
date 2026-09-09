@@ -2261,7 +2261,7 @@ _adopt_orphaned_gpu_device_plugin() {
          return 0 ;;
     esac
   fi
-  log "Adopting pre-existing GPU device plugin ${ds} into the Helm release (client#564 migration)"
+  log "Adopting pre-existing GPU device plugin ${ds} into the Helm release (migrating from the standalone install)"
   # Adoption must actually succeed — a swallowed label/annotate failure leaves an
   # unowned DS that collides with the release. If it fails, remove the orphan so
   # the chart recreates a clean Helm-owned copy (the plugin is stateless; a brief

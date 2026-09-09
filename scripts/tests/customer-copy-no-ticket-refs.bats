@@ -100,6 +100,83 @@ plant() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
+# --- review round (client#1020): token shapes, comment stripping, derivation -----
+
+@test "mutation: a cross-repo identifier (client#<n>, .github#<n>) is copy the customer cannot open" {
+  plant scripts/lib/cluster.sh 'warn "planted cross-repo (client#564 migration)"'
+  plant scripts/lib/cluster.sh 'warn "planted dotted repo (.github#306)"'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"client#564 migration"* ]] || return 1
+  [[ "$output" == *".github#306"* ]] || return 1
+}
+
+@test "mutation: the org's RFC-<AREA>-<nnnn> form is caught, not only RFC-<nnnn>" {
+  plant scripts/lib/cluster.sh 'warn "planted alpha rfc (RFC-BACKEND-0007 D1)"'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"RFC-BACKEND-0007"* ]] || return 1
+}
+
+@test "shell parameter expansion with a # is not an identifier" {
+  plant scripts/lib/cluster.sh 'warn "trimmed ${x#0} of ${#arr[@]} items, argc $#"'
+  run run_guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a token in a trailing comment that contains an apostrophe is NOT flagged" {
+  plant scripts/lib/cluster.sh 'warn "clean visible text"  # we don'"'"'t ship backend#5 anymore'
+  run run_guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a # inside a quoted string is not a comment: the token after it is still flagged" {
+  plant scripts/lib/cluster.sh 'warn "issue #5 is fixed, see backend#7"'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"backend#7"* ]] || return 1
+}
+
+@test "derivation: a helper whose closing brace is indented is still classified" {
+  printf 'shout_indented() {\n    echo "$*"\n    }\nafter_indented() {\n  echo "$*"\n}\n' >> "$WORK/scripts/lib/cluster.sh"
+  plant scripts/lib/cluster.sh 'after_indented "planted after an indented close (backend#8)"'
+  run run_guard "$WORK" --print-vocab bash
+  [[ "$output" == *"shout_indented"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"after_indented"* ]] || { echo "$output"; return 1; }
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"planted after an indented close (backend#8)"* ]] || return 1
+}
+
+@test "derivation: a definition with its brace on the next line is classified" {
+  printf 'shout_nextline()\n{\n  echo "$*"\n}\n' >> "$WORK/scripts/lib/cluster.sh"
+  run run_guard "$WORK" --print-vocab bash
+  [[ "$output" == *"shout_nextline"* ]] || { echo "$output"; return 1; }
+}
+
+@test "derivation: a here-document with unbalanced braces inside a helper does not break the walk" {
+  printf 'banner_heredoc() {\n  cat <<EOF\n  { this brace never closes\nEOF\n  echo "$*"\n}\nafter_heredoc() { echo "$*"; }\n' >> "$WORK/scripts/lib/cluster.sh"
+  run run_guard "$WORK" --print-vocab bash
+  [[ "$output" == *"banner_heredoc"* && "$output" == *"after_heredoc"* ]] || { echo "$output"; return 1; }
+}
+
+@test "fail closed: a helper whose braces never balance is a guard error, not a shorter vocabulary" {
+  printf 'broken_open() {\n  echo "never closed"\n' >> "$WORK/scripts/lib/cluster.sh"
+  grep -q '^broken_open() {' "$WORK/scripts/lib/cluster.sh" || return 1   # anchor applied
+  run run_guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"broken_open"*"still open at end of file"* ]] || { echo "$output"; return 1; }
+}
+
+@test "derivation: an echo that lives only in a comment does not make a helper an emitter" {
+  printf 'quiet_helper() {\n  # this used to echo the value\n  return 0\n}\n' >> "$WORK/scripts/lib/cluster.sh"
+  plant scripts/lib/cluster.sh 'quiet_helper "not copy (backend#9)"'
+  run run_guard "$WORK" --print-vocab bash
+  [[ "$output" != *"quiet_helper"* ]] || { echo "$output"; return 1; }
+  run run_guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "mutation: the count names every offender, not just the first" {
   plant scripts/lib/cluster.sh 'warn "planted one (backend#1)"'
   plant scripts/lib/probe.sh 'hint "planted two (RFC-9902)"'
