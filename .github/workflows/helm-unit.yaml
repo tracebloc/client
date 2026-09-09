@@ -41,12 +41,12 @@ name: Helm unit tests
 
 on:
   push:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     paths:
       - 'client/**'
       - '.github/workflows/helm-unit.yaml'
   pull_request:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     # `edited` closes a THIRD trigger gap, alongside the two paths reasons in the
     # header. GitHub's default pull_request types are [opened, synchronize,
     # reopened] -- a base-branch change (a RETARGET) fires only `edited`, which

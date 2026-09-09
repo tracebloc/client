@@ -21,35 +21,43 @@ name: E2E auth-proxy
 # `Source-of-truth drift` made out of installer-tests.yaml's old `static` job
 # (see drift-checks.yaml).
 #
-# NO `paths:` ON pull_request, deliberately. This is a candidate required status
-# check on `staging` and `main`; a required check that is path-filtered is
-# unmergeable-forever the moment a PR touches nothing under the filter — a
-# promotion PR whose batch happens not to touch scripts/, a backmerge, the hotfix
-# lane. So on pull_request it always runs and always reports. (drift-checks.yaml's
-# header spells out the identical hazard, and names the PRs it once stuck.)
+# `paths:` ON pull_request TOO, since 2026-09-09 — the same filter `push` has.
+# The paragraph above is still why this is its own file: a check that is to
+# BECOME required must be able to report on every PR, and a paths filter on a
+# REQUIRED context holds any PR that touches nothing under it at "Expected —
+# waiting for status to be reported" forever (a promotion batch that happens not
+# to touch scripts/, a backmerge, the hotfix lane; drift-checks.yaml's header
+# names the PRs it once stuck). That hazard exists only once the context IS
+# required, and `E2E auth-proxy (squid)` is required on no branch — read
+#   gh api repos/tracebloc/client/branches/<b>/protection/required_status_checks
+# for develop, staging and main before touching this block. Unarmed, running
+# it on every docs-only or workflow-only PR bought nothing, so it is scoped.
 #
-# `push` KEEPS a paths filter: pushes are not gated by required checks, so
-# path-scoping the post-merge signal is free and correct.
+# ARMING PRE-CONDITION — two halves that move together. Whoever makes this
+# check required MUST, in the same PR, delete the `paths:` under pull_request
+# and add `edited` to its `types:` (a retarget fires only `edited`), or the
+# first PR outside the filter is unmergeable. Arm it on `staging` + `main` (the
+# hop this protects), not on `develop` where the same blip would tax every PR,
+# and only after a green-watch window per the "arm while green" rule
+# (CLAUDE.md). This workflow does NOT make the check required — that is a
+# branch-protection setting. See backend#2350 for the extraction.
 #
-# COST — unlike installer-tests.yaml's 9-distro docker-in-docker matrix this is a
-# SINGLE ubuntu-latest job (~90s k3d), so "runs on every PR to these branches" is
-# one run, not the matrix. That matrix cost is the objection that kept it
-# path-filtered inside installer-tests; it does not apply once the job stands
-# alone. If per-PR cost ever bites, the lever is to scope pull_request to the
-# gating branches only ([main, staging]) and lean on the push signal for develop.
-#
-# This workflow does NOT make the check required — that is a branch-protection
-# setting, armed only after a green-watch window per the "arm while green" rule
-# (CLAUDE.md). Arm it on `staging` + `main` (the hop this protects), not on
-# `develop` where the same blip would tax every PR. See backend#2350.
+# COST — a single ubuntu-latest job (52-100 s measured, median 65 s). The filter
+# drops it from PRs that touch neither scripts/ nor this file; the weekly cron
+# and the push signal on the gated branches are unchanged.
 on:
   push:
-    branches: [main, staging, develop, openshift]
+    branches: [main, staging, develop]
     paths:
       - 'scripts/**'
       - '.github/workflows/e2e-auth-proxy.yaml'
   pull_request:
-    branches: [main, staging, develop, openshift]
+    branches: [main, staging, develop]
+    # Same filter as `push` — see the header for why, and for what MUST change
+    # here before this context is ever made a required check.
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/e2e-auth-proxy.yaml'
   schedule:
     # Mondays 03:00 UTC — the same cadence e2e-proxy already ran on via
     # installer-tests.yaml's cron; kept here so extracting the job does not drop
