@@ -145,10 +145,22 @@ PREV="$(helm search repo "${REPO_NAME}/client" -o yaml \
 LOCAL_VERSION="$(awk '/^version:/ {print $2; exit}' "$CHART_DIR/Chart.yaml")"
 echo "   published: $PREV   local working tree: $LOCAL_VERSION"
 
+# Seed the baseline as EXPLICITLY un-rotated (backend#3384). rotateMysqlRootByEnv
+# now defaults prod=true (epic backend#947 — retire edgeuser, rotate root fleet-
+# wide), and an unset CLIENT_ENV resolves to prod (tracebloc.clientEnv), so a
+# fresh install is otherwise BORN ROTATED: bakedRootRotationOn's fresh-install arm
+# (no datadir yet) fires, the ByEnv default resolves on, and secrets.yaml mints
+# MYSQL_ROOT_PASSWORD. The top-level rotateMysqlRoot operator override wins over
+# the ByEnv default (tracebloc.rotateMysqlRoot short-circuits before the ByEnv/
+# bakedRootRotationOn path), so =false forces rotation off, no password is minted,
+# and no marker is laid down — the un-rotated starting state the backend#2879
+# guard precondition below ([ -z MYSQL_ROOT_PASSWORD ]) depends on. Paths from the
+# ack step onward turn rotation on explicitly to exercise the born-rotated edges.
 helm install "$NS" "${REPO_NAME}/client" --version "$PREV" \
   --namespace "$NS" --create-namespace \
   --set clientId=ci-e2e-upgrade \
   --set clientPassword=ci-e2e-upgrade \
+  --set rotateMysqlRoot=false \
   --set storageClass.provisioner=rancher.io/local-path
 
 # The baseline (published) release's computed prod-ingestor pin, if any. This
@@ -231,9 +243,20 @@ echo "── isolate path 2 from path 1's --reuse-values contamination (#459) �
 # hold from this step, and a --reset-then-reuse-values → --reuse-values regression would
 # slip through (computed values would still carry the local pin). Resetting to the baseline
 # keeps path 2 a genuine published→local upgrade that MUST pull the new defaults (#459 Bugbot).
+# Re-establish the SAME explicitly un-rotated baseline as the install above
+# (backend#3384). --reset-values discards the install-time rotateMysqlRoot=false,
+# so re-set it here. On the current chart the existing (un-rotated) datadir would
+# keep the ByEnv default gated off anyway — bakedRootRotationOn sees the PVC with
+# no marker and no baked root — but re-setting the override makes this re-based
+# baseline DETERMINISTICALLY un-rotated for paths 2-4 (they inherit it via
+# --reset-then-reuse-values) regardless of the published $PREV era, rather than
+# un-rotated only because that gate happens to hold. Path 5's --reset-values
+# discards this override and DOES rely on the gate resolving OFF — see its NOTE
+# below; the precondition holds because the whole window stays marker-free.
 helm upgrade "$NS" "${REPO_NAME}/client" --version "$PREV" --namespace "$NS" --reset-values \
   --set clientId=ci-e2e-upgrade \
   --set clientPassword=ci-e2e-upgrade \
+  --set rotateMysqlRoot=false \
   --set storageClass.provisioner=rancher.io/local-path
 # Verify the contamination is actually gone: `helm get values` WITHOUT --all reports only
 # USER-SUPPLIED values, so a chart-default key like images.ingestor.prodDigest showing up
@@ -326,6 +349,15 @@ echo "── path 5: client credentials resolve from the existing Secret (backen
 #  afterwards, the lookup is the only thing that could have supplied them — helm
 #  has nothing left to replay. That is what makes this an assertion about tier 2
 #  rather than about --reuse-values.
+#
+#  NOTE (backend#3384): unlike the baseline install and the isolate reset above,
+#  this --reset-values is DELIBERATELY left without --set rotateMysqlRoot=false.
+#  --reset-values drops rotation to the LOCAL chart's prod ByEnv default, and on
+#  this existing un-rotated datadir tracebloc.bakedRootRotationOn resolves it OFF
+#  (PVC present, no marker, no baked root) — so the Secret stays free of
+#  MYSQL_ROOT_PASSWORD and the backend#2879 precondition below still holds without
+#  a flag here. Do NOT add one: it would inject a stray override into this
+#  deliberate "no user values supplied" tier-2 assertion.
 secret_key() {   # $1 = key name -> decoded value from the release Secret
   kubectl -n "$NS" get secret "${NS}-secrets" -o "jsonpath={.data.$1}" 2>/dev/null | base64 -d
 }
@@ -367,7 +399,9 @@ kubectl -n "$NS" patch secret "${NS}-secrets" --type merge \
 [ "$(secret_key CLIENT_ID)" = "ci-e2e-upgrade" ] || fail "CLIENT_ID not restored after the empty-key check"
 
 # ── backend#2879: the existing-datadir root-rotation guard ───────────────────
-#  This release was installed with rotation OFF (prod default), so its Secret has
+#  This release was installed with rotation EXPLICITLY off (--set
+#  rotateMysqlRoot=false at the baseline — the prod ByEnv default is now ON, so a
+#  fresh install would otherwise be born rotated; backend#3384), so its Secret has
 #  no MYSQL_ROOT_PASSWORD and `mysql-pvc` already exists — the exact "datadir
 #  predates the rotation" state the guard refuses. Turning the gate on would mint
 #  a new root password the live database was never told about (the entrypoint
