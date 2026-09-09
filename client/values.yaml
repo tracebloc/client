@@ -1720,7 +1720,7 @@ autoUpgrade:
 #     repo@digest for byte-identical content would roll every workload —
 #     including the DaemonSet on every node — for nothing. The NEXT tick,
 #     seeing the digest recorded but the workload still on repo:tag, pins
-#     it (backend#199) — so a fresh edge becomes reproducible ~one interval
+#     it (client-runtime#199) — so a fresh edge becomes reproducible ~one interval
 #     post-install, not at the next upstream release. Restart-safe offline
 #     throughout.
 #   - Idle-cheap: when the recorded digest matches today's digest AND the

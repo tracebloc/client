@@ -2,7 +2,7 @@
 # image-refresh RE-PINS the digest when a helm re-render reverted the workload
 # to `repo:tag`, instead of no-op'ing off the annotation alone.
 #
-# backend#199. `recorded == latest` proves the REGISTRY digest has not moved; it
+# client-runtime#199. `recorded == latest` proves the REGISTRY digest has not moved; it
 # does NOT prove the workload is running it. `helm upgrade --reset-then-reuse-values`
 # (the fleet auto-upgrade) re-renders the Deployment back to `repo:tag` and discards
 # an earlier `set image repo@digest` pin -- and on a node whose `:tag` layer is
@@ -10,7 +10,7 @@
 # loop reads each workload's LIVE image and re-pins whenever it is off the digest.
 #
 # These assert BEHAVIOUR, not text presence: the earlier helm-unittest checks that
-# `workload_image_for_repo`/`have=`/`proxy_off_digest` merely APPEAR in the script
+# `workload_image_for_repo`/`have=`/`proxy_on_digest` merely APPEAR in the script
 # still pass if the comparison is inverted. This extracts the shipped branch from
 # the RENDERED chart and drives it with the registry + live-workload reads stubbed,
 # so an inverted comparison reddens.
@@ -97,7 +97,12 @@ annotate_args=""
 jm_set_args=""
 rp_set_args=""
 rm_set_args=""
+RELEASE_NAMESPACE="tracebloc"
+DEPLOYMENT_NAME="jobs-manager"
+ATTEMPT_KEY="tracebloc.io/refresh-attempt"
+FLAP_KEY="tracebloc.io/refresh-flap-detected"
 log() { printf '%s\n' "\$*"; }
+kubectl() { printf 'KUBECTL:%s\n' "\$*"; }
 workload_image_for_repo() { [ -n "\$STUB_API" ] && printf '%s' "\$STUB_API"; }
 requests_proxy_image() { [ -n "\$STUB_PROXY" ] && printf '%s' "\$STUB_PROXY"; }
 for _once in 1; do
@@ -162,6 +167,34 @@ EOF
   [[ "$output" == *"; no-op"* ]] || return 1
   [[ "$output" == *"RESTART:0"* ]] || return 1
   [[ "$output" != *"unfinished re-image"* ]] || return 1
+}
+
+@test "a LATCHED tick still SURFACES the stopped refresh (WARN + FLAP_KEY), not a bare no-op" {
+  # With the `< MAX` gate a latched tick keeps restart_needed=0 and never enters
+  # the downstream flap guard -- the only other writer of FLAP_KEY and the MANUAL
+  # ATTENTION WARN. So refresh is dead for ALL control-plane images while the
+  # CronJob stays green, and #1964 forbids "images did not update" being
+  # inferable only from the Job's colour. The latched arm must itself emit the
+  # WARN naming the refresh-attempt clear and annotate FLAP_KEY before the no-op
+  # (@shujaatTracebloc / @LukasWodka / @saadqbal on #1008). MAX is 3.
+  run run_branch "docker.io/tracebloc/jobs-manager@sha256:aaa" \
+                 "docker.io/tracebloc/jobs-manager@sha256:aaa" "0" "3"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"FLAP LATCHED"* ]] || return 1
+  [[ "$output" == *"MANUAL ATTENTION NEEDED"* ]] || return 1
+  [[ "$output" == *"clear the tracebloc.io/refresh-attempt annotation"* ]] || return 1
+  [[ "$output" == *"KUBECTL:annotate deployment"*"tracebloc.io/refresh-flap-detected=3"* ]] || return 1
+}
+
+@test "a NON-latched no-op (pending<MAX) stays silent -- no FLAP_KEY, no WARN" {
+  # The surface-the-latch arm must fire ONLY at pending>=MAX; a clean on-digest
+  # tick (pending=0) and a bounded-attempt tick must not annotate FLAP_KEY.
+  run run_branch "docker.io/tracebloc/jobs-manager@sha256:aaa" \
+                 "docker.io/tracebloc/jobs-manager@sha256:aaa" "0" "0"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"; no-op"* ]] || return 1
+  [[ "$output" != *"FLAP LATCHED"* ]] || return 1
+  [[ "$output" != *"KUBECTL:"* ]] || return 1
 }
 
 @test "api on digest but proxy reverted re-pins the PROXY, not the api" {

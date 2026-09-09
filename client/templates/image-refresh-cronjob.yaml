@@ -54,7 +54,7 @@ data:
     #   in the same tick); it does not detect and repair skew that predates
     #   it, because it compares registry-vs-annotation, never pod-vs-pod.
     #
-    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (backend#199).
+    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (client-runtime#199).
     # `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade path)
     # re-renders the templates, which write `repo:tag` and so revert an earlier
     # `set image` pin. `recorded == latest` no longer means no-op: the loop reads
@@ -99,7 +99,7 @@ data:
     # change, therefore a rollout, for byte-identical content, and for the
     # resource-monitor DaemonSet that is a rollout across every node. So the
     # first tick only RECORDS. The NEXT tick, seeing `recorded == latest` but the
-    # workload still on `:tag`, pins the digest (backend#199) — so a fresh edge
+    # workload still on `:tag`, pins the digest (client-runtime#199) — so a fresh edge
     # becomes reproducible ~one interval post-install, NOT "at the next upstream
     # release". Between the two it is still restart-safe offline (IfNotPresent).
     #
@@ -320,7 +320,7 @@ data:
 
     # The image reference the LIVE workload currently runs for $repo's primary
     # container. Used to detect when `helm upgrade --reset-then-reuse-values`
-    # (the hourly auto-upgrade) has re-rendered the workload back to the
+    # (the auto-upgrade) has re-rendered the workload back to the
     # chart's `repo:tag` and so DISCARDED an earlier `set image repo@digest`
     # pin. That revert is invisible to the digest comparison below -- the
     # annotation still equals the registry digest, so `recorded == latest`
@@ -476,7 +476,7 @@ data:
     rp_set_args=""
     rm_set_args=""
 
-    # An UNFINISHED re-image attempt (backend#199, Bugbot High on #1008). The
+    # An UNFINISHED re-image attempt (client-runtime#199, Bugbot High on #1008). The
     # restart block below increments ATTEMPT_KEY BEFORE the rollout and only
     # resets it on a settled one; a rollout that times out exits the tick under
     # set -e with the counter still raised. `kubectl set image` has by then
@@ -611,7 +611,7 @@ data:
       if [ "$recorded" = "$latest" ]; then
         # The registry digest has not moved since we recorded it -- but that
         # alone does NOT prove the workload is running it. A `helm upgrade
-        # --reset-then-reuse-values` (the hourly auto-upgrade) re-renders the
+        # --reset-then-reuse-values` (the auto-upgrade) re-renders the
         # Deployment back to `repo:tag` and discards our `set image repo@digest`
         # pin; with `recorded == latest` this used to no-op, leaving the workload
         # on the bare tag until the NEXT registry publish -- and on a node whose
@@ -692,6 +692,20 @@ data:
             # workload pays only one fast `rollout status`.
             log "  workload spec is on the pinned digest, but ATTEMPT_KEY=${pending_attempt} marks an unfinished re-image (a rollout that never settled) -- re-running the rollout to resolve it or surface it via the flap guard"
           else
+            # Latched on-digest: the spec is on the pinned digest but a prior
+            # re-image never reset ATTEMPT_KEY, and the `< MAX` gate above now
+            # keeps restart_needed=0 so the flap guard below (the only other
+            # writer of FLAP_KEY / the MANUAL ATTENTION WARN) never runs on this
+            # tick. Surface the latch HERE, mirroring that guard, so a
+            # stopped-and-silent refresh is never inferable only from the
+            # CronJob's green (#1964): without this the tick would log a bare
+            # "no-op" on the exact tick refresh is dead for ALL control-plane
+            # images (@shujaatTracebloc / @LukasWodka / @saadqbal on #1008).
+            if [ "$pending_attempt" -ge "$MAX_REFRESH_ATTEMPTS" ]; then
+              log "  WARN: workload is on the pinned digest but ${ATTEMPT_KEY}=${pending_attempt} (>= MAX_REFRESH_ATTEMPTS=${MAX_REFRESH_ATTEMPTS}) -- FLAP LATCHED: image refresh is STOPPED for ALL control-plane images and does not auto-resume. MANUAL ATTENTION NEEDED: clear the ${ATTEMPT_KEY} annotation on deployment/${DEPLOYMENT_NAME} to re-arm refresh."
+              kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+                "${FLAP_KEY}=${pending_attempt}" --overwrite --request-timeout=15s
+            fi
             log "  digest unchanged and workload already on the pinned digest; no-op"
             continue
           fi
