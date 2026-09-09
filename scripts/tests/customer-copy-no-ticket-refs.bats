@@ -77,6 +77,13 @@ plant() {
   [[ "$output" == *"planted in a group (RFC-9901)"* ]] || return 1
 }
 
+@test "mutation: an emitter on a one-line case arm is copy too" {
+  plant scripts/lib/cluster.sh 'case "$x" in 2) warn "planted on a case arm (backend#11)";; esac'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"planted on a case arm (backend#11)"* ]] || return 1
+}
+
 @test "mutation: an emitter after then/else on one line is copy too" {
   plant scripts/lib/cluster.sh 'if [ -z "$x" ]; then warn "planted after then (backend#2)"; else warn "ok"; fi'
   run run_guard

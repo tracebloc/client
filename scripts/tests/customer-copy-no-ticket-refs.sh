@@ -195,7 +195,9 @@ alt() { printf '%s\n' "$@" | sed 's/[][\.*^$]/\\&/g' | paste -sd'|' -; }
 # is then looked for on the code part of the WHOLE line: a token in an earlier
 # command on the same line as an emitter is flagged too, which errs towards a
 # false positive over a missed customer-visible string.
-CMD_START='(^|[|&;{(]|(^|[[:space:]])(then|else|do))[[:space:]]*'
+# `)` too: a one-line case arm (`pat) info "…"`, `2) warn "…"`) starts a command
+# right after its pattern (Bugbot on client#1020, second round).
+CMD_START='(^|[|&;{()]|(^|[[:space:]])(then|else|do))[[:space:]]*'
 # shellcheck disable=SC2086
 bash_line_re="${CMD_START}($(alt $bash_vocab))([[:space:]]|$)"
 # shellcheck disable=SC2086

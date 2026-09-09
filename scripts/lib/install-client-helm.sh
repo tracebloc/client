@@ -2109,7 +2109,7 @@ _resolve_mysql_engine() {
   case "$reason" in
     explicit) log "MySQL engine: ${engine} (explicit TB_MYSQL_ENGINE)" ;;
     sticky)   log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)" ;;
-    fresh)    log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine, backend#723)" ;;
+    fresh)    log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine)" ;;
   esac
 }
 
