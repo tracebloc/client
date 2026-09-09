@@ -63,6 +63,43 @@ plant() {
   [[ "$output" == *"scripts/install.ps1:"*"RFC-9901"* ]] || { echo "$output"; return 1; }
 }
 
+@test "mutation: an emitter after || is copy too (compound error line)" {
+  plant scripts/lib/cluster.sh 'do_thing || error "planted after or (backend#1)"'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"scripts/lib/cluster.sh:"*"planted after or (backend#1)"* ]] || return 1
+}
+
+@test "mutation: an emitter inside || { …; } is copy too" {
+  plant scripts/lib/cluster.sh 'do_thing || { echo "[ERROR] planted in a group (RFC-9901)" >&2; exit 1; }'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"planted in a group (RFC-9901)"* ]] || return 1
+}
+
+@test "mutation: an emitter after then/else on one line is copy too" {
+  plant scripts/lib/cluster.sh 'if [ -z "$x" ]; then warn "planted after then (backend#2)"; else warn "ok"; fi'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"planted after then (backend#2)"* ]] || return 1
+}
+
+@test "mutation: a PowerShell emitter inside a one-line if block is copy too" {
+  plant scripts/install-k8s.ps1 'if (-not $ok) { Write-Host "planted in a block (RFC-9903)"; exit 1 }'
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"planted in a block (RFC-9903)"* ]] || return 1
+}
+
+@test "an emitter name that is only an argument or a substring is NOT a command start" {
+  # `myecho` is not `echo`; `some_unknown_cmd` emits nothing and its argument
+  # merely mentions `warn`. Neither line starts a command from the vocabulary.
+  plant scripts/lib/cluster.sh 'myecho "not copy (backend#3)"'
+  plant scripts/lib/cluster.sh 'some_unknown_cmd "the word warn appears here (backend#4)"'
+  run run_guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "mutation: the count names every offender, not just the first" {
   plant scripts/lib/cluster.sh 'warn "planted one (backend#1)"'
   plant scripts/lib/probe.sh 'hint "planted two (RFC-9902)"'

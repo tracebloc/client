@@ -129,10 +129,19 @@ fi
 
 # ---- 3. the scan ------------------------------------------------------------------
 alt() { printf '%s\n' "$@" | sed 's/[][\.*^$]/\\&/g' | paste -sd'|' -; }
+# An emitter counts wherever a SIMPLE COMMAND starts, not only at column 0: house
+# error lines are often `… || error "…"`, `… || { echo "[ERROR] …"; exit 1; }`,
+# `if …; then warn "…"; fi` (Bugbot on client#1020). So the emitter may follow the
+# line start, a control operator (`||`, `&&`, `;`, `|`), an opening brace or
+# parenthesis, or one of the compound keywords `then`/`else`/`do`. The identifier
+# is then looked for on the WHOLE line (minus a trailing `# comment`): a token in
+# an earlier command on the same line as an emitter is flagged too, which errs
+# towards a false positive over a missed customer-visible string.
+CMD_START='(^|[|&;{(]|(^|[[:space:]])(then|else|do))[[:space:]]*'
 # shellcheck disable=SC2086
-bash_line_re="^[[:space:]]*($(alt $bash_vocab))([[:space:]]|$)"
+bash_line_re="${CMD_START}($(alt $bash_vocab))([[:space:]]|$)"
 # shellcheck disable=SC2086
-ps_line_re="^[[:space:]]*($(alt $ps_vocab))([[:space:]]|$)"
+ps_line_re="${CMD_START}($(alt $ps_vocab))([[:space:]]|$)"
 
 offenders=0
 for f in $shipped; do
