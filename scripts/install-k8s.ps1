@@ -947,7 +947,11 @@ function Get-KubeletReservationValues($Platform) {
              "TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_$key", "TB_KUBELET_EVICTION_MEM_MIB")
   $vals = @{}
   foreach ($n in $names) {
-    $v = Get-Variable -Name $n -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    # Dynamic lookup, no -Scope: when the installer runs as a script the block
+    # is in script scope; when Pester dot-sources it inside a BeforeAll it is
+    # not, and a -Scope Script read would come back empty and report a healthy
+    # embed as broken.
+    $v = Get-Variable -Name $n -ValueOnly -ErrorAction SilentlyContinue
     if ("$v" -notmatch '^[1-9]\d*$') {
       Log "kubelet reservation: $n is '$v', not a positive whole number -- the generated block is broken; run scripts/gen-node-reservation-embed.sh"
       return $null

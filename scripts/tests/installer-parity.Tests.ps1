@@ -133,7 +133,7 @@ Describe "Installer parity: the kubelet drop-in's reservation shape (backend#246
   BeforeAll {
     $script:KR = $script:Parity.kubelet_reservation
     $script:Measured = @()
-    $listVar = Get-Variable -Name $script:KR.measured_platforms_variable -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $listVar = Get-Variable -Name $script:KR.measured_platforms_variable -ValueOnly -ErrorAction SilentlyContinue
     if ($listVar) { $script:Measured = @("$listVar".Trim() -split '\s+' | Where-Object { $_ }) }
   }
 

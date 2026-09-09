@@ -9216,9 +9216,9 @@ Describe 'kubelet node reservation in the drop-in (backend#2460)' {
   It 'a measured platform writes kubeReserved / systemReserved / evictionHard from the embed, LF-only, no BOM' {
     if ($script:Measured.Count -eq 0) { Set-ItResult -Skipped -Because 'no platform has a measured record in this tree'; return }
     $plat = $script:Measured[0]; $key = $plat.ToUpper()
-    $cpu = Get-Variable -Name "TB_KUBELET_KUBE_RESERVED_CPU_MILLI_$key" -Scope Script -ValueOnly
-    $mem = Get-Variable -Name "TB_KUBELET_KUBE_RESERVED_MEM_MIB_$key" -Scope Script -ValueOnly
-    $sys = Get-Variable -Name "TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_$key" -Scope Script -ValueOnly
+    $cpu = Get-Variable -Name "TB_KUBELET_KUBE_RESERVED_CPU_MILLI_$key" -ValueOnly
+    $mem = Get-Variable -Name "TB_KUBELET_KUBE_RESERVED_MEM_MIB_$key" -ValueOnly
+    $sys = Get-Variable -Name "TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_$key" -ValueOnly
     $path = Join-Path $TestDrive "m/kubelet.yaml"
     (Write-KubeletConfig -Path $path -Platform $plat) | Should -Be $path
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -9255,19 +9255,17 @@ Describe 'kubelet node reservation in the drop-in (backend#2460)' {
   }
 
   It 'a measured platform whose embed is broken THROWS rather than writing `memory: Mi` (fail closed)' {
-    $saved = $TB_KUBELET_RESERVATION_PLATFORMS
-    try {
-      Set-Variable -Name TB_KUBELET_RESERVATION_PLATFORMS -Scope Script -Value 'broken'
-      Set-Variable -Name TB_KUBELET_KUBE_RESERVED_CPU_MILLI_BROKEN -Scope Script -Value 100
-      Set-Variable -Name TB_KUBELET_KUBE_RESERVED_MEM_MIB_BROKEN -Scope Script -Value ''
-      Set-Variable -Name TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_BROKEN -Scope Script -Value 1024
-      $path = Join-Path $TestDrive "b/kubelet.yaml"
-      { Write-KubeletConfig -Path $path -Platform 'broken' } | Should -Throw -ExpectedMessage '*cannot be read*'
-      Set-Variable -Name TB_KUBELET_KUBE_RESERVED_MEM_MIB_BROKEN -Scope Script -Value 0
-      { Write-KubeletConfig -Path $path -Platform 'broken' } | Should -Throw -ExpectedMessage '*cannot be read*'
-    } finally {
-      Set-Variable -Name TB_KUBELET_RESERVATION_PLATFORMS -Scope Script -Value $saved
-    }
+    # Set in THIS scope: the writer resolves the names by dynamic lookup, so the
+    # It block's variables shadow the dot-sourced block's for the call and
+    # vanish with the block -- nothing to restore.
+    $TB_KUBELET_RESERVATION_PLATFORMS = 'broken'
+    $TB_KUBELET_KUBE_RESERVED_CPU_MILLI_BROKEN = 100
+    $TB_KUBELET_KUBE_RESERVED_MEM_MIB_BROKEN = ''
+    $TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_BROKEN = 1024
+    $path = Join-Path $TestDrive "b/kubelet.yaml"
+    { Write-KubeletConfig -Path $path -Platform 'broken' } | Should -Throw -ExpectedMessage '*cannot be read*'
+    $TB_KUBELET_KUBE_RESERVED_MEM_MIB_BROKEN = 0
+    { Write-KubeletConfig -Path $path -Platform 'broken' } | Should -Throw -ExpectedMessage '*cannot be read*'
   }
 
   It 'New-K3dCluster writes the drop-in through Write-KubeletConfig and warns when the platform is unmeasured' {
