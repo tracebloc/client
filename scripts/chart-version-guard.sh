@@ -69,15 +69,17 @@ done
 
 # Does this path change what an install renders or validates?
 #
-# .helmignore in both charts excludes only editor/VCS junk, so everything else
-# in the chart dir is packaged. Only these paths change install behaviour:
+# .helmignore in both charts excludes editor/VCS junk plus the chart-root
+# tests/ and ci/ directories (scripts/check-chart-contents.sh holds the packaged
+# tarball to that), so everything else in the chart dir is packaged. Only these
+# paths change install behaviour:
 #   templates/**        rendered manifests
 #   values.yaml         defaults
 #   values.schema.json  Helm validates user values against the PACKAGED schema
 #   charts/**, crds/**  subcharts and CRDs (none today; covered pre-emptively so
 #                       adding one is not a fresh hole)
-# Deliberately NOT content: ci/** and tests/** (chart-testing inputs — packaged
-# but never rendered by an install) and *.md.
+# Deliberately NOT content: ci/** and tests/** (chart-testing inputs — no longer
+# packaged, and never rendered by an install) and *.md.
 is_chart_content() { # $1 = chart, $2 = path
   case "$2" in
     "$1"/templates/*|"$1"/charts/*|"$1"/crds/*|"$1"/values.yaml|"$1"/values.schema.json) return 0 ;;
