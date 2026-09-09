@@ -167,6 +167,25 @@ plant() {
   [[ "$output" == *"banner_heredoc"* && "$output" == *"after_heredoc"* ]] || { echo "$output"; return 1; }
 }
 
+@test "derivation: a QUOTED here-document (<<'X', <<\"X\", <<-'X') with unbalanced braces does not break the walk" {
+  printf "help_quoted() {\n  cat <<'HELP'\n  { this brace never closes, and neither does this one {\nHELP\n  echo \"\$*\"\n}\n" >> "$WORK/scripts/lib/cluster.sh"
+  printf 'help_dquoted() {\n  cat <<"HELP2"\n  } stray close\nHELP2\n  echo "$*"\n}\n' >> "$WORK/scripts/lib/cluster.sh"
+  printf "help_dash() {\n\tcat <<-'HELP3'\n\t{ indented\n\tHELP3\n\techo \"\$*\"\n}\nafter_quoted() { echo \"\$*\"; }\n" >> "$WORK/scripts/lib/cluster.sh"
+  run run_guard "$WORK" --print-vocab bash
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for fn in help_quoted help_dquoted help_dash after_quoted; do
+    [[ "$output" == *"$fn"* ]] || { echo "missing $fn"; echo "$output"; return 1; }
+  done
+}
+
+@test "mutation: an identifier inside a quoted here-document body (help text) is copy too" {
+  printf "help_planted() {\n  cat <<'HELP'\n  Usage: tracebloc install\n  See the migration notes (backend#12) before upgrading.\nHELP\n}\n" >> "$WORK/scripts/lib/cluster.sh"
+  grep -q 'migration notes (backend#12)' "$WORK/scripts/lib/cluster.sh" || return 1   # anchor applied
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"migration notes (backend#12)"* ]] || return 1
+}
+
 @test "fail closed: a helper whose braces never balance is a guard error, not a shorter vocabulary" {
   printf 'broken_open() {\n  echo "never closed"\n' >> "$WORK/scripts/lib/cluster.sh"
   grep -q '^broken_open() {' "$WORK/scripts/lib/cluster.sh" || return 1   # anchor applied

@@ -95,7 +95,7 @@ done
 derive_emitters() {
   local lang="$1" file="$2" known="${3:-}"
   awk -v LANG="$lang" -v FILE="$file" -v KNOWN="$known" '
-    function fail(msg) { printf("DERIVE ERROR %s:%d: %s\n", FILE, NR, msg) > "/dev/stderr"; exit 3 }
+    function fail(msg) { failed = 1; printf("DERIVE ERROR %s:%d: %s\n", FILE, NR, msg) > "/dev/stderr"; exit 3 }
     # Remove string CONTENTS and a trailing comment, keeping quote marks, so braces
     # and `#` inside strings/comments cannot move the depth or fake an emitter.
     function code_only(line,   out, i, c, q) {
@@ -130,11 +130,22 @@ derive_emitters() {
       }
       depth += count(code, "{") - count(code, "}")
       body = body "\n" code
-      if (code ~ /<<-?[\047"]?[A-Za-z_][A-Za-z0-9_]*/) { h = code; sub(/.*<<-?[\047"]?/, "", h); sub(/[^A-Za-z0-9_].*$/, "", h); heredoc = h }
+      # Here-document: the OPERATOR must be in code (not inside a string), but the
+      # delimiter is read from the RAW line, because code_only has already emptied
+      # a QUOTED delimiter (<<HELP written with quotes around HELP reads as two bare
+      # quote marks after stripping). Bugbot on client#1020, third round: print_help
+      # and the nested STORAGE / MYSQL84 blocks use the quoted spelling.
+      # `(^|[^<])` keeps a here-STRING (`<<< "$a"`, whose string strips to `""`) from
+      # reading as a quoted here-document -- _version_lt in common.sh tripped it.
+      if (code ~ /(^|[^<])<<-?[ \t]*([\047"]?[A-Za-z_]|[\047"][\047"])([^<]|$)/) {
+        h = line; sub(/.*<<-?[ \t]*/, "", h); q2 = substr(h, 1, 1)
+        if (q2 == "\047" || q2 == "\"") { h = substr(h, 2); sub(q2 ".*$", "", h) } else { sub(/[^A-Za-z0-9_].*$/, "", h) }
+        if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) heredoc = h; else fail("here-document with an unreadable delimiter in " name)
+      }
       if (LANG == "ps" && code ~ /@["\047][ \t]*$/) { heredoc = (code ~ /@"/) ? "\"@" : "\047@" }
       if (depth <= 0) { if (body ~ EMIT) print name; name = ""; body = "" }
     }
-    END { if (name != "") fail("function " name " (defined at line " defline ") is still open at end of file: braces do not balance, so every later helper would be hidden") }
+    END { if (failed) exit 3; if (name != "") fail("function " name " (defined at line " defline ") is still open at end of file: braces do not balance, so every later helper would be hidden") }
   ' "$file"
 }
 
@@ -226,6 +237,36 @@ strip_trailing_comment() {
   }'
 }
 
+# heredoc_body_lines FILE — print `NNN:<line>` for every line inside a bash
+# here-document. Operator detected on quote-stripped code (so a `<<` inside a
+# string does not count, and `<<<` here-strings are excluded); delimiter taken
+# from the raw line, quoted or not -- the same rule derive_emitters applies.
+heredoc_body_lines() {
+  awk '
+    function code_only(line,   out, i, c, q) {
+      out = ""; q = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (q != "") { if (c == q) { q = ""; out = out c } ; continue }
+        if (c == "\"" || c == "\047") { q = c; out = out c; continue }
+        if (c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t;]/)) break
+        out = out c
+      }
+      return out
+    }
+    BEGIN { heredoc = "" }
+    {
+      if (heredoc != "") { if ($0 ~ ("^[ \t]*" heredoc "[ \t]*$")) heredoc = ""; else printf("%d:%s\n", NR, $0); next }
+      code = code_only($0)
+      if (code ~ /(^|[^<])<<-?[ \t]*([\047"]?[A-Za-z_]|[\047"][\047"])([^<]|$)/) {
+        h = $0; sub(/.*<<-?[ \t]*/, "", h); q2 = substr(h, 1, 1)
+        if (q2 == "\047" || q2 == "\"") { h = substr(h, 2); sub(q2 ".*$", "", h) } else { sub(/[^A-Za-z0-9_].*$/, "", h) }
+        if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) heredoc = h
+      }
+    }
+  ' "$1"
+}
+
 offenders=0
 for f in $shipped; do
   case "$f" in
@@ -242,6 +283,13 @@ for f in $shipped; do
   stage1="$(mktemp)"; stage2="$(mktemp)"
   grep -nE "$line_re" "$ROOT/$f" >"$stage1"; rc=$?
   [ "$rc" -le 1 ] || { rm -f "$stage1" "$stage2"; guard_error "grep failed ($rc) selecting copy lines in $f"; }
+  # HERE-DOCUMENT BODIES ARE COPY TOO (bash only): `cat <<'HELP' … HELP` is how the
+  # installers print help and multi-line notices, and none of those lines starts
+  # with an emitter, so the grep above never sees them. Append every body line of
+  # every here-document (same operator/delimiter rule as the derivation).
+  case "$f" in *.sh)
+    heredoc_body_lines "$ROOT/$f" >>"$stage1" || { rm -f "$stage1" "$stage2"; guard_error "could not list here-document bodies in $f"; }
+  esac
   strip_trailing_comment <"$stage1" >"$stage2" || { rm -f "$stage1" "$stage2"; guard_error "comment stripping failed in $f"; }
   hits="$(grep -E "$TOKEN_RE" "$stage2")"; rc=$?
   rm -f "$stage1" "$stage2"
