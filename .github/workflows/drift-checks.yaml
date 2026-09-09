@@ -32,7 +32,7 @@ name: Drift checks
 # path-scoping there is free and correct.
 on:
   push:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     paths:
       - 'scripts/**'
       - 'client/**'
@@ -45,7 +45,7 @@ on:
       - '.github/workflows/build-k3s-cuda.yaml'
       - 'Makefile'
   pull_request:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     # `edited` so a RETARGET re-evaluates this required check. The default types
     # [opened, synchronize, reopened] omit it, so a PR retargeted onto a gated
     # base from a base this job never ran on would leave `Source-of-truth drift`

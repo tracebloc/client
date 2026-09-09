@@ -29,9 +29,9 @@ name: Standard checks
 
 on:
   push:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
   pull_request:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     # `edited` so a RETARGET re-evaluates these required checks. The default
     # types [opened, synchronize, reopened] omit it, so a PR retargeted onto a
     # gated base from a base these jobs never ran on would leave `Lint` /
