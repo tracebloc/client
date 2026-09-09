@@ -236,10 +236,15 @@ done | jq -s .)"
 # belongs in `--kubelet-arg=config=` (the #2634 mechanism) or in k3s's
 # `kubelet.conf.d/` -- a config-dir drop-in merges AFTER the --config file, so
 # whichever holds k3s's defaults wins over the other for the same map.
+#
+# The kubelet command line is captured whole and then sliced with awk -- never
+# piped into grep -m1: under errexit+pipefail an early-closing reader can SIGPIPE
+# its writer and fail the pipeline (the repo's early-close guard). NO COMMENTS
+# INSIDE the $( ) below: bash 3.2 (macOS) does not skip comment text while it
+# scans for the closing paren, so a backtick or apostrophe in one breaks the
+# parse of the whole file -- measured, the hard way, on this block.
 wiring="$(for node in $nodes; do
   confd="$(docker exec "$node" sh -c 'd=/var/lib/rancher/k3s/agent/etc/kubelet.conf.d; if [ -d "$d" ]; then for f in "$d"/*; do echo "=== $f"; cat "$f"; done; else echo "no kubelet.conf.d"; fi' 2>/dev/null || echo unreadable)"
-  # Capture-then-slice, never `| grep -m1`: under errexit+pipefail an early-closing
-  # reader can SIGPIPE its writer and fail the pipeline (the repo's early-close guard).
   cmdlines="$(docker exec "$node" sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < "$p/cmdline" 2>/dev/null; echo; done' 2>/dev/null || echo unreadable)"
   cmdline="$(awk '/--config/ && /kubelet/ {print; exit}' <<<"$cmdlines")"
   jq -cn --arg node "$node" --arg confd "$confd" --arg cmdline "$cmdline" '{node: $node, kubelet_conf_d: $confd, k3s_cmdline: $cmdline}'
