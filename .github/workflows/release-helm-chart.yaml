@@ -225,9 +225,12 @@ jobs:
           fi
           MERGE_INDEX="$MERGE_INDEX" OUT_INDEX=index.yaml \
             bash "$RUNNER_TEMP/publish-helm-index.sh"
-          # Move the new charts to the gh-pages root, alongside the historical
-          # ones, so their (root-relative) index URLs resolve for customers.
-          mv "$NEW_CHARTS_DIR"/*.tgz .
+          # COPY (not move) the new charts to the gh-pages root, alongside the
+          # historical ones, so their (root-relative) index URLs resolve for
+          # customers. They must ALSO stay in $NEW_CHARTS_DIR: the release-upload
+          # step below reads from there, because a root glob in this working dir
+          # matches every historical .tgz too (see that step).
+          cp "$NEW_CHARTS_DIR"/*.tgz .
           git add index.yaml client-*.tgz ingestor-*.tgz
           git status
           if git diff --staged --quiet; then
@@ -242,13 +245,23 @@ jobs:
         # github.ref / github.ref_name, which intermittently arrive empty on
         # release-triggered runs (actions/runner#2788, still open).
         # Attach BOTH chart tgzs so downloaders pinning a specific release
-        # tag can pull either chart's exact bytes from this release page.
+        # tag can pull either chart's exact bytes from this release page --
+        # and ONLY those two. The globs are scoped to the isolated download
+        # dir (the same `_new_charts` the Download step fills; it runs on
+        # stable AND pre-release paths, so the dir exists on both): on a
+        # stable release this step runs in the gh-pages checkout, whose root
+        # holds every historical .tgz, and a root-level `client-*.tgz` glob
+        # attached all of them to every release (63 tarballs on v1.9.107,
+        # zero downloads). fail_on_unmatched_files turns an empty glob into a
+        # red run instead of a release page with no charts on it.
+        # Guarded by scripts/tests/release-upload-scope.bats.
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
-            client-*.tgz
-            ingestor-*.tgz
+            _new_charts/client-*.tgz
+            _new_charts/ingestor-*.tgz
+          fail_on_unmatched_files: true
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
