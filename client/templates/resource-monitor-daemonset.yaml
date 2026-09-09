@@ -136,7 +136,7 @@ spec:
             entry). `dig` is not usable here — it rejects chartutil.Values.
           */}}
           {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
-          {{- /* client-runtime#199: seed the digest image-refresh last applied so a
+          {{- /* client-runtime#199: seed the digest image-refresh last observed so a
                  `helm upgrade` renders repo@digest, not the bare :tag (see
                  tracebloc.controlPlaneDigest). The last-refreshed-resource-monitor-digest
                  annotation lives on the jobs-manager Deployment in the release

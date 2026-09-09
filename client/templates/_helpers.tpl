@@ -480,14 +480,27 @@ true
   freezing — a frozen control plane with no signal is worse than a restart that
   needs the network.
 
+  #569 OFFLINE GUARANTEE — NARROWED as of 1.9.110 (#1013). IfNotPresent only
+  helps when the REFERENCE is cache-satisfiable. Until 1.9.110 a `helm upgrade`
+  re-rendered the bare `:tag`, which a node that had pulled that tag could always
+  satisfy from cache, so an offline restart ran the (possibly stale) cached
+  image. From 1.9.110 tracebloc.controlPlaneDigest can render `repo@<digest>`
+  seeded from the last-refreshed annotation (see its header), and because the
+  first-observation path RECORDS a digest without re-imaging, the rendered digest
+  may be one the node has never pulled. Online that is the fix working; OFFLINE
+  it turns "restarts on a stale image" into "cannot start" (ImagePullBackOff) for
+  that one digest. Two corollaries: a `global.imageRegistry` mirror is exempt
+  (branch 2 stays inert there → `:tag`), and a side-loaded k3d image is affected
+  because `k3d image import` stores a tag alias with no resolvable digest and a
+  local k3d install IS docker.io, so the mirror gate does not help it.
+
   Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
 */}}
 {{- define "tracebloc.controlPlanePullPolicy" -}}
 {{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
-{{- $ir := .root.Values.imageRefresh | default dict -}}
 {{- if .digest -}}
 IfNotPresent
-{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") (not $ir.suspend) -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
 IfNotPresent
 {{- else -}}
 Always
@@ -501,18 +514,34 @@ Always
     1. an operator's explicit values pin (`images.<name>.digest`) — wins,
        behaviour unchanged;
     2. else, when image-refresh is the update path (enabled AND the docker.io
-       mirror), the digest image-refresh last APPLIED, read from the
+       mirror), the digest image-refresh last OBSERVED, read from the
        jobs-manager Deployment's `tracebloc.io/last-refreshed-<annotationImage>-digest`
-       annotation via `lookup`. This is what makes a `helm upgrade` RENDER
-       `repo@digest` instead of reverting to the bare `:tag` and dropping
-       image-refresh's out-of-band `kubectl set image` pin — the revert that let
-       a stale-`:tag` node cache silently run an OLD control-plane image
-       (client-runtime#199). `lookup` returns empty during `helm template` /
-       `helm diff` / the FIRST install (no Deployment yet), so it degrades to
-       `""` → `:tag` there, which is correct: nothing is pinned yet and the
-       node's fresh tag pull is the right image.
+       annotation via `lookup`. ("Observed", not "applied": on the FIRST tick
+       image-refresh records the current digest WITHOUT `set image`, deliberately
+       — see the image-refresh CronJob header — so the annotation is what refresh
+       last saw, which is only the same as what it last applied once a real
+       refresh has run.) This is what makes a `helm upgrade` RENDER `repo@digest`
+       instead of reverting to the bare `:tag` and dropping image-refresh's
+       out-of-band `kubectl set image` pin — the revert that let a stale-`:tag`
+       node cache silently run an OLD control-plane image (client-runtime#199).
+       `lookup` returns empty during `helm template` / `helm diff` / the FIRST
+       install (no Deployment yet), so it degrades to `""` → `:tag` there, which
+       is correct: nothing is pinned yet and the node's fresh tag pull is the
+       right image.
     3. else `""` (bare `:tag`; `Always` via controlPlanePullPolicy is then the
        update path — the non-refresh / mirror edges #569 protects).
+
+  On `imageRefresh.suspend: true` the pin is KEPT, not dropped. suspend stops the
+  CronJob from POLLING; it does not un-pin (@LukasWodka on #1013). The knob is
+  used to FREEZE an edge during an incident, and `values.schema.json` promises it
+  "pause[s] without removing the resources" — un-pinning here would re-render
+  jobs-manager (Recreate), requests-proxy and the resource-monitor DaemonSet onto
+  the floating `:tag` + `Always`, three unplanned rollouts plus a downgrade to
+  whatever `:tag` points at now, which is the opposite of freezing. Keeping the
+  last-observed `@digest` freezes the edge on a real, previously-resolved image;
+  a newly joined node then pulls that frozen digest (a valid ref), not a missing
+  one, which still answers the newly-joined-node concern that first put a suspend
+  gate here (@shujaatTracebloc's earlier BLOCKING-2 on #1013, reversed here).
 
   The lookup targets ONLY the jobs-manager Deployment (where image-refresh writes
   every last-refreshed annotation) in the release namespace — a read the
@@ -525,10 +554,9 @@ Always
 */}}
 {{- define "tracebloc.controlPlaneDigest" -}}
 {{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
-{{- $ir := .root.Values.imageRefresh | default dict -}}
 {{- if .operatorDigest -}}
 {{- .operatorDigest -}}
-{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") (not $ir.suspend) -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
 {{- $dep := lookup "apps/v1" "Deployment" .root.Release.Namespace (printf "%s-jobs-manager" (include "tracebloc.fullname" .root)) -}}
 {{- if $dep -}}
 {{- $ann := index (($dep.metadata).annotations | default dict) (printf "tracebloc.io/last-refreshed-%s-digest" .annotationImage) | default "" -}}
@@ -540,9 +568,9 @@ Always
   unstartable ref helm cannot detect — the kubelet reports InvalidImageName
   while the apiserver accepts the spec. Require a full sha256 digest; anything
   else degrades to `""` → `:tag`, the safe fallback (@shujaatTracebloc on #1013).
-  `suspend` is honoured above: a suspended CronJob never runs, so its last
-  annotation is frozen and must NOT pin the render — a newly joined node would
-  otherwise pull a stale digest instead of the current tag.
+  `suspend` is deliberately NOT gated here: a suspended edge keeps rendering the
+  last-observed digest so `helm upgrade` freezes it in place rather than rolling
+  it onto the floating tag (see the header note).
 */}}
 {{- if regexMatch "^sha256:[a-f0-9]{64}$" $ann -}}
 {{- $ann -}}

@@ -42,19 +42,24 @@ data:
     # change its image ref either), so it only ever moved by accident.
     #
     # TWO KNOWN, BOUNDED LIMITATIONS of keeping the annotation (rather than the
-    # live pod spec) as the source of truth. Both are self-healing at the next
-    # upstream image change, which at the control plane's release cadence is
-    # days, and neither can break a running edge — the pods stay offline-safe
-    # throughout because IfNotPresent does not depend on any of this.
+    # live pod spec) as the source of truth — the FIRST now RESOLVED by #1013.
+    # Both are self-healing at the next upstream image change, which at the
+    # control plane's release cadence is days, and neither can break a running
+    # edge — the pods stay offline-safe throughout because IfNotPresent does not
+    # depend on any of this.
     #
-    #   1. HELM RE-RENDER. `helm upgrade --reset-then-reuse-values` (the fleet
-    #      auto-upgrade path) re-renders the templates, which write `repo:tag`
-    #      and so revert an earlier `set image` pin. This tick will NOT re-pin:
-    #      the annotation still records that digest, so `recorded == latest`
-    #      and the loop no-ops. The edge floats on the tag until the next
-    #      upstream release re-pins it. Note this only happens on a chart
-    #      VERSION bump — auto-upgrade compares versions and skips otherwise —
-    #      so it is not an hourly revert.
+    #   1. HELM RE-RENDER — RESOLVED as of chart 1.9.110 (#1013 /
+    #      client-runtime#199). `helm upgrade --reset-then-reuse-values` (the
+    #      fleet auto-upgrade path) re-renders the templates; BEFORE 1.9.110 they
+    #      wrote the bare `repo:tag` and so reverted an earlier `set image` pin,
+    #      and the edge floated on the tag until the next upstream release
+    #      re-pinned it. FROM 1.9.110 the control-plane image sites render
+    #      through `tracebloc.controlPlaneDigest`, which reads THIS annotation via
+    #      `lookup` and renders `repo@<last-refreshed digest>` — so a re-render
+    #      now PRESERVES the pin instead of dropping it. (Still only relevant on a
+    #      chart VERSION bump — auto-upgrade compares versions and skips
+    #      otherwise.) The one residue is the first-observation roll in the
+    #      first-tick contract below.
     #
     #   2. PRE-EXISTING SKEW. requests-proxy and jobs-manager may already be
     #      running different builds of the same image on an edge upgrading INTO
@@ -63,7 +68,7 @@ data:
     #      in the same tick); it does not detect and repair skew that predates
     #      it, because it compares registry-vs-annotation, never pod-vs-pod.
     #
-    # Fixing either properly means reconciling against each workload's LIVE
+    # Fixing the remaining one properly means reconciling against each workload's LIVE
     # container image instead of a shared annotation — a declarative reconcile,
     # which `set image` makes possible for the first time (`rollout restart`
     # was a blind action, which is why the annotation existed at all). That is
@@ -99,6 +104,19 @@ data:
     # digest change: still restart-safe offline (IfNotPresent), just not yet
     # reproducible. Offline-safety is what #569 is fixing; reproducibility
     # follows on the next upstream release.
+    #
+    # First-observation roll (chart ≥ 1.9.110, #1013). Once this tick has
+    # RECORDED D0 without re-imaging, the live spec still says `:tag` but the
+    # annotation now says `@D0`, so the NEXT chart bump renders `repo@D0`
+    # (tracebloc.controlPlaneDigest reads the annotation) and rolls jobs-manager
+    # (Recreate), requests-proxy and the resource-monitor DaemonSet ONCE, for
+    # byte-identical content. auto-upgrade runs that upgrade `--atomic --wait`
+    # (auto-upgrade-cronjob.yaml), so on a slow single-node edge the one-time
+    # roll can hit the timeout and roll back, then re-attempt identically on the
+    # next bump. This is the deliberate tradeoff for NOT `set image`-ing on the
+    # first tick; pinning on the first tick instead would move the same roll to
+    # install time for every edge. Also narrows #569's offline guarantee — see
+    # the note at controlPlanePullPolicy in _helpers.tpl.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure

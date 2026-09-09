@@ -245,6 +245,8 @@ Two things to know before you force:
 
 1. **`--force-conflicts` re-takes *every* field the chart renders that a non-Helm manager owns — not only `limits.cpu`.** Helm prints the full conflict list on the failed attempt; read it first. On a long-running fleet the list can include `image-refresh`'s pinned digests (`kubectl set image`); forcing reverts them to the chart's rendered image, and `image-refresh` re-pins on its next tick. That is recoverable but is a real, if brief, image churn — don't force blind.
 
+   **From chart 1.9.110 (#1013 / client-runtime#199) the `.image` conflict narrows.** The chart now renders the last-refreshed `@digest` itself (`tracebloc.controlPlaneDigest` reads image-refresh's annotation via `lookup`), so in the **steady state** Helm applies the same value the `kubectl-set` manager holds and the `.spec…containers[…].image` conflict disappears. A `.image` conflict on 1.9.110+ therefore signals **annotation-vs-live LAG** — the rollout-timeout / `helm rollback` window where the annotation trails the live spec — not steady-state drift. Wait one refresh tick for the reconcile to re-pin, then re-run; or `--force-conflicts` to take the chart's rendered (annotation) digest, accepting it may briefly trail until the next tick.
+
 2. **`--server-side=true` is not optional, even though Helm 4 defaults to it.** After a rollback (including the automatic one the `auto-upgrade` CronJob performs when it reads a `pending-upgrade` release as a wedge — `backend#2877`), the release's stored apply method can revert to client-side. Then `--force-conflicts` **alone** fails with:
 
    ```

@@ -41,7 +41,7 @@ spec:
             these keys.
           */}}
           {{- $rpDigest := (dig "requestsProxy" "digest" "" $rpImages) | default (dig "jobsManager" "digest" "" $rpImages) }}
-          {{- /* client-runtime#199: seed the digest image-refresh last applied so a
+          {{- /* client-runtime#199: seed the digest image-refresh last observed so a
                  `helm upgrade` renders repo@digest, not the bare :tag (see
                  tracebloc.controlPlaneDigest). requests-proxy runs the SAME
                  jobs-manager image and follows its annotation. */}}

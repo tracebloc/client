@@ -287,11 +287,17 @@ client-runtime#199.
 run a build carrying client-runtime#416 (the HF-offline injection) *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
 On each cluster the chart renders control-plane images as `repository:tag` +
-`IfNotPresent`, and the `image-refresh` CronJob pins the live digest. dev now
-tracks its `:dev` tag (auto-refresh); staging/prod **pin the #416 digest** in
-values (`images.jobsManager.digest`) because their tag node-caches were stale
-(pre-#416) — pinning is deterministic and survives `--reset-then-reuse-values`,
-but disables `image-refresh` auto-tracking until the pin is bumped.
+`IfNotPresent` on a fresh install, and the `image-refresh` CronJob pins the live
+digest out-of-band. **As of chart 1.9.110 (#1013 / client-runtime#199) a
+`helm upgrade` no longer reverts that pin:** `tracebloc.controlPlaneDigest` reads
+image-refresh's last-refreshed annotation via `lookup` and re-renders
+`repository@digest`, so `--reset-then-reuse-values` preserves the digest on its
+own — you no longer need a values pin merely to survive an upgrade. dev now
+tracks its `:dev` tag (auto-refresh); staging/prod still **pin the #416 digest**
+in values (`images.jobsManager.digest`) because their tag node-caches were stale
+(pre-#416) and a values pin is the deterministic, image-refresh-independent
+choice (it wins over the annotation), but that pin disables `image-refresh`
+auto-tracking until it is bumped.
 
 ## Runbook: flip the §8.2 egress lockdown on a real fleet
 
