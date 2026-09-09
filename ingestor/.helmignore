@@ -24,7 +24,11 @@
 # run on the source checkout (helm-unittest's own README says to list `tests`
 # here). scripts/check-chart-contents.sh refuses a packaged chart that carries
 # either directory, so this rule is held by the artefact, not by this comment.
-# Helm's own `templates/tests/` hook convention is unaffected: only the
-# chart-root directories are listed.
-tests/
-ci/
+# LEADING SLASH, deliberately: Helm strips a trailing slash and then matches an
+# unanchored name against EVERY path component, so a bare `tests/` would also
+# drop a future `templates/tests/` hook directory (Helm's own `helm test`
+# convention). `/tests/` anchors to the chart root -- measured: with `tests/`
+# a `templates/tests/hook.yaml` vanished from the package; with `/tests/` it
+# shipped and `tests/**` did not.
+/tests/
+/ci/

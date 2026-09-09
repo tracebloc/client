@@ -19,7 +19,11 @@
 #      the scan would be looking at the wrong thing).
 #
 #  Only CHART-ROOT `tests/` and `ci/` are refused. Helm's own test-hook
-#  convention lives at `templates/tests/` and must stay shippable.
+#  convention lives at `templates/tests/` and must stay shippable -- which is
+#  why the .helmignore rules are written `/tests/` and `/ci/` (leading slash):
+#  Helm matches an unanchored `tests/` against every path component and would
+#  drop that hook directory too. The bats suite packages a fixture chart under
+#  the real .helmignore to hold both halves of the rule together.
 #
 #  NEVER `producer | grep -q` HERE (Bugbot on client#515, scripts/index-
 #  invariants.sh): the listing is written to a FILE and grepped there, so a

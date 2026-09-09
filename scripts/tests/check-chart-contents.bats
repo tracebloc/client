@@ -145,15 +145,39 @@ need_helm() { command -v helm >/dev/null 2>&1 || skip "helm not on PATH (CI inst
 @test "mutation: strip tests/ and ci/ from .helmignore and the packaged chart reddens" {
   need_helm
   cp -R "$REPO/client" ./client-mutant
-  grep -qE '^tests/$' client-mutant/.helmignore || return 1   # anchor present before the mutation
-  sed -e '/^tests\/$/d' -e '/^ci\/$/d' client-mutant/.helmignore >client-mutant/.helmignore.new
+  grep -qE '^/tests/$' client-mutant/.helmignore || return 1   # anchor present before the mutation
+  sed -e '/^\/tests\/$/d' -e '/^\/ci\/$/d' client-mutant/.helmignore >client-mutant/.helmignore.new
   mv client-mutant/.helmignore.new client-mutant/.helmignore
-  ! grep -qE '^(tests|ci)/$' client-mutant/.helmignore || return 1   # anchor applied
+  ! grep -qE '^/(tests|ci)/$' client-mutant/.helmignore || return 1   # anchor applied
   helm package ./client-mutant >/dev/null
   guard client-*.tgz
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [[ "$output" == *"client/tests/"* ]] || return 1
   [[ "$output" == *"client/ci/"* ]] || return 1
+}
+
+@test "the real .helmignore keeps a templates/tests/ hook while dropping chart-root tests/ (anchoring)" {
+  need_helm
+  # A minimal chart wearing the REAL client .helmignore: helm matches an
+  # unanchored `tests/` against every path component, so only the leading
+  # slash keeps helm's own `templates/tests/` hook convention shippable.
+  mkdir -p fixture/templates/tests fixture/tests/deep fixture/ci
+  printf 'apiVersion: v2\nname: fixture\nversion: 0.1.0\n' >fixture/Chart.yaml
+  : >fixture/values.yaml; : >fixture/templates/deploy.yaml; : >fixture/templates/tests/hook.yaml
+  : >fixture/tests/a_test.yaml; : >fixture/tests/deep/b_test.yaml; : >fixture/ci/v.yaml
+  cp "$REPO/client/.helmignore" fixture/.helmignore
+  grep -qE '^/tests/$' fixture/.helmignore || return 1
+  helm package ./fixture >/dev/null
+  tar tzf fixture-0.1.0.tgz >members.txt
+  grep -qx 'fixture/templates/tests/hook.yaml' members.txt || { cat members.txt; return 1; }
+  ! grep -qE '^fixture/(tests|ci)/' members.txt || { cat members.txt; return 1; }
+  guard fixture-0.1.0.tgz
+  [ "$status" -eq 0 ] || return 1
+  # Mutation: the unanchored form drops the hook -- the defect Bugbot named.
+  printf 'tests/\nci/\n' >fixture/.helmignore
+  helm package ./fixture >/dev/null
+  tar tzf fixture-0.1.0.tgz >members2.txt
+  ! grep -qx 'fixture/templates/tests/hook.yaml' members2.txt || return 1
 }
 
 # ── the workflow calls the guard, right after packaging ──────────────────────
