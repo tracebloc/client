@@ -41,33 +41,36 @@ data:
     # resource-monitor was likewise untouched (and a chart release does not
     # change its image ref either), so it only ever moved by accident.
     #
-    # TWO KNOWN, BOUNDED LIMITATIONS of keeping the annotation (rather than the
-    # live pod spec) as the source of truth. Both are self-healing at the next
-    # upstream image change, which at the control plane's release cadence is
-    # days, and neither can break a running edge — the pods stay offline-safe
+    # ONE KNOWN, BOUNDED LIMITATION of keeping the annotation (rather than the
+    # live pod spec) as the DIGEST source of truth. It is self-healing at the
+    # next upstream image change, which at the control plane's release cadence is
+    # days, and cannot break a running edge — the pods stay offline-safe
     # throughout because IfNotPresent does not depend on any of this.
     #
-    #   1. HELM RE-RENDER. `helm upgrade --reset-then-reuse-values` (the fleet
-    #      auto-upgrade path) re-renders the templates, which write `repo:tag`
-    #      and so revert an earlier `set image` pin. This tick will NOT re-pin:
-    #      the annotation still records that digest, so `recorded == latest`
-    #      and the loop no-ops. The edge floats on the tag until the next
-    #      upstream release re-pins it. Note this only happens on a chart
-    #      VERSION bump — auto-upgrade compares versions and skips otherwise —
-    #      so it is not an hourly revert.
+    #   PRE-EXISTING SKEW. requests-proxy and jobs-manager may already be
+    #   running different builds of the same image on an edge upgrading INTO
+    #   this version, because nothing reconciled requests-proxy before now.
+    #   This script converges them on the next digest change (both are set
+    #   in the same tick); it does not detect and repair skew that predates
+    #   it, because it compares registry-vs-annotation, never pod-vs-pod.
     #
-    #   2. PRE-EXISTING SKEW. requests-proxy and jobs-manager may already be
-    #      running different builds of the same image on an edge upgrading INTO
-    #      this version, because nothing reconciled requests-proxy before now.
-    #      This script converges them on the next digest change (both are set
-    #      in the same tick); it does not detect and repair skew that predates
-    #      it, because it compares registry-vs-annotation, never pod-vs-pod.
+    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (backend#199).
+    # `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade path)
+    # re-renders the templates, which write `repo:tag` and so revert an earlier
+    # `set image` pin. `recorded == latest` no longer means no-op: the loop reads
+    # each workload's LIVE image and re-pins the digest whenever the workload is
+    # off it. The revert therefore lasts ONE tick — the next tick puts the digest
+    # back — instead of floating on the tag until the next upstream release. It
+    # is compared on the @sha256 digest, so a registry-prefix rewrite (a mutating
+    # webhook) is not mistaken for a revert. This only happens on a chart VERSION
+    # bump anyway — auto-upgrade compares versions and skips otherwise — so it is
+    # not an hourly revert.
     #
-    # Fixing either properly means reconciling against each workload's LIVE
-    # container image instead of a shared annotation — a declarative reconcile,
-    # which `set image` makes possible for the first time (`rollout restart`
-    # was a blind action, which is why the annotation existed at all). That is
-    # a deliberate follow-up, not an oversight.
+    # Reconciling against the live spec is what makes that possible — the
+    # declarative reconcile `set image` enables (`rollout restart` was a blind
+    # action, which is why the annotation existed at all). The remaining
+    # pre-existing-skew case would need pod-vs-pod comparison; that is a
+    # deliberate follow-up, not an oversight.
     #
     # Source of truth: annotations on the JOBS-MANAGER deployment metadata
     # (`tracebloc.io/last-refreshed-<image>-digest`) — comparing the registry
@@ -91,14 +94,16 @@ data:
     #
     # First-tick contract: annotation missing → record the current registry
     # digest WITHOUT touching the workload (no evidence of drift, no reason to
-    # churn pods). #569 keeps this deliberately. Pinning on the first tick
+    # churn pods). #569 keeps this deliberately. Pinning on the FIRST tick
     # would rewrite `repo:tag` to `repo@digest` on every fresh install — a spec
     # change, therefore a rollout, for byte-identical content, and for the
-    # resource-monitor DaemonSet that is a rollout across every node. The cost
-    # is that a freshly installed edge runs `repo:tag` until the first real
-    # digest change: still restart-safe offline (IfNotPresent), just not yet
-    # reproducible. Offline-safety is what #569 is fixing; reproducibility
-    # follows on the next upstream release.
+    # resource-monitor DaemonSet that is a rollout across every node. So the
+    # first tick only RECORDS. The NEXT tick, seeing `recorded == latest` but the
+    # workload still on `:tag`, pins the digest (backend#199) — so a fresh edge
+    # becomes reproducible ~one interval post-install (one rollout), NOT "at the
+    # next upstream release". Between the two it is still restart-safe offline
+    # (IfNotPresent); offline-safety is what #569 fixed, reproducibility is what
+    # this completes.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure
@@ -313,8 +318,10 @@ data:
     # egress netpol on the stg/prod fleets, client-runtime#199). Container
     # names are contractual with the deployment/daemonset templates -- keep in
     # sync with the `case` block in the reconcile loop below. An empty result
-    # (read error / container absent) makes the caller re-assert the pin rather
-    # than assume agreement (fail-safe, same stance as get_annotation).
+    # (read error / container absent) makes the caller SKIP the re-pin this tick
+    # and retry -- NOT re-assert (which would burn a #563 flap attempt on a
+    # healthy edge) and NOT assume agreement. That is the fail-closed stance
+    # get_annotation and the settled guard already take.
     workload_image_for_repo() {
       case "$1" in
         tracebloc/jobs-manager)
@@ -339,8 +346,8 @@ data:
     # `:tag` -- a tick that pinned `api` then died before the rp rollout, or a
     # helm re-render that reverted only the proxy -- is still re-pinned instead
     # of being declared "unchanged" forever because `api` happens to match
-    # (Bugbot on #1008). Empty (read error / absent) re-asserts the pin, same
-    # fail-safe stance as `workload_image_for_repo`.
+    # (Bugbot on #1008). Empty (read error / absent) makes the caller SKIP this
+    # tick, same fail-closed stance as `workload_image_for_repo`.
     requests_proxy_image() {
       kubectl get deployment -n "$RELEASE_NAMESPACE" "$REQUESTS_PROXY_DEPLOYMENT" \
         -o jsonpath='{.spec.template.spec.containers[?(@.name=="proxy")].image}' \
@@ -580,41 +587,68 @@ data:
         # on the bare tag until the NEXT registry publish -- and on a node whose
         # `:tag` layer is stale that silently runs an OLD image (client-runtime#199:
         # a pre-#416 jobs-manager under a sealed egress netpol). So re-assert the
-        # pin whenever the live workload is not already on `repo@latest`.
+        # pin whenever the live workload is not already on the pinned digest.
         #
-        # DESIGN NOTE (for review): this also converges a FRESH install to a
-        # digest pin on the first tick where `recorded == latest` but the
-        # workload is still on `:tag` (i.e. ~one interval post-install, one extra
-        # rollout). That is a deliberate widening of the header's "first-tick
-        # contract" -- which recorded-without-re-imaging to avoid install churn,
-        # but by staying on `:tag` left exactly the steady-state stale-`:tag`
-        # exposure this fix closes. If the install-churn cost is unwanted, gate
-        # this re-pin on a per-image "have we ever applied a digest here?" marker
-        # so it fires only on genuine reverts (see PR discussion).
-        want="${IMAGE_REGISTRY}/${repo}@${latest}"
+        # The re-pin is BOUNDED TO ONE TICK: it writes the digest back and the
+        # next tick sees the workload on it and no-ops. It also converges a FRESH
+        # install to the digest one tick after first observation -- the first-tick
+        # contract in the header records without re-imaging, and this completes
+        # it, because staying on `:tag` is exactly the steady-state stale-`:tag`
+        # exposure this fix closes.
+        #
+        # Compare on the @sha256 DIGEST, not the whole image reference: a mutating
+        # admission webhook that rewrites the registry PREFIX to an internal mirror
+        # (seen behind hospital proxies) keeps the digest, so a prefix-only rewrite
+        # must NOT read as a revert -- otherwise the ref never equals the pinned one,
+        # every tick re-pins, the webhook rewrites it again, and three ticks trip the
+        # #563 flap lockout for ALL control-plane images (LukasWodka on #1008). A
+        # genuine revert to `:tag` carries no `@sha256` suffix, so `${ref##*@}` (the
+        # digest for `repo@sha256:...`, the whole ref otherwise) still mismatches a
+        # bare `sha256:...` and re-pins.
         have="$(workload_image_for_repo "$repo" || true)"
-        # jobs-manager: the requests-proxy runs this SAME image and is its own
+        # jobs-manager: the requests-proxy runs this SAME image as its own
         # deployment. When it follows this digest (not operator-pinned) it must
-        # ALSO be on `want`, or a partial re-pin (api pinned, proxy still on
-        # :tag) is declared no-op forever off the api match alone and never
-        # retried (Bugbot on #1008). Any mismatch falls through to the re-image
-        # path, whose `case` block re-derives BOTH `jm_set_args`/`rp_set_args`.
-        proxy_off_digest=0
+        # ALSO be on it, or a partial re-pin (api pinned, proxy still on :tag) is
+        # declared no-op forever off the api match alone and never retried (Bugbot
+        # on #1008). Any mismatch falls through to the re-image path, whose `case`
+        # block re-derives BOTH `jm_set_args`/`rp_set_args`.
+        proxy_follows=0
+        rp_have=""
         if [ "$repo" = "tracebloc/jobs-manager" ] && [ "$REQUESTS_PROXY_PINNED" != "1" ]; then
+          proxy_follows=1
           rp_have="$(requests_proxy_image || true)"
-          [ "$rp_have" = "$want" ] || proxy_off_digest=1
         fi
-        if [ "$have" = "$want" ] && [ "$proxy_off_digest" = "0" ]; then
+        # Unreadable live image (read error / container absent): SKIP the re-pin
+        # this tick and retry, rather than re-assert. Re-asserting on an unreadable
+        # read would burn a #563 flap attempt on a possibly-healthy edge and log a
+        # revert that may not have happened -- the same fail-closed stance the
+        # SKIP_KEY read and the settled guard take. A real `:tag` ref is readable
+        # and is NOT this case; it falls through and re-pins.
+        if [ -z "$have" ]; then
+          log "  digest unchanged, but the live ${repo} image is unreadable (API read error / container absent) -- skipping re-pin this tick, will retry when readable"
+          continue
+        fi
+        if [ "$proxy_follows" = "1" ] && [ -z "$rp_have" ]; then
+          log "  digest unchanged, but the live requests-proxy image is unreadable (API read error / container absent) -- skipping re-pin this tick, will retry when readable"
+          continue
+        fi
+        api_on_digest=1
+        [ "${have##*@}" = "$latest" ] || api_on_digest=0
+        proxy_on_digest=1
+        if [ "$proxy_follows" = "1" ]; then
+          [ "${rp_have##*@}" = "$latest" ] || proxy_on_digest=0
+        fi
+        if [ "$api_on_digest" = "1" ] && [ "$proxy_on_digest" = "1" ]; then
           log "  digest unchanged and workload already on the pinned digest; no-op"
           continue
         fi
-        if [ "$have" = "$want" ] && [ "$proxy_off_digest" = "1" ]; then
+        if [ "$api_on_digest" = "1" ]; then
           log "  digest unchanged and jobs-manager already on the pinned digest, but"
-          log "        deployment/${REQUESTS_PROXY_DEPLOYMENT} runs '${rp_have:-<unreadable>}', not '${want}'"
+          log "        deployment/${REQUESTS_PROXY_DEPLOYMENT} runs '${rp_have}', not digest ${latest}"
           log "        -- re-pinning the requests-proxy digest"
-        elif [ "$have" != "$want" ]; then
-          log "  digest unchanged, but the workload runs '${have:-<unreadable>}', not '${want}'"
-          log "        -- a helm re-render reverted the pin onto :${IMAGE_TAG}; re-pinning the digest"
+        else
+          log "  digest unchanged, but the workload runs '${have}', not digest ${latest}"
+          log "        (fresh install, or a helm re-render reverted the pin onto :${IMAGE_TAG}) -- re-pinning the digest"
         fi
         # Fall through to the re-image path (ref + case block) with recorded
         # already == latest: the annotate below is an idempotent re-write, and

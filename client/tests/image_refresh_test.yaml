@@ -226,15 +226,18 @@ tests:
       # Regression guard (Bugbot #1008): the requests-proxy is a SEPARATE
       # deployment running the SAME jobs-manager image, so the no-op "already on
       # the pinned digest" decision MUST also read the proxy and fall through
-      # when it is off `want` -- else a partial re-pin (api pinned, proxy still
-      # on :tag) is declared unchanged forever off the api match alone and never
-      # retried. Lock both the reader and the check in place.
+      # when it is off the digest -- else a partial re-pin (api pinned, proxy
+      # still on :tag) is declared unchanged forever off the api match alone and
+      # never retried. Lock the reader and the per-workload digest check in
+      # place. (The BEHAVIOUR -- that an inverted check reddens -- is asserted in
+      # scripts/tests/image-refresh-repin-on-revert.bats; this only pins that the
+      # two pieces still exist in the shipped script.)
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'requests_proxy_image\(\)'
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: 'proxy_off_digest'
+          pattern: 'proxy_on_digest'
       # Regression guard: the script must HEAD the manifest with all
       # four Accept media types in a SINGLE comma-separated Accept
       # header per the Docker registry v2 spec (some proxies have been
