@@ -376,6 +376,7 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   scripts/gen-node-reservation-embed.sh --check|\
   bash scripts/tests/cronjob-failures-are-readable.sh|\
   bash scripts/tests/release-name-equals-namespace.sh|\
+  bash scripts/tests/customer-copy-no-ticket-refs.sh|\
   bash scripts/tests/helm-unittest-error-assertions.sh|\
   bash scripts/tests/helm-unittest-gated.sh|\
   bash scripts/tests/mirror-enumeration-complete.sh|\

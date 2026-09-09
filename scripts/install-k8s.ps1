@@ -6957,7 +6957,7 @@ function Install-ClientHelm {
       Warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
       foreach ($l in $fit.Lines) { Hint "  $l" }
       Hint "  The client needs ~$([math]::Floor(($script:TbCpFootprintMemBytes + $script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $($script:TbCpFootprintCpuMilli + $script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-      Err "Refusing to write a training envelope that cannot be scheduled on this machine (backend#2870)."
+      Err "Refusing to write a training envelope that cannot be scheduled on this machine."
     }
     'reduced' {
       Info "Training envelope reduced to fit beside the platform on this machine:"

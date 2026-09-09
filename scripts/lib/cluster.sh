@@ -1773,7 +1773,7 @@ _check_existing_cluster_storage_mode() {
     if [[ "${TB_STORAGE_MODE_SOURCE:-default}" == "explicit" ]]; then
       warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
     else
-      warn "node-local is the default now (RFC-0003 D15), but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+      warn "node-local is the default now, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
     fi
     hint "That cluster disabled k3s local-storage, so the 'local-path' StorageClass node-local needs does not exist — PVCs would stay Pending."
     hint "To keep using your existing hostpath cluster, just re-run with the old mode — no recreate needed:"
