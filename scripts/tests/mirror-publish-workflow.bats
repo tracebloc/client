@@ -26,6 +26,12 @@
 #   * a refusal from publish-mirror.sh is a `::error::` line in the step's
 #     stdout, so no step captures the publisher through `$(...)` (Bugbot:
 #     "captured output hides publish refusals")
+#   * isPrerelease must be an explicit boolean: a missing or malformed value is
+#     refused, never read as "stable" (Bugbot: "prerelease tree-push guard
+#     fails open")
+#   * a guard refusal still lands in the step summary and the step exits with
+#     the guard's status — under the `-e` Actions runs every body with (Bugbot:
+#     "guard refusal skips step summary")
 #
 # FAILS CLOSED: an unreadable workflow, a missing step id, or PyYAML absent is a
 # named refusal, never "nothing to check". The shape check is one function run
@@ -114,7 +120,10 @@ run_step() {
   local body="$BATS_TEST_TMPDIR/step-$1.sh"
   step_run "${RUN_WF:-$WF}" "$1" >"$body" || { cat "$body"; return 1; }
   local dir="${2:-$WORK}"
-  run env PATH="$SHIM:$PATH" bash -c "cd '$dir' && bash '$body'"
+  # `bash -e`: what Actions runs a `run:` body with. A body that relies on
+  # surviving a failing command (the guard steps' tee pipeline) is tested under
+  # the same errexit it gets in CI, or the test proves nothing about the step.
+  run env PATH="$SHIM:$PATH" bash -c "cd '$dir' && bash -e '$body'"
 }
 
 out() { grep -E "^$1=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-; }
@@ -152,6 +161,15 @@ release_json() { # <tag> <isPrerelease>
   [[ "$output" == *"::notice::'v1.2.3-rc.1' is a prerelease: only its GitHub release is mirrored (marked prerelease)."*"default branch and chart index are not pushed"* ]] || { echo "$output"; return 1; }
   # A prerelease is never the newest stable release; the question is not asked.
   ! grep -q 'releases/latest' "$GH_LOG" || return 1
+}
+
+@test "plan: a release whose isPrerelease is not a boolean is refused — the tree push is armed only by an explicit false" {
+  export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_RELEASE_JSON GH_LATEST_TAG=v1.2.3
+  GH_RELEASE_JSON='{"tagName":"v1.2.3","isDraft":false}'
+  run_step plan
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"::error::release 'v1.2.3' reports isPrerelease 'null' — not a boolean, refusing"* ]] || { echo "$output"; return 1; }
+  [ ! -s "$GITHUB_OUTPUT" ] || return 1
 }
 
 @test "plan: a stable release that is not the newest one mirrors only its release — publish_tree=false, not marked prerelease" {
@@ -312,6 +330,43 @@ make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK 
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [[ "$output" == *"::error::'v1.2.3-rc.1' does not replace the mirror's default branch (a prerelease, or not the newest stable release) and the mirror has no commit on 'main' to pin its release to — the first publish to an empty mirror must be the newest stable release."* ]] || { echo "$output"; return 1; }
   [ ! -s "$GITHUB_OUTPUT" ] || return 1
+}
+
+# ── guard steps: a refusal reaches the step summary, the step exits with it ────
+
+# fake_guard <dir> — a cwd holding a scripts/publish-guard.sh that refuses
+# (prints a guard line, exits 1) whatever it is asked; the guard itself has its
+# own suite, this is about what the STEP does with a refusal.
+fake_guard() {
+  mkdir -p "$1/scripts"
+  cat >"$1/scripts/publish-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "::error::publish-guard: [forbidden-strings] REFUSED — planted refusal"
+exit 1
+EOF
+}
+
+@test "guard-tree: a guard refusal is written to the step summary and the step exits with the guard's status" {
+  fake_guard "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" TAG="" STRICT="" SRC_DIR=""
+  : >"$GITHUB_STEP_SUMMARY"
+  run_step guard-tree
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"REFUSED — planted refusal"* ]] || { echo "$output"; return 1; }
+  grep -q '^## Mirror publish — tree$' "$GITHUB_STEP_SUMMARY" || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
+  grep -q 'REFUSED — planted refusal' "$GITHUB_STEP_SUMMARY" || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
+}
+
+@test "guard-tree mutation: without catching the guard's status, errexit skips the summary — the test above catches it" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'guard-tree'][0]; s['run'] = s['run'].replace(' || rc=\$?', '')")" || return 1
+  fake_guard "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" TAG="" STRICT="" SRC_DIR=""
+  : >"$GITHUB_STEP_SUMMARY"
+  RUN_WF="$m" run_step guard-tree
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  # The refusal happened, but the summary is empty: the finding, reproduced.
+  [ ! -s "$GITHUB_STEP_SUMMARY" ] || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
 }
 
 # ── shape: derived from the workflow, one implementation for real and mutated ──
