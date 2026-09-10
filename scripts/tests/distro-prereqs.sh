@@ -6,7 +6,8 @@
 #  container and asserts every prerequisite binary lands on PATH:
 #
 #    setup_pm            → correct package manager detected for this distro
-#    install_system_deps → conntrack installed under the right package name (#720)
+#    install_system_deps → curl / tar / gzip present (conntrack was dropped from
+#                          the list on 2026-09-09: k3s-in-k3d ships its own)
 #    install_docker_engine → correct Docker branch taken (get.docker.com vs the
 #                            docker-ce repo for RHEL rebuilds #719, dnf/yum/zypper/
 #                            pacman), Docker package actually installed
@@ -121,7 +122,7 @@ install_helm
 echo ""
 echo "── prerequisite check ─────────────────────────────────────────────────"
 fail=0
-for tool in docker kubectl k3d helm conntrack; do
+for tool in docker kubectl k3d helm; do
   if path="$(command -v "$tool" 2>/dev/null)"; then
     ver="$("$tool" --version 2>/dev/null | head -1 || true)"
     printf '  ✔ %-9s %s  %s\n' "$tool" "$path" "${ver:-}"

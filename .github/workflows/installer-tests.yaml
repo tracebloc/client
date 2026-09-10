@@ -2,7 +2,10 @@ name: Installer tests
 
 # Validates the curl/PowerShell installer (scripts/) across the breadth of
 # environments a customer might actually have:
-#   • unit-bash  — bats (mocked) for the bash installer
+#   (bats, the mocked bash unit suite, is NOT here: it runs once, as the
+#    required `Unit tests` check in standard-checks.yml. A second, non-required
+#    copy lived here as `unit-bash` until 2026-09-09 — 5-6 CI-minutes per
+#    scripts/** push that could never block anything.)
 #   • unit-pester— Pester for the PowerShell installer, on Linux AND real Windows
 #   • distro-prereqs — runs the REAL Linux prerequisite-install path (package
 #                  manager, system deps, Docker branch, kernel modules, kubectl/
@@ -11,7 +14,7 @@ name: Installer tests
 #                  bugs that mocked unit tests can't see.
 on:
   push:
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     paths:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
@@ -20,7 +23,7 @@ on:
     # e2e-journey job immediately — with the default types it would only fire on
     # the next push, making the label gate feel broken.
     types: [opened, synchronize, reopened, labeled]
-    branches: [main, develop, openshift]
+    branches: [main, develop]
     paths:
       - 'scripts/**'
       - '.github/workflows/installer-tests.yaml'
@@ -61,69 +64,11 @@ jobs:
   #
   # The three guard moves go through the Makefile's `drift` target, so the gate and
   # the pre-push hook read one list instead of two that had already diverged. This
-  # job keeps only what nothing else can do: the real bats suite, Pester on real
-  # Windows, the 9-distro prereq matrix, PATH persistence and the e2e runs.
-
-  unit-bash:
-    # 10 -> 15. At 10 the bounded install (390 s worst case) plus ~155 s of bats
-    # could still reach the cap and report `cancelled`, which is the #753 bug the
-    # bound exists to remove. Matches standard-checks.yml's `Unit tests`.
-    timeout-minutes: 15
-    name: bats (bash unit, mocked)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Bounded and retried, same shape as "Pull <distro> (bounded, retried)"
-      # below. This is not speculative hardening: this exact step stalled on
-      # 2026-08-19 at 11:58 and burned the whole `timeout-minutes: 10` budget,
-      # reporting `cancelled` with an empty log and `Run bats` skipped -- the
-      # #753 signature, on bats rather than shellcheck. shellcheck could be
-      # fixed by deleting the install (it is preinstalled); bats genuinely has
-      # to be installed, so it gets a bound instead.
-      #
-      # `sudo timeout`, not `timeout sudo`: timeout must run as root so it
-      # signals apt-get directly rather than signalling sudo and hoping the TERM
-      # is forwarded. `-qq` is dropped on the install so a slow mirror leaves
-      # something in the log, and `bats --version` is the proof-of-install
-      # marker whose absence identified the stall in the first place.
-      - name: Install bats (bounded, retried)
-        # Bounds sized against the job budget (see the twin step in
-        # standard-checks.yml for the arithmetic): worst case 3 x (60 + 60) +
-        # 30 s backoff = 390 s, plus ~155 s of bats, inside the 15 minutes this
-        # job now allows. `if`/`fi` not `[ ... ] &&` because the default shell is
-        # `bash -e` and a false test on the last iteration would abort before the
-        # ::error:: line printed.
-        run: |
-          for i in 1 2 3; do
-            if sudo timeout 60 apt-get update -qq \
-               && sudo timeout 60 apt-get install -y bats; then
-              bats --version && exit 0
-            fi
-            echo "::warning::bats install stalled or failed (attempt $i/3)"
-            if [ "$i" -lt 3 ]; then sleep $((i*10)); fi
-          done
-          echo "::error::could not install bats in 3 bounded attempts - runner-to-mirror connectivity, not this PR. Re-run this job."
-          exit 1
-
-      # scripts/tests/chart-pull-secret.bats renders the REAL chart, so this job
-      # needs helm too. Without it `require_tool helm` fail-closes under CI=true
-      # and every `scripts/**` PR reds here instead of skipping -- the mirror
-      # image of the client#751 finding, where the suite ran with no helm and
-      # self-skipped green. standard-checks.yml already sets helm up; this job
-      # runs the same suite and was missed (Bugbot on the develop -> staging
-      # promotion, client#760).
-      #
-      # Same sha-pinned action and same v3.15.4 pin as standard-checks.yml,
-      # helm-ci.yaml and drift-checks.yaml: the bats file's own version gate keys
-      # off this pin, and an unpinned helm silently changes which assertions run.
-      - name: Set up Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-        with:
-          version: v3.15.4
-
-      - name: Run bats
-        run: bats scripts/tests/*.bats
+  # job keeps only what nothing else can do: Pester on real Windows, the
+  # 9-distro prereq matrix, PATH persistence and the e2e runs. (The bats suite
+  # also ran here as `unit-bash` until 2026-09-09 — a byte-for-byte twin of the
+  # required `Unit tests` job in standard-checks.yml, and not itself required,
+  # so it was advice at ~5 min a run; the required copy is the only one now.)
 
   unit-pester:
     timeout-minutes: 20
@@ -228,10 +173,11 @@ jobs:
   distro-prereqs:
     timeout-minutes: 20
     # Runs the installer's REAL Linux prerequisite path in a fresh container for
-    # each distro family. Proves the package-manager / Docker / conntrack / helm
+    # each distro family. Proves the package-manager / Docker / tar+gzip / helm
     # branches all resolve and install — the layer where every installer bug we
-    # have shipped lived (#718 PATH, #719 RHEL docker-ce, #720 conntrack-tools,
-    # the AlmaLinux kernel-modules gap, the Amazon Linux openssl/tar gap).
+    # have shipped lived (#718 PATH, #719 RHEL docker-ce, #720 the per-distro
+    # package name of a since-retired prerequisite, the AlmaLinux kernel-modules
+    # gap, the Amazon Linux openssl/tar gap).
     # It does NOT start dockerd or create a cluster — that needs a real kernel +
     # systemd, covered by local VMs and (optionally) a future e2e job. Arch is
     # omitted: its official image is x86-only and bare containers need keyring
@@ -310,6 +256,45 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Bring up a real k3d cluster + run a workload
         run: bash scripts/tests/e2e-cluster.sh
+
+  node-reservation-measure:
+    timeout-minutes: 30
+    # The Linux half of backend#2460's measurement. Brings up the installer's real
+    # cluster on each Ubuntu runner and samples the kubelet's own accounting idle
+    # and under a training-shaped load (the real 2 GB CPU task image, pulled and
+    # run), then publishes the record scripts/gen-node-reservation-embed.sh
+    # derives the `linux` reservation from. Three legs, because amd64 and arm64
+    # are different machines and the generator takes the MAX across a platform's
+    # records. Label-gated like e2e-journey: a 10-minute measurement is not a PR
+    # check, it is evidence, re-taken when someone asks for it (`e2e` label) and on
+    # the weekly schedule so a k3s bump that moves the footprint is seen.
+    # NON-GATING BY DESIGN: it writes a record, it asserts nothing; the assertion
+    # that the declared reservation is what the node took lives in e2e-cluster.
+    name: Node reservation measurement (${{ matrix.os }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Measure the kubelet + runtime footprint on a real k3d node
+        env:
+          TB_MEASURE_IDLE_S: "180"
+          TB_MEASURE_LOAD_S: "240"
+          TB_MEASURE_INTERVAL_S: "10"
+          TB_MEASURE_OUT: ${{ runner.temp }}/node-reservation-linux-${{ runner.arch }}-${{ matrix.os }}.json
+        run: bash scripts/tests/measure-node-reservation.sh
+      - name: Publish the measurement record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-reservation-${{ matrix.os }}
+          path: ${{ runner.temp }}/node-reservation-*.json
+          if-no-files-found: warn
 
   # The `e2e-proxy` job (`E2E auth-proxy (squid)`) moved to its own workflow,
   # e2e-auth-proxy.yaml, on 2026-08-27 (backend#2350). It shipped RED to `staging`

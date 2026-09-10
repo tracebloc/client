@@ -42,6 +42,18 @@
 #    6. the node mount path agrees with the --kubelet-arg path, in both twins --
 #       a drop-in mounted somewhere the kubelet is not told to read is the
 #       silent-no-op version of this whole change
+#    7. THE NODE RESERVATION (backend#2460): the generated reservation block --
+#       the platforms list, every per-platform kubeReserved / systemReserved
+#       value and the eviction threshold -- is present in BOTH twins and equal,
+#       field by field; every platform in the list has all three values; no
+#       value exists for a platform NOT in the list (a stale entry is a
+#       reservation the writer will never emit, i.e. a platform that LOOKS
+#       measured to a reader of the file); every value is a positive whole
+#       number (an empty one is `memory: Mi`, which the kubelet refuses to
+#       start on); and the eviction threshold is not LOOSER than the kubelet's
+#       own 100Mi default. The SET of reservation names is derived from the two
+#       files (union), never listed here, so a name added to one twin and not
+#       the other is caught rather than skipped.
 #
 #  Pinning the RELATIONSHIPS rather than the values is deliberate: a guard that
 #  asserted `high == 75` would have to be edited by whoever retunes the numbers,
@@ -74,6 +86,11 @@ PS1_FILE="$root/scripts/install-k8s.ps1"
 # the restatement rule 1 forbids. The values under test are parsed, never held.
 TB_STOCK_GC_HIGH=85
 TB_MIN_GC_BAND=10
+# The kubelet's own default memory eviction threshold (evictionHard
+# memory.available<100Mi). k3s ships NONE, which is part of what backend#2460
+# fixes; a declared threshold below the upstream default would be looser than
+# even a stock kubelet. A property of the kubelet, held here like the two above.
+TB_KUBELET_DEFAULT_EVICTION_MEM_MIB=100
 
 fail_closed() { printf 'ERROR: %s\n' "$1" >&2; exit 2; }
 for f in "$BASH_LIB" "$PS1_FILE"; do
@@ -300,9 +317,120 @@ if [ "$bsh_reuse" -eq 1 ]; then
   fi
 fi
 
+# ── 7. THE NODE RESERVATION BLOCK (backend#2460) ──────────────────────────────
+#
+# Names are DERIVED: every `TB_KUBELET_RESERVATION_*`, `TB_KUBELET_KUBE_RESERVED_*`,
+# `TB_KUBELET_SYSTEM_RESERVED_*` and `TB_KUBELET_EVICTION_*` assignment found in
+# EITHER twin's code is compared in both. Holding the list here would let a name
+# added to one twin sail past (rule 1); the union cannot.
+reservation_names() {
+  grep -oE -- '\$?TB_KUBELET_(RESERVATION|KUBE_RESERVED|SYSTEM_RESERVED|EVICTION)_[A-Z0-9_]+[[:space:]]*=' <<<"$1" \
+    | sed -E 's/^\$?//; s/[[:space:]]*=$//' | sort -u
+}
+res_names="$( { reservation_names "$bsh_body"; reservation_names "$ps1_body"; } | sort -u )"
+if [ -z "$res_names" ]; then
+  note "neither installer declares a node reservation block (no TB_KUBELET_RESERVATION_/KUBE_RESERVED_/SYSTEM_RESERVED_/EVICTION_ assignment)" \
+    "backend#2460 puts kubeReserved / systemReserved / evictionHard in the same drop-in." \
+    "Without the block, allocatable == capacity on every node the installers create."
+fi
+printf '\nnode reservation block, as declared by each installer:\n'
+# The platforms list is a quoted, possibly EMPTY, space-separated string, which
+# value_of (one unquoted token) cannot read; parse it as the writer does.
+platforms_of() {
+  grep -oE -- "^[[:space:]]*\\\$?TB_KUBELET_RESERVATION_PLATFORMS[[:space:]]*=[[:space:]]*\"[^\"]*\"" <<<"$1" \
+    | head -1 | sed -E 's/^[^"]*"//; s/"$//'
+}
+for name in $res_names; do
+  if [ "$name" = "TB_KUBELET_RESERVATION_PLATFORMS" ]; then
+    b="$(platforms_of "$bsh_body")"
+    p="$(platforms_of "$ps1_body")"
+    printf '  %-44s bash="%s"  ps1="%s"\n' "$name" "$b" "$p"
+    grep -qE -- "^[[:space:]]*${name}[[:space:]]*=" <<<"$bsh_body" || note "$name is not assigned in cluster.sh"
+    grep -qE -- "^[[:space:]]*\\\$${name}[[:space:]]*=" <<<"$ps1_body" || note "$name is not assigned in install-k8s.ps1"
+    if [ "$b" != "$p" ]; then
+      note "$name DIVERGES between the twins: bash='$b' ps1='$p'" \
+        "A platform measured for one installer and not the other is a reservation half the fleet never gets."
+    fi
+    continue
+  fi
+  b="$(value_of "$bsh_body" "$name")"
+  p="$(value_of "$ps1_body" "$name")"
+  printf '  %-44s bash=%-20s ps1=%s\n' "$name" "${b:-<absent>}" "${p:-<absent>}"
+  if [ -z "$b" ] || [ -z "$p" ]; then
+    note "$name is not set by both installers (bash='${b:-<absent>}' ps1='${p:-<absent>}')" \
+      "Every reservation value must exist in both twins: the writer reads it by name, and an" \
+      "absent one is a \`memory: Mi\` the kubelet refuses to start on -- a node that never becomes Ready."
+  elif [ "$b" != "$p" ]; then
+    note "$name DIVERGES between the twins: bash='$b' ps1='$p'" \
+      "Same platform, two different reservations. The block is GENERATED into both files by" \
+      "scripts/gen-node-reservation-embed.sh; one of them was hand-edited or the generator ran on one."
+  elif ! [[ "$b" =~ ^[1-9][0-9]*$ ]]; then
+    note "$name is '$b', not a positive whole number" \
+      "The writer interpolates it into a Kubernetes quantity (\`250m\`, \`700Mi\`); anything else is a" \
+      "kubelet that refuses to start, or a 0 that keeps the node dishonest while looking configured."
+  fi
+done
+
+# Every platform in the list has all three values; no value belongs to a platform
+# outside the list. Read from the bash body (the twins were just held equal).
+platforms="$(platforms_of "$bsh_body")"
+for plat in $platforms; do
+  key="$(printf '%s' "$plat" | tr '[:lower:]' '[:upper:]')"
+  for stem in KUBE_RESERVED_CPU_MILLI KUBE_RESERVED_MEM_MIB SYSTEM_RESERVED_MEM_MIB; do
+    grep -qE -- "^[[:space:]]*TB_KUBELET_${stem}_${key}[[:space:]]*=" <<<"$bsh_body" \
+      || note "platform '$plat' is listed as measured but TB_KUBELET_${stem}_${key} is not declared" \
+           "The writer would emit the maps for it and read an empty value into a Kubernetes quantity."
+  done
+done
+for name in $res_names; do
+  case "$name" in
+    TB_KUBELET_KUBE_RESERVED_*|TB_KUBELET_SYSTEM_RESERVED_*)
+      key="${name##*_}"
+      plat="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+      case " $platforms " in
+        *" $plat "*) ;;
+        *) note "$name is declared but '$plat' is NOT in TB_KUBELET_RESERVATION_PLATFORMS" \
+             "A value the writer never emits: to a reader of the file the platform looks measured," \
+             "and to the node it is not. Either list it or delete it." ;;
+      esac ;;
+  esac
+done
+if [ -n "$platforms" ]; then
+  grep -qE -- '^[[:space:]]*TB_KUBELET_EVICTION_MEM_MIB[[:space:]]*=' <<<"$bsh_body" \
+    || note "platforms are measured but TB_KUBELET_EVICTION_MEM_MIB is not declared" \
+         "The eviction threshold is written for every measured platform."
+fi
+evict="$(value_of "$bsh_body" TB_KUBELET_EVICTION_MEM_MIB)"
+if [[ "$evict" =~ ^[0-9]+$ ]] && [ "$evict" -lt "$TB_KUBELET_DEFAULT_EVICTION_MEM_MIB" ]; then
+  note "evictionHard memory.available (${evict}Mi) is LOOSER than the kubelet's own default (${TB_KUBELET_DEFAULT_EVICTION_MEM_MIB}Mi)" \
+    "Declaring a threshold is the point; declaring one below the upstream default inverts it."
+fi
+
+# The WRITER in each twin must actually EMIT the maps -- a declared table nothing
+# reads is the silent no-op again. Keyed on the YAML keys the kubelet reads, and
+# SCOPED TO THE WRITER FUNCTION'S OWN BODY: the existing-cluster advisory greps
+# the same `kubeReserved:` key out of the file on disk, so a whole-file search
+# was satisfied by the advisory while the writer emitted nothing. Its own mutation
+# ("bash writer stops emitting kubeReserved") read VACUOUS before this scoping.
+bsh_writer="$(awk '/^_write_kubelet_config\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$BASH_LIB")"
+ps1_writer="$(awk '/^function Write-KubeletConfig/{f=1} f{print} f&&/^\}$/{exit}' "$PS1_FILE")"
+[ -n "$bsh_writer" ] || note "could not extract _write_kubelet_config's body from cluster.sh" \
+  "Refusing to report on an empty extraction -- zero lines satisfy every check below."
+[ -n "$ps1_writer" ] || note "could not extract Write-KubeletConfig's body from install-k8s.ps1" \
+  "Refusing to report on an empty extraction -- zero lines satisfy every check below."
+for pair in "cluster.sh:$bsh_writer" "install-k8s.ps1:$ps1_writer"; do
+  fname="${pair%%:*}"; body="${pair#*:}"
+  [ -n "$body" ] || continue
+  for yk in 'kubeReserved:' 'systemReserved:' 'evictionHard:' 'memory.available:'; do
+    grep -qF -- "$yk" <<<"$body" \
+      || note "$fname's writer never emits \`$yk\` into the drop-in" \
+           "The reservation table is declared but the file the kubelet reads does not carry it."
+  done
+done
+
 if [ "$findings" -gt 0 ]; then
   printf '\nkubelet-config-agreement: %d finding(s).\n' "$findings"
   exit 1
 fi
-printf '\nkubelet-config-agreement: clean -- both installers emit the same drop-in, the band is usable, and the kubelet is pointed at the file that is mounted.\n'
+printf '\nkubelet-config-agreement: clean -- both installers emit the same drop-in, the band is usable, the reservation block agrees, and the kubelet is pointed at the file that is mounted.\n'
 exit 0
