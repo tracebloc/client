@@ -12,8 +12,10 @@ data:
   image-refresh.sh: |
     #!/bin/sh
     # Polls the registry for a new manifest digest and reconciles it onto the
-    # long-lived control-plane workloads, on docker.io under the floating
-    # CLIENT_ENV tag (#154, extended by #569).
+    # long-lived control-plane workloads, on IMAGE_REGISTRY (the registry the
+    # chart pulls the tracebloc-published images from -- see the
+    # tracebloc.tbRegistry helper) under the floating CLIENT_ENV tag (#154,
+    # extended by #569).
     #
     # Action on change: `kubectl set image <workload> <container>=repo@digest`.
     # It used to be `kubectl rollout restart`. #569 changed the mechanism so
@@ -191,16 +193,24 @@ data:
     SKIP_KEY="tracebloc.io/refresh-skip-streak"
 
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE deployment=$DEPLOYMENT_NAME"
-    log "  client images: tracebloc/{jobs-manager,pods-monitor,resource-monitor} on docker.io under tag=$IMAGE_TAG"
+    log "  client images: tracebloc/{jobs-manager,pods-monitor,resource-monitor} on ${IMAGE_REGISTRY} under tag=$IMAGE_TAG"
     log "  also reconciling: deployment/${REQUESTS_PROXY_DEPLOYMENT} (jobs-manager image), daemonset/${RESOURCE_MONITOR_DAEMONSET} in ${NODE_AGENTS_NAMESPACE}"
 
     # #569: a private-mirror install (global.imageRegistry) renders every pod
-    # image as <mirror>/tracebloc/... , but the digests resolved below come from
-    # docker.io. Writing a docker.io digest onto a mirror reference is not just
-    # wrong, it is BREAKING: the mirror may not hold that digest at all, so
-    # `set image` would pin the control plane to an unpullable ref. Under the
-    # old `rollout restart` this mismatch was merely useless (it restarted pods
-    # to re-pull the mirror's own tag); with `set image` it must fail closed.
+    # image as <mirror>/tracebloc/... , but this script can only resolve a tag
+    # to a digest on the public registries it has a token arm for (get_token
+    # below: docker.io, ghcr.io). Writing a digest resolved elsewhere onto a
+    # mirror reference is not just wrong, it is BREAKING: the mirror may not
+    # hold that digest at all, so `set image` would pin the control plane to an
+    # unpullable ref. Under the old `rollout restart` this mismatch was merely
+    # useless (it restarted pods to re-pull the mirror's own tag); with
+    # `set image` it must fail closed.
+    #
+    # The verdict is RENDERED by the chart (IMAGE_REGISTRY_RESOLVABLE, from the
+    # same tracebloc.imageRefreshResolvableRegistries declaration that decides
+    # the pods' imagePullPolicy) rather than re-derived here, so the guard and
+    # the pull policy cannot disagree about which edges the reconcile runs on.
+    # Absent or anything but "true" is refused: not knowing is not permission.
     #
     # Exit 0, not 1: a mirror install has deliberately taken over image
     # distribution, so "nothing to reconcile" is the correct steady state, not
@@ -209,9 +219,9 @@ data:
     # The CronJob is still RENDERED under a mirror (the alpine/k8s runner image
     # is re-homed onto it, per global_image_registry_test.yaml); only the
     # reconcile is inert.
-    if [ "$IMAGE_REGISTRY" != "docker.io" ]; then
-      log "NOTE: images are served from private mirror '${IMAGE_REGISTRY}' (global.imageRegistry), but this script resolves digests from docker.io."
-      log "      Pinning a docker.io digest onto a mirrored reference could pin an image the mirror does not hold, so auto-refresh is INERT on this edge."
+    if [ "${IMAGE_REGISTRY_RESOLVABLE:-}" != "true" ]; then
+      log "NOTE: images are served from '${IMAGE_REGISTRY}', a registry this script cannot resolve digests on anonymously (it knows docker.io and ghcr.io)."
+      log "      Pinning a digest resolved elsewhere onto that reference could pin an image the registry does not hold, so auto-refresh is INERT on this edge."
       log "      Update the control-plane images by syncing your mirror and restarting the workloads, or pin images.<image>.digest explicitly."
       log "      (That restart DOES re-pull: because this reconcile is inert here, the chart renders imagePullPolicy=Always on the unpinned control-plane images rather than IfNotPresent -- see the tracebloc.controlPlanePullPolicy helper. Offline-restart safety is traded away on this edge precisely so it is not left with no update path at all.)"
       log "tick complete"
@@ -568,7 +578,7 @@ data:
         # it changes no behaviour: `continue` still ends this image's tick either
         # way. Only the reporting is new.
         stale_key="tracebloc.io/stale-pin-${repo#*/}"
-        pin_latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "docker.io" || true)"
+        pin_latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "$IMAGE_REGISTRY" || true)"
         if [ -z "$pin_latest" ]; then
           log "  pinned by digest in values; skipping (could not resolve ${IMAGE_TAG} to compare -- not knowing is a finding, not agreement)"
           log "        leaving any existing ${stale_key} as the last KNOWN state rather than asserting agreement"
@@ -608,7 +618,7 @@ data:
           annotate_args="$annotate_args ${unpinned_stale_key}-"
         fi
 
-      latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "docker.io" || true)"
+      latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "$IMAGE_REGISTRY" || true)"
       if [ -z "$latest" ]; then
         log "  WARN: could not resolve latest digest (rate-limited or transient); skipping this tick"
         continue
@@ -781,9 +791,10 @@ data:
       annotate_args="$annotate_args ${key}=${latest} ${applied_key}=1"
       restart_needed=1
 
-      # The reference we pin. IMAGE_REGISTRY is docker.io here — a mirror
-      # exits the tick far above — but render it from the variable so this
-      # stays honest if that guard is ever relaxed.
+      # The reference we pin: the SAME registry the digest above was resolved
+      # on, so a copy of this image on another registry can never be pinned by
+      # a digest it does not hold. A registry the script cannot resolve on
+      # exited the tick far above (IMAGE_REGISTRY_RESOLVABLE).
       ref="${IMAGE_REGISTRY}/${repo}@${latest}"
 
       # Map the image onto the workload+container(s) that run it. Container
@@ -1045,21 +1056,25 @@ spec:
                   value: {{ include "tracebloc.resourceMonitorName" . | quote }}
                 - name: NODE_AGENTS_NAMESPACE
                   value: {{ .Values.nodeAgents.namespace.name | quote }}
-                # The registry the chart renders into every pod image. The
-                # script resolves digests from docker.io only, so it goes inert
-                # when this is a private mirror rather than pinning a digest the
-                # mirror may not hold (see the guard at the top of the script).
-                #
-                # `| default "docker.io"` is NOT redundant with dig's default:
-                # values.yaml ships `global.imageRegistry: ""`, so the key EXISTS
-                # and dig returns the empty string rather than its fallback.
-                # Without the trailing default this renders "", the mirror guard
-                # below sees "" != "docker.io" and goes inert on every DEFAULT
-                # install — silently disabling refresh fleet-wide. The
-                # `tracebloc.image` helper handles the same trap with its own
-                # `| default "docker.io"`.
+                # The registry the chart renders into the control-plane pod
+                # images -- ONE helper (tracebloc.tbRegistry: global mirror, else
+                # images.traceblocRegistry, else the chart default), so the
+                # script resolves digests on exactly the registry the pods pull
+                # from. The helper owns the `| default` chain: values.yaml ships
+                # `global.imageRegistry: ""`, so the key EXISTS and a bare dig
+                # returns "" rather than its fallback; rendering "" here would
+                # make the reconcile go inert on every DEFAULT install (the
+                # "IMAGE_REGISTRY defaults to ..., not the empty string" test).
                 - name: IMAGE_REGISTRY
-                  value: {{ dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io" | quote }}
+                  value: {{ include "tracebloc.tbRegistry" . | quote }}
+                # Whether the script can resolve digests on IMAGE_REGISTRY
+                # anonymously -- derived from the same declaration
+                # (tracebloc.imageRefreshResolvableRegistries) that switches the
+                # pods to IfNotPresent, so the guard at the top of the script and
+                # the pull policy agree by construction. "false" makes the tick
+                # log and exit 0 (a mirror install has taken over distribution).
+                - name: IMAGE_REGISTRY_RESOLVABLE
+                  value: {{ include "tracebloc.imageRefreshResolvable" . | default "false" | quote }}
                 - name: IMAGE_TAG
                   # RESOLVED, not raw. This is the tag the refresh pulls, so a
                   # documented alias here freezes the edge on a tag the publish
