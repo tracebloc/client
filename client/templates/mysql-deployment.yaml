@@ -159,7 +159,7 @@ spec:
         resources:
           requests:
             memory: {{ .Values.resources.mysql.requests.memory | default "704Mi" | quote }}
-            cpu: {{ .Values.resources.mysql.requests.cpu | default "250m" | quote }}
+            cpu: {{ .Values.resources.mysql.requests.cpu | default "150m" | quote }}
           limits:
             memory: {{ .Values.resources.mysql.limits.memory | default "704Mi" | quote }}
             {{- /*
