@@ -41,7 +41,7 @@ spec:
             these keys.
           */}}
           {{- $rpDigest := (dig "requestsProxy" "digest" "" $rpImages) | default (dig "jobsManager" "digest" "" $rpImages) }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
           # #569: IfNotPresent wherever an update path exists without `Always` --
           # a pinned digest, or the image-refresh reconcile (see
           # tracebloc.controlPlanePullPolicy; it stays Always on an edge the

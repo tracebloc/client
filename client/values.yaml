@@ -12,10 +12,13 @@ global:
   # When set, EVERY image the chart pulls is re-homed onto this host — the
   # tracebloc services, the spawned ingestor + training-job images, and the
   # alpine/*, ubuntu/squid, busybox, curl helper images — which must already host
-  # the same repositories + tags/digests. Unset (the default) pulls tracebloc/*
-  # and the helper images from docker.io and the ingestor from ghcr.io. If the
-  # mirror needs authentication, also set dockerRegistry below. The standalone
-  # installer writes this from TRACEBLOC_IMAGE_REGISTRY. See docs/INSTALL.md.
+  # the same repositories + tags/digests. Unset (the default) pulls the
+  # tracebloc-published control-plane images from images.traceblocRegistry
+  # (below), the helper images from docker.io and the ingestor from ghcr.io. If
+  # the mirror needs authentication, also set dockerRegistry below. The
+  # standalone installer writes this from TRACEBLOC_IMAGE_REGISTRY. See
+  # docs/INSTALL.md. To move ONLY the tracebloc images, leave this unset and set
+  # images.traceblocRegistry instead.
   imageRegistry: ""
 
 # -- Environment variables passed to containers
@@ -906,15 +909,39 @@ telemetryCollector:
 #   * neither                    -> Always       (floating tag + restart is the
 #                                                 only update path there is)
 #
-# The third case is real, not theoretical: a `global.imageRegistry` mirror makes
-# the reconcile inert (it resolves digests from docker.io, which the mirror may
-# not hold), and `imageRefresh.enabled: false` disables it outright. Those edges
+# The third case is real, not theoretical: a registry the reconcile cannot
+# resolve digests on anonymously -- a `global.imageRegistry` mirror, or an
+# `images.traceblocRegistry` other than docker.io / ghcr.io -- makes it inert
+# (a digest resolved elsewhere may not exist there), and
+# `imageRefresh.enabled: false` disables it outright. Those edges
 # keep the pre-#569 behaviour deliberately — a frozen control plane with a green
 # CronJob and no signal is worse than a restart that needs the network.
 #
 # Setting `digest` here is still meaningful: it is an explicit operator pin
 # that also opts the image OUT of auto-refresh.
 images:
+  # Registry the tracebloc-PUBLISHED control-plane images are pulled from:
+  # tracebloc/jobs-manager, tracebloc/pods-monitor, tracebloc/resource-monitor
+  # and the requests-proxy (which runs the jobs-manager image). A bare host, no
+  # scheme. Resolved by the tracebloc.tbRegistry helper as ONE precedence chain
+  # -- `global.imageRegistry` (a mirror re-homes everything) always wins, then
+  # this, then the chart default -- so the pods, the image-refresh CronJob and
+  # NOTES.txt cannot disagree about where those images live.
+  #
+  # This knob moves ONLY the tracebloc images: busybox, squid, alpine/*, the
+  # device plugins and the ingestor keep their own registries, and
+  # tracebloc/mysql-client stays on docker.io (frozen, digest-pinned, published
+  # nowhere else -- see images.mysqlClient). The training-image host
+  # (JOB_IMAGE_HOST) is not routed through it yet; that moves in its own step.
+  #
+  # The tracebloc images are published to BOTH docker.io and ghcr.io, at the
+  # same digests. Setting this to "ghcr.io" on one edge is how to try the
+  # ghcr.io copies before the chart default moves; setting it back is the
+  # per-edge rollback once it has. Image-refresh follows it: the CronJob
+  # resolves digests on this registry (it can do so anonymously on docker.io
+  # and ghcr.io; any other value makes the reconcile inert and the pods
+  # imagePullPolicy=Always, exactly as a global.imageRegistry mirror does).
+  traceblocRegistry: "docker.io"
   jobsManager:
     digest: ""
   # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
@@ -1730,10 +1757,13 @@ autoUpgrade:
 #     prefix rewrite is not mistaken for a revert). Steady state is one HEAD
 #     per image per tick, well under Docker Hub's 100/6h anonymous
 #     pull-rate limit.
-#   - Private mirrors (global.imageRegistry): the script resolves digests
-#     from docker.io, so pinning one onto a mirrored reference could pin
-#     an image the mirror does not hold. It logs and goes INERT instead.
-#     Under the old `rollout restart` the mismatch was merely useless; with
+#   - The script resolves digests on the SAME registry the pods pull the
+#     tracebloc images from (images.traceblocRegistry, or the
+#     global.imageRegistry mirror when set), and it can only do so
+#     anonymously on docker.io and ghcr.io. Anywhere else -- a private
+#     mirror -- pinning a digest resolved elsewhere could pin an image the
+#     registry does not hold, so it logs and goes INERT instead. Under the
+#     old `rollout restart` the mismatch was merely useless; with
 #     `set image` it has to fail closed.
 #
 # Pinned-digest interaction: if images.jobsManager.digest,
@@ -1756,8 +1786,9 @@ autoUpgrade:
 # requires) are namespace-wide and read-only. Still far narrower than
 # autoUpgrade, which holds cluster-admin.
 #
-# The script reaches out only to docker.io's public registry endpoints; if
-# your cluster requires egress through a proxy, set HTTPS_PROXY via env
+# The script reaches out only to the public token + manifest endpoints of
+# the registry the tracebloc images are pulled from (docker.io or ghcr.io);
+# if your cluster requires egress through a proxy, set HTTPS_PROXY via env
 # or disable this CronJob.
 #
 # Disabled-on-this-cluster check after install:
