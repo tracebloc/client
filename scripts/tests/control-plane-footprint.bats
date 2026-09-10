@@ -75,7 +75,7 @@ YAML
   # guard hands to backend#2460/#2461.
   #
   # THIS FIXTURE EXISTS BECAUSE THE REAL CHART CANNOT TELL THE TWO APART. On the
-  # live render the number is 2336 MiB either way (3136 before backend#2461) -- the chart's init containers
+  # live render the number is the same either way -- the chart's init containers
   # carry no requests -- so the fix is INERT there and a green run proves nothing
   # about the formula. Here the two answers differ, deliberately:
   #

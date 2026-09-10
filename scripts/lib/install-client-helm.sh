@@ -263,8 +263,8 @@ _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
 # `make drift` (the required Source-of-truth drift job): the value below must
 # equal a fresh render of the chart in the same tree, or CI reddens.
-_TB_CP_FOOTPRINT_MEM_BYTES=2449473536
-_TB_CP_FOOTPRINT_CPU_MILLI=750
+_TB_CP_FOOTPRINT_MEM_BYTES=2382364672
+_TB_CP_FOOTPRINT_CPU_MILLI=650
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the fallback training envelope (precedence step 4) ──────────────────────
@@ -724,12 +724,17 @@ _training_provenance() {
 #
 # Everything above sizes the envelope against ALLOCATABLE and stops. Nothing then
 # asked whether the number written can be scheduled beside what else runs on the
-# node: the chart's own control plane (3136 MiB / 900 m, from the render) plus
-# the distribution's system pods (~140 MiB / 200 m of coredns and metrics-server
-# on k3s). Measured on a real single-node install, the platform out-requests the
-# 3 GiB reserve the envelope subtracts, so `allocatable - 3 GiB` over-asked at
-# EVERY machine size and the training pod sat `Pending / Insufficient memory`
+# node: the chart's own control plane (the embedded _TB_CP_FOOTPRINT_* constants,
+# generated from the render by scripts/gen-footprint-embed.sh) plus the
+# distribution's system pods (~140 MiB / 200 m of coredns and metrics-server on
+# k3s). When this was written the chart requested 3136 MiB / 900 m -- MORE than
+# the 3 GiB reserve the envelope subtracts -- so `allocatable - 3 GiB` over-asked
+# at EVERY machine size and the training pod sat `Pending / Insufficient memory`
 # while the installer printed `Training size: ...` and cli doctor said OK.
+# backend#2461's interim trim (chart 1.9.112) brought the control plane under the
+# reserve, so today the fit below is a no-op on every golden vector; it stays
+# because the constants are generated, not promised, and the next chart that
+# out-requests the reserve should be reduced here rather than sit Pending again.
 #
 # The two functions below make the installer own that question at the moment it
 # writes the envelope. The 3 GiB constant itself is not touched here: fixing the

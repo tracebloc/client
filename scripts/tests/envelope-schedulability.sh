@@ -27,7 +27,9 @@
 #    1. the installer's embedded footprint constants equal that render;
 #    2. for EVERY single-node golden vector in the contract table, the envelope
 #       written + chart footprint + system pods <= allocatable, on memory AND cpu;
-#    3. the ticket's 8 GiB reproduction is REDUCED, with the arithmetic;
+#    3. the ticket's 8 GiB reproduction now FITS unreduced (backend#2461 brought
+#       the footprint under the reserve), and a node sized from the live
+#       footprint to over-ask is REDUCED, with the arithmetic (3b);
 #    4. a machine where not even a 1-core / 1-GiB run fits is REFUSED;
 #    5. a cpu-only overshoot reduces cpu alone (DoD part 5: cover cpu too);
 #    6. a human's pin is never altered, only warned;

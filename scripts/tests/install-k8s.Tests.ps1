@@ -9780,9 +9780,11 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     }
     $failures -join "`n" | Should -BeNullOrEmpty
     $checked | Should -BeGreaterOrEqual 10 -Because "a guard that checked almost nothing proves almost nothing"
-    # POSITIVE CONTROL: the platform out-requests the reserve today, so at least
-    # one vector must over-ask BEFORE the fit -- else this suite could never have
-    # seen the defect it exists for.
+    # POSITIVE CONTROL: while the platform out-requested the reserve (before
+    # backend#2461's trim) at least one vector had to over-ask BEFORE the fit --
+    # else this suite could never have seen the defect it exists for. The guard is
+    # conditional on the embedded footprint, so it re-arms by itself the day a
+    # chart out-requests the reserve again.
     if ($needB -gt $script:TbEnvelopeOverheadMemBytes -or $needM -gt $script:TbEnvelopeOverheadCpuMilli) {
       $overBefore | Should -BeGreaterThan 0 -Because "the platform out-requests the reserve, yet no vector over-asked before the fit"
     }

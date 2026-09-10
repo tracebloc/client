@@ -70,20 +70,24 @@ tests:
           path: spec.template.spec.containers[0].resources.requests
       - isNotEmpty:
           path: spec.template.spec.containers[0].resources.limits
-      # #1144: requests.memory pinned == limits.memory (1Gi api / 512Mi
-      # pods-monitor) to lower oom_score_adj during a mass restart.
+      # #1144 pinned requests.memory == limits.memory (1Gi api / 512Mi
+      # pods-monitor) to lower oom_score_adj during a mass restart. The interim
+      # trim (backend#2461, client#1032) lowers the REQUESTS (640Mi / 384Mi) and
+      # keeps the LIMITS (1Gi / 512Mi) -- the limit is the hard ceiling the
+      # restart peak justified and nothing has re-measured it; the request is
+      # what the scheduler and admission subtract. Derivation: values.yaml#resources.
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 768Mi
+          value: 640Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
-          value: 768Mi
+          value: 1Gi
       - equal:
           path: spec.template.spec.containers[1].resources.requests.memory
-          value: 320Mi
+          value: 384Mi
       - equal:
           path: spec.template.spec.containers[1].resources.limits.memory
-          value: 320Mi
+          value: 512Mi
 
   # SELECTED BY NAME, NOT BY POSITION. This was `env[0]`, and `env[0]` was
   # CLIENT_ID only for as long as nothing was ever prepended — which stopped being
