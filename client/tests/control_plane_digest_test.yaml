@@ -61,7 +61,13 @@ tests:
           path: 'spec.template.spec.containers[?(@.name=="api")].imagePullPolicy'
           value: IfNotPresent
 
-  - it: the wait-for-mysql init container renders the jobs-manager digest too
+  - it: the wait-for-mysql init container is NOT seeded from the annotation (floats on :tag)
+    # @shujaatTracebloc #1013 (High): the init container is deliberately NOT seeded
+    # from the last-refreshed annotation. A digest a node never pulled would fail as
+    # Init:ImagePullBackOff (pod never starts) on exactly the k3d/Docker-Desktop edge
+    # #569 protects, and `kubectl set image` never touches this container so the chart
+    # would be its only, un-reconciled driver. So even with a valid annotation present,
+    # this init site stays on :tag.
     template: templates/jobs-manager-deployment.yaml
     documentIndex: 0
     kubernetesProvider:
@@ -78,7 +84,20 @@ tests:
     asserts:
       - equal:
           path: 'spec.template.spec.initContainers[?(@.name=="wait-for-mysql")].image'
-          value: docker.io/tracebloc/jobs-manager@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          value: docker.io/tracebloc/jobs-manager:prod
+
+  - it: the wait-for-mysql init container STILL honours an explicit operator pin
+    # Dropping the annotation seed must not drop the operator's own reproducible pin.
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: 'spec.template.spec.initContainers[?(@.name=="wait-for-mysql")].image'
+          value: docker.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
   - it: pods-monitor-container follows its OWN last-refreshed annotation key
     template: templates/jobs-manager-deployment.yaml
@@ -286,3 +305,88 @@ tests:
       - equal:
           path: 'spec.template.spec.containers[?(@.name=="api")].image'
           value: docker.io/tracebloc/jobs-manager:prod
+
+  # ── the digest-source provenance annotation (@shujaatTracebloc #1013) ────────
+  # tracebloc.io/controlplane-digest-source records WHICH branch produced the
+  # image ref, so a `lookup` that fails open (silently dropping the pin to :tag)
+  # is observable instead of a silent client-runtime#199 recurrence.
+  - it: source is "annotation" when a valid last-refreshed digest is preserved
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    kubernetesProvider:
+      scheme:
+        "apps/v1/Deployment": {gvr: {group: apps, version: v1, resource: deployments}, namespaced: true}
+      objects:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: RELEASE-NAME-jobs-manager
+            namespace: NAMESPACE
+            annotations:
+              tracebloc.io/last-refreshed-jobs-manager-digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    asserts:
+      - equal:
+          path: 'metadata.annotations["tracebloc.io/controlplane-digest-source"]'
+          value: annotation
+
+  - it: source is "values" when an operator pins the digest
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: 'metadata.annotations["tracebloc.io/controlplane-digest-source"]'
+          value: values
+
+  - it: source is "tag" when the Deployment exists but carries no valid annotation
+    # First-observation window: the Deployment is present but image-refresh has not
+    # written a digest yet. Legitimately :tag — not an anomaly.
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    kubernetesProvider:
+      scheme:
+        "apps/v1/Deployment": {gvr: {group: apps, version: v1, resource: deployments}, namespaced: true}
+      objects:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: RELEASE-NAME-jobs-manager
+            namespace: NAMESPACE
+    asserts:
+      - equal:
+          path: 'metadata.annotations["tracebloc.io/controlplane-digest-source"]'
+          value: tag
+
+  - it: source is "tag-lookup-failed" when the lookup returns empty ON AN UPGRADE
+    # The anomaly: on an upgrade the jobs-manager Deployment MUST exist, so an empty
+    # lookup is a read failure (RBAC/5xx/timeout), NOT a fresh install. Surface it so
+    # a silent fall-back to :tag (client-runtime#199) is alertable.
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    release:
+      upgrade: true
+    kubernetesProvider:
+      scheme:
+        "apps/v1/Deployment": {gvr: {group: apps, version: v1, resource: deployments}, namespaced: true}
+      objects: []
+    asserts:
+      - equal:
+          path: 'metadata.annotations["tracebloc.io/controlplane-digest-source"]'
+          value: tag-lookup-failed
+
+  - it: source is "tag" on a FIRST INSTALL with no Deployment (not an anomaly)
+    template: templates/jobs-manager-deployment.yaml
+    documentIndex: 0
+    release:
+      upgrade: false
+    kubernetesProvider:
+      scheme:
+        "apps/v1/Deployment": {gvr: {group: apps, version: v1, resource: deployments}, namespaced: true}
+      objects: []
+    asserts:
+      - equal:
+          path: 'metadata.annotations["tracebloc.io/controlplane-digest-source"]'
+          value: tag

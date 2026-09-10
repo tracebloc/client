@@ -10,6 +10,16 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    # PROVENANCE of the control-plane image ref this render resolved
+    # (client-runtime#199, @shujaatTracebloc on #1013). `lookup` fails OPEN, so a
+    # transient read failure would silently drop image-refresh's pin back to
+    # `:tag` with a green upgrade and no signal. This records which branch won —
+    # `values` | `annotation` | `tag` | `tag-lookup-failed` — so a monitored edge
+    # can alert on the fallback instead of discovering the #199 revert after the
+    # fact. Metadata-only: changing it does not roll the pods. See
+    # tracebloc.controlPlaneDigestSource.
+    tracebloc.io/controlplane-digest-source: {{ include "tracebloc.controlPlaneDigestSource" (dict "root" $ "operatorDigest" .Values.images.jobsManager.digest "annotationImage" "jobs-manager") | quote }}
 spec:
   selector:
     matchLabels:
@@ -100,7 +110,20 @@ spec:
         #
         # It also removes an image: busybox was a second pull on every edge, for a
         # TCP connect the app image can already do.
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" (include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" .Values.images.jobsManager.digest "annotationImage" "jobs-manager")) "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        #
+        # NOT seeded from the last-refreshed annotation (client-runtime#199,
+        # @shujaatTracebloc on #1013): this is an INIT container, so a digest a
+        # node has never pulled fails as `Init:ImagePullBackOff` and the pod never
+        # reaches any container at all — on exactly the offline/side-loaded k3d /
+        # Docker-Desktop edge #569 was written to protect (a `k3d image import`
+        # stores a tag alias with no resolvable digest; see the #569 note at
+        # controlPlanePullPolicy). And `image-refresh` never reconciles this site:
+        # `kubectl set image` only names `api` and `pods-monitor-container`, so the
+        # chart render would be its ONLY driver, with no `set image` to move it
+        # forward. The pin buys nothing here anyway — it is a MySQL TCP wait on the
+        # same image. So keep the OPERATOR pin (`images.jobsManager.digest`) for an
+        # explicit, reproducible pin, but do NOT seed the floating annotation.
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
           # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
           # `restricted` SCC assigns a UID from the project's range, and the pod
