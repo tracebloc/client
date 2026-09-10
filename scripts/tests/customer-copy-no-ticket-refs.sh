@@ -308,7 +308,21 @@ heredoc_body_lines() {
       if (code ~ /^[ \t]*((local|export|readonly|declare)[ \t]+)?\$?[A-Za-z_][A-Za-z0-9_:]*(\[[^]]*\])?[ \t]*\+?=/) return 1
       if (code ~ /(^|[^A-Za-z0-9-])(Set-Content|Add-Content|Out-File)([^A-Za-z0-9-]|$)/) return 1
       if (LANG == "ps") return 0
-      return (code ~ /(^|[^>])>>?[ \t]*[^&> \t]/) ? 1 : 0
+      # bash: STDOUT redirected to a file -- `>`/`>>`, or `1>`. Not `2>` (only
+      # stderr moves, the body still prints), not `>&2` (a stream), not a
+      # /dev/ pseudo-file (`>/dev/stderr` prints, `>/dev/null` writes no file).
+      # Any of those leaves the body classified as printed text (Bugbot on
+      # client#1022: `2>/dev/null` used to read as a generated file).
+      rest = code
+      while (match(rest, />>?/)) {
+        pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
+        tgt = substr(rest, RSTART + RLENGTH); sub(/^[ \t]*/, "", tgt)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (pre ~ /[0-9]/ && pre != "1") continue
+        if (tgt == "" || tgt ~ /^[&>]/ || tgt ~ /^\/dev\//) continue
+        return 1
+      }
+      return 0
     }
     function file_text(line) { sub(/(^|[ \t])#.*$/, "", line); return line }
     BEGIN { closer = ""; is_file = 0 }
@@ -328,7 +342,11 @@ heredoc_body_lines() {
   ' "$file"
 }
 
-tmpd="$(mktemp -d)"
+# Template + fail-closed: a bare `mktemp -d` can fail (BSD mktemp, an unwritable
+# TMPDIR) and leave tmpd EMPTY, and the cleanup below would then expand to
+# `rm -f /*` (Bugbot on client#1022). The trap is armed only once the directory
+# exists.
+tmpd="$(mktemp -d "${TMPDIR:-/tmp}/copyrefs.XXXXXX")" && [ -d "$tmpd" ] || guard_error "could not create a scratch directory under ${TMPDIR:-/tmp}"
 trap 'rm -f "$tmpd"/*; rmdir "$tmpd" 2>/dev/null' EXIT
 offenders=0
 for f in $shipped; do

@@ -455,3 +455,26 @@ FX
   [ "$(grep -c 'sub(/\.\*<<-?' "$GUARD")" -eq 1 ] || return 1
   [ "$(grep -c 'function herestring_closer(' "$GUARD")" -eq 1 ] || return 1
 }
+
+# --- Bugbot round on the follow-up: redirect classification, scratch dir ------
+
+@test "a printed here-document with a stderr or /dev redirect is still text, not a generated file" {
+  printf "help_quiet() {\n  cat <<'HELP' 2>/dev/null\n  # see backend#24 before upgrading\nHELP\n}\nhelp_err() {\n  cat <<'HELP' >/dev/stderr\n  # see backend#25 before upgrading\nHELP\n}\nhelp_fd() {\n  cat <<'HELP' >&2\n  # see backend#26 before upgrading\nHELP\n}\n" >> "$WORK/scripts/lib/cluster.sh"
+  grep -q 'see backend#26 before upgrading' "$WORK/scripts/lib/cluster.sh" || return 1   # anchor applied
+  run run_guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  for t in 'backend#24' 'backend#25' 'backend#26'; do
+    [[ "$output" == *"$t before upgrading"* ]] || { echo "missing $t"; echo "$output"; return 1; }
+  done
+  [[ "$output" == *"3 user-visible line(s)"* ]] || { echo "$output"; return 1; }
+  # ...while an explicit stdout-to-file redirect (`1>`) is a generated file.
+  printf 'write_one() {\n  cat <<EOF 1> "$1"\n# rationale (backend#27)\nEOF\n}\n' >> "$WORK/scripts/lib/cluster.sh"
+  run run_guard
+  [[ "$output" != *"backend#27"* ]] || { echo "$output"; return 1; }
+}
+
+@test "fail closed: a scratch directory that cannot be created is a guard error, never a cleanup of /" {
+  TMPDIR="$WORK/does-not-exist" run run_guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"could not create a scratch directory"* ]] || { echo "$output"; return 1; }
+}
