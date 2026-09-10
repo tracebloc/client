@@ -100,13 +100,35 @@ data:
     # would rewrite `repo:tag` to `repo@digest` on every fresh install — a spec
     # change, therefore a rollout, for byte-identical content, and for the
     # resource-monitor DaemonSet that is a rollout across every node. So the
-    # first tick only RECORDS. The NEXT tick, seeing `recorded == latest` but the
-    # workload still on `:tag`, pins the digest (client-runtime#199) — so a fresh edge
-    # becomes reproducible ~one interval post-install, NOT "at the next upstream
-    # release". Between the two it is still restart-safe offline (IfNotPresent).
+    # first tick only RECORDS. It stays restart-safe offline throughout
+    # (IfNotPresent).
     #
-    # COST, stated honestly (@shujaatTracebloc / @LukasWodka on #1008): that
-    # re-pin is not "one cheap rollout". It enters the shared #563 flap path —
+    # A fresh install then STAYS on `:tag` (#1008). The re-pin on
+    # `recorded == latest` reads the live workload and, when it is off the digest,
+    # skips the roll ONLY on positive fresh-install evidence — two markers:
+    # `tracebloc.io/first-observed-<image>` (stamped by the first-observation arm
+    # above) and `tracebloc.io/digest-applied-<image>` (stamped only after a
+    # re-image rollout succeeds). first_observed present AND applied absent is a
+    # workload we watched born on `:tag` here, so it is left on `:tag`: the
+    # install already pulled the current tag, there is no stale-`:tag`-layer
+    # exposure to repair, and the first genuine UPSTREAM digest change pins it
+    # (and stamps applied). applied present is an established edge and rolls —
+    # the client-runtime#199 repair of a helm re-render that reverted the pin.
+    #
+    # NEITHER marker is a PRE-MARKER / legacy edge (pinned by a version that
+    # predates these markers): it is NOT skipped. The upgrade shipping this chart
+    # re-renders the Deployment back to `:tag` (the same #199 premise), so on the
+    # next tick every established-but-unmarked edge is byte-for-byte the fresh
+    # shape; skipping on absence alone would strand the WHOLE existing fleet on a
+    # possibly-stale `:tag` until the next upstream digest change (LukasWodka on
+    # #1008). So a legacy edge takes the repair roll once, which stamps applied.
+    # This trades "a fresh edge becomes digest-reproducible ~one interval
+    # post-install" for skipping the fresh-install roll outright — the cost below
+    # is why (@shujaatTracebloc / @LukasWodka on #1008).
+    #
+    # COST of that roll — which the marker gate now avoids on a fresh install —
+    # stated honestly (@shujaatTracebloc / @LukasWodka on #1008): the re-pin is
+    # not "one cheap rollout". It enters the shared #563 flap path —
     # `rollout status` on the resource-monitor DaemonSet, whose
     # `desiredNumberScheduled` counts every node (tolerations: Exists), so it can
     # never settle on a fleet with one NotReady/cordoned node; three such ticks
@@ -114,11 +136,10 @@ data:
     # lockout and stop refresh for ALL control-plane images until a human clears
     # ATTEMPT_KEY, while the CronJob stays green. And jobs-manager is
     # `strategy: Recreate`, so its extra rollout is full downtime + wait-for-mysql
-    # for byte-identical content, on every fresh install and again after each
-    # chart-version bump. The widening is kept deliberately — it also repairs a
-    # reinstall onto a node whose `:tag` layer is already stale — but that is the
-    # price, and a follow-up may gate the re-pin on "have we ever applied a digest
-    # here?" so a genuine fresh install skips the flap path entirely.
+    # for byte-identical content. That price is now paid ONLY when it buys
+    # something — repairing an established or legacy edge whose pin a helm
+    # re-render reverted, including a chart-version bump on such an edge. A fresh
+    # install, watched born on `:tag` here, no longer pays it at all.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure
@@ -517,6 +538,27 @@ data:
       pinned="${rest%%|*}"
       pin_digest="${rest#*|}"
 
+      # #1008: two durable markers that let the `recorded == latest` / off-digest
+      # arm below tell a genuine fresh install from a helm-revert of an applied
+      # pin -- WITHOUT mistaking the pre-marker fleet for either. The skip fires
+      # only on POSITIVE fresh-install evidence, never on mere absence:
+      #   first_observed_key  written by the first-observation arm (we saw this
+      #                       workload with no annotation and recorded the digest
+      #                       WITHOUT applying it -- proof it was born on :tag here).
+      #   applied_key         written alongside the digest record only after a
+      #                       re-image rollout succeeds -- proof a digest was
+      #                       actually rolled onto this workload.
+      # Fresh install = first_observed present AND applied absent -> skip the roll.
+      # Established edge = applied present -> roll (the client-runtime#199 repair).
+      # Pre-marker / legacy edge = NEITHER marker (nothing wrote them before this
+      # version): it is NOT positively a fresh install, so it keeps the repair
+      # roll -- the fleet upgrading INTO this version reverts to :tag on the
+      # upgrade hop, and skipping it on absence alone would strand every such edge
+      # on a possibly-stale :tag until the next upstream digest change (LukasWodka
+      # on #1008). Same `${repo#*/}` suffix convention as the stale-pin keys.
+      applied_key="tracebloc.io/digest-applied-${repo#*/}"
+      first_observed_key="tracebloc.io/first-observed-${repo#*/}"
+
       log "checking ${repo}:${IMAGE_TAG} (annotation=${key})"
 
       if [ "$pinned" = "1" ]; then
@@ -603,7 +645,18 @@ data:
         continue
       fi
 
-      recorded="$(get_annotation "$key" || true)"
+      # FAIL-CLOSED, not `|| true` (Bugbot on #1008). A read ERROR here must NOT
+      # collapse to "" and fall into the first-observation arm below: that arm now
+      # stamps first_observed_key, which SUPPRESSES the client-runtime#199 repair
+      # on later ticks. So a transient kubectl/jq error on a legacy edge (which
+      # genuinely HAS a recorded digest) would mis-stamp it as first-observed and
+      # strand it on :tag. get_annotation returns non-zero on a read error and
+      # zero+empty only on genuine absence, so skip this image this tick on error
+      # and retry -- the same stance the marker reads and the settled guard take.
+      if ! recorded="$(get_annotation "$key")"; then
+        log "  WARN: could not read ${key} (kubectl/jq error); skipping this image this tick rather than mistaking a read error for a first observation. Will retry next tick."
+        continue
+      fi
 
       log "  latest=$latest"
       log "  recorded=${recorded:-<unset>}"
@@ -612,9 +665,14 @@ data:
         # First-observation path: record without re-imaging. No evidence
         # the running pod is on an older digest, and rewriting repo:tag to
         # repo@digest for identical content would roll every pod on install
-        # (see the first-tick contract in the header).
+        # (see the first-tick contract in the header). Stamp first_observed_key
+        # too (#1008): this is the POSITIVE evidence that lets the off-digest arm
+        # skip the fresh-install roll -- a workload we watched from its first
+        # annotation-less tick. A pre-marker edge upgrading into this version
+        # never gets this stamp (its first observation predates the marker), so
+        # it is not mistaken for a fresh install and keeps the repair roll.
         log "  first observation; recording without re-imaging"
-        annotate_args="$annotate_args ${key}=${latest}"
+        annotate_args="$annotate_args ${key}=${latest} ${first_observed_key}=1"
         continue
       fi
 
@@ -630,11 +688,14 @@ data:
         # pin whenever the live workload is not already on the pinned digest.
         #
         # The re-pin is BOUNDED TO ONE TICK: it writes the digest back and the
-        # next tick sees the workload on it and no-ops. It also converges a FRESH
-        # install to the digest one tick after first observation -- the first-tick
-        # contract in the header records without re-imaging, and this completes
-        # it, because staying on `:tag` is exactly the steady-state stale-`:tag`
-        # exposure this fix closes.
+        # next tick sees the workload on it and no-ops. It fires to repair an
+        # established or legacy edge whose pin a helm re-render reverted onto
+        # `:tag`, the steady-state stale-`:tag` exposure this fix closes. A fresh
+        # install -- one we watched born on `:tag` (first_observed set, applied
+        # absent) -- is GATED OUT of this roll (see the two-marker check in the
+        # off-digest arm below) and left on `:tag` (#1008); the first genuine
+        # upstream digest change pins it. A pre-marker/legacy edge has neither
+        # marker and is NOT gated out, so the existing fleet is not stranded.
         #
         # Compare on the @sha256 DIGEST, not the whole image reference: a mutating
         # admission webhook that rewrites the registry PREFIX to an internal mirror
@@ -724,8 +785,53 @@ data:
           log "        deployment/${REQUESTS_PROXY_DEPLOYMENT} runs '${rp_have}', not digest ${latest}"
           log "        -- re-pinning the requests-proxy digest"
         else
-          log "  digest unchanged, but the workload runs '${have}', not digest ${latest}"
-          log "        (fresh install, or a helm re-render reverted the pin onto :${IMAGE_TAG}) -- re-pinning the digest"
+          # The workload is fully on :tag, not the digest. THREE shapes reach
+          # here, and the skip must fire only on the fresh-install one (#1008):
+          #   * ESTABLISHED edge, helm-reverted -- a prior tick pinned the digest
+          #     (rollout succeeded, so ${applied_key} is set), then a helm
+          #     re-render discarded it back to :tag. On a node whose :tag layer
+          #     is stale this silently runs an OLD image, so re-pinning is the
+          #     client-runtime#199 repair and MUST run. (applied present)
+          #   * FRESH INSTALL -- the first-observation tick recorded the digest
+          #     and applied nothing, and the workload has been on :tag since
+          #     install. No prior digest to have reverted FROM: the install just
+          #     pulled the current :tag, so re-pinning buys no staleness
+          #     protection -- it only pays the full fresh-install roll (the #563
+          #     flap path on the resource-monitor DaemonSet under
+          #     `tolerations: Exists`, and a `strategy: Recreate` downtime on
+          #     jobs-manager) for byte-identical content.
+          #     (first_observed present AND applied absent)
+          #   * PRE-MARKER / LEGACY edge -- pinned by a version that predates
+          #     these markers, so it has NEITHER. The upgrade that ships this
+          #     chart re-renders the Deployment back to :tag (the same #199
+          #     premise), so on the next tick it is byte-for-byte the fresh
+          #     shape. Skipping on absence alone would strand the WHOLE existing
+          #     fleet on a possibly-stale :tag until the next upstream digest
+          #     change (weeks on :prod) -- the exact #199 exposure, fleet-wide.
+          #     So a legacy edge (no first_observed) is NOT skipped: it takes the
+          #     repair roll, which then stamps applied_key. (neither marker)
+          # Skip ONLY on positive fresh-install evidence. A read ERROR on either
+          # marker (as opposed to genuine absence) skips the re-pin this tick and
+          # retries -- the same fail-closed stance the unreadable-`have` skip
+          # above takes -- rather than guessing the shape.
+          if ! first_observed="$(get_annotation "$first_observed_key")"; then
+            log "  digest unchanged and workload off-digest, but ${first_observed_key} was unreadable (API/jq error) -- skipping re-pin this tick, will retry when readable"
+            continue
+          fi
+          if ! applied="$(get_annotation "$applied_key")"; then
+            log "  digest unchanged and workload off-digest, but ${applied_key} was unreadable (API/jq error) -- skipping re-pin this tick, will retry when readable"
+            continue
+          fi
+          if [ -n "$first_observed" ] && [ -z "$applied" ]; then
+            log "  digest unchanged and workload runs '${have}' on :${IMAGE_TAG}, but this is a fresh install (observed here, no digest ever applied) -- NOT rolling (#1008); it stays on :${IMAGE_TAG} (IfNotPresent-safe) until a genuine upstream digest change pins it."
+            continue
+          fi
+          if [ -z "$first_observed" ] && [ -z "$applied" ]; then
+            log "  digest unchanged, but the workload runs '${have}', not digest ${latest}, and this edge predates the fresh-install markers -- re-pinning to repair a possibly-stale :${IMAGE_TAG} on the upgrade hop (client-runtime#199)"
+          else
+            log "  digest unchanged, but the workload runs '${have}', not digest ${latest}"
+            log "        (a helm re-render reverted the pin onto :${IMAGE_TAG}) -- re-pinning the digest"
+          fi
         fi
         # Fall through to the re-image path (ref + case block) with recorded
         # already == latest: the annotate below is an idempotent re-write, and
@@ -733,7 +839,14 @@ data:
       else
         log "  digest changed (${recorded} -> ${latest}); re-image needed"
       fi
-      annotate_args="$annotate_args ${key}=${latest}"
+      # Record the digest AND stamp applied_key -- proof a digest has now been
+      # rolled onto this workload (#1008). Both land in the SAME annotate below,
+      # after a successful rollout, so they share one fate: whenever a later tick
+      # reads `recorded == latest`, the applied marker it gates on is present too.
+      # The first-observation arm stamps first_observed_key instead (it applies
+      # nothing), and the two markers are what let the off-digest arm above tell a
+      # fresh install from an established edge without stranding the legacy fleet.
+      annotate_args="$annotate_args ${key}=${latest} ${applied_key}=1"
       restart_needed=1
 
       # The reference we pin: the SAME registry the digest above was resolved

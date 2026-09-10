@@ -70,10 +70,18 @@ teardown() { rm -rf "$TMP"; }
 
 # Runs the shipped re-pin branch with the registry HEAD (already known: recorded
 # == latest) and the two LIVE-image reads stubbed.
-#   $1 = STUB_API   what workload_image_for_repo returns ("" = unreadable)
-#   $2 = STUB_PROXY what requests_proxy_image returns   ("" = unreadable)
-#   $3 = RP_PINNED  "1" opts the requests-proxy out of following the digest
-#   $4 = PENDING    the ATTEMPT_KEY value carried in (0 = no unfinished re-image)
+#   $1 = STUB_API     what workload_image_for_repo returns ("" = unreadable)
+#   $2 = STUB_PROXY   what requests_proxy_image returns   ("" = unreadable)
+#   $3 = RP_PINNED    "1" opts the requests-proxy out of following the digest
+#   $4 = PENDING      the ATTEMPT_KEY value carried in (0 = no unfinished re-image)
+#   $5 = STUB_APPLIED         get_annotation value for ${applied_key}
+#                             (non-empty = a digest was rolled here before)
+#   $6 = STUB_FIRST_OBSERVED  get_annotation value for ${first_observed_key}
+#                             (non-empty = we recorded this workload's first,
+#                              annotation-less tick here)
+# The off-digest arm skips ONLY on first_observed present AND applied absent
+# (fresh install). applied present rolls (established edge); NEITHER marker rolls
+# (pre-marker/legacy edge -- not stranded on the upgrade hop). #1008.
 #
 # The branch is wrapped in a ONE-ITERATION loop so its `continue` statements run
 # as they ship, rather than being stripped (which would change control flow).
@@ -82,6 +90,8 @@ run_branch() {
 set -eu
 repo="tracebloc/jobs-manager"
 key="tracebloc.io/last-refreshed-jobs-manager-digest"
+applied_key="tracebloc.io/digest-applied-jobs-manager"
+first_observed_key="tracebloc.io/first-observed-jobs-manager"
 IMAGE_REGISTRY="docker.io"
 IMAGE_TAG="dev"
 REQUESTS_PROXY_DEPLOYMENT="t-requests-proxy"
@@ -91,6 +101,8 @@ recorded="sha256:aaa"
 STUB_API="\${1:-}"
 STUB_PROXY="\${2:-}"
 pending_attempt="\${4:-0}"
+STUB_APPLIED="\${5:-}"
+STUB_FIRST_OBSERVED="\${6:-}"
 MAX_REFRESH_ATTEMPTS=3
 restart_needed=0
 annotate_args=""
@@ -105,6 +117,17 @@ log() { printf '%s\n' "\$*"; }
 kubectl() { printf 'KUBECTL:%s\n' "\$*"; }
 workload_image_for_repo() { [ -n "\$STUB_API" ] && printf '%s' "\$STUB_API"; }
 requests_proxy_image() { [ -n "\$STUB_PROXY" ] && printf '%s' "\$STUB_PROXY"; }
+# Only the two markers are read inside this branch. Model the real get_annotation:
+# return 0 with the value (empty = annotation ABSENT), never non-zero -- a
+# non-zero return means a kubectl/jq READ ERROR, which the branch handles
+# separately. Using \`[ -n ] && printf\` here would return non-zero on an empty
+# stub and be misread as a read error.
+get_annotation() {
+  case "\$1" in
+    "\$applied_key")        printf '%s' "\$STUB_APPLIED" ;;
+    "\$first_observed_key") printf '%s' "\$STUB_FIRST_OBSERVED" ;;
+  esac
+}
 for _once in 1; do
 $(sed 's/^/  /' "$TMP/branch.sh")
 done
@@ -113,15 +136,52 @@ printf 'JM:%s\n' "\$jm_set_args"
 printf 'RP:%s\n' "\$rp_set_args"
 printf 'ANNOTATE:%s\n' "\$annotate_args"
 EOF
-  sh "$TMP/harness.sh" "${1:-}" "${2:-}" "${3:-}" "${4:-0}"
+  sh "$TMP/harness.sh" "${1:-}" "${2:-}" "${3:-}" "${4:-0}" "${5:-}" "${6:-}"
 }
 
-@test "workload reverted to :tag re-pins the digest (restart_needed=1)" {
-  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1"
+@test "ESTABLISHED edge reverted to :tag re-pins the digest (restart_needed=1)" {
+  # A digest was applied here before (applied marker present, $5="1"), then a helm
+  # re-render reverted the workload onto :tag -- the client-runtime#199 repair
+  # must roll. #1008.
+  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1" "0" "1"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"RESTART:1"* ]] || return 1
   [[ "$output" == *"api=docker.io/tracebloc/jobs-manager@sha256:aaa"* ]] || return 1
   [[ "$output" == *"re-pinning the digest"* ]] || return 1
+  # the re-image records the digest AND stamps the applied marker, in one annotate
+  [[ "$output" == *"tracebloc.io/digest-applied-jobs-manager=1"* ]] || return 1
+}
+
+@test "FRESH install (first-observed here, never applied) does NOT roll -- stays on :tag" {
+  # #1008. recorded == latest, workload on :tag, first_observed set ($6="1") and
+  # applied absent ($5="") -- a workload we watched born on :tag here. Rolling
+  # would pay the full #563 flap-path / Recreate cost for byte-identical content
+  # the install already pulled. The tick must leave it on :tag.
+  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1" "0" "" "1"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"fresh install"* ]] || return 1
+  [[ "$output" == *"NOT rolling"* ]] || return 1
+  [[ "$output" == *"RESTART:0"* ]] || return 1
+  # nothing queued for a rollout, and no digest/marker write this tick
+  [[ "$output" != *"JM:api="* ]] || return 1
+  [[ "$output" != *"re-pinning the digest"* ]] || return 1
+  [[ "$output" != *"digest-applied-jobs-manager=1"* ]] || return 1
+}
+
+@test "PRE-MARKER / legacy edge (NEITHER marker) still gets the repair roll" {
+  # LukasWodka on #1008: an edge pinned by a version predating these markers has
+  # neither ($5="" $6=""). The upgrade shipping this chart reverts it to :tag, so
+  # its first post-upgrade tick is byte-for-byte the fresh shape. Skipping on
+  # absence alone would strand the whole existing fleet on a possibly-stale :tag
+  # until the next upstream digest change -- the exact #199 exposure. A legacy
+  # edge must therefore ROLL (repair), which then stamps the applied marker.
+  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1" "0" "" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"RESTART:1"* ]] || return 1
+  [[ "$output" == *"predates the fresh-install markers"* ]] || return 1
+  [[ "$output" == *"api=docker.io/tracebloc/jobs-manager@sha256:aaa"* ]] || return 1
+  [[ "$output" == *"tracebloc.io/digest-applied-jobs-manager=1"* ]] || return 1
+  [[ "$output" != *"fresh install"* ]] || return 1
 }
 
 @test "api and proxy both on the digest is a no-op (restart_needed=0, no set args)" {
