@@ -9799,7 +9799,7 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     $r.Fit.Verdict | Should -Be 'fits'
     $r.Fit.Size | Should -Be $r.Before
   }
-  It "3b. the REDUCE path, on a node DERIVED from the footprint (moves with the render)" {
+  It "3b. a node DERIVED from the footprint (moves with the render) is REDUCED, arithmetic printed" {
     # Below 4 GiB the resolver falls to the 1-core / 2-GiB floor; this node leaves
     # room for 1 GiB but not for that floor, so the fit must reduce to 1 GiB with
     # the OVER arithmetic on screen.
