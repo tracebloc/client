@@ -241,9 +241,11 @@ echo "── simulate an image-refresh-managed annotation (must survive upgrades
 # _helpers.tpl), so any upgrade that renders the WORKING-TREE chart (path 1's
 # `--reuse-values`, path 2's `--reset-then-reuse-values`) Recreates jobs-manager
 # onto an unpullable ref and it sits in Init:ImagePullBackOff. (The intermediate
-# reset to the PUBLISHED $PREV chart between paths 1 and 2 renders `:tag` and
-# briefly un-wedges it, because $PREV predates tracebloc.controlPlaneDigest.) That
-# is harmless to paths 2-5 BY CONSTRUCTION: the only readiness wait in this script
+# reset to the PUBLISHED $PREV chart between paths 1 and 2 MAY briefly un-wedge it
+# by rendering `:tag` — but only while $PREV predates tracebloc.controlPlaneDigest;
+# once 1.9.110+ is the published $PREV the reset renders this sentinel too and the
+# un-wedge stops happening. Do not depend on it either way.) That
+# is harmless to paths 2-5 BY CONSTRUCTION regardless: the only readiness wait in this script
 # is `kubectl wait … nodes` at the top (before this seed), and every assertion
 # after this point is a spec-only read (`kubectl get … -o jsonpath`), never a
 # live-pod / rollout / readiness read. If you add a step below that needs a
@@ -352,8 +354,11 @@ ANNOT="$(kubectl get -n "$NS" "$(jm_deploy)" \
 # so it survives even if tracebloc.controlPlaneDigest is removed or always returns
 # empty and the image silently reverts to :tag. Assert the RENDERED image digest,
 # which is what actually protects the pin: this is the assertion that reddens if
-# the helper is dropped. (Fleet auto-upgrade E2E confirms later paths tolerate the
-# unpullable sentinel digest — no --wait on this upgrade, spec-only reads here.)
+# the helper is dropped. (This test's upgrade tolerates the unpullable sentinel
+# digest because *this script's* helm upgrade passes no --wait and every check here
+# is a spec-only read — NOT a property of the fleet path: auto-upgrade-cronjob.yaml
+# runs `--atomic --cleanup-on-fail --timeout`, and --atomic implies --wait, so on a
+# real edge an unpullable seed blocks on readiness and rolls back. See the :245 note.)
 CP_DIGEST="$(jm_controlplane_image_digest)"
 [ "$CP_DIGEST" = "$E2E_REFRESH_DIGEST" ] \
   || fail "auto-upgrade did not seed the jobs-manager control-plane image from the last-refreshed digest: got '${CP_DIGEST:-<none — reverted to floating :tag>}', want '$E2E_REFRESH_DIGEST' (tracebloc.controlPlaneDigest did not render the pin — client-runtime#199 revert not prevented)"

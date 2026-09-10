@@ -1547,7 +1547,13 @@ podTokenTtlSeconds: 604800
 #   - NOTE (#569): a chart upgrade no longer picks up new IMAGE content as a
 #     side effect. That used to work because the control-plane pods ran
 #     `imagePullPolicy: Always`, so any restart re-resolved the floating tag;
-#     they now run IfNotPresent so an offline restart cannot fail. New image
+#     they now run IfNotPresent so an offline restart cannot fail *provided the
+#     node already cached the running image*. NARROWED (client#1013): once
+#     image-refresh has observed a digest, the chart seeds that registry
+#     `@digest` onto the control-plane images (see tracebloc.controlPlaneDigest),
+#     so a node that never pulled that exact digest — an offline/side-loaded k3d
+#     or Docker-Desktop edge — now restarts into ImagePullBackOff instead of the
+#     cached tag. New image
 #     content arrives via the image-refresh CronJob's `kubectl set image`
 #     instead. This CronJob still delivers everything else a chart release
 #     carries — template, RBAC, values-default and schema changes.
@@ -1720,7 +1726,11 @@ autoUpgrade:
 #     repo@digest for byte-identical content would roll every workload —
 #     including the DaemonSet on every node — for nothing. The cost is
 #     that a fresh edge runs repo:tag until the first real digest change:
-#     still restart-safe offline, just not yet reproducible.
+#     still restart-safe offline, just not yet reproducible. NARROWED
+#     (client#1013): this holds only for the first-observation window. Once a
+#     digest has been recorded, the chart seeds it (tracebloc.controlPlaneDigest)
+#     and a later chart render pins repo@digest, so from then on an offline
+#     restart is restart-safe only on a node that already cached that digest.
 #   - Idle-cheap: when the recorded digest matches today's digest, the
 #     script exits without touching anything. Steady state is one HEAD
 #     per image per tick, well under Docker Hub's 100/6h anonymous
