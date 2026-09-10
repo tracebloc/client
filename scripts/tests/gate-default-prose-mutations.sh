@@ -43,6 +43,57 @@ mkfixture() {                       # $1 = destination root
       done
 }
 
+# A CONSISTENT MIXED-POLARITY fixture (backend#3509). narrowEdgeuserByEnv shipping
+# `true` for dev and `false` for stg/prod, with EVERY source that names the gate --
+# the chart, the schema description, the helper comment, the runbook -- stating
+# exactly that. The real chart ships it true everywhere (backend#947), so like case
+# (a-on) this patches a THROWAWAY copy, never the shipped chart. All sources must
+# AGREE, or the guard reddens on the stale one instead of on the span this exercises.
+# The runbook sentence is the point: `true for dev, false for stg` comma-joined, so a
+# greedy `[\w,\s]*` span runs from `true ... for` across `false` into `stg`, while the
+# shipped `_SPAN` (which refuses to cross the opposite polarity word or a second `for`)
+# reads it the way a human does. Cases (c) and (c-span) share this one builder so the
+# GREEN assertion and its `_SPAN` mutation stand on the SAME fixture.
+mixfixture() {                      # $1 = destination root
+  local d="$1"
+  mkfixture "$d"
+  python3 - "$d/client/values.yaml" <<'PY2'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+m = re.search(r"narrowEdgeuserByEnv:\n(?:  \w+: \w+\n)+", s)
+assert m, "fixture lost the narrowEdgeuserByEnv block"
+block = m.group(0)
+patched = block.replace("  stg: true\n", "  stg: false\n").replace(
+    "  prod: true\n", "  prod: false\n")
+assert patched.count(": false\n") >= 2, "expected stg+prod to flip to false in the fixture"
+open(p, "w").write(s[: m.start()] + patched + s[m.end() :])
+PY2
+  python3 - "$d/client/values.schema.json" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "TRUE for dev, stg and prod"
+assert s.count(old) == 1, f"schema anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(old, "TRUE for dev, FALSE for stg and prod"))
+PY2
+  python3 - "$d/client/templates/_helpers.tpl" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "BAKED ON FOR dev, stg AND prod"
+assert s.count(old) == 1, f"helper anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(old, "BAKED ON FOR dev, OFF FOR stg AND prod"))
+PY2
+  python3 - "$d/client/MIGRATION.md" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
+assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
+open(p, "w").write(s.replace(
+    old,
+    "`narrowEdgeuserByEnv` is `true` for `dev`, `false` for `stg` and `prod`, "
+    "which is what this fixture ships."))
+PY2
+}
+
 run_case() {                        # $1 label, $2 expected rc, $3 expected substring, $4 fixture root
   local label="$1" want_rc="$2" want="$3" d="$4" out rc
   set +e
@@ -243,26 +294,38 @@ open(p, "w").write(s.replace(
 PY2
 run_case "an ON-polarity claim in LIST form is caught (fixture ships stg/prod false)" 1   "MIGRATION.md" "$D"
 
-# (c) THE FALSE-POSITIVE GUARD: a CORRECT claim must stay GREEN. Now that every
-# gate ships true for every env, the correct claim is the all-true LIST form; the
-# guard must read it as agreement, not misfire on the list span. (Before the
-# rollout completed this case stated BOTH polarities in one sentence -- `true` for
-# dev, `false` for stg/prod -- to prove a greedy list span did not cross the other
-# polarity word and mis-report it; that mixed sentence is no longer a correct
-# statement of any real gate, so the check is now the all-true claim. It is still
-# the thing standing between the guard and a wall of false findings.)
-D="$TMP/mixed"; mkfixture "$D"
-python3 - "$D/client/MIGRATION.md" <<'PY2'
+# (c) THE FALSE-POSITIVE GUARD, and the reason _SPAN refuses to cross the other
+# polarity word. A CORRECT MIXED-POLARITY claim -- `true` for one env and `false`
+# for others in ONE sentence -- must stay GREEN: a reader parses "true for dev,
+# false for stg and prod" as dev-on / stg-prod-off, and so must the guard. This is
+# the case whose loss backend#3509 caught: after backend#947 baked every gate true
+# everywhere, an all-true sentence was substituted here, and with nothing left in
+# the suite crossing an opposite-polarity word a greedy `_SPAN` would have stayed
+# green. mixfixture rebuilds the mixed reality on a throwaway copy, so the sentence
+# is correct against THAT chart -- forever, regardless of what the real chart ships.
+D="$TMP/mixed"; mixfixture "$D"
+run_case "a CORRECT mixed-polarity claim (true dev, false stg/prod) is NOT a finding" 0 \
+  "no document contradicts" "$D"
+
+# (c-span) ...AND THE MUTATION THAT PROVES _SPAN IS LOAD-BEARING (backend#3509,
+# repo CLAUDE.md rule 9). On the SAME mixfixture, revert _SPAN in the fixture's OWN
+# guard copy to the greedy `[\w,\s]*` it replaced (saqlainsyed007 on #900). The span
+# now runs from `true for dev,` across `false` to `stg`, so env stg (shipped false
+# here) matches a TRUE_CLAIM and the guard reports "says 'true' for stg" -- one brick
+# of the 18-wide false-finding wall the refusal-to-cross was added to stop. Green
+# above and red here on one fixture, driven by the real _SPAN and its real reversion,
+# not a reimplementation.
+D="$TMP/mixedmut"; mixfixture "$D"
+python3 - "$D/scripts/tests/gate-default-prose-agreement.sh" <<'PY2'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "`rotateMysqlRootByEnv` were added in `1.9.71`."
-assert s.count(old) == 1, f"fixture anchor matched {s.count(old)} times, not 1"
+old = r"_SPAN = r'(?:(?!{opp}\b|for\b)[\w,\s])*'"
+assert s.count(old) == 1, f"_SPAN anchor matched {s.count(old)} times, not 1"
 open(p, "w").write(s.replace(
-    old,
-    "`rotateMysqlRootByEnv` were added in `1.9.71`.\n\n`narrowEdgeuserByEnv` is `true` for `dev`, `stg` "
-    "and `prod`, which is what the chart ships.\n\n"))
+    old, r"_SPAN = r'[\w,\s]*'   # mutation: greedy span crosses the other polarity"))
 PY2
-run_case "a correct all-true LIST claim is NOT a finding" 0   "no document contradicts" "$D"
+run_case "a greedy _SPAN misfires on the same mixed claim (says 'true' for stg)" 1 \
+  "says 'true' for stg" "$D"
 
 # Re-established here rather than relying on the `$D` set above: the cases
 # inserted between that setup and this assertion silently repointed `$D`, and
