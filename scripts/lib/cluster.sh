@@ -1193,8 +1193,8 @@ ensure_cluster_autostart() {
   # path, and it ran unbounded while its `docker info` neighbours did not — the gap
   # check-style rule 5 could not see until it was widened past `info`.
   #
-  # DO NOT `|| return 0` here (Bugbot Medium, client#1011 -> backend#3554): this
-  # read feeds ONLY the node restart-policy loop below, but the Linux
+  # DO NOT `|| return 0` here (Bugbot Medium, off the client#1011 promotion
+  # review): this read feeds ONLY the node restart-policy loop below, but the Linux
   # docker.service boot-enable further down does NOT depend on the node list.
   # Bailing out of the whole function on a 124 left the operator a finished
   # install whose docker.service was never enabled on boot — the cluster would
