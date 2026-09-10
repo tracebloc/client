@@ -48,12 +48,12 @@ data:
     # edge — the pods stay offline-safe throughout because IfNotPresent does not
     # depend on any of this.
     #
-    #   1. HELM RE-RENDER — RESOLVED as of chart 1.9.110 (#1013 /
+    #   1. HELM RE-RENDER — RESOLVED as of chart 1.9.111 (#1013 /
     #      client-runtime#199). `helm upgrade --reset-then-reuse-values` (the
-    #      fleet auto-upgrade path) re-renders the templates; BEFORE 1.9.110 they
+    #      fleet auto-upgrade path) re-renders the templates; BEFORE 1.9.111 they
     #      wrote the bare `repo:tag` and so reverted an earlier `set image` pin,
     #      and the edge floated on the tag until the next upstream release
-    #      re-pinned it. FROM 1.9.110 the control-plane image sites render
+    #      re-pinned it. FROM 1.9.111 the control-plane image sites render
     #      through `tracebloc.controlPlaneDigest`, which reads THIS annotation via
     #      `lookup` and renders `repo@<last-refreshed digest>` — so a re-render
     #      now PRESERVES the pin instead of dropping it. (Still only relevant on a
@@ -105,7 +105,7 @@ data:
     # reproducible. Offline-safety is what #569 is fixing; reproducibility
     # follows on the next upstream release.
     #
-    # First-observation roll (chart ≥ 1.9.110, #1013). Once this tick has
+    # First-observation roll (chart ≥ 1.9.111, #1013). Once this tick has
     # RECORDED D0 without re-imaging, the live spec still says `:tag` but the
     # annotation now says `@D0`, so the NEXT chart bump renders `repo@D0`
     # (tracebloc.controlPlaneDigest reads the annotation) and rolls jobs-manager

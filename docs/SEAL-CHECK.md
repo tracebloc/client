@@ -288,7 +288,7 @@ run a build carrying client-runtime#416 (the HF-offline injection) *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
 On each cluster the chart renders control-plane images as `repository:tag` +
 `IfNotPresent` on a fresh install, and the `image-refresh` CronJob pins the live
-digest out-of-band. **As of chart 1.9.110 (#1013 / client-runtime#199) a
+digest out-of-band. **As of chart 1.9.111 (#1013 / client-runtime#199) a
 `helm upgrade` no longer reverts that pin:** `tracebloc.controlPlaneDigest` reads
 image-refresh's last-refreshed annotation via `lookup` and re-renders
 `repository@digest`, so `--reset-then-reuse-values` preserves the digest on its

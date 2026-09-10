@@ -1,0 +1,1 @@
+Documented in 1c78acf next to the suspend note; the actual fix (record the tag alongside the digest, honour the annotation only when it matches the current env) is an A-side change — see @shujaatTracebloc's thread. Leaving open until A lands.

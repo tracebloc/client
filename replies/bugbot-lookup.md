@@ -1,0 +1,1 @@
+Addressed in 1c78acf — `tracebloc.controlPlaneDigestSource` records `tracebloc.io/controlplane-digest-source` (`values`|`annotation`|`tag`|`tag-lookup-failed`) on the jobs-manager Deployment; on an upgrade an empty lookup ⇒ `tag-lookup-failed`, since the Deployment must exist. See the fuller reply on @shujaatTracebloc's thread.

@@ -480,11 +480,11 @@ true
   freezing — a frozen control plane with no signal is worse than a restart that
   needs the network.
 
-  #569 OFFLINE GUARANTEE — NARROWED as of 1.9.110 (#1013). IfNotPresent only
-  helps when the REFERENCE is cache-satisfiable. Until 1.9.110 a `helm upgrade`
+  #569 OFFLINE GUARANTEE — NARROWED as of 1.9.111 (#1013). IfNotPresent only
+  helps when the REFERENCE is cache-satisfiable. Until 1.9.111 a `helm upgrade`
   re-rendered the bare `:tag`, which a node that had pulled that tag could always
   satisfy from cache, so an offline restart ran the (possibly stale) cached
-  image. From 1.9.110 tracebloc.controlPlaneDigest can render `repo@<digest>`
+  image. From 1.9.111 tracebloc.controlPlaneDigest can render `repo@<digest>`
   seeded from the last-refreshed annotation (see its header), and because the
   first-observation path RECORDS a digest without re-imaging, the rendered digest
   may be one the node has never pulled. Online that is the fix working; OFFLINE

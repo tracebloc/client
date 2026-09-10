@@ -243,7 +243,7 @@ echo "── simulate an image-refresh-managed annotation (must survive upgrades
 # onto an unpullable ref and it sits in Init:ImagePullBackOff. (The intermediate
 # reset to the PUBLISHED $PREV chart between paths 1 and 2 MAY briefly un-wedge it
 # by rendering `:tag` — but only while $PREV predates tracebloc.controlPlaneDigest;
-# once 1.9.110+ is the published $PREV the reset renders this sentinel too and the
+# once 1.9.111+ is the published $PREV the reset renders this sentinel too and the
 # un-wedge stops happening. Do not depend on it either way.) That
 # is harmless to paths 2-5 BY CONSTRUCTION regardless: the only readiness wait in this script
 # is `kubectl wait … nodes` at the top (before this seed), and every assertion
