@@ -87,16 +87,23 @@ add_file() { # path content
 commit() { git -C "$SRC" commit -q -m fixture --allow-empty; }
 write_include() { printf '# fixture allowlist\n' >"$SRC/.publish-include"; printf '%s\n' "$@" >>"$SRC/.publish-include"; }
 # The fixture's forbidden list — a DIFFERENT list from the repo's, written here.
+# Two string tiers: a mailbox and an ARN refuse; a tracker reference, an RFC
+# identifier and a non-production host are reported.
 write_forbidden() {
   {
     printf '[paths]\n'
     printf '%s\n' 'tests/' 'scripts/tests/' 'Makefile' 'CLAUDE.md' '.github/' '*.go' 'kubeconfig*'
-    printf '\n[strings]\n'
-    printf '%s\n' 'backend#' 'RFC-0' 'dev-api\.tracebloc\.io' '[A-Za-z0-9._%+-]+@tracebloc\.io'
+    printf '\n[strings-refuse]\n'
+    printf '%s\n' '[A-Za-z0-9._%+-]+@tracebloc\.io' 'arn:aws:'
+    printf '\n[strings-report]\n'
+    printf '%s\n' 'backend#' 'RFC-0' 'dev-api\.tracebloc\.io'
     printf '\n[allow]\n'
     printf '%s\n' 'support@tracebloc\.io'
   } >"$SRC/.publish-forbidden"
 }
+# A forbidden list with only a [paths] section and the refuse tier below, for
+# the tests that exercise path matching alone.
+paths_only_forbidden() { printf '[paths]\n%s\n[strings-refuse]\narn:aws:\n' "$1" >"$SRC/.publish-forbidden"; }
 # plant PATH LINE — append LINE to a fixture file, commit, and PROVE it landed
 # (an inert mutation and real coverage look identical in a log).
 plant() {
@@ -114,7 +121,7 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"[allowlist] staged 7 of 14 tracked file(s)"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"[forbidden-paths] clean (7 pattern(s) against 7 staged path(s))"* ]] || return 1
-  [[ "$output" == *"[forbidden-strings] clean (4 needle(s), 1 allow token(s); 7 text file(s) scanned, 0 binary"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] clean (2 refuse + 3 report needle(s), 1 allow token(s); 7 text file(s) scanned, 0 binary"* ]] || return 1
   [[ "$output" == *"[gitleaks] clean"* ]] || return 1
   [[ "$output" == *"publish-guard: OK — all 4 guards ran and passed"* ]] || return 1
   # The staged tree is exactly the allowlisted set: nothing more, nothing less.
@@ -177,7 +184,7 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
 
 @test "a pattern with a slash is anchored to the staged root; one without matches any component" {
   write_include 'scripts/tests/**' 'other/**' 'README.md'
-  printf '[paths]\nscripts/tests/\n[strings]\nbackend#\n' >"$SRC/.publish-forbidden"
+  paths_only_forbidden 'scripts/tests/'
   guard
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [[ "$output" == *"forbidden path pattern 'scripts/tests/' matched:"* ]] || return 1
@@ -185,7 +192,7 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   [[ "$output" != *"tree:other/scripts/tests/b.bats"* ]] || return 1   # anchored: not this one
   # The unanchored form reaches it.
   rm -rf "$OUT"
-  printf '[paths]\ntests/\n[strings]\nbackend#\n' >"$SRC/.publish-forbidden"
+  paths_only_forbidden 'tests/'
   guard
   [ "$status" -eq 1 ] || return 1
   [[ "$output" == *"tree:other/scripts/tests/b.bats"* ]] || return 1
@@ -206,36 +213,30 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
 }
 
 @test "no [paths] entries is could-not-tell, not clean" {
-  printf '[strings]\nbackend#\n' >"$SRC/.publish-forbidden"
+  printf '[strings-refuse]\narn:aws:\n' >"$SRC/.publish-forbidden"
   guard
   [ "$status" -eq 2 ] || return 1
   [[ "$output" == *"[forbidden-paths] COULD NOT TELL — '"*"' has no [paths] entries"* ]] || return 1
 }
 
-# ── guard 3: forbidden strings ────────────────────────────────────────────────
+# ── guard 3: forbidden strings — the refuse tier ──────────────────────────────
 
-@test "mutation: an internal tracker reference in a staged file is refused, file and line named" {
-  plant README.md 'see backend#1234 for the rationale'
+@test "mutation: a refuse-tier needle in a staged file is refused, tier, file and line named" {
+  plant README.md 'role arn:aws:iam::000000000000:role/planted'
   guard
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"[forbidden-strings] REFUSED — needle 'backend#' found in 1 staged line(s):"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s):"* ]] || return 1
   [[ "$output" == *"    tree/README.md:2"* ]] || return 1
   # The matched text itself is never echoed.
-  [[ "$output" != *"for the rationale"* ]] || return 1
-}
-
-@test "mutation: a non-production hostname in a staged file is refused" {
-  plant client/Chart.yaml '# points at dev-api.tracebloc.io'
-  guard
-  [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"needle 'dev-api\.tracebloc\.io' found in 1 staged line(s):"*"tree/client/Chart.yaml:2"* ]] || return 1
+  [[ "$output" != *"role/planted"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] 1 refuse-tier hit(s), 0 report-tier hit(s) counted"* ]] || return 1
 }
 
 @test "needles match case-insensitively" {
-  plant README.md 'BACKEND#7'
+  plant README.md 'ARN:AWS:s3:::planted'
   guard
   [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"needle 'backend#' found in 1 staged line(s)"* ]] || return 1
+  [[ "$output" == *"[strings-refuse] needle 'arn:aws:' found in 1 staged line(s)"* ]] || return 1
 }
 
 @test "an [allow] token spares a line only when it was the whole reason the needle hit" {
@@ -247,16 +248,16 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   plant README.md 'or write to someone@tracebloc.io / support@tracebloc.io'
   guard
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"needle '[A-Za-z0-9._%+-]+@tracebloc\.io' found in 1 staged line(s):"*"tree/README.md:2"* ]] || return 1
+  [[ "$output" == *"[strings-refuse] needle '[A-Za-z0-9._%+-]+@tracebloc\.io' found in 1 staged line(s):"*"tree/README.md:2"* ]] || return 1
 }
 
-@test "mutation: a private needle supplied with --extra-forbidden is enforced" {
+@test "mutation: a private needle supplied with --extra-forbidden joins the refuse tier" {
   printf '# private list\nplanted-tenant\n' >"$BATS_TEST_TMPDIR/tenants.txt"
   plant client/templates/deploy.yaml '# for Planted-Tenant only'
   guard --extra-forbidden "$BATS_TEST_TMPDIR/tenants.txt"
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"needle 'planted-tenant' found in 1 staged line(s):"*"tree/client/templates/deploy.yaml:2"* ]] || return 1
-  [[ "$output" == *"[forbidden-strings] 1 hit(s) across 5 needle(s)"* ]] || return 1
+  [[ "$output" == *"[strings-refuse] needle 'planted-tenant' found in 1 staged line(s):"*"tree/client/templates/deploy.yaml:2"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] 1 refuse-tier hit(s), 0 report-tier hit(s) counted (3 refuse + 3 report needle(s)"* ]] || return 1
 }
 
 @test "an empty --extra-forbidden list is could-not-tell: the private needles were not supplied" {
@@ -272,28 +273,144 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   [[ "$output" == *"[forbidden-strings] COULD NOT TELL — extra forbidden list '"*"absent.txt' is missing or unreadable"* ]] || return 1
 }
 
-@test "an internal reference inside a release asset is refused with the asset named" {
+@test "a refuse-tier needle inside a release asset is refused with the asset named" {
   mkdir -p "$BATS_TEST_TMPDIR/assets"
-  printf '#!/bin/sh\n# see backend#42\n' >"$BATS_TEST_TMPDIR/assets/install.sh"
+  printf '#!/bin/sh\n# bucket arn:aws:s3:::planted\n' >"$BATS_TEST_TMPDIR/assets/install.sh"
   guard --assets "$BATS_TEST_TMPDIR/assets"
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [[ "$output" == *"[assets] staged 1 release asset(s):"*"    install.sh"* ]] || return 1
-  [[ "$output" == *"needle 'backend#' found in 1 staged line(s):"*"assets/install.sh:2"* ]] || return 1
+  [[ "$output" == *"[strings-refuse] needle 'arn:aws:' found in 1 staged line(s):"*"assets/install.sh:2"* ]] || return 1
 }
 
 @test "a binary asset is opaque to the string scan and counted as such" {
   mkdir -p "$BATS_TEST_TMPDIR/assets"
-  printf 'ELF\000\000backend#1\000' >"$BATS_TEST_TMPDIR/assets/tracebloc-linux-amd64"
+  printf 'ELF\000\000arn:aws:x\000' >"$BATS_TEST_TMPDIR/assets/tracebloc-linux-amd64"
   guard --assets "$BATS_TEST_TMPDIR/assets"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"7 text file(s) scanned, 1 binary file(s) opaque to this scan"* ]] || return 1
 }
 
-@test "no [strings] entries is could-not-tell, not clean" {
-  printf '[paths]\ntests/\n' >"$SRC/.publish-forbidden"
+# ── guard 3: forbidden strings — the report tier and --strict ─────────────────
+
+@test "a report-tier hit alone is counted, not refused: exit 0, per-needle total, most-hit files" {
+  plant README.md 'see backend#1234 for the rationale'
+  guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] [strings-report] needle 'backend#' found in 1 staged line(s) — counted, not refused (--strict refuses)"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] [strings-report] 1 hit(s) in 1 file(s); most-hit files:"* ]] || return 1
+  [[ "$output" == *"         1  tree/README.md"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] 0 refuse-tier hit(s), 1 report-tier hit(s) counted"* ]] || return 1
+  [[ "$output" != *"REFUSED"* ]] || return 1
+  [[ "$output" == *"publish-guard: OK — all 4 guards ran and passed"* ]] || return 1
+  # The matched text itself is never echoed; the full location list is in the report.
+  [[ "$output" != *"for the rationale"* ]] || return 1
+  grep -qF "[strings-report] needle 'backend#':" "$OUT/publish-guard-report.txt" || return 1
+  grep -qF "tree/README.md:2" "$OUT/publish-guard-report.txt" || return 1
+}
+
+@test "mutation: the same report-tier hit under --strict is refused, tier named" {
+  plant README.md 'see backend#1234 for the rationale'
+  guard --strict
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] REFUSED — [strings-report (strict)] needle 'backend#' found in 1 staged line(s):"* ]] || return 1
+  [[ "$output" == *"    tree/README.md:2"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] 0 refuse-tier hit(s), 1 report-tier hit(s) refused under --strict"* ]] || return 1
+  [[ "$output" == *"publish-guard: REFUSED — do not publish"* ]] || return 1
+}
+
+@test "--strict with no report-tier hit is still clean" {
+  guard --strict
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] clean (2 refuse + 3 report needle(s)"* ]] || return 1
+}
+
+@test "a non-production hostname is report-tier: counted, and refused under --strict" {
+  plant client/Chart.yaml '# points at dev-api.tracebloc.io'
+  guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[strings-report] needle 'dev-api\.tracebloc\.io' found in 1 staged line(s) — counted, not refused"* ]] || return 1
+  rm -rf "$OUT"
+  guard --strict
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"REFUSED — [strings-report (strict)] needle 'dev-api\.tracebloc\.io' found in 1 staged line(s):"*"tree/client/Chart.yaml:2"* ]] || return 1
+}
+
+@test "the most-hit table sums every report-tier needle per file, largest first, ten rows at most" {
+  plant README.md 'backend#1 and RFC-0001 on one line'
+  plant README.md 'backend#2 on another'
+  plant client/Chart.yaml '# backend#3'
+  guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[strings-report] needle 'backend#' found in 3 staged line(s)"* ]] || return 1
+  [[ "$output" == *"[strings-report] needle 'RFC-0' found in 1 staged line(s)"* ]] || return 1
+  # 3 + 1 hits, 2 files; README's two lines (three hits) outrank Chart.yaml's one.
+  [[ "$output" == *"[strings-report] 4 hit(s) in 2 file(s); most-hit files:"*"         3  tree/README.md"*"         1  tree/client/Chart.yaml"* ]] || { echo "$output"; return 1; }
+  # Eleven files, one hit each: the table stops at ten.
+  rm -rf "$OUT"
+  local i
+  for i in 01 02 03 04 05 06 07 08 09 10 11; do add_file "notes/n$i.md" "ref backend#$i"; done
+  commit
+  guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[strings-report] 15 hit(s) in 13 file(s); most-hit files:"* ]] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -cE '^ +[0-9]+  (tree|assets)/')" -eq 10 ] || { echo "$output"; return 1; }
+}
+
+@test "a refuse-tier hit and a report-tier hit in one run: refused, and the report tier still counted" {
+  plant README.md 'arn:aws:iam::000000000000:root — see backend#9'
+  guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s):"* ]] || return 1
+  [[ "$output" == *"[strings-report] needle 'backend#' found in 1 staged line(s) — counted, not refused"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] 1 refuse-tier hit(s), 1 report-tier hit(s) counted"* ]] || return 1
+}
+
+# ── guard 3: the forbidden list itself ────────────────────────────────────────
+
+@test "no [strings-refuse] entries is could-not-tell, not clean (a guard with nothing to refuse)" {
+  printf '[paths]\ntests/\n[strings-report]\nbackend#\n' >"$SRC/.publish-forbidden"
+  guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] COULD NOT TELL — '"*"' has no [strings-refuse] entries — a guard with nothing to refuse is misconfigured"* ]] || return 1
+  # A present-but-empty section is the same finding.
+  rm -rf "$OUT"
+  printf '[paths]\ntests/\n[strings-refuse]\n# none yet\n[strings-report]\nbackend#\n' >"$SRC/.publish-forbidden"
   guard
   [ "$status" -eq 2 ] || return 1
-  [[ "$output" == *"[forbidden-strings] COULD NOT TELL — '"*"' has no [strings] entries"* ]] || return 1
+  [[ "$output" == *"has no [strings-refuse] entries"* ]] || return 1
+}
+
+@test "an empty [strings-refuse] is judged before the private needles join it" {
+  printf '[paths]\ntests/\n[strings-report]\nbackend#\n' >"$SRC/.publish-forbidden"
+  printf 'planted-tenant\n' >"$BATS_TEST_TMPDIR/tenants.txt"
+  guard --extra-forbidden "$BATS_TEST_TMPDIR/tenants.txt"
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"has no [strings-refuse] entries"* ]] || return 1
+}
+
+@test "a needle listed in both string tiers is could-not-tell, the duplicate named" {
+  printf '[paths]\ntests/\n[strings-refuse]\narn:aws:\nbackend#\n[strings-report]\nbackend#\nRFC-0\n' >"$SRC/.publish-forbidden"
+  guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] COULD NOT TELL — '"*"' lists needle 'backend#' in both [strings-refuse] and [strings-report] — a needle has one tier"* ]] || return 1
+}
+
+@test "an unknown section header is could-not-tell for both scans that read the list" {
+  # The retired name is the likeliest misspelling; nothing under it may be read
+  # as a rule of the section before it.
+  printf '[paths]\ntests/\n[strings]\narn:aws:\n' >"$SRC/.publish-forbidden"
+  guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-paths] COULD NOT TELL — '"*"' has an unknown section [strings] — the guard reads only [paths] [strings-refuse] [strings-report] [allow]"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] COULD NOT TELL — '"*"' has an unknown section [strings]"* ]] || return 1
+  # A header with a space or a case slip is a header too, refused by name rather
+  # than read as a needle of the section before it.
+  rm -rf "$OUT"
+  printf '[paths]\ntests/\n[strings-refuse]\narn:aws:\n[strings report]\nbackend#\n' >"$SRC/.publish-forbidden"
+  guard
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"has an unknown section [strings report]"* ]] || return 1
+  [[ "$output" != *"needle 'backend#'"* ]] || return 1
 }
 
 @test "a missing forbidden list is could-not-tell for both scans that read it" {
@@ -402,24 +519,48 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
 }
 
 # ── the repo's OWN lists, fed inputs written here ─────────────────────────────
+# The inputs below are written independently of .publish-forbidden; the summary
+# line's needle counts are asserted so a needle added to either tier without a
+# planted input here reddens this file.
 
-@test "the committed .publish-forbidden refuses an internal reference planted in a fixture" {
-  cp "$REPO/.publish-forbidden" "$SRC/.publish-forbidden"
-  plant README.md 'rationale in backend#1'
-  guard
-  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"needle 'backend#' found in 1 staged line(s):"*"tree/README.md:2"* ]] || return 1
-}
-
-@test "the committed .publish-forbidden refuses a non-production hostname and spares the support mailbox" {
+@test "the committed .publish-forbidden refuses every refuse-tier needle by name and spares the support mailbox" {
   cp "$REPO/.publish-forbidden" "$SRC/.publish-forbidden"
   guard
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }    # README's support@tracebloc.io is allowed
+  [[ "$output" == *"[forbidden-strings] clean (3 refuse + 10 report needle(s), 1 allow token(s)"* ]] || { echo "$output"; return 1; }
   rm -rf "$OUT"
-  plant scripts/lib/common.sh 'API=https://stg-api.tracebloc.io/'
+  plant README.md 'ask someone@tracebloc.io'
+  plant client/Chart.yaml '# role arn:aws:iam::000000000000:role/x'
+  plant scripts/lib/common.sh 'IMG=000000000000.dkr.ecr.eu-central-1.amazonaws.com/x'
   guard
-  [ "$status" -eq 1 ] || return 1
-  [[ "$output" == *"needle 'stg-api\.tracebloc\.io' found in 1 staged line(s):"*"tree/scripts/lib/common.sh:2"* ]] || return 1
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  local needle
+  for needle in '[A-Za-z0-9._%+-]+@tracebloc\.io' 'arn:aws:' '[0-9]{12}\.dkr\.ecr\.'; do
+    [[ "$output" == *"REFUSED — [strings-refuse] needle '$needle' found in 1 staged line(s):"* ]] || { echo "missing: $needle"; echo "$output"; return 1; }
+  done
+  [[ "$output" == *"[forbidden-strings] 3 refuse-tier hit(s), 0 report-tier hit(s) counted"* ]] || return 1
+}
+
+@test "the committed .publish-forbidden counts every report-tier needle by name, and --strict refuses them" {
+  cp "$REPO/.publish-forbidden" "$SRC/.publish-forbidden"
+  plant README.md 'see backend#1 and rfcs#2 and RFC-0003 and RFC-BACKEND-0004'
+  plant README.md 'see e2e-test-agent#5 and tracebloc/backend'
+  plant scripts/lib/common.sh 'A=https://dev-api.tracebloc.io/ B=https://stg-api.tracebloc.io/'
+  plant scripts/lib/common.sh 'C=https://dev.tracebloc.io/ D=https://stg.tracebloc.io/'
+  guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local needle
+  for needle in 'backend#' 'rfcs#' 'RFC-0' 'RFC-BACKEND' 'e2e-test-agent#' 'tracebloc/backend' \
+                'dev-api\.tracebloc\.io' 'stg-api\.tracebloc\.io' 'dev\.tracebloc\.io' 'stg\.tracebloc\.io'; do
+    [[ "$output" == *"[strings-report] needle '$needle' found in 1 staged line(s) — counted, not refused"* ]] || { echo "missing: $needle"; echo "$output"; return 1; }
+  done
+  [[ "$output" == *"[strings-report] 10 hit(s) in 2 file(s); most-hit files:"* ]] || return 1
+  [[ "$output" == *"[forbidden-strings] 0 refuse-tier hit(s), 10 report-tier hit(s) counted (3 refuse + 10 report needle(s)"* ]] || return 1
+  rm -rf "$OUT"
+  guard --strict
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"REFUSED — [strings-report (strict)] needle 'backend#' found in 1 staged line(s):"*"tree/README.md:2"* ]] || return 1
+  [[ "$output" == *"REFUSED — [strings-report (strict)] needle 'stg\.tracebloc\.io' found in 1 staged line(s):"*"tree/scripts/lib/common.sh:3"* ]] || return 1
 }
 
 @test "the committed .publish-forbidden refuses each forbidden path class by name" {
@@ -443,13 +584,14 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
 
 @test "the committed .publish-include stages the deliverable of the real repo and nothing forbidden" {
   run bash "$GUARD" --source "$REPO" --out "$OUT"
-  # Not asserted clean: the strings scan has a known backlog in the chart and
-  # installer comments (internal tracker references) that is tracked separately;
-  # what this test pins is that the allowlist and path rules hold on the real
-  # tree and that the guard could evaluate it.
-  [ "$status" -le 1 ] || { echo "$output"; return 1; }
-  [[ "$output" != *"COULD NOT TELL"* ]] || { echo "$output"; return 1; }
+  # Asserted CLEAN: the refuse tier must hold on the real deliverable, and the
+  # report tier (the known backlog of internal references in the chart and the
+  # installers) is counted, not refused, until --strict is the policy. A
+  # refuse-tier needle landing in a deliverable file reddens this test — which
+  # is the point.
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"[forbidden-paths] clean"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] 0 refuse-tier hit(s), "* || "$output" == *"[forbidden-strings] clean ("* ]] || { echo "$output"; return 1; }
   local f
   for f in client/Chart.yaml client/values.yaml ingestor/Chart.yaml scripts/install.sh scripts/install.ps1 scripts/install-k8s.sh scripts/lib/common.sh scripts/manifest.sha256 README.md LICENSE docs/INSTALL.md; do
     [ -f "$OUT/tree/$f" ] || { echo "not staged: $f"; return 1; }
