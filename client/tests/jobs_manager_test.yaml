@@ -74,16 +74,16 @@ tests:
       # pods-monitor) to lower oom_score_adj during a mass restart.
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 1Gi
+          value: 768Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
-          value: 1Gi
+          value: 768Mi
       - equal:
           path: spec.template.spec.containers[1].resources.requests.memory
-          value: 512Mi
+          value: 320Mi
       - equal:
           path: spec.template.spec.containers[1].resources.limits.memory
-          value: 512Mi
+          value: 320Mi
 
   # SELECTED BY NAME, NOT BY POSITION. This was `env[0]`, and `env[0]` was
   # CLIENT_ID only for as long as nothing was ever prepended — which stopped being

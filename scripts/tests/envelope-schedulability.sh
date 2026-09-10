@@ -7,11 +7,15 @@
 #  ---------------
 #  backend#2870: the installer sized the training envelope as `allocatable - 3 GiB`
 #  and nothing then asked whether that number could be scheduled beside what the
-#  chart installs. It could not: the control plane requests 3136 MiB (from the
-#  render) against the 3072 MiB reserve, so every install over-asked and the
+#  chart installs. It could not: the control plane then requested 3136 MiB (from
+#  the render) against the 3072 MiB reserve, so every install over-asked and the
 #  training pod sat Pending. No test in this repo could see it, because every
 #  test compared the installers to the CONTRACT and none compared the arithmetic
-#  to a CLUSTER.
+#  to a CLUSTER. backend#2461's interim trim (2026-09-10) took the render to
+#  2336 MiB / 750 m, UNDER the reserve -- so the over-ask no longer occurs on a
+#  real node and the positive control below reports that instead of failing;
+#  the reduce/refuse paths are exercised on nodes DERIVED from the footprint
+#  (SMALL_MI / TINY_MI), never a written-down machine size.
 #
 #  WHAT IT ASSERTS, and how it derives rather than restates (backend#1729 rule 1)
 #  ----------------------------------------------------------------------------
@@ -190,32 +194,56 @@ if (( NEED_B > _TB_ENVELOPE_OVERHEAD_MEM_BYTES || NEED_M > _TB_ENVELOPE_OVERHEAD
     bad "positive control: the platform out-requests the reserve, yet no vector over-asked before the fit -- this guard cannot see the defect it exists for"
   fi
 else
-  echo "  note  the platform (${NEED_B} B / ${NEED_M} m) now fits inside the reserve; the fit is a no-op by construction and the positive control does not apply"
+  echo "  note  positive control: ${over_before}/${checked} measurable vectors over-asked -- the platform (${NEED_B} B / ${NEED_M} m) now fits inside the reserve, so the fit is a no-op by construction and the control does not apply (backend#2461)"
 fi
 
-# 3. THE TICKET'S REPRODUCTION: an 8 GiB node.
+# 3. THE TICKET'S REPRODUCTION: an 8 GiB node. Before backend#2461 it over-asked
+#    (5120 + 3136 + 140 > 8192) and was REDUCED; after the trim it fits unreduced.
+#    Pinning the fit is the regression guard: a chart change that pushes the
+#    footprint back over the reserve reddens here first.
 resolve_and_fit "4 8Gi"
-if [[ "$_TB_FIT_VERDICT" == "reduced" ]] && [[ "$_TB_FIT_LINES" == *"OVER"* ]] && [[ "$_TB_FIT_LINES" == *"reduced ${BEFORE} -> ${_TB_TRAINING_SIZE}"* ]]; then
-  ok "8 GiB reproduction: ${BEFORE} -> ${_TB_TRAINING_SIZE}, arithmetic printed"
+if [[ "$_TB_FIT_VERDICT" == "fits" && "$_TB_TRAINING_SIZE" == "$BEFORE" ]]; then
+  ok "8 GiB reproduction: ${BEFORE} fits unreduced beside $(( NEED_B / MIB )) MiB / ${NEED_M} m (backend#2461 closed the over-ask)"
+else
+  bad "8 GiB reproduction: verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE} (want fits, unreduced)"
+fi
+
+# 3b. THE REDUCE PATH still has to be exercised, so the node is DERIVED from the
+#     footprint: below 4 GiB the resolver falls to the 1-core / 2-GiB floor, and
+#     SMALL_MI leaves room for 1 GiB but not for that floor, so the fit must
+#     reduce to 1 GiB with the arithmetic on screen. Moves with the render.
+SMALL_MI=$(( NEED_B / MIB + 1024 + 64 ))
+resolve_and_fit "4 ${SMALL_MI}Mi"
+if [[ "$_TB_FIT_VERDICT" == "reduced" ]] && [[ "$_TB_FIT_LINES" == *"OVER"* ]] && [[ "$_TB_FIT_LINES" == *"reduced ${BEFORE} -> ${_TB_TRAINING_SIZE}"* ]] && [[ "$_TB_TRAINING_SIZE" == "cpu=1,memory=1Gi" ]]; then
+  ok "${SMALL_MI} MiB node (derived): ${BEFORE} -> ${_TB_TRAINING_SIZE}, arithmetic printed"
   printf '%s\n' "$_TB_FIT_LINES" | sed 's/^/        /'
 else
-  bad "8 GiB reproduction: verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE}"
+  bad "${SMALL_MI} MiB node (derived): verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE} (want reduced to cpu=1,memory=1Gi)"
 fi
 
-# 4. REFUSAL when not even 1 core / 1 GiB fits.
-resolve_and_fit "4 4Gi"
+# 4. REFUSAL when not even 1 core / 1 GiB fits -- TINY_MI is derived so that
+#    allocatable minus the platform is 64 MiB short of a 1 GiB run.
+TINY_MI=$(( NEED_B / MIB + 1024 - 64 ))
+resolve_and_fit "4 ${TINY_MI}Mi"
 if [[ "$_TB_FIT_VERDICT" == "refused" && "$_TB_FIT_LINES" == *"not even a 1-core / 1-GiB run"* ]]; then
-  ok "4 GiB node: refused, with the arithmetic"
+  ok "${TINY_MI} MiB node (derived): refused, with the arithmetic"
 else
-  bad "4 GiB node: verdict '${_TB_FIT_VERDICT}' size '${_TB_TRAINING_SIZE}' (want refused)"
+  bad "${TINY_MI} MiB node (derived): verdict '${_TB_FIT_VERDICT}' size '${_TB_TRAINING_SIZE}' (want refused)"
 fi
 
-# 5. CPU-ONLY overshoot: memory already fits (the GiB floor absorbed it), cpu does not.
+# 5. CPU-ONLY overshoot: memory already fits, cpu does not. The resolver leaves
+#    one core for the platform and the trimmed platform needs 950 m, so no real
+#    node can produce this any more -- the pre-trim footprint could. The case
+#    keeps DoD part 5 covered by REPLAYING that footprint (900 m, the value the
+#    embed carried before backend#2461) through the real fit; the memory side is
+#    untouched so only cpu can move.
+saved_cpu="$_TB_CP_FOOTPRINT_CPU_MILLI"; _TB_CP_FOOTPRINT_CPU_MILLI=900
 resolve_and_fit "8 63928Mi"
+_TB_CP_FOOTPRINT_CPU_MILLI="$saved_cpu"
 a_mem="$(env_mem_b "$_TB_TRAINING_SIZE")"; b_mem="$(env_mem_b "$BEFORE")"
 a_cpu="$(env_cpu_m "$_TB_TRAINING_SIZE")"; b_cpu="$(env_cpu_m "$BEFORE")"
-if [[ "$_TB_FIT_VERDICT" == "reduced" ]] && (( a_mem == b_mem && a_cpu < b_cpu && a_cpu + NEED_M <= 8000 )); then
-  ok "cpu-only overshoot: ${BEFORE} -> ${_TB_TRAINING_SIZE} (memory kept, cpu reduced)"
+if [[ "$_TB_FIT_VERDICT" == "reduced" ]] && (( a_mem == b_mem && a_cpu < b_cpu && a_cpu + 900 + SYS_M <= 8000 )); then
+  ok "cpu-only overshoot (pre-trim 900 m replayed): ${BEFORE} -> ${_TB_TRAINING_SIZE} (memory kept, cpu reduced)"
 else
   bad "cpu-only overshoot: verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE}"
 fi
@@ -237,9 +265,10 @@ else
   bad "measured system pods: $(( ${_TB_SYS_MEM_BYTES:-0} / MIB )) MiB / ${_TB_SYS_CPU_MILLI:-0} m (want ${SYS_MIB} / ${SYS_M}); note: ${_TB_SYS_NOTE:-}"
 fi
 
-# 7b. Pods unreadable: chart-only, and the verdict SAYS so; still reduces.
+# 7b. Pods unreadable: chart-only, and the verdict SAYS so; still reduces on the
+#     derived SMALL_MI node (the 8 GiB machine no longer needs reducing).
 PODS_READABLE=0
-resolve_and_fit "4 8Gi"
+resolve_and_fit "4 ${SMALL_MI}Mi"
 if [[ "$_TB_FIT_VERDICT" == "reduced" && "$_TB_FIT_LINES" == *"NOT measured"*"chart derivation only"* ]]; then
   ok "pod list unreadable: verified against the chart derivation only, and said so (${BEFORE} -> ${_TB_TRAINING_SIZE})"
 else

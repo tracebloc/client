@@ -612,7 +612,7 @@ egressProxy:
   resources:
     requests:
       cpu: "50m"
-      memory: "64Mi"
+      memory: "160Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -1355,35 +1355,65 @@ images:
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
+  # INTERIM TRIM (backend#2461, 2026-09-10) -- read before "fixing" any number back up.
+  #
+  # Requests are what the scheduler and the jobs-manager's admission SUBTRACT from
+  # the node; they are not what the process uses. Measured on an installer edge
+  # (backend#2461): the control plane requested 1050m / 3276Mi while using
+  # 36m / ~1022Mi. Since chart 1.9.109 the kubelet reservation is honest
+  # (#1017) and since client-runtime#544 the admission subtracts the chart's
+  # real requests, so on the smallest supported node -- 2 cores / 8 GiB -- the
+  # arithmetic became visible: allocatable 1900m / 5538Mi, minus these requests
+  # (800m / 3008Mi without the collector) and k3s's own coredns + metrics-server
+  # (200m / 140Mi), LEFT 900m / 2390Mi, and the smallest training envelope needs
+  # 1000m / 3072Mi. Every task on staging was refused NEVER_STEADY_STATE
+  # (e2e-test-agent fleet 34473120598, 2026-09-10).
+  #
+  # The numbers below give back 150m / 800Mi so that node leaves 1050m / 3190Mi:
+  #   mysql           250m/1Gi   -> 150m/704Mi   peak measured 0.40-0.55x of 1Gi (max ~563Mi); 704 = +25% headroom, requests==limits kept
+  #   jobs-manager    250m/1Gi   -> 250m/768Mi   168Mi idle (0.16x); restart peak NOT yet measured -- 768 keeps 4.5x over idle, cpu untouched
+  #   pods-monitor    100m/512Mi -> 100m/320Mi   requests==limits kept (oom_score_adj, #1144)
+  #   requests-proxy  100m/256Mi ->  50m/128Mi   a few requests a minute; limits unchanged (1000m/512Mi) so bursts still fit
+  #   egress-proxy     50m/64Mi  ->  50m/160Mi   UP: measured 2.45x OVER its request (backend#2461) -- it was the one under-provisioned component
+  #
+  # What this is NOT: the final trim. backend#2461 sizes requests from p95 under a
+  # load run (ambient, one cycle, five-queued burst, node restart under 8 GiB) that
+  # is in progress; jobs-manager's request in particular is justified by the
+  # restart peak and moves only once that leg is measured. Re-derive from the
+  # measurement; do not hand-tune here. The guards that read these values:
+  # scripts/tests/control-plane-footprint.sh (ceiling), the generated embed in
+  # scripts/lib/install-client-helm.sh (scripts/gen-footprint-embed.sh --check),
+  # scripts/tests/envelope-schedulability.sh (fit on the golden vectors).
   mysql:
     requests:
-      cpu: "250m"
-      memory: "1Gi"
+      cpu: "150m"
+      memory: "704Mi"
     limits:
-      memory: "1Gi"
+      memory: "704Mi"
       # No cpu limit — see comment above.
   jobsManager:
     requests:
       cpu: "250m"
-      memory: "1Gi"
+      memory: "768Mi"
     limits:
       cpu: "1000m"
-      memory: "1Gi"
+      memory: "768Mi"
   podsMonitor:
     requests:
       cpu: "100m"
-      memory: "512Mi"
+      memory: "320Mi"
     limits:
       cpu: "500m"
-      memory: "512Mi"
+      memory: "320Mi"
   # requests-proxy serves the Service Bus / backend communication path and
-  # is mostly idle (a few req/min). 100m/256Mi requests with headroom for
-  # the occasional burst; revisit if heap profiling shows growth. Schema
-  # at values.schema.json#resources.requestsProxy validates overrides.
+  # is mostly idle (a few req/min). 50m/128Mi requests (trimmed from 100m/256Mi,
+  # backend#2461) with the limits left at 1000m/512Mi for the occasional burst;
+  # revisit if heap profiling shows growth. Schema at
+  # values.schema.json#resources.requestsProxy validates overrides.
   requestsProxy:
     requests:
-      cpu: "100m"
-      memory: "256Mi"
+      cpu: "50m"
+      memory: "128Mi"
     limits:
       cpu: "1000m"
       memory: "512Mi"

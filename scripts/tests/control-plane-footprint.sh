@@ -15,10 +15,11 @@
 #  footprint`, `control plane requests`: zero hits. The number was invisible.
 #
 #  Measured here by rendering the chart: the steady-state control plane requests
-#  ~3136 MiB, already ABOVE the 3 GiB (3072 MiB) the envelope reserves for it.
+#  ~3136 MiB before backend#2461's interim trim (2026-09-10) -- ABOVE the 3 GiB
+#  (3072 MiB) the envelope reserved for it; 2336 MiB / 750 m after, under it.
 #  That 64 MiB overshoot is the memory half of the reason a training pod on a
 #  freshly-installed single-node edge can sit `Pending / Insufficient memory`
-#  (backend#2870). CPU fits: 900m requested against a 1000m reserve.
+#  (backend#2870). CPU: 900m before the trim, 750m after, against a 1000m reserve.
 #
 #  WHAT THIS GUARD DOES, AND DELIBERATELY DOES NOT
 #  -----------------------------------------------
@@ -70,8 +71,8 @@ installer="$root/scripts/lib/install-client-helm.sh"
 # same PR -- which is the moment to weigh whether the training envelope can still
 # afford it. Overridable so the guard's own test can drive a lower ceiling and
 # watch a real render breach it.
-MEM_CEIL_MIB="${TB_CP_FOOTPRINT_MEM_CEIL:-3136}"
-CPU_CEIL_MILLI="${TB_CP_FOOTPRINT_CPU_CEIL:-900}"
+MEM_CEIL_MIB="${TB_CP_FOOTPRINT_MEM_CEIL:-2336}"
+CPU_CEIL_MILLI="${TB_CP_FOOTPRINT_CPU_CEIL:-750}"
 
 command -v helm >/dev/null 2>&1 || { echo "[ERROR] helm is required to render the chart footprint" >&2; exit 3; }
 command -v python3 >/dev/null 2>&1 || { echo "[ERROR] python3 is required to sum the rendered requests" >&2; exit 3; }
@@ -169,7 +170,7 @@ try:
             # and cpu, so a pod can take its memory from the init side and its cpu
             # from the app side.
             #
-            # THE NUMBER DOES NOT MOVE ON THIS CHART -- 3136 MiB / 900 m either way,
+            # THE NUMBER DOES NOT MOVE ON THIS CHART -- 2336 MiB / 750 m either way,
             # because these init containers carry no requests. So the "64 MiB OVER"
             # finding stands; the method was wrong, the conclusion was not. It also
             # means the fix is INERT on the real render, which is why the bats

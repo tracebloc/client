@@ -134,8 +134,8 @@ spec:
           {{- $rpLim := default dict $rp.limits }}
           resources:
             requests:
-              cpu: {{ $rpReq.cpu | default "100m" | quote }}
-              memory: {{ $rpReq.memory | default "256Mi" | quote }}
+              cpu: {{ $rpReq.cpu | default "50m" | quote }}
+              memory: {{ $rpReq.memory | default "128Mi" | quote }}
             limits:
               cpu: {{ $rpLim.cpu | default "1000m" | quote }}
               memory: {{ $rpLim.memory | default "512Mi" | quote }}

@@ -158,10 +158,10 @@ spec:
         # PodDisruptionBudget cover the eviction angle instead.
         resources:
           requests:
-            memory: {{ .Values.resources.mysql.requests.memory | default "1Gi" | quote }}
+            memory: {{ .Values.resources.mysql.requests.memory | default "704Mi" | quote }}
             cpu: {{ .Values.resources.mysql.requests.cpu | default "250m" | quote }}
           limits:
-            memory: {{ .Values.resources.mysql.limits.memory | default "1Gi" | quote }}
+            memory: {{ .Values.resources.mysql.limits.memory | default "704Mi" | quote }}
             {{- /*
               CPU limit is intentionally unset by default (see comment block
               above). Schema permits it, so honour an explicit override here

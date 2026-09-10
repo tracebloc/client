@@ -339,10 +339,10 @@ spec:
         resources:
           requests:
             cpu: {{ .Values.resources.jobsManager.requests.cpu | default "250m" | quote }}
-            memory: {{ .Values.resources.jobsManager.requests.memory | default "1Gi" | quote }}
+            memory: {{ .Values.resources.jobsManager.requests.memory | default "768Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
-            memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
+            memory: {{ .Values.resources.jobsManager.limits.memory | default "768Mi" | quote }}
         ports:
           # client-runtime#21: POST /internal/submit-ingestion-run. The
           # ingestor subchart's post-install hook hits this through the
@@ -925,10 +925,10 @@ spec:
         resources:
           requests:
             cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "100m" | quote }}
-            memory: {{ .Values.resources.podsMonitor.requests.memory | default "512Mi" | quote }}
+            memory: {{ .Values.resources.podsMonitor.requests.memory | default "320Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.podsMonitor.limits.cpu | default "500m" | quote }}
-            memory: {{ .Values.resources.podsMonitor.limits.memory | default "512Mi" | quote }}
+            memory: {{ .Values.resources.podsMonitor.limits.memory | default "320Mi" | quote }}
         volumeMounts:
         - name: logs-volume
           mountPath: "/data/logs"
