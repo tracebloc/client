@@ -81,6 +81,29 @@ mirror_files() { git -C "$BARE" ls-tree -r --name-only "$1" | sort | paste -sd' 
   [[ "$output" == *"COULD NOT TELL — target: --source-repo is required"* ]] || return 1
 }
 
+# --output: the workflow runs the publisher DIRECTLY and reads results from a
+# file, so a refusal's ::error:: line is on stdout where Actions annotates it —
+# captured through $(...) it would be swallowed by set -e (Bugbot on the PR).
+
+@test "target: --output writes repo= and name= for the workflow; stdout still names the mirror" {
+  local out="$BATS_TEST_TMPDIR/out"
+  pub target --mirror client-public --source-repo tracebloc/client --output "$out"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "tracebloc/client-public" ] || return 1
+  [ "$(cat "$out")" = $'repo=tracebloc/client-public\nname=client-public' ] || { cat "$out"; return 1; }
+}
+
+@test "target: a refusal puts the ::error:: line on stdout and writes nothing to --output" {
+  local out="$BATS_TEST_TMPDIR/out"
+  pub target --mirror '' --source-repo tracebloc/client --output "$out"
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == "::error::publish-mirror: REFUSED — no mirror repository is configured"* ]] || { echo "$output"; return 1; }
+  [ ! -e "$out" ] || return 1
+  pub target --mirror client --source-repo tracebloc/client --output "$out"
+  [ "$status" -eq 1 ] || return 1
+  [ ! -e "$out" ] || return 1
+}
+
 # ── tree ──────────────────────────────────────────────────────────────────────
 
 @test "tree: the first publish starts the branch and the mirror holds exactly the stage" {
@@ -141,6 +164,30 @@ mirror_files() { git -C "$BARE" ls-tree -r --name-only "$1" | sort | paste -sd' 
   tree
   [ "$status" -eq 2 ] || return 1
   [[ "$output" == *"contains a .git entry"* ]] || return 1
+}
+
+@test "tree: --output writes result= and sha= (pushed, then unchanged); a refusal writes nothing and annotates stdout" {
+  local out="$BATS_TEST_TMPDIR/out"
+  tree --output "$out"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(sed -n 1p "$out")" = "result=pushed" ] || { cat "$out"; return 1; }
+  [ "$(sed -n 2p "$out")" = "sha=$(git -C "$BARE" rev-parse main)" ] || { cat "$out"; return 1; }
+  rm "$out"
+  tree --output "$out"
+  [ "$status" -eq 0 ] || return 1
+  [ "$(sed -n 1p "$out")" = "result=unchanged" ] || { cat "$out"; return 1; }
+  [ "$(sed -n 2p "$out")" = "sha=$(git -C "$BARE" rev-parse main)" ] || return 1
+  rm "$out"
+  pub tree --stage "$STAGE" --repo tracebloc/mirror --branch main --message m --remote "file://$BATS_TEST_TMPDIR/no-such.git" --output "$out"
+  [ "$status" -eq 2 ] || return 1
+  [[ "$output" == "::error::publish-mirror: COULD NOT TELL — tree: the mirror remote did not answer"* ]] || { echo "$output"; return 1; }
+  [ ! -e "$out" ] || return 1
+}
+
+@test "tree: an unwritable --output is could-not-tell — a result the caller never receives is not a publish" {
+  tree --output "$BATS_TEST_TMPDIR/no-such-dir/out"
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — could not write results to"* ]] || return 1
 }
 
 @test "tree: the script never forces a push" {
