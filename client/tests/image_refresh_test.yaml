@@ -1020,3 +1020,33 @@ tests:
       - notMatchRegex:
           path: data["image-refresh.sh"]
           pattern: 'recorded="\$\(get_annotation "\$key" \|\| true\)"'
+
+  - it: stale-pin annotations are written BEFORE the restart block, so they survive a latched flap
+    # Guards #1008 item 1. The #563 flap guard does WARN + FLAP_KEY +
+    # exit 0 once refresh-attempt >= MAX, BEFORE the final digest-record annotate.
+    # Batching the stale-pin CLEARS into that final annotate dropped them on a
+    # tick that is both off-digest and latched -- leaving a FALSE stale-pin
+    # finding to persist. They now accumulate in their own list and are annotated
+    # above the restart block. image-refresh-latched-annotate.bats asserts the
+    # BEHAVIOUR; these lock the code shapes.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # the stale-pin writes go to their own accumulator, not annotate_args
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'stale_pin_args="\$stale_pin_args \$\{stale_key\}-"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'stale_pin_args="\$stale_pin_args \$\{unpinned_stale_key\}-"'
+      # and that accumulator is annotated BEFORE the restart block (ordering)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?s)if \[ -n "\$stale_pin_args" \]; then.*if \[ "\$restart_needed" -eq 1 \]; then'
+      # the stale-pin keys must NOT ride the final digest-record annotate_args
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'annotate_args="\$annotate_args \$\{stale_key\}'
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'annotate_args="\$annotate_args \$\{unpinned_stale_key\}'

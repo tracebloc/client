@@ -84,6 +84,10 @@ pin_digest="\${1:-}"
 STUB_LATEST="\${2:-}"
 EXISTING_ANNOTATION="\${3:-}"
 annotate_args=""
+# #1008 item 1: the stale-pin writes moved into their own accumulator
+# (annotated before the restart block so a latched flap can't drop them). The
+# branch under test writes here now, so the harness must define + print it.
+stale_pin_args=""
 log() { printf '%s\n' "\$*"; }
 get_latest_digest() { [ -n "\$STUB_LATEST" ] && printf '%s' "\$STUB_LATEST"; }
 get_annotation() { [ -n "\$EXISTING_ANNOTATION" ] && printf '%s' "\$EXISTING_ANNOTATION"; }
@@ -91,6 +95,7 @@ for _once in 1; do
 $(sed 's/^/  /' "$TMP/branch.sh")
 done
 printf 'ANNOTATE:%s\n' "\$annotate_args"
+printf 'STALEPIN:%s\n' "\$stale_pin_args"
 EOF
   sh "$TMP/harness.sh" "$1" "$2" "${3:-}"
 }
