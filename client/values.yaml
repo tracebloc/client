@@ -12,10 +12,13 @@ global:
   # When set, EVERY image the chart pulls is re-homed onto this host — the
   # tracebloc services, the spawned ingestor + training-job images, and the
   # alpine/*, ubuntu/squid, busybox, curl helper images — which must already host
-  # the same repositories + tags/digests. Unset (the default) pulls tracebloc/*
-  # and the helper images from docker.io and the ingestor from ghcr.io. If the
-  # mirror needs authentication, also set dockerRegistry below. The standalone
-  # installer writes this from TRACEBLOC_IMAGE_REGISTRY. See docs/INSTALL.md.
+  # the same repositories + tags/digests. Unset (the default) pulls the
+  # tracebloc-published control-plane images from images.traceblocRegistry
+  # (below), the helper images from docker.io and the ingestor from ghcr.io. If
+  # the mirror needs authentication, also set dockerRegistry below. The
+  # standalone installer writes this from TRACEBLOC_IMAGE_REGISTRY. See
+  # docs/INSTALL.md. To move ONLY the tracebloc images, leave this unset and set
+  # images.traceblocRegistry instead.
   imageRegistry: ""
 
 # -- Environment variables passed to containers
@@ -609,7 +612,7 @@ egressProxy:
   resources:
     requests:
       cpu: "50m"
-      memory: "64Mi"
+      memory: "160Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -906,15 +909,39 @@ telemetryCollector:
 #   * neither                    -> Always       (floating tag + restart is the
 #                                                 only update path there is)
 #
-# The third case is real, not theoretical: a `global.imageRegistry` mirror makes
-# the reconcile inert (it resolves digests from docker.io, which the mirror may
-# not hold), and `imageRefresh.enabled: false` disables it outright. Those edges
+# The third case is real, not theoretical: a registry the reconcile cannot
+# resolve digests on anonymously -- a `global.imageRegistry` mirror, or an
+# `images.traceblocRegistry` other than docker.io / ghcr.io -- makes it inert
+# (a digest resolved elsewhere may not exist there), and
+# `imageRefresh.enabled: false` disables it outright. Those edges
 # keep the pre-#569 behaviour deliberately — a frozen control plane with a green
 # CronJob and no signal is worse than a restart that needs the network.
 #
 # Setting `digest` here is still meaningful: it is an explicit operator pin
 # that also opts the image OUT of auto-refresh.
 images:
+  # Registry the tracebloc-PUBLISHED control-plane images are pulled from:
+  # tracebloc/jobs-manager, tracebloc/pods-monitor, tracebloc/resource-monitor
+  # and the requests-proxy (which runs the jobs-manager image). A bare host, no
+  # scheme. Resolved by the tracebloc.tbRegistry helper as ONE precedence chain
+  # -- `global.imageRegistry` (a mirror re-homes everything) always wins, then
+  # this, then the chart default -- so the pods, the image-refresh CronJob and
+  # NOTES.txt cannot disagree about where those images live.
+  #
+  # This knob moves ONLY the tracebloc images: busybox, squid, alpine/*, the
+  # device plugins and the ingestor keep their own registries, and
+  # tracebloc/mysql-client stays on docker.io (frozen, digest-pinned, published
+  # nowhere else -- see images.mysqlClient). The training-image host
+  # (JOB_IMAGE_HOST) is not routed through it yet; that moves in its own step.
+  #
+  # The tracebloc images are published to BOTH docker.io and ghcr.io, at the
+  # same digests. Setting this to "ghcr.io" on one edge is how to try the
+  # ghcr.io copies before the chart default moves; setting it back is the
+  # per-edge rollback once it has. Image-refresh follows it: the CronJob
+  # resolves digests on this registry (it can do so anonymously on docker.io
+  # and ghcr.io; any other value makes the reconcile inert and the pods
+  # imagePullPolicy=Always, exactly as a global.imageRegistry mirror does).
+  traceblocRegistry: "docker.io"
   jobsManager:
     digest: ""
   # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
@@ -1328,35 +1355,80 @@ images:
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
+  # INTERIM TRIM (backend#2461, 2026-09-10) -- read before "fixing" any number back up.
+  #
+  # Requests are what the scheduler and the jobs-manager's admission SUBTRACT from
+  # the node; they are not what the process uses. Measured on an installer edge
+  # (backend#2461): the control plane requested 1050m / 3276Mi while using
+  # 36m / ~1022Mi. Since chart 1.9.109 the kubelet reservation is honest
+  # (#1017) and since client-runtime#544 the admission subtracts the chart's
+  # real requests, so on the smallest supported node -- 2 cores / 8 GiB -- the
+  # arithmetic became visible: allocatable 1900m / 5538Mi, minus these requests,
+  # minus k3s's own coredns + metrics-server (200m / 140Mi), left 900m / 2390Mi,
+  # and the smallest training envelope needs 1000m / 3072Mi. Every task on
+  # staging was refused NEVER_STEADY_STATE (e2e-test-agent fleet 34473120598).
+  #
+  # THE FOOTPRINT COUNTS THE COLLECTOR. `helm template` cannot look up the token
+  # Secret, so the render -- and therefore control-plane-footprint.sh, the
+  # installer embed and this derivation -- carries the telemetry collector's
+  # 100m / 128Mi. That is the right worst case: on a real edge the collector IS
+  # rendered once jobs-manager has written the token Secret (backend#2274), so an
+  # edge that trains on install must still train after that. With it counted the
+  # render is 650m / 2272Mi, and the node above leaves 1050m / 3126Mi (was
+  # 900m / 2390Mi): 50m and 54Mi over the envelope. Thin, and honest.
+  #
+  #   mysql           250m/1Gi   -> 150m/704Mi   peak measured 0.40-0.55x of 1Gi (max ~563Mi); 704 = +25% headroom; requests==limits kept
+  #   jobs-manager    250m/1Gi   -> 150m/640Mi   168Mi idle (0.16x); LIMIT STAYS 1Gi (see below); cpu: the whole plane idles at 36m
+  #   pods-monitor    100m/512Mi -> 100m/384Mi   no measurement yet; LIMIT STAYS 512Mi (see below)
+  #   requests-proxy  100m/256Mi ->  50m/128Mi   a few requests a minute; limits unchanged (1000m/512Mi)
+  #   egress-proxy     50m/64Mi  ->  50m/160Mi   UP: measured 2.45x OVER its request (backend#2461)
+  #   collector       100m/128Mi unchanged       unmeasured (distroless, no readable cgroup) -- not trimmed on a guess
+  #
+  # WHY jobs-manager AND pods-monitor NOW HAVE requests < limits. #1144 pinned
+  # requests.memory == limits.memory on both so a cluster-recovery mass restart
+  # would not pick them as OOM victims; the PODS were Burstable then and still
+  # are (the unresourced init containers, see above). The trim lowers only the
+  # REQUEST -- what the scheduler and admission subtract -- and leaves the LIMIT
+  # where it was, because the limit is the hard cgroup ceiling and the restart
+  # peak that justifies it is exactly the leg backend#2461's load run has not
+  # produced yet (review on client#1032). The cost is a higher oom_score_adj
+  # under node pressure; the alternative was a hard ceiling nothing has measured.
+  # When the restart leg lands, set BOTH from its p95 and restore the equality.
+  #
+  # What this is NOT: the final trim. Re-derive from the load run; do not
+  # hand-tune here. Guards that read these values: control-plane-footprint.sh
+  # (ceiling), the generated embed in scripts/lib/install-client-helm.sh
+  # (scripts/gen-footprint-embed.sh --check), envelope-schedulability.sh.
   mysql:
     requests:
-      cpu: "250m"
-      memory: "1Gi"
+      cpu: "150m"
+      memory: "704Mi"
     limits:
-      memory: "1Gi"
+      memory: "704Mi"
       # No cpu limit — see comment above.
   jobsManager:
     requests:
-      cpu: "250m"
-      memory: "1Gi"
+      cpu: "150m"
+      memory: "640Mi"
     limits:
       cpu: "1000m"
       memory: "1Gi"
   podsMonitor:
     requests:
       cpu: "100m"
-      memory: "512Mi"
+      memory: "384Mi"
     limits:
       cpu: "500m"
       memory: "512Mi"
   # requests-proxy serves the Service Bus / backend communication path and
-  # is mostly idle (a few req/min). 100m/256Mi requests with headroom for
-  # the occasional burst; revisit if heap profiling shows growth. Schema
-  # at values.schema.json#resources.requestsProxy validates overrides.
+  # is mostly idle (a few req/min). 50m/128Mi requests (trimmed from 100m/256Mi,
+  # backend#2461) with the limits left at 1000m/512Mi for the occasional burst;
+  # revisit if heap profiling shows growth. Schema at
+  # values.schema.json#resources.requestsProxy validates overrides.
   requestsProxy:
     requests:
-      cpu: "100m"
-      memory: "256Mi"
+      cpu: "50m"
+      memory: "128Mi"
     limits:
       cpu: "1000m"
       memory: "512Mi"
@@ -1718,17 +1790,25 @@ autoUpgrade:
 #   - First observation (annotation absent on a fresh install): record
 #     the current digest without re-imaging. Rewriting repo:tag to
 #     repo@digest for byte-identical content would roll every workload —
-#     including the DaemonSet on every node — for nothing. The cost is
-#     that a fresh edge runs repo:tag until the first real digest change:
-#     still restart-safe offline, just not yet reproducible.
-#   - Idle-cheap: when the recorded digest matches today's digest, the
-#     script exits without touching anything. Steady state is one HEAD
+#     including the DaemonSet on every node — for nothing. The NEXT tick,
+#     seeing the digest recorded but the workload still on repo:tag, pins
+#     it (client-runtime#199) — so a fresh edge becomes reproducible ~one interval
+#     post-install, not at the next upstream release. Restart-safe offline
+#     throughout.
+#   - Idle-cheap: when the recorded digest matches today's digest AND the
+#     workload already runs that digest, the script exits without touching
+#     anything. If a helm re-render reverted the pin back to repo:tag it
+#     re-pins that one tick (compared on the @sha256 digest, so a mirror
+#     prefix rewrite is not mistaken for a revert). Steady state is one HEAD
 #     per image per tick, well under Docker Hub's 100/6h anonymous
 #     pull-rate limit.
-#   - Private mirrors (global.imageRegistry): the script resolves digests
-#     from docker.io, so pinning one onto a mirrored reference could pin
-#     an image the mirror does not hold. It logs and goes INERT instead.
-#     Under the old `rollout restart` the mismatch was merely useless; with
+#   - The script resolves digests on the SAME registry the pods pull the
+#     tracebloc images from (images.traceblocRegistry, or the
+#     global.imageRegistry mirror when set), and it can only do so
+#     anonymously on docker.io and ghcr.io. Anywhere else -- a private
+#     mirror -- pinning a digest resolved elsewhere could pin an image the
+#     registry does not hold, so it logs and goes INERT instead. Under the
+#     old `rollout restart` the mismatch was merely useless; with
 #     `set image` it has to fail closed.
 #
 # Pinned-digest interaction: if images.jobsManager.digest,
@@ -1751,8 +1831,9 @@ autoUpgrade:
 # requires) are namespace-wide and read-only. Still far narrower than
 # autoUpgrade, which holds cluster-admin.
 #
-# The script reaches out only to docker.io's public registry endpoints; if
-# your cluster requires egress through a proxy, set HTTPS_PROXY via env
+# The script reaches out only to the public token + manifest endpoints of
+# the registry the tracebloc images are pulled from (docker.io or ghcr.io);
+# if your cluster requires egress through a proxy, set HTTPS_PROXY via env
 # or disable this CronJob.
 #
 # Disabled-on-this-cluster check after install:

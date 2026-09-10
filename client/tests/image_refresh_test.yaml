@@ -223,6 +223,21 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "pinned by digest in values"
+      # Regression guard (Bugbot #1008): the requests-proxy is a SEPARATE
+      # deployment running the SAME jobs-manager image, so the no-op "already on
+      # the pinned digest" decision MUST also read the proxy and fall through
+      # when it is off the digest -- else a partial re-pin (api pinned, proxy
+      # still on :tag) is declared unchanged forever off the api match alone and
+      # never retried. Lock the reader and the per-workload digest check in
+      # place. (The BEHAVIOUR -- that an inverted check reddens -- is asserted in
+      # scripts/tests/image-refresh-repin-on-revert.bats; this only pins that the
+      # two pieces still exist in the shipped script.)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'requests_proxy_image\(\)'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'proxy_on_digest'
       # Regression guard: the script must HEAD the manifest with all
       # four Accept media types in a SINGLE comma-separated Accept
       # header per the Docker registry v2 spec (some proxies have been
@@ -755,11 +770,13 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'kubectl set image -n "\$NODE_AGENTS_NAMESPACE"'
-      # Mirror guard: a docker.io digest must never be pinned onto a mirrored
-      # reference the mirror may not hold.
+      # Mirror guard: a digest resolved on a public registry must never be pinned
+      # onto a mirrored reference the mirror may not hold. The verdict is the
+      # chart-rendered IMAGE_REGISTRY_RESOLVABLE (tracebloc_registry_test.yaml
+      # covers its values); anything but "true" -- including absent -- refuses.
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: 'if \[ "\$IMAGE_REGISTRY" != "docker.io" \]; then'
+          pattern: 'if \[ "\$\{IMAGE_REGISTRY_RESOLVABLE:-\}" != "true" \]; then'
       # The pods-monitor container name is contractual with the deployment.
       - matchRegex:
           path: data["image-refresh.sh"]
@@ -935,3 +952,23 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'rm_set_args tracebloc-resource-monitor='
+
+  - it: reconcile re-pins when a helm re-render reverted the workload off the digest
+    # Guards the client-runtime#199 fix: with `recorded == latest` the loop must
+    # NOT unconditionally no-op -- it must read the live workload image and
+    # re-pin when it is not `repo@latest` (a `helm upgrade --reset-then-reuse-values`
+    # reverted the pin onto the bare :tag, where a stale node cache serves an old
+    # image). The helper + the fall-through into the re-image path are the fix.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'workload_image_for_repo\(\)'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'have="\$\(workload_image_for_repo "\$repo"'
+      # the true no-op now requires BOTH digest-unchanged AND workload-on-digest
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'workload already on the pinned digest; no-op'

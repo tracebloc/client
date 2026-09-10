@@ -110,7 +110,7 @@ run_case "unreadable cluster writes a carried non-floor size" "$LIB" \
 
 printf '\nthe embed:\n'
 run_case "embedded footprint drifts from the render" "$LIB" \
-  '_TB_CP_FOOTPRINT_MEM_BYTES=3288334336' \
+  '_TB_CP_FOOTPRINT_MEM_BYTES=2382364672' \
   '_TB_CP_FOOTPRINT_MEM_BYTES=3221225472' 1
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

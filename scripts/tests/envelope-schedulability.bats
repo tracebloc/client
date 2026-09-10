@@ -171,9 +171,12 @@ YAML
   # It walked the golden vectors -- a guard that passes having checked nothing is
   # the class this repo catalogues. The table has 13 rows today; assert a floor,
   # not the exact count, so a vector added upstream does not redden this.
-  [[ "$output" =~ ok\ +positive\ control:\ ([0-9]+)/([0-9]+) ]] || { echo "$output"; return 1; }
-  [ "${BASH_REMATCH[2]}" -ge 10 ] || { echo "only ${BASH_REMATCH[2]} measurable vectors"; return 1; }
-  [ "${BASH_REMATCH[1]}" -ge 1 ] || return 1
+  # Two legitimate shapes: `ok positive control: N/M` while the platform out-requests
+  # the reserve, or `note positive control: N/M ... does not apply` once it fits
+  # inside it (backend#2461). Either way the guard must have walked the table.
+  [[ "$output" =~ (ok|note)\ +positive\ control:\ ([0-9]+)/([0-9]+) ]] || { echo "$output"; return 1; }
+  [ "${BASH_REMATCH[3]}" -ge 10 ] || { echo "only ${BASH_REMATCH[3]} measurable vectors"; return 1; }
+  if [[ "${BASH_REMATCH[1]}" == "ok" ]]; then [ "${BASH_REMATCH[2]}" -ge 1 ] || return 1; fi
 }
 
 @test "envelope-schedulability.sh: CANNOT TELL (exit 2) when the tree has no chart to derive from" {
@@ -360,10 +363,11 @@ for key, kind in (("cpu_to_milli", "cpu"), ("mem_to_bytes", "mem")):
   }
   helm() { return 1; }
   unset TRACEBLOC_TRAINING_RESOURCES
-  # ONE system pod here (70Mi / 100m), so cpu fits (3000 + 900 + 100 = 4000) and
-  # only memory reduces (5120 + 3136 + 70 > 8192 -> 4 GiB): cpu=3,memory=4Gi.
-  # Anything else in the capture -- a stray echo -- would corrupt the value.
+  # ONE system pod here (70Mi / 100m). Since backend#2461's trim the resolver's
+  # cpu=3,memory=5Gi fits (5120 + 2336 + 70 <= 8192; 3000 + 750 + 100 <= 4000), so
+  # the fit writes it unchanged. Anything else in the capture -- a stray echo --
+  # would corrupt the value, which is what this test is for.
   local captured
   captured="$(_resolve_training_size; _fit_training_envelope; printf '%s' "$_TB_TRAINING_SIZE")"
-  [ "$captured" = "cpu=3,memory=4Gi" ] || { echo "captured '$captured'"; return 1; }
+  [ "$captured" = "cpu=3,memory=5Gi" ] || { echo "captured '$captured'"; return 1; }
 }
