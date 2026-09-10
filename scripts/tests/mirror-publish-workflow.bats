@@ -15,6 +15,10 @@
 #   * a prerelease sets publish_tree=false and says why; a stable release sets
 #     it true — and every step that pushes a tree is gated on that output, the
 #     release step is not (Bugbot: "prerelease overwrites public default branch")
+#   * a stable release that is NOT the newest one (releases/latest of the source
+#     repo) also sets publish_tree=false, and an unreadable releases/latest is
+#     refused — a rebuild or dispatch of an older tag must not roll the mirror's
+#     default branch back (Bugbot: "older stable tags replace mirror docs")
 #   * no actions/checkout step takes a `ref:` — the tooling runs from this
 #     workflow's own commit; the release tag is fetched into a detached worktree
 #     and refused unless it resolves to the commit the plan step expects
@@ -41,8 +45,9 @@ setup() {
   WORK="$BATS_TEST_TMPDIR/work"
   mkdir -p "$SHIM" "$WORK" "$BATS_TEST_TMPDIR/runner-temp"
   # gh shim: `release view` prints GH_RELEASE_JSON (or fails with GH_RELEASE_RC);
-  # `api ... --jq .sha` prints GH_API_SHA (or fails with GH_API_RC). Every call
-  # is logged so a test can assert WHICH question the step asked.
+  # `api .../releases/latest` prints GH_LATEST_TAG (or fails with GH_LATEST_RC);
+  # any other `api ... --jq .sha` prints GH_API_SHA (or fails with GH_API_RC).
+  # Every call is logged so a test can assert WHICH question the step asked.
   cat >"$SHIM/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${GH_LOG:?}"
@@ -50,6 +55,9 @@ case "${1:-} ${2:-}" in
   "release view")
     [ "${GH_RELEASE_RC:-0}" -eq 0 ] || { echo "release not found" >&2; exit "$GH_RELEASE_RC"; }
     printf '%s\n' "${GH_RELEASE_JSON:?}" ;;
+  "api "*"/releases/latest")
+    [ "${GH_LATEST_RC:-0}" -eq 0 ] || { echo "HTTP 404: Not Found" >&2; exit "$GH_LATEST_RC"; }
+    printf '%s\n' "${GH_LATEST_TAG:?}" ;;
   "api "*)
     [ "${GH_API_RC:-0}" -eq 0 ] || { echo "HTTP 409: Git Repository is empty" >&2; exit "$GH_API_RC"; }
     printf '%s\n' "${GH_API_SHA:?}" ;;
@@ -99,10 +107,12 @@ PY
 }
 
 # run_step <step id> [cwd] — execute the step body as Actions would: its own
-# bash, the exported env, the gh shim first on PATH.
+# bash, the exported env, the gh shim first on PATH. RUN_WF names the workflow
+# to read the body from (default: the real one; a mutation test points it at a
+# mutated copy so the same step body runs with one decision removed).
 run_step() {
   local body="$BATS_TEST_TMPDIR/step-$1.sh"
-  step_run "$WF" "$1" >"$body" || { cat "$body"; return 1; }
+  step_run "${RUN_WF:-$WF}" "$1" >"$body" || { cat "$body"; return 1; }
   local dir="${2:-$WORK}"
   run env PATH="$SHIM:$PATH" bash -c "cd '$dir' && bash '$body'"
 }
@@ -115,8 +125,8 @@ release_json() { # <tag> <isPrerelease>
 
 # ── plan ──────────────────────────────────────────────────────────────────────
 
-@test "plan: a stable release from workflow_run publishes tree and release, pinned to head_sha" {
-  export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_RELEASE_JSON
+@test "plan: the newest stable release from workflow_run publishes tree and release, pinned to head_sha" {
+  export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_RELEASE_JSON GH_LATEST_TAG=v1.2.3
   GH_RELEASE_JSON="$(release_json v1.2.3 false)"
   run_step plan
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -126,7 +136,9 @@ release_json() { # <tag> <isPrerelease>
   [ "$(out publish_tree)" = "true" ] || return 1
   [ "$(out expect_sha)" = "$SHA_A" ] || return 1
   grep -q '^release view v1.2.3 --repo example/source --json tagName,isDraft,isPrerelease$' "$GH_LOG" || return 1
-  [[ "$output" != *"::notice::"*"prerelease"* ]] || return 1
+  # The newest-stable answer is GitHub's, asked of the SOURCE repository.
+  grep -q '^api repos/example/source/releases/latest --jq .tag_name$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
+  [[ "$output" != *"::notice::"* ]] || return 1
 }
 
 @test "plan: a prerelease mirrors only its release — publish_tree=false, and the log says why" {
@@ -138,6 +150,41 @@ release_json() { # <tag> <isPrerelease>
   [ "$(out publish_tree)" = "false" ] || return 1
   [ "$(out expect_sha)" = "$SHA_A" ] || return 1
   [[ "$output" == *"::notice::'v1.2.3-rc.1' is a prerelease: only its GitHub release is mirrored (marked prerelease)."*"default branch and chart index are not pushed"* ]] || { echo "$output"; return 1; }
+  # A prerelease is never the newest stable release; the question is not asked.
+  ! grep -q 'releases/latest' "$GH_LOG" || return 1
+}
+
+@test "plan: a stable release that is not the newest one mirrors only its release — publish_tree=false, not marked prerelease" {
+  export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_RELEASE_JSON GH_LATEST_TAG=v1.3.0
+  GH_RELEASE_JSON="$(release_json v1.2.3 false)"
+  run_step plan
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(out tag)" = "v1.2.3" ] || return 1
+  [ "$(out prerelease)" = "false" ] || return 1
+  [ "$(out publish_tree)" = "false" ] || return 1
+  [ "$(out expect_sha)" = "$SHA_A" ] || return 1
+  [[ "$output" == *"::notice::'v1.2.3' is not the newest stable release (v1.3.0 is): only its GitHub release is mirrored."*"they keep the newest stable release"* ]] || { echo "$output"; return 1; }
+}
+
+@test "plan: an unreadable releases/latest is refused — 'cannot tell' does not replace the default branch" {
+  export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_RELEASE_JSON GH_LATEST_TAG="" GH_LATEST_RC=1
+  GH_RELEASE_JSON="$(release_json v1.2.3 false)"
+  run_step plan
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"::error::cannot read the newest stable release of example/source (releases/latest) — refusing"* ]] || { echo "$output"; return 1; }
+  [ ! -s "$GITHUB_OUTPUT" ] || return 1
+}
+
+@test "plan mutation: with the newest-stable comparison removed, an older tag publishes the tree — the test above catches it" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'plan'][0]; s['run'] = s['run'].replace('if [ \"\$LATEST\" != \"\$TAG\" ]; then', 'if false; then')")" || return 1
+  export RUN_HEAD_BRANCH=v1.2.3 RUN_HEAD_SHA="$SHA_A" GH_RELEASE_JSON GH_LATEST_TAG=v1.3.0
+  GH_RELEASE_JSON="$(release_json v1.2.3 false)"
+  RUN_WF="$m" run_step plan
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # The mutated body lets the older tag through: this is the outcome the real
+  # test refuses, so the assertion there is live, not vacuous.
+  [ "$(out publish_tree)" = "true" ] || { echo "$output"; return 1; }
 }
 
 @test "plan: a workflow_run whose head is a branch, not a tag, is refused before anything is read" {
@@ -168,11 +215,12 @@ release_json() { # <tag> <isPrerelease>
 }
 
 @test "plan: a dispatch takes the expected commit from the API and is a dry run unless told 'false'" {
-  export EVENT_NAME=workflow_dispatch INPUT_TAG=v1.2.3 INPUT_DRY_RUN=true GH_RELEASE_JSON GH_API_SHA="$SHA_B"
+  export EVENT_NAME=workflow_dispatch INPUT_TAG=v1.2.3 INPUT_DRY_RUN=true GH_RELEASE_JSON GH_API_SHA="$SHA_B" GH_LATEST_TAG=v1.2.3
   GH_RELEASE_JSON="$(release_json v1.2.3 false)"
   run_step plan
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(out dry_run)" = "true" ] || return 1
+  [ "$(out publish_tree)" = "true" ] || return 1
   [ "$(out expect_sha)" = "$SHA_B" ] || return 1
   grep -q '^api repos/example/source/commits/v1.2.3 --jq .sha$' "$GH_LOG" || return 1
   # The API not answering is "cannot tell", never an unpinned fetch.
@@ -252,17 +300,17 @@ make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK 
   [ "$(out name)" = "source-public" ] || return 1
 }
 
-@test "keep: a prerelease is pinned to the mirror's default-branch head; an empty mirror is refused" {
+@test "keep: a release-only publish is pinned to the mirror's default-branch head; an empty mirror is refused" {
   export REPO=example/source-public BRANCH=main TAG=v1.2.3-rc.1 GH_API_SHA="$SHA_B"
   run_step keep
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(out sha)" = "$SHA_B" ] || return 1
   grep -q '^api repos/example/source-public/commits/main --jq .sha$' "$GH_LOG" || return 1
-  [[ "$output" == *"prerelease v1.2.3-rc.1: default branch 'main' and gh-pages left untouched"* ]] || return 1
+  [[ "$output" == *"release-only v1.2.3-rc.1: default branch 'main' and gh-pages left untouched"* ]] || { echo "$output"; return 1; }
   : >"$GITHUB_OUTPUT"
   GH_API_RC=1 run_step keep
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"::error::'v1.2.3-rc.1' is a prerelease and the mirror has no commit on 'main' to pin it to — a prerelease cannot be the first publish to an empty mirror"* ]] || return 1
+  [[ "$output" == *"::error::'v1.2.3-rc.1' does not replace the mirror's default branch (a prerelease, or not the newest stable release) and the mirror has no commit on 'main' to pin its release to — the first publish to an empty mirror must be the newest stable release."* ]] || { echo "$output"; return 1; }
   [ ! -s "$GITHUB_OUTPUT" ] || return 1
 }
 
@@ -336,6 +384,16 @@ if len(fetches) != 1:
 if "EXPECT_SHA" not in str(fetches[0].get("run", "")):
     fail("the tag fetch step does not compare against EXPECT_SHA")
 print("OK: the one tag fetch compares against the expected commit")
+
+# The step that DECIDES publish_tree (writes it to GITHUB_OUTPUT) must ask
+# GitHub which release is the newest stable one; a decision that never asks
+# would let a rebuild of an older tag replace the mirror's default branch.
+deciders = [s for s in steps if re.search(r"publish_tree=", str(s.get("run", "")))]
+if len(deciders) != 1:
+    fail("expected exactly one step writing publish_tree=, found %d" % len(deciders))
+if "releases/latest" not in str(deciders[0].get("run", "")):
+    fail("step %r decides publish_tree without reading releases/latest — an older stable tag would replace the mirror's default branch" % deciders[0].get("name"))
+print("OK: the publish_tree decision reads releases/latest")
 PY
 }
 
@@ -372,6 +430,15 @@ PY
   [[ "$output" == *"OK: the release step is not gated on publish_tree"* ]] || return 1
   [[ "$output" == *"OK: no step captures the publisher's output"* ]] || return 1
   [[ "$output" == *"OK: the one tag fetch compares against the expected commit"* ]] || return 1
+  [[ "$output" == *"OK: the publish_tree decision reads releases/latest"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: a publish_tree decision that never reads releases/latest reddens" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'plan'][0]; s['run'] = s['run'].replace('releases/latest', 'releases/tags/latest')")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: step "*"decides publish_tree without reading releases/latest"* ]] || { echo "$output"; return 1; }
 }
 
 @test "shape mutation: a checkout that takes a ref reddens" {

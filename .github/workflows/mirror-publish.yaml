@@ -57,6 +57,16 @@
 #   prereleases out of the Helm index. A prerelease therefore cannot be the
 #   first thing published to an empty mirror — the run refuses and says so.
 #
+# Older stable releases
+#   The default branch and the chart index are replaced only by the NEWEST
+#   stable release of this repository (what GitHub reports as releases/latest).
+#   A re-run of the chart workflow for an earlier tag, or a dispatch naming one,
+#   mirrors that release only — otherwise a rebuild of v1.8.0 after v1.9.0 had
+#   shipped would roll the public README, installer and charts back to v1.8.0
+#   and, if v1.8.0 was already mirrored, stop there with the rollback in place.
+#   When releases/latest cannot be read the run refuses: "cannot tell" does not
+#   replace what customers install from.
+#
 # Target
 #   The mirror is named by the Actions VARIABLE `MIRROR_REPO` (a bare repo name
 #   in this organisation), or the `mirror-repo` dispatch input. It has NO
@@ -189,6 +199,20 @@ jobs:
             if [ "$PRERELEASE" = "true" ]; then
               PUBLISH_TREE=false
               echo "::notice::'$TAG' is a prerelease: only its GitHub release is mirrored (marked prerelease). The mirror's default branch and chart index are not pushed — they keep the last stable release."
+            else
+              # Only the NEWEST stable release replaces the mirror's default
+              # branch and chart index. A re-run for an older tag (or a dispatch
+              # naming one) would otherwise roll the public tree back to it.
+              # releases/latest is GitHub's own answer, not a sort done here.
+              LATEST="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" || LATEST=""
+              if [ -z "$LATEST" ]; then
+                echo "::error::cannot read the newest stable release of $GITHUB_REPOSITORY (releases/latest) — refusing: without it this run cannot tell whether '$TAG' may replace the mirror's default branch."
+                exit 1
+              fi
+              if [ "$LATEST" != "$TAG" ]; then
+                PUBLISH_TREE=false
+                echo "::notice::'$TAG' is not the newest stable release ($LATEST is): only its GitHub release is mirrored. The mirror's default branch and chart index are not pushed — they keep the newest stable release."
+              fi
             fi
           else
             if [ "$DRY_RUN" != "true" ]; then
@@ -378,8 +402,9 @@ jobs:
           cat "$RUNNER_TEMP/mirror.json"
 
       - name: Push the tree to the mirror's default branch
-        # Stable releases only: a prerelease never replaces what customers
-        # install from (publish_tree=false, see the plan step).
+        # The newest stable release only: neither a prerelease nor an older
+        # stable tag replaces what customers install from (publish_tree=false,
+        # see the plan step).
         if: steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true'
         id: push
         env:
@@ -408,11 +433,12 @@ jobs:
           set -euo pipefail
           bash scripts/publish-mirror.sh tree --stage "$RUNNER_TEMP/stage-pages/tree" --repo "$REPO" --branch gh-pages --message "Chart index at $TAG"
 
-      - name: Prerelease — keep the mirror's default branch, pin the release to its head
-        # Nothing was pushed, so the release is created at the commit the
-        # mirror's default branch already has (the last stable publish). An
-        # empty mirror has no such commit: a prerelease cannot be the first
-        # publish, and the run says so instead of inventing a target.
+      - name: Release only — keep the mirror's default branch, pin the release to its head
+        # A prerelease or an older stable tag: nothing was pushed, so the
+        # release is created at the commit the mirror's default branch already
+        # has (the newest stable publish). An empty mirror has no such commit:
+        # neither can be the first publish, and the run says so instead of
+        # inventing a target.
         if: steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree != 'true'
         id: keep
         env:
@@ -423,11 +449,11 @@ jobs:
         run: |
           set -euo pipefail
           if ! SHA="$(gh api "repos/$REPO/commits/$BRANCH" --jq .sha)" || [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::'$TAG' is a prerelease and the mirror has no commit on '$BRANCH' to pin it to — a prerelease cannot be the first publish to an empty mirror; publish a stable release first."
+            echo "::error::'$TAG' does not replace the mirror's default branch (a prerelease, or not the newest stable release) and the mirror has no commit on '$BRANCH' to pin its release to — the first publish to an empty mirror must be the newest stable release."
             exit 1
           fi
           echo "sha=$SHA" >>"$GITHUB_OUTPUT"
-          echo "prerelease $TAG: default branch '$BRANCH' and gh-pages left untouched; release will be pinned to $SHA"
+          echo "release-only $TAG: default branch '$BRANCH' and gh-pages left untouched; release will be pinned to $SHA"
 
       - name: Create the release on the mirror
         if: steps.plan.outputs.dry_run != 'true'
