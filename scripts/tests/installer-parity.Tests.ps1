@@ -122,3 +122,52 @@ Describe "Installer parity (client#772)" {
     }
   }
 }
+
+Describe "Installer parity: the kubelet drop-in's reservation shape (backend#2460)" {
+  # The PowerShell half of the bats block of the same name: Write-KubeletConfig is
+  # driven with the platform overridden -- once as the first platform in THIS
+  # twin's own measured list, once as the fixture's unmeasured probe -- and the
+  # keys it must / must not emit come from the shared fixture. The values are
+  # not asserted here: they are generated into both twins and held equal by
+  # scripts/tests/kubelet-config-agreement.sh in the required drift job.
+  BeforeAll {
+    $script:KR = $script:Parity.kubelet_reservation
+    $script:Measured = @()
+    $listVar = Get-Variable -Name $script:KR.measured_platforms_variable -ValueOnly -ErrorAction SilentlyContinue
+    if ($listVar) { $script:Measured = @("$listVar".Trim() -split '\s+' | Where-Object { $_ }) }
+  }
+
+  It "the fixture declares the reservation shape" {
+    $script:KR | Should -Not -BeNullOrEmpty
+    $script:KR.measured_platforms_variable | Should -Be 'TB_KUBELET_RESERVATION_PLATFORMS'
+    @($script:KR.emitted_for_a_measured_platform).Count | Should -BeGreaterOrEqual 4
+    @($script:KR.never_emitted_for_an_unmeasured_platform).Count | Should -BeGreaterOrEqual 4
+    @($script:KR.never_restated_from_k3s).Count | Should -BeGreaterOrEqual 2
+    @($script:KR.always_emitted).Count | Should -BeGreaterOrEqual 3
+  }
+
+  It "a measured platform's drop-in carries every key the fixture names, and none it forbids" {
+    if ($script:Measured.Count -eq 0) { Set-ItResult -Skipped -Because "no platform has a measured record in this tree"; return }
+    $path = Join-Path $TestDrive "measured/kubelet.yaml"
+    $null = Write-KubeletConfig -Path $path -Platform $script:Measured[0]
+    $yaml = Get-Content -LiteralPath $path -Raw
+    foreach ($k in @($script:KR.emitted_for_a_measured_platform) + @($script:KR.always_emitted)) {
+      $yaml | Should -Match ([regex]::Escape($k)) -Because "a measured platform must emit '$k'"
+    }
+    foreach ($k in @($script:KR.never_restated_from_k3s)) {
+      $yaml | Should -Not -Match ([regex]::Escape($k)) -Because "k3s's '$k' must not be restated"
+    }
+  }
+
+  It "an unmeasured platform's drop-in carries none of the reservation keys, and all of the always-keys" {
+    $path = Join-Path $TestDrive "unmeasured/kubelet.yaml"
+    $null = Write-KubeletConfig -Path $path -Platform $script:KR.unmeasured_probe_platform
+    $yaml = Get-Content -LiteralPath $path -Raw
+    foreach ($k in @($script:KR.never_emitted_for_an_unmeasured_platform)) {
+      $yaml | Should -Not -Match ([regex]::Escape($k)) -Because "an unmeasured platform must not emit '$k'"
+    }
+    foreach ($k in @($script:KR.always_emitted)) {
+      $yaml | Should -Match ([regex]::Escape($k)) -Because "the image-GC half must survive on an unmeasured platform"
+    }
+  }
+}
