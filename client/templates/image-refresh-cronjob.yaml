@@ -54,17 +54,23 @@ data:
     #   in the same tick); it does not detect and repair skew that predates
     #   it, because it compares registry-vs-annotation, never pod-vs-pod.
     #
-    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (client-runtime#199).
-    # `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade path)
-    # re-renders the templates, which write `repo:tag` and so revert an earlier
-    # `set image` pin. `recorded == latest` no longer means no-op: the loop reads
-    # each workload's LIVE image and re-pins the digest whenever the workload is
-    # off it. The revert therefore lasts ONE tick — the next tick puts the digest
-    # back — instead of floating on the tag until the next upstream release. It
-    # is compared on the @sha256 digest, so a registry-prefix rewrite (a mutating
-    # webhook) is not mistaken for a revert. This only happens on a chart VERSION
-    # bump anyway — auto-upgrade compares versions and skips otherwise — so it is
-    # not an hourly revert.
+    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (client-runtime#199),
+    # from BOTH sides now. Chart-side (#1013, from 1.9.111): the control-plane
+    # image sites render through `tracebloc.controlPlaneDigest`, which reads THIS
+    # annotation via `lookup`, so `helm upgrade --reset-then-reuse-values` (the
+    # fleet auto-upgrade path) re-renders `repo@<last-refreshed digest>` and no
+    # longer writes the bare `repo:tag` that used to revert an earlier `set image`
+    # pin. Script-side (#1008): `recorded == latest` no longer means no-op — the
+    # loop reads each workload's LIVE image and re-pins the digest whenever the
+    # workload is off it, so any residual revert (an annotation that lags the live
+    # spec — a timed-out rollout, `helm rollback`) lasts ONE tick instead of
+    # floating on the tag until the next upstream release. Compared on the @sha256
+    # digest, so a registry-prefix rewrite (a mutating webhook) is not mistaken
+    # for a revert. This only bites on a chart VERSION bump anyway — auto-upgrade
+    # compares versions and skips otherwise — so it is not an hourly revert. (One
+    # residue the script-side re-pin does not yet cover is the durable flap-lockout
+    # state, where the annotation stays stuck while the live spec has moved on —
+    # tracked as a follow-up; see the first-tick contract below.)
     #
     # Reconciling against the live spec is what makes that possible — the
     # declarative reconcile `set image` enables (`rollout restart` was a blind
@@ -117,6 +123,19 @@ data:
     # reinstall onto a node whose `:tag` layer is already stale — but that is the
     # price, and a follow-up may gate the re-pin on "have we ever applied a digest
     # here?" so a genuine fresh install skips the flap path entirely.
+    #
+    # First-observation roll (chart ≥ 1.9.111, #1013). Once this tick has
+    # RECORDED D0 without re-imaging, the live spec still says `:tag` but the
+    # annotation now says `@D0`, so the NEXT chart bump renders `repo@D0`
+    # (tracebloc.controlPlaneDigest reads the annotation) and rolls jobs-manager
+    # (Recreate), requests-proxy and the resource-monitor DaemonSet ONCE, for
+    # byte-identical content. auto-upgrade runs that upgrade `--atomic --wait`
+    # (auto-upgrade-cronjob.yaml), so on a slow single-node edge the one-time
+    # roll can hit the timeout and roll back, then re-attempt identically on the
+    # next bump. This is the deliberate tradeoff for NOT `set image`-ing on the
+    # first tick; pinning on the first tick instead would move the same roll to
+    # install time for every edge. Also narrows #569's offline guarantee — see
+    # the note at controlPlanePullPolicy in _helpers.tpl.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure

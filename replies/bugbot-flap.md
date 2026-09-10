@@ -1,0 +1,1 @@
+Confirmed — same finding as @shujaatTracebloc's BLOCKING thread on this helper. The fix is A-side (#1008): write each workload's `last-refreshed-*` annotation right after its own `rollout status` and before the flap-guard `exit 0`, so the annotation can't lag the live spec into a backward move. B is held behind A; tracked there, leaving open.

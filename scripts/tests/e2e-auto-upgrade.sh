@@ -116,6 +116,19 @@ local_prod_digest() {
   awk -F'"' '/^[[:space:]]*prodDigest:[[:space:]]*"/ {print $2; exit}' "$CHART_DIR/values.yaml"
 }
 
+# The control-plane image DIGEST the jobs-manager container is ACTUALLY running,
+# read off the LIVE Deployment and extracted from `image:` (repo@sha256:…). This
+# is what `tracebloc.controlPlaneDigest` must render from the last-refreshed
+# annotation (client-runtime#199) — assert the rendered image, not merely that
+# the annotation survived: the annotation is a k8s object helm never touches, so
+# it survives even if the helper is removed and the image reverts to a floating
+# `:tag`. Empty output means no digest is pinned on `image:` (the revert).
+jm_controlplane_image_digest() {
+  kubectl get -n "$NS" "$(jm_deploy)" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' \
+    | sed -n 's/.*@\(sha256:[a-f0-9]\{64\}\).*/\1/p'
+}
+
 # Decode one key from the release Secret. Defined here with the other
 # cluster-reading helpers (it used to live in path 5) so the baseline
 # root-rotation assertion below can use it too (backend#3384).
@@ -216,8 +229,31 @@ BASELINE_EGRESS_PROXY_URL="$(jm_egress_proxy_url)"
 echo "   baseline egress posture: external_443=$([ "$BASELINE_EXTERNAL_443" = 1 ] && echo present || echo absent) egress_proxy_url=${BASELINE_EGRESS_PROXY_URL:-<none>}"
 
 echo "── simulate an image-refresh-managed annotation (must survive upgrades) ──"
+# A VALID sha256 digest (64 hex): tracebloc.controlPlaneDigest validates the
+# annotation against `^sha256:[a-f0-9]{64}$` before rendering it onto `image:`, so
+# a placeholder like `sha256:e2e-sentinel` would degrade to `:tag` and stop
+# exercising branch 2 (the digest render this test exists to protect). Bound once
+# and reused by both the survival check and the rendered-image check in path 2.
+#
+# DELIBERATELY UNPULLABLE, and asserted as such below. This 64-hex digest does
+# not resolve to any image in the k3d cache (a side-loaded `k3d image import`
+# stores a tag alias with no resolvable digest — see the #569 offline note in
+# _helpers.tpl), so any upgrade that renders the WORKING-TREE chart (path 1's
+# `--reuse-values`, path 2's `--reset-then-reuse-values`) Recreates jobs-manager
+# onto an unpullable ref and it sits in Init:ImagePullBackOff. (The intermediate
+# reset to the PUBLISHED $PREV chart between paths 1 and 2 MAY briefly un-wedge it
+# by rendering `:tag` — but only while $PREV predates tracebloc.controlPlaneDigest;
+# once 1.9.111+ is the published $PREV the reset renders this sentinel too and the
+# un-wedge stops happening. Do not depend on it either way.) That
+# is harmless to paths 2-5 BY CONSTRUCTION regardless: the only readiness wait in this script
+# is `kubectl wait … nodes` at the top (before this seed), and every assertion
+# after this point is a spec-only read (`kubectl get … -o jsonpath`), never a
+# live-pod / rollout / readiness read. If you add a step below that needs a
+# running jobs-manager pod, seed a pullable digest here (or clear the annotation
+# first) — do not assume the pod is up.
+E2E_REFRESH_DIGEST="sha256:e2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee2ee"
 kubectl annotate -n "$NS" "$(jm_deploy)" \
-  "tracebloc.io/last-refreshed-jobs-manager-digest=sha256:e2e-sentinel" --overwrite
+  "tracebloc.io/last-refreshed-jobs-manager-digest=$E2E_REFRESH_DIGEST" --overwrite
 
 echo "── path 1: manual-operator habit — helm upgrade --reuse-values ──"
 # Old stored values replayed against the new chart: every new key is absent and
@@ -249,7 +285,16 @@ else
   [ "$(jm_ingestor_digest)" = "$BASELINE_PROD_DIGEST" ] \
     || fail "--reuse-values did not replay the baseline prod pin verbatim: got '$(jm_ingestor_digest)', want '$BASELINE_PROD_DIGEST' (stored computed values must win over new chart defaults on this path)"
 fi
-echo "   OK: upgrade succeeded, egress posture replayed from the baseline verbatim, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating})"
+# Control-plane pin also survives --reuse-values: this upgrade renders the working
+# tree chart, so tracebloc.controlPlaneDigest reads the seeded annotation and pins
+# the jobs-manager image to the sentinel. Spec-only read (no live-pod dependency) —
+# and this is the upgrade that first Recreates jobs-manager onto the deliberately
+# unpullable sentinel, asserting explicitly here so the Init:ImagePullBackOff that
+# follows is a documented, expected state rather than a surprise to the next author.
+CP_DIGEST_P1="$(jm_controlplane_image_digest)"
+[ "$CP_DIGEST_P1" = "$E2E_REFRESH_DIGEST" ] \
+  || fail "--reuse-values did not seed the jobs-manager control-plane image from the last-refreshed digest: got '${CP_DIGEST_P1:-<none — reverted to floating :tag>}', want '$E2E_REFRESH_DIGEST' (tracebloc.controlPlaneDigest did not preserve the pin on this path — client-runtime#199)"
+echo "   OK: upgrade succeeded, egress posture replayed from the baseline verbatim, ingestor pin matches the baseline era (${BASELINE_PROD_DIGEST:-floating}), control-plane image pinned to the last-refreshed digest (jobs-manager now Init:ImagePullBackOff on the unpullable sentinel BY DESIGN — later paths read spec only)"
 
 echo "── isolate path 2 from path 1's --reuse-values contamination (#459) ──"
 # path 1's --reuse-values rewrote THIS release's recorded values to the baseline's FULL
@@ -301,7 +346,22 @@ kubectl get deploy "${NS}-egress-proxy" -n "$NS" >/dev/null \
   || fail "auto-upgrade did not deploy the egress gateway (new defaults did not flow)"
 ANNOT="$(kubectl get -n "$NS" "$(jm_deploy)" \
   -o jsonpath='{.metadata.annotations.tracebloc\.io/last-refreshed-jobs-manager-digest}')"
-[ "$ANNOT" = "sha256:e2e-sentinel" ] || fail "image-refresh annotation was clobbered by the upgrade"
+[ "$ANNOT" = "$E2E_REFRESH_DIGEST" ] || fail "image-refresh annotation was clobbered by the upgrade"
+# THE #1013 CONTRACT: the auto-upgrade must SEED the control-plane image from that
+# annotation, so the jobs-manager container renders repo@<digest> instead of the
+# floating :tag a stale node would run old (client-runtime#199). The annotation
+# check above is necessary but not sufficient — helm never touches the annotation,
+# so it survives even if tracebloc.controlPlaneDigest is removed or always returns
+# empty and the image silently reverts to :tag. Assert the RENDERED image digest,
+# which is what actually protects the pin: this is the assertion that reddens if
+# the helper is dropped. (This test's upgrade tolerates the unpullable sentinel
+# digest because *this script's* helm upgrade passes no --wait and every check here
+# is a spec-only read — NOT a property of the fleet path: auto-upgrade-cronjob.yaml
+# runs `--atomic --cleanup-on-fail --timeout`, and --atomic implies --wait, so on a
+# real edge an unpullable seed blocks on readiness and rolls back. See the :245 note.)
+CP_DIGEST="$(jm_controlplane_image_digest)"
+[ "$CP_DIGEST" = "$E2E_REFRESH_DIGEST" ] \
+  || fail "auto-upgrade did not seed the jobs-manager control-plane image from the last-refreshed digest: got '${CP_DIGEST:-<none — reverted to floating :tag>}', want '$E2E_REFRESH_DIGEST' (tracebloc.controlPlaneDigest did not render the pin — client-runtime#199 revert not prevented)"
 DEPLOYED="$(helm list -n "$NS" --filter "^${NS}\$" -o yaml \
   | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
 [ "$DEPLOYED" = "client-${LOCAL_VERSION}" ] || fail "deployed chart is $DEPLOYED, expected client-${LOCAL_VERSION}"

@@ -41,6 +41,11 @@ spec:
             these keys.
           */}}
           {{- $rpDigest := (dig "requestsProxy" "digest" "" $rpImages) | default (dig "jobsManager" "digest" "" $rpImages) }}
+          {{- /* client-runtime#199: seed the digest image-refresh last observed so a
+                 `helm upgrade` renders repo@digest, not the bare :tag (see
+                 tracebloc.controlPlaneDigest). requests-proxy runs the SAME
+                 jobs-manager image and follows its annotation. */}}
+          {{- $rpDigest = include "tracebloc.controlPlaneDigest" (dict "root" $ "operatorDigest" $rpDigest "annotationImage" "jobs-manager") }}
           image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
           # #569: IfNotPresent wherever an update path exists without `Always` --
           # a pinned digest, or the image-refresh reconcile (see

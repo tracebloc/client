@@ -480,6 +480,20 @@ true
   freezing — a frozen control plane with no signal is worse than a restart that
   needs the network.
 
+  #569 OFFLINE GUARANTEE — NARROWED as of 1.9.111 (#1013). IfNotPresent only
+  helps when the REFERENCE is cache-satisfiable. Until 1.9.111 a `helm upgrade`
+  re-rendered the bare `:tag`, which a node that had pulled that tag could always
+  satisfy from cache, so an offline restart ran the (possibly stale) cached
+  image. From 1.9.111 tracebloc.controlPlaneDigest can render `repo@<digest>`
+  seeded from the last-refreshed annotation (see its header), and because the
+  first-observation path RECORDS a digest without re-imaging, the rendered digest
+  may be one the node has never pulled. Online that is the fix working; OFFLINE
+  it turns "restarts on a stale image" into "cannot start" (ImagePullBackOff) for
+  that one digest. Two corollaries: a `global.imageRegistry` mirror is exempt
+  (branch 2 stays inert there → `:tag`), and a side-loaded k3d image is affected
+  because `k3d image import` stores a tag alias with no resolvable digest and a
+  local k3d install IS docker.io, so the mirror gate does not help it.
+
   Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
 */}}
 {{- define "tracebloc.controlPlanePullPolicy" -}}
@@ -490,6 +504,150 @@ IfNotPresent
 IfNotPresent
 {{- else -}}
 Always
+{{- end -}}
+{{- end }}
+
+{{/*
+  tracebloc.controlPlaneDigest — the EFFECTIVE digest for a control-plane image,
+  resolved in priority order:
+
+    1. an operator's explicit values pin (`images.<name>.digest`) — wins,
+       behaviour unchanged;
+    2. else, when image-refresh is the update path (enabled AND the docker.io
+       mirror), the digest image-refresh last OBSERVED, read from the
+       jobs-manager Deployment's `tracebloc.io/last-refreshed-<annotationImage>-digest`
+       annotation via `lookup`. ("Observed", not "applied": on the FIRST tick
+       image-refresh records the current digest WITHOUT `set image`, deliberately
+       — see the image-refresh CronJob header — so the annotation is what refresh
+       last saw, which is only the same as what it last applied once a real
+       refresh has run.) This is what makes a `helm upgrade` RENDER `repo@digest`
+       instead of reverting to the bare `:tag` and dropping image-refresh's
+       out-of-band `kubectl set image` pin — the revert that let a stale-`:tag`
+       node cache silently run an OLD control-plane image (client-runtime#199).
+       `lookup` returns empty during `helm template` / `helm diff` / the FIRST
+       install (no Deployment yet), so it degrades to `""` → `:tag` there, which
+       is correct: nothing is pinned yet and the node's fresh tag pull is the
+       right image.
+    3. else `""` (bare `:tag`; `Always` via controlPlanePullPolicy is then the
+       update path — the non-refresh / mirror edges #569 protects).
+
+  On `imageRefresh.suspend: true` the pin is KEPT, not dropped. suspend stops the
+  CronJob from POLLING; it does not un-pin (@LukasWodka on #1013). The knob is
+  used to FREEZE an edge during an incident, and `values.schema.json` promises it
+  "pause[s] without removing the resources" — un-pinning here would re-render
+  jobs-manager (Recreate), requests-proxy and the resource-monitor DaemonSet onto
+  the floating `:tag` + `Always`, three unplanned rollouts plus a downgrade to
+  whatever `:tag` points at now, which is the opposite of freezing. Keeping the
+  last-observed `@digest` freezes the edge on a real, previously-resolved image;
+  a newly joined node then pulls that frozen digest (a valid ref), not a missing
+  one, which still answers the newly-joined-node concern that first put a suspend
+  gate here (@shujaatTracebloc's earlier BLOCKING-2 on #1013, reversed here).
+
+  ENV-SCOPING CAVEAT (@shujaatTracebloc #1013, Medium; fix lives in A, not here).
+  The `last-refreshed-<image>-digest` annotation key is NOT tag/env-scoped, and
+  `tracebloc.image` drops the tag once a digest is present, so a `CLIENT_ENV` /
+  tag change made AT upgrade time (e.g. `--set env.CLIENT_ENV=prod`, or the fleet
+  moving an edge between environments) is silently inert on the image: the render
+  pins the OLD env's `@digest` while every label reads the new env. It self-heals
+  on image-refresh's next tick (it resolves the new `:tag`, sees `recorded !=
+  latest`, and `set image`s) — a window of up to `imageRefresh.schedule`, and
+  NEVER while `imageRefresh.suspend: true`, since suspend now keeps the pin. The
+  containment is an A-side change: image-refresh records the resolved tag
+  alongside the digest (`tracebloc.io/last-refreshed-<image>-tag`) so this helper
+  can honour the annotation only when that tag equals the currently resolved
+  `tracebloc.clientEnv`, falling back to `:tag` otherwise. Called out here because
+  suspend makes the mismatch permanent.
+
+  The lookup targets ONLY the jobs-manager Deployment (where image-refresh writes
+  every last-refreshed annotation) in the release namespace — a read the
+  auto-upgrade SA already holds (its release-ns Role grants all verbs on all
+  resources in that namespace), so this adds no RBAC and does not hit the
+  backend#2469 bootstrap lockout.
+
+  Args: (dict "root" $ "operatorDigest" <values digest for this image>
+              "annotationImage" <"jobs-manager"|"pods-monitor"|"resource-monitor">)
+*/}}
+{{- define "tracebloc.controlPlaneDigest" -}}
+{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- if .operatorDigest -}}
+{{- .operatorDigest -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+{{- $dep := lookup "apps/v1" "Deployment" .root.Release.Namespace (printf "%s-jobs-manager" (include "tracebloc.fullname" .root)) -}}
+{{- if $dep -}}
+{{- $ann := index (($dep.metadata).annotations | default dict) (printf "tracebloc.io/last-refreshed-%s-digest" .annotationImage) | default "" -}}
+{{/*
+  VALIDATE before rendering: the 11 values digest keys are schema-guarded by
+  `^(sha256:[a-f0-9]{64})?$`, but this annotation is written out-of-band by
+  image-refresh (kubectl) and reaches an `image:` field unchecked. A malformed
+  value (`tracebloc.image` drops the tag when a digest is present) renders an
+  unstartable ref helm cannot detect — the kubelet reports InvalidImageName
+  while the apiserver accepts the spec. Require a full sha256 digest; anything
+  else degrades to `""` → `:tag`, the safe fallback (@shujaatTracebloc on #1013).
+  `suspend` is deliberately NOT gated here: a suspended edge keeps rendering the
+  last-observed digest so `helm upgrade` freezes it in place rather than rolling
+  it onto the floating tag (see the header note).
+*/}}
+{{- if regexMatch "^sha256:[a-f0-9]{64}$" $ann -}}
+{{- $ann -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+  tracebloc.controlPlaneDigestSource — the PROVENANCE of what controlPlaneDigest
+  resolved, rendered onto the jobs-manager Deployment as
+  `tracebloc.io/controlplane-digest-source` so a monitored edge can SEE which
+  branch produced the image ref. It mirrors controlPlaneDigest's resolution
+  exactly and must stay in lockstep with it. Values:
+
+    values             — an operator `images.<name>.digest` pin (priority 1).
+    annotation         — image-refresh's last-refreshed `@digest` (the pin is
+                         preserved on this upgrade — the healthy steady state).
+    tag                — the bare `:tag`. Legitimate here: first install, a
+                         `global.imageRegistry` mirror, `imageRefresh.enabled:
+                         false`, or the first-observation window (Deployment
+                         present but not yet annotated).
+    tag-lookup-failed  — the ANOMALY (@shujaatTracebloc #1013, Medium): `lookup`
+                         fails OPEN — Helm returns an empty map on EVERY failure
+                         (RBAC denial, apiserver 5xx, client timeout, a
+                         kubectl-less renderer), not just NotFound — so a read
+                         failure is otherwise indistinguishable from "first
+                         install" and would silently drop the pin back to `:tag`
+                         (client-runtime#199, now non-deterministic and unsignalled).
+                         On an UPGRADE the jobs-manager Deployment MUST exist, so
+                         `.Release.IsUpgrade` AND an empty lookup means the READ
+                         failed, not that the release is new. We cannot recover
+                         the digest from a read we could not do, and a hard `fail`
+                         would break `helm diff upgrade` (lookup is empty there
+                         too), so we SURFACE it instead: a monitored edge alerts
+                         on this value. (It also shows in `helm diff upgrade` for
+                         the same empty-lookup reason the digest churn does — the
+                         diff caveat the header already documents; it is accurate
+                         on a real apply.)
+
+  Args: same as controlPlaneDigest.
+*/}}
+{{- define "tracebloc.controlPlaneDigestSource" -}}
+{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
+{{- if .operatorDigest -}}
+values
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+{{- $dep := lookup "apps/v1" "Deployment" .root.Release.Namespace (printf "%s-jobs-manager" (include "tracebloc.fullname" .root)) -}}
+{{- if $dep -}}
+{{- $ann := index (($dep.metadata).annotations | default dict) (printf "tracebloc.io/last-refreshed-%s-digest" .annotationImage) | default "" -}}
+{{- if regexMatch "^sha256:[a-f0-9]{64}$" $ann -}}
+annotation
+{{- else -}}
+tag
+{{- end -}}
+{{- else if .root.Release.IsUpgrade -}}
+tag-lookup-failed
+{{- else -}}
+tag
+{{- end -}}
+{{- else -}}
+tag
 {{- end -}}
 {{- end }}
 
