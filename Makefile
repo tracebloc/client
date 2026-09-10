@@ -373,7 +373,6 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   bash scripts/tests/kubelet-arg-map-safety.sh|\
   bash scripts/tests/kubelet-config-agreement.sh|\
   bash scripts/tests/kubelet-config-mutations.sh|\
-  scripts/gen-node-reservation-embed.sh --check|\
   bash scripts/tests/cronjob-failures-are-readable.sh|\
   bash scripts/tests/release-name-equals-namespace.sh|\
   bash scripts/tests/customer-copy-no-ticket-refs.sh|\

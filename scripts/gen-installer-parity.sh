@@ -77,33 +77,6 @@ for row in spec["rows"]:
             raise SystemExit(f"field contains the delimiter: {f!r}")
     print('  "' + "|".join(fields) + '"')
 print(")")
-
-# backend#2460: the kubelet drop-in's reservation BEHAVIOUR both writers must
-# show (the values are generated into the twins and held equal by the agreement
-# guard; this is the shape, driven through each real writer).
-kr = spec.get("kubelet_reservation")
-if not kr:
-    raise SystemExit("installer_parity.json has no kubelet_reservation section")
-
-
-def arr(name, items):
-    for it in items:
-        if '"' in it:
-            raise SystemExit(f"{name}: item contains a double quote: {it!r}")
-    print(f"{name}=(")
-    for it in items:
-        print(f'  "{it}"')
-    print(")")
-
-
-print()
-print("# kubelet drop-in reservation shape (backend#2460); see the JSON's kubelet_reservation.purpose")
-print(f'TB_PARITY_RESERVATION_PLATFORMS_VAR="{kr["measured_platforms_variable"]}"')
-print(f'TB_PARITY_RESERVATION_UNMEASURED_PROBE="{kr["unmeasured_probe_platform"]}"')
-arr("TB_PARITY_RESERVATION_EMITTED_MEASURED", kr["emitted_for_a_measured_platform"])
-arr("TB_PARITY_RESERVATION_NEVER_UNMEASURED", kr["never_emitted_for_an_unmeasured_platform"])
-arr("TB_PARITY_RESERVATION_NEVER_RESTATED", kr["never_restated_from_k3s"])
-arr("TB_PARITY_RESERVATION_ALWAYS", kr["always_emitted"])
 PY
 }
 

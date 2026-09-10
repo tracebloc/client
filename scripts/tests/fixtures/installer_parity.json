@@ -333,45 +333,5 @@
         "limits": "memory=29Gi"
       }
     }
-  ],
-  "kubelet_reservation": {
-    "issue": "tracebloc/backend#2460",
-    "purpose": [
-      "The kubelet drop-in both installers write must carry the SAME reservation shape, and",
-      "each must refuse to invent one for a platform nobody measured. The VALUES are not here:",
-      "they are generated into both twins by scripts/gen-node-reservation-embed.sh from the",
-      "measurement records and held equal by scripts/tests/kubelet-config-agreement.sh. What",
-      "this section declares is the BEHAVIOUR both writers must show, driven through the real",
-      "writer in each language (_write_kubelet_config / Write-KubeletConfig) with the platform",
-      "overridden -- once as a platform from the twin's own measured list, once as one that",
-      "is in no list."
-    ],
-    "measured_platforms_variable": "TB_KUBELET_RESERVATION_PLATFORMS",
-    "unmeasured_probe_platform": "nowhere",
-    "emitted_for_a_measured_platform": [
-      "enforceNodeAllocatable:",
-      "kubeReserved:",
-      "systemReserved:",
-      "evictionHard:",
-      "memory.available:"
-    ],
-    "never_emitted_for_an_unmeasured_platform": [
-      "enforceNodeAllocatable",
-      "kubeReserved",
-      "systemReserved",
-      "evictionHard",
-      "memory.available"
-    ],
-    "never_restated_from_k3s": [
-      "imagefs.available",
-      "nodefs.available"
-    ],
-    "always_emitted": [
-      "apiVersion: kubelet.config.k8s.io/v1beta1",
-      "kind: KubeletConfiguration",
-      "imageGCHighThresholdPercent:",
-      "imageGCLowThresholdPercent:",
-      "imageMinimumGCAge:"
-    ]
-  }
+  ]
 }

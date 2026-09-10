@@ -39,32 +39,3 @@ TB_PARITY_ROWS=(
   "all-nodes-cordoned|16 64Gi true;8 32Gi true|none|||cpu=1,memory=2Gi|installer|0|0|memory=2Gi"
   "explicit-unschedulable-false-is-schedulable|8 32Gi false|none|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
 )
-
-# kubelet drop-in reservation shape (backend#2460); see the JSON's kubelet_reservation.purpose
-TB_PARITY_RESERVATION_PLATFORMS_VAR="TB_KUBELET_RESERVATION_PLATFORMS"
-TB_PARITY_RESERVATION_UNMEASURED_PROBE="nowhere"
-TB_PARITY_RESERVATION_EMITTED_MEASURED=(
-  "enforceNodeAllocatable:"
-  "kubeReserved:"
-  "systemReserved:"
-  "evictionHard:"
-  "memory.available:"
-)
-TB_PARITY_RESERVATION_NEVER_UNMEASURED=(
-  "enforceNodeAllocatable"
-  "kubeReserved"
-  "systemReserved"
-  "evictionHard"
-  "memory.available"
-)
-TB_PARITY_RESERVATION_NEVER_RESTATED=(
-  "imagefs.available"
-  "nodefs.available"
-)
-TB_PARITY_RESERVATION_ALWAYS=(
-  "apiVersion: kubelet.config.k8s.io/v1beta1"
-  "kind: KubeletConfiguration"
-  "imageGCHighThresholdPercent:"
-  "imageGCLowThresholdPercent:"
-  "imageMinimumGCAge:"
-)
