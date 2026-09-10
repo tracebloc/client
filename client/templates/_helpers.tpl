@@ -618,8 +618,10 @@ NOTES.txt cannot disagree about where those images live:
                                     squid, alpine/*, the device plugins and the
                                     ingestor where they are. Also the per-edge
                                     rollback: set it to the previous registry.
-  3. "docker.io"                 — the chart default while the images are
-                                    published to Docker Hub.
+  3. "ghcr.io"                   — the chart default since the GHCR migration.
+                                    The images are still dual-published to
+                                    Docker Hub at the same digests, so
+                                    "docker.io" is the documented rollback.
 
 NOT routed through here, on purpose: `tracebloc/mysql-client` (frozen,
 digest-pinned, published only to Docker Hub — see images.mysqlClient), the
@@ -630,14 +632,18 @@ Every read is nil-guarded and `| default`-chained: values.yaml ships
 `global.imageRegistry: ""` (the key EXISTS, so `dig`'s own fallback never
 applies — the trap image_refresh_test.yaml pins), and an edge upgrading with
 `--reuse-values` from before `images.traceblocRegistry` existed has no such key
-at all. Both must render the default, never "".
+at all. Both must render the default, never "". The literal below RESTATES
+values.yaml's `images.traceblocRegistry` default -- unavoidably, since a
+template cannot read the chart's defaults apart from the merged values -- so
+tests/tracebloc_registry_test.yaml pins both to one value: the chart-default
+tests read values.yaml, the EMPTY-knob tests read this literal.
 
 Call with the ROOT context: {{ include "tracebloc.tbRegistry" . }}
 */}}
 {{- define "tracebloc.tbRegistry" -}}
 {{- $mirror := dig "imageRegistry" "" (.Values.global | default dict) -}}
 {{- $own := dig "traceblocRegistry" "" (.Values.images | default dict) -}}
-{{- $mirror | default ($own | default "docker.io") -}}
+{{- $mirror | default ($own | default "ghcr.io") -}}
 {{- end -}}
 
 {{/*

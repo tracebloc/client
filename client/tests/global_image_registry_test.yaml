@@ -5,7 +5,8 @@ suite: global.imageRegistry private-mirror re-homing (#585)
 # convention. Two invariants are pinned here:
 #   1. Set  -> every image (tracebloc/*, the spawned ingestor + training jobs,
 #      and the alpine/*, ubuntu/squid utility images) carries the mirror prefix.
-#   2. Unset -> byte-identical to the pre-#585 chart: tracebloc/* + squid on
+#   2. Unset -> the chart's own defaults, untouched: tracebloc/* on
+#      images.traceblocRegistry (ghcr.io since the GHCR migration), squid on
 #      docker.io, ingestor on ghcr.io, alpine/* unprefixed (docker.io implicit).
 # Precedence guards: an explicit images.ingestor.repository still wins over the
 # mirror (someone who names a full repo means it); an explicit per-image
@@ -116,14 +117,14 @@ tests:
             value: "mirror.corp.example/"
 
   # ---------------------------------------------------------------------------
-  # 2. Mirror UNSET -> byte-identical to pre-#585 defaults
+  # 2. Mirror UNSET -> the chart's own defaults, untouched
   # ---------------------------------------------------------------------------
-  - it: leaves tracebloc.image on docker.io when no mirror is set
+  - it: leaves tracebloc.image on the chart default (ghcr.io) when no mirror is set
     template: templates/jobs-manager-deployment.yaml
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].image
-          pattern: "^docker\\.io/tracebloc/jobs-manager"
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager"
 
   - it: leaves the ingestor repository on ghcr.io when no mirror is set
     template: templates/jobs-manager-deployment.yaml
