@@ -449,11 +449,18 @@ FX
   [[ "$output" == *"planted after a trimmed here-string (RFC-9910)"* ]] || { echo "$output"; return 1; }
 }
 
-@test "one lexer: the quote/comment walk and the here-document delimiter rule are defined once" {
-  [ "$(grep -c 'function lex(' "$GUARD")" -eq 1 ] || return 1
-  [ "$(grep -c 'function code_only(' "$GUARD")" -eq 1 ] || return 1
+@test "one lexer: the quote/comment walk and every here-document rule (open AND close) are defined once" {
+  # The census names each shared rule, opener and closer alike: the closer is the
+  # half that was wrong before (a second, anchored closer rule left ~2,750 lines
+  # of install-k8s.ps1 as here-string body), so a second copy of it must redden
+  # this test too (Bugbot on client#1022).
+  for fn in lex code_only heredoc_delim herestring_closer closes; do
+    [ "$(grep -c "function $fn(" "$GUARD")" -eq 1 ] || { echo "$fn defined $(grep -c "function $fn(" "$GUARD") times"; return 1; }
+  done
   [ "$(grep -c 'sub(/\.\*<<-?' "$GUARD")" -eq 1 ] || return 1
-  [ "$(grep -c 'function herestring_closer(' "$GUARD")" -eq 1 ] || return 1
+  # ...and the closer TEST is spelled exactly once, inside closes(): a state
+  # machine re-spelling `"^[ \t]*" closer` inline is a second closer rule.
+  [ "$(grep -cE '"\^\[ \\t\]\*" (heredoc|closer)' "$GUARD")" -eq 1 ] || { echo "an inline closer regex exists outside closes()"; return 1; }
 }
 
 # --- Bugbot round on the follow-up: redirect classification, scratch dir ------
