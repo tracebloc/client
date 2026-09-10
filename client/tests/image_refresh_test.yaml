@@ -970,3 +970,34 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'workload already on the pinned digest; no-op'
+
+  - it: a fresh install (no digest ever applied) is gated OUT of the re-pin roll
+    # Guards backend#3556 item 2. With `recorded == latest` and the workload on
+    # :tag, the loop must tell a FRESH install (no digest ever applied here) from
+    # a helm-revert of an applied pin, and roll ONLY the latter -- else every
+    # fresh install pays the #563 flap-path / Recreate cost for byte-identical
+    # content the install already pulled. The `tracebloc.io/digest-applied-<image>`
+    # marker is the discriminator: derived per image, READ in the off-digest arm
+    # to gate the roll, and WRITTEN with the digest record only on a re-image.
+    # image-refresh-repin-on-revert.bats asserts the BEHAVIOUR (an inverted
+    # comparison reddens there); these lock the code shapes so a refactor cannot
+    # silently drop the gate.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # the marker key, derived per image with the same suffix as stale-pin keys
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'applied_key="tracebloc\.io/digest-applied-\$\{repo#\*/\}"'
+      # READ to gate the roll: an absent marker is a fresh install -> skip
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '\[ -z "\$\(get_annotation "\$applied_key" \|\| true\)" \]'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'treating as a fresh install and NOT rolling'
+      # WRITTEN only on a re-image, in the SAME annotate as the digest record so
+      # the two share one fate (a later recorded==latest tick sees both or neither)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'annotate_args="\$annotate_args \$\{key\}=\$\{latest\} \$\{applied_key\}=1"'
