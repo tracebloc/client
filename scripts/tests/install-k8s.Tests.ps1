@@ -9900,7 +9900,7 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     # 3 cores, still requestable, so REDUCED, not refused.
     $saved = $script:TbCpFootprintMemBytes
     try {
-      $script:TbCpFootprintMemBytes = [long](3136 * 1MB)
+      $script:TbCpFootprintMemBytes = 3136L * 1MB   # Int64 literal: no Int32 product to argue about (Bugbot, twice)
       $r = Invoke-FitOn -Nodes @('4 5Gi')
       $r.Fit.Verdict | Should -Be 'reduced'
       $r.Fit.Size | Should -Be 'cpu=3,memory=1Gi'
