@@ -40,13 +40,13 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 1Gi
+          value: 704Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
-          value: 1Gi
+          value: 704Mi
       - equal:
           path: spec.template.spec.containers[0].resources.requests.cpu
-          value: 250m
+          value: 150m
       # CPU limit deliberately unset — InnoDB lock-wait timeouts under throttling.
       - notExists:
           path: spec.template.spec.containers[0].resources.limits.cpu

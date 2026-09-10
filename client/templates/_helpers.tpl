@@ -463,10 +463,12 @@ true
        the kubelet pulls a digest it has never seen. Two conditions:
          * the CronJob renders at all (`imageRefresh.enabled`, and not every
            refreshed image already pinned), and
-         * images come from docker.io. Under a `global.imageRegistry` mirror the
-           script goes inert by design — it resolves digests from docker.io, and
-           pinning one onto a mirrored reference could pin an image the mirror
-           does not hold.
+         * the images come from a registry the script can resolve digests on
+           anonymously (tracebloc.imageRefreshResolvableRegistries: docker.io,
+           ghcr.io — wherever tracebloc.tbRegistry points). Under a
+           `global.imageRegistry` mirror the script goes inert by design — it
+           cannot resolve there, and pinning a digest resolved elsewhere onto a
+           mirrored reference could pin an image the mirror does not hold.
     3. Otherwise -> Always. No reconcile, no pin, so a floating tag plus a
        restart is the ONLY way that edge can ever move. This is exactly the
        pre-#569 behaviour, kept for exactly the edges that still depend on it:
@@ -483,10 +485,9 @@ true
   Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
 */}}
 {{- define "tracebloc.controlPlanePullPolicy" -}}
-{{- $mirror := (dig "imageRegistry" "docker.io" (.root.Values.global | default dict)) | default "docker.io" -}}
 {{- if .digest -}}
 IfNotPresent
-{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (eq $mirror "docker.io") -}}
+{{- else if and (include "tracebloc.imageRefreshEnabled" .root) (include "tracebloc.imageRefreshResolvable" .root) -}}
 IfNotPresent
 {{- else -}}
 Always
@@ -582,6 +583,73 @@ with the ROOT context (e.g. `include "tracebloc.mirrorPrefix" $`).
 */}}
 {{- define "tracebloc.mirrorPrefix" -}}
 {{- with (dig "imageRegistry" "" (.Values.global | default dict)) }}{{ . }}/{{ end -}}
+{{- end -}}
+
+{{/*
+tracebloc.imageRefreshResolvableRegistries — the registries the image-refresh
+script can resolve a floating tag to a digest on WITHOUT a credential: the
+public token endpoints it knows (`get_token` / `get_latest_digest` in
+image-refresh-cronjob.yaml carry one arm per entry). Space-separated, ONE
+declaration: `tracebloc.imageRefreshResolvable` (below) and the
+`tracebloc.controlPlanePullPolicy` decision both read it, and the CronJob
+renders the verdict into the script's env as IMAGE_REGISTRY_RESOLVABLE — so the
+pods' pull policy and the script's "can I reconcile here" guard cannot disagree.
+Adding a registry here without a matching token arm in the script would make
+the pods IfNotPresent while every tick WARNs "unknown registry"; the unit tests
+pin the arms to this list.
+*/}}
+{{- define "tracebloc.imageRefreshResolvableRegistries" -}}
+docker.io ghcr.io
+{{- end -}}
+
+{{/*
+tracebloc.tbRegistry — the registry the tracebloc-PUBLISHED control-plane images
+(tracebloc/jobs-manager, tracebloc/pods-monitor, tracebloc/resource-monitor, and
+the requests-proxy, which runs the jobs-manager image) are pulled from.
+
+ONE precedence chain, so the four call sites, the image-refresh CronJob and
+NOTES.txt cannot disagree about where those images live:
+
+  1. `global.imageRegistry`      — a private mirror re-homes EVERY image the
+                                    chart pulls (#585), tracebloc/* included.
+                                    It always wins.
+  2. `images.traceblocRegistry`  — the tracebloc-only knob: moves just the
+                                    tracebloc-published images, leaving busybox,
+                                    squid, alpine/*, the device plugins and the
+                                    ingestor where they are. Also the per-edge
+                                    rollback: set it to the previous registry.
+  3. "docker.io"                 — the chart default while the images are
+                                    published to Docker Hub.
+
+NOT routed through here, on purpose: `tracebloc/mysql-client` (frozen,
+digest-pinned, published only to Docker Hub — see images.mysqlClient), the
+third-party images (each has its own `registry` key), and — for now — the
+training-image host JOB_IMAGE_HOST, which moves in its own step.
+
+Every read is nil-guarded and `| default`-chained: values.yaml ships
+`global.imageRegistry: ""` (the key EXISTS, so `dig`'s own fallback never
+applies — the trap image_refresh_test.yaml pins), and an edge upgrading with
+`--reuse-values` from before `images.traceblocRegistry` existed has no such key
+at all. Both must render the default, never "".
+
+Call with the ROOT context: {{ include "tracebloc.tbRegistry" . }}
+*/}}
+{{- define "tracebloc.tbRegistry" -}}
+{{- $mirror := dig "imageRegistry" "" (.Values.global | default dict) -}}
+{{- $own := dig "traceblocRegistry" "" (.Values.images | default dict) -}}
+{{- $mirror | default ($own | default "docker.io") -}}
+{{- end -}}
+
+{{/*
+tracebloc.imageRefreshResolvable — "true" when the image-refresh script can
+reconcile on this edge: the registry tracebloc.tbRegistry resolves to is one of
+tracebloc.imageRefreshResolvableRegistries. Empty otherwise (a private mirror,
+or a registry the script has no token arm for). Call with the ROOT context.
+*/}}
+{{- define "tracebloc.imageRefreshResolvable" -}}
+{{- if has (include "tracebloc.tbRegistry" .) (splitList " " (include "tracebloc.imageRefreshResolvableRegistries" .)) -}}
+true
+{{- end -}}
 {{- end -}}
 
 {{/*

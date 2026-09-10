@@ -75,6 +75,9 @@ run_branch() {
   cat > "$TMP/harness.sh" <<EOF
 set -eu
 repo="tracebloc/jobs-manager"
+# The branch resolves the pin on the registry the pods pull from (IMAGE_REGISTRY),
+# not a docker.io literal; the pod supplies it, so the harness must too (set -u).
+IMAGE_REGISTRY="docker.io"
 IMAGE_TAG="dev"
 pinned=1
 pin_digest="\${1:-}"
