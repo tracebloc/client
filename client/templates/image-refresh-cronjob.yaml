@@ -645,7 +645,18 @@ data:
         continue
       fi
 
-      recorded="$(get_annotation "$key" || true)"
+      # FAIL-CLOSED, not `|| true` (Bugbot on #1008). A read ERROR here must NOT
+      # collapse to "" and fall into the first-observation arm below: that arm now
+      # stamps first_observed_key, which SUPPRESSES the client-runtime#199 repair
+      # on later ticks. So a transient kubectl/jq error on a legacy edge (which
+      # genuinely HAS a recorded digest) would mis-stamp it as first-observed and
+      # strand it on :tag. get_annotation returns non-zero on a read error and
+      # zero+empty only on genuine absence, so skip this image this tick on error
+      # and retry -- the same stance the marker reads and the settled guard take.
+      if ! recorded="$(get_annotation "$key")"; then
+        log "  WARN: could not read ${key} (kubectl/jq error); skipping this image this tick rather than mistaking a read error for a first observation. Will retry next tick."
+        continue
+      fi
 
       log "  latest=$latest"
       log "  recorded=${recorded:-<unset>}"

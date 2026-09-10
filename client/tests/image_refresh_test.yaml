@@ -1010,3 +1010,13 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'annotate_args="\$annotate_args \$\{key\}=\$\{latest\} \$\{applied_key\}=1"'
+      # the digest-record read is FAIL-CLOSED: a read error must not collapse to ""
+      # and enter the first-observation arm (which stamps first_observed and
+      # suppresses the #199 repair on a legacy edge) -- Bugbot on #1008. The
+      # fail-open `|| true` form must be gone; the guarded read must be present.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'if ! recorded="\$\(get_annotation "\$key"\)"; then'
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'recorded="\$\(get_annotation "\$key" \|\| true\)"'
