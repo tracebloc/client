@@ -28,10 +28,16 @@
 #      plus those primitives themselves and PowerShell's `throw`.
 #
 #  A line whose FIRST command word is in that vocabulary and which carries a
-#  `backend#<n>` or `RFC-<nnnn>` token is an offender. A trailing `# comment`
-#  on such a line (whitespace, `#`, no quote after it) is stripped first: the
-#  customer does not see it. Known limit: a string continued onto a second
-#  line is not seen either — its first word is not an emitter.
+#  `<repo>#<n>` or `RFC-[<AREA>-]<n>` token is an offender, and so is every line
+#  of a here-document / here-string body (help text, multi-line notices). A
+#  trailing `# comment` on a CODE line (whitespace, `#`, outside quotes) is
+#  stripped first: the customer does not see it. Inside a here-document body a
+#  `#` is text the customer reads, so nothing is stripped there -- unless the
+#  here-document GENERATES A FILE (redirected into one, or assigned to a
+#  variable): then its `#` lines are that file's comments, out of scope like
+#  every other comment, and only its non-comment lines are copy. Known limit: a
+#  string continued onto a second line is not seen — its first word is not an
+#  emitter.
 #
 #  Usage:  customer-copy-no-ticket-refs.sh [REPO_ROOT] [--print-vocab bash|ps]
 #  Exit 0 = clean, 1 = offenders found, 2 = the guard itself could not check
@@ -54,12 +60,74 @@ MANIFEST="$ROOT/scripts/manifest.sha256"
 BOOTSTRAPS="scripts/install.sh scripts/install.ps1"
 # Internal tracker identifiers, REPO-AGNOSTIC (Saqlain, client#1020): `client#564`,
 # `engine#972`, `e2e#459`, `.github#306`, `rfcs#80` are as internal as `backend#889`,
-# and the org's RFC form is `RFC-BACKEND-0007` as well as `RFC-0001`. The leading
-# character class keeps shell parameter expansion out of it: `${x#0}` is preceded
-# by `{`, `$#` has no name, `${a[@]#1}` is preceded by `]`.
-TOKEN_RE='(^|[^{[$A-Za-z0-9_.-])[A-Za-z.][A-Za-z0-9._-]*#[0-9]+|RFC-([A-Z]+-)?[0-9]{4}'
+# and the org's RFC form is `RFC-BACKEND-0007` as well as `RFC-0001`. The RFC number
+# is THREE OR MORE digits, not exactly four: `RFC-BACKEND-664` is a real one this
+# repo cites (Saqlain, client#1020, second round). The leading character class
+# keeps shell parameter expansion out of it: `${x#0}` is preceded by `{`, `$#` has
+# no name, `${a[@]#1}` is preceded by `]`.
+TOKEN_RE='(^|[^{[$A-Za-z0-9_.-])[A-Za-z.][A-Za-z0-9._-]*#[0-9]+|RFC-([A-Z]+-)?[0-9]{3,}'
 
 guard_error() { echo "[GUARD ERROR] $*" >&2; echo "              'could not check' is a finding, never 'clean'." >&2; exit 2; }
+
+# ---- 0. the ONE lexer every awk program below includes ------------------------------
+# Three awk programs here walk quotes, comments and here-document openers: the
+# vocabulary derivation, the here-document body lister and the comment stripper.
+# They used to carry three verbatim copies of that walk, so a fix to one could
+# silently miss the others (Saqlain, client#1020, second round). This string is
+# prepended to each program; every function in it reads the -v LANG=bash|ps the
+# caller passes.
+#
+#   lex(line, keep)        the code part of LINE: a trailing comment removed and,
+#                          unless KEEP, string CONTENTS removed too (the quote
+#                          marks stay). Escapes are honoured per language -- bash:
+#                          a backslash escapes the next character outside single
+#                          quotes; PowerShell: a backtick does, and a doubled
+#                          quote inside a string is a literal quote -- so a brace
+#                          inside `"he said \"go { deeper\" now"` stays inside the
+#                          string instead of opening one (Saqlain, client#1020,
+#                          second round: it used to abort the derivation, or
+#                          close a helper early and hide every later one).
+#   code_only(line)        lex(line, 0).
+#   heredoc_delim(code, raw)  "" when CODE opens no here-document; else the
+#                          delimiter, read from the RAW line because code_only
+#                          has already emptied a QUOTED delimiter (<<'HELP' reads
+#                          as two bare quote marks after stripping); "?" when the
+#                          delimiter cannot be read. `(^|[^<])` keeps a here-STRING
+#                          (`<<< "$a"`) from reading as a quoted here-document.
+#   herestring_closer(code)  PowerShell: the closer of a here-string CODE opens
+#                          (`"@` / `'@`), else "".
+#   closes(line, closer)   does LINE end the open here-document / here-string?
+#                          bash: the delimiter alone on its line; PowerShell: the
+#                          closer at the start of the line (`"@.Trim()` closes).
+AWK_LEX='
+  function lex(line, keep,   out, i, c, q, esc, n) {
+    out = ""; q = ""; esc = (LANG == "ps") ? "`" : "\\"; n = length(line)
+    for (i = 1; i <= n; i++) {
+      c = substr(line, i, 1)
+      if (q != "") {
+        if (c == esc && q == "\"") { if (keep) out = out c substr(line, i + 1, 1); i++; continue }
+        if (c == q && LANG == "ps" && substr(line, i + 1, 1) == q) { if (keep) out = out c c; i++; continue }
+        if (c == q) { q = ""; out = out c; continue }
+        if (keep) out = out c
+        continue
+      }
+      if (c == esc) { if (keep) out = out c substr(line, i + 1, 1); i++; continue }
+      if (c == "\"" || c == "\047") { q = c; out = out c; continue }
+      if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;]/)) break
+      out = out c
+    }
+    return out
+  }
+  function code_only(line) { return lex(line, 0) }
+  function heredoc_delim(code, raw,   h, q2) {
+    if (code !~ /(^|[^<])<<-?[ \t]*([\047"]?[A-Za-z_]|[\047"][\047"])([^<]|$)/) return ""
+    h = raw; sub(/.*<<-?[ \t]*/, "", h); q2 = substr(h, 1, 1)
+    if (q2 == "\047" || q2 == "\"") { h = substr(h, 2); sub(q2 ".*$", "", h) } else { sub(/[^A-Za-z0-9_].*$/, "", h) }
+    return (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) ? h : "?"
+  }
+  function herestring_closer(code) { return (code ~ /@"[ \t]*$/) ? "\"@" : (code ~ /@\047[ \t]*$/) ? "\047@" : "" }
+  function closes(line, closer) { return (LANG == "ps") ? (line ~ ("^[ \t]*" closer)) : (line ~ ("^[ \t]*" closer "[ \t]*$")) }
+'
 
 # ---- 1. the shipped set --------------------------------------------------------
 [ -r "$MANIFEST" ] || guard_error "cannot read $MANIFEST"
@@ -94,21 +162,8 @@ done
 #   Write-Warning|Write-Error|Write-Output`.
 derive_emitters() {
   local lang="$1" file="$2" known="${3:-}"
-  awk -v LANG="$lang" -v FILE="$file" -v KNOWN="$known" '
+  awk -v LANG="$lang" -v FILE="$file" -v KNOWN="$known" "$AWK_LEX"'
     function fail(msg) { failed = 1; printf("DERIVE ERROR %s:%d: %s\n", FILE, NR, msg) > "/dev/stderr"; exit 3 }
-    # Remove string CONTENTS and a trailing comment, keeping quote marks, so braces
-    # and `#` inside strings/comments cannot move the depth or fake an emitter.
-    function code_only(line,   out, i, c, q) {
-      out = ""; q = ""
-      for (i = 1; i <= length(line); i++) {
-        c = substr(line, i, 1)
-        if (q != "") { if (c == q) { q = ""; out = out c } ; continue }
-        if (c == "\"" || c == "\047") { q = c; out = out c; continue }
-        if (c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t;]/)) break   # not after `{`/`$`: ${#arr[@]}, $# are code
-        out = out c
-      }
-      return out
-    }
     function count(s, ch,   n, i) { n = 0; for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == ch) n++; return n }
     BEGIN {
       if (LANG == "bash") { DEF = "^[ \t]*(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*\\(\\)|^[ \t]*function[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*(\\{|$)"; EMIT = "(^|[^A-Za-z0-9_.-])(echo|printf" (KNOWN != "" ? "|" KNOWN : "") ")([^A-Za-z0-9_.-]|$)" }
@@ -117,7 +172,7 @@ derive_emitters() {
     }
     {
       line = $0
-      if (heredoc != "") { if (line ~ ("^[ \t]*" heredoc "[ \t]*$")) heredoc = ""; next }
+      if (heredoc != "") { if (closes(line, heredoc)) heredoc = ""; next }
       code = code_only(line)
       if (name == "") {
         if (code !~ DEF) next
@@ -130,19 +185,10 @@ derive_emitters() {
       }
       depth += count(code, "{") - count(code, "}")
       body = body "\n" code
-      # Here-document: the OPERATOR must be in code (not inside a string), but the
-      # delimiter is read from the RAW line, because code_only has already emptied
-      # a QUOTED delimiter (<<HELP written with quotes around HELP reads as two bare
-      # quote marks after stripping). Bugbot on client#1020, third round: print_help
-      # and the nested STORAGE / MYSQL84 blocks use the quoted spelling.
-      # `(^|[^<])` keeps a here-STRING (`<<< "$a"`, whose string strips to `""`) from
-      # reading as a quoted here-document -- _version_lt in common.sh tripped it.
-      if (code ~ /(^|[^<])<<-?[ \t]*([\047"]?[A-Za-z_]|[\047"][\047"])([^<]|$)/) {
-        h = line; sub(/.*<<-?[ \t]*/, "", h); q2 = substr(h, 1, 1)
-        if (q2 == "\047" || q2 == "\"") { h = substr(h, 2); sub(q2 ".*$", "", h) } else { sub(/[^A-Za-z0-9_].*$/, "", h) }
-        if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) heredoc = h; else fail("here-document with an unreadable delimiter in " name)
-      }
-      if (LANG == "ps" && code ~ /@["\047][ \t]*$/) { heredoc = (code ~ /@"/) ? "\"@" : "\047@" }
+      h = heredoc_delim(code, line)
+      if (h == "?") fail("here-document with an unreadable delimiter in " name)
+      if (h != "") heredoc = h
+      if (LANG == "ps") { h = herestring_closer(code); if (h != "") heredoc = h }
       if (depth <= 0) { if (body ~ EMIT) print name; name = ""; body = "" }
     }
     END { if (failed) exit 3; if (name != "") fail("function " name " (defined at line " defline ") is still open at end of file: braces do not balance, so every later helper would be hidden") }
@@ -214,26 +260,18 @@ bash_line_re="${CMD_START}($(alt $bash_vocab))([[:space:]]|$)"
 # shellcheck disable=SC2086
 ps_line_re="${CMD_START}($(alt $ps_vocab))([[:space:]]|$)"
 
-# strip_trailing_comment — cut each line at the first `#` that is OUTSIDE quotes and
-# starts a comment (line start, or after whitespace / `;` / `(` / `{`). Quote-aware,
-# so an apostrophe in the comment (`# we don't …`) no longer keeps the comment in
-# scope, and a `#` inside a quoted string (`echo "issue #5"`) is never a comment
-# (Saqlain, client#1020: the old `[^"']*$` stripper failed on exactly that pair).
+# strip_trailing_comment LANG — cut each `NNN:<line>` at the first `#` that is
+# OUTSIDE quotes and starts a comment (line start, or after whitespace / `;`).
+# Quote-aware through the shared lexer, so an apostrophe in the comment (`# we
+# don't …`) no longer keeps the comment in scope, and a `#` inside a quoted string
+# (`echo "issue #5"`) is never a comment (Saqlain, client#1020: the old `[^"']*$`
+# stripper failed on exactly that pair). Input lines carry grep's `NNN:` prefix;
+# the text after it is walked, so a comment at column 1 (`1022:# …`) is still one.
 strip_trailing_comment() {
-  # Input lines carry grep's `NNN:` prefix; walk the text after it, so a comment
-  # at column 1 (`1022:# …`) is still a comment.
-  awk '{
+  awk -v LANG="$1" "$AWK_LEX"'{
     prefix = ""; text = $0
     if (match($0, /^[0-9]+:/)) { prefix = substr($0, 1, RLENGTH); text = substr($0, RLENGTH + 1) }
-    out = ""; q = ""
-    for (i = 1; i <= length(text); i++) {
-      c = substr(text, i, 1)
-      if (q != "") { if (c == q) q = ""; out = out c; continue }
-      if (c == "\"" || c == "\047") { q = c; out = out c; continue }
-      if (c == "#" && (i == 1 || substr(text, i-1, 1) ~ /[ \t;]/)) break
-      out = out c
-    }
-    print prefix out
+    print prefix lex(text, 1)
   }'
 }
 
@@ -241,77 +279,109 @@ strip_trailing_comment() {
 # bash here-document (LANG=bash) or a PowerShell here-string (LANG=ps).
 # Bash: operator detected on quote-stripped code (so a `<<` inside a string does
 # not count, and `<<<` here-strings are excluded); delimiter taken from the raw
-# line, quoted or not -- the same rule derive_emitters applies.
+# line, quoted or not -- the same shared rule the derivation applies.
 # PowerShell: an opener is an at-sign followed by a double or single quote at the
 # end of a line (Write-Host, throw, or an assignment), the closer is that quote
 # followed by an at-sign at the start of a line
 # (Bugbot on client#1020, fourth round: Print-Help and the data-directory
-# `throw` are here-strings a customer reads). Assignments are scanned too --
-# over-inclusive on purpose, the guard accepts that bias.
+# `throw` are here-strings a customer reads).
+#
+# TWO KINDS OF BODY. A here-document the installer PRINTS (`cat <<'HELP'`,
+# `warn <<EOF`, `Write-Host @"`, `throw @"`) is text the customer reads in full:
+# every line is printed as it stands, `#` included -- it used to be stripped as a
+# comment, so `# migration required, see backend#4242` in a help text passed as
+# clean (Saqlain, client#1020, second round). A here-document that GENERATES A
+# FILE -- redirected into one (`cat <<EOF > "$values_file"` or `cat > "$f" <<EOF`,
+# not `>&2`), assigned
+# to a variable (`x=$(cat <<EOF`, `$block += @"`), or handed to
+# Set-Content/Add-Content/Out-File -- is that file's content: its `#` lines are
+# comments of the generated file (the values.yaml the installer writes carries
+# the rationale for its defaults), out of scope like every other comment, and
+# only its non-comment text is scanned. The comment rule there is the one YAML,
+# shell and PowerShell share: `#` at the start of the line or after whitespace.
+# Anything the classifier cannot place (`return @"`, a body piped to another
+# command) is treated as printed text -- over-inclusive on purpose.
 heredoc_body_lines() {
   local lang="$1" file="$2"
-  if [ "$lang" = ps ]; then
-    awk '
-      BEGIN { closer = "" }
-      {
-        if (closer != "") { if ($0 ~ ("^[ \t]*" closer)) closer = ""; else printf("%d:%s\n", NR, $0); next }
-        if ($0 ~ /@"[ \t]*$/) closer = "\"@"; else if ($0 ~ /@\047[ \t]*$/) closer = "\047@"
+  awk -v LANG="$lang" -v FILE="$file" "$AWK_LEX"'
+    function generates_a_file(code,   rest) {
+      if (code ~ /^[ \t]*((local|export|readonly|declare)[ \t]+)?\$?[A-Za-z_][A-Za-z0-9_:]*(\[[^]]*\])?[ \t]*\+?=/) return 1
+      if (code ~ /(^|[^A-Za-z0-9-])(Set-Content|Add-Content|Out-File)([^A-Za-z0-9-]|$)/) return 1
+      if (LANG == "ps") return 0
+      # bash: STDOUT redirected to a file -- `>`/`>>`, or `1>`. Not `2>` (only
+      # stderr moves, the body still prints), not `>&2` (a stream), not a
+      # /dev/ pseudo-file (`>/dev/stderr` prints, `>/dev/null` writes no file).
+      # Any of those leaves the body classified as printed text (Bugbot on
+      # client#1022: `2>/dev/null` used to read as a generated file).
+      rest = code
+      while (match(rest, />>?/)) {
+        pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
+        tgt = substr(rest, RSTART + RLENGTH); sub(/^[ \t]*/, "", tgt)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (pre ~ /[0-9]/ && pre != "1") continue
+        if (tgt == "" || tgt ~ /^[&>]/ || tgt ~ /^\/dev\//) continue
+        return 1
       }
-    ' "$file"
-    return
-  fi
-  awk '
-    function code_only(line,   out, i, c, q) {
-      out = ""; q = ""
-      for (i = 1; i <= length(line); i++) {
-        c = substr(line, i, 1)
-        if (q != "") { if (c == q) { q = ""; out = out c } ; continue }
-        if (c == "\"" || c == "\047") { q = c; out = out c; continue }
-        if (c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t;]/)) break
-        out = out c
-      }
-      return out
+      return 0
     }
-    BEGIN { heredoc = "" }
+    function file_text(line) { sub(/(^|[ \t])#.*$/, "", line); return line }
+    BEGIN { closer = ""; is_file = 0 }
     {
-      if (heredoc != "") { if ($0 ~ ("^[ \t]*" heredoc "[ \t]*$")) heredoc = ""; else printf("%d:%s\n", NR, $0); next }
-      code = code_only($0)
-      if (code ~ /(^|[^<])<<-?[ \t]*([\047"]?[A-Za-z_]|[\047"][\047"])([^<]|$)/) {
-        h = $0; sub(/.*<<-?[ \t]*/, "", h); q2 = substr(h, 1, 1)
-        if (q2 == "\047" || q2 == "\"") { h = substr(h, 2); sub(q2 ".*$", "", h) } else { sub(/[^A-Za-z0-9_].*$/, "", h) }
-        if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) heredoc = h
+      if (closer != "") {
+        if (closes($0, closer)) closer = ""; else printf("%d:%s\n", NR, is_file ? file_text($0) : $0)
+        next
       }
+      code = code_only($0)
+      if (LANG == "ps") { closer = herestring_closer(code) } else {
+        h = heredoc_delim(code, $0)
+        if (h == "?") { printf("LEX ERROR %s:%d: here-document with an unreadable delimiter\n", FILE, NR) > "/dev/stderr"; exit 3 }
+        closer = h
+      }
+      if (closer != "") is_file = generates_a_file(code)
     }
   ' "$file"
 }
 
+# Template + fail-closed: a bare `mktemp -d` can fail (BSD mktemp, an unwritable
+# TMPDIR) and leave tmpd EMPTY, and the cleanup below would then expand to
+# `rm -f /*` (Bugbot on client#1022). The trap is armed only once the directory
+# exists.
+tmpd="$(mktemp -d "${TMPDIR:-/tmp}/copyrefs.XXXXXX")" && [ -d "$tmpd" ] || guard_error "could not create a scratch directory under ${TMPDIR:-/tmp}"
+trap 'rm -f "$tmpd"/*; rmdir "$tmpd" 2>/dev/null' EXIT
 offenders=0
 for f in $shipped; do
   case "$f" in
-    *.sh)  line_re="$bash_line_re" ;;
-    *.ps1) line_re="$ps_line_re" ;;
+    *.sh)  lang=bash; line_re="$bash_line_re" ;;
+    *.ps1) lang='ps';   line_re="$ps_line_re" ;;
     *)     guard_error "shipped file with an unknown language, cannot pick a vocabulary: $f" ;;
   esac
-  # THREE STAGES, EACH THROUGH A FILE WITH ITS OWN STATUS -- never one pipeline.
-  # Under `pipefail` a pipeline's status is the RIGHTMOST non-zero one, so
+  # STAGED, EACH THROUGH A FILE WITH ITS OWN STATUS -- never one pipeline. Under
+  # `pipefail` a pipeline's status is the RIGHTMOST non-zero one, so
   # `grep | sed | grep` turned a first-grep failure (2: a bad line regex, an
   # unreadable path) into the trailing grep's no-match (1) and reported the
   # file clean (Bugbot on client#1020). Each stage's own exit code is checked
   # before the next runs; only grep's 1 (no match) may pass.
-  stage1="$(mktemp)"; stage2="$(mktemp)"
-  grep -nE "$line_re" "$ROOT/$f" >"$stage1"; rc=$?
-  [ "$rc" -le 1 ] || { rm -f "$stage1" "$stage2"; guard_error "grep failed ($rc) selecting copy lines in $f"; }
-  # HERE-DOCUMENT / HERE-STRING BODIES ARE COPY TOO: `cat <<'HELP' … HELP` and
+  code_lines="$tmpd/code"; body_lines="$tmpd/body"; scan="$tmpd/scan"
+  # (a) code lines that start with an emitter
+  grep -nE "$line_re" "$ROOT/$f" >"$code_lines"; rc=$?
+  [ "$rc" -le 1 ] || guard_error "grep failed ($rc) selecting copy lines in $f"
+  # (b) HERE-DOCUMENT / HERE-STRING BODIES ARE COPY TOO: `cat <<'HELP' … HELP` and
   # `Write-Host @" … "@` are how the installers print help and multi-line notices,
   # and none of those body lines starts with an emitter, so the grep above never
-  # sees them. Append every body line (same operator/delimiter rule as the derivation).
-  case "$f" in
-    *.sh)  heredoc_body_lines bash "$ROOT/$f" >>"$stage1" || { rm -f "$stage1" "$stage2"; guard_error "could not list here-document bodies in $f"; } ;;
-    *.ps1) heredoc_body_lines ps   "$ROOT/$f" >>"$stage1" || { rm -f "$stage1" "$stage2"; guard_error "could not list here-string bodies in $f"; } ;;
-  esac
-  strip_trailing_comment <"$stage1" >"$stage2" || { rm -f "$stage1" "$stage2"; guard_error "comment stripping failed in $f"; }
-  hits="$(grep -E "$TOKEN_RE" "$stage2")"; rc=$?
-  rm -f "$stage1" "$stage2"
+  # sees them.
+  heredoc_body_lines "$lang" "$ROOT/$f" >"$body_lines" || guard_error "could not list here-document bodies in $f"
+  # (c) a body line is TEXT the customer reads in full: it is never also a code
+  # line, and no comment is stripped from it. A body line that happened to start
+  # with an emitter word (`echo` in a usage text) used to be taken by BOTH (a) and
+  # (b) -- printed twice, counted twice -- and `# …` in a body line used to be
+  # stripped as a comment although the customer reads it (Saqlain, client#1020,
+  # second round). The body list is read in BEGIN, not via NR==FNR, so an empty
+  # body list cannot make every code line read as a body line.
+  awk -F: -v BODY="$body_lines" 'BEGIN { while ((getline l < BODY) > 0) { split(l, a, ":"); body[a[1]] = 1 } } !($1 in body)' "$code_lines" >"$scan" || guard_error "could not separate code lines from here-document bodies in $f"
+  strip_trailing_comment "$lang" <"$scan" >"$code_lines" || guard_error "comment stripping failed in $f"
+  cat "$body_lines" >>"$code_lines" || guard_error "could not append here-document bodies in $f"
+  # (d) the identifier scan
+  hits="$(grep -E "$TOKEN_RE" "$code_lines")"; rc=$?
   [ "$rc" -le 1 ] || guard_error "grep failed ($rc) scanning $f for tracker identifiers"
   if [ -n "$hits" ]; then
     printf '%s\n' "$hits" | sed "s|^|$f:|"
@@ -320,7 +390,7 @@ for f in $shipped; do
 done
 
 if [ "$offenders" -gt 0 ]; then
-  echo "[FAIL] $offenders user-visible line(s) carry an internal tracker identifier (<repo>#<n> / RFC-<nnnn> / RFC-<AREA>-<nnnn>)." >&2
+  echo "[FAIL] $offenders user-visible line(s) carry an internal tracker identifier (<repo>#<n> / RFC-<n> / RFC-<AREA>-<n>)." >&2
   echo "       A customer cannot open those; say why in words instead." >&2
   exit 1
 fi
