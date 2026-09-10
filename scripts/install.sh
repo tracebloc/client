@@ -3,8 +3,8 @@
 #  Bootstrap installer — downloads the installer sub-scripts from GitHub and
 #  runs install-k8s.sh.
 #
-#  SUPPLY-CHAIN HARDENING (RFC-0001 R8, backend#889)
-#  -------------------------------------------------
+#  SUPPLY-CHAIN HARDENING
+#  ----------------------
 #  This is the most privileged code in the whole product: the sub-scripts it
 #  fetches mint the machine credential, write it to disk, and run Helm. So the
 #  fetch is verified, not trusted:
@@ -72,7 +72,7 @@ _tb_force=0
 # `tracebloc upgrade` (TB_UPGRADE_CLI=1): the user explicitly asked to bring the
 # CLI to the latest release. Skip the healthy bailout so we reach install-k8s.sh's
 # stop-and-check gate, which — seeing the same flag — updates just the CLI when it
-# is behind latest (backend#2253). NOT a reinstall: leave _tb_force at 0 so this
+# is behind latest. NOT a reinstall: leave _tb_force at 0 so this
 # does not force the full flow. A below-floor CLI still forces a full reinstall
 # there via the gate's cli-outdated path, so the floor keeps its stricter meaning.
 [[ "${TB_UPGRADE_CLI:-0}" == "1" ]] && _tb_bail_ok=0
@@ -200,13 +200,13 @@ fi
 # Validate the ref shape (defends the URL we build from it).
 [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ ]] || { echo "[ERROR] Invalid ref: $REF"; exit 1; }
 
-# A ref that isn't a vX.Y.Z tag is a mutable branch — the exact thing R8 closes.
+# A ref that isn't a vX.Y.Z tag is a mutable branch — the exact thing this pin closes.
 # Allow it only under the explicit unverified opt-in, and say so loudly.
 # The version-suffix class is restricted to [A-Za-z0-9.] (e.g. -rc1, .4): a looser
 # trailer like ([.-].+)? admits '/' and '..', so a ref such as
 # 'v1.2.3-../../heads/main' would pass this gate and then curl would collapse the
 # '..' to fetch sub-scripts off the MUTABLE 'main' branch — the immutable-tag
-# guarantee bypassed with no opt-in (RFC-0001 R8, backend#889).
+# guarantee bypassed with no opt-in.
 if [[ "${USING_BRANCH:-0}" == "1" || ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]]; then
   if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
     echo "============================================================================" >&2
@@ -227,7 +227,7 @@ fi
 # path separator or a parent-dir token before it is interpolated into a URL. A
 # '/' or '..' here is a path-traversal lever (curl collapses '..', so the fetch
 # could escape the pinned tag onto a mutable branch) — independent of which
-# branch above let the ref through (RFC-0001 R8, backend#889).
+# branch above let the ref through.
 case "$REF" in
   */*|*..*)
     echo "[ERROR] Ref '$REF' contains a path separator or '..' — refusing to build a" >&2
@@ -552,7 +552,7 @@ ensure_cosign() {
   # function sitting in the signature-verification path should not rest on how
   # its caller happens to be written, and one bare call would turn this into an
   # abort of the bootstrap with no message. Slicing keeps "first match, first
-  # field" exactly (backend#1778).
+  # field" exactly.
   sums_line="$(grep " ${asset}\$" "$sums" || true)"   # every matching line
   sums_line="${sums_line%%$'\n'*}"                    # …the first one
   want="${sums_line%% *}"                             # …its digest field

@@ -257,6 +257,45 @@ jobs:
       - name: Bring up a real k3d cluster + run a workload
         run: bash scripts/tests/e2e-cluster.sh
 
+  node-reservation-measure:
+    timeout-minutes: 30
+    # The Linux half of backend#2460's measurement. Brings up the installer's real
+    # cluster on each Ubuntu runner and samples the kubelet's own accounting idle
+    # and under a training-shaped load (the real 2 GB CPU task image, pulled and
+    # run), then publishes the record scripts/gen-node-reservation-embed.sh
+    # derives the `linux` reservation from. Three legs, because amd64 and arm64
+    # are different machines and the generator takes the MAX across a platform's
+    # records. Label-gated like e2e-journey: a 10-minute measurement is not a PR
+    # check, it is evidence, re-taken when someone asks for it (`e2e` label) and on
+    # the weekly schedule so a k3s bump that moves the footprint is seen.
+    # NON-GATING BY DESIGN: it writes a record, it asserts nothing; the assertion
+    # that the declared reservation is what the node took lives in e2e-cluster.
+    name: Node reservation measurement (${{ matrix.os }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Measure the kubelet + runtime footprint on a real k3d node
+        env:
+          TB_MEASURE_IDLE_S: "180"
+          TB_MEASURE_LOAD_S: "240"
+          TB_MEASURE_INTERVAL_S: "10"
+          TB_MEASURE_OUT: ${{ runner.temp }}/node-reservation-linux-${{ runner.arch }}-${{ matrix.os }}.json
+        run: bash scripts/tests/measure-node-reservation.sh
+      - name: Publish the measurement record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-reservation-${{ matrix.os }}
+          path: ${{ runner.temp }}/node-reservation-*.json
+          if-no-files-found: warn
+
   # The `e2e-proxy` job (`E2E auth-proxy (squid)`) moved to its own workflow,
   # e2e-auth-proxy.yaml, on 2026-08-27 (backend#2350). It shipped RED to `staging`
   # on client#789 and blocked nothing: a job in THIS workflow can never be a
