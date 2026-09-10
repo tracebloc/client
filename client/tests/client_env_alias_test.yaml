@@ -43,7 +43,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager:stg
+          value: ghcr.io/tracebloc/jobs-manager:stg
 
   - it: "staging resolves to :stg for the pods-monitor sidecar"
     template: templates/jobs-manager-deployment.yaml
@@ -52,7 +52,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[1].image
-          value: docker.io/tracebloc/pods-monitor:stg
+          value: ghcr.io/tracebloc/pods-monitor:stg
 
   - it: "staging resolves to :stg for requests-proxy (which runs the jobs-manager image)"
     template: templates/requests-proxy-deployment.yaml
@@ -61,7 +61,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager:stg
+          value: ghcr.io/tracebloc/jobs-manager:stg
 
   - it: "staging resolves to :stg for the resource-monitor daemonset"
     template: templates/resource-monitor-daemonset.yaml
@@ -70,7 +70,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/resource-monitor:stg
+          value: ghcr.io/tracebloc/resource-monitor:stg
 
   - it: "production and development resolve too, not just staging"
     template: templates/jobs-manager-deployment.yaml
@@ -79,7 +79,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager:prod
+          value: ghcr.io/tracebloc/jobs-manager:prod
 
   - it: "a canonical value is unchanged by resolution"
     template: templates/jobs-manager-deployment.yaml
@@ -88,7 +88,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager:stg
+          value: ghcr.io/tracebloc/jobs-manager:stg
 
   # ---- the auto-upgrade CronJob ---------------------------------------
   # The most consequential site: this is what keeps an installed edge
