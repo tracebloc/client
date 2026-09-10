@@ -75,7 +75,7 @@ YAML
   # guard hands to backend#2460/#2461.
   #
   # THIS FIXTURE EXISTS BECAUSE THE REAL CHART CANNOT TELL THE TWO APART. On the
-  # live render the number is 3136 MiB either way -- the chart's init containers
+  # live render the number is 2336 MiB either way (3136 before backend#2461) -- the chart's init containers
   # carry no requests -- so the fix is INERT there and a green run proves nothing
   # about the formula. Here the two answers differ, deliberately:
   #
@@ -162,7 +162,13 @@ YAML
 }
 
 @test "guard: RATCHET reddens when the footprint would exceed the ceiling" {
-  TB_CP_FOOTPRINT_MEM_CEIL=3000 run bash "$GUARD"
+  # The ceiling is DERIVED from the live render (one MiB under it), so this test
+  # keeps reddening whatever the chart requests -- a written-down 3000 stopped
+  # breaching once backend#2461 trimmed the render from 3136 to 2336 MiB.
+  local mib
+  mib="$(bash "$GUARD" --print-footprint 2>/dev/null | cut -d' ' -f1)"
+  [[ "$mib" =~ ^[0-9]+$ ]] || { echo "could not derive the render footprint: '$mib'"; return 1; }
+  TB_CP_FOOTPRINT_MEM_CEIL=$(( mib - 1 )) run bash "$GUARD"
   [ "$status" -eq 1 ] || { echo "expected exit 1, got $status: $output"; return 1; }
   printf '%s\n' "$output" | grep -q 'exceed the recorded ceiling' || { echo "$output"; return 1; }
 }
