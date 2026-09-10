@@ -1724,15 +1724,19 @@ autoUpgrade:
 #   - First observation (annotation absent on a fresh install): record
 #     the current digest without re-imaging. Rewriting repo:tag to
 #     repo@digest for byte-identical content would roll every workload —
-#     including the DaemonSet on every node — for nothing. The cost is
-#     that a fresh edge runs repo:tag until the first real digest change:
-#     still restart-safe offline, just not yet reproducible. NARROWED
-#     (client#1013): this holds only for the first-observation window. Once a
-#     digest has been recorded, the chart seeds it (tracebloc.controlPlaneDigest)
-#     and a later chart render pins repo@digest, so from then on an offline
-#     restart is restart-safe only on a node that already cached that digest.
-#   - Idle-cheap: when the recorded digest matches today's digest, the
-#     script exits without touching anything. Steady state is one HEAD
+#     including the DaemonSet on every node — for nothing. The NEXT tick,
+#     seeing the digest recorded but the workload still on repo:tag, pins
+#     it (client-runtime#199) — so a fresh edge becomes reproducible ~one interval
+#     post-install, not at the next upstream release. Restart-safe offline
+#     throughout — NARROWED (client#1013): once a digest has been recorded, the
+#     chart ALSO seeds it (tracebloc.controlPlaneDigest) and a later chart render
+#     pins repo@digest, so from then on an offline restart is restart-safe only
+#     on a node that already cached that digest.
+#   - Idle-cheap: when the recorded digest matches today's digest AND the
+#     workload already runs that digest, the script exits without touching
+#     anything. If a helm re-render reverted the pin back to repo:tag it
+#     re-pins that one tick (compared on the @sha256 digest, so a mirror
+#     prefix rewrite is not mistaken for a revert). Steady state is one HEAD
 #     per image per tick, well under Docker Hub's 100/6h anonymous
 #     pull-rate limit.
 #   - Private mirrors (global.imageRegistry): the script resolves digests
