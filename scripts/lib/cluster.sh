@@ -1191,10 +1191,19 @@ ensure_cluster_autostart() {
   local nodes node
   # BOUNDED (client#984, LukasWodka): this is a daemon read on the main install
   # path, and it ran unbounded while its `docker info` neighbours did not — the gap
-  # check-style rule 5 could not see until it was widened past `info`. `|| return 0`
-  # already treats an unreadable engine as "nothing to autostart", so a 124 lands in
-  # the branch this function was written for.
-  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
+  # check-style rule 5 could not see until it was widened past `info`.
+  #
+  # FALL THROUGH on a failed/timed-out listing, do NOT `return 0` (Bugbot Medium,
+  # client#1004 / backend#3429): this function has TWO independent halves, and only
+  # the node-restart loop below needs the listing. The Linux `systemctl enable
+  # docker` half enables docker.service on boot — that is what brings an
+  # installed-but-disabled daemon (and thus the cluster) back after a reboot, and it
+  # does not read the node list at all. A `docker ps` that takes >10s on an
+  # otherwise-healthy create hits the 124 deadline; treating that as "nothing to
+  # autostart" and returning skipped the enable, so a run that printed ready could
+  # still lose the cluster on the next boot. Treat an unreadable listing as "no
+  # nodes to re-flag" (the loop is guarded on non-empty `nodes`) and continue.
+  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || nodes=""
   if [[ -n "$nodes" ]]; then
     for node in $nodes; do
       docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true

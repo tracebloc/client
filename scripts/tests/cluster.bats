@@ -932,6 +932,24 @@ _cc_mocks() {   # $1 = "real-handle" to leave _handle_existing_cluster UNstubbed
   [[ "$output" != *"docker update"* ]] || return 1
 }
 
+# A timed-out `docker ps` listing (124) must NOT skip the Linux systemctl-enable
+# half: that half enables docker.service on boot and never reads the node list, so
+# a slow listing on an otherwise-healthy create must still reach it or the cluster
+# is lost on the next reboot (Bugbot Medium, client#1004 / backend#3429).
+@test "ensure_cluster_autostart: a timed-out docker ps still enables docker.service on boot" {
+  OS=Linux
+  # `_bounded` (setup) shifts the timeout and runs the command, so a 124 here is the
+  # deadline landing on `docker ps` — the exact case the `|| return 0` mishandled.
+  docker() { if [[ "$1 $2" == "ps -a" ]]; then return 124; else record "docker $*"; fi; }
+  sudo()   { record "sudo $*"; }
+  systemctl() { record "systemctl $*"; return 1; }   # not already enabled on boot
+  has()    { return 0; }
+  ensure_cluster_autostart
+  run mock_calls
+  [[ "$output" != *"docker update"* ]] || return 1            # unread listing -> no node re-flag
+  [[ "$output" == *"sudo systemctl enable docker"* ]] || return 1   # but the boot-enable half still runs
+}
+
 # ── bounded create (#426) ────────────────────────────────────────────────────
 @test "k3d create is bounded: --wait always pairs with --timeout (#426)" {
   grep -q -- '--wait --timeout' "$BATS_TEST_DIRNAME/../lib/cluster.sh"
