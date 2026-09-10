@@ -251,13 +251,33 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   [[ "$output" == *"[strings-refuse] needle '[A-Za-z0-9._%+-]+@tracebloc\.io' found in 1 staged line(s):"*"tree/README.md:2"* ]] || return 1
 }
 
-@test "mutation: a private needle supplied with --extra-forbidden joins the refuse tier" {
+@test "mutation: an [allow] token is stripped as a whole word only — a mailbox that merely ends in it is refused" {
+  # The unanchored strip this replaces left `dev` behind and the mailbox rule no
+  # longer matched, so an internal address ending in the public one shipped.
+  plant README.md 'escalate to devsupport@tracebloc.io'
+  guard
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[strings-refuse] needle '[A-Za-z0-9._%+-]+@tracebloc\.io' found in 1 staged line(s):"*"tree/README.md:2"* ]] || return 1
+}
+
+@test "an [allow] token matches case-insensitively, like the scan, and a sentence-ending dot is still a boundary" {
+  plant README.md 'Questions? Write to Support@Tracebloc.io.'
+  guard
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"[forbidden-strings] clean ("* ]] || return 1
+}
+
+@test "mutation: a private needle supplied with --extra-forbidden joins the refuse tier, named by number only" {
   printf '# private list\nplanted-tenant\n' >"$BATS_TEST_TMPDIR/tenants.txt"
   plant client/templates/deploy.yaml '# for Planted-Tenant only'
   guard --extra-forbidden "$BATS_TEST_TMPDIR/tenants.txt"
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"[strings-refuse] needle 'planted-tenant' found in 1 staged line(s):"*"tree/client/templates/deploy.yaml:2"* ]] || return 1
+  [[ "$output" == *"[strings-refuse] private needle #1 found in 1 staged line(s):"*"tree/client/templates/deploy.yaml:2"* ]] || return 1
   [[ "$output" == *"[forbidden-strings] 1 refuse-tier hit(s), 0 report-tier hit(s) counted (3 refuse + 3 report needle(s)"* ]] || return 1
+  # The private pattern is the identifier kept out of the public list; it must
+  # not surface in the log (teed into the public run summary) or in the report.
+  ! grep -qi 'planted-tenant' <<<"$output" || { echo "$output"; return 1; }
+  ! grep -qi 'planted-tenant' "$OUT/publish-guard-report.txt" || return 1
 }
 
 @test "an empty --extra-forbidden list is could-not-tell: the private needles were not supplied" {
