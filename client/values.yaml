@@ -612,7 +612,7 @@ egressProxy:
   resources:
     requests:
       cpu: "50m"
-      memory: "64Mi"
+      memory: "160Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
@@ -1355,35 +1355,80 @@ images:
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
+  # INTERIM TRIM (backend#2461, 2026-09-10) -- read before "fixing" any number back up.
+  #
+  # Requests are what the scheduler and the jobs-manager's admission SUBTRACT from
+  # the node; they are not what the process uses. Measured on an installer edge
+  # (backend#2461): the control plane requested 1050m / 3276Mi while using
+  # 36m / ~1022Mi. Since chart 1.9.109 the kubelet reservation is honest
+  # (#1017) and since client-runtime#544 the admission subtracts the chart's
+  # real requests, so on the smallest supported node -- 2 cores / 8 GiB -- the
+  # arithmetic became visible: allocatable 1900m / 5538Mi, minus these requests,
+  # minus k3s's own coredns + metrics-server (200m / 140Mi), left 900m / 2390Mi,
+  # and the smallest training envelope needs 1000m / 3072Mi. Every task on
+  # staging was refused NEVER_STEADY_STATE (e2e-test-agent fleet 34473120598).
+  #
+  # THE FOOTPRINT COUNTS THE COLLECTOR. `helm template` cannot look up the token
+  # Secret, so the render -- and therefore control-plane-footprint.sh, the
+  # installer embed and this derivation -- carries the telemetry collector's
+  # 100m / 128Mi. That is the right worst case: on a real edge the collector IS
+  # rendered once jobs-manager has written the token Secret (backend#2274), so an
+  # edge that trains on install must still train after that. With it counted the
+  # render is 650m / 2272Mi, and the node above leaves 1050m / 3126Mi (was
+  # 900m / 2390Mi): 50m and 54Mi over the envelope. Thin, and honest.
+  #
+  #   mysql           250m/1Gi   -> 150m/704Mi   peak measured 0.40-0.55x of 1Gi (max ~563Mi); 704 = +25% headroom; requests==limits kept
+  #   jobs-manager    250m/1Gi   -> 150m/640Mi   168Mi idle (0.16x); LIMIT STAYS 1Gi (see below); cpu: the whole plane idles at 36m
+  #   pods-monitor    100m/512Mi -> 100m/384Mi   no measurement yet; LIMIT STAYS 512Mi (see below)
+  #   requests-proxy  100m/256Mi ->  50m/128Mi   a few requests a minute; limits unchanged (1000m/512Mi)
+  #   egress-proxy     50m/64Mi  ->  50m/160Mi   UP: measured 2.45x OVER its request (backend#2461)
+  #   collector       100m/128Mi unchanged       unmeasured (distroless, no readable cgroup) -- not trimmed on a guess
+  #
+  # WHY jobs-manager AND pods-monitor NOW HAVE requests < limits. #1144 pinned
+  # requests.memory == limits.memory on both so a cluster-recovery mass restart
+  # would not pick them as OOM victims; the PODS were Burstable then and still
+  # are (the unresourced init containers, see above). The trim lowers only the
+  # REQUEST -- what the scheduler and admission subtract -- and leaves the LIMIT
+  # where it was, because the limit is the hard cgroup ceiling and the restart
+  # peak that justifies it is exactly the leg backend#2461's load run has not
+  # produced yet (review on client#1032). The cost is a higher oom_score_adj
+  # under node pressure; the alternative was a hard ceiling nothing has measured.
+  # When the restart leg lands, set BOTH from its p95 and restore the equality.
+  #
+  # What this is NOT: the final trim. Re-derive from the load run; do not
+  # hand-tune here. Guards that read these values: control-plane-footprint.sh
+  # (ceiling), the generated embed in scripts/lib/install-client-helm.sh
+  # (scripts/gen-footprint-embed.sh --check), envelope-schedulability.sh.
   mysql:
     requests:
-      cpu: "250m"
-      memory: "1Gi"
+      cpu: "150m"
+      memory: "704Mi"
     limits:
-      memory: "1Gi"
+      memory: "704Mi"
       # No cpu limit — see comment above.
   jobsManager:
     requests:
-      cpu: "250m"
-      memory: "1Gi"
+      cpu: "150m"
+      memory: "640Mi"
     limits:
       cpu: "1000m"
       memory: "1Gi"
   podsMonitor:
     requests:
       cpu: "100m"
-      memory: "512Mi"
+      memory: "384Mi"
     limits:
       cpu: "500m"
       memory: "512Mi"
   # requests-proxy serves the Service Bus / backend communication path and
-  # is mostly idle (a few req/min). 100m/256Mi requests with headroom for
-  # the occasional burst; revisit if heap profiling shows growth. Schema
-  # at values.schema.json#resources.requestsProxy validates overrides.
+  # is mostly idle (a few req/min). 50m/128Mi requests (trimmed from 100m/256Mi,
+  # backend#2461) with the limits left at 1000m/512Mi for the occasional burst;
+  # revisit if heap profiling shows growth. Schema at
+  # values.schema.json#resources.requestsProxy validates overrides.
   requestsProxy:
     requests:
-      cpu: "100m"
-      memory: "256Mi"
+      cpu: "50m"
+      memory: "128Mi"
     limits:
       cpu: "1000m"
       memory: "512Mi"

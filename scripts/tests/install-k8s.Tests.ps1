@@ -9780,41 +9780,62 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     }
     $failures -join "`n" | Should -BeNullOrEmpty
     $checked | Should -BeGreaterOrEqual 10 -Because "a guard that checked almost nothing proves almost nothing"
-    # POSITIVE CONTROL: the platform out-requests the reserve today, so at least
-    # one vector must over-ask BEFORE the fit -- else this suite could never have
-    # seen the defect it exists for.
+    # POSITIVE CONTROL: while the platform out-requested the reserve (before
+    # backend#2461's trim) at least one vector had to over-ask BEFORE the fit --
+    # else this suite could never have seen the defect it exists for. The guard is
+    # conditional on the embedded footprint, so it re-arms by itself the day a
+    # chart out-requests the reserve again.
     if ($needB -gt $script:TbEnvelopeOverheadMemBytes -or $needM -gt $script:TbEnvelopeOverheadCpuMilli) {
       $overBefore | Should -BeGreaterThan 0 -Because "the platform out-requests the reserve, yet no vector over-asked before the fit"
     }
   }
 
-  It "3. the ticket's reproduction: an 8 GiB node is REDUCED, arithmetic printed" {
+  It "3. the ticket's reproduction: an 8 GiB node now FITS unreduced (backend#2461 closed the over-ask)" {
+    # Before the interim trim the platform asked 3136 MiB / 900 m and this node was
+    # REDUCED to cpu=2,memory=4Gi; at 2336 MiB / 750 m the resolver's cpu=3,memory=5Gi
+    # fits: 5120 + 2476 <= 8192 and 3000 + 950 <= 4000. Pinning the fit is the
+    # regression guard for a chart change that pushes the footprint back up.
     $r = Invoke-FitOn -Nodes @('4 8Gi')
+    $r.Fit.Verdict | Should -Be 'fits'
+    $r.Fit.Size | Should -Be $r.Before
+  }
+  It "3b. a node DERIVED from the footprint (moves with the render) is REDUCED, arithmetic printed" {
+    # Below 4 GiB the resolver falls to the 1-core / 2-GiB floor; this node leaves
+    # room for 1 GiB but not for that floor, so the fit must reduce to 1 GiB with
+    # the OVER arithmetic on screen.
+    $needMib = [long]($script:TbCpFootprintMemBytes / 1MB) + [long]$script:SysMib
+    $small = $needMib + 1024 + 64
+    $r = Invoke-FitOn -Nodes @("4 ${small}Mi")
     $r.Fit.Verdict | Should -Be 'reduced'
     ($r.Fit.Lines -join "`n") | Should -BeLike '*OVER*'
     ($r.Fit.Lines -join "`n") | Should -BeLike "*reduced $($r.Before) -> $($r.Fit.Size)*"
-    # The numbers on this node against the canned cluster: cpu 3000+900+200 = 4100
-    # > 4000 -> 2 cores; memory 5120+3136+140 = 8396 > 8192 -> 8192-3276 = 4916 MiB
-    # -> 4 GiB. Both dimensions over-asked, both reduced.
-    $r.Fit.Size | Should -Be 'cpu=2,memory=4Gi'
+    $r.Fit.Size | Should -Be 'cpu=1,memory=1Gi'
   }
-
-  It "4. REFUSED when not even 1 core / 1 GiB fits, with the arithmetic" {
-    $r = Invoke-FitOn -Nodes @('4 4Gi')
+  It "4. REFUSED when not even 1 core / 1 GiB fits, with the arithmetic (node derived)" {
+    # allocatable minus the platform is 64 MiB short of a 1 GiB run
+    $needMib = [long]($script:TbCpFootprintMemBytes / 1MB) + [long]$script:SysMib
+    $tiny = $needMib + 1024 - 64
+    $r = Invoke-FitOn -Nodes @("4 ${tiny}Mi")
     $r.Fit.Verdict | Should -Be 'refused'
     ($r.Fit.Lines -join "`n") | Should -BeLike '*not even a 1-core / 1-GiB run*'
   }
-
-  It "5. cpu-only overshoot reduces cpu alone (memory kept)" {
-    $r = Invoke-FitOn -Nodes @('8 63928Mi')
-    $r.Fit.Verdict | Should -Be 'reduced'
-    (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key memory) | Should -Be (Get-TbEnvelopeDimension -Size $r.Before -Key memory)
-    $aCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key cpu)
-    $bCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Before -Key cpu)
-    $aCpu | Should -BeLessThan $bCpu
-    ($aCpu + $script:TbCpFootprintCpuMilli + $script:SysM) | Should -BeLessOrEqual 8000
+  It "5. cpu-only overshoot reduces cpu alone (memory kept) -- the pre-trim 900 m replayed" {
+    # The resolver leaves one core for the platform and the trimmed platform needs
+    # 950 m, so no real node produces a cpu-only overshoot any more; the pre-trim
+    # footprint (900 m) did. Replaying it through the real fit keeps DoD part 5
+    # covered; memory is untouched so only cpu can move.
+    $saved = $script:TbCpFootprintCpuMilli
+    try {
+      $script:TbCpFootprintCpuMilli = 900
+      $r = Invoke-FitOn -Nodes @('8 63928Mi')
+      $r.Fit.Verdict | Should -Be 'reduced'
+      (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key memory) | Should -Be (Get-TbEnvelopeDimension -Size $r.Before -Key memory)
+      $aCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Fit.Size -Key cpu)
+      $bCpu = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $r.Before -Key cpu)
+      $aCpu | Should -BeLessThan $bCpu
+      ($aCpu + 900 + $script:SysM) | Should -BeLessOrEqual 8000
+    } finally { $script:TbCpFootprintCpuMilli = $saved }
   }
-
   It "6. a human's pin is warned, never altered (pinned-over)" {
     $r = Invoke-FitOn -Nodes @('4 8Gi') -Override 'cpu=4,memory=16Gi'
     $r.Prov | Should -Be 'user'
@@ -9836,7 +9857,10 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
   }
 
   It "7b. pods unreadable: verified against the chart derivation only, and it SAYS so; still reduces" {
-    $r = Invoke-FitOn -Nodes @('4 8Gi') -PodsReadable $false
+    # on the derived small node -- the 8 GiB machine no longer needs reducing
+    $needMib = [long]($script:TbCpFootprintMemBytes / 1MB) + [long]$script:SysMib
+    $small = $needMib + 1024 + 64
+    $r = Invoke-FitOn -Nodes @("4 ${small}Mi") -PodsReadable $false
     $r.Fit.Verdict | Should -Be 'reduced'
     ($r.Fit.Lines -join "`n") | Should -BeLike '*NOT measured*chart derivation only*'
   }
@@ -9867,19 +9891,22 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
   }
 
   It "the reduction below the contract floor flags Undersized, and a fit does not" {
-    # 4c/5Gi: the resolver leaves cpu=3,memory=2Gi (5120-3072 = 2048 MiB, the
-    # floor exactly). Memory: 2048+3136+140 > 5120 -> 5120-3276 = 1844 MiB -> 1 GiB,
-    # below the 2 GiB floor -> Undersized. Cpu: 4000-1100 = 2900 m -> 2 cores, so
-    # the run is still a requestable shape and is REDUCED, not refused. (On a
-    # 2-core node the same memory would reduce but cpu would leave 900 m -- under
-    # one core -- and the verdict is refused; that is case 4's territory.)
-    $r = Invoke-FitOn -Nodes @('4 5Gi')
-    $r.Fit.Verdict | Should -Be 'reduced'
-    $r.Fit.Size | Should -Be 'cpu=2,memory=1Gi'
-    $r.Fit.Undersized | Should -BeTrue
-    # A genuine fit: an installer-sized envelope ALWAYS over-asks today (the
-    # resolver leaves 3 GiB and the platform asks 3136 MiB plus system pods -- the
-    # positive control above), so use a carried installer size that fits.
+    # A reduction that lands BELOW the 2 GiB floor needs the resolver to start at
+    # or above the floor (node >= 5 GiB) AND the platform to push it under -- which
+    # the trimmed 2336 MiB no longer can (5120 - 2476 = 2644 MiB >= 2 GiB). Replay
+    # the pre-trim footprint (3136 MiB) through the real fit, as case 5 does for
+    # cpu: 4c/5Gi -> cpu=3,memory=2Gi; memory 2048+3136+140 > 5120 -> 5120-3276 =
+    # 1844 MiB -> 1 GiB, below the floor -> Undersized. Cpu: 4000-950 = 3050 m ->
+    # 3 cores, still requestable, so REDUCED, not refused.
+    $saved = $script:TbCpFootprintMemBytes
+    try {
+      $script:TbCpFootprintMemBytes = 3136L * 1MB   # Int64 literal: no Int32 product to argue about (Bugbot, twice)
+      $r = Invoke-FitOn -Nodes @('4 5Gi')
+      $r.Fit.Verdict | Should -Be 'reduced'
+      $r.Fit.Size | Should -Be 'cpu=3,memory=1Gi'
+      $r.Fit.Undersized | Should -BeTrue
+    } finally { $script:TbCpFootprintMemBytes = $saved }
+    # A genuine fit, on the real footprint: a carried installer size that fits.
     $r2 = Invoke-FitOn -Nodes @('16 64Gi') -Carried @{ Size = 'cpu=4,memory=12Gi'; Provenance = 'installer' }
     $r2.Before | Should -Be 'cpu=4,memory=12Gi'
     $r2.Fit.Verdict | Should -Be 'fits'

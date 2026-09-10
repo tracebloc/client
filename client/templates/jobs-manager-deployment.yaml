@@ -333,13 +333,16 @@ spec:
         # unresourced-init set, and neither is reachability.
         # `scripts/tests/qos-reachability.sh` asserts it now.
         #
-        # requests.cpu is
-        # also raised (100m -> 250m) so a mass restart doesn't throttle its
-        # startup to a crawl (the ~9m recovery seen on lukas-test).
+        # requests.cpu was raised (100m -> 250m) so a mass restart doesn't throttle
+        # its startup to a crawl (the ~9m recovery seen on lukas-test); the interim
+        # trim (backend#2461) brings it to 150m -- the whole plane idles at 36m --
+        # and lowers requests.memory to 640Mi while the LIMIT stays 1Gi, so the
+        # #1144 equality is deliberately broken here: see the derivation on
+        # values.yaml#resources for why the request moved and the limit did not.
         resources:
           requests:
-            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "250m" | quote }}
-            memory: {{ .Values.resources.jobsManager.requests.memory | default "1Gi" | quote }}
+            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "150m" | quote }}
+            memory: {{ .Values.resources.jobsManager.requests.memory | default "640Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
             memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
@@ -915,17 +918,20 @@ spec:
           capabilities:
             drop: ["ALL"]
         # #1144: same cluster-recovery treatment as the api container above —
-        # pods-monitor was also exit-137 killed in the mass restart. Pin
+        # pods-monitor was also exit-137 killed in the mass restart. #1144 pinned
         # requests.memory == limits.memory (512Mi) to lower its oom_score_adj
         # (a less-preferred node OOM victim; the pod stays Burstable — and cpu is
         # not the only reason: see the init-container note on the api container
-        # above, backend#2872), and raise
+        # above, backend#2872), and raised
         # requests.cpu (50m -> 100m) so its startup is not starved under
-        # contention.
+        # contention. The interim trim (backend#2461) lowers the REQUEST to 384Mi
+        # and keeps the 512Mi LIMIT: nothing has measured this container yet, so
+        # the ceiling that #1144's restart peak justified stays where it was
+        # (derivation on values.yaml#resources).
         resources:
           requests:
             cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "100m" | quote }}
-            memory: {{ .Values.resources.podsMonitor.requests.memory | default "512Mi" | quote }}
+            memory: {{ .Values.resources.podsMonitor.requests.memory | default "384Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.podsMonitor.limits.cpu | default "500m" | quote }}
             memory: {{ .Values.resources.podsMonitor.limits.memory | default "512Mi" | quote }}
