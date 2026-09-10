@@ -43,10 +43,10 @@ mkfixture() {                       # $1 = destination root
       done
 }
 
-# A CONSISTENT MIXED-POLARITY fixture (backend#3509). narrowEdgeuserByEnv shipping
+# A CONSISTENT MIXED-POLARITY fixture. narrowEdgeuserByEnv shipping
 # `true` for dev and `false` for stg/prod, with EVERY source that names the gate --
 # the chart, the schema description, the helper comment, the runbook -- stating
-# exactly that. The real chart ships it true everywhere (backend#947), so like case
+# exactly that. The real chart ships it true everywhere, so like case
 # (a-on) this patches a THROWAWAY copy, never the shipped chart. All sources must
 # AGREE, or the guard reddens on the stale one instead of on the span this exercises.
 # The runbook sentence is the point: `true for dev, false for stg` comma-joined, so a
@@ -65,7 +65,7 @@ assert m, "fixture lost the narrowEdgeuserByEnv block"
 block = m.group(0)
 patched = block.replace("  stg: true\n", "  stg: false\n").replace(
     "  prod: true\n", "  prod: false\n")
-assert patched.count(": false\n") >= 2, "expected stg+prod to flip to false in the fixture"
+assert patched.count(": false\n") == 2, "expected stg+prod to flip to false in the fixture"
 open(p, "w").write(s[: m.start()] + patched + s[m.end() :])
 PY2
   python3 - "$d/client/values.schema.json" <<'PY2'
@@ -279,7 +279,7 @@ assert m, "fixture lost the narrowEdgeuserByEnv block"
 block = m.group(0)
 patched = block.replace("  stg: true\n", "  stg: false\n").replace(
     "  prod: true\n", "  prod: false\n")
-assert patched.count(": false\n") >= 2, "expected stg+prod to flip to false in the fixture"
+assert patched.count(": false\n") == 2, "expected stg+prod to flip to false in the fixture"
 open(p, "w").write(s[: m.start()] + patched + s[m.end() :])
 PY2
 python3 - "$D/client/MIGRATION.md" <<'PY2'
@@ -298,8 +298,8 @@ run_case "an ON-polarity claim in LIST form is caught (fixture ships stg/prod fa
 # polarity word. A CORRECT MIXED-POLARITY claim -- `true` for one env and `false`
 # for others in ONE sentence -- must stay GREEN: a reader parses "true for dev,
 # false for stg and prod" as dev-on / stg-prod-off, and so must the guard. This is
-# the case whose loss backend#3509 caught: after backend#947 baked every gate true
-# everywhere, an all-true sentence was substituted here, and with nothing left in
+# the case that was lost when the chart went all-true: after every `*ByEnv` gate was
+# baked `true` everywhere, an all-true sentence was substituted here, and with nothing left in
 # the suite crossing an opposite-polarity word a greedy `_SPAN` would have stayed
 # green. mixfixture rebuilds the mixed reality on a throwaway copy, so the sentence
 # is correct against THAT chart -- forever, regardless of what the real chart ships.
@@ -307,8 +307,8 @@ D="$TMP/mixed"; mixfixture "$D"
 run_case "a CORRECT mixed-polarity claim (true dev, false stg/prod) is NOT a finding" 0 \
   "no document contradicts" "$D"
 
-# (c-span) ...AND THE MUTATION THAT PROVES _SPAN IS LOAD-BEARING (backend#3509,
-# repo CLAUDE.md rule 9). On the SAME mixfixture, revert _SPAN in the fixture's OWN
+# (c-span) ...AND THE MUTATION THAT PROVES _SPAN IS LOAD-BEARING (repo
+# CLAUDE.md rule 9). On the SAME mixfixture, revert _SPAN in the fixture's OWN
 # guard copy to the greedy `[\w,\s]*` it replaced (saqlainsyed007 on #900). The span
 # now runs from `true for dev,` across `false` to `stg`, so env stg (shipped false
 # here) matches a TRUE_CLAIM and the guard reports "says 'true' for stg" -- one brick
