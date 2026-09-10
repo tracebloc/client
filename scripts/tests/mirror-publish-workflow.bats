@@ -184,9 +184,14 @@ release_json() { # <tag> <isPrerelease>
 
 # ── src: the release tag is data, fetched only at the expected commit ─────────
 
-make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK becomes its clone
+make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK becomes its clone; prints the commit
   local seed="$BATS_TEST_TMPDIR/seed" bare="$BATS_TEST_TMPDIR/origin.git"
   git init -q --bare "$bare"
+  # The bare HEAD is pinned to `main` explicitly: with init.defaultBranch unset
+  # (a fresh runner) it would point at a `master` that never receives a push,
+  # the clone would have an unborn HEAD, and `rev-parse HEAD` would print the
+  # literal word HEAD as the expected sha (measured on the first CI run).
+  git -C "$bare" symbolic-ref HEAD refs/heads/main
   git init -q "$seed"
   printf 'readme\n' >"$seed/README.md"
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid add README.md
@@ -195,7 +200,7 @@ make_origin() { # a bare origin with one commit tagged v1.2.3 (annotated); WORK 
   git -C "$seed" push -q "file://$bare" HEAD:refs/heads/main refs/tags/v1.2.3
   rm -rf "$WORK"
   git clone -q "file://$bare" "$WORK" 2>/dev/null
-  git -C "$WORK" rev-parse HEAD
+  git -C "$seed" rev-parse --verify HEAD
 }
 
 @test "src: the tag is fetched into a detached worktree outside the checkout, only at the expected commit" {
