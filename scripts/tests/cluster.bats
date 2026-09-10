@@ -932,6 +932,26 @@ _cc_mocks() {   # $1 = "real-handle" to leave _handle_existing_cluster UNstubbed
   [[ "$output" != *"docker update"* ]] || return 1
 }
 
+# A TIMED-OUT nodes read must skip only the node restart-policy loop, NOT abandon
+# the Linux docker.service boot-enable below it — that step does not depend on the
+# node list, and bailing out left a finished install whose cluster never came back
+# after a reboot, with no warning (Bugbot Medium, off the client#1011 promotion review).
+@test "ensure_cluster_autostart: nodes read times out -> still enables docker.service, skips node loop, logs" {
+  OS=Linux
+  LOG_FILE="$BATS_TEST_TMPDIR/autostart.log"
+  _bounded() { return 124; }                         # docker ps -a (nodes read) times out
+  docker() { record "docker $*"; }                   # any docker update would be recorded
+  sudo()   { record "sudo $*"; }
+  systemctl() { record "systemctl $*"; return 1; }   # not already enabled on boot
+  has()    { return 0; }
+  run ensure_cluster_autostart
+  [ "$status" -eq 0 ] || return 1
+  run mock_calls
+  [[ "$output" != *"docker update"* ]] || return 1                 # node loop skipped on the timeout
+  [[ "$output" == *"sudo systemctl enable docker"* ]] || return 1  # INDEPENDENT boot-enable still ran
+  grep -q "leaving k3d's own --restart policy in place" "$LOG_FILE" || return 1   # logged to LOG_FILE, not silent
+}
+
 # ── bounded create (#426) ────────────────────────────────────────────────────
 @test "k3d create is bounded: --wait always pairs with --timeout (#426)" {
   grep -q -- '--wait --timeout' "$BATS_TEST_DIRNAME/../lib/cluster.sh"

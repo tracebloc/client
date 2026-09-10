@@ -1188,13 +1188,26 @@ create_cluster() {
 ensure_cluster_autostart() {
   if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then return 0; fi
 
-  local nodes node
+  local nodes node _nodes_rc=0
   # BOUNDED (client#984, LukasWodka): this is a daemon read on the main install
   # path, and it ran unbounded while its `docker info` neighbours did not — the gap
-  # check-style rule 5 could not see until it was widened past `info`. `|| return 0`
-  # already treats an unreadable engine as "nothing to autostart", so a 124 lands in
-  # the branch this function was written for.
-  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || return 0
+  # check-style rule 5 could not see until it was widened past `info`.
+  #
+  # DO NOT `|| return 0` here (Bugbot Medium, off the client#1011 promotion
+  # review): this read feeds ONLY the node restart-policy loop below, but the Linux
+  # docker.service boot-enable further down does NOT depend on the node list.
+  # Bailing out of the whole function on a 124 left the operator a finished
+  # install whose docker.service was never enabled on boot — the cluster would
+  # not come back after a reboot, with no warning. A failed/timed-out read means
+  # "we couldn't enumerate nodes", so skip the loop (k3d already sets
+  # --restart unless-stopped at create time, so the policy still holds — the same
+  # rationale the Windows twin Set-ClusterAutostart states) and fall through to
+  # the boot-enable step.
+  nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || _nodes_rc=$?
+  if [[ "$_nodes_rc" -ne 0 ]]; then
+    nodes=""
+    log "Could not read k3d nodes for the restart policy (docker ps exit ${_nodes_rc}); leaving k3d's own --restart policy in place and continuing to the boot-enable step."
+  fi
   if [[ -n "$nodes" ]]; then
     for node in $nodes; do
       docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true
