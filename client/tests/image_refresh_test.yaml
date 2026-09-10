@@ -770,11 +770,13 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'kubectl set image -n "\$NODE_AGENTS_NAMESPACE"'
-      # Mirror guard: a docker.io digest must never be pinned onto a mirrored
-      # reference the mirror may not hold.
+      # Mirror guard: a digest resolved on a public registry must never be pinned
+      # onto a mirrored reference the mirror may not hold. The verdict is the
+      # chart-rendered IMAGE_REGISTRY_RESOLVABLE (tracebloc_registry_test.yaml
+      # covers its values); anything but "true" -- including absent -- refuses.
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: 'if \[ "\$IMAGE_REGISTRY" != "docker.io" \]; then'
+          pattern: 'if \[ "\$\{IMAGE_REGISTRY_RESOLVABLE:-\}" != "true" \]; then'
       # The pods-monitor container name is contractual with the deployment.
       - matchRegex:
           path: data["image-refresh.sh"]

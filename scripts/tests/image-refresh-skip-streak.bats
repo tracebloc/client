@@ -107,15 +107,16 @@ exit 6
 CURLSTUB
   chmod +x "$STUB_DIR/curl"
 
-  # The env the pod supplies. IMAGE_REGISTRY must be docker.io or the mirror
-  # guard exits 0 long before the settled guard is reached.
+  # The env the pod supplies. IMAGE_REGISTRY_RESOLVABLE is the chart-rendered
+  # verdict the mirror guard reads (tracebloc.imageRefreshResolvable); anything
+  # but "true" exits 0 long before the settled guard is reached.
   export PATH="$STUB_DIR:$PATH"
   export RELEASE_NAME=stg RELEASE_NAMESPACE=tracebloc
   export DEPLOYMENT_NAME=stg-jobs-manager
   export REQUESTS_PROXY_DEPLOYMENT=stg-requests-proxy
   export RESOURCE_MONITOR_DAEMONSET=stg-resource-monitor
   export NODE_AGENTS_NAMESPACE=tracebloc-node-agents
-  export IMAGE_REGISTRY=docker.io IMAGE_TAG=stg
+  export IMAGE_REGISTRY=docker.io IMAGE_REGISTRY_RESOLVABLE=true IMAGE_TAG=stg
   export ROLLOUT_TIMEOUT=300s
   # The script builds an explicit in-cluster kubeconfig from these (#634) and
   # runs under `set -u`, so they are not optional.

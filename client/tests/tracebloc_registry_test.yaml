@@ -1,0 +1,439 @@
+suite: images.traceblocRegistry — the tracebloc-only registry knob (tracebloc.tbRegistry)
+# The tracebloc-PUBLISHED control-plane images (jobs-manager, pods-monitor,
+# resource-monitor, and the requests-proxy that runs the jobs-manager image) are
+# published to both docker.io and ghcr.io at the same digests. ONE helper,
+# tracebloc.tbRegistry, decides which registry the chart pulls them from, as one
+# precedence chain: global.imageRegistry (a mirror re-homes everything) wins,
+# then images.traceblocRegistry, then the chart default.
+#
+# Pinned here, each of them a machine check for a sentence in values.yaml:
+#   1. The knob moves EXACTLY the tracebloc control-plane sites: busybox, the
+#      ingestor repo and JOB_IMAGE_HOST do not follow it, and mysql-client stays
+#      on docker.io (frozen, digest-pinned, published nowhere else).
+#   2. The mirror wins over the knob; an empty knob renders the default, not "".
+#   3. The image-refresh CronJob resolves digests on the same registry the pods
+#      pull from, and its reconcile verdict (IMAGE_REGISTRY_RESOLVABLE) and the
+#      pods' imagePullPolicy are derived from ONE declaration
+#      (tracebloc.imageRefreshResolvableRegistries) -- so a registry the script
+#      has no token arm for makes the pods Always AND the tick inert, together.
+#   4. NOTES.txt reports the registry the pods actually pull from.
+# helm-unittest 0.5.2 applies asserts to EVERY template a test names, so each
+# test below names exactly one.
+templates:
+  - templates/jobs-manager-deployment.yaml
+  - templates/requests-proxy-deployment.yaml
+  - templates/resource-monitor-daemonset.yaml
+  - templates/mysql-deployment.yaml
+  - templates/image-refresh-cronjob.yaml
+  - templates/NOTES.txt
+release:
+  name: t
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  - it: the chart default pulls the jobs-manager Deployment's images from docker.io
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+      - matchRegex:
+          path: spec.template.spec.containers[1].image
+          pattern: "^docker\\.io/tracebloc/pods-monitor:"
+
+  - it: the chart default pulls the requests-proxy image from docker.io
+    template: templates/requests-proxy-deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+
+  - it: the chart default pulls the resource-monitor image from docker.io
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/resource-monitor:"
+
+  - it: an EMPTY knob renders the default registry on the pods, not an empty one (the dig-empty trap)
+    # values.yaml ships every registry key as a string, so `dig` finds the key
+    # and returns "" instead of its fallback; an edge that clears the knob, or a
+    # --reuse-values replay from before it existed, must still get a registry.
+    # The pods are guarded twice (tracebloc.image applies its own default to an
+    # empty registry), so this test alone would stay green if the helper lost
+    # its `| default` chain -- the IMAGE_REGISTRY test right below is the one
+    # with no second net, and it is what reddens under that mutation.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ""
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+
+  - it: an EMPTY knob renders the default registry into IMAGE_REGISTRY, not an empty one
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        traceblocRegistry: ""
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "docker.io"
+
+  - it: images.traceblocRegistry re-homes the jobs-manager Deployment (init, api, pods-monitor)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].image
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager:"
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager:"
+      - matchRegex:
+          path: spec.template.spec.containers[1].image
+          pattern: "^ghcr\\.io/tracebloc/pods-monitor:"
+
+  - it: images.traceblocRegistry re-homes the requests-proxy
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager:"
+
+  - it: images.traceblocRegistry re-homes the resource-monitor
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^ghcr\\.io/tracebloc/resource-monitor:"
+
+  - it: a digest pin keeps the knob's registry (repo@digest, not repo:tag)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  - it: the knob does NOT move mysql-client (frozen, digest-pinned, docker.io only)
+    # The open question on mysql-client, recorded on the epic: it stays on
+    # Docker Hub. This is that decision as a machine check -- routing the mysql
+    # site through tracebloc.tbRegistry would make this test red.
+    template: templates/mysql-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^docker\\.io/tracebloc/mysql-client@sha256:"
+
+  - it: the knob does NOT move busybox
+    # busybox keeps its own precedence (global mirror, else docker.io).
+    template: templates/mysql-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].image
+          pattern: "^docker\\.io/library/busybox:"
+
+  - it: the knob does NOT move the ingestor repository or JOB_IMAGE_HOST
+    # The ingestor is already on ghcr.io by repository; the training-image host
+    # moves in its own step, so it must still read docker.io/ here.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: INGESTOR_IMAGE_REPOSITORY
+            value: "ghcr.io/tracebloc/ingestor"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "docker.io/"
+
+  - it: global.imageRegistry wins over images.traceblocRegistry on the jobs-manager
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^mirror\\.corp\\.example/tracebloc/jobs-manager:"
+
+  - it: global.imageRegistry wins over images.traceblocRegistry on the resource-monitor
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^mirror\\.corp\\.example/tracebloc/resource-monitor:"
+
+  - it: global.imageRegistry wins over images.traceblocRegistry in IMAGE_REGISTRY
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "mirror.corp.example"
+
+  - it: image-refresh resolves digests on the registry the pods pull from, never a docker.io literal
+    # The pinned reference is built from the same variable the digest was
+    # resolved on, so a copy on another registry can never be pinned by a digest
+    # it does not hold.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'pin_latest="\$\(get_latest_digest "\$repo" "\$IMAGE_TAG" "\$IMAGE_REGISTRY" \|\| true\)"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'latest="\$\(get_latest_digest "\$repo" "\$IMAGE_TAG" "\$IMAGE_REGISTRY" \|\| true\)"'
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'get_latest_digest "\$repo" "\$IMAGE_TAG" "docker\.io"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'ref="\$\{IMAGE_REGISTRY\}/\$\{repo\}@\$\{latest\}"'
+
+  - it: the script carries a token arm for every registry the chart declares resolvable
+    # tracebloc.imageRefreshResolvableRegistries is "docker.io ghcr.io". A
+    # registry declared there without a get_token / get_latest_digest arm would
+    # make the pods IfNotPresent while every tick WARNs "unknown registry".
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '_url="https://auth\.docker\.io/token\?service=registry\.docker\.io&scope=repository:\$\{_repo\}:pull"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '_url="https://ghcr\.io/token\?service=ghcr\.io&scope=repository:\$\{_repo\}:pull"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'docker\.io\) _host="registry-1\.docker\.io" ;;'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'ghcr\.io\)   _host="ghcr\.io" ;;'
+
+  - it: on docker.io the reconcile is resolvable
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY_RESOLVABLE
+            value: "true"
+
+  - it: on docker.io the pods are IfNotPresent
+    template: templates/jobs-manager-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: on ghcr.io the reconcile is resolvable and IMAGE_REGISTRY follows
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "ghcr.io"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY_RESOLVABLE
+            value: "true"
+
+  - it: on ghcr.io the jobs-manager pods are IfNotPresent
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: IfNotPresent
+
+  - it: on ghcr.io the requests-proxy is IfNotPresent
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: on ghcr.io the resource-monitor is IfNotPresent
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: a registry the script has no token arm for makes the tick inert
+    # The two consumers of tracebloc.imageRefreshResolvableRegistries must move
+    # as one: IfNotPresent with an inert reconcile is a frozen control plane
+    # with a green CronJob (#569, Bugbot High).
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "quay.example"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY_RESOLVABLE
+            value: "false"
+
+  - it: a registry the script has no token arm for makes the jobs-manager pods Always
+    # The two consumers of tracebloc.imageRefreshResolvableRegistries must move
+    # as one: IfNotPresent with an inert reconcile is a frozen control plane
+    # with a green CronJob (#569, Bugbot High).
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: Always
+
+  - it: a registry the script has no token arm for makes the requests-proxy Always
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: a registry the script has no token arm for makes the resource-monitor Always
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: a global mirror is not resolvable even when the knob names a public registry
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY_RESOLVABLE
+            value: "false"
+
+  - it: a global mirror keeps the pods Always even when the knob names a public registry
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: NOTES prints the default registry
+    template: templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: "Image registry:.*docker\\.io.*\\(tracebloc control-plane images\\)"
+
+  - it: NOTES follows images.traceblocRegistry
+    template: templates/NOTES.txt
+    set:
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegexRaw:
+          pattern: "Image registry:.*ghcr\\.io"
+      - notMatchRegexRaw:
+          pattern: "Image registry:.*docker\\.io"
+
+  - it: NOTES follows the global mirror over the knob
+    template: templates/NOTES.txt
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: ghcr.io
+    asserts:
+      - matchRegexRaw:
+          pattern: "Image registry:.*mirror\\.corp\\.example"
+

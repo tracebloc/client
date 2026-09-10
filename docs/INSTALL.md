@@ -34,7 +34,7 @@ The standalone installer runs a **preflight** check that verifies this connectiv
 | Host | Why |
 |---|---|
 | `registry-1.docker.io` (Docker Hub) | k3s, mysql-client, busybox + the tracebloc client images |
-| `ghcr.io` | k3d node images + the ingestor image |
+| `ghcr.io` (+ `pkg-containers.githubusercontent.com`, where GHCR redirects layer downloads) | k3d node images + the ingestor image; the tracebloc control-plane images when `images.traceblocRegistry` points there |
 | `api.tracebloc.io` (`dev-api`/`stg-api` for non-prod) | client credential check + the running client's platform connection |
 | `tracebloc.github.io` | the tracebloc Helm chart repository |
 
@@ -54,6 +54,8 @@ On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.git
 Some sites hard-block Docker Hub / GHCR outright — the images aren't reachable directly at all (this is different from a proxy or TLS-inspection, which the section above covers). The preflight check detects a blocked registry and points you here rather than failing with a raw pull error.
 
 The chart follows the **`global.imageRegistry`** convention: set it once and **every** image the chart pulls — the tracebloc services, the spawned ingestor, the training-job images, and the `alpine/*`, `ubuntu/squid`, `busybox`, `curl` helper images — is re-homed onto your registry. No per-image overrides.
+
+**Moving only the tracebloc images.** `global.imageRegistry` re-homes *everything*. To point just the tracebloc-published control-plane images (jobs-manager, pods-monitor, resource-monitor, requests-proxy) at a different registry — they are published to both `docker.io` and `ghcr.io` at the same digests — set `images.traceblocRegistry` (a bare host) and leave `global.imageRegistry` unset. `global.imageRegistry` always wins when both are set. The image-refresh CronJob follows the same value and can resolve digests anonymously on `docker.io` and `ghcr.io` only; any other registry makes the reconcile inert, exactly as a mirror does. `tracebloc/mysql-client` is not moved by this knob (it is frozen, digest-pinned and published only to Docker Hub), and neither is the training-image host yet.
 
 **1. A private/mirror registry your site *can* reach.**
 
