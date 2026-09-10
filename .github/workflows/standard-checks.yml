@@ -187,12 +187,12 @@ jobs:
         # `bash -e`, so a bare test returning false on the last iteration would
         # abort the script before the ::error:: line ever printed.
         run: |
-          # ubuntu-latest pre-bakes google-chrome.list into the apt sources, so
+          # ubuntu-latest pre-bakes google-chrome.list (and, on current images, the deb822 google-chrome.sources) into the apt sources, so
           # every `apt-get update` here depends on dl.google.com serving
           # consistent index metadata. On 2026-09-09 it did not ("Hash Sum
           # mismatch", ~10 minutes) and all three attempts below lost on main for
           # a repository this job never reads. Drop it before the first update.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           for i in 1 2 3; do
             if sudo timeout 60 apt-get update -qq \
                && sudo timeout 60 apt-get install -y bats; then
