@@ -603,21 +603,26 @@ docker.io ghcr.io
 {{- end -}}
 
 {{/*
-tracebloc.tbRegistry — the registry the tracebloc-PUBLISHED control-plane images
-(tracebloc/jobs-manager, tracebloc/pods-monitor, tracebloc/resource-monitor, and
-the requests-proxy, which runs the jobs-manager image) are pulled from.
+tracebloc.tbRegistry — the registry the tracebloc-PUBLISHED images are pulled
+from: the control-plane images (tracebloc/jobs-manager, tracebloc/pods-monitor,
+tracebloc/resource-monitor, and the requests-proxy, which runs the jobs-manager
+image) AND the host jobs-manager stamps onto every training image it spawns
+(JOB_IMAGE_HOST, rendered as "<registry>/" on both jobs-manager containers).
 
-ONE precedence chain, so the four call sites, the image-refresh CronJob and
-NOTES.txt cannot disagree about where those images live:
+ONE precedence chain, so the four control-plane call sites, the two
+JOB_IMAGE_HOST sites, the image-refresh CronJob and NOTES.txt cannot disagree
+about where those images live:
 
   1. `global.imageRegistry`      — a private mirror re-homes EVERY image the
                                     chart pulls (#585), tracebloc/* included.
                                     It always wins.
-  2. `images.traceblocRegistry`  — the tracebloc-only knob: moves just the
-                                    tracebloc-published images, leaving busybox,
-                                    squid, alpine/*, the device plugins and the
-                                    ingestor where they are. Also the per-edge
-                                    rollback: set it to the previous registry.
+  2. `images.traceblocRegistry`  — the tracebloc-only knob: moves the
+                                    tracebloc-published images -- control plane
+                                    and training-image host TOGETHER -- leaving
+                                    busybox, squid, alpine/*, the device plugins
+                                    and the ingestor where they are. Also the
+                                    per-edge rollback: set it to the previous
+                                    registry.
   3. "ghcr.io"                   — the chart default since the GHCR migration.
                                     The images are still dual-published to
                                     Docker Hub at the same digests, so
@@ -625,8 +630,9 @@ NOTES.txt cannot disagree about where those images live:
 
 NOT routed through here, on purpose: `tracebloc/mysql-client` (frozen,
 digest-pinned, published only to Docker Hub — see images.mysqlClient), the
-third-party images (each has its own `registry` key), and — for now — the
-training-image host JOB_IMAGE_HOST, which moves in its own step.
+third-party images (each has its own `registry` key), and the ingestor, which is
+named by full repository (images.ingestor.repository, already on ghcr.io) and
+follows only the global mirror.
 
 Every read is nil-guarded and `| default`-chained: values.yaml ships
 `global.imageRegistry: ""` (the key EXISTS, so `dig`'s own fallback never

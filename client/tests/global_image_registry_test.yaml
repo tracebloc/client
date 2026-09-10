@@ -5,9 +5,10 @@ suite: global.imageRegistry private-mirror re-homing (#585)
 # convention. Two invariants are pinned here:
 #   1. Set  -> every image (tracebloc/*, the spawned ingestor + training jobs,
 #      and the alpine/*, ubuntu/squid utility images) carries the mirror prefix.
-#   2. Unset -> the chart's own defaults, untouched: tracebloc/* on
-#      images.traceblocRegistry (ghcr.io since the GHCR migration), squid on
-#      docker.io, ingestor on ghcr.io, alpine/* unprefixed (docker.io implicit).
+#   2. Unset -> the chart's own defaults, untouched: tracebloc/* AND the
+#      training-image host JOB_IMAGE_HOST on images.traceblocRegistry (ghcr.io
+#      since the GHCR migration), squid on docker.io, ingestor on ghcr.io,
+#      alpine/* unprefixed (docker.io implicit).
 # Precedence guards: an explicit images.ingestor.repository still wins over the
 # mirror (someone who names a full repo means it); an explicit per-image
 # registry (egressProxy.image.registry) is overridden by the global mirror.
@@ -105,6 +106,7 @@ tests:
             value: "mirror.corp.example/tracebloc/ingestor"
 
   - it: re-homes the training-job image host (JOB_IMAGE_HOST) onto the mirror
+    # Both jobs-manager containers carry the variable; both read tracebloc.tbRegistry.
     template: templates/jobs-manager-deployment.yaml
     set:
       global:
@@ -112,6 +114,11 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "mirror.corp.example/"
+      - contains:
+          path: spec.template.spec.containers[1].env
           content:
             name: JOB_IMAGE_HOST
             value: "mirror.corp.example/"
@@ -135,14 +142,19 @@ tests:
             name: INGESTOR_IMAGE_REPOSITORY
             value: "ghcr.io/tracebloc/ingestor"
 
-  - it: leaves JOB_IMAGE_HOST on docker.io when no mirror is set
+  - it: leaves JOB_IMAGE_HOST on the tracebloc registry default (ghcr.io/) when no mirror is set
     template: templates/jobs-manager-deployment.yaml
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: JOB_IMAGE_HOST
-            value: "docker.io/"
+            value: "ghcr.io/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "ghcr.io/"
 
   - it: leaves the alpine/helm auto-upgrade image unprefixed when no mirror is set
     template: templates/auto-upgrade-cronjob.yaml
