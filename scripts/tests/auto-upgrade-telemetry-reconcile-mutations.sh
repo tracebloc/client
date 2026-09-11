@@ -116,8 +116,13 @@ if [ "$MODE" = record ]; then
 # ---- (d) the status record's honesty is pinned by the chart unit tests -------
 # Needs the helm-unittest plugin; refuse rather than skip (rule 3: "cannot tell"
 # is a finding, and a skip here would leave (d) decorative on the job that owns it).
-helm plugin list 2>/dev/null | grep -q unittest \
-  || { echo "FAIL: helm-unittest plugin missing -- MODE=record cannot prove (d); install it or run this in the Helm unit tests job" >&2; exit 2; }
+# capture-then-match, not `| grep -q`: under errexit+pipefail a reader that
+# closes early can SIGPIPE the writer and turn a present plugin into a refusal.
+plugins=$(helm plugin list 2>/dev/null || true)
+case "$plugins" in
+  *unittest*) ;;
+  *) echo "FAIL: helm-unittest plugin missing -- MODE=record cannot prove (d); install it or run this in the Helm unit tests job" >&2; exit 2 ;;
+esac
 # Baseline: the unmutated Collector suite is green, so (d)'s red below is the mutation's.
 set +e
 out=$(cd "$ROOT" && helm unittest ./client -f "$SUITE" 2>&1); rc=$?
