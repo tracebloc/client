@@ -293,6 +293,25 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   [[ "$output" == *"[forbidden-strings] COULD NOT TELL — extra forbidden list '"*"absent.txt' is missing or unreadable"* ]] || return 1
 }
 
+@test "an invalid --extra-forbidden regex is could-not-tell WITHOUT leaking the private pattern" {
+  # An unbalanced '[' is an invalid ERE: grep fails to compile it (rc>=2). Some
+  # greps echo the offending pattern on stderr, and that pattern is the private
+  # identifier the guard names only as 'private needle #N' — so the could-not-tell
+  # reason must be built from the safe name and the exit code, never from grep's
+  # raw stderr, which would leak the tenant token onto the public ::error:: line.
+  printf '# private list\nplanted-tenant-xyz[\n' >"$BATS_TEST_TMPDIR/tenants.txt"
+  guard --extra-forbidden "$BATS_TEST_TMPDIR/tenants.txt"
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  # The reason must be the SAFE form — the public-safe name and the exit code and
+  # nothing else. The leaky form appended grep's raw stderr after 'needle #1: ';
+  # asserting the exact safe suffix reddens on every grep, whatever its error text.
+  [[ "$output" == *"[forbidden-strings] COULD NOT TELL — grep exited "*" on private needle #1 — the needle may be an invalid regex (see its definition)"* ]] || { echo "$output"; return 1; }
+  # And, for the greps that DO echo the pattern, the token itself must not surface
+  # in the log (teed into the public run summary) or in the report.
+  ! grep -qi 'planted-tenant' <<<"$output" || { echo "$output"; return 1; }
+  [ ! -f "$OUT/publish-guard-report.txt" ] || ! grep -qi 'planted-tenant' "$OUT/publish-guard-report.txt" || return 1
+}
+
 @test "a refuse-tier needle inside a release asset is refused with the asset named" {
   mkdir -p "$BATS_TEST_TMPDIR/assets"
   printf '#!/bin/sh\n# bucket arn:aws:s3:::planted\n' >"$BATS_TEST_TMPDIR/assets/install.sh"
