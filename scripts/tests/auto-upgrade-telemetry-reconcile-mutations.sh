@@ -17,7 +17,17 @@
 #    (c) unhook the reconcile from the tick       -> the Secret-arrived case does not reconcile
 #    (d) restore "this resolves itself" wording   -> the status-record unit test reddens
 #
+#  Two modes, because (d) needs the helm-unittest plugin and the drift job has
+#  none (measured 2026-09-11: `Error: unknown command "unittest" for "helm"`
+#  read as "suite reddened, but not on the honest-record test" -- a gate red for
+#  the wrong reason). MODE=reconcile (default; `make drift`) runs the baseline
+#  and (a)-(c). MODE=record (`make helm-unittest`, the Helm unit tests job) runs
+#  (d) and REFUSES without the plugin -- it never skips, so a runner that lost
+#  the plugin turns the job red instead of leaving (d) decorative.
+#
 set -euo pipefail
+MODE="${MODE:-reconcile}"
+case "$MODE" in reconcile|record) ;; *) echo "FAIL: MODE must be reconcile or record, got '$MODE'" >&2; exit 2 ;; esac
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 GATE="$ROOT/scripts/tests/auto-upgrade-telemetry-reconcile.sh"
@@ -68,8 +78,9 @@ run_gate_case() {                   # $1 label, $2 want rc, $3 want substring, $
   printf '  [ok]   %s\n' "$label"; pass=$((pass+1))
 }
 
-echo "== auto-upgrade-telemetry-reconcile: can it fail? =="
+echo "== auto-upgrade-telemetry-reconcile: can it fail? (MODE=$MODE) =="
 
+if [ "$MODE" = reconcile ]; then
 # ---- 0. baseline: the tree as shipped is green ------------------------------
 D="$TMP/base"; mkfixture "$D"
 run_gate_case "the tree as shipped passes the gate" 0 "all 23 cases" "$D"
@@ -99,7 +110,24 @@ mutate "$D/$CRONJOB" \
 run_gate_case "(c) unhooking the reconcile from the at-latest branch reddens on the Secret-arrived case" 1 \
   "Secret arrived: stored skipped-no-token, no DaemonSet, dry-run enabled -> reconcile: expected a same-version reconcile, no upgrade ran" "$D"
 
+fi  # MODE=reconcile
+
+if [ "$MODE" = record ]; then
 # ---- (d) the status record's honesty is pinned by the chart unit tests -------
+# Needs the helm-unittest plugin; refuse rather than skip (rule 3: "cannot tell"
+# is a finding, and a skip here would leave (d) decorative on the job that owns it).
+helm plugin list 2>/dev/null | grep -q unittest \
+  || { echo "FAIL: helm-unittest plugin missing -- MODE=record cannot prove (d); install it or run this in the Helm unit tests job" >&2; exit 2; }
+# Baseline: the unmutated Collector suite is green, so (d)'s red below is the mutation's.
+set +e
+out=$(cd "$ROOT" && helm unittest ./client -f "$SUITE" 2>&1); rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  printf '  [FAIL] baseline: the Collector unit suite is already red on the tree as shipped\n'
+  printf '%s\n' "$out" | sed 's/^/         | /'; fail=$((fail+1))
+else
+  printf '  [ok]   baseline: the Collector unit suite is green on the tree as shipped\n'; pass=$((pass+1))
+fi
 # The old sentence, byte for byte, back in the no-token branch. The unit suite
 # for the Collector must name the record as the failing test.
 D="$TMP/old-wording"; mkfixture "$D"
@@ -117,6 +145,7 @@ elif ! grep -qF -- "names the trigger that actually re-renders it, not a self-re
 else
   printf '  [ok]   (d) restoring "this resolves itself" reddens the honest-record unit test\n'; pass=$((pass+1))
 fi
+fi  # MODE=record
 
 echo
 if [ "$fail" -ne 0 ]; then
