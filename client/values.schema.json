@@ -333,9 +333,19 @@
       "description": "Use ClusterRole (true) or namespace-scoped Role (false). Defaults to true."
     },
     "resourceMonitor": {
-      "type": "boolean",
-      "default": true,
-      "description": "Deploy resource-monitor DaemonSet. Defaults to true."
+      "type": [
+        "boolean",
+        "object"
+      ],
+      "description": "Deploy the resource-monitor DaemonSet. RFC-0076 (D2): prefer the object form `resourceMonitor.enabled: <bool>`; the legacy scalar `resourceMonitor: <bool>` (and `--set resourceMonitor=true`) is still accepted through the alias window (remove_by: 2026-12-31) — see tracebloc.resourceMonitorEnabled. Defaults to enabled.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Deploy the resource-monitor DaemonSet. Defaults to true."
+        }
+      },
+      "additionalProperties": false
     },
     "nodeAgents": {
       "type": "object",
