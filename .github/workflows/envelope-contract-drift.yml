@@ -65,6 +65,70 @@ permissions:
   contents: read
 
 jobs:
+  # ── IS THE PIN ITSELF STALE? (backend#2460) ────────────────────────────────
+  # The job below compares the vendored copies against the PINNED ref, which is
+  # the whole point of pinning: an unrelated client-runtime commit must not
+  # redden every open client PR. The cost is that it cannot see the pin going
+  # stale -- it compares v2 against v2 and agrees.
+  #
+  # MEASURED, not hypothetical. client-runtime#376 merged 2026-08-24 and the pin
+  # comment carried a note to re-point once it did. That went unactioned for 2.5
+  # weeks, during which client-runtime#544 landed envelope contract v3 -- and
+  # this repo went on verifying its installers against v2, with the drift job
+  # GREEN the whole time. The pin comment claimed "the weekly run is what catches
+  # a pin gone stale enough to matter"; nothing compared the pin against the
+  # producer's default branch, so nothing caught it (CLAUDE.md rule 7: a comment
+  # asserting a property the code does not have).
+  #
+  # WARNS ON A PR, FAILS ON THE SCHEDULE. Failing a PR would punish whoever
+  # happens to touch an installer line for a pin someone else left behind, which
+  # is how a whole tier gets skipped (rule 4). The weekly and dispatch runs are
+  # where the alarm is actionable and blocks nobody.
+  pin-staleness:
+    name: pinned contract vs client-runtime's default branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+
+      - name: Compare the pinned contract against the producer's default branch
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
+          [ -n "$ref" ] || { echo "::error::scripts/.client-runtime-ref names no ref"; exit 1; }
+
+          # FAIL CLOSED on both reads: a fetch I could not do is not evidence the
+          # pin is fresh, and two unknowns must never compare equal (rule 3).
+          fetch() {
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/tracebloc/client-runtime/contents/envelope_contract.json?ref=$1"
+          }
+          fetch "$ref" > /tmp/pinned.json \
+            || { echo "::error::cannot read envelope_contract.json at the pinned ref $ref"; exit 1; }
+          fetch develop > /tmp/head.json \
+            || { echo "::error::cannot read envelope_contract.json on client-runtime develop -- cannot tell whether the pin is stale"; exit 1; }
+
+          pinned="$(python3 scripts/contract-summary.py /tmp/pinned.json)"
+          head="$(python3 scripts/contract-summary.py /tmp/head.json)"
+          echo "pinned  ($ref): contract v${pinned%%|*}  overhead ${pinned#*|}"
+          echo "develop        : contract v${head%%|*}  overhead ${head#*|}"
+
+          if cmp -s /tmp/pinned.json /tmp/head.json; then
+            echo "the pin is current."
+            exit 0
+          fi
+
+          msg="this repo vendors envelope contract v${pinned%%|*} (${pinned#*|}) while client-runtime develop ships v${head%%|*} (${head#*|}). To adopt: bump scripts/.client-runtime-ref, re-vendor BOTH contracts, re-run scripts/gen-envelope-embed.sh (it rewrites the bash vectors AND the embedded literals in scripts/lib/install-client-helm.sh and scripts/install-k8s.ps1), then update the hand-written expectations the new numbers move."
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "::warning::PIN STALE (not this PR's doing) -- $msg"
+            exit 0
+          fi
+          echo "::error::PIN STALE -- $msg"
+          exit 1
+
   envelope-contract:
     timeout-minutes: 10
     runs-on: ubuntu-latest
