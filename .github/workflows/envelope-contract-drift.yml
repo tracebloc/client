@@ -121,6 +121,16 @@ jobs:
           set -euo pipefail
           ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
           [ -n "$ref" ] || { echo "::error::scripts/.client-runtime-ref names no ref"; exit 1; }
+          # SAME SHAPE GATE the sibling job applies before it hands the pin to
+          # checkout -- no path traversal, no option-looking refs. This job
+          # interpolates the pin into a contents API URL, which is a second
+          # place the value escapes into, so it needs the same check rather
+          # than trusting that the other job ran first (Bugbot Medium).
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' \
+             || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.client-runtime-ref::invalid ref shape: $ref"
+            exit 1
+          fi
 
           # BOTH CONTRACTS, because the pin governs both. scripts/.client-runtime-ref
           # says so in capitals -- "ONE REF, TWO CONTRACTS since backend#2378" --
@@ -159,12 +169,21 @@ jobs:
             fi
           done
 
-          # The envelope contract carries a version worth naming in the message;
-          # log_redactions.json does not, so it is reported by name alone.
+          # COSMETIC, AND MUST NOT BE ABLE TO CHANGE THE VERDICT. The version
+          # line is nicer output; `cmp` above already decided. Under `set -e` an
+          # unreadable summary used to abort the script BEFORE the warn-on-PR
+          # branch, so a develop-side schema change -- exactly the stale case
+          # this job exists to surface -- would have FAILED a pull request that
+          # was supposed to warn (Bugbot Medium). `|| true` keeps the failure
+          # cosmetic; the reads that matter already failed closed above.
           if [ -s /tmp/pinned-envelope_contract.json ]; then
-            pinned="$(python3 scripts/contract-summary.py /tmp/pinned-envelope_contract.json)"
-            head="$(python3 scripts/contract-summary.py /tmp/head-envelope_contract.json)"
-            echo "envelope contract: pinned v${pinned%%|*} (${pinned#*|})  vs  develop v${head%%|*} (${head#*|})"
+            pinned="$(python3 scripts/contract-summary.py /tmp/pinned-envelope_contract.json 2>/dev/null || true)"
+            head="$(python3 scripts/contract-summary.py /tmp/head-envelope_contract.json 2>/dev/null || true)"
+            if [ -n "$pinned" ] && [ -n "$head" ]; then
+              echo "envelope contract: pinned v${pinned%%|*} (${pinned#*|})  vs  develop v${head%%|*} (${head#*|})"
+            else
+              echo "envelope contract: could not summarise one of the copies (schema change?) -- the comparison above stands regardless"
+            fi
           fi
 
           if [ -z "$stale" ]; then
