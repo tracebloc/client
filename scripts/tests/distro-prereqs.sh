@@ -55,11 +55,41 @@ _pm_run() { # bounded + retried package-manager invocation; $@ = the PM argv
     # `cancelled` (the failure class of #2859).
     [ "$i" -lt 3 ] && sleep $((i * 5))
   done
-  echo "::error::package-manager step failed after 3 bounded attempts: $* — distro-mirror connectivity inside the CI container, not this PR. Re-run this job." >&2
+  echo "::error::package-manager step failed after 3 bounded attempts: $* — the package manager could not reach its mirrors from inside the CI container. This is NOT this PR's diff. Re-running often does NOT help: two consecutive attempts failed identically on 2026-09-11. If apt, the attempts above should carry Acquire::* bounds; if they did not, that is the bug." >&2
   return 1
 }
+# APT NEEDS ITS OWN SOCKET BOUND, not just the external one _pm_run applies.
+#
+# `timeout 60` around apt kills a stalled fetch, but apt never learns anything: it
+# emits NO output, retries nothing, and the next attempt stalls identically. The
+# observed failure is three attempts of pure silence -- no `Err:`, no `W:`, no
+# `E:` -- then the job's 12m bound killing the container with exit 137. A refused
+# connection errors instantly; only a BLACKHOLED route (packets dropped, not
+# rejected) hangs like that, and apt's default socket timeout is long enough to
+# outlast the external kill every time.
+#
+# So bound apt where apt can act on it. `Acquire::http::Timeout=10` turns a
+# 60-second silent kill into a 10-second error apt can retry, and
+# `Acquire::Retries=3` lets it ride out a transient stall inside ONE attempt
+# instead of burning a whole _pm_run cycle. Same options tracebloc-engine's
+# test workflow already uses on its own `apt-get update`, which does not exhibit
+# this failure.
+#
+# ForceIPv4 is the MITIGATION FOR THE LIKELY CAUSE, not a proven one: a container
+# with no working IPv6 egress resolves an AAAA, connects, and waits -- the exact
+# silent-hang signature. There is no apt output to prove that from a stalled run,
+# so this is here because it is cheap and cannot hurt an IPv4-only path, not
+# because the logs named it.
+#
+# apt-only, deliberately: dnf/yum/zypper/pacman below take none of these flags
+# and would fail on an unknown option, converting a mirror stall into a hard
+# argument error on four distros to fix it on one.
+_APT_BOUND='-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=3 -o Acquire::ForceIPv4=true'
+
 _pm_install_one() { # install a single package with whatever PM exists
-  if   command -v apt-get >/dev/null 2>&1; then _pm_run apt-get update -qq && _pm_run apt-get install -y -qq "$1"
+  if   command -v apt-get >/dev/null 2>&1; then
+    # shellcheck disable=SC2086  # _APT_BOUND is a deliberate word-split argv
+    _pm_run apt-get update -qq $_APT_BOUND && _pm_run apt-get install -y -qq $_APT_BOUND "$1"
   elif command -v dnf     >/dev/null 2>&1; then _pm_run dnf install -y -q "$1"
   elif command -v yum     >/dev/null 2>&1; then _pm_run yum install -y -q "$1"
   elif command -v zypper  >/dev/null 2>&1; then _pm_run zypper --non-interactive install "$1"
