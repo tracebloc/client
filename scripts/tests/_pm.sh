@@ -26,23 +26,46 @@
 # it emits NO output, retries nothing, and the next attempt stalls identically.
 # The observed failure is three attempts of pure silence — no `Err:`, no `W:`,
 # no `E:` — then the job's outer bound killing the container with exit 137. A
-# refused connection errors instantly; only a BLACKHOLED route (packets dropped,
-# not rejected) hangs like that, and apt's default socket timeout outlasts the
-# external kill every time. So the bound was in the wrong place, not missing.
+# refused connection errors instantly; only a stalled one hangs like that, and
+# apt's default socket timeout outlasts the external kill every time. So the
+# bound was in the wrong place, not missing.
 #
-# Timeout + Retries are what tracebloc-engine's test workflow already applies to
-# its own `apt-get update`, which does not exhibit this failure.
+# WHY NOT THE FIX tracebloc-engine#1029 USED. That change found the specific
+# cause on the RUNNER — the mirrorlist lists the archive over http first and
+# https second, http stopped answering on 2026-09-11, and apt walked 52 index
+# URLs before falling back — and fixed it by rewriting the mirrorlist to https.
+# THAT MUST NOT BE COPIED HERE. These harnesses run inside a BARE distro
+# container, and ubuntu:24.04 ships no ca-certificates: rewriting its sources to
+# https makes every index fetch fail certificate verification. Measured, in the
+# image the job actually uses:
 #
-# ForceIPv4 is the MITIGATION FOR THE LIKELY CAUSE, not a proven one: a container
-# with no working IPv6 egress resolves an AAAA, connects, and waits — the exact
-# silent-hang signature. A stalled run emits no apt output, so nothing in the
-# logs proves it. It is here because it is cheap and cannot hurt an IPv4-only
-# path, not because it was measured.
+#     W: Failed to fetch https://…/InRelease  Certificate verification failed:
+#        The certificate is NOT trusted. The certificate issuer is unknown.
+#     apt-get update  -> exit 0   (warnings only — it "succeeds" fetching nothing)
+#     apt-get install -> exit 100, the package is not installed
+#
+# An update that exits 0 having fetched nothing is worse than the hang, because
+# the failure moves to whatever needed the package. So https is not available to
+# us until something installs ca-certificates, which needs apt, which is the
+# circle. The bounds below are what IS available.
+#
+# They are adequate here in a way they were not on the runner. #1029 measured
+# Timeout/Retries alone still stalling 29 minutes, but that was ~52 index URLs;
+# a bare container lists four suites, so a total stall costs minutes and ends in
+# an honest error rather than a 12-minute silent kill. Bounded to something
+# useful, at this scale.
 #
 # apt-only, deliberately: dnf/yum/zypper/apk/pacman take none of these flags and
 # would fail on an unknown option — turning a mirror stall on one distro into a
 # hard argument error on five.
-_APT_BOUND='-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=3 -o Acquire::ForceIPv4=true'
+#
+# NOTE `Acquire::http::Timeout` does not govern https connections (#1029), hence
+# both. No ForceIPv4: an earlier version of this carried it on the theory that a
+# blackholed AAAA caused the stall. #1029 then measured the real cause on the
+# runner to be the SCHEME, not the address family. The flag was harmless but its
+# stated reason was wrong, and a flag shipped on a contradicted hypothesis is
+# the kind of thing that gets copied forward as fact.
+_APT_BOUND='-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=3'
 
 # Bounded + retried package-manager invocation; "$@" = the PM argv.
 #
