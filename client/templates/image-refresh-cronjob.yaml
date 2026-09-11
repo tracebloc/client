@@ -500,6 +500,13 @@ data:
 
     restart_needed=0
     annotate_args=""
+    # Pass-0 diagnostic annotations -- the `stale-pin-<image>` clears and
+    # finding-sets -- accumulate SEPARATELY from annotate_args and are written in
+    # their own bounded annotate BEFORE the restart block (#1008 item 1).
+    # They touch only the stale-pin keys, never `last-refreshed-<image>-digest`,
+    # so they are safe to land before the rollout; keeping them out of the final
+    # annotate is what lets them survive a latched-flap tick (see the write site).
+    stale_pin_args=""
     # `kubectl set image` argument lists, accumulated per WORKLOAD (a single
     # `set image` call can carry several container=ref pairs, so the
     # two-container jobs-manager Deployment is re-imaged in one patch and
@@ -585,7 +592,7 @@ data:
           disabled_stale_key="tracebloc.io/stale-pin-${repo#*/}"
           if [ -n "$(get_annotation "$disabled_stale_key" || true)" ]; then
             log "        clearing ${disabled_stale_key}: this image is no longer pinned by a digest"
-            annotate_args="$annotate_args ${disabled_stale_key}-"
+            stale_pin_args="$stale_pin_args ${disabled_stale_key}-"
           fi
           continue
         fi
@@ -613,7 +620,7 @@ data:
           # (@saqlainsyed007 + Bugbot on client#824.)
           if [ -n "$(get_annotation "$stale_key" || true)" ]; then
             log "        clearing a previous ${stale_key}: the pin is current again"
-            annotate_args="$annotate_args ${stale_key}-"
+            stale_pin_args="$stale_pin_args ${stale_key}-"
           fi
         else
           log "  WARN: PIN IS STALE. values pin ${pin_digest}"
@@ -624,7 +631,7 @@ data:
           log "        in values (backend#2458)."
           # Queryable after the log ages out, on the same object the refresh
           # annotations use, so `kubectl describe` shows pin state beside refresh state.
-          annotate_args="$annotate_args ${stale_key}=${pin_latest}"
+          stale_pin_args="$stale_pin_args ${stale_key}=${pin_latest}"
         fi
         continue
       fi
@@ -637,7 +644,7 @@ data:
         unpinned_stale_key="tracebloc.io/stale-pin-${repo#*/}"
         if [ -n "$(get_annotation "$unpinned_stale_key" || true)" ]; then
           log "  clearing ${unpinned_stale_key}: this image is no longer pinned"
-          annotate_args="$annotate_args ${unpinned_stale_key}-"
+          stale_pin_args="$stale_pin_args ${unpinned_stale_key}-"
         fi
 
       latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "$IMAGE_REGISTRY" || true)"
@@ -880,6 +887,32 @@ data:
           ;;
       esac
     done
+
+    # Pass-0 annotations land HERE, before the restart block (#1008 item 1).
+    # The restart block's #563 flap guard does `WARN + FLAP_KEY + exit 0`
+    # once refresh-attempt >= MAX_REFRESH_ATTEMPTS -- BEFORE the digest-record
+    # annotate at the end of the tick. So on a tick that is both off-digest
+    # (restart_needed=1) and latched, batching the stale-pin writes into that
+    # final annotate dropped them: a stale-pin CLEAR that never landed leaves a
+    # FALSE "pin is stale" finding to persist forever (a write-only annotation
+    # outliving its problem -- the class client#824's clear paths fixed), and it
+    # is dropped on the exact tick refresh is dead, when the finding matters most.
+    # These touch only the `stale-pin-<image>` keys, never
+    # `last-refreshed-<image>-digest`, so writing them before the rollout cannot
+    # affect the `recorded == latest` skip logic -- unlike the digest record,
+    # which MUST stay after a successful `rollout status`, since annotating the
+    # digest before a failed rollout would freeze the workload on the old image
+    # (@shujaatTracebloc on #1008). NON-FATAL, like the SKIP_KEY clear above
+    # (backend#2007): a transient failure on a diagnostic annotation must not
+    # abort the tick before the re-image; a stale value is re-reconciled next tick.
+    if [ -n "$stale_pin_args" ]; then
+      log "updating stale-pin annotations:$stale_pin_args"
+      # shellcheck disable=SC2086  # word-split stale_pin_args intentional
+      if ! sp_err="$(kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        $stale_pin_args --overwrite --request-timeout=15s 2>&1 >/dev/null)"; then
+        log "  WARNING: could not update stale-pin annotations on deployment/${DEPLOYMENT_NAME}: ${sp_err:-unknown error}. Continuing -- these are diagnostic bookkeeping and a stale value is re-reconciled on the next tick."
+      fi
+    fi
 
     # Order matters: rollout FIRST, annotate AFTER `rollout status`
     # succeeds. Annotating first would let a failed rollout silently
