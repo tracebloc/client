@@ -277,6 +277,16 @@ jobs:
           curl -fsSL --tlsv1.2 --retry 3 --connect-timeout 10 --max-time 120 \
             -o "$RUNNER_TEMP/gitleaks.tgz" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          # Assert the digest is a full SHA-256 before trusting it. `sha256sum -c`
+          # reports a malformed line as "no properly formatted checksum lines
+          # found", and whether that is a non-zero exit depends on the coreutils
+          # build (GNU exits 1; the macOS sha256sum exits 0). An empty or
+          # truncated env var must be a hard failure here, not a verification
+          # that quietly checks nothing and lets the install proceed.
+          if [[ ! "${GITLEAKS_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::GITLEAKS_SHA256 is not a 64-character hex SHA-256 digest."
+            exit 1
+          fi
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP/bin" gitleaks
           chmod 0755 "$RUNNER_TEMP/bin/gitleaks"
