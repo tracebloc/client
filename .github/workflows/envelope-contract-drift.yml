@@ -87,13 +87,36 @@ jobs:
   pin-staleness:
     name: pinned contract vs client-runtime's default branch
     runs-on: ubuntu-latest
+    # A stalled api.github.com must not hold a runner to the six-hour cap; a
+    # read that cannot finish is a cannot-tell, and cannot-tell has to FAIL, not
+    # hang (Bugbot Medium). The curl calls carry their own bounds too, so a hang
+    # inside one read fails that read rather than the whole job.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+
+      - name: Mint a read-only installation token for client-runtime
+        id: token
+        # GITHUB_TOKEN is scoped to THIS repo and cannot read another private
+        # one -- the job below read tracebloc/client-runtime with it and so
+        # failed closed on EVERY run, turning a pin comparison into a
+        # cannot-read error (Bugbot High, and it was right: this PR's own run
+        # went red that way). The envelope-contract job twenty lines down
+        # already solved this and says so in its comment; I added a second
+        # cross-repo reader without reading the first. Same App, same least
+        # privilege: named `repositories`, contents:read only.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: client-runtime
+          permission-contents: read
 
       - name: Compare the pinned contract against the producer's default branch
         env:
           EVENT: ${{ github.event_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
           ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
@@ -102,7 +125,8 @@ jobs:
           # FAIL CLOSED on both reads: a fetch I could not do is not evidence the
           # pin is fresh, and two unknowns must never compare equal (rule 3).
           fetch() {
-            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+              -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github.raw" \
               "https://api.github.com/repos/tracebloc/client-runtime/contents/envelope_contract.json?ref=$1"
           }
