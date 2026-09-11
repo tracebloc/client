@@ -920,28 +920,41 @@ telemetryCollector:
 # Setting `digest` here is still meaningful: it is an explicit operator pin
 # that also opts the image OUT of auto-refresh.
 images:
-  # Registry the tracebloc-PUBLISHED control-plane images are pulled from:
-  # tracebloc/jobs-manager, tracebloc/pods-monitor, tracebloc/resource-monitor
-  # and the requests-proxy (which runs the jobs-manager image). A bare host, no
+  # Registry the tracebloc-PUBLISHED images are pulled from: the control-plane
+  # images (tracebloc/jobs-manager, tracebloc/pods-monitor,
+  # tracebloc/resource-monitor and the requests-proxy, which runs the
+  # jobs-manager image) AND the training-image host -- JOB_IMAGE_HOST, the
+  # "<registry>/" prefix jobs-manager stamps onto every training image it
+  # spawns (tracebloc/client-<task>-<arch>:<CLIENT_ENV>). A bare host, no
   # scheme. Resolved by the tracebloc.tbRegistry helper as ONE precedence chain
   # -- `global.imageRegistry` (a mirror re-homes everything) always wins, then
-  # this, then the chart default -- so the pods, the image-refresh CronJob and
-  # NOTES.txt cannot disagree about where those images live.
+  # this, then the chart default -- so the pods, the training pods they spawn,
+  # the image-refresh CronJob and NOTES.txt cannot disagree about where those
+  # images live.
   #
-  # This knob moves ONLY the tracebloc images: busybox, squid, alpine/*, the
-  # device plugins and the ingestor keep their own registries, and
+  # This knob moves ONLY the tracebloc images, and it moves the control plane
+  # and the training-image host TOGETHER: busybox, squid, alpine/*, the device
+  # plugins and the ingestor keep their own registries, and
   # tracebloc/mysql-client stays on docker.io (frozen, digest-pinned, published
-  # nowhere else -- see images.mysqlClient). The training-image host
-  # (JOB_IMAGE_HOST) is not routed through it yet; that moves in its own step.
+  # nowhere else -- see images.mysqlClient).
   #
-  # The tracebloc images are published to BOTH docker.io and ghcr.io, at the
-  # same digests. Setting this to "ghcr.io" on one edge is how to try the
-  # ghcr.io copies before the chart default moves; setting it back is the
-  # per-edge rollback once it has. Image-refresh follows it: the CronJob
-  # resolves digests on this registry (it can do so anonymously on docker.io
-  # and ghcr.io; any other value makes the reconcile inert and the pods
+  # ghcr.io is where the control-plane and training images are published since
+  # the GHCR migration, and it is the chart default. They are still
+  # dual-published to docker.io at the same digests for now, so "docker.io"
+  # remains a valid value and is the per-edge rollback
+  # (`--set images.traceblocRegistry=docker.io`; user-supplied, so it survives
+  # the fleet auto-upgrade until cleared). Digest pins (images.*.digest, and
+  # the training-image digest pins below) are registry-agnostic: the same digest
+  # exists on both. No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
+  # for layer redirects) is already required for the ingestor image and probed
+  # by the installer preflight. Image-refresh follows it: the CronJob resolves
+  # digests on this registry (it can do so anonymously on ghcr.io and docker.io;
+  # any other value makes the reconcile inert and the pods
   # imagePullPolicy=Always, exactly as a global.imageRegistry mirror does).
-  traceblocRegistry: "docker.io"
+  # The tracebloc.tbRegistry helper's own fallback for an EMPTY or absent key
+  # restates this default; tests/tracebloc_registry_test.yaml pins both to one
+  # value so they cannot drift apart unseen.
+  traceblocRegistry: "ghcr.io"
   jobsManager:
     digest: ""
   # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for

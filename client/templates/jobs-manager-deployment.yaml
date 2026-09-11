@@ -672,13 +672,18 @@ spec:
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}
         # JOB_IMAGE_HOST is the registry prefix jobs-manager stamps onto every
-        # training-job image it spawns. Honour a private mirror set via
-        # global.imageRegistry (#585) so an air-gapped/mirrored install pulls job
-        # images from the same registry as the chart's own images; defaults to
-        # docker.io/ when no mirror is configured. Nil-guarded for pre-this-key
-        # --reset-then-reuse-values upgrades.
+        # training-job image it spawns. Rendered from tracebloc.tbRegistry -- the
+        # SAME precedence chain as the control-plane images, so the two cannot
+        # point at different registries: a private mirror set via
+        # global.imageRegistry (#585) wins, so an air-gapped/mirrored install
+        # pulls job images from the same registry as the chart's own images;
+        # else images.traceblocRegistry (the per-edge rollback knob); else the
+        # chart default, ghcr.io since the GHCR migration (the training images
+        # are published there at the same digests as on Docker Hub). The helper
+        # is nil-guarded for pre-this-key --reset-then-reuse-values upgrades.
+        # Trailing slash: the runtime concatenates <host><repo>:<tag> verbatim.
         - name: JOB_IMAGE_HOST
-          value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
+          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- if include "tracebloc.useImagePullSecrets" . }}
         # IMAGE_PULL_SECRET_NAME is the pull Secret jobs-manager puts on the
         # TRAINING pods it spawns (backend#2119). It has to be injected rather
@@ -952,10 +957,11 @@ spec:
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
-        # See the api container's JOB_IMAGE_HOST note (#585): honour a private
-        # mirror set via global.imageRegistry, defaulting to docker.io/.
+        # See the api container's JOB_IMAGE_HOST note (#585): rendered from
+        # tracebloc.tbRegistry, so a global.imageRegistry mirror wins, then
+        # images.traceblocRegistry, then the chart default (ghcr.io).
         - name: JOB_IMAGE_HOST
-          value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
+          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
         # See the api container's RESOURCE_REQUESTS note (backend#664,

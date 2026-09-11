@@ -49,7 +49,8 @@ spec:
           # `Always` re-pulled on every restart even when the image was already
           # cached, so an offline Docker/WSL restart landed in ImagePullBackOff.
           #
-          # This Deployment runs the SAME docker.io/tracebloc/jobs-manager image as
+          # This Deployment runs the SAME tracebloc/jobs-manager image (from the
+          # tracebloc.tbRegistry registry) as
           # the jobs-manager Deployment, and image-refresh now reconciles both to
           # the same digest in one tick. Before #569 it reconciled only
           # `<release>-jobs-manager`, so requests-proxy silently skewed: it stayed

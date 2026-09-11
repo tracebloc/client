@@ -1,0 +1,29 @@
+# .publish-include — what the public mirror of this repo MAY carry.
+#
+# Read by scripts/publish-guard.sh. One glob per line; `#` starts a comment.
+# `*` and `?` do not cross `/`, `**` does; a leading `!` takes matching files
+# back out. Only tracked files are considered. Anything not matched here is
+# excluded by construction — .publish-forbidden is the second lock, and it
+# refuses the excluded directories below even if the `!` lines were deleted.
+
+# The two Helm charts that `helm repo add tracebloc https://tracebloc.github.io/client`
+# serves. Their unit-test suites and CI values never ship (see .helmignore).
+client/**
+!client/tests/**
+!client/ci/**
+ingestor/**
+
+# The installer: the two bootstraps plus every file they fetch and verify
+# against scripts/manifest.sha256 (the sub-scripts live under scripts/lib/).
+scripts/install.sh
+scripts/install.ps1
+scripts/install-k8s.sh
+scripts/install-k8s.ps1
+scripts/lib/**
+scripts/manifest.sha256
+
+# Front matter, and the operator docs README links to. One level only:
+# docs/rfcs/ and docs/migration-tools/ stay home.
+README.md
+LICENSE
+docs/*.md

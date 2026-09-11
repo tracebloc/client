@@ -692,14 +692,14 @@ tests:
             name: NODE_AGENTS_NAMESPACE
             value: "tracebloc-node-agents"
 
-  - it: IMAGE_REGISTRY defaults to docker.io, not the empty string
+  - it: IMAGE_REGISTRY defaults to ghcr.io, not the empty string
     # Regression guard with teeth. values.yaml ships `global.imageRegistry: ""`,
-    # so `dig "imageRegistry" "docker.io" .Values.global` returns "" — the key
-    # EXISTS, so dig's own default never applies. Rendering "" here would make
-    # the script's mirror guard see "" != "docker.io" and go INERT on every
-    # default install, silently disabling auto-refresh fleet-wide. The template
-    # needs a trailing `| default "docker.io"`; this test is what catches its
-    # removal.
+    # so a bare `dig "imageRegistry" <fallback> .Values.global` returns "" — the
+    # key EXISTS, so dig's own default never applies. Rendering "" here would
+    # make the script's resolvable guard go INERT on every default install,
+    # silently disabling auto-refresh fleet-wide. tracebloc.tbRegistry owns the
+    # `| default` chain that ends in the chart default (ghcr.io since the GHCR
+    # migration); this test is what catches its removal.
     template: templates/image-refresh-cronjob.yaml
     documentIndex: 1
     asserts:
@@ -707,7 +707,7 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: IMAGE_REGISTRY
-            value: "docker.io"
+            value: "ghcr.io"
 
   - it: IMAGE_REGISTRY follows a configured private mirror
     template: templates/image-refresh-cronjob.yaml
@@ -1032,21 +1032,37 @@ tests:
     template: templates/image-refresh-cronjob.yaml
     documentIndex: 0
     asserts:
-      # the stale-pin writes go to their own accumulator, not annotate_args
+      # ALL FOUR stale-pin writes go to their own accumulator, not annotate_args.
+      # Every key gets a positive (goes to stale_pin_args) AND a negative (does NOT
+      # ride annotate_args) -- Bugbot Low + @saadqbal on #1039: a key covered by
+      # neither could be re-batched into annotate_args and dropped on a latched
+      # tick while both suites stayed green (this guard's own thesis, one level up).
+      # The two clears:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'stale_pin_args="\$stale_pin_args \$\{stale_key\}-"'
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'stale_pin_args="\$stale_pin_args \$\{unpinned_stale_key\}-"'
+      # the disabled-monitor clear (the third clear -- was uncovered):
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'stale_pin_args="\$stale_pin_args \$\{disabled_stale_key\}-"'
+      # the finding-SET (a lost set means a real staleness goes unreported):
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'stale_pin_args="\$stale_pin_args \$\{stale_key\}=\$\{pin_latest\}"'
       # and that accumulator is annotated BEFORE the restart block (ordering)
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: '(?s)if \[ -n "\$stale_pin_args" \]; then.*if \[ "\$restart_needed" -eq 1 \]; then'
-      # the stale-pin keys must NOT ride the final digest-record annotate_args
+      # NONE of the stale-pin keys may ride the final digest-record annotate_args
       - notMatchRegex:
           path: data["image-refresh.sh"]
           pattern: 'annotate_args="\$annotate_args \$\{stale_key\}'
       - notMatchRegex:
           path: data["image-refresh.sh"]
           pattern: 'annotate_args="\$annotate_args \$\{unpinned_stale_key\}'
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'annotate_args="\$annotate_args \$\{disabled_stale_key\}'

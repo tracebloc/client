@@ -493,7 +493,8 @@ data:
 
     # =================================================================
     # Pass 1 — the control-plane images: jobs-manager, pods-monitor,
-    # resource-monitor. docker.io, floating CLIENT_ENV tag,
+    # resource-monitor. IMAGE_REGISTRY (tracebloc.tbRegistry), floating
+    # CLIENT_ENV tag,
     # annotation-based source of truth, action = kubectl set image.
     # =================================================================
 

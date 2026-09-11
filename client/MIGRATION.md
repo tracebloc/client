@@ -2,6 +2,108 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.114 — training pods pull from the tracebloc registry (`ghcr.io`) by default
+
+The training-image host now follows `images.traceblocRegistry`: `JOB_IMAGE_HOST`,
+the registry prefix the jobs-manager stamps onto every training image it spawns
+(`tracebloc/client-<task>-<cpu|gpu>:<CLIENT_ENV>`), renders as **`ghcr.io/`** at
+the chart default instead of `docker.io/`, on both jobs-manager containers. It is
+resolved by the same `tracebloc.tbRegistry` helper as the control-plane images,
+as ONE precedence chain: a `global.imageRegistry` mirror wins, then
+`images.traceblocRegistry`, then the chart default. From this version the
+control plane (moved in 1.9.113) and the training pods pull from the same
+registry and cannot be pointed at different ones.
+
+**Why:** every training image is published to GHCR at the same digests as its
+Docker Hub copy (the GHCR migration), so this changes where the training pods
+pull from, not which bytes run.
+
+**What you need to do: nothing for most edges.**
+
+- **Egress.** No new host: `ghcr.io` (and `pkg-containers.githubusercontent.com`,
+  where GHCR redirects layer downloads) is already required for the
+  control-plane images since 1.9.113 and for the ingestor image before that.
+  If your allowlist was built by hand from an older egress table, add both
+  before upgrading. Docker Hub is still needed for k3s, `tracebloc/mysql-client`
+  and busybox.
+- **One rollout, then one pull per task.** The jobs-manager pod template changes
+  (`JOB_IMAGE_HOST`), so the upgrade rolls the jobs-manager once. The next
+  experiment of each task pulls its training image from `ghcr.io` — a full pull
+  the first time, as after any tag move; the digest-pinned spawn path
+  (`TRAINING_IMAGE_DIGESTS`) is unaffected, the same digest exists on both
+  registries.
+- **Mirrors.** Edges with `global.imageRegistry` set are unaffected: the mirror
+  re-homes every image, `JOB_IMAGE_HOST` included, and always wins — exactly as
+  before.
+- **Runtime default.** The chart always sets `JOB_IMAGE_HOST`, so the
+  client-runtime's own fallback for an *unset* variable (changed separately, in
+  that project) only ever applies to installs from before the chart carried the
+  key.
+
+**Rollback (per edge):** the same knob as 1.9.113 — it moves the control plane
+AND the training-image host back to Docker Hub together, and, being
+user-supplied, it persists across the fleet auto-upgrade until you clear it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.traceblocRegistry=docker.io
+```
+
+Confirm which host the training pods will pull from:
+
+```bash
+kubectl get deploy -n <namespace> <release>-jobs-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="JOB_IMAGE_HOST")].value}{"\n"}'
+```
+
+## Upgrading to 1.9.113 — the control-plane images pull from `ghcr.io` by default
+
+`images.traceblocRegistry` now defaults to **`ghcr.io`**: the four
+tracebloc-published control-plane images (jobs-manager, pods-monitor,
+resource-monitor, and the requests-proxy, which runs the jobs-manager image)
+are pulled from GitHub Container Registry instead of Docker Hub. The
+image-refresh CronJob resolves digests there too (`IMAGE_REGISTRY`), and
+`NOTES.txt` reports it. Nothing else moves: `tracebloc/mysql-client`, busybox
+and the other third-party images keep their registries, the training-image host
+(`JOB_IMAGE_HOST`) is unchanged, and a `global.imageRegistry` mirror still wins
+over everything.
+
+**Why:** the control-plane packages are public on GHCR and published there by
+digest alongside the Docker Hub copies (the GHCR migration). The same digests
+exist on both registries, so this changes where the bytes come from, not which
+bytes run.
+
+**What you need to do: nothing for most edges.**
+
+- **Egress.** No new host: `ghcr.io` (and `pkg-containers.githubusercontent.com`,
+  where GHCR redirects layer downloads) is already required for the ingestor
+  image and probed by the installer preflight. If your allowlist was built by
+  hand from an older egress table, add both before upgrading.
+- **One rollout.** The image reference in each control-plane pod template
+  changes (`docker.io/…` → `ghcr.io/…`), so the upgrade rolls those pods once
+  and the kubelet pulls the new reference. `imagePullPolicy: IfNotPresent`
+  behaves as before from then on.
+- **Digest pins.** `images.*.digest` values keep working unchanged — the pin
+  renders as `ghcr.io/tracebloc/<image>@<digest>`, and the digest is the same
+  on both registries.
+- **Mirrors.** Edges with `global.imageRegistry` set are unaffected: the mirror
+  re-homes every image and always wins.
+
+**Rollback (per edge):** point the knob back at Docker Hub. It is user-supplied,
+so it persists across the fleet auto-upgrade until you clear it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.traceblocRegistry=docker.io
+```
+
+Confirm which registry an edge pulls from:
+
+```bash
+kubectl get deploy -n <namespace> <release>-jobs-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
+
 ## Upgrading to 1.9.105 — `env.GPU_LIMITS` alone now renders an equal `GPU_REQUESTS` (client#995)
 
 Nothing to do if your values set both keys, or neither — that is every edge the
