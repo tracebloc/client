@@ -333,9 +333,19 @@
       "description": "Use ClusterRole (true) or namespace-scoped Role (false). Defaults to true."
     },
     "resourceMonitor": {
-      "type": "boolean",
-      "default": true,
-      "description": "Deploy resource-monitor DaemonSet. Defaults to true."
+      "type": [
+        "boolean",
+        "object"
+      ],
+      "description": "Deploy the resource-monitor DaemonSet. RFC-0076 (D2): prefer the object form `resourceMonitor.enabled: <bool>`; the legacy scalar `resourceMonitor: <bool>` (and `--set resourceMonitor=true`) is still accepted through the alias window (remove_by: 2026-12-31) — see tracebloc.resourceMonitorEnabled. Defaults to enabled.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Deploy the resource-monitor DaemonSet. Defaults to true."
+        }
+      },
+      "additionalProperties": false
     },
     "nodeAgents": {
       "type": "object",
@@ -794,7 +804,7 @@
         "traceblocRegistry": {
           "type": "string",
           "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?)?$",
-          "description": "Registry the tracebloc-published control-plane images (jobs-manager, pods-monitor, resource-monitor, requests-proxy) are pulled from. A bare host, no scheme; empty renders the chart default. global.imageRegistry always wins when set. Moves ONLY the tracebloc images (mysql-client stays on docker.io; third-party images keep their own registry keys; JOB_IMAGE_HOST is not routed through it yet). Image-refresh resolves digests on this registry and can only do so anonymously on docker.io and ghcr.io -- any other value makes the reconcile inert and the pods imagePullPolicy=Always, like a mirror."
+          "description": "Registry the tracebloc-published images are pulled from: the control-plane images (jobs-manager, pods-monitor, resource-monitor, requests-proxy) and the training-image host JOB_IMAGE_HOST (the '<registry>/' prefix jobs-manager stamps onto every training image it spawns) -- both move together. A bare host, no scheme; empty renders the chart default. global.imageRegistry always wins when set. Moves ONLY the tracebloc images (mysql-client stays on docker.io; third-party images and the ingestor keep their own registry keys). Image-refresh resolves digests on this registry and can only do so anonymously on docker.io and ghcr.io -- any other value makes the reconcile inert and the pods imagePullPolicy=Always, like a mirror."
         },
         "jobsManager": {
           "type": "object",

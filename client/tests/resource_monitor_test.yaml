@@ -251,3 +251,99 @@ tests:
       - equal:
           path: metadata.namespace
           value: tracebloc-node-agents
+
+  # ── RFC-0076 bool→object alias window (client#1009) ───────────────────────────
+  # `resourceMonitor: <bool>` is being renamed to `resourceMonitor.enabled: <bool>`
+  # (D2). This is a bool→object change, so a stored values.yaml or a bare
+  # `--set resourceMonitor=true` still arrives as a SCALAR; the templates route the
+  # gate through tracebloc.resourceMonitorEnabled, which must honour BOTH shapes
+  # for the whole window (remove_by: 2026-12-31). There are two crash directions
+  # the helper prevents: a blind `ne .Values.resourceMonitor false` gate fails
+  # "incompatible types for comparison: map and bool" on the new object, and a
+  # blind `.Values.resourceMonitor.enabled` read fails "can't evaluate field
+  # enabled in interface {}" on the legacy scalar. The three canonical inputs are
+  # legacy scalar, new object, and unset; null (a --reuse-values upgrade from a
+  # chart that predates the key) and `{}` (object with .enabled absent) are the
+  # two edges of "unset".
+  - it: renders the DaemonSet for the legacy scalar resourceMonitor=true
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+
+  - it: renders the DaemonSet for the new object resourceMonitor.enabled=true
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+
+  - it: renders the DaemonSet on the chart default (unset — values.yaml object form)
+    template: templates/resource-monitor-daemonset.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+
+  - it: treats an absent key (null, --reuse-values from a pre-key chart) as enabled
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor: null
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+
+  - it: treats an object with .enabled absent as enabled (default true)
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor: {}
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: DaemonSet
+
+  - it: renders nothing for the legacy scalar resourceMonitor=false
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders nothing for the new object resourceMonitor.enabled=false
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # The object form CLOSES its keys (values.schema.json additionalProperties:
+  # false), so a mistyped `enabled` (enable / Enabled / disabled) is REFUSED at
+  # chart load rather than silently `dig`-defaulting back to true and turning the
+  # monitor back on — a silent-misconfiguration surface the scalar had no sub-key
+  # to expose. BARE failedTemplate, per the auto-upgrade schema tests: 0.5.2
+  # reports a schema rejection as an errored test with no matchable render error,
+  # and errorPattern is silently ignored (backend#2606). To pin the specific
+  # "additional properties 'enable' not allowed" text, assert it from outside the
+  # plugin with `helm template` + grep.
+  - it: refuses a mistyped enabled sub-key instead of silently staying enabled
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      resourceMonitor:
+        enable: false
+    asserts:
+      - failedTemplate: {}

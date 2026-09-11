@@ -5,7 +5,7 @@
 {{ "\033[1;35m" }}Components:{{ "\033[0m" }}
   - {{ "\033[1;34m" }}Jobs Manager:{{ "\033[0m" }}            {{ "\033[0;33m" }}{{ include "tracebloc.fullname" . }}-jobs-manager{{ "\033[0m" }}
   - {{ "\033[1;34m" }}MySQL Host:{{ "\033[0m" }}                   {{ "\033[0;33m" }}mysql-client{{ "\033[0m" }}
-{{- if ne .Values.resourceMonitor false }}
+{{- if (include "tracebloc.resourceMonitorEnabled" .) }}
   - {{ "\033[1;34m" }}Resource Monitor (DS):{{ "\033[0m" }}   {{ "\033[0;33m" }}{{ include "tracebloc.resourceMonitorName" . }}{{ "\033[0m" }}
 {{- end }}
 
@@ -13,7 +13,7 @@
   {{ "\033[1;34m" }}Service Account:{{ "\033[0m" }}  {{ "\033[0;33m" }}{{ include "tracebloc.serviceAccountName" . }}{{ "\033[0m" }}
   {{ "\033[1;34m" }}Secret:{{ "\033[0m" }}           {{ "\033[0;33m" }}{{ include "tracebloc.secretName" . }}{{ "\033[0m" }}
   {{ "\033[1;34m" }}RBAC scope:{{ "\033[0m" }}       {{ "\033[0;33m" }}{{ if ne .Values.clusterScope false }}Cluster{{ else }}Namespace{{ end }}{{ "\033[0m" }}
-  {{ "\033[1;34m" }}Image registry:{{ "\033[0m" }}   {{ "\033[1;32m" }}{{ include "tracebloc.tbRegistry" . }}{{ "\033[0m" }} (tracebloc control-plane images)
+  {{ "\033[1;34m" }}Image registry:{{ "\033[0m" }}   {{ "\033[1;32m" }}{{ include "tracebloc.tbRegistry" . }}{{ "\033[0m" }} (tracebloc control-plane + training images)
 {{- if (default dict .Values.hostPath).enabled }}
   {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}hostPath (bare-metal){{ "\033[0m" }}
   {{ "\033[1;34m" }}Host dirs:{{ "\033[0m" }}        {{ "\033[0;33m" }}/tracebloc/data, /tracebloc/logs, /tracebloc/mysql (on the node){{ "\033[0m" }}

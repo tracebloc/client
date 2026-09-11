@@ -126,6 +126,42 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{ include "tracebloc.fullname" . }}-resource-monitor
 {{- end }}
 
+{{/*
+  tracebloc.resourceMonitorEnabled — the SINGLE reader of "is the resource-monitor
+  on", coalescing the two value shapes during the RFC-0076 alias window
+  (remove_by: 2026-12-31, client#1009):
+
+    legacy scalar   resourceMonitor: <bool>
+    new object      resourceMonitor.enabled: <bool>   (D2: <component>.enabled)
+
+  This is a bool→object rename, so a stored values.yaml or a bare
+  `--set resourceMonitor=true` still arrives as a SCALAR. Reading
+  `.Values.resourceMonitor.enabled` blindly would `fail` with "can't evaluate
+  field enabled in interface {}" on the scalar and, on a `--reuse-values`
+  upgrade that carries the scalar forward, silently drop the setting. So decide
+  the shape with kindIs and prefer the new `.enabled` form:
+
+    map     -> .enabled, defaulting to true when the key is absent
+    bool    -> the scalar itself
+    absent  -> enabled (the historical default: `ne <nil> false` was true)
+
+  Effective behaviour is unchanged: resourceMonitor.enabled=true does exactly
+  what resourceMonitor=true did. Emits "true" or nothing, so callers use
+  `(include "tracebloc.resourceMonitorEnabled" .)` in an `and`/`or` and
+  `not (include ...)` for the disabled case — the same idiom as
+  tracebloc.nodeAgentsInUse.
+*/}}
+{{- define "tracebloc.resourceMonitorEnabled" -}}
+{{- $rm := .Values.resourceMonitor -}}
+{{- if kindIs "map" $rm -}}
+{{- if ne (dig "enabled" true $rm) false -}}true{{- end -}}
+{{- else if kindIs "invalid" $rm -}}
+{{- "true" -}}
+{{- else -}}
+{{- if ne $rm false -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.rbacName" -}}
 {{ include "tracebloc.fullname" . }}-jobs-manager-rbac
 {{- end }}
@@ -384,11 +420,12 @@ nvidia-device-plugin-daemonset
     * `resourceMonitor: false` — there is no DaemonSet at all, so there is
       nothing to reconcile and a cross-namespace `set image` would just fail.
 
-  Nil-safe: `.Values.resourceMonitor` absent reads as enabled, matching the
-  `ne .Values.resourceMonitor false` gate on the DaemonSet itself.
+  Nil-safe via tracebloc.resourceMonitorEnabled, which absent reads as enabled,
+  matching the gate on the DaemonSet itself and honouring both the legacy scalar
+  and the new resourceMonitor.enabled object form.
 */}}
 {{- define "tracebloc.resourceMonitorRefreshPinned" -}}
-{{- if eq .Values.resourceMonitor false -}}
+{{- if not (include "tracebloc.resourceMonitorEnabled" .) -}}
 true
 {{- else if (default dict (default dict .Values.images).resourceMonitor).digest -}}
 true
@@ -603,21 +640,26 @@ docker.io ghcr.io
 {{- end -}}
 
 {{/*
-tracebloc.tbRegistry — the registry the tracebloc-PUBLISHED control-plane images
-(tracebloc/jobs-manager, tracebloc/pods-monitor, tracebloc/resource-monitor, and
-the requests-proxy, which runs the jobs-manager image) are pulled from.
+tracebloc.tbRegistry — the registry the tracebloc-PUBLISHED images are pulled
+from: the control-plane images (tracebloc/jobs-manager, tracebloc/pods-monitor,
+tracebloc/resource-monitor, and the requests-proxy, which runs the jobs-manager
+image) AND the host jobs-manager stamps onto every training image it spawns
+(JOB_IMAGE_HOST, rendered as "<registry>/" on both jobs-manager containers).
 
-ONE precedence chain, so the four call sites, the image-refresh CronJob and
-NOTES.txt cannot disagree about where those images live:
+ONE precedence chain, so the four control-plane call sites, the two
+JOB_IMAGE_HOST sites, the image-refresh CronJob and NOTES.txt cannot disagree
+about where those images live:
 
   1. `global.imageRegistry`      — a private mirror re-homes EVERY image the
                                     chart pulls (#585), tracebloc/* included.
                                     It always wins.
-  2. `images.traceblocRegistry`  — the tracebloc-only knob: moves just the
-                                    tracebloc-published images, leaving busybox,
-                                    squid, alpine/*, the device plugins and the
-                                    ingestor where they are. Also the per-edge
-                                    rollback: set it to the previous registry.
+  2. `images.traceblocRegistry`  — the tracebloc-only knob: moves the
+                                    tracebloc-published images -- control plane
+                                    and training-image host TOGETHER -- leaving
+                                    busybox, squid, alpine/*, the device plugins
+                                    and the ingestor where they are. Also the
+                                    per-edge rollback: set it to the previous
+                                    registry.
   3. "ghcr.io"                   — the chart default since the GHCR migration.
                                     The images are still dual-published to
                                     Docker Hub at the same digests, so
@@ -625,8 +667,9 @@ NOTES.txt cannot disagree about where those images live:
 
 NOT routed through here, on purpose: `tracebloc/mysql-client` (frozen,
 digest-pinned, published only to Docker Hub — see images.mysqlClient), the
-third-party images (each has its own `registry` key), and — for now — the
-training-image host JOB_IMAGE_HOST, which moves in its own step.
+third-party images (each has its own `registry` key), and the ingestor, which is
+named by full repository (images.ingestor.repository, already on ghcr.io) and
+follows only the global mirror.
 
 Every read is nil-guarded and `| default`-chained: values.yaml ships
 `global.imageRegistry: ""` (the key EXISTS, so `dig`'s own fallback never
@@ -1550,7 +1593,7 @@ https://api.tracebloc.io/
   became a second tenant, two of them were widened and the rest were not." The
   tri-state made `enabled` a second copy of the answer for a third time.
 */ -}}
-{{- if or (ne .Values.resourceMonitor false) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
+{{- if or (include "tracebloc.resourceMonitorEnabled" .) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
 {{- end -}}
 
 {{/*

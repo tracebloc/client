@@ -232,7 +232,7 @@ roleRef:
 {{- end }}
 
 {{- $nodeAgentsNs := dig "namespace" "name" "" (.Values.nodeAgents | default dict) }}
-{{- if and (ne .Values.resourceMonitor false) $nodeAgentsNs (ne $nodeAgentsNs .Release.Namespace) }}
+{{- if and (include "tracebloc.resourceMonitorEnabled" .) $nodeAgentsNs (ne $nodeAgentsNs .Release.Namespace) }}
 ---
 {{/*
   jobs-manager reads the resource-monitor DaemonSet for the heartbeat version
