@@ -29,62 +29,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
-
-# ── Make the container resemble a real host ──────────────────────────────────
-# Anyone running the real installer reached it via `curl | bash`, so curl always
-# exists and the box has sudo. Minimal base images ship neither — install them
-# up front (we are root here) so the rest of the run mirrors a real machine.
-# These bootstrap installs run in an EPHEMERAL CI container against distro mirrors
-# that occasionally STALL rather than fail. An unbounded package-manager call then
-# hangs until the job's `timeout-minutes`, which GitHub reports as `cancelled` — NOT
-# a red check — so the failure is silent (this is the exact class that bit the
-# sibling path-persist job's opensuse leg on 2026-08-31; backend#2859). Bound each
-# attempt and retry: a transient stall recovers, a dead mirror fails FAST with an
-# honest error. `command -v` (not has()) because this runs BEFORE common.sh is
-# sourced; notices go to stderr. NB: this bounds the harness's own bootstrap only —
-# the real installer functions invoked below use common.sh's bounded probes.
-_pm_run() { # bounded + retried package-manager invocation; $@ = the PM argv
-  local i
-  for i in 1 2 3; do
-    if   command -v timeout  >/dev/null 2>&1; then timeout  "${TB_PM_TIMEOUT:-60}" "$@" && return 0
-    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "${TB_PM_TIMEOUT:-60}" "$@" && return 0
-    else "$@" && return 0; fi
-    echo "::warning::package-manager step stalled or failed (attempt $i/3): $*" >&2
-    # No backoff after the LAST attempt, so a dead mirror fails RED here well under
-    # the job's timeout-minutes rather than running the clock out into a silent
-    # `cancelled` (the failure class of #2859).
-    [ "$i" -lt 3 ] && sleep $((i * 5))
-  done
-  echo "::error::package-manager step failed after 3 bounded attempts: $* — the package manager could not reach its mirrors from inside the CI container. This is NOT this PR's diff. Re-running often does NOT help: two consecutive attempts failed identically on 2026-09-11. If apt, the attempts above should carry Acquire::* bounds; if they did not, that is the bug." >&2
-  return 1
-}
-# APT NEEDS ITS OWN SOCKET BOUND, not just the external one _pm_run applies.
-#
-# `timeout 60` around apt kills a stalled fetch, but apt never learns anything: it
-# emits NO output, retries nothing, and the next attempt stalls identically. The
-# observed failure is three attempts of pure silence -- no `Err:`, no `W:`, no
-# `E:` -- then the job's 12m bound killing the container with exit 137. A refused
-# connection errors instantly; only a BLACKHOLED route (packets dropped, not
-# rejected) hangs like that, and apt's default socket timeout is long enough to
-# outlast the external kill every time.
-#
-# So bound apt where apt can act on it. `Acquire::http::Timeout=10` turns a
-# 60-second silent kill into a 10-second error apt can retry, and
-# `Acquire::Retries=3` lets it ride out a transient stall inside ONE attempt
-# instead of burning a whole _pm_run cycle. Same options tracebloc-engine's
-# test workflow already uses on its own `apt-get update`, which does not exhibit
-# this failure.
-#
-# ForceIPv4 is the MITIGATION FOR THE LIKELY CAUSE, not a proven one: a container
-# with no working IPv6 egress resolves an AAAA, connects, and waits -- the exact
-# silent-hang signature. There is no apt output to prove that from a stalled run,
-# so this is here because it is cheap and cannot hurt an IPv4-only path, not
-# because the logs named it.
-#
-# apt-only, deliberately: dnf/yum/zypper/pacman below take none of these flags
-# and would fail on an unknown option, converting a mirror stall into a hard
-# argument error on four distros to fix it on one.
-_APT_BOUND='-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=3 -o Acquire::ForceIPv4=true'
+# The bounded package-manager runner and apt's socket bounds live in ONE place;
+# both container harnesses source it. See scripts/tests/_pm.sh for why.
+# shellcheck source=scripts/tests/_pm.sh
+. "${BASH_SOURCE[0]%/*}/_pm.sh"
 
 _pm_install_one() { # install a single package with whatever PM exists
   if   command -v apt-get >/dev/null 2>&1; then
