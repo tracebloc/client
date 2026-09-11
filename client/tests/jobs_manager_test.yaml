@@ -106,13 +106,22 @@ tests:
           path: spec.template.spec.containers[0].image
           pattern: "^ghcr\\.io/tracebloc/"
 
-  - it: should set JOB_IMAGE_HOST to docker.io
+  - it: should set JOB_IMAGE_HOST to the tracebloc registry default (ghcr.io/) on both containers
+    # tracebloc.tbRegistry's chart default with the trailing slash the runtime
+    # concatenates onto <repo>:<tag>. The api and pods-monitor containers read
+    # the same helper, so both are pinned; tests/tracebloc_registry_test.yaml
+    # covers the knob and the mirror.
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: JOB_IMAGE_HOST
-            value: "docker.io/"
+            value: "ghcr.io/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "ghcr.io/"
 
   # ---------------------------------------------------------------------------
   # Ingestor image distribution (backend#1028 pin, backend#1245 distribution).
