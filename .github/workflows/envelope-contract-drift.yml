@@ -122,30 +122,57 @@ jobs:
           ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
           [ -n "$ref" ] || { echo "::error::scripts/.client-runtime-ref names no ref"; exit 1; }
 
-          # FAIL CLOSED on both reads: a fetch I could not do is not evidence the
+          # BOTH CONTRACTS, because the pin governs both. scripts/.client-runtime-ref
+          # says so in capitals -- "ONE REF, TWO CONTRACTS since backend#2378" --
+          # and the first version of this job compared only the envelope contract
+          # and then printed "the pin is current". An upstream-only change to
+          # log_redactions.json would have left the pin stale with this guard
+          # reporting green: the exact silent-green gap the job exists to close,
+          # reproduced one file over (Bugbot Medium). Checking one of two and
+          # reporting on both is worse than not checking, because it looks like
+          # cover.
+          #
+          # Left half is the path in client-runtime, right half is where this repo
+          # vendors it -- named together so adding a third contract is one line.
+          CONTRACTS="envelope_contract.json log_redactions.json"
+
+          # FAIL CLOSED on every read: a fetch I could not do is not evidence the
           # pin is fresh, and two unknowns must never compare equal (rule 3).
           fetch() {
             curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github.raw" \
-              "https://api.github.com/repos/tracebloc/client-runtime/contents/envelope_contract.json?ref=$1"
+              "https://api.github.com/repos/tracebloc/client-runtime/contents/$1?ref=$2"
           }
-          fetch "$ref" > /tmp/pinned.json \
-            || { echo "::error::cannot read envelope_contract.json at the pinned ref $ref"; exit 1; }
-          fetch develop > /tmp/head.json \
-            || { echo "::error::cannot read envelope_contract.json on client-runtime develop -- cannot tell whether the pin is stale"; exit 1; }
 
-          pinned="$(python3 scripts/contract-summary.py /tmp/pinned.json)"
-          head="$(python3 scripts/contract-summary.py /tmp/head.json)"
-          echo "pinned  ($ref): contract v${pinned%%|*}  overhead ${pinned#*|}"
-          echo "develop        : contract v${head%%|*}  overhead ${head#*|}"
+          stale=""
+          for path in $CONTRACTS; do
+            fetch "$path" "$ref" > "/tmp/pinned-$path" \
+              || { echo "::error::cannot read $path at the pinned ref $ref"; exit 1; }
+            fetch "$path" develop > "/tmp/head-$path" \
+              || { echo "::error::cannot read $path on client-runtime develop -- cannot tell whether the pin is stale"; exit 1; }
+            if cmp -s "/tmp/pinned-$path" "/tmp/head-$path"; then
+              echo "$path: pinned copy matches develop"
+            else
+              echo "$path: DIFFERS between the pinned ref and develop"
+              stale="$stale $path"
+            fi
+          done
 
-          if cmp -s /tmp/pinned.json /tmp/head.json; then
-            echo "the pin is current."
+          # The envelope contract carries a version worth naming in the message;
+          # log_redactions.json does not, so it is reported by name alone.
+          if [ -s /tmp/pinned-envelope_contract.json ]; then
+            pinned="$(python3 scripts/contract-summary.py /tmp/pinned-envelope_contract.json)"
+            head="$(python3 scripts/contract-summary.py /tmp/head-envelope_contract.json)"
+            echo "envelope contract: pinned v${pinned%%|*} (${pinned#*|})  vs  develop v${head%%|*} (${head#*|})"
+          fi
+
+          if [ -z "$stale" ]; then
+            echo "the pin is current for every contract it governs."
             exit 0
           fi
 
-          msg="this repo vendors envelope contract v${pinned%%|*} (${pinned#*|}) while client-runtime develop ships v${head%%|*} (${head#*|}). To adopt: bump scripts/.client-runtime-ref, re-vendor BOTH contracts, re-run scripts/gen-envelope-embed.sh (it rewrites the bash vectors AND the embedded literals in scripts/lib/install-client-helm.sh and scripts/install-k8s.ps1), then update the hand-written expectations the new numbers move."
+          msg="the pin is behind client-runtime develop for:$stale. To adopt: bump scripts/.client-runtime-ref, re-vendor BOTH contracts (scripts/tests/fixtures/envelope_contract.json and client/log_redactions.json), re-run scripts/gen-envelope-embed.sh (it rewrites the bash vectors AND the embedded literals in scripts/lib/install-client-helm.sh and scripts/install-k8s.ps1), then update the hand-written expectations the new numbers move."
           if [ "$EVENT" = "pull_request" ]; then
             echo "::warning::PIN STALE (not this PR's doing) -- $msg"
             exit 0
