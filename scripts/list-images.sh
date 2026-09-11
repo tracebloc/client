@@ -40,7 +40,11 @@
 #    chart images   <- `helm template` on YOUR values, so conditionals resolve
 #    mirror prefix  <- the rendered JOB_IMAGE_HOST
 #    ingestor       <- the rendered INGESTOR_IMAGE_REPOSITORY + TAG/DIGEST
-#    training tasks <- the registry's own `<prefix>client-*` repository list
+#    training tasks <- Docker Hub's `client-*` repository list for the namespace
+#                      (the NAMES; the host prefix is the rendered JOB_IMAGE_HOST,
+#                      ghcr.io by chart default since the GHCR migration -- the
+#                      images are dual-published under the same names, and GHCR
+#                      has no anonymous repository-list endpoint to derive from)
 #
 #  FAILS CLOSED (rule 3). A failed render, an unreadable registry, or a task
 #  enumeration of zero is an ERROR, not an empty section. "We could not tell"
@@ -262,6 +266,11 @@ else
   # refusal could only be reasoned about, never exercised -- and an unexercised
   # guard is indistinguishable from one that does not work (rule 5). Note that
   # common.sh prepends the system PATH, so stubbing `curl` is not an option.
+  # Docker Hub is queried for the repository NAMES whatever host the render
+  # stamps (ghcr.io by chart default): GHCR exposes no anonymous repository-list
+  # endpoint, and the training images are dual-published under the same names,
+  # so the names agree. A site that blocks Docker Hub but reaches the rendered
+  # host still enumerates via TRACEBLOC_REGISTRY_URL or TRACEBLOC_TASK_REPOS.
   page="${TRACEBLOC_REGISTRY_URL:-https://hub.docker.com/v2/repositories/${REGISTRY_NAMESPACE}/?page_size=100}"
   while [ -n "$page" ]; do
     # curl's OWN stderr is kept and shown. Bugbot, medium, and it matters here

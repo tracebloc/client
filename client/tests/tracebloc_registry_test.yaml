@@ -1,11 +1,14 @@
 suite: images.traceblocRegistry — the tracebloc-only registry knob (tracebloc.tbRegistry)
-# The tracebloc-PUBLISHED control-plane images (jobs-manager, pods-monitor,
-# resource-monitor, and the requests-proxy that runs the jobs-manager image) are
+# The tracebloc-PUBLISHED images -- the control-plane images (jobs-manager,
+# pods-monitor, resource-monitor, and the requests-proxy that runs the
+# jobs-manager image) and the training images jobs-manager spawns -- are
 # published to both docker.io and ghcr.io at the same digests. ONE helper,
-# tracebloc.tbRegistry, decides which registry the chart pulls them from, as one
-# precedence chain: global.imageRegistry (a mirror re-homes everything) wins,
-# then images.traceblocRegistry, then the chart default -- ghcr.io since the
-# GHCR migration, with docker.io the documented per-edge rollback.
+# tracebloc.tbRegistry, decides which registry the chart pulls them from, and
+# which host jobs-manager stamps onto the training images (JOB_IMAGE_HOST, on
+# both of its containers), as one precedence chain: global.imageRegistry (a
+# mirror re-homes everything) wins, then images.traceblocRegistry, then the
+# chart default -- ghcr.io since the GHCR migration, with docker.io the
+# documented per-edge rollback.
 #
 # Because ghcr.io IS the default, a knob set to ghcr.io exercises nothing: every
 # override test below sets the knob to docker.io (the rollback) or quay.example
@@ -13,9 +16,11 @@ suite: images.traceblocRegistry — the tracebloc-only registry knob (tracebloc.
 # That is what lets a helper that ignores the knob go red here.
 #
 # Pinned here, each of them a machine check for a sentence in values.yaml:
-#   1. The knob moves EXACTLY the tracebloc control-plane sites: busybox, the
-#      ingestor repo and JOB_IMAGE_HOST do not follow it, and mysql-client stays
-#      on docker.io (frozen, digest-pinned, published nowhere else).
+#   1. The knob moves EXACTLY the tracebloc-published sites -- the control-plane
+#      images AND the training-image host JOB_IMAGE_HOST, together, so one
+#      rollback moves both: busybox and the ingestor repo do not follow it, and
+#      mysql-client stays on docker.io (frozen, digest-pinned, published nowhere
+#      else).
 #   2. The mirror wins over the knob; an empty knob renders the default, not "".
 #   3. The image-refresh CronJob resolves digests on the same registry the pods
 #      pull from, and its reconcile verdict (IMAGE_REGISTRY_RESOLVABLE) and the
@@ -169,9 +174,9 @@ tests:
           path: spec.template.spec.initContainers[0].image
           pattern: "^docker\\.io/library/busybox:"
 
-  - it: the knob does NOT move the ingestor repository or JOB_IMAGE_HOST
-    # The ingestor is already on ghcr.io by repository; the training-image host
-    # moves in its own step, so it must still read docker.io/ here.
+  - it: the knob does NOT move the ingestor repository
+    # The ingestor is named by full repository (images.ingestor.repository),
+    # already on ghcr.io, and follows only the global mirror.
     template: templates/jobs-manager-deployment.yaml
     set:
       images:
@@ -182,11 +187,90 @@ tests:
           content:
             name: INGESTOR_IMAGE_REPOSITORY
             value: "ghcr.io/tracebloc/ingestor"
+
+  - it: images.traceblocRegistry moves JOB_IMAGE_HOST on both containers -- the docker.io rollback
+    # The training-image host reads the same helper as the control-plane
+    # images, so ONE knob rolls the control plane and the training pods back
+    # together. A site that hardcodes the default, or reads only the mirror,
+    # reddens here. Trailing slash: the runtime concatenates <host><repo>:<tag>.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: docker.io
+    asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: JOB_IMAGE_HOST
             value: "docker.io/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "docker.io/"
+
+  - it: images.traceblocRegistry moves JOB_IMAGE_HOST to a registry the script has no token arm for
+    # The knob is honoured verbatim; whether the refresh script can resolve
+    # there is a separate verdict (the IMAGE_REGISTRY_RESOLVABLE tests below).
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: quay.example
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "quay.example/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "quay.example/"
+
+  - it: an EMPTY knob renders the default registry into JOB_IMAGE_HOST, not a bare "/" (the dig-empty trap)
+    # Same trap as the pods' image above: the key EXISTS in values.yaml, so
+    # `dig`'s own fallback never applies, and an edge that clears it to "" (or
+    # a --reuse-values replay from before it existed) must still get a host. A
+    # site that read the knob without the helper's `| default` chain would
+    # stamp a bare "/" onto every training image.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "ghcr.io/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "ghcr.io/"
+
+  - it: global.imageRegistry wins over images.traceblocRegistry in JOB_IMAGE_HOST
+    # A mirror re-homes EVERY image, the training images included: the knob
+    # must not be able to send training pods past the mirror to a public
+    # registry.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: mirror.corp.example
+      images:
+        traceblocRegistry: docker.io
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "mirror.corp.example/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "mirror.corp.example/"
 
   - it: global.imageRegistry wins over images.traceblocRegistry on the jobs-manager
     template: templates/jobs-manager-deployment.yaml
@@ -428,7 +512,7 @@ tests:
     template: templates/NOTES.txt
     asserts:
       - matchRegexRaw:
-          pattern: "Image registry:.*ghcr\\.io.*\\(tracebloc control-plane images\\)"
+          pattern: "Image registry:.*ghcr\\.io.*\\(tracebloc control-plane \\+ training images\\)"
 
   - it: NOTES follows images.traceblocRegistry -- the docker.io rollback
     template: templates/NOTES.txt
