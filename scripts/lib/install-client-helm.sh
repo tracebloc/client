@@ -263,8 +263,8 @@ _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
 # `make drift` (the required Source-of-truth drift job): the value below must
 # equal a fresh render of the chart in the same tree, or CI reddens.
-_TB_CP_FOOTPRINT_MEM_BYTES=3288334336
-_TB_CP_FOOTPRINT_CPU_MILLI=900
+_TB_CP_FOOTPRINT_MEM_BYTES=2382364672
+_TB_CP_FOOTPRINT_CPU_MILLI=650
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the fallback training envelope (precedence step 4) ──────────────────────
@@ -724,12 +724,17 @@ _training_provenance() {
 #
 # Everything above sizes the envelope against ALLOCATABLE and stops. Nothing then
 # asked whether the number written can be scheduled beside what else runs on the
-# node: the chart's own control plane (3136 MiB / 900 m, from the render) plus
-# the distribution's system pods (~140 MiB / 200 m of coredns and metrics-server
-# on k3s). Measured on a real single-node install, the platform out-requests the
-# 3 GiB reserve the envelope subtracts, so `allocatable - 3 GiB` over-asked at
-# EVERY machine size and the training pod sat `Pending / Insufficient memory`
+# node: the chart's own control plane (the embedded _TB_CP_FOOTPRINT_* constants,
+# generated from the render by scripts/gen-footprint-embed.sh) plus the
+# distribution's system pods (~140 MiB / 200 m of coredns and metrics-server on
+# k3s). When this was written the chart requested 3136 MiB / 900 m -- MORE than
+# the 3 GiB reserve the envelope subtracts -- so `allocatable - 3 GiB` over-asked
+# at EVERY machine size and the training pod sat `Pending / Insufficient memory`
 # while the installer printed `Training size: ...` and cli doctor said OK.
+# backend#2461's interim trim (chart 1.9.112) brought the control plane under the
+# reserve, so today the fit below is a no-op on every golden vector; it stays
+# because the constants are generated, not promised, and the next chart that
+# out-requests the reserve should be reduced here rather than sit Pending again.
 #
 # The two functions below make the installer own that question at the moment it
 # writes the envelope. The 3 GiB constant itself is not touched here: fixing the
@@ -2109,7 +2114,7 @@ _resolve_mysql_engine() {
   case "$reason" in
     explicit) log "MySQL engine: ${engine} (explicit TB_MYSQL_ENGINE)" ;;
     sticky)   log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)" ;;
-    fresh)    log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine, backend#723)" ;;
+    fresh)    log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine)" ;;
   esac
 }
 
@@ -2261,7 +2266,7 @@ _adopt_orphaned_gpu_device_plugin() {
          return 0 ;;
     esac
   fi
-  log "Adopting pre-existing GPU device plugin ${ds} into the Helm release (client#564 migration)"
+  log "Adopting pre-existing GPU device plugin ${ds} into the Helm release (migrating from the standalone install)"
   # Adoption must actually succeed — a swallowed label/annotate failure leaves an
   # unowned DS that collides with the release. If it fails, remove the orphan so
   # the chart recreates a clean Helm-owned copy (the plugin is stateless; a brief
@@ -2609,7 +2614,7 @@ install_client_helm() {
       warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
       _print_fit_lines hint
       hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-      error "Refusing to write a training envelope that cannot be scheduled on this machine (backend#2870)."
+      error "Refusing to write a training envelope that cannot be scheduled on this machine."
       ;;
     reduced)
       info "Training envelope reduced to fit beside the platform on this machine:"

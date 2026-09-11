@@ -33,8 +33,8 @@ The standalone installer runs a **preflight** check that verifies this connectiv
 
 | Host | Why |
 |---|---|
-| `registry-1.docker.io` (Docker Hub) | k3s, mysql-client, busybox + the tracebloc client images |
-| `ghcr.io` | k3d node images + the ingestor image |
+| `registry-1.docker.io` (Docker Hub) | k3s, mysql-client, busybox; the tracebloc control-plane and training images too, only if you roll them back with `images.traceblocRegistry=docker.io` |
+| `ghcr.io` (+ `pkg-containers.githubusercontent.com`, where GHCR redirects layer downloads) | the tracebloc control-plane images (jobs-manager, pods-monitor, resource-monitor, requests-proxy) and the training images jobs-manager spawns — both the default since the GHCR migration — + the ingestor image + k3d node images |
 | `api.tracebloc.io` (`dev-api`/`stg-api` for non-prod) | client credential check + the running client's platform connection |
 | `tracebloc.github.io` | the tracebloc Helm chart repository |
 
@@ -54,6 +54,8 @@ On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.git
 Some sites hard-block Docker Hub / GHCR outright — the images aren't reachable directly at all (this is different from a proxy or TLS-inspection, which the section above covers). The preflight check detects a blocked registry and points you here rather than failing with a raw pull error.
 
 The chart follows the **`global.imageRegistry`** convention: set it once and **every** image the chart pulls — the tracebloc services, the spawned ingestor, the training-job images, and the `alpine/*`, `ubuntu/squid`, `busybox`, `curl` helper images — is re-homed onto your registry. No per-image overrides.
+
+**Moving only the tracebloc images.** `global.imageRegistry` re-homes *everything*. The tracebloc-published images — the control-plane images (jobs-manager, pods-monitor, resource-monitor, requests-proxy) and the training images jobs-manager spawns (through `JOB_IMAGE_HOST`, the registry prefix it stamps onto every training image) — pull from `ghcr.io` by default and are also published to `docker.io` at the same digests. To point just those images at a different registry, set `images.traceblocRegistry` (a bare host) and leave `global.imageRegistry` unset; `global.imageRegistry` always wins when both are set. Rolling them back to Docker Hub is one flag — `--set images.traceblocRegistry=docker.io` — which moves the control plane and the training-image host together, and, being user-supplied, persists across the fleet auto-upgrade until you clear it. The image-refresh CronJob follows the same value and can resolve digests anonymously on `ghcr.io` and `docker.io` only; any other registry makes the reconcile inert, exactly as a mirror does. `tracebloc/mysql-client` is not moved by this knob (it is frozen, digest-pinned and published only to Docker Hub), and neither is the ingestor (named by full repository, already on `ghcr.io`).
 
 **1. A private/mirror registry your site *can* reach.**
 

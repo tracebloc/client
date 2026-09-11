@@ -73,11 +73,11 @@ tests:
           path: spec.template.spec.containers[0].securityContext.capabilities.drop
           content: "ALL"
 
-  - it: should pull the jobs-manager image from docker.io
+  - it: should pull the jobs-manager image from ghcr.io by default (the GHCR migration)
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].image
-          pattern: "^docker\\.io/tracebloc/jobs-manager[:@]"
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager[:@]"
 
   # #569: still floats on the tag by default, but the pull policy is now
   # IfNotPresent REGARDLESS of pinning. `Always` forced a registry round-trip on
@@ -89,7 +89,7 @@ tests:
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].image
-          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager:"
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
@@ -104,7 +104,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager@sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
+          value: ghcr.io/tracebloc/jobs-manager@sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
@@ -127,10 +127,10 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].resources.requests.cpu
-          value: 100m
+          value: 50m
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 256Mi
+          value: 128Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.cpu
           value: 1000m
@@ -211,7 +211,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          value: ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
@@ -226,7 +226,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/tracebloc/jobs-manager@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          value: ghcr.io/tracebloc/jobs-manager@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
   - it: still renders (no nil-pointer) when the images block is entirely absent
     # --reuse-values replay from a release predating these keys.
@@ -235,7 +235,7 @@ tests:
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].image
-          pattern: "^docker\\.io/tracebloc/jobs-manager:"
+          pattern: "^ghcr\\.io/tracebloc/jobs-manager:"
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent

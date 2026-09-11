@@ -136,7 +136,7 @@ spec:
             entry). `dig` is not usable here — it rejects chartutil.Values.
           */}}
           {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" $rmDigest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" $rmDigest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
           # #569: IfNotPresent wherever an update path exists without `Always` --
           # see tracebloc.controlPlanePullPolicy. `Always` made every node's pod
           # re-pull on restart, so an offline restart wedged the DaemonSet in

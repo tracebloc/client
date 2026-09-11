@@ -1,7 +1,7 @@
 # =============================================================================
-#  Bootstrap installer (Windows) — the R8 signed-installer trust root, Windows
+#  Bootstrap installer (Windows) — the signed-installer trust root, Windows
 #  side. This is the PowerShell peer of scripts/install.sh; the two implement
-#  the SAME supply-chain guarantee (RFC-0001 R8, tracebloc/backend#889):
+#  the SAME supply-chain guarantee:
 #
 #    1. Fetch every sub-script from an IMMUTABLE release tag (never a mutable
 #       branch), so a moved ref can't change what runs as Administrator.
@@ -43,7 +43,7 @@ $DefaultRef = "__TRACEBLOC_RELEASE_REF__"
 # if this array and that one drift. Keep them in lockstep.
 $Files = @(
   "scripts/install-k8s.ps1"
-  # The outcome emitter (backend#2268). A separate file rather than 500 more
+  # The outcome emitter. A separate file rather than 500 more
   # lines inside install-k8s.ps1, for the same reason the bash side keeps
   # lib/telemetry.sh separate: it is the one part of the installer with its own
   # unit suite (scripts/tests/telemetry.Tests.ps1), and it is verified against
@@ -69,7 +69,7 @@ function Err($m)  { Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -Foreg
 #  exiting; the main block below turns a throw into a red error + exit 1.
 # =============================================================================
 
-# Resolve the ref to fetch from and enforce the R8 guarantees. Precedence:
+# Resolve the ref to fetch from and enforce the immutable-tag guarantees. Precedence:
 # explicit $env:REF (pin a different release tag) > legacy $env:BRANCH (dev only)
 # > the stamped $DefaultRef. Returns the validated ref string, or throws.
 function Resolve-InstallRef {
@@ -109,11 +109,11 @@ function Resolve-InstallRef {
     throw "Invalid ref: $ref"
   }
 
-  # A ref that isn't a vX.Y.Z tag is a mutable branch — the exact thing R8 closes.
+  # A ref that isn't a vX.Y.Z tag is a mutable branch — the exact thing this pin closes.
   # Allow it only under the explicit unverified opt-in, and say so loudly. The
   # version-suffix class is restricted to [A-Za-z0-9.] (e.g. -rc1, .4): a looser
   # trailer would admit '/' and '..', letting a ref like 'v1.2.3-../../heads/main'
-  # slip past this gate and fetch off the MUTABLE 'main' branch (RFC-0001 R8).
+  # slip past this gate and fetch off the MUTABLE 'main' branch.
   if ($usingBranch -or $ref -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$') {
     if ($AllowUnverified) {
       Warn "============================================================================"
@@ -128,7 +128,7 @@ function Resolve-InstallRef {
 
   # Belt-and-suspenders: even after the shape checks above, refuse a parent-dir
   # token before the ref is interpolated into a URL. '..' is the traversal lever
-  # -- it is what could escape the pinned tag onto a mutable branch (RFC-0001 R8)
+  # -- it is what could escape the pinned tag onto a mutable branch
   # -- and it is refused on EVERY path, opt-in or not.
   if ($ref -match '\.\.') {
     throw "Ref '$ref' contains '..' -- refusing to build a fetch URL from it (path-traversal guard)."
@@ -142,7 +142,7 @@ function Resolve-InstallRef {
   # feature branches. Measured on a real Windows box: the install stopped at
   # "contains a path separator" before it did anything.
   #
-  # The R8 property is unchanged, because it never rested on '/': a TAG still
+  # The immutable-tag property is unchanged, because it never rested on '/': a TAG still
   # cannot carry one (the vX.Y.Z shape check above rejects it, so a ref like
   # 'v1.2.3-../../heads/main' is refused twice over -- by that check and by the
   # '..' guard). A '/' is accepted ONLY on the path that has already announced
@@ -571,7 +571,7 @@ function Invoke-Bootstrap {
     foreach ($f in $Files) {
       $dest = Join-Path $tmpDir ($f -replace '^scripts/', '')
       # CREATE THE PARENT FIRST. `$Files` gained its first `scripts/lib/` entry
-      # under backend#2268, and Invoke-WebRequest -OutFile does not create
+      # when telemetry.ps1 was split out, and Invoke-WebRequest -OutFile does not create
       # directories: without this the very first fetch of a lib file throws
       # DirectoryNotFound and the Windows bootstrap dies before it verifies
       # anything. install.sh has always done the equivalent `mkdir -p`. This
@@ -608,7 +608,7 @@ function Invoke-Bootstrap {
     # environment variable set here is inherited. Without it `service.version` on
     # every Windows telemetry record was permanently "0.0.0-unknown" — the field
     # that says WHICH installer failed, on the platform this feature was added for.
-    # (backend#2268; found by the derived ScriptVar test, not by review.)
+    # (Found by the derived ScriptVar test, not by review.)
     $env:TRACEBLOC_INSTALL_REF = $ref
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
     Info "Running tracebloc environment setup..."

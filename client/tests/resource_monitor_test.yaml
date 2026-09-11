@@ -19,7 +19,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: "docker.io/tracebloc/resource-monitor:prod"
+          value: "ghcr.io/tracebloc/resource-monitor:prod"
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
@@ -33,14 +33,16 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: "docker.io/tracebloc/resource-monitor@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          value: "ghcr.io/tracebloc/resource-monitor@sha256:0000000000000000000000000000000000000000000000000000000000000000"
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent
 
   # Regression guard: `helm upgrade --reuse-values` from <1.0.7 carries forward
   # stored values that never included images.resourceMonitor. The template must
-  # tolerate the whole images map being missing without nil-pointer.
+  # tolerate the whole images map being missing without nil-pointer. With no
+  # images.traceblocRegistry key at all, the registry comes from the
+  # tracebloc.tbRegistry helper's own fallback, which is the chart default.
   - it: should render when images block is entirely absent
     template: templates/resource-monitor-daemonset.yaml
     set:
@@ -48,7 +50,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: "docker.io/tracebloc/resource-monitor:prod"
+          value: "ghcr.io/tracebloc/resource-monitor:prod"
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy
           value: IfNotPresent

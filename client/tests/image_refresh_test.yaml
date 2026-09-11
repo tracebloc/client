@@ -223,6 +223,21 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: "pinned by digest in values"
+      # Regression guard (Bugbot #1008): the requests-proxy is a SEPARATE
+      # deployment running the SAME jobs-manager image, so the no-op "already on
+      # the pinned digest" decision MUST also read the proxy and fall through
+      # when it is off the digest -- else a partial re-pin (api pinned, proxy
+      # still on :tag) is declared unchanged forever off the api match alone and
+      # never retried. Lock the reader and the per-workload digest check in
+      # place. (The BEHAVIOUR -- that an inverted check reddens -- is asserted in
+      # scripts/tests/image-refresh-repin-on-revert.bats; this only pins that the
+      # two pieces still exist in the shipped script.)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'requests_proxy_image\(\)'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'proxy_on_digest'
       # Regression guard: the script must HEAD the manifest with all
       # four Accept media types in a SINGLE comma-separated Accept
       # header per the Docker registry v2 spec (some proxies have been
@@ -677,14 +692,14 @@ tests:
             name: NODE_AGENTS_NAMESPACE
             value: "tracebloc-node-agents"
 
-  - it: IMAGE_REGISTRY defaults to docker.io, not the empty string
+  - it: IMAGE_REGISTRY defaults to ghcr.io, not the empty string
     # Regression guard with teeth. values.yaml ships `global.imageRegistry: ""`,
-    # so `dig "imageRegistry" "docker.io" .Values.global` returns "" — the key
-    # EXISTS, so dig's own default never applies. Rendering "" here would make
-    # the script's mirror guard see "" != "docker.io" and go INERT on every
-    # default install, silently disabling auto-refresh fleet-wide. The template
-    # needs a trailing `| default "docker.io"`; this test is what catches its
-    # removal.
+    # so a bare `dig "imageRegistry" <fallback> .Values.global` returns "" — the
+    # key EXISTS, so dig's own default never applies. Rendering "" here would
+    # make the script's resolvable guard go INERT on every default install,
+    # silently disabling auto-refresh fleet-wide. tracebloc.tbRegistry owns the
+    # `| default` chain that ends in the chart default (ghcr.io since the GHCR
+    # migration); this test is what catches its removal.
     template: templates/image-refresh-cronjob.yaml
     documentIndex: 1
     asserts:
@@ -692,7 +707,7 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: IMAGE_REGISTRY
-            value: "docker.io"
+            value: "ghcr.io"
 
   - it: IMAGE_REGISTRY follows a configured private mirror
     template: templates/image-refresh-cronjob.yaml
@@ -755,11 +770,13 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'kubectl set image -n "\$NODE_AGENTS_NAMESPACE"'
-      # Mirror guard: a docker.io digest must never be pinned onto a mirrored
-      # reference the mirror may not hold.
+      # Mirror guard: a digest resolved on a public registry must never be pinned
+      # onto a mirrored reference the mirror may not hold. The verdict is the
+      # chart-rendered IMAGE_REGISTRY_RESOLVABLE (tracebloc_registry_test.yaml
+      # covers its values); anything but "true" -- including absent -- refuses.
       - matchRegex:
           path: data["image-refresh.sh"]
-          pattern: 'if \[ "\$IMAGE_REGISTRY" != "docker.io" \]; then'
+          pattern: 'if \[ "\$\{IMAGE_REGISTRY_RESOLVABLE:-\}" != "true" \]; then'
       # The pods-monitor container name is contractual with the deployment.
       - matchRegex:
           path: data["image-refresh.sh"]
@@ -935,3 +952,71 @@ tests:
       - matchRegex:
           path: data["image-refresh.sh"]
           pattern: 'rm_set_args tracebloc-resource-monitor='
+
+  - it: reconcile re-pins when a helm re-render reverted the workload off the digest
+    # Guards the client-runtime#199 fix: with `recorded == latest` the loop must
+    # NOT unconditionally no-op -- it must read the live workload image and
+    # re-pin when it is not `repo@latest` (a `helm upgrade --reset-then-reuse-values`
+    # reverted the pin onto the bare :tag, where a stale node cache serves an old
+    # image). The helper + the fall-through into the re-image path are the fix.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'workload_image_for_repo\(\)'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'have="\$\(workload_image_for_repo "\$repo"'
+      # the true no-op now requires BOTH digest-unchanged AND workload-on-digest
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'workload already on the pinned digest; no-op'
+
+  - it: a fresh install is gated OUT of the re-pin roll, but the legacy fleet is not
+    # Guards #1008 item 2. With `recorded == latest` and the workload on :tag, the
+    # loop must tell a FRESH install (watched born on :tag here) from a helm-revert
+    # of an applied pin AND from a pre-marker/legacy edge, and skip ONLY the fresh
+    # one -- else either every fresh install pays the #563 flap-path / Recreate
+    # cost for byte-identical content, or (if it skipped on absence alone) the
+    # whole existing fleet is stranded on a stale :tag on the upgrade hop. Two
+    # markers discriminate: `first-observed-<image>` (stamped by first-observation)
+    # and `digest-applied-<image>` (stamped only on a successful re-image). Skip =
+    # first_observed present AND applied absent. image-refresh-repin-on-revert.bats
+    # asserts the BEHAVIOUR across all three shapes (fresh / established / legacy);
+    # these lock the code shapes so a refactor cannot silently drop the gate.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      # both marker keys, derived per image with the same suffix as stale-pin keys
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'applied_key="tracebloc\.io/digest-applied-\$\{repo#\*/\}"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'first_observed_key="tracebloc\.io/first-observed-\$\{repo#\*/\}"'
+      # the skip fires ONLY on positive fresh-install evidence, not on absence
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '\[ -n "\$first_observed" \] && \[ -z "\$applied" \]'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'this is a fresh install .* -- NOT rolling'
+      # first-observation stamps first_observed (the positive fresh-install signal)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'annotate_args="\$annotate_args \$\{key\}=\$\{latest\} \$\{first_observed_key\}=1"'
+      # a re-image stamps applied alongside the digest record (one shared fate)
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'annotate_args="\$annotate_args \$\{key\}=\$\{latest\} \$\{applied_key\}=1"'
+      # the digest-record read is FAIL-CLOSED: a read error must not collapse to ""
+      # and enter the first-observation arm (which stamps first_observed and
+      # suppresses the #199 repair on a legacy edge) -- Bugbot on #1008. The
+      # fail-open `|| true` form must be gone; the guarded read must be present.
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'if ! recorded="\$\(get_annotation "\$key"\)"; then'
+      - notMatchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'recorded="\$\(get_annotation "\$key" \|\| true\)"'

@@ -1378,12 +1378,16 @@ _override_release_ctx() {
 
 # ── the envelope is checked against what the node can actually schedule (backend#2870) ──
 #
-# The resolver sizes against ALLOCATABLE. The chart's own control plane requests
-# 3136 MiB / 900 m (from the render) and k3s's system pods ~140 MiB / 200 m, so
-# `allocatable - 3 GiB` over-asked on every machine and the training pod sat
-# Pending. These three drive the WHOLE install flow so the written values file
-# is what is asserted -- the unit-level arithmetic lives in
-# scripts/tests/envelope-schedulability.sh and .bats.
+# The resolver sizes against ALLOCATABLE. Before backend#2461 the chart's own
+# control plane requested 3136 MiB / 900 m (from the render) and k3s's system
+# pods ~140 MiB / 200 m, so `allocatable - 3 GiB` over-asked on every machine and
+# the training pod sat Pending. The interim trim (2026-09-10) took the render to
+# 2336 MiB / 750 m, UNDER the reserve, so an 8 GiB node now fits unreduced -- and
+# the reduce/refuse paths are exercised on nodes DERIVED from the embedded
+# footprint (`_TB_CP_FOOTPRINT_MEM_BYTES`, sourced with the library), so these
+# tests follow the number instead of restating it. These drive the WHOLE install
+# flow so the written values file is what is asserted -- the unit-level
+# arithmetic lives in scripts/tests/envelope-schedulability.sh and .bats.
 _sched_cluster() {   # $1 = node line(s)
   kubectl() {
     case "$*" in
@@ -1395,6 +1399,26 @@ _sched_cluster() {   # $1 = node line(s)
   }
   _SCHED_NODES="$1"
 }
+# platform = embedded chart footprint + the two canned system pods (140 MiB / 200 m)
+_sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
+
+@test "install_client_helm: the ticket's 8 GiB node now FITS unreduced (backend#2870 closed by backend#2461)" {
+  HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
+  _ensure_tracebloc_dirs() { :; }
+  _ensure_release_dirs() { :; }
+  _ensure_helm_runnable() { :; }
+  helm() { record "helm $*"; return 0; }
+  has() { return 0; }
+  verify_credentials() { printf valid; }
+  unset TRACEBLOC_TRAINING_RESOURCES
+  # 5120 + platform <= 8192 MiB and 3000 + 950 <= 4000 m: the resolver's
+  # cpu=3,memory=5Gi is written as-is, and nothing is reported OVER.
+  _sched_cluster '4 8Gi'
+  run install_client_helm <<< $'myid\nmypw'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'RESOURCE_REQUESTS: "cpu=3,memory=5Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  [[ "$output" != *"OVER"* ]] || { echo "$output"; return 1; }
+}
 
 @test "install_client_helm: an envelope that over-asks is REDUCED in the written values, with the arithmetic (backend#2870)" {
   HOST_DATA_DIR="$BATS_TEST_TMPDIR/data"; mkdir -p "$HOST_DATA_DIR"
@@ -1405,17 +1429,20 @@ _sched_cluster() {   # $1 = node line(s)
   has() { return 0; }
   verify_credentials() { printf valid; }
   unset TRACEBLOC_TRAINING_RESOURCES
-  # The ticket's reproduction: an 8 GiB node. The resolver says cpu=3,memory=5Gi;
-  # 5120 + 3136 + 140 = 8396 MiB > 8192, and 3000 + 900 + 200 = 4100 m > 4000.
-  _sched_cluster '4 8Gi'
+  # A node DERIVED from the footprint: below 4 GiB the resolver falls to the
+  # 1-core / 2-GiB floor; this node leaves room for 1 GiB but not 2, so the fit
+  # must reduce to memory=1Gi and print the OVER arithmetic.
+  local need small over
+  need="$(_sched_need_mib)"; small=$(( need + 1024 + 64 )); over=$(( 2048 + need - small ))
+  _sched_cluster "4 ${small}Mi"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -q 'RESOURCE_REQUESTS: "cpu=2,memory=4Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
-  grep -q 'RESOURCE_LIMITS: "memory=4Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
+  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=1Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'RESOURCE_LIMITS: "memory=1Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
   grep -q 'RESOURCE_PROVENANCE: "installer"' "$HOST_DATA_DIR/values.yaml" || return 1
   # The arithmetic is on screen, not just the verdict.
-  [[ "$output" == *"204 MiB OVER"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"reduced cpu=3,memory=5Gi -> cpu=2,memory=4Gi"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"${over} MiB OVER"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"reduced cpu=1,memory=2Gi -> cpu=1,memory=1Gi"* ]] || { echo "$output"; return 1; }
 }
 
 @test "install_client_helm: REFUSES to write an envelope when not even a 1-core/1-GiB run fits (backend#2870)" {
@@ -1427,8 +1454,9 @@ _sched_cluster() {   # $1 = node line(s)
   has() { return 0; }
   verify_credentials() { printf valid; }
   unset TRACEBLOC_TRAINING_RESOURCES
-  # 4 GiB allocatable: 4096 - 3136 - 140 = 820 MiB is all that is left.
-  _sched_cluster '4 4Gi'
+  # Derived: allocatable minus the platform is 64 MiB short of a 1 GiB run.
+  local tiny; tiny=$(( $(_sched_need_mib) + 1024 - 64 ))
+  _sched_cluster "4 ${tiny}Mi"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"Refusing to write a training envelope"* ]] || { echo "$output"; return 1; }

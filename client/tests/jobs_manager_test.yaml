@@ -70,17 +70,21 @@ tests:
           path: spec.template.spec.containers[0].resources.requests
       - isNotEmpty:
           path: spec.template.spec.containers[0].resources.limits
-      # #1144: requests.memory pinned == limits.memory (1Gi api / 512Mi
-      # pods-monitor) to lower oom_score_adj during a mass restart.
+      # #1144 pinned requests.memory == limits.memory (1Gi api / 512Mi
+      # pods-monitor) to lower oom_score_adj during a mass restart. The interim
+      # trim (backend#2461, client#1032) lowers the REQUESTS (640Mi / 384Mi) and
+      # keeps the LIMITS (1Gi / 512Mi) -- the limit is the hard ceiling the
+      # restart peak justified and nothing has re-measured it; the request is
+      # what the scheduler and admission subtract. Derivation: values.yaml#resources.
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 1Gi
+          value: 640Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
       - equal:
           path: spec.template.spec.containers[1].resources.requests.memory
-          value: 512Mi
+          value: 384Mi
       - equal:
           path: spec.template.spec.containers[1].resources.limits.memory
           value: 512Mi
@@ -96,19 +100,28 @@ tests:
           path: spec.template.spec.containers[0].env[?(@.name=="CLIENT_ID")].valueFrom.secretKeyRef.name
           value: RELEASE-NAME-secrets
 
-  - it: should use docker.io registry by default
+  - it: should pull the control-plane images from ghcr.io by default (the GHCR migration)
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].image
-          pattern: "^docker\\.io/tracebloc/"
+          pattern: "^ghcr\\.io/tracebloc/"
 
-  - it: should set JOB_IMAGE_HOST to docker.io
+  - it: should set JOB_IMAGE_HOST to the tracebloc registry default (ghcr.io/) on both containers
+    # tracebloc.tbRegistry's chart default with the trailing slash the runtime
+    # concatenates onto <repo>:<tag>. The api and pods-monitor containers read
+    # the same helper, so both are pinned; tests/tracebloc_registry_test.yaml
+    # covers the knob and the mirror.
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: JOB_IMAGE_HOST
-            value: "docker.io/"
+            value: "ghcr.io/"
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: JOB_IMAGE_HOST
+            value: "ghcr.io/"
 
   # ---------------------------------------------------------------------------
   # Ingestor image distribution (backend#1028 pin, backend#1245 distribution).
@@ -1127,7 +1140,7 @@ tests:
   # tracebloc.controlPlanePullPolicy helper.
   # =====================================================================
 
-  - it: both containers are IfNotPresent by default (refresh on, docker.io)
+  - it: both containers are IfNotPresent by default (refresh on, ghcr.io)
     # The offline-restart fix: `Always` forced a registry round-trip on every
     # (re)start, so a Docker/WSL restart without the registry landed in
     # ImagePullBackOff on a cached image. Safe here because image-refresh drives
@@ -1141,7 +1154,7 @@ tests:
           value: IfNotPresent
 
   - it: falls back to Always behind a private mirror (#569, Bugbot High)
-    # The reconcile resolves digests from docker.io, so it goes inert under a
+    # The reconcile resolves digests on the public registry, so it goes inert under a
     # mirror rather than pinning a digest the mirror may not hold. If the pods
     # were IfNotPresent anyway, that edge would have NO update path at all:
     # syncing the mirror and restarting would keep serving the cached tag, and

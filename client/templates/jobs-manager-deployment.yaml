@@ -100,7 +100,7 @@ spec:
         #
         # It also removes an image: busybox was a second pull on every edge, for a
         # TCP connect the app image can already do.
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         securityContext:
           # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
           # `restricted` SCC assigns a UID from the project's range, and the pod
@@ -265,7 +265,7 @@ spec:
       {{- end }}
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         # #569: IfNotPresent wherever an update path exists without `Always` --
         # a pinned digest, or the image-refresh reconcile. `Always` forced a
         # registry round-trip on every (re)start, so an offline Docker Desktop /
@@ -333,13 +333,16 @@ spec:
         # unresourced-init set, and neither is reachability.
         # `scripts/tests/qos-reachability.sh` asserts it now.
         #
-        # requests.cpu is
-        # also raised (100m -> 250m) so a mass restart doesn't throttle its
-        # startup to a crawl (the ~9m recovery seen on lukas-test).
+        # requests.cpu was raised (100m -> 250m) so a mass restart doesn't throttle
+        # its startup to a crawl (the ~9m recovery seen on lukas-test); the interim
+        # trim (backend#2461) brings it to 150m -- the whole plane idles at 36m --
+        # and lowers requests.memory to 640Mi while the LIMIT stays 1Gi, so the
+        # #1144 equality is deliberately broken here: see the derivation on
+        # values.yaml#resources for why the request moved and the limit did not.
         resources:
           requests:
-            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "250m" | quote }}
-            memory: {{ .Values.resources.jobsManager.requests.memory | default "1Gi" | quote }}
+            cpu: {{ .Values.resources.jobsManager.requests.cpu | default "150m" | quote }}
+            memory: {{ .Values.resources.jobsManager.requests.memory | default "640Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.jobsManager.limits.cpu | default "1000m" | quote }}
             memory: {{ .Values.resources.jobsManager.limits.memory | default "1Gi" | quote }}
@@ -669,13 +672,18 @@ spec:
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}
         # JOB_IMAGE_HOST is the registry prefix jobs-manager stamps onto every
-        # training-job image it spawns. Honour a private mirror set via
-        # global.imageRegistry (#585) so an air-gapped/mirrored install pulls job
-        # images from the same registry as the chart's own images; defaults to
-        # docker.io/ when no mirror is configured. Nil-guarded for pre-this-key
-        # --reset-then-reuse-values upgrades.
+        # training-job image it spawns. Rendered from tracebloc.tbRegistry -- the
+        # SAME precedence chain as the control-plane images, so the two cannot
+        # point at different registries: a private mirror set via
+        # global.imageRegistry (#585) wins, so an air-gapped/mirrored install
+        # pulls job images from the same registry as the chart's own images;
+        # else images.traceblocRegistry (the per-edge rollback knob); else the
+        # chart default, ghcr.io since the GHCR migration (the training images
+        # are published there at the same digests as on Docker Hub). The helper
+        # is nil-guarded for pre-this-key --reset-then-reuse-values upgrades.
+        # Trailing slash: the runtime concatenates <host><repo>:<tag> verbatim.
         - name: JOB_IMAGE_HOST
-          value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
+          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- if include "tracebloc.useImagePullSecrets" . }}
         # IMAGE_PULL_SECRET_NAME is the pull Secret jobs-manager puts on the
         # TRAINING pods it spawns (backend#2119). It has to be injected rather
@@ -906,7 +914,7 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         # #569: same policy as the api container above -- see
         # tracebloc.controlPlanePullPolicy.
         imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.podsMonitor.digest "root" $) }}
@@ -915,17 +923,20 @@ spec:
           capabilities:
             drop: ["ALL"]
         # #1144: same cluster-recovery treatment as the api container above —
-        # pods-monitor was also exit-137 killed in the mass restart. Pin
+        # pods-monitor was also exit-137 killed in the mass restart. #1144 pinned
         # requests.memory == limits.memory (512Mi) to lower its oom_score_adj
         # (a less-preferred node OOM victim; the pod stays Burstable — and cpu is
         # not the only reason: see the init-container note on the api container
-        # above, backend#2872), and raise
+        # above, backend#2872), and raised
         # requests.cpu (50m -> 100m) so its startup is not starved under
-        # contention.
+        # contention. The interim trim (backend#2461) lowers the REQUEST to 384Mi
+        # and keeps the 512Mi LIMIT: nothing has measured this container yet, so
+        # the ceiling that #1144's restart peak justified stays where it was
+        # (derivation on values.yaml#resources).
         resources:
           requests:
             cpu: {{ .Values.resources.podsMonitor.requests.cpu | default "100m" | quote }}
-            memory: {{ .Values.resources.podsMonitor.requests.memory | default "512Mi" | quote }}
+            memory: {{ .Values.resources.podsMonitor.requests.memory | default "384Mi" | quote }}
           limits:
             cpu: {{ .Values.resources.podsMonitor.limits.cpu | default "500m" | quote }}
             memory: {{ .Values.resources.podsMonitor.limits.memory | default "512Mi" | quote }}
@@ -946,10 +957,11 @@ spec:
               key: CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
-        # See the api container's JOB_IMAGE_HOST note (#585): honour a private
-        # mirror set via global.imageRegistry, defaulting to docker.io/.
+        # See the api container's JOB_IMAGE_HOST note (#585): rendered from
+        # tracebloc.tbRegistry, so a global.imageRegistry mirror wins, then
+        # images.traceblocRegistry, then the chart default (ghcr.io).
         - name: JOB_IMAGE_HOST
-          value: {{ printf "%s/" (dig "imageRegistry" "docker.io" (.Values.global | default dict) | default "docker.io") | quote }}
+          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         - name: CLIENT_ENV
           value: {{ include "tracebloc.clientEnv" . | quote }}
         # See the api container's RESOURCE_REQUESTS note (backend#664,

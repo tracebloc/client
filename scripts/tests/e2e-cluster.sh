@@ -70,6 +70,9 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
+echo "── assert: the node reservation the drop-in declares is what the kubelet took (backend#2460) ──"
+e2e_assert_node_reservation
+
 echo "── assert: the cluster can pull, schedule, and run a public workload ──"
 kubectl run e2e-probe --image=nginx:alpine --restart=Never
 kubectl wait --for=condition=Ready pod/e2e-probe --timeout=180s

@@ -102,7 +102,10 @@ _bounded_capture_read
   # Why each is out of scope rather than wrong: every one is a best-effort read
   # whose timeout branch is already a `|| return 0` / `|| true` no-op on a path
   # that reconciles anyway (the _check_existing_cluster_* drift probes,
-  # _generate_node_cdi_specs, ensure_cluster_autostart), a yes/no liveness probe
+  # _generate_node_cdi_specs), or falls through logging the skip without ever
+  # claiming a machine state it could not read (ensure_cluster_autostart, whose
+  # timed-out node read now skips only the restart-policy loop and still runs the
+  # boot-enable), a yes/no liveness probe
   # that is already tri-state or has no third state to lose (_docker_answers,
   # _k3d_cluster_running, _assess_runtime_down, _docker_default_runtime_is_nvidia),
   # or a preflight/install step that reports its own failure to the operator

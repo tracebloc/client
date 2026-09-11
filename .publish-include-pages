@@ -1,0 +1,7 @@
+# .publish-include-pages — what the mirror's GitHub Pages branch MAY carry.
+#
+# Read by scripts/publish-guard.sh with `--include` when the gh-pages branch is
+# mirrored (it is what `helm repo add tracebloc https://tracebloc.github.io/client`
+# reads). The branch holds the chart index and the packaged charts, nothing else.
+index.yaml
+*.tgz
