@@ -20,8 +20,15 @@ name: Cross-repo contract drift
 #        -> the bats + Pester replays, which run in the normal test jobs
 #
 # Pin, don't float (the rule cli/.github/workflows/chart-drift.yml states): an
-# unrelated client-runtime commit must not redden every open client PR. The
-# weekly run is what catches a pin gone stale enough to matter.
+# unrelated client-runtime commit must not redden every open client PR.
+#
+# WHAT CATCHES A STALE PIN is the `pin-staleness` job below -- NOT this job,
+# which checks out the pinned ref and so compares the vendored copy against
+# itself and agrees. The sentence that used to sit here ("the weekly run is what
+# catches a pin gone stale enough to matter") was false for exactly the reason
+# this PR exists, and removing it from scripts/.client-runtime-ref while leaving
+# it here left the fix half-applied -- the same rule-7 assertion surviving one
+# comment over.
 #
 # tracebloc/client-runtime is PRIVATE, so unlike cli's chart-drift (which reads
 # the public tracebloc/client with no token) this needs an App installation
@@ -65,6 +72,197 @@ permissions:
   contents: read
 
 jobs:
+  # ── IS THE PIN ITSELF STALE? (backend#2460) ────────────────────────────────
+  # The job below compares the vendored copies against the PINNED ref, which is
+  # the whole point of pinning: an unrelated client-runtime commit must not
+  # redden every open client PR. The cost is that it cannot see the pin going
+  # stale -- it compares v2 against v2 and agrees.
+  #
+  # MEASURED, not hypothetical. client-runtime#376 merged 2026-08-24 and the pin
+  # comment carried a note to re-point once it did. That went unactioned for 2.5
+  # weeks, during which client-runtime#544 landed envelope contract v3 -- and
+  # this repo went on verifying its installers against v2, with the drift job
+  # GREEN the whole time. The pin comment claimed "the weekly run is what catches
+  # a pin gone stale enough to matter"; nothing compared the pin against the
+  # producer's default branch, so nothing caught it (CLAUDE.md rule 7: a comment
+  # asserting a property the code does not have).
+  #
+  # WARNS ON A PR, FAILS ON THE SCHEDULE. Failing a PR would punish whoever
+  # happens to touch an installer line for a pin someone else left behind, which
+  # is how a whole tier gets skipped (rule 4). The weekly and dispatch runs are
+  # where the alarm is actionable and blocks nobody.
+  pin-staleness:
+    name: pinned contract vs client-runtime's default branch
+    runs-on: ubuntu-latest
+    # A stalled api.github.com must not hold a runner to the six-hour cap; a
+    # read that cannot finish is a cannot-tell, and cannot-tell has to FAIL, not
+    # hang (Bugbot Medium). The curl calls carry their own bounds too, so a hang
+    # inside one read fails that read rather than the whole job.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+
+      - name: Mint a read-only installation token for client-runtime
+        id: token
+        # GITHUB_TOKEN is scoped to THIS repo and cannot read another private
+        # one -- the job below read tracebloc/client-runtime with it and so
+        # failed closed on EVERY run, turning a pin comparison into a
+        # cannot-read error (Bugbot High, and it was right: this PR's own run
+        # went red that way). The envelope-contract job twenty lines down
+        # already solved this and says so in its comment; I added a second
+        # cross-repo reader without reading the first. Same App, same least
+        # privilege: named `repositories`, contents:read only.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TRAIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: client-runtime
+          permission-contents: read
+
+      - name: Compare the pinned contract against the producer's default branch
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
+          [ -n "$ref" ] || { echo "::error::scripts/.client-runtime-ref names no ref"; exit 1; }
+          # SAME SHAPE GATE the sibling job applies before it hands the pin to
+          # checkout -- no path traversal, no option-looking refs. This job
+          # interpolates the pin into a contents API URL, which is a second
+          # place the value escapes into, so it needs the same check rather
+          # than trusting that the other job ran first (Bugbot Medium).
+          if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' \
+             || printf '%s' "$ref" | grep -q '\.\.'; then
+            echo "::error file=scripts/.client-runtime-ref::invalid ref shape: $ref"
+            exit 1
+          fi
+
+          # BOTH CONTRACTS, because the pin governs both. scripts/.client-runtime-ref
+          # says so in capitals -- "ONE REF, TWO CONTRACTS since backend#2378" --
+          # and the first version of this job compared only the envelope contract
+          # and then printed "the pin is current". An upstream-only change to
+          # log_redactions.json would have left the pin stale with this guard
+          # reporting green: the exact silent-green gap the job exists to close,
+          # reproduced one file over (Bugbot Medium). Checking one of two and
+          # reporting on both is worse than not checking, because it looks like
+          # cover.
+          #
+          # A FLAT LIST OF PRODUCER PATHS. Both entries are paths in
+          # client-runtime; neither is a path in this repo. This comment used to
+          # claim "left half is the path in client-runtime, right half is where
+          # this repo vendors it" -- a mapping the value never had, which is the
+          # precise defect this job exists to catch, sitting in the job itself.
+          # Where each one is vendored is named in the adopt instructions below.
+          # Adding a third contract is still one word here.
+          CONTRACTS="envelope_contract.json log_redactions.json"
+          # Derived through the same sanitiser the loop uses, so that if this
+          # name ever gains a directory the summary block below follows it.
+          ENVELOPE="envelope_contract.json"
+
+          # FAIL CLOSED on every read: a fetch I could not do is not evidence the
+          # pin is fresh, and two unknowns must never compare equal (rule 3).
+          #
+          # FAILING CLOSED IS NOT THE SAME AS FAILING THE PR. A fork PR mints no
+          # token and a client-runtime API hiccup is transient; reddening an
+          # unrelated PR for either is the outcome the warn-on-PR design was
+          # written to avoid, and every read below used to do exactly that by
+          # exiting 1 before the EVENT branch was ever reached.
+          #
+          # The split is deliberate and is NOT "warn on everything": an empty or
+          # malformed ref is THIS PR's diff -- scripts/.client-runtime-ref lives in
+          # this repo and a PR can change it -- so those still fail hard above.
+          # Routing them through here would let a PR land a broken pin behind a
+          # warning nobody reads. Only "I could not find out" warns.
+          cannot_tell() {
+            if [ "$EVENT" = "pull_request" ]; then
+              echo "::warning::$1 -- cannot tell whether the pin is stale (not this PR's doing)"
+              exit 0
+            fi
+            echo "::error::$1 -- cannot tell whether the pin is stale"
+            exit 1
+          }
+
+          fetch() {
+            curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/tracebloc/client-runtime/contents/$1?ref=$2"
+          }
+
+          # The repo object itself, for the default branch. Same token, same
+          # bounds, same fail-closed contract as fetch() -- a different Accept
+          # because this one is metadata, not a file.
+          fetch_json() {
+            curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/tracebloc/client-runtime$1"
+          }
+
+          # DERIVED, NOT HARDCODED. This job's name, and the PR describing it,
+          # both say it compares against client-runtime's DEFAULT BRANCH; the code
+          # said the literal `develop`. They agree today, so it was not a live bug
+          # -- but a default-branch rename would have turned every fetch into a
+          # silent 404, and "the comment and the code agree only by coincidence"
+          # is the thing this PR is about. Ask the producer instead (rule 1).
+          default_branch="$(fetch_json "" | python3 -c 'import json,sys; print(json.load(sys.stdin)["default_branch"])' 2>/dev/null)" \
+            || cannot_tell "cannot read client-runtime's default branch"
+          [ -n "$default_branch" ] || cannot_tell "client-runtime reported no default branch"
+          echo "comparing against client-runtime's default branch: $default_branch"
+
+          stale=""
+          for path in $CONTRACTS; do
+            # SLASH-SAFE TEMP NAMES. `/tmp/pinned-$path` only worked because both
+            # contract paths happen to be flat filenames; a contract under a
+            # subdirectory would redirect into a parent that does not exist and
+            # abort the job under `set -e` -- contradicting the "adding a third
+            # contract is one line" claim six lines up.
+            safe="${path//\//_}"
+            fetch "$path" "$ref" > "/tmp/pinned-$safe" \
+              || cannot_tell "cannot read $path at the pinned ref $ref"
+            fetch "$path" "$default_branch" > "/tmp/head-$safe" \
+              || cannot_tell "cannot read $path on client-runtime $default_branch"
+            if cmp -s "/tmp/pinned-$safe" "/tmp/head-$safe"; then
+              echo "$path: pinned copy matches $default_branch"
+            else
+              echo "$path: DIFFERS between the pinned ref and $default_branch"
+              stale="$stale $path"
+            fi
+          done
+
+          # COSMETIC, AND MUST NOT BE ABLE TO CHANGE THE VERDICT. The version
+          # line is nicer output; `cmp` above already decided. Under `set -e` an
+          # unreadable summary used to abort the script BEFORE the warn-on-PR
+          # branch, so a develop-side schema change -- exactly the stale case
+          # this job exists to surface -- would have FAILED a pull request that
+          # was supposed to warn (Bugbot Medium). `|| true` keeps the failure
+          # cosmetic; the reads that matter already failed closed above.
+          envelope_safe="${ENVELOPE//\//_}"
+          if [ -s "/tmp/pinned-$envelope_safe" ]; then
+            pinned="$(python3 scripts/contract-summary.py "/tmp/pinned-$envelope_safe" 2>/dev/null || true)"
+            head="$(python3 scripts/contract-summary.py "/tmp/head-$envelope_safe" 2>/dev/null || true)"
+            if [ -n "$pinned" ] && [ -n "$head" ]; then
+              echo "envelope contract: pinned v${pinned%%|*} (${pinned#*|})  vs  $default_branch v${head%%|*} (${head#*|})"
+            else
+              echo "envelope contract: could not summarise one of the copies (schema change?) -- the comparison above stands regardless"
+            fi
+          fi
+
+          if [ -z "$stale" ]; then
+            echo "the pin is current for every contract it governs."
+            exit 0
+          fi
+
+          msg="the pin is behind client-runtime $default_branch for:$stale. To adopt: bump scripts/.client-runtime-ref, re-vendor BOTH contracts (scripts/tests/fixtures/envelope_contract.json and client/log_redactions.json), re-run scripts/gen-envelope-embed.sh (it rewrites the bash vectors AND the embedded literals in scripts/lib/install-client-helm.sh and scripts/install-k8s.ps1), then update the hand-written expectations the new numbers move."
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "::warning::PIN STALE (not this PR's doing) -- $msg"
+            exit 0
+          fi
+          echo "::error::PIN STALE -- $msg"
+          exit 1
+
   envelope-contract:
     timeout-minutes: 10
     runs-on: ubuntu-latest
