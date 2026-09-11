@@ -62,35 +62,61 @@ tests:
             name: TRACEBLOC_AMP
             value: "True"
 
-  - it: an absent key emits nothing -- unset is OFF on the runtime side, and the pod spec stays byte-identical for every edge that never set it
+  - it: an absent AMP key emits nothing -- unset is OFF on the runtime side, and the pod spec stays byte-identical for every edge that never set it
+    # TRACEBLOC_DDP left this case in 1.9.115: it now has a rendered default, so
+    # "absent" means "the default travels" for it (pinned two cases below). The
+    # three-state rule -- set / explicitly empty / absent -- is still exercised
+    # for DDP by the explicit-empty case further down.
     asserts:
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TRACEBLOC_DDP
-          any: true
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TRACEBLOC_AMP
           any: true
 
-  - it: the default values.yaml ships both switches OFF (absent), so no edge is armed by a chart upgrade
-    # The keys exist in values.yaml only as documentation comments. If someone
-    # uncomments a default, every auto-upgrading edge turns DDP (or AMP) on
-    # overnight with none of RFC-0067 D7's preconditions checked -- this is the
-    # guard, and it covers BOTH switches (Bugbot, client#975).
+  - it: the default values.yaml ships TRACEBLOC_DDP ON (RFC-0067 D7 precondition bundle met, chart 1.9.115) and TRACEBLOC_AMP OFF (absent)
+    # THE FLIP THIS SUITE USED TO GUARD AGAINST (client#975's "no edge is armed
+    # by a chart upgrade"). It is deliberate now: D7's preconditions hold --
+    # per_rank_split is the engine default (tracebloc-engine#1010), a decline
+    # falls back to one GPU (client-runtime#553), both on the published :dev
+    # digests -- so the chart default records the decision (backend#3147).
+    # DDP ON alone still arms nothing: the size floor below has no default and
+    # the runtime refuses every expansion while it is unset, which the next
+    # case pins. AMP keeps its OFF default (backend#2327).
     asserts:
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TRACEBLOC_DDP
-          any: true
+            value: "1"
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TRACEBLOC_AMP
           any: true
+
+  - it: the default values.yaml ships NO size floor, so the DDP default arms no edge on its own
+    # Two-switch arming (client-runtime#513, values.yaml): expansion needs
+    # TRACEBLOC_DDP truthy AND MULTI_GPU_MIN_PARAMETERS set. With the first now
+    # defaulted ON, this is the line that keeps a chart upgrade from expanding
+    # anyone: the floor stays absent until an operator sets one.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MULTI_GPU_MIN_PARAMETERS
+          any: true
+
+  - it: an operator's explicit OFF still wins over the ON default -- the kill switch
+    set:
+      env:
+        TRACEBLOC_DDP: "0"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_DDP
+            value: "0"
 
   - it: an EXPLICIT empty string is the third state -- unset -- and must not travel either
     # "" is how a values file says "I have no opinion"; the runtime reads an

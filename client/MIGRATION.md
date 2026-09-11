@@ -2,6 +2,41 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.115 — `env.TRACEBLOC_DDP` defaults ON (RFC-0067 D7)
+
+`env.TRACEBLOC_DDP` now renders as **`"1"`** at the chart default. This is the
+ARM step of backend#3147: RFC-0067 D7's precondition bundle holds — the engine
+defaults its effective-batch mechanism to `per_rank_split` (tracebloc-engine#1010;
+each rank trains on B/N so the effective batch stays B and the numerics are the
+one-GPU experiment's, e2e-test-agent#444), a run on which that mechanism cannot
+apply falls back to **one GPU** rather than to an uncompensated N×B
+(client-runtime#553), and both were verified on the published `:dev` engine and
+jobs-manager digests before this default flipped.
+
+**What changes on upgrade: nothing expands yet.** Multi-GPU needs **both**
+switches — `TRACEBLOC_DDP` truthy **and** `env.MULTI_GPU_MIN_PARAMETERS` set
+(1.9.103) — and the floor still has no default, so an edge that never set a
+floor keeps one GPU per run, with `GPU_COUNT_SIZE_FLOOR_UNSET` in the
+jobs-manager log. To arm an edge, set the floor:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.MULTI_GPU_MIN_PARAMETERS=1000000
+```
+
+(1,000,000 admits ResNet-18-class models and refuses LeNet-class ones; it is the
+floor RFC-0067's G6 measured with, not a general recommendation — see
+backend#3147 for where the speedup crossover sits on your hardware.)
+
+**Rollback lever, per edge:**
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.TRACEBLOC_DDP=0
+```
+
+An explicit `"0"` travels to the jobs-manager and wins over the default; the
+runtime reads it as OFF (`GPU_COUNT_SWITCH_OFF`) and spawns one GPU per run
+whatever the floor says. `TRACEBLOC_AMP` is unchanged (still OFF by default).
+
 ## Upgrading to 1.9.114 — training pods pull from the tracebloc registry (`ghcr.io`) by default
 
 The training-image host now follows `images.traceblocRegistry`: `JOB_IMAGE_HOST`,

@@ -152,10 +152,16 @@ env: {
   # construction.
   #
   #   TRACEBLOC_DDP -- DistributedDataParallel across the GPUs a training pod is
-  #                    given. Default OFF until RFC-0067 D7's precondition bundle
-  #                    holds (backend#3147 tracks it); flipping it on an edge
-  #                    ahead of that is the operator's call, and this is the
-  #                    lever that flips it back.
+  #                    given. DEFAULT ON since chart 1.9.115: RFC-0067 D7's
+  #                    precondition bundle holds (backend#3147 -- the engine
+  #                    defaults to per_rank_split, tracebloc-engine#1010; a
+  #                    decline falls back to ONE GPU, client-runtime#553; both
+  #                    verified on the published :dev digests 2026-09-11). ON
+  #                    alone arms nothing: expansion also needs the size floor
+  #                    below (MULTI_GPU_MIN_PARAMETERS), which has no default,
+  #                    so an edge that never set a floor keeps one GPU per run.
+  #                    This key is the kill switch: `--set-string
+  #                    env.TRACEBLOC_DDP=0` on an edge is the rollback lever.
   #   TRACEBLOC_AMP -- automatic mixed precision. The ENGINE still chooses
   #                    bf16-vs-fp16 from the device in front of it (RFC-0067 D4);
   #                    this only says whether it may. Default OFF (backend#2327).
@@ -163,7 +169,7 @@ env: {
   # Reaches the training pods only through a jobs-manager that forwards it
   # (client-runtime#480); on an older runtime the value lands on the
   # jobs-manager container and goes no further -- inert, never harmful.
-  # TRACEBLOC_DDP: "0"
+  TRACEBLOC_DDP: "1"
   # TRACEBLOC_AMP: "0"
   # -- Per-edge OPERATOR switches for what the training pod REPORTS (same
   #    mechanism, same vocabulary). Both default OFF because the destination
