@@ -1,4 +1,4 @@
-{{- if ne .Values.resourceMonitor false }}
+{{- if (include "tracebloc.resourceMonitorEnabled" .) }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -27,7 +27,7 @@ metadata:
   the training/jobs isolation footprint elsewhere -- it must not cripple node
   telemetry by leaving the DaemonSet without the permissions it cannot run without.
   If a deployment genuinely cannot allow any cluster-scoped read, disable the
-  monitor entirely via .Values.resourceMonitor=false rather than deploying it broken.
+  monitor entirely via .Values.resourceMonitor.enabled=false rather than deploying it broken.
 */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

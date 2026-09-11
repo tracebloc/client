@@ -126,6 +126,42 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{ include "tracebloc.fullname" . }}-resource-monitor
 {{- end }}
 
+{{/*
+  tracebloc.resourceMonitorEnabled — the SINGLE reader of "is the resource-monitor
+  on", coalescing the two value shapes during the RFC-0076 alias window
+  (remove_by: 2026-12-31, client#1009):
+
+    legacy scalar   resourceMonitor: <bool>
+    new object      resourceMonitor.enabled: <bool>   (D2: <component>.enabled)
+
+  This is a bool→object rename, so a stored values.yaml or a bare
+  `--set resourceMonitor=true` still arrives as a SCALAR. Reading
+  `.Values.resourceMonitor.enabled` blindly would `fail` with "can't evaluate
+  field enabled in interface {}" on the scalar and, on a `--reuse-values`
+  upgrade that carries the scalar forward, silently drop the setting. So decide
+  the shape with kindIs and prefer the new `.enabled` form:
+
+    map     -> .enabled, defaulting to true when the key is absent
+    bool    -> the scalar itself
+    absent  -> enabled (the historical default: `ne <nil> false` was true)
+
+  Effective behaviour is unchanged: resourceMonitor.enabled=true does exactly
+  what resourceMonitor=true did. Emits "true" or nothing, so callers use
+  `(include "tracebloc.resourceMonitorEnabled" .)` in an `and`/`or` and
+  `not (include ...)` for the disabled case — the same idiom as
+  tracebloc.nodeAgentsInUse.
+*/}}
+{{- define "tracebloc.resourceMonitorEnabled" -}}
+{{- $rm := .Values.resourceMonitor -}}
+{{- if kindIs "map" $rm -}}
+{{- if ne (dig "enabled" true $rm) false -}}true{{- end -}}
+{{- else if kindIs "invalid" $rm -}}
+{{- "true" -}}
+{{- else -}}
+{{- if ne $rm false -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.rbacName" -}}
 {{ include "tracebloc.fullname" . }}-jobs-manager-rbac
 {{- end }}
@@ -384,11 +420,12 @@ nvidia-device-plugin-daemonset
     * `resourceMonitor: false` — there is no DaemonSet at all, so there is
       nothing to reconcile and a cross-namespace `set image` would just fail.
 
-  Nil-safe: `.Values.resourceMonitor` absent reads as enabled, matching the
-  `ne .Values.resourceMonitor false` gate on the DaemonSet itself.
+  Nil-safe via tracebloc.resourceMonitorEnabled, which absent reads as enabled,
+  matching the gate on the DaemonSet itself and honouring both the legacy scalar
+  and the new resourceMonitor.enabled object form.
 */}}
 {{- define "tracebloc.resourceMonitorRefreshPinned" -}}
-{{- if eq .Values.resourceMonitor false -}}
+{{- if not (include "tracebloc.resourceMonitorEnabled" .) -}}
 true
 {{- else if (default dict (default dict .Values.images).resourceMonitor).digest -}}
 true
@@ -1556,7 +1593,7 @@ https://api.tracebloc.io/
   became a second tenant, two of them were widened and the rest were not." The
   tri-state made `enabled` a second copy of the answer for a third time.
 */ -}}
-{{- if or (ne .Values.resourceMonitor false) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
+{{- if or (include "tracebloc.resourceMonitorEnabled" .) (eq (include "tracebloc.telemetryCollectorState" .) "enabled") }}true{{ end -}}
 {{- end -}}
 
 {{/*
