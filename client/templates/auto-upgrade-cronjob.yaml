@@ -116,6 +116,123 @@ data:
       }'
     }
 
+    # --- telemetry Collector same-version reconcile: begin (backend#3550) -------
+    # The Collector's three-state rule (`telemetryCollector.enabled` unset ->
+    # collect iff the token Secret exists, else record `skipped-no-token`) is
+    # decided by a template `lookup`, and a `lookup` runs ONLY inside a
+    # `helm upgrade`. This tick used to upgrade only onto a NEWER published chart,
+    # so the Secret appearing (jobs-manager writes it minutes after install)
+    # triggered nothing: measured on a fresh edge, three hourly ticks passed with
+    # the Secret present and no Collector, which then rendered a day later only
+    # because a new chart happened to ship. So a tick that has no newer chart to
+    # install now asks the one question that matters and re-renders the DEPLOYED
+    # version in place when the answer is yes.
+    #
+    # DERIVED, NOT RESTATED. The decision is read from the chart's own decider,
+    # twice: the stored state out of `helm get manifest` (what the last render
+    # decided) and the would-be state out of a server-side dry-run of the SAME
+    # chart version (`--dry-run=server`, helm 3.13+, runs the templates' real
+    # `lookup`s against the cluster). No Secret name, Class A rule or DaemonSet
+    # gate is copied here; the three names this needs arrive in env from the same
+    # helpers the templates render with (TELEMETRY_STATUS_NAME,
+    # TELEMETRY_STATUS_ANNOTATION, TELEMETRY_COLLECTOR_NAME).
+    #
+    # TRI-STATE, and "cannot tell" never acts: 0 reconcile / 1 nothing to do /
+    # 2 cannot tell. An unreadable manifest, a failed dry-run, a contradictory
+    # record, or a deployed version the repo cannot serve is not evidence either
+    # way, so the tick leaves the release alone and says so on stdout.
+    #
+    # AHEAD OF THE INDEX IS THE ONE STATE THIS CANNOT FIX, said plainly: a release
+    # deployed from a dev chart (current > latest) runs a version the repo does
+    # not offer, and nothing here can re-render a chart it cannot fetch. That edge
+    # converges on the next published chart, and the verdict names it every tick.
+
+    # Resolved Collector state carried by the manifest on stdin: the state
+    # annotation of the ConfigMap named TELEMETRY_STATUS_NAME. Prints nothing when
+    # the record is absent (a release rendered by a chart that predates it).
+    telemetry_state_of() {
+      awk -v name="$TELEMETRY_STATUS_NAME" -v key="$TELEMETRY_STATUS_ANNOTATION" '
+        /^---/ { doc = ""; next }
+        /^  name: / && $2 == name { doc = "status"; next }
+        doc == "status" && $1 == key ":" { v = $2; gsub(/"/, "", v); print v; exit }'
+    }
+
+    # Exit 0 iff the manifest on stdin carries a DaemonSet named
+    # TELEMETRY_COLLECTOR_NAME, i.e. the last render DID enable the Collector.
+    telemetry_manifest_has_collector() {
+      awk -v name="$TELEMETRY_COLLECTOR_NAME" '
+        /^---/ { kind = ""; next }
+        /^kind: / { kind = $2; next }
+        kind == "DaemonSet" && /^  name: / && $2 == name { found = 1; exit }
+        END { exit found ? 0 : 1 }'
+    }
+
+    # THE condition, in one place, so the test and its mutation drive this code
+    # and not a copy. Reads helm; prints one reason line; returns the tri-state.
+    # Reconcile iff: the stored record says skipped-no-token (which by the
+    # decider's construction means `enabled` was unset) AND the stored manifest
+    # carries no Collector DaemonSet AND a server-side dry-run of the deployed
+    # chart version now resolves to `enabled` (the token Secret has arrived).
+    telemetry_reconcile_verdict() {
+      if [ -z "${TELEMETRY_STATUS_NAME:-}" ] || [ -z "${TELEMETRY_STATUS_ANNOTATION:-}" ] \
+         || [ -z "${TELEMETRY_COLLECTOR_NAME:-}" ]; then
+        echo "reconcile inputs missing from env (TELEMETRY_STATUS_NAME / TELEMETRY_STATUS_ANNOTATION / TELEMETRY_COLLECTOR_NAME)"
+        return 2
+      fi
+      _manifest="$(helm get manifest "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null)" \
+        || { echo "cannot read the deployed manifest (helm get manifest failed)"; return 2; }
+      [ -n "$_manifest" ] || { echo "cannot read the deployed manifest (empty)"; return 2; }
+      _stored="$(printf '%s\n' "$_manifest" | telemetry_state_of)"
+      case "$_stored" in
+        "") echo "release carries no telemetry status record (chart predates it); nothing to reconcile"; return 1 ;;
+        skipped-no-token) ;;
+        *) echo "telemetry Collector state is '$_stored'; nothing to reconcile"; return 1 ;;
+      esac
+      if printf '%s\n' "$_manifest" | telemetry_manifest_has_collector; then
+        echo "status record says skipped-no-token but the release already carries DaemonSet $TELEMETRY_COLLECTOR_NAME: contradictory, not touching it"
+        return 2
+      fi
+      _search="$(helm search repo "${REPO_NAME}/${CHART_NAME}" --version "$CURRENT" -o yaml 2>&1)" \
+        || { echo "cannot ask $REPO_URL whether it serves $CURRENT: $(printf '%s\n' "$_search" | tail -n 1)"; return 2; }
+      _served="$(printf '%s\n' "$_search" | awk '/^[[:space:]]*version:/ {print $2; exit}')"
+      [ "$_served" = "$CURRENT" ] \
+        || { echo "deployed chart $CURRENT is not served by $REPO_URL (newest there: $LATEST): a same-version re-render is impossible, the Collector renders on the next published chart"; return 2; }
+      _render="$(helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+          --namespace "$RELEASE_NAMESPACE" --version "$CURRENT" \
+          --reset-then-reuse-values --dry-run=server --hide-secret 2>&1)" \
+        || { echo "server-side dry-run of $CURRENT failed: $(printf '%s\n' "$_render" | tail -n 1)"; return 2; }
+      _would="$(printf '%s\n' "$_render" | telemetry_state_of)"
+      case "$_would" in
+        enabled) echo "token Secret is now present, a re-render of $CURRENT enables the Collector"; return 0 ;;
+        "") echo "dry-run render of $CURRENT carries no telemetry status record; cannot tell"; return 2 ;;
+        *) echo "a re-render would still decide '$_would'; nothing to reconcile"; return 1 ;;
+      esac
+    }
+
+    # Runs where this tick has no newer chart to install. The reconcile IS the
+    # upgrade at the bottom of this script, pinned to the DEPLOYED version, so it
+    # keeps every flag and the same values discipline. Only verdict 0 acts; 2 is
+    # logged because "cannot tell" must never be silent; 1 stays quiet, as today.
+    telemetry_reconcile_if_needed() {
+      if _why="$(telemetry_reconcile_verdict)"; then
+        log "reconcile: $_why; re-rendering $CURRENT in place (same-version upgrade, values reused)"
+        helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+          --namespace "$RELEASE_NAMESPACE" \
+          --version "$CURRENT" \
+          --reset-then-reuse-values \
+          --atomic \
+          --cleanup-on-fail \
+          --timeout "$UPGRADE_TIMEOUT"
+        log "reconcile complete: $CURRENT re-rendered in place"
+      else
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+          log "reconcile: NOT re-rendering, cannot tell whether the Collector is due: $_why"
+        fi
+      fi
+    }
+    # --- telemetry Collector same-version reconcile: end ------------------------
+
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
 
     helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
@@ -229,14 +346,16 @@ data:
     log "current=$CURRENT latest=$LATEST"
 
     if [ "$LATEST" = "$CURRENT" ]; then
-      log "already at latest; nothing to do"
+      log "already at latest; nothing to upgrade"
+      telemetry_reconcile_if_needed
       exit 0
     fi
 
     # Semver-aware compare via `sort -V` so 1.10.0 > 1.9.0.
     NEWER="$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n 1)"
     if [ "$NEWER" != "$LATEST" ]; then
-      log "deployed version is ahead of repo (current=$CURRENT > latest=$LATEST); skipping"
+      log "deployed version is ahead of repo (current=$CURRENT > latest=$LATEST); skipping the upgrade"
+      telemetry_reconcile_if_needed
       exit 0
     fi
 
@@ -374,6 +493,16 @@ spec:
                 # predates the key (same pattern as activeDeadlineSeconds).
                 - name: WEDGE_MIN_AGE_SECONDS
                   value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
+                # backend#3550: the names the same-version reconcile reads the
+                # stored manifest and the dry-run render by. Rendered from the SAME
+                # helpers the status template and the Collector DaemonSet use, so
+                # the reader and the writers cannot disagree about a spelling.
+                - name: TELEMETRY_STATUS_NAME
+                  value: {{ include "tracebloc.telemetryStatusName" . | quote }}
+                - name: TELEMETRY_STATUS_ANNOTATION
+                  value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
+                - name: TELEMETRY_COLLECTOR_NAME
+                  value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -1,0 +1,87 @@
+# The auto-upgrade tick reads the telemetry status record back out of the stored
+# release to decide whether a same-version re-render is due (backend#3550). The
+# reader and the writer must name the same ConfigMap, the same annotation key and
+# the same DaemonSet — each through ONE helper — so this suite renders both
+# templates side by side and pins that the CronJob's env is what the record and
+# the Collector actually render as. A restated spelling in either would drift
+# silently: the awk would match nothing and the reconcile would quietly never fire.
+suite: telemetry status record <-> auto-upgrade reconcile wiring (backend#3550)
+templates:
+  - templates/telemetry-collector-status.yaml
+  - templates/auto-upgrade-cronjob.yaml
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  storageClass:
+    create: false
+release:
+  name: edge
+  namespace: tracebloc
+tests:
+  - it: auto-upgrade reads the status record by the name and key this template writes
+    templates:
+      - templates/telemetry-collector-status.yaml
+      - templates/auto-upgrade-cronjob.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: edge-telemetry-status
+        template: templates/telemetry-collector-status.yaml
+      - isNotNull:
+          path: metadata.annotations["tracebloc.io/telemetry-collector-state"]
+        template: templates/telemetry-collector-status.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_STATUS_NAME
+            value: edge-telemetry-status
+        template: templates/auto-upgrade-cronjob.yaml
+        documentSelector:
+          path: kind
+          value: CronJob
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_STATUS_ANNOTATION
+            value: tracebloc.io/telemetry-collector-state
+        template: templates/auto-upgrade-cronjob.yaml
+        documentSelector:
+          path: kind
+          value: CronJob
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_COLLECTOR_NAME
+            value: edge-telemetry-collector
+        template: templates/auto-upgrade-cronjob.yaml
+        documentSelector:
+          path: kind
+          value: CronJob
+
+
+  - it: every name follows fullnameOverride together, reader and writers alike
+    set:
+      fullnameOverride: renamed
+    asserts:
+      - equal:
+          path: metadata.name
+          value: renamed-telemetry-status
+        template: templates/telemetry-collector-status.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_STATUS_NAME
+            value: renamed-telemetry-status
+        template: templates/auto-upgrade-cronjob.yaml
+        documentSelector:
+          path: kind
+          value: CronJob
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: TELEMETRY_COLLECTOR_NAME
+            value: renamed-telemetry-collector
+        template: templates/auto-upgrade-cronjob.yaml
+        documentSelector:
+          path: kind
+          value: CronJob

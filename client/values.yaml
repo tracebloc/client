@@ -1676,6 +1676,18 @@ autoUpgrade:
   # Hourly at :23. The off-hour minute spreads load across the
   # tracebloc.github.io/client GitHub Pages origin.
   schedule: "23 * * * *"
+  # A tick with NO newer chart to install is not idle (backend#3550): when the
+  # deployed release recorded the telemetry Collector as `skipped-no-token`
+  # (nobody set telemetryCollector.enabled and jobs-manager had not yet written
+  # the token Secret), the tick asks a server-side dry-run of the DEPLOYED chart
+  # version what it would decide now, and if the answer is `enabled` it re-runs
+  # `helm upgrade` at that same version so the Collector renders. The `lookup`
+  # that decides the three-state rule runs only inside an upgrade, so without
+  # this the Secret appearing changed nothing until the next chart release — the
+  # <release>-telemetry-status ConfigMap names this tick as the trigger. It needs
+  # the deployed version to be one `repoUrl` serves; an edge running a version
+  # AHEAD of that index (a dev chart) cannot be re-rendered and waits for the next
+  # published chart, which the tick says every hour rather than guessing.
   # Helm chart repo to poll. Override only when mirroring internally.
   repoUrl: "https://tracebloc.github.io/client"
   repoName: "tracebloc"
