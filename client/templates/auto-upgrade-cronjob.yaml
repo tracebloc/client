@@ -147,6 +147,16 @@ data:
     # not offer, and nothing here can re-render a chart it cannot fetch. That edge
     # converges on the next published chart, and the verdict names it every tick.
 
+    # Parses the `version:` field out of `helm search repo ... -o yaml` output on
+    # stdin. Search results are newest-first, so with no --version filter on the
+    # search itself the first hit is the latest; with one, it's the served
+    # version for that pin (or nothing, if the repo does not carry it). One
+    # parser for both call sites below so they cannot drift in how they read the
+    # same `helm search repo` output shape.
+    parse_repo_version() {
+      awk '/^[[:space:]]*version:/ {print $2; exit}'
+    }
+
     # Resolved Collector state carried by the manifest on stdin: the state
     # annotation of the ConfigMap named TELEMETRY_STATUS_NAME. Prints nothing when
     # the record is absent (a release rendered by a chart that predates it).
@@ -194,12 +204,17 @@ data:
       fi
       _search="$(helm search repo "${REPO_NAME}/${CHART_NAME}" --version "$CURRENT" -o yaml 2>&1)" \
         || { echo "cannot ask $REPO_URL whether it serves $CURRENT: $(printf '%s\n' "$_search" | tail -n 1)"; return 2; }
-      _served="$(printf '%s\n' "$_search" | awk '/^[[:space:]]*version:/ {print $2; exit}')"
+      _served="$(printf '%s\n' "$_search" | parse_repo_version)"
       [ "$_served" = "$CURRENT" ] \
         || { echo "deployed chart $CURRENT is not served by $REPO_URL (newest there: $LATEST): a same-version re-render is impossible, the Collector renders on the next published chart"; return 2; }
+      # Bounded at 60s: a server-side dry-run only templates and diffs against
+      # the API server, it never waits on a rollout, so it should complete in
+      # seconds. Left unbounded it would share helm's 5m default, which could eat
+      # deep into the 300s repo-fetch buffer activeDeadlineSeconds reserves below
+      # for the REAL --atomic upgrade that follows it on this same tick.
       _render="$(helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
           --namespace "$RELEASE_NAMESPACE" --version "$CURRENT" \
-          --reset-then-reuse-values --dry-run=server --hide-secret 2>&1)" \
+          --reset-then-reuse-values --dry-run=server --hide-secret --timeout 60s 2>&1)" \
         || { echo "server-side dry-run of $CURRENT failed: $(printf '%s\n' "$_render" | tail -n 1)"; return 2; }
       _would="$(printf '%s\n' "$_render" | telemetry_state_of)"
       case "$_would" in
@@ -322,10 +337,8 @@ data:
         ;;
     esac
 
-    # Latest published version. Helm orders search results newest-first,
-    # so the first `version:` line in the YAML output is the latest.
-    LATEST="$(helm search repo "${REPO_NAME}/${CHART_NAME}" -o yaml \
-      | awk '/^[[:space:]]*version:/ {print $2; exit}')"
+    # Latest published version.
+    LATEST="$(helm search repo "${REPO_NAME}/${CHART_NAME}" -o yaml | parse_repo_version)"
 
     # Currently deployed chart version. `helm list -o yaml` emits
     # `chart: client-<version>` for the matching release.

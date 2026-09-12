@@ -1341,7 +1341,7 @@ can be kept above the configured helm timeout.
   depend on that.
 */}}
 {{- define "tracebloc.telemetryStatusName" -}}
-{{- printf "%s-telemetry-status" (include "tracebloc.fullname" .) -}}
+{{- printf "%s-telemetry-status" (include "tracebloc.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
