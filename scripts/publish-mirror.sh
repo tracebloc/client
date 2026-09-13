@@ -111,9 +111,14 @@ cmd_tree() {
   local email="${PUBLISH_MIRROR_GIT_EMAIL:-github-actions[bot]@users.noreply.github.com}"
   # The checkout lives in its own subdirectory of the scratch dir; error
   # captures live BESIDE it, never inside it, or they would be committed.
-  local scratch work
-  scratch="$(mktemp -d "${TMPDIR:-/tmp}/publish-mirror.XXXXXX")" && [ -d "$scratch" ] || die2 "tree: could not create a scratch directory"
-  trap 'rm -rf "$scratch"' EXIT
+  # SCRATCH is deliberately NOT `local`: the EXIT trap runs after this function
+  # has returned, where a local is out of scope — under `set -u` that was an
+  # "unbound variable" line on stderr at every exit and a scratch directory
+  # never removed (the cleanup silently did nothing).
+  local work
+  SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/publish-mirror.XXXXXX")" && [ -d "$SCRATCH" ] || die2 "tree: could not create a scratch directory"
+  trap 'rm -rf "$SCRATCH"' EXIT
+  local scratch="$SCRATCH"
   work="$scratch/work"
   mkdir -p "$work" || die2 "tree: could not create the checkout directory"
 
