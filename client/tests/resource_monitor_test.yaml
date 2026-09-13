@@ -30,6 +30,7 @@ tests:
       images:
         resourceMonitor:
           digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          digestRegistry: "ghcr.io"
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image

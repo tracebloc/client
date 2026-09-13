@@ -66,16 +66,22 @@ tests:
     # refreshed here; requests-proxy runs the jobs-manager IMAGE and follows its
     # digest, so it needs no entry of its own. When all three are digest-pinned
     # there is nothing left to reconcile, so the CronJob renders nothing.
-    # A pinned image is signalled by a non-empty `digest`.
+    # A pinned image is signalled by a non-empty `digest` that is HONOURED --
+    # resolved on the registry this release pulls from (`digestRegistry:
+    # ghcr.io` at the chart default). A pin resolved elsewhere is ignored and
+    # the image keeps refreshing; digest_pin_registry_test.yaml owns that rule.
     template: templates/image-refresh-cronjob.yaml
     set:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
         resourceMonitor:
           digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          digestRegistry: "ghcr.io"
     asserts:
       - hasDocuments:
           count: 0
@@ -90,8 +96,10 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
     asserts:
       - hasDocuments:
           count: 2
@@ -102,10 +110,13 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
         resourceMonitor:
           digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          digestRegistry: "ghcr.io"
     asserts:
       - hasDocuments:
           count: 0
@@ -122,6 +133,7 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         ingestor:
           digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     asserts:
@@ -137,6 +149,7 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
     asserts:
       - isKind:
           of: CronJob
@@ -744,6 +757,7 @@ tests:
       images:
         requestsProxy:
           digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          digestRegistry: "ghcr.io"
     asserts:
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
@@ -820,8 +834,10 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
     asserts:
       - hasDocuments:
           count: 0
@@ -833,8 +849,10 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         podsMonitor:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
     asserts:
       - hasDocuments:
           count: 0

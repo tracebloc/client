@@ -22,14 +22,19 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          {{- $rpImages := (.Values.images | default dict) }}
           {{- /*
             #569 (Bugbot): requests-proxy runs the jobs-manager IMAGE, so it must
             follow the jobs-manager pin. `images.requestsProxy.digest` stays an
-            explicit per-workload override; when it is empty we fall back to
-            `images.jobsManager.digest`.
+            explicit per-workload override; when it is empty -- or IGNORED,
+            because it was resolved on a registry this release does not pull
+            from -- the workload follows the honoured `images.jobsManager.digest`.
+            That fallback used to be computed HERE with a `dig` chain; it now
+            lives in tracebloc.effectivePin, the same function the pull policy
+            and the image-refresh env read, so this site cannot render a digest
+            the pin rule rejected (the shape that put a Docker Hub digest on a
+            ghcr.io reference).
 
-            Without this fallback, pinning jobs-manager ALONE was a silent trap:
+            Without the fallback, pinning jobs-manager ALONE was a silent trap:
             this Deployment kept rendering the floating `repo:tag` while
             jobs-manager ran the pinned digest, AND image-refresh skips pinned
             images — so it never wrote a `set image` for the proxy either. The
@@ -37,11 +42,10 @@ spec:
             same image than jobs-manager. That is precisely the skew this change
             set out to close, re-introduced through the pinning path.
 
-            Nil-guarded on `.Values.images` for --reuse-values replays predating
+            Nil-guarded inside the helper for --reuse-values replays predating
             these keys.
           */}}
-          {{- $rpDigest := (dig "requestsProxy" "digest" "" $rpImages) | default (dig "jobsManager" "digest" "" $rpImages) }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" $rpDigest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+          image: {{ include "tracebloc.controlPlaneImage" (dict "image" "requestsProxy" "root" $) | quote }}
           # #569: IfNotPresent wherever an update path exists without `Always` --
           # a pinned digest, or the image-refresh reconcile (see
           # tracebloc.controlPlanePullPolicy; it stays Always on an edge the
@@ -56,7 +60,7 @@ spec:
           # `<release>-jobs-manager`, so requests-proxy silently skewed: it stayed
           # on the old build until some unrelated restart, then jumped to whatever
           # the floating tag pointed at.
-          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $rpDigest "root" $) }}
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "requestsProxy" "root" $) }}
           workingDir: /app
           command: ["python", "-m", "gunicorn"]
           args:
@@ -136,7 +140,7 @@ spec:
           resources:
             requests:
               cpu: {{ $rpReq.cpu | default "50m" | quote }}
-              memory: {{ $rpReq.memory | default "128Mi" | quote }}
+              memory: {{ $rpReq.memory | default "96Mi" | quote }}
             limits:
               cpu: {{ $rpLim.cpu | default "1000m" | quote }}
               memory: {{ $rpLim.memory | default "512Mi" | quote }}

@@ -812,7 +812,12 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional image digest (sha256:...). When set, overrides the tag, opts this image out of image-refresh, and is ALSO inherited by the requests-proxy Deployment, which runs the same image (see images.requestsProxy.digest)."
+              "description": "Optional image digest (sha256:...). When set AND honoured (see digestRegistry: resolved on the registry this release pulls from), overrides the tag, opts this image out of image-refresh, and is ALSO inherited by the requests-proxy Deployment, which runs the same image (see images.requestsProxy.digest). Recommended state is EMPTY: image-refresh pins the live digest from the registry the pods actually pull from."
+            },
+            "digestRegistry": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. A pin is rendered ONLY when this equals the registry the release pulls from (global.imageRegistry, else images.traceblocRegistry, else the chart default): a digest names bytes on the registry it was resolved on, and another registry may never have held them. Otherwise the pin is IGNORED -- the jobs-manager renders the channel tag, image-refresh re-pins it from the live registry, and NOTES prints a warning naming the image and both registries; the render never fails on it. EMPTY with a non-empty `digest` is the legacy rule: the pin is deemed resolved on docker.io (the only registry these images were pulled from before this key existed), so it is honoured only with images.traceblocRegistry=docker.io and ignored at the ghcr.io default."
             }
           }
         },
@@ -822,7 +827,12 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional image digest (sha256:...). When set, overrides the tag and opts this image out of image-refresh."
+              "description": "Optional image digest (sha256:...). When set AND honoured (see digestRegistry), overrides the tag and opts this image out of image-refresh."
+            },
+            "digestRegistry": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. A pin is rendered ONLY when this equals the registry the release pulls from (global.imageRegistry, else images.traceblocRegistry, else the chart default): a digest names bytes on the registry it was resolved on, and another registry may never have held them. Otherwise the pin is IGNORED -- the pods-monitor container renders the channel tag, image-refresh re-pins it from the live registry, and NOTES prints a warning naming the image and both registries; the render never fails on it. EMPTY with a non-empty `digest` is the legacy rule: the pin is deemed resolved on docker.io (the only registry these images were pulled from before this key existed), so it is honoured only with images.traceblocRegistry=docker.io and ignored at the ghcr.io default."
             }
           }
         },
@@ -832,7 +842,12 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional image digest (sha256:...). When set, overrides the tag and opts the resource-monitor DaemonSet out of image-refresh (#569 brought it under refresh; before that it had no deliberate update path at all)."
+              "description": "Optional image digest (sha256:...). When set AND honoured (see digestRegistry), overrides the tag and opts the resource-monitor DaemonSet out of image-refresh (#569 brought it under refresh; before that it had no deliberate update path at all)."
+            },
+            "digestRegistry": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. A pin is rendered ONLY when this equals the registry the release pulls from (global.imageRegistry, else images.traceblocRegistry, else the chart default): a digest names bytes on the registry it was resolved on, and another registry may never have held them. Otherwise the pin is IGNORED -- the resource-monitor DaemonSet renders the channel tag, image-refresh re-pins it from the live registry, and NOTES prints a warning naming the image and both registries; the render never fails on it. EMPTY with a non-empty `digest` is the legacy rule: the pin is deemed resolved on docker.io (the only registry these images were pulled from before this key existed), so it is honoured only with images.traceblocRegistry=docker.io and ignored at the ghcr.io default."
             }
           }
         },
@@ -842,7 +857,12 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
-              "description": "Optional image digest (sha256:...) for the requests-proxy Deployment, which runs the tracebloc/jobs-manager image. Leave EMPTY (default) and it follows images.jobsManager.digest, so the two pods cannot run different builds of the same image. Set it only to pin requests-proxy independently of jobs-manager."
+              "description": "Optional image digest (sha256:...) for the requests-proxy Deployment, which runs the tracebloc/jobs-manager image. Leave EMPTY (default) and it follows the HONOURED images.jobsManager pin, so the two pods cannot run different builds of the same image; an own pin that is IGNORED (see digestRegistry) is not an override and follows jobs-manager the same way. Set it, with digestRegistry, only to pin requests-proxy independently of jobs-manager."
+            },
+            "digestRegistry": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. A pin is rendered ONLY when this equals the registry the release pulls from (global.imageRegistry, else images.traceblocRegistry, else the chart default): a digest names bytes on the registry it was resolved on, and another registry may never have held them. Otherwise the pin is IGNORED -- the requests-proxy renders the channel tag, image-refresh re-pins it from the live registry, and NOTES prints a warning naming the image and both registries; the render never fails on it. EMPTY with a non-empty `digest` is the legacy rule: the pin is deemed resolved on docker.io (the only registry these images were pulled from before this key existed), so it is honoured only with images.traceblocRegistry=docker.io and ignored at the ghcr.io default."
             }
           }
         },

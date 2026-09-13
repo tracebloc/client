@@ -263,7 +263,7 @@ _TB_ENVELOPE_NODE_MIN_MEM_BYTES=5368709120
 # signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
 # `make drift` (the required Source-of-truth drift job): the value below must
 # equal a fresh render of the chart in the same tree, or CI reddens.
-_TB_CP_FOOTPRINT_MEM_BYTES=2382364672
+_TB_CP_FOOTPRINT_MEM_BYTES=1879048192
 _TB_CP_FOOTPRINT_CPU_MILLI=650
 # ── end generated ───────────────────────────────────────────────────────────
 

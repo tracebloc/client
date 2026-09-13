@@ -415,8 +415,10 @@ nvidia-device-plugin-daemonset
   tick, forever — where before #569 that combination retired it (Bugbot).
 
   Two ways to have nothing to do:
-    * an explicit `images.resourceMonitor.digest` pin, same signal as the other
-      images, or
+    * an HONOURED `images.resourceMonitor.digest` pin (tracebloc.pinFor -- a
+      pin resolved on a registry this release does not pull from is ignored,
+      so the DaemonSet floats and the CronJob keeps re-pinning it from the
+      live registry), same signal as the other images, or
     * `resourceMonitor: false` — there is no DaemonSet at all, so there is
       nothing to reconcile and a cross-namespace `set image` would just fail.
 
@@ -427,28 +429,28 @@ nvidia-device-plugin-daemonset
 {{- define "tracebloc.resourceMonitorRefreshPinned" -}}
 {{- if not (include "tracebloc.resourceMonitorEnabled" .) -}}
 true
-{{- else if (default dict (default dict .Values.images).resourceMonitor).digest -}}
+{{- else if (include "tracebloc.pinFor" (dict "image" "resourceMonitor" "root" .)) -}}
 true
 {{- end -}}
 {{- end }}
 
 {{- define "tracebloc.imageRefreshEnabled" -}}
 {{- $ir := default dict .Values.imageRefresh -}}
-{{- $imgs := default dict .Values.images -}}
-{{- $jm := default dict $imgs.jobsManager -}}
-{{- $pm := default dict $imgs.podsMonitor -}}
 {{/*
   Per-image pin signal (means "skip auto-refresh for this image"):
-  jobs-manager / pods-monitor are pinned when `digest` is set (non-empty) —
-  the same signal the deployment uses to switch imagePullPolicy to
-  IfNotPresent. The ingestor is no longer refreshed by this CronJob (it is
-  spawned by jobs-manager from a floating tag — see the
-  image-refresh-cronjob.yaml header and submit_ingestion_run in
-  client-runtime), so the CronJob exists only to refresh the two class-1
-  images: when BOTH are pinned there is nothing left for it to do.
+  jobs-manager / pods-monitor are pinned when tracebloc.pinFor HONOURS their
+  `digest` -- set, and resolved on the registry this release pulls from. That
+  is the same decision that renders `repo@digest` and switches imagePullPolicy
+  to IfNotPresent, so a pin the render ignored (registry mismatch) is unpinned
+  here too and the CronJob stays to re-pin it from the live registry. The
+  ingestor is no longer refreshed by this CronJob (it is spawned by
+  jobs-manager from a floating tag — see the image-refresh-cronjob.yaml header
+  and submit_ingestion_run in client-runtime), so the CronJob exists only to
+  refresh the two class-1 images: when BOTH are pinned there is nothing left
+  for it to do.
 */}}
-{{- $jmPinned := $jm.digest -}}
-{{- $pmPinned := $pm.digest -}}
+{{- $jmPinned := include "tracebloc.pinFor" (dict "image" "jobsManager" "root" .) -}}
+{{- $pmPinned := include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" .) -}}
 {{/*
   #569: resource-monitor came under refresh too, so it joins the "nothing left
   to do" test. requests-proxy deliberately does NOT: it runs the SAME
@@ -492,9 +494,13 @@ true
   a green CronJob and no signal (Bugbot, High). So the policy tracks whether an
   update path actually exists:
 
-    1. An explicit `digest` pin -> IfNotPresent. The reference is immutable, so
+    1. An HONOURED `digest` pin (tracebloc.effectivePin: set, resolved on the
+       registry this release pulls from; requests-proxy inherits the
+       jobs-manager pin) -> IfNotPresent. The reference is immutable, so
        re-checking the registry can only ever return the same image. Updates
-       come from changing the pin.
+       come from changing the pin. A pin the render IGNORED (registry
+       mismatch) is not a pin here either: that workload floats, so it takes
+       branch 2 or 3 like an unpinned one.
     2. Otherwise, if the image-refresh reconcile can actually drive updates on
        this edge -> IfNotPresent, because `set image` changes the REFERENCE and
        the kubelet pulls a digest it has never seen. Two conditions:
@@ -519,10 +525,13 @@ true
   freezing — a frozen control plane with no signal is worse than a restart that
   needs the network.
 
-  Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $d "root" $) }}
+  Usage: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "jobsManager" "root" $) }}
+  Takes the IMAGE KEY, not a digest: the helper asks tracebloc.effectivePin
+  itself, so a call site cannot hand it a raw values digest the image site
+  did not render.
 */}}
 {{- define "tracebloc.controlPlanePullPolicy" -}}
-{{- if .digest -}}
+{{- if include "tracebloc.effectivePin" . -}}
 IfNotPresent
 {{- else if and (include "tracebloc.imageRefreshEnabled" .root) (include "tracebloc.imageRefreshResolvable" .root) -}}
 IfNotPresent
@@ -594,10 +603,16 @@ Image reference — defaults to docker.io when no registry is provided.
 When `digest` (sha256:...) is set, renders registry/repo@digest (immutable pin,
 preferred for security). Otherwise falls back to registry/repo:tag, where tag
 defaults to "prod" when CLIENT_ENV is omitted or empty.
-Usage: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" "docker.io") }}
+Usage: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" "docker.io") }}
 NOTE the resolved tag. This example previously read `.Values.env.CLIENT_ENV`
 and all four image call sites were copied from it, so a documented alias
 became an image tag nothing publishes (backend#1723).
+CONTROL-PLANE IMAGES DO NOT CALL THIS DIRECTLY. jobs-manager, pods-monitor,
+resource-monitor and requests-proxy go through tracebloc.controlPlaneImage,
+which decides FIRST whether the values pin may be rendered at all
+(tracebloc.pinFor: only on the registry it was resolved on). Passing
+`.Values.images.jobsManager.digest` straight in here -- the shape this example
+used to show -- is how a Docker Hub digest was rendered onto ghcr.io.
 */}}
 {{- define "tracebloc.image" -}}
 {{- $registry := .registry | default "docker.io" -}}
@@ -698,6 +713,195 @@ or a registry the script has no token arm for). Call with the ROOT context.
 {{- define "tracebloc.imageRefreshResolvable" -}}
 {{- if has (include "tracebloc.tbRegistry" .) (splitList " " (include "tracebloc.imageRefreshResolvableRegistries" .)) -}}
 true
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.controlPlaneImages — THE declaration of the four always-running
+control-plane images that share one pinning contract: the values key under
+`images.` -> the repository. JSON, because a template can only return a string;
+consumers `fromJson` it. ONE declaration so the image sites, the pin decision,
+the image-refresh env flags and the NOTES.txt warning all iterate the same set:
+a fifth image added here is pinned, refreshed and reported everywhere at once,
+and a key that is not here fails the render (a template bug, never an operator
+input -- see tracebloc.controlPlaneRepository).
+
+requests-proxy runs the jobs-manager IMAGE and, when it carries no honoured pin
+of its own, follows the jobs-manager pin (tracebloc.effectivePin).
+*/}}
+{{- define "tracebloc.controlPlaneImages" -}}
+{"jobsManager":"tracebloc/jobs-manager","podsMonitor":"tracebloc/pods-monitor","resourceMonitor":"tracebloc/resource-monitor","requestsProxy":"tracebloc/jobs-manager"}
+{{- end -}}
+
+{{- define "tracebloc.controlPlaneRepository" -}}
+{{- $repos := include "tracebloc.controlPlaneImages" . | fromJson -}}
+{{- $repo := index $repos (.image | default "") -}}
+{{- if not $repo -}}
+{{- fail (printf "tracebloc.controlPlaneRepository: %q is not a control-plane image key (known: %s) -- a template bug, not a values problem" (.image | default "") (keys $repos | sortAlpha | join ", ")) -}}
+{{- end -}}
+{{- $repo -}}
+{{- end -}}
+
+{{/*
+tracebloc.legacyPinRegistry — the registry a values pin is deemed resolved on
+when `images.<image>.digestRegistry` is empty or absent: docker.io, the ONLY
+registry the chart pulled the control-plane images from before the key
+existed, so every pin written before it was, by construction, resolved there.
+ONE literal; tracebloc.pinDeclaredRegistry is its only reader.
+*/}}
+{{- define "tracebloc.legacyPinRegistry" -}}
+docker.io
+{{- end -}}
+
+{{/*
+tracebloc.pinDeclaredRegistry — the registry a control-plane values pin claims
+to have been resolved on: `images.<image>.digestRegistry`, else the legacy rule
+above. Renders the bare host. Only meaningful beside a non-empty digest; the
+NOTES.txt warning names it when a pin is ignored.
+Usage: {{ include "tracebloc.pinDeclaredRegistry" (dict "image" "jobsManager" "root" $) }}
+*/}}
+{{- define "tracebloc.pinDeclaredRegistry" -}}
+{{- $img := default dict (index (default dict .root.Values.images) .image) -}}
+{{- $img.digestRegistry | default (include "tracebloc.legacyPinRegistry" .root) -}}
+{{- end -}}
+
+{{/*
+tracebloc.pinFor — THE ONE decision: does this control-plane image render its
+values digest pin, and to which digest? Renders the digest (`sha256:...`) when
+the pin is HONOURED, nothing when there is no pin or the pin is IGNORED.
+
+A digest names bytes on the registry it was resolved on. Nothing guarantees any
+other registry ever held them, and a pod told to pull a digest its registry
+does not have never starts -- so a pin resolved on one registry and rendered
+onto another is not "the same image elsewhere", it is an unpullable reference.
+That is how a digest pin outlived its registry: an operator pin resolved on
+Docker Hub, the chart default moved to ghcr.io, the image site rendered
+`ghcr.io/tracebloc/jobs-manager@sha256:<x>` for a digest ghcr.io never had, and
+every auto-upgrade timed out and rolled back for two days -- one killed attempt
+left the edge with no jobs-manager at all -- while the image-refresh script,
+which by design never edits an operator pin, correctly reported the pin stale
+and did nothing else.
+
+THE RULE. A pin is honoured only on the registry it was resolved against:
+
+  images.<image>.digest          the pin
+  images.<image>.digestRegistry  the registry it was resolved on (bare host,
+                                 spelled exactly as `images.traceblocRegistry`
+                                 or `global.imageRegistry` would be)
+
+  honoured  <=>  digest is non-empty AND digestRegistry == tracebloc.tbRegistry
+                 (the registry this release actually pulls from)
+  ignored   otherwise: the workload renders the channel tag, image-refresh
+            treats the image as unpinned and re-pins it from the LIVE registry,
+            and NOTES.txt carries a warning naming the image, the pin's registry
+            and the effective one (tracebloc.ignoredPins).
+
+LEGACY RULE. `digest` set and `digestRegistry` empty is a pin written before the
+key existed. Every such pin was resolved on docker.io -- the only registry the
+control-plane images were pulled from until then -- so it is read as
+`digestRegistry: docker.io`: honoured when the effective registry is docker.io
+(the documented rollback), ignored at the ghcr.io default. That IS the incident
+case, and the fallback is the fix: on a registry that has no such digest, the
+channel tag is the only reference that can pull.
+
+NEVER `fail`. An install or auto-upgrade must not be blocked by a stale pin --
+the tag is the safe state, and refusing to render would have wedged exactly the
+fleet this exists to unwedge.
+
+ONE FUNCTION, four consumers, so "pinned" and "rendered digest" cannot disagree:
+  * tracebloc.controlPlaneImage           -> the image reference at every site
+  * tracebloc.controlPlanePullPolicy      -> IfNotPresent on a pin
+  * tracebloc.imageRefreshEnabled and
+    tracebloc.resourceMonitorRefreshPinned -> whether the CronJob has work
+  * image-refresh-cronjob.yaml env        -> the *_PINNED / *_PIN the script reads
+The chart tests exercise the consumers; none of them re-derives the rule.
+
+Nil-guarded on every dereference for `--reuse-values` replays that predate the
+`images` block or the new key. Fails the render only on an unknown IMAGE KEY
+(a template bug -- tracebloc.controlPlaneRepository), never on values.
+
+Usage: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) }}
+*/}}
+{{- define "tracebloc.pinFor" -}}
+{{- $_ := include "tracebloc.controlPlaneRepository" . -}}
+{{- $img := default dict (index (default dict .root.Values.images) .image) -}}
+{{- $digest := $img.digest | default "" -}}
+{{- if and $digest (eq (include "tracebloc.pinDeclaredRegistry" .) (include "tracebloc.tbRegistry" .root)) -}}
+{{- $digest -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.pinIgnored — "1" when this image HAS a values digest pin that
+tracebloc.pinFor did NOT honour (resolved on a registry this release does not
+pull from), else "". The image-refresh CronJob reads it per image: an ignored
+pin is NOT a fresh install -- the operator pinned this image on purpose and a
+pinned image was never refreshed, so it carries no refresh annotation for that
+reason, not because it was just born. The first tick after the pin is ignored
+therefore re-pins the workload from the live registry instead of leaving it on
+the channel tag until the next upstream digest change (the fresh-install skip
+applied to the wrong case). Derived from the same decision as the render
+(pinFor), so "ignored" here is exactly what NOTES reports and what the image
+sites did.
+Usage: {{ include "tracebloc.pinIgnored" (dict "image" "jobsManager" "root" $) }}
+*/}}
+{{- define "tracebloc.pinIgnored" -}}
+{{- $img := default dict (index (default dict .root.Values.images) .image) -}}
+{{- if and ($img.digest | default "") (not (include "tracebloc.pinFor" .)) -}}
+1
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.effectivePin — the digest a WORKLOAD renders: its own honoured pin
+(tracebloc.pinFor), except that requests-proxy, which runs the jobs-manager
+image, follows the honoured jobs-manager pin when it has no honoured pin of its
+own -- so the two pods cannot run different builds of one image (the skew #569
+closed). An IGNORED requests-proxy pin is not a pin, so it falls through to the
+jobs-manager decision exactly like an empty one; that is what "follows the
+jobs-manager pin" has always meant. Renders the digest or nothing.
+Usage: {{ include "tracebloc.effectivePin" (dict "image" "requestsProxy" "root" $) }}
+*/}}
+{{- define "tracebloc.effectivePin" -}}
+{{- $own := include "tracebloc.pinFor" . -}}
+{{- if $own -}}
+{{- $own -}}
+{{- else if eq .image "requestsProxy" -}}
+{{- include "tracebloc.pinFor" (dict "image" "jobsManager" "root" .root) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.controlPlaneImage — the ONE image reference for a control-plane
+workload: <tbRegistry>/<repository>@<effectivePin> when a pin is honoured,
+<tbRegistry>/<repository>:<resolved CLIENT_ENV> otherwise. Every control-plane
+image site calls this and nothing else, so no site can hand a raw
+`.Values.images.<image>.digest` past the pin rule -- the shape that rendered
+the unpullable reference. Third-party images keep calling tracebloc.image
+directly; their digests have their own registry keys.
+Usage: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) }}
+*/}}
+{{- define "tracebloc.controlPlaneImage" -}}
+{{- include "tracebloc.image" (dict "repository" (include "tracebloc.controlPlaneRepository" .) "tag" (include "tracebloc.clientEnv" .root) "digest" (include "tracebloc.effectivePin" .) "registry" (include "tracebloc.tbRegistry" .root)) -}}
+{{- end -}}
+
+{{/*
+tracebloc.ignoredPins — one entry per control-plane pin that is SET but IGNORED
+by tracebloc.pinFor (registry mismatch), for the NOTES.txt warning. Derived from
+the same declaration (tracebloc.controlPlaneImages) and the same decision
+(pinFor) the workloads use, so the warning cannot name a pin the render
+honoured, nor miss one it dropped. Renders nothing when every pin is honoured
+or absent. Call with the ROOT context.
+*/}}
+{{- define "tracebloc.ignoredPins" -}}
+{{- $root := . -}}
+{{- $eff := include "tracebloc.tbRegistry" $root -}}
+{{- range $image := (include "tracebloc.controlPlaneImages" $root | fromJson | keys | sortAlpha) -}}
+{{- $img := default dict (index (default dict $root.Values.images) $image) -}}
+{{- if and $img.digest (not (include "tracebloc.pinFor" (dict "image" $image "root" $root))) }}
+  - images.{{ $image }}.digest = {{ $img.digest }}
+    resolved on {{ include "tracebloc.pinDeclaredRegistry" (dict "image" $image "root" $root) }}{{ if not $img.digestRegistry }} (digestRegistry unset -- a legacy pin, deemed docker.io){{ end }}; this release pulls from {{ $eff }}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
