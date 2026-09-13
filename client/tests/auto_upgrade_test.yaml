@@ -213,6 +213,45 @@ tests:
           path: data["auto-upgrade.sh"]
           pattern: 'oh > 23 \|\| om > 59'
 
+  # backend#3550: with no newer chart to install, the tick re-renders the DEPLOYED
+  # version in place once the Collector's token Secret exists. The condition is
+  # DRIVEN, not read, by scripts/tests/auto-upgrade-telemetry-reconcile.sh (a stub
+  # helm, 23 cases, tri-state); what this pins is the shape a reader can verify
+  # here: the decision reads the chart's own decider (stored manifest + a
+  # server-side dry-run), the reconcile is pinned to $CURRENT, and both no-upgrade
+  # branches reach it.
+  - it: script reconciles the telemetry Collector in place when its token arrives (backend#3550)
+    template: templates/auto-upgrade-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: "telemetry_reconcile_verdict\\(\\) \\{"
+      # Reads the stored decision, never re-deriving the Secret rule here.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: 'helm get manifest "\$RELEASE_NAME"'
+      # Asks the chart's real lookups what a re-render would decide.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '--version "\$CURRENT" \\\n\s*--reset-then-reuse-values --dry-run=server --hide-secret'
+      # The reconcile IS the upgrade, pinned to the deployed version, same flags.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '(?s)telemetry_reconcile_if_needed\(\) \{.*--version "\$CURRENT".*--reset-then-reuse-values.*--atomic.*--cleanup-on-fail.*--timeout "\$UPGRADE_TIMEOUT"'
+      # Both branches that install nothing consult it; the newer-chart path does
+      # not need to, because that upgrade re-renders anyway.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '(?s)already at latest; nothing to upgrade"\s*\n\s*telemetry_reconcile_if_needed'
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: '(?s)skipping the upgrade"\s*\n\s*telemetry_reconcile_if_needed'
+      # Verdict 2 is logged, never acted on.
+      - matchRegex:
+          path: data["auto-upgrade.sh"]
+          pattern: 'reconcile: NOT re-rendering, cannot tell'
+
   - it: CronJob passes the wedge-age threshold to the upgrade script (#2877)
     template: templates/auto-upgrade-cronjob.yaml
     documentIndex: 1

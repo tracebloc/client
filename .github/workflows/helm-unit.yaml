@@ -89,3 +89,11 @@ jobs:
 
       - name: Run unit tests
         run: helm unittest ./client
+
+      # Mutation (d) of the telemetry-reconcile gate: restoring the old
+      # "resolves itself" wording must redden the status-record unit test. It
+      # needs the plugin installed above, which is why it runs here and not in
+      # `make drift` (that job has no helm-unittest and read the missing plugin
+      # as a wrong-reason red on 2026-09-11).
+      - name: Prove the status-record honesty test can fail
+        run: MODE=record bash scripts/tests/auto-upgrade-telemetry-reconcile-mutations.sh
