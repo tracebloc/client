@@ -31,8 +31,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
 # The bounded package-manager runner and apt's socket bounds live in ONE place;
 # both container harnesses source it. See scripts/tests/_pm.sh for why.
+# $HERE, not ${BASH_SOURCE[0]%/*} -- same reason as path-persist.sh: with no
+# directory component in $0 there is no slash to strip, so `%/*` yields the
+# filename and this sources distro-prereqs.sh/_pm.sh. `set -uo pipefail` has no
+# -e, so the failed source is silent and the first $_APT_BOUND aborts on unbound.
 # shellcheck source=scripts/tests/_pm.sh
-. "${BASH_SOURCE[0]%/*}/_pm.sh"
+. "$HERE/_pm.sh"
 
 _pm_install_one() { # install a single package with whatever PM exists
   if   command -v apt-get >/dev/null 2>&1; then

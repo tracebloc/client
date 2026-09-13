@@ -80,12 +80,19 @@ CLI_REF="${TRACEBLOC_CLI_REF:-$DEFAULT_CLI_REF}"
 CLI_VERSION="${TRACEBLOC_CLI_VERSION:-}"
 # The bounded package-manager runner and apt's socket bounds live in ONE place;
 # both container harnesses source it. See scripts/tests/_pm.sh for why.
+# $HERE, not ${BASH_SOURCE[0]%/*}: `%/*` strips the last /segment, but invoked
+# with no directory component (`cd scripts/tests && bash path-persist.sh`) there
+# is no slash to strip, so it yields the filename and sources
+# path-persist.sh/_pm.sh. There is no `set -e`, so that failure is silent and the
+# first $_APT_BOUND use then aborts with "unbound variable" under `set -u`.
+# HERE goes through dirname, which returns "." in that case.
 # shellcheck source=scripts/tests/_pm.sh
-. "${BASH_SOURCE[0]%/*}/_pm.sh"
+. "$HERE/_pm.sh"
 
 _pm_install() { # install one or more packages with whatever PM exists; best-effort
-  # shellcheck disable=SC2086  # _APT_BOUND is a deliberate word-split argv
-  if   command -v apt-get >/dev/null 2>&1; then _pm_run apt-get update -qq $_APT_BOUND && _pm_run apt-get install -y -qq $_APT_BOUND "$@"
+  if   command -v apt-get >/dev/null 2>&1; then
+    # shellcheck disable=SC2086  # _APT_BOUND is a deliberate word-split argv
+    _pm_run apt-get update -qq $_APT_BOUND && _pm_run apt-get install -y -qq $_APT_BOUND "$@"
   elif command -v dnf     >/dev/null 2>&1; then _pm_run dnf install -y -q "$@"
   elif command -v yum     >/dev/null 2>&1; then _pm_run yum install -y -q "$@"
   elif command -v zypper  >/dev/null 2>&1; then _pm_run zypper --non-interactive --quiet install "$@"

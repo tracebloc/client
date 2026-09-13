@@ -65,12 +65,29 @@
 # runner to be the SCHEME, not the address family. The flag was harmless but its
 # stated reason was wrong, and a flag shipped on a contradicted hypothesis is
 # the kind of thing that gets copied forward as fact.
-_APT_BOUND='-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=3'
+#
+# `Acquire::Retries=0`, NOT 3. An inner retry count fights the outer bound: every
+# retry happens INSIDE the one `timeout ${TB_PM_TIMEOUT:-60}` that _pm_run wraps
+# the call in, so raising it buys nothing the outer 3-attempt loop does not
+# already give, and spends the budget that loop depends on. Measured against a
+# true blackhole (ubuntu:24.04, iptables DROP on 80/443 so SYNs vanish with no
+# RST -- a stall, not a refusal; 36 index URLs):
+#
+#     no bounds at all   39s      <- the pre-PR baseline
+#     Retries=3          19s
+#     Retries=1          13s
+#     Retries=0          12s      <- this
+#
+# So the bounds are worth having (39s -> 12s) and the retries were costing ~7s of
+# the 60s budget to re-ask a host that is not answering.
+_APT_BOUND='-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0'
 
 # Bounded + retried package-manager invocation; "$@" = the PM argv.
 #
-# `command -v` (not has()) because this runs BEFORE common.sh is sourced;
-# notices go to stderr.
+# `command -v` (not has()) because the two callers source this file at DIFFERENT
+# points: distro-prereqs.sh sources it before common.sh exists, path-persist.sh
+# after. has() is therefore defined for one caller and not the other, so this
+# file cannot depend on it. Notices go to stderr.
 _pm_run() {
   local i
   for i in 1 2 3; do
