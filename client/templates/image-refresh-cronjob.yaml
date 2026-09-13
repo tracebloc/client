@@ -326,6 +326,42 @@ data:
         | tr -d '\r\n'
     }
 
+    # Whether IMAGE_REGISTRY can actually serve a pinned digest: HEAD the
+    # manifest BY DIGEST, the same endpoint / token / Accept shape as
+    # get_latest_digest, and print the HTTP status ("404" = the registry has
+    # never held this digest, "200" = pullable, anything else = could not
+    # tell). Without `-f`, so a 404 is an answer rather than a curl error;
+    # a transport failure prints curl's "000".
+    #
+    # WHY THIS EXISTS. A digest names bytes on the registry it was resolved
+    # on, and nothing else. The chart already refuses to RENDER a pin onto a
+    # registry it was not resolved on (tracebloc.pinFor reads
+    # images.<image>.digestRegistry), which is why this branch sees only pins
+    # the chart believed were local. This is the runtime backstop for the case
+    # the render cannot see: a `digestRegistry` declared wrong, or a digest the
+    # registry has since garbage-collected -- a digest pin that outlived its
+    # registry. A pod told to pull such a reference never starts, every
+    # rollout onto it times out, and nothing in this system said why. Now
+    # something does, on every tick, on the object `kubectl describe` shows.
+    manifest_status_by_digest() {
+      _repo="$1"; _digest="$2"; _registry="$3"
+      _token="$(get_token "$_repo" "$_registry")"
+      if [ -z "$_token" ]; then
+        log "  WARN: could not fetch auth token for $_registry/$_repo"
+        return 1
+      fi
+      case "$_registry" in
+        docker.io) _host="registry-1.docker.io" ;;
+        ghcr.io)   _host="ghcr.io" ;;
+        *)         log "  WARN: unknown registry host: $_registry"; return 1 ;;
+      esac
+      curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -I \
+        -H "Authorization: Bearer $_token" \
+        -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json" \
+        "https://${_host}/v2/${_repo}/manifests/${_digest}" \
+        | tr -d '\r\n'
+    }
+
     # Read an annotation value off the deployment. Empty output means
     # the annotation is absent (first observation) — distinct from an
     # explicit empty string, which the chart never writes.
@@ -607,6 +643,35 @@ data:
         # it changes no behaviour: `continue` still ends this image's tick either
         # way. Only the reporting is new.
         stale_key="tracebloc.io/stale-pin-${repo#*/}"
+
+        # FIRST: can IMAGE_REGISTRY serve this digest at all? A pin the registry
+        # has never held is the worse finding and makes the staleness compare
+        # moot -- "stale" presumes the pinned bytes exist to be behind. Only a
+        # definite 404 is NOT PULLABLE; 200 proceeds; anything else (token, rate
+        # limit, transport) is "could not tell", a finding that falls through to
+        # the compare rather than asserting either way. The workload is left
+        # exactly as it is: an operator pin is never edited by this script, so
+        # the finding is the log line plus the annotation, on the same object and
+        # key as a stale pin (`unpullable:<digest>` vs a stale pin's `<latest>`),
+        # and it is cleared by the same paths -- the pin becoming CURRENT, or
+        # being dropped.
+        pin_status="$(manifest_status_by_digest "$repo" "$pin_digest" "$IMAGE_REGISTRY" || true)"
+        case "$pin_status" in
+          404)
+            log "  ERROR: PIN IS NOT PULLABLE on ${IMAGE_REGISTRY}: ${IMAGE_REGISTRY}/${repo}@${pin_digest} does not exist there (HTTP 404)."
+            log "         A digest names bytes on the registry it was resolved on; this one was not resolved on ${IMAGE_REGISTRY}, or that registry"
+            log "         has since dropped it. A pod told to pull it cannot start, and every rollout onto it will time out."
+            log "         Re-resolve the digest on ${IMAGE_REGISTRY} and set images.<name>.digestRegistry=\"${IMAGE_REGISTRY}\" beside it, or clear"
+            log "         images.<name>.digest and let this script pin from the live registry. The workload is left untouched."
+            stale_pin_args="$stale_pin_args ${stale_key}=unpullable:${pin_digest}"
+            continue
+            ;;
+          200) ;;
+          *)
+            log "  WARN: could not verify the pin is pullable on ${IMAGE_REGISTRY} (HTTP ${pin_status:-none}) -- not knowing is a finding, not agreement; continuing to the staleness compare"
+            ;;
+        esac
+
         pin_latest="$(get_latest_digest "$repo" "$IMAGE_TAG" "$IMAGE_REGISTRY" || true)"
         if [ -z "$pin_latest" ]; then
           log "  pinned by digest in values; skipping (could not resolve ${IMAGE_TAG} to compare -- not knowing is a finding, not agreement)"
@@ -1182,16 +1247,24 @@ spec:
                 # settled guard, which a never-Ready pod never gets past.
                 - name: MAX_SKIP_TICKS
                   value: {{ .Values.imageRefresh.maxSkipTicks | default 8 | quote }}
-                # Per-image opt-out flags. Pinning a class-1 image is
-                # signalled by setting `images.<image>.digest` to a non-empty
-                # value — the same signal the deployment uses to switch
-                # imagePullPolicy to IfNotPresent. Both guards are nil-safe.
-                # (The ingestor is no longer refreshed here — it is spawned
-                # by jobs-manager from the floating tag; see header.)
+                # Per-image opt-out flags. A class-1 image is pinned when
+                # tracebloc.pinFor HONOURS `images.<image>.digest`: set, AND
+                # resolved on the registry this release pulls from
+                # (`digestRegistry` == IMAGE_REGISTRY; unset means docker.io,
+                # the legacy rule). That is the SAME decision that renders
+                # `repo@digest` and switches imagePullPolicy to IfNotPresent,
+                # so a pin the render ignored (registry mismatch) reads "0"
+                # here and this script re-pins the image from IMAGE_REGISTRY --
+                # the fallback that is the fix for a digest pin that outlived
+                # its registry. Computing the flag from `.digest` alone is what
+                # let the render float an image while this script skipped it as
+                # pinned. Nil-safe inside the helper. (The ingestor is no longer
+                # refreshed here — it is spawned by jobs-manager from the
+                # floating tag; see header.)
                 - name: JOBS_MANAGER_PINNED
-                  value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).jobsManager).digest)) | quote }}
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $)))) | quote }}
                 - name: PODS_MONITOR_PINNED
-                  value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).podsMonitor).digest)) | quote }}
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $)))) | quote }}
                 # #569: resource-monitor is refreshed too. It counts as "pinned"
                 # (i.e. skip it) either when an operator set an explicit digest
                 # OR when `resourceMonitor: false` disables the DaemonSet
@@ -1206,17 +1279,21 @@ spec:
                 # Skipping before resolving the tag meant nothing ever learned a pin
                 # had gone STALE: a pin set once for a good reason silently became a
                 # freeze, and the only symptom was a fix that appeared to ship and
-                # did not.
+                # did not. The HONOURED value (tracebloc.pinFor), so it is the
+                # digest the workload actually renders -- an ignored pin is "".
                 - name: JOBS_MANAGER_PIN
-                  value: {{ (default dict (default dict .Values.images).jobsManager).digest | default "" | quote }}
+                  value: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) | quote }}
                 - name: PODS_MONITOR_PIN
-                  value: {{ (default dict (default dict .Values.images).podsMonitor).digest | default "" | quote }}
+                  value: {{ include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $) | quote }}
                 - name: RESOURCE_MONITOR_PIN
-                  value: {{ (default dict (default dict .Values.images).resourceMonitor).digest | default "" | quote }}
+                  value: {{ include "tracebloc.pinFor" (dict "image" "resourceMonitor" "root" $) | quote }}
                 # requests-proxy follows the jobs-manager digest by default;
-                # this flag is the per-workload override that opts it out.
+                # this flag is the per-workload override that opts it out -- an
+                # HONOURED own pin (tracebloc.pinFor). An ignored one is not an
+                # override: the proxy follows jobs-manager as if it were empty,
+                # which is also what the Deployment renders (tracebloc.effectivePin).
                 - name: REQUESTS_PROXY_PINNED
-                  value: {{ ternary "1" "0" (not (empty (default dict (default dict .Values.images).requestsProxy).digest)) | quote }}
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "requestsProxy" "root" $)))) | quote }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -1194,6 +1194,7 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
     asserts:
       - equal:
           path: spec.template.spec.containers[0].imagePullPolicy

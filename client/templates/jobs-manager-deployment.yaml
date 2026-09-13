@@ -100,7 +100,7 @@ spec:
         #
         # It also removes an image: busybox was a second pull on every edge, for a
         # TCP connect the app image can already do.
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+        image: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         securityContext:
           # NO runAsUser, DELIBERATELY (Bugbot High, #942). OpenShift's
           # `restricted` SCC assigns a UID from the project's range, and the pod
@@ -265,7 +265,7 @@ spec:
       {{- end }}
       containers:
       - name: api
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/jobs-manager" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.jobsManager.digest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+        image: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         # #569: IfNotPresent wherever an update path exists without `Always` --
         # a pinned digest, or the image-refresh reconcile. `Always` forced a
         # registry round-trip on every (re)start, so an offline Docker Desktop /
@@ -274,7 +274,7 @@ spec:
         # is NOT unconditional: on an edge the reconcile cannot reach (private
         # mirror, or imageRefresh disabled) a floating tag plus a restart is the
         # only update path there is, so it stays Always.
-        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.jobsManager.digest "root" $) }}
+        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "jobsManager" "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -914,10 +914,10 @@ spec:
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
-        image: {{ include "tracebloc.image" (dict "repository" "tracebloc/pods-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" .Values.images.podsMonitor.digest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+        image: {{ include "tracebloc.controlPlaneImage" (dict "image" "podsMonitor" "root" $) | quote }}
         # #569: same policy as the api container above -- see
         # tracebloc.controlPlanePullPolicy.
-        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" .Values.images.podsMonitor.digest "root" $) }}
+        imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "podsMonitor" "root" $) }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
