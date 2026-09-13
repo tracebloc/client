@@ -781,6 +781,30 @@ mutant() {
   [[ "$output" == *"--pages would: index 7 chart(s) from 6 stable release(s) at https://github.com/acme/mirror/releases/download/<tag>/; index.yaml unchanged against the mirror's gh-pages (present); not pushed"* ]] || { echo "$output"; return 1; }
 }
 
+@test "--apply --pages: a publisher that exits 0 without its 'pushed/unchanged <sha>' line is could-not-tell (exit 2) naming the missing contract line" {
+  local m
+  m="$(mutant pages-publisher ': >"$P/tree.out"')" || { echo "$m"; return 1; }
+  BACKFILL_UNDER_TEST="$m" backfill --apply --pages
+  [ "$status" -eq 2 ] || { echo "status=$status"; echo "$output"; return 1; }
+  [[ "$output" == *"--pages: the publisher exited 0 but reported no 'pushed <sha>' / 'unchanged <sha>' line"* ]] || { echo "$output"; return 1; }
+}
+
+@test "mutation: with the result grep back under pipefail, the same publisher miss dies at exit 1 with NO reason — the test above catches it" {
+  local m1 m2 a
+  m1="$(mutant pages-publisher ': >"$P/tree.out"')" || { echo "$m1"; return 1; }
+  # Second mutation applied on the first mutant's copy (mutant() reads $REAL, so it
+  # is applied here by hand with the same anchor-applied proof: exactly one anchor,
+  # copy differs, copy parses).
+  m2="$BATS_TEST_TMPDIR/mutant-pages-result-grep.sh"; a="# mutation-anchor: pages-result-grep"
+  [ "$(grep -c -- "$a\$" "$m1")" -eq 1 ] || { echo "anchor pages-result-grep not exactly once"; return 1; }
+  awk -v a="$a" 'index($0, a) && substr($0, length($0) - length(a) + 1) == a { print "        TREE_RESULT=\"$(grep -E '"'"'^(pushed|unchanged) [0-9a-f]{40}$'"'"' \"$P/tree.out\" | tail -1)\""; next } { print }' "$m1" >"$m2"
+  cmp -s "$m1" "$m2" && { echo "mutation pages-result-grep did not change the script"; return 1; }
+  bash -n "$m2" || { echo "mutant does not parse"; return 1; }
+  BACKFILL_UNDER_TEST="$m2" backfill --apply --pages
+  [ "$status" -eq 1 ] || { echo "status=$status"; echo "$output"; return 1; }
+  [[ "$output" != *"the publisher exited 0 but reported no"* ]] || { echo "$output"; return 1; }
+}
+
 @test "mutation: with the unchanged-index comparison removed, the second --pages pushes a new commit for a generated: timestamp alone — the test above catches it" {
   local m
   m="$(mutant index-unchanged-not-pushed ':')" || { echo "$m"; return 1; }

@@ -765,10 +765,15 @@ if [ "$PAGES" -eq 1 ]; then
         PAGES_RESULT="planned ($N_CHARTS chart(s), index $CHANGE_TEXT)"
       else
         rc=0
-        bash "$PUBLISH_MIRROR" tree --stage "$P/stage" --repo "$MIRROR" --branch gh-pages --message "Chart index: backfill of $N_CHARTS chart version(s)" --remote "$PAGES_REMOTE" >"$P/tree.out" 2>&1 || rc=$?
+        bash "$PUBLISH_MIRROR" tree --stage "$P/stage" --repo "$MIRROR" --branch gh-pages --message "Chart index: backfill of $N_CHARTS chart version(s)" --remote "$PAGES_REMOTE" >"$P/tree.out" 2>&1 || rc=$?   # mutation-anchor: pages-publisher
         cat "$P/tree.out"
         [ "$rc" -eq 0 ] || die2 "--pages: the publisher did not push gh-pages (exit $rc, see above)"
-        TREE_RESULT="$(grep -E '^(pushed|unchanged) [0-9a-f]{40}$' "$P/tree.out" | tail -1)"
+        # `|| true`: under pipefail a grep with no match exits 1 and the assignment
+        # would abort the script at exit 1 BEFORE the die2 below can say why. A
+        # publisher that exits 0 without its contract line is the could-not-tell
+        # case that die2 exists for (review on #1057).
+        TREE_RESULT="$(grep -E '^(pushed|unchanged) [0-9a-f]{40}$' "$P/tree.out" || true)"   # mutation-anchor: pages-result-grep
+        TREE_RESULT="$(printf '%s\n' "$TREE_RESULT" | tail -1)"
         [ -n "$TREE_RESULT" ] || die2 "--pages: the publisher exited 0 but reported no 'pushed <sha>' / 'unchanged <sha>' line"
         PAGES_RESULT="$TREE_RESULT ($N_CHARTS chart(s), index $CHANGE_TEXT)"
         note "--pages: $PAGES_RESULT"
