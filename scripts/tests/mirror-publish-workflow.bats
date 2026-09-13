@@ -32,6 +32,13 @@
 #   * a guard refusal still lands in the step summary and the step exits with
 #     the guard's status — under the `-e` Actions runs every body with (Bugbot:
 #     "guard refusal skips step summary")
+#   * the mirror's chart index is DERIVED from the mirror's own releases
+#     (`publish-mirror.sh index`, after the release step) and never read from a
+#     Pages branch: the only `git fetch` is the release tag's, no step reads an
+#     index.yaml by path, and the gh-pages push is gated on the index step
+#     reporting `changed` — so a backfilled index whose URLs name the mirror is
+#     re-derived, not overwritten with the source's Pages URLs (review on the
+#     backfill: "the next stable publish replaces the backfilled index")
 #
 # FAILS CLOSED: an unreadable workflow, a missing step id, or PyYAML absent is a
 # named refusal, never "nothing to check". The shape check is one function run
@@ -81,7 +88,7 @@ EOF
   # The plan step's job-level env, every field set (the body runs under set -u).
   export EVENT_NAME=workflow_run INPUT_TAG="" INPUT_DRY_RUN="" INPUT_MIRROR="" INPUT_STRICT=""
   export RUN_HEAD_BRANCH="" RUN_HEAD_SHA="" VAR_MIRROR="" VAR_STRICT=""
-  export TAG="" EXPECT_SHA="" BRANCH="" REPO=""
+  export TAG="" EXPECT_SHA="" BRANCH="" REPO="" SOURCE_RELEASES="" DRY_RUN=""
 }
 
 SHA_A=1111111111111111111111111111111111111111
@@ -369,6 +376,95 @@ EOF
   [ ! -s "$GITHUB_STEP_SUMMARY" ] || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
 }
 
+# ── dates / index: the chart index derived from the mirror, its verdict in the summary ──
+
+@test "dates: this repository's release list is read with the default token into RUNNER_TEMP; an unreadable list is exit 2 naming the repository" {
+  export GH_API_SHA='[{"tag_name":"v1.2.3","published_at":"2026-01-01T00:00:00Z"}]'
+  run_step dates
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(out file)" = "$RUNNER_TEMP/source-releases.json" ] || return 1
+  [ "$(jq -r '.[0].tag_name' "$RUNNER_TEMP/source-releases.json")" = v1.2.3 ] || return 1
+  grep -q '^api --paginate repos/example/source/releases$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
+  [[ "$output" == *"release list of example/source: 1 release(s)"* ]] || { echo "$output"; return 1; }
+  : >"$GITHUB_OUTPUT"
+  GH_API_RC=1 run_step dates
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"::error::could not read the releases of example/source — the chart index stamps each entry with its original publish date and cannot be rebuilt without them; refusing."* ]] || { echo "$output"; return 1; }
+  [ ! -s "$GITHUB_OUTPUT" ] || return 1
+}
+
+# fake_index <dir> — a cwd holding a scripts/publish-mirror.sh that answers
+# `index` per FAKE_INDEX: `refuse` prints the command's refusal line and exits
+# 1; otherwise it writes a one-entry index into --out, the result keys into
+# --output, and exits 0. The command has its own suite
+# (publish-mirror-index.bats); this is about what the STEP does with its
+# verdict and its result.
+fake_index() {
+  mkdir -p "$1/scripts"
+  cat >"$1/scripts/publish-mirror.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${PM_LOG:?}"
+[ "${1:-}" = index ] || { echo "fake publish-mirror: not index: $*" >&2; exit 99; }
+if [ "${FAKE_INDEX:-ok}" = refuse ]; then
+  echo "    [forbidden-strings] REFUSED — [strings-refuse] private needle #1 found in 1 staged line(s):"
+  echo "::error::publish-mirror: REFUSED — index: the guard refused the index or the Pages branch: planted refusal"
+  exit 1
+fi
+out=""; output=""
+while [ "$#" -gt 0 ]; do case "$1" in --out) out="$2"; shift 2 ;; --output) output="$2"; shift 2 ;; *) shift ;; esac; done
+mkdir -p "$out/stage"
+printf 'apiVersion: v1\nentries:\n  client:\n  - version: 1.2.3\n    urls:\n    - https://github.com/example/source-public/releases/download/v1.2.3/client-1.2.3.tgz\n' >"$out/index.yaml"
+cp "$out/index.yaml" "$out/stage/index.yaml"
+printf 'charts=1\nstable_releases=1\nchanged=true\npages_existed=false\nstage=%s/stage\nindex=%s/index.yaml\n' "$out" "$out" >>"$output"
+echo "index: 1 chart version(s) from 1 stable release(s) of example/source-public; index.yaml changed against the mirror's gh-pages (absent)"
+EOF
+  chmod +x "$1/scripts/publish-mirror.sh"
+  export PM_LOG="$BATS_TEST_TMPDIR/pm.log"; : >"$PM_LOG"
+}
+
+@test "index: the command's result lands in GITHUB_OUTPUT, the rebuilt index.yaml in the step summary; a dry run says nothing was pushed, a real run does not" {
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT=true DRY_RUN=true
+  : >"$GITHUB_STEP_SUMMARY"
+  run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(out changed)" = true ] || { cat "$GITHUB_OUTPUT"; return 1; }
+  [ "$(out stage)" = "$RUNNER_TEMP/index/stage" ] || return 1
+  grep -q -- '--repo example/source-public --source-releases .*/src.json --out .*/index --forbidden .*/.publish-forbidden --extra-forbidden .*/tenants.txt --output .* --strict$' "$PM_LOG" || { cat "$PM_LOG"; return 1; }
+  grep -q "^## Mirror publish — chart index (derived from the mirror's releases)$" "$GITHUB_STEP_SUMMARY" || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
+  grep -q 'index.yaml as rebuilt' "$GITHUB_STEP_SUMMARY" || return 1
+  grep -q 'releases/download/v1.2.3/client-1.2.3.tgz' "$GITHUB_STEP_SUMMARY" || return 1
+  [[ "$output" == *"dry run: the index above is what the mirror's releases yield today"*"Nothing was pushed."* ]] || { echo "$output"; return 1; }
+  : >"$GITHUB_OUTPUT"; : >"$GITHUB_STEP_SUMMARY"; rm -rf "$RUNNER_TEMP/index"
+  DRY_RUN=false STRICT=false run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" != *"dry run:"* ]] || return 1
+  ! grep -q -- '--strict' <(tail -1 "$PM_LOG") || return 1
+}
+
+@test "index: a refusal is written to the step summary and the step exits with the command's status; nothing lands in GITHUB_OUTPUT" {
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=false FAKE_INDEX=refuse
+  : >"$GITHUB_STEP_SUMMARY"
+  run_step index
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"REFUSED — index: the guard refused the index or the Pages branch: planted refusal"* ]] || { echo "$output"; return 1; }
+  grep -q 'planted refusal' "$GITHUB_STEP_SUMMARY" || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
+  ! grep -q 'index.yaml as rebuilt' "$GITHUB_STEP_SUMMARY" || return 1
+  [ ! -s "$GITHUB_OUTPUT" ] || return 1
+}
+
+@test "index mutation: without catching the command's status, errexit skips the summary — the test above catches it" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace(' || rc=\$?', '')")" || return 1
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=false FAKE_INDEX=refuse
+  : >"$GITHUB_STEP_SUMMARY"
+  RUN_WF="$m" run_step index
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [ ! -s "$GITHUB_STEP_SUMMARY" ] || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
+}
+
 # ── shape: derived from the workflow, one implementation for real and mutated ──
 
 # shape <workflow.yaml> — OK lines / one FAIL line. Every rule is derived from
@@ -421,24 +517,69 @@ for s in tree_pushes:
         fail("step %r pushes a tree without `if: ... %s` — a prerelease would replace the mirror's branch" % (s.get("name"), GATE))
 print("OK: %d tree push step(s), each gated on publish_tree" % len(tree_pushes))
 
-releases = [s for s in steps if re.search(r"publish-mirror\.sh\s+\"?\$\{?args|publish-mirror\.sh\s+release\b", str(s.get("run", "")))]
+releases = [s for s in steps if re.search(r"args=\(release\b|publish-mirror\.sh\s+release\b", str(s.get("run", "")))]
 if len(releases) != 1:
     fail("expected exactly one release step, found %d" % len(releases))
 if "publish_tree" in str(releases[0].get("if", "")):
     fail("the release step is gated on publish_tree — a prerelease must still get its release")
 print("OK: the release step is not gated on publish_tree")
 
+# The ONLY `git fetch` is the release tag's, as data. A second fetch is how the
+# source's gh-pages index used to reach the mirror.
+fetches = [s for s in steps if re.search(r"\bgit fetch\b", str(s.get("run", "")))]
+if len(fetches) != 1:
+    fail("expected exactly one step running `git fetch` (the release tag, as data), found %d — a second fetch is how the source's Pages index reached the mirror" % len(fetches))
+if "refs/tags/" not in str(fetches[0].get("run", "")):
+    fail("the one git fetch step %r does not fetch a release tag" % fetches[0].get("name"))
+if "EXPECT_SHA" not in str(fetches[0].get("run", "")):
+    fail("the tag fetch step does not compare against EXPECT_SHA")
+print("OK: the one git fetch is the release tag's, compared against the expected commit")
+
+# The chart index: ONE step derives it from the mirror's releases, AFTER the
+# release step (so the release just published is in it); a dry run derives it
+# too (the plan); the gh-pages push stages what that step produced and is
+# gated on it reporting changed=true.
+indexers = [s for s in steps if re.search(r"args=\(index\b|publish-mirror\.sh\s+index\b", str(s.get("run", "")))]
+if len(indexers) != 1:
+    fail("expected exactly one step deriving the chart index (`publish-mirror.sh index`), found %d" % len(indexers))
+index_step = indexers[0]
+index_id = index_step.get("id")
+if not index_id:
+    fail("the index step has no id — the gh-pages push cannot be gated on its result")
+if steps.index(index_step) < steps.index(releases[0]):
+    fail("the index step %r runs before the release step — the release just published would be missing from the index" % index_step.get("name"))
+index_if = str(index_step.get("if", ""))
+if "steps.plan.outputs.publish_tree == 'true'" not in index_if or "steps.plan.outputs.dry_run == 'true'" not in index_if:
+    fail("the index step %r is not gated on publish_tree for a real run and enabled for a dry run (its if: %r)" % (index_step.get("name"), index_if))
+print("OK: one index step, after the release step, derived for a dry run too")
+
+gh_pushes = [s for s in tree_pushes if re.search(r"--branch\s+gh-pages\b", str(s.get("run", "")))]
+if len(gh_pushes) != 1:
+    fail("expected exactly one step pushing gh-pages, found %d" % len(gh_pushes))
+gh_push = gh_pushes[0]
+m = re.search(r"steps\.([A-Za-z0-9_-]+)\.outputs\.changed == 'true'", str(gh_push.get("if", "")))
+if not m:
+    fail("step %r pushes gh-pages without `if: ... steps.<index>.outputs.changed == 'true'` — an unchanged index would be a commit, and a refused one has no result to gate on" % gh_push.get("name"))
+if m.group(1) != index_id:
+    fail("step %r is gated on steps.%s.outputs.changed but the index step's id is %r" % (gh_push.get("name"), m.group(1), index_id))
+if steps.index(gh_push) < steps.index(index_step):
+    fail("step %r pushes gh-pages before the index step derived it" % gh_push.get("name"))
+if ("steps.%s.outputs.stage" % index_id) not in yaml.safe_dump(gh_push):
+    fail("step %r does not stage what the index step produced (steps.%s.outputs.stage)" % (gh_push.get("name"), index_id))
+print("OK: the gh-pages push stages the index step's result and is gated on it having changed")
+
+for s in steps:
+    if re.search(r"contents/index\.yaml|publish-include-pages|pages-src", str(s.get("run", ""))):
+        fail("step %r reads a Pages index by path — the mirror's index is derived from the mirror's releases, never read from a Pages branch" % s.get("name"))
+    if "continue-on-error" in s:
+        fail("step %r has continue-on-error — a refusal must stop the job" % s.get("name"))
+print("OK: no step reads a Pages index, none continues on error")
+
 captured = [s for s in steps if re.search(r"\$\(\s*bash\s+scripts/publish-mirror\.sh", str(s.get("run", "")))]
 if captured:
     fail("step %r captures publish-mirror.sh through $(...) — a refusal's ::error:: line would never reach the log" % captured[0].get("name"))
 print("OK: no step captures the publisher's output")
 
-fetches = [s for s in steps if re.search(r"git fetch[^\n]*refs/tags/", str(s.get("run", "")))]
-if len(fetches) != 1:
-    fail("expected exactly one step fetching a tag, found %d" % len(fetches))
-if "EXPECT_SHA" not in str(fetches[0].get("run", "")):
-    fail("the tag fetch step does not compare against EXPECT_SHA")
-print("OK: the one tag fetch compares against the expected commit")
 
 # The step that DECIDES publish_tree (writes it to GITHUB_OUTPUT) must ask
 # GitHub which release is the newest stable one; a decision that never asks
@@ -484,8 +625,51 @@ PY
   [[ "$output" == *"OK: 2 tree push step(s), each gated on publish_tree"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: the release step is not gated on publish_tree"* ]] || return 1
   [[ "$output" == *"OK: no step captures the publisher's output"* ]] || return 1
-  [[ "$output" == *"OK: the one tag fetch compares against the expected commit"* ]] || return 1
+  [[ "$output" == *"OK: the one git fetch is the release tag's, compared against the expected commit"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: the publish_tree decision reads releases/latest"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"OK: one index step, after the release step, derived for a dry run too"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"OK: the gh-pages push stages the index step's result and is gated on it having changed"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"OK: no step reads a Pages index, none continues on error"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: restoring the source-index copy (a step fetching origin gh-pages) reddens — the index is derived from the mirror, never copied" {
+  local m
+  m="$(mutate "steps.insert(7, {'name': 'Guard the chart index (gh-pages)', 'id': 'guard-pages', 'run': 'git fetch --depth 1 origin gh-pages\\ngit worktree add --detach \"\$RUNNER_TEMP/pages-src\" FETCH_HEAD\\n'})")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: expected exactly one step running \`git fetch\` (the release tag, as data), found 2"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: a step reading a Pages index.yaml by path reddens" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'dates'][0]; s['run'] = s['run'] + 'gh api repos/x/y/contents/index.yaml?ref=gh-pages\\n'")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: step "*"reads a Pages index by path"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: dropping the only-push-when-changed gate from the gh-pages push reddens" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'push-index'][0]; s['if'] = \"steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true'\"")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: step "*"pushes gh-pages without"*"changed == 'true'"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: the index step moved before the release step reddens — the release just published would be missing" {
+  local m
+  m="$(mutate "i = [n for n, s in enumerate(steps) if s.get('id') == 'index'][0]; r = [n for n, s in enumerate(steps) if 'args=(release' in str(s.get('run', ''))][0]; steps.insert(r, steps.pop(i))")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: the index step "*"runs before the release step"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: an index step that a dry run skips reddens — the dry run must show the planned index" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['if'] = \"steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true'\"")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: the index step "*"is not gated on publish_tree for a real run and enabled for a dry run"* ]] || { echo "$output"; return 1; }
 }
 
 @test "shape mutation: a publish_tree decision that never reads releases/latest reddens" {

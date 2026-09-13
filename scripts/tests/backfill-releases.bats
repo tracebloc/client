@@ -29,7 +29,10 @@
 # from the MIRROR's stable releases with release-asset URLs, one entry per chart
 # version under the oldest release carrying it, `created` = the original publish
 # date, keeps every other file on gh-pages, and pushes nothing when the index is
-# unchanged; a missing helm refuses --pages before any gh call.
+# unchanged; a missing helm refuses --pages before any gh call. The rebuild
+# itself is publish-mirror.sh `index`, shared with the workflow and pinned —
+# with its own mutations — in publish-mirror-index.bats; here the --pages tests
+# pin what THIS script does with its verdict (the push, the table, the exit).
 #
 # Mutations: `mutant NAME REPL` copies the script with the `# mutation-anchor:
 # NAME` line replaced, PROVES the copy differs and parses, and the test then
@@ -760,11 +763,13 @@ mutant() {
   [ "$status" -eq 0 ] || return 1
 }
 
-@test "mutation: with the helm check removed, a --pages dry-run on an empty mirror ends 0 having never needed helm — the test above catches it" {
+@test "mutation: with the pre-flight removed, a --pages run without helm is still refused — by the index rebuild, AFTER its gh calls; the test above (no gh call) catches it" {
   local m
   m="$(mutant helm-required ':')" || { echo "$m"; return 1; }
   BACKFILL_HELM="$BATS_TEST_TMPDIR/no-such-helm" BACKFILL_UNDER_TEST="$m" backfill --pages
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — index: '"*"no-such-helm' is not on PATH"* ]] || { echo "$output"; return 1; }
+  [ -s "$GH_LOG" ] || return 1
 }
 
 @test "--pages dry-run on a mirror with no releases: nothing to index yet, nothing pushed, exit 0" {
@@ -837,33 +842,6 @@ mutant() {
   [[ "$output" != *"the publisher exited 0 but reported no"* ]] || { echo "$output"; return 1; }
 }
 
-@test "mutation: with the unchanged-index comparison removed, the second --pages pushes a new commit for a generated: timestamp alone — the test above catches it" {
-  local m
-  m="$(mutant index-unchanged-not-pushed ':')" || { echo "$m"; return 1; }
-  backfill --apply --pages
-  [ "$status" -eq 0 ] || return 1
-  BACKFILL_UNDER_TEST="$m" backfill --apply --pages
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(pages_commits)" -eq 2 ] || return 1
-  [[ "$output" == *"--pages: pushed "* ]] || return 1
-}
-
-@test "mutation: with created left as helm stamped it, the index carries the backfill instant, not the publish date — the index test catches it" {
-  local m
-  m="$(mutant index-created-from-source 'cp "$P/charts/index.yaml" "$P/index.yaml"')" || { echo "$m"; return 1; }
-  BACKFILL_UNDER_TEST="$m" backfill --apply --pages
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(pages_file index.yaml | created_for 1.0.0)" != '"2026-01-01T12:00:00Z"' ] || return 1
-}
-
-@test "mutation: with the stable-only filter dropped from the index, the prerelease chart is listed — the index test catches it" {
-  local m
-  m="$(mutant index-stable-only 'jq -r '"'"'.[] | select(.draft == false) | .tag_name'"'"' "$TMP/mirror-releases.json" >"$P/stable-tags.txt"')" || { echo "$m"; return 1; }
-  BACKFILL_UNDER_TEST="$m" backfill --apply --pages
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$(pages_file index.yaml)" == *"1.0.6-rc.1"* ]] || return 1
-}
-
 @test "--pages keeps every other file on the mirror's gh-pages and appends to its history; only index.yaml is replaced" {
   local seed="$BATS_TEST_TMPDIR/seed"
   git clone -q "file://$PAGES_BARE" "$seed" 2>/dev/null
@@ -908,13 +886,14 @@ mutant() {
   jq --arg d "sha256:$(sha256_of "$FIX/charts/ingestor-0.2.0.tgz")" '(.[] | select(.tag_name == "v1.0.0") | .assets[] | select(.name == "client-1.0.0.tgz") | .digest) = $d' "$STATE/mirror-releases.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-releases.json"
   backfill --pages --only-tag v1.0.0
   [ "$status" -eq 2 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"COULD NOT TELL — --pages: 'client-1.0.0.tgz' contains chart 'ingestor' version '0.2.0', not what its name says"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — index: 'client-1.0.0.tgz' contains chart 'ingestor' version '0.2.0', not what its name says"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — --pages: the index rebuild could not tell (exit 2, see above)"* ]] || { echo "$output"; return 1; }
   ! git -C "$PAGES_BARE" rev-parse --verify -q gh-pages >/dev/null || return 1
   # A mirror release with no counterpart on the source cannot be placed in time.
   jq '. + [{id: 99, tag_name: "v9.9.9", name: "v9.9.9", body: "", prerelease: false, draft: false, assets: []}]' "$STATE/mirror-releases.json" >"$STATE/t.json" && mv "$STATE/t.json" "$STATE/mirror-releases.json"
   backfill --pages --only-tag v1.0.0
   [ "$status" -eq 2 ] || return 1
-  [[ "$output" == *"COULD NOT TELL — --pages: mirror release 'v9.9.9' has no counterpart on 'acme/src'"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — index: mirror release 'v9.9.9' has no publish date in '"*"' — a release the source never had cannot be placed in time"* ]] || { echo "$output"; return 1; }
 }
 
 @test "--pages: a mirror download whose bytes are not the mirror's digest is could-not-tell, never indexed" {
@@ -923,5 +902,6 @@ mutant() {
   printf 'tampered\n' >>"$STATE/assets/v1.0.0/client-1.0.0.tgz"
   backfill --pages --only-tag v1.0.0
   [ "$status" -eq 2 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"COULD NOT TELL — --pages: 'client-1.0.0.tgz' from 'acme/mirror' release 'v1.0.0' hashes to "*"the download is not the asset"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — index: 'client-1.0.0.tgz' from 'acme/mirror' release 'v1.0.0' hashes to "*"the download is not the asset"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"--pages: the index rebuild could not tell (exit 2, see above)"* ]] || return 1
 }
