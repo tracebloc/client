@@ -390,6 +390,8 @@ DRIFT_GUARDS := scripts/gen-manifest.sh --check|\
   bash scripts/tests/gate-default-prose-mutations.sh|\
   bash scripts/tests/guards-survive-spaced-paths.sh|\
   bash scripts/tests/auto-upgrade-inflight-vs-wedge.sh|\
+  bash scripts/tests/auto-upgrade-telemetry-reconcile.sh|\
+  bash scripts/tests/auto-upgrade-telemetry-reconcile-mutations.sh|\
   bash scripts/tests/hostpath-reads-guarded.sh|\
   bash scripts/tests/jobs-manager-waits-for-mysql.sh|\
   bash scripts/tests/control-plane-footprint.sh|\
@@ -585,3 +587,4 @@ helm-unittest:
 	       echo "  helm plugin install https://github.com/helm-unittest/helm-unittest --version 0.5.2"; \
 	       exit 1; }
 	helm unittest ./client
+	MODE=record bash scripts/tests/auto-upgrade-telemetry-reconcile-mutations.sh
