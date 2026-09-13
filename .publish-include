@@ -22,6 +22,12 @@ scripts/install-k8s.ps1
 scripts/lib/**
 scripts/manifest.sha256
 
+# A standalone operator tool, not part of the installer's fetch-and-verify
+# chain (so it is not in scripts/manifest.sha256) but documented in
+# docs/INSTALL.md as the way to enumerate the pull set for a blocked-registry
+# or air-gapped install — it has to ship for that instruction to work.
+scripts/list-images.sh
+
 # Front matter, and the operator docs README links to. One level only:
 # docs/rfcs/ and docs/migration-tools/ stay home.
 README.md

@@ -190,6 +190,20 @@ mirror_files() { git -C "$BARE" ls-tree -r --name-only "$1" | sort | paste -sd' 
   [[ "$output" == *"COULD NOT TELL — could not write results to"* ]] || return 1
 }
 
+@test "tree: the result is the ONLY line printed and the scratch directory is gone afterwards (the EXIT trap really runs)" {
+  # The trap used to name a `local` of cmd_tree; at exit that variable was out
+  # of scope, so `set -u` printed an unbound-variable line after the result and
+  # the scratch checkout stayed behind. A caller reading the last line got the
+  # error, not the result.
+  local tmp="$BATS_TEST_TMPDIR/tmpdir"; mkdir -p "$tmp"
+  TMPDIR="$tmp" tree
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == pushed\ [0-9a-f]* ]] || return 1
+  [[ "$output" != *"unbound variable"* ]] || return 1
+  [ -z "$(find "$tmp" -mindepth 1 -maxdepth 1 -name 'publish-mirror.*')" ] || { ls "$tmp"; return 1; }
+}
+
 @test "tree: the script never forces a push" {
   run grep -nE -- '--force|\+refs/|-f[[:space:]]' "$PUB"
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }

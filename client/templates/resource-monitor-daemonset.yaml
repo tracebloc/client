@@ -134,9 +134,11 @@ spec:
             their stored values, so read it defensively (nested `default dict`
             tolerates a missing `images` map AND a missing `resourceMonitor`
             entry). `dig` is not usable here — it rejects chartutil.Values.
+            Both guards now live inside tracebloc.controlPlaneImage, which also
+            decides whether the pin may be rendered at all (tracebloc.pinFor:
+            only on the registry it was resolved on).
           */}}
-          {{- $rmDigest := (default (dict) (default (dict) .Values.images).resourceMonitor).digest | default "" }}
-          image: {{ include "tracebloc.image" (dict "repository" "tracebloc/resource-monitor" "tag" (include "tracebloc.clientEnv" .) "digest" $rmDigest "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+          image: {{ include "tracebloc.controlPlaneImage" (dict "image" "resourceMonitor" "root" $) | quote }}
           # #569: IfNotPresent wherever an update path exists without `Always` --
           # see tracebloc.controlPlanePullPolicy. `Always` made every node's pod
           # re-pull on restart, so an offline restart wedged the DaemonSet in
@@ -147,7 +149,7 @@ spec:
           # with `kubectl set image`, so the update path is intentional for the
           # first time -- but only where that reconcile can run, which is exactly
           # what the helper gates on.
-          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "digest" $rmDigest "root" $) }}
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "resourceMonitor" "root" $) }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -198,7 +200,7 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 160Mi
             limits:
               cpu: 200m
               memory: 256Mi

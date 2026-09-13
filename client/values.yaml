@@ -624,10 +624,10 @@ egressProxy:
   resources:
     requests:
       cpu: "50m"
-      memory: "160Mi"
+      memory: "256Mi"
     limits:
       cpu: "500m"
-      memory: "256Mi"
+      memory: "384Mi"
 
 # -- Rename the resources this chart creates, without uninstall + reinstall.
 # backend#2626.
@@ -791,7 +791,7 @@ telemetryCollector:
   resources:
     requests:
       cpu: "100m"
-      memory: "128Mi"
+      memory: "256Mi"
     limits:
       cpu: "500m"
       memory: "512Mi"
@@ -955,9 +955,13 @@ images:
   # dual-published to docker.io at the same digests for now, so "docker.io"
   # remains a valid value and is the per-edge rollback
   # (`--set images.traceblocRegistry=docker.io`; user-supplied, so it survives
-  # the fleet auto-upgrade until cleared). Digest pins (images.*.digest, and
-  # the training-image digest pins below) are registry-agnostic: the same digest
-  # exists on both. No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
+  # the fleet auto-upgrade until cleared). Digest pins are NOT registry-
+  # agnostic: a digest names bytes on the registry it was resolved on, and
+  # nothing guarantees another registry ever held them -- a control-plane pin
+  # is therefore rendered only when its `digestRegistry` equals the registry
+  # this knob resolves to (see images.jobsManager below). The training-image
+  # digest pins below are published to both registries by the same pipeline.
+  # No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
   # for layer redirects) is already required for the ingestor image and probed
   # by the installer preflight. Image-refresh follows it: the CronJob resolves
   # digests on this registry (it can do so anonymously on ghcr.io and docker.io;
@@ -967,8 +971,59 @@ images:
   # restates this default; tests/tracebloc_registry_test.yaml pins both to one
   # value so they cannot drift apart unseen.
   traceblocRegistry: "ghcr.io"
+  # -- CONTROL-PLANE DIGEST PINS (jobsManager, podsMonitor, resourceMonitor,
+  #    requestsProxy): `digest` + `digestRegistry`, ONE contract.
+  #
+  # A digest names bytes on the registry it was resolved on. Nothing guarantees
+  # any other registry ever held them, and a pod told to pull a digest its
+  # registry does not have never starts. So a pin carries the registry it was
+  # resolved on, and is HONOURED only there:
+  #
+  #   digest:          "sha256:<64 hex>"   the pin
+  #   digestRegistry:  "<bare host>"       the registry the digest was resolved
+  #                                        on, spelled exactly as
+  #                                        images.traceblocRegistry /
+  #                                        global.imageRegistry would be
+  #
+  #   honoured  <=>  digest set AND digestRegistry == the registry this release
+  #                  pulls from (tracebloc.tbRegistry: the mirror, else
+  #                  traceblocRegistry above, else the chart default)
+  #             ->  repository@digest, imagePullPolicy=IfNotPresent, and the
+  #                 image-refresh CronJob leaves the image alone (it still
+  #                 reports a stale pin, and now also one the registry cannot
+  #                 serve: `tracebloc.io/stale-pin-<image>=unpullable:<digest>`).
+  #   ignored   otherwise -> the workload renders the channel tag, image-refresh
+  #                 re-pins it from the LIVE registry on its first tick (an
+  #                 ignored pin is not a fresh install), and `helm install/upgrade`
+  #                 prints a NOTES warning naming the image, the pin's registry
+  #                 and the effective one. The render never fails on it: the tag
+  #                 is the safe state.
+  #
+  # LEGACY RULE: `digest` set with `digestRegistry` empty is a pin written
+  # before the key existed. Every such pin was resolved on docker.io -- the only
+  # registry these images were pulled from until then -- so it is read as
+  # `digestRegistry: docker.io`: honoured with `traceblocRegistry: docker.io`
+  # (the rollback), ignored at the ghcr.io default. That is exactly the pin
+  # that outlived its registry when the default moved: rendered onto ghcr.io,
+  # which never had the digest, it could not pull, and two days of
+  # auto-upgrades timed out and rolled back against it. Now it floats instead.
+  #
+  # RECOMMENDED STATE: unpinned. Leave `digest` empty and let image-refresh pin
+  # the live digest from the registry the pods actually pull from (it writes
+  # the record to the workload, never to values). Pin here only for a
+  # deliberate reproducibility hold, and then ALWAYS resolve on and declare the
+  # registry:
+  #   crane digest ghcr.io/tracebloc/jobs-manager:prod     # or: docker buildx
+  #   imagetools inspect ghcr.io/tracebloc/jobs-manager:prod --format '{{.Manifest.Digest}}'
+  #   --set images.jobsManager.digest=sha256:<x> --set images.jobsManager.digestRegistry=ghcr.io
+  #
+  # requests-proxy runs the jobs-manager image and follows the HONOURED
+  # jobs-manager pin when its own `digest` is empty or ignored (see
+  # images.requestsProxy). Every read is nil-guarded for --reuse-values
+  # replays that predate these keys.
   jobsManager:
     digest: ""
+    digestRegistry: ""
   # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
   #    RFC-0067 D8 by backend#3156). The READER shipped first, in client-runtime
   #    (jobs_manager.load_training_image_digests / training_image_reference), and
@@ -1262,12 +1317,23 @@ images:
     # data-ingestors#150/#167/#168/#170/#172/#176/#179):
     #   sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
     digest: ""
+  # Same `digest` + `digestRegistry` contract as images.jobsManager above.
   podsMonitor:
     digest: ""
+    digestRegistry: ""
+  # Same contract. `resourceMonitor: false` (no DaemonSet) also counts as
+  # "nothing to refresh" for the CronJob -- see tracebloc.resourceMonitorRefreshPinned.
   resourceMonitor:
     digest: ""
+    digestRegistry: ""
+  # Same contract. Leave `digest` EMPTY (default) and the proxy follows the
+  # honoured images.jobsManager pin, so the two pods cannot run different
+  # builds of the same image; an own pin here that is IGNORED (registry
+  # mismatch) is not an override and follows jobs-manager the same way. Set
+  # both keys only to pin requests-proxy apart from jobs-manager deliberately.
   requestsProxy:
     digest: ""
+    digestRegistry: ""
   mysqlClient:
     # Repository and tag are stated rather than left to template defaults so the
     # digest below is WATCHABLE: check-digest-drift.sh pairs a pin with the
@@ -1380,7 +1446,27 @@ images:
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
-  # INTERIM TRIM (backend#2461, 2026-09-10) -- read before "fixing" any number back up.
+  # MEASURED TRIM (backend#2461, 2026-09-13) -- every request below is sized from the
+  # load run, not from the idle snapshot the interim trim used. Four legs on the same
+  # edge (11.23 h ambient, one training cycle, a five-deep queue, two full-node
+  # restarts incl. one under an 8 GiB cap) found that LOAD DOES NOT MOVE THE CONTROL
+  # PLANE -- no container's p95 rose more than ~4 MiB from ambient -- and that the
+  # RESTART PEAK is the sizing driver. Requests = worst observed (p95 or restart peak)
+  # with ~1.5x headroom; the render sums to 1792 MiB / 650 m (was 2272 / 650):
+  #
+  #   container              request   worst observed (MiB)      why
+  #   egress-proxy   160Mi -> 256Mi    176 on restart (1.10x OVER 160)   UP; limit 256 -> 384 so request < limit
+  #   collector      128Mi -> 256Mi    158 on restart (1.23x OVER 128)   UP; first measurement of it (was "unmeasured")
+  #   resource-mon   128Mi -> 160Mi    101 on restart (0.79x)            UP; hardcoded in its DaemonSet template
+  #   mysql          704Mi (kept)      468 p95 under load                requests==limits kept
+  #   requests-proxy 128Mi ->  96Mi     64 on restart                    limits unchanged
+  #   pods-monitor   384Mi -> 128Mi     77 on restart                    LIMIT STAYS 512Mi
+  #   jobs-manager   640Mi -> 192Mi    105 p95 / 103 restart (0.16x)     LIMIT STAYS 1Gi; QoS unchanged (see below)
+  #
+  # CPU requests are untouched: the highest control-plane cpu p95 in any leg was 13m
+  # (jobs-manager during the burst). Full tables, windows and caveats are on the ticket.
+  #
+  # INTERIM TRIM (backend#2461, 2026-09-10) -- the history the block above supersedes.
   #
   # Requests are what the scheduler and the jobs-manager's admission SUBTRACT from
   # the node; they are not what the process uses. Measured on an installer edge
@@ -1399,7 +1485,7 @@ resources:
   # 100m / 128Mi. That is the right worst case: on a real edge the collector IS
   # rendered once jobs-manager has written the token Secret (backend#2274), so an
   # edge that trains on install must still train after that. With it counted the
-  # render is 650m / 2272Mi, and the node above leaves 1050m / 3126Mi (was
+  # render was 650m / 2272Mi (now 1792Mi, see above), and the node above left 1050m / 3126Mi (was
   # 900m / 2390Mi): 50m and 54Mi over the envelope. Thin, and honest.
   #
   #   mysql           250m/1Gi   -> 150m/704Mi   peak measured 0.40-0.55x of 1Gi (max ~563Mi); 704 = +25% headroom; requests==limits kept
@@ -1434,14 +1520,14 @@ resources:
   jobsManager:
     requests:
       cpu: "150m"
-      memory: "640Mi"
+      memory: "192Mi"
     limits:
       cpu: "1000m"
       memory: "1Gi"
   podsMonitor:
     requests:
       cpu: "100m"
-      memory: "384Mi"
+      memory: "128Mi"
     limits:
       cpu: "500m"
       memory: "512Mi"
@@ -1453,7 +1539,7 @@ resources:
   requestsProxy:
     requests:
       cpu: "50m"
-      memory: "128Mi"
+      memory: "96Mi"
     limits:
       cpu: "1000m"
       memory: "512Mi"

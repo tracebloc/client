@@ -16,7 +16,8 @@
 #
 #  Measured here by rendering the chart: the steady-state control plane requested
 #  ~3136 MiB / 900 m before backend#2461's interim trim (2026-09-10) -- ABOVE the
-#  3 GiB (3072 MiB) the envelope reserved for it; 2272 MiB / 650 m after, under it.
+#  3 GiB (3072 MiB) the envelope reserved for it; 2272 MiB / 650 m after the interim
+#  trim, and 1792 MiB / 650 m after the measured one (backend#2461, 2026-09-13).
 #  That 64 MiB overshoot was the memory half of the reason a training pod on a
 #  freshly-installed single-node edge could sit `Pending / Insufficient memory`
 #  (backend#2870). The render COUNTS THE TELEMETRY COLLECTOR (helm template cannot
@@ -73,7 +74,7 @@ installer="$root/scripts/lib/install-client-helm.sh"
 # same PR -- which is the moment to weigh whether the training envelope can still
 # afford it. Overridable so the guard's own test can drive a lower ceiling and
 # watch a real render breach it.
-MEM_CEIL_MIB="${TB_CP_FOOTPRINT_MEM_CEIL:-2272}"
+MEM_CEIL_MIB="${TB_CP_FOOTPRINT_MEM_CEIL:-1792}"
 CPU_CEIL_MILLI="${TB_CP_FOOTPRINT_CPU_CEIL:-650}"
 
 command -v helm >/dev/null 2>&1 || { echo "[ERROR] helm is required to render the chart footprint" >&2; exit 3; }

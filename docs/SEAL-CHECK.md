@@ -287,11 +287,36 @@ client-runtime#199.
 run a build carrying client-runtime#416 (the HF-offline injection) *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
 On each cluster the chart renders control-plane images as `repository:tag` +
-`IfNotPresent`, and the `image-refresh` CronJob pins the live digest. dev now
-tracks its `:dev` tag (auto-refresh); staging/prod **pin the #416 digest** in
-values (`images.jobsManager.digest`) because their tag node-caches were stale
-(pre-#416) — pinning is deterministic and survives `--reset-then-reuse-values`,
-but disables `image-refresh` auto-tracking until the pin is bumped.
+`IfNotPresent`, and the `image-refresh` CronJob pins the live digest — resolved
+on the registry the pods actually pull from and written to the workload, never
+to values. **That unpinned state is the recommended one**, on every environment:
+it is what keeps the running digest reproducible *and* current, and it needs no
+operator action when the registry moves.
+
+A **values pin** (`images.jobsManager.digest`) is for a deliberate hold only, and
+since chart 1.9.119 it **must carry the registry it was resolved on**
+(`images.jobsManager.digestRegistry`, a bare host spelled like
+`images.traceblocRegistry`). A digest names bytes on the registry it was
+resolved on; another registry may never have held them, and a pod told to pull
+a digest its registry does not have never starts. So a pin is honoured **only
+when `digestRegistry` equals the registry the release pulls from**; otherwise
+it is ignored — the workload renders the channel tag, `image-refresh` re-pins
+from the live registry, and `helm install/upgrade` prints a NOTES warning
+naming the image and both registries. A pin with `digest` set and
+`digestRegistry` empty is read as resolved on `docker.io` (the only registry
+these images were pulled from before the key existed), so it is honoured under
+`images.traceblocRegistry: docker.io` and ignored at the `ghcr.io` default.
+
+That legacy shape is exactly what earlier versions of this note recommended for
+staging/prod, and it is how a digest pin outlived its registry: pins resolved on
+Docker Hub were rendered onto `ghcr.io` when the default moved, the pods could
+not pull, and every auto-upgrade timed out and rolled back. If a fleet still
+carries such a pin, either re-resolve it on the current registry and declare it
+(`crane digest ghcr.io/tracebloc/jobs-manager:prod`, then set both keys), or —
+preferably — drop it and let `image-refresh` pin. The refresh tick additionally
+HEADs every honoured pin by digest on its registry and records one the registry
+cannot serve as `tracebloc.io/stale-pin-jobs-manager=unpullable:<digest>` on the
+jobs-manager Deployment, without touching the workload.
 
 ## Runbook: flip the §8.2 egress lockdown on a real fleet
 

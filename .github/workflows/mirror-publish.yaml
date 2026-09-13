@@ -81,6 +81,21 @@
 #   carries the private needles for the string scan (one extended regex per
 #   line — see .publish-forbidden for why they are not committed); the guard
 #   refuses to run the scan without it.
+#
+# Historical releases
+#   This workflow publishes releases cut AFTER the mirror exists. The releases
+#   that existed before it are carried over once, by a human, with
+#   scripts/backfill-releases.sh (dry-run by default; --apply writes; --pages
+#   rebuilds the mirror's Helm index from the backfilled chart tarballs at
+#   their release-asset URLs and pushes it to the mirror's gh-pages through the
+#   same publisher `tree` step this workflow uses). It reuses publish-mirror.sh
+#   for the target rule and the Pages push and publish-guard.sh for every text
+#   asset, release body and the index; its header carries the full contract.
+#   NOTE the two disagree on what the mirror's index.yaml points at: the
+#   "Guard the chart index" step below copies the source's gh-pages, whose URLs
+#   name the source's Pages site, while the backfill writes release-asset URLs
+#   on the mirror. Until this workflow rewrites the index for the mirror, the
+#   next stable publish replaces the backfilled index with the copied one.
 name: Mirror publish
 
 on:

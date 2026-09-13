@@ -55,7 +55,7 @@ assert script, "no rendered script containing the re-pin branch"
 
 lines = script.splitlines()
 start = next(i for i, l in enumerate(lines)
-             if l.strip() == 'if [ "$recorded" = "$latest" ]; then')
+             if l.strip() == 'if [ -z "$recorded" ]; then')
 # The branch ends at the `esac` that closes the `case "$repo" in` re-image block
 # (no nested `case`, so the first `esac` after it closes it).
 case_at = next(i for i in range(start, len(lines))
@@ -97,7 +97,8 @@ IMAGE_TAG="dev"
 REQUESTS_PROXY_DEPLOYMENT="t-requests-proxy"
 REQUESTS_PROXY_PINNED="\${3:-0}"
 latest="sha256:aaa"
-recorded="sha256:aaa"
+recorded="\${8-sha256:aaa}"
+pin_ignored="\${7:-0}"
 STUB_API="\${1:-}"
 STUB_PROXY="\${2:-}"
 pending_attempt="\${4:-0}"
@@ -136,7 +137,7 @@ printf 'JM:%s\n' "\$jm_set_args"
 printf 'RP:%s\n' "\$rp_set_args"
 printf 'ANNOTATE:%s\n' "\$annotate_args"
 EOF
-  sh "$TMP/harness.sh" "${1:-}" "${2:-}" "${3:-}" "${4:-0}" "${5:-}" "${6:-}"
+  sh "$TMP/harness.sh" "${1:-}" "${2:-}" "${3:-}" "${4:-0}" "${5:-}" "${6:-}" "${7:-0}" "${8-sha256:aaa}"
 }
 
 @test "ESTABLISHED edge reverted to :tag re-pins the digest (restart_needed=1)" {
@@ -294,4 +295,45 @@ EOF
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"no-op"* ]] || return 1
   [[ "$output" == *"RESTART:0"* ]] || return 1
+}
+
+@test "IGNORED values pin, FIRST observation (no annotation yet) re-pins now -- not a fresh install" {
+  # The pin was resolved on a registry this release does not pull from, so the
+  # render floated the image on :tag and the CronJob env flagged it ($7="1").
+  # Pinned images were never refreshed, so recorded is EMPTY ($8="") -- the
+  # exact shape of a fresh install, which this script does not roll (#1008).
+  # The flag is what says this one is different: the operator asked for a
+  # digest, so the first tick gives it one from IMAGE_REGISTRY.
+  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1" "0" "" "" "1" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"values pin was IGNORED"* ]] || return 1
+  [[ "$output" == *"not a fresh install"* ]] || return 1
+  [[ "$output" == *"RESTART:1"* ]] || return 1
+  [[ "$output" == *"api=docker.io/tracebloc/jobs-manager@sha256:aaa"* ]] || return 1
+  [[ "$output" == *"tracebloc.io/digest-applied-jobs-manager=1"* ]] || return 1
+  [[ "$output" != *"recording without re-imaging"* ]] || return 1
+}
+
+@test "FIRST observation WITHOUT an ignored pin still records without re-imaging" {
+  # The control for the case above: same empty annotation, flag off ($7="0").
+  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1" "0" "" "" "0" ""
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"first observation; recording without re-imaging"* ]] || return 1
+  [[ "$output" == *"RESTART:0"* ]] || return 1
+  [[ "$output" == *"tracebloc.io/first-observed-jobs-manager=1"* ]] || return 1
+  [[ "$output" != *"JM:api="* ]] || return 1
+}
+
+@test "IGNORED values pin on a fresh-install-shaped edge (first-observed, never applied) re-pins too" {
+  # An edge born on :tag, later pinned by an operator, whose pin is now ignored:
+  # first_observed set ($6="1"), applied absent ($5=""), flag on ($7="1"). The
+  # fresh-install skip must yield to the flag.
+  run run_branch "docker.io/tracebloc/jobs-manager:dev" "" "1" "0" "" "1" "1"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"values pin was IGNORED"* ]] || return 1
+  [[ "$output" == *"RESTART:1"* ]] || return 1
+  [[ "$output" == *"api=docker.io/tracebloc/jobs-manager@sha256:aaa"* ]] || return 1
+  # the skip's own sentence must be absent (the re-pin line says "not a fresh install")
+  [[ "$output" != *"NOT rolling"* ]] || return 1
+  [[ "$output" != *"this is a fresh install"* ]] || return 1
 }
