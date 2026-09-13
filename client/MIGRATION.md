@@ -13,7 +13,7 @@ or `global.imageRegistry` would be. A pin is now rendered **only when
 (`global.imageRegistry`, else `images.traceblocRegistry`, else the chart default
 `ghcr.io`). Otherwise the pin is **ignored**: the workload renders the channel
 tag, the `image-refresh` CronJob treats the image as unpinned and re-pins it from
-the live registry, and `helm install`/`helm upgrade` prints a NOTES warning naming
+the live registry on its first tick (an ignored pin is not a fresh install), and `helm install`/`helm upgrade` prints a NOTES warning naming
 the image, the registry the pin was resolved on and the one the release pulls
 from. The render never fails on a pin — the tag is the safe state. requests-proxy
 follows the *honoured* jobs-manager pin, so an ignored requests-proxy pin is not

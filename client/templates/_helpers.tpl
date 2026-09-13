@@ -832,6 +832,27 @@ Usage: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) }}
 {{- end -}}
 
 {{/*
+tracebloc.pinIgnored — "1" when this image HAS a values digest pin that
+tracebloc.pinFor did NOT honour (resolved on a registry this release does not
+pull from), else "". The image-refresh CronJob reads it per image: an ignored
+pin is NOT a fresh install -- the operator pinned this image on purpose and a
+pinned image was never refreshed, so it carries no refresh annotation for that
+reason, not because it was just born. The first tick after the pin is ignored
+therefore re-pins the workload from the live registry instead of leaving it on
+the channel tag until the next upstream digest change (the fresh-install skip
+applied to the wrong case). Derived from the same decision as the render
+(pinFor), so "ignored" here is exactly what NOTES reports and what the image
+sites did.
+Usage: {{ include "tracebloc.pinIgnored" (dict "image" "jobsManager" "root" $) }}
+*/}}
+{{- define "tracebloc.pinIgnored" -}}
+{{- $img := default dict (index (default dict .root.Values.images) .image) -}}
+{{- if and ($img.digest | default "") (not (include "tracebloc.pinFor" .)) -}}
+1
+{{- end -}}
+{{- end -}}
+
+{{/*
 tracebloc.effectivePin — the digest a WORKLOAD renders: its own honoured pin
 (tracebloc.pinFor), except that requests-proxy, which runs the jobs-manager
 image, follows the honoured jobs-manager pin when it has no honoured pin of its

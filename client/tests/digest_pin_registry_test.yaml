@@ -368,6 +368,62 @@ tests:
   # image-refresh env agrees with the render (paired with the cases above)
   # documentIndex 1 is the CronJob (0 is the script ConfigMap).
   # =====================================================================
+  - it: INCIDENT CASE -- the refresh env flags a legacy pin at ghcr.io as IGNORED, so the script re-pins on the FIRST tick instead of treating the edge as a fresh install
+    # A pinned image was never refreshed, so it carries no refresh annotation --
+    # the fresh-install shape the script deliberately does not roll (#1008). The
+    # flag is what tells it this one is different. Same decision as the render.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PIN_IGNORED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PIN_IGNORED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PIN_IGNORED
+            value: "1"
+
+  - it: the refresh env does NOT flag an honoured pin, nor no pin at all, as ignored
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PIN_IGNORED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PIN_IGNORED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PIN_IGNORED
+            value: "0"
+
   - it: INCIDENT CASE -- the refresh env reads a legacy pin at ghcr.io as UNPINNED, so the script re-pins from the live registry
     # PAIRED with "INCIDENT CASE -- a legacy pin ... the tag renders". Computing
     # this flag from `.digest` alone is what made the render float the image

@@ -570,9 +570,9 @@ data:
 
     # Each entry: "<docker-hub-repo>|<annotation-key>|<pin-flag>|<pin-digest>".
     set -- \
-      "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}|${JOBS_MANAGER_PIN:-}" \
-      "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}|${PODS_MONITOR_PIN:-}" \
-      "tracebloc/resource-monitor|tracebloc.io/last-refreshed-resource-monitor-digest|${RESOURCE_MONITOR_PINNED}|${RESOURCE_MONITOR_PIN:-}"
+      "tracebloc/jobs-manager|tracebloc.io/last-refreshed-jobs-manager-digest|${JOBS_MANAGER_PINNED}|${JOBS_MANAGER_PIN:-}|${JOBS_MANAGER_PIN_IGNORED:-0}" \
+      "tracebloc/pods-monitor|tracebloc.io/last-refreshed-pods-monitor-digest|${PODS_MONITOR_PINNED}|${PODS_MONITOR_PIN:-}|${PODS_MONITOR_PIN_IGNORED:-0}" \
+      "tracebloc/resource-monitor|tracebloc.io/last-refreshed-resource-monitor-digest|${RESOURCE_MONITOR_PINNED}|${RESOURCE_MONITOR_PIN:-}|${RESOURCE_MONITOR_PIN_IGNORED:-0}"
 
     for entry in "$@"; do
       repo="${entry%%|*}"
@@ -580,7 +580,11 @@ data:
       key="${rest%%|*}"
       rest="${rest#*|}"
       pinned="${rest%%|*}"
-      pin_digest="${rest#*|}"
+      rest="${rest#*|}"
+      pin_digest="${rest%%|*}"
+      # 5th field: "1" when a values pin exists but the render IGNORED it
+      # (registry mismatch) -- see the *_PIN_IGNORED env. Not a fresh install.
+      pin_ignored="${rest#*|}"
 
       # #1008: two durable markers that let the `recorded == latest` / off-digest
       # arm below tell a genuine fresh install from a helm-revert of an applied
@@ -744,9 +748,23 @@ data:
         # annotation-less tick. A pre-marker edge upgrading into this version
         # never gets this stamp (its first observation predates the marker), so
         # it is not mistaken for a fresh install and keeps the repair roll.
-        log "  first observation; recording without re-imaging"
-        annotate_args="$annotate_args ${key}=${latest} ${first_observed_key}=1"
-        continue
+        if [ "$pin_ignored" = "1" ]; then
+          # NOT a fresh install. This image carries a values pin the render
+          # IGNORED (resolved on a registry this release does not pull from), so
+          # it was never refreshed -- pinned images skip this path -- and has no
+          # annotation for that reason, not because it was just born. The
+          # operator pinned it on purpose; leaving it on :tag until the next
+          # upstream digest change would be the fresh-install skip applied to the
+          # wrong case. Treat the recorded digest as current and let the
+          # off-digest compare below roll it (the repair path), which also stamps
+          # the applied marker so later ticks see an established edge.
+          log "  first observation, but this image's values pin was IGNORED (resolved on a registry this release does not pull from) -- not a fresh install; re-pinning from ${IMAGE_REGISTRY} now rather than leaving it on :${IMAGE_TAG}"
+          recorded="$latest"
+        else
+          log "  first observation; recording without re-imaging"
+          annotate_args="$annotate_args ${key}=${latest} ${first_observed_key}=1"
+          continue
+        fi
       fi
 
       if [ "$recorded" = "$latest" ]; then
@@ -895,11 +913,16 @@ data:
             log "  digest unchanged and workload off-digest, but ${applied_key} was unreadable (API/jq error) -- skipping re-pin this tick, will retry when readable"
             continue
           fi
-          if [ -n "$first_observed" ] && [ -z "$applied" ]; then
+          if [ -n "$first_observed" ] && [ -z "$applied" ] && [ "$pin_ignored" != "1" ]; then
             log "  digest unchanged and workload runs '${have}' on :${IMAGE_TAG}, but this is a fresh install (observed here, no digest ever applied) -- NOT rolling (#1008); it stays on :${IMAGE_TAG} (IfNotPresent-safe) until a genuine upstream digest change pins it."
             continue
           fi
-          if [ -z "$first_observed" ] && [ -z "$applied" ]; then
+          if [ "$pin_ignored" = "1" ]; then
+            # An IGNORED values pin is never the fresh-install case, whatever the
+            # markers say: the operator asked for a digest, so give it one from
+            # the registry this release pulls from.
+            log "  digest unchanged, but the workload runs '${have}', not digest ${latest}, and this image's values pin was IGNORED (resolved on a registry this release does not pull from) -- not a fresh install; re-pinning from ${IMAGE_REGISTRY}"
+          elif [ -z "$first_observed" ] && [ -z "$applied" ]; then
             log "  digest unchanged, but the workload runs '${have}', not digest ${latest}, and this edge predates the fresh-install markers -- re-pinning to repair a possibly-stale :${IMAGE_TAG} on the upgrade hop (client-runtime#199)"
           else
             log "  digest unchanged, but the workload runs '${have}', not digest ${latest}"
@@ -1287,6 +1310,21 @@ spec:
                   value: {{ include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $) | quote }}
                 - name: RESOURCE_MONITOR_PIN
                   value: {{ include "tracebloc.pinFor" (dict "image" "resourceMonitor" "root" $) | quote }}
+                # Whether a values pin EXISTS but the render IGNORED it
+                # (tracebloc.pinIgnored: resolved on a registry this release does
+                # not pull from). Such an image floats on :tag and, having been
+                # pinned, carries no refresh annotation -- byte-for-byte the shape
+                # of a fresh install, which the script deliberately does not roll
+                # (#1008). It is not one: the operator pinned it on purpose. The
+                # script reads this flag to re-pin the image from IMAGE_REGISTRY on
+                # the first tick instead of leaving it on :tag until the next
+                # upstream digest change. Same decision as the render and NOTES.
+                - name: JOBS_MANAGER_PIN_IGNORED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "jobsManager" "root" $)))) | quote }}
+                - name: PODS_MONITOR_PIN_IGNORED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "podsMonitor" "root" $)))) | quote }}
+                - name: RESOURCE_MONITOR_PIN_IGNORED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "resourceMonitor" "root" $)))) | quote }}
                 # requests-proxy follows the jobs-manager digest by default;
                 # this flag is the per-workload override that opts it out -- an
                 # HONOURED own pin (tracebloc.pinFor). An ignored one is not an

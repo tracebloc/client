@@ -993,7 +993,8 @@ images:
   #                 reports a stale pin, and now also one the registry cannot
   #                 serve: `tracebloc.io/stale-pin-<image>=unpullable:<digest>`).
   #   ignored   otherwise -> the workload renders the channel tag, image-refresh
-  #                 re-pins it from the LIVE registry, and `helm install/upgrade`
+  #                 re-pins it from the LIVE registry on its first tick (an
+  #                 ignored pin is not a fresh install), and `helm install/upgrade`
   #                 prints a NOTES warning naming the image, the pin's registry
   #                 and the effective one. The render never fails on it: the tag
   #                 is the safe state.
