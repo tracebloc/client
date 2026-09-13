@@ -109,9 +109,23 @@ run_case "unreadable cluster writes a carried non-floor size" "$LIB" \
   '    if false; then' 1
 
 printf '\nthe embed:\n'
+# DERIVED FROM THE INSTALLER, NOT RESTATED. This anchor used to be the literal
+# byte count of the embed; the moment gen-footprint-embed.sh re-embedded a new
+# render (client#1055: 2272 -> 1792 MiB) the literal matched nothing, the case
+# went INERT, and the required Source-of-truth drift job reddened on the very
+# PR that moved the number (Bugbot Medium). A mutation must call the code under
+# test, not a copy of it (CLAUDE.md rule 9): read the current embed, then drift
+# it by +1 GiB. Fail closed if the constant cannot be read -- an unreadable
+# embed is not evidence the guard would catch a drift.
+embed_cur="$(grep -oE '^_TB_CP_FOOTPRINT_MEM_BYTES=[0-9]+$' "$SRC/$LIB" || true)"
+if [ -z "$embed_cur" ]; then
+  printf 'ERROR: cannot read _TB_CP_FOOTPRINT_MEM_BYTES from %s -- the embed-drift case cannot be armed\n' "$LIB" >&2
+  exit 2
+fi
+embed_mut="_TB_CP_FOOTPRINT_MEM_BYTES=$(( ${embed_cur#*=} + 1073741824 ))"
 run_case "embedded footprint drifts from the render" "$LIB" \
-  '_TB_CP_FOOTPRINT_MEM_BYTES=2382364672' \
-  '_TB_CP_FOOTPRINT_MEM_BYTES=3221225472' 1
+  "$embed_cur" \
+  "$embed_mut" 1
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 if [ "$fail" -gt 0 ]; then
