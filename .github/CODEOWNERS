@@ -5,8 +5,9 @@
 
 * @tracebloc-review
 
-# Narrow CODEOWNERS — security backstop only.
-# Author picks reviewers for everything else.
+# Human ownership is narrow — a security backstop on the paths below only.
+# The author still picks the human reviewer for everything else; the `*` rule
+# above adds only the automated review account.
 
 /client/templates/ @saadqbal @tracebloc-review
 /client/values.schema.json @saadqbal @tracebloc-review
