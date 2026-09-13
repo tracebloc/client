@@ -112,6 +112,16 @@ jobs:
         # already solved this and says so in its comment; I added a second
         # cross-repo reader without reading the first. Same App, same least
         # privilege: named `repositories`, contents:read only.
+        #
+        # continue-on-error BECAUSE A FAILED MINT IS A CANNOT-TELL, NOT A VERDICT.
+        # This repo is PUBLIC, so a fork PR carries no secrets and this step fails
+        # outright; an App outage does the same. Without this the job dies HERE,
+        # one step before the compare step's cannot_tell() gate -- so the gate was
+        # written for the fork-PR case and then placed where it could never see it
+        # (Bugbot Medium, and the review said the same). The outcome is checked
+        # below and routed through that gate rather than guarded with an `if:`
+        # here, which would have to re-implement the warn-on-PR branch.
+        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_TRAIN_APP_ID }}
@@ -124,6 +134,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          TOKEN_OUTCOME: ${{ steps.token.outcome }}
         run: |
           set -euo pipefail
           ref="$(grep -vE '^[[:space:]]*(#|$)' scripts/.client-runtime-ref | head -1 | tr -d '[:space:]')"
@@ -200,6 +211,14 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/tracebloc/client-runtime$1"
           }
+
+          # THE MINT IS A READ TOO, and it is the FIRST one -- so it is checked
+          # here, after cannot_tell() exists and before anything uses $GH_TOKEN.
+          # `outcome` is the step's real result (continue-on-error leaves
+          # `conclusion` success), and the emptiness check covers a mint that
+          # reports success but hands back nothing.
+          [ "${TOKEN_OUTCOME:-}" = "success" ] && [ -n "${GH_TOKEN:-}" ] \
+            || cannot_tell "could not mint the client-runtime read token (fork PR, or the App is unavailable)"
 
           # DERIVED, NOT HARDCODED. This job's name, and the PR describing it,
           # both say it compares against client-runtime's DEFAULT BRANCH; the code
