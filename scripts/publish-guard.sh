@@ -366,8 +366,14 @@ guard_forbidden_strings() {
     local needle="$1" shown="$2" rc
     # Hits go through a FILE, never `producer | grep -q`: a closed pipe would
     # turn a real finding into "clean" via SIGPIPE.
-    grep -rIinE -e "$needle" "${scan_dirs[@]}" >"$TMP/hits.txt" 2>"$TMP/grep.err"; rc=$?
-    if [ "$rc" -ge 2 ]; then GREP_ERR="grep exited $rc on $shown: $(tr '\n' ' ' <"$TMP/grep.err")"; return 2; fi
+    # grep's stderr is DISCARDED, never folded into GREP_ERR: on an invalid regex
+    # grep echoes the offending pattern, and for an --extra-forbidden needle that
+    # pattern is the private identifier $shown deliberately withholds. GREP_ERR is
+    # emitted on a public ::error:: line, so it is built from $shown (already
+    # public-safe) and the exit code ONLY — dropping grep's stderr on the floor is
+    # what keeps the private pattern out of the public log.
+    grep -rIinE -e "$needle" "${scan_dirs[@]}" >"$TMP/hits.txt" 2>/dev/null; rc=$?
+    if [ "$rc" -ge 2 ]; then GREP_ERR="grep exited $rc on $shown — the needle may be an invalid regex (see its definition)"; return 2; fi
     if [ "$rc" -ne 0 ]; then : >"$TMP/hits.txt"; return 0; fi
     # [allow] tokens are removed from each hit line and the needle re-tested, so
     # a line is spared only when the allowed token was the whole reason it hit.
