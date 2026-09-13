@@ -1,10 +1,17 @@
+# Code review is automated: the dedicated review account is requested on every
+# pull request the moment it opens, and a review from it satisfies the
+# required approving review. Path rules below add it beside any existing
+# owner rather than replacing them (the last matching rule wins in CODEOWNERS).
+
+* @tracebloc-review
+
 # Narrow CODEOWNERS — security backstop only.
 # Author picks reviewers for everything else.
 
-/client/templates/                                      @saadqbal
-/client/values.schema.json                              @saadqbal
-/client/values.yaml                                     @saadqbal
-/docs/SECURITY.md                                       @saadqbal
+/client/templates/ @saadqbal @tracebloc-review
+/client/values.schema.json @saadqbal @tracebloc-review
+/client/values.yaml @saadqbal @tracebloc-review
+/docs/SECURITY.md @saadqbal @tracebloc-review
 
 # ── R8 signed-installer trust root (RFC-0001 / tracebloc/backend#889, client#282/#283) ──
 # The signed-install bootstraps — install.sh (curl|bash) and install.ps1 (irm|iex) —
@@ -12,17 +19,17 @@
 # a signed manifest. The keyless signer identity IS the release workflow — so a change
 # to the workflow, either installer, their sub-scripts, or the manifest generator
 # changes *what gets trusted*, and must be code-owner reviewed.
-/.github/workflows/release-helm-chart.yaml              @saadqbal
-/scripts/install.sh                                     @saadqbal
-/scripts/install.ps1                                    @saadqbal
-/scripts/install-k8s.sh                                 @saadqbal
-/scripts/install-k8s.ps1                                @saadqbal
-/scripts/gen-manifest.sh                                @saadqbal
-/scripts/manifest.sha256                                @saadqbal
-/scripts/lib/                                           @saadqbal
+/.github/workflows/release-helm-chart.yaml @saadqbal @tracebloc-review
+/scripts/install.sh @saadqbal @tracebloc-review
+/scripts/install.ps1 @saadqbal @tracebloc-review
+/scripts/install-k8s.sh @saadqbal @tracebloc-review
+/scripts/install-k8s.ps1 @saadqbal @tracebloc-review
+/scripts/gen-manifest.sh @saadqbal @tracebloc-review
+/scripts/manifest.sha256 @saadqbal @tracebloc-review
+/scripts/lib/ @saadqbal @tracebloc-review
 
 # ── Style-system enforcement (STYLE.md) ──
 # The guard + the style definition decide what output regressions CI blocks; a
 # change here changes the rules themselves, so it must be code-owner reviewed.
-/scripts/check-style.sh                                 @saadqbal
-/STYLE.md                                               @saadqbal
+/scripts/check-style.sh @saadqbal @tracebloc-review
+/STYLE.md @saadqbal @tracebloc-review
