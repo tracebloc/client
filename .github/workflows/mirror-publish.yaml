@@ -479,6 +479,10 @@ jobs:
         if: steps.plan.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Same token, same reason as the index step: the global credential
+          # helper the push step installed reads MIRROR_TOKEN whenever git is
+          # made to authenticate from here on.
+          MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ steps.target.outputs.repo }}
           TAG: ${{ steps.plan.outputs.tag }}
           SHA: ${{ steps.push.outputs.sha || steps.keep.outputs.sha }}
@@ -539,10 +543,19 @@ jobs:
         # the command's exit status, caught with `|| rc=$?` so it still reaches
         # the step summary, then re-raised. The rebuilt index.yaml is put in the
         # summary too — in a dry run that IS the plan.
+        #
+        # MIRROR_TOKEN: the git reads of the mirror's gh-pages (ls-remote, fetch)
+        # go out anonymously — the mirror is public — and git consults the
+        # global credential helper the push step installed only after a 401.
+        # The helper reads MIRROR_TOKEN when it runs, so the variable is set
+        # here too: should the mirror ever answer 401, the helper answers with
+        # the app token, never an empty one (Bugbot on #1060). Empty in a dry
+        # run, where no helper was installed.
         if: (steps.plan.outputs.dry_run == 'true' && steps.target.outputs.repo != '') || (steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true')
         id: index
         env:
           GH_TOKEN: ${{ steps.token.outputs.token || secrets.GITHUB_TOKEN }}
+          MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ steps.target.outputs.repo }}
           SOURCE_RELEASES: ${{ steps.dates.outputs.file }}
           STRICT: ${{ steps.plan.outputs.strict }}

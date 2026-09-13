@@ -580,6 +580,18 @@ if captured:
     fail("step %r captures publish-mirror.sh through $(...) — a refusal's ::error:: line would never reach the log" % captured[0].get("name"))
 print("OK: no step captures the publisher's output")
 
+# A global git credential helper outlives the step that installed it and reads
+# MIRROR_TOKEN when git consults it (after a 401). Every later step that invokes
+# the publisher must carry MIRROR_TOKEN in its env, or a mirror answering 401
+# would have git send an empty token and the step die as "could not tell".
+installers = [i for i, s in enumerate(steps) if "credential.helper" in str(s.get("run", ""))]
+if len(installers) != 1:
+    fail("expected exactly one step installing a git credential helper, found %d" % len(installers))
+for s in steps[installers[0] + 1:]:
+    if re.search(r"publish-mirror\.sh", str(s.get("run", ""))) and "MIRROR_TOKEN" not in (s.get("env") or {}):
+        fail("step %r invokes the publisher after the credential helper was installed but sets no MIRROR_TOKEN — a 401 from the mirror would have git send an empty token" % s.get("name"))
+print("OK: every publisher step after the credential helper carries MIRROR_TOKEN")
+
 
 # The step that DECIDES publish_tree (writes it to GITHUB_OUTPUT) must ask
 # GitHub which release is the newest stable one; a decision that never asks
@@ -630,6 +642,15 @@ PY
   [[ "$output" == *"OK: one index step, after the release step, derived for a dry run too"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: the gh-pages push stages the index step's result and is gated on it having changed"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: no step reads a Pages index, none continues on error"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"OK: every publisher step after the credential helper carries MIRROR_TOKEN"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: the index step without MIRROR_TOKEN reddens — the global credential helper would answer a 401 with an empty token" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; del s['env']['MIRROR_TOKEN']")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: step "*"invokes the publisher after the credential helper was installed but sets no MIRROR_TOKEN"* ]] || { echo "$output"; return 1; }
 }
 
 @test "shape mutation: restoring the source-index copy (a step fetching origin gh-pages) reddens — the index is derived from the mirror, never copied" {

@@ -686,11 +686,16 @@ if [ "$PAGES" -eq 1 ]; then
   # note, not a refusal; under --apply an empty index is refused.
   [ "$APPLY" -eq 1 ] || IDX_ARGS+=(--allow-empty)
   rc=0
-  bash "$PUBLISH_MIRROR" "${IDX_ARGS[@]}" >"$P/index.out" 2>&1 || rc=$?
+  bash "$PUBLISH_MIRROR" "${IDX_ARGS[@]}" >"$P/index.out" 2>&1 || rc=$?   # mutation-anchor: pages-index-call
   cat "$P/index.out"
   case "$rc" in
     0) ;;
-    1) IDX_REASON="$(grep -E '^::error::publish-mirror: REFUSED — index: ' "$P/index.out" | tail -1 | sed 's/^::error::publish-mirror: REFUSED — index: //')"
+    1) # `|| true`, as for TREE_RESULT below: under pipefail a grep with no match
+       # exits 1 and the assignment would abort the script at exit 1 BEFORE the
+       # ::error:: line, the refused count and the report. Today `index` exits 1
+       # only through its two `index: `-prefixed refusals, so the grep always
+       # matches; this guards the next unprefixed exit 1 (Bugbot on #1060).
+       IDX_REASON="$(grep -E '^::error::publish-mirror: REFUSED — index: ' "$P/index.out" | tail -1 | sed 's/^::error::publish-mirror: REFUSED — index: //' || true)"   # mutation-anchor: pages-refuse-reason
        echo "::error::backfill-releases: REFUSED — --pages: ${IDX_REASON:-the index rebuild was refused (see above)}"
        N_REFUSED=$((N_REFUSED + 1))
        case "$IDX_REASON" in

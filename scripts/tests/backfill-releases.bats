@@ -842,6 +842,46 @@ mutant() {
   [[ "$output" != *"the publisher exited 0 but reported no"* ]] || { echo "$output"; return 1; }
 }
 
+@test "--apply --pages: an index rebuild that exits 1 WITHOUT its refusal line still reaches the ::error:: fallback, the refused count and the report (exit 1)" {
+  local m
+  m="$(mutant pages-index-call '  echo "index: exit 1 with no REFUSED line (planted)" >"$P/index.out"; rc=1')" || { echo "$m"; return 1; }
+  BACKFILL_UNDER_TEST="$m" backfill --apply --pages
+  [ "$status" -eq 1 ] || { echo "status=$status"; echo "$output"; return 1; }
+  [[ "$output" == *"::error::backfill-releases: REFUSED — --pages: the index rebuild was refused (see above)"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"Helm index (gh-pages): refused"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"1 item(s) were refused"* ]] || { echo "$output"; return 1; }
+  # The releases themselves went ahead and are reported: the refusal is the index's alone.
+  [ "$(verdicts "done")" -eq 7 ] || { echo "$output"; return 1; }
+}
+
+@test "mutation: with the refusal-reason grep back under pipefail, the same unprefixed exit 1 dies with NO reason and NO report — the test above catches it" {
+  local m1 m2
+  m1="$(mutant pages-index-call '  echo "index: exit 1 with no REFUSED line (planted)" >"$P/index.out"; rc=1')" || { echo "$m1"; return 1; }
+  # Second mutation applied on the first mutant's copy (mutant() reads $REAL), with
+  # the same anchor-applied proof: exactly one anchor, copy differs, copy parses.
+  m2="$BATS_TEST_TMPDIR/mutant-pages-refuse-reason.sh"
+  python3 - "$m1" "$m2" <<'PY' || return 1
+import sys
+src, dst, a = sys.argv[1], sys.argv[2], "# mutation-anchor: pages-refuse-reason"
+lines = open(src).read().split("\n")
+hits = [i for i, l in enumerate(lines) if l.endswith(a)]
+if len(hits) != 1:
+    sys.exit("anchor pages-refuse-reason found %d time(s), need exactly 1" % len(hits))
+l = lines[hits[0]]
+if ' || true)"' not in l:
+    sys.exit("anchor line carries no `|| true` to remove")
+lines[hits[0]] = l.replace(' || true)"', ')"').split("   # mutation-anchor")[0]
+open(dst, "w").write("\n".join(lines))
+PY
+  cmp -s "$m1" "$m2" && { echo "mutation pages-refuse-reason did not change the script"; return 1; }
+  bash -n "$m2" || { echo "mutant does not parse"; return 1; }
+  BACKFILL_UNDER_TEST="$m2" backfill --apply --pages
+  [ "$status" -eq 1 ] || { echo "status=$status"; echo "$output"; return 1; }
+  [[ "$output" != *"the index rebuild was refused (see above)"* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *"Helm index (gh-pages)"* ]] || { echo "$output"; return 1; }
+  [ "$(verdicts "done")" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "--pages keeps every other file on the mirror's gh-pages and appends to its history; only index.yaml is replaced" {
   local seed="$BATS_TEST_TMPDIR/seed"
   git clone -q "file://$PAGES_BARE" "$seed" 2>/dev/null
