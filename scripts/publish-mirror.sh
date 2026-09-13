@@ -41,8 +41,9 @@
 #             never overwritten, and a differing one is a human decision.
 #
 #    index    --repo OWNER/NAME --source-releases FILE --out DIR
-#             [--remote URL] [--forbidden FILE] [--extra-forbidden FILE]...
-#             [--strict] [--helm BIN] [--allow-empty] [--output FILE]
+#             [--mirror-releases FILE] [--remote URL] [--forbidden FILE]
+#             [--extra-forbidden FILE]... [--strict] [--helm BIN]
+#             [--allow-empty] [--output FILE]
 #             Rebuild the Helm repository index the mirror's gh-pages serves
 #             from the chart tarballs on the MIRROR's own releases — never from
 #             the source repository's Pages branch, whose URLs name the source.
@@ -59,10 +60,20 @@
 #             source repository's release list as `gh api --paginate
 #             repos/OWNER/REPO/releases` prints it — the caller reads it, because
 #             a token scoped to the mirror cannot), so the same mirror yields the
-#             same index bytes on every run. The mirror's current gh-pages is
-#             fetched from --remote (default https://github.com/OWNER/NAME.git);
-#             every other file on it is kept and staged again, index.yaml is
-#             replaced only when it differs apart from `generated:`. The staged
+#             same index bytes on every run. The mirror's release list is read
+#             fresh by default; --mirror-releases FILE takes the caller's own
+#             read of `gh api --paginate repos/OWNER/NAME/releases` instead —
+#             only for a caller that has written nothing to the mirror since
+#             (backfill's dry run), or the index would miss what it just wrote.
+#             The mirror's current gh-pages is fetched from --remote (default
+#             https://github.com/OWNER/NAME.git) and carried forward through
+#             the Pages allowlist: index.yaml and *.tgz as plain files are kept
+#             and staged again, index.yaml replaced only when it differs apart
+#             from `generated:`; anything else on the branch — a stray file, a
+#             directory, a symlink — is DROPPED with a notice and counted as a
+#             change, so the push prunes it (the branch is what `helm repo add`
+#             reads, and nothing else belongs there; a directory or symlink
+#             would also stop the guard below on every later publish). The staged
 #             branch goes through scripts/publish-guard.sh — the index as text,
 #             the tarballs already on the branch as opaque binaries — with
 #             --forbidden (default: this repo's .publish-forbidden), every
@@ -70,14 +81,15 @@
 #             text asset. Nothing is pushed: the caller pushes DIR/stage with
 #             `tree --branch gh-pages` when `changed=true`.
 #             Writes to --output: charts=N stable_releases=N changed=true|false
-#             pages_existed=true|false download_base=URL stage=DIR/stage
-#             index=DIR/index.yaml. Refuses (1) a mirror with no chart tarball
-#             on any stable release unless --allow-empty (then charts=0,
-#             changed=false, exit 0 — a dry run before the first release), and
-#             a guard refusal. Could-not-tell (2): helm or gh missing, a mirror
+#             pages_existed=true|false dropped=N download_base=URL
+#             stage=DIR/stage index=DIR/index.yaml. Refuses (1) a mirror with
+#             no chart tarball on any stable release unless --allow-empty (then
+#             charts=0, changed=false, exit 0 — a dry run before the first
+#             release), and a guard refusal. Could-not-tell (2): helm or gh missing, a mirror
 #             read that fails, a tarball whose bytes are not the mirror's digest
 #             or not the chart its name says, a mirror release the source list
-#             has no date for, a guard that could not tell.
+#             has no date for, an unreadable --mirror-releases, a guard that
+#             could not tell.
 #
 #  Exit 0 done; 1 refused (the message says why); 2 could not tell (an input
 #  missing or unreadable, a remote that did not answer). "Cannot tell" never
@@ -336,12 +348,13 @@ index_set_created() {
 }
 
 cmd_index() {
-  local repo="" src_releases="" out="" remote="" forbidden="" strict=0 helm="helm" allow_empty=0 output=""
+  local repo="" src_releases="" mirror_releases="" out="" remote="" forbidden="" strict=0 helm="helm" allow_empty=0 output=""
   local -a extra=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --repo)             repo="${2:-}"; shift 2 ;;
       --source-releases)  src_releases="${2:-}"; shift 2 ;;
+      --mirror-releases)  mirror_releases="${2:-}"; shift 2 ;;
       --out)              out="${2:-}"; shift 2 ;;
       --remote)           remote="${2:-}"; shift 2 ;;
       --forbidden)        forbidden="${2:-}"; shift 2 ;;
@@ -356,6 +369,7 @@ cmd_index() {
   [ -n "$repo" ] && [ -n "$src_releases" ] && [ -n "$out" ] || die2 "index: --repo, --source-releases and --out are all required"
   [[ "$repo" =~ $REPO_RE ]] || die2 "index: --repo '$repo' is not OWNER/NAME"
   [ -s "$src_releases" ] || die2 "index: --source-releases '$src_releases' is missing or empty — without the source's release dates no entry can be stamped"
+  [ -z "$mirror_releases" ] || [ -s "$mirror_releases" ] || die2 "index: --mirror-releases '$mirror_releases' is missing or empty — the caller's read of the mirror's release list is not there to reuse"
   if [ -e "$out" ]; then
     [ -d "$out" ] || die2 "index: --out '$out' exists and is not a directory"
     [ -z "$(ls -A "$out")" ] || die2 "index: --out '$out' is not empty; a stale directory could carry a file the guard never read"
@@ -386,8 +400,14 @@ cmd_index() {
   date_of() { awk -F'\t' -v t="$1" '$1 == t && $2 != "" && $2 != "null" { print $2; exit }' "$out/dates.tsv"; }
 
   # -- the mirror's releases, read fresh: the index covers exactly what a
-  #    `helm repo add` against the mirror can download -------------------------------
-  gh api --paginate "repos/$repo/releases" >"$out/mirror-pages.json" 2>"$L/gh.err" || die2 "index: could not read the releases of '$repo' (gh api --paginate repos/$repo/releases failed: $(tr '\n' ' ' <"$L/gh.err"))"
+  #    `helm repo add` against the mirror can download. A caller that read the
+  #    same list moments ago and has written nothing since hands it over with
+  #    --mirror-releases instead of having it paginated a second time. ------------
+  if [ -n "$mirror_releases" ]; then
+    cp "$mirror_releases" "$out/mirror-pages.json" || die2 "index: could not read --mirror-releases '$mirror_releases'"
+  else
+    gh api --paginate "repos/$repo/releases" >"$out/mirror-pages.json" 2>"$L/gh.err" || die2 "index: could not read the releases of '$repo' (gh api --paginate repos/$repo/releases failed: $(tr '\n' ' ' <"$L/gh.err"))"
+  fi
   jq -s 'add // []' "$out/mirror-pages.json" >"$out/mirror-releases.json" 2>"$L/jq.err" || die2 "index: the release list of '$repo' did not parse: $(tr '\n' ' ' <"$L/jq.err")"
   jq -r '.[] | select(.draft == false) | select(.prerelease == false) | .tag_name' "$out/mirror-releases.json" >"$out/stable-tags.txt" 2>"$L/jq.err" || die2 "index: could not filter the release list of '$repo': $(tr '\n' ' ' <"$L/jq.err")"   # mutation-anchor: index-stable-only
   # Oldest first by the SOURCE's publish date of the same tag (the mirror's own
@@ -432,23 +452,42 @@ cmd_index() {
   local n_charts
   n_charts="$(grep -c . "$out/placed.tsv" || true)"
 
-  # -- the mirror's current gh-pages: everything on it stays, only index.yaml is
-  #    replaced, and its index.yaml is what the rebuilt one is compared with. An
+  # -- the mirror's current gh-pages, carried forward through the Pages
+  #    allowlist: index.yaml and *.tgz, as plain files, stay (the branch is what
+  #    `helm repo add` reads — the index and the packaged charts, nothing else);
+  #    index.yaml is what the rebuilt one is compared with. Anything else on the
+  #    branch is dropped, named, and counted as a change so the push prunes it:
+  #    a stray file would otherwise sit there for good, and a directory or a
+  #    symlink would stop the guard below (--assets takes plain files only) on
+  #    every later publish until a human pruned the branch (review on #1060). An
   #    unreachable remote is could-not-tell; an absent branch is a first publish.
   git -C "$out/current" init -q || die2 "index: git init failed"
-  local heads pages_existed=0
+  local heads pages_existed=0 dropped=0 name why
   heads="$(git -C "$out/current" ls-remote --heads "$remote" refs/heads/gh-pages 2>"$L/lsr.err")" || die2 "index: the mirror remote did not answer (git ls-remote: $(tr '\n' ' ' <"$L/lsr.err"))"
   if [ -n "$heads" ]; then
     pages_existed=1
     git -C "$out/current" fetch -q --depth 1 "$remote" refs/heads/gh-pages 2>"$L/fetch.err" || die2 "index: could not fetch gh-pages from the mirror: $(tr '\n' ' ' <"$L/fetch.err")"
     git -C "$out/current" checkout -q FETCH_HEAD 2>/dev/null || die2 "index: could not check out the mirror's gh-pages"
-    find "$out/current" -mindepth 1 -maxdepth 1 ! -name .git -exec cp -Rp {} "$out/stage"/ \; || die2 "index: could not copy the mirror's gh-pages"
+    while IFS= read -r name; do
+      why=""
+      # A checkout holds plain files, symlinks and directories, nothing else:
+      # the two tests then the name rule are the whole space.
+      if [ -L "$out/current/$name" ]; then why="a symlink"
+      elif [ -d "$out/current/$name" ]; then why="a directory"
+      else case "$name" in index.yaml|*.tgz) ;; *) why="neither index.yaml nor a *.tgz" ;; esac; fi   # mutation-anchor: index-pages-allowlist
+      if [ -n "$why" ]; then
+        dropped=$((dropped + 1))
+        echo "index: dropping '$name' from the mirror's gh-pages — $why; the Pages branch carries only index.yaml and chart tarballs as plain files, so the push prunes it"
+        continue
+      fi
+      cp -p "$out/current/$name" "$out/stage/$name" || die2 "index: could not copy '$name' from the mirror's gh-pages"
+    done < <(find "$out/current" -mindepth 1 -maxdepth 1 ! -name .git -exec basename {} \; | LC_ALL=C sort)
   fi
   local present=absent; [ "$pages_existed" -eq 0 ] || present=present
 
   if [ "$n_charts" -eq 0 ]; then
     if [ "$allow_empty" -eq 1 ]; then
-      emit_output "$output" "charts=0" "stable_releases=$n_stable" "changed=false" "pages_existed=$([ "$pages_existed" -eq 1 ] && echo true || echo false)" "download_base=$base" "stage=$out/stage" "index="
+      emit_output "$output" "charts=0" "stable_releases=$n_stable" "changed=false" "pages_existed=$([ "$pages_existed" -eq 1 ] && echo true || echo false)" "dropped=$dropped" "download_base=$base" "stage=$out/stage" "index="
       echo "index: the mirror '$repo' carries no chart tarball on any stable release yet — nothing to index (--allow-empty); gh-pages $present, nothing staged"
       return 0
     fi
@@ -461,10 +500,14 @@ cmd_index() {
   # read off the entry's own URL; every entry must get one.
   index_set_created "$out/dates.tsv" "$out/charts/index.yaml" "$out/index.yaml" 2>"$L/awk.err" || die2 "index: could not set created on the index: $(tr '\n' ' ' <"$L/awk.err")"   # mutation-anchor: index-created-from-source
   # Unchanged apart from `generated:`? Then the mirror's own file stays staged
-  # verbatim, the publisher sees no difference, and nothing is pushed.
-  local changed=1
-  if [ "$pages_existed" -eq 1 ] && [ -e "$out/stage/index.yaml" ] && cmp -s <(grep -v '^generated:' "$out/stage/index.yaml") <(grep -v '^generated:' "$out/index.yaml"); then changed=0; fi   # mutation-anchor: index-unchanged-not-pushed
-  [ "$changed" -eq 0 ] || cp "$out/index.yaml" "$out/stage/index.yaml" || die2 "index: could not stage the index"
+  # verbatim. With nothing dropped from the branch either, the publisher sees
+  # no difference and nothing is pushed; a drop IS a difference — the push is
+  # what removes the stray item from the branch — so `changed` says so even
+  # when the index itself did not move.
+  local index_same=0 changed=1
+  if [ "$pages_existed" -eq 1 ] && [ -e "$out/stage/index.yaml" ] && cmp -s <(grep -v '^generated:' "$out/stage/index.yaml") <(grep -v '^generated:' "$out/index.yaml"); then index_same=1; fi   # mutation-anchor: index-unchanged-not-pushed
+  if [ "$index_same" -eq 1 ] && [ "$dropped" -eq 0 ]; then changed=0; fi
+  [ "$index_same" -eq 1 ] || cp "$out/index.yaml" "$out/stage/index.yaml" || die2 "index: could not stage the index"
 
   # -- the guard over the whole staged branch: the index as text, the tarballs
   #    already on the branch as opaque binaries. publish-guard.sh stages a tree
@@ -490,9 +533,10 @@ cmd_index() {
     *) cat "$out/guard.log"; die2 "index: the guard could not tell (exit $rc)" ;;
   esac
 
-  local change_text=changed; [ "$changed" -eq 1 ] || change_text=unchanged
-  emit_output "$output" "charts=$n_charts" "stable_releases=$n_stable" "changed=$([ "$changed" -eq 1 ] && echo true || echo false)" "pages_existed=$([ "$pages_existed" -eq 1 ] && echo true || echo false)" "download_base=$base" "stage=$out/stage" "index=$out/index.yaml"
-  echo "index: $n_charts chart version(s) from $n_stable stable release(s) of $repo at $base/<tag>/; index.yaml $change_text against the mirror's gh-pages ($present); staged at $out/stage, not pushed by this command"
+  local change_text=changed; [ "$index_same" -eq 0 ] || change_text=unchanged
+  emit_output "$output" "charts=$n_charts" "stable_releases=$n_stable" "changed=$([ "$changed" -eq 1 ] && echo true || echo false)" "pages_existed=$([ "$pages_existed" -eq 1 ] && echo true || echo false)" "dropped=$dropped" "download_base=$base" "stage=$out/stage" "index=$out/index.yaml"
+  local drop_text=""; [ "$dropped" -eq 0 ] || drop_text=", $dropped item(s) dropped from the branch"
+  echo "index: $n_charts chart version(s) from $n_stable stable release(s) of $repo at $base/<tag>/; index.yaml $change_text against the mirror's gh-pages ($present)$drop_text; staged at $out/stage, not pushed by this command"
 }
 
 [ "$#" -ge 1 ] || die2 "a subcommand is required: target | tree | release | index"

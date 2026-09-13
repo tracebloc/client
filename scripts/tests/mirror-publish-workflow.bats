@@ -44,6 +44,13 @@
 #     index — a note, as backfill's dry run — while a real publish, which has
 #     just created a release, still refuses an empty index (Bugbot: "dry-run
 #     index refuses empty mirrors")
+#   * in a DRY RUN the index step probes the mirror (`gh api repos/$REPO`)
+#     before invoking the publisher: GITHUB_TOKEN may not read a mirror that
+#     does not exist yet, and the preview says "nothing to preview" and exits 0
+#     instead of dying as could-not-tell; a real publish does not probe here
+#     (the confirm step refused a missing mirror with the app token), so an
+#     unreadable mirror there is still the publisher's hard failure (review on
+#     #1060: "dry run's index step can die2 on a mirror that isn't readable yet")
 #
 # FAILS CLOSED: an unreadable workflow, a missing step id, or PyYAML absent is a
 # named refusal, never "nothing to check". The shape check is one function run
@@ -427,12 +434,13 @@ EOF
   export PM_LOG="$BATS_TEST_TMPDIR/pm.log"; : >"$PM_LOG"
 }
 
-@test "index: the command's result lands in GITHUB_OUTPUT, the rebuilt index.yaml in the step summary; a dry run allows an empty mirror and says nothing was pushed, a real run does neither" {
+@test "index: the command's result lands in GITHUB_OUTPUT, the rebuilt index.yaml in the step summary; a dry run probes the mirror, allows an empty one and says nothing was pushed, a real run does none of that" {
   fake_index "$WORK"
-  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT=true DRY_RUN=true
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT=true DRY_RUN=true GH_API_SHA=example/source-public
   : >"$GITHUB_STEP_SUMMARY"
   run_step index
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^api repos/example/source-public --jq .full_name$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
   [ "$(out changed)" = true ] || { cat "$GITHUB_OUTPUT"; return 1; }
   [ "$(out stage)" = "$RUNNER_TEMP/index/stage" ] || return 1
   grep -q -- '--repo example/source-public --source-releases .*/src.json --out .*/index --forbidden .*/.publish-forbidden --extra-forbidden .*/tenants.txt --output .* --strict --allow-empty$' "$PM_LOG" || { cat "$PM_LOG"; return 1; }
@@ -440,20 +448,54 @@ EOF
   grep -q 'index.yaml as rebuilt' "$GITHUB_STEP_SUMMARY" || return 1
   grep -q 'releases/download/v1.2.3/client-1.2.3.tgz' "$GITHUB_STEP_SUMMARY" || return 1
   [[ "$output" == *"dry run: the index above is what the mirror's releases yield today"*"Nothing was pushed."* ]] || { echo "$output"; return 1; }
-  : >"$GITHUB_OUTPUT"; : >"$GITHUB_STEP_SUMMARY"; rm -rf "$RUNNER_TEMP/index"
+  : >"$GITHUB_OUTPUT"; : >"$GITHUB_STEP_SUMMARY"; : >"$GH_LOG"; rm -rf "$RUNNER_TEMP/index"
   DRY_RUN=false STRICT=false run_step index
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" != *"dry run:"* ]] || return 1
   ! grep -q -- '--strict' <(tail -1 "$PM_LOG") || return 1
   # A real publish has just created a release: an empty index stays a refusal.
   ! grep -q -- '--allow-empty' <(tail -1 "$PM_LOG") || { cat "$PM_LOG"; return 1; }
+  # And it does not probe the mirror here: the confirm step did, with the app token.
+  [ ! -s "$GH_LOG" ] || { cat "$GH_LOG"; return 1; }
+}
+
+@test "index: a dry run against a mirror that is named but not readable yet is a notice and exit 0 — the publisher is never invoked, the summary says there is nothing to preview, nothing lands in GITHUB_OUTPUT; a real publish does not take that exit" {
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=true GH_API_RC=1
+  : >"$GITHUB_STEP_SUMMARY"
+  run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"::notice::dry run: the mirror 'example/source-public' is not readable with this run's token (HTTP 409: Git Repository is empty) — not created yet, or not readable by GITHUB_TOKEN. There is no chart index to preview until it is; a real publish mints a token scoped to the mirror and refuses a missing one at the confirm step. Nothing was pushed."* ]] || { echo "$output"; return 1; }
+  [ ! -s "$PM_LOG" ] || { cat "$PM_LOG"; return 1; }
+  grep -q "^dry run: the mirror 'example/source-public' is not readable yet — nothing to preview.$" "$GITHUB_STEP_SUMMARY" || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
+  [ ! -s "$GITHUB_OUTPUT" ] || return 1
+  # A real publish: no probe, the publisher runs (and would refuse on its own).
+  : >"$GH_LOG"; : >"$GITHUB_STEP_SUMMARY"; rm -rf "$RUNNER_TEMP/index"
+  DRY_RUN=false run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -s "$PM_LOG" ] || return 1
+  [ ! -s "$GH_LOG" ] || { cat "$GH_LOG"; return 1; }
+}
+
+@test "index mutation: with the dry-run probe removed, an unreadable mirror reaches the publisher — the test above catches it" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace('if [ \"\$DRY_RUN\" = \"true\" ] && ! gh api \"repos/\$REPO\"', 'if false && ! gh api \"repos/\$REPO\"')")" || return 1
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=true GH_API_RC=1
+  : >"$GITHUB_STEP_SUMMARY"
+  RUN_WF="$m" run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # The publisher was invoked against a mirror the token cannot read: with the
+  # real command that is the die2 the finding named.
+  [ -s "$PM_LOG" ] || return 1
+  [[ "$output" != *"nothing to preview"* ]] || return 1
 }
 
 @test "index mutation: with --allow-empty dropped, a dry run against a mirror with no stable chart yet would refuse — the test above catches it" {
   local m
   m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace('[ \"\$DRY_RUN\" != \"true\" ] || args+=(--allow-empty)', ':')")" || return 1
   fake_index "$WORK"
-  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=true
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=true GH_API_SHA=example/source-public
   : >"$GITHUB_STEP_SUMMARY"
   RUN_WF="$m" run_step index
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -582,6 +624,20 @@ if "steps.plan.outputs.publish_tree == 'true'" not in index_if or "steps.plan.ou
     fail("the index step %r is not gated on publish_tree for a real run and enabled for a dry run (its if: %r)" % (index_step.get("name"), index_if))
 print("OK: one index step, after the release step, derived for a dry run too")
 
+# A dry run reaches the index step with GITHUB_TOKEN and a mirror that may not
+# exist yet: the step probes `repos/$REPO` BEFORE invoking the publisher, so a
+# named-but-unreadable mirror is a notice, not a could-not-tell — and only in a
+# dry run: a real publish that exited 0 past an unreadable mirror would report
+# success with no index.
+body = str(index_step.get("run", ""))
+probe = re.search(r'gh api "repos/\$REPO"', body)
+call = re.search(r"publish-mirror\.sh", body)
+if not probe or not call or probe.start() > call.start():
+    fail("the index step %r invokes the publisher without first probing the mirror (gh api \"repos/$REPO\") — in a dry run GITHUB_TOKEN may not read a mirror that does not exist yet, and the preview would die as could-not-tell instead of saying there is nothing to preview" % index_step.get("name"))
+if "DRY_RUN" not in body.splitlines()[body[:probe.start()].count("\n")]:
+    fail("the index step's mirror probe is not conditioned on DRY_RUN — a real publish must not exit 0 past an unreadable mirror with no index")
+print("OK: the index step probes the mirror before the publisher, in a dry run only")
+
 gh_pushes = [s for s in tree_pushes if re.search(r"--branch\s+gh-pages\b", str(s.get("run", "")))]
 if len(gh_pushes) != 1:
     fail("expected exactly one step pushing gh-pages, found %d" % len(gh_pushes))
@@ -669,6 +725,7 @@ PY
   [[ "$output" == *"OK: the one git fetch is the release tag's, compared against the expected commit"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: the publish_tree decision reads releases/latest"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: one index step, after the release step, derived for a dry run too"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"OK: the index step probes the mirror before the publisher, in a dry run only"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: the gh-pages push stages the index step's result and is gated on it having changed"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: no step reads a Pages index, none continues on error"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"OK: every publisher step after the credential helper carries MIRROR_TOKEN"* ]] || { echo "$output"; return 1; }
@@ -680,6 +737,18 @@ PY
   shape "$m"
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [[ "$output" == *"FAIL: step "*"invokes the publisher after the credential helper was installed but sets no MIRROR_TOKEN"* ]] || { echo "$output"; return 1; }
+}
+
+@test "shape mutation: the index step without its dry-run mirror probe reddens; a probe not conditioned on DRY_RUN reddens too" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace('gh api \"repos/\$REPO\"', 'true')")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: the index step "*"invokes the publisher without first probing the mirror"* ]] || { echo "$output"; return 1; }
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace('if [ \"\$DRY_RUN\" = \"true\" ] && ! gh api', 'if ! gh api')")" || return 1
+  shape "$m"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"FAIL: the index step's mirror probe is not conditioned on DRY_RUN"* ]] || { echo "$output"; return 1; }
 }
 
 @test "shape mutation: restoring the source-index copy (a step fetching origin gh-pages) reddens — the index is derived from the mirror, never copied" {

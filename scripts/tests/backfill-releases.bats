@@ -28,8 +28,11 @@
 # refuse-tier needle there refuses the release in either notes mode; --pages builds the index
 # from the MIRROR's stable releases with release-asset URLs, one entry per chart
 # version under the oldest release carrying it, `created` = the original publish
-# date, keeps every other file on gh-pages, and pushes nothing when the index is
-# unchanged; a missing helm refuses --pages before any gh call. The rebuild
+# date, keeps the index.yaml and *.tgz files on gh-pages (a stray is dropped and
+# pruned by the push), pushes nothing when the index is unchanged, and in a dry
+# run hands `index` the release list this script already read instead of having
+# it paginated again (under --apply `index` reads it fresh, after the writes); a
+# missing helm refuses --pages before any gh call. The rebuild
 # itself is publish-mirror.sh `index`, shared with the workflow and pinned —
 # with its own mutations — in publish-mirror-index.bats; here the --pages tests
 # pin what THIS script does with its verdict (the push, the table, the exit).
@@ -818,6 +821,28 @@ mutant() {
   [[ "$output" == *"--pages would: index 7 chart(s) from 6 stable release(s) at https://github.com/acme/mirror/releases/download/<tag>/; index.yaml unchanged against the mirror's gh-pages (present); not pushed"* ]] || { echo "$output"; return 1; }
 }
 
+@test "--pages dry-run hands the index rebuild the release list this script already read: the mirror's list is paginated ONCE per run; under --apply the rebuild reads it fresh after the writes (twice)" {
+  backfill --apply
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  backfill --pages
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"--pages would: index 7 chart(s) from 6 stable release(s)"* ]] || { echo "$output"; return 1; }
+  [ "$(grep -c '^api --paginate repos/acme/mirror/releases$' "$GH_LOG")" -eq 1 ] || { grep 'repos/acme/mirror/releases' "$GH_LOG"; return 1; }
+  backfill --apply --pages
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^api --paginate repos/acme/mirror/releases$' "$GH_LOG")" -eq 2 ] || { grep 'repos/acme/mirror/releases' "$GH_LOG"; return 1; }
+}
+
+@test "mutation: with the list hand-over removed, the dry run paginates the mirror's releases twice — the test above catches it" {
+  local m
+  m="$(mutant pages-mirror-list-reuse ':')" || { echo "$m"; return 1; }
+  backfill --apply
+  [ "$status" -eq 0 ] || return 1
+  BACKFILL_UNDER_TEST="$m" backfill --pages
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^api --paginate repos/acme/mirror/releases$' "$GH_LOG")" -eq 2 ] || { grep 'repos/acme/mirror/releases' "$GH_LOG"; return 1; }
+}
+
 @test "--apply --pages: a publisher that exits 0 without its 'pushed/unchanged <sha>' line is could-not-tell (exit 2) naming the missing contract line" {
   local m
   m="$(mutant pages-publisher ': >"$P/tree.out"')" || { echo "$m"; return 1; }
@@ -882,11 +907,11 @@ PY
   [ "$(verdicts "done")" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-@test "--pages keeps every other file on the mirror's gh-pages and appends to its history; only index.yaml is replaced" {
+@test "--pages keeps the index.yaml and *.tgz files on the mirror's gh-pages, drops a stray file, and appends to the branch's history" {
   local seed="$BATS_TEST_TMPDIR/seed"
   git clone -q "file://$PAGES_BARE" "$seed" 2>/dev/null
   git -C "$seed" checkout -q --orphan gh-pages
-  printf 'not really gzip\n' >"$seed/client-0.9.0.tgz"; printf 'apiVersion: v1\nentries: {}\n' >"$seed/index.yaml"
+  printf 'not really gzip\n' >"$seed/client-0.9.0.tgz"; printf 'apiVersion: v1\nentries: {}\n' >"$seed/index.yaml"; printf 'stray\n' >"$seed/notes.txt"
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid add -A
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid commit -q -m seed
   git -C "$seed" push -q origin gh-pages
@@ -896,11 +921,12 @@ PY
   [ "$(git -C "$PAGES_BARE" ls-tree -r --name-only gh-pages | sort | paste -sd' ' -)" = "client-0.9.0.tgz index.yaml" ] || return 1
   [ "$(pages_file client-0.9.0.tgz)" = "not really gzip" ] || return 1
   [[ "$(pages_file index.yaml)" == *"releases/download/v1.0.5/client-1.0.5.tgz"* ]] || return 1
-  # The stray file went through the guard with the index (it is staged again).
+  # The stray was dropped by `index` (named in this script's log) and the push pruned it.
+  [[ "$output" == *"index: dropping 'notes.txt' from the mirror's gh-pages — neither index.yaml nor a *.tgz;"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"--pages: pushed "* ]] || return 1
 }
 
-@test "--pages: a refuse-tier needle in a file already on gh-pages refuses the index push, naming the guard's finding" {
+@test "--pages: a refuse-tier needle the guard finds in the rebuilt index refuses the index push, naming the guard's finding; a stray file on gh-pages is dropped before the guard, never scanned" {
   local seed="$BATS_TEST_TMPDIR/seed"
   git clone -q "file://$PAGES_BARE" "$seed" 2>/dev/null
   git -C "$seed" checkout -q --orphan gh-pages
@@ -908,10 +934,16 @@ PY
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid add -A
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid commit -q -m seed
   git -C "$seed" push -q origin gh-pages
-  backfill --apply --pages
+  # The workflow's private needles (--extra-forbidden): one matching a chart
+  # name hits index.yaml, the one text file the Pages allowlist lets through.
+  printf 'ingestor\n' >"$BATS_TEST_TMPDIR/needles.txt"
+  BACKFILL_EXTRA_FORBIDDEN="$BATS_TEST_TMPDIR/needles.txt" backfill --apply --pages
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"REFUSED — --pages: the guard refused the index or the Pages branch: [forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s)"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"assets/notes.txt:1"* ]] || return 1
+  [[ "$output" == *"REFUSED — --pages: the guard refused the index or the Pages branch: [forbidden-strings] REFUSED — [strings-refuse] private needle #1 found in "*" staged line(s)"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"assets/index.yaml:"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"index: dropping 'notes.txt' from the mirror's gh-pages — neither index.yaml nor a *.tgz;"* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *"notes.txt:1"* ]] || return 1
+  [[ "$output" != *"planted"* ]] || return 1
   [ "$(pages_commits)" -eq 1 ] || return 1
   [[ "$output" == *"Helm index (gh-pages): refused by the guard"* ]] || return 1
   # The releases themselves went ahead: the refusal is the index's alone.

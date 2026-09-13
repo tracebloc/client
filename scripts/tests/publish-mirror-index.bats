@@ -26,8 +26,13 @@
 # source list has no date for, an unreadable mirror and an unanswering remote
 # are could-not-tell; a mirror with no chart tarball is refused unless
 # --allow-empty; each chart version sits once, under the oldest stable release
-# carrying it, with the original publish date; prereleases are left out; every
-# other file on gh-pages is kept.
+# carrying it, with the original publish date; prereleases are left out; the
+# index.yaml and *.tgz files on gh-pages are kept, anything else there — a
+# stray file, a directory, a symlink — is dropped, named, and the drop alone
+# makes the index `changed` so the push prunes it (review on #1060: a stray
+# would otherwise sit there for good, and a directory or symlink would stop the
+# guard on every later publish); --mirror-releases reuses the caller's read of
+# the release list instead of paginating it again.
 #
 # Mutations: `mutant NAME REPL` copies the script with the `# mutation-anchor:
 # NAME` line replaced, PROVES the copy differs and parses, and the test then
@@ -49,9 +54,9 @@ sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut
 # chart_tgz DIR NAME VERSION — a packaged chart, built by `helm package` the way
 # the release workflow builds the real ones. Built once per file.
 chart_tgz() {
-  local dir="$1" name="$2" ver="$3" src="$BATS_FILE_TMPDIR/chart-src-$name-$ver"
+  local dir="$1" name="$2" ver="$3" desc="${4:-fixture chart}" src="$BATS_FILE_TMPDIR/chart-src-$name-$ver"
   mkdir -p "$src" "$dir"
-  printf 'apiVersion: v2\nname: %s\nversion: %s\ndescription: fixture chart\n' "$name" "$ver" >"$src/Chart.yaml"
+  printf 'apiVersion: v2\nname: %s\nversion: %s\ndescription: %s\n' "$name" "$ver" "$desc" >"$src/Chart.yaml"
   helm package "$src" --destination "$dir" >/dev/null
   [ -f "$dir/$name-$ver.tgz" ] || { echo "helm package did not produce $dir/$name-$ver.tgz" >&2; return 1; }
 }
@@ -164,6 +169,11 @@ seed_pages() {
   git -C "$seed" -c user.name=t -c user.email=t@example.invalid commit -q -m seed
   git -C "$seed" push -q origin gh-pages
 }
+# pages_clone — a working clone of the mirror's gh-pages; prints its path. The
+# test puts strays in it the way a hand push would, then pages_push commits and
+# pushes them.
+pages_clone() { local c="$BATS_TEST_TMPDIR/clone-$RANDOM"; git clone -q -b gh-pages "file://$BARE" "$c" 2>/dev/null || return 1; printf '%s\n' "$c"; }
+pages_push()  { git -C "$1" -c user.name=t -c user.email=t@example.invalid add -A && git -C "$1" -c user.name=t -c user.email=t@example.invalid commit -q -m strays && git -C "$1" push -q origin gh-pages; }
 # Helm-index readers (see publish-helm-index.bats): the URL / created of a version.
 url_for()     { awk -v want="$1" '/^  - / { if (v != "") c[v] = u; v = ""; u = "" } /^    version:/ { v = $2 } /^    - https/ { u = $2 } END { if (v != "") c[v] = u; print c[want] }'; }
 created_for() { awk -v want="$1" '/^  - / { if (v != "") c[v] = cr; v = ""; cr = "" } /^    version:/ { v = $2 } /^    created:/ { cr = $2 } END { if (v != "") c[v] = cr; print c[want] }'; }
@@ -306,33 +316,50 @@ mutant() {
   ! git -C "$BARE" rev-parse --verify -q gh-pages >/dev/null || return 1
 }
 
-@test "guard: a refuse-tier needle in a file already on the mirror's gh-pages refuses the index push, naming the file" {
+@test "guard: a refuse-tier needle a chart carries into the rebuilt index (its description) refuses the index push, naming the file, never echoing the text" {
   seed_mirror
-  seed_pages notes.txt $'bucket arn:aws:s3:::planted\n'
+  # The committed refuse tier, not a private needle: helm copies Chart.yaml's
+  # description into index.yaml, so the branch text the guard reads carries it.
+  chart_tgz "$BATS_TEST_TMPDIR/planted" client 1.0.3 'bucket arn:aws:s3:::planted'
+  add_release v1.0.3 false "$BATS_TEST_TMPDIR/planted/client-1.0.3.tgz"
   idx
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [[ "$output" == *"REFUSED — index: the guard refused the index or the Pages branch: [forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s)"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"assets/notes.txt:1"* ]] || return 1
+  [[ "$output" == *"assets/index.yaml:"* ]] || return 1
   [[ "$output" != *"planted"* ]] || return 1
   [ ! -e "$RESULT" ] || return 1
-  [ "$(pages_commits)" -eq 1 ] || return 1
+  ! git -C "$BARE" rev-parse --verify -q gh-pages >/dev/null || return 1
 }
 
-@test "mutation: with the guard dropped, the planted branch is staged as changed=true, exit 0 — the two tests above catch it" {
+@test "guard: a stray text file on the branch is dropped BEFORE the guard — never scanned, never refused, pruned by the push" {
+  seed_mirror
+  seed_pages notes.txt $'bucket arn:aws:s3:::planted\n' index.yaml $'apiVersion: v1\nentries: {}\n'
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"index: dropping 'notes.txt' from the mirror's gh-pages — neither index.yaml nor a *.tgz;"* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *"planted"* ]] || return 1
+  [ ! -e "$OUT/stage/notes.txt" ] || return 1
+  [ "$(res changed)" = true ] || return 1
+  push_stage
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$BARE" ls-tree --name-only gh-pages | sort | paste -sd' ' -)" = "index.yaml" ] || return 1
+}
+
+@test "mutation: with the guard dropped, the planted index is staged as changed=true, exit 0 — the needle tests catch it" {
   local m
   m="$(mutant index-guard ':')" || { echo "$m"; return 1; }
   seed_mirror
-  seed_pages notes.txt $'bucket arn:aws:s3:::planted\n'
   printf 'ingestor\n' >"$BATS_TEST_TMPDIR/needles.txt"
   PUB_UNDER_TEST="$m" idx --extra-forbidden "$BATS_TEST_TMPDIR/needles.txt"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(res changed)" = true ] || return 1
-  grep -q planted "$OUT/stage/notes.txt" || return 1
+  grep -q ingestor "$OUT/stage/index.yaml" || return 1
 }
 
-@test "--strict is passed to the guard: a report-tier needle on the branch refuses only under --strict, tier named" {
+@test "--strict is passed to the guard: a report-tier needle a chart carries into the index refuses only under --strict, tier named" {
   seed_mirror
-  seed_pages notes.txt $'tested against https://dev-api.tracebloc.io\n'
+  chart_tgz "$BATS_TEST_TMPDIR/report" client 1.0.3 'tested against https://dev-api.tracebloc.io'
+  add_release v1.0.3 false "$BATS_TEST_TMPDIR/report/client-1.0.3.tgz"
   idx
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   idx --strict
@@ -382,15 +409,116 @@ mutant() {
   [ "$(created_for 1.0.0 <"$OUT/stage/index.yaml")" != '"2026-01-01T12:00:00Z"' ] || return 1
 }
 
-@test "every other file on the mirror's gh-pages is kept in the stage; only index.yaml is replaced" {
+@test "the index.yaml and *.tgz files on the mirror's gh-pages are kept in the stage; only index.yaml is replaced; nothing dropped" {
   seed_mirror
   seed_pages client-0.9.0.tgz 'not really gzip' index.yaml $'apiVersion: v1\nentries: {}\n'
   idx
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(res changed)" = true ] || return 1
+  [ "$(res dropped)" = 0 ] || { cat "$RESULT"; return 1; }
   [ "$(cd "$OUT/stage" && find . -type f | sed 's|^\./||' | sort | paste -sd' ' -)" = "client-0.9.0.tgz index.yaml" ] || { ls -R "$OUT/stage"; return 1; }
   [ "$(cat "$OUT/stage/client-0.9.0.tgz")" = "not really gzip" ] || return 1
   grep -q 'releases/download/v1.0.2/client-1.0.2.tgz' "$OUT/stage/index.yaml" || return 1
+  [[ "$output" != *"dropping"* ]] || { echo "$output"; return 1; }
+}
+
+# ── the Pages allowlist over what the branch already carries ──────────────────
+
+@test "Pages allowlist: a stray file, a directory and a symlink on the mirror's gh-pages are dropped from the stage, each named by kind; the drop ALONE is changed=true; the push prunes them and the next derivation is changed=false" {
+  seed_mirror
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  push_stage
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(pages_commits)" -eq 1 ] || return 1
+  # Strays land on the branch the way a hand push would leave them; the
+  # index.yaml already there is the one just derived, so only the drops differ.
+  local c
+  c="$(pages_clone)" || return 1
+  printf 'hello\n' >"$c/notes.txt"
+  printf 'not really gzip' >"$c/client-0.9.0.tgz"
+  mkdir -p "$c/assets"; printf 'x\n' >"$c/assets/x.txt"
+  ln -s index.yaml "$c/link.yaml"
+  pages_push "$c" || return 1
+  [ "$(pages_commits)" -eq 2 ] || return 1
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(res changed)" = true ] || { cat "$RESULT"; return 1; }
+  [ "$(res dropped)" = 3 ] || { cat "$RESULT"; return 1; }
+  [ "$(cd "$OUT/stage" && find . -mindepth 1 | sed 's|^\./||' | sort | paste -sd' ' -)" = "client-0.9.0.tgz index.yaml" ] || { ls -laR "$OUT/stage"; return 1; }
+  [[ "$output" == *"index: dropping 'notes.txt' from the mirror's gh-pages — neither index.yaml nor a *.tgz; the Pages branch carries only index.yaml and chart tarballs as plain files, so the push prunes it"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"index: dropping 'assets' from the mirror's gh-pages — a directory;"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"index: dropping 'link.yaml' from the mirror's gh-pages — a symlink;"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"index.yaml unchanged against the mirror's gh-pages (present), 3 item(s) dropped from the branch;"* ]] || { echo "$output"; return 1; }
+  push_stage
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == pushed\ [0-9a-f]* ]] || { echo "$output"; return 1; }
+  [ "$(pages_commits)" -eq 3 ] || return 1
+  [ "$(git -C "$BARE" ls-tree --name-only gh-pages | sort | paste -sd' ' -)" = "client-0.9.0.tgz index.yaml" ] || return 1
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(res changed)" = false ] || { cat "$RESULT"; return 1; }
+  [ "$(res dropped)" = 0 ] || return 1
+}
+
+@test "mutation: with the allowlist not applied to plain files, the stray file is staged again and the push carries it forward — the test above catches it" {
+  local m
+  m="$(mutant index-pages-allowlist '      else :; fi')" || { echo "$m"; return 1; }
+  seed_mirror
+  seed_pages notes.txt $'hello\n' index.yaml $'apiVersion: v1\nentries: {}\n'
+  PUB_UNDER_TEST="$m" idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$OUT/stage/notes.txt" ] || { ls -la "$OUT/stage"; return 1; }
+  [ "$(res dropped)" = 0 ] || return 1
+  [[ "$output" != *"dropping 'notes.txt'"* ]] || return 1
+  # The real script drops it.
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$OUT/stage/notes.txt" ] || return 1
+}
+
+@test "a directory on the mirror's gh-pages used to stop the guard (--assets takes plain files only) on every publish; dropped first, the derivation succeeds" {
+  seed_mirror
+  idx
+  [ "$status" -eq 0 ] || return 1
+  push_stage
+  [ "$status" -eq 0 ] || return 1
+  local c
+  c="$(pages_clone)" || return 1
+  mkdir -p "$c/charts"; printf 'x\n' >"$c/charts/stray.txt"
+  pages_push "$c" || return 1
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(res dropped)" = 1 ] || return 1
+  # Kept verbatim, the same directory is the guard's could-not-tell — the
+  # failure the allowlist pass exists to prevent (the guard's own rule, exercised
+  # here through the real guard, not restated).
+  rm -rf "$OUT/stage/charts"; mkdir -p "$OUT/stage/charts"; printf 'x\n' >"$OUT/stage/charts/stray.txt"
+  run bash "$REPO_ROOT/scripts/publish-guard.sh" --source "$OUT/scratch-src" --include "$OUT/include.txt" --forbidden "$REPO_ROOT/.publish-forbidden" --out "$BATS_TEST_TMPDIR/guard-out" --assets "$OUT/stage"
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"holds something other than plain files (a directory or a symlink)"* ]] || { echo "$output"; return 1; }
+}
+
+# ── --mirror-releases: the caller's read of the list ──────────────────────────
+
+@test "--mirror-releases: the caller's read of the mirror's release list is used — the list is not paginated again — and yields the same index; a missing or empty file is could-not-tell before any gh call" {
+  seed_mirror
+  idx
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^api --paginate repos/acme/mirror/releases$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
+  local fresh="$BATS_TEST_TMPDIR/fresh-index.yaml"
+  cp "$OUT/index.yaml" "$fresh"
+  # As `gh api --paginate` prints it — here one page.
+  cp "$STATE/mirror-releases.json" "$BATS_TEST_TMPDIR/mirror-list.json"
+  idx --mirror-releases "$BATS_TEST_TMPDIR/mirror-list.json"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  ! grep -q '^api --paginate repos/acme/mirror/releases$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
+  [ "$(grep -c '^release download ' "$GH_LOG")" -eq 4 ] || { cat "$GH_LOG"; return 1; }
+  cmp -s <(grep -v '^generated:' "$fresh") <(grep -v '^generated:' "$OUT/index.yaml") || { diff "$fresh" "$OUT/index.yaml"; return 1; }
+  idx --mirror-releases "$BATS_TEST_TMPDIR/absent.json"
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — index: --mirror-releases '"*"absent.json' is missing or empty"* ]] || { echo "$output"; return 1; }
+  [ ! -s "$GH_LOG" ] || { cat "$GH_LOG"; return 1; }
 }
 
 # ── nothing to index ──────────────────────────────────────────────────────────

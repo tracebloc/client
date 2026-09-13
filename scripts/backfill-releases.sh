@@ -110,7 +110,8 @@
 #                    that carries it, `created` set to that release's original
 #                    publish date so the index is the same bytes on every run;
 #                    push to the mirror's gh-pages when it differs from what is
-#                    there, keeping every other file on that branch. The rebuild
+#                    there, keeping the index.yaml and *.tgz files already on
+#                    that branch and dropping anything else. The rebuild
 #                    is publish-mirror.sh `index` (its header has the contract);
 #                    this script adds the push. Needs helm, and says so before
 #                    any gh call.
@@ -671,8 +672,9 @@ fi
 # each chart tarball, places every chart version once under the OLDEST stable
 # release carrying it, builds the index with helm at the mirror's release-asset
 # URLs, stamps `created` from the SOURCE's release list, compares against the
-# mirror's current gh-pages apart from `generated:`, keeps every other file on
-# that branch, and runs the guard over the staged branch. It pushes nothing;
+# mirror's current gh-pages apart from `generated:`, keeps the index.yaml and
+# *.tgz files already on that branch (anything else is dropped and the drop
+# counts as a change), and runs the guard over the staged branch. It pushes nothing;
 # the push below is this script's, through the same `tree` step the workflow
 # uses. The source's Pages index is never read for this: its URLs name the
 # source's Pages site (it IS read above, as the digest manifest for uploads).
@@ -685,6 +687,11 @@ if [ "$PAGES" -eq 1 ]; then
   # A dry run before the first release has nothing to index yet — that is a
   # note, not a refusal; under --apply an empty index is refused.
   [ "$APPLY" -eq 1 ] || IDX_ARGS+=(--allow-empty)
+  # A dry run wrote nothing since read_mirror_releases paginated the mirror's
+  # list above, so `index` reuses that read instead of paginating it again;
+  # under --apply the releases written above are not in it, so `index` reads
+  # the list fresh (review on #1060).
+  [ "$APPLY" -eq 1 ] || IDX_ARGS+=(--mirror-releases "$TMP/mirror-pages.json")   # mutation-anchor: pages-mirror-list-reuse
   rc=0
   bash "$PUBLISH_MIRROR" "${IDX_ARGS[@]}" >"$P/index.out" 2>&1 || rc=$?   # mutation-anchor: pages-index-call
   cat "$P/index.out"
