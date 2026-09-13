@@ -645,6 +645,31 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
   done <"$REPO/scripts/manifest.sha256"
 }
 
+@test "every scripts/*.sh|.ps1 docs/INSTALL.md tells an operator to run is staged by the real .publish-include" {
+  # backend#3706 / client#1052 (discussion r3990455766): docs/INSTALL.md told
+  # operators to run scripts/list-images.sh, but .publish-include didn't ship
+  # it -- so the one enumeration command the doc gives a blocked-registry or
+  # air-gapped site for mirroring images was missing from the public mirror
+  # itself. A hand-listed "and also check list-images.sh" assertion would only
+  # cover this one script and drift again the next time the doc starts telling
+  # operators to run something new (CLAUDE.md rule 1: derive, never restate).
+  # So the expected set is read out of the doc itself, not typed here.
+  run bash "$GUARD" --source "$REPO" --out "$OUT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local referenced
+  referenced=$(grep -oE 'scripts/[A-Za-z0-9_./-]+\.(sh|ps1)' "$REPO/docs/INSTALL.md" | sort -u)
+  # A derivation that finds nothing is broken, not evidence there is nothing to
+  # check (CLAUDE.md rule 3: fail closed, "cannot tell" is a finding) -- the doc
+  # names scripts/lib/install-client-helm.sh in prose today, so an empty result
+  # means the pattern stopped matching, not that the doc went quiet.
+  [ -n "$referenced" ] || { echo "derived ZERO scripts/*.sh|.ps1 references from docs/INSTALL.md -- the derivation is broken, not proof there is nothing to check"; return 1; }
+  local s
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    [ -f "$OUT/tree/$s" ] || { echo "docs/INSTALL.md tells operators to run $s, but the real .publish-include does not ship it to the public mirror"; return 1; }
+  done <<<"$referenced"
+}
+
 @test "the committed .publish-include-pages stages exactly the chart index and packages" {
   add_file index.yaml 'apiVersion: v1'
   add_file client-1.0.0.tgz 'not really gzip'
