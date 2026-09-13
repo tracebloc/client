@@ -1332,6 +1332,29 @@ can be kept above the configured helm timeout.
 {{- end -}}
 
 {{/*
+  tracebloc.telemetryStatusName — the ConfigMap that records what the Collector
+  decided, and why (templates/telemetry-collector-status.yaml). ONE resolver for
+  its two readers: the status template that writes it and the auto-upgrade
+  CronJob that reads it back out of the stored release manifest to decide whether
+  a same-version re-render is due (backend#3550). Deliberately NOT under the
+  `telemetry-collector` prefix — see the status template for why five shell gates
+  depend on that.
+*/}}
+{{- define "tracebloc.telemetryStatusName" -}}
+{{- printf "%s-telemetry-status" (include "tracebloc.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+  tracebloc.telemetryStateAnnotation — the annotation key the status ConfigMap
+  carries its resolved state under. Shared by the writer (status template) and the
+  reader (auto-upgrade script, which greps it out of `helm get manifest` and out of
+  a server-side dry-run render) so the two cannot disagree about the spelling.
+*/}}
+{{- define "tracebloc.telemetryStateAnnotation" -}}
+tracebloc.io/telemetry-collector-state
+{{- end -}}
+
+{{/*
   tracebloc.telemetryTokenLegacyName — the pre-backend#2625 fixed Secret name.
 
   It has TWO temporary jobs, and it is the single source for both so they cannot

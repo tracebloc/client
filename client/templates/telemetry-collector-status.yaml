@@ -30,10 +30,31 @@
   label selectors.
 */}}
 {{- $state := include "tracebloc.telemetryCollectorState" . -}}
+{{- /*
+  WHAT ACTUALLY RE-RENDERS A SKIP (backend#3550). The record used to say the
+  no-token skip "resolves itself once jobs-manager writes the Secret". It does
+  not: the `lookup` that decides the state runs only inside a `helm upgrade`, and
+  the Secret appearing triggers none. Measured on a fresh edge — the Secret was
+  present within minutes, three hourly ticks passed, no Collector; it rendered a
+  day later, when a NEWER chart happened to be published. So the trigger is a
+  helm upgrade, and the record must name the one that will actually happen. The
+  auto-upgrade tick now performs a same-version re-render when the stored state is
+  skipped-no-token and a server-side dry-run says the Secret has arrived
+  (auto-upgrade-cronjob.yaml), but only when the deployed chart version is one
+  its repo can serve — an edge running a version AHEAD of the published index
+  (a dev chart) has nothing the tick can re-render, and waits for the next
+  published chart. Both the schedule and the repo are read from the values that
+  drive that CronJob, never restated here.
+*/ -}}
+{{- $au := default (dict) .Values.autoUpgrade -}}
+{{- $trigger := "autoUpgrade is off in this release, so nothing re-renders it for you: run `helm upgrade` on this release once the Secret exists" -}}
+{{- if $au.enabled -}}
+{{- $trigger = printf "the next auto-upgrade tick (CronJob schedule %q) re-renders this release in place once the Secret exists, provided the deployed chart version %s is one the repo %s serves — a version ahead of that repo's index cannot be re-rendered and waits for the next published chart" ($au.schedule | default "unset" | toString) .Chart.Version ($au.repoUrl | default "unset" | toString) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ printf "%s-telemetry-status" (include "tracebloc.fullname" .) }}
+  name: {{ include "tracebloc.telemetryStatusName" . }}
   namespace: {{ .Values.nodeAgents.namespace.name }}
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
@@ -41,8 +62,8 @@ metadata:
   annotations:
     # Sweepable across a cluster without parsing the data block:
     #   kubectl get cm -A -l app.kubernetes.io/component=telemetry-collector-status \
-    #     -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,STATE:.metadata.annotations.tracebloc\.io/telemetry-collector-state
-    tracebloc.io/telemetry-collector-state: {{ $state | quote }}
+    #     -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,STATE:.metadata.annotations.{{ include "tracebloc.telemetryStateAnnotation" . | replace "." "\\." }}
+    {{ include "tracebloc.telemetryStateAnnotation" . }}: {{ $state | quote }}
 data:
   state: {{ $state | quote }}
   # WHY, in the operator's terms — the state alone does not say what to do next.
@@ -51,7 +72,7 @@ data:
   {{- else if eq $state "disabled-by-operator" -}}
     "telemetryCollector.enabled is explicitly false in this release's values. Nothing is collected, by choice."
   {{- else if eq $state "skipped-incomplete-values" -}}
-    {{ printf "No Collector: nobody set telemetryCollector.enabled, and this release carries no Class A container lists — helm DELETES a key set to null and does not coalesce chart defaults back under --reuse-values, so a release predating the Collector arrives without them. Upgrading with --reset-then-reuse-values (which auto-upgrade uses) restores them and this resolves itself." | quote }}
+    {{ printf "No Collector: nobody set telemetryCollector.enabled, and this release carries no Class A container lists — helm DELETES a key set to null and does not coalesce chart defaults back under --reuse-values, so a release predating the Collector arrives without them. Upgrading with --reset-then-reuse-values (which auto-upgrade uses) restores them — on the next chart upgrade, which is the next auto-upgrade tick that finds a newer published chart or a `helm upgrade` you run; nothing re-renders this release by itself." | quote }}
   {{- else -}}
-    {{ printf "No Collector: nobody set telemetryCollector.enabled, and its token Secret is not present in namespace %q (looked for %q, and the legacy %q). jobs-manager writes that Secret when it next re-authenticates (backend#2274); this resolves itself once it does. Set telemetryCollector.enabled: false to opt out permanently." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .) | quote }}
+    {{ printf "No Collector: nobody set telemetryCollector.enabled, and its token Secret is not present in namespace %q (looked for %q, and the legacy %q). jobs-manager writes that Secret when it next re-authenticates (backend#2274). The Secret appearing triggers nothing by itself — the Collector renders on the next helm upgrade of this release: %s. Set telemetryCollector.enabled: false to opt out permanently." .Values.nodeAgents.namespace.name (include "tracebloc.telemetryTokenSecretName" .) (include "tracebloc.telemetryTokenLegacyName" .) $trigger | quote }}
   {{- end }}

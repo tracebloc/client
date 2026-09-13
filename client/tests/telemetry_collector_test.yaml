@@ -119,6 +119,124 @@ tests:
   #                     --set telemetryCollector.classAContainers=null
   # -> at '/telemetryCollector': missing property 'classAContainers'.)
 
+  # ── the no-token skip names its REAL trigger (backend#3550) ─────────────────
+  # The record used to end "this resolves itself once it does". Nothing performed
+  # that: the `lookup` deciding the state runs only inside a `helm upgrade`, and
+  # the Secret appearing triggers none. Measured on a fresh edge — Secret present
+  # within minutes, three hourly ticks, no Collector, until a NEWER chart happened
+  # to ship a day later. The auto-upgrade tick now re-renders in place
+  # (auto-upgrade-cronjob.yaml), and the record says so, in the words of the
+  # values that actually schedule it — the schedule and repo below come from
+  # autoUpgrade.*, not from a copy in the template.
+  #
+  # `kubernetesProvider` gives `lookup` a cluster with a kube-system Namespace and
+  # NO token Secret, so the decider resolves skipped-no-token offline — the one
+  # state the plain `helm template` path (lookup empty -> "enabled") cannot reach.
+  - it: the no-token skip names the trigger that actually re-renders it, not a self-resolution
+    template: templates/telemetry-collector-status.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/Namespace":
+          gvr:
+            version: v1
+            resource: namespaces
+          namespaced: false
+      objects:
+        - kind: Namespace
+          apiVersion: v1
+          metadata:
+            name: kube-system
+    asserts:
+      - equal:
+          path: data.state
+          value: skipped-no-token
+      - notMatchRegex:
+          path: data.reason
+          pattern: "resolves itself"
+      - matchRegex:
+          path: data.reason
+          pattern: "triggers nothing by itself"
+      - matchRegex:
+          path: data.reason
+          pattern: "next auto-upgrade tick"
+      # Derived from autoUpgrade.schedule, the CronJob's own schedule.
+      - matchRegex:
+          path: data.reason
+          pattern: 'CronJob schedule "23 \* \* \* \*"'
+      # The one state the tick cannot fix is named, not hidden.
+      - matchRegex:
+          path: data.reason
+          pattern: "ahead of that repo's index cannot be re-rendered"
+
+  - it: the no-token skip follows an operator's schedule override, never a baked-in one
+    set:
+      autoUpgrade.schedule: "7 */2 * * *"
+    template: templates/telemetry-collector-status.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/Namespace":
+          gvr:
+            version: v1
+            resource: namespaces
+          namespaced: false
+      objects:
+        - kind: Namespace
+          apiVersion: v1
+          metadata:
+            name: kube-system
+    asserts:
+      - matchRegex:
+          path: data.reason
+          pattern: 'CronJob schedule "7 \*/2 \* \* \*"'
+      - notMatchRegex:
+          path: data.reason
+          pattern: '"23 \* \* \* \*"'
+
+  - it: with autoUpgrade off, the no-token skip says nobody will re-render it for you
+    set:
+      autoUpgrade.enabled: false
+    template: templates/telemetry-collector-status.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/Namespace":
+          gvr:
+            version: v1
+            resource: namespaces
+          namespaced: false
+      objects:
+        - kind: Namespace
+          apiVersion: v1
+          metadata:
+            name: kube-system
+    asserts:
+      - equal:
+          path: data.state
+          value: skipped-no-token
+      - notMatchRegex:
+          path: data.reason
+          pattern: "resolves itself"
+      - notMatchRegex:
+          path: data.reason
+          pattern: "auto-upgrade tick"
+      - matchRegex:
+          path: data.reason
+          pattern: "autoUpgrade is off in this release"
+
+  - it: the incomplete-values skip no longer promises to resolve itself either
+    set:
+      telemetryCollector: null
+    template: templates/telemetry-collector-status.yaml
+    asserts:
+      - equal:
+          path: data.state
+          value: skipped-incomplete-values
+      - notMatchRegex:
+          path: data.reason
+          pattern: "resolves itself"
+      - matchRegex:
+          path: data.reason
+          pattern: "nothing re-renders this release by itself"
+
   - it: the status ConfigMap is ALWAYS rendered, so absence means only "chart too old"
     template: templates/telemetry-collector-status.yaml
     asserts:

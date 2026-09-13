@@ -2,8 +2,16 @@
 # envelope_contract.json is vendored from (backend#2220).
 #
 # Pin, don't float: an unrelated client-runtime commit must not redden every
-# open client PR. Same rule as cli/scripts/.client-ref. The weekly run is what
-# catches a pin gone stale enough to matter.
+# open client PR. Same rule as cli/scripts/.client-ref.
+#
+# WHAT CATCHES A STALE PIN is the `pin-staleness` job in
+# .github/workflows/envelope-contract-drift.yml -- it compares this ref's
+# contract against client-runtime's DEFAULT BRANCH, warns on a PR and fails on
+# the weekly/dispatch run. This comment used to say "the weekly run is what
+# catches a pin gone stale enough to matter", and no job did that: the drift job
+# checks out THIS ref, so it compared the vendored copy against itself and
+# agreed. A pin sat 2.5 weeks behind contract v3 under a green gate
+# (backend#2460).
 #
 # ONE REF, TWO CONTRACTS since backend#2378. This pin governs both vendored
 # copies -- scripts/tests/fixtures/envelope_contract.json and
