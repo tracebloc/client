@@ -101,6 +101,7 @@ tests:
       images:
         requestsProxy:
           digest: "sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8"
+          digestRegistry: "ghcr.io"
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
@@ -208,6 +209,7 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
@@ -221,8 +223,10 @@ tests:
       images:
         jobsManager:
           digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
         requestsProxy:
           digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image

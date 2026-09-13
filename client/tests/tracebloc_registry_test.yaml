@@ -139,6 +139,10 @@ tests:
           pattern: "^docker\\.io/tracebloc/resource-monitor:"
 
   - it: a digest pin keeps the knob's registry (repo@digest, not repo:tag) -- the docker.io rollback
+    # No `digestRegistry` beside this pin, deliberately: that is the LEGACY
+    # rule (tracebloc.pinFor deems it resolved on docker.io), and docker.io is
+    # exactly where this rollback pulls from, so the pin is honoured. The same
+    # pin at the ghcr.io default is IGNORED -- digest_pin_registry_test.yaml.
     template: templates/jobs-manager-deployment.yaml
     set:
       images:

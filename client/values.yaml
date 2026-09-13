@@ -955,9 +955,13 @@ images:
   # dual-published to docker.io at the same digests for now, so "docker.io"
   # remains a valid value and is the per-edge rollback
   # (`--set images.traceblocRegistry=docker.io`; user-supplied, so it survives
-  # the fleet auto-upgrade until cleared). Digest pins (images.*.digest, and
-  # the training-image digest pins below) are registry-agnostic: the same digest
-  # exists on both. No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
+  # the fleet auto-upgrade until cleared). Digest pins are NOT registry-
+  # agnostic: a digest names bytes on the registry it was resolved on, and
+  # nothing guarantees another registry ever held them -- a control-plane pin
+  # is therefore rendered only when its `digestRegistry` equals the registry
+  # this knob resolves to (see images.jobsManager below). The training-image
+  # digest pins below are published to both registries by the same pipeline.
+  # No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
   # for layer redirects) is already required for the ingestor image and probed
   # by the installer preflight. Image-refresh follows it: the CronJob resolves
   # digests on this registry (it can do so anonymously on ghcr.io and docker.io;
@@ -967,8 +971,59 @@ images:
   # restates this default; tests/tracebloc_registry_test.yaml pins both to one
   # value so they cannot drift apart unseen.
   traceblocRegistry: "ghcr.io"
+  # -- CONTROL-PLANE DIGEST PINS (jobsManager, podsMonitor, resourceMonitor,
+  #    requestsProxy): `digest` + `digestRegistry`, ONE contract.
+  #
+  # A digest names bytes on the registry it was resolved on. Nothing guarantees
+  # any other registry ever held them, and a pod told to pull a digest its
+  # registry does not have never starts. So a pin carries the registry it was
+  # resolved on, and is HONOURED only there:
+  #
+  #   digest:          "sha256:<64 hex>"   the pin
+  #   digestRegistry:  "<bare host>"       the registry the digest was resolved
+  #                                        on, spelled exactly as
+  #                                        images.traceblocRegistry /
+  #                                        global.imageRegistry would be
+  #
+  #   honoured  <=>  digest set AND digestRegistry == the registry this release
+  #                  pulls from (tracebloc.tbRegistry: the mirror, else
+  #                  traceblocRegistry above, else the chart default)
+  #             ->  repository@digest, imagePullPolicy=IfNotPresent, and the
+  #                 image-refresh CronJob leaves the image alone (it still
+  #                 reports a stale pin, and now also one the registry cannot
+  #                 serve: `tracebloc.io/stale-pin-<image>=unpullable:<digest>`).
+  #   ignored   otherwise -> the workload renders the channel tag, image-refresh
+  #                 re-pins it from the LIVE registry on its first tick (an
+  #                 ignored pin is not a fresh install), and `helm install/upgrade`
+  #                 prints a NOTES warning naming the image, the pin's registry
+  #                 and the effective one. The render never fails on it: the tag
+  #                 is the safe state.
+  #
+  # LEGACY RULE: `digest` set with `digestRegistry` empty is a pin written
+  # before the key existed. Every such pin was resolved on docker.io -- the only
+  # registry these images were pulled from until then -- so it is read as
+  # `digestRegistry: docker.io`: honoured with `traceblocRegistry: docker.io`
+  # (the rollback), ignored at the ghcr.io default. That is exactly the pin
+  # that outlived its registry when the default moved: rendered onto ghcr.io,
+  # which never had the digest, it could not pull, and two days of
+  # auto-upgrades timed out and rolled back against it. Now it floats instead.
+  #
+  # RECOMMENDED STATE: unpinned. Leave `digest` empty and let image-refresh pin
+  # the live digest from the registry the pods actually pull from (it writes
+  # the record to the workload, never to values). Pin here only for a
+  # deliberate reproducibility hold, and then ALWAYS resolve on and declare the
+  # registry:
+  #   crane digest ghcr.io/tracebloc/jobs-manager:prod     # or: docker buildx
+  #   imagetools inspect ghcr.io/tracebloc/jobs-manager:prod --format '{{.Manifest.Digest}}'
+  #   --set images.jobsManager.digest=sha256:<x> --set images.jobsManager.digestRegistry=ghcr.io
+  #
+  # requests-proxy runs the jobs-manager image and follows the HONOURED
+  # jobs-manager pin when its own `digest` is empty or ignored (see
+  # images.requestsProxy). Every read is nil-guarded for --reuse-values
+  # replays that predate these keys.
   jobsManager:
     digest: ""
+    digestRegistry: ""
   # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
   #    RFC-0067 D8 by backend#3156). The READER shipped first, in client-runtime
   #    (jobs_manager.load_training_image_digests / training_image_reference), and
@@ -1262,12 +1317,23 @@ images:
     # data-ingestors#150/#167/#168/#170/#172/#176/#179):
     #   sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
     digest: ""
+  # Same `digest` + `digestRegistry` contract as images.jobsManager above.
   podsMonitor:
     digest: ""
+    digestRegistry: ""
+  # Same contract. `resourceMonitor: false` (no DaemonSet) also counts as
+  # "nothing to refresh" for the CronJob -- see tracebloc.resourceMonitorRefreshPinned.
   resourceMonitor:
     digest: ""
+    digestRegistry: ""
+  # Same contract. Leave `digest` EMPTY (default) and the proxy follows the
+  # honoured images.jobsManager pin, so the two pods cannot run different
+  # builds of the same image; an own pin here that is IGNORED (registry
+  # mismatch) is not an override and follows jobs-manager the same way. Set
+  # both keys only to pin requests-proxy apart from jobs-manager deliberately.
   requestsProxy:
     digest: ""
+    digestRegistry: ""
   mysqlClient:
     # Repository and tag are stated rather than left to template defaults so the
     # digest below is WATCHABLE: check-digest-drift.sh pairs a pin with the
