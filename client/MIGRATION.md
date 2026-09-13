@@ -2,6 +2,75 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.119 — a control-plane digest pin is honoured only on the registry it was resolved against
+
+**What changed.** The four control-plane pins (`images.jobsManager.digest`,
+`images.podsMonitor.digest`, `images.resourceMonitor.digest`,
+`images.requestsProxy.digest`) each gain a sibling key, **`digestRegistry`**: the
+bare host the digest was resolved on, spelled exactly as `images.traceblocRegistry`
+or `global.imageRegistry` would be. A pin is now rendered **only when
+`digestRegistry` equals the registry this release actually pulls from**
+(`global.imageRegistry`, else `images.traceblocRegistry`, else the chart default
+`ghcr.io`). Otherwise the pin is **ignored**: the workload renders the channel
+tag, the `image-refresh` CronJob treats the image as unpinned and re-pins it from
+the live registry on its first tick (an ignored pin is not a fresh install), and `helm install`/`helm upgrade` prints a NOTES warning naming
+the image, the registry the pin was resolved on and the one the release pulls
+from. The render never fails on a pin — the tag is the safe state. requests-proxy
+follows the *honoured* jobs-manager pin, so an ignored requests-proxy pin is not
+an override either.
+
+**Why.** A digest names bytes on the registry it was resolved on; nothing
+guarantees another registry ever held them, and a pod told to pull a digest its
+registry does not have never starts. That is how a digest pin outlived its
+registry: an operator pin resolved on Docker Hub was replayed after the chart
+default moved to `ghcr.io` (1.9.113), the chart rendered
+`ghcr.io/tracebloc/jobs-manager@sha256:<x>` for a digest `ghcr.io` never had, and
+every auto-upgrade timed out and rolled back for two days — one killed attempt
+left the edge with no jobs-manager. `image-refresh` reported the pin stale and,
+by design, did not edit it. The 1.9.114 note's claim that pins are
+"registry-agnostic" was wrong for operator pins and has been retracted in
+`values.yaml`.
+
+**The legacy rule — what happens to a pin you already have.** `digest` set with
+`digestRegistry` empty is a pin written before the key existed. Every such pin
+was resolved on `docker.io` (the only registry these images were pulled from
+until then), so it is read as `digestRegistry: docker.io`:
+
+| Your pin | `images.traceblocRegistry` | Result on upgrade |
+|---|---|---|
+| `digest` only (legacy) | `docker.io` (the rollback) | **honoured** — unchanged behaviour |
+| `digest` only (legacy) | default (`ghcr.io`) or a mirror | **ignored** — the tag renders, `image-refresh` re-pins, NOTES warns. This is the incident case; if your edge was wedged on it, this upgrade is what unwedges it. |
+| `digest` + `digestRegistry` matching the effective registry | any | honoured |
+| `digest` + `digestRegistry` NOT matching | any | ignored, NOTES warns |
+
+**What you need to do.** Nothing, unless you carry a control-plane pin:
+
+- **Recommended: drop it.** Set `images.<image>.digest: ""` and let
+  `image-refresh` pin the live digest from the registry the pods pull from. That
+  is the reproducible-*and*-current state, and it survives the next registry
+  move without any action.
+- **To keep a pin, re-resolve it on the registry you pull from and declare it:**
+
+  ```bash
+  crane digest ghcr.io/tracebloc/jobs-manager:prod        # or the tag your CLIENT_ENV maps to
+  helm upgrade <release> tracebloc/client --reuse-values \
+    --set images.jobsManager.digest=sha256:<that digest> \
+    --set images.jobsManager.digestRegistry=ghcr.io
+  ```
+
+  Do not copy a Docker Hub digest across and declare `ghcr.io`: the render will
+  honour it (the declaration is what it checks), and the pod will not pull. The
+  refresh tick now catches exactly that: it HEADs every honoured pin **by digest**
+  on its registry, and a 404 logs `ERROR: PIN IS NOT PULLABLE on <registry>` and
+  writes `tracebloc.io/stale-pin-<image>=unpullable:<digest>` on the jobs-manager
+  Deployment (`kubectl describe deployment <release>-jobs-manager`), leaving the
+  workload untouched.
+
+**How you see it.** The NOTES warning block (`WARNING: digest pin(s) IGNORED`)
+prints on every `helm install`/`helm upgrade`, including the fleet auto-upgrade
+tick, whose log carries helm's output. One entry per ignored pin, with both
+registries and the two remedies above.
+
 ## Upgrading to 1.9.115 — `env.TRACEBLOC_DDP` defaults ON (RFC-0067 D7)
 
 `env.TRACEBLOC_DDP` now renders as **`"1"`** at the chart default. This is the

@@ -1,0 +1,756 @@
+suite: control-plane digest pins are honoured only on the registry they were resolved against (tracebloc.pinFor)
+# A digest names bytes on the registry it was resolved on; nothing guarantees any
+# other registry ever held them, and a pod told to pull a digest its registry does
+# not have never starts. This is how a digest pin outlived its registry: an
+# operator pin (`images.jobsManager.digest`) resolved on Docker Hub, the chart
+# default moved to ghcr.io, the image site rendered
+# `ghcr.io/tracebloc/jobs-manager@sha256:<x>` for a digest ghcr.io never had, and
+# every auto-upgrade timed out and rolled back for two days -- one killed attempt
+# left the edge with no jobs-manager. image-refresh reported the pin stale and,
+# by design, touched nothing.
+#
+# THE RULE, one function (tracebloc.pinFor) read by every consumer:
+#   honoured <=> `digest` set AND `digestRegistry` == the registry this release
+#                pulls from (tracebloc.tbRegistry: mirror, else
+#                images.traceblocRegistry, else the chart default ghcr.io)
+#   ignored  otherwise -> the workload renders the channel tag, image-refresh
+#                treats it as unpinned and re-pins from the live registry, and
+#                NOTES.txt warns naming the image and both registries. The
+#                render never fails.
+#   LEGACY   `digest` set, `digestRegistry` empty -> deemed resolved on docker.io
+#                (the only registry these images were pulled from before the key
+#                existed): honoured under the docker.io rollback, IGNORED at the
+#                ghcr.io default. That is the incident case, named as such below.
+#
+# WHAT IS PINNED HERE. Each consumer of the decision, so "pinned" and "rendered
+# digest" cannot disagree: the three workload templates (image + pull policy),
+# the requests-proxy follow rule, the image-refresh env flags and PIN values, the
+# CronJob's retire test, and the NOTES warning. The env tests are PAIRED with the
+# render tests on identical `set:` blocks -- helm-unittest asserts one template
+# per test -- and scripts/tests/digest-pin-registry-agreement.bats renders both
+# sides and compares them mechanically.
+#
+# helm-unittest 0.5.2 applies asserts to EVERY template a test names, so each
+# test below names exactly one.
+templates:
+  - templates/jobs-manager-deployment.yaml
+  - templates/requests-proxy-deployment.yaml
+  - templates/resource-monitor-daemonset.yaml
+  - templates/image-refresh-cronjob.yaml
+  - templates/NOTES.txt
+release:
+  name: t
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+tests:
+  # =====================================================================
+  # jobs-manager (api + init container, both the jobs-manager image)
+  # =====================================================================
+  - it: a pin declared on the effective registry renders repo@digest with IfNotPresent (jobs-manager, ghcr.io default)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: INCIDENT CASE -- a legacy pin (no digestRegistry) at the ghcr.io default is IGNORED, the tag renders, never a digest ghcr.io never held
+    # The exact values that wedged an edge: `images.jobsManager.digest` written
+    # when docker.io was the default, replayed after the default moved. Before
+    # this rule the api AND the init container rendered
+    # ghcr.io/tracebloc/jobs-manager@<docker.io digest>, which cannot pull.
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "@sha256:"
+      # Unpinned on an edge where the reconcile runs -> IfNotPresent, exactly
+      # like an edge that never pinned (image-refresh re-pins from ghcr.io).
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: a legacy pin is honoured on docker.io -- the registry it was resolved on (the rollback)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: docker.io
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "docker.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: a pin DECLARED on docker.io is ignored at the ghcr.io default (the declared registry is what counts, not the digest)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "docker.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+
+  - it: a pin declared on ghcr.io is ignored under the docker.io rollback (the rule is symmetric)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: docker.io
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "docker.io/tracebloc/jobs-manager:prod"
+
+  - it: an ignored pin is not a pin for the pull policy either -- with refresh off the workload is Always, like any unpinned one
+    # Contrast jobs_manager_test "an explicit digest pin is IfNotPresent even
+    # with refresh disabled": that pin declares ghcr.io. This one is legacy at
+    # the ghcr.io default, so it floats, and a floating image on an edge with no
+    # reconcile keeps the restart-to-update path (tracebloc.controlPlanePullPolicy).
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      imageRefresh:
+        enabled: false
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: pods-monitor -- a legacy pin at the ghcr.io default is ignored (same rule, second class-1 image)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: "ghcr.io/tracebloc/pods-monitor:prod"
+
+  - it: pods-monitor -- a pin declared on ghcr.io is honoured
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: "ghcr.io/tracebloc/pods-monitor@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      - equal:
+          path: spec.template.spec.containers[1].imagePullPolicy
+          value: IfNotPresent
+
+  # =====================================================================
+  # requests-proxy: runs the jobs-manager image, follows the HONOURED pin
+  # =====================================================================
+  - it: requests-proxy follows an honoured jobs-manager pin
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: INCIDENT CASE -- requests-proxy does NOT follow an ignored (legacy) jobs-manager pin, both float on the tag
+    # The proxy inherits the DECISION, not the raw digest: the unpullable
+    # reference would otherwise have reached a second Deployment.
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+
+  - it: an own requests-proxy pin declared on the effective registry is honoured
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+  - it: an own requests-proxy pin that is IGNORED falls through to the honoured jobs-manager pin (an ignored override is no override)
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  - it: an own requests-proxy pin that is IGNORED with no jobs-manager pin floats on the tag
+    template: templates/requests-proxy-deployment.yaml
+    set:
+      images:
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+
+  # =====================================================================
+  # resource-monitor DaemonSet
+  # =====================================================================
+  - it: resource-monitor -- a legacy pin at the ghcr.io default is ignored
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      images:
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/resource-monitor:prod"
+
+  - it: resource-monitor -- a pin declared on ghcr.io is honoured
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      images:
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/resource-monitor@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: resource-monitor -- a pin declared on the mirror host is honoured under that mirror
+    template: templates/resource-monitor-daemonset.yaml
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+      images:
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          digestRegistry: "mirror.example.com"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "mirror.example.com/tracebloc/resource-monitor@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+  # =====================================================================
+  # mirror and empty-knob cases (jobs-manager)
+  # =====================================================================
+  - it: mirror -- a pin declared on the mirror host is honoured (repo@digest, IfNotPresent)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "mirror.example.com"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "mirror.example.com/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: mirror -- a docker.io pin is ignored, the mirror may never have held it (tag, and Always because no reconcile runs there)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "docker.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "mirror.example.com/tracebloc/jobs-manager:prod"
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: mirror -- a legacy pin is ignored too (deemed docker.io, and the mirror is not docker.io)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "mirror.example.com/tracebloc/jobs-manager:prod"
+
+  - it: empty knob -- a legacy pin is ignored at the chart default (an empty traceblocRegistry still means ghcr.io)
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ""
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager:prod"
+
+  - it: empty knob -- a pin declared on ghcr.io is honoured at the chart default
+    template: templates/jobs-manager-deployment.yaml
+    set:
+      images:
+        traceblocRegistry: ""
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/tracebloc/jobs-manager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  # =====================================================================
+  # image-refresh env agrees with the render (paired with the cases above)
+  # documentIndex 1 is the CronJob (0 is the script ConfigMap).
+  # =====================================================================
+  - it: INCIDENT CASE -- the refresh env flags a legacy pin at ghcr.io as IGNORED, so the script re-pins on the FIRST tick instead of treating the edge as a fresh install
+    # A pinned image was never refreshed, so it carries no refresh annotation --
+    # the fresh-install shape the script deliberately does not roll (#1008). The
+    # flag is what tells it this one is different. Same decision as the render.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PIN_IGNORED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PIN_IGNORED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PIN_IGNORED
+            value: "1"
+
+  - it: the refresh env does NOT flag an honoured pin, nor no pin at all, as ignored
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PIN_IGNORED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PIN_IGNORED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PIN_IGNORED
+            value: "0"
+
+  - it: INCIDENT CASE -- the refresh env reads a legacy pin at ghcr.io as UNPINNED, so the script re-pins from the live registry
+    # PAIRED with "INCIDENT CASE -- a legacy pin ... the tag renders". Computing
+    # this flag from `.digest` alone is what made the render float the image
+    # while the script skipped it as pinned -- two views, no reconcile, no signal.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PINNED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PIN
+            value: ""
+
+  - it: the refresh env reads a pin declared on ghcr.io as PINNED, carrying the honoured digest
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PINNED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PIN
+            value: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+  - it: the refresh env reads a legacy pin under the docker.io rollback as PINNED
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        traceblocRegistry: docker.io
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: JOBS_MANAGER_PINNED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: IMAGE_REGISTRY
+            value: "docker.io"
+
+  - it: pods-monitor and resource-monitor legacy pins at ghcr.io read as UNPINNED in the refresh env
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PINNED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PINNED
+            value: "0"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PIN
+            value: ""
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PIN
+            value: ""
+
+  - it: pods-monitor and resource-monitor pins declared on ghcr.io read as PINNED in the refresh env
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PODS_MONITOR_PINNED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PINNED
+            value: "1"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RESOURCE_MONITOR_PIN
+            value: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+  - it: an ignored own requests-proxy pin is NOT an override in the refresh env (REQUESTS_PROXY_PINNED=0, so the proxy follows jobs-manager)
+    # PAIRED with "an own requests-proxy pin that is IGNORED ... floats on the tag":
+    # the Deployment follows jobs-manager, so the script must re-image the proxy
+    # alongside it rather than leave it as "pinned by images.requestsProxy.digest".
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_PINNED
+            value: "0"
+
+  - it: an honoured own requests-proxy pin IS the override in the refresh env
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 1
+    set:
+      images:
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: REQUESTS_PROXY_PINNED
+            value: "1"
+
+  - it: three legacy pins at the ghcr.io default do NOT retire the CronJob -- none is honoured, so every image still needs refresh
+    # Before the rule, this combination rendered NOTHING: the CronJob retired
+    # on the strength of three pins the registry could not serve, leaving
+    # three floating workloads with no reconcile -- the #569 trap, reached via
+    # the registry move.
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: three pins declared on ghcr.io retire the CronJob (nothing left to refresh)
+    template: templates/image-refresh-cronjob.yaml
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          digestRegistry: "ghcr.io"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: the refresh script verifies a values pin is pullable BY DIGEST on IMAGE_REGISTRY before comparing it, and records an unpullable one
+    # The runtime backstop for what the render cannot see: a digestRegistry
+    # declared wrong, or a digest the registry has since dropped. Locks the
+    # function, its by-digest endpoint, the ERROR text, the annotation value
+    # shape, and that the pullability check precedes the staleness compare.
+    # scripts/tests/image-refresh-stale-pin.bats drives the shipped branch.
+    template: templates/image-refresh-cronjob.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'manifest_status_by_digest\(\) \{'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '"https://\$\{_host\}/v2/\$\{_repo\}/manifests/\$\{_digest\}"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'pin_status="\$\(manifest_status_by_digest "\$repo" "\$pin_digest" "\$IMAGE_REGISTRY" \|\| true\)"'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: 'ERROR: PIN IS NOT PULLABLE on \$\{IMAGE_REGISTRY\}'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '\$\{stale_key\}=unpullable:\$\{pin_digest\}'
+      - matchRegex:
+          path: data["image-refresh.sh"]
+          pattern: '(?s)pin_status="\$\(manifest_status_by_digest.*pin_latest="\$\(get_latest_digest'
+
+  # =====================================================================
+  # NOTES.txt: the operator-visible finding for an ignored pin
+  # =====================================================================
+  - it: INCIDENT CASE -- NOTES warns, naming the image, the registry the pin was resolved on and the one this release pulls from
+    template: templates/NOTES.txt
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - matchRegexRaw:
+          pattern: 'digest pin\(s\) IGNORED'
+      - matchRegexRaw:
+          pattern: 'images\.jobsManager\.digest = sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      - matchRegexRaw:
+          pattern: 'resolved on docker\.io \(digestRegistry unset -- a legacy pin, deemed docker\.io\); this release pulls from ghcr\.io'
+      # both remedies
+      - matchRegexRaw:
+          pattern: 're-resolve the digest on ghcr\.io and set images\.<image>\.digestRegistry: "ghcr\.io"'
+      - matchRegexRaw:
+          pattern: 'drop the pin \(images\.<image>\.digest: ""\)'
+
+  - it: NOTES names a mismatching DECLARED registry without the legacy caveat
+    template: templates/NOTES.txt
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "docker.io"
+    asserts:
+      - matchRegexRaw:
+          pattern: 'resolved on docker\.io; this release pulls from ghcr\.io'
+      - notMatchRegexRaw:
+          pattern: 'legacy pin'
+
+  - it: NOTES lists EVERY ignored pin, one entry each, including requests-proxy
+    template: templates/NOTES.txt
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        resourceMonitor:
+          digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        requestsProxy:
+          digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    asserts:
+      - matchRegexRaw:
+          pattern: 'images\.jobsManager\.digest = sha256:a{64}'
+      - matchRegexRaw:
+          pattern: 'images\.podsMonitor\.digest = sha256:b{64}'
+      - matchRegexRaw:
+          pattern: 'images\.resourceMonitor\.digest = sha256:c{64}'
+      - matchRegexRaw:
+          pattern: 'images\.requestsProxy\.digest = sha256:d{64}'
+
+  - it: NOTES lists only the ignored pin when another is honoured
+    template: templates/NOTES.txt
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+        podsMonitor:
+          digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    asserts:
+      - matchRegexRaw:
+          pattern: 'images\.podsMonitor\.digest = sha256:b{64}'
+      - notMatchRegexRaw:
+          pattern: 'images\.jobsManager\.digest'
+
+  - it: mirror -- NOTES names the mirror as the registry this release pulls from
+    template: templates/NOTES.txt
+    set:
+      global:
+        imageRegistry: "mirror.example.com"
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "docker.io"
+    asserts:
+      - matchRegexRaw:
+          pattern: 'resolved on docker\.io; this release pulls from mirror\.example\.com'
+      - matchRegexRaw:
+          pattern: 'digestRegistry: "mirror\.example\.com"'
+
+  - it: NOTES does not warn at the chart default (no pin at all)
+    template: templates/NOTES.txt
+    asserts:
+      - notMatchRegexRaw:
+          pattern: 'IGNORED'
+
+  - it: NOTES does not warn for a pin declared on the effective registry
+    template: templates/NOTES.txt
+    set:
+      images:
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          digestRegistry: "ghcr.io"
+    asserts:
+      - notMatchRegexRaw:
+          pattern: 'IGNORED'
+
+  - it: NOTES does not warn for a legacy pin honoured under the docker.io rollback
+    template: templates/NOTES.txt
+    set:
+      images:
+        traceblocRegistry: docker.io
+        jobsManager:
+          digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - notMatchRegexRaw:
+          pattern: 'IGNORED'
