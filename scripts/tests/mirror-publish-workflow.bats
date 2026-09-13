@@ -39,6 +39,11 @@
 #     reporting `changed` — so a backfilled index whose URLs name the mirror is
 #     re-derived, not overwritten with the source's Pages URLs (review on the
 #     backfill: "the next stable publish replaces the backfilled index")
+#   * the index step passes --allow-empty on a DRY RUN and only there: a dry run
+#     creates no release, so a mirror with no stable chart yet has nothing to
+#     index — a note, as backfill's dry run — while a real publish, which has
+#     just created a release, still refuses an empty index (Bugbot: "dry-run
+#     index refuses empty mirrors")
 #
 # FAILS CLOSED: an unreadable workflow, a missing step id, or PyYAML absent is a
 # named refusal, never "nothing to check". The shape check is one function run
@@ -422,7 +427,7 @@ EOF
   export PM_LOG="$BATS_TEST_TMPDIR/pm.log"; : >"$PM_LOG"
 }
 
-@test "index: the command's result lands in GITHUB_OUTPUT, the rebuilt index.yaml in the step summary; a dry run says nothing was pushed, a real run does not" {
+@test "index: the command's result lands in GITHUB_OUTPUT, the rebuilt index.yaml in the step summary; a dry run allows an empty mirror and says nothing was pushed, a real run does neither" {
   fake_index "$WORK"
   export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT=true DRY_RUN=true
   : >"$GITHUB_STEP_SUMMARY"
@@ -430,7 +435,7 @@ EOF
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(out changed)" = true ] || { cat "$GITHUB_OUTPUT"; return 1; }
   [ "$(out stage)" = "$RUNNER_TEMP/index/stage" ] || return 1
-  grep -q -- '--repo example/source-public --source-releases .*/src.json --out .*/index --forbidden .*/.publish-forbidden --extra-forbidden .*/tenants.txt --output .* --strict$' "$PM_LOG" || { cat "$PM_LOG"; return 1; }
+  grep -q -- '--repo example/source-public --source-releases .*/src.json --out .*/index --forbidden .*/.publish-forbidden --extra-forbidden .*/tenants.txt --output .* --strict --allow-empty$' "$PM_LOG" || { cat "$PM_LOG"; return 1; }
   grep -q "^## Mirror publish — chart index (derived from the mirror's releases)$" "$GITHUB_STEP_SUMMARY" || { cat "$GITHUB_STEP_SUMMARY"; return 1; }
   grep -q 'index.yaml as rebuilt' "$GITHUB_STEP_SUMMARY" || return 1
   grep -q 'releases/download/v1.2.3/client-1.2.3.tgz' "$GITHUB_STEP_SUMMARY" || return 1
@@ -440,6 +445,30 @@ EOF
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" != *"dry run:"* ]] || return 1
   ! grep -q -- '--strict' <(tail -1 "$PM_LOG") || return 1
+  # A real publish has just created a release: an empty index stays a refusal.
+  ! grep -q -- '--allow-empty' <(tail -1 "$PM_LOG") || { cat "$PM_LOG"; return 1; }
+}
+
+@test "index mutation: with --allow-empty dropped, a dry run against a mirror with no stable chart yet would refuse — the test above catches it" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace('[ \"\$DRY_RUN\" != \"true\" ] || args+=(--allow-empty)', ':')")" || return 1
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=true
+  : >"$GITHUB_STEP_SUMMARY"
+  RUN_WF="$m" run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  ! grep -q -- '--allow-empty' <(tail -1 "$PM_LOG") || { cat "$PM_LOG"; return 1; }
+}
+
+@test "index mutation: with --allow-empty passed unconditionally, a real publish would accept an empty index — the test above catches it" {
+  local m
+  m="$(mutate "s = [s for s in steps if s.get('id') == 'index'][0]; s['run'] = s['run'].replace('[ \"\$DRY_RUN\" != \"true\" ] || args+=(--allow-empty)', 'args+=(--allow-empty)')")" || return 1
+  fake_index "$WORK"
+  export GITHUB_STEP_SUMMARY="$BATS_TEST_TMPDIR/summary.md" REPO=example/source-public SOURCE_RELEASES="$BATS_TEST_TMPDIR/src.json" STRICT="" DRY_RUN=false
+  : >"$GITHUB_STEP_SUMMARY"
+  RUN_WF="$m" run_step index
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q -- '--allow-empty' <(tail -1 "$PM_LOG") || { cat "$PM_LOG"; return 1; }
 }
 
 @test "index: a refusal is written to the step summary and the step exits with the command's status; nothing lands in GITHUB_OUTPUT" {

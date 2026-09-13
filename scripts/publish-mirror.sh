@@ -31,9 +31,14 @@
 #    release  --tag TAG --repo OWNER/NAME --target SHA --assets DIR
 #             --notes FILE [--prerelease]
 #             Create TAG on the mirror at SHA with every file in DIR attached.
-#             Refuses when TAG already exists on the mirror: a published release
-#             is never overwritten, and a re-run of a mirrored release is a
-#             human decision.
+#             When TAG already exists on the mirror and its release IS this one
+#             — the tag names SHA, published (not a draft) with the same
+#             prerelease flag, its assets exactly DIR's files by name and
+#             sha256, every one uploaded — it is already done: exit 0, nothing
+#             re-created, so a re-run of a publish that failed AFTER this step
+#             (dates, helm, index, the gh-pages push) goes on to rebuild the
+#             index. Any other existing TAG is refused: a published release is
+#             never overwritten, and a differing one is a human decision.
 #
 #    index    --repo OWNER/NAME --source-releases FILE --out DIR
 #             [--remote URL] [--forbidden FILE] [--extra-forbidden FILE]...
@@ -95,6 +100,13 @@ NAME_RE='^[A-Za-z0-9_.-]+$'
 # prerelease suffix). Both parts are read off the file name and, under `index`,
 # checked against what `helm show chart` reads inside the tarball.
 CHART_FILE_RE='^([A-Za-z0-9_.-]+)-([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?)\.tgz$'
+
+# sha256_of FILE — the hex digest, with whichever of sha256sum / shasum is here
+# (`release` and `index` both check one is before any read of the mirror).
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 
 # emit_output FILE KEY=VALUE... — append results for the caller (the workflow's
 # $GITHUB_OUTPUT). An unwritable file is "could not tell": a result the caller
@@ -199,6 +211,57 @@ cmd_tree() {
   echo "pushed $sha"
 }
 
+# release_existing_is_this TAG REPO TARGET PRERELEASE FILE... — TAG is already
+# on REPO. Returns when the mirror's release IS the one this run would create:
+# the tag names TARGET (read as the commit it resolves to, so an annotated tag
+# from the backfill counts too), it is published with the same prerelease flag,
+# and its assets are exactly FILE... by name, sha256 and upload state. That is
+# a re-run of a publish that failed AFTER the release step (dates, helm, index,
+# the gh-pages push): refusing it would leave the mirror with the release but
+# no index entry for it — the gap the index step exists to close. On any
+# difference: refused (1), every difference named — a published release is
+# never overwritten, and a differing one is a human decision. A release or tag
+# that cannot be read, or an asset the mirror reports no digest for, is "cannot
+# tell" (2).
+release_existing_is_this() {
+  local tag="$1" repo="$2" target="$3" prerelease="$4"; shift 4
+  local json at flags draft pre assets
+  json="$(gh api "repos/$repo/releases/tags/$tag" 2>&1)" || die2 "release: '$tag' exists on '$repo' but its release could not be read (gh exited $?: $(printf '%s' "$json" | tr '\n' ' '))"
+  at="$(gh api "repos/$repo/commits/$tag" --jq .sha 2>&1)" || die2 "release: could not resolve tag '$tag' on '$repo' to a commit (gh exited $?: $(printf '%s' "$at" | tr '\n' ' '))"
+  [[ "$at" =~ ^[0-9a-f]{40}$ ]] || die2 "release: tag '$tag' on '$repo' resolves to '$at', not a commit sha"
+  flags="$(printf '%s' "$json" | jq -r '[(.draft | tostring), (.prerelease | tostring)] | @tsv' 2>&1)" || die2 "release: the release '$tag' of '$repo' did not parse: $(printf '%s' "$flags" | tr '\n' ' ')"
+  IFS=$'\t' read -r draft pre <<<"$flags"
+  assets="$(printf '%s' "$json" | jq -r '.assets[] | [.name, ((.digest // "") | ltrimstr("sha256:")), (.state // "")] | @tsv' 2>&1)" || die2 "release: could not read the assets of '$tag' on '$repo': $(printf '%s' "$assets" | tr '\n' ' ')"
+
+  local want=false why=""
+  [ "$prerelease" -eq 0 ] || want=true
+  differs() { why="${why:+$why; }$1"; }
+  [ "$at" = "$target" ] || differs "its tag is at $at, this run publishes $target"
+  [ "$draft" = false ] || differs "it is a draft"
+  [ "$pre" = "$want" ] || differs "it is prerelease=$pre, this run publishes prerelease=$want"
+  # Fields by awk, not `read`: a tab is IFS whitespace, so `read` would fold
+  # the empty digest of `name<TAB><TAB>uploaded` away and read the state as
+  # the digest.
+  local f name sum d st found
+  for f in "$@"; do
+    name="$(basename "$f")"
+    sum="$(sha256_of "$f")" || die2 "release: could not hash '$f'"
+    if ! awk -F'\t' -v n="$name" '$1 == n { f = 1 } END { exit !f }' <<<"$assets"; then differs "asset '$name' is not on the mirror's release"; continue; fi
+    d="$(awk -F'\t' -v n="$name" '$1 == n { print $2; exit }' <<<"$assets")"
+    st="$(awk -F'\t' -v n="$name" '$1 == n { print $3; exit }' <<<"$assets")"
+    if [ "$st" != uploaded ]; then differs "asset '$name' is on the mirror's release in state '$st', not uploaded"; continue; fi
+    [ -n "$d" ] || die2 "release: asset '$name' of '$tag' on '$repo' has no digest — cannot tell whether it is this file"
+    [ "$d" = "$sum" ] || differs "asset '$name' hashes to $d on the mirror, $sum here"
+  done
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    found=0
+    for f in "$@"; do [ "$(basename "$f")" != "$name" ] || { found=1; break; }; done
+    [ "$found" -eq 1 ] || differs "asset '$name' is on the mirror's release but not in --assets"
+  done < <(cut -f1 <<<"$assets")
+  [ -z "$why" ] || die1 "release: '$tag' already exists on '$repo' and is not what this run would publish — a mirrored release is never overwritten; $why"   # mutation-anchor: release-existing-differs
+}
+
 cmd_release() {
   local tag="" repo="" target="" assets="" notes="" prerelease=0
   while [ "$#" -gt 0 ]; do
@@ -222,13 +285,20 @@ cmd_release() {
   while IFS= read -r f; do files+=("$f"); done < <(find "$assets" -mindepth 1 -maxdepth 1 -type f | sort)
   [ "${#files[@]}" -gt 0 ] || die2 "release: '$assets' holds no files — a release with no assets is not what a customer downloads"
   command -v gh >/dev/null 2>&1 || die2 "release: gh is not on PATH"
+  command -v jq >/dev/null 2>&1 || die2 "release: jq is not on PATH"
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die2 "release: neither sha256sum nor shasum is on PATH"
 
-  # Existing release → refuse. `gh release view` exits 1 for "not found" AND for
-  # auth or network failure, so the text decides which it was; anything that is
-  # not a clear "not found" is "cannot tell".
+  # Existing release → already done when it IS this one, refused otherwise (see
+  # release_existing_is_this). `gh release view` exits 1 for "not found" AND
+  # for auth or network failure, so the text decides which it was; anything
+  # that is not a clear "not found" is "cannot tell".
   local err rc
   err="$(gh release view "$tag" --repo "$repo" 2>&1 >/dev/null)"; rc=$?
-  if [ "$rc" -eq 0 ]; then die1 "release: '$tag' already exists on '$repo' — a mirrored release is never overwritten"; fi
+  if [ "$rc" -eq 0 ]; then
+    release_existing_is_this "$tag" "$repo" "$target" "$prerelease" "${files[@]}"
+    echo "already released $tag on $repo at $target with ${#files[@]} asset(s) — the mirror's release is identical to this one, nothing re-created (a re-run of a publish that failed after this step)"
+    return 0
+  fi
   printf '%s' "$err" | grep -qi 'release not found' || die2 "release: could not read releases of '$repo' (gh exited $rc: $(printf '%s' "$err" | tr '\n' ' '))"
 
   local -a args=(release create "$tag" --repo "$repo" --target "$target" --title "$tag" --notes-file "$notes")
@@ -299,11 +369,7 @@ cmd_index() {
   command -v "$helm" >/dev/null 2>&1 || die2 "index: '$helm' is not on PATH — the Helm index is rebuilt with it, and an index built any other way is not one helm would"   # mutation-anchor: index-helm-required
   local guard="$SELF_DIR/publish-guard.sh"
   [ -r "$guard" ] || die2 "index: $guard is missing"
-  local sha256_cmd
-  if command -v sha256sum >/dev/null 2>&1; then sha256_cmd="sha256sum"
-  elif command -v shasum >/dev/null 2>&1; then sha256_cmd="shasum -a 256"
-  else die2 "index: neither sha256sum nor shasum is on PATH"; fi
-  sha256_of() { $sha256_cmd "$1" | cut -d' ' -f1; }
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die2 "index: neither sha256sum nor shasum is on PATH"
   [ -n "$remote" ] || remote="https://github.com/$repo.git"
   local base="https://github.com/$repo/releases/download"
 

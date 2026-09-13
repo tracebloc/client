@@ -64,7 +64,13 @@
 #   branch is pushed only when the index changed apart from `generated:`. A
 #   missing helm, an unverifiable tarball or an unreadable mirror is "cannot
 #   tell" and stops the run; a guard hit refuses the push. A dry run rebuilds
-#   and shows the index the mirror's current releases yield, and pushes nothing.
+#   and shows the index the mirror's current releases yield, and pushes nothing;
+#   against a mirror with no stable chart yet it is a note (--allow-empty), not
+#   a refusal — a real publish has just created a release, so there an empty
+#   index stays refused. A RE-RUN after a failure past the release step finds
+#   the release already on the mirror, identical (tag commit, prerelease flag,
+#   assets by name and sha256), reports it done and goes on to the index; a
+#   release that differs is still refused.
 #
 # Prereleases
 #   A prerelease (-rc.N) mirrors ONLY its GitHub release, marked prerelease,
@@ -476,6 +482,12 @@ jobs:
           echo "release-only $TAG: default branch '$BRANCH' and gh-pages left untouched; release will be pinned to $SHA"
 
       - name: Create the release on the mirror
+        # Re-runnable: a release already on the mirror that IS this one (same
+        # commit, prerelease flag and assets by name and sha256) is reported
+        # as done and the job goes on to the index steps — a publish that
+        # failed at dates / helm / index / the gh-pages push would otherwise
+        # die here on every re-run and never put the release into the index
+        # (Bugbot on #1060). A release that differs is refused, as before.
         if: steps.plan.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
@@ -565,6 +577,11 @@ jobs:
           args=(index --repo "$REPO" --source-releases "$SOURCE_RELEASES" --out "$RUNNER_TEMP/index"
                 --forbidden "$GITHUB_WORKSPACE/.publish-forbidden" --extra-forbidden "$RUNNER_TEMP/tenants.txt" --output "$GITHUB_OUTPUT")
           [ "$STRICT" != "true" ] || args+=(--strict)
+          # A dry run creates no release, so a mirror with no stable chart yet
+          # (first publish, or prereleases only) has nothing to index: a note,
+          # not a refusal — as backfill's dry run. A real publish has just put
+          # a release there, so an empty index stays refused.
+          [ "$DRY_RUN" != "true" ] || args+=(--allow-empty)
           rc=0
           bash scripts/publish-mirror.sh "${args[@]}" | tee "$RUNNER_TEMP/index.log" || rc=$?
           {
