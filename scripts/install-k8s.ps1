@@ -5263,7 +5263,7 @@ $script:TbEnvelopeNodeMinMemBytes   = 5368709120
 # this bootstrap is signed and guarantees neither helm nor python3. What keeps it
 # honest is `scripts/gen-footprint-embed.sh --check` in `make drift`: both
 # installers' values must equal a fresh render of the chart in the same tree.
-$script:TbCpFootprintMemBytes = 2382364672
+$script:TbCpFootprintMemBytes = 1879048192
 $script:TbCpFootprintCpuMilli = 650
 # ── end generated footprint ─────────────────────────────────────────────────
 

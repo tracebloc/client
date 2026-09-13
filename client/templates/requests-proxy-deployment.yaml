@@ -136,7 +136,7 @@ spec:
           resources:
             requests:
               cpu: {{ $rpReq.cpu | default "50m" | quote }}
-              memory: {{ $rpReq.memory | default "128Mi" | quote }}
+              memory: {{ $rpReq.memory | default "96Mi" | quote }}
             limits:
               cpu: {{ $rpLim.cpu | default "1000m" | quote }}
               memory: {{ $rpLim.memory | default "512Mi" | quote }}

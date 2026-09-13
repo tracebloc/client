@@ -66,10 +66,10 @@ spec:
           resources:
             requests:
               cpu: {{ $epReq.cpu | default "50m" | quote }}
-              memory: {{ $epReq.memory | default "160Mi" | quote }}
+              memory: {{ $epReq.memory | default "256Mi" | quote }}
             limits:
               cpu: {{ $epLim.cpu | default "500m" | quote }}
-              memory: {{ $epLim.memory | default "256Mi" | quote }}
+              memory: {{ $epLim.memory | default "384Mi" | quote }}
           volumeMounts:
             - name: squid-config
               mountPath: /etc/squid/squid.conf
