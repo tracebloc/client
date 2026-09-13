@@ -29,9 +29,12 @@
 #  annotation carries the ORIGINAL date (the source tag's tagger date when the
 #  source tag is annotated, the release's created_at otherwise) and the
 #  original message, and says in plain words that the tag is a RELEASE MARKER
-#  on the mirror, not a source snapshot. A tag already on the mirror is
-#  accepted only if it points at a commit the mirror has; a dangling one is
-#  refused, never repointed.
+#  on the mirror, not a source snapshot. The original message is source text
+#  that lands on the public mirror, so it goes through the guard's
+#  forbidden-string scan with the notes, before any write (a hit refuses the
+#  release and names the tier). A tag already on the mirror is accepted only
+#  if it points at a commit the mirror has; a dangling one is refused, never
+#  repointed.
 #
 #  RELEASE NOTES: --notes fixed (DEFAULT) writes the same fixed text the
 #  workflow writes for new releases. Historical source bodies are GitHub's
@@ -553,14 +556,37 @@ while IFS= read -r TAG; do
     } >>"$R/notes.md"
   fi
 
-  # -- the guard: text assets and notes, before any write -------------------------------------
+  # -- tag message ----------------------------------------------------------------------------
+  # The original tag's date and message, when it is annotated; the release's
+  # created_at otherwise. Read from the source, never invented. Composed here,
+  # before the guard, because the original message is source text that lands on
+  # the public mirror as the tag annotation — it is scanned like the notes.
+  if [ "$TAG_ACTION" = create ]; then
+    gh_read "$R/src-ref.json" api "repos/$SRC/git/ref/tags/$TAG"
+    SRC_OBJ_TYPE="$(jq_of "$R/src-ref.json" '.object.type')"; SRC_OBJ_SHA="$(jq_of "$R/src-ref.json" '.object.sha')"
+    TAG_DATE="$CREATED"; ORIG_MSG=""
+    if [ "$SRC_OBJ_TYPE" = tag ]; then
+      gh_read "$R/src-tagobj.json" api "repos/$SRC/git/tags/$SRC_OBJ_SHA"
+      TAG_DATE="$(jq_of "$R/src-tagobj.json" '.tagger.date // empty')"; [ -n "$TAG_DATE" ] || TAG_DATE="$CREATED"
+      ORIG_MSG="$(jq_of "$R/src-tagobj.json" '.message // ""')"
+    fi
+    {
+      echo "Release $TAG"
+      echo
+      echo "Mirror release marker for $TAG: this tag points at the mirror's default-branch head, not at the sources the release was built from. Original tag date: $TAG_DATE."
+      if [ -n "$ORIG_MSG" ]; then echo; echo "--- original tag message ---"; printf '%s\n' "$ORIG_MSG"; fi
+    } >"$R/tag-message.txt"
+  fi
+
+  # -- the guard: text assets, notes and the tag message, before any write --------------------
   while IFS= read -r f; do cp "$R/text/$f" "$R/guard-assets/$f"; done < <(awk -F'\t' '$2 == "upload" { print $1 }' "$R/upload-text.txt")
   [ "$REL_ACTION" != create ] || cp "$R/notes.md" "$R/guard-assets/RELEASE_NOTES.md"
+  [ "$TAG_ACTION" != create ] || cp "$R/tag-message.txt" "$R/guard-assets/TAG_MESSAGE.txt"   # mutation-anchor: tag-message-guarded
   if [ -n "$(ls -A "$R/guard-assets")" ]; then
     rc=0; run_guard "$R/guard-assets" "$R/guard-out" || rc=$?
     case "$rc" in
       0) ;;
-      1) REFUSAL="the guard refused the notes or a text asset: $(guard_refusal_text "$R/guard-out.log")" ;;   # mutation-anchor: guard-refusal
+      1) REFUSAL="the guard refused the notes, the tag message or a text asset: $(guard_refusal_text "$R/guard-out.log")" ;;   # mutation-anchor: guard-refusal
       *) cat "$R/guard-out.log"; die2 "$TAG: the guard could not tell (exit $rc)" ;;
     esac
     if [ -n "$REFUSAL" ]; then grep -E 'REFUSED|^    ' "$R/guard-out.log" | sed 's/^/    /'; refuse "$TAG" "$REFUSAL"; continue; fi
@@ -579,22 +605,7 @@ while IFS= read -r TAG; do
   # -- writes -----------------------------------------------------------------------------------
   note "$TAG [$KIND]: $PLAN ($N_INDEXED tarball(s) also matched the source's Helm index)"
   if [ "$TAG_ACTION" = create ]; then
-    # The original tag's date and message, when it is annotated; the release's
-    # created_at otherwise. Read from the source, never invented.
-    gh_read "$R/src-ref.json" api "repos/$SRC/git/ref/tags/$TAG"
-    SRC_OBJ_TYPE="$(jq_of "$R/src-ref.json" '.object.type')"; SRC_OBJ_SHA="$(jq_of "$R/src-ref.json" '.object.sha')"
-    TAG_DATE="$CREATED"; ORIG_MSG=""
-    if [ "$SRC_OBJ_TYPE" = tag ]; then
-      gh_read "$R/src-tagobj.json" api "repos/$SRC/git/tags/$SRC_OBJ_SHA"
-      TAG_DATE="$(jq_of "$R/src-tagobj.json" '.tagger.date // empty')"; [ -n "$TAG_DATE" ] || TAG_DATE="$CREATED"
-      ORIG_MSG="$(jq_of "$R/src-tagobj.json" '.message // ""')"
-    fi
-    {
-      echo "Release $TAG"
-      echo
-      echo "Mirror release marker for $TAG: this tag points at the mirror's default-branch head, not at the sources the release was built from. Original tag date: $TAG_DATE."
-      if [ -n "$ORIG_MSG" ]; then echo; echo "--- original tag message ---"; printf '%s\n' "$ORIG_MSG"; fi
-    } >"$R/tag-message.txt"
+    # The annotation text and date were composed above and passed the guard.
     gh_write "$R/tagobj.json" api -X POST "repos/$MIRROR/git/tags" \
       -f "tag=$TAG" -F "message=@$R/tag-message.txt" -f "object=$MIRROR_HEAD" -f type=commit \
       -f "tagger[name]=${PUBLISH_MIRROR_GIT_NAME:-github-actions[bot]}" \

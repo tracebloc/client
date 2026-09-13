@@ -23,7 +23,9 @@
 # one equal to the source is refused by publish-mirror's rule; a read that fails
 # is could-not-tell (exit 2) naming the call, never an empty list; the default
 # notes are the workflow's fixed text and a refuse-tier needle in a source body
-# refuses only under --notes source, naming the tier; --pages builds the index
+# refuses only under --notes source, naming the tier; an annotated source tag's
+# message is carried onto the mirror's tag and goes through the same guard, so a
+# refuse-tier needle there refuses the release in either notes mode; --pages builds the index
 # from the MIRROR's stable releases with release-asset URLs, one entry per chart
 # version under the oldest release carrying it, `created` = the original publish
 # date, keeps every other file on gh-pages, and pushes nothing when the index is
@@ -132,12 +134,17 @@ setup_file() {
   variant badbody '(.[] | select(.tag_name == "v1.0.2") | .body) |= . + "\n* ops: moved to role arn:aws:iam::000000000000:role/planted"'
   # v1.0.1's chart tarball has no digest on the source at all.
   variant nodigest '(.[] | select(.tag_name == "v1.0.1") | .assets[] | select(.name == "client-1.0.1.tgz") | .digest) = null'
+  # The annotated source tag's (v1.0.3) message carries a refuse-tier needle; the release body is clean.
+  variant badtag '.'
+  jq '(.[] | select(.sha == "3333333333333333333333333333333333333333") | .message) |= . + "\nrole arn:aws:iam::000000000000:role/planted"' \
+    "$BATS_FILE_TMPDIR/fix-badtag/src-tagobjs.json" >"$BATS_FILE_TMPDIR/fix-badtag/t.json" && mv "$BATS_FILE_TMPDIR/fix-badtag/t.json" "$BATS_FILE_TMPDIR/fix-badtag/src-tagobjs.json"
+  grep -q 'role/planted' "$BATS_FILE_TMPDIR/fix-badtag/src-tagobjs.json" || { echo "badtag fixture did not apply" >&2; return 1; }
   # The source's Pages index lists client 1.0.4 with a digest that is not the tarball's.
   variant idxbad '.'
   awk -v d="$(sha256_of "$FIX/charts/client-1.0.4.tgz")" '$0 == "    digest: " d { print "    digest: 1111111111111111111111111111111111111111111111111111111111111111"; next } { print }' \
     "$FIX/src-index.yaml" >"$BATS_FILE_TMPDIR/fix-idxbad/src-index.yaml"
   grep -q '1111111111111111111111111111111111111111111111111111111111111111' "$BATS_FILE_TMPDIR/fix-idxbad/src-index.yaml" || { echo "idxbad fixture did not apply" >&2; return 1; }
-  export FIX_CORRUPT="$BATS_FILE_TMPDIR/fix-corrupt" FIX_BADBODY="$BATS_FILE_TMPDIR/fix-badbody" FIX_NODIGEST="$BATS_FILE_TMPDIR/fix-nodigest" FIX_IDXBAD="$BATS_FILE_TMPDIR/fix-idxbad"
+  export FIX_CORRUPT="$BATS_FILE_TMPDIR/fix-corrupt" FIX_BADBODY="$BATS_FILE_TMPDIR/fix-badbody" FIX_NODIGEST="$BATS_FILE_TMPDIR/fix-nodigest" FIX_IDXBAD="$BATS_FILE_TMPDIR/fix-idxbad" FIX_BADTAG="$BATS_FILE_TMPDIR/fix-badtag"
 }
 
 # ── per test: the fake gh, the gitleaks stub, an empty mirror ──────────────────
@@ -633,7 +640,7 @@ mutant() {
 @test "--notes source, refuse-tier needle in a body: refused naming the tier and the notes file, text not echoed, nothing written; the default notes never quote it" {
   backfill "$FIX_BADBODY" --apply --notes source
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"REFUSED v1.0.2 — the guard refused the notes or a text asset: [forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s)"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"REFUSED v1.0.2 — the guard refused the notes, the tag message or a text asset: [forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s)"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"assets/RELEASE_NOTES.md:"* ]] || return 1
   [[ "$output" != *"role/planted"* ]] || return 1
   [ "$(verdicts refused)" -eq 1 ] || return 1
@@ -651,6 +658,31 @@ mutant() {
   BACKFILL_UNDER_TEST="$m" backfill "$FIX_BADBODY" --apply --notes source
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q 'role/planted' "$STATE/mirror-releases.json" || return 1
+}
+
+@test "an annotated source tag whose message carries a refuse-tier needle is refused naming the tier and TAG_MESSAGE.txt, in BOTH notes modes; no tag, no release of it is written, the other 6 go ahead" {
+  local mode
+  for mode in fixed source; do
+    fresh_state "$STATE"
+    backfill "$FIX_BADTAG" --apply --notes "$mode"
+    [ "$status" -eq 1 ] || { echo "[$mode]"; echo "$output"; return 1; }
+    [[ "$output" == *"REFUSED v1.0.3 — the guard refused the notes, the tag message or a text asset: [forbidden-strings] REFUSED — [strings-refuse] needle 'arn:aws:' found in 1 staged line(s)"* ]] || { echo "[$mode]"; echo "$output"; return 1; }
+    [[ "$output" == *"assets/TAG_MESSAGE.txt:"* ]] || { echo "[$mode]"; echo "$output"; return 1; }
+    [[ "$output" != *"role/planted"* ]] || return 1
+    [ "$(verdicts refused)" -eq 1 ] || return 1
+    [ "$(verdicts "done")" -eq 6 ] || return 1
+    [ "$(jq -r '[.[] | select(.tag == "v1.0.3")] | length' "$STATE/mirror-tagobjs.json")" -eq 0 ] || return 1
+    [ "$(jq -r '[.[] | select(.tag_name == "v1.0.3")] | length' "$STATE/mirror-releases.json")" -eq 0 ] || return 1
+    ! grep -q 'role/planted' "$STATE/mirror-tagobjs.json" || return 1
+  done
+}
+
+@test "mutation: with the tag message left out of the guard, the planted annotation reaches the mirror's tag object — the test above catches it" {
+  local m
+  m="$(mutant tag-message-guarded '  :')" || { echo "$m"; return 1; }
+  BACKFILL_UNDER_TEST="$m" backfill "$FIX_BADTAG" --apply
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'role/planted' "$STATE/mirror-tagobjs.json" || return 1
 }
 
 @test "mutation: with the notes default flipped to source, a plain --apply writes the pull-request list — the default-notes test catches it" {
