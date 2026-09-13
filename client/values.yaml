@@ -624,10 +624,10 @@ egressProxy:
   resources:
     requests:
       cpu: "50m"
-      memory: "160Mi"
+      memory: "256Mi"
     limits:
       cpu: "500m"
-      memory: "256Mi"
+      memory: "384Mi"
 
 # -- Rename the resources this chart creates, without uninstall + reinstall.
 # backend#2626.
@@ -791,7 +791,7 @@ telemetryCollector:
   resources:
     requests:
       cpu: "100m"
-      memory: "128Mi"
+      memory: "256Mi"
     limits:
       cpu: "500m"
       memory: "512Mi"
@@ -1380,7 +1380,27 @@ images:
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
-  # INTERIM TRIM (backend#2461, 2026-09-10) -- read before "fixing" any number back up.
+  # MEASURED TRIM (backend#2461, 2026-09-13) -- every request below is sized from the
+  # load run, not from the idle snapshot the interim trim used. Four legs on the same
+  # edge (11.23 h ambient, one training cycle, a five-deep queue, two full-node
+  # restarts incl. one under an 8 GiB cap) found that LOAD DOES NOT MOVE THE CONTROL
+  # PLANE -- no container's p95 rose more than ~4 MiB from ambient -- and that the
+  # RESTART PEAK is the sizing driver. Requests = worst observed (p95 or restart peak)
+  # with ~1.5x headroom; the render sums to 1792 MiB / 650 m (was 2272 / 650):
+  #
+  #   container              request   worst observed (MiB)      why
+  #   egress-proxy   160Mi -> 256Mi    176 on restart (1.10x OVER 160)   UP; limit 256 -> 384 so request < limit
+  #   collector      128Mi -> 256Mi    158 on restart (1.23x OVER 128)   UP; first measurement of it (was "unmeasured")
+  #   resource-mon   128Mi -> 160Mi    101 on restart (0.79x)            UP; hardcoded in its DaemonSet template
+  #   mysql          704Mi (kept)      468 p95 under load                requests==limits kept
+  #   requests-proxy 128Mi ->  96Mi     64 on restart                    limits unchanged
+  #   pods-monitor   384Mi -> 128Mi     77 on restart                    LIMIT STAYS 512Mi
+  #   jobs-manager   640Mi -> 192Mi    105 p95 / 103 restart (0.16x)     LIMIT STAYS 1Gi; QoS unchanged (see below)
+  #
+  # CPU requests are untouched: the highest control-plane cpu p95 in any leg was 13m
+  # (jobs-manager during the burst). Full tables, windows and caveats are on the ticket.
+  #
+  # INTERIM TRIM (backend#2461, 2026-09-10) -- the history the block above supersedes.
   #
   # Requests are what the scheduler and the jobs-manager's admission SUBTRACT from
   # the node; they are not what the process uses. Measured on an installer edge
@@ -1399,7 +1419,7 @@ resources:
   # 100m / 128Mi. That is the right worst case: on a real edge the collector IS
   # rendered once jobs-manager has written the token Secret (backend#2274), so an
   # edge that trains on install must still train after that. With it counted the
-  # render is 650m / 2272Mi, and the node above leaves 1050m / 3126Mi (was
+  # render was 650m / 2272Mi (now 1792Mi, see above), and the node above left 1050m / 3126Mi (was
   # 900m / 2390Mi): 50m and 54Mi over the envelope. Thin, and honest.
   #
   #   mysql           250m/1Gi   -> 150m/704Mi   peak measured 0.40-0.55x of 1Gi (max ~563Mi); 704 = +25% headroom; requests==limits kept
@@ -1434,14 +1454,14 @@ resources:
   jobsManager:
     requests:
       cpu: "150m"
-      memory: "640Mi"
+      memory: "192Mi"
     limits:
       cpu: "1000m"
       memory: "1Gi"
   podsMonitor:
     requests:
       cpu: "100m"
-      memory: "384Mi"
+      memory: "128Mi"
     limits:
       cpu: "500m"
       memory: "512Mi"
@@ -1453,7 +1473,7 @@ resources:
   requestsProxy:
     requests:
       cpu: "50m"
-      memory: "128Mi"
+      memory: "96Mi"
     limits:
       cpu: "1000m"
       memory: "512Mi"

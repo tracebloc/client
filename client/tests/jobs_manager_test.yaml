@@ -78,13 +78,13 @@ tests:
       # what the scheduler and admission subtract. Derivation: values.yaml#resources.
       - equal:
           path: spec.template.spec.containers[0].resources.requests.memory
-          value: 640Mi
+          value: 192Mi
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
       - equal:
           path: spec.template.spec.containers[1].resources.requests.memory
-          value: 384Mi
+          value: 128Mi
       - equal:
           path: spec.template.spec.containers[1].resources.limits.memory
           value: 512Mi
