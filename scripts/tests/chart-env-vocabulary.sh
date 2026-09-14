@@ -40,6 +40,8 @@ fi
 fails=0
 checks=0
 
+HELM_KUBE_VERSION="${HELM_KUBE_VERSION:-1.28.0}"
+
 render() { # $@ = extra helm args; prints combined output, returns helm's status
   # backend#2892: pin mysqlRootPassword so the dev renders below (dev turns
   # rotateMysqlRoot on via its ByEnv default) don't trip the fail-closed
@@ -47,7 +49,12 @@ render() { # $@ = extra helm args; prints combined output, returns helm's status
   # render refuses. The pin is tier 1 (bypasses the mint) and is inert to the env
   # vocabulary this script checks; a bad CLIENT_ENV / channelTags value is still
   # rejected by the schema regardless.
-  helm template vocab "$CHART" -f "$VALUES" --set mysqlRootPassword=RotatedRootPw123 "$@" 2>&1
+  #
+  # --kube-version: Chart.yaml requires >=1.24.0-0; helm's own cluster-less
+  # default capability varies by helm version (this bit newer local helm
+  # installs), matching the pin the other scripts/tests/*.sh scripts already
+  # use.
+  helm template vocab "$CHART" -f "$VALUES" --kube-version "$HELM_KUBE_VERSION" --set mysqlRootPassword=RotatedRootPw123 "$@" 2>&1
 }
 
 pass() { checks=$((checks + 1)); echo "  ok    $1"; }
@@ -259,7 +266,7 @@ expect_resource_render() { # <label> <key> <value>
   local label="$1" key="$2" value="$3" f out
   f="$(resource_values_file "$key" "$value")"
   checks=$((checks + 1))
-  if out="$(helm template vocab "$CHART" -f "$VALUES" -f "$f" 2>&1)"; then
+  if out="$(helm template vocab "$CHART" -f "$VALUES" --kube-version "$HELM_KUBE_VERSION" -f "$f" 2>&1)"; then
     echo "  ok    $label"
   else
     fails=$((fails + 1))
@@ -272,7 +279,7 @@ expect_resource_reject() { # <label> <key> <value>
   local label="$1" key="$2" value="$3" f out
   f="$(resource_values_file "$key" "$value")"
   checks=$((checks + 1))
-  if out="$(helm template vocab "$CHART" -f "$VALUES" -f "$f" 2>&1)"; then
+  if out="$(helm template vocab "$CHART" -f "$VALUES" --kube-version "$HELM_KUBE_VERSION" -f "$f" 2>&1)"; then
     fails=$((fails + 1))
     echo "  FAIL  $label: expected a rejection, but the chart rendered"
   elif grep -qF "$SCHEMA_ERR" <<<"$out"; then
