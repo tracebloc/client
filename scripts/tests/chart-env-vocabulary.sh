@@ -187,8 +187,13 @@ if [ "$tb_count" -eq 2 ] && [ "$ce_count" -eq 2 ]; then
 else
   fail "jobs-manager pod is missing one of TRACEBLOC_ENV / CLIENT_ENV, or a wrong count: TRACEBLOC_ENV=$tb_count CLIENT_ENV=$ce_count (want 2 each, one per container)"
 fi
-if grep -A1 "name: TRACEBLOC_ENV" <<<"$out" | grep -q 'value: "stg"' && \
-   grep -A1 "name: CLIENT_ENV" <<<"$out" | grep -q 'value: "stg"'; then
+# Capture-then-slice, not a live pipe into grep -q: -q closes its stdin as
+# soon as it finds a match, and under this script's `set -o pipefail` the
+# upstream grep -A1 can then be seen as SIGPIPE-killed rather than as the
+# match it actually found (quality/pipefail-early-close gate, client#1071).
+tb_block="$(grep -A1 "name: TRACEBLOC_ENV" <<<"$out")"
+ce_block="$(grep -A1 "name: CLIENT_ENV" <<<"$out")"
+if grep -q 'value: "stg"' <<<"$tb_block" && grep -q 'value: "stg"' <<<"$ce_block"; then
   pass "both TRACEBLOC_ENV and CLIENT_ENV carry the same resolved value (stg)"
 else
   fail "TRACEBLOC_ENV / CLIENT_ENV do not both resolve to stg"
