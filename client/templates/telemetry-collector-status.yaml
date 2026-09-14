@@ -45,11 +45,22 @@
   (a dev chart) has nothing the tick can re-render, and waits for the next
   published chart. Both the schedule and the repo are read from the values that
   drive that CronJob, never restated here.
+
+  A NAMED TRIGGER CAN ITSELF BE PAUSED (backend#3731). `$au.enabled` alone is not
+  "the tick will run" — the CronJob this record names also honours
+  `autoUpgrade.suspend` (auto-upgrade-cronjob.yaml renders it into the CronJob's
+  own `spec.suspend`), and a suspended CronJob never fires no matter what its
+  schedule says. Naming the tick as the trigger while it is suspended is the same
+  false promise backend#3550 fixed for the wrong-mechanism case, so `$au.suspend`
+  gates this branch too. `imageRefresh.suspend` is a different flag on a
+  different CronJob and has no bearing here.
 */ -}}
 {{- $au := default (dict) .Values.autoUpgrade -}}
 {{- $trigger := "autoUpgrade is off in this release, so nothing re-renders it for you: run `helm upgrade` on this release once the Secret exists" -}}
-{{- if $au.enabled -}}
+{{- if and $au.enabled (not $au.suspend) -}}
 {{- $trigger = printf "the next auto-upgrade tick (CronJob schedule %q) re-renders this release in place once the Secret exists, provided the deployed chart version %s is one the repo %s serves — a version ahead of that repo's index cannot be re-rendered and waits for the next published chart" ($au.schedule | default "unset" | toString) .Chart.Version ($au.repoUrl | default "unset" | toString) -}}
+{{- else if and $au.enabled $au.suspend -}}
+{{- $trigger = "autoUpgrade is suspended on this release (autoUpgrade.suspend: true): the CronJob will not run until it is unsuspended, so nothing re-renders this for you — unsuspend autoUpgrade, or run `helm upgrade` on this release yourself once the Secret exists" -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
