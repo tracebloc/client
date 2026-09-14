@@ -173,11 +173,25 @@ echo "== both TRACEBLOC_ENV and CLIENT_ENV land in the pod env, same resolved va
 # and falls back to CLIENT_ENV -- so a jobs-manager built before that PR must
 # still see a correct CLIENT_ENV, and one built after it must see TRACEBLOC_ENV,
 # from the SAME chart render.
-out="$(render --set env.TRACEBLOC_ENV=stg)"
-if grep -q "name: TRACEBLOC_ENV" <<<"$out" && grep -q "name: CLIENT_ENV" <<<"$out"; then
-  pass "jobs-manager pod carries both TRACEBLOC_ENV and CLIENT_ENV"
+#
+# --show-only scopes this to the jobs-manager Deployment specifically: a bare
+# grep over the full multi-document render would also match resource-monitor's
+# or egress-reachability-check's identical stanza, so dropping ONLY the
+# jobs-manager injection (or emitting a mismatched value there) would still
+# pass (Bugbot Medium, client#1071).
+out="$(render --set env.TRACEBLOC_ENV=stg --show-only templates/jobs-manager-deployment.yaml)"
+tb_count="$(grep -c "name: TRACEBLOC_ENV" <<<"$out")"
+ce_count="$(grep -c "name: CLIENT_ENV" <<<"$out")"
+if [ "$tb_count" -eq 2 ] && [ "$ce_count" -eq 2 ]; then
+  pass "jobs-manager pod (both containers) carries both TRACEBLOC_ENV and CLIENT_ENV"
 else
-  fail "jobs-manager pod is missing one of TRACEBLOC_ENV / CLIENT_ENV: $(grep -c 'name: TRACEBLOC_ENV\|name: CLIENT_ENV' <<<"$out") matches"
+  fail "jobs-manager pod is missing one of TRACEBLOC_ENV / CLIENT_ENV, or a wrong count: TRACEBLOC_ENV=$tb_count CLIENT_ENV=$ce_count (want 2 each, one per container)"
+fi
+if grep -A1 "name: TRACEBLOC_ENV" <<<"$out" | grep -q 'value: "stg"' && \
+   grep -A1 "name: CLIENT_ENV" <<<"$out" | grep -q 'value: "stg"'; then
+  pass "both TRACEBLOC_ENV and CLIENT_ENV carry the same resolved value (stg)"
+else
+  fail "TRACEBLOC_ENV / CLIENT_ENV do not both resolve to stg"
 fi
 
 echo "== the template fail is a real backstop, not decoration =="
