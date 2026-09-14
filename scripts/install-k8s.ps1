@@ -5237,14 +5237,14 @@ function Get-ImageMirrorYaml {
 # scripts/gen-envelope-embed.sh --check verifies the constants in CI.
 #
 # Regenerate with: scripts/gen-envelope-embed.sh
-$script:TbEnvelopeContractVersion  = 2
-$script:TbEnvelopeOverheadCpuMilli = 1000
-$script:TbEnvelopeOverheadMemBytes = 3221225472
+$script:TbEnvelopeContractVersion  = 4
+$script:TbEnvelopeOverheadCpuMilli = 650
+$script:TbEnvelopeOverheadMemBytes = 1879048192
 $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
 $script:TbEnvelopeVmReserveMemBytes = 1073741824
-$script:TbEnvelopeNodeMinCpuMilli   = 2000
-$script:TbEnvelopeNodeMinMemBytes   = 5368709120
+$script:TbEnvelopeNodeMinCpuMilli   = 1650
+$script:TbEnvelopeNodeMinMemBytes   = 4026531840
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──

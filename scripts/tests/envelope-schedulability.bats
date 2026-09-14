@@ -369,5 +369,5 @@ for key, kind in (("cpu_to_milli", "cpu"), ("mem_to_bytes", "mem")):
   # would corrupt the value, which is what this test is for.
   local captured
   captured="$(_resolve_training_size; _fit_training_envelope; printf '%s' "$_TB_TRAINING_SIZE")"
-  [ "$captured" = "cpu=3,memory=5Gi" ] || { echo "captured '$captured'"; return 1; }
+  [ "$captured" = "cpu=3,memory=6Gi" ] || { echo "captured '$captured'"; return 1; }
 }
