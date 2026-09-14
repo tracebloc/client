@@ -20,7 +20,9 @@
 # schemas.) Bump it, and re-vendor BOTH, whenever either contract changes
 # upstream. The drift gate below will tell you when that has happened.
 #
-# client-runtime#376 (which introduced log_redactions.json) landed on develop
-# a while back; this now points at develop's tip as of the bump below rather
-# than at that PR's head commit.
-9d577454a1f2eb87c294fdd9cb334b3a7cd90be6
+# Points at client-runtime 779b7ba7 -- the develop merge of
+# client-runtime#567 (envelope contract v4, 650m / 1792 MiB), which is the
+# commit both vendored contracts were taken from in client#1064. The
+# "unmerged #376 head" paragraph that stood here described the previous pin
+# (e4c4813e) and was left behind by that bump.
+779b7ba7ff22e20fd06fbeaeb5018cdb544ecc7f
