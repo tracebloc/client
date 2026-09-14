@@ -18,6 +18,7 @@ BeforeAll {
 }
 
 Describe "Get-BackendUrl" {
+  BeforeEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   AfterEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   It "defaults to prod when CLIENT_ENV is unset" {
     $env:CLIENT_ENV = $null
@@ -64,6 +65,7 @@ Describe "Get-BackendUrl" {
 }
 
 Describe "Get-TraceblocClientEnv" {
+  BeforeEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   AfterEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   It "reduces the documented aliases" {
     Get-TraceblocClientEnv "staging"     | Should -Be "stg"
@@ -5246,6 +5248,12 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
   #
   # The hosts are the BACKEND'S OWN settings, not a guess: DEVICE_VERIFICATION_URI
   # / RESET_PASSWORD_URL in xraybackend/settings/{dev,stg,prod}.py.
+  #
+  # BeforeEach, not just AfterEach: AfterEach only cleans up AFTER a test
+  # completes, so it can't protect the very FIRST test in this block from an
+  # ambient TRACEBLOC_ENV already present in the invoking shell (Bugbot
+  # Medium, client#1073).
+  BeforeEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   AfterEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
 
   It "dev -> dev.tracebloc.io" {
