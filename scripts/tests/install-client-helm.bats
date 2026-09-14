@@ -1416,7 +1416,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
   _sched_cluster '4 8Gi'
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -q 'RESOURCE_REQUESTS: "cpu=3,memory=5Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  grep -q 'RESOURCE_REQUESTS: "cpu=3,memory=6Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
   [[ "$output" != *"OVER"* ]] || { echo "$output"; return 1; }
 }
 
@@ -1433,16 +1433,23 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
   # 1-core / 2-GiB floor; this node leaves room for 1 GiB but not 2, so the fit
   # must reduce to memory=1Gi and print the OVER arithmetic.
   local need small over
-  need="$(_sched_need_mib)"; small=$(( need + 1024 + 64 )); over=$(( 2048 + need - small ))
+  # The over-asking node is per_node_minimum + 64 MiB: the resolver answers the
+  # 2 GiB floor there and the fit finds 2048 + need > node by (need + 2048 -
+  # small) MiB. Derived from the embedded constants, like the sh harness; the old
+  # need + 1024 + 64 relied on a >= 3 GiB overhead (see envelope-schedulability.sh 3b).
+  need="$(_sched_need_mib)"; small=$(( _TB_ENVELOPE_NODE_MIN_MEM_BYTES / 1024 / 1024 + 64 )); over=$(( 2048 + need - small ))
   _sched_cluster "4 ${small}Mi"
   run install_client_helm <<< $'myid\nmypw'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -q 'RESOURCE_REQUESTS: "cpu=1,memory=1Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
+  # cpu stays the resolver's 3 (4000m - 650m floored); the fit reduces MEMORY only. cpu=1 was the
+  # old floor artefact: at a >= 3 GiB overhead the resolver fell to the 1c/2Gi floor before the fit ran.
+  grep -q 'RESOURCE_REQUESTS: "cpu=3,memory=1Gi"' "$HOST_DATA_DIR/values.yaml" || { cat "$HOST_DATA_DIR/values.yaml"; return 1; }
   grep -q 'RESOURCE_LIMITS: "memory=1Gi"' "$HOST_DATA_DIR/values.yaml" || return 1
   grep -q 'RESOURCE_PROVENANCE: "installer"' "$HOST_DATA_DIR/values.yaml" || return 1
   # The arithmetic is on screen, not just the verdict.
   [[ "$output" == *"${over} MiB OVER"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"reduced cpu=1,memory=2Gi -> cpu=1,memory=1Gi"* ]] || { echo "$output"; return 1; }
+  # 4 cores - 650m floors to 3; the fit reduces MEMORY only (cpu=1 on both sides was the old floor artefact).
+  [[ "$output" == *"reduced cpu=3,memory=2Gi -> cpu=3,memory=1Gi"* ]] || { echo "$output"; return 1; }
 }
 
 @test "install_client_helm: REFUSES to write an envelope when not even a 1-core/1-GiB run fits (backend#2870)" {
@@ -1534,7 +1541,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
     esac
   }
   run _training_resources
-  [ "$output" = "cpu=11,memory=3Gi" ] || return 1
+  [ "$output" = "cpu=11,memory=5Gi" ] || return 1
 }
 
 @test "training size: fresh install sized to the largest node minus overhead" {
@@ -1553,7 +1560,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
     esac
   }
   run _training_resources
-  [ "$output" = "cpu=11,memory=3Gi" ] || return 1   # 12−1 CPU; 6.76−3 GiB floored
+  [ "$output" = "cpu=11,memory=5Gi" ] || return 1   # 12−0.65 CPU floored; 6.76−1.75 GiB = 5.01 floored (contract v4)
 }
 
 # CHANGED BEHAVIOR (backend#2220). This test used to assert that a 2c/4Gi machine
@@ -1570,7 +1577,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
-  kubectl() { printf '2 4Gi\n'; }        # 4−3 GiB = 1 GiB < the 2 GiB floor
+  kubectl() { printf '2 3Gi\n'; }        # 3−1.75 GiB = 1.25 GiB < the 2 GiB floor (v4; 4Gi now clears it: 2304 MiB)
   run _training_resources
   [ "$output" = "cpu=1,memory=1Gi" ] || return 1
 }
@@ -1580,7 +1587,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
-  kubectl() { printf '2 4Gi\n'; }
+  kubectl() { printf '2 3Gi\n'; }
   _resolve_training_size
   [ "$_TB_TRAINING_UNDERSIZED" = "1" ] || return 1
   [ "$_TB_TRAINING_UNSCHEDULABLE" = "0" ] || return 1
@@ -1591,7 +1598,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }
   has() { return 0; }
-  kubectl() { printf '2 4Gi\n'; }
+  kubectl() { printf '2 3Gi\n'; }
   # $(...) capture is exactly how the values generation reads this, so any warn
   # text emitted by the resolver would land inside RESOURCE_LIMITS.
   local captured
@@ -1768,7 +1775,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
     esac
   }
   run _machine_training_resources
-  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+  [ "$output" = "cpu=7,memory=30Gi" ] || return 1
 }
 
 # ── cordoned nodes (backend#2237) ────────────────────────────────────────────
@@ -1798,7 +1805,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
     esac
   }
   run _machine_training_resources
-  [ "$output" = "cpu=3,memory=13Gi" ] || return 1
+  [ "$output" = "cpu=3,memory=14Gi" ] || return 1
 }
 
 @test "envelope contract: cordoning the SMALL node changes nothing" {
@@ -1816,7 +1823,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
     esac
   }
   run _machine_training_resources
-  [ "$output" = "cpu=15,memory=61Gi" ] || return 1
+  [ "$output" = "cpu=15,memory=62Gi" ] || return 1
 }
 
 @test "envelope contract: every node cordoned is UNMEASURED, not too small" {
@@ -1857,7 +1864,7 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
     esac
   }
   run _machine_training_resources
-  [ "$output" = "cpu=7,memory=29Gi" ] || return 1
+  [ "$output" = "cpu=7,memory=30Gi" ] || return 1
 }
 
 # ── the VM beneath the node containers (backend#2221) ────────────────────────
@@ -1981,11 +1988,11 @@ _sched_need_mib() { echo $(( _TB_CP_FOOTPRINT_MEM_BYTES / 1048576 + 140 )); }
   has() { return 0; }
   kubectl() { printf '8 16Gi\n4 32Gi\n'; }
   run _machine_training_resources
-  [ "$output" = "cpu=7,memory=13Gi" ] || return 1
+  [ "$output" = "cpu=7,memory=14Gi" ] || return 1
   # ...and the answer must not depend on the order the API listed the nodes in.
   kubectl() { printf '4 32Gi\n8 16Gi\n'; }
   run _machine_training_resources
-  [ "$output" = "cpu=7,memory=13Gi" ] || return 1
+  [ "$output" = "cpu=7,memory=14Gi" ] || return 1
 }
 
 @test "envelope contract: the embedded constants match the vendored contract" {
@@ -2129,10 +2136,16 @@ PY
 
   # And it must refuse BEFORE writing anything: a generator that rewrites one
   # installer and then dies is the Bugbot#766 failure this file exists to catch.
-  grep -qE '^_TB_ENVELOPE_OVERHEAD_MEM_BYTES[[:space:]]*=[[:space:]]*3221225472$' \
-    "$work/scripts/lib/install-client-helm.sh" || return 1
-  grep -qE '^\$script:TbEnvelopeOverheadMemBytes[[:space:]]*=[[:space:]]*3221225472$' \
-    "$work/scripts/install-k8s.ps1" || return 1
+  # The surviving value is READ FROM THE REAL INSTALLER, not restated: this
+  # used to grep for the literal 3221225472 (contract v2's overhead) and went
+  # inert the moment v4 re-embedded 1879048192 -- a pin that restates the embed
+  # cannot notice the embed moving (CLAUDE.md rule 9).
+  local before_sh before_ps
+  before_sh="$(grep -oE '^_TB_ENVELOPE_OVERHEAD_MEM_BYTES[[:space:]]*=[[:space:]]*[0-9]+$' scripts/lib/install-client-helm.sh)"
+  before_ps="$(grep -oE '^\$script:TbEnvelopeOverheadMemBytes[[:space:]]*=[[:space:]]*[0-9]+$' scripts/install-k8s.ps1)"
+  [ -n "$before_sh" ] && [ -n "$before_ps" ] || return 1
+  grep -qF -- "$before_sh" "$work/scripts/lib/install-client-helm.sh" || return 1
+  grep -qF -- "$before_ps" "$work/scripts/install-k8s.ps1" || return 1
 }
 
 # ── provenance (backend#2220) ────────────────────────────────────────────────
@@ -2305,7 +2318,7 @@ PY
     esac
   }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=7,memory=29Gi" ] || return 1
+  [ "$_TB_TRAINING_SIZE" = "cpu=7,memory=30Gi" ] || return 1
   [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
 }
 
@@ -3663,14 +3676,14 @@ _arch_gate_ctx() {
   unset TRACEBLOC_TRAINING_RESOURCES
   helm() { return 1; }            # no carried release -> machine sizing runs
   has() { return 0; }
-  # 10 cores / 15Gi allocatable, minus the 1c/3Gi platform overhead, is a viable
+  # 10 cores / 15Gi allocatable, minus the 650m/1792Mi platform overhead (v4), is a viable
   # ceiling of cpu=9,memory=12Gi -- the shape that reproduced client#836.
   kubectl() { printf '10 15Gi\n'; }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=9,memory=12Gi" ] || return 1
+  [ "$_TB_TRAINING_SIZE" = "cpu=9,memory=13Gi" ] || return 1   # 15 − 1.75 GiB = 13.25 floored (v4)
   # RESOURCE_LIMITS is derived exactly as values generation derives it.
   local limits; limits="$(_training_limits "$_TB_TRAINING_SIZE")"
-  [ "$limits" = "memory=12Gi" ] || return 1   # the value from the issue
+  [ "$limits" = "memory=13Gi" ] || return 1   # follows the size; was 12Gi at the 3 GiB overhead
   local root="${BATS_TEST_DIRNAME}/../.."
   run python3 - "$root/client/values.schema.json" "$limits" <<'PY'
 import json, re, sys
