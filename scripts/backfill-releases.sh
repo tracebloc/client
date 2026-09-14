@@ -21,7 +21,10 @@
 #      was backfilled: `--pages` rebuilds `index.yaml` from the chart tarballs
 #      the MIRROR's releases carry, every URL a release-asset download URL on
 #      the mirror, and pushes it through the same publisher step the workflow
-#      uses for the Pages branch.
+#      uses for the Pages branch. The rebuild itself is publish-mirror.sh
+#      `index` — the same command the workflow runs on every stable publish, so
+#      a publish after the backfill re-derives the index from the mirror
+#      instead of overwriting it.
 #
 #  HOW MIRROR TAGS ARE ANCHORED: the mirror holds the deliverable, not the
 #  source, so no tag can point at the commit a release was built from. Each
@@ -49,7 +52,9 @@
 #
 #  WHAT IS REUSED: scripts/publish-mirror.sh `target` decides the mirror name
 #  (unset, malformed, or equal to the source is refused there — one rule, one
-#  place) and `tree` pushes the Pages branch (plain push, never a force; the
+#  place), `index` rebuilds the Helm index from the mirror's releases and runs
+#  the guard over the staged Pages branch (one implementation, shared with the
+#  workflow), and `tree` pushes the Pages branch (plain push, never a force; the
 #  caller's git credentials, so no token lands on a command line);
 #  scripts/publish-guard.sh scans every text asset, the notes and the rebuilt
 #  index.yaml with the repo's own .publish-forbidden (and the private needles
@@ -105,7 +110,11 @@
 #                    that carries it, `created` set to that release's original
 #                    publish date so the index is the same bytes on every run;
 #                    push to the mirror's gh-pages when it differs from what is
-#                    there, keeping every other file on that branch. Needs helm.
+#                    there, keeping the index.yaml and *.tgz files already on
+#                    that branch and dropping anything else. The rebuild
+#                    is publish-mirror.sh `index` (its header has the contract);
+#                    this script adds the push. Needs helm, and says so before
+#                    any gh call.
 #
 #  Exit 0 done (every release created or already present); 1 at least one
 #  release was REFUSED (the table says which and why; the rest went ahead);
@@ -155,8 +164,11 @@ BINARY_KEEP="${BINARY_KEEP:-all}"
 [ "$BINARY_KEEP" = all ] || [[ "$BINARY_KEEP" =~ ^[0-9]+$ ]] || die2 "BINARY_KEEP '$BINARY_KEEP' is neither 'all' nor a non-negative integer"
 TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 # <chart>-<version>.tgz: the chart name, then a semver (with an optional
-# prerelease suffix). Both parts are derived from the file name and, under
-# --pages, checked against what `helm show chart` reads inside the tarball.
+# prerelease suffix), read off an UPLOAD's file name to look its digest up in
+# the source's Helm index. publish-mirror.sh `index` carries the same
+# expression for the mirror's tarballs and also checks it against what
+# `helm show chart` reads inside; the shape of a chart file name is helm's,
+# not either script's, which is why both spell it the same way.
 CHART_FILE_RE='^([A-Za-z0-9_.-]+)-([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?)\.tgz$'
 [ -z "$FROM_TAG" ] || [[ "$FROM_TAG" =~ $TAG_RE ]] || die2 "--from-tag '$FROM_TAG' is not a release tag"
 [ -z "$ONLY_TAG" ] || [[ "$ONLY_TAG" =~ $TAG_RE ]] || die2 "--only-tag '$ONLY_TAG' is not a release tag"
@@ -165,6 +177,8 @@ CHART_FILE_RE='^([A-Za-z0-9_.-]+)-([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?)\.tgz
 for t in gh jq git awk base64; do command -v "$t" >/dev/null 2>&1 || die2 "'$t' is not on PATH"; done
 command -v "${PUBLISH_GUARD_GITLEAKS:-gitleaks}" >/dev/null 2>&1 || die2 "'${PUBLISH_GUARD_GITLEAKS:-gitleaks}' is not on PATH — the guard treats a missing scanner as could-not-tell, so nothing could be uploaded"
 if [ "$PAGES" -eq 1 ]; then
+  # A pre-flight, so a run that will need helm says so before its first gh
+  # call; publish-mirror.sh `index` refuses a missing helm again on its own.
   command -v "$HELM" >/dev/null 2>&1 || die2 "'$HELM' is not on PATH — --pages rebuilds the Helm index with it, and an index built any other way is not one helm would"   # mutation-anchor: helm-required
 fi
 [ -f "$PUBLISH_MIRROR" ] || die2 "$PUBLISH_MIRROR is missing"
@@ -247,7 +261,6 @@ fi
 MIRROR_HEAD="$(jq_of "$TMP/head.json" '.sha')"
 [[ "$MIRROR_HEAD" =~ ^[0-9a-f]{40}$ ]] || die2 "mirror head '$MIRROR_HEAD' is not a commit sha"
 PAGES_REMOTE="${BACKFILL_PAGES_REMOTE:-https://github.com/$MIRROR.git}"
-DOWNLOAD_BASE="https://github.com/$MIRROR/releases/download"
 
 # ---- the release list, derived from the API -----------------------------------------
 # --paginate concatenates one JSON array per page; `jq -s add` joins them.
@@ -270,9 +283,6 @@ else
 fi
 NEWEST_STABLE="$(jq_of "$TMP/releases.json" '[ .[] | select(.prerelease == false) ] | .[0].tag_name // ""')"
 carries_binaries() { grep -qxF -- "$1" "$TMP/tags-with-binaries.txt"; }
-# tag → original publish date, for the index's `created` and the notes footer.
-jq -r '.[] | [.tag_name, (.published_at // .created_at)] | @tsv' "$TMP/src-releases.json" >"$TMP/published.tsv"
-published_of() { awk -F'\t' -v t="$1" '$1 == t { print $2; exit }' "$TMP/published.tsv"; }
 
 # The source's own Helm index — the chart manifest: name, version, digest per
 # entry. A chart version it lists must hash to that digest wherever it is
@@ -656,139 +666,77 @@ if [ "$APPLY" -eq 1 ] && [ "$NEWEST_STABLE_REFUSED" -eq 1 ]; then
 fi
 
 # ---- the Helm index the mirror serves --------------------------------------------------
-# Built from what the MIRROR has, never from the plan: under --apply the mirror
-# release list is re-read after the writes above, so the index covers exactly
-# the charts a `helm repo add` against the mirror can download.
-#
-# Layout: charts/<tag>/<chart>-<version>.tgz. `helm repo index` walks one level
-# of subdirectories and joins the directory name onto --url, so a single
-# `--url <mirror>/releases/download` yields each chart's own release-asset URL.
-# A chart version carried by several releases (older releases attached every
-# chart published so far) is placed once, under the OLDEST stable release that
-# carries it; prereleases are left out, as the chart workflow leaves them out
-# of the source's index. `created` is set to that release's original publish
-# date and `generated` is left alone in the comparison, so the same mirror
-# yields the same index bytes on every run — and an unchanged index is not a
-# push.
-# set_created IN OUT — copy the helm index IN to OUT with every entry's
-# `created` replaced by the original publish date of the release its URL names
-# (tag → date from the source's release list). Two passes over IN: the first
-# maps each entry to its tag, the second rewrites. An entry with no tag or no
-# date, or a count of rewritten lines that is not the entry count, is a failure
-# (non-zero, reason in $P/awk.err) — never a partially dated index.
-set_created() {
-  awk -F'\t' 'NR == FNR { d[$1] = $2; next }
-    FILENAME != ARGV[1] && FNR == 1 { pass++ }
-    pass == 1 && /^  - /  { it++ }
-    pass == 1 && /^    - https?:\/\// { u = $0; sub(/\/[^\/]*$/, "", u); sub(/.*\//, "", u); tag[it] = u }
-    pass == 2 && /^  - /  { it2++ }
-    pass == 2 && /^    created: / {
-      t = tag[it2]; if (t == "" || !(t in d)) { print "no publish date for entry " it2 " (tag: " t ")" > "/dev/stderr"; bad = 1; exit 3 }
-      print "    created: \"" d[t] "\""; fixed++; next }
-    pass == 2 { print }
-    END { if (!bad && fixed != it) { print "rewrote " fixed " created line(s) for " it " entries" > "/dev/stderr"; exit 3 } }
-  ' "$TMP/published.tsv" "$1" "$1" >"$2" 2>"$P/awk.err"
-}
-
+# One implementation, publish-mirror.sh `index`, shared with the workflow's
+# every-stable-publish step: it reads the MIRROR's releases fresh (so under
+# --apply the index covers the releases written above), downloads and verifies
+# each chart tarball, places every chart version once under the OLDEST stable
+# release carrying it, builds the index with helm at the mirror's release-asset
+# URLs, stamps `created` from the SOURCE's release list, compares against the
+# mirror's current gh-pages apart from `generated:`, keeps the index.yaml and
+# *.tgz files already on that branch (anything else is dropped and the drop
+# counts as a change), and runs the guard over the staged branch. It pushes nothing;
+# the push below is this script's, through the same `tree` step the workflow
+# uses. The source's Pages index is never read for this: its URLs name the
+# source's Pages site (it IS read above, as the digest manifest for uploads).
 PAGES_RESULT=""
 if [ "$PAGES" -eq 1 ]; then
-  P="$TMP/pages"; mkdir -p "$P/charts" "$P/stage" "$P/guard-assets" "$P/current"
-  [ "$APPLY" -eq 0 ] || read_mirror_releases
-  # Mirror stable releases, oldest first by the SOURCE's publish date of the
-  # same tag (the mirror's own created_at is the backfill instant).
-  jq -r '.[] | select(.draft == false) | select(.prerelease == false) | .tag_name' "$TMP/mirror-releases.json" >"$P/stable-tags.txt"   # mutation-anchor: index-stable-only
-  : >"$P/order.tsv"
-  while IFS= read -r t; do
-    d="$(published_of "$t")"
-    [ -n "$d" ] || die2 "--pages: mirror release '$t' has no counterpart on '$SRC' — cannot place its charts in time"
-    printf '%s\t%s\n' "$d" "$t" >>"$P/order.tsv"
-  done <"$P/stable-tags.txt"
-  sort "$P/order.tsv" | cut -f2 >"$P/tags-oldest-first.txt"
-  : >"$P/placed.tsv"    # name<TAB>version<TAB>tag<TAB>file
-  while IFS= read -r t; do
-    jq -r --arg t "$t" '.[] | select(.tag_name == $t) | .assets[] | select(.name | endswith(".tgz")) | [.name, ((.digest // "") | ltrimstr("sha256:"))] | @tsv' "$TMP/mirror-releases.json" >"$P/tgz-$t.tsv"
-    while IFS=$'\t' read -r f d; do
-      [[ "$f" =~ $CHART_FILE_RE ]] || die2 "--pages: mirror asset '$f' on '$t' is not a <chart>-<version>.tgz"
-      cname="${BASH_REMATCH[1]}"; cver="${BASH_REMATCH[2]}"
-      awk -F'\t' -v n="$cname" -v v="$cver" '$1 == n && $2 == v { f = 1 } END { exit !f }' "$P/placed.tsv" && continue
-      [ -n "$d" ] || die2 "--pages: mirror asset '$f' on '$t' has no digest — cannot verify the download"
-      mkdir -p "$P/charts/$t"
-      gh_read "$P/dl-$t.log" release download "$t" --repo "$MIRROR" --dir "$P/charts/$t" --pattern "$f"
-      [ -f "$P/charts/$t/$f" ] || die2 "--pages: '$f' did not download from '$MIRROR' release '$t'"
-      got="$(sha256_of "$P/charts/$t/$f")"
-      [ "$got" = "$d" ] || die2 "--pages: '$f' from '$MIRROR' release '$t' hashes to $got, the mirror says $d — the download is not the asset"
-      # What the tarball says it is must be what its name says it is.
-      "$HELM" show chart "$P/charts/$t/$f" >"$P/chart-$t-$f.yaml" 2>"$P/helm.err" || die2 "--pages: helm show chart '$f' failed: $(tr '\n' ' ' <"$P/helm.err")"
-      hname="$(awk '$1 == "name:" { print $2; exit }' "$P/chart-$t-$f.yaml")"; hver="$(awk '$1 == "version:" { print $2; exit }' "$P/chart-$t-$f.yaml")"
-      [ "$hname" = "$cname" ] && [ "$hver" = "$cver" ] || die2 "--pages: '$f' contains chart '$hname' version '$hver', not what its name says"
-      printf '%s\t%s\t%s\t%s\n' "$cname" "$cver" "$t" "$f" >>"$P/placed.tsv"
-    done <"$P/tgz-$t.tsv"
-  done <"$P/tags-oldest-first.txt"
-  N_CHARTS="$(grep -c . "$P/placed.tsv" || true)"
-
-  # The mirror's current Pages branch: what is there stays there (only
-  # index.yaml is replaced), and its index.yaml is what the rebuilt one is
-  # compared with. An unreachable remote is could-not-tell; an absent branch is
-  # a first publish.
-  git -C "$P/current" init -q || die2 "--pages: git init failed"
-  heads="$(git -C "$P/current" ls-remote --heads "$PAGES_REMOTE" refs/heads/gh-pages 2>"$P/lsr.err")" || die2 "--pages: the mirror remote did not answer (git ls-remote: $(tr '\n' ' ' <"$P/lsr.err"))"
-  PAGES_EXISTED=0
-  if [ -n "$heads" ]; then
-    PAGES_EXISTED=1
-    git -C "$P/current" fetch -q --depth 1 "$PAGES_REMOTE" refs/heads/gh-pages 2>"$P/fetch.err" || die2 "--pages: could not fetch gh-pages from the mirror: $(tr '\n' ' ' <"$P/fetch.err")"
-    git -C "$P/current" checkout -q FETCH_HEAD 2>/dev/null || die2 "--pages: could not check out the mirror's gh-pages"
-    find "$P/current" -mindepth 1 -maxdepth 1 ! -name .git -exec cp -Rp {} "$P/stage"/ \; || die2 "--pages: could not copy the mirror's gh-pages"
-  fi
-
-  if [ "$N_CHARTS" -eq 0 ]; then
-    if [ "$APPLY" -eq 1 ]; then
-      echo "::error::backfill-releases: REFUSED — --pages: the mirror carries no chart tarball on any stable release; a Helm index with nothing in it is not published"
-      N_REFUSED=$((N_REFUSED + 1)); PAGES_RESULT="refused (no chart on the mirror)"
-    else
+  P="$TMP/pages"; mkdir -p "$P"
+  IDX_ARGS=(index --repo "$MIRROR" --source-releases "$TMP/src-pages.json" --out "$P/index" --remote "$PAGES_REMOTE" --forbidden "$FORBIDDEN_LIST" --helm "$HELM" --output "$P/result.txt")
+  [ -z "${BACKFILL_EXTRA_FORBIDDEN:-}" ] || IDX_ARGS+=(--extra-forbidden "$BACKFILL_EXTRA_FORBIDDEN")
+  [ "$STRICT" -eq 0 ] || IDX_ARGS+=(--strict)
+  # A dry run before the first release has nothing to index yet — that is a
+  # note, not a refusal; under --apply an empty index is refused.
+  [ "$APPLY" -eq 1 ] || IDX_ARGS+=(--allow-empty)
+  # A dry run wrote nothing since read_mirror_releases paginated the mirror's
+  # list above, so `index` reuses that read instead of paginating it again;
+  # under --apply the releases written above are not in it, so `index` reads
+  # the list fresh (review on #1060).
+  [ "$APPLY" -eq 1 ] || IDX_ARGS+=(--mirror-releases "$TMP/mirror-pages.json")   # mutation-anchor: pages-mirror-list-reuse
+  rc=0
+  bash "$PUBLISH_MIRROR" "${IDX_ARGS[@]}" >"$P/index.out" 2>&1 || rc=$?   # mutation-anchor: pages-index-call
+  cat "$P/index.out"
+  case "$rc" in
+    0) ;;
+    1) # `|| true`, as for TREE_RESULT below: under pipefail a grep with no match
+       # exits 1 and the assignment would abort the script at exit 1 BEFORE the
+       # ::error:: line, the refused count and the report. Today `index` exits 1
+       # only through its two `index: `-prefixed refusals, so the grep always
+       # matches; this guards the next unprefixed exit 1 (Bugbot on #1060).
+       IDX_REASON="$(grep -E '^::error::publish-mirror: REFUSED — index: ' "$P/index.out" | tail -1 | sed 's/^::error::publish-mirror: REFUSED — index: //' || true)"   # mutation-anchor: pages-refuse-reason
+       echo "::error::backfill-releases: REFUSED — --pages: ${IDX_REASON:-the index rebuild was refused (see above)}"
+       N_REFUSED=$((N_REFUSED + 1))
+       case "$IDX_REASON" in
+         "the guard refused"*) PAGES_RESULT="refused by the guard" ;;
+         *) PAGES_RESULT="refused (no chart on the mirror)" ;;
+       esac ;;
+    *) die2 "--pages: the index rebuild could not tell (exit $rc, see above)" ;;
+  esac
+  if [ -z "$PAGES_RESULT" ]; then
+    idx_result() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$P/result.txt"; }
+    N_CHARTS="$(idx_result charts)"; N_PAGES_STABLE="$(idx_result stable_releases)"; IDX_CHANGED="$(idx_result changed)"; IDX_BASE="$(idx_result download_base)"; IDX_STAGE="$(idx_result stage)"
+    [[ "$N_CHARTS" =~ ^[0-9]+$ ]] && [ -n "$IDX_STAGE" ] || die2 "--pages: the index rebuild exited 0 but reported no charts=/stage= result"
+    PAGES_PRESENT=absent; [ "$(idx_result pages_existed)" != true ] || PAGES_PRESENT=present
+    CHANGE_TEXT=unchanged; [ "$IDX_CHANGED" != true ] || CHANGE_TEXT=changed
+    if [ "$N_CHARTS" -eq 0 ]; then
       note "--pages: the mirror carries no chart tarball on any stable release yet — nothing to index in this dry-run; run --apply first"
       PAGES_RESULT="nothing to index yet"
-    fi
-  else
-    "$HELM" repo index "$P/charts" --url "$DOWNLOAD_BASE" >"$P/helm.out" 2>&1 || { cat "$P/helm.out"; die2 "--pages: helm repo index failed"; }
-    [ -s "$P/charts/index.yaml" ] || die2 "--pages: helm wrote no index.yaml"
-    # `created` = the original publish date of the release each chart sits
-    # under, read off the entry's own URL; every entry must get one.
-    set_created "$P/charts/index.yaml" "$P/index.yaml" || die2 "--pages: could not set created on the index: $(tr '\n' ' ' <"$P/awk.err")"   # mutation-anchor: index-created-from-source
-    # Unchanged apart from `generated`? Then the mirror's own file is staged
-    # verbatim, so the publisher sees no difference and pushes nothing.
-    INDEX_CHANGED=1
-    if [ "$PAGES_EXISTED" -eq 1 ] && [ -f "$P/stage/index.yaml" ] && cmp -s <(grep -v '^generated:' "$P/stage/index.yaml") <(grep -v '^generated:' "$P/index.yaml"); then INDEX_CHANGED=0; fi   # mutation-anchor: index-unchanged-not-pushed
-    [ "$INDEX_CHANGED" -eq 0 ] || cp "$P/index.yaml" "$P/stage/index.yaml"
-    # The guard reads the whole staged branch: the index as text, the tarballs
-    # already on the branch as opaque binaries.
-    rc=0; run_guard "$P/stage" "$P/guard-out" || rc=$?
-    case "$rc" in
-      0) ;;
-      1) echo "::error::backfill-releases: REFUSED — --pages: the guard refused the index or the Pages branch: $(guard_refusal_text "$P/guard-out.log")"
-         grep -E 'REFUSED|^    ' "$P/guard-out.log" | sed 's/^/    /'
-         N_REFUSED=$((N_REFUSED + 1)); PAGES_RESULT="refused by the guard" ;;
-      *) cat "$P/guard-out.log"; die2 "--pages: the guard could not tell (exit $rc)" ;;
-    esac
-    if [ -z "$PAGES_RESULT" ]; then
-      CHANGE_TEXT="unchanged"; [ "$INDEX_CHANGED" -eq 0 ] || CHANGE_TEXT="changed"
-      if [ "$APPLY" -eq 0 ]; then
-        note "--pages would: index $N_CHARTS chart(s) from $(grep -c . "$P/tags-oldest-first.txt") stable release(s) at $DOWNLOAD_BASE/<tag>/; index.yaml $CHANGE_TEXT against the mirror's gh-pages ($( [ "$PAGES_EXISTED" -eq 1 ] && echo present || echo absent)); not pushed"
-        PAGES_RESULT="planned ($N_CHARTS chart(s), index $CHANGE_TEXT)"
-      else
-        rc=0
-        bash "$PUBLISH_MIRROR" tree --stage "$P/stage" --repo "$MIRROR" --branch gh-pages --message "Chart index: backfill of $N_CHARTS chart version(s)" --remote "$PAGES_REMOTE" >"$P/tree.out" 2>&1 || rc=$?   # mutation-anchor: pages-publisher
-        cat "$P/tree.out"
-        [ "$rc" -eq 0 ] || die2 "--pages: the publisher did not push gh-pages (exit $rc, see above)"
-        # `|| true`: under pipefail a grep with no match exits 1 and the assignment
-        # would abort the script at exit 1 BEFORE the die2 below can say why. A
-        # publisher that exits 0 without its contract line is the could-not-tell
-        # case that die2 exists for (review on #1057).
-        TREE_RESULT="$(grep -E '^(pushed|unchanged) [0-9a-f]{40}$' "$P/tree.out" || true)"   # mutation-anchor: pages-result-grep
-        TREE_RESULT="$(printf '%s\n' "$TREE_RESULT" | tail -1)"
-        [ -n "$TREE_RESULT" ] || die2 "--pages: the publisher exited 0 but reported no 'pushed <sha>' / 'unchanged <sha>' line"
-        PAGES_RESULT="$TREE_RESULT ($N_CHARTS chart(s), index $CHANGE_TEXT)"
-        note "--pages: $PAGES_RESULT"
-      fi
+    elif [ "$APPLY" -eq 0 ]; then
+      note "--pages would: index $N_CHARTS chart(s) from $N_PAGES_STABLE stable release(s) at $IDX_BASE/<tag>/; index.yaml $CHANGE_TEXT against the mirror's gh-pages ($PAGES_PRESENT); not pushed"
+      PAGES_RESULT="planned ($N_CHARTS chart(s), index $CHANGE_TEXT)"
+    else
+      rc=0
+      bash "$PUBLISH_MIRROR" tree --stage "$IDX_STAGE" --repo "$MIRROR" --branch gh-pages --message "Chart index: backfill of $N_CHARTS chart version(s)" --remote "$PAGES_REMOTE" >"$P/tree.out" 2>&1 || rc=$?   # mutation-anchor: pages-publisher
+      cat "$P/tree.out"
+      [ "$rc" -eq 0 ] || die2 "--pages: the publisher did not push gh-pages (exit $rc, see above)"
+      # `|| true`: under pipefail a grep with no match exits 1 and the assignment
+      # would abort the script at exit 1 BEFORE the die2 below can say why. A
+      # publisher that exits 0 without its contract line is the could-not-tell
+      # case that die2 exists for (review on #1057).
+      TREE_RESULT="$(grep -E '^(pushed|unchanged) [0-9a-f]{40}$' "$P/tree.out" || true)"   # mutation-anchor: pages-result-grep
+      TREE_RESULT="$(printf '%s\n' "$TREE_RESULT" | tail -1)"
+      [ -n "$TREE_RESULT" ] || die2 "--pages: the publisher exited 0 but reported no 'pushed <sha>' / 'unchanged <sha>' line"
+      PAGES_RESULT="$TREE_RESULT ($N_CHARTS chart(s), index $CHANGE_TEXT)"
+      note "--pages: $PAGES_RESULT"
     fi
   fi
 fi
