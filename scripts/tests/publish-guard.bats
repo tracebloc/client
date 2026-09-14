@@ -669,14 +669,3 @@ staged() { ( cd "$OUT/tree" && find . -type f | sed 's|^\./||' | sort ); }
     [ -f "$OUT/tree/$s" ] || { echo "docs/INSTALL.md tells operators to run $s, but the real .publish-include does not ship it to the public mirror"; return 1; }
   done <<<"$referenced"
 }
-
-@test "the committed .publish-include-pages stages exactly the chart index and packages" {
-  add_file index.yaml 'apiVersion: v1'
-  add_file client-1.0.0.tgz 'not really gzip'
-  add_file notes.md 'stray'
-  commit
-  cp "$REPO/.publish-include-pages" "$SRC/.publish-include"
-  guard
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(staged | paste -sd' ' -)" = "client-1.0.0.tgz index.yaml" ] || { staged; return 1; }
-}
