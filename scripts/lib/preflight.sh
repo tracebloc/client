@@ -349,12 +349,16 @@ _pf_docker_root() {
   fi
 }
 
-# Backend host per CLIENT_ENV (mirrors install-client-helm.sh::_backend_url;
-# inlined so preflight is self-contained + unit-testable in isolation).
+# Backend host per TRACEBLOC_ENV/CLIENT_ENV (mirrors
+# install-client-helm.sh::_backend_url; inlined so preflight is
+# self-contained + unit-testable in isolation).
 _pf_backend_host() {
   # Same alias reduction as _backend_url (backend#1745) — an egress preflight
   # that probes the wrong backend passes while the real path is unreachable.
-  case "$(tb_client_env "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}")" in
+  # Bare call: tb_client_env's own ambient-env path is already alias-first,
+  # and the *) branch below is the prod-equivalent for any unset/unrecognised
+  # result, so there's nothing for an explicit fallback here to add.
+  case "$(tb_client_env)" in
     dev) echo "dev-api.tracebloc.io" ;;
     stg) echo "stg-api.tracebloc.io" ;;
     *)   echo "api.tracebloc.io" ;;

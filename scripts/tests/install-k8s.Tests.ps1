@@ -5246,7 +5246,7 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
   #
   # The hosts are the BACKEND'S OWN settings, not a guess: DEVICE_VERIFICATION_URI
   # / RESET_PASSWORD_URL in xraybackend/settings/{dev,stg,prod}.py.
-  AfterEach { $env:CLIENT_ENV = $null }
+  AfterEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
 
   It "dev -> dev.tracebloc.io" {
     $env:CLIENT_ENV = "dev"; Get-TraceblocDashboardUrl | Should -Be "https://dev.tracebloc.io/clients"
@@ -5276,12 +5276,10 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
   # (remove_by 2026-12-31), same precedence as Get-BackendUrl above.
   It "TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
     $env:TRACEBLOC_ENV = "stg"; Get-TraceblocDashboardUrl | Should -Be "https://stg.tracebloc.io/clients"
-    $env:TRACEBLOC_ENV = $null
   }
   It "TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
     $env:CLIENT_ENV = "prod"; $env:TRACEBLOC_ENV = "dev"
     Get-TraceblocDashboardUrl | Should -Be "https://dev.tracebloc.io/clients"
-    $env:TRACEBLOC_ENV = $null
   }
   It "and it AGREES with Get-BackendUrl about which environment this is" {
     # The defect was precisely these two disagreeing. Pair them per environment

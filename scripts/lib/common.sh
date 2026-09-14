@@ -85,7 +85,12 @@ tb_client_env() {
 #   $1 = path under the dashboard (default "clients"; pass "" for the bare host)
 _dashboard_url() {
   local path="${1-clients}" base
-  case "$(tb_client_env "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}")" in
+  # Bare call, no explicit fallback: tb_client_env's own ambient-env path
+  # already reads TRACEBLOC_ENV alias-first, and an unset/unrecognised result
+  # lands in the *) branch below the same way an explicit "prod" would --
+  # spelling out "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}" here would just
+  # re-derive what tb_client_env already does internally.
+  case "$(tb_client_env)" in
     dev) base='https://dev.tracebloc.io' ;;
     stg) base='https://stg.tracebloc.io' ;;
     *)   base='https://ai.tracebloc.io' ;;

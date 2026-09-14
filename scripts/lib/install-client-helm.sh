@@ -1276,12 +1276,17 @@ _sanitize_workspace_name() {
 
 # ── Credential verification (#717) ────────────────────────────────────────
 # Resolve the backend base URL the same way jobs-manager does
-# (client-runtime/controller.py: CLIENT_ENV → backend), defaulting to prod.
+# (client-runtime/controller.py: TRACEBLOC_ENV/CLIENT_ENV → backend),
+# defaulting to prod.
 _backend_url() {
   # Reduce aliases FIRST (backend#1745): a raw `staging` fell through to the
   # prod branch, so verify_credentials() checked staging credentials against
   # the production backend and reported them invalid.
-  case "$(tb_client_env "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}")" in
+  # Bare call: tb_client_env's own ambient-env path is already alias-first
+  # (TRACEBLOC_ENV, else CLIENT_ENV), and the *) branch below is the
+  # prod-equivalent for any unset/unrecognised result, so there's nothing for
+  # an explicit "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}" fallback to add here.
+  case "$(tb_client_env)" in
     dev) printf 'https://dev-api.tracebloc.io/' ;;
     stg) printf 'https://stg-api.tracebloc.io/' ;;
     *)   printf 'https://api.tracebloc.io/' ;;
