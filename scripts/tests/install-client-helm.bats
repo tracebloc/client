@@ -3843,7 +3843,7 @@ PY
   # gap Bugbot flagged: if the re-read cluster is unreadable, a (wrongly)
   # re-derived value ALSO falls through to the floor, so carry and re-derive are
   # indistinguishable. A viable 8c/32Gi node makes them differ — a re-derive
-  # would yield cpu=7,memory=29Gi — so asserting the size stays the floor proves
+  # would yield cpu=7,memory=30Gi (contract v4) — so asserting the size stays the floor proves
   # it was CARRIED, not re-sized.
   kubectl() {
     case "$*" in
@@ -3865,7 +3865,7 @@ PY
   # with: the gate refuses only the historic 8Gi literal, so a schedulable floor
   # is preserved rather than re-derived on a machine that could host more.
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT the node's cpu=7,memory=29Gi
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT the node's cpu=7,memory=30Gi (v4)
   [ "$_TB_TRAINING_PROVENANCE" = "installer" ] || return 1
 }
 
@@ -3882,7 +3882,7 @@ PY
   unset TRACEBLOC_TRAINING_RESOURCES
   has() { return 0; }
   # A human pinned the floor; the machine is large, so a re-derive would give
-  # cpu=7,memory=29Gi — that gap is what makes carry vs re-derive observable.
+  # cpu=7,memory=30Gi (contract v4) — that gap is what makes carry vs re-derive observable.
   helm() { printf 'env:\n  RESOURCE_REQUESTS: "cpu=1,memory=2Gi"\n  RESOURCE_PROVENANCE: "user"\n'; }
   kubectl() {
     case "$*" in
@@ -3892,7 +3892,7 @@ PY
     esac
   }
   _resolve_training_size
-  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT re-derived to cpu=7,memory=29Gi
+  [ "$_TB_TRAINING_SIZE" = "cpu=1,memory=2Gi" ] || return 1   # carried, NOT re-derived to cpu=7,memory=30Gi (v4)
   [ "$_TB_TRAINING_PROVENANCE" = "user" ] || return 1          # marker preserved, not downgraded to installer
 }
 

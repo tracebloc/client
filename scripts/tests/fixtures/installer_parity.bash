@@ -13,31 +13,37 @@
 # or the RESOURCE_LIMITS value a previous release carries.
 # `limits` is what RESOURCE_LIMITS gets: `size` minus its cpu dimension
 # (backend#2418 L0.2). NOT the same string as `size` any more.
-# schema_version 2
+#
+# Machine-sized rows (size_from=contract in the JSON) carry verdicts DERIVED
+# from envelope_contract.json (contract_version 4: overhead
+# 650m / 1792 MiB, floor 1000m / 2048 MiB),
+# after reproducing 13 single-node and
+# 4 multi-node golden vectors. Carried and overridden rows are hand-pinned.
+# schema_version 3
 
 TB_PARITY_ROWS=(
-  "viable-single-node|8 32Gi|none|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
-  "viable-large-node|16 64Gi|none|||cpu=15,memory=61Gi|installer|0|0|memory=61Gi"
-  "heterogeneous-incomparable|8 16Gi;4 32Gi|none|||cpu=7,memory=13Gi|installer|0|0|memory=13Gi"
-  "node-order-reversed|4 32Gi;8 16Gi|none|||cpu=7,memory=13Gi|installer|0|0|memory=13Gi"
-  "one-unparseable-one-valid|16 64GB;8 32Gi|none|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
-  "unparseable-cpu-one-valid|sixteen 64Gi;8 32Gi|none|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
+  "viable-single-node|8 32Gi|none|||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
+  "viable-large-node|16 64Gi|none|||cpu=15,memory=62Gi|installer|0|0|memory=62Gi"
+  "heterogeneous-incomparable|8 16Gi;4 32Gi|none|||cpu=7,memory=14Gi|installer|0|0|memory=14Gi"
+  "node-order-reversed|4 32Gi;8 16Gi|none|||cpu=7,memory=14Gi|installer|0|0|memory=14Gi"
+  "one-unparseable-one-valid|16 64GB;8 32Gi|none|||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
+  "unparseable-cpu-one-valid|sixteen 64Gi;8 32Gi|none|||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
   "all-nodes-unparseable|sixteen 64GB;eight lots|none|||cpu=1,memory=2Gi|installer|0|0|memory=2Gi"
-  "below-floor-but-requestable|2 4Gi|none|||cpu=1,memory=1Gi|installer|1|0|memory=1Gi"
+  "below-floor-but-requestable|2 3Gi|none|||cpu=1,memory=1Gi|installer|1|0|memory=1Gi"
   "too-small-to-request|500m 512Mi|none|||cpu=1,memory=2Gi|installer|0|1|memory=2Gi"
-  "exact-floor|2 5Gi|none|||cpu=1,memory=2Gi|installer|0|0|memory=2Gi"
-  "carried-read-fails|8 32Gi|read-fails|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
-  "carried-read-empty|8 32Gi|read-empty|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
+  "exact-floor|1650m 4026531840|none|||cpu=1,memory=2Gi|installer|0|0|memory=2Gi"
+  "carried-read-fails|8 32Gi|read-fails|||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
+  "carried-read-empty|8 32Gi|read-empty|||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
   "carried-size-no-marker|8 32Gi|cpu=4,memory=12Gi|||cpu=4,memory=12Gi|unknown|0|0|memory=12Gi"
   "carried-size-user-marker|8 32Gi|cpu=4,memory=12Gi|user||cpu=4,memory=12Gi|user|0|0|memory=12Gi"
   "carried-size-installer-marker|8 32Gi|cpu=4,memory=12Gi|installer||cpu=4,memory=12Gi|installer|0|0|memory=12Gi"
   "carried-size-junk-marker|8 32Gi|cpu=4,memory=12Gi|banana||cpu=4,memory=12Gi|unknown|0|0|memory=12Gi"
-  "carried-historic-literal|8 32Gi|cpu=2,memory=8Gi|user||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
+  "carried-historic-literal|8 32Gi|cpu=2,memory=8Gi|user||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
   "install-time-override|8 32Gi|none||cpu=4,memory=16Gi|cpu=4,memory=16Gi|user|0|0|memory=16Gi"
-  "cordoned-large-node-skipped|16 64Gi true;4 16Gi|none|||cpu=3,memory=13Gi|installer|0|0|memory=13Gi"
-  "cordoned-small-node-ignored|16 64Gi;4 16Gi true|none|||cpu=15,memory=61Gi|installer|0|0|memory=61Gi"
+  "cordoned-large-node-skipped|16 64Gi true;4 16Gi|none|||cpu=3,memory=14Gi|installer|0|0|memory=14Gi"
+  "cordoned-small-node-ignored|16 64Gi;4 16Gi true|none|||cpu=15,memory=62Gi|installer|0|0|memory=62Gi"
   "all-nodes-cordoned|16 64Gi true;8 32Gi true|none|||cpu=1,memory=2Gi|installer|0|0|memory=2Gi"
-  "explicit-unschedulable-false-is-schedulable|8 32Gi false|none|||cpu=7,memory=29Gi|installer|0|0|memory=29Gi"
+  "explicit-unschedulable-false-is-schedulable|8 32Gi false|none|||cpu=7,memory=30Gi|installer|0|0|memory=30Gi"
 )
 
 # kubelet drop-in reservation shape (backend#2460); see the JSON's kubelet_reservation.purpose
