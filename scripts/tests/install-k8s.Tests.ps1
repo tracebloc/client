@@ -18,7 +18,7 @@ BeforeAll {
 }
 
 Describe "Get-BackendUrl" {
-  AfterEach { $env:CLIENT_ENV = $null }
+  AfterEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   It "defaults to prod when CLIENT_ENV is unset" {
     $env:CLIENT_ENV = $null
     Get-BackendUrl | Should -Be "https://api.tracebloc.io/"
@@ -46,10 +46,25 @@ Describe "Get-BackendUrl" {
   It "production alias -> prod backend" {
     $env:CLIENT_ENV = "production"; Get-BackendUrl | Should -Be "https://api.tracebloc.io/"
   }
+
+  # RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+  # legacy alias (remove_by 2026-12-31), same precedence as
+  # Get-TraceblocClientEnv's own default-param fallback.
+  It "TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+    $env:TRACEBLOC_ENV = "stg"; Get-BackendUrl | Should -Be "https://stg-api.tracebloc.io/"
+  }
+  It "TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+    $env:CLIENT_ENV = "prod"; $env:TRACEBLOC_ENV = "dev"
+    Get-BackendUrl | Should -Be "https://dev-api.tracebloc.io/"
+  }
+  It "a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+    $env:TRACEBLOC_ENV = ""; $env:CLIENT_ENV = "stg"
+    Get-BackendUrl | Should -Be "https://stg-api.tracebloc.io/"
+  }
 }
 
 Describe "Get-TraceblocClientEnv" {
-  AfterEach { $env:CLIENT_ENV = $null }
+  AfterEach { $env:CLIENT_ENV = $null; $env:TRACEBLOC_ENV = $null }
   It "reduces the documented aliases" {
     Get-TraceblocClientEnv "staging"     | Should -Be "stg"
     Get-TraceblocClientEnv "development" | Should -Be "dev"
@@ -60,6 +75,10 @@ Describe "Get-TraceblocClientEnv" {
     # fallback for genuine garbage.
     Get-TraceblocClientEnv "stg"      | Should -Be "stg"
     Get-TraceblocClientEnv "whatever" | Should -Be "whatever"
+  }
+  It "TRACEBLOC_ENV wins over CLIENT_ENV when reading the ambient env (no explicit arg)" {
+    $env:CLIENT_ENV = "prod"; $env:TRACEBLOC_ENV = "staging"
+    Get-TraceblocClientEnv | Should -Be "stg"
   }
 }
 
@@ -2028,7 +2047,10 @@ Describe "Install-ClientHelm" {
     }
     Mock Test-Credentials { "valid" }
     Install-ClientHelm
-    (Get-Content "$HOST_DATA_DIR/values.yaml" -Raw) | Should -Match 'CLIENT_ENV: dev'
+    # RFC-0076 settings-naming (S3): both keys are written, remove_by 2026-12-31.
+    $writtenValues = Get-Content "$HOST_DATA_DIR/values.yaml" -Raw
+    $writtenValues | Should -Match 'TRACEBLOC_ENV: dev'
+    $writtenValues | Should -Match 'CLIENT_ENV: dev'
   }
   It "re-prompts on invalid, then accepts valid" {
     $HOST_DATA_DIR = "$TestDrive/d2"; $script:vc = 0
@@ -5249,6 +5271,17 @@ Describe "The dashboard link follows CLIENT_ENV (backend#2849)" {
     $env:CLIENT_ENV = "dev"
     Get-TraceblocDashboardUrl 'my-use-cases' | Should -Be "https://dev.tracebloc.io/my-use-cases"
     Get-TraceblocDashboardUrl ''             | Should -Be "https://dev.tracebloc.io"
+  }
+  # RFC-0076 settings-naming (S3): TRACEBLOC_ENV canonical, CLIENT_ENV legacy
+  # (remove_by 2026-12-31), same precedence as Get-BackendUrl above.
+  It "TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+    $env:TRACEBLOC_ENV = "stg"; Get-TraceblocDashboardUrl | Should -Be "https://stg.tracebloc.io/clients"
+    $env:TRACEBLOC_ENV = $null
+  }
+  It "TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+    $env:CLIENT_ENV = "prod"; $env:TRACEBLOC_ENV = "dev"
+    Get-TraceblocDashboardUrl | Should -Be "https://dev.tracebloc.io/clients"
+    $env:TRACEBLOC_ENV = $null
   }
   It "and it AGREES with Get-BackendUrl about which environment this is" {
     # The defect was precisely these two disagreeing. Pair them per environment

@@ -354,7 +354,7 @@ _pf_docker_root() {
 _pf_backend_host() {
   # Same alias reduction as _backend_url (backend#1745) — an egress preflight
   # that probes the wrong backend passes while the real path is unreachable.
-  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
+  case "$(tb_client_env "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}")" in
     dev) echo "dev-api.tracebloc.io" ;;
     stg) echo "stg-api.tracebloc.io" ;;
     *)   echo "api.tracebloc.io" ;;

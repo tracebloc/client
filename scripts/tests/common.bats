@@ -1077,6 +1077,28 @@ EOF
   [ "$output" = "https://dev.tracebloc.io" ] || return 1
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  _dashboard_url / TRACEBLOC_ENV — RFC-0076 settings-naming (S3): TRACEBLOC_ENV
+#  is canonical, CLIENT_ENV the legacy alias (remove_by 2026-12-31), same
+#  precedence as tb_client_env's own ambient-env fallback.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "_dashboard_url: TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+  unset CLIENT_ENV
+  TRACEBLOC_ENV=stg run _dashboard_url
+  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+  CLIENT_ENV=prod TRACEBLOC_ENV=dev run _dashboard_url
+  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+  TRACEBLOC_ENV= CLIENT_ENV=stg run _dashboard_url
+  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
+}
+
 @test "no LIVE dashboard link is hardcoded to production in ANY bash lib" {
   # A hardcoded link always carries a PATH (/clients, /my-use-cases); the bare
   # host with no path is only ever the mapping arm inside _dashboard_url.

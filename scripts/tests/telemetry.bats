@@ -633,6 +633,30 @@ attr() {
   [[ "$output" == *'"deployment.environment":"prod"'* ]] || return 1
 }
 
+# RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+# legacy alias (remove_by 2026-12-31), same precedence as tb_client_env's own
+# ambient-env fallback and telemetry_environment's no-tb_client_env fallback.
+@test "TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+  unset CLIENT_ENV
+  TRACEBLOC_ENV=stg
+  run telemetry_render_event 0
+  [[ "$output" == *'"deployment.environment":"stg"'* ]] || return 1
+}
+
+@test "TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+  CLIENT_ENV=prod
+  TRACEBLOC_ENV=dev
+  run telemetry_render_event 0
+  [[ "$output" == *'"deployment.environment":"dev"'* ]] || return 1
+}
+
+@test "a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+  TRACEBLOC_ENV=
+  CLIENT_ENV=stg
+  run telemetry_render_event 0
+  [[ "$output" == *'"deployment.environment":"stg"'* ]] || return 1
+}
+
 @test "the resource layer carries the registered identity and OTel's own names" {
   run telemetry_render_event 0
   [[ "$output" == *'"service.name":"installer"'* ]] || return 1

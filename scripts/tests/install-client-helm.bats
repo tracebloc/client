@@ -97,6 +97,36 @@ setup() {
   [ "$output" = "https://api.tracebloc.io/" ] || return 1
 }
 
+# RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+# legacy alias (remove_by 2026-12-31), same precedence as tb_client_env's own
+# ambient-env fallback.
+@test "_backend_url: TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+  unset CLIENT_ENV
+  TRACEBLOC_ENV=stg
+  run _backend_url
+  [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+  CLIENT_ENV=prod
+  TRACEBLOC_ENV=dev
+  run _backend_url
+  [ "$output" = "https://dev-api.tracebloc.io/" ] || return 1
+}
+
+@test "_backend_url: a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+  TRACEBLOC_ENV=
+  CLIENT_ENV=stg
+  run _backend_url
+  [ "$output" = "https://stg-api.tracebloc.io/" ] || return 1
+}
+
+@test "tb_client_env: TRACEBLOC_ENV wins over CLIENT_ENV when reading the ambient env (no explicit arg)" {
+  CLIENT_ENV=prod
+  TRACEBLOC_ENV=staging
+  [ "$(tb_client_env)" = "stg" ] || return 1
+}
+
 # ── verify_credentials (mock curl's http_code on stdout) ───────────────────
 @test "verify_credentials: HTTP 200 -> valid" {
   curl() { echo 200; }
