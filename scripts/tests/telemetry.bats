@@ -19,6 +19,10 @@ CANARY="CANARY-PATIENT-7"
 
 setup() {
   load_lib telemetry.sh
+  # RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV, so an ambient
+  # TRACEBLOC_ENV in the invoking shell (a developer's own env, a CI runner's)
+  # would otherwise override this deterministic pin (Bugbot Medium, client#1073).
+  TRACEBLOC_ENV=""
   CLIENT_ENV=prod
   OS=Linux
   ARCH=x86_64

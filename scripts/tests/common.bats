@@ -9,6 +9,11 @@ load test_helper
 
 setup() {
   load_lib
+  # RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV in tb_client_env's
+  # ambient-env path, so an ambient TRACEBLOC_ENV in the invoking shell would
+  # otherwise override any test below that pins only CLIENT_ENV (the class
+  # Bugbot flagged on install-client-helm.bats/telemetry.bats, client#1073).
+  unset TRACEBLOC_ENV
 }
 
 # ── validate_config ────────────────────────────────────────────────────────

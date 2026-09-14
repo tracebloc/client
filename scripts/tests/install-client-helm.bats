@@ -7,6 +7,10 @@ setup() {
   load_lib install-client-helm.sh
   MOCK_CALLS="$(mktemp)"
   GPU_VENDOR=none
+  # RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV, so an ambient
+  # TRACEBLOC_ENV in the invoking shell (a developer's own env, a CI runner's)
+  # would otherwise override this deterministic pin (Bugbot Medium, client#1073).
+  TRACEBLOC_ENV=""
   CLIENT_ENV=""
   # Interactive credential reads come from TB_TTY (the controlling terminal in
   # production, so prompts survive `curl … | bash`). Point it at stdin so the
