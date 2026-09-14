@@ -707,8 +707,11 @@ spec:
         - name: IMAGE_PULL_SECRET_NAME
           value: {{ include "tracebloc.registrySecretName" . | quote }}
         {{- end }}
+        {{- $clientEnv := include "tracebloc.clientEnv" . }}
+        - name: TRACEBLOC_ENV
+          value: {{ $clientEnv | quote }}
         - name: CLIENT_ENV
-          value: {{ include "tracebloc.clientEnv" . | quote }}
+          value: {{ $clientEnv | quote }}
         {{- /* Digest-pinned training images (RFC-1246 P2; backend#3156 for
              RFC-0067 D8). Read by jobs_manager.load_training_image_digests /
              training_pinning_enabled, which run in THIS container only -- the
@@ -909,7 +912,7 @@ spec:
              passing it through there put an ignored value in an unrelated
              process's environment and nothing more. Nobody can depend on that:
              the variable does not exist before this change. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -964,8 +967,11 @@ spec:
         # images.traceblocRegistry, then the chart default (ghcr.io).
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
+        {{- $clientEnv := include "tracebloc.clientEnv" . }}
+        - name: TRACEBLOC_ENV
+          value: {{ $clientEnv | quote }}
         - name: CLIENT_ENV
-          value: {{ include "tracebloc.clientEnv" . | quote }}
+          value: {{ $clientEnv | quote }}
         # See the api container's RESOURCE_REQUESTS note (backend#664,
         # backend#2418): both omitted when neither is set (jobs-manager derives
         # from node allocatable; older images keep their built-in literal), and
@@ -1012,7 +1018,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

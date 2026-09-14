@@ -137,6 +137,49 @@ for bad in "${BAD_ENVS[@]}"; do
   expect_reject "CLIENT_ENV=${bad//$'\t'/<tab>}" "$SCHEMA_ERR" --set env.CLIENT_ENV="$bad"
 done
 
+echo "== env.TRACEBLOC_ENV: RFC-0076 settings-naming (S3) alias-first read =="
+# TRACEBLOC_ENV is the canonical name now; CLIENT_ENV is the legacy fallback
+# (remove_by 2026-12-31). Same six spellings plus empty, read the same way,
+# through env.TRACEBLOC_ENV alone -- proves the new name is a real input, not
+# just accepted by the schema's open additionalProperties.
+expect_render "TRACEBLOC_ENV unset"       "tracebloc/jobs-manager:prod"
+expect_render "TRACEBLOC_ENV=''"          "tracebloc/jobs-manager:prod" --set env.TRACEBLOC_ENV=""
+expect_render "TRACEBLOC_ENV=dev"         "tracebloc/jobs-manager:dev"  --set env.TRACEBLOC_ENV=dev
+expect_render "TRACEBLOC_ENV=stg"         "tracebloc/jobs-manager:stg"  --set env.TRACEBLOC_ENV=stg
+expect_render "TRACEBLOC_ENV=prod"        "tracebloc/jobs-manager:prod" --set env.TRACEBLOC_ENV=prod
+expect_render "TRACEBLOC_ENV=development" "tracebloc/jobs-manager:dev"  --set env.TRACEBLOC_ENV=development
+expect_render "TRACEBLOC_ENV=staging"     "tracebloc/jobs-manager:stg"  --set env.TRACEBLOC_ENV=staging
+expect_render "TRACEBLOC_ENV=production"  "tracebloc/jobs-manager:prod" --set env.TRACEBLOC_ENV=production
+for bad in "${BAD_ENVS[@]}"; do
+  expect_reject "TRACEBLOC_ENV=${bad//$'\t'/<tab>}" "$SCHEMA_ERR" --set env.TRACEBLOC_ENV="$bad"
+done
+
+echo "== env.TRACEBLOC_ENV wins over env.CLIENT_ENV when both are set =="
+# The precedence a mid-migration values file depends on: a customer who has
+# started setting the canonical name should not be silently overridden by a
+# legacy value nobody remembered to remove.
+expect_render "TRACEBLOC_ENV=stg beats CLIENT_ENV=prod" "tracebloc/jobs-manager:stg" \
+  --set env.TRACEBLOC_ENV=stg --set env.CLIENT_ENV=prod
+expect_render "TRACEBLOC_ENV=staging (alias) beats CLIENT_ENV=dev" "tracebloc/jobs-manager:stg" \
+  --set env.TRACEBLOC_ENV=staging --set env.CLIENT_ENV=dev
+# A blank TRACEBLOC_ENV is treated as unset, so a non-blank CLIENT_ENV behind
+# it still applies -- the same "blank means unset" rule this chart has always
+# used for CLIENT_ENV alone, just checked on both names now.
+expect_render "TRACEBLOC_ENV='' falls back to CLIENT_ENV=stg" "tracebloc/jobs-manager:stg" \
+  --set env.TRACEBLOC_ENV="" --set env.CLIENT_ENV=stg
+
+echo "== both TRACEBLOC_ENV and CLIENT_ENV land in the pod env, same resolved value =="
+# client-runtime's read_client_env() (client-runtime#561) prefers TRACEBLOC_ENV
+# and falls back to CLIENT_ENV -- so a jobs-manager built before that PR must
+# still see a correct CLIENT_ENV, and one built after it must see TRACEBLOC_ENV,
+# from the SAME chart render.
+out="$(render --set env.TRACEBLOC_ENV=stg)"
+if grep -q "name: TRACEBLOC_ENV" <<<"$out" && grep -q "name: CLIENT_ENV" <<<"$out"; then
+  pass "jobs-manager pod carries both TRACEBLOC_ENV and CLIENT_ENV"
+else
+  fail "jobs-manager pod is missing one of TRACEBLOC_ENV / CLIENT_ENV: $(grep -c 'name: TRACEBLOC_ENV\|name: CLIENT_ENV' <<<"$out") matches"
+fi
+
 echo "== the template fail is a real backstop, not decoration =="
 # The enum is only enforced where the packaged schema is read. Prove the helper
 # refuses independently, by rendering with schema validation switched off.
