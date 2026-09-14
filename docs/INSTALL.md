@@ -498,4 +498,4 @@ The ingestor runs once: validates the data, copies files into the destination di
 
 Full ingestor documentation, including the schema for every supported category, the auto-update model that keeps the ingestor image current without per-install overrides, and verification commands → **[ingestor/README.md](../ingestor/README.md)**.
 
-Category-specific YAML examples (image classification, object detection, tabular regression, semantic segmentation, text classification, masked language modeling, etc.) → **[tracebloc/data-ingestors templates](https://github.com/tracebloc/data-ingestors/tree/master/templates)**.
+Category-specific YAML examples (image classification, object detection, tabular regression, semantic segmentation, text classification, masked language modeling, etc.) → **[dataset templates on docs.tracebloc.io](https://docs.tracebloc.io/create-use-case/templates)**.

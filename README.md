@@ -129,7 +129,7 @@ Full ingestor docs → **[ingestor/README.md](ingestor/README.md)** (data stagin
 |---|---|
 | Production install + required values | [docs/INSTALL.md](docs/INSTALL.md) |
 | Ingest a dataset (declarative YAML) | [ingestor/README.md](ingestor/README.md) |
-| Available ingestion categories + example YAMLs | [tracebloc/data-ingestors templates](https://github.com/tracebloc/data-ingestors/tree/master/templates) |
+| Available ingestion categories + example YAMLs | [dataset templates on docs.tracebloc.io](https://docs.tracebloc.io/create-use-case/templates) |
 | Threat model & operator responsibilities | [docs/SECURITY.md](docs/SECURITY.md) |
 | Migrating from `eks-1.0.x` / `aks-*` charts to `client-1.x` | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
 | Per-tenant migration runbook | [docs/migration-tools/README.md](docs/migration-tools/README.md) |
