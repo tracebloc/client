@@ -222,6 +222,82 @@ tests:
           path: data.reason
           pattern: "autoUpgrade is off in this release"
 
+  # ── a suspended CronJob is not a running one (backend#3731) ────────────────
+  # `autoUpgrade.enabled` alone answers "is the CronJob templated in", not "will
+  # it ever run" — auto-upgrade-cronjob.yaml also renders `autoUpgrade.suspend`
+  # into the CronJob's own `spec.suspend`, and Kubernetes never fires a suspended
+  # CronJob no matter what its schedule says. Naming "the next auto-upgrade tick"
+  # as the trigger while the CronJob is suspended is the same false promise
+  # backend#3550 fixed for the wrong-mechanism case — this is the same record
+  # failing to account for whether the right mechanism is currently paused.
+  - it: with autoUpgrade suspended, the no-token skip names the suspension, not a tick that will never fire
+    set:
+      autoUpgrade.enabled: true
+      autoUpgrade.suspend: true
+    template: templates/telemetry-collector-status.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/Namespace":
+          gvr:
+            version: v1
+            resource: namespaces
+          namespaced: false
+      objects:
+        - kind: Namespace
+          apiVersion: v1
+          metadata:
+            name: kube-system
+    asserts:
+      - equal:
+          path: data.state
+          value: skipped-no-token
+      - notMatchRegex:
+          path: data.reason
+          pattern: "resolves itself"
+      - notMatchRegex:
+          path: data.reason
+          pattern: "next auto-upgrade tick"
+      - matchRegex:
+          path: data.reason
+          pattern: "autoUpgrade is suspended on this release"
+      - matchRegex:
+          path: data.reason
+          pattern: "autoUpgrade\\.suspend: true"
+      - matchRegex:
+          path: data.reason
+          pattern: "unsuspend autoUpgrade"
+
+  # THE POSITIVE COUNTERPART. autoUpgrade enabled with suspend left at its chart
+  # default (false) must still get the tick message — the suspend check must not
+  # swallow the case that already worked.
+  - it: with autoUpgrade enabled and not suspended, the tick message is unchanged
+    set:
+      autoUpgrade.enabled: true
+      autoUpgrade.suspend: false
+    template: templates/telemetry-collector-status.yaml
+    kubernetesProvider:
+      scheme:
+        "v1/Namespace":
+          gvr:
+            version: v1
+            resource: namespaces
+          namespaced: false
+      objects:
+        - kind: Namespace
+          apiVersion: v1
+          metadata:
+            name: kube-system
+    asserts:
+      - equal:
+          path: data.state
+          value: skipped-no-token
+      - matchRegex:
+          path: data.reason
+          pattern: "next auto-upgrade tick"
+      - notMatchRegex:
+          path: data.reason
+          pattern: "suspended"
+
   - it: the incomplete-values skip no longer promises to resolve itself either
     set:
       telemetryCollector: null
