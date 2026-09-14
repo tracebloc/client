@@ -2365,7 +2365,7 @@ Describe "Get-TrainingResources" {
         @("12 6924Mi")
       } else { $global:LASTEXITCODE = 0; "" }   # namespace probe passes
     }
-    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+    Get-TrainingResources | Should -Be "cpu=11,memory=5Gi"   # 6924 - 1792 MiB = 5132 -> 5Gi (contract v4)
   }
   It "fresh install sized to the largest node minus overhead (k3d nodes not summed)" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
@@ -2378,7 +2378,7 @@ Describe "Get-TrainingResources" {
         @("12 6924Mi", "12 6924Mi")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=11,memory=3Gi"
+    Get-TrainingResources | Should -Be "cpu=11,memory=5Gi"   # 6924 - 1792 MiB = 5132 -> 5Gi (contract v4)
   }
   # CHANGED BEHAVIOR (backend#2220). This asserted that a 2c/4Gi machine gets
   # "cpu=2,memory=8Gi" -- an envelope LARGER than the machine, on which no
@@ -2391,7 +2391,7 @@ Describe "Get-TrainingResources" {
   # distinction this change introduces; they used to be the same answer.
   It "below-floor machine gets the honest remainder, not an unschedulable literal" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
-    Mock kubectl { $global:LASTEXITCODE = 0; @("2 4Gi") }
+    Mock kubectl { $global:LASTEXITCODE = 0; @("2 3Gi") }
     Get-TrainingResources | Should -Be "cpu=1,memory=1Gi"
   }
   It "unreadable cluster falls back to the contract floor" {
@@ -2557,14 +2557,14 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("16 64Gi true", "4 16Gi ")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=3,memory=13Gi"
+    Get-TrainingResources | Should -Be "cpu=3,memory=14Gi"
 
     Mock kubectl {
       if ($args -contains "--request-timeout=10s") {
         $global:LASTEXITCODE = 0; @("16 64Gi ", "4 16Gi true")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=15,memory=61Gi"
+    Get-TrainingResources | Should -Be "cpu=15,memory=62Gi"
   }
 
   It "every node cordoned reads as UNMEASURED, not as too small" {
@@ -2594,7 +2594,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("8 32Gi false")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingResources | Should -Be "cpu=7,memory=30Gi"
   }
 
   It "ANCHOR_LARGEST ties break on cpu, not memory — and the bash twin agrees" {
@@ -2608,7 +2608,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("8 16Gi", "4 32Gi")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
+    Get-TrainingResources | Should -Be "cpu=7,memory=14Gi"
   }
 
   It "the answer does not depend on the order the API listed nodes in" {
@@ -2618,7 +2618,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("4 32Gi", "8 16Gi")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=7,memory=13Gi"
+    Get-TrainingResources | Should -Be "cpu=7,memory=14Gi"
   }
 
   # Bugbot #766, second pass. The contract's skipped_nodes says allocatable that
@@ -2690,7 +2690,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("8 32Gi") }
       else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources  | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingResources  | Should -Be "cpu=7,memory=30Gi"
     Get-TrainingProvenance | Should -Be "installer"
   }
 
@@ -2755,7 +2755,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
   It "undersized: a below-floor machine gets the honest remainder, not the literal" {
     Mock helm { $global:LASTEXITCODE = 1; "" }
     Mock kubectl {
-      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("2 4Gi") }
+      if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("2 3Gi") }
       else { $global:LASTEXITCODE = 1; "" }
     }
     # 4 GiB - 3 GiB = 1 GiB, below the 2 GiB floor but still a requestable shape.
@@ -2792,7 +2792,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
       if ($args -contains "--request-timeout=10s") { $global:LASTEXITCODE = 0; @("8 32Gi") }
       else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingResources | Should -Be "cpu=7,memory=30Gi"
     $script:TbTrainingUndersized | Should -BeFalse
     $script:TbTrainingUnschedulable | Should -BeFalse
   }
@@ -2806,7 +2806,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("16 64GB", "8 32Gi")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingResources | Should -Be "cpu=7,memory=30Gi"
   }
 
   It "a node with unparseable cpu does not beat a valid one" {
@@ -2816,7 +2816,7 @@ Describe "Envelope contract golden vectors (backend#2220)" {
         $global:LASTEXITCODE = 0; @("sixteen 64Gi", "8 32Gi")
       } else { $global:LASTEXITCODE = 1; "" }
     }
-    Get-TrainingResources | Should -Be "cpu=7,memory=29Gi"
+    Get-TrainingResources | Should -Be "cpu=7,memory=30Gi"
   }
 
   It "every node unparseable falls through to the literal" {
@@ -9804,12 +9804,12 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     # room for 1 GiB but not for that floor, so the fit must reduce to 1 GiB with
     # the OVER arithmetic on screen.
     $needMib = [long]($script:TbCpFootprintMemBytes / 1MB) + [long]$script:SysMib
-    $small = $needMib + 1024 + 64
+    $small = [long]($script:TbEnvelopeNodeMinMemBytes / 1MB) + 64   # per_node_minimum + 64 (v4): resolver says 2Gi, fit over-asks by 76 MiB
     $r = Invoke-FitOn -Nodes @("4 ${small}Mi")
     $r.Fit.Verdict | Should -Be 'reduced'
     ($r.Fit.Lines -join "`n") | Should -BeLike '*OVER*'
     ($r.Fit.Lines -join "`n") | Should -BeLike "*reduced $($r.Before) -> $($r.Fit.Size)*"
-    $r.Fit.Size | Should -Be 'cpu=1,memory=1Gi'
+    $r.Fit.Size | Should -Be (($r.Before -replace ',memory=.*$') + ',memory=1Gi')   # cpu kept from the resolver; memory reduced (cpu=1 was the old floor artefact)
   }
   It "4. REFUSED when not even 1 core / 1 GiB fits, with the arithmetic (node derived)" {
     # allocatable minus the platform is 64 MiB short of a 1 GiB run
@@ -9856,12 +9856,12 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
     $r.CpuMilli | Should -Be $script:SysM
   }
 
-  It "7b. pods unreadable: verified against the chart derivation only, and it SAYS so; still reduces" {
+  It "7b. pods unreadable: verified against the chart derivation only, and it SAYS so; cannot over-ask by construction (v4)" {
     # on the derived small node -- the 8 GiB machine no longer needs reducing
     $needMib = [long]($script:TbCpFootprintMemBytes / 1MB) + [long]$script:SysMib
-    $small = $needMib + 1024 + 64
+    $small = [long]($script:TbEnvelopeNodeMinMemBytes / 1MB) + 64   # per_node_minimum + 64 (v4): resolver says 2Gi, fit over-asks by 76 MiB
     $r = Invoke-FitOn -Nodes @("4 ${small}Mi") -PodsReadable $false
-    $r.Fit.Verdict | Should -Be 'reduced'
+    $r.Fit.Verdict | Should -Be 'fits'   # with system pods unmeasured the fit subtracts exactly what the resolver did; resolver + overhead <= node always
     ($r.Fit.Lines -join "`n") | Should -BeLike '*NOT measured*chart derivation only*'
   }
 
@@ -9917,8 +9917,8 @@ Describe "Resolve-TbTrainingFit -- envelope schedulability (backend#2870, client
 
   It "Get-TrainingResources still sizes through the ONE anchor reader (extraction did not change the answer)" {
     Mock kubectl { if ($args -contains 'nodes') { $global:LASTEXITCODE = 0; @('12 6924Mi', '12 6924Mi') } else { $global:LASTEXITCODE = 1; '' } }
-    Get-TrainingResources | Should -Be 'cpu=11,memory=3Gi'
+    Get-TrainingResources | Should -Be 'cpu=11,memory=5Gi'
     Mock kubectl { if ($args -contains 'nodes') { $global:LASTEXITCODE = 0; @('16 64Gi true', '4 16Gi') } else { $global:LASTEXITCODE = 1; '' } }
-    Get-TrainingResources | Should -Be 'cpu=3,memory=13Gi'
+    Get-TrainingResources | Should -Be 'cpu=3,memory=14Gi'
   }
 }

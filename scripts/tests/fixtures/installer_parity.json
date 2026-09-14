@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "issue": "tracebloc/client#772",
   "purpose": [
     "One table of CLUSTER STATES, driven through BOTH installers, asserting identical",
@@ -26,10 +26,25 @@
     "A row added here forces BOTH languages to answer it. That is the property that was",
     "missing.",
     "",
-    "Regenerate the bash companion after editing: scripts/gen-installer-parity.sh"
+    "",
+    "schema_version 3 (backend#2460, contract v4): a row marked `size_from: contract`",
+    "describes a MACHINE-SIZED verdict, and its expect.size / limits / undersized /",
+    "unschedulable are WRITTEN by the generator from envelope_contract.json -- never",
+    "typed. Adopting contract v4 reddened 15 rows whose answers were hand-copied",
+    "consequences of the v2 overhead; a table that restates the contract drifts the",
+    "moment the contract moves. Each derived row also declares the branch it `covers`",
+    "(viable | undersized | unschedulable | unreadable | exact-floor) and the generator",
+    "REFUSES a fixture in which the contract no longer sends that row down that",
+    "branch -- so an overhead change cannot quietly turn the undersized case into one",
+    "more viable row. `nodes_from: per_node_minimum` writes the node line from the",
+    "contract, so the exact-floor row moves with the floor. Rows without the marker",
+    "(carried sizes, the install-time override) are hand-pinned: they compare CONTROL",
+    "FLOW, which is what this fixture exists for, not arithmetic.",
+    "",
+    "Regenerate both companions after editing: scripts/gen-installer-parity.sh"
   ],
   "verdict_fields": {
-    "size": "what _resolve_training_size / Get-TrainingResources choose for RESOURCE_REQUESTS. Since backend#2870 BOTH installers run a SECOND step after this -- _fit_training_envelope on bash, Resolve-TbTrainingFit on PowerShell (client#992) -- which may REDUCE an installer-chosen size (or refuse the install) so it schedules beside the chart's control plane, so the value WRITTEN can be smaller than this field on either twin. That step is asserted against the derived chart footprint by scripts/tests/envelope-schedulability.sh (bash) and by the envelope-schedulability Describe blocks in scripts/tests/install-k8s.Tests.ps1 (PowerShell), both replaying the same contract vectors and the same canned cluster; this fixture pins the resolver's choice BEFORE the fit.",
+    "size": "what _resolve_training_size / Get-TrainingResources choose for RESOURCE_REQUESTS. Since backend#2870 BOTH installers run a SECOND step after this -- _fit_training_envelope on bash, Resolve-TbTrainingFit on PowerShell (client#992) -- which may REDUCE an installer-chosen size (or refuse the install) so it schedules beside the chart's control plane, so the value WRITTEN can be smaller than this field on either twin. That step is asserted against the derived chart footprint by scripts/tests/envelope-schedulability.sh (bash) and by the envelope-schedulability Describe blocks in scripts/tests/install-k8s.Tests.ps1 (PowerShell), both replaying the same contract vectors and the same canned cluster; this fixture pins the resolver's choice BEFORE the fit. For size_from=contract rows this value is derived from envelope_contract.json by scripts/gen-installer-parity.sh (schema_version 3).",
     "provenance": "installer | user | unknown -- who chose that size",
     "undersized": "machine measured, below the training floor, honest remainder written",
     "unschedulable": "machine measured, cannot host even a 1-core/1-GiB run",
@@ -44,15 +59,17 @@
   "rows": [
     {
       "label": "viable-single-node",
-      "why": "the ordinary field case -- an 8c/32Gi box",
+      "why": "the ordinary field case -- an 8c/32Gi box (32768 - 1792 MiB overhead = 30976 -> 30Gi at contract v4; derived, so it follows the contract)",
       "nodes": "8 32Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     },
     {
@@ -60,12 +77,14 @@
       "why": "guards the ps1 Int32 overload (divergence 2): 61 GiB in bytes exceeds 2^31",
       "nodes": "16 64Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=15,memory=61Gi",
+        "size": "cpu=15,memory=62Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=61Gi"
+        "limits": "memory=62Gi"
       }
     },
     {
@@ -73,12 +92,14 @@
       "why": "the anchor tie-break (divergence 1). bash ranked (memory,cpu) and would pick 4c/32Gi; the contract's order is (cpu,memory) so 8c/16Gi wins.",
       "nodes": "8 16Gi;4 32Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=13Gi",
+        "size": "cpu=7,memory=14Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=13Gi"
+        "limits": "memory=14Gi"
       }
     },
     {
@@ -86,12 +107,14 @@
       "why": "the anchor must not depend on the order the API returned nodes in",
       "nodes": "4 32Gi;8 16Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=13Gi",
+        "size": "cpu=7,memory=14Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=13Gi"
+        "limits": "memory=14Gi"
       }
     },
     {
@@ -99,12 +122,14 @@
       "why": "divergence 3. ps1 coerced the bad node to 0 and ranked it, so 16 cores with a memory unit we do not speak took the anchor and dropped the whole machine to the literal.",
       "nodes": "16 64GB;8 32Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     },
     {
@@ -112,12 +137,14 @@
       "why": "same as above on the CPU dimension",
       "nodes": "sixteen 64Gi;8 32Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     },
     {
@@ -125,6 +152,8 @@
       "why": "divergence 5. Nothing was measured, so the literal is right and any claim about machine SIZE is a fabrication -- unschedulable must stay false.",
       "nodes": "sixteen 64GB;eight lots",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "unreadable",
       "expect": {
         "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
@@ -135,9 +164,11 @@
     },
     {
       "label": "below-floor-but-requestable",
-      "why": "4 GiB - 3 GiB = 1 GiB, under the 2 GiB floor but still a requestable shape. The honest remainder FITS; the 8 GiB literal would not.",
-      "nodes": "2 4Gi",
+      "why": "2c/3Gi: 3072 - 1792 MiB overhead = 1280 MiB, under the 2 GiB floor but still a requestable shape (1 whole GiB, 1 whole core). The honest remainder FITS; the 8 GiB literal would not. Was 2c/4Gi under contract v2's 3 GiB overhead; at v4 a 4 GiB node CLEARS the floor (4096 - 1792 = 2304), so that shape stopped exercising this branch -- which `covers: undersized` now refuses instead of letting the row quietly become one more viable case.",
+      "nodes": "2 3Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "undersized",
       "expect": {
         "size": "cpu=1,memory=1Gi",
         "provenance": "installer",
@@ -151,6 +182,8 @@
       "why": "cpu=0 is not a training request, so there is no honest number -- keep the literal and say so. Measured, unlike all-nodes-unparseable.",
       "nodes": "500m 512Mi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "unschedulable",
       "expect": {
         "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
@@ -161,9 +194,12 @@
     },
     {
       "label": "exact-floor",
-      "why": "5 GiB - 3 GiB = exactly the 2 GiB floor: viable, not undersized. The off-by-one that decides whether an edge can train.",
-      "nodes": "2 5Gi",
+      "why": "allocatable exactly at the contract's per_node_minimum (overhead + floor), written by the generator so it moves with the contract: the remainder is exactly the 2 GiB / 1-core floor -- viable, NOT undersized. The off-by-one that decides whether an edge can train. Was a hand-typed 2c/5Gi under v2's 3 GiB overhead.",
+      "nodes": "1650m 4026531840",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "exact-floor",
+      "nodes_from": "per_node_minimum",
       "expect": {
         "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
@@ -177,12 +213,14 @@
       "why": "divergence 4, the fail-unsafe one. Nothing is carried, so the machine is sized and `installer` is the TRUE answer. ps1 used to say installer for a CARRIED size; bash used to say unknown.",
       "nodes": "8 32Gi",
       "carried": "read-fails",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     },
     {
@@ -190,12 +228,14 @@
       "why": "the read succeeded but said nothing -- same verdict as a failure, and not `unknown`",
       "nodes": "8 32Gi",
       "carried": "read-empty",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     },
     {
@@ -259,12 +299,14 @@
       "nodes": "8 32Gi",
       "carried": "cpu=2,memory=8Gi",
       "carried_provenance": "user",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     },
     {
@@ -286,12 +328,14 @@
       "why": "backend#2237, the defect itself. The contract's skipped_nodes has always said `spec.unschedulable (cordoned)` is skipped, but NEITHER installer asked the API for the field, so neither could honour it -- and the golden generator pre-filtered cordoned nodes, so the contract's own one-cordoned-out vector never handed a cordoned node to the code under test. A cordoned 16c/64Gi node beside a live 4c/16Gi one took the anchor, and the installer wrote an envelope that cannot schedule: training pods sit Pending with no obvious cause. The live node must win.",
       "nodes": "16 64Gi true;4 16Gi",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=3,memory=13Gi",
+        "size": "cpu=3,memory=14Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=13Gi"
+        "limits": "memory=14Gi"
       }
     },
     {
@@ -299,12 +343,14 @@
       "why": "the mirror of the row above, and the reason it is not enough on its own: a filter that always dropped the LARGEST node would satisfy cordoned-large-node-skipped while being completely wrong. Here the cordoned node is the small one, so the 16c/64Gi anchor must survive.",
       "nodes": "16 64Gi;4 16Gi true",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=15,memory=61Gi",
+        "size": "cpu=15,memory=62Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=61Gi"
+        "limits": "memory=62Gi"
       }
     },
     {
@@ -312,6 +358,8 @@
       "why": "every node cordoned means the machine was never MEASURED, which is not the same as measured-and-too-small. It takes the unreadable-cluster branch and keeps the literal, exactly as all-nodes-unparseable does -- and critically it must NOT set the undersized/unschedulable warnings, which would tell an operator their hardware is too small when the real cause is a cordon they can undo.",
       "nodes": "16 64Gi true;8 32Gi true",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "unreadable",
       "expect": {
         "size": "cpu=1,memory=2Gi",
         "provenance": "installer",
@@ -325,12 +373,14 @@
       "why": "the third field's value domain, tested rather than assumed (backend#1729 rule 6). Kubernetes declares Unschedulable with `omitempty`, so in practice the field is either ABSENT or the literal `true` -- but both readers must key on `true`, never on non-emptiness, or an API server that ever serialises `false` would read as cordoned and the node would vanish from sizing. Cheap to pin, silent and total if wrong.",
       "nodes": "8 32Gi false",
       "carried": "none",
+      "size_from": "contract",
+      "covers": "viable",
       "expect": {
-        "size": "cpu=7,memory=29Gi",
+        "size": "cpu=7,memory=30Gi",
         "provenance": "installer",
         "undersized": false,
         "unschedulable": false,
-        "limits": "memory=29Gi"
+        "limits": "memory=30Gi"
       }
     }
   ],
