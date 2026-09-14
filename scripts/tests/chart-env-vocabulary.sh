@@ -180,8 +180,17 @@ echo "== both TRACEBLOC_ENV and CLIENT_ENV land in the pod env, same resolved va
 # jobs-manager injection (or emitting a mismatched value there) would still
 # pass (Bugbot Medium, client#1071).
 out="$(render --set env.TRACEBLOC_ENV=stg --show-only templates/jobs-manager-deployment.yaml)"
-tb_count="$(grep -c "name: TRACEBLOC_ENV" <<<"$out")"
-ce_count="$(grep -c "name: CLIENT_ENV" <<<"$out")"
+# `|| true` on every grep here: under this script's `set -euo pipefail`, a
+# bare `grep -c`/`grep -A1` that matches NOTHING exits 1, and since each of
+# these is a plain assignment (not an `if` condition, which errexit exempts),
+# that exit would abort the script before `fail` below ever ran -- silently
+# turning "the injection is missing" into a hard crash instead of a reported
+# failure, the exact case this check exists to catch (Bugbot Medium +
+# tracebloc-review, client#1071). `grep -c` still prints "0" on no match, and
+# a `grep -A1` capture is simply empty, so `|| true` only discards the exit
+# status, never the output.
+tb_count="$(grep -c "name: TRACEBLOC_ENV" <<<"$out" || true)"
+ce_count="$(grep -c "name: CLIENT_ENV" <<<"$out" || true)"
 if [ "$tb_count" -eq 2 ] && [ "$ce_count" -eq 2 ]; then
   pass "jobs-manager pod (both containers) carries both TRACEBLOC_ENV and CLIENT_ENV"
 else
@@ -191,8 +200,8 @@ fi
 # soon as it finds a match, and under this script's `set -o pipefail` the
 # upstream grep -A1 can then be seen as SIGPIPE-killed rather than as the
 # match it actually found (quality/pipefail-early-close gate, client#1071).
-tb_block="$(grep -A1 "name: TRACEBLOC_ENV" <<<"$out")"
-ce_block="$(grep -A1 "name: CLIENT_ENV" <<<"$out")"
+tb_block="$(grep -A1 "name: TRACEBLOC_ENV" <<<"$out" || true)"
+ce_block="$(grep -A1 "name: CLIENT_ENV" <<<"$out" || true)"
 if grep -q 'value: "stg"' <<<"$tb_block" && grep -q 'value: "stg"' <<<"$ce_block"; then
   pass "both TRACEBLOC_ENV and CLIENT_ENV carry the same resolved value (stg)"
 else
