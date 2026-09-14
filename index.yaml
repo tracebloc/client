@@ -4,6 +4,33 @@ entries:
   - annotations:
       category: Machine Learning
     apiVersion: v2
+    appVersion: 1.9.121
+    created: "2026-09-14T17:06:02.440678018Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: 1415022b457de00671f4b9e5f43db6b35f9af7cc46b0f633d16f3ebc1cdbfe96
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://tracebloc.github.io/client/client-1.9.121.tgz
+    version: 1.9.121
+  - annotations:
+      category: Machine Learning
+    apiVersion: v2
     appVersion: 1.9.120
     created: "2026-09-14T12:06:34.405359016Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
@@ -1894,13 +1921,13 @@ entries:
   ingestor:
   - apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-09-14T12:06:34.40637009Z"
+    created: "2026-09-14T17:06:02.441071972Z"
     description: 'Helm chart for submitting a tracebloc data-ingestion run. Renders
       a customer''s ingest.yaml into a ConfigMap and runs a post-install hook that
       POSTs it to jobs-manager''s /internal/submit-ingestion-run. jobs-manager validates
       the YAML, mints a backend token, and creates the ingestor Job directly — this
       chart owns the config + hook artifacts, not the resulting Job or its data. '
-    digest: e06e3c97d3388b8389b802bd1d6e733b005ba9348efa0061c8c1976364c48c99
+    digest: 3c6994bfc43ab996156707b8f5275da385c7582e57855cc0e703e4fdf9270606
     home: https://github.com/tracebloc/client/tree/develop/ingestor
     keywords:
     - tracebloc
@@ -1918,4 +1945,4 @@ entries:
     urls:
     - https://tracebloc.github.io/client/ingestor-0.2.0.tgz
     version: 0.2.0
-generated: "2026-09-14T12:06:34.397261811Z"
+generated: "2026-09-14T17:06:02.434212202Z"
