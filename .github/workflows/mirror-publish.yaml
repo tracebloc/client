@@ -13,18 +13,19 @@
 #   workflow_run       after "Release Helm Chart" completes successfully. NOT on
 #                      `release: published`: that event fires when the release
 #                      is created, BEFORE the chart workflow has attached the
-#                      charts, installer and signed manifest and pushed the
-#                      gh-pages index — a mirror cut then would copy a release
-#                      with half its assets. The completed chart workflow is the
-#                      moment every asset exists. head_branch of a release-
+#                      charts, installer and signed manifest — a mirror cut then
+#                      would copy a release with half its assets. The completed
+#                      chart workflow is the moment every asset exists. head_branch of a release-
 #                      triggered run is the tag (measured on v1.9.109 / -rc.1),
 #                      head_sha the commit it points at; both are checked below.
 #   workflow_dispatch  `dry-run` (default TRUE) runs every guard, prints the
-#                      staged file list and stops. `tag` names a published
-#                      release whose assets are staged too (empty = tree only).
-#                      `dry-run: false` with a tag publishes; it still refuses
-#                      while no mirror is configured. `strict` (default FALSE)
-#                      promotes the guard's report tier to refusal (below).
+#                      staged file list, resolves the mirror when one is named
+#                      and shows the chart index its releases yield — and
+#                      publishes nothing. `tag` names a published release whose
+#                      assets are staged too (empty = tree only). `dry-run:
+#                      false` with a tag publishes; it still refuses while no
+#                      mirror is configured. `strict` (default FALSE) promotes
+#                      the guard's report tier to refusal (below).
 #
 # String tiers
 #   .publish-forbidden splits its needles in two. [strings-refuse] (mailboxes,
@@ -48,6 +49,43 @@
 #   ran on (workflow_run.head_sha; for a dispatch, the commit GitHub reports
 #   for the tag). A tag that names a branch, a moved tag, or a release whose
 #   tag differs from the run's are all refused before anything is read.
+#
+# Chart index
+#   The mirror serves its own Helm repository from its gh-pages branch, and that
+#   index is DERIVED FROM THE MIRROR'S OWN RELEASES on every stable publish —
+#   never copied from this repository's gh-pages, whose entries point at this
+#   repository's Pages site and would break `helm repo add` / `helm install`
+#   against the mirror. After the release and its assets are on the mirror,
+#   scripts/publish-mirror.sh `index` (one implementation, shared with
+#   scripts/backfill-releases.sh --pages) reads the mirror's stable releases,
+#   downloads and verifies every chart tarball, places each chart version once
+#   under the oldest release that carries it at its release-asset URL, stamps
+#   `created` with the original publish date read from THIS repository's
+#   release list, carries the mirror's gh-pages forward through the Pages
+#   allowlist — index.yaml and *.tgz as plain files stay; a stray file, a
+#   directory or a symlink is dropped with a notice and the drop counts as a
+#   change, so the push prunes it — and runs the guard over the staged branch
+#   like every other uploaded text asset. The branch is pushed only when the
+#   index changed apart from `generated:` or something was dropped. A missing
+#   helm, an unverifiable tarball or an unreadable mirror is "cannot tell" and
+#   stops the run; a guard hit refuses the push.
+#
+#   A DRY RUN is not free of refusals: when a mirror is named it is resolved
+#   (publish-mirror.sh `target`) exactly as a real run would, so a malformed
+#   name, an OWNER/NAME, or a name equal to this repository is refused in the
+#   dry run too — deliberately, so a misconfigured MIRROR_REPO is found by the
+#   preview, not by the first real publish. Past that, a dry run rebuilds and
+#   shows the index the mirror's current releases yield, and pushes nothing;
+#   against a mirror with no stable chart yet it is a note (--allow-empty), not
+#   a refusal — a real publish has just created a release, so there an empty
+#   index stays refused. A dry run reads the mirror with GITHUB_TOKEN (the
+#   app token is minted for real publishes only), so a mirror that is named
+#   but not readable yet — not created, or not readable by that token — is a
+#   notice, "nothing to preview yet", never a failure; a real publish refuses
+#   a missing mirror at the confirm step. A RE-RUN after a failure past the
+#   release step finds the release already on the mirror, identical (tag
+#   commit, prerelease flag, assets by name and sha256), reports it done and
+#   goes on to the index; a release that differs is still refused.
 #
 # Prereleases
 #   A prerelease (-rc.N) mirrors ONLY its GitHub release, marked prerelease,
@@ -89,13 +127,11 @@
 #   rebuilds the mirror's Helm index from the backfilled chart tarballs at
 #   their release-asset URLs and pushes it to the mirror's gh-pages through the
 #   same publisher `tree` step this workflow uses). It reuses publish-mirror.sh
-#   for the target rule and the Pages push and publish-guard.sh for every text
-#   asset, release body and the index; its header carries the full contract.
-#   NOTE the two disagree on what the mirror's index.yaml points at: the
-#   "Guard the chart index" step below copies the source's gh-pages, whose URLs
-#   name the source's Pages site, while the backfill writes release-asset URLs
-#   on the mirror. Until this workflow rewrites the index for the mirror, the
-#   next stable publish replaces the backfilled index with the copied one.
+#   for the target rule, the index rebuild and the Pages push and
+#   publish-guard.sh for every text asset, release body and the index; its
+#   header carries the full contract. Both derive the index the same way, so a
+#   stable publish after the backfill re-derives what the backfill wrote
+#   instead of replacing it.
 name: Mirror publish
 
 on:
@@ -156,7 +192,7 @@ jobs:
         # No `ref:` — github.sha, the commit this workflow file came from. The
         # guard, the publisher and the policy lists run from here and only
         # here; the release tag is fetched below into its own directory as
-        # data. This is also the repository the gh-pages fetch reads.
+        # data.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve what to publish
@@ -359,51 +395,35 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      - name: Guard the chart index (gh-pages)
-        # The mirror serves the Helm repository at the same Pages URL, so its
-        # gh-pages branch is a copy of this repo's. Guarded with the Pages
-        # allowlist (index + packages, nothing else) and the same forbidden
-        # lists. A missing gh-pages is not "nothing to do": the chart workflow
-        # just pushed to it, so its absence means this run is looking at the
-        # wrong repository.
-        id: guard-pages
-        env:
-          STRICT: ${{ steps.plan.outputs.strict }}
-        run: |
-          set -uo pipefail
-          git fetch --depth 1 origin gh-pages || { echo "::error::could not fetch gh-pages — the chart index is missing, refusing to mirror"; exit 2; }
-          git worktree add --detach "$RUNNER_TEMP/pages-src" FETCH_HEAD || exit 2
-          args=(--source "$RUNNER_TEMP/pages-src" --include .publish-include-pages --forbidden .publish-forbidden
-                --extra-forbidden "$RUNNER_TEMP/tenants.txt" --out "$RUNNER_TEMP/stage-pages")
-          [ "$STRICT" != "true" ] || args+=(--strict)
-          rc=0
-          bash scripts/publish-guard.sh "${args[@]}" | tee "$RUNNER_TEMP/guard-pages.log" || rc=$?
-          {
-            echo "## Mirror publish — chart index (gh-pages)"
-            echo
-            echo '```'
-            cat "$RUNNER_TEMP/guard-pages.log"
-            echo '```'
-          } >>"$GITHUB_STEP_SUMMARY"
-          exit "$rc"
-
-      - name: Dry run — stop here
+      - name: Dry run — nothing is published
+        # Every publishing step below is gated off in a dry run. Two steps are
+        # not, and both can still end the run: the target resolution below runs
+        # whenever a mirror is named, so a mirror name a real run would refuse
+        # (malformed, OWNER/NAME, this repository) is refused here too — the
+        # preview is where a misconfigured MIRROR_REPO should be found; and the
+        # index derivation reads the mirror (pushes nothing) so the plan shows
+        # the chart index its releases yield today — a mirror that is not
+        # readable yet is a notice there, not a failure.
         if: steps.plan.outputs.dry_run == 'true'
         run: |
           set -euo pipefail
           MIRROR="${INPUT_MIRROR:-$VAR_MIRROR}"
-          echo "dry run: every guard passed; nothing was published."
+          echo "dry run: every guard passed; nothing is published."
           if [ -z "$MIRROR" ]; then
-            echo "::notice::MIRROR_REPO is unset — a real run would refuse at the target check until the mirror repository exists and is named."
+            echo "::notice::MIRROR_REPO is unset — a real run would refuse at the target check until the mirror repository exists and is named; with no mirror there is no chart index to derive either."
           else
-            echo "a real run would publish to: $GITHUB_REPOSITORY_OWNER/$MIRROR"
+            echo "a real run would publish to: $GITHUB_REPOSITORY_OWNER/$MIRROR — the name is checked next, as a real run would, and the chart index its releases yield follows."
           fi
 
       - name: Resolve the mirror repository
         # Run directly, never through `$(...)`: a refusal is a `::error::` line
         # on stdout, and a capture would swallow it before `set -e` exits. The
         # result (repo=, name=) is written by the script to $GITHUB_OUTPUT.
-        if: steps.plan.outputs.dry_run != 'true'
+        # A dry run resolves the mirror too when one is named, so the index
+        # step below can show what the mirror's releases yield; with no mirror
+        # named it is skipped (the dry-run step above already says so) and the
+        # index step is skipped with it.
+        if: steps.plan.outputs.dry_run != 'true' || env.INPUT_MIRROR != '' || env.VAR_MIRROR != ''
         id: target
         run: |
           set -euo pipefail
@@ -459,16 +479,6 @@ jobs:
           # the log; the result (result=, sha=) lands in $GITHUB_OUTPUT.
           bash scripts/publish-mirror.sh tree --stage "$RUNNER_TEMP/stage/tree" --repo "$REPO" --branch "$BRANCH" --message "Publish $TAG" --output "$GITHUB_OUTPUT"
 
-      - name: Push the chart index to the mirror's gh-pages
-        if: steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true'
-        env:
-          MIRROR_TOKEN: ${{ steps.token.outputs.token }}
-          REPO: ${{ steps.target.outputs.repo }}
-          TAG: ${{ steps.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          bash scripts/publish-mirror.sh tree --stage "$RUNNER_TEMP/stage-pages/tree" --repo "$REPO" --branch gh-pages --message "Chart index at $TAG"
-
       - name: Release only — keep the mirror's default branch, pin the release to its head
         # A prerelease or an older stable tag: nothing was pushed, so the
         # release is created at the commit the mirror's default branch already
@@ -492,9 +502,19 @@ jobs:
           echo "release-only $TAG: default branch '$BRANCH' and gh-pages left untouched; release will be pinned to $SHA"
 
       - name: Create the release on the mirror
+        # Re-runnable: a release already on the mirror that IS this one (same
+        # commit, prerelease flag and assets by name and sha256) is reported
+        # as done and the job goes on to the index steps — a publish that
+        # failed at dates / helm / index / the gh-pages push would otherwise
+        # die here on every re-run and never put the release into the index
+        # (Bugbot on #1060). A release that differs is refused, as before.
         if: steps.plan.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Same token, same reason as the index step: the global credential
+          # helper the push step installed reads MIRROR_TOKEN whenever git is
+          # made to authenticate from here on.
+          MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ steps.target.outputs.repo }}
           TAG: ${{ steps.plan.outputs.tag }}
           SHA: ${{ steps.push.outputs.sha || steps.keep.outputs.sha }}
@@ -514,3 +534,128 @@ jobs:
           args=(release --tag "$TAG" --repo "$REPO" --target "$SHA" --assets "$RUNNER_TEMP/stage/assets" --notes "$RUNNER_TEMP/notes.md")
           [ "$PRERELEASE" != "true" ] || args+=(--prerelease)
           bash scripts/publish-mirror.sh "${args[@]}"
+
+      - name: Read this repository's release list (the index's original publish dates)
+        # The index stamps every chart with the ORIGINAL publish date of the
+        # release it sits under, read from THIS repository's releases: the
+        # mirror's own created_at is the instant a release was mirrored, which
+        # for a backfilled one is years off. Read here with GITHUB_TOKEN — the
+        # app token below is scoped to the mirror only and cannot read this
+        # repository. An unreadable list is "cannot tell": no date, no index.
+        if: (steps.plan.outputs.dry_run == 'true' && steps.target.outputs.repo != '') || (steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true')
+        id: dates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh api --paginate "repos/$GITHUB_REPOSITORY/releases" >"$RUNNER_TEMP/source-releases.json"; then
+            echo "::error::could not read the releases of $GITHUB_REPOSITORY — the chart index stamps each entry with its original publish date and cannot be rebuilt without them; refusing."
+            exit 2
+          fi
+          echo "file=$RUNNER_TEMP/source-releases.json" >>"$GITHUB_OUTPUT"
+          echo "release list of $GITHUB_REPOSITORY: $(jq -s 'add // [] | length' "$RUNNER_TEMP/source-releases.json") release(s)"
+
+      - name: Set up Helm (the index is rebuilt with helm repo index)
+        # Same sha-pinned action and the same v3.15.4 pin as the Unit tests job:
+        # the index a customer's `helm repo add` reads is built by the tool it
+        # trusts, at a version this repository chose. publish-mirror.sh `index`
+        # refuses to run without helm, so a failed install here is a red run,
+        # never an index built some other way.
+        if: (steps.plan.outputs.dry_run == 'true' && steps.target.outputs.repo != '') || (steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true')
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.15.4
+
+      - name: Rebuild the mirror's chart index from the mirror's own releases
+        # AFTER the release and its assets exist on the mirror, so the index
+        # covers the release just published. Reads the MIRROR (the app token in
+        # a real run; GITHUB_TOKEN reads the public mirror in a dry run), never
+        # this repository's gh-pages. The staged branch went through
+        # publish-guard.sh inside the command; a refusal or a "cannot tell" is
+        # the command's exit status, caught with `|| rc=$?` so it still reaches
+        # the step summary, then re-raised. The rebuilt index.yaml is put in the
+        # summary too — in a dry run that IS the plan.
+        #
+        # MIRROR_TOKEN: the git reads of the mirror's gh-pages (ls-remote, fetch)
+        # go out anonymously — the mirror is public — and git consults the
+        # global credential helper the push step installed only after a 401.
+        # The helper reads MIRROR_TOKEN when it runs, so the variable is set
+        # here too: should the mirror ever answer 401, the helper answers with
+        # the app token, never an empty one (Bugbot on #1060). Empty in a dry
+        # run, where no helper was installed.
+        #
+        # Dry run only: the mirror is probed (`gh api repos/$REPO`) before the
+        # command runs. GITHUB_TOKEN may not read a mirror that does not exist
+        # yet — an operator setting MIRROR_REPO ahead of creating it — and the
+        # command would die as "could not tell"; a preview with nothing to
+        # preview is a notice and exit 0 instead (review on #1060). A real
+        # publish does not probe here: the confirm step already refused a
+        # missing mirror with the app token.
+        if: (steps.plan.outputs.dry_run == 'true' && steps.target.outputs.repo != '') || (steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true')
+        id: index
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token || secrets.GITHUB_TOKEN }}
+          MIRROR_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ steps.target.outputs.repo }}
+          SOURCE_RELEASES: ${{ steps.dates.outputs.file }}
+          STRICT: ${{ steps.plan.outputs.strict }}
+          DRY_RUN: ${{ steps.plan.outputs.dry_run }}
+        run: |
+          set -uo pipefail
+          args=(index --repo "$REPO" --source-releases "$SOURCE_RELEASES" --out "$RUNNER_TEMP/index"
+                --forbidden "$GITHUB_WORKSPACE/.publish-forbidden" --extra-forbidden "$RUNNER_TEMP/tenants.txt" --output "$GITHUB_OUTPUT")
+          [ "$STRICT" != "true" ] || args+=(--strict)
+          # A dry run creates no release, so a mirror with no stable chart yet
+          # (first publish, or prereleases only) has nothing to index: a note,
+          # not a refusal — as backfill's dry run. A real publish has just put
+          # a release there, so an empty index stays refused.
+          [ "$DRY_RUN" != "true" ] || args+=(--allow-empty)
+          if [ "$DRY_RUN" = "true" ] && ! gh api "repos/$REPO" --jq .full_name >"$RUNNER_TEMP/mirror-probe.out" 2>"$RUNNER_TEMP/mirror-probe.err"; then
+            echo "::notice::dry run: the mirror '$REPO' is not readable with this run's token ($(tr '\n' ' ' <"$RUNNER_TEMP/mirror-probe.err" | sed 's/ *$//')) — not created yet, or not readable by GITHUB_TOKEN. There is no chart index to preview until it is; a real publish mints a token scoped to the mirror and refuses a missing one at the confirm step. Nothing was pushed."
+            {
+              echo "## Mirror publish — chart index (derived from the mirror's releases)"
+              echo
+              echo "dry run: the mirror '$REPO' is not readable yet — nothing to preview."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          rc=0
+          bash scripts/publish-mirror.sh "${args[@]}" | tee "$RUNNER_TEMP/index.log" || rc=$?
+          {
+            echo "## Mirror publish — chart index (derived from the mirror's releases)"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/index.log"
+            echo '```'
+            if [ -s "$RUNNER_TEMP/index/index.yaml" ]; then
+              echo
+              echo "<details><summary>index.yaml as rebuilt</summary>"
+              echo
+              echo '```yaml'
+              cat "$RUNNER_TEMP/index/index.yaml"
+              echo '```'
+              echo "</details>"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -eq 0 ] && [ "$DRY_RUN" = "true" ]; then
+            echo "dry run: the index above is what the mirror's releases yield today; a real stable publish pushes it to the mirror's gh-pages only when it differs. Nothing was pushed."
+          fi
+          exit "$rc"
+
+      - name: Push the chart index to the mirror's gh-pages
+        # Only when the rebuilt index differs from what the mirror's gh-pages
+        # already serves (changed=true from the index step): an unchanged index
+        # is not a commit; a stray item dropped from the branch is (the push is
+        # what prunes it). The stage is the index step's — the index.yaml and
+        # *.tgz files the mirror's gh-pages already had plus the new index.yaml
+        # — and the push is the same plain `tree` push as the default branch's.
+        if: steps.plan.outputs.dry_run != 'true' && steps.plan.outputs.publish_tree == 'true' && steps.index.outputs.changed == 'true'
+        id: push-index
+        env:
+          MIRROR_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ steps.target.outputs.repo }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          STAGE: ${{ steps.index.outputs.stage }}
+        run: |
+          set -euo pipefail
+          bash scripts/publish-mirror.sh tree --stage "$STAGE" --repo "$REPO" --branch gh-pages --message "Chart index at $TAG" --output "$GITHUB_OUTPUT"

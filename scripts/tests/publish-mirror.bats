@@ -8,6 +8,13 @@
 # place (no mirror named, the mirror IS the source, a diverged remote), and that
 # the mirror branch ends up holding EXACTLY the stage — files removed from the
 # stage disappear from the mirror, and history is appended, never rewritten.
+# For `release`: a tag already on the mirror is "already done" ONLY when its
+# release is identical to what this run would create (tag commit, prerelease
+# flag, assets by name, sha256 and upload state) — so a re-run of a publish that
+# failed after the release step goes on to the index (Bugbot on #1060: "failed
+# index blocks workflow re-run") — and refused, naming every difference,
+# otherwise. Mutation: with the difference refusal removed, a tag at another
+# commit passes as done; the refusal test catches it.
 
 PUB=""
 BARE=""
@@ -25,14 +32,23 @@ setup() {
   printf 'doc\n' >"$STAGE/docs/a.md"
   git init -q --bare "$BARE"
   # gh shim: records every argv line to GH_LOG; `release view` answers per
-  # GH_VIEW_RC / GH_VIEW_ERR; everything else succeeds.
+  # GH_VIEW_RC / GH_VIEW_ERR; `api repos/../releases/tags/..` prints
+  # GH_RELEASE_JSON and `api repos/../commits/..` GH_TAG_SHA (both fail with
+  # GH_API_RC); everything else succeeds.
   cat >"$SHIM/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${GH_LOG:?}"
-if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
-  printf '%s\n' "${GH_VIEW_ERR:-release not found}" >&2
-  exit "${GH_VIEW_RC:-1}"
-fi
+case "${1:-} ${2:-}" in
+  "release view")
+    printf '%s\n' "${GH_VIEW_ERR:-release not found}" >&2
+    exit "${GH_VIEW_RC:-1}" ;;
+  "api repos/"*"/releases/tags/"*)
+    [ "${GH_API_RC:-0}" -eq 0 ] || { echo "HTTP 500: planted failure" >&2; exit "$GH_API_RC"; }
+    printf '%s\n' "${GH_RELEASE_JSON:?}" ;;
+  "api repos/"*"/commits/"*)
+    [ "${GH_API_RC:-0}" -eq 0 ] || { echo "HTTP 500: planted failure" >&2; exit "$GH_API_RC"; }
+    printf '%s\n' "${GH_TAG_SHA:?}" ;;
+esac
 exit 0
 EOF
   chmod +x "$SHIM/gh"
@@ -235,13 +251,114 @@ release() {
   grep -q '^release create .* --prerelease ' "$GH_LOG" || return 1
 }
 
-@test "release: a tag that already exists on the mirror is refused, never overwritten" {
+TARGET=0123456789abcdef0123456789abcdef01234567
+OTHER=ffffffffffffffffffffffffffffffffffffffff
+
+# sum FILE — the test's own sha256 of a stage file (an oracle independent of the
+# script's helper: sha256sum where it exists, shasum otherwise).
+sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+
+# existing_release DRAFT PRERELEASE [NAME<TAB>DIGEST<TAB>STATE]... — the REST
+# payload of v1.0.0 on the mirror as `gh api repos/../releases/tags/..` prints
+# it; an empty DIGEST is a `digest: null` asset.
+existing_release() {
+  local draft="$1" pre="$2" assets="" a n d st dj; shift 2
+  for a in "$@"; do
+    # Split on each tab (not `read`, which folds the two tabs of an empty digest).
+    n="${a%%$'\t'*}"; a="${a#*$'\t'}"; d="${a%%$'\t'*}"; st="${a#*$'\t'}"
+    dj=null; [ -z "$d" ] || dj="\"sha256:$d\""
+    assets="${assets:+$assets,}{\"name\":\"$n\",\"digest\":$dj,\"state\":\"$st\"}"
+  done
+  printf '{"tag_name":"v1.0.0","draft":%s,"prerelease":%s,"assets":[%s]}' "$draft" "$pre" "$assets"
+}
+# identical_release — v1.0.0 on the mirror exactly as `release` would create it
+# from the default stage (LICENSE, README.md; docs/ is not an asset).
+identical_release() { existing_release false false "LICENSE	$(sum "$STAGE/LICENSE")	uploaded" "README.md	$(sum "$STAGE/README.md")	uploaded"; }
+
+# mutant NAME REPLACEMENT — a copy of publish-mirror.sh with the line carrying
+# `# mutation-anchor: NAME` replaced by REPLACEMENT; prints its path. Refuses
+# unless the anchor was found exactly once, the copy differs and still parses.
+mutant() {
+  local name="$1" repl="$2" copy="$BATS_TEST_TMPDIR/mutant-$name.sh" n
+  n="$(grep -c -- "# mutation-anchor: $name\$" "$PUB")"
+  [ "$n" -eq 1 ] || { echo "anchor $name found $n time(s), need exactly 1"; return 1; }
+  awk -v a="# mutation-anchor: $name" -v r="$repl" 'index($0, a) && substr($0, length($0) - length(a) + 1) == a { print r; next } { print }' "$PUB" >"$copy"
+  cmp -s "$PUB" "$copy" && { echo "mutation $name did not change the script"; return 1; }
+  bash -n "$copy" || { echo "mutant $name does not parse"; return 1; }
+  printf '%s\n' "$copy"
+}
+
+@test "release: a re-run finds the tag already on the mirror and identical — already done, exit 0, nothing re-created" {
   printf 'notes\n' >"$BATS_TEST_TMPDIR/notes.md"
+  export GH_RELEASE_JSON GH_TAG_SHA="$TARGET"
+  GH_RELEASE_JSON="$(identical_release)"
   GH_VIEW_RC=0 release
-  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"REFUSED — release: 'v1.0.0' already exists on 'tracebloc/mirror'"* ]] || return 1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == "already released v1.0.0 on tracebloc/mirror at $TARGET with 2 asset(s) — the mirror's release is identical to this one, nothing re-created"* ]] || { echo "$output"; return 1; }
+  # What was compared: the release by tag and the commit the tag resolves to.
+  grep -q '^api repos/tracebloc/mirror/releases/tags/v1.0.0$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
+  grep -q '^api repos/tracebloc/mirror/commits/v1.0.0 --jq .sha$' "$GH_LOG" || { cat "$GH_LOG"; return 1; }
   run grep -c '^release create' "$GH_LOG"
   [ "$output" = "0" ] || return 1
+}
+
+@test "release: a tag already on the mirror whose release is NOT this one is refused, every difference named, never overwritten" {
+  printf 'notes\n' >"$BATS_TEST_TMPDIR/notes.md"
+  export GH_RELEASE_JSON GH_TAG_SHA
+  # The tag names another commit.
+  GH_RELEASE_JSON="$(identical_release)"; GH_TAG_SHA="$OTHER"
+  GH_VIEW_RC=0 release
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"REFUSED — release: 'v1.0.0' already exists on 'tracebloc/mirror' and is not what this run would publish — a mirrored release is never overwritten; its tag is at $OTHER, this run publishes $TARGET"* ]] || { echo "$output"; return 1; }
+  # Other bytes under one name, one asset missing, one extra: all three named.
+  GH_TAG_SHA="$TARGET"
+  GH_RELEASE_JSON="$(existing_release false false "LICENSE	$(sum "$STAGE/docs/a.md")	uploaded" "installer.sh	0123	uploaded")"
+  GH_VIEW_RC=0 release
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"asset 'LICENSE' hashes to $(sum "$STAGE/docs/a.md") on the mirror, $(sum "$STAGE/LICENSE") here"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"asset 'README.md' is not on the mirror's release"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"asset 'installer.sh' is on the mirror's release but not in --assets"* ]] || { echo "$output"; return 1; }
+  # The prerelease flag disagrees; an upload that never finished.
+  GH_RELEASE_JSON="$(existing_release false true "LICENSE	$(sum "$STAGE/LICENSE")	uploaded" "README.md	$(sum "$STAGE/README.md")	open")"
+  GH_VIEW_RC=0 release
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"it is prerelease=true, this run publishes prerelease=false"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"asset 'README.md' is on the mirror's release in state 'open', not uploaded"* ]] || { echo "$output"; return 1; }
+  # A draft under the tag.
+  GH_RELEASE_JSON="$(existing_release true false "LICENSE	$(sum "$STAGE/LICENSE")	uploaded" "README.md	$(sum "$STAGE/README.md")	uploaded")"
+  GH_VIEW_RC=0 release
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"; it is a draft"* ]] || { echo "$output"; return 1; }
+  run grep -c '^release create' "$GH_LOG"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "release: a tag already on the mirror whose release cannot be read, or an asset the mirror has no digest for, is could-not-tell" {
+  printf 'notes\n' >"$BATS_TEST_TMPDIR/notes.md"
+  export GH_RELEASE_JSON GH_TAG_SHA="$TARGET"
+  GH_RELEASE_JSON="$(identical_release)"
+  GH_VIEW_RC=0 GH_API_RC=1 release
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — release: 'v1.0.0' exists on 'tracebloc/mirror' but its release could not be read (gh exited 1: HTTP 500: planted failure)"* ]] || { echo "$output"; return 1; }
+  GH_RELEASE_JSON="$(existing_release false false "LICENSE		uploaded" "README.md	$(sum "$STAGE/README.md")	uploaded")"
+  GH_VIEW_RC=0 release
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"COULD NOT TELL — release: asset 'LICENSE' of 'v1.0.0' on 'tracebloc/mirror' has no digest — cannot tell whether it is this file"* ]] || { echo "$output"; return 1; }
+  run grep -c '^release create' "$GH_LOG"
+  [ "$output" = "0" ] || return 1
+}
+
+@test "release mutation: with the difference refusal removed, a tag at another commit passes as already done — the refusal test catches it" {
+  local m
+  m="$(mutant release-existing-differs '  :')" || { echo "$m"; return 1; }
+  printf 'notes\n' >"$BATS_TEST_TMPDIR/notes.md"
+  export GH_RELEASE_JSON GH_TAG_SHA="$OTHER"
+  GH_RELEASE_JSON="$(identical_release)"
+  GH_VIEW_RC=0 PATH="$SHIM:$PATH" run bash "$m" release --tag v1.0.0 --repo tracebloc/mirror --target "$TARGET" --assets "$STAGE" --notes "$BATS_TEST_TMPDIR/notes.md"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # The mutant reports the differing release as done: the outcome the real test
+  # refuses, so its assertion is live, not vacuous.
+  [[ "$output" == "already released v1.0.0 on tracebloc/mirror at $TARGET"* ]] || { echo "$output"; return 1; }
 }
 
 @test "release: a view failure that is not 'not found' is could-not-tell" {
