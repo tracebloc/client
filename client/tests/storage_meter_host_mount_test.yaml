@@ -102,11 +102,25 @@ tests:
     # Without `"pattern": "^/"` in values.schema.json this renders happily and
     # the cluster rejects it on apply (`hostPath.path: Invalid value: must be
     # an absolute path`) -- late, and nowhere near the key that caused it.
+    #
+    # BARE failedTemplate, per the auto-upgrade and resource-monitor schema
+    # tests: this proves the value IS REFUSED, not which refusal fired. The
+    # earlier version of this case pinned the full schema text with
+    # `errorMessage`, and that does match under helm-unittest 0.5.2 + Helm
+    # 3.15.4 -- a deliberately wrong string reds the case, so it was not the
+    # silently-ignored `errorPattern` that backend#2606 removed. It is dropped
+    # anyway because the string is HELM's, not ours: the wording, the chart
+    # list and the line breaks all come from Helm's schema validator, so a Helm
+    # upgrade rewords it and reds a case about a value that never changed.
+    # To pin the specific text, assert it from OUTSIDE the plugin
+    # (`helm template` + grep stderr), the way scripts/tests/chart-env-vocabulary.sh
+    # does. The assertion below still fails the moment the pattern is removed,
+    # because the template then renders instead of failing -- which is the
+    # regression this case exists to catch.
     set:
       resourceMonitor.hostStoragePath: data/disk
     asserts:
-      - failedTemplate:
-          errorMessage: "values don't meet the specifications of the schema(s) in the following chart(s):\nclient:\n- resourceMonitor.hostStoragePath: Does not match pattern '^/'\n"
+      - failedTemplate: {}
 
   - it: "leaves the existing /proc and /sys mounts alone"
     asserts:
