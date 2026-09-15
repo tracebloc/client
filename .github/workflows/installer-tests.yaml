@@ -283,6 +283,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Measure the kubelet + runtime footprint on a real k3d node
         env:
+          # ASSERTED, not implied by the filename. The record these legs produce is
+          # bucketed by its `platform.os` field, and until now the only thing saying
+          # these runners are Linux was `node-reservation-linux-*` in the path. The
+          # harness refuses when the assertion and the host disagree, so this turns
+          # the filename's claim into a check that can fail.
+          TB_MEASURE_PLATFORM: linux
           TB_MEASURE_IDLE_S: "180"
           TB_MEASURE_LOAD_S: "240"
           TB_MEASURE_INTERVAL_S: "10"
