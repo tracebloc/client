@@ -357,6 +357,11 @@
           "type": "boolean",
           "default": true,
           "description": "Deploy the resource-monitor DaemonSet. Defaults to true."
+        },
+        "hostStoragePath": {
+          "type": "string",
+          "default": "/",
+          "description": "Host path whose free/total space becomes the cockpit's Storage meter (backend#3762). Defaults to the node's root filesystem: the meter shows the whole storage available to the client, not the dataset PVC, whose declared size is a request rather than a reservation. Point this at a dedicated data disk if datasets live on one -- statvfs reports the device backing the path it is given, so leaving it at \"/\" there measures the wrong disk and reports nothing wrong."
         }
       },
       "additionalProperties": false

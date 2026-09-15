@@ -384,6 +384,16 @@ clusterScope: true
 # (remove_by: 2026-12-31) — see tracebloc.resourceMonitorEnabled in _helpers.tpl.
 resourceMonitor:
   enabled: true
+  # -- Host path whose free/total space becomes the cockpit's Storage meter
+  # (backend#3762). Defaults to the node's root filesystem, because the meter
+  # shows the whole storage available to the client rather than the dataset
+  # PVC -- `pvc.data` is a request, not a reservation, and on hostPath /
+  # local-path installs it describes a directory on this very disk.
+  #
+  # Point this at a dedicated data disk if datasets live on one: statvfs
+  # reports the device backing the path it is given, so leaving it at "/"
+  # on such a node measures the wrong disk and reports nothing wrong.
+  hostStoragePath: "/"
 
 # -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
 # The resource-monitor needs hostPath /proc and /sys to read node metrics,
