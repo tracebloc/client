@@ -393,6 +393,15 @@ resourceMonitor:
   # Point this at a dedicated data disk if datasets live on one: statvfs
   # reports the device backing the path it is given, so leaving it at "/"
   # on such a node measures the wrong disk and reports nothing wrong.
+  #
+  # KNOWN GAP: an install using HOST_DATASET_DIR keeps datasets on a separate
+  # (often network) volume bind-mounted at /tracebloc-data, and nothing sets
+  # this key in that flow -- so the meter measures the node root, which is
+  # exactly the disk those datasets are not on. Set it explicitly there.
+  #
+  # Whatever you set must EXIST ON EVERY NODE: the mount is type: Directory and
+  # the DaemonSet tolerates every taint, so a path only the workers have leaves
+  # control-plane pods in ContainerCreating with no probe to flag it.
   hostStoragePath: "/"
 
 # -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).

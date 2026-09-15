@@ -9,7 +9,9 @@ metadata:
     meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     kubernetes.io/description: >-
       Minimal SCC for the tracebloc resource-monitor DaemonSet.
-      Allows read-only hostPath mounts to /proc and /sys for node metrics collection.
+      Allows read-only hostPath mounts to /proc and /sys for node metrics collection,
+      and to the node filesystem at resourceMonitor.hostStoragePath (default /) for the
+      Storage meter's statvfs free/total reading.
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app: {{ include "tracebloc.resourceMonitorName" . }}
