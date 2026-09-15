@@ -18,6 +18,10 @@
 #  re-implemented in the test would keep passing while the real one drifted.
 # =============================================================================
 
+# `run --separate-stderr` (test 5) needs the 1.5.0 flag semantics declared, or
+# bats warns on every run. CI and the Homebrew formula are both well past it.
+bats_require_minimum_version 1.5.0
+
 setup() {
   MEASURE="${BATS_TEST_DIRNAME}/measure-node-reservation.sh"
   [ -x "$MEASURE" ] || [ -r "$MEASURE" ] || return 1
@@ -27,9 +31,17 @@ setup() {
 resolve() { TB_MEASURE_PRINT_PLATFORM=1 bash "$MEASURE" "$@"; }
 
 @test "the platform is resolved and printed without creating anything" {
-  run env -u TB_MEASURE_PLATFORM -u WSL_DISTRO_NAME -u WSL_INTEROP bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
+  # The title is the property, so the body has to pin it: the print seam is only
+  # safe for the other tests BECAUSE it exits before the harness does any of its
+  # real work. Asserting status + a known key would leave the title true by
+  # accident and green after the seam grew a side effect (a partial record from
+  # the EXIT trap, a $TB_MEASURE_OUT file, a k3d call).
+  local out="$BATS_TEST_TMPDIR/should-not-exist.json"
+  run env -u TB_MEASURE_PLATFORM -u WSL_DISTRO_NAME -u WSL_INTEROP \
+      TB_MEASURE_OUT="$out" bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == "Darwin" || "$output" == "Linux" || "$output" == "Windows" ]] || return 1
+  [ ! -e "$out" ] || return 1
 }
 
 @test "inside WSL2 the record is a WINDOWS record, not a Linux one" {
@@ -62,10 +74,21 @@ resolve() { TB_MEASURE_PRINT_PLATFORM=1 bash "$MEASURE" "$@"; }
     Windows) wrong=linux ;;
     *)       wrong=windows ;;
   esac
-  run env TB_MEASURE_PLATFORM="$wrong" bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
+  # --separate-stderr, so the refusal (stderr) and the stamp (stdout) can be told
+  # apart. The property is that the refusal emits NO platform at all: the seam
+  # prints the resolved key on stdout, so an empty stdout is the assertion that a
+  # foreign platform was never minted.
+  #
+  # The line this replaces was `[[ "$output" != *"$wrong"*"record for"* ]]`, and
+  # it could not fail: `record for` is printed only by the success banner, which
+  # this invocation never reaches, so the right-hand side was absent under every
+  # outcome and the test would have passed with the refusal deleted -- the one
+  # thing it is named for. Caught in review, not by the mutation pass, because
+  # the two assertions above it were doing the real work and reddened correctly.
+  run --separate-stderr env TB_MEASURE_PLATFORM="$wrong" bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
   [ "$status" -eq 2 ] || return 1
-  [[ "$output" == *"but this host detects as"* ]] || return 1
-  [[ "$output" != *"$wrong"*"record for"* ]] || return 1
+  [[ "$stderr" == *"but this host detects as"* ]] || return 1
+  [ -z "$output" ] || return 1
 }
 
 @test "the generator buckets on the field the harness stamps (they cannot drift apart)" {

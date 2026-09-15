@@ -57,7 +57,8 @@
 #  field, so a WSL2 run stamped from `uname` would not merely fail to produce a
 #  `windows` row -- it would fold Windows' footprint into the MEASURED `linux`
 #  reservation and move numbers a platform already depends on, with no error and
-#  nothing red. See _measure_platform_os below.
+#  nothing red. See _measure_platform_os below, which detects WSL through
+#  `scripts/lib/probe.sh`'s `_probe_wsl` rather than a second copy of that rule.
 #
 #  Usage:  bash scripts/tests/measure-node-reservation.sh
 #    TB_MEASURE_IDLE_S=300 TB_MEASURE_LOAD_S=300 TB_MEASURE_INTERVAL_S=15
@@ -86,6 +87,16 @@
 #  installers and adds `windows` to TB_KUBELET_RESERVATION_PLATFORMS. Until that
 #  lands, Write-KubeletConfig writes no reservation on Windows and SAYS so --
 #  unreserved and honest, never borrowing linux's numbers.
+#
+#  BUT THE LOOP DOES NOT FULLY CLOSE YET, AND THIS RUNBOOK MUST NOT IMPLY IT DOES.
+#  The `windows` row the generator writes is selected only by `install-k8s.ps1`'s
+#  `Get-KubeletReservationPlatform`. The BASH installer still buckets by kernel
+#  name -- `scripts/lib/cluster.sh`'s `_kubelet_reservation_platform()` is
+#  `uname -s` lower-cased, the very rule this harness stopped believing -- so on
+#  the WSL2 route `docs/INSTALL.md` recommends (run the Linux command inside your
+#  distro) it will keep selecting TB_KUBELET_*_LINUX on the machine the `windows`
+#  record came from. Until the apply side learns the same distinction, a Windows
+#  record is reachable from the PowerShell installer only. Tracked as backend#3861.
 # =============================================================================
 set -euo pipefail
 
@@ -112,19 +123,37 @@ LIB="$HERE/../lib"
 # can never make the record claim a platform this host is not. A detection this
 # script does not recognise refuses too -- a record for an unknown platform is
 # not a finding, it is a corruption waiting for whoever adds that platform.
-_measure_in_wsl() {
-  [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]] && return 0
-  local osrelease=/proc/sys/kernel/osrelease
-  [[ -r "$osrelease" ]] && grep -qiE 'microsoft|wsl' "$osrelease" && return 0
-  return 1
-}
+# WSL DETECTION IS `_probe_wsl`, NOT A COPY OF IT. `scripts/lib/probe.sh` already
+# owns this rule (tested in probe.bats), and it checks one thing more than an
+# obvious re-implementation does: `/proc/version`, which is the ONLY place
+# `microsoft` appears on a WSL2 distro running a custom kernel -- WSL supports
+# one, and `osrelease` is then whatever that kernel was built with. A weaker copy
+# answers "not WSL" where the real one answers "WSL", and that direction mints
+# exactly the mis-bucketed `linux` record this file exists to prevent. It also
+# takes file seams (TB_OSRELEASE_FILE / TB_PROC_VERSION_FILE), so the tests need
+# no environment variables to drive it.
+#
+# An unreadable probe.sh REFUSES. Without the detector this script cannot tell a
+# WSL2 host from a Linux one, and that failure is silent and in the unsafe
+# direction. `install-k8s.sh` sources probe.sh conditionally because an install
+# can proceed without the host audit; a measurement cannot proceed without
+# knowing what it is measuring.
+if [[ -r "$LIB/probe.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$LIB/probe.sh"
+else
+  echo "measure: $LIB/probe.sh is not readable, so WSL2 cannot be told from Linux." >&2
+  echo "measure: refusing rather than stamping a platform that would silently fold a" >&2
+  echo "measure: Windows footprint into the measured 'linux' reservation." >&2
+  exit 2
+fi
 
 # Echoes the canonical platform key, or exits 2 saying why it will not guess.
 _measure_platform_os() {
   local detected
   case "$(uname -s)" in
     Darwin) detected=Darwin ;;
-    Linux)  if _measure_in_wsl; then detected=Windows; else detected=Linux; fi ;;
+    Linux)  if _probe_wsl; then detected=Windows; else detected=Linux; fi ;;
     *)      echo "measure: \`uname -s\` is '$(uname -s)', which this harness has no platform key for." >&2
             echo "measure: add it to _measure_platform_os AND to the installers' reservation table before measuring it -- a record stamped with a key no installer reads is a measurement nobody can apply." >&2
             exit 2 ;;
