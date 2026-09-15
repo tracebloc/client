@@ -98,6 +98,16 @@ tests:
               path: "/mnt/data"
               type: Directory
 
+  - it: "refuses a relative path at the values file, not at the API server"
+    # Without `"pattern": "^/"` in values.schema.json this renders happily and
+    # the cluster rejects it on apply (`hostPath.path: Invalid value: must be
+    # an absolute path`) -- late, and nowhere near the key that caused it.
+    set:
+      resourceMonitor.hostStoragePath: data/disk
+    asserts:
+      - failedTemplate:
+          errorMessage: "values don't meet the specifications of the schema(s) in the following chart(s):\nclient:\n- resourceMonitor.hostStoragePath: Does not match pattern '^/'\n"
+
   - it: "leaves the existing /proc and /sys mounts alone"
     asserts:
       - contains:

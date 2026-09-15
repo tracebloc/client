@@ -468,7 +468,11 @@ Chart versions bundle specific Dockerfile + jobs-manager builds. Mixing an old c
 
 `enforce: restricted` is the chart default for CSI-backed deployments. Bare-metal installs (`hostPath.enabled: true`) cannot use enforce because the privileged `init-mysql-data` container — required because kubelet does not apply `fsGroup` to hostPath volumes ([kubernetes/kubernetes#138411](https://github.com/kubernetes/kubernetes/issues/138411)) — would be rejected. `ci/bm-values.yaml` overrides `namespace.podSecurity.enforce` to `""` accordingly. `warn` and `audit` remain on so violations are still logged.
 
-Node-level agents (`tracebloc-resource-monitor` DaemonSet) run in a separate namespace (`tracebloc-node-agents`) at `enforce: privileged` — they legitimately need hostPath access to `/proc` / `/sys` / cgroups. The release namespace stays clean.
+Node-level agents (`tracebloc-resource-monitor` DaemonSet) run in a separate namespace (`tracebloc-node-agents`) at `enforce: privileged` — they legitimately need hostPath access to `/proc` / `/sys` / cgroups, **and to the node's root filesystem** (`resourceMonitor.hostStoragePath`, default `/`). The release namespace stays clean.
+
+That last mount is a different kind from the other two and is called out separately for that reason: `/proc` and `/sys` are kernel metric interfaces, while this is the node's real filesystem. It backs the cockpit's Storage meter, which reports the whole storage available to the client rather than the dataset PVC (backend#3762). The posture is **read-only**, non-root (the SCC keeps `MustRunAsNonRoot`), and the agent only ever calls `statvfs` on the mount root — it reads free/total block counts and never opens, lists, or transmits file contents. `statvfs` has no narrower primitive; measuring a filesystem requires a path on it.
+
+Operators who would rather not expose `/` can point `resourceMonitor.hostStoragePath` at a narrower mount — the disk datasets actually live on, say — at the cost of the meter describing that volume instead of the node. Setting it to a path that is not a mountpoint reports the filesystem containing it, not the subtree.
 
 ### 6.7 Move an existing install off values-stored credentials
 
