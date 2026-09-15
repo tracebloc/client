@@ -65,8 +65,15 @@ tests:
               type: Directory
 
   - it: "renders for the object form that predates the key (--reuse-values)"
+    # `hostStoragePath: null` DELETES the chart default rather than overriding
+    # it (Helm coalesces a null user value by removing the key), which is the
+    # only way to reproduce what `--reuse-values` hands the template on an
+    # install whose stored values predate the key. Setting `enabled` alone
+    # leaves values.yaml's `hostStoragePath: "/"` in place, so the `dig`
+    # fallback this case exists to pin would never be reached.
     set:
       resourceMonitor.enabled: true
+      resourceMonitor.hostStoragePath: null
     asserts:
       - contains:
           path: spec.template.spec.volumes
