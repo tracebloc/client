@@ -363,7 +363,7 @@ namespace:
 
 ### Node-agents namespace (resource-monitor)
 
-The `tracebloc-resource-monitor` DaemonSet mounts `hostPath` volumes (`/proc`, `/sys`) which Pod Security Admission's `restricted` profile bans outright. The chart isolates it in a dedicated **privileged** namespace (default `tracebloc-node-agents`) so it does not constrain the restricted profile on the release namespace.
+The `tracebloc-resource-monitor` DaemonSet mounts `hostPath` volumes (`/proc`, `/sys`, and the node's root filesystem — `resourceMonitor.hostStoragePath`, default `/`, read-only and used only for a `statvfs` free/total reading; see [SECURITY.md §6.6](SECURITY.md)) which Pod Security Admission's `restricted` profile bans outright. The chart isolates it in a dedicated **privileged** namespace (default `tracebloc-node-agents`) so it does not constrain the restricted profile on the release namespace.
 
 ```yaml
 # my-values.yaml (defaults shown)

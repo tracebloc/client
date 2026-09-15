@@ -161,6 +161,24 @@ spec:
             - name: host-sys
               mountPath: /host/sys
               readOnly: true
+            # The node's filesystem, for the Storage meter (backend#3762). The
+            # cockpit shows the WHOLE storage available to the client, not
+            # `client-pvc`: `pvc.data` is a request, not a reservation, so on the
+            # hostPath / local-path setups this chart supports it describes a
+            # directory on this same disk and can name a size that does not exist.
+            #
+            # Read-only, and no extra privilege: statvfs needs only traverse
+            # permission, so this works under the `MustRunAsNonRoot` SCC exactly
+            # as the two mounts above do.
+            #
+            # The mount point is FIXED, and pairs with `HOST_ROOT_PATH` in
+            # resource_monitor.py. Only the HOST side below is configurable:
+            # which disk gets measured is a per-cluster fact, where it lands
+            # inside the pod is not, and making both adjustable would let the
+            # two drift apart into a mount the collector never looks at.
+            - name: host-root
+              mountPath: /host/root
+              readOnly: true
           env:
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all"
@@ -220,5 +238,14 @@ spec:
         - name: host-sys
           hostPath:
             path: /sys
+            type: Directory
+        # `/` by default, because "the client's storage" is the node's root
+        # filesystem. A node whose datasets sit on a DEDICATED disk mounted
+        # deeper in the tree must point this at that mount instead -- statvfs
+        # reports the device backing the path it is given, so measuring `/`
+        # there would report the wrong disk with no error to notice.
+        - name: host-root
+          hostPath:
+            path: {{ include "tracebloc.resourceMonitorHostStoragePath" . | quote }}
             type: Directory
 {{- end }}

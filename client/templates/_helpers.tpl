@@ -162,6 +162,33 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- end -}}
 {{- end }}
 
+{{/*
+  The host path whose free/total space becomes the cockpit's Storage meter
+  (backend#3762), defaulting to the node's root filesystem.
+
+  A HELPER RATHER THAN AN INLINE LOOKUP, for the same reason
+  tracebloc.resourceMonitorEnabled is one: `resourceMonitor` is still accepted
+  in its legacy SCALAR form (`resourceMonitor: true`, alias window
+  remove_by: 2026-12-31), and a bool has no fields. The obvious nil-guard,
+  `(default dict .Values.resourceMonitor).hostStoragePath`, does NOT cover that
+  case -- `default` substitutes only when a value is EMPTY, and `true` is not
+  empty -- so it renders "can't evaluate field hostStoragePath in type bool" and
+  fails templating for every operator still on the scalar form. Measured, not
+  reasoned: that is the error the first version of this produced.
+
+  The else branch also covers `kindIs "invalid"` (the key absent entirely),
+  which is what `helm upgrade --reuse-values` hands us on an install whose
+  stored values predate this key.
+*/}}
+{{- define "tracebloc.resourceMonitorHostStoragePath" -}}
+{{- $rm := .Values.resourceMonitor -}}
+{{- if kindIs "map" $rm -}}
+{{- dig "hostStoragePath" "/" $rm -}}
+{{- else -}}
+{{- "/" -}}
+{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.rbacName" -}}
 {{ include "tracebloc.fullname" . }}-jobs-manager-rbac
 {{- end }}

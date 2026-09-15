@@ -1,0 +1,140 @@
+suite: the Storage meter's host mount renders on every values shape (backend#3762)
+# WHY THIS SUITE EXISTS
+#
+# The cockpit's Storage meter shows the WHOLE storage available to the client --
+# the node filesystem -- not `client-pvc`. `pvc.data` (default 50Gi) is a
+# request, not a reservation: on the hostPath / local-path setups this chart
+# supports the dataset volume is a directory on this very disk, so a PVC-derived
+# figure would report headroom that does not exist on exactly the single-node
+# installs most customers run.
+#
+# THE REGRESSION THIS PINS. `resourceMonitor` is accepted in two shapes -- the
+# object form and the legacy scalar `resourceMonitor: true` (alias window,
+# remove_by: 2026-12-31). The first version of this feature read the new key as
+# `(default dict .Values.resourceMonitor).hostStoragePath`, which is the usual
+# nil-guard idiom and is WRONG here: `default` substitutes only when a value is
+# empty, and `true` is not empty, so the lookup reached a bool and templating
+# died with "can't evaluate field hostStoragePath in type bool" -- for every
+# operator still on the scalar form, on a chart that renders fine for everyone
+# else. A rendering test is the only thing that catches that; the schema
+# accepts both shapes by design.
+templates:
+  - templates/resource-monitor-daemonset.yaml
+release:
+  name: storage
+  namespace: tracebloc
+set:
+  clientId: "test-id"
+  clientPassword: "test"
+  storageClass.create: false
+
+tests:
+  - it: "defaults to the node's root filesystem"
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-root
+            hostPath:
+              path: "/"
+              type: Directory
+
+  - it: "mounts it read-only, at the path the collector actually reads"
+    # The mount point pairs with HOST_ROOT_PATH in resource_monitor.py and is
+    # deliberately NOT configurable -- only the host side is. If this value ever
+    # changes, the producer's default changes with it or the collector statvfs's
+    # a path that is not there.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: host-root
+            mountPath: /host/root
+            readOnly: true
+
+  - it: "renders for the LEGACY SCALAR resourceMonitor: true"
+    set:
+      resourceMonitor: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-root
+            hostPath:
+              path: "/"
+              type: Directory
+
+  - it: "renders for the object form that predates the key (--reuse-values)"
+    # `hostStoragePath: null` DELETES the chart default rather than overriding
+    # it (Helm coalesces a null user value by removing the key), which is the
+    # only way to reproduce what `--reuse-values` hands the template on an
+    # install whose stored values predate the key. Setting `enabled` alone
+    # leaves values.yaml's `hostStoragePath: "/"` in place, so the `dig`
+    # fallback this case exists to pin would never be reached.
+    set:
+      resourceMonitor.enabled: true
+      resourceMonitor.hostStoragePath: null
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-root
+            hostPath:
+              path: "/"
+              type: Directory
+
+  - it: "points at a dedicated data disk when one is configured"
+    # statvfs reports the device backing the path it is given, so a node whose
+    # datasets live on a separate mount needs this or it measures the wrong disk
+    # and reports nothing wrong.
+    set:
+      resourceMonitor.hostStoragePath: /mnt/data
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-root
+            hostPath:
+              path: "/mnt/data"
+              type: Directory
+
+  - it: "refuses a relative path at the values file, not at the API server"
+    # Without `"pattern": "^/"` in values.schema.json this renders happily and
+    # the cluster rejects it on apply (`hostPath.path: Invalid value: must be
+    # an absolute path`) -- late, and nowhere near the key that caused it.
+    #
+    # BARE failedTemplate, per the auto-upgrade and resource-monitor schema
+    # tests: this proves the value IS REFUSED, not which refusal fired. The
+    # earlier version of this case pinned the full schema text with
+    # `errorMessage`, and that does match under helm-unittest 0.5.2 + Helm
+    # 3.15.4 -- a deliberately wrong string reds the case, so it was not the
+    # silently-ignored `errorPattern` that backend#2606 removed. It is dropped
+    # anyway because the string is HELM's, not ours: the wording, the chart
+    # list and the line breaks all come from Helm's schema validator, so a Helm
+    # upgrade rewords it and reds a case about a value that never changed.
+    # To pin the specific text, assert it from OUTSIDE the plugin
+    # (`helm template` + grep stderr), the way scripts/tests/chart-env-vocabulary.sh
+    # does. The assertion below still fails the moment the pattern is removed,
+    # because the template then renders instead of failing -- which is the
+    # regression this case exists to catch.
+    set:
+      resourceMonitor.hostStoragePath: data/disk
+    asserts:
+      - failedTemplate: {}
+
+  - it: "leaves the existing /proc and /sys mounts alone"
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-proc
+            hostPath:
+              path: /proc
+              type: Directory
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-sys
+            hostPath:
+              path: /sys
+              type: Directory

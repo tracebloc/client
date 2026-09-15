@@ -384,10 +384,31 @@ clusterScope: true
 # (remove_by: 2026-12-31) — see tracebloc.resourceMonitorEnabled in _helpers.tpl.
 resourceMonitor:
   enabled: true
+  # -- Host path whose free/total space becomes the cockpit's Storage meter
+  # (backend#3762). Defaults to the node's root filesystem, because the meter
+  # shows the whole storage available to the client rather than the dataset
+  # PVC -- `pvc.data` is a request, not a reservation, and on hostPath /
+  # local-path installs it describes a directory on this very disk.
+  #
+  # Point this at a dedicated data disk if datasets live on one: statvfs
+  # reports the device backing the path it is given, so leaving it at "/"
+  # on such a node measures the wrong disk and reports nothing wrong.
+  #
+  # KNOWN GAP: an install using HOST_DATASET_DIR keeps datasets on a separate
+  # (often network) volume bind-mounted at /tracebloc-data, and nothing sets
+  # this key in that flow -- so the meter measures the node root, which is
+  # exactly the disk those datasets are not on. Set it explicitly there.
+  #
+  # Whatever you set must EXIST ON EVERY NODE: the mount is type: Directory and
+  # the DaemonSet tolerates every taint, so a path only the workers have leaves
+  # control-plane pods in ContainerCreating with no probe to flag it.
+  hostStoragePath: "/"
 
 # -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
-# The resource-monitor needs hostPath /proc and /sys to read node metrics,
-# which Pod Security Admission's `restricted` profile bans outright. Rather
+# The resource-monitor needs hostPath /proc and /sys to read node metrics, plus
+# the node's root filesystem (hostStoragePath, above) for the Storage meter's
+# statvfs reading, all of which Pod Security Admission's `restricted` profile
+# bans outright. Rather
 # than diluting the release namespace's PSA profile, node-agents get their
 # own `privileged` namespace so the rest of the workload can run under
 # `enforce: restricted` unblocked.
