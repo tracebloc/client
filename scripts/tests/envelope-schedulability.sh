@@ -210,17 +210,24 @@ else
   bad "8 GiB reproduction: verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE} (want fits, unreduced)"
 fi
 
-# 3b. THE REDUCE PATH still has to be exercised, so the node is DERIVED from the
-#     footprint: below 4 GiB the resolver falls to the 1-core / 2-GiB floor, and
-#     SMALL_MI leaves room for 1 GiB but not for that floor, so the fit must
-#     reduce to 1 GiB with the arithmetic on screen. Moves with the render.
-SMALL_MI=$(( NEED_B / MIB + 1024 + 64 ))
+# 3b. THE REDUCE PATH still has to be exercised, so the node is DERIVED: the
+#     resolver subtracts the embedded overhead and floors to whole Gi, and the
+#     fit then adds overhead + system pods back. On a node of exactly
+#     per_node_minimum + 64 MiB the resolver answers the 2 GiB floor (the 64
+#     spare MiB floor away) while 2 GiB + overhead + 140 MiB of system pods is
+#     76 MiB more than the node has -- so the fit MUST reduce to 1 GiB with the
+#     arithmetic on screen. Derived from the embedded constants, so it moves
+#     with both the overhead and the floor. (It used to be NEED + 1024 + 64,
+#     which relied on the resolver falling to the floor below 4 GiB -- true only
+#     while the overhead was >= 3 GiB; contract v4's 1792 MiB made the resolver
+#     and the fit agree on that node and nothing reduced.)
+SMALL_MI=$(( _TB_ENVELOPE_NODE_MIN_MEM_BYTES / MIB + 64 ))
 resolve_and_fit "4 ${SMALL_MI}Mi"
-if [[ "$_TB_FIT_VERDICT" == "reduced" ]] && [[ "$_TB_FIT_LINES" == *"OVER"* ]] && [[ "$_TB_FIT_LINES" == *"reduced ${BEFORE} -> ${_TB_TRAINING_SIZE}"* ]] && [[ "$_TB_TRAINING_SIZE" == "cpu=1,memory=1Gi" ]]; then
-  ok "${SMALL_MI} MiB node (derived): ${BEFORE} -> ${_TB_TRAINING_SIZE}, arithmetic printed"
+if [[ "$_TB_FIT_VERDICT" == "reduced" ]] && [[ "$_TB_FIT_LINES" == *"OVER"* ]] && [[ "$_TB_FIT_LINES" == *"reduced ${BEFORE} -> ${_TB_TRAINING_SIZE}"* ]] && [[ "$_TB_TRAINING_SIZE" == "${BEFORE%%,*},memory=1Gi" ]]; then
+  ok "${SMALL_MI} MiB node (derived): ${BEFORE} -> ${_TB_TRAINING_SIZE}, arithmetic printed (cpu kept, memory reduced)"
   printf '%s\n' "$_TB_FIT_LINES" | sed 's/^/        /'
 else
-  bad "${SMALL_MI} MiB node (derived): verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE} (want reduced to cpu=1,memory=1Gi)"
+  bad "${SMALL_MI} MiB node (derived): verdict '${_TB_FIT_VERDICT}', ${BEFORE} -> ${_TB_TRAINING_SIZE} (want reduced to ${BEFORE%%,*},memory=1Gi -- the fit reduces memory, never cpu)"
 fi
 
 # 4. REFUSAL when not even 1 core / 1 GiB fits -- TINY_MI is derived so that
@@ -267,12 +274,19 @@ else
   bad "measured system pods: $(( ${_TB_SYS_MEM_BYTES:-0} / MIB )) MiB / ${_TB_SYS_CPU_MILLI:-0} m (want ${SYS_MIB} / ${SYS_M}); note: ${_TB_SYS_NOTE:-}"
 fi
 
-# 7b. Pods unreadable: chart-only, and the verdict SAYS so; still reduces on the
-#     derived SMALL_MI node (the 8 GiB machine no longer needs reducing).
+# 7b. Pods unreadable: chart-only, and the verdict SAYS so. It used to "still
+#     reduce" on the derived node; since contract v4 that is UNREACHABLE BY
+#     CONSTRUCTION, not merely untested: with system pods unmeasured the fit
+#     subtracts exactly the overhead the resolver already subtracted, and the
+#     resolver's whole-Gi floor can only give back slack, so
+#     resolver + overhead <= node always holds. The only thing the fit can ever
+#     find OVER is the measured system-pods term (3b, above). So the honest
+#     assertion here is: verdict fits, AND the lines say the pods were NOT
+#     measured -- the verdict must not pretend to a measurement it did not make.
 PODS_READABLE=0
 resolve_and_fit "4 ${SMALL_MI}Mi"
-if [[ "$_TB_FIT_VERDICT" == "reduced" && "$_TB_FIT_LINES" == *"NOT measured"*"chart derivation only"* ]]; then
-  ok "pod list unreadable: verified against the chart derivation only, and said so (${BEFORE} -> ${_TB_TRAINING_SIZE})"
+if [[ "$_TB_FIT_VERDICT" == "fits" && "$_TB_FIT_LINES" == *"NOT measured"*"chart derivation only"* ]]; then
+  ok "pod list unreadable: verified against the chart derivation only, said so, and (by construction) could not over-ask (${BEFORE} -> ${_TB_TRAINING_SIZE})"
 else
   bad "pod list unreadable: verdict '${_TB_FIT_VERDICT}'; lines: ${_TB_FIT_LINES}"
 fi

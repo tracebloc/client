@@ -335,6 +335,24 @@ for *what the operator sees and can act on*, not code elegance.
   exists for a case the guard cannot reason about, and is currently unused in the tree.
   Flag a new marker that does not state why.
 
+- **A `grep` pipeline feeding a bare assignment under errexit + pipefail.**
+  `var="$(grep … | tail -1 | sed …)"` — the sibling of the rule above, with the roles
+  swapped: the reader is fine, the PRODUCER's legitimate "no match" exit 1 is what kills
+  the script. pipefail makes the pipeline 1, the assignment is the whole statement so
+  errexit fires on it, and the script dies BEFORE the `${var:-…}` fallback, the counter
+  bump and the report that were written for exactly the no-match case — the operator
+  sees a bare exit 1 with no reason. Bitten twice in `scripts/backfill-releases.sh`
+  across two PRs (`TREE_RESULT`, #1057; `IDX_REASON`, #1060), so it is a rule now, not a
+  comment thread. Flag any `var="$(… grep … | …)"` (or `grep -c`, which prints a useful
+  `0` and still exits 1) whose script runs `set -e` with `pipefail` and that has no
+  trailing `|| true`, when a no-match is a case the code below it handles. The house
+  idiom: `|| true` on the capture, a one-line comment saying the no-match case is
+  decided below, and then an explicit decision — `[ -n "$var" ] || die2 …` or
+  `${var:-fallback}`. `grep -q` inside an `if` is not this pattern (its status is read,
+  not assigned). Grep-expressible, so it belongs in code-quality's org-wide house-rules
+  (`tracebloc/.github`), not as a second scanner in this repo — see the early-close rule
+  above for why one copy.
+
 - **Half of a paired construct changed.** Openers and closers, arms of one `if`, a
   neutralisation and the boundary it destroys, a writer and its reader — when a rule lives
   in two places that must move together, changing one is not a partial fix, it is a *new*

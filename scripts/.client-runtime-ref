@@ -20,10 +20,9 @@
 # schemas.) Bump it, and re-vendor BOTH, whenever either contract changes
 # upstream. The drift gate below will tell you when that has happened.
 #
-# CURRENTLY POINTS AT AN UNMERGED COMMIT, deliberately and temporarily: it is
-# the head of tracebloc/client-runtime#376, the PR that introduces
-# log_redactions.json. Pinning develop's tip instead would mean landing this PR
-# with a red cross-repo job, and a red gate teaches people to skip the tier.
-# RE-POINT THIS at client-runtime's develop merge SHA once #376 lands -- the
-# bytes are identical either way, so this is tidiness, not correctness.
-e4c4813e4faeba3b63e517c1781c089416f6a08d
+# Points at client-runtime 779b7ba7 -- the develop merge of
+# client-runtime#567 (envelope contract v4, 650m / 1792 MiB), which is the
+# commit both vendored contracts were taken from in client#1064. The
+# "unmerged #376 head" paragraph that stood here described the previous pin
+# (e4c4813e) and was left behind by that bump.
+779b7ba7ff22e20fd06fbeaeb5018cdb544ecc7f
