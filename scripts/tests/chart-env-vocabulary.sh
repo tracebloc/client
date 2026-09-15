@@ -40,6 +40,8 @@ fi
 fails=0
 checks=0
 
+HELM_KUBE_VERSION="${HELM_KUBE_VERSION:-1.28.0}"
+
 render() { # $@ = extra helm args; prints combined output, returns helm's status
   # backend#2892: pin mysqlRootPassword so the dev renders below (dev turns
   # rotateMysqlRoot on via its ByEnv default) don't trip the fail-closed
@@ -47,7 +49,12 @@ render() { # $@ = extra helm args; prints combined output, returns helm's status
   # render refuses. The pin is tier 1 (bypasses the mint) and is inert to the env
   # vocabulary this script checks; a bad CLIENT_ENV / channelTags value is still
   # rejected by the schema regardless.
-  helm template vocab "$CHART" -f "$VALUES" --set mysqlRootPassword=RotatedRootPw123 "$@" 2>&1
+  #
+  # --kube-version: Chart.yaml requires >=1.24.0-0; helm's own cluster-less
+  # default capability varies by helm version (this bit newer local helm
+  # installs), matching the pin the other scripts/tests/*.sh scripts already
+  # use.
+  helm template vocab "$CHART" -f "$VALUES" --kube-version "$HELM_KUBE_VERSION" --set mysqlRootPassword=RotatedRootPw123 "$@" 2>&1
 }
 
 pass() { checks=$((checks + 1)); echo "  ok    $1"; }
@@ -129,6 +136,77 @@ BAD_ENVS+=($'\t')
 for bad in "${BAD_ENVS[@]}"; do
   expect_reject "CLIENT_ENV=${bad//$'\t'/<tab>}" "$SCHEMA_ERR" --set env.CLIENT_ENV="$bad"
 done
+
+echo "== env.TRACEBLOC_ENV: RFC-0076 settings-naming (S3) alias-first read =="
+# TRACEBLOC_ENV is the canonical name now; CLIENT_ENV is the legacy fallback
+# (remove_by 2026-12-31). Same six spellings plus empty, read the same way,
+# through env.TRACEBLOC_ENV alone -- proves the new name is a real input, not
+# just accepted by the schema's open additionalProperties.
+expect_render "TRACEBLOC_ENV unset"       "tracebloc/jobs-manager:prod"
+expect_render "TRACEBLOC_ENV=''"          "tracebloc/jobs-manager:prod" --set env.TRACEBLOC_ENV=""
+expect_render "TRACEBLOC_ENV=dev"         "tracebloc/jobs-manager:dev"  --set env.TRACEBLOC_ENV=dev
+expect_render "TRACEBLOC_ENV=stg"         "tracebloc/jobs-manager:stg"  --set env.TRACEBLOC_ENV=stg
+expect_render "TRACEBLOC_ENV=prod"        "tracebloc/jobs-manager:prod" --set env.TRACEBLOC_ENV=prod
+expect_render "TRACEBLOC_ENV=development" "tracebloc/jobs-manager:dev"  --set env.TRACEBLOC_ENV=development
+expect_render "TRACEBLOC_ENV=staging"     "tracebloc/jobs-manager:stg"  --set env.TRACEBLOC_ENV=staging
+expect_render "TRACEBLOC_ENV=production"  "tracebloc/jobs-manager:prod" --set env.TRACEBLOC_ENV=production
+for bad in "${BAD_ENVS[@]}"; do
+  expect_reject "TRACEBLOC_ENV=${bad//$'\t'/<tab>}" "$SCHEMA_ERR" --set env.TRACEBLOC_ENV="$bad"
+done
+
+echo "== env.TRACEBLOC_ENV wins over env.CLIENT_ENV when both are set =="
+# The precedence a mid-migration values file depends on: a customer who has
+# started setting the canonical name should not be silently overridden by a
+# legacy value nobody remembered to remove.
+expect_render "TRACEBLOC_ENV=stg beats CLIENT_ENV=prod" "tracebloc/jobs-manager:stg" \
+  --set env.TRACEBLOC_ENV=stg --set env.CLIENT_ENV=prod
+expect_render "TRACEBLOC_ENV=staging (alias) beats CLIENT_ENV=dev" "tracebloc/jobs-manager:stg" \
+  --set env.TRACEBLOC_ENV=staging --set env.CLIENT_ENV=dev
+# A blank TRACEBLOC_ENV is treated as unset, so a non-blank CLIENT_ENV behind
+# it still applies -- the same "blank means unset" rule this chart has always
+# used for CLIENT_ENV alone, just checked on both names now.
+expect_render "TRACEBLOC_ENV='' falls back to CLIENT_ENV=stg" "tracebloc/jobs-manager:stg" \
+  --set env.TRACEBLOC_ENV="" --set env.CLIENT_ENV=stg
+
+echo "== both TRACEBLOC_ENV and CLIENT_ENV land in the pod env, same resolved value =="
+# client-runtime's read_client_env() (client-runtime#561) prefers TRACEBLOC_ENV
+# and falls back to CLIENT_ENV -- so a jobs-manager built before that PR must
+# still see a correct CLIENT_ENV, and one built after it must see TRACEBLOC_ENV,
+# from the SAME chart render.
+#
+# --show-only scopes this to the jobs-manager Deployment specifically: a bare
+# grep over the full multi-document render would also match resource-monitor's
+# or egress-reachability-check's identical stanza, so dropping ONLY the
+# jobs-manager injection (or emitting a mismatched value there) would still
+# pass (Bugbot Medium, client#1071).
+out="$(render --set env.TRACEBLOC_ENV=stg --show-only templates/jobs-manager-deployment.yaml)"
+# `|| true` on every grep here: under this script's `set -euo pipefail`, a
+# bare `grep -c`/`grep -A1` that matches NOTHING exits 1, and since each of
+# these is a plain assignment (not an `if` condition, which errexit exempts),
+# that exit would abort the script before `fail` below ever ran -- silently
+# turning "the injection is missing" into a hard crash instead of a reported
+# failure, the exact case this check exists to catch (Bugbot Medium +
+# tracebloc-review, client#1071). `grep -c` still prints "0" on no match, and
+# a `grep -A1` capture is simply empty, so `|| true` only discards the exit
+# status, never the output.
+tb_count="$(grep -c "name: TRACEBLOC_ENV" <<<"$out" || true)"
+ce_count="$(grep -c "name: CLIENT_ENV" <<<"$out" || true)"
+if [ "$tb_count" -eq 2 ] && [ "$ce_count" -eq 2 ]; then
+  pass "jobs-manager pod (both containers) carries both TRACEBLOC_ENV and CLIENT_ENV"
+else
+  fail "jobs-manager pod is missing one of TRACEBLOC_ENV / CLIENT_ENV, or a wrong count: TRACEBLOC_ENV=$tb_count CLIENT_ENV=$ce_count (want 2 each, one per container)"
+fi
+# Capture-then-slice, not a live pipe into grep -q: -q closes its stdin as
+# soon as it finds a match, and under this script's `set -o pipefail` the
+# upstream grep -A1 can then be seen as SIGPIPE-killed rather than as the
+# match it actually found (quality/pipefail-early-close gate, client#1071).
+tb_block="$(grep -A1 "name: TRACEBLOC_ENV" <<<"$out" || true)"
+ce_block="$(grep -A1 "name: CLIENT_ENV" <<<"$out" || true)"
+if grep -q 'value: "stg"' <<<"$tb_block" && grep -q 'value: "stg"' <<<"$ce_block"; then
+  pass "both TRACEBLOC_ENV and CLIENT_ENV carry the same resolved value (stg)"
+else
+  fail "TRACEBLOC_ENV / CLIENT_ENV do not both resolve to stg"
+fi
 
 echo "== the template fail is a real backstop, not decoration =="
 # The enum is only enforced where the packaged schema is read. Prove the helper
@@ -259,7 +337,7 @@ expect_resource_render() { # <label> <key> <value>
   local label="$1" key="$2" value="$3" f out
   f="$(resource_values_file "$key" "$value")"
   checks=$((checks + 1))
-  if out="$(helm template vocab "$CHART" -f "$VALUES" -f "$f" 2>&1)"; then
+  if out="$(helm template vocab "$CHART" -f "$VALUES" --kube-version "$HELM_KUBE_VERSION" -f "$f" 2>&1)"; then
     echo "  ok    $label"
   else
     fails=$((fails + 1))
@@ -272,7 +350,7 @@ expect_resource_reject() { # <label> <key> <value>
   local label="$1" key="$2" value="$3" f out
   f="$(resource_values_file "$key" "$value")"
   checks=$((checks + 1))
-  if out="$(helm template vocab "$CHART" -f "$VALUES" -f "$f" 2>&1)"; then
+  if out="$(helm template vocab "$CHART" -f "$VALUES" --kube-version "$HELM_KUBE_VERSION" -f "$f" 2>&1)"; then
     fails=$((fails + 1))
     echo "  FAIL  $label: expected a rejection, but the chart rendered"
   elif grep -qF "$SCHEMA_ERR" <<<"$out"; then

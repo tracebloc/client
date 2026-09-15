@@ -69,18 +69,20 @@ spec:
             readOnlyRootFilesystem: true
           env:
             {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+            - name: TRACEBLOC_ENV
+              value: {{ $env | quote }}
             - name: CLIENT_ENV
               value: {{ $env | quote }}
           command:
             - sh
             - -c
             - |
-              case "$CLIENT_ENV" in
+              case "$TRACEBLOC_ENV" in
                 dev) HOST="dev-api.tracebloc.io" ;;
                 stg) HOST="stg-api.tracebloc.io" ;;
                 *)   HOST="api.tracebloc.io" ;;
               esac
-              echo "[egress-reachability-check] CLIENT_ENV=$CLIENT_ENV -> probing backend reachability to https://${HOST}/ (through the proxy if one is configured)..."
+              echo "[egress-reachability-check] TRACEBLOC_ENV=$TRACEBLOC_ENV -> probing backend reachability to https://${HOST}/ (through the proxy if one is configured)..."
               # Key the verdict on curl's EXIT CODE, not the HTTP status. With no
               # --fail, curl exits 0 for ANY HTTP response (200/401/404/5xx), so a
               # 0 exit is the only outcome that proves a full TCP+TLS+HTTP round

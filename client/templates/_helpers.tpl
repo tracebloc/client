@@ -1341,15 +1341,34 @@ true
 {{- end -}}
 {{- end }}
 
+{{/*
+  RFC-0076 settings-naming (S3): TRACEBLOC_ENV is the canonical name for this
+  var, CLIENT_ENV the legacy one. Read alias-first -- a non-empty
+  env.TRACEBLOC_ENV wins, else a non-empty env.CLIENT_ENV, else "prod" -- so a
+  customer values file that still says CLIENT_ENV keeps rendering unchanged.
+  A BLANK value on either name is "unset", same as before this alias existed
+  (env.CLIENT_ENV="" has always meant prod, per the schema's own closed enum
+  and chart-env-vocabulary.sh; TRACEBLOC_ENV="" gets the identical treatment,
+  not the stricter "present-but-blank fails validation" some other RFC-0076
+  readers use, because that would change an existing, tested contract).
+  remove_by: 2026-12-31, after which only TRACEBLOC_ENV is read.
+*/}}
 {{- define "tracebloc.clientEnv" -}}
-{{- $raw := (default dict .Values.env).CLIENT_ENV | default "prod" -}}
+{{- $envVals := default dict .Values.env -}}
+{{- $source := "TRACEBLOC_ENV (defaulted)" -}}
+{{- if $envVals.TRACEBLOC_ENV -}}
+{{- $source = "TRACEBLOC_ENV" -}}
+{{- else if $envVals.CLIENT_ENV -}}
+{{- $source = "CLIENT_ENV" -}}
+{{- end -}}
+{{- $raw := $envVals.TRACEBLOC_ENV | default $envVals.CLIENT_ENV | default "prod" -}}
 {{- $aliases := dict "development" "dev" "staging" "stg" "production" "prod" -}}
 {{- $resolved := $raw -}}
 {{- if hasKey $aliases $raw -}}
 {{- $resolved = get $aliases $raw -}}
 {{- end -}}
 {{- if not (has $resolved (list "dev" "stg" "prod")) -}}
-{{- fail (printf "env.CLIENT_ENV: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, serviceDbAccountsByEnv and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $raw) -}}
+{{- fail (printf "env.%s: %q is not a recognized environment. Accepted: dev, stg, prod (canonical) or development, staging, production (aliases); empty/unset means prod. This value is the tag for the jobs-manager, pods-monitor and resource-monitor images, and it keys images.ingestor.channelTags, serviceDbAccountsByEnv and the prod digest pin -- an unrecognized value would pull unpublished tags, miss every one of those lookups and silently drop the pin. Note dev/stg are abbreviated: `develop` and `production` differ, and only the six listed spellings resolve." $source $raw) -}}
 {{- end -}}
 {{- $resolved -}}
 {{- end }}

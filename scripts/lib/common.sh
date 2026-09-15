@@ -17,7 +17,7 @@ umask 077
 # into one argv element that curl rejects.
 readonly CURL_SECURE="--tlsv1.2"
 
-# tb_client_env — CLIENT_ENV reduced to the canonical dev|stg|prod.
+# tb_client_env — TRACEBLOC_ENV/CLIENT_ENV reduced to the canonical dev|stg|prod.
 #
 # The chart, client-runtime and this installer all key on dev|stg|prod, while
 # values.schema.json documents development|staging|production as accepted
@@ -31,14 +31,27 @@ readonly CURL_SECURE="--tlsv1.2"
 # credentials against the PRODUCTION backend and told them their correct
 # credentials were wrong.
 #
+# RFC-0076 settings-naming (S3): TRACEBLOC_ENV is the canonical shell var,
+# CLIENT_ENV the legacy one (remove_by 2026-12-31), same alias-first
+# precedence as the chart's tracebloc.clientEnv -- a non-empty TRACEBLOC_ENV
+# wins, else CLIENT_ENV, else absent. This is only the AMBIENT-ENV fallback:
+# an explicit $1 (even "") still wins outright, so a caller that has already
+# resolved its own value (e.g. from a values-file read) is unaffected.
+#
 # Unknown values pass through unchanged: this normalises spellings, it does not
 # validate. Each caller keeps its own fallback for genuinely unrecognised input.
 tb_client_env() {
-  case "${1-${CLIENT_ENV:-}}" in
+  local raw
+  if [ "$#" -ge 1 ]; then
+    raw="$1"
+  else
+    raw="${TRACEBLOC_ENV:-${CLIENT_ENV:-}}"
+  fi
+  case "$raw" in
     development) printf 'dev'  ;;
     staging)     printf 'stg'  ;;
     production)  printf 'prod' ;;
-    *)           printf '%s' "${1-${CLIENT_ENV:-}}" ;;
+    *)           printf '%s' "$raw" ;;
   esac
 }
 
@@ -72,7 +85,12 @@ tb_client_env() {
 #   $1 = path under the dashboard (default "clients"; pass "" for the bare host)
 _dashboard_url() {
   local path="${1-clients}" base
-  case "$(tb_client_env "${CLIENT_ENV:-prod}")" in
+  # Bare call, no explicit fallback: tb_client_env's own ambient-env path
+  # already reads TRACEBLOC_ENV alias-first, and an unset/unrecognised result
+  # lands in the *) branch below the same way an explicit "prod" would --
+  # spelling out "${TRACEBLOC_ENV:-${CLIENT_ENV:-prod}}" here would just
+  # re-derive what tb_client_env already does internally.
+  case "$(tb_client_env)" in
     dev) base='https://dev.tracebloc.io' ;;
     stg) base='https://stg.tracebloc.io' ;;
     *)   base='https://ai.tracebloc.io' ;;

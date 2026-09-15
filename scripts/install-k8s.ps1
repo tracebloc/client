@@ -19,7 +19,9 @@
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
 #    $env:K8S_VERSION   = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
-#    $env:CLIENT_ENV    = "dev"            optional; if not set, CLIENT_ENV is not added to env in values
+#    $env:TRACEBLOC_ENV = "dev"            optional, canonical name (RFC-0076); if neither this nor the
+#                                            legacy $env:CLIENT_ENV is set, no stage var is added to values
+#    $env:CLIENT_ENV    = "dev"            legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
 #    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
 # =============================================================================
 
@@ -1156,7 +1158,10 @@ Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
   }
   finally { Remove-Item -Path $hostMarker -Force -ErrorAction SilentlyContinue }
 }
-$CLIENT_ENV    = $env:CLIENT_ENV
+# RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+# legacy alias (remove_by 2026-12-31) -- a non-empty TRACEBLOC_ENV wins, else
+# CLIENT_ENV, same precedence as Get-TraceblocClientEnv's own default param.
+$CLIENT_ENV    = if ($env:TRACEBLOC_ENV) { $env:TRACEBLOC_ENV } else { $env:CLIENT_ENV }
 
 $GPU_VENDOR       = "none"
 $NVIDIA_DRIVER_OK = $false
@@ -1257,7 +1262,7 @@ Advanced configuration (environment variables):
 Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
   Set the client credentials as environment variables so nothing prompts:
     TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD   from your dashboard's Clients page
-                 (dev.tracebloc.io | stg.tracebloc.io | ai.tracebloc.io, per CLIENT_ENV)
+                 (dev.tracebloc.io | stg.tracebloc.io | ai.tracebloc.io, per TRACEBLOC_ENV/CLIENT_ENV)
     TRACEBLOC_CLIENT_NAME                             the name shown on your dashboard
   With those set (plus TRACEBLOC_SKIP_REBOOT_PROMPT=1, or -NoReboot), a
   console-less install runs end to end instead of blocking on a prompt.
@@ -5936,8 +5941,13 @@ function Get-TraceblocYamlValue {
 #
 # Unknown values pass through unchanged -- this normalises spellings, it does
 # not validate -- so the default branch below still catches genuine garbage.
+#
+# RFC-0076 settings-naming (S3): the default parameter reads TRACEBLOC_ENV
+# alias-first (canonical, else legacy CLIENT_ENV; remove_by 2026-12-31) -- an
+# EXPLICIT $Value argument still wins outright, matching the bash twin's
+# tb_client_env.
 function Get-TraceblocClientEnv {
-  param([string]$Value = "$env:CLIENT_ENV")
+  param([string]$Value = $(if ($env:TRACEBLOC_ENV) { $env:TRACEBLOC_ENV } else { $env:CLIENT_ENV }))
   switch ($Value) {
     "development" { return "dev"  }
     "staging"     { return "stg"  }
@@ -5947,10 +5957,12 @@ function Get-TraceblocClientEnv {
 }
 
 # Resolve the backend base URL the same way jobs-manager does
-# (client-runtime/controller.py: CLIENT_ENV -> backend), defaulting to prod.
+# (client-runtime/controller.py: TRACEBLOC_ENV/CLIENT_ENV -> backend),
+# defaulting to prod.
 function Get-BackendUrl {
-  # Quote the value so a truly-unset CLIENT_ENV ($null) coerces to "" and the
-  # default (prod) branch reliably fires across PowerShell versions.
+  # Quote the value so a truly-unset TRACEBLOC_ENV/CLIENT_ENV ($null) coerces
+  # to "" and the default (prod) branch reliably fires across PowerShell
+  # versions.
   switch ("$(Get-TraceblocClientEnv)") {
     "dev"   { return "https://dev-api.tracebloc.io/" }
     "stg"   { return "https://stg-api.tracebloc.io/" }
@@ -6935,7 +6947,13 @@ function Install-ClientHelm {
   if ($CLIENT_ENV) {
     # Write the RESOLVED value, matching the bash installer: the chart
     # normalises too, but the two must not disagree about what was installed.
-    $envBlock += "  CLIENT_ENV: $(Get-TraceblocClientEnv $CLIENT_ENV)`n"
+    #
+    # RFC-0076 settings-naming (S3): both keys are written (remove_by
+    # 2026-12-31) so a chart version on either side of client#1071 resolves
+    # the same stage from this one generated file. $CLIENT_ENV itself is
+    # already alias-first resolved (TRACEBLOC_ENV wins) at capture time above.
+    $resolvedStage = Get-TraceblocClientEnv $CLIENT_ENV
+    $envBlock += "  TRACEBLOC_ENV: $resolvedStage`n  CLIENT_ENV: $resolvedStage`n"
   }
   # backend#743: relocate the dataset PV onto the network mount when HOST_DATASET_DIR is set.
   $datasetPathLine = if ($HOST_DATASET_DIR) { "`n  datasetPath: /tracebloc-data" } else { "" }
@@ -8246,7 +8264,7 @@ function Invoke-DiagnoseBundle {
 
   # host / versions
   $h = @("# tracebloc diagnose ($ts)", "OS: Windows  ARCH: $(Get-WindowsArch)",
-         "CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
+         "TRACEBLOC_ENV: $($env:TRACEBLOC_ENV)  CLIENT_ENV: $($env:CLIENT_ENV)  CLUSTER_NAME: $cn  NAMESPACE: $ns", "CLIENT VERSION: $cver", "## versions",
          (Invoke-DiagnoseCapture -FileName "k3d" -Arguments @("version")),
          (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("version","--client")),
          (Invoke-DiagnoseCapture -FileName "helm" -Arguments @("version","--short")),

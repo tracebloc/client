@@ -7,6 +7,20 @@
       "type": "object",
       "description": "Environment variables passed to containers",
       "properties": {
+        "TRACEBLOC_ENV": {
+          "type": "string",
+          "default": "prod",
+          "enum": [
+            "",
+            "dev",
+            "stg",
+            "prod",
+            "development",
+            "staging",
+            "production"
+          ],
+          "description": "CANONICAL name (RFC-0076 settings-naming, S3). Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. Read alias-first against the legacy `CLIENT_ENV` (a non-empty TRACEBLOC_ENV wins; otherwise a non-empty CLIENT_ENV; a blank value on either name is 'unset', same as CLIENT_ENV alone always meant); remove_by 2026-12-31, after which CLIENT_ENV stops being read. Load-bearing in four places (control-plane image tags, images.ingestor.channelTags, serviceDbAccountsByEnv, the prod digest pin), validated in none but tracebloc.clientEnv."
+        },
         "CLIENT_ENV": {
           "type": "string",
           "default": "prod",
@@ -19,7 +33,7 @@
             "staging",
             "production"
           ],
-          "description": "Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. It was open until backend#1723's follow-up, and an out-of-vocabulary value did not degrade -- it silently reconfigured the edge: it became the tag for three control-plane images (no `:prd`/`:qa` tag is published), it missed `images.ingestor.channelTags` so the ingestor fell to the last-resort literal, it missed `serviceDbAccountsByEnv` so no service DB account was provisioned, AND it dropped the prod digest pin, which applies only where the env resolves to exactly `prod`. Load-bearing in four places, validated in none."
+          "description": "LEGACY alias for TRACEBLOC_ENV (RFC-0076 settings-naming, S3) -- prefer TRACEBLOC_ENV in new values files. remove_by: 2026-12-31. Read only when TRACEBLOC_ENV is absent or empty; a blank CLIENT_ENV is also treated as unset (resolves to prod), same as it always has. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. It was open until backend#1723's follow-up, and an out-of-vocabulary value did not degrade -- it silently reconfigured the edge: it became the tag for three control-plane images (no `:prd`/`:qa` tag is published), it missed `images.ingestor.channelTags` so the ingestor fell to the last-resort literal, it missed `serviceDbAccountsByEnv` so no service DB account was provisioned, AND it dropped the prod digest pin, which applies only where the env resolves to exactly `prod`. Load-bearing in four places, validated in none but tracebloc.clientEnv."
         },
         "HTTP_PROXY_HOST": {
           "type": "string"
