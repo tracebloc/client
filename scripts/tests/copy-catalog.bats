@@ -40,6 +40,13 @@ setup() {
   # prod is the right pin because the golden is the copy a CUSTOMER sees, and
   # `_dashboard_url` treats unset as prod anyway — this makes that explicit
   # rather than dependent on the developer's environment being clean.
+  #
+  # RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV in _dashboard_url's
+  # ambient-env path, so a developer shell carrying TRACEBLOC_ENV=dev would
+  # fail this catalog (or, under TB_UPDATE_GOLDEN=1, bake dev.tracebloc.io
+  # into the committed golden) exactly as CLIENT_ENV=dev alone used to
+  # (tracebloc-review, client#1073) -- pin it to prod too.
+  export TRACEBLOC_ENV=prod
   export CLIENT_ENV=prod
   load_lib summary.sh        # common.sh (banner/roadmap/help/step_header) + summary.sh
   # Deterministic env for the copy-emitting functions (values a user never sees

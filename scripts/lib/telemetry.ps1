@@ -294,7 +294,11 @@ function Get-TelemetryErrorClass {
 # ── Environment (telemetry.sh:407) ───────────────────────────────────────────
 #  Returns $null for an unrecognised environment, which DROPS the record (§3.2).
 function Get-TelemetryEnvironment {
-  $env_ = $env:CLIENT_ENV
+  # RFC-0076 settings-naming (S3): TRACEBLOC_ENV alias-first (canonical, else
+  # legacy CLIENT_ENV; remove_by 2026-12-31), read directly here rather than
+  # via Get-TraceblocClientEnv's own default param, since the explicit-arg
+  # call below bypasses that default just like the bash twin's tb_client_env.
+  $env_ = if ($env:TRACEBLOC_ENV) { $env:TRACEBLOC_ENV } else { $env:CLIENT_ENV }
   if ([string]::IsNullOrWhiteSpace($env_)) { $env_ = 'prod' }
   # tb_client_env's alias folding, where install-k8s.ps1 provides it.
   # Get-TraceblocClientEnv is install-k8s.ps1's alias folder (backend#1745:

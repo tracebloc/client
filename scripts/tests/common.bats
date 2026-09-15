@@ -9,6 +9,11 @@ load test_helper
 
 setup() {
   load_lib
+  # RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV in tb_client_env's
+  # ambient-env path, so an ambient TRACEBLOC_ENV in the invoking shell would
+  # otherwise override any test below that pins only CLIENT_ENV (the class
+  # Bugbot flagged on install-client-helm.bats/telemetry.bats, client#1073).
+  unset TRACEBLOC_ENV
 }
 
 # ── validate_config ────────────────────────────────────────────────────────
@@ -1075,6 +1080,28 @@ EOF
   [ "$output" = "https://dev.tracebloc.io/my-use-cases" ] || return 1
   CLIENT_ENV=dev run _dashboard_url ""
   [ "$output" = "https://dev.tracebloc.io" ] || return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  _dashboard_url / TRACEBLOC_ENV — RFC-0076 settings-naming (S3): TRACEBLOC_ENV
+#  is canonical, CLIENT_ENV the legacy alias (remove_by 2026-12-31), same
+#  precedence as tb_client_env's own ambient-env fallback.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "_dashboard_url: TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+  unset CLIENT_ENV
+  TRACEBLOC_ENV=stg run _dashboard_url
+  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+  CLIENT_ENV=prod TRACEBLOC_ENV=dev run _dashboard_url
+  [ "$output" = "https://dev.tracebloc.io/clients" ] || return 1
+}
+
+@test "_dashboard_url: a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+  TRACEBLOC_ENV= CLIENT_ENV=stg run _dashboard_url
+  [ "$output" = "https://stg.tracebloc.io/clients" ] || return 1
 }
 
 @test "no LIVE dashboard link is hardcoded to production in ANY bash lib" {

@@ -54,6 +54,11 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
+            name: TRACEBLOC_ENV
+            value: prod
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
             name: CLIENT_ENV
             value: prod
 
@@ -64,8 +69,35 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
+            name: TRACEBLOC_ENV
+            value: dev
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
             name: CLIENT_ENV
             value: dev
+
+  # RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+  # legacy alias. Pinning BOTH names here, not just CLIENT_ENV, is the point
+  # (Bugbot Medium, client#1071): a helm-unittest suite that only asserted on
+  # CLIENT_ENV would still pass if the TRACEBLOC_ENV injection were dropped or
+  # given the wrong value, and the probe script itself now branches on
+  # $TRACEBLOC_ENV, so THAT is the var whose value actually decides the host.
+  - it: TRACEBLOC_ENV wins over a conflicting CLIENT_ENV
+    set:
+      env.TRACEBLOC_ENV: stg
+      env.CLIENT_ENV: prod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TRACEBLOC_ENV
+            value: stg
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLIENT_ENV
+            value: stg
 
   - it: inherits the corporate proxy env so it tests the real egress path
     set:

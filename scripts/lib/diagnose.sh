@@ -225,7 +225,7 @@ run_diagnose() {
     echo "# tracebloc diagnose ($ts)"
     echo "OS:   $(uname -s) $(uname -r)"
     echo "ARCH: $(uname -m)"
-    echo "CLIENT_ENV: ${CLIENT_ENV:-<unset>}   CLUSTER_NAME: $cn   NAMESPACE: $ns"
+    echo "TRACEBLOC_ENV: ${TRACEBLOC_ENV:-<unset>}   CLIENT_ENV: ${CLIENT_ENV:-<unset>}   CLUSTER_NAME: $cn   NAMESPACE: $ns"
     echo "CLIENT VERSION: ${cver:-unknown}"
     echo; echo "## versions"
     has k3d     && k3d version

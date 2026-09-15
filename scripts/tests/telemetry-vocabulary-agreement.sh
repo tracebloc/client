@@ -262,6 +262,13 @@ compare "event names" "$declared_names" "$parsed_names" \
 # Read by the sourced telemetry.sh, not by this file — telemetry_render_event
 # needs a recognised environment or it renders nothing at all (§3.2), which would
 # make the comparison below inert.
+# RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV in telemetry_environment's
+# ambient-env path, so an unrecognised (or merely different) ambient TRACEBLOC_ENV
+# would make this pin inert the same way an unrecognised CLIENT_ENV alone used to
+# (tracebloc-review, client#1073) -- pin it too, rather than leave it to the
+# invoking shell.
+# shellcheck disable=SC2034
+TRACEBLOC_ENV=prod
 # shellcheck disable=SC2034
 CLIENT_ENV=prod
 # shellcheck disable=SC2034

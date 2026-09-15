@@ -177,8 +177,11 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: MONITOR_INTERVAL
               value: "30"
+            {{- $clientEnv := include "tracebloc.clientEnv" . }}
+            - name: TRACEBLOC_ENV
+              value: {{ $clientEnv | quote }}
             - name: CLIENT_ENV
-              value: {{ include "tracebloc.clientEnv" . | quote }}
+              value: {{ $clientEnv | quote }}
             - name: CLIENT_ID
               valueFrom:
                 secretKeyRef:
