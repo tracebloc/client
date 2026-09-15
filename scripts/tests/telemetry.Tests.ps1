@@ -28,7 +28,7 @@ BeforeAll {
 BeforeEach {
   # Fresh state per test. Also clears every env var the emitter reads, so no test
   # inherits another's environment.
-  foreach ($v in @('CLIENT_ENV', 'CLIENT_STATE', 'TB_VERSION', 'TB_ERR_LOC',
+  foreach ($v in @('CLIENT_ENV', 'TRACEBLOC_ENV', 'CLIENT_STATE', 'TB_VERSION', 'TB_ERR_LOC',
                    'TB_CLI_ON_FRESH_PATH', 'HOST_DATA_DIR',
                    'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')) {
     Remove-Item -Path "env:$v" -ErrorAction SilentlyContinue
@@ -462,6 +462,29 @@ Describe "closed sets are closed, and canonical" {
     # Folding must not become "accept anything shaped like it".
     $env:CLIENT_ENV = $Given
     Get-TelemetryEvent -Code 0 | Should -BeNullOrEmpty
+  }
+
+  # RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+  # legacy alias (remove_by 2026-12-31), same precedence Get-BackendUrl uses.
+  # No local AfterEach needed: the file-level BeforeEach above already clears
+  # TRACEBLOC_ENV (and CLIENT_ENV) before every test in this file.
+  It "TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+    $env:CLIENT_ENV = $null
+    $env:TRACEBLOC_ENV = 'stg'
+    $got = (Get-TelemetryEvent -Code 0 | ConvertFrom-Json).resource.'deployment.environment'
+    $got | Should -BeExactly 'stg'
+  }
+  It "TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+    $env:CLIENT_ENV = 'prod'
+    $env:TRACEBLOC_ENV = 'dev'
+    $got = (Get-TelemetryEvent -Code 0 | ConvertFrom-Json).resource.'deployment.environment'
+    $got | Should -BeExactly 'dev'
+  }
+  It "a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+    $env:TRACEBLOC_ENV = ''
+    $env:CLIENT_ENV = 'stg'
+    $got = (Get-TelemetryEvent -Code 0 | ConvertFrom-Json).resource.'deployment.environment'
+    $got | Should -BeExactly 'stg'
   }
 
   It "canonicalises an odd-cased client state rather than passing it through" {

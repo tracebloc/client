@@ -30,7 +30,9 @@
 #                                ~/.tracebloc on the host (survive cluster delete;
 #                                required for a HOST_DATASET_DIR network mount).
 #                                Linux/k3s path only — install-k8s.ps1 is hostpath-only.
-#    CLIENT_ENV=dev              optional; if not set, CLIENT_ENV is not added to env in values
+#    TRACEBLOC_ENV=dev           optional, canonical name (RFC-0076); if neither this nor the
+#                                legacy CLIENT_ENV is set, no stage var is added to values
+#    CLIENT_ENV=dev              legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
 #    TB_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data

@@ -19,6 +19,10 @@ CANARY="CANARY-PATIENT-7"
 
 setup() {
   load_lib telemetry.sh
+  # RFC-0076 (S3): TRACEBLOC_ENV now wins over CLIENT_ENV, so an ambient
+  # TRACEBLOC_ENV in the invoking shell (a developer's own env, a CI runner's)
+  # would otherwise override this deterministic pin (Bugbot Medium, client#1073).
+  TRACEBLOC_ENV=""
   CLIENT_ENV=prod
   OS=Linux
   ARCH=x86_64
@@ -631,6 +635,30 @@ attr() {
   unset CLIENT_ENV
   run telemetry_render_event 0
   [[ "$output" == *'"deployment.environment":"prod"'* ]] || return 1
+}
+
+# RFC-0076 settings-naming (S3): TRACEBLOC_ENV is canonical, CLIENT_ENV the
+# legacy alias (remove_by 2026-12-31), same precedence as tb_client_env's own
+# ambient-env fallback and telemetry_environment's no-tb_client_env fallback.
+@test "TRACEBLOC_ENV alone resolves, same as CLIENT_ENV alone did" {
+  unset CLIENT_ENV
+  TRACEBLOC_ENV=stg
+  run telemetry_render_event 0
+  [[ "$output" == *'"deployment.environment":"stg"'* ]] || return 1
+}
+
+@test "TRACEBLOC_ENV wins over a conflicting CLIENT_ENV" {
+  CLIENT_ENV=prod
+  TRACEBLOC_ENV=dev
+  run telemetry_render_event 0
+  [[ "$output" == *'"deployment.environment":"dev"'* ]] || return 1
+}
+
+@test "a blank TRACEBLOC_ENV falls back to CLIENT_ENV" {
+  TRACEBLOC_ENV=
+  CLIENT_ENV=stg
+  run telemetry_render_event 0
+  [[ "$output" == *'"deployment.environment":"stg"'* ]] || return 1
 }
 
 @test "the resource layer carries the registered identity and OTel's own names" {
