@@ -50,16 +50,107 @@
 #  Never touches the host kubeconfig or ~/.tracebloc: KUBECONFIG and
 #  HOST_DATA_DIR are pointed at a scratch directory for the run.
 #
+#  WHICH PLATFORM A RECORD IS FOR IS DETECTED, NOT TYPED -- and WSL2 is the
+#  reason the detection is not `uname -s`. On Windows the installer's k3d nodes
+#  live inside the WSL2 VM, so the harness runs there, and `uname -s` inside WSL2
+#  answers `Linux`. gen-node-reservation-embed.sh buckets records by exactly that
+#  field, so a WSL2 run stamped from `uname` would not merely fail to produce a
+#  `windows` row -- it would fold Windows' footprint into the MEASURED `linux`
+#  reservation and move numbers a platform already depends on, with no error and
+#  nothing red. See _measure_platform_os below.
+#
 #  Usage:  bash scripts/tests/measure-node-reservation.sh
 #    TB_MEASURE_IDLE_S=300 TB_MEASURE_LOAD_S=300 TB_MEASURE_INTERVAL_S=15
 #    TB_MEASURE_LOAD_IMAGE=docker.io/tracebloc/client-image_classification-cpu:prod
 #    TB_MEASURE_OUT=<path>  TB_MEASURE_KEEP=1 (leave the cluster up)
 #    TB_MEASURE_API_PORT=6560  (a second cluster on this engine holds 6550)
+#    TB_MEASURE_PLATFORM=windows  (ASSERTS the detected platform; see below)
+#
+#  Measuring WINDOWS/WSL2 (backend#2460, the platform with no record yet). Run it
+#  INSIDE the WSL2 distro of a Windows host whose Docker Desktop uses the WSL2
+#  backend -- that VM is where the installer's k3d nodes live, so it is the node a
+#  Windows customer gets. The host must be the measurement's only tenant: a second
+#  k3d cluster on the same engine competes for CPU during the load phase, which
+#  DEFLATES the cpu figure kubeReserved is derived from (the unsafe direction),
+#  and its node container lands in the systemReserved cross-check as memory
+#  "outside the nodes". So delete any installed cluster first.
+#
+#    wsl -d <distro>
+#    curl -fsSL https://github.com/tracebloc/client/archive/<sha>.tar.gz | tar xz
+#    cd client-<sha>
+#    TB_MEASURE_PLATFORM=windows TB_MEASURE_OUT=$PWD/windows-amd64.json \\
+#      bash scripts/tests/measure-node-reservation.sh
+#
+#  Then commit the record under scripts/spec/node-reservation/ and regenerate:
+#  scripts/gen-node-reservation-embed.sh writes the `windows` row into BOTH
+#  installers and adds `windows` to TB_KUBELET_RESERVATION_PLATFORMS. Until that
+#  lands, Write-KubeletConfig writes no reservation on Windows and SAYS so --
+#  unreserved and honest, never borrowing linux's numbers.
 # =============================================================================
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$HERE/../lib"
+
+# --- the platform a record is FOR (backend#2460) ------------------------------
+#
+# DERIVED FROM THE ENVIRONMENT, NEVER TYPED, AND THE TWO MUST AGREE.
+#
+# gen-node-reservation-embed.sh buckets every record by `platform.os` and emits
+# one kubeReserved/systemReserved pair per bucket. So the stamp is not a label on
+# the record -- it selects which installed platform's reservation this run moves.
+#
+# `uname -s` cannot be that stamp. On Windows the installer's k3d nodes live in
+# the WSL2 VM, so this harness runs INSIDE WSL2, where `uname -s` is `Linux`. A
+# WSL2 run stamped from uname would silently merge Windows' footprint into the
+# measured `linux` reservation -- a wrong number on a platform that already
+# depends on it, produced by a green run.
+#
+# So: WSL2 detects as `Windows`, and TB_MEASURE_PLATFORM is an ASSERTION rather
+# than an override. Setting it lets a caller (a workflow, a runbook) say which
+# platform it believes it is measuring and be refused if the host disagrees; it
+# can never make the record claim a platform this host is not. A detection this
+# script does not recognise refuses too -- a record for an unknown platform is
+# not a finding, it is a corruption waiting for whoever adds that platform.
+_measure_in_wsl() {
+  [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]] && return 0
+  local osrelease=/proc/sys/kernel/osrelease
+  [[ -r "$osrelease" ]] && grep -qiE 'microsoft|wsl' "$osrelease" && return 0
+  return 1
+}
+
+# Echoes the canonical platform key, or exits 2 saying why it will not guess.
+_measure_platform_os() {
+  local detected
+  case "$(uname -s)" in
+    Darwin) detected=Darwin ;;
+    Linux)  if _measure_in_wsl; then detected=Windows; else detected=Linux; fi ;;
+    *)      echo "measure: \`uname -s\` is '$(uname -s)', which this harness has no platform key for." >&2
+            echo "measure: add it to _measure_platform_os AND to the installers' reservation table before measuring it -- a record stamped with a key no installer reads is a measurement nobody can apply." >&2
+            exit 2 ;;
+  esac
+  local asserted="${TB_MEASURE_PLATFORM:-}"
+  if [[ -n "$asserted" ]]; then
+    # Case-insensitive compare; the canonical form is what gets stamped.
+    if [[ "$(printf '%s' "$asserted" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$detected" | tr '[:upper:]' '[:lower:]')" ]]; then
+      echo "measure: TB_MEASURE_PLATFORM='$asserted' but this host detects as '$detected'." >&2
+      if [[ "$detected" == Windows ]]; then
+        echo "measure: this is a WSL2 shell, so the record is a WINDOWS record -- that is the point of the detection." >&2
+      fi
+      echo "measure: refusing rather than stamping the platform you asked for: the stamp picks which installed reservation this record moves, and a wrong one silently rewrites a platform that is already measured." >&2
+      exit 2
+    fi
+  fi
+  printf '%s' "$detected"
+}
+
+PLATFORM_OS="$(_measure_platform_os)"
+
+# The seam the bats suite drives: resolve the platform, print it, run nothing.
+# The test then exercises THE function the record is stamped from, not a copy of
+# its rule (a re-implemented detector is how a guard goes on proving a regex
+# nobody uses -- CLAUDE.md, "a mutation check must call the code under test").
+if [[ -n "${TB_MEASURE_PRINT_PLATFORM:-}" ]]; then printf '%s\n' "$PLATFORM_OS"; exit 0; fi
 
 # shellcheck source=/dev/null
 source "$HERE/lib/e2e-common.sh"
@@ -76,6 +167,7 @@ IDLE_S="${TB_MEASURE_IDLE_S:-300}"
 LOAD_S="${TB_MEASURE_LOAD_S:-300}"
 INTERVAL_S="${TB_MEASURE_INTERVAL_S:-15}"
 LOAD_IMAGE="${TB_MEASURE_LOAD_IMAGE:-docker.io/tracebloc/client-image_classification-cpu:prod}"
+
 
 # shellcheck source=/dev/null
 source "$LIB/common.sh"
@@ -145,7 +237,7 @@ RECORD_WRITTEN=0
 save_partial() {
   local rc=$?
   if [[ "$RECORD_WRITTEN" -eq 0 && -s "$SAMPLES" ]]; then
-    jq -n --arg platform "$(uname -s)" --arg arch "$(uname -m)" --arg why "the run aborted before the summary (exit $rc); raw samples preserved" \
+    jq -n --arg platform "$PLATFORM_OS" --arg arch "$(uname -m)" --arg why "the run aborted before the summary (exit $rc); raw samples preserved" \
       --slurpfile samples "$SAMPLES" '{schema_version: 1, partial: true, why: $why, platform: {os: $platform, arch: $arch}, samples: $samples}' > "$OUT" 2>/dev/null || cp "$SAMPLES" "${OUT%.json}.samples.jsonl"
     echo "PARTIAL RECORD (samples only): $OUT" >&2
   fi
@@ -155,7 +247,7 @@ save_partial() {
 trap save_partial EXIT
 
 echo "═══════════════════════════════════════════════════════════════════════"
-echo "  node reservation measurement   $(uname -s)/$(uname -m)   idle ${IDLE_S}s  load ${LOAD_S}s  every ${INTERVAL_S}s"
+echo "  node reservation measurement   record for ${PLATFORM_OS}/$(uname -m) (shell: $(uname -s))   idle ${IDLE_S}s  load ${LOAD_S}s  every ${INTERVAL_S}s"
 echo "═══════════════════════════════════════════════════════════════════════"
 
 echo "── create_cluster() — the installer's real bring-up path ──"
@@ -331,7 +423,7 @@ summary="$(json_or_null "$summary" "system-container summary")"
 cg_summary="$(json_or_null "$cg_summary" "cgroup summary")"
 
 jq -n \
-  --arg platform "$(uname -s)" --arg arch "$(uname -m)" --arg host_kernel "$(uname -r)" \
+  --arg platform "$PLATFORM_OS" --arg arch "$(uname -m)" --arg host_kernel "$(uname -r)" \
   --arg k3d "$k3d_version" --arg k3s "$K8S_VERSION" \
   --arg servers "${SERVERS:-1}" --arg agents "${AGENTS:-1}" \
   --arg load_image "$LOAD_IMAGE" --argjson pull_ok "$pull_ok" \
