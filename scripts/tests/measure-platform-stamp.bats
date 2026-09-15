@@ -44,17 +44,47 @@ resolve() { TB_MEASURE_PRINT_PLATFORM=1 bash "$MEASURE" "$@"; }
   [ ! -e "$out" ] || return 1
 }
 
+# Every WSL case below drives ALL THREE inputs `_probe_wsl` reads — the two env
+# markers and both file seams — because leaving any of them to the host makes the
+# fixture host-dependent. That is not hypothetical: the "NOT WSL" case used to
+# unset only the env vars, so on a real WSL2 host `uname -s` is `Linux` (the skip
+# does not fire), the detector correctly answered `Windows`, and the test failed
+# — on the one platform it exists for. `probe.bats` isolates the same seams.
+_not_wsl_env() {
+  printf '6.8.0-generic\n' > "$BATS_TEST_TMPDIR/osrelease"
+  printf 'Linux version 6.8.0-generic (gcc 13)\n' > "$BATS_TEST_TMPDIR/version"
+  printf '%s' "-u TB_MEASURE_PLATFORM -u WSL_DISTRO_NAME -u WSL_INTEROP TB_OSRELEASE_FILE=$BATS_TEST_TMPDIR/osrelease TB_PROC_VERSION_FILE=$BATS_TEST_TMPDIR/version"
+}
+
 @test "inside WSL2 the record is a WINDOWS record, not a Linux one" {
   # The whole point of the ticket's trap: `uname -s` here is `Linux`.
   [ "$(uname -s)" = "Linux" ] || skip "WSL detection only applies to a Linux shell"
-  run env -u TB_MEASURE_PLATFORM WSL_DISTRO_NAME=Ubuntu-22.04 bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
+  # shellcheck disable=SC2086
+  run env $(_not_wsl_env) WSL_DISTRO_NAME=Ubuntu-22.04 bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
+  [ "$status" -eq 0 ] || return 1
+  [ "$output" = "Windows" ] || return 1
+}
+
+@test "WSL2 detected from /proc/version alone is still a WINDOWS record" {
+  # The seam a re-implemented detector drops, and the one that matters: a WSL2
+  # distro on a CUSTOM kernel carries `microsoft` ONLY here, because `osrelease`
+  # is then whatever that kernel was built with. Answering `Linux` to this input
+  # is what mints the mis-bucketed record this whole file exists to prevent.
+  [ "$(uname -s)" = "Linux" ] || skip "WSL detection only applies to a Linux shell"
+  printf 'Linux version 5.15.0 (Microsoft@WSL2)\n' > "$BATS_TEST_TMPDIR/version-wsl"
+  printf '5.15.0-custom\n' > "$BATS_TEST_TMPDIR/osrelease-plain"
+  run env -u TB_MEASURE_PLATFORM -u WSL_DISTRO_NAME -u WSL_INTEROP \
+      TB_OSRELEASE_FILE="$BATS_TEST_TMPDIR/osrelease-plain" \
+      TB_PROC_VERSION_FILE="$BATS_TEST_TMPDIR/version-wsl" \
+      bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
   [ "$status" -eq 0 ] || return 1
   [ "$output" = "Windows" ] || return 1
 }
 
 @test "a Linux shell that is NOT WSL still stamps Linux (the detection is not a blanket rewrite)" {
   [ "$(uname -s)" = "Linux" ] || skip "only meaningful on a Linux shell"
-  run env -u TB_MEASURE_PLATFORM -u WSL_DISTRO_NAME -u WSL_INTEROP bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
+  # shellcheck disable=SC2086
+  run env $(_not_wsl_env) bash -c 'TB_MEASURE_PRINT_PLATFORM=1 bash "$0"' "$MEASURE"
   [ "$status" -eq 0 ] || return 1
   [ "$output" = "Linux" ] || return 1
 }
