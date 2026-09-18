@@ -1,0 +1,1560 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  setup-linux.sh — Linux prerequisites: package manager, Docker Engine,
+#                   system deps, kubectl, k3d, helm, GPU dispatch
+# =============================================================================
+
+# ── Tool-install target defaults ─────────────────────────────────────────────
+# WHERE kubectl/k3d/helm install, and whether that needs sudo. Default to the
+# system location; _set_tools_target() overrides at runtime (Tier 0 flips these
+# to a no-sudo ~/.local/bin). Defaulted here so any caller that reaches the
+# install_* functions WITHOUT going through _set_tools_target — the bats suite,
+# e2e harnesses — still gets the system behaviour, not an empty TB_TOOLS_DIR
+# (kubectl → "/kubectl") or a spurious no-sudo branch (Bugbot #1175 r2).
+: "${TB_TOOLS_DIR:=/usr/local/bin}"
+: "${TB_TOOLS_SUDO:=sudo}"
+
+# ── Package manager detection ────────────────────────────────────────────────
+setup_pm() {
+  # apt note: Ubuntu 22.04+ ships needrestart, which hooks `apt-get install` and
+  # opens an interactive "restart services?" prompt that `-y` does NOT suppress.
+  # Run inside spin_cmd (stdout/stderr redirected, process backgrounded) that
+  # prompt is invisible and blocks reading the TTY → SIGTTIN → the install hangs
+  # forever (the symptom was a spinner stuck on "still pulling conntrack" — a
+  # package the installer no longer installs; the hang class is what matters).
+  # DEBIAN_FRONTEND=noninteractive + NEEDRESTART_MODE=a make apt fully
+  # non-interactive; they are passed *through*
+  # `sudo env` because sudo resets the environment by default.
+  #
+  # apt also waits *indefinitely* on the dpkg lock while apt-daily / unattended-
+  # upgrades hold it on a freshly-booted host (#210); -o DPkg::Lock::Timeout=600
+  # bounds that wait so the install fails with a clear error rather than hanging
+  # silently behind the spinner.
+  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq -o DPkg::Lock::Timeout=600"; PM_INSTALL="sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+  elif has dnf;     then PM_UPDATE="sudo dnf makecache -q";             PM_INSTALL="sudo dnf install -y -q"
+  elif has yum;     then PM_UPDATE="sudo yum makecache -q";             PM_INSTALL="sudo yum install -y -q"
+  elif has zypper;  then PM_UPDATE="sudo zypper refresh";               PM_INSTALL="sudo zypper install -y"
+  elif has pacman;  then PM_UPDATE="sudo pacman -Sy --noconfirm";       PM_INSTALL="sudo pacman -S --noconfirm"
+  else error "No supported package manager found."; fi
+}
+
+# ── Wait out apt/dpkg lock holders before our apt calls ──────────────────────
+# On a freshly-installed/booted Debian/Ubuntu host, the apt-daily and
+# unattended-upgrades systemd units grab the dpkg lock at boot and can hold it
+# for several minutes (longer when a kernel/security batch is pending). apt-get
+# then blocks on the lock, and because we run it behind spin_cmd the
+# "Waiting for cache lock…" line is hidden in the log — the installer looks
+# frozen (#210). Surface the wait with a visible spinner and bound it; the
+# per-command DPkg::Lock::Timeout (setup_pm) is the backstop if a holder appears
+# mid-run. No-op when apt or fuser is absent, or when the lock is already free.
+apt_wait_for_lock() {
+  has apt-get && has fuser || return 0
+  local locks="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
+  sudo fuser $locks >/dev/null 2>&1 || return 0   # free already → silent fast path
+  spin_cmd "Waiting for background system updates to finish…" bash -c '
+    waited=0
+    while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+      [ "$waited" -ge 600 ] && exit 0
+      sleep 5; waited=$((waited + 5))
+    done' || true
+}
+
+# ── Kernel modules Docker + k3s need ─────────────────────────────────────────
+# Docker's bridge driver programs iptables NAT rules using the `addrtype` match
+# (xt_addrtype), and k3s needs br_netfilter + overlay. On minimal RHEL/AlmaLinux
+# cloud images (e.g. AWS EC2) these netfilter modules ship in kernel-modules-EXTRA,
+# which is NOT installed by default (the base kernel-modules package does NOT
+# carry xt_addrtype/iptable_nat/br_netfilter) — so dockerd dies on startup with
+# "iptables … addrtype … missing kernel module". Install kernel-modules-extra,
+# (re)load the modules, and persist them for reboots. Best-effort + idempotent.
+#
+# Caveat: kernel-modules-extra is only published for the repo's CURRENT kernel.
+# If the running kernel is older (image hasn't been rebooted into the latest
+# kernel yet), dnf installs the modules for the NEW kernel and they can't be
+# modprobe'd until a reboot. We flag that (KMODS_REBOOT_REQUIRED) so the caller
+# can tell the user to reboot + re-run; the modules-load.d entry then activates
+# them on boot.
+_ensure_kernel_modules() {
+  local mods="overlay br_netfilter xt_addrtype iptable_nat ip_tables"
+  local m missing=""
+  for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
+  if [[ -n "$missing" ]] && has dnf; then
+    # The netfilter modules live in kernel-modules-extra, NOT the base
+    # kernel-modules package. Install unversioned so dnf pulls the extra set
+    # (and a matching newer kernel, if the repo has moved on) for the current repo.
+    spin_cmd "Installing kernel modules for Docker/k3s…" \
+      sudo dnf install -y -q kernel-modules-extra || true
+    missing=""
+    for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
+  fi
+  printf '%s\n' $mods | sudo tee /etc/modules-load.d/tracebloc.conf >/dev/null 2>&1 || true
+
+  # Still unloadable, but the module file exists for a DIFFERENT (installed but
+  # not-yet-booted) kernel → a reboot will bring it in via modules-load.d.
+  # `grep -q .` closes the pipe on the first line, so a SIGPIPE'd find makes
+  # the pipeline 141 -- which reads here as "no module found" and drops the
+  # reboot hint. Capture instead, and keep the short-circuit: neither find runs
+  # unless $missing is non-empty (backend#1778).
+  if [[ -n "$missing" ]]; then
+    local mod_this_kernel mod_any_kernel
+    mod_this_kernel="$(find "/lib/modules/$(uname -r)" -name 'xt_addrtype.ko*' 2>/dev/null || true)"
+    mod_any_kernel="$(find /lib/modules -name 'xt_addrtype.ko*' 2>/dev/null || true)"
+    if [[ -z "$mod_this_kernel" && -n "$mod_any_kernel" ]]; then
+      KMODS_REBOOT_REQUIRED=1
+    fi
+  fi
+}
+
+# ── Corporate-proxy support for the host Docker daemon (#244) ────────────────
+# dockerd pulls the k3d node image (rancher/k3s) and other images via the HOST
+# daemon, which does NOT inherit the shell's HTTP_PROXY — it reads a systemd
+# drop-in instead. Without it, `k3d cluster create` fails on a strict proxy-only
+# host with "failed to pull rancher/k3s … i/o timeout", BEFORE the client is
+# ever installed. Mirrors cluster.sh (k3d node env, #166) and
+# install-client-helm.sh (chart values, #242): when the host has a proxy,
+# propagate it to every layer that needs it. Idempotent — only restarts dockerd
+# when the drop-in content actually changes, so a re-run never bounces a running
+# cluster; and if the host proxy is later REMOVED, a re-run deletes the drop-in
+# we wrote (tagged with a marker) so dockerd stops routing pulls through a dead
+# proxy, while a foreign http-proxy.conf is left untouched. (Linux/systemd only;
+# Docker Desktop on macOS manages its own proxy.)
+# SCOPE (RFC 0001 #1221): "system" (default) manages the host daemon's drop-in
+# under /etc/systemd/system with sudo — the original #244 behaviour, unchanged.
+# "user" manages the ROOTLESS daemon's drop-in under ~/.config/systemd/user with
+# NO sudo and `systemctl --user`. Slice 1's Tier-1 early-return never reaches the
+# system path, so on a proxy-only host the rootless daemon would pull rancher/k3s
+# with no proxy and time out; install_rootless_docker calls this with "user" to
+# fix that. One implementation, two scopes — no duplicated proxy logic.
+_configure_docker_proxy() {
+  has systemctl || return 0                       # only systemd-managed Docker
+  local scope="${1:-system}"
+  local dir _sudo
+  local -a _sc                                    # systemctl invocation (never empty)
+  if [[ "$scope" == "user" ]]; then
+    dir="${TB_DOCKER_USER_DROPIN_DIR:-$HOME/.config/systemd/user/docker.service.d}"
+    _sudo=""                                       # user-scoped: no root
+    _sc=(systemctl --user)
+  else
+    dir="${TB_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
+    _sudo="sudo"
+    _sc=(sudo systemctl)
+  fi
+  local conf="$dir/http-proxy.conf"
+  local marker="# Managed by tracebloc installer (#244)"
+
+  local proxy="" var
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -n "${!var:-}" ]] && { proxy="${!var}"; break; }
+  done
+
+  # No host proxy → remove a drop-in WE wrote on a previous run (the proxy was
+  # removed since), so dockerd doesn't keep pulling through a proxy that no
+  # longer exists. Only touch our own file (identified by the marker); a
+  # user/IT-managed http-proxy.conf is left alone.
+  if [[ -z "$proxy" ]]; then
+    # shellcheck disable=SC2086  # $_sudo is a deliberate optional prefix (empty in user scope)
+    if [[ -f "$conf" ]] && $_sudo grep -qF "$marker" "$conf" 2>/dev/null; then
+      # shellcheck disable=SC2086
+      $_sudo rm -f "$conf"
+      "${_sc[@]}" daemon-reload 2>/dev/null || true
+      if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then
+        spin_cmd "Removing stale Docker proxy settings…" "${_sc[@]}" restart docker || true
+      fi
+      log "Removed stale tracebloc-managed Docker daemon proxy (no host proxy set)."
+    fi
+    return 0
+  fi
+
+  local https="${HTTPS_PROXY:-${https_proxy:-$proxy}}"
+  local noproxy
+  if declare -F _augment_no_proxy >/dev/null 2>&1; then
+    noproxy="$(_augment_no_proxy)"                 # host NO_PROXY ∪ cluster-internal ranges
+  else
+    noproxy="${NO_PROXY:-${no_proxy:-}}"
+  fi
+
+  local desired
+  printf -v desired '%s\n[Service]\nEnvironment="HTTP_PROXY=%s"\nEnvironment="HTTPS_PROXY=%s"\nEnvironment="NO_PROXY=%s"\n' \
+    "$marker" "$proxy" "$https" "$noproxy"
+
+  # Unchanged → leave dockerd alone (a restart would bounce a running cluster).
+  # Compare with cmp, not "$(cat)" == , so a trailing newline isn't stripped by
+  # command substitution (which would make the check always report "changed").
+  # shellcheck disable=SC2086
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | $_sudo cmp -s - "$conf" 2>/dev/null; then
+    log "Docker daemon proxy already configured."
+    return 0
+  fi
+
+  # shellcheck disable=SC2086
+  $_sudo mkdir -p "$dir"
+  # shellcheck disable=SC2086
+  printf '%s' "$desired" | $_sudo tee "$conf" >/dev/null
+  "${_sc[@]}" daemon-reload 2>/dev/null || true
+  # Restart only if the daemon is already up; on a fresh install the start in
+  # install_docker_engine (system) / install_rootless_docker (user) brings it up
+  # with the drop-in already in place.
+  if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then
+    spin_cmd "Applying Docker proxy settings…" "${_sc[@]}" restart docker || true
+  fi
+  log "Configured Docker daemon proxy (${scope} scope) for image pulls behind a corporate proxy (HTTP_PROXY=$proxy)."
+}
+
+# ── Docker Engine ────────────────────────────────────────────────────────────
+install_docker_engine() {
+  # os-release path is overridable (TB_OS_RELEASE_FILE) so the distro detection
+  # below stays testable on hosts without one — e.g. macOS dev machines, where a
+  # bash `[[ -f ]]` file-test can't be mocked the way a command like `grep` can.
+  local os_release="${TB_OS_RELEASE_FILE:-/etc/os-release}"
+  # The invoking user we grant docker to AND re-exec under — resolved once so the
+  # grant and the sg-docker re-exec guard below always agree, even in the USER-unset
+  # edge (#427 reviewer). A sudo-wrapped full run is already refused, so this is the
+  # real daily user, never root.
+  local _grant_user="${USER:-$(id -un 2>/dev/null)}"
+  if ! has docker; then
+    if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
+      if has dnf; then spin_cmd "Installing Docker…" sudo dnf install -y docker
+      else              spin_cmd "Installing Docker…" sudo yum install -y docker; fi
+    elif has pacman; then
+      spin_cmd "Installing Docker…" sudo pacman -S --noconfirm docker
+    elif has zypper; then
+      spin_cmd "Installing Docker…" sudo zypper install -y docker
+    elif [[ -f "$os_release" ]] && grep -qiE '^ID="?(almalinux|rocky|ol|oracle)"?' "$os_release"; then
+      # get.docker.com rejects RHEL rebuilds (almalinux/rocky/ol) with
+      # "Unsupported distribution". Install docker-ce from Docker's official
+      # CentOS repo instead — it is RHEL-compatible and works on these distros.
+      spin_cmd "Installing Docker…" bash -c '
+        set -e
+        sudo dnf -y -q install dnf-plugins-core
+        sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        sudo dnf -y -q install docker-ce docker-ce-cli containerd.io'
+    else
+      local docker_script
+      docker_script="$(mktemp)"
+      retry 3 5 curl_secure -fsSL https://get.docker.com -o "$docker_script"
+      chmod +x "$docker_script"
+      # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
+      # internally, so under spin_cmd it can hit the same hidden prompt and hang.
+      #
+      # And BOUND it: the script's internal apt/download.docker.com fetches carry
+      # no timeout of their own, so a stalled connection hung here silently behind
+      # the spinner until something else killed the process — in CI that was the
+      # 20-minute job timeout, three times in one day, with nothing in the log but
+      # "Installing Docker…" (backend, 2026-08-04). A healthy install takes 1-3
+      # minutes; 10 is network trouble, not a slow link. spin_cmd_bounded returns
+      # 124 ONLY on the deadline, so a fast real apt/script failure keeps its own
+      # error instead of being mislabelled as a stall (Bugbot).
+      local _dk_rc=0
+      spin_cmd_bounded 600 "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
+      rm -f "$docker_script"
+      # Re-run advice by mode, matching the daemon-check errors below: telling a
+      # prepare-host ADMIN to "re-run the installer" points them at a full
+      # provision as themselves — the exact outcome prepare-host exists to
+      # prevent (Bugbot).
+      local _rerun="the installer"
+      [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && _rerun="prepare-host"
+      if (( _dk_rc == 124 )); then
+        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run ${_rerun}; it resumes safely."
+      elif (( _dk_rc != 0 )); then
+        error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run ${_rerun}."
+      fi
+    fi
+    # Enable for boot only (no --now): starting is handled below, where a start
+    # failure is diagnosed instead of aborting the whole script under `set -e`.
+    sudo systemctl enable docker >/dev/null 2>&1 || true
+    success "Docker"
+  else
+    success "Docker"
+  fi
+
+  # Ensure the invoking user is in the docker group whenever we take the daemon
+  # path — NOT only on a fresh install (#427). On a box where Docker was already
+  # present but the user isn't a member, the old code granted nothing here and the
+  # recovery path below dead-ended at "log out and back in" without ever granting
+  # membership, looping every re-run. prepare-host is exempt: the invoking ADMIN
+  # must not get the socket — only TB_PREPARE_USER does, later (least-privilege,
+  # Bugbot #381 / the #377 SUDO_USER rule).
+  if [[ -z "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    # Grant the INVOKING user ($USER) — not TB_PREPARE_USER: socket access and the
+    # sg-docker re-exec below both key off $USER, and a sudo-wrapped full run is
+    # already refused, so $USER is the real daily user. TB_PREPARE_USER is the
+    # admin-for-someone-else mechanism and is granted only on the prepare-host path
+    # (#427 Bugbot; matches the rest of the tree's identity).
+    # Capture-then-match: `id -nG | grep -qw` lets grep close the pipe on its
+    # first hit, id takes SIGPIPE and pipefail makes the pipeline 141 — which the
+    # `if !` reads as "not a member" (backend#1778). The space padding in the
+    # `case` pattern is exactly `grep -w`'s word boundary.
+    local _grant_groups
+    _grant_groups="$(id -nG "$_grant_user" 2>/dev/null || true)"
+    case " $_grant_groups " in
+      *" docker "*) ;;
+      *) sudo usermod -aG docker "$_grant_user" 2>/dev/null \
+           || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}" ;;
+    esac
+  fi
+
+  # Load the kernel modules dockerd's bridge driver + k3s need BEFORE starting,
+  # so minimal RHEL/AlmaLinux images don't fail with the "addrtype" iptables error.
+  _ensure_kernel_modules
+
+  # Give the host Docker daemon the corporate proxy BEFORE it starts and before
+  # k3d uses it to pull rancher/k3s (#244) — dockerd doesn't read the shell env.
+  _configure_docker_proxy
+
+  # Clear any failed/throttled state from a previous attempt first — a crashed
+  # daemon leaves the unit in "Start request repeated too quickly", which makes
+  # systemctl refuse a plain start (so a bare re-run can never recover). Both
+  # commands are best-effort; the `docker info` check below is the real gate.
+  sudo systemctl reset-failed docker 2>/dev/null || true
+  sudo systemctl start docker 2>/dev/null || true
+
+  # prepare-host mode: the admin verifies the DAEMON via sudo and never joins
+  # or re-execs into the docker group — the sg re-exec below re-runs the script
+  # WITHOUT its arguments, which would silently turn a host-prep into a FULL
+  # provision as the admin; and a non-root admin without socket access must not
+  # abort before the TB_PREPARE_USER grant runs (Bugbot on #381).
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    # Bound the daemon probe: a wedged daemon makes `docker info` hang forever, and
+    # this runs on the admin's host-prep path (#744). Use `_bounded_root`, not
+    # `_bounded … sudo …`: `_bounded` execs `timeout` (a binary) which resolves `sudo`
+    # from PATH and bypasses the root-aware `sudo()` shadow — and this path is normally
+    # run AS ROOT, where RFC 0001 often has no sudo binary, so `timeout sudo docker info`
+    # would fail to find sudo and misreport a live daemon as dead (Bugbot #744, LukasWodka).
+    # `_bounded_root` runs bare when root, real `sudo` otherwise.
+    if _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then
+      # Running NOW isn't enough for host-prep: after a reboot the Tier-0
+      # researcher can't start the daemon themselves, so make sure it's also
+      # enabled on boot (best-effort — non-systemd hosts manage this their own
+      # way, and the daemon is verifiably up either way) (Bugbot r5).
+      sudo systemctl enable docker 2>/dev/null || true
+      log "Docker daemon running (verified via sudo — prepare-host mode)."
+      return 0
+    fi
+    # Daemon ACTIVE but not answering even via sudo: terminal HERE — the
+    # shared tail's "log out and back in" advice is docker-group advice, wrong
+    # for an admin who never joins the group (Bugbot).
+    if sudo systemctl is-active --quiet docker 2>/dev/null; then
+      error "Docker's daemon is active but not answering (even via sudo). Check 'sudo docker info', then re-run prepare-host."
+    fi
+    # Daemon DOWN: starting it IS host preparation — try, then re-verify. Every
+    # outcome stays terminal in prepare-host wording: the shared diagnostics
+    # below end with "re-run this installer", which for the ADMIN means a full
+    # provision as themselves — the exact outcome prepare-host exists to
+    # prevent (Bugbot r3).
+    log "Docker daemon not active (prepare-host) — starting it."
+    sudo systemctl enable --now docker 2>/dev/null || true
+    if _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then   # root-aware bound, as above (#744)
+      log "Docker daemon started (prepare-host mode)."
+      return 0
+    fi
+    if [[ -n "${KMODS_REBOOT_REQUIRED:-}" ]]; then
+      error "Reboot required to finish Docker setup: its kernel modules were installed for a newer kernel that isn't running yet. Reboot, then re-run prepare-host."
+    fi
+    warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc. Docker's error:"
+    # || true: `systemctl status` exits 3 for an inactive unit, and under
+    # set -e -o pipefail the failing pipeline would abort BEFORE the error
+    # below — a silent death with no re-run guidance (Bugbot r6).
+    { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /' || true
+    error "Fix the Docker error above, then re-run prepare-host."
+  fi
+  if ! _docker_answers; then
+    # (a) Group not active in THIS shell yet → re-exec under the docker group. Key
+    # off $_grant_user (not bare $USER) so the USER-unset edge the grant handled
+    # still triggers the in-session re-exec instead of dead-ending (#427 reviewer).
+    # Capture-then-match (backend#1778), and NESTED so the two mode guards still
+    # short-circuit ahead of the probe — `id` must not run in prepare-host or
+    # re-exec mode, where the old `&&` never reached it.
+    if [[ -z "${TB_PREPARE_HOST_MODE:-}" && -z "${_K3S_INSTALL_REEXEC:-}" ]]; then
+      local _reexec_groups
+      _reexec_groups="$(id -nG "$_grant_user" 2>/dev/null || true)"
+      case " $_reexec_groups " in
+        *" docker "*)
+          SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+          log "Docker group not yet active in this session — re-executing script..."
+          exec sg docker -c "_K3S_INSTALL_REEXEC=1 bash '$SELF'"
+          ;;
+      esac
+    fi
+    # (b) The daemon itself isn't running → a Docker/host problem, not a group
+    # one. Surface Docker's OWN error (a 'log out and back in' hint would just
+    # send the user in circles, as it can't fix a crashing daemon).
+    if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
+      echo ""
+      # Modules were just installed for a newer, not-yet-booted kernel → the only
+      # remedy is a reboot; a re-run without it would loop on the same failure.
+      if [[ -n "${KMODS_REBOOT_REQUIRED:-}" ]]; then
+        warn "Docker can't start yet: the netfilter kernel modules it needs were just installed"
+        hint "for a newer kernel that isn't running. Reboot to load it, then re-run this installer:"
+        hint "    sudo reboot"
+        hint "(The modules are pinned in /etc/modules-load.d/tracebloc.conf and load automatically on boot.)"
+        echo ""
+        error "Reboot required to finish Docker setup. Reboot, then re-run this installer."
+      fi
+      warn "Docker is installed, but its daemon won't start — this is a Docker/host issue, not tracebloc."
+      hint "If the error below mentions 'addrtype' / 'missing kernel module', the host lacks the"
+      hint "netfilter modules Docker needs — try:  sudo dnf install -y kernel-modules-extra && sudo reboot"
+      hint "Other causes: SELinux, an overlay storage-driver issue, or low /var/lib/docker disk. Docker's error:"
+      # || true: same silent-death hazard as the prepare-host block above —
+      # `systemctl status` exits 3 on an inactive unit and a no-match `grep`
+      # exits 1, so under set -e -o pipefail this diagnostics pipeline would
+      # abort before the error message below ever printed (Bugbot r6).
+      { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6
+        sudo journalctl -u docker.service --no-pager 2>/dev/null \
+          | grep -iE 'level=(error|fatal)|failed to|cannot |unable |no such' | tail -12; } | sed 's/^/    /' || true
+      echo ""
+      error "Start Docker manually (fix the error above), then re-run this installer."
+    fi
+    error "Could not connect to Docker. Try logging out and back in, then re-run the script."
+  fi
+  log "Docker daemon running."
+}
+
+# ── System dependencies ─────────────────────────────────────────────────────
+install_system_deps() {
+  # conntrack is deliberately NOT here any more (removed 2026-09-09). It was
+  # installed on every host from the first k3d-based installer onward and
+  # invoked by nothing: the cluster is k3s INSIDE k3d (Docker), and the k3s
+  # image ships its own conntrack for kube-proxy. The host package only cost an
+  # index refresh plus one install per distro — and a per-distro package-name
+  # split (#720) to keep right. If a host-side need ever appears, cite the
+  # caller here rather than re-adding it on faith.
+  MISSING_PKGS=()
+  has curl      || MISSING_PKGS+=(curl)
+  # Helm's release tarball is unpacked with tar + gzip; minimal cloud images
+  # (Amazon Linux 2023, minimal RHEL) ship neither. openssl is NOT needed any
+  # more — the Helm download is verified with sha256sum since get-helm-3 was
+  # replaced by a direct fetch (#395; see _fetch_helm_release). Package names
+  # are uniform across apt/dnf/yum/zypper/pacman.
+  has tar       || MISSING_PKGS+=(tar)
+  has gzip      || MISSING_PKGS+=(gzip)
+  if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
+    # Guard the index refresh: under set -e an unguarded failure here aborts the
+    # whole install, yet the per-package installs below are already guarded
+    # (|| log) — so a flaky mirror refresh was MORE fatal than a failed install,
+    # which is backwards. A stale index usually still installs from cache; if a
+    # package genuinely can't be found, the guarded install below surfaces it.
+    spin_cmd "Updating package index…" $PM_UPDATE || \
+      warn "Package index refresh failed — continuing; installs will use the cached index."
+    for pkg in "${MISSING_PKGS[@]}"; do
+      spin_cmd "Installing $pkg…" $PM_INSTALL "$pkg" || \
+        log "Could not install $pkg — may already be satisfied by an alternative package."
+    done
+    log "Dependencies installed: ${MISSING_PKGS[*]}"
+  fi
+  success "System dependencies"
+}
+
+# ── kubectl ──────────────────────────────────────────────────────────────────
+# _set_tools_target — decide WHERE kubectl/k3d/helm install and whether that
+# needs sudo, based on the tier (RFC 0001 #1175). On Tier 0 (a usable runtime
+# already exists, no admin) the tools MUST NOT sudo — a docker-group researcher
+# without root would otherwise fail (or hit a hidden password prompt under
+# spin_cmd) at the "zero privileged steps" step. Install them into ~/.local/bin
+# (user-owned) and put it on this process's PATH so create_cluster finds them.
+# Otherwise the system location, with sudo. Sets TB_TOOLS_DIR + TB_TOOLS_SUDO.
+_set_tools_target() {
+  # Tier 0 (a usable runtime, no admin) AND rootless Tier 1 (#1221, possibly no root
+  # at all) both install user-space with NO sudo: a `sudo mv → /usr/local/bin` here
+  # would abort the rootless install under `set -e` AFTER the daemon is already up,
+  # leaving a half-install on a true no-sudo host (Asad review, #452). This is the
+  # LINUX target-selector; macOS (no Tier/rootless model) sets its own target in
+  # install_macos_cli_tools.
+  if [ "${INSTALL_TIER:-}" = "0" ] || _rootless_active; then
+    TB_TOOLS_DIR="${HOME}/.local/bin"
+    TB_TOOLS_SUDO=""
+    mkdir -p "$TB_TOOLS_DIR"
+    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+  else
+    TB_TOOLS_DIR="/usr/local/bin"
+    TB_TOOLS_SUDO="sudo"
+  fi
+}
+
+_fetch_kubectl() {
+  local ver="$1" arch="$2"
+  # Download platform slug: defaults to linux, so Linux (and every bats fetch test
+  # that leaves OS_DL unset) is byte-identical; the macOS path sets OS_DL=darwin so
+  # the SAME pinned/verified fetch honors the pins there too (#429).
+  local os="${OS_DL:-linux}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  # Same bounds as _fetch_k3d_release below, and for the same reason: kubectl is a
+  # ~50 MB binary, so a stall floor is the right bound and a hard --max-time is not
+  # (it would fail a slow-but-healthy link). These flags are also how curl_secure
+  # knows not to add its default deadline here (Bugbot, backend#1252). Before this
+  # the fetch had no bound at all — a mid-stream stall hung the step indefinitely.
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl.sha256" -o "${tmpdir}/kubectl.sha256"
+  # Catch a truncated/blocked transfer as a TRANSFER failure before the checksum
+  # misreports it as tampering (#607). kubectl is ~50 MB; 20 MB is a safe floor.
+  _assert_download_size "${tmpdir}/kubectl" 20000000 "kubectl" "$tmpdir"
+  _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
+    || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
+  chmod +x "${tmpdir}/kubectl"
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  else
+    mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  fi
+  rm -rf "$tmpdir"
+}
+
+install_kubectl() {
+  if ! has kubectl; then
+    # tail -1 + tr: retry's attempt notices go to STDOUT and, on a failed-then-
+    # successful fetch, concatenate into the capture — polluting the version and
+    # breaking the download URL. The endpoint body (the version) is the last line
+    # either way; on total failure the last line is retry's notice, which the tag
+    # regex below rejects → the honest error. Mirrors the Helm resolver in
+    # install_helm (Bugbot r3655543170).
+    KUBE_VER="$(retry 3 5 curl_secure -fsSL https://dl.k8s.io/release/stable.txt 2>/dev/null | tail -1 | tr -d '[:space:]')"
+    [[ "$KUBE_VER" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
+    spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
+    log "kubectl $KUBE_VER installed."
+  fi
+  # Gate on both paths (fresh + already-present). --rm removes our TB_TOOLS_DIR copy
+  # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
+  # installer-placed kubectl self-heals on re-run while a pkg copy elsewhere is safe.
+  assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client
+}
+
+# ── k3d ──────────────────────────────────────────────────────────────────────
+# Download the k3d release binary + checksums.txt at the given tag, verify, and
+# install into TB_TOOLS_DIR (mirrors _fetch_kubectl; fail-closed). We install
+# the binary OURSELVES because upstream's install.sh performs NO checksum
+# verification — its downloadFile fetches the bare binary and installFile just
+# chmod+cp's it (review of the pinned v5.9.0 script, PR #382) — so piping it
+# through sudo would install unverified bytes on a privileged path.
+# checksums.txt lines read "<sha256>  _dist/k3d-linux-amd64": match on the
+# asset basename.
+_fetch_k3d_release() {
+  local tag="$1" arch="$2"
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
+  local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  # --connect-timeout + a stall floor (not --max-time: the binary is ~50 MB and
+  # a hard cap would break slow-but-healthy links): a hung transfer under
+  # spin_cmd would otherwise spin forever (Bugbot r2).
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/k3d-${os}-${arch}" -o "${tmpdir}/k3d"
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
+  local want
+  want="$(awk -v asset="k3d-${os}-${arch}" \
+    '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
+    "${tmpdir}/checksums.txt" 2>/dev/null)"
+  # Transfer-vs-checksum distinction (#607): k3d is ~50 MB; 10 MB floor catches a
+  # truncated/blocked download before the checksum misreports it as tampering.
+  _assert_download_size "${tmpdir}/k3d" 10000000 "k3d" "$tmpdir"
+  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/k3d"; then
+    rm -rf "$tmpdir"
+    error "System tool checksum verification failed"
+  fi
+  chmod +x "${tmpdir}/k3d"
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  else
+    mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  fi
+  rm -rf "$tmpdir"
+}
+
+install_k3d() {
+  if has k3d; then
+    assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
+    return 0
+  fi
+
+  # Pin the k3d release (K3D_VERSION, common.sh) and fetch the binary DIRECTLY
+  # from the pinned release, verified against the release's checksums.txt
+  # (upstream's install.sh verifies nothing — see _fetch_k3d_release). The
+  # direct download also never touches the releases/latest redirect, whose
+  # GitHub rate limiting on shared egress IPs (CI runners, corporate NAT) took
+  # down 2/9 distro CI jobs on 2026-07-21 with a bare "curl: 404" — so the
+  # failure mode can't occur on the pinned (default) path at all.
+  # K3D_VERSION=latest resolves the newest tag at install time via the plain
+  # /releases/latest redirect (no API) and then takes the same verified path;
+  # an empty value means the common.sh default pin (Bugbot r1). The tag lands
+  # in a URL path, so anything that isn't a plain release tag fails closed —
+  # a value carrying "/" could otherwise traverse outside k3d-io/k3d
+  # (Bugbot r1).
+  local _k3d_tag="${K3D_VERSION:-}"
+  [[ "$_k3d_tag" == "latest" ]] && _k3d_tag=""
+  [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+    || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
+  if [ -z "$_k3d_tag" ]; then
+    _k3d_tag="$(retry 3 5 curl_secure -fsSLI --connect-timeout 15 --max-time 30 \
+      -o /dev/null -w '%{url_effective}' \
+      "https://github.com/k3d-io/k3d/releases/latest" 2>/dev/null)" || _k3d_tag=""
+    _k3d_tag="${_k3d_tag##*/}"
+    [[ "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "Couldn't resolve the latest k3d release tag — set K3D_VERSION to a release tag (e.g. v5.9.0) and re-run."
+  fi
+
+  spin_cmd "Installing system tools…" _fetch_k3d_release "$_k3d_tag" "$ARCH_DL" \
+    || error "System tool installation failed. See the install log for details."
+
+  if ! has k3d; then
+    error "System tool installation completed but not found on PATH."
+  fi
+
+  assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
+}
+
+# ── Helm ─────────────────────────────────────────────────────────────────────
+# _ensure_unpack_tools — Helm's release ships as a .tar.gz, so unpacking needs
+# tar + gzip. The full flow guarantees them via install_system_deps, but the
+# Tier 0 fast path skips that step — and minimal cloud images (Amazon Linux
+# 2023, minimal RHEL) genuinely ship without them, so the Helm install would
+# die mid-flight (Bugbot #383). Product call (#395): the installer takes care
+# of its own requirements — install what's missing via the package manager
+# instead of telling the user to go install tools. Root / passwordless sudo
+# installs quietly; otherwise we say exactly why we're asking for a password
+# this once (and only error as a last resort, when we truly can't get rights).
+_ensure_unpack_tools() {
+  local missing=() _unpack_keepalive=""
+  has tar  || missing+=(tar)
+  has gzip || missing+=(gzip)
+  [ ${#missing[@]} -eq 0 ] && return 0
+  setup_pm    # variable setup only (PM_UPDATE/PM_INSTALL); errors on unknown PM
+  # PM_INSTALL leads with `sudo` — that's the common.sh shadow (A2): as root it
+  # runs the command directly (fine with no sudo binary at all), so nothing to
+  # strip here. The OPTION-led probes below must BYPASS the shadow via
+  # _have_sudo_bin/_real_sudo — as root the shadow would execute "-n true" as a
+  # command — mirroring preflight_sudo/_probe_privilege (Bugbot #372).
+  if [ "${EUID:-1000}" -ne 0 ] && ! _real_sudo -n true 2>/dev/null; then
+    _have_sudo_bin || error "Couldn't install ${missing[*]} (needed to unpack Helm): you aren't root and this machine has no sudo. Ask an administrator to install ${missing[*]}, then re-run this installer."
+    # A password IS needed — prompt on a plain line (a spinner would garble the
+    # sudo prompt), with the honest reason, before the spin_cmd installs below.
+    info "Your machine is missing ${missing[*]} (needed once, to unpack Helm) — administrator password required to install ${missing[*]}."
+    _real_sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."
+    # Tier 0 skips preflight_sudo, so keep the just-primed ticket warm ourselves:
+    # the dpkg-lock wait below can outlast sudo's timestamp, and an expired
+    # ticket re-prompts invisibly behind the spinner (Bugbot r2). Same pattern
+    # as preflight_sudo; install_cleanup kills the pid on ANY exit, and we kill
+    # it right after the installs — the zero-privilege tier shouldn't hold a
+    # warm admin ticket a second longer than needed.
+    ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
+    _unpack_keepalive=$!
+    # Register OUR pid for install_cleanup only when no preflight keepalive
+    # owns the global — on the Tier 1/2 recovery path SUDO_KEEPALIVE_PID is
+    # preflight_sudo's, and clobbering (or later killing) it would let the
+    # remaining privileged steps re-prompt behind a spinner (Bugbot r3).
+    if [ -z "${SUDO_KEEPALIVE_PID:-}" ]; then
+      SUDO_KEEPALIVE_PID=$_unpack_keepalive
+    fi
+  fi
+  # Tier 0 also skips the full flow's apt_wait_for_lock — on a freshly-booted
+  # Debian/Ubuntu host apt-daily can hold the dpkg lock for minutes, and apt
+  # would sit on it invisibly behind the spinner (Bugbot r2). Bounded + visible;
+  # no-op off apt distros. Runs after the priming above so its own sudo calls
+  # never prompt mid-spinner.
+  apt_wait_for_lock
+  # Mirror install_system_deps: refresh the index best-effort (a brand-new
+  # minimal image has no package lists at all), gate on the install itself.
+  spin_cmd "Updating package index…" $PM_UPDATE || \
+    warn "Package index refresh failed — continuing; installs will use the cached index."
+  # ONE combined install (not per-package): a single sudo consumer right after
+  # the priming, minimizing the window in which the ticket could lapse.
+  spin_cmd "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || \
+    error "Couldn't install ${missing[*]} (needed to unpack Helm). Install with your package manager, then re-run this installer."
+  # Kill only the keepalive WE started — never a preflight_sudo one that the
+  # rest of the full flow still relies on (Bugbot r3).
+  if [ -n "$_unpack_keepalive" ]; then
+    kill "$_unpack_keepalive" 2>/dev/null || true
+    if [ "${SUDO_KEEPALIVE_PID:-}" = "$_unpack_keepalive" ]; then
+      SUDO_KEEPALIVE_PID=""
+    fi
+  fi
+  log "Dependencies installed: ${missing[*]}"
+}
+
+# _fetch_helm_release <tag> <arch> — download the Helm tarball for <tag> plus
+# its published .sha256sum from get.helm.sh, verify (FAIL-CLOSED), unpack, and
+# move the binary into TB_TOOLS_DIR. Runs under spin_cmd — no output of its own.
+# Direct download replaces helm's get-helm-3: that script floats on the MUTABLE
+# helm/helm@main (unpinned code executed on the host), needs openssl for its
+# checksum step (absent on minimal images — Bugbot #383), and its own fetches
+# are unbounded. sha256sum (coreutils) is present everywhere we run, get.helm.sh
+# is Helm's official release CDN, and the pin keeps installs deterministic
+# (mirrors _fetch_k3d_release / #382).
+_fetch_helm_release() {
+  local tag="$1" arch="$2" tarball tmpdir
+  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
+  tarball="helm-${tag}-${os}-${arch}.tar.gz"
+  tmpdir="$(mktemp -d)"
+  # --connect-timeout + a stall floor (not --max-time: the tarball is ~17 MB and
+  # a hard cap would break slow-but-healthy links) — a hung transfer under
+  # spin_cmd would otherwise spin forever.
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://get.helm.sh/${tarball}" -o "${tmpdir}/${tarball}"
+  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://get.helm.sh/${tarball}.sha256sum" -o "${tmpdir}/${tarball}.sha256sum"
+  # The published file is "<sha256>  <tarball-name>" — pull the hash and verify the
+  # tarball with the portable checker (sha256sum on Linux, shasum on macOS; #429).
+  local want
+  want="$(awk 'NR==1{print $1}' "${tmpdir}/${tarball}.sha256sum" 2>/dev/null)"
+  # Transfer-vs-checksum distinction (#607): the Helm tarball is ~17 MB; 5 MB floor
+  # catches a truncated/blocked download before the checksum misreports tampering.
+  _assert_download_size "${tmpdir}/${tarball}" 5000000 "Helm" "$tmpdir"
+  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/${tarball}"; then
+    rm -rf "$tmpdir"
+    error "System tool checksum verification failed"
+  fi
+  tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "${os}-${arch}/helm"
+  chmod +x "${tmpdir}/${os}-${arch}/helm"
+  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
+  if [ -n "$TB_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
+  else
+    mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
+  fi
+  rm -rf "$tmpdir"
+}
+
+_ensure_helm_executable() {
+  local helm_bin
+  helm_bin="$(command -v helm 2>/dev/null)" || true
+  if [[ -n "$helm_bin" && -f "$helm_bin" && ! -x "$helm_bin" ]]; then
+    log "Making Helm executable (fixing permissions)..."
+    # Tier 0 (no admin): helm is in the user's ~/.local/bin — a plain owner chmod
+    # works and MUST NOT sudo (would prompt on the tty after the zero-privilege
+    # promise, like the systemctl guard). Full flow: /usr/local/bin needs sudo.
+    # TB_TOOLS_SUDO is set by _set_tools_target (empty on Tier 0), defaulted to
+    # "sudo" at module scope for direct callers (Bugbot #1175 r3).
+    if [[ -n "${TB_TOOLS_SUDO:-}" ]]; then
+      sudo chmod 755 "$helm_bin" 2>/dev/null || true
+    else
+      chmod 755 "$helm_bin" 2>/dev/null || true
+    fi
+  fi
+}
+
+install_helm() {
+  if ! has helm; then
+    # Pin the Helm release (HELM_VERSION, common.sh) and fetch the tarball
+    # DIRECTLY from get.helm.sh, verified against its published .sha256sum —
+    # get-helm-3 is gone (see _fetch_helm_release). HELM_VERSION=latest resolves
+    # the newest release at install time via get.helm.sh/helm-latest-version and
+    # takes the same verified path; an empty value means the common.sh pin. The
+    # tag lands in a URL path, so anything that isn't a plain release tag fails
+    # closed (mirrors install_k3d).
+    local _helm_tag="${HELM_VERSION:-}"
+    [[ "$_helm_tag" == "latest" ]] && _helm_tag=""
+    [[ -z "$_helm_tag" || "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+      || error "HELM_VERSION must be a Helm release tag like v4.2.3, or 'latest' (got '${HELM_VERSION:-}')"
+
+    # Unpack needs tar + gzip — make sure of them BEFORE spending the download,
+    # installing them ourselves when missing (#395; Tier 0 skips system deps).
+    _ensure_unpack_tools
+
+    if [ -z "$_helm_tag" ]; then
+      # tail -1: retry's attempt notices go to STDOUT and would concatenate into
+      # the capture on a failed-then-successful fetch; the endpoint's body is
+      # the last line either way (Bugbot r3). On total failure the last line is
+      # retry's notice, which the tag regex below rejects → the honest error.
+      _helm_tag="$(retry 3 5 curl_secure -fsSL --connect-timeout 15 --max-time 30 \
+        "https://get.helm.sh/helm-latest-version" 2>/dev/null | tail -1 | tr -d '[:space:]')" || _helm_tag=""
+      [[ "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
+        || error "Couldn't resolve the latest Helm release tag — set HELM_VERSION to a release tag (e.g. v4.2.3) and re-run."
+    fi
+
+    spin_cmd "Installing system tools…" _fetch_helm_release "$_helm_tag" "$ARCH_DL" \
+      || error "System tool installation failed. See the install log for details."
+
+    if ! has helm; then
+      error "System tool installation completed but not found on PATH."
+    fi
+  fi
+  _ensure_helm_executable
+  # bare `helm version` (not --short: it may be dropped like kubectl's was). --rm
+  # removes our TB_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
+  # never a pre-existing / pkg-managed helm elsewhere on PATH (#411 review).
+  assert_tool_runs --rm "$TB_TOOLS_DIR/helm" helm version
+  success "System tools"
+}
+
+# ── GPU setup dispatch ───────────────────────────────────────────────────────
+dispatch_gpu_setup() {
+  case "$GPU_VENDOR" in
+    nvidia) install_nvidia_drivers; install_nvidia_container_toolkit ;;
+    amd)    install_rocm ;;
+    *)      log "No GPU setup required." ;;
+  esac
+}
+
+# ── Main Linux installer ────────────────────────────────────────────────────
+# _route_install_tier — honor the detected install tier (set by run_host_probes
+# in main's step a, RFC 0001) and fail fast when the host genuinely cannot run
+# containers without administrator rights AND there is no way to get them.
+# Extracted so the bats suite can exercise the decision without running the whole
+# install. TB_FORCE_TIER overrides the detected tier (QA / support).
+#
+# This is the routing SKELETON (#1172): it adds tier detection + the honest
+# fail-fast to the flow. Per-tier optimisation of the body — Tier 0 skipping the
+# privileged steps (#1175), Tier 1 setting up rootless Docker (#1177) — lands on
+# top; until then every proceeding tier runs the existing full flow below.
+_route_install_tier() {
+  [ -n "${TB_FORCE_TIER:-}" ] && INSTALL_TIER="$TB_FORCE_TIER"
+  # Tier 2 = the kernel can't run an unprivileged container (no cgroup v2 /
+  # unprivileged userns). If we also can't become root, no amount of retrying
+  # helps — fail with the actionable remedy instead of a cryptic mid-install
+  # crash minutes later. Tier 0 (runtime usable) and Tier 1 (rootless-capable)
+  # proceed. When probe.sh wasn't loaded (stale bootstrap) INSTALL_TIER is unset
+  # and we proceed exactly as before.
+  if [ "${INSTALL_TIER:-}" = "2" ] && [ "${PROBE_PRIVILEGE:-}" = "no_sudo" ]; then
+    error "This machine can't run containers without administrator rights — its kernel lacks cgroup v2 / unprivileged user namespaces, and you are neither root nor able to sudo. Ask an administrator to prepare this host once (install a container runtime + enable the kernel prerequisites), then re-run this installer as yourself. Details: docs/rfcs/0001-least-privilege-install.md"
+  fi
+  return 0
+}
+
+# _tools_rc_for_shell — which POSIX rc file a *fresh* interactive shell of the
+# user's $SHELL reads, so a PATH line we append is actually sourced. Mirrors
+# install-cli.sh::_cli_rc_for_shell, kept local so this module stays testable on
+# its own: zsh → ~/.zshrc; bash+macOS → ~/.bash_profile; bash+Linux → ~/.bashrc
+# (a fresh non-login bash reads ~/.bashrc, NOT ~/.profile — the failure mode);
+# anything else → POSIX ~/.profile. fish is NOT a POSIX shell (no `export`, reads
+# ~/.config/fish, not these files) and is handled separately in
+# _persist_tools_on_path — never routed here.
+_tools_rc_for_shell() {
+  case "$(basename "${SHELL:-sh}")" in
+    zsh)  echo "${HOME}/.zshrc" ;;
+    bash) if [ "${OS:-}" = "Darwin" ]; then echo "${HOME}/.bash_profile"; else echo "${HOME}/.bashrc"; fi ;;
+    *)    echo "${HOME}/.profile" ;;
+  esac
+}
+
+# _persist_tools_on_path — when Tier 0 dropped kubectl/k3d/helm into the user's
+# ~/.local/bin, that dir usually isn't on a fresh shell's PATH, so the summary's
+# suggested `kubectl …` commands fail in a NEW terminal — and because the CLI can
+# live in /usr/local/bin (already on PATH), nothing else triggers a PATH fix
+# either (Bugbot #375). Persist the dir to the shell rc so future terminals
+# resolve the tools. Idempotent (skips if the rc already references ~/.local/bin)
+# and best-effort — a PATH-persist hiccup must never fail an otherwise-good
+# install. No-op unless we actually used the user-local dir (i.e. Tier 0).
+_persist_tools_on_path() {
+  [ "${TB_TOOLS_DIR:-}" = "${HOME}/.local/bin" ] || return 0
+  # fish reads ~/.config/fish, not the POSIX rc files, and uses `set`/fish_add_path
+  # rather than `export PATH=`. Appending a bash `export` line to ~/.profile would
+  # be dead (fish never loads it), so hint the fish-correct command instead — it
+  # persists (a universal var) AND applies to the current shell (Bugbot #375).
+  if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
+    hint "Add ${HOME}/.local/bin to your PATH so kubectl/k3d/helm resolve:  fish_add_path \"${HOME}/.local/bin\""
+    return 0
+  fi
+  local rc; rc="$(_tools_rc_for_shell)"
+  # Already referenced (a prior run, or the user's/distro's own line) → leave it:
+  # a fresh shell already finds the tools, and we must not double-append.
+  if [ -f "$rc" ] && grep -qF '.local/bin' "$rc" 2>/dev/null; then return 0; fi
+  {
+    printf '\n# Added by tracebloc installer (RFC 0001 #1175): user-local tools\n'
+    printf 'export PATH="%s/.local/bin:$PATH"\n' "$HOME"
+  } >> "$rc" 2>/dev/null || return 0
+  hint "Added ${HOME}/.local/bin to your PATH in ${rc} — open a new terminal (or run 'source ${rc}') so kubectl/k3d/helm resolve."
+}
+
+# _persist_docker_host — RFC 0001 #1221 (Tier 1). install_rootless_docker exports
+# DOCKER_HOST for THIS process only, and _persist_tools_on_path puts ~/.local/bin on
+# future shells' PATH — but without DOCKER_HOST persisted too, a new terminal (and
+# the tracebloc CLI it launches) can't reach the rootless socket (Asad review, #452).
+# Persist it to the same shell rc, idempotently. Best-effort; no-op off the rootless
+# path. The rc line keeps the ${XDG_RUNTIME_DIR:-…} expansion UNquoted-at-write so it
+# resolves per-session in the user's shell, not to this install's runtime dir.
+_persist_docker_host() {
+  _rootless_active || return 0
+  if [ "$(basename "${SHELL:-sh}")" = "fish" ]; then
+    hint "Point new shells at the rootless Docker socket:  set -Ux DOCKER_HOST \"unix://\$XDG_RUNTIME_DIR/docker.sock\""
+    return 0
+  fi
+  local rc; rc="$(_tools_rc_for_shell)"
+  local marker='# Added by tracebloc installer (RFC 0001 #1221): rootless Docker socket'
+  # Our own prior line → idempotent, nothing to do. Key off OUR marker, not a bare
+  # 'DOCKER_HOST=' probe (that also matched a user's own DOCKER_HOST and silently skipped
+  # — Asad + Bugbot #478).
+  if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then return 0; fi
+  # A DOCKER_HOST the user set themselves → don't clobber it, but warn so they know to
+  # repoint it at the rootless socket.
+  if [ -f "$rc" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?DOCKER_HOST=' "$rc" 2>/dev/null; then
+    warn "Your ${rc} already sets DOCKER_HOST — left it untouched. If it isn't the rootless socket, new terminals and the tracebloc CLI won't reach the rootless daemon; point it at:  export DOCKER_HOST=\"unix://\$XDG_RUNTIME_DIR/docker.sock\""
+    return 0
+  fi
+  # Rootless Tier 1 runs under user-systemd, so pam sets XDG_RUNTIME_DIR=/run/user/<uid>
+  # and the socket always lives there — persist the standard template. (The no-systemd
+  # nohup fallback, where the socket could live under $HOME, is descoped from this slice
+  # and deferred until it can be validated on a real HPC host — see the PR/issue.)
+  {
+    printf '\n%s\n' "$marker"
+    printf '%s\n' 'export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"'
+  } >> "$rc" 2>/dev/null || return 0
+  hint "Added DOCKER_HOST to ${rc} so new terminals reach the rootless Docker daemon."
+}
+
+# _install_userspace_tools — download kubectl / k3d / helm into the user's bin
+# (no root: install-cli-style ~/.local/bin fallback). Shared by the Tier-0 fast
+# path and the full flow so they can't drift. umask 077 (common.sh) would make
+# the binaries executable only by their owner — relax to 022 for the installs.
+_install_userspace_tools() {
+  _set_tools_target          # RFC 0001 #1175: Tier 0 → ~/.local/bin, no sudo
+  local _saved_umask
+  _saved_umask=$(umask)
+  umask 022
+  install_kubectl
+  install_k3d
+  install_helm
+  umask "$_saved_umask"
+  _persist_tools_on_path     # RFC 0001 #1175: keep ~/.local/bin on PATH for new shells (Bugbot #375)
+  _persist_docker_host       # RFC 0001 #1221: keep DOCKER_HOST resolving on rootless Tier 1 (self-gates; no-op otherwise)
+}
+
+# _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,
+# but create_cluster still needs K3D_GPU_FLAGS to expose an NVIDIA GPU to the k3d
+# cluster (--gpus=all). Without it a GPU host gets a CPU-only cluster even when the
+# toolkit is already installed (Bugbot #375). Reuse the flag ONLY when Docker's
+# NVIDIA runtime is already configured — expected on a GPU host with a usable
+# Docker; we can't (and won't) install/configure it here without admin. Otherwise
+# stay CPU-only and tell the user how to enable it. (AMD uses the device plugin
+# only — no k3d flag — so it needs nothing here.)
+_tier0_gpu_flags() {
+  [ "${GPU_VENDOR:-none}" = "nvidia" ] || return 0
+  # Capture-then-match (backend#1778): `docker info … | grep -q` lets grep close
+  # the pipe on its first hit, docker takes SIGPIPE and pipefail makes it 141 —
+  # which the `if` reads as "no nvidia runtime", handing a Tier-0 GPU host a
+  # CPU-only cluster even though the toolkit is already configured.
+  local _runtimes
+  _runtimes="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
+  case "$_runtimes" in
+    *'"nvidia"'*)
+      K3D_GPU_FLAGS=("--gpus=all")
+      success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access." ;;
+    *)
+      warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
+      hint "To enable GPU, have an admin install and configure nvidia-container-toolkit on this host, then re-run." ;;
+  esac
+}
+
+# install_rootless_docker — RFC 0001 #1219 (Tier 1). Stand up a per-user, ROOTLESS
+# Docker daemon with NO blanket sudo, so a researcher on a modern kernel (cgroup v2
+# + unprivileged userns) with no runtime and no admin can still install tracebloc.
+# This slice covers the daemon core + pointing the run at the rootless socket.
+# Sibling slices build on it: subuid/subgid range creation → prepare-host (slice 2,
+# #1220), k3s cgroup delegation + explicit k3d-on-rootless wiring (slice 3, #1221),
+# and the no-systemd/HPC fallback + fuse-overlayfs perf (slice 4, #1222). The whole
+# path is gated behind TB_TIER1_ROOTLESS=1 at the call site until the spike's §5
+# host-validation matrix runs (#1176 / #1177).
+# _user_systemd_available — is there a per-user systemd manager to run the rootless
+# daemon under? RFC 0001 #1222. `systemctl --user is-system-running` prints a state
+# word (running/degraded/starting/…) whenever a user manager exists — even when it
+# exits non-zero — and prints NOTHING when there's no user D-Bus/manager (hardened /
+# HPC login nodes) or no systemctl at all. Also require XDG_RUNTIME_DIR, where the
+# user socket must live. A non-empty state ⇒ usable; otherwise take the nohup fallback.
+_user_systemd_available() {
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+  [ -n "$(systemctl --user is-system-running 2>/dev/null)" ]
+}
+
+# _tier2_fallthrough REASON — a rootless Tier-1 bring-up failed mid-flight (setuptool
+# error, daemon never Ready) or the host has no per-user systemd. Rather than proceed on
+# a broken/absent socket or die opaquely, route to the Tier-2 prepare-host remedy — the
+# honest "this host needs a one-time admin step" outcome (RFC 0001 #1222). Exits.
+_tier2_fallthrough() {
+  local reason="${1:-rootless setup failed}"
+  # NAME the researcher, matching _ensure_subid_ranges' hand-off (Bugbot on #485): a bare
+  # `prepare-host` provisions nothing for the user — run_prepare_host only grants
+  # docker-group + subuid ranges when TB_PREPARE_USER is set — so an admin who followed a
+  # bare hint would leave the researcher unable to install, looping back to this fall-through.
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+  warn "Couldn't complete a rootless install (${reason}) — falling back to the administrator-prepared path."
+  hint "Have an administrator prepare this host once (naming you as the researcher), then re-run as yourself:"
+  hint "  export TB_PREPARE_USER=${_user}"
+  hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+  hint "  (or, with the CLI:  tracebloc prepare-host ${_user})"
+  error "This host couldn't complete a rootless install (${reason}); an administrator must prepare it for '${_user}' (see above), then re-run. Details: docs/rfcs/0001-least-privilege-install.md"
+}
+
+
+install_rootless_docker() {
+  # Resolve the current user robustly: $USER can be empty in headless / su / cron
+  # contexts (Saqlain review, #452), and the linger call + success line below need a
+  # real name. `id -un` is authoritative; fall back to $USER only if it somehow fails.
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+
+  # Gate on per-user systemd BEFORE installing anything (Bugbot on #485): the setuptool
+  # sets up a `systemctl --user` unit and fails on a host with no user manager, so
+  # checking first yields the accurate "no per-user systemd" reason and avoids a partial
+  # ~/bin install + user drop-ins before the Tier-2 remedy. The nohup fallback for such
+  # hosts is deferred (#1354); until then, route to prepare-host.
+  if ! _user_systemd_available; then
+    _tier2_fallthrough "this host has no per-user systemd (systemctl --user has no manager); rootless without it needs a one-time admin step"
+  fi
+
+  # Preconditions — the subuid/subgid range and the setuid newuidmap/newgidmap
+  # helpers — are ensured by _ensure_subid_ranges, called just before this in
+  # install_linux's Tier-1 branch (RFC 0001 #1220). So by the time we get here the
+  # host can actually stand up a rootless daemon; we don't re-check them.
+
+  # Install the rootless daemon as THIS user, no sudo. Prefer the setuptool shipped
+  # by docker-ce-rootless-extras when it's already present; otherwise fetch Docker's
+  # official rootless installer (same retry + mktemp pattern as install_docker_engine's
+  # get.docker.com path), run as the current user — never under sudo.
+  # Guard both install paths: under `set -e` an unguarded spin_cmd failure would
+  # abort with the spinner log tail, NOT the Tier-2 remedy this slice promises for a
+  # setuptool/installer failure — route it through _tier2_fallthrough instead (Bugbot #485 r2).
+  if has dockerd-rootless-setuptool.sh; then
+    spin_cmd "Installing rootless Docker…" dockerd-rootless-setuptool.sh install \
+      || _tier2_fallthrough "the rootless setup tool (dockerd-rootless-setuptool.sh install) failed"
+  else
+    local rootless_script
+    rootless_script="$(mktemp)"
+    retry 3 5 curl_secure -fsSL https://get.docker.com/rootless -o "$rootless_script"
+    # No chmod +x — we run it via `sh "$rootless_script"`, which ignores the exec bit (Asad review, #452).
+    spin_cmd "Installing rootless Docker…" sh "$rootless_script" \
+      || _tier2_fallthrough "the rootless installer (get.docker.com/rootless) failed"
+    rm -f "$rootless_script"
+  fi
+
+  # The rootless installer drops the Docker CLI + daemon binaries in ~/bin (its
+  # default target); prepend it so THIS run's `docker info` verify and later k3d /
+  # docker calls resolve them. Without it the get.docker.com/rootless fallback
+  # (taken exactly when dockerd-rootless-setuptool.sh is absent) installs docker
+  # off-PATH and every later call fails as if the daemon never came up (Bugbot).
+  # Idempotent, and a no-op on the setuptool path where docker is already on PATH.
+  case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+
+  # Give the ROOTLESS daemon the corporate proxy BEFORE it starts, user-scoped and
+  # with NO sudo (RFC 0001 #1221). The system path's _configure_docker_proxy (#244)
+  # is sudo/system-scoped and never runs on this Tier-1 early-return, so without it
+  # k3d pulls of rancher/k3s time out on a proxy-only host even though the daemon
+  # verified (Bugbot on #452). The drop-in must exist before the
+  # `systemctl --user enable --now docker` below picks it up.
+  _configure_docker_proxy user
+
+  # Start the user daemon under per-user systemd (survives logout via linger). We already
+  # gated on _user_systemd_available at the TOP of this function, so this is unconditional
+  # here; neither call is fatal — the bounded `docker info` verify below is the real gate,
+  # and linger can fail on polkit-locked hosts even when the daemon is up (Bugbot).
+  systemctl --user enable --now docker || true
+  loginctl enable-linger "$_user" \
+    || warn "Couldn't enable linger (optional) — the rootless daemon may not survive logout. Enable it later with:  loginctl enable-linger ${_user}"
+
+  # Point every later docker/k3d call in this run at the rootless socket. docker and
+  # k3d both read DOCKER_HOST from the environment, so exporting it is sufficient
+  # here; create_cluster re-asserts this same export (#1221) so a re-run that lost
+  # it still targets the socket. Guard XDG_RUNTIME_DIR,
+  # which is unset on some non-login / systemd-less sessions → fall back to the
+  # canonical /run/user/<uid> path rather than emitting a bare unix://docker.sock.
+  export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
+
+  # Confirm the rootless daemon actually answers on that socket before handing off
+  # to the tools / cluster. Bound it (installer rule) so a wedged user daemon can't
+  # hang a headless install; on failure surface the daemon's own (bounded) error and
+  # stop — no retry loop (a rootless bring-up failure is a prerequisite problem, not
+  # a race).
+  if ! _bounded 15 docker info >/dev/null 2>&1; then
+    _bounded 15 docker info || true
+    _tier2_fallthrough "the rootless daemon never answered on ${DOCKER_HOST}"
+  fi
+  # Be honest about privilege: _ensure_subid_ranges may have used one announced sudo
+  # touch (subuid range / uidmap install) on the root/sudo_nopw path. Only claim
+  # "no administrator rights" on the true zero-root path (Bugbot #458).
+  if [ "${TB_ROOTLESS_ADMIN_TOUCH:-0}" = "1" ]; then
+    success "Rootless Docker is running as ${_user} — one or more one-time admin steps set up the host prerequisites (subuid/subgid range and/or cgroup delegation); the daemon itself runs rootless."
+  else
+    success "Rootless Docker is running as ${_user} — no administrator rights were used."
+  fi
+}
+
+# _ensure_subid_ranges — RFC 0001 #1220 (Tier 1). The ONE spot a modern rootless
+# host may still need a privileged touch: the current user must own a subordinate
+# UID/GID range (/etc/subuid + /etc/subgid) AND have the setuid uidmap helpers. Runs
+# BEFORE install_rootless_docker so a missing range never fails deep inside
+# dockerd-rootless-setuptool.sh with a message a researcher can't action. Reads the
+# cached PROBE_SUBID / PROBE_UIDMAP / PROBE_PRIVILEGE (set by run_host_probes).
+_ensure_subid_ranges() {
+  # Already provisioned → proceed rootless with ZERO privileged calls. The common
+  # modern-host case (Ubuntu 22.04/24.04, Debian 12, RHEL/Alma/Rocky 9, openSUSE
+  # 15.6 all ship a default range + the uidmap helpers).
+  if [ "${PROBE_SUBID:-0}" = "1" ] && [ "${PROBE_UIDMAP:-0}" = "1" ]; then
+    return 0
+  fi
+
+  # Key everything off the user the rootless daemon will run as — `id -un`, not
+  # $USER (they diverge under su/cron), matching install_rootless_docker and the
+  # probe so detection + provisioning + the hand-off all name the same user
+  # (Asad/Bugbot, client#458).
+  local _user; _user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+
+  case "${PROBE_PRIVILEGE:-no_sudo}" in
+    root | sudo_nopw)
+      # Sudo available → perform the touch as exactly ONE named, announced
+      # privileged step (A2 honest-messaging), never blanket sudo. Delegate to the
+      # shared remediation so installer + prepare-host use one implementation.
+      info "Adding a subordinate UID/GID range for rootless containers (one-time, needs admin)…"
+      # Hard-fail the install if provisioning can't complete — the rootless daemon
+      # can't come up without it. (run_prepare_host, by contrast, calls this
+      # best-effort; _provision_subid_ranges returns non-zero rather than exiting so
+      # each caller decides — self-review, client#458.)
+      _provision_subid_ranges "$_user" \
+        || error "Couldn't set up the subuid/subgid prerequisites for '${_user}' (see the warning above) — an administrator must prepare this host, then re-run."
+      # Record that this path used one privileged (sudo) touch, so the final summary
+      # doesn't falsely claim "no administrator rights were used" (Bugbot #458).
+      TB_ROOTLESS_ADMIN_TOUCH=1
+      ;;
+    *)
+      # Unprivileged (no_sudo, or sudo_pw we choose not to prompt) → HAND OFF, never
+      # fail opaque: name exactly what's missing, print the prepare-host command AND
+      # the literal lines an admin can paste, then stop with an actionable error.
+      # The prepare-host command MUST name the researcher — bare `prepare-host`
+      # provisions nothing (run_prepare_host keys off TB_PREPARE_USER), so following
+      # it would loop back to this same hand-off (Bugbot #458).
+      warn "Rootless Docker needs host prerequisites for '${_user}' that aren't set up yet."
+      hint "Have an administrator prepare this host once (naming you as the researcher), then re-run:"
+      hint "  export TB_PREPARE_USER=${_user}"
+      hint "  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+      hint "  (or, with the CLI:  tracebloc prepare-host ${_user})"
+      if [ "${PROBE_SUBID:-0}" != "1" ]; then
+        # Compute a non-overlapping start for THIS host so the paste-in remedy can't
+        # collide with an existing allocation (Bugbot #458).
+        local _start; _start="$(_next_subid_start "${TB_SUBUID_FILE:-/etc/subuid}" "${TB_SUBGID_FILE:-/etc/subgid}")"
+        hint "Missing — a subordinate UID/GID range. An admin can add it directly:"
+        hint "  echo '${_user}:${_start}:65536' | sudo tee -a /etc/subuid"
+        hint "  echo '${_user}:${_start}:65536' | sudo tee -a /etc/subgid"
+      fi
+      if [ "${PROBE_UIDMAP:-0}" != "1" ]; then
+        hint "Missing — the uidmap helpers:  sudo apt-get install -y uidmap   (RHEL family: sudo dnf install -y shadow-utils)"
+      fi
+      error "Missing rootless prerequisites for '${_user}' — an administrator must prepare this host (see above), then re-run."
+      ;;
+  esac
+}
+
+# _provision_subid_ranges USER — the shared, idempotent subuid/subgid remediation
+# used by BOTH the sudo-available installer path (_ensure_subid_ranges) and the
+# admin-run prepare-host (run_prepare_host). Installs the uidmap helpers if absent,
+# then (unless the user already owns a range) allocates a non-overlapping 65536-wide
+# block and writes it via `usermod --add-subuids/--add-subgids`, falling back to a
+# direct file append on older shadow-utils. Idempotent: an existing range is left
+# untouched. Paths overridable (TB_SUBUID_FILE/TB_SUBGID_FILE) for tests.
+_provision_subid_ranges() {
+  local user="${1:-$(id -un 2>/dev/null || printf '%s' "${USER:-}")}"
+  local subuid="${TB_SUBUID_FILE:-/etc/subuid}"
+  local subgid="${TB_SUBGID_FILE:-/etc/subgid}"
+
+  # The helpers must be present AND privileged (setuid bit OR cap_setuid) to write ID
+  # maps — present-but-unprivileged is as useless as missing. Install if not usable,
+  # then RE-VERIFY and fail HONESTLY rather than printing success and letting rootless
+  # die deep inside dockerd-rootless-setuptool.sh — this restores the guard the removed
+  # install_rootless_docker precondition gave (Bugbot/Asad, client#458).
+  if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
+    _install_uidmap_pkg
+    if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
+      # Return non-zero (don't error/exit): the sudo-path caller turns this into a
+      # hard failure via `|| error`, but run_prepare_host wants it best-effort
+      # (`if ! _provision_subid_ranges`) so an unknown-distro uidmap gap warns and
+      # lets the rest of the host-prep finish (Bugbot/Asad + self-review, client#458).
+      warn "The uidmap helpers (newuidmap/newgidmap) are still missing or not privileged (no setuid bit / cap_setuid) after install — rootless Docker can't map IDs. Install the 'uidmap' package (Debian/Ubuntu) or 'shadow'/'shadow-utils' (setuid or filecaps) for this distro."
+      return 1
+    fi
+  fi
+
+  # Idempotent: a user that already owns a range in both files needs nothing.
+  local uid; uid="$(id -u "$user" 2>/dev/null)"
+  if _subid_has_entry "$subuid" "$user" "$uid" && _subid_has_entry "$subgid" "$user" "$uid"; then
+    success "Subordinate UID/GID range already present for ${user}."
+    return 0
+  fi
+
+  local start count=65536 end
+  start="$(_next_subid_start "$subuid" "$subgid")"
+  end=$(( start + count - 1 ))
+
+  # Prefer usermod (keeps both files consistent + validated); fall back to a direct
+  # append when this shadow-utils lacks --add-subuids. Capture --help output FIRST
+  # (not `usermod --help | grep`): under `set -o pipefail` a non-zero `usermod --help`
+  # exit would falsely fail the match and silently downgrade a capable shadow-utils to
+  # the append path (Asad #458).
+  # Guard every write: both callers run this with `set -e` disabled (`|| error`,
+  # `if !`), so an unguarded failure would fall through to `success`/return 0 and let
+  # the installer proceed with no range — dying later in setuptool (Bugbot #458).
+  local _um_help; _um_help="$(usermod --help 2>&1 || true)"
+  # Match the captured value with `case` rather than re-piping it into `grep -q`:
+  # the capture above already removed the SIGPIPE hazard, and this drops the last
+  # pipeline (and two forks) from the probe (backend#1778).
+  case "$_um_help" in
+    *'--add-subuids'*)
+      sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user" \
+        || { warn "Couldn't add the subuid/subgid range for ${user} via usermod."; return 1; }
+      ;;
+    *)
+      printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null \
+        || { warn "Couldn't append the subuid range for ${user} to ${subuid}."; return 1; }
+      printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subgid" >/dev/null \
+        || { warn "Couldn't append the subgid range for ${user} to ${subgid}."; return 1; }
+      ;;
+  esac
+  success "Added subordinate UID/GID range ${start}-${end} for ${user}."
+}
+
+# _install_uidmap_pkg — install the setuid newuidmap/newgidmap helpers: the `uidmap`
+# package on Debian/Ubuntu, `shadow-utils` on the RHEL family, `shadow` elsewhere.
+# One announced privileged step.
+_install_uidmap_pkg() {
+  local pkg
+  if   has apt-get;              then pkg=uidmap
+  elif has dnf || has yum;       then pkg=shadow-utils
+  elif has zypper || has pacman; then pkg=shadow
+  else
+    warn "Couldn't determine how to install the uidmap helpers on this distro — install newuidmap/newgidmap manually."
+    return 0
+  fi
+  # Use the repo's hardened install command (PM_INSTALL: needrestart/DEBIAN_FRONTEND
+  # env + DPkg::Lock::Timeout), not a bare `apt-get` — under the spinner on Ubuntu a
+  # bare install hangs on a needrestart prompt or an apt-daily lock (Bugbot #458, same
+  # class as #210). The Tier-1 path skips setup_pm, so populate PM_INSTALL here.
+  [ -n "${PM_INSTALL:-}" ] || setup_pm
+  apt_wait_for_lock
+  # Refresh the package index first: on the Tier-1 path this is the first package
+  # operation, so an empty/stale apt/dnf/pacman list can't locate uidmap/shadow and
+  # the install hard-stops (Bugbot #458). Best-effort — matches the repo pattern; a
+  # genuine not-found still surfaces on the guarded install below.
+  # shellcheck disable=SC2086  # PM_UPDATE is a command line that must word-split
+  spin_cmd "Updating package index…" $PM_UPDATE \
+    || warn "Package index refresh failed — continuing; the install will use the cached index."
+  # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
+  spin_cmd "Installing uidmap helpers…" $PM_INSTALL "$pkg"
+}
+
+install_linux() {
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+  export NEEDRESTART_SUSPEND=1
+
+  _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
+
+  # ── Tier 0 — a usable container runtime already exists → ZERO privileged
+  # steps (RFC 0001 #1175). Skip sudo priming, the Docker engine install, the
+  # system-package + kernel-module setup, and the privileged GPU-driver install
+  # entirely; just drop the user-space tools in and let create_cluster reuse the
+  # runtime. The biggest unlock for shared/managed hosts (a researcher in the
+  # `docker` group installs with no admin at all). We still set the k3d GPU flag
+  # from the ALREADY-configured runtime (_tier0_gpu_flags) so a GPU host isn't
+  # silently downgraded to a CPU-only cluster; only the privileged driver/toolkit
+  # INSTALL is skipped.
+  if [ "${INSTALL_TIER:-}" = "0" ]; then
+    info "Using the container runtime already on this machine — no administrator rights needed."
+    # Helm's tar/gzip needs are handled inside install_helm (_ensure_unpack_tools),
+    # which installs them Tier-0-aware when a minimal image lacks them (#395). Helm
+    # no longer needs openssl: the release is fetched directly and sha256-verified,
+    # so get-helm-3 and its openssl dependency are gone (Bugbot #383/#396).
+    _install_userspace_tools
+    _tier0_gpu_flags
+    return 0
+  fi
+
+  # ── Tier 1 — rootless (RFC 0001 #1177/#1219, the RFC's PRIMARY path). A modern
+  # kernel with no runtime and no root: set up a per-user rootless Docker daemon and
+  # install entirely in user space, mirroring the Tier-0 early-return above. Gated
+  # behind the opt-in TB_TIER1_ROOTLESS until the spike's §5 host validation runs
+  # (#1176) — with the flag unset, a Tier-1 host falls straight through to the
+  # legacy privileged flow below, which stays the validated default. Tools install
+  # entirely user-space here (_set_tools_target routes rootless Tier 1 to
+  # ~/.local/bin, no sudo — #1221), so this branch stays root-free apart from the
+  # two announced prerequisite touches (_ensure_subid_ranges + _ensure_cgroup_
+  # delegation), each of which routes to prepare-host when unprivileged.
+  if _rootless_active; then
+    # Header stays neutral on privileges: unlike Tier 0 above, this branch has
+    # two conditional privileged prerequisites (subuid ranges, cgroup
+    # delegation). Each announces itself or hands off to prepare-host when it
+    # actually applies — promising "no admin" here first read as a
+    # contradiction on hosts where one fires (Bugbot, #480).
+    info "Setting up a rootless container runtime (user-space install)."
+    _ensure_subid_ranges         # RFC 0001 #1220: the one narrow privileged residue — gated + announced, or handed off
+    _ensure_cgroup_delegation || true  # RFC 0001 #1221: delegate cpu/cpuset/io so pod CPU/mem limits enforce (best-effort; routes to prepare-host if unprivileged)
+    install_rootless_docker
+    _install_userspace_tools     # user-space, no sudo (_set_tools_target, #1221); also persists DOCKER_HOST for new shells
+    _tier0_gpu_flags             # reuse an already-configured runtime only; no privileged driver install
+    return 0
+  fi
+
+  # ── Tier 1/2 (or unknown / stale bootstrap) — the full privileged flow.
+  # Breadcrumbs (client#681): step b is the step that can die before any of its
+  # stages prints, and the log then ends at the step header. One line per stage
+  # makes the log say how far it got, independent of the ERR trap.
+  log "step b: install_linux privileged flow starting (tier=${INSTALL_TIER:-?})"
+  preflight_sudo
+  log "step b: sudo ready"
+  setup_pm
+  apt_wait_for_lock          # don't fight apt-daily/unattended-upgrades for the lock
+  log "step b: package manager ready"
+  install_docker_engine
+  log "step b: docker engine ready"
+  install_system_deps
+  _install_userspace_tools
+  log "step b: system + userspace tools ready"
+  dispatch_gpu_setup
+}
+
+# The cgroup.controllers file that reflects whether `Delegate=` on user@.service is
+# LIVE. It MUST be the user MANAGER's own node — user@$(id -u).service/cgroup.controllers
+# — not the enclosing user-$(id -u).slice: `Delegate=` on user@.service enables the
+# controllers INSIDE user@$UID.service (the path runc/rootless-containers document),
+# whereas the slice node lists whatever user.slice already had in subtree_control, which
+# routinely includes cpu/io by default (DefaultCPUAccounting). Reading the slice would
+# print "active" while the user manager still lacks the delegation and limit-bearing
+# pods run unconstrained (#514 Bugbot, High). Split out so it's unit-testable.
+_cgroup_controllers_path() {
+  local u; u="$(id -u 2>/dev/null)"
+  printf '/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/cgroup.controllers' "$u" "$u"
+}
+
+# Are the cpu/cpuset/io controllers ACTUALLY delegated to this user session right now?
+# Reads the live cgroup.controllers of the user MANAGER (#496, path corrected #514). A
+# `daemon-reload` writes the drop-in but does NOT restart the running user@$(id -u).service,
+# so the delegated controllers only appear after a re-login — this is how we tell
+# "written" from "in effect" instead of assuming. Path overridable
+# (TB_USER_CGROUP_CONTROLLERS) for tests. memory/pids are delegated by default;
+# cpu/cpuset/io are the ones this adds.
+_cgroup_controllers_active() {
+  local f="${TB_USER_CGROUP_CONTROLLERS:-$(_cgroup_controllers_path)}"
+  [[ -r "$f" ]] || return 1
+  local c; c="$(cat "$f" 2>/dev/null)" || return 1
+  [[ " $c " == *" cpu "* && " $c " == *" cpuset "* && " $c " == *" io "* ]]
+}
+
+# _write_cgroup_delegation — the shared, idempotent WRITE of the cgroup v2 controller
+# delegation drop-in, used by BOTH the sudo-available installer path
+# (_ensure_cgroup_delegation) and admin-run prepare-host (run_prepare_host). Always
+# writes with sudo; returns non-zero on failure so each caller decides how fatal it
+# is — mirroring _provision_subid_ranges. Path overridable (TB_USER_UNIT_DROPIN_DIR)
+# for tests.
+_write_cgroup_delegation() {
+  local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
+  local conf="$dir/delegate.conf"
+  local marker="# Managed by tracebloc installer (RFC 0001 #1221)"
+  local desired
+  printf -v desired '%s\n[Service]\nDelegate=cpu cpuset io memory pids\n' "$marker"
+
+  # Unchanged → don't rewrite / daemon-reload (avoids churning the user manager), but
+  # STILL report below — a re-run over an existing drop-in must re-surface an inactive
+  # delegation, not take a silent fast path (#496 Bugbot). The drop-in lives under /etc
+  # and is world-readable, so this presence-check is a PLAIN cmp — no sudo — matching
+  # _ensure_cgroup_delegation's unprivileged grep and avoiding a needless elevation on
+  # the idempotent path (#514 reviewer).
+  if [[ -f "$conf" ]] && printf '%s' "$desired" | cmp -s - "$conf" 2>/dev/null; then
+    log "cgroup delegation drop-in already present."
+  else
+    # Guard the writes: callers run this with `set -e` relaxed (`|| true`, `if !`), so
+    # an unguarded failure would fall through to success and let the install proceed
+    # with pods that can't be given limits (the exact silent breakage this slice
+    # exists to prevent).
+    sudo mkdir -p "$dir" \
+      || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
+    printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
+      || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
+    sudo systemctl daemon-reload 2>/dev/null || true
+  fi
+  # Verify + report on EVERY path (#496 Bugbot).
+  _report_cgroup_delegation "$conf"
+}
+
+# Report whether the cgroup delegation is actually in effect (#496). Mode-aware:
+#  - prepare-host (admin): the drop-in is written for the RESEARCHER's FUTURE session —
+#    the admin's own controllers are irrelevant, and prepare-host creates no cluster, so
+#    the "recreate the cluster" advice is wrong here (Bugbot). Just confirm it's written.
+#  - full install: verify THIS session. daemon-reload does NOT restart the running
+#    user@$(id -u).service, so the delegation usually isn't live yet, and the k3d node
+#    inherits the delegation state from when it is CREATED. If inactive, say the real
+#    consequence: limits won't enforce until the user manager restarts AND the cluster
+#    is recreated. With lingering (the rootless path), a re-login may NOT restart the
+#    user manager — a reboot reliably does. We never `systemctl restart user@…`
+#    ourselves: it would kill the user's session processes.
+_report_cgroup_delegation() {
+  local conf="$1"
+  if [[ -n "${TB_PREPARE_HOST_MODE:-}" ]]; then
+    success "Wrote the cgroup delegation drop-in (${conf}); it takes effect at the researcher's next login (before any cluster is created)."
+    return 0
+  fi
+  if _cgroup_controllers_active; then
+    success "Delegated cpu/cpuset/io cgroup controllers (${conf}) — active in this session."
+  else
+    warn "The cgroup delegation drop-in (${conf}) is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you recreate the cluster after the user manager restarts:"
+    hint "  log out and back in — or, with lingering enabled, reboot (a re-login may not restart your user manager) — then:"
+    hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # and re-run"
+    hint "  (Until then the install looks healthy, but limit-bearing workloads run unconstrained.)"
+  fi
+}
+
+# _ensure_cgroup_delegation — RFC 0001 #1221 (Tier 1). k3s inside the k3d node needs
+# the cpu/cpuset/io cgroup v2 controllers delegated to the user session to enforce
+# the pod CPU/memory limits our Helm chart sets. On cgroup v2 systemd delegates
+# memory+pids to user sessions by default but NOT cpu/cpuset/io; enabling those needs
+# a SYSTEM-level drop-in at /etc/systemd/system/user@.service.d/delegate.conf +
+# `daemon-reload` (systemd ≥ 244). That file is root-owned, so this is a SECOND named
+# privileged touch alongside slice 2's subuid/subgid line — routed by privilege
+# exactly as _ensure_subid_ranges routes that one; never blanket sudo, never opaque:
+#   • root/sudo_nopw → write it + daemon-reload (one announced touch, logged).
+#   • unprivileged   → hand off to prepare-host (#1178) with the exact path + content.
+# Non-fatal to the caller: unlike the subuid range (without which the daemon can't
+# start at all), a missing delegation still lets the cluster CREATE — it only breaks
+# once limit-bearing workloads schedule — so the Tier-1 branch calls this best-effort
+# and a no-sudo host gets a (degraded, clearly-warned) cluster rather than an abort.
+_ensure_cgroup_delegation() {
+  local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
+  local conf="$dir/delegate.conf"
+  # Fast path: drop-in already present → no privileged call at all (an unprivileged
+  # read; it's world-readable under /etc). But still VERIFY it's active and re-surface
+  # if not — a 2nd run over a written-but-not-yet-live drop-in must NOT take a silent
+  # fast path (the exact #496 "written but not active" case; #514 reviewer). The report
+  # is itself unprivileged (a controllers read), so this keeps the no-sudo property.
+  if [[ -f "$conf" ]] && grep -qF 'Delegate=cpu cpuset io memory pids' "$conf" 2>/dev/null; then
+    _report_cgroup_delegation "$conf"
+    return 0
+  fi
+  case "${PROBE_PRIVILEGE:-no_sudo}" in
+    root | sudo_nopw)
+      info "Delegating cpu/cpuset/io cgroup controllers to your user session (one-time, needs admin)…"
+      if _write_cgroup_delegation; then
+        # Record the one privileged touch so the final summary doesn't falsely claim
+        # "no administrator rights were used" (Bugbot #458, same rule as subuid).
+        TB_ROOTLESS_ADMIN_TOUCH=1
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      # Unprivileged → HAND OFF, never silent-sudo, never opaque. Name what's missing
+      # and print the exact lines an admin can paste (mirrors _ensure_subid_ranges).
+      warn "Rootless pod CPU/memory limits need cgroup controller delegation that isn't set up on this host yet."
+      hint "Have an administrator prepare this host once (or run prepare-host), then re-run — or add it directly:"
+      hint "  sudo mkdir -p ${dir}"
+      hint "  sudo tee ${conf} <<'EOF'"
+      hint "  [Service]"
+      hint "  Delegate=cpu cpuset io memory pids"
+      hint "  EOF"
+      hint "  sudo systemctl daemon-reload"
+      return 1
+      ;;
+  esac
+}
+
+# refuse_sudo_wrapped_install — a full provision must run as the DAILY (non-root)
+# user; the installer elevates each privileged step itself (RFC-0002). A
+# `sudo bash install.sh` runs the WHOLE thing as root: `usermod -aG docker` would
+# grant root (not the user), and ~/.tracebloc, ~/.kube/config, and the chmod-600
+# credential would land root-owned under /root — locking the daily user out, with
+# no chown anywhere to undo it (#427). Refuse it early, before any file is created.
+# Exemptions: a genuine root login (no SUDO_USER) is fine — /root IS its home; and
+# prepare-host (the admin path) has already dispatched-and-exited in main() before
+# this runs. Admins provisioning for someone else use prepare-host / TB_PREPARE_USER.
+refuse_sudo_wrapped_install() {
+  # `id -u` (the EFFECTIVE uid) rather than $EUID: EUID is read-only in bash, so the
+  # test suite can't shadow it — id() can be mocked.
+  [[ "$(id -u 2>/dev/null)" == "0" ]] || return 0
+  [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] || return 0
+  error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself) so they get docker-group access:  export TB_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
+}
+
+# run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
+# administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
+# `tracebloc prepare-host`) on a host a researcher can't install on unprivileged
+# — no usable runtime — after which the researcher installs at Tier 0 with NO
+# admin. It does ONLY the privileged prerequisites, reusing the exact functions
+# the full install uses (install the container runtime + system deps + kernel
+# modules) and then grants the researcher docker-group access. It never mints a
+# credential, creates a cluster, or installs the CLI — so an admin can safely run
+# it on a shared host without provisioning anything as themselves.
+run_prepare_host() {
+  if [[ "$OS" != "Linux" ]]; then
+    error "prepare-host is for Linux hosts. On macOS/Windows, install Docker Desktop (or enable WSL2) as an administrator, then run the installer normally."
+  fi
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
+  step_header a "Preparing this host for tracebloc (one-time administrator step)"
+  if declare -F host_audit >/dev/null 2>&1; then host_audit; fi
+  echo ""
+
+  preflight_sudo
+  setup_pm
+  apt_wait_for_lock
+  # Prepare-host reuses the full install's engine setup, but the ADMIN must
+  # never be granted the socket or sg-re-exec'd into the script (which drops
+  # the prepare-host argument and runs a FULL provision) — the daemon check
+  # runs via sudo instead (Bugbot on #381).
+  TB_PREPARE_HOST_MODE=1
+  install_docker_engine
+  TB_PREPARE_HOST_MODE=""
+  install_system_deps
+
+  # Grant the researcher docker-group access so THEIR later install is Tier 0
+  # (zero root). The researcher must be named EXPLICITLY via TB_PREPARE_USER — we
+  # must NOT fall back to $SUDO_USER, which is the ADMIN who ran prepare-host, not
+  # the researcher (adding the admin would report success while the researcher
+  # still can't install; Bugbot #377). Best-effort: never fail the prep over it.
+  local target="${TB_PREPARE_USER:-}"
+  # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
+  # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
+  # messaging even though a real username was intended (Bugbot r3).
+  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
+  local granted=0
+  if [[ -n "$target" && "$target" != "root" ]]; then
+    if sudo usermod -aG docker "$target" 2>/dev/null; then
+      success "Added ${target} to the docker group — they can now install with no admin."
+      granted=1
+    else
+      warn "Couldn't add ${target} to the docker group; add it manually:  sudo usermod -aG docker ${target}"
+    fi
+    # Also provision the rootless (Tier 1) prerequisites for the researcher, so a
+    # host where docker-group access isn't wanted still supports a fully rootless
+    # install (RFC 0001 #1220). Idempotent + non-overlapping; best-effort — never
+    # fail the whole prep over it.
+    if ! _provision_subid_ranges "$target"; then
+      # Non-overlapping start for the manual fallback too — don't hardcode 100000,
+      # which collides on a host that already allocated that block (Bugbot #458).
+      # Honor the TB_SUBUID_FILE/TB_SUBGID_FILE overrides like every other subid path.
+      local _s; _s="$(_next_subid_start "${TB_SUBUID_FILE:-/etc/subuid}" "${TB_SUBGID_FILE:-/etc/subgid}")"
+      warn "Couldn't provision subuid/subgid ranges for ${target}; add later with:  sudo usermod --add-subuids ${_s}-$(( _s + 65535 )) --add-subgids ${_s}-$(( _s + 65535 )) ${target}"
+    fi
+  else
+    hint "To let a non-admin user install at Tier 0, grant them docker-group access:"
+    hint "  set TB_PREPARE_USER=<their-username> when running prepare-host, or run:  sudo usermod -aG docker <their-username>"
+  fi
+
+  # Write the cgroup controller delegation drop-in a rootless k3s cluster needs to
+  # enforce pod CPU/memory limits (RFC 0001 #1221). It's system-wide (user@.service),
+  # so writing it once here covers the researcher named above — this is the second
+  # half of the prepare-host contract alongside the subuid/subgid range. Best-effort:
+  # never fail the whole prep over it.
+  # Report in prepare-host mode: the drop-in is for the RESEARCHER's future session, so
+  # _report_cgroup_delegation must not judge the ADMIN's live controllers nor print the
+  # "recreate the cluster" advice (prepare-host creates none). The mode was reset right
+  # after install_docker_engine, so set it again around this write — otherwise it falls
+  # through to the full-install branch on the admin's slice (#514 reviewer).
+  TB_PREPARE_HOST_MODE=1
+  if ! _write_cgroup_delegation; then
+    warn "Couldn't write the cgroup delegation drop-in; a rootless install won't enforce pod limits until it's added (see above)."
+  fi
+  TB_PREPARE_HOST_MODE=""
+
+  echo ""
+  success "Host prepared."
+  # Only promise a no-admin install when a researcher actually got docker-group
+  # access. Without a successful grant (no TB_PREPARE_USER, or usermod failed)
+  # the user still can't reach the socket, so claiming "no administrator rights"
+  # would be a lie that sends them into an install that then demands sudo
+  # (Bugbot #377).
+  if [[ "$granted" == 1 ]]; then
+    info "The researcher can now install tracebloc with no administrator rights:"
+    echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+    info "(A fresh login may be needed for docker-group membership to take effect.)"
+  else
+    info "The container runtime and prerequisites are installed. Once a researcher"
+    info "has docker-group access (see above), they can install with no admin rights:"
+    echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+  fi
+  return 0
+}

@@ -1,0 +1,914 @@
+# Migration Guide: Per-Platform Charts → Unified `tracebloc` Chart
+
+This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
+
+## Upgrading to 1.9.119 — a control-plane digest pin is honoured only on the registry it was resolved against
+
+**What changed.** The four control-plane pins (`images.jobsManager.digest`,
+`images.podsMonitor.digest`, `images.resourceMonitor.digest`,
+`images.requestsProxy.digest`) each gain a sibling key, **`digestRegistry`**: the
+bare host the digest was resolved on, spelled exactly as `images.traceblocRegistry`
+or `global.imageRegistry` would be. A pin is now rendered **only when
+`digestRegistry` equals the registry this release actually pulls from**
+(`global.imageRegistry`, else `images.traceblocRegistry`, else the chart default
+`ghcr.io`). Otherwise the pin is **ignored**: the workload renders the channel
+tag, the `image-refresh` CronJob treats the image as unpinned and re-pins it from
+the live registry on its first tick (an ignored pin is not a fresh install), and `helm install`/`helm upgrade` prints a NOTES warning naming
+the image, the registry the pin was resolved on and the one the release pulls
+from. The render never fails on a pin — the tag is the safe state. requests-proxy
+follows the *honoured* jobs-manager pin, so an ignored requests-proxy pin is not
+an override either.
+
+**Why.** A digest names bytes on the registry it was resolved on; nothing
+guarantees another registry ever held them, and a pod told to pull a digest its
+registry does not have never starts. That is how a digest pin outlived its
+registry: an operator pin resolved on Docker Hub was replayed after the chart
+default moved to `ghcr.io` (1.9.113), the chart rendered
+`ghcr.io/tracebloc/jobs-manager@sha256:<x>` for a digest `ghcr.io` never had, and
+every auto-upgrade timed out and rolled back for two days — one killed attempt
+left the edge with no jobs-manager. `image-refresh` reported the pin stale and,
+by design, did not edit it. The 1.9.114 note's claim that pins are
+"registry-agnostic" was wrong for operator pins and has been retracted in
+`values.yaml`.
+
+**The legacy rule — what happens to a pin you already have.** `digest` set with
+`digestRegistry` empty is a pin written before the key existed. Every such pin
+was resolved on `docker.io` (the only registry these images were pulled from
+until then), so it is read as `digestRegistry: docker.io`:
+
+| Your pin | `images.traceblocRegistry` | Result on upgrade |
+|---|---|---|
+| `digest` only (legacy) | `docker.io` (the rollback) | **honoured** — unchanged behaviour |
+| `digest` only (legacy) | default (`ghcr.io`) or a mirror | **ignored** — the tag renders, `image-refresh` re-pins, NOTES warns. This is the incident case; if your edge was wedged on it, this upgrade is what unwedges it. |
+| `digest` + `digestRegistry` matching the effective registry | any | honoured |
+| `digest` + `digestRegistry` NOT matching | any | ignored, NOTES warns |
+
+**What you need to do.** Nothing, unless you carry a control-plane pin:
+
+- **Recommended: drop it.** Set `images.<image>.digest: ""` and let
+  `image-refresh` pin the live digest from the registry the pods pull from. That
+  is the reproducible-*and*-current state, and it survives the next registry
+  move without any action.
+- **To keep a pin, re-resolve it on the registry you pull from and declare it:**
+
+  ```bash
+  crane digest ghcr.io/tracebloc/jobs-manager:prod        # or the tag your CLIENT_ENV maps to
+  helm upgrade <release> tracebloc/client --reuse-values \
+    --set images.jobsManager.digest=sha256:<that digest> \
+    --set images.jobsManager.digestRegistry=ghcr.io
+  ```
+
+  Do not copy a Docker Hub digest across and declare `ghcr.io`: the render will
+  honour it (the declaration is what it checks), and the pod will not pull. The
+  refresh tick now catches exactly that: it HEADs every honoured pin **by digest**
+  on its registry, and a 404 logs `ERROR: PIN IS NOT PULLABLE on <registry>` and
+  writes `tracebloc.io/stale-pin-<image>=unpullable:<digest>` on the jobs-manager
+  Deployment (`kubectl describe deployment <release>-jobs-manager`), leaving the
+  workload untouched.
+
+**How you see it.** The NOTES warning block (`WARNING: digest pin(s) IGNORED`)
+prints on every `helm install`/`helm upgrade`, including the fleet auto-upgrade
+tick, whose log carries helm's output. One entry per ignored pin, with both
+registries and the two remedies above.
+
+## Upgrading to 1.9.115 — `env.TRACEBLOC_DDP` defaults ON (RFC-0067 D7)
+
+`env.TRACEBLOC_DDP` now renders as **`"1"`** at the chart default. This is the
+ARM step of backend#3147: RFC-0067 D7's precondition bundle holds — the engine
+defaults its effective-batch mechanism to `per_rank_split` (tracebloc-engine#1010;
+each rank trains on B/N so the effective batch stays B and the numerics are the
+one-GPU experiment's, e2e-test-agent#444), a run on which that mechanism cannot
+apply falls back to **one GPU** rather than to an uncompensated N×B
+(client-runtime#553), and both were verified on the published `:dev` engine and
+jobs-manager digests before this default flipped.
+
+**What changes on upgrade: nothing expands yet.** Multi-GPU needs **both**
+switches — `TRACEBLOC_DDP` truthy **and** `env.MULTI_GPU_MIN_PARAMETERS` set
+(1.9.103) — and the floor still has no default, so an edge that never set a
+floor keeps one GPU per run, with `GPU_COUNT_SIZE_FLOOR_UNSET` in the
+jobs-manager log. To arm an edge, set the floor:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.MULTI_GPU_MIN_PARAMETERS=1000000
+```
+
+(1,000,000 admits ResNet-18-class models and refuses LeNet-class ones; it is the
+floor RFC-0067's G6 measured with, not a general recommendation — see
+backend#3147 for where the speedup crossover sits on your hardware.)
+
+**Rollback lever, per edge:**
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.TRACEBLOC_DDP=0
+```
+
+An explicit `"0"` travels to the jobs-manager and wins over the default; the
+runtime reads it as OFF (`GPU_COUNT_SWITCH_OFF`) and spawns one GPU per run
+whatever the floor says. `TRACEBLOC_AMP` is unchanged (still OFF by default).
+
+## Upgrading to 1.9.114 — training pods pull from the tracebloc registry (`ghcr.io`) by default
+
+The training-image host now follows `images.traceblocRegistry`: `JOB_IMAGE_HOST`,
+the registry prefix the jobs-manager stamps onto every training image it spawns
+(`tracebloc/client-<task>-<cpu|gpu>:<CLIENT_ENV>`), renders as **`ghcr.io/`** at
+the chart default instead of `docker.io/`, on both jobs-manager containers. It is
+resolved by the same `tracebloc.tbRegistry` helper as the control-plane images,
+as ONE precedence chain: a `global.imageRegistry` mirror wins, then
+`images.traceblocRegistry`, then the chart default. From this version the
+control plane (moved in 1.9.113) and the training pods pull from the same
+registry and cannot be pointed at different ones.
+
+**Why:** every training image is published to GHCR at the same digests as its
+Docker Hub copy (the GHCR migration), so this changes where the training pods
+pull from, not which bytes run.
+
+**What you need to do: nothing for most edges.**
+
+- **Egress.** No new host: `ghcr.io` (and `pkg-containers.githubusercontent.com`,
+  where GHCR redirects layer downloads) is already required for the
+  control-plane images since 1.9.113 and for the ingestor image before that.
+  If your allowlist was built by hand from an older egress table, add both
+  before upgrading. Docker Hub is still needed for k3s, `tracebloc/mysql-client`
+  and busybox.
+- **One rollout, then one pull per task.** The jobs-manager pod template changes
+  (`JOB_IMAGE_HOST`), so the upgrade rolls the jobs-manager once. The next
+  experiment of each task pulls its training image from `ghcr.io` — a full pull
+  the first time, as after any tag move; the digest-pinned spawn path
+  (`TRAINING_IMAGE_DIGESTS`) is unaffected, the same digest exists on both
+  registries.
+- **Mirrors.** Edges with `global.imageRegistry` set are unaffected: the mirror
+  re-homes every image, `JOB_IMAGE_HOST` included, and always wins — exactly as
+  before.
+- **Runtime default.** The chart always sets `JOB_IMAGE_HOST`, so the
+  client-runtime's own fallback for an *unset* variable (changed separately, in
+  that project) only ever applies to installs from before the chart carried the
+  key.
+
+**Rollback (per edge):** the same knob as 1.9.113 — it moves the control plane
+AND the training-image host back to Docker Hub together, and, being
+user-supplied, it persists across the fleet auto-upgrade until you clear it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.traceblocRegistry=docker.io
+```
+
+Confirm which host the training pods will pull from:
+
+```bash
+kubectl get deploy -n <namespace> <release>-jobs-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="JOB_IMAGE_HOST")].value}{"\n"}'
+```
+
+## Upgrading to 1.9.113 — the control-plane images pull from `ghcr.io` by default
+
+`images.traceblocRegistry` now defaults to **`ghcr.io`**: the four
+tracebloc-published control-plane images (jobs-manager, pods-monitor,
+resource-monitor, and the requests-proxy, which runs the jobs-manager image)
+are pulled from GitHub Container Registry instead of Docker Hub. The
+image-refresh CronJob resolves digests there too (`IMAGE_REGISTRY`), and
+`NOTES.txt` reports it. Nothing else moves: `tracebloc/mysql-client`, busybox
+and the other third-party images keep their registries, the training-image host
+(`JOB_IMAGE_HOST`) is unchanged, and a `global.imageRegistry` mirror still wins
+over everything.
+
+**Why:** the control-plane packages are public on GHCR and published there by
+digest alongside the Docker Hub copies (the GHCR migration). The same digests
+exist on both registries, so this changes where the bytes come from, not which
+bytes run.
+
+**What you need to do: nothing for most edges.**
+
+- **Egress.** No new host: `ghcr.io` (and `pkg-containers.githubusercontent.com`,
+  where GHCR redirects layer downloads) is already required for the ingestor
+  image and probed by the installer preflight. If your allowlist was built by
+  hand from an older egress table, add both before upgrading.
+- **One rollout.** The image reference in each control-plane pod template
+  changes (`docker.io/…` → `ghcr.io/…`), so the upgrade rolls those pods once
+  and the kubelet pulls the new reference. `imagePullPolicy: IfNotPresent`
+  behaves as before from then on.
+- **Digest pins.** `images.*.digest` values keep working unchanged — the pin
+  renders as `ghcr.io/tracebloc/<image>@<digest>`, and the digest is the same
+  on both registries.
+- **Mirrors.** Edges with `global.imageRegistry` set are unaffected: the mirror
+  re-homes every image and always wins.
+
+**Rollback (per edge):** point the knob back at Docker Hub. It is user-supplied,
+so it persists across the fleet auto-upgrade until you clear it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.traceblocRegistry=docker.io
+```
+
+Confirm which registry an edge pulls from:
+
+```bash
+kubectl get deploy -n <namespace> <release>-jobs-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
+
+## Upgrading to 1.9.105 — `env.GPU_LIMITS` alone now renders an equal `GPU_REQUESTS` (client#995)
+
+Nothing to do if your values set both keys, or neither — that is every edge the
+installers provisioned, since both installers write the pair with one value.
+
+If your values file set **only `env.GPU_LIMITS`** (say `nvidia.com/gpu=2`), the
+chart used to fill the absent `GPU_REQUESTS` with a literal `nvidia.com/gpu=1`,
+so the jobs-manager received *requests=1, limits=2*. Kubernetes requires an
+extended resource's request to equal its limit, so every training pod on that
+edge was rejected by the API server — and the runtime's own mirror ("setting
+only one of them now mirrors it into the other", 1.9.104 above) could not help,
+because from values both keys always arrived set. From this version the chart
+renders an absent `GPU_REQUESTS` **with `GPU_LIMITS`' own value**, so a lone
+`GPU_LIMITS` gives an equal pair. Both set to different values are still written
+as given — the runtime warns once and the pod is rejected; set both to one
+value, or set only `GPU_LIMITS`.
+
+`GPU_LIMITS` stays the **only** gate, exactly as before: `GPU_LIMITS: ""` still
+means "no GPU on this cluster" and renders both keys empty; `GPU_LIMITS` absent
+still renders nothing (the runtime's legacy assume-a-GPU default) — **including
+when `GPU_REQUESTS` alone is set, empty or not**, so an edge carrying a lone
+`GPU_REQUESTS` keeps its behaviour on upgrade. The chart test
+`gpu_env_declaration_test.yaml` asserts `requests == limits` on both containers
+for every rendering that sets `GPU_LIMITS`, and that a lone `GPU_REQUESTS`
+renders neither.
+
+## Upgrading to 1.9.104 — what the jobs-manager now tells you about GPU admission (RFC-0067 D7)
+
+Nothing to configure, and **nothing in this chart carries the change**: both
+behaviours below live in the jobs-manager image, which this chart does not pin
+to a version (`images.jobsManager.digest` is empty by default, so the running
+image follows your environment's channel and the image-refresh CronJob
+reconciles its digest). They are present on an edge once its jobs-manager image
+is built from client-runtime at or after `a04288f` (client-runtime#514 and
+#516). This entry sits under the next chart version so the note reads in
+order; upgrading the chart neither adds nor removes the behaviour.
+
+- **A queued GPU run says so.** When a training run wants `nvidia.com/gpu`
+  devices another run is holding, the experiment's status shows
+  `waiting_for_capacity` and the run is admitted as a Pending pod that the
+  scheduler places when the device frees. Before, the same run showed no
+  status until it was overdue. On a cluster with `env.SINGLE_NODE: "true"`, a
+  GPU run whose cpu/memory can never fit the node is refused immediately with
+  the same message a CPU run gets ("training needs more than this machine has
+  at all …"); on an elastic cluster (`SINGLE_NODE` false) it waits instead,
+  because an autoscaler may add the node.
+- **`GPU_REQUESTS` and `GPU_LIMITS` are one number.** Setting only one of them
+  now mirrors it into the other (an INFO line names the mirror); Kubernetes
+  requires an extended resource's request to equal its limit, so a pod with
+  only `GPU_LIMITS` set used to be rejected by the API server. Setting both to
+  different values is still written as given and warned about once — it will
+  be rejected; set both to one value, or set only one.
+
+## Upgrading to 1.9.103 — `env.MULTI_GPU_MIN_PARAMETERS`, the multi-GPU size floor (RFC-0067 D2)
+
+Nothing changes on upgrade: the key is **absent by default**, and absent means
+the runtime's size gate **refuses every run** (`GPU_COUNT_SIZE_FLOOR_UNSET`), so
+an edge that has `TRACEBLOC_DDP=1` still gets one GPU per run until an operator
+also sets this floor. That is client-runtime#513 (@ f42d5e9) by design: RFC-0067
+OQ3 says the floor is unmeasured (G6 produces it), so neither the runtime nor the
+chart guesses one. This release only makes the key a schema-checked values
+change:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.MULTI_GPU_MIN_PARAMETERS=50000000
+```
+
+The vocabulary is closed to a positive integer. A non-numeric or non-positive
+value reads as unset with one WARNING and then the same refusal as the dark
+default, so a typo would be indistinguishable from never setting the key; unset
+or empty itself logs one INFO line at jobs-manager startup, not a warning, so
+grep the log for `Multi-GPU size gate`, not for WARN. Leading zeros are refused
+for a different reason: the runtime parses `int(value.strip())`, so `007` would
+read as a valid floor of 7 -- the schema admits one canonical spelling per floor
+so two values files cannot disagree about the same number. Multi-GPU expansion needs
+**both** `env.TRACEBLOC_DDP=1` (1.9.101) **and** this floor; the parameter count
+it compares against is the backend's server-computed one (backend#3171), so the
+backend carrying that column must be deployed to the edge's environment first.
+
+## Upgrading to 1.9.101 — per-edge `TRACEBLOC_DDP` / `TRACEBLOC_AMP` switches (RFC-0067 D8)
+
+Nothing changes on upgrade: both keys are **absent by default**, and absent
+means OFF. This release only teaches the chart the two operator switches that
+RFC-0067 makes the kill switch and the rollback lever for automatic multi-GPU
+training (backend#3149), so that setting them is a schema-checked values change:
+
+```bash
+helm upgrade <release> tracebloc/client --reuse-values --set-string env.TRACEBLOC_DDP=1
+```
+
+The value reaches the training pods only through a jobs-manager that forwards
+it (client-runtime#480, `client-runtime` on or after that change). On an older
+runtime it lands on the jobs-manager container and goes no further — inert.
+The vocabulary is closed (`1|0|true|false|yes|no`, case-insensitive, empty =
+unset); any other spelling is refused at `helm upgrade` time rather than
+silently read as off.
+
+It also documents the two **reporting** switches, `env.EMIT_TOPOLOGY` and
+`env.EMIT_OOM_RESCUE` (contract: tracebloc-engine#879 @ 383b0daa), with the same
+vocabulary and the same absent-by-default rule — and one ordering rule of their
+own: **deploy the backend that has the destination columns to that environment
+first**, then set the switch. An emitted cycle-payload key the backend lacks
+destroys the edge's cycle row rather than being ignored.
+
+The same release documents `env.MULTI_GPU_LEASE_SECONDS` (client-runtime#486),
+the per-run lease jobs-manager applies as `activeDeadlineSeconds` to
+**multi-GPU** pods only. Also absent by default — jobs-manager's own 86400 s
+default stands — and also rendered only when set, because the runtime reads an
+empty value as *disabled*. Digits, or `0`/`off`/`false`/`no` to disable.
+## Upgrading to 1.9.100 — `images.training`: the digest-pinned engine image half (RFC-1246 P2, RFC-0067 D8)
+
+Nothing changes on upgrade: `images.training.digests` ships **empty**, so no
+`TRAINING_IMAGE_DIGESTS` / `TRAINING_IMAGE_PINNED` / `TRAINING_ENGINE_CAPABILITIES`
+is rendered and every edge keeps spawning the floating `:<CLIENT_ENV>` tag
+exactly as before (backend#3156). What lands is the render path and its
+contract, so that populating the map is a values change the release train can
+make rather than a template change:
+
+- `digests` — task → `{cpu, gpu}` → canonical `sha256:` digest, rendered onto
+  jobs-manager as JSON; the runtime (client-runtime `jobs_manager.py`) validates
+  it at boot and spawns `repo@digest` with `IfNotPresent` where it applies.
+- `pinned` — `""` (auto: prod only), or an explicit `true`/`false`.
+- `capabilities` — the engine's own `io.tracebloc.engine.capabilities` label
+  read off the pinned images; **written only by the resolver that writes the
+  digests, never by hand.** The chart refuses to render it with an empty map.
+
+Do **not** populate `digests` by hand on an edge: a hand-pinned edge stops
+following engine promotions until someone advances the pin.
+## Upgrading to 1.9.99 — `rotateMysqlRoot` / `bootstrapDbReparent` baked for `stg` and `prod` (datadir-aware)
+
+`rotateMysqlRootByEnv` and `bootstrapDbReparentByEnv` are now baked `true` for
+**`stg` and `prod`** as well as `dev` (backend#947). The bake is **datadir-aware**,
+so what an edge does on upgrade depends on its state — no operator flip required:
+
+* **Fresh install** (no MySQL datadir yet, on a live cluster) → **born rotated**:
+  the chart mints a root password into the Secret, re-parents the account-minting
+  bootstrap onto root, and records a `mysql-root-rotated` ConfigMap so the edge is
+  recognised as rotated on every later render.
+* **An edge already born-rotated by this bake** (the marker is present) → **stays
+  rotated**, and its generated root password is preserved across upgrades.
+* **Existing un-rotated / "blind" edge** (a datadir predating the rotation, no
+  marker) → **left exactly as it is** on its current (image-baked) password. The
+  baked default resolves *off* for it — no wedge, no `1045`. Rotating such an edge
+  is still the deliberate manual path in `docs/migration-tools/rotate-mysql-root.md`
+  (explicit `rotateMysqlRoot=true` + the one-time `ALTER USER 'root'`).
+* **Cluster-less render** (`helm template`, `--dry-run=client`, ArgoCD default /
+  Flux post-render) cannot prove a datadir fresh, so it resolves **off** — pin
+  `mysqlRootPassword` or render server-side to rotate a cluster-less fleet.
+
+Nothing here changes an already-rotated fleet (dev, edge 713) that carries an
+explicit `rotateMysqlRoot=true` override: the override bypasses the datadir gate
+entirely and its posture is unchanged.
+
+## Upgrading to 1.9.71 — the `rotateMysqlRoot` gate, and one new object outside the release namespace
+
+Two things matter when you cross this version from anything below it.
+
+**1. The MySQL root-rotation gate now exists.** `rotateMysqlRoot` /
+`rotateMysqlRootByEnv` were added in `1.9.71`. They were `false` for every
+environment when this section was written; **since backend#1528 S3 baked dev's
+retired posture, `rotateMysqlRootByEnv.dev` is `true`** — so on a **dev** fleet
+an upgrade across that version DOES change something: the Secret gains
+`MYSQL_ROOT_PASSWORD` and the mysql pod rolls once to pick it up. Since
+backend#947 `rotateMysqlRootByEnv` is baked `true` for **`stg` and `prod`** too
+(see *Upgrading to 1.9.99* below) — but datadir-aware, so an **existing
+un-rotated** stg/prod edge is left on its current password and is unaffected,
+while only a **fresh** install born-rotates. The gate is a *precondition* for the
+rotation runbook (`docs/migration-tools/rotate-mysql-root.md`), not the rotation
+itself.
+
+> **Read this before the first auto-upgrade on a dev edge that has never
+> rotated root.** The bake turns on the re-parent and the rotation together, and
+> on such an edge those two interact badly:
+>
+> * The Secret has no `MYSQL_ROOT_PASSWORD`, so the chart **generates** one.
+> * The mysql entrypoint applies that value only at **fresh datadir init** — an
+>   existing datadir keeps root's current (image-baked) password.
+> * `DB_BOOTSTRAP_PASSWORD` is **derived from the rotation value**
+>   (backend#2738), so `jobs-manager` authenticates as `root` with the generated
+>   password the live account does not have.
+>
+> The visible result is a **`jobs-manager` CrashLoop after the hourly
+> auto-upgrade**, not a silent no-op — auto-upgrade uses
+> `--reset-then-reuse-values`, so it picks up the new chart defaults on its own.
+>
+> This does not affect an edge that already rotated: its Secret holds the
+> current value, the preserve-across-upgrades tier wins, and root's live
+> password matches. Fleet-wide, dev rotated before the re-parent was enabled,
+> which is why the ordering hazard has not bitten (see the `secrets.yaml`
+> derivation comment) — but *check the edge* rather than assume it. If
+> `kubectl -n <ns> get secret <release>-secrets -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}'`
+> is empty on a dev edge with an existing datadir, complete the one-time
+> `ALTER USER 'root'` step in the rotation runbook **before** letting the
+> upgrade land, or pin `bootstrapDbPassword` to the live root password.
+
+Below `1.9.71` the key does not exist and `values.schema.json` does not close
+`additionalProperties`, so `--set rotateMysqlRoot=true` on an older chart is
+**accepted, exits 0, and renders nothing**. Enable the gate only once the edge is
+actually on `>= 1.9.71`; the runbook's precondition 1 has the version check.
+
+**2. The Collector's token `Role`/`RoleBinding` render unconditionally, in the
+node-agents namespace.** In `1.9.63` all of
+`templates/telemetry-token-rbac.yaml` sat behind the Collector's own `enabled`
+flag; in `1.9.71` the file carries no `if` at all, so the two objects render on
+every install. With default
+values that namespace is `tracebloc-node-agents` — **not** the release namespace
+— so the identity running the upgrade needs write reach there too. This is the
+same cluster-scope requirement documented in `docs/INSTALL.md`: namespace `admin`
+on the release namespace is not sufficient, and no `--set` flag substitutes for
+it.
+
+Measured, rendering `1.9.63` and `1.9.71` offline with `CLIENT_ENV: prod` and
+otherwise-default values: the object set gains exactly the two objects from
+`templates/telemetry-token-rbac.yaml`, and nothing is removed.
+
+**What this upgrade does not do.** It does not enable per-database service
+identities — `serviceDbAccountsByEnv` is still `dev: true`, `stg: true`,
+`prod: false`. On an edge where that flag resolves false, `requests-proxy`
+renders byte-for-byte identically across these versions apart from the chart
+labels, so its metadata-bootstrap behaviour is unchanged by the upgrade. Flipping
+that flag is a separate, windowed decision with its own ordering constraint —
+read the note on `images.ingestor.prodDigest` in `values.yaml` before you do.
+
+**New values keys, all off or empty by default — and they did not all arrive at
+the same version.** All six are new to the `1.9.63` fleet this section targets,
+which is why they are listed together; an operator crossing from `1.9.67` or
+later will already have the first three.
+
+| key | first shipped |
+|---|---|
+| `bootstrapDbPassword` · `bootstrapDbReparent` · `bootstrapDbReparentByEnv` | **1.9.67** (`e03edbb`, #785) |
+| `mysqlRootPassword` · `rotateMysqlRoot` · `rotateMysqlRootByEnv` | **1.9.71** (`09bb86c`, #822) |
+
+Read from the chart rather than recalled: `git log -S<key> -- client/values.yaml`
+gives the introducing commit, and `Chart.yaml` at that commit gives the version.
+
+## Upgrading to 1.9.49 — `RESOURCE_PROVENANCE`: who chose the training envelope
+
+**Nothing to do.** This adds a bookkeeping key. It never changes the training
+envelope, and an upgrade cannot move any edge's training size.
+
+### What it is
+
+`env.RESOURCE_PROVENANCE` records **who** chose `RESOURCE_REQUESTS` /
+`RESOURCE_LIMITS`:
+
+| Value | Meaning |
+|---|---|
+| `installer` | sized to this machine at install time |
+| `user` | an explicit `tracebloc resources set`, or a `TRACEBLOC_TRAINING_RESOURCES` install-time override |
+| `unknown` | carried forward from before this key existed — genuinely unattributable |
+
+It renders only when the envelope itself is set, and defaults to `unknown` on
+any release that predates it.
+
+### Why it has to exist
+
+`RESOURCE_*` has **no unset state** once Helm has seen it. The fleet auto-upgrade
+CronJob runs `helm upgrade --reset-then-reuse-values`, which re-applies the
+release's *user-supplied* values forever, and the installer reconcile path does
+the same. So a value written once at install time is re-applied indefinitely.
+
+That means an installer-written envelope and a deliberate human choice are
+**indistinguishable** once the value differs from the historic
+`cpu=2,memory=8Gi` literal — the installer carries any differing value forward
+precisely because it cannot tell them apart. Without a marker, any future
+automatic-sizing work would have to either strand every already-pinned edge or
+silently overrule operators who had deliberately set a size. Neither is
+acceptable, so the marker records the difference from now on (backend#2220).
+
+**`unknown` must be treated as `user`.** It means we do not know, and guessing
+`installer` would risk overruling a human. Existing edges will therefore report
+`unknown` and keep their current size until someone opts in explicitly.
+
+### If you want an edge to size itself from the node again
+
+Clearing the envelope is an **explicit, deliberate** act — a chart change cannot
+do it for you, because `--reset-then-reuse-values` re-applies the stored
+user-supplied value on every upgrade. Setting the keys to `null` removes them
+(Helm deletes null-valued keys during value coalescing), which drops all three
+env vars and returns `jobs-manager` to its built-in `cpu=1,memory=2Gi` literal
+(the contract floor since backend#2254; it was `cpu=2,memory=8Gi`)
+— and, if `env.DERIVE_JOB_ENVELOPE` is also set, unblocks the node-allocatable
+derivation (read the caveat below before you do that):
+
+```bash
+helm upgrade "$NAMESPACE" tracebloc/tracebloc -n "$NAMESPACE" \
+  --reset-then-reuse-values \
+  --set env.RESOURCE_LIMITS=null \
+  --set env.RESOURCE_REQUESTS=null \
+  --set env.RESOURCE_PROVENANCE=null
+```
+
+Verify the three vars are gone before relying on it:
+
+```bash
+kubectl -n "$NAMESPACE" get deploy "$NAMESPACE-jobs-manager" -o yaml | grep RESOURCE_
+```
+
+> **Read this before you run it.** Node-derived sizing is currently gated OFF by
+> default (`DERIVE_JOB_ENVELOPE`, backend#2167): an envelope sized to ~75% of a
+> node fits only **one** training job per node, so a second concurrent
+> experiment cannot schedule. With the gate off, clearing the keys returns the
+> edge to the fixed `cpu=1,memory=2Gi` literal — the contract floor since
+> backend#2254, which fits the smallest host we support. (Before #2254 the
+> fallback was `cpu=2,memory=8Gi`, which on a machine with less than ~8 GiB
+> allocatable could not schedule at all, so clearing the keys on a small machine
+> was unsafe; the floor removes that hazard.) To opt in to node sizing
+> deliberately, clear the pair **and** set the gate in
+> the same upgrade — `--set-string env.DERIVE_JOB_ENVELOPE=true`, with
+> `--set-string`, because every key under `env` is typed `string` and a bare
+> `--set ...=true` is rejected as a boolean. The key is documented in
+> `client/values.yaml` (backend#2250).
+
+## Upgrading to 1.9.6 — the prod ingestor pin moved into chart defaults; `values-prod.yaml` removed
+
+The digest that pins the spawned ingestion image on prod now lives in the
+chart's **default** `client/values.yaml` as `images.ingestor.prodDigest`, gated
+to prod. The `client/values-prod.yaml` install-time overlay has been **deleted**.
+
+**Why:** an install-time `-f` overlay could never deliver the pin.
+
+- The installer only ever passes its own generated values file, so a standard
+  prod install never applied the overlay at all — prod floated on the tag
+  exactly like dev and staging.
+- Even where an operator layered it by hand, it could never be *updated*. The
+  fleet auto-upgrade CronJob runs `helm upgrade --reset-then-reuse-values` with
+  no `-f` and no `--set`: that resets to the **new chart's `values.yaml`
+  defaults**, then re-applies the release's stored **user-supplied** values. An
+  overlay value is user-supplied, so it was replayed verbatim forever — and
+  because Helm only auto-reads `values.yaml` from a chart, the overlay shipped
+  inside the new chart archive was never read. The edge stayed frozen on its
+  install-day digest while the chart version advanced.
+
+Chart **defaults** propagate through that upgrade; user-supplied values freeze.
+So the pin has to be a default, which is how the egress-proxy squid image has
+always been pinned. Removing the overlay rather than keeping it as a shim is
+deliberate: passing `-f values-prod.yaml` would re-create the frozen-value bug.
+
+**What you need to do: nothing for most clusters.**
+
+| Edge | `env.CLIENT_ENV` | Ingestor image |
+|---|---|---|
+| Prod (installer writes no `CLIENT_ENV`) | unset → resolves `prod` | Pinned to `images.ingestor.prodDigest`, `imagePullPolicy: IfNotPresent` |
+| Dev / staging | `dev` / `stg` | Floating `images.ingestor.tag`, `imagePullPolicy: Always` (unchanged) |
+
+The pin arrives on the next hands-off auto-upgrade, and each subsequent
+republished pin follows the same way.
+
+**If you hand-layered the old overlay, clear the stored value.** A manually
+applied `-f client/values-prod.yaml` stored `images.ingestor.digest` as a
+user-supplied value, and that key still takes precedence over `prodDigest` — so
+such an edge would stay frozen on its install-day digest. Clear it once:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.ingestor.digest=""
+```
+
+Confirm the edge now tracks the chart pin:
+
+```bash
+kubectl get deploy -n <namespace> <release>-jobs-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
+```
+
+**Canary edges.** To float one prod edge on the tag while the rest of the fleet
+stays pinned — e.g. to validate a new ingestor release in place — set
+`images.ingestor.prodPin=false` on that edge. It is user-supplied, so the
+opt-out persists across auto-upgrades until you change it back. To pin an edge
+to a *specific* different digest instead, set `images.ingestor.digest`; that
+wins in any environment.
+
+## Upgrading to 1.5.1 — single-node gating of the GPU→CPU pending fallback
+
+[client-runtime#92](https://github.com/tracebloc/client-runtime/issues/92) /
+[#222](https://github.com/tracebloc/client/issues/222): jobs-manager's
+GPU→CPU fallback (a GPU pod stuck `Pending` past the scheduling-overdue
+interval is stopped and respun as a CPU job) is now gated on a new
+`env.SINGLE_NODE` flag.
+
+**Why:** on a multi-node / elastic cluster (EKS cluster-autoscaler / Karpenter,
+AKS) a `Pending` GPU pod usually just means a GPU node is still autoscaling in
+(3–10 min). Downgrading to CPU after ~180s is premature — it silently moves a
+GPU experiment onto CPU and drives the stop→respin token churn behind the
+[client-runtime#80](https://github.com/tracebloc/client-runtime/issues/80) 401
+race. On a fixed single-node cluster (installer-provisioned k3d) GPU presence is
+known at install time and no node will autoscale in, so the fallback is correct.
+
+**What you need to do: nothing for most clusters.** `SINGLE_NODE` defaults to
+`hostPath.enabled`, so the behavior tracks your existing topology across the
+hands-off auto-upgrade:
+
+| Deployment | `hostPath.enabled` | `SINGLE_NODE` default | Behavior |
+|---|---|---|---|
+| Installer k3d / bare-metal single-host | `true` | `"true"` | GPU→CPU fallback **on** (unchanged) |
+| EKS / AKS / OpenShift (dynamic PVC) | `false` | `"false"` | Pending GPU pods left for the autoscaler |
+
+- **EKS/AKS/OpenShift** automatically stop the premature downgrade on the next
+  auto-upgrade — no value change needed.
+- **The installer** now writes `env.SINGLE_NODE: "true"` explicitly for new k3d
+  installs, so they don't depend on the heuristic.
+- **A fixed multi-node bare-metal cluster** (e.g. an NFS-backed cluster with
+  `hostPath.enabled: false`) that *wants* the hard CPU/GPU fallback must set it
+  explicitly: `env.SINGLE_NODE: "true"`. Must be a quoted string.
+
+`SINGLE_NODE` requires the matching jobs-manager image (it ships in the same
+release train). During the brief window where image-refresh rolls the new image
+before this chart upgrade injects the var, an absent `SINGLE_NODE` is treated as
+single-node (fallback on), so a single-node cluster is never regressed mid-rollout.
+
+## Upgrading to 1.3.4 — parent chart owns the shared ingestor ServiceAccount
+
+[#129](https://github.com/tracebloc/client/issues/129): the ingestor
+ServiceAccount has moved from the `tracebloc/ingestor` subchart into this
+parent chart. Background: the SA is shared by every ingestor subchart
+release in a namespace, but per-release Helm ownership meant two concurrent
+`helm install tracebloc/ingestor` calls collided with "cannot import into
+current release", and uninstalling the first release ripped the SA out
+from under all the others. With the SA in the parent chart, every
+ingestor release in the namespace shares it cleanly and `helm uninstall`
+of any individual ingestor release leaves it alone.
+
+> **The matching ingestor subchart change** ships as
+> `tracebloc/ingestor` **0.2.0** — `serviceAccount.create` default
+> flipped from `true` to `false`. Upgrade the subchart releases in
+> lockstep with the parent so they stop trying to own the SA.
+
+### When you need to adopt an existing SA
+
+If you already have a `tracebloc/ingestor` 0.1.0 release installed in the
+same namespace as this `tracebloc/client` release, `kubectl get sa
+ingestor -n <ns> -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'`
+returns that subchart release's name. Plain `helm upgrade tracebloc/client`
+to 1.3.4 will fail with `Unable to continue with update: ServiceAccount
+"ingestor" ... exists and cannot be imported into the current release`.
+
+Transfer Helm ownership before upgrading:
+
+```bash
+# 1. Identify the values you need.
+NAMESPACE=<your-tracebloc-namespace>
+CLIENT_RELEASE=<your-client-release-name>          # e.g. "tracebloc"
+SA_NAME=ingestor                                    # or ingestionAuthz.serviceAccountName if overridden
+
+# 2. Re-annotate the SA so Helm sees the parent client release as its owner.
+kubectl annotate sa "$SA_NAME" -n "$NAMESPACE" \
+  meta.helm.sh/release-name="$CLIENT_RELEASE" \
+  meta.helm.sh/release-namespace="$NAMESPACE" \
+  --overwrite
+
+kubectl label sa "$SA_NAME" -n "$NAMESPACE" \
+  app.kubernetes.io/managed-by=Helm \
+  --overwrite
+
+# 3. Now run the upgrade — Helm adopts the SA on next reconcile.
+helm upgrade "$CLIENT_RELEASE" tracebloc/client \
+  -n "$NAMESPACE" --version 1.3.4 --reset-then-reuse-values
+
+# 4. Upgrade each ingestor subchart release to 0.2.0 so it stops trying
+#    to create the SA itself. The flipped default does this for you, but
+#    use --reset-then-reuse-values so pre-0.2.0 stored values don't
+#    re-apply serviceAccount.create=true.
+helm upgrade <ingestor-release> tracebloc/ingestor \
+  -n "$NAMESPACE" --version 0.2.0 --reset-then-reuse-values
+```
+
+If no ingestor 0.1.0 release exists in the namespace yet, you don't have
+to do anything — the parent chart creates the SA on first install of
+1.3.4 and subsequent ingestor 0.2.0 releases consume it.
+
+### `--reuse-values` upgrade path
+
+Operators using plain `--reuse-values` (or the auto-upgrade cronjob
+prior to 1.3.0, which used that flag) won't get the new
+`ingestionAuthz.serviceAccountName` default. The chart's template
+defaults the value to `"ingestor"` when absent, so the SA is created
+with the expected name and existing `allowed` entries keep matching.
+No template-level breakage; this is the same nil-guard pattern as
+[#124](https://github.com/tracebloc/client/pull/124).
+
+## Upgrading to 1.3.0 — self-upgrade CronJob lands on by default
+
+Releases of 1.3.0+ install a `<release>-auto-upgrade` CronJob that polls
+`https://tracebloc.github.io/client` and runs
+`helm upgrade --reset-then-reuse-values` when a newer chart version is
+published. This closes [tracebloc/client#69](https://github.com/tracebloc/client/issues/69) —
+older deployed clients stop drifting from the latest secure / stable release.
+
+The default cadence is **hourly at :23 UTC** as of 1.3.2 (was daily at 02:23
+UTC in 1.3.0 / 1.3.1). The off-hour minute spreads load across the
+`tracebloc.github.io/client` GitHub Pages origin. Operators who want a
+different schedule can override `autoUpgrade.schedule`.
+
+> **Verified end-to-end on `tb-client-dev-templates` during the 1.3.1 release**:
+> a `tracebloc` release at 1.3.0 self-upgraded to 1.3.1 within a single
+> CronJob tick after publish, with no operator intervention.
+
+> **Operator note for the 1.x → 1.3.0 jump.** Use `--reset-then-reuse-values`
+> on the *manual* upgrade command too, not plain `--reuse-values`. The new
+> `autoUpgrade` block was added in 1.3.0; with `--reuse-values` Helm reuses
+> the last release's *computed* values, which don't contain `autoUpgrade`,
+> and the new templates fail with `nil pointer evaluating interface {}.enabled`.
+> Once you're on 1.3.0+ the CronJob handles future bumps with the correct
+> flag itself.
+>
+> ```bash
+> helm upgrade <release> tracebloc/client \
+>   -n <namespace> --version 1.3.0 \
+>   --reset-then-reuse-values
+> ```
+
+The upgrader's ServiceAccount is bound to the built-in `cluster-admin`
+ClusterRole because the chart already templates cluster-scoped resources
+(`PriorityClass`, `StorageClass`, `ClusterRole`/`Binding`, optionally
+`Namespace`); a curated narrower role would silently break the day a future
+chart version adds a new resource kind.
+
+To opt out and keep the manual approval gate you had on 1.2.x:
+
+```yaml
+# values-overrides.yaml
+autoUpgrade:
+  enabled: false
+```
+
+Or for a one-shot pause without removing the resources, set
+`autoUpgrade.suspend: true`.
+
+## What Changed
+
+| Legacy | Unified |
+|--------|---------|
+| 4 separate charts (`aks/`, `bm/`, `eks/`, `oc/`) | 1 chart (`tracebloc/`) with platform toggles |
+| Hardcoded `tracebloc-secrets` | `{{ .Release.Name }}-secrets` via helper |
+| `default` ServiceAccount | Dedicated `{{ .Release.Name }}-jobs-manager` SA |
+| No standard labels | Kubernetes recommended labels on all resources |
+| Monolithic `mysql-client-deployment.yaml` | Split into `mysql-deployment.yaml`, `mysql-configmap.yaml`, `mysql-service.yaml` |
+| Unused `namespace` value in `values.yaml` | Removed — use `helm install -n <ns>` |
+
+## Key Value Mapping
+
+### AKS → Unified
+
+No structural changes. Add platform-specific storage values:
+
+```yaml
+# values-aks.yaml
+storageClass:
+  create: true
+  provisioner: file.csi.azure.com
+  parameters:
+    skuName: Standard_LRS
+  mountOptions:
+    - dir_mode=0750
+    - file_mode=0640
+    - uid=999
+    - gid=999
+    - mfsymlinks
+    - cache=strict
+    - actimeo=30
+
+clusterScope: true
+```
+
+### EKS → Unified
+
+```yaml
+# values-eks.yaml
+storageClass:
+  create: true
+  provisioner: efs.csi.aws.com
+  volumeBindingMode: Immediate
+  reclaimPolicy: Retain
+  mountOptions:
+    - actimeo=30
+  parameters:
+    directoryPerms: "700"
+    uid: "999"
+    gid: "999"
+    fileSystemId: <YOUR_EFS_FILESYSTEM_ID>
+    provisioningMode: efs-ap
+
+clusterScope: true
+```
+
+### Bare-Metal → Unified
+
+Key change: `hostPath` section replaces per-PVC `hostPath` values.
+
+```yaml
+# values-bm.yaml
+hostPath:
+  enabled: true
+
+pvcAccessMode: ReadWriteOnce
+
+storageClass:
+  create: true
+  provisioner: kubernetes.io/no-provisioner
+
+clusterScope: true
+```
+
+**PV paths (fixed):** When `hostPath.enabled` is true, PVs use `/tracebloc/data`, `/tracebloc/logs`, `/tracebloc/mysql` (e.g. map to `~/.tracebloc/{data,logs,mysql}` when that dir is mounted at `/tracebloc`).
+
+### OpenShift → Unified
+
+```yaml
+# values-oc.yaml
+storageClass:
+  create: false
+  name: ocs-storagecluster-cephfs  # or your existing SC
+
+clusterScope: false  # namespace-scoped RBAC
+
+openshift:
+  scc:
+    enabled: true  # creates the resource-monitor SCC
+```
+
+## Migration Steps
+
+### 1. Export current values
+
+```bash
+helm get values <release-name> -n <namespace> -o yaml > old-values.yaml
+```
+
+### 2. Create new values file
+
+Map old values to the unified schema (see tables above). Credentials stay the same.
+
+### 3. Dry-run the upgrade
+
+```bash
+helm template <release-name> ./client -n <namespace> -f new-values.yaml > new-manifests.yaml
+```
+
+Compare with current manifests:
+
+```bash
+helm get manifest <release-name> -n <namespace> > old-manifests.yaml
+diff old-manifests.yaml new-manifests.yaml
+```
+
+### 4. Key differences to expect
+
+- **Resource names**: Secret name changes from `tracebloc-secrets` to `<release>-secrets`
+- **Labels**: All resources get standard `app.kubernetes.io/*` labels
+- **ServiceAccount**: Dedicated SA instead of `default`
+
+### 5. Apply the migration
+
+```bash
+# Uninstall old release (PVCs are protected with helm.sh/resource-policy: keep)
+helm uninstall <release-name> -n <namespace>
+
+# Install with new chart
+helm install <release-name> ./client -n <namespace> -f new-values.yaml
+```
+
+> **Important:** PVCs have `helm.sh/resource-policy: keep` so they survive `helm uninstall`. Verify PVCs still exist before installing the new chart.
+
+### 6. Clean up pre-Helm `resource-monitor` remnants
+
+Some early-era edges were installed with a `resource-monitor` DaemonSet deployed via raw `kubectl apply` — **before** the per-platform charts existed. The live manifest has no Helm ownership annotations (`meta.helm.sh/release-*`), and its pods are named `resource-monitor-<suffix>` (not `tracebloc-resource-monitor-<suffix>`).
+
+The unified chart's `tracebloc-resource-monitor` DaemonSet supersedes it. After migrating, delete the legacy resources so the namespace has a single node-level agent and isn't carrying an unmanaged, hostPath-mounting pod that blocks PSA `enforce=restricted`:
+
+```bash
+# Check whether your cluster has the legacy DS
+kubectl -n <namespace> get ds resource-monitor 2>/dev/null
+
+# If present, delete it and its cluster-scoped RBAC (all four names are exact).
+# The ClusterRole/Binding are global — verify they aren't shared by any other workload first:
+kubectl get clusterrolebinding resource-monitor -o jsonpath='{.subjects}'
+# Expect a single subject: ServiceAccount/resource-monitor in <namespace>.
+
+kubectl -n <namespace> delete ds resource-monitor
+kubectl -n <namespace> delete sa resource-monitor
+kubectl delete clusterrolebinding resource-monitor
+kubectl delete clusterrole resource-monitor
+```
+
+The chart-managed `tracebloc-resource-monitor` keeps running throughout; no rollout is triggered.
+
+## Rollback
+
+The legacy per-platform chart directories (`aks/`, `bm/`, `eks/`, `oc/`) were
+removed from the repo in #70 once the unified chart had been validated across
+every supported platform. If you must install one of those legacy charts,
+recover the directory from git history at the deletion commit:
+
+```bash
+# find the SHA where the legacy dirs were last present
+git log --diff-filter=D --summary -- aks bm eks oc | head
+git checkout <pre-delete-sha> -- aks bm eks oc
+helm install <release-name> ./<old-chart> -n <namespace> -f old-values.yaml
+```
+
+In practice, rolling back *within* the unified chart family is the safer
+path — `helm rollback <release-name> <revision>` keeps the cluster on a
+chart it has been exercising.

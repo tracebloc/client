@@ -1,0 +1,130 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # client#86: post-install hook that POSTs the ingest.yaml to
+  # jobs-manager. Hook lifecycle:
+  #
+  #   - post-install + post-upgrade fires the Job.
+  #   - hook-weight 1 ensures the ConfigMap (weight 0) is in place first.
+  #   - hook-delete-policy "before-hook-creation" cleans up the previous
+  #     Job on a re-install of the same release, so we don't trip on a
+  #     leftover completed Job. We DO NOT use "hook-succeeded" because
+  #     keeping the Job around lets operators read the POST result via
+  #     `kubectl logs` after install.
+  name: {{ include "ingestor.hookJobName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ingestor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  # Bound: jobs-manager validates synchronously; if it hasn't responded
+  # in this window something is genuinely wrong and the install should
+  # fail loudly rather than hang.
+  activeDeadlineSeconds: {{ .Values.hookTimeoutSeconds | default 30 }}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "ingestor.labels" . | nindent 8 }}
+    spec:
+      # The hook talks to one in-cluster endpoint with one specific SA
+      # token. Hardened defaults match the tracebloc client chart's
+      # training-pod template — non-root, all caps dropped.
+      automountServiceAccountToken: true  # we DO need the SA token to authenticate the POST
+      serviceAccountName: {{ include "ingestor.serviceAccountName" . }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: submit
+          image: {{ printf "%s:%s" .Values.hookImage.repository .Values.hookImage.tag | quote }}
+          imagePullPolicy: {{ .Values.hookImage.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.hookResources | nindent 12 }}
+          env:
+            # client#127: default to the jobs-manager Service in this
+            # release's own namespace rather than hardcoding "tracebloc".
+            # Releases in any other namespace would otherwise hit
+            # `curl: Could not resolve host` at the hook. Customers
+            # whose ingestor release sits in a different namespace from
+            # the tracebloc release set `jobsManager.endpoint`
+            # explicitly to override.
+            - name: JOBS_MANAGER_ENDPOINT
+              value: {{ .Values.jobsManager.endpoint | default (printf "http://jobs-manager.%s.svc.cluster.local:8080" .Release.Namespace) | quote }}
+            - name: SUBMIT_PATH
+              value: {{ .Values.jobsManager.submitPath | quote }}
+          command: ["/bin/sh", "-c"]
+          # The script:
+          #   1. Reads the SA token from the projected volume (k8s adds
+          #      it automatically when automountServiceAccountToken: true).
+          #   2. POSTs the pre-rendered JSON body from
+          #      /etc/ingest/body.json — Helm built the JSON at template
+          #      time so the script doesn't have to construct or escape
+          #      anything itself. Earlier versions used a python3 / jq
+          #      escape pipeline at runtime; both failed in different
+          #      ways (curlimages/curl strips python3 from the runtime
+          #      layer, and shell-side JSON escaping a multi-line YAML
+          #      scalar is its own bug farm). Bugbot caught both.
+          #   3. Non-2xx fails the Job, which fails the helm install with
+          #      the response body visible in the install output.
+          args:
+            - |
+              set -eu
+
+              TOKEN_PATH=/var/run/secrets/kubernetes.io/serviceaccount/token
+              BODY_FILE=/etc/ingest/body.json
+
+              if [ ! -r "$TOKEN_PATH" ]; then
+                echo "ERROR: SA token not found at $TOKEN_PATH" >&2
+                exit 1
+              fi
+              if [ ! -r "$BODY_FILE" ]; then
+                echo "ERROR: request body not found at $BODY_FILE — ConfigMap mount failed" >&2
+                exit 1
+              fi
+
+              URL="${JOBS_MANAGER_ENDPOINT}${SUBMIT_PATH}"
+              echo "POST $URL"
+              echo "Body source: $BODY_FILE"
+
+              HTTP_STATUS=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
+                --max-time {{ .Values.hookTimeoutSeconds | default 30 }} \
+                -X POST "$URL" \
+                -H "Authorization: Bearer $(cat "$TOKEN_PATH")" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$BODY_FILE")
+
+              echo "HTTP $HTTP_STATUS"
+              echo "Response:"
+              cat /tmp/resp.json
+              echo
+
+              # 200 = replay (existing run for this key); 201 = freshly
+              # created. Both are success for the customer's helm install.
+              if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+                exit 1
+              fi
+          volumeMounts:
+            - name: ingest-config
+              mountPath: /etc/ingest
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: ingest-config
+          configMap:
+            name: {{ include "ingestor.configMapName" . }}
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,97 @@
+{{- if (include "tracebloc.resourceMonitorEnabled" .) }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.resourceMonitorName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+{{/*
+  Per-node monitoring is INTRINSICALLY cluster-scoped, so the resource-monitor
+  always needs a ClusterRole -- it is deliberately NOT gated on .Values.clusterScope.
+  The code path that requires it:
+    * resource_monitor.py uses core_v1_api.list_pod_for_all_namespaces(
+        field_selector="spec.nodeName=<node>") to enumerate every pod on the node.
+      list_pod_for_all_namespaces is a CLUSTER-SCOPED list verb that a namespaced
+      Role can never satisfy (it 403s -> CrashLoopBackOff).
+    * It also read_namespaced_pod()s its OWN pod, which lives in
+      .Values.nodeAgents.namespace.name (NOT .Release.Namespace), so a Role scoped
+      to the release namespace would miss it too.
+  This ClusterRole is strictly READ-ONLY (get/list/watch on pod/node metadata +
+  metrics); it grants no write/exec/secret access. clusterScope continues to gate
+  the training/jobs isolation footprint elsewhere -- it must not cripple node
+  telemetry by leaving the DaemonSet without the permissions it cannot run without.
+  If a deployment genuinely cannot allow any cluster-scoped read, disable the
+  monitor entirely via .Values.resourceMonitor.enabled=false rather than deploying it broken.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+{{/*
+  Keep this rule matched to what the DaemonSet image actually calls. The image
+  (Node-deploy/Dockerfile) ships exactly resource_monitor.py, resource_utils.py,
+  constants.py and proxy_config.py, whose entire Kubernetes surface is:
+    read_namespaced_pod            -> pods            get
+    list_pod_for_all_namespaces    -> pods            list
+    read_node / read_node_status   -> nodes, nodes/status  get
+    list_namespaced_custom_object  -> metrics.k8s.io/pods  list
+    get_cluster_custom_object      -> metrics.k8s.io/nodes get
+  `pods/log` and `namespaces` were granted but never called; `pods/log` is
+  removed because cluster-wide it lets this ServiceAccount read the LOG CONTENTS
+  of every pod in the cluster -- including other tenants' training pods, which
+  run customer code and print customer data. That is a real exfiltration path
+  for a node-telemetry agent that never reads a log. backend#950.
+
+  `watch` is removed for the same reason, on both rules: every call above is a
+  point read or a one-shot list. The image never opens a watch -- no `Watch()`,
+  no `watch.stream`, no `watch=True`, and it shells out to nothing (its CMD is
+  `python /app/resource_monitor.py`; there is no kubectl in the image). A
+  cluster-wide `watch` on pods is a live streaming feed of every pod object in
+  the cluster, so an agent that only samples its own node's metrics should not
+  hold one. backend#950 follow-up.
+
+  VERBS ARE PINNED BY TEST, not just resources. `watch` survived the #950 trim
+  because resource_monitor_test.yaml asserted only `resources` -- the rule was
+  narrowed on one axis while the other kept an unused grant. Both axes are
+  asserted now.
+*/}}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "nodes/status"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.resourceMonitorName" . }}
+    namespace: {{ .Values.nodeAgents.namespace.name }}
+{{- end }}

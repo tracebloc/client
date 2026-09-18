@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: requests-proxy-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: requests-proxy
+spec:
+  selector:
+    app: requests-proxy
+  ports:
+    - name: http
+      port: 8888
+      targetPort: 8888
+      protocol: TCP
+  type: ClusterIP

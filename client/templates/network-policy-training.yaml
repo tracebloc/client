@@ -1,0 +1,124 @@
+{{/*
+  Training pod egress lockdown.
+
+  Training pods run untrusted ML code uploaded by external data scientists.
+  This NetworkPolicy:
+    1. Denies all ingress to training pods (nothing should connect TO them).
+    2. Allows DNS to the cluster's DNS service.
+    3. Allows TCP/443 egress to addresses OUTSIDE the cluster CIDRs only —
+       blocking pod-to-pod, K8s API, jobs-manager pod IPs, etc.
+    4. Allows TCP/3306 egress to the in-namespace mysql-client pod.
+       Training pods load their training dataset via
+       core/utils/database.py::load_dataframe_from_sql_table; without this
+       rule the connect fails with "Can't connect to MySQL server (111)"
+       and the job CrashLoopBackOffs before the first batch.
+       Scoped by podSelector (app=mysql-client) so it stays tight to the
+       chart's own mysql pod and does not open the namespace generally.
+
+  Selects pods by label tracebloc.io/workload=training. The jobs-manager
+  injects this label when spawning each training Job (see client-runtime
+  jobs_manager._prepare_job_config).
+
+  Requires a CNI that enforces NetworkPolicy. Not enforced by:
+    - kindnet (minikube / KIND)
+    - flannel (without kube-router add-on)
+    - AWS VPC CNI (without Calico add-on)
+  See values.yaml networkPolicy.training.enabled for platform notes.
+*/}}
+{{- if .Values.networkPolicy.training.enabled }}
+{{- if not .Values.networkPolicy.training.clusterCidrs }}
+{{- fail "networkPolicy.training.enabled is true but networkPolicy.training.clusterCidrs is empty. An empty list renders `except: null`, which Kubernetes treats as no exceptions — training pods would get unrestricted port-443 egress to MySQL, the K8s API, jobs-manager, and other in-cluster destinations. Set the list to your cluster's pod+service CIDRs, or disable the policy." }}
+{{- end }}
+{{- $dnsSelector := .Values.networkPolicy.training.dnsSelector }}
+{{- if not $dnsSelector }}{{ $dnsSelector = dict "k8s-app" "kube-dns" }}{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-training-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      tracebloc.io/workload: training
+  policyTypes:
+    - Ingress
+    - Egress
+  # Deny all ingress — no one should connect TO a training pod.
+  ingress: []
+  egress:
+    # 1. DNS to the cluster's DNS service.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.training.dnsNamespace | default "kube-system" }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $dnsSelector | nindent 14 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- /* Rule 2 (external HTTPS) is the egress hole SECURITY §8.2 closes. The
+           shipped default is now `false` (values.yaml — RFC-0003 D6 deny-by-default),
+           so a fresh render drops this rule. The `dig` default of TRUE here is the
+           legacy fallback ONLY: an absent key (helm upgrade --reuse-values from a
+           release predating the key) keeps the rule — old permissive behaviour — and
+           an operator can still opt a fleet back out with an explicit `true` (#102). */}}
+    {{- if dig "allowExternalHttps" true .Values.networkPolicy.training }}
+    # 2. External HTTPS — everything NOT in the cluster's pod/service CIDRs.
+    #    Training pods reach the backend / Azure Service Bus / App Insights directly.
+    #    This blocks pod-to-pod, ClusterIPs, jobs-manager, K8s API. MySQL and the
+    #    in-cluster proxies are explicitly re-permitted by the rules below.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.training.clusterCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+      ports:
+        - port: 443
+          protocol: TCP
+    {{- end }}
+    # 3. MySQL — training pods read the training dataset from the
+    #    in-namespace mysql-client pod. podSelector with no namespaceSelector
+    #    matches pods in the same namespace as this NetworkPolicy.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mysql-client
+      ports:
+        - port: 3306
+          protocol: TCP
+    # 4. requests-proxy — training pods POST epoch results / FLOPs to the
+    #    in-namespace requests-proxy on 8888 (so they never hold Service Bus
+    #    credentials). Rule 2 blocks this ClusterIP egress, so re-permit it
+    #    explicitly, exactly like MySQL above. Without this rule every
+    #    experiment CrashLoopBackOffs at the first epoch finalize with
+    #    "requests-proxy-service:8888 ... Connection refused" (client#196).
+    #    Service selector + port: templates/requests-proxy-service.yaml
+    #    (app=requests-proxy, 8888).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: requests-proxy
+      ports:
+        - port: 8888
+          protocol: TCP
+    {{- if (default dict .Values.egressProxy).enabled }}
+    # 5. egress gateway — training pods reach the in-cluster squid egress gateway
+    #    (egress-proxy-service) for allowlisted external HTTPS, used once the
+    #    external-HTTPS rule (rule 2) is dropped. Re-permitted explicitly like MySQL /
+    #    requests-proxy above (rule 2's `except` blocks ClusterIP egress).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: egress-proxy
+      ports:
+        - port: {{ (default dict .Values.egressProxy).port | default 3128 }}
+          protocol: TCP
+    {{- end }}
+{{- end }}

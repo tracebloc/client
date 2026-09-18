@@ -1,0 +1,135 @@
+{{- if and (default dict .Values.networkPolicy.training).enabled (not (dig "allowExternalHttps" true .Values.networkPolicy.training)) (dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training) }}
+{{- /*
+  Egress-lockdown enforcement check (SECURITY §8.2 / client-runtime#104).
+  Renders ONLY when the lockdown is enabled (allowExternalHttps=false) and a probe
+  host is set. This is a `helm test` hook — run `helm test <release>` after flipping
+  the lockdown to verify it. A `tracebloc.io/workload: training`-labelled pod (so the
+  training-egress NetworkPolicy governs it) opens a DIRECT TCP connection to a canary
+  host's :443 (the TLS/HTTP outcome is ignored — we only test reachability): connection
+  blocked => the CNI enforces egress (test PASSES); connection established => NOT
+  enforced => the lockdown is a silent no-op (test FAILS, exit 1). Because it's a test
+  hook it never
+  runs during install/upgrade, so it can NEVER block them or the hourly auto-upgrade.
+  The probe-host default is 1.1.1.1; set enforcementProbeHost="" to disable (e.g.
+  air-gapped clusters with no external host to test against).
+*/ -}}
+{{- $host := dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-egress-enforcement-check
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    {{- /* seal-check enumeration contract (RFC-0003 §8.2) — see _helpers.tpl */}}
+    {{- include "tracebloc.sealCheckLabels" (dict "name" "egress-enforcement") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+        {{- include "tracebloc.sealCheckLabels" (dict "name" "egress-enforcement") | nindent 8 }}
+        tracebloc.io/workload: training
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # curlimages/curl's default user is non-numeric (curl_user); runAsNonRoot
+        # can't verify that, so pin the image's uid explicitly.
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: {{ include "tracebloc.image" (dict "repository" "curlimages/curl" "tag" "8.20.0" "digest" "sha256:b3f1fb2a51d923260350d21b8654bbc607164a987e2f7c84a0ac199a67df812a" "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          command:
+            - sh
+            - -c
+            - |
+              HOST={{ $host | quote }}
+              TIMEOUT={{ dig "enforcementProbeTimeoutSeconds" 60 .Values.networkPolicy.training }}
+              echo "[egress-enforcement-check] probing direct TCP egress to ${HOST}:443; it must be BLOCKED once the CNI reconciles the training-egress NetworkPolicy (retrying up to ${TIMEOUT}s)..."
+              # We only care whether a TCP connection to :443 can be ESTABLISHED — the
+              # TLS/HTTP outcome is irrelevant. -k disables cert verification so probing an
+              # IP (or any host whose cert doesn't match) is NOT misread as a block, and the
+              # verdict is keyed on curl's EXIT CODE, not the HTTP status: a blocked egress
+              # yields a timeout (28) or connect failure (7); a DNS failure (6) is inconclusive;
+              # any other outcome (incl. a TLS/cert error) means the TCP connect already succeeded.
+              #
+              # Why retry: standard-mode CNIs — notably AWS VPC CNI with
+              # NETWORK_POLICY_ENFORCING_MODE=standard — allow a brand-new pod ALL traffic
+              # until its per-pod policy is reconciled (a few-second startup window). A single
+              # immediate probe races that window and can see a false connect, reporting "not
+              # enforced" on a cluster that DOES enforce. Real training pods start far slower
+              # than this window (image pull, dataset load, framework init) so user code never
+              # runs un-policed; this loop measures that steady state, not the startup race.
+              # PASS as soon as egress is blocked; FAIL only if it stays reachable for TIMEOUT.
+              deadline=$(( $(date +%s) + $TIMEOUT ))
+              rc=0
+              attempt=0
+              reached=0
+              while :; do
+                attempt=$(( attempt + 1 ))
+                curl --noproxy '*' -k -sS -m 5 -o /dev/null "https://$HOST"; rc=$?
+                if [ "$rc" = 7 ] || [ "$rc" = 28 ]; then
+                  # connect refused (7) / timed out (28): the TCP handshake never completed => blocked.
+                  echo "OK  egress lockdown verified after ${attempt} attempt(s): TCP to ${HOST}:443 could not be established (curl exit ${rc}) — egress is blocked."
+                  exit 0
+                fi
+                # Not blocked. Anything other than a DNS failure (6) means the TCP connect
+                # succeeded => egress was observed REACHABLE. Latch it so a later DNS blip can't
+                # downgrade a definitive "reachable" verdict to "inconclusive" after the loop.
+                [ "$rc" != 6 ] && reached=1
+                [ "$(date +%s)" -ge "$deadline" ] && break
+                echo "...  attempt ${attempt}: ${HOST}:443 not yet blocked (curl exit ${rc}); egress not yet enforced — retrying in 3s."
+                sleep 3
+              done
+              if [ "$reached" != 1 ]; then
+                # Never established a TCP connection — every attempt failed DNS (curl exit 6),
+                # so egress enforcement could not be judged either way.
+                echo "WARNING  egress enforcement INCONCLUSIVE: could not resolve host '${HOST}' (curl exit 6) within ${TIMEOUT}s."
+                echo "WARNING  No TCP connection ever succeeded, so the lockdown was NOT verified. Point"
+                echo "WARNING  networkPolicy.training.enforcementProbeHost at an external IP (e.g. 1.1.1.1)"
+                echo "WARNING  or fix in-cluster DNS, then re-run 'helm test'."
+                exit 1
+              fi
+              # Egress was observed REACHABLE on at least one attempt (TCP connect succeeded;
+              # rc=0 or a TLS-/HTTP-layer error such as 35/52/56/60) and never became blocked
+              # within TIMEOUT — regardless of the final attempt's code, so a late DNS blip
+              # cannot mask a connect we already saw.
+              echo "WARNING ================================================================"
+              echo "WARNING  EGRESS LOCKDOWN NOT ENFORCED on this cluster."
+              echo "WARNING  A tracebloc.io/workload=training pod established a direct TCP connection"
+              echo "WARNING  to ${HOST}:443 within ${TIMEOUT}s and egress never became blocked. networkPolicy.training."
+              echo "WARNING  allowExternalHttps is false, but the CNI is NOT enforcing egress"
+              echo "WARNING  NetworkPolicy, so the SECURITY §8.2 lockdown is INACTIVE and"
+              echo "WARNING  training pods can still reach the open internet."
+              echo "WARNING  Fix: ensure the CNI enforces egress NetworkPolicy — Calico/Cilium, or"
+              echo "WARNING  AWS VPC CNI with enableNetworkPolicy=true (enforced after a brief reconcile"
+              echo "WARNING  in 'standard' mode). Then re-run 'helm test'."
+              echo "WARNING ================================================================"
+              exit 1
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+{{- end }}

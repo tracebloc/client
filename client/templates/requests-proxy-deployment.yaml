@@ -1,0 +1,186 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tracebloc.requestsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: requests-proxy
+  template:
+    metadata:
+      labels:
+        app: requests-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          {{- /*
+            #569 (Bugbot): requests-proxy runs the jobs-manager IMAGE, so it must
+            follow the jobs-manager pin. `images.requestsProxy.digest` stays an
+            explicit per-workload override; when it is empty -- or IGNORED,
+            because it was resolved on a registry this release does not pull
+            from -- the workload follows the honoured `images.jobsManager.digest`.
+            That fallback used to be computed HERE with a `dig` chain; it now
+            lives in tracebloc.effectivePin, the same function the pull policy
+            and the image-refresh env read, so this site cannot render a digest
+            the pin rule rejected (the shape that put a Docker Hub digest on a
+            ghcr.io reference).
+
+            Without the fallback, pinning jobs-manager ALONE was a silent trap:
+            this Deployment kept rendering the floating `repo:tag` while
+            jobs-manager ran the pinned digest, AND image-refresh skips pinned
+            images — so it never wrote a `set image` for the proxy either. The
+            proxy froze on the tag indefinitely, running a different build of the
+            same image than jobs-manager. That is precisely the skew this change
+            set out to close, re-introduced through the pinning path.
+
+            Nil-guarded inside the helper for --reuse-values replays predating
+            these keys.
+          */}}
+          image: {{ include "tracebloc.controlPlaneImage" (dict "image" "requestsProxy" "root" $) | quote }}
+          # #569: IfNotPresent wherever an update path exists without `Always` --
+          # a pinned digest, or the image-refresh reconcile (see
+          # tracebloc.controlPlanePullPolicy; it stays Always on an edge the
+          # reconcile cannot reach, or that edge could never update at all).
+          # `Always` re-pulled on every restart even when the image was already
+          # cached, so an offline Docker/WSL restart landed in ImagePullBackOff.
+          #
+          # This Deployment runs the SAME tracebloc/jobs-manager image (from the
+          # tracebloc.tbRegistry registry) as
+          # the jobs-manager Deployment, and image-refresh now reconciles both to
+          # the same digest in one tick. Before #569 it reconciled only
+          # `<release>-jobs-manager`, so requests-proxy silently skewed: it stayed
+          # on the old build until some unrelated restart, then jumped to whatever
+          # the floating tag pointed at.
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "requestsProxy" "root" $) }}
+          workingDir: /app
+          command: ["python", "-m", "gunicorn"]
+          args:
+            - "--bind=0.0.0.0:8888"
+            # The proxy stores registered pod tokens in process-local memory,
+            # so it must run as a single worker unless the registry moves to
+            # shared storage.
+            - "--workers=1"
+            - "--worker-tmp-dir=/dev/shm"
+            - "--threads=4"
+            - "--graceful-timeout=30"
+            - "--timeout=60"
+            - "--access-logfile=-"
+            - "--error-logfile=-"
+            - "requests_proxy_server:create_app()"
+          ports:
+            - containerPort: 8888
+          # #1143: without probes the pod is "Ready" the instant the container
+          # process starts — before gunicorn has bound :8888 — so tb doctor's
+          # "Service Bus egress (requests-proxy) ready" (which reads
+          # ReadyReplicas) shows a false green even when the proxy can't relay.
+          # tcpSocket (not httpGet): the proxy app lives in client-runtime and
+          # exposes no chart-visible HTTP health path, and a probe against an
+          # unknown path would 404 and wedge the pod. A successful TCP accept on
+          # :8888 confirms the gunicorn MASTER has bound the listen socket. That
+          # is a strict improvement over no probes — it catches a container that
+          # never starts — but it does NOT fully close the false-green: the
+          # master binds the socket before the single worker finishes importing
+          # create_app(), and keeps it bound while a worker crash-loops on that
+          # import, so a proxy that can't actually relay can still read Ready.
+          # Fully closing it would need a real /healthz served from
+          # client-runtime. Mirrors mysql-deployment.yaml's
+          # startup/liveness/readiness structure.
+          startupProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          {{- /* Nil-guard the whole resources.requestsProxy chain. A
+                 helm upgrade --reuse-values from a release predating this
+                 field (any 1.3.x ≤ 1.3.5) won't have it in stored values,
+                 and the direct path .Values.resources.requestsProxy... on
+                 a nil parent dict crashes with "nil pointer evaluating
+                 interface{}.requests". Default-through-dict idiom lets
+                 missing values fall through to the inline literals.
+                 The trailing dash on `{{-` strips the newline AFTER
+                 readOnlyRootFilesystem; we deliberately do NOT use `-}}`
+                 on the last `:=` so the newline before `resources:` is
+                 preserved (an earlier version of this guard ate the
+                 newline and rendered `readOnlyRootFilesystem: trueresources:`). */ -}}
+          {{- $rp := default dict (default dict .Values.resources).requestsProxy }}
+          {{- $rpReq := default dict $rp.requests }}
+          {{- $rpLim := default dict $rp.limits }}
+          resources:
+            requests:
+              cpu: {{ $rpReq.cpu | default "50m" | quote }}
+              memory: {{ $rpReq.memory | default "96Mi" | quote }}
+            limits:
+              cpu: {{ $rpLim.cpu | default "1000m" | quote }}
+              memory: {{ $rpLim.memory | default "512Mi" | quote }}
+          env:
+          {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+            - name: MYSQL_HOST
+              value: "mysql-client"
+            - name: EXPERIMENTS_QUEUE_NAME
+              value: "experiments"
+            - name: FLOPS_QUEUE_NAME
+              value: "flops"
+            # client-runtime#79: shared HMAC secret used to VERIFY the per-pod
+            # bearer token statelessly (signature + expiry), the same key the
+            # jobs-manager uses to mint it. When present, the proxy skips the
+            # pod_tokens table entirely.
+            - name: POD_TOKEN_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: POD_TOKEN_SIGNING_SECRET
+            {{- if (include "tracebloc.serviceDbAccounts" .) }}
+            # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the proxy's
+            # metadata-DB access as the dedicated tb_meta identity instead of
+            # the root-equivalent edgeuser. Only the metadata identity is wired
+            # here — the proxy never touches the dataset DB. jobs-manager mints
+            # tb_meta at its startup; the proxy's bootstrap retries until it
+            # lands. Rendered only when enabled, so a default install stays
+            # byte-identical (mirrors the jobs-manager block).
+            - name: SERVICE_DB_ACCOUNTS
+              value: "1"
+            - name: TB_META_USER
+              value: "tb_meta"
+            - name: TB_META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TB_META_PASSWORD
+            {{- end }}
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always

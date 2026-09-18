@@ -1,0 +1,272 @@
+{{- if and .Values.perDatasetPvcs (eq .Values.clusterScope false) }}
+{{- fail "perDatasetPvcs requires clusterScope: PersistentVolumes are cluster-scoped, so the namespaced Role cannot grant the PV provisioning/GC verbs jobs-manager needs — Job spawns would 403 at runtime. Set clusterScope: true (the default) or disable perDatasetPvcs." }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tracebloc.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+{{- if ne .Values.clusterScope false }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tracebloc.rbacName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  # Read-only, for the heartbeat version inventory: `deployments` covers every
+  # chart workload except resource-monitor, which needs `daemonsets`.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # backend#1876: jobs-manager's check_pending_jobs GPU->CPU fallback
+  # (client-runtime#217) calls list_node() to decide whether an overdue
+  # Pending GPU pod is waiting for a GPU node to autoscale in (leave it) or
+  # genuinely has no GPU node (downgrade to CPU). `nodes` is cluster-scoped,
+  # so — like tokenreviews below — it can only be granted here, in the
+  # clusterScope: true branch. Without it list_node() 403s and the runtime's
+  # fail-safe assumes a GPU node is present, silently disabling the fallback:
+  # the pod wedges Pending forever while the backend shows RUNNING.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+  # client-runtime#21: jobs-manager's POST /internal/submit-ingestion-run
+  # endpoint authenticates callers (the ingestor subchart's post-install
+  # hook) via TokenReview, then creates a per-run ConfigMap (ingest.yaml)
+  # and Secret (BACKEND_TOKEN) before spawning the ingestor Job.
+  #
+  # TokenReview is a cluster-scoped Kubernetes API; the create verb cannot
+  # be granted by a namespace Role. This means the ingestion endpoint
+  # requires ``clusterScope: true``. The else branch below intentionally
+  # omits it.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    # `get` is required by jobs-manager's orphan-resource verify path
+    # (client-runtime#52) and the missing-row self-heal (client-runtime#54):
+    # on a create-409 it reads the existing ConfigMap/Secret to confirm the
+    # content matches before reusing it. Without `get`, those reads return
+    # Forbidden and the endpoint 500s instead of the intended 409/replay.
+    verbs: ["create", "get"]
+{{- if (include "tracebloc.perExperimentDbCreds" .) }}
+  # Per-experiment DB creds only: jobs-manager's revoke/sweep path reaps the
+  # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
+  # the orphan reaper must LIST cred Secrets to find any whose Job died before
+  # cleanup — without `list` that enumeration 403s and orphaned credential
+  # material accumulates in etcd (backend#2692). Same shape as the perDatasetPvcs
+  # GC grant (`list` + `delete`). `list` on secrets does widen exposure
+  # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
+  # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
+  # unchanged when off (Saqlain review).
+  #
+  # `patch` IS THE SECOND CYCLE (backend#2795). Cycle 1 CREATES the cred Secret
+  # and is covered by `create` above; cycle 2 reuses the experiment's Secret and
+  # PATCHES it, which nothing here granted. Measured on dev, experiment 15044:
+  #
+  #   secrets "tb-dbcreds-exp15044c2-0fbcc6e0f93f" is forbidden:
+  #   User "system:serviceaccount:e2e-tier-a:e2e-tier-a-jobs-manager"
+  #   cannot patch resource "secrets" in API group "" in the namespace
+  #
+  # The edge 403s before it runs inference, so it never reports back, the
+  # inference row stays `inference_captured=False`, and no leaderboard row is
+  # ever written — with the experiment recorded COMPLETED and no error. Every
+  # cycle-1 inference on dev is captured and every cycle-2 one since the flag
+  # went on is not, which is this verb and nothing else.
+  #
+  # NOT name-restricted, unlike the pull-secret grants elsewhere in this chart:
+  # the Secret name carries the experiment id and cycle
+  # (`tb-dbcreds-exp<id>c<cycle>-<hash>`), so there is no fixed name to pin and
+  # `resourceNames` cannot express a prefix. It sits in the same flag-gated,
+  # secrets-only rule as `list`/`delete` so the blast radius is unchanged when
+  # the flag is off.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list", "delete", "patch"]
+{{- end }}
+{{- if .Values.perDatasetPvcs }}
+  # Per-dataset PVCs only (RFC-0003 D9 Track B, client-runtime#203/#261):
+  # jobs-manager provisions one static hostPath PV + pre-bound PVC per
+  # dataset handle before spawning a training Job (`create`; PV `get`/`patch`
+  # to recover a Released PV's claimRef for reuse) and garbage-collects
+  # PV/PVCs no live Job references (`list` + `delete`). Cluster-scope only:
+  # PVs cannot be granted by a namespace Role, so the Role branch below
+  # omits this and rendering fails on the combination (guard at the top).
+  # Flag-gated so a default install grants nothing extra — least privilege.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["create", "get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "list", "delete"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tracebloc.rbacName" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "tracebloc.rbacName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- else }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.rbacName" . }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  # Read-only, for the heartbeat version inventory: `deployments` covers every
+  # chart workload except resource-monitor, which needs `daemonsets`.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # client-runtime#21: ingestion endpoint creates a per-run ConfigMap
+  # (ingest.yaml) and Secret (BACKEND_TOKEN) before spawning the Job.
+  # TokenReview is omitted here (cluster-scoped API; not grantable by a
+  # namespace Role). Customers using clusterScope: false won't be able
+  # to authenticate ingestion calls — see the ClusterRole branch above.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    # `get` is required by jobs-manager's orphan-resource verify path
+    # (client-runtime#52) and the missing-row self-heal (client-runtime#54):
+    # on a create-409 it reads the existing ConfigMap/Secret to confirm the
+    # content matches before reusing it. Without `get`, those reads return
+    # Forbidden and the endpoint 500s instead of the intended 409/replay.
+    verbs: ["create", "get"]
+{{- if (include "tracebloc.perExperimentDbCreds" .) }}
+  # Per-experiment DB creds only: jobs-manager's revoke/sweep path reaps the
+  # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
+  # the orphan reaper must LIST cred Secrets to find any whose Job died before
+  # cleanup — without `list` that enumeration 403s and orphaned credential
+  # material accumulates in etcd (backend#2692). Same shape as the perDatasetPvcs
+  # GC grant (`list` + `delete`). `list` on secrets does widen exposure
+  # namespace-wide, so it stays a deliberate, flag-gated grant scoped to
+  # `secrets` alone (never configmaps) — least privilege, and byte-for-byte
+  # unchanged when off (Saqlain review).
+  #
+  # `patch` IS THE SECOND CYCLE (backend#2795). Cycle 1 CREATES the cred Secret
+  # and is covered by `create` above; cycle 2 reuses the experiment's Secret and
+  # PATCHES it, which nothing here granted. Measured on dev, experiment 15044:
+  #
+  #   secrets "tb-dbcreds-exp15044c2-0fbcc6e0f93f" is forbidden:
+  #   User "system:serviceaccount:e2e-tier-a:e2e-tier-a-jobs-manager"
+  #   cannot patch resource "secrets" in API group "" in the namespace
+  #
+  # The edge 403s before it runs inference, so it never reports back, the
+  # inference row stays `inference_captured=False`, and no leaderboard row is
+  # ever written — with the experiment recorded COMPLETED and no error. Every
+  # cycle-1 inference on dev is captured and every cycle-2 one since the flag
+  # went on is not, which is this verb and nothing else.
+  #
+  # NOT name-restricted, unlike the pull-secret grants elsewhere in this chart:
+  # the Secret name carries the experiment id and cycle
+  # (`tb-dbcreds-exp<id>c<cycle>-<hash>`), so there is no fixed name to pin and
+  # `resourceNames` cannot express a prefix. It sits in the same flag-gated,
+  # secrets-only rule as `list`/`delete` so the blast radius is unchanged when
+  # the flag is off.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list", "delete", "patch"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.rbacName" . }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.rbacName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+
+{{- $nodeAgentsNs := dig "namespace" "name" "" (.Values.nodeAgents | default dict) }}
+{{- if and (include "tracebloc.resourceMonitorEnabled" .) $nodeAgentsNs (ne $nodeAgentsNs .Release.Namespace) }}
+---
+{{/*
+  jobs-manager reads the resource-monitor DaemonSet for the heartbeat version
+  inventory, and that DaemonSet lives in nodeAgents.namespace, not the release
+  namespace — so the Role above cannot reach it. The ClusterRole branch already
+  covers it; this pair is for clusterScope: false. Mirrors image-refresh-rbac.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  namespace: {{ $nodeAgentsNs }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  namespace: {{ $nodeAgentsNs }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  # One ServiceAccount, in the release namespace; only the Role/RoleBinding
+  # names differ, so the two pairs cannot collide.
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.rbacNodeAgentsName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

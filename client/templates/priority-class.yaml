@@ -1,0 +1,19 @@
+{{- if .Values.priorityClass.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priorityClass.name | quote }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+  annotations:
+    # PriorityClass is cluster-scoped, so we never let helm uninstall yank it —
+    # other releases may share it. Re-installs reuse the existing object.
+    helm.sh/resource-policy: keep
+value: {{ .Values.priorityClass.value | int }}
+globalDefault: false
+description: >-
+  Tracebloc data-plane workloads (mysql-client). Sits above default user
+  workloads so the scheduler preempts noisy training jobs to keep mysql
+  running, but stays below system-cluster-critical (2,000,000,000) so it
+  cannot starve cluster-essential pods.
+{{- end }}

@@ -1,0 +1,107 @@
+{
+  "contract_version": 1,
+  "issue": "tracebloc/backend#2378",
+  "source_of_truth": "tracebloc/client-runtime :: log_redactions.json (this file)",
+  "digest_pin": ".log-redactions.sha256",
+  "description": [
+    "THE ONE DECLARATION of which strings must be scrubbed out of a log before",
+    "it leaves a customer's cluster.",
+    "",
+    "Before this file the rule existed as three hand-maintained copies and",
+    "nothing derived from anything: controller.py's _LOG_REDACTIONS, the OTTL",
+    "replace_pattern calls in the client chart's telemetry-collector ConfigMap,",
+    "and a chart test holding hand-written fragments of the second. They agreed",
+    "only because one person changed them in one sitting. The proof that this",
+    "matters: for as long as all three existed the generic pattern anchored its",
+    "keyword with \\b on both sides, so every environment-variable spelling of a",
+    "secret -- AZURE_CLIENT_SECRET=, MYSQL_PASSWORD=, DJANGO_SECRET_KEY=,",
+    "AWS_SECRET_ACCESS_KEY= -- fell straight through, in every copy, with",
+    "passing tests on both sides (backend#1908, client#799, client-runtime#372).",
+    "",
+    "Both consumers now DERIVE from this file:",
+    "  * controller.py compiles `redactions` into _LOG_REDACTIONS at import.",
+    "  * the client chart vendors this file into the chart and GENERATES the",
+    "    OTTL statements from it, so no hand port of a regex exists anywhere.",
+    "",
+    "client is a separate repository and GITHUB_TOKEN is repo-scoped, so the",
+    "chart cannot read this file at CI time without a credential. It vendors a",
+    "byte-identical copy plus the digest in .log-redactions.sha256 and checks",
+    "the two locally, with no network. THE HONEST COST: adopting a change here",
+    "is a TWO-PR ritual -- land it in this repo (bumping the digest), then land",
+    "the vendored copy, the digest and the pin in tracebloc/client. The digest",
+    "test below is what makes step two impossible to forget silently."
+  ],
+  "replacement_syntax": [
+    "RE2 / Go: a capture group is `$1`, which is what OpenTelemetry's OTTL",
+    "replace_pattern consumes verbatim. controller.py converts `$N` to `\\N`",
+    "for python's re.sub -- one mechanical conversion in one function, tested,",
+    "rather than a human retyping a regex. `${...}` named-group syntax is",
+    "REFUSED by that converter rather than mistranslated."
+  ],
+  "pattern_syntax": [
+    "The intersection of python `re` and Go RE2 that both engines read the same",
+    "way: inline (?i)/(?im) flags, \\b, character classes, bounded repeats. No",
+    "lookaround and no backreferences INSIDE a pattern -- RE2 has neither, and",
+    "an invalid regex in OTTL is a processor that starts and scrubs nothing.",
+    "Over-redaction is acceptable here; losing the diagnosis is not, which is",
+    "why the chart guard replays diagnosis specimens as well as secret ones."
+  ],
+  "redactions": [
+    {
+      "id": "url-credentials",
+      "why": "scheme://user:pass@host -- corporate-proxy credentials, DB and broker URLs.",
+      "pattern": "://[^:/@\\s]+:[^@/\\s]+@",
+      "replacement": "://***REDACTED***@"
+    },
+    {
+      "id": "azure-shared-access-key",
+      "why": "Azure / ServiceBus / Storage keys inside connection strings. The trailing Name= form (SharedAccessKeyName) is not a secret and is deliberately left intact for diagnosis.",
+      "pattern": "(?i)(SharedAccessKey|AccountKey)=[^;\\s\"']+",
+      "replacement": "$1=***REDACTED***"
+    },
+    {
+      "id": "auth-header",
+      "why": "Authorization / x-api-key headers -- the whole value, to end of line.",
+      "pattern": "(?im)^(.*\\b(?:authorization|x-api-key)\\b[^:=\\n]*[:=]).*$",
+      "replacement": "$1 ***REDACTED***"
+    },
+    {
+      "id": "bearer-or-drf-token",
+      "why": "Bearer / DRF Token credentials wherever they appear.",
+      "pattern": "(?i)\\b(bearer|token)\\b([\\s:=]+)[A-Za-z0-9._\\-]{12,}",
+      "replacement": "$1$2***REDACTED***"
+    },
+    {
+      "id": "secret-bearing-assignment",
+      "why": [
+        "Generic secret-bearing assignments (password / secret / *_key).",
+        "",
+        "THE NAME MAY CARRY A PREFIX, which is what the leading [\\w.-]* is for.",
+        "The earlier form anchored the keyword with \\b on each side, so it caught",
+        "a bare password= and missed every environment-variable spelling, because",
+        "_ is a word character and there is therefore no boundary between the",
+        "prefix and the keyword. Those are the shapes this stack actually prints:",
+        "backend#2069 deliberately names which AZURE_* variable is unset when",
+        "edge-device provisioning fails.",
+        "",
+        "A FREE TRAILING [\\w.-]* WAS TRIED AND IS WRONG: it made",
+        "SharedAccessKeyName= match -- prefix Shared, keyword AccessKey, suffix",
+        "Name -- and redact a key NAME that is not a secret. So the compound",
+        "endings live in the alternation instead (secret[_-]?key before secret,",
+        "alternation being leftmost-first) and there is no free suffix.",
+        "",
+        "The optional opening quote matters for a related reason: without it",
+        "SECRET_KEY='x9y8z7' fell out entirely, because the value class excludes",
+        "quotes and so matched nothing after the separator."
+      ],
+      "pattern": "(?i)\\b([\\w.-]*(?:password|passwd|pwd|secret[_-]?key|secret|api[_-]?key|access[_-]?key|client[_-]?secret))(\\s*[:=]\\s*)[\"']?[^\\s\"',;]+",
+      "replacement": "$1$2***REDACTED***"
+    },
+    {
+      "id": "aws-access-key-id",
+      "why": "AWS access key IDs.",
+      "pattern": "\\bAKIA[0-9A-Z]{16}\\b",
+      "replacement": "***REDACTED***"
+    }
+  ]
+}

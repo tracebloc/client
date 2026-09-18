@@ -1,0 +1,39 @@
+{{- $name := include "tracebloc.clientLogsPvc" . -}}
+{{- $storage := include "tracebloc.clientLogsStorage" . -}}
+{{- if (default dict .Values.hostPath).enabled }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "tracebloc.clientLogsPvName" . }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  capacity:
+    storage: {{ $storage }}
+  accessModes:
+    - ReadWriteOnce
+  claimRef:
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+  hostPath:
+    path: /tracebloc/{{ .Release.Name }}/logs
+    type: DirectoryOrCreate
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  accessModes:
+    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .Values.hostPath).enabled | default false)) }}
+  resources:
+    requests:
+      storage: {{ $storage }}

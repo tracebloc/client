@@ -1,0 +1,227 @@
+{{- /*
+GPU device-plugin DaemonSet — Helm-managed (client#564).
+
+Historically the installer applied the vendor GPU device plugin with an
+imperative `kubectl apply` of an upstream manifest fetched at install time
+(bash: scripts/lib/gpu-plugins.sh). That object was NOT part of any Helm
+release, so it lingered through `helm uninstall` and was re-created on every
+installer re-run, and it added a raw.githubusercontent.com network dependency
+to the install path.
+
+Rendering it here makes it a tracked release resource — reconciled on upgrade,
+removed on `helm uninstall` — and bakes the manifest into the chart, so no
+install-time download is needed. Gated on `gpu.devicePlugin.enabled`, so a
+CPU-only install renders nothing.
+
+The DaemonSet lives in `gpu.devicePlugin.namespace` (kube-system by default):
+the kubelet only discovers a device plugin that mounts its own
+/var/lib/kubelet/device-plugins socket dir, and kube-system is where the
+upstream manifests place it. Helm still tracks and removes a resource in a
+namespace other than the release namespace.
+
+NOTE: deliberately NO `helm.sh/resource-policy: keep` here — the whole point of
+#564 is that this object shares the release lifecycle and IS removed on
+uninstall (contrast the PVCs in docs/MIGRATIONS.md, which are kept on purpose).
+
+Windows: the installer's WSL2/CDI path advertises nvidia.com/gpu itself via a
+node-status patch and must NOT run the NVML device plugin (it would register 0
+GPUs and pin the resource at 0 — see docker/k3s-cuda/nvidia-runtimeclass.yaml),
+so that path leaves this disabled. The Windows non-WSL2 fallback still applies
+the plugin imperatively because it must verify the node advertises a GPU before
+it writes the GPU request — an ordering this Helm-managed resource can't satisfy
+in a single install. See the issue thread.
+*/ -}}
+{{- /*
+Nil-safe access via the chart's `default dict` pattern (mirrors resource-monitor
+reading .Values.images defensively). A `helm upgrade --reuse-values` from a
+release predating this chart carries no `gpu` key and does NOT merge values.yaml
+defaults, so .Values.gpu / .devicePlugin can be entirely absent. Coalescing each
+level to an empty dict BEFORE any field access means `$dp.enabled` can never be
+called on nil — Go template `and` is not short-circuit, so `and $dp $dp.enabled`
+would still evaluate `.enabled` on a nil $dp and panic. `default dict` removes
+the nil, so no evaluation order matters.
+*/ -}}
+{{- $gpu := .Values.gpu | default dict }}
+{{- $dp := $gpu.devicePlugin | default dict }}
+{{- if $dp.enabled }}
+{{- $vendor := $dp.vendor | default "" }}
+{{- if not (or (eq $vendor "nvidia") (eq $vendor "amd")) }}
+{{- fail (printf "gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is %q; set it to \"nvidia\" or \"amd\"" $vendor) }}
+{{- end }}
+{{- $ns := $dp.namespace | default "kube-system" }}
+{{- /* global.imageRegistry (#585 mirror / air-gap) re-homes the plugin image
+     exactly like every other chart image; nil-safe for reuse-values. */ -}}
+{{- $g := .Values.global | default dict }}
+{{- if eq $vendor "nvidia" }}
+{{- $nv := $dp.nvidia | default dict }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  # Name/namespace match the upstream NVIDIA manifest (v0.14.5) the installer
+  # used to apply, so an installer re-run adopts an existing DaemonSet in place
+  # rather than orphaning it. The name comes from a shared helper because
+  # auto-upgrade-rbac.yaml restricts the auto-upgrade SA's write verbs in this
+  # namespace to exactly this resourceName (backend#1992) — one declaration, so
+  # the two cannot drift into a 403.
+  name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+        {{- /* Pod template carries only version-free identity labels: tracebloc.labels
+             embeds helm.sh/chart + app.kubernetes.io/version, so a chart bump would
+             change the pod template and needlessly rolling-restart the plugin
+             (resource-monitor keeps versioned labels off its pod template for the
+             same reason — client#564 / Bugbot). */ -}}
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with $nv.runtimeClassName }}
+      # client#835: run the plugin under the `nvidia` RuntimeClass so its pod gets
+      # the GPU (the node's containerd invokes the NVIDIA runtime) and NVML can
+      # enumerate GPUs — otherwise the pod runs under the default runtime, sees no
+      # device, and registers 0. The Linux installer sets this to "nvidia" only when
+      # the GPU is wired; the RuntimeClass is baked into the k3s-cuda node image.
+      # Left unset on Windows/WSL2 (that path doesn't run this plugin) and CPU.
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      # NOT NEEDED, and no ServiceAccount is named — so without this the pod
+      # would mount the namespace's `default` SA token. The upstream device
+      # plugin talks to the kubelet over the device-plugin socket mounted
+      # below, never to the API server.
+      automountServiceAccountToken: false
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: "system-node-critical"
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      # Mirror/private-registry pull secret, copied into this namespace by
+      # docker-registry-secret.yaml so the plugin can pull when global.imageRegistry
+      # points at an authenticated mirror (resource-monitor pattern).
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      containers:
+        {{- $nvRes := ($nv.resources | default dict) }}
+        - name: nvidia-device-plugin-ctr
+          image: {{ include "tracebloc.image" (dict "repository" ($nv.repository | default "nvidia/k8s-device-plugin") "tag" ($nv.tag | default "v0.14.5") "digest" ($nv.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($nv.registry | default "nvcr.io"))) | quote }}
+          env:
+            # Optional GPU: a node without a working NVIDIA runtime must not
+            # crash-loop the plugin — it registers 0 GPUs and the install stays
+            # CPU-only, matching the upstream default the installer relied on.
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # GUARANTEED QoS, deliberately (backend#2871). Vendored from the upstream
+          # manifest, which ships no resources at all -- so before this the pod was
+          # the only BestEffort workload in the chart alongside its AMD twin, i.e. the
+          # kernel OOM-killer's FIRST victim on the node.
+          #
+          # priorityClassName: system-node-critical (above) does NOT cover this. It
+          # ranks preemption and kubelet eviction; the kernel's oom_score_adj is driven
+          # by QoS class, and BestEffort scores +1000. So a node under memory pressure
+          # kills the device plugin, the node stops advertising nvidia.com/gpu, and
+          # EVERY GPU training pod on it goes Pending -- the least-protected pod on the
+          # node was the one all GPU work depends on.
+          #
+          # requests == limits on BOTH dimensions, which is what Guaranteed requires;
+          # anything less leaves it Burstable. Per-field `default` rather than a bare
+          # `toYaml` so a values file that sets `resources: null` cannot silently drop
+          # it back to BestEffort (the failure mode telemetryCollector/autoUpgrade/
+          # imageRefresh still have).
+          resources:
+            requests:
+              cpu: {{ $nvRes.cpu | default "50m" | quote }}
+              memory: {{ $nvRes.memory | default "64Mi" | quote }}
+            limits:
+              cpu: {{ $nvRes.cpu | default "50m" | quote }}
+              memory: {{ $nvRes.memory | default "64Mi" | quote }}
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+{{- end }}
+{{- if eq $vendor "amd" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  # Shared helper — see the NVIDIA DaemonSet above (backend#1992).
+  name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: amdgpu-dp-ds
+  template:
+    metadata:
+      labels:
+        name: amdgpu-dp-ds
+        {{- /* version-free identity labels only — see the nvidia pod template above
+             (client#564 / Bugbot). */ -}}
+        {{- include "tracebloc.selectorLabels" . | nindent 8 }}
+    spec:
+      # NOT NEEDED, and no ServiceAccount is named — so without this the pod
+      # would mount the namespace's `default` SA token. The upstream device
+      # plugin talks to the kubelet over the device-plugin socket mounted
+      # below, never to the API server.
+      automountServiceAccountToken: false
+      restartPolicy: Always
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      containers:
+        {{- $am := $dp.amd | default dict }}
+        {{- $amRes := ($am.resources | default dict) }}
+        - name: amdgpu-dp-cntr
+          image: {{ include "tracebloc.image" (dict "repository" ($am.repository | default "rocm/k8s-device-plugin") "tag" ($am.tag | default "latest") "digest" ($am.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($am.registry | default "docker.io"))) | quote }}
+          securityContext:
+            privileged: true
+            capabilities:
+              drop: ["ALL"]
+          # GUARANTEED QoS -- see the nvidia twin above for why this is not optional.
+          # Same cascade, and this container is additionally `privileged: true`.
+          resources:
+            requests:
+              cpu: {{ $amRes.cpu | default "50m" | quote }}
+              memory: {{ $amRes.memory | default "64Mi" | quote }}
+            limits:
+              cpu: {{ $amRes.cpu | default "50m" | quote }}
+              memory: {{ $amRes.memory | default "64Mi" | quote }}
+          volumeMounts:
+            - name: dp
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: sys
+              mountPath: /sys
+      volumes:
+        - name: dp
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: sys
+          hostPath:
+            path: /sys
+{{- end }}
+{{- end }}

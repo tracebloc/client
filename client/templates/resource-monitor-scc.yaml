@@ -1,0 +1,86 @@
+{{- if and (include "tracebloc.resourceMonitorEnabled" .) .Values.openshift.scc.enabled }}
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    kubernetes.io/description: >-
+      Minimal SCC for the tracebloc resource-monitor DaemonSet.
+      Allows read-only hostPath mounts to /proc and /sys for node metrics collection,
+      and to the node filesystem at resourceMonitor.hostStoragePath (default /) for the
+      Storage meter's statvfs free/total reading.
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+allowPrivilegedContainer: false
+allowPrivilegeEscalation: false
+allowedCapabilities: []
+defaultAddCapabilities: []
+requiredDropCapabilities:
+  - ALL
+allowHostNetwork: false
+allowHostPorts: false
+allowHostPID: false
+allowHostIPC: false
+allowHostDirVolumePlugin: true
+volumes:
+  - hostPath
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - persistentVolumeClaim
+  - projected
+  - secret
+runAsUser:
+  type: MustRunAsNonRoot
+seLinuxContext:
+  type: MustRunAs
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+seccompProfiles:
+  - runtime/default
+readOnlyRootFilesystem: false
+users:
+  - system:serviceaccount:{{ .Values.nodeAgents.namespace.name }}:{{ include "tracebloc.resourceMonitorName" . }}
+groups: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["tracebloc-resource-monitor-{{ include "tracebloc.fullname" . }}"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tracebloc-resource-monitor-scc-{{ include "tracebloc.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.resourceMonitorName" . }}
+    namespace: {{ .Values.nodeAgents.namespace.name }}
+{{- end }}

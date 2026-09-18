@@ -1,0 +1,2538 @@
+# ============================================================
+# Tracebloc Unified Helm Chart — values.yaml
+# ============================================================
+# This chart supports AKS, EKS, bare-metal (bm), and OpenShift (oc).
+# Platform-specific behaviour is controlled by the values below.
+# Use per-environment value files (e.g. ci/aks-values.yaml) to override.
+
+# -- Cross-cutting settings shared by all sub-resources.
+global:
+  # Private registry mirror for restricted-network / air-gapped installs (#585).
+  # A BARE host (no scheme), e.g. "mirror.corp.example" or "mirror.corp.example:5000".
+  # When set, EVERY image the chart pulls is re-homed onto this host — the
+  # tracebloc services, the spawned ingestor + training-job images, and the
+  # alpine/*, ubuntu/squid, busybox, curl helper images — which must already host
+  # the same repositories + tags/digests. Unset (the default) pulls the
+  # tracebloc-published control-plane images from images.traceblocRegistry
+  # (below), the helper images from docker.io and the ingestor from ghcr.io. If
+  # the mirror needs authentication, also set dockerRegistry below. The
+  # standalone installer writes this from TRACEBLOC_IMAGE_REGISTRY. See
+  # docs/INSTALL.md. To move ONLY the tracebloc images, leave this unset and set
+  # images.traceblocRegistry instead.
+  imageRegistry: ""
+
+# -- Environment variables passed to containers
+env: {
+  # Optional proxy settings
+  # HTTP_PROXY_HOST: ""
+  # HTTP_PROXY_PORT: ""
+  # HTTP_PROXY_USERNAME: ""
+  # HTTP_PROXY_PASSWORD: ""
+  # Optional: explicit resource requests/limits for spawned training jobs.
+  # UNSET (the default): jobs-manager uses its built-in "cpu=1,memory=2Gi"
+  # literal — the contract floor since backend#2254 (was "cpu=2,memory=8Gi",
+  # which exceeded a default Docker Desktop VM and left a fresh install
+  # unschedulable). SET: pins the envelope to exactly what you write here.
+  #
+  # This comment used to say that leaving the pair unset made jobs-manager size
+  # the envelope from node allocatable (75% of the node). It does not: that
+  # path is real but GATED OFF behind DERIVE_JOB_ENVELOPE (documented below).
+  # Unset means the literal (backend#664 L0, backend#2167, backend#2250).
+  # RESOURCE_REQUESTS: "cpu=1,memory=2Gi"
+  # RESOURCE_LIMITS: "cpu=1,memory=2Gi"
+  # Bookkeeping only (backend#2220): WHO chose the two values above.
+  #   installer - sized to this machine at install time
+  #   user      - an explicit `tracebloc resources set`
+  #   unknown   - carried forward from before this key existed; genuinely
+  #               unknowable, and therefore treated as `user` (never touched)
+  # It never changes the envelope. It exists because RESOURCE_* has no unset
+  # state once helm's --reset-then-reuse-values has seen it, so without a
+  # marker an installer-written value and a deliberate human choice are
+  # indistinguishable — and a future ladder must not silently overrule the
+  # human. Leave it alone; the installer and the CLI maintain it.
+  # RESOURCE_PROVENANCE: "installer"
+  # Optional, OFF by default: let jobs-manager size the training-job envelope
+  # from node allocatable capacity instead of the literal above --
+  # cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi,
+  # floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and
+  # CPU is a request-only share weight with NO limit since backend#2418, so the
+  # job pod is BURSTABLE -- not Guaranteed QoS, as this line said until
+  # backend#2872 (`test_pod_envelope_sizing.py` asserts the opposite: "cpu" not
+  # in resource_limits). With this flag OFF -- the default -- jobs-manager uses
+  # its built-in literal on requests AND limits, so a CPU job pod is GUARANTEED.
+  #
+  # THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU (Asad,
+  # review of backend#2872). A GPU job's envelope resolves to nvidia.com/gpu and
+  # ephemeral-storage only; neither is QoS-relevant, so the container sets no
+  # cpu/memory request or limit at all and the pod is BESTEFFORT whichever way
+  # the flag is set. `pod-qos-class.py` already encodes that carve-out
+  # (backend#2871) -- this line asserted the opposite of the chart's own checker.
+  #
+  #   cpu-only + flag off -> GUARANTEED
+  #   cpu-only + flag on  -> BURSTABLE
+  #   GPU                 -> BESTEFFORT, either way
+  #
+  # So do not read "Burstable" as the default, and do not turn this on expecting
+  # to escape Burstable on a GPU node: on that cluster it changes nothing.
+  #
+  # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
+  # an explicit envelope always wins, and this key is then inert (jobs-manager
+  # never reaches the derive branch). Note that BOTH installers write
+  # RESOURCE_* unconditionally, so on an installer-provisioned edge you must
+  # clear both keys as well as setting this one.
+  #
+  # READ THIS BEFORE TURNING IT ON (backend#2167). A ~75% Guaranteed envelope
+  # is EXCLUSIVE: any Guaranteed fraction >= 50% caps the machine at ONE
+  # concurrent training job, whatever the machine's size. And on a multi-node
+  # k3d cluster whose node containers are uncapped, every node reports the
+  # whole Docker VM (allocatable == capacity, no kube/system-reserved), so the
+  # min-across-nodes in the derivation does not save you and the OOM killer
+  # takes victims -- a k3s node container included. Turn this on to measure or
+  # to opt one edge in, not as a default. backend#2418 (CPU burstable, memory
+  # Guaranteed) and backend#2419 (a job that does not fit queues) are what make
+  # the derived envelope safe to default; until they land, this is opt-in.
+  #
+  # Truthy spellings jobs-manager accepts: "1", "true", "yes", "on"
+  # (case-insensitive). Anything else -- including "" -- is off.
+  # DERIVE_JOB_ENVELOPE: "true"
+  # Optional: GPU requests / limits for spawned jobs. The two are ONE number
+  # (client#995) and GPU_LIMITS is the gate: set it alone and the chart renders
+  # GPU_REQUESTS with the same value, because Kubernetes requires an extended
+  # resource's request to equal its limit. GPU_REQUESTS alone renders nothing.
+  # With GPU_LIMITS absent nothing is rendered and the runtime's legacy default
+  # ("nvidia.com/gpu=1") applies; `GPU_LIMITS: ""` declares a CPU-only cluster
+  # (backend#2216).
+  # GPU_REQUESTS: "nvidia.com/gpu=1"
+  # GPU_LIMITS: "nvidia.com/gpu=1"
+  # Optional: runtime class for GPU jobs (defaults to "" if not provided)
+  # RUNTIME_CLASS_NAME: ""
+  # Optional: CDI device selector threaded into GPU training pods as
+  # NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set this ONLY where the NVIDIA k8s
+  # device plugin can't run and the GPU is injected via CDI instead — notably Docker
+  # Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED (tracebloc/client#616); the
+  # Windows installer sets it automatically on that path. Leave EMPTY on a normal
+  # device-plugin (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets
+  # concrete GPU UUIDs, so forcing a CDI selector would break device resolution.
+  # GPU_VISIBLE_DEVICES: "nvidia.com/gpu=all"
+  # Optional: single-node (fixed, non-elastic) cluster flag — gates
+  # jobs-manager's GPU->CPU pending-job fallback (client-runtime#92).
+  #   "true"  -> a GPU pod stuck Pending past the scheduling-overdue interval
+  #              is downgraded to a CPU job. Correct on a fixed single-host
+  #              cluster (installer k3d / bare-metal) where GPU presence is
+  #              known at install time and no node will autoscale in.
+  #   "false" -> a Pending GPU pod is left for the autoscaler/backend. Correct
+  #              for EKS/AKS/OpenShift, where a GPU node may still be
+  #              provisioning and a premature downgrade breaks the run.
+  # If unset, DEFAULTS to hostPath.enabled (true on installer-provisioned
+  # single-host clusters, false on managed dynamic-PVC clusters), so existing
+  # clusters keep correct behaviour across auto-upgrade without re-running the
+  # installer. Set explicitly to override (e.g. a fixed multi-node bare-metal
+  # cluster that wants the fallback). Must be a quoted string.
+  # SINGLE_NODE: "true"
+  # -- Per-edge OPERATOR switches for the training pods (RFC-0067 D8,
+  #    backend#3149; the runtime half is client-runtime#480).
+  #
+  # jobs-manager reads these from its OWN container env -- the generic
+  # passthrough in templates/jobs-manager-deployment.yaml delivers any
+  # `env.<KEY>` there -- and writes an explicit "1" or "0" onto EVERY training
+  # pod it spawns, so the edge setting always wins over whatever the engine
+  # image defaults to. That is what makes this the kill switch AND the
+  # rollback lever: turning multi-GPU (or AMP) off is a values change plus a
+  # jobs-manager restart, not an image rebuild and not a chart release.
+  #
+  # Truthy = "1" | "true" | "yes" (case-insensitive, whitespace-tolerant --
+  # the engine's own _TRUTHY). Everything else, INCLUDING UNSET, is OFF. The
+  # schema closes the vocabulary to those spellings plus "0" / "false" / "no",
+  # so a typo ("ture", "on") is refused at install time instead of silently
+  # reading as off -- the CLIENT_ENV lesson (backend#1723), applied before the
+  # first customer hits it. Empty ("") means unset.
+  #
+  # Per-edge and operator-level, NEVER per-experiment: there is no experiment
+  # field for either, so RFC-0067 D2's "never user-requested" holds by
+  # construction.
+  #
+  #   TRACEBLOC_DDP -- DistributedDataParallel across the GPUs a training pod is
+  #                    given. DEFAULT ON since chart 1.9.115: RFC-0067 D7's
+  #                    precondition bundle holds (backend#3147 -- the engine
+  #                    defaults to per_rank_split, tracebloc-engine#1010; a
+  #                    decline falls back to ONE GPU, client-runtime#553; both
+  #                    verified on the published :dev digests 2026-09-11). ON
+  #                    alone arms nothing: expansion also needs the size floor
+  #                    below (MULTI_GPU_MIN_PARAMETERS), which has no default,
+  #                    so an edge that never set a floor keeps one GPU per run.
+  #                    This key is the kill switch: `--set-string
+  #                    env.TRACEBLOC_DDP=0` on an edge is the rollback lever.
+  #   TRACEBLOC_AMP -- automatic mixed precision. The ENGINE still chooses
+  #                    bf16-vs-fp16 from the device in front of it (RFC-0067 D4);
+  #                    this only says whether it may. Default OFF (backend#2327).
+  #
+  # Reaches the training pods only through a jobs-manager that forwards it
+  # (client-runtime#480); on an older runtime the value lands on the
+  # jobs-manager container and goes no further -- inert, never harmful.
+  TRACEBLOC_DDP: "1"
+  # TRACEBLOC_AMP: "0"
+  # -- Per-edge OPERATOR switches for what the training pod REPORTS (same
+  #    mechanism, same vocabulary). Both default OFF because the destination
+  #    columns live in the backend and land per environment on the backend's
+  #    own schedule: an edge that emits a cycle-payload key its backend lacks
+  #    does not get the key ignored -- update_cycle_data splats leftover keys
+  #    into objects.create AFTER deleting the row, so the edge's cycle row is
+  #    DESTROYED. Two explicit steps, in order: deploy the backend that has the
+  #    columns to that environment, THEN set the switch on the edge.
+  #
+  #   EMIT_TOPOLOGY   -- cycle payload carries world_size + effective_batch
+  #                      (backend#3160's columns; RFC-0067 D5/D9). Contract:
+  #                      tracebloc-engine#879 @ 383b0daa -- "Env var
+  #                      EMIT_TOPOLOGY; default off ("false"); truthy 1, true,
+  #                      yes (case-insensitive, whitespace-stripped)".
+  #   EMIT_OOM_RESCUE -- cycle payload carries oom_rescue_rung + oom_rescue_epoch
+  #                      (backend#2175's columns) when a CUDA-OOM rescue fired.
+  #                      Same gate shape; the engine's _emit_oom_rescue_fields.
+  #
+  # Reach the training pod only through a jobs-manager that forwards them
+  # (client-runtime's OPERATOR_TRAINING_SWITCHES carries both since
+  # client-runtime#507); on an older runtime they land on the jobs-manager
+  # container and go no further.
+  # EMIT_TOPOLOGY: "0"
+  # EMIT_OOM_RESCUE: "0"
+  # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
+  #    B7). jobs-manager applies it as the pod-level activeDeadlineSeconds ONLY
+  #    when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet
+  #    cap, so one run cannot hold N GPUs indefinitely; single-GPU and CPU runs
+  #    keep today's "bias toward NOT killing". Default inside jobs-manager is
+  #    86400 (one day) when this key is UNSET. Digits = seconds; "0", "off",
+  #    "false", "no" DISABLE the lease -- note "off" disables HERE but is
+  #    refused for the TRACEBLOC_*/EMIT_* switches above: each key mirrors its
+  #    own reader's vocabulary and both fail loudly, so do not learn one from
+  #    the other. "00" is refused: it is not in the runtime's falsy set and
+  #    would silently become the default. RENDERED ONLY WHEN SET, like the two
+  #    switches above -- an unconditional default here would switch the lease
+  #    off fleet-wide, silently, because an empty value is how the runtime reads
+  #    "disabled". The schema closes the vocabulary so a typo is refused at
+  #    install time rather than falling back to the default unnoticed. The
+  #    controller reports a lease kill as "lease expired" through the pod
+  #    annotation tracebloc.io/lease-seconds.
+  # MULTI_GPU_LEASE_SECONDS: "86400"
+  # -- Multi-GPU SIZE FLOOR (RFC-0067 D2 gate 2; client-runtime#513 @ f42d5e9,
+  #    B9): the smallest server-computed parameter_count (backend#3171) that
+  #    jobs-manager will expand into more than one GPU. NO DEFAULT, ON PURPOSE:
+  #    RFC-0067 OQ3 says the floor is unmeasured (G6 produces it), so the
+  #    runtime guesses nothing -- UNSET means the size gate REFUSES every run,
+  #    and so does an empty, non-numeric or non-positive value. The log says
+  #    which: unset or empty is one INFO line at jobs-manager startup naming
+  #    the gate as UNSET (_log_size_gate_mode -- grep INFO, not WARN); a
+  #    malformed value is one WARNING from the shared positive-int reader.
+  #    Multi-GPU therefore needs BOTH of two values set on the edge --
+  #    TRACEBLOC_DDP=1 above AND this floor; with either missing an opted-in
+  #    edge still gets one GPU per run, with the gate's reason
+  #    (GPU_COUNT_SIZE_FLOOR_UNSET) in the log. Vocabulary: a positive integer
+  #    in its canonical spelling. The runtime would accept "007" (int() reads
+  #    it as 7, no warning) -- the schema refuses it so two values files
+  #    cannot spell one floor two ways, not because it would fall back to
+  #    anything. RENDERED ONLY WHEN SET, so absence keeps the gate dark
+  #    exactly as the runtime intends rather than delivering a chart guess.
+  # MULTI_GPU_MIN_PARAMETERS: "50000000"
+}
+
+# -- GPU device plugin (client#564)
+# Renders a vendor GPU device-plugin DaemonSet as a Helm-managed resource, so it
+# is reconciled on upgrade and removed on `helm uninstall` — instead of the
+# installer applying an upstream manifest imperatively (outside any release) and
+# leaving it behind. The manifest is baked into the chart, so no install-time
+# download is needed. See templates/gpu-device-plugin.yaml.
+gpu:
+  devicePlugin:
+    # Master gate. The Linux installer sets this true on the native-GPU path, in
+    # lockstep with the GPU request it writes for training jobs (env.GPU_REQUESTS
+    # / env.GPU_LIMITS). Left false for CPU-only installs and for the Windows
+    # WSL2/CDI path (which advertises the GPU itself via a node-status patch and
+    # must NOT run the NVML plugin). Default false: nothing renders.
+    enabled: false
+    # Which vendor plugin to render when enabled: "nvidia" or "amd".
+    # Rendering with enabled: true and an unset/other vendor is a template error.
+    vendor: ""
+    # Namespace for the DaemonSet. kube-system by default — the kubelet only
+    # discovers a device plugin that mounts its own device-plugins socket dir,
+    # and this matches the upstream manifests. Helm still tracks/removes it even
+    # though it lives outside the release namespace.
+    namespace: kube-system
+    # Images are split registry/repository/tag[/digest] so global.imageRegistry
+    # (#585 mirror / air-gap) re-homes them exactly like every other chart image
+    # — the mirror must host the same repository path. Set a digest to pin.
+    nvidia:
+      # Pinned to the version the installer used to apply (NVIDIA k8s-device-plugin).
+      registry: nvcr.io
+      repository: nvidia/k8s-device-plugin
+      tag: v0.14.5
+      digest: ""
+      # -- Device-plugin pod resources. ONE pair, applied to both requests AND limits,
+      # because the pod must be **Guaranteed** (backend#2871) — Guaranteed needs
+      # requests == limits on both cpu and memory, so a separate requests/limits
+      # shape here would just be a way to get it wrong.
+      #
+      # Why Guaranteed and not Burstable: if this pod is OOM-killed the node stops
+      # advertising nvidia.com/gpu and every GPU training pod on it goes Pending.
+      # `priorityClassName: system-node-critical` does not help — it ranks preemption
+      # and eviction, not the kernel's oom_score_adj, which is set from the QoS class.
+      #
+      # The plugin is a tiny long-lived watcher (it enumerates devices and serves a
+      # gRPC socket), so 50m/64Mi is generous; raise it only with a measurement.
+      resources:
+        cpu: 50m
+        memory: 64Mi
+      # RuntimeClass for the plugin pod (client#835). On native Linux the k3s-cuda
+      # node runs the NVIDIA runtime in CDI mode, and the plugin can only enumerate
+      # GPUs (init NVML) if its own pod runs under that runtime — so the Linux
+      # installer sets this to "nvidia" (the RuntimeClass baked into the node image)
+      # whenever the GPU is wired. Empty = plugin runs under the default runtime
+      # (the correct choice for CPU clusters and the Windows/WSL2 path, which does
+      # not run this plugin at all).
+      runtimeClassName: ""
+    amd:
+      # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin). Set a digest
+      # for air-gapped / reproducible installs.
+      registry: docker.io
+      repository: rocm/k8s-device-plugin
+      tag: latest
+      digest: ""
+      # -- Same contract as nvidia.resources above: ONE pair, both sides, Guaranteed
+      # (backend#2871). This container also runs privileged, so it is the last thing
+      # that should be first in the OOM queue.
+      resources:
+        cpu: 50m
+        memory: 64Mi
+
+# -- StorageClass configuration
+# When create: true, the StorageClass name is release-unique (e.g. "<release-name>-storage-class")
+# so each release gets its own class and Helm ownership conflicts are avoided.
+# Set create: false to use an existing storage class; then name must match that class.
+storageClass:
+  create: true
+  name: client-storage-class  # only used when create: false
+  provisioner: ""
+  allowVolumeExpansion: true
+  # Optional fields — omitted from rendered YAML when empty
+  volumeBindingMode: ""
+  reclaimPolicy: ""
+  mountOptions: []
+  parameters: {}
+
+# -- Bare-metal only: hostPath-backed PersistentVolumes
+# When enabled, a PV + PVC pair is created for each volume.
+# When disabled, only dynamic PVCs are created (AKS/EKS/OC pattern).
+hostPath:
+  enabled: false
+  # PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql (→ ~/.tracebloc/{data,logs,mysql} when HOST_DATA_DIR is mounted at /tracebloc). Directories are created automatically via hostPath type: DirectoryOrCreate.
+  # Base host path for the DATASET PV ONLY (shared training data). Default
+  # /tracebloc keeps datasets on the local mount alongside mysql/logs. The
+  # installer sets this to /tracebloc-data when a customer network (NFS) dataset
+  # mount is provided via HOST_DATASET_DIR (backend#743) — mysql + logs ALWAYS
+  # stay on the local /tracebloc tree (InnoDB over NFS is unsafe). The chart
+  # appends /<release>/data. mysql/logs PV paths are not affected by this key.
+  #
+  # It is ALSO what tells the Storage meter there is a second filesystem to
+  # measure (backend#3916): set to anything other than the default /tracebloc,
+  # it adds a read-only resource-monitor mount of that path so the meter reports
+  # the client's whole storage instead of just the local disk. Leaving it at the
+  # default renders no second mount at all -- see
+  # tracebloc.resourceMonitorDatasetPath for why "unset" cannot be the signal.
+  datasetPath: /tracebloc
+
+# -- Cluster topology: does this cluster have a single schedulable node?
+# Gates the AUTO-mode single-replica PodDisruptionBudgets (podDisruptionBudget
+# below): a minAvailable:1 PDB on a one-node cluster is undrainable (the pod
+# cannot reschedule), so it is skipped when singleNode is effectively true.
+#   null (default) -> DEFAULT to hostPath.enabled: bare-metal installer clusters
+#                     (hostPath.enabled=true) are single-node; managed dynamic
+#                     clusters (AKS/EKS/OC) are multi-node.
+#   true / false   -> explicit override.
+# This is DELIBERATELY separate from env.SINGLE_NODE (which gates the
+# jobs-manager GPU->CPU pending-job fallback and may be true on a FIXED
+# MULTI-NODE cluster). The installer sets singleNode=true for the node-local
+# single-node k3d path (hostPath.enabled=false, local-path CSI, AGENTS=0), where
+# hostPath alone would misclassify it as multi-node.
+singleNode: null
+
+# -- PVC storage sizes (override per-environment if needed)
+pvc:
+  mysql: 2Gi
+  logs: 10Gi
+  data: 50Gi
+
+# -- PVC access mode (ReadWriteMany for dynamic, ReadWriteOnce for hostPath)
+# Override per-environment if needed
+# pvcAccessMode: ReadWriteMany
+
+
+# -- RBAC scope: true for ClusterRole, false for namespace-scoped Role (recommended for OpenShift without cluster-admin)
+clusterScope: true
+
+# -- Resource monitor DaemonSet (node-level metrics collection).
+# REQUIRES metrics-server (https://github.com/kubernetes-sigs/metrics-server):
+# the DaemonSet polls /apis/metrics.k8s.io/v1beta1 for node CPU/memory. The
+# chart's resource-monitor-daemonset.yaml has a pre-install `lookup` that fails
+# the release up front so misconfiguration surfaces loudly — which is the only
+# place it does surface. If metrics-server goes away later, the pod does NOT
+# crash-loop (as this comment claimed): it keeps running and stops sending
+# heartbeats, because the poll loop rebuilds its metrics client every tick and
+# swallows the error. There are no probes to catch it. Platform notes:
+#   k3d / k3s: metrics-server bundled by default (installer keeps it enabled).
+#   AKS:       metrics-server enabled by default.
+#   EKS:       NOT installed by default — `kubectl apply -f \
+#              https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
+#   OC:        uses the built-in OpenShift metrics stack.
+#   kubeadm / bare-metal: install metrics-server manually; add
+#              --kubelet-insecure-tls on clusters with self-signed kubelet certs.
+# Set enabled to false on clusters where metrics-server cannot be installed.
+#
+# RFC-0076 (D2): this was the scalar `resourceMonitor: <bool>` and is now
+# `resourceMonitor.enabled: <bool>`. The chart still honours the legacy scalar
+# (and `--set resourceMonitor=true|false`) through the alias window
+# (remove_by: 2026-12-31) — see tracebloc.resourceMonitorEnabled in _helpers.tpl.
+resourceMonitor:
+  enabled: true
+  # -- Host path whose free/total space becomes the cockpit's Storage meter
+  # (backend#3762). Defaults to the node's root filesystem, because the meter
+  # shows the whole storage available to the client rather than the dataset
+  # PVC -- `pvc.data` is a request, not a reservation, and on hostPath /
+  # local-path installs it describes a directory on this very disk.
+  #
+  # Point this at a dedicated data disk if datasets live on one: statvfs
+  # reports the device backing the path it is given, so leaving it at "/"
+  # on such a node measures the wrong disk and reports nothing wrong.
+  #
+  # NOT THE ONLY PATH MEASURED, since backend#3916. An install that relocated
+  # its datasets (hostPath.datasetPath, the HOST_DATASET_DIR flow) gets that
+  # mount measured TOO, and the two are summed after de-duplicating by backing
+  # device -- so you no longer have to choose between seeing the dataset volume
+  # and seeing mysql/logs/scratch, and pointing this key at the dataset mount by
+  # hand is no longer the workaround it was.
+  #
+  # Whatever you set must EXIST ON EVERY NODE: the mount is type: Directory and
+  # the DaemonSet tolerates every taint, so a path only the workers have leaves
+  # control-plane pods in ContainerCreating with no probe to flag it.
+  hostStoragePath: "/"
+
+# -- Node-level agents (currently: tracebloc-resource-monitor DaemonSet).
+# The resource-monitor needs hostPath /proc and /sys to read node metrics, plus
+# the node's root filesystem (hostStoragePath, above) for the Storage meter's
+# statvfs reading, all of which Pod Security Admission's `restricted` profile
+# bans outright. Rather
+# than diluting the release namespace's PSA profile, node-agents get their
+# own `privileged` namespace so the rest of the workload can run under
+# `enforce: restricted` unblocked.
+#
+# namespace.create: true  -- chart templates the namespace with PSA
+#                            privileged + helm.sh/resource-policy: keep.
+# namespace.create: false -- operator creates the namespace out-of-band
+#                            (e.g. pre-existing cluster, shared namespace,
+#                            or GitOps tool manages it). The chart still
+#                            deploys the DaemonSet, SA, and RBAC into
+#                            namespace.name; it must exist already with
+#                            privileged PSA labels.
+nodeAgents:
+  namespace:
+    create: true
+    name: tracebloc-node-agents
+
+  # -- Run the metrics-server preflight's AUTHORITATIVE check (client#2469).
+  #
+  # resource-monitor polls metrics.k8s.io, so the chart refuses to install it when
+  # that API is absent -- the pod would stay Running and healthy-looking forever
+  # while never reaching send_heartbeat, so the render is the last loud moment.
+  #
+  # The check normally costs nothing: a `metrics-server` Deployment in kube-system
+  # answers it, and any namespace admin can read that. This flag governs only the
+  # FALLBACK, a cluster-scoped APIService lookup used when that Deployment is not
+  # found -- and Kubernetes' built-in `admin` ClusterRole cannot read APIServices,
+  # so for such a caller helm RAISES rather than returning empty and the whole
+  # upgrade dies, resource-monitor or not.
+  #
+  # Set false only when BOTH are true: metrics-server is installed under a name
+  # this probe does not recognise, AND the caller cannot read APIServices. The
+  # DaemonSet's `tracebloc.io/metrics-server-preflight` annotation records which
+  # path decided, so a skip is never mistaken for a pass.
+  metricsServerPreflight: true
+
+# -- OpenShift-specific settings
+openshift:
+  # Create a SecurityContextConstraints allowing hostPath for the resource monitor
+  scc:
+    enabled: false
+
+# -- Namespace management
+# Default: OFF -- the chart assumes the operator pre-created the namespace via
+#   kubectl create namespace <name>
+# or
+#   helm install --create-namespace -n <name> ...
+#
+# Set namespace.create: true ONLY on greenfield installs. The chart then
+# templates the Namespace with Pod Security Admission labels applied and
+# `helm.sh/resource-policy: keep` so uninstall does not delete your data.
+#
+# For EXISTING namespaces, leave create: false and apply the labels yourself:
+#   kubectl label namespace <name> \
+#     pod-security.kubernetes.io/warn=restricted \
+#     pod-security.kubernetes.io/audit=restricted \
+#     pod-security.kubernetes.io/enforce=restricted
+#
+# enforce=restricted is the default for CSI-backed deployments (EKS/AKS/OC).
+# The mysql init-container has been refactored so it only renders on bare-metal
+# (hostPath.enabled=true); see client/templates/mysql-deployment.yaml.
+# The resource-monitor DaemonSet lives in its own privileged node-agents
+# namespace (nodeAgents.namespace above), so it does not constrain this one.
+# Bare-metal installs override enforce to "" via ci/bm-values.yaml because
+# kubelet does not apply fsGroup to hostPath volumes
+# (kubernetes/kubernetes#138411), so the privileged init-mysql-data chown
+# container is still needed there and would be rejected by restricted.
+namespace:
+  create: false
+  podSecurity:
+    # Kubectl warnings for pods that violate the profile
+    warn: restricted
+    warnVersion: "latest"
+    # Audit-log events for pods that violate the profile
+    audit: restricted
+    auditVersion: "latest"
+    # Pod rejection -- restricted by default on CSI; bare-metal must override to ""
+    enforce: restricted
+    enforceVersion: "latest"
+
+# -- NetworkPolicy hardening for training pods.
+# Training pods run untrusted ML code; this denies ingress and restricts
+# egress to DNS + external HTTPS only (blocks pod-to-pod, MySQL, K8s API).
+# Requires a CNI that enforces NetworkPolicy:
+#   AKS:   needs "Azure NPM" (--network-policy azure) or Calico at cluster create
+#   EKS:   AWS VPC CNI with enableNetworkPolicy=true (the network-policy agent), or
+#          a Calico / Cilium add-on. Plain AWS VPC CNI without the agent does NOT
+#          enforce. In "standard" mode enforcement applies after a brief per-pod
+#          reconcile (see enforcementProbeTimeoutSeconds).
+#   bm:    needs Calico / Cilium / kube-router (Flannel alone does NOT enforce)
+#   OC:    OVN-Kubernetes enforces by default
+# Leave `enabled: false` on clusters without an enforcing CNI — silently
+# having no protection is worse than explicitly disabling it.
+networkPolicy:
+  training:
+    enabled: true
+    # Egress lockdown (SECURITY §8.2 / client-runtime#102). When false, the
+    # training NetworkPolicy DROPS the 0.0.0.0/0:443 rule, so training pods can
+    # reach only DNS, in-cluster MySQL, the requests-proxy, and the egress
+    # gateway. Shipped default is now FALSE — deny-by-default egress (RFC-0003 D6 /
+    # client-runtime#199): new installs are locked down, external HTTPS goes through
+    # the gateway allowlist. Set true only to opt a fleet back out. The template
+    # nil-guards this key, so a `helm upgrade --reuse-values` from a release
+    # predating it keeps the old behaviour (rule present).
+    allowExternalHttps: false
+    # client-runtime#104: enforcement check, run via `helm test <release>` after
+    # flipping the lockdown (allowExternalHttps=false). A training-labelled pod opens a
+    # direct TCP connection to this host's :443 and RETRIES until it is blocked (PASS) or
+    # enforcementProbeTimeoutSeconds elapses while still reachable (FAIL — the CNI isn't
+    # enforcing egress). The retry tolerates standard-mode CNIs that enforce only after a
+    # brief per-pod reconcile. A test hook never affects install/upgrade. Set "" to
+    # disable (e.g. air-gapped clusters).
+    #
+    # FALSE-PASS CAVEAT (SECURITY §8.2): the check reads a refused TCP connect
+    # (curl exit 7) as "egress is blocked" — and a host with NOTHING LISTENING on
+    # :443 refuses identically, so it passes without testing anything. This host
+    # MUST genuinely accept TCP :443 when egress is open. 1.1.1.1 does. Before
+    # trusting a custom value, confirm it is reachable with the lockdown OFF; if
+    # that probe also fails to connect, the host is wrong, not the CNI.
+    enforcementProbeHost: "1.1.1.1"
+    # Max seconds the enforcement check waits for egress to become blocked before it
+    # gives up and FAILS. Covers the standard-mode CNI reconciliation window (AWS VPC CNI
+    # NETWORK_POLICY_ENFORCING_MODE=standard allows a new pod all traffic until its policy
+    # is programmed). 60s suits AWS VPC CNI / Calico / Cilium; raise it on slow nodes.
+    enforcementProbeTimeoutSeconds: 60
+    dnsNamespace: kube-system
+    # CoreDNS pod selector — varies per platform. Override in ci/<platform>-values.yaml.
+    # When empty, the template falls back to {k8s-app: kube-dns}, which works
+    # on AKS / EKS / kind / kubeadm / most standard distros.
+    # OpenShift requires explicit override: see client/ci/oc-values.yaml.
+    # Helm merges map values, so to change the selector you MUST set
+    # dnsSelector to the complete desired map (not just additions).
+    dnsSelector: {}
+    # In-cluster CIDRs to block for pod-to-pod egress.
+    # The defaults cover common pod+service CIDR combinations. Override if your
+    # cluster uses different CIDRs (e.g. OpenShift defaults: 10.128.0.0/14 + 172.30.0.0/16).
+    clusterCidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+
+# -- In-cluster backend-reachability check (client-runtime#116 WS3 / cli#90).
+# A `helm test` Job that verifies a normal (non-training) pod in this namespace
+# can reach the tracebloc backend API — the egress dependency that gates
+# everything (the cluster authenticates to the backend to obtain its Service Bus
+# credentials, so no backend egress => experiments sit in Pending). It is the
+# required-egress complement to networkPolicy.training.enforcementProbeHost
+# (which verifies the opposite: that training pods are locked out). As a test
+# hook it never runs during install/upgrade. Set enabled=false on a truly
+# air-gapped cluster with no route to the backend.
+egressReachabilityCheck:
+  enabled: true
+
+# -- Seal check (RFC-0003 §8.2 / backend#1184) — the chart's conformance suite.
+# Every runnable check is a `helm test` hook Job carrying the enumeration
+# labels (the contract tooling consumes — tracebloc CLI, cli#393):
+#   tracebloc.io/seal-check: "true"
+#   tracebloc.io/seal-check-name: <check>
+# Checks today: egress-enforcement (config under networkPolicy.training),
+# backend-reachability (config under egressReachabilityCheck), and
+# storage-assertions (config below). Run with `helm test <release> --logs`.
+# Philosophy: a guarantee that cannot be verified is reported UNSEALED — a
+# check fails loudly rather than silently claiming sealed. Disabling a check
+# is an explicit, values-visible declaration, never a runtime fallback.
+# See docs/SEAL-CHECK.md for the contract, coverage, and runbooks.
+sealCheck:
+  # In-cluster storage assertions: all release PVCs (data / logs / mysql) are
+  # Bound on the release's expected StorageClass, and — in dynamic-PVC mode
+  # (hostPath.enabled=false) — no release PVC is backed by a hostPath
+  # PersistentVolume on an unmanaged host tree. Leftover chart hostPath PVs
+  # from an older bare-metal install carry a claimRef for our PVC names and
+  # would capture the claims even in dynamic mode (the RFC-0003 D3/D4
+  # stranding scenario); this check catches that. Dynamically provisioned
+  # node-local hostPath PVs (k3s local-path pattern) are tolerated and
+  # reported — see nodeLocalPathPrefixes. In hostPath mode the PV sub-check
+  # reports SKIP (hostPath is the declared storage model there).
+  # PV introspection needs cluster-scoped read RBAC: with clusterScope=false
+  # the sub-check degrades to a PV-name check and prints an explicit WARNING
+  # naming what was not verified.
+  storageAssertions:
+    enabled: true
+    # Max seconds to wait for all release PVCs to reach Bound before failing.
+    # Covers WaitForFirstConsumer classes (bind only when the consuming pod
+    # schedules) and first-install image pulls.
+    timeoutSeconds: 120
+    # hostPath prefixes accepted as provisioner-managed NODE-LOCAL storage in
+    # dynamic mode: the k3s bundled local-path provisioner
+    # (/var/lib/rancher/…) and upstream local-path-provisioner's default
+    # (/opt/local-path-provisioner/). Any other hostPath backing in dynamic
+    # mode fails the check. Extend only for a provisioner you trust to keep
+    # data inside the cluster node. Entries match whole path segments (a
+    # trailing slash is optional): a prefix admits itself and paths under
+    # it, never sibling paths like /opt/local-path-provisioner-evil.
+    nodeLocalPathPrefixes:
+      - /var/lib/rancher/
+      - /opt/local-path-provisioner/
+    # kubectl-capable image for the assertion pod — same image the
+    # image-refresh CronJob uses; the tag pins kubectl so behaviour cannot
+    # drift if upstream re-tags.
+    image:
+      repository: alpine/k8s
+      tag: "1.30.5"
+      pullPolicy: IfNotPresent
+
+# -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
+# In-cluster forward proxy that lets a locked-down training pod reach an FQDN
+# allowlist (backend) and nothing else. Labelled app=egress-proxy
+# so the training NetworkPolicy never selects it (it keeps its own egress).
+egressProxy:
+  enabled: true
+  # Route training-pod outbound HTTPS through the gateway (Step 1 of #102). Shipped
+  # default is now TRUE — deny-by-default egress (RFC-0003 D6 / client-runtime#199):
+  # training egress flows through the gateway allowlist, paired with
+  # networkPolicy.training.allowExternalHttps=false. Set false only to opt back out.
+  routeWorkloads: true
+  # squid image, pinned by multi-arch (amd64+arm64) index digest — tracebloc pins
+  # all images by digest. `tag` stays for readability; the digest is authoritative.
+  # ubuntu/squid:6.6-24.04_beta (Ubuntu 24.04 LTS base), resolved 2026-06-10.
+  image:
+    registry: docker.io
+    repository: ubuntu/squid
+    tag: "6.6-24.04_beta"
+    digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+  # squid's non-root uid (Ubuntu `proxy`). Image-specific — verify if you swap image.
+  runAsUser: 13
+  port: 3128
+  # FQDNs the gateway permits HTTPS CONNECT to. squid dstdomain syntax: a leading
+  # dot matches subdomains; a bare host is exact. Fails CLOSED when empty.
+  allowlist:
+    - dev-api.tracebloc.io
+    - stg-api.tracebloc.io
+    - api.tracebloc.io
+    - xray-backend.azurewebsites.net
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "384Mi"
+
+# -- Rename the resources this chart creates, without uninstall + reinstall.
+# backend#2626.
+#
+# UNSET BY DEFAULT, and the default resolves to `.Release.Name` VERBATIM, so
+# leaving it alone renders byte-identical to the chart before this existed. That
+# is asserted, not asserted-in-prose: `scripts/tests/fullname-override-completeness.sh`
+# renders with the override set to the release name and diffs against unset.
+#
+# IT RENAMES RESOURCES, NOT THE RELEASE. The Helm release keeps its name --
+# `helm list`, `helm status` and `helm rollback` are unaffected, and so are
+# `app.kubernetes.io/instance`, Helm's `meta.helm.sh/release-name` bookkeeping,
+# and the RELEASE_NAME env auto-upgrade rolls back with (backend#2620).
+#
+# THE INSTALLER DOES NOT YET UNDERSTAND IT — backend#2888. `helm` renders the
+# overridden names correctly, but the shell and PowerShell installers still derive
+# the client's workload names as `<namespace>-jobs-manager` / `-requests-proxy`
+# (`scripts/lib/common.sh` `_client_workload_deployments`, `scripts/install-k8s.ps1`
+# `Get-ClientDeploymentNames`). So on an overridden release the #420 fast-path
+# health check reads UNHEALTHY and a re-run reinstalls over a working client
+# instead of no-opping. Set this via `helm upgrade` directly until #2888 lands,
+# or accept that the installer's idempotence check is wrong for this release.
+#
+# IT DOES NOT MOVE DATA. Release-scoped on-disk PATHS -- the dataset directory,
+# the hostPath PV's `path`, the Collector's queue -- keep the RELEASE name,
+# because a path is a location: renaming it orphans a tenant's data instead of
+# moving it.
+#
+# A PATH IS NOT AN OBJECT, and this comment used to conflate the two (Bugbot,
+# High). The hostPath PVs' on-disk paths stay put, but the PersistentVolume
+# OBJECTS are named through `tracebloc.fullname` -- `<name>-mysql-pv`,
+# `-data-pv`, `-logs-pv` -- so their names DO follow this key. Unlike the PVCs
+# they carry no `helm.sh/resource-policy: keep`, so on a bare-metal (hostPath)
+# release a rename deletes those PV objects and creates them under the new name
+# while the retained PVCs stay Bound to the ones that just went away.
+#
+# CHANGING IT ON A LIVE RELEASE IS REFUSED, not merely discouraged. Earlier
+# revisions of this comment called it "a migration, not a config tweak", which
+# invited planning a migration the chart will not let you start. `secrets.yaml`
+# now hard-fails at template time when the MySQL PVC is present and no Secret
+# exists under the name this render resolves to -- which is every direction of a
+# rename (unset->A, A->B, A->none) and also a reinstall over a retained PVC. The
+# refusal names the one-command remedy: copy the Secret to the name this render
+# wants. Without it, four credentials would be re-minted while the kept
+# `mysql-pvc` datadir still holds the old ones, the upgrade would report
+# `deployed`, and MySQL would refuse every login.
+#
+# ON hostPath, COPYING THE SECRET IS NOT THE WHOLE REMEDY -- see the PV-object
+# paragraph above, and re-point the PVCs at the new PVs (or keep the old name).
+# The refusal says so too, but only while it FIRES: once a Secret exists under
+# the new name it is skipped, and an operator on their second attempt would
+# otherwise read this remedy with the caveat missing. NOTES.txt repeats it on
+# every hostPath render, which is the path the refusal cannot reach.
+#
+# ON EVERY hostPath RENDER, not only an overridden one -- this sentence said
+# "of an overridden release" and the gate never matched it (Bugbot, Low). The
+# gate is `hostPath.enabled` alone, deliberately: the hazard is the name MOVING,
+# and A->unset moves it just as much as unset->A. Gating the notice on the key
+# being SET would go quiet on exactly the direction where the operator has no
+# override left to look at. The cost is a standing notice on first installs that
+# never rename, so the notice says outright that nothing is wrong yet rather than
+# addressing a reader who just renamed.
+#
+# So: choose it at INSTALL time. On a live release, read the refusal message.
+#
+# The commented example below is the EMPTY STRING, which the template treats as
+# unset (`default .Release.Name .Values.fullnameOverride`) and which
+# values.schema.json therefore accepts explicitly -- an earlier revision of the
+# schema pattern required at least one character and would have rejected this
+# very line if uncommented verbatim (Arturo, review of backend#2626).
+# fullnameOverride: ""
+
+# -- Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906).
+# An OpenTelemetry Collector DaemonSet that reads Class A container stdout with a
+# `filelog` receiver and forwards it to the tracebloc backend's ingest endpoint.
+#
+# SHIPS DISABLED, and that is a deliberate safety decision rather than caution.
+# The exporter authenticates with a token this chart does not create: it is
+# written into a Secret by jobs-manager, which does not do so yet (tracked
+# separately). Enabling the Collector before that Secret exists would put a
+# DaemonSet on every customer node spooling to disk with nothing it can deliver —
+# filling toward the 1 GiB cap per node for no benefit, which is precisely the
+# "telemetry must never be the reason a node fills" risk D7 exists to bound.
+# Ships inert and is flipped per fleet once its prerequisite is in place — the
+# posture `egressProxy.routeWorkloads` had before RFC-0003 D6 flipped it on by
+# default.
+#
+# CLASS A ONLY (D12), AND PERMANENTLY SO. The receiver is scoped to the
+# control-plane containers this chart owns; training and ingestion pods are
+# Class B and stay out.
+#
+# This used to read "until backend#1908 lands content redaction", which is now
+# false in both directions: #1908 was closed **NOT_PLANNED** on 2026-08-24, and
+# the decision was reaffirmed on 2026-09-03 (backend#1908) — Class B is not
+# collected because the volume is not worth collecting, not because redaction is
+# pending. Nothing is waiting on anything.
+#
+# So widening `classAContainers` is not a config tweak and not a scheduling
+# question: it reverses a product decision about what leaves a customer's
+# cluster. Per-incident Class B diagnosis is the operator-triggered support
+# bundle instead.
+telemetryCollector:
+  # -- `enabled` HAS NO DEFAULT HERE ON PURPOSE. It is deliberately absent, not
+  # forgotten, and setting it back to `false` would undo backend#1906.
+  #
+  # THE KEY'S ABSENCE IS A THIRD STATE. `tracebloc.telemetryCollectorState`
+  # (_helpers.tpl) reads three cases, not two:
+  #
+  #   enabled: true    an operator chose this. A missing token Secret REFUSES the
+  #                    release, naming the Secret — they are watching, and that is
+  #                    actionable.
+  #   enabled: false   an operator opted out. Nothing is collected, permanently.
+  #   (absent)         nobody chose. The chart decides: collect if the token
+  #                    Secret is there, and if it is not, SKIP — recording why in
+  #                    <release>-telemetry-collector-status — rather than fail.
+  #
+  # WHY THE THIRD CASE EXISTS. Auto-upgrade runs unattended, hourly, and
+  # `--reset-then-reuse-values` takes new chart defaults fresh. So a default that
+  # refuses on a missing Secret does not inform anybody — it fails at RENDER time,
+  # before `--atomic` can roll anything back, and the edge stops receiving every
+  # future upgrade including security fixes. On an edge whose jobs-manager predates
+  # backend#2400 nothing will ever write the Secret that would unwedge it. That is
+  # a permanent stop delivered by a checklist item, which is why the unattended
+  # path skips and the attended path refuses.
+  #
+  # An absent key is what makes the two distinguishable: `--reset-then-reuse-values`
+  # preserves operator CHOICES and drops old chart DEFAULTS, so `kindIs "bool"` is
+  # precisely "somebody chose this". Measured on a real cluster, not assumed — see
+  # the helper's comment.
+  #
+  # THE TOKEN SECRET IS PROVISIONED REGARDLESS (backend#2400): jobs-manager always
+  # receives its coordinates and always holds the RBAC to write it, so an edge
+  # becomes eligible on its own once it re-authenticates. That asymmetry is what
+  # broke the original deadlock, in which the Secret could not exist until the flag
+  # was set and the flag could not be set until the Secret existed.
+  #
+  # enabled: <unset>
+
+  # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the
+  # distinction is load-bearing: `filelog`, `bearertokenauth` and `file_storage`
+  # are all contrib components and none of them exist in the core distribution.
+  # THE TAG HAS A FEATURE FLOOR, and 0.109.0 was below it — the first version of
+  # this block pinned that and would not have started at all.
+  #
+  # `block_on_overflow` replaced the older `blocking` option upstream in
+  # 2025-03 (deprecated) / 2025-06 (removed), i.e. around 0.122-0.128, and
+  # `sizer: bytes` on a PERSISTENT queue is later still (~0.130). The Collector
+  # rejects unknown configuration keys, so an older image does not silently
+  # ignore them — it fails to start, on every node.
+  #
+  # `tests/telemetry_collector_test.yaml` asserts the pinned minor is at or above
+  # that floor, so the pin cannot drift back below the config it has to run.
+  image:
+    registry: docker.io
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.159.0"
+    digest: ""
+
+  # 500m/512Mi per D7's table. The existing node agent runs 200m/256Mi, which a
+  # filelog collector over node stdout will not fit.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # The containers whose stdout is collected — CONTAINER names, taken from the
+  # rendered chart, not workload or image names. The first version of this list
+  # invented `tracebloc-jobs-manager`, `egress-proxy` and `requests-proxy`, none
+  # of which exist: `filelog`'s include globs match the kubelet's on-disk path,
+  # which carries the CONTAINER name, so the Collector would have run, reported
+  # healthy, and shipped nothing. (Bugbot on #779.)
+  #
+  # Mapped from D6's Class A list, which is the authority on membership:
+  #   controller.py     -> pods-monitor-container  (Dockerfile.controller)
+  #   jobs-manager      -> api                     (Dockerfile.jobs_manager)
+  #   the egress proxy  -> squid
+  #   resource-monitor  -> tracebloc-resource-monitor, and it lives in a
+  #                        DIFFERENT namespace — hence the second list below.
+  #
+  # `proxy` (requests-proxy) is deliberately absent: it runs the jobs-manager
+  # image but is not in D6's Class A list, and adding a container because it
+  # happens to share an image is how a class boundary stops meaning anything.
+  classAContainers:
+    - api
+    - pods-monitor-container
+    - squid
+    # THE UPGRADE PATH'S OWN OUTPUT (backend#2935). `helm` is the auto-upgrade
+    # CronJob's container and `refresh` is image-refresh's. Without them the
+    # collector tails neither, so when a customer's edge stops upgrading we can
+    # see THAT it failed -- the controller reports the pod's exit status -- and
+    # never WHY.
+    #
+    # Measured on a live workspace: 477 failures in 24 hours, 431 of them a bare
+    # `exit code 1` whose reason exists only in these containers' stdout and
+    # reached nothing. An edge that cannot upgrade stops receiving security
+    # fixes, which makes this the least diagnosable failure with the highest
+    # cost -- the worst possible pairing.
+    #
+    # Cheap: both are hourly CronJobs that log a few lines and exit.
+    - helm
+    - refresh
+
+  # Class A containers that run in the node-agents namespace rather than the
+  # release namespace. Separate list rather than a magic value inside the one
+  # above: the namespace is part of the path, and a single `.Release.Namespace`
+  # scope silently missed resource-monitor entirely.
+  classANodeAgentContainers:
+    - tracebloc-resource-monitor
+
+  # Where the kubelet writes container stdout. Overridable because it is not
+  # universal — k3s and some distributions differ — and a wrong path yields a
+  # Collector that runs, reports healthy, and collects nothing.
+  hostLogsPath: /var/log/pods
+
+  # The Secret jobs-manager writes the ingest token into, and the key inside it.
+  # Read through `bearertokenauth`'s `filename`, which watches the projected file
+  # (credentialsfile.ValueResolver + WithOnChange upstream), so a rotated token is
+  # picked up without restarting the Collector.
+  #
+  # `name` IS DELIBERATELY UNSET (backend#2625). The effective default is
+  # release-scoped — `<release>-telemetry-token` — computed in
+  # tracebloc.telemetryTokenSecretName, because the node-agents namespace is SHARED:
+  # a fixed name let two edges on one cluster overwrite each other's credential, and
+  # the loser's Collector then authenticated as the wrong tenant. Setting it here
+  # would re-pin the fixed name and reintroduce the collision. Set it ONLY to a
+  # genuinely custom per-release name; the helper treats the old fixed
+  # `tracebloc-telemetry-token` as "migrate me", not as a chosen override.
+  tokenSecret:
+    key: token
+
+  # `Token`, NOT `Bearer`. The edge authenticates to the backend with a DRF user
+  # token (`Authorization: Token <key>`, see client-runtime jobs_manager.py), and
+  # the ingest endpoint accepts it via `TokenAuthentication` under
+  # `IsAuthenticatedEdge`. The extension's default scheme is `Bearer`, which is
+  # the OTHER credential type (`ClientAccessToken`) — sending the wrong keyword
+  # 401s silently, so this is set explicitly rather than defaulted.
+  authScheme: Token
+
+  # D7's bounds. ONE bound: the byte cap.
+  buffer:
+    # 1 GiB — 10% of the smallest disk the installer accepts, so the buffer can
+    # never be the reason a node fills.
+    maxSizeBytes: 1073741824
+    # DROP-NEWEST, and it is named here rather than left to a default because D7
+    # was AMENDED to it (rfcs#36): `exporterhelper` sheds at the ENTRANCE and has
+    # no evict-oldest option (upstream #12788, open). So a long outage is
+    # observable at its START and dark at its end. That is the inverse of what an
+    # operator expects, which is why the drop COUNT is load-bearing here rather
+    # than incidental — it is the only signal separating a quiet edge from a
+    # shedding one.
+    blockOnOverflow: false
+
+  # Retry forever. A second, time-based bound silently overrides the byte cap,
+  # because under `exporterhelper` a batch past `max_elapsed_time` is DROPPED
+  # rather than requeued — so the shorter bound wins and the cap stops meaning
+  # anything. D7: one bound.
+  retryMaxElapsedTime: 0
+
+# -- Container image pinning.
+# For each image, set `digest` to a sha256 (e.g. "sha256:abc123...") to pin
+# the image by content hash. Digest pinning is strongly preferred: tags are
+# mutable, so registry swaps can silently change what you run. When `digest`
+# is set the tag field is ignored. Leave `digest` empty to fall back to
+# tag-based pulls (CLIENT_ENV for tracebloc images, `tag` for
+# busybox/mysql-client).
+#
+# PULL POLICY (#569). The four always-running control-plane images —
+# jobsManager, podsMonitor, requestsProxy, resourceMonitor — render
+# `imagePullPolicy: IfNotPresent` wherever an update path exists that does not
+# depend on `Always`. `Always` forced a registry round-trip on every (re)start,
+# so an offline Docker Desktop / WSL2 restart landed in ImagePullBackOff even
+# with the image already cached in containerd — the pods came back only once
+# docker.io was reachable again (up to ~6h behind Docker Hub's anonymous
+# pull-rate limit).
+#
+# That is safe only where the UPDATE path no longer depends on the pull policy.
+# `Always` + a floating tag IS an update mechanism: it is what made the
+# image-refresh CronJob's `kubectl rollout restart` pick up a new build.
+# Offline-safety and restart-driven updates are mutually exclusive unless the
+# image REFERENCE itself changes, so image-refresh now pins the resolved digest
+# with `kubectl set image repo@digest` instead (see the imageRefresh block).
+#
+# So the policy is NOT unconditional — it is resolved per image by the
+# `tracebloc.controlPlanePullPolicy` helper, which is the authoritative
+# description:
+#   * explicit `digest` pin      -> IfNotPresent (immutable reference)
+#   * refresh can reconcile here -> IfNotPresent (`set image` drives updates)
+#   * neither                    -> Always       (floating tag + restart is the
+#                                                 only update path there is)
+#
+# The third case is real, not theoretical: a registry the reconcile cannot
+# resolve digests on anonymously -- a `global.imageRegistry` mirror, or an
+# `images.traceblocRegistry` other than docker.io / ghcr.io -- makes it inert
+# (a digest resolved elsewhere may not exist there), and
+# `imageRefresh.enabled: false` disables it outright. Those edges
+# keep the pre-#569 behaviour deliberately — a frozen control plane with a green
+# CronJob and no signal is worse than a restart that needs the network.
+#
+# Setting `digest` here is still meaningful: it is an explicit operator pin
+# that also opts the image OUT of auto-refresh.
+images:
+  # Registry the tracebloc-PUBLISHED images are pulled from: the control-plane
+  # images (tracebloc/jobs-manager, tracebloc/pods-monitor,
+  # tracebloc/resource-monitor and the requests-proxy, which runs the
+  # jobs-manager image) AND the training-image host -- JOB_IMAGE_HOST, the
+  # "<registry>/" prefix jobs-manager stamps onto every training image it
+  # spawns (tracebloc/client-<task>-<arch>:<CLIENT_ENV>). A bare host, no
+  # scheme. Resolved by the tracebloc.tbRegistry helper as ONE precedence chain
+  # -- `global.imageRegistry` (a mirror re-homes everything) always wins, then
+  # this, then the chart default -- so the pods, the training pods they spawn,
+  # the image-refresh CronJob and NOTES.txt cannot disagree about where those
+  # images live.
+  #
+  # This knob moves ONLY the tracebloc images, and it moves the control plane
+  # and the training-image host TOGETHER: busybox, squid, alpine/*, the device
+  # plugins and the ingestor keep their own registries, and
+  # tracebloc/mysql-client stays on docker.io (frozen, digest-pinned, published
+  # nowhere else -- see images.mysqlClient).
+  #
+  # ghcr.io is where the control-plane and training images are published since
+  # the GHCR migration, and it is the chart default. They are still
+  # dual-published to docker.io at the same digests for now, so "docker.io"
+  # remains a valid value and is the per-edge rollback
+  # (`--set images.traceblocRegistry=docker.io`; user-supplied, so it survives
+  # the fleet auto-upgrade until cleared). Digest pins are NOT registry-
+  # agnostic: a digest names bytes on the registry it was resolved on, and
+  # nothing guarantees another registry ever held them -- a control-plane pin
+  # is therefore rendered only when its `digestRegistry` equals the registry
+  # this knob resolves to (see images.jobsManager below). The training-image
+  # digest pins below are published to both registries by the same pipeline.
+  # No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
+  # for layer redirects) is already required for the ingestor image and probed
+  # by the installer preflight. Image-refresh follows it: the CronJob resolves
+  # digests on this registry (it can do so anonymously on ghcr.io and docker.io;
+  # any other value makes the reconcile inert and the pods
+  # imagePullPolicy=Always, exactly as a global.imageRegistry mirror does).
+  # The tracebloc.tbRegistry helper's own fallback for an EMPTY or absent key
+  # restates this default; tests/tracebloc_registry_test.yaml pins both to one
+  # value so they cannot drift apart unseen.
+  traceblocRegistry: "ghcr.io"
+  # -- CONTROL-PLANE DIGEST PINS (jobsManager, podsMonitor, resourceMonitor,
+  #    requestsProxy): `digest` + `digestRegistry`, ONE contract.
+  #
+  # A digest names bytes on the registry it was resolved on. Nothing guarantees
+  # any other registry ever held them, and a pod told to pull a digest its
+  # registry does not have never starts. So a pin carries the registry it was
+  # resolved on, and is HONOURED only there:
+  #
+  #   digest:          "sha256:<64 hex>"   the pin
+  #   digestRegistry:  "<bare host>"       the registry the digest was resolved
+  #                                        on, spelled exactly as
+  #                                        images.traceblocRegistry /
+  #                                        global.imageRegistry would be
+  #
+  #   honoured  <=>  digest set AND digestRegistry == the registry this release
+  #                  pulls from (tracebloc.tbRegistry: the mirror, else
+  #                  traceblocRegistry above, else the chart default)
+  #             ->  repository@digest, imagePullPolicy=IfNotPresent, and the
+  #                 image-refresh CronJob leaves the image alone (it still
+  #                 reports a stale pin, and now also one the registry cannot
+  #                 serve: `tracebloc.io/stale-pin-<image>=unpullable:<digest>`).
+  #   ignored   otherwise -> the workload renders the channel tag, image-refresh
+  #                 re-pins it from the LIVE registry on its first tick (an
+  #                 ignored pin is not a fresh install), and `helm install/upgrade`
+  #                 prints a NOTES warning naming the image, the pin's registry
+  #                 and the effective one. The render never fails on it: the tag
+  #                 is the safe state.
+  #
+  # LEGACY RULE: `digest` set with `digestRegistry` empty is a pin written
+  # before the key existed. Every such pin was resolved on docker.io -- the only
+  # registry these images were pulled from until then -- so it is read as
+  # `digestRegistry: docker.io`: honoured with `traceblocRegistry: docker.io`
+  # (the rollback), ignored at the ghcr.io default. That is exactly the pin
+  # that outlived its registry when the default moved: rendered onto ghcr.io,
+  # which never had the digest, it could not pull, and two days of
+  # auto-upgrades timed out and rolled back against it. Now it floats instead.
+  #
+  # RECOMMENDED STATE: unpinned. Leave `digest` empty and let image-refresh pin
+  # the live digest from the registry the pods actually pull from (it writes
+  # the record to the workload, never to values). Pin here only for a
+  # deliberate reproducibility hold, and then ALWAYS resolve on and declare the
+  # registry:
+  #   crane digest ghcr.io/tracebloc/jobs-manager:prod     # or: docker buildx
+  #   imagetools inspect ghcr.io/tracebloc/jobs-manager:prod --format '{{.Manifest.Digest}}'
+  #   --set images.jobsManager.digest=sha256:<x> --set images.jobsManager.digestRegistry=ghcr.io
+  #
+  # requests-proxy runs the jobs-manager image and follows the HONOURED
+  # jobs-manager pin when its own `digest` is empty or ignored (see
+  # images.requestsProxy). Every read is nil-guarded for --reuse-values
+  # replays that predate these keys.
+  jobsManager:
+    digest: ""
+    digestRegistry: ""
+  # -- TRAINING IMAGES: the digest-pinned spawn path (RFC-1246 P2, landed for
+  #    RFC-0067 D8 by backend#3156). The READER shipped first, in client-runtime
+  #    (jobs_manager.load_training_image_digests / training_image_reference), and
+  #    is INERT until this map is populated -- which is the hop order
+  #    backend#2473 exists to enforce, and why this block can land empty.
+  #
+  # WHY. Training pods are spawned from the floating `tracebloc/client-<task>-
+  # <arch>:<CLIENT_ENV>` tag with imagePullPolicy=Always, so cycle k and k+1 of
+  # ONE experiment can be different engine bytes, and with RFC-0067 that means
+  # the DDP state can flip inside one experiment. A digest pin is what stops it.
+  #
+  # THE SHAPE the runtime reads (rendered onto jobs-manager as
+  # TRAINING_IMAGE_DIGESTS via `toJson`; an env var and not a ConfigMap on
+  # purpose -- the value is in the pod template, so a promotion rolls the pod and
+  # the pins are live on upgrade completion):
+  #
+  #   digests:
+  #     image_classification: { cpu: "sha256:...", gpu: "sha256:..." }
+  #     tabular_classification: { cpu: "sha256:...", gpu: "sha256:..." }
+  #     # ... one entry per task the engine publishes, x {cpu, gpu}
+  #
+  # Every digest MUST be canonical `sha256:` + 64 lowercase hex; the schema
+  # refuses anything else here and the runtime refuses it again at boot (a
+  # CrashLoopBackOff rather than per-spawn InvalidImageName pods). A map that
+  # exists but lacks a (task, arch) is a PROMOTION BUG, not a choice: the runtime
+  # warns and spawns the floating tag for that one.
+  #
+  # `pinned` -- "" (default) = AUTO: pin iff CLIENT_ENV resolves to prod, so dev
+  # and staging edges keep floating with zero per-edge action (they carry
+  # env.CLIENT_ENV in user-supplied values). true / false = explicit override for
+  # canary edges and transition windows. Rendered as TRAINING_IMAGE_PINNED only
+  # when set; absent means auto on the runtime side too.
+  #
+  # `capabilities` -- what the PINNED engine can do, as the engine itself
+  # declares it: the comma-separated OCI label `io.tracebloc.engine.capabilities`
+  # on the pinned GPU images (tracebloc-engine#857 adds `ddp`). Rendered onto
+  # jobs-manager as TRAINING_ENGINE_CAPABILITIES; client-runtime requests N>1
+  # GPUs ONLY when `ddp` is present (RFC-0067 D8's skew guard), so an edge whose
+  # pinned engine predates DDP stays at one GPU by construction.
+  #
+  # NEVER HAND-TYPE `capabilities`. It is DERIVED from the pinned digests by the
+  # same step that writes them (scripts/resolve-training-digests.sh, backend#3156
+  # follow-up): the resolver reads the label off each pinned image's config, once,
+  # at pin time, refuses to write when the label cannot be read (unreadable is
+  # not empty), and writes the two keys together. A capability typed beside a pin
+  # is a restated fact that drifts the first time the pin moves -- the chart
+  # therefore REFUSES to render `capabilities` with an empty `digests` (see the
+  # template), because there is nothing it could have been derived from.
+  #
+  # Populating the map is the release train's promotion step, not a hand edit:
+  # it moves prod edges from "whatever :prod points at right now" to a fixed
+  # engine, and the map must then be advanced on every engine promotion or prod
+  # freezes on today's bytes. Until that step exists the map stays EMPTY here,
+  # every edge floats exactly as today, and this block is documentation plus a
+  # tested render path.
+  training:
+    pinned: ""
+    digests: {}
+    capabilities: ""
+  # client-runtime#40 / client#125: the ingestor image is spawned by
+  # jobs-manager at ingestion-submission time, not as a long-lived pod.
+  # jobs-manager resolves ONE effective digest from the keys below and spawns
+  # each ingestion Job from it — see client-runtime
+  # submit_ingestion_run._build_image_reference and the `tracebloc.ingestorDigest`
+  # helper. The consuming contract is fixed:
+  #   * effective digest set   → `repository@digest`, imagePullPolicy=IfNotPresent
+  #   * effective digest empty → `repository:tag`,    imagePullPolicy=Always
+  #
+  # Non-prod (dev / staging) — floating, always-current:
+  #   * No effective digest → each ingestion Job is spawned by the floating
+  #     `tag` with imagePullPolicy=Always. The kubelet resolves the tag's
+  #     current digest on every spawn (a cheap manifest check; already-present
+  #     layers are reused), so the edge always runs the current published
+  #     ingestor release. This mirrors how training pods are spawned.
+  #   * New ingestor releases under the same `tag` are picked up on the
+  #     next ingestion submit — no chart release, no CronJob, no
+  #     `kubectl set env`. The image-refresh CronJob's ingestor (class-2)
+  #     pass was retired; image-refresh now only rolls the long-lived
+  #     jobs-manager pod.
+  #
+  # Prod — pinned, reproducible (backend#1028, redistributed by backend#1245):
+  #   * `prodDigest` below is a CHART DEFAULT and applies whenever the resolved
+  #     CLIENT_ENV is "prod", so a standard prod install is reproducible with no
+  #     per-edge action and a republished pin reaches installed edges through the
+  #     auto-upgrade the fleet already runs. See `prodDigest`/`prodPin`.
+  #   * An earlier attempt distributed this pin through an install-time
+  #     `-f values-prod.yaml` overlay. That reached no edge: the installer never
+  #     passed the overlay, and `helm upgrade --reset-then-reuse-values` (the
+  #     auto-upgrade path) re-applies stored USER-SUPPLIED values while reading
+  #     defaults only from `values.yaml`, so an overlay value could never be
+  #     updated either. Chart defaults propagate; user-supplied values freeze.
+  #     Hence the pin lives here. (backend#1245)
+  #
+  # Any pinned digest — `prodDigest` or `digest` — MUST be a multi-arch index
+  # (linux/amd64 + linux/arm64): an amd64-only pin breaks ingestion on arm64
+  # hosts (Apple Silicon, Graviton) with "no match for platform" /
+  # ImagePullBackOff (#186; the amd64-only v0.3.1 pin in #160 was the original
+  # regression). The same applies to the floating `tag` — the team publishes the
+  # tag as a multi-arch index. Enforced for both chart-default values by the
+  # `ingestor-multiarch` job in .github/workflows/helm-ci.yaml.
+  ingestor:
+    # Image repository. Override for a private mirror / air-gapped registry
+    # (which must host the same `tag` / `digest`). Surfaces into jobs-manager
+    # as INGESTOR_IMAGE_REPOSITORY.
+    repository: "ghcr.io/tracebloc/ingestor"
+    # Floating tag spawned by default (imagePullPolicy=Always). The team's
+    # ghcr.io publishing convention uses semver-style float tags — `0` tracks
+    # the latest 0.x, `0.8` tracks the latest 0.8.x patch. Moving a line float
+    # (`0.8` -> `0.9`) is deliberate: a future 0.9 release is NOT picked up
+    # until someone changes it (or sets `0` for minor auto-track too).
+    # `latest` is rejected by the schema.
+    #
+    # THIS FIELD IS EMPTY BY DEFAULT — see `tag: ""` below. The per-environment
+    # floats in `channelTags` are what actually select a tag, and prod's is
+    # `"0.8"`. An earlier revision of this comment said `0.7` was the default
+    # and that the chart was "pinned to the 0.7 line"; both stopped being true
+    # when backend#1360 moved tag selection into `channelTags`, and the stale
+    # text survived long enough to disagree with the `prodDigest` note 90 lines
+    # down (backend#1528).
+    #
+    # The line the fleet tracks carries the ingestion correctness fixes and task
+    # catalogue accumulated to date — case/whitespace
+    # label-column resolution (data-ingestors#340) and UTF-8 BOM header
+    # handling (#338) from the 0.6 line, plus 0.7's tabular schema-inference
+    # rules (#349), the semantic-segmentation mask_id contract (#358), and the
+    # minimum-image-size floor (#348). Keep this tracking the current line:
+    # leaving it on an older line while client-runtime's ingest schema tracks
+    # newer categories re-opens the submit-vs-run drift bug (categories
+    # accepted at submit that the spawned image can't process). See
+    # client-runtime#162 discussion.
+    # Empty by DEFAULT: the effective tag now comes from `channelTags` below,
+    # keyed on the resolved CLIENT_ENV. Set this to force one tag on an edge
+    # regardless of environment (to pin an exact immutable image, prefer
+    # `digest` — it wins over any tag). backend#1360.
+    tag: ""
+
+    # -- PER-ENVIRONMENT CHANNELS (backend#1360)
+    #
+    # dev and staging edges track the internal channels published from the
+    # matching data-ingestors branch (`publish-images.yml`: develop -> :dev,
+    # staging -> :stg), so an ingestor change can be validated on a real edge
+    # WITHOUT a production release. Before this, the ingestor image existed
+    # only as a byproduct of a prod release, so testing one change cost a prod
+    # PyPI publish plus an FR-gate override (2026-07-30).
+    #
+    # `prod` deliberately stays a semver float, NOT a `:prod` channel — no
+    # such tag is published; prod normally runs `prodDigest` anyway and this is
+    # only the fallback when pinning is disabled. Keep the prod entry tracking
+    # the current release line for the same submit-vs-run reasons noted above.
+    #
+    # These are unsigned internal images. Do not point a prod edge at them.
+    #
+    # THESE THREE VALUES ARE MIRRORED as last-resort literals in the
+    # `tracebloc.ingestorTag` helper, for the `--reuse-values` replay where
+    # this key is absent and no chart default is adopted. Bump `prod` here and
+    # you must bump it there; ingestor_channel_tag_test.yaml pins both so a
+    # half-done bump fails CI. Read that helper's comment before touching prod.
+    channelTags:
+      dev: "dev"
+      stg: "stg"
+      # 0.8 line: carries the ds_<hex> per-ingestion write path (D16,
+      # data-ingestors#408, first released as v0.8.0 on 2026-07-30). THIS FLOAT
+      # MOVES WITHOUT US: it was at v0.8.4 on 2026-08-12 and is at **v0.8.8**
+      # (sha256:4beb85da…) later the same day. `prodDigest` below deliberately
+      # pins v0.8.2 — see the ordering constraint noted there.
+      #
+      # Do not restate the float's current version here. Any version written
+      # into this comment is stale the moment the next release ships, and a
+      # stale one reads as reassurance ("only two patches behind") for a gap
+      # that may be much larger. scripts/check-digest-drift.sh is what tracks
+      # it; it compares the float against the pin on a schedule and says so
+      # when they part company (backend#1853). A prod edge left on 0.7
+      # spawns a pre-D16 ingestor
+      # and silently falls back to the legacy tables even with
+      # `perIngestionTables` on (found on staging). Verified multi-arch against
+      # ghcr.io 2026-08-04 (linux/amd64 + linux/arm64 OCI image index).
+      prod: "0.8"
+
+    # -- PROD REPRODUCIBILITY PIN — the digest prod edges run.
+    #
+    # This is a CHART DEFAULT on purpose (backend#1245). The fleet auto-upgrade
+    # CronJob runs `helm upgrade --reset-then-reuse-values` with no `-f` and no
+    # `--set`: it resets to the NEW chart's values.yaml defaults, then re-applies
+    # only the release's stored user-supplied values. A default therefore reaches
+    # every installed edge on the next auto-upgrade; an install-time overlay value
+    # freezes on its install-day value forever. The egress-proxy squid pin above
+    # is the in-chart precedent that already reaches installed edges.
+    #
+    # Applies only where `prodPin` resolves true (prod) — see `prodPin` below.
+    #
+    # RELEASE CONVENTION — re-verify at each prod cut. Resolve it with the
+    # helper, never by hand (it reads `tag` above, checks the multi-arch index,
+    # and refuses to write a single-arch digest):
+    #   scripts/resolve-ingestor-digest.sh            # print the index digest
+    #   scripts/resolve-ingestor-digest.sh --write    # patch the value below
+    # then bump Chart.yaml — the chart only publishes on a version change, so an
+    # unbumped refresh reaches nobody — and commit. CI's `ingestor-multiarch`
+    # job validates this value on every PR.
+    #
+    # ghcr.io/tracebloc/ingestor multi-arch index for the 0.8 line, **v0.8.2** —
+    # VERIFIED against ghcr.io 2026-08-12 (linux/amd64 + linux/arm64 OCI image
+    # index; matches the v0.8.2 GitHub Release digest). The `VERIFIED` note is
+    # the audit trail: re-resolve it, do not trust a previous note's date.
+    #
+    # DELIBERATELY BEHIND the `channelTags.prod: "0.8"` float, and the float has
+    # CROSSED THE BOUNDARY. Do not "refresh" this to the float without reading
+    # the ordering constraint in docs/SECURITY.md §4.1.1: `serviceDbAccountsByEnv.prod`
+    # is now `true` by default, but an existing edge upgraded with plain
+    # `--reuse-values` keeps its stored `false` (the new default is never injected),
+    # so it still gets no DB_USER and still needs the fallback; and the boundary is not
+    # a version number — it is whether the release you move to was cut before
+    # data-ingestors#468. `prodPin: true` means this digest, not the float, is
+    # what prod spawns, which is exactly the protection being relied on.
+    #
+    # WHERE THE BOUNDARY IS, stated so it cannot go stale with the next release:
+    # data-ingestors#468 (drops the edgeuser fallback) merged 2026-08-11 10:48.
+    # v0.8.4 was cut 08-10 and does NOT contain it; **v0.8.8 (2026-08-12) is the
+    # FIRST release that does**, and every 0.8.x after it therefore does too.
+    # Verified by ancestry against the tags, not by reading a changelog.
+    #
+    # So the safe set is exactly {v0.8.0 … v0.8.4}, and this pin (v0.8.2) is in
+    # it. Naming the first UNSAFE release rather than "the current float" is the
+    # point: an earlier revision of this note said #468 was "NOT yet in any 0.8
+    # release" and that "the next 0.8 release is the dangerous one" — true when
+    # written on 2026-08-12, false hours later when v0.8.8 shipped, and by then
+    # it contradicted the paragraph directly above it in this same comment.
+    # A boundary is a fact; "the latest release" is a moving target.
+    #
+    # -- ACKNOWLEDGED DRIFT (backend#2673). Because `prodDigest` is deliberately
+    # held behind the `channelTags.prod` float above, scripts/check-digest-drift.sh
+    # sees `ghcr.io/tracebloc/ingestor:0.8` resolve away from this pin every
+    # night. That divergence is EXPECTED. Left unhandled it made the daily watch
+    # RED forever, which trained everyone to ignore it AND masked any NEW,
+    # actionable drift on another pin (squid, mysql-client) behind the standing
+    # red -- the backend#2386 failure mode. This block tells the watcher the
+    # divergence is acknowledged, so the job goes GREEN and prints ACKNOWLEDGED,
+    # while ANY OTHER pin drifting still reds it.
+    #
+    # It is NOT a blanket mute. The watcher still re-verifies, every run, that
+    # THIS pin resolves to a healthy multi-arch index; a pin that stopped
+    # resolving or went single-arch reds regardless of this block. And the
+    # acknowledgement is declared HERE, not in the script, on purpose: acknowledging
+    # a security-relevant drift belongs next to the pin and behind this file's
+    # CODEOWNERS review, so lifting it is a reviewed chart change rather than a
+    # silent script edit.
+    #
+    #   line   — the channel line this acknowledgement was reasoned about. It
+    #            MUST equal channelTags.prod above. If the prod float is ever moved
+    #            to a new line, these stop matching, the acknowledgement LAPSES,
+    #            and the watch reds until someone re-derives the boundary for the
+    #            new line and updates both. Do not paste a digest here: the float
+    #            legitimately roams every 0.8.x patch, so a digest would re-alarm
+    #            on each one — acknowledge the CLASS, never a specific float.
+    #   reason — surfaced verbatim in the ACKNOWLEDGED report. Keep it a factual
+    #            statement of WHY the pin is held back, so a reader (or an operator
+    #            about to flip serviceDbAccountsByEnv.prod) sees when it no longer
+    #            applies. When the boundary is resolved, delete this whole block in
+    #            the same change that advances the pin.
+    ackDrift:
+      line: "0.8"
+      reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8). serviceDbAccountsByEnv.prod is now true by default, so a fresh 1.9.98+ install injects DB_USER=tb_ingest and needs no fallback -- but the durable un-migrated population still does: an edge upgraded with plain --reuse-values, or carrying an operator-set serviceDbAccountsByEnv.prod: false (which --reset-then-reuse-values replays verbatim forever), keeps that flag off, gets no DB_USER, and genuinely still needs the v0.8.2 fallback. (A prod edge merely still on a pre-1.9.98 chart self-heals within ~1h of publish via the auto-upgrade CronJob's --reset-then-reuse-values; the two above do not -- see scripts/tests/e2e-auto-upgrade.sh.) Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on until those edges adopt serviceDbAccounts=true (or a prod-safe 0.8.x is cut) -- NOT until edgeuser is narrowed/dropped, which is the moment the fallback stops working too."
+    prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
+
+    # -- Whether `prodDigest` applies on this edge. Default true, which means
+    # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"
+    # (that is, `env.CLIENT_ENV` unset or empty — the template defaults it to
+    # prod). Dev and staging installs carry `env.CLIENT_ENV: dev|stg` in their
+    # user-supplied values, so they keep floating on `tag` with
+    # imagePullPolicy=Always and are never frozen on a stale build.
+    #
+    # Set FALSE on a canary prod edge to float it on `tag` while the rest of the
+    # fleet stays pinned — e.g. to validate a new ingestor release in place
+    # before it becomes the fleet-wide pin. Being user-supplied, that opt-out
+    # survives auto-upgrades until an operator changes it back.
+    prodPin: true
+
+    # -- Explicit per-edge pin. Empty (default) = let `prodPin`/CLIENT_ENV
+    # decide. Set to a canonical multi-arch digest to lock every ingestion Job on
+    # THIS edge to that exact image in ANY environment; it takes precedence over
+    # `prodDigest` and over `prodPin: false` (so for a hard float, clear this to
+    # "" as well). Use for debugging a release before rollout, certification, or
+    # air-gapped repro. A single request can also be pinned via the submit
+    # endpoint's `image_digest` body field, independent of this value.
+    #
+    # Set at install time this becomes a user-supplied value, so it freezes
+    # across auto-upgrades — intended for a deliberate per-edge pin, and exactly
+    # why the fleet-wide prod pin lives in `prodDigest` instead (backend#1245).
+    #
+    # Last known-good baseline, for easy manual pinning: v0.3.6 (cumulative
+    # NULL / empty-value ingestion fixes —
+    # data-ingestors#150/#167/#168/#170/#172/#176/#179):
+    #   sha256:dfdaa7e633a8df0f46b403e9422eba5c16bdb7d9c39047e6d3738f9e38fbdba8
+    digest: ""
+  # Same `digest` + `digestRegistry` contract as images.jobsManager above.
+  podsMonitor:
+    digest: ""
+    digestRegistry: ""
+  # Same contract. `resourceMonitor: false` (no DaemonSet) also counts as
+  # "nothing to refresh" for the CronJob -- see tracebloc.resourceMonitorRefreshPinned.
+  resourceMonitor:
+    digest: ""
+    digestRegistry: ""
+  # Same contract. Leave `digest` EMPTY (default) and the proxy follows the
+  # honoured images.jobsManager pin, so the two pods cannot run different
+  # builds of the same image; an own pin here that is IGNORED (registry
+  # mismatch) is not an override and follows jobs-manager the same way. Set
+  # both keys only to pin requests-proxy apart from jobs-manager deliberately.
+  requestsProxy:
+    digest: ""
+    digestRegistry: ""
+  mysqlClient:
+    # Repository and tag are stated rather than left to template defaults so the
+    # digest below is WATCHABLE: check-digest-drift.sh pairs a pin with the
+    # repo/float in its own block, and this block had neither — so the daily
+    # watch classified it UNWATCHABLE and exited non-zero, staying red forever
+    # while the pin it was meant to compare was never checked at all
+    # (Bugbot, client#713). Both values are what the templates already default
+    # to, so the rendered image is byte-identical.
+    repository: "tracebloc/mysql-client"
+    # mysql-client is only published under the "prod" tag — it has no dev/
+    # staging variants, so we decouple it from env.CLIENT_ENV. Override only
+    # if you are publishing your own fork with a different tag. Never use
+    # "latest"; pin via digest instead.
+    tag: "prod"
+    # Pinned (2026-07-28) to the current MySQL 5.7-lineage :prod image
+    # (pushed 2026-04-24). Workspace datadirs are 5.7-format and MySQL
+    # supports only staged upgrades (5.7 -> 8.0 -> 8.4), while this repo's
+    # Dockerfile.mysql_client already builds 8.4 (backend#723) — so a
+    # re-published :prod tag must never reach fleets implicitly. Remove or
+    # replace this pin only as an explicit step of the staged migration
+    # plan in backend#723.
+    # NOTE: this digest is a single-arch (amd64) image manifest — identical
+    # to what the floating tag always resolved to, so fleet behavior is
+    # unchanged (arm64 hosts keep running it emulated). A future re-pin
+    # (the 8.4 multi-arch image, backend#723) should pin the manifest-INDEX
+    # digest, like images.ingestor.prodDigest does.
+    #
+    # 8.4 OPT-IN (backend#723, decision A2 2026-08-05) — FRESH datadirs only:
+    #   tag: "8.4"
+    #   digest: ""
+    # The bash installer sets exactly this on fresh arm64 installs (native
+    # multi-arch engine instead of amd64 emulation) and keeps it sticky across
+    # re-runs; TB_MYSQL_ENGINE=8.4|5.7 overrides. NEVER set it on an edge with
+    # an existing 5.7 datadir: 8.4 refuses to open 5.7 data (staged
+    # 5.7 -> 8.0 -> 8.4 only) — the mysql-format-guard init container blocks
+    # the mismatch with an actionable message instead of a mysqld CrashLoop.
+    # If you re-pin this digest, update tracebloc.mysqlEngineMajor in
+    # _helpers.tpl in the same commit (mysql_test.yaml enforces the pair).
+    digest: "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
+  busybox:
+    tag: "1.35"
+    digest: ""
+
+# -- Container resource requests and limits.
+# Tuned in v1.1.0 after the prod investigation showed mysql being killed
+# every ~12 minutes when jobs-manager, under-resourced, ate node memory and
+# triggered the kernel OOM killer.
+#
+# NOT "BestEffort QoS in older releases", as this comment claimed until
+# backend#2872. Before #66 introduced this block the template hardcoded
+# requests cpu 100m / memory 256Mi and limits cpu 500m / memory 512Mi
+# (`git show 2d9d013^:client/templates/jobs-manager-deployment.yaml`) —
+# requests AND limits set, so Burstable from day one. BestEffort requires
+# neither, and jobs-manager has never had neither. The pod was under-resourced,
+# which is the real cause; the QoS class was never the difference.
+#
+# mysql: requests.memory == limits.memory pins the cgroup memory budget so
+# mysqld is never the largest victim during node-level OOM. CPU limit is
+# intentionally OMITTED (no `limits.cpu` field below) — CPU throttling
+# causes InnoDB lock-wait timeouts and is a far more common cause of
+# mysql crashes than a noisy CPU neighbour. PriorityClass + PDB cover
+# eviction.
+#
+# jobs-manager: 256Mi was too tight under load; bumped to 512Mi/1Gi so
+# the Service Bus client + pod watcher have headroom before OOM. In v1.x
+# (#1144) requests.memory was raised to EQUAL limits.memory (1Gi api /
+# 512Mi pods-monitor) to lower each container's oom_score_adj — on a
+# single-node cluster-recovery mass restart they were otherwise the kernel
+# OOM-killer's preferred victims and were exit-137 killed, taking ~9m to
+# recover. The pods stay Burstable; pinning memory just makes them
+# less-preferred OOM victims.
+#
+# Burstable for TWO reasons, not one — cpu request != limit is the obvious one,
+# and the one every earlier version of this comment stopped at. The other:
+# ComputePodQOS requires requests == limits in EVERY container including INIT
+# containers, and `jobs-manager` renders an unresourced `init-writable-data`
+# whenever hostPath.enabled=true (every installer edge), while `mysql` renders
+# an unresourced `mysql-format-guard` UNCONDITIONALLY plus `init-mysql-data` on
+# hostPath edges.
+#
+# AND SINCE #942, EQUALISING CPU BELOW BUYS GUARANTEED NOWHERE (review on
+# client#922). The claim here used to read "only for jobs-manager on a CSI
+# cluster"; #942 added `wait-for-mysql`, which is UNCONDITIONAL and unequal on
+# BOTH dimensions (cpu 10m/100m, memory 16Mi/64Mi) and has no values key. So
+# Guaranteed is now unreachable through values for t-jobs-manager on EVERY
+# cluster, not just off-CSI. Measured on the merged tree -- hostPath off plus
+# every resources.* knob this chart exposes equalised:
+#
+#   t-jobs-manager  Burstable  wait-for-mysql:cpu(req=10m,lim=100m);
+#                              wait-for-mysql:memory(req=16Mi,lim=64Mi)
+#
+# `wait-for-mysql` is the only blocker left, and nothing in values can move it.
+#
+# THE GUARD STAYED GREEN THROUGH THAT, which is this PR's own subject one turn
+# deeper. The goldens pin the CLASS (still Burstable) and the unresourced-init
+# SET (`wait-for-mysql` is resourced, merely unequal), so a claim about
+# REACHABILITY had nothing asserting it and went stale in silence.
+# `scripts/tests/qos-reachability.sh` now asserts it: see that file for what it
+# derives and what it cannot.
+#
+# TWO routes still clear it, and the earlier "only route" was false (review on
+# client#922). Pod-level resources (KEP-2837, beta 1.34) clear it without
+# touching the init containers. Giving every init container requests == limits
+# also reaches Guaranteed -- but note that is now a CHART edit rather than a
+# values change, because `wait-for-mysql` has no key -- at the cost of reserving
+# that capacity for the pod's whole life, which is why it is not the route taken
+# here.
+#
+# requests.cpu was also raised so
+# a mass restart does not throttle their startup. Same requests.memory==limits
+# philosophy mysql already uses (mysql likewise omits its cpu limit).
+resources:
+  # MEASURED TRIM (backend#2461, 2026-09-13) -- every request below is sized from the
+  # load run, not from the idle snapshot the interim trim used. Four legs on the same
+  # edge (11.23 h ambient, one training cycle, a five-deep queue, two full-node
+  # restarts incl. one under an 8 GiB cap) found that LOAD DOES NOT MOVE THE CONTROL
+  # PLANE -- no container's p95 rose more than ~4 MiB from ambient -- and that the
+  # RESTART PEAK is the sizing driver. Requests = worst observed (p95 or restart peak)
+  # with ~1.5x headroom; the render sums to 1792 MiB / 650 m (was 2272 / 650):
+  #
+  #   container              request   worst observed (MiB)      why
+  #   egress-proxy   160Mi -> 256Mi    176 on restart (1.10x OVER 160)   UP; limit 256 -> 384 so request < limit
+  #   collector      128Mi -> 256Mi    158 on restart (1.23x OVER 128)   UP; first measurement of it (was "unmeasured")
+  #   resource-mon   128Mi -> 160Mi    101 on restart (0.79x)            UP; hardcoded in its DaemonSet template
+  #   mysql          704Mi (kept)      468 p95 under load                requests==limits kept
+  #   requests-proxy 128Mi ->  96Mi     64 on restart                    limits unchanged
+  #   pods-monitor   384Mi -> 128Mi     77 on restart                    LIMIT STAYS 512Mi
+  #   jobs-manager   640Mi -> 192Mi    105 p95 / 103 restart (0.16x)     LIMIT STAYS 1Gi; QoS unchanged (see below)
+  #
+  # CPU requests are untouched: the highest control-plane cpu p95 in any leg was 13m
+  # (jobs-manager during the burst). Full tables, windows and caveats are on the ticket.
+  #
+  # INTERIM TRIM (backend#2461, 2026-09-10) -- the history the block above supersedes.
+  #
+  # Requests are what the scheduler and the jobs-manager's admission SUBTRACT from
+  # the node; they are not what the process uses. Measured on an installer edge
+  # (backend#2461): the control plane requested 1050m / 3276Mi while using
+  # 36m / ~1022Mi. Since chart 1.9.109 the kubelet reservation is honest
+  # (#1017) and since client-runtime#544 the admission subtracts the chart's
+  # real requests, so on the smallest supported node -- 2 cores / 8 GiB -- the
+  # arithmetic became visible: allocatable 1900m / 5538Mi, minus these requests,
+  # minus k3s's own coredns + metrics-server (200m / 140Mi), left 900m / 2390Mi,
+  # and the smallest training envelope needs 1000m / 3072Mi. Every task on
+  # staging was refused NEVER_STEADY_STATE (e2e-test-agent fleet 34473120598).
+  #
+  # THE FOOTPRINT COUNTS THE COLLECTOR. `helm template` cannot look up the token
+  # Secret, so the render -- and therefore control-plane-footprint.sh, the
+  # installer embed and this derivation -- carries the telemetry collector's
+  # 100m / 128Mi. That is the right worst case: on a real edge the collector IS
+  # rendered once jobs-manager has written the token Secret (backend#2274), so an
+  # edge that trains on install must still train after that. With it counted the
+  # render was 650m / 2272Mi (now 1792Mi, see above), and the node above left 1050m / 3126Mi (was
+  # 900m / 2390Mi): 50m and 54Mi over the envelope. Thin, and honest.
+  #
+  #   mysql           250m/1Gi   -> 150m/704Mi   peak measured 0.40-0.55x of 1Gi (max ~563Mi); 704 = +25% headroom; requests==limits kept
+  #   jobs-manager    250m/1Gi   -> 150m/640Mi   168Mi idle (0.16x); LIMIT STAYS 1Gi (see below); cpu: the whole plane idles at 36m
+  #   pods-monitor    100m/512Mi -> 100m/384Mi   no measurement yet; LIMIT STAYS 512Mi (see below)
+  #   requests-proxy  100m/256Mi ->  50m/128Mi   a few requests a minute; limits unchanged (1000m/512Mi)
+  #   egress-proxy     50m/64Mi  ->  50m/160Mi   UP: measured 2.45x OVER its request (backend#2461)
+  #   collector       100m/128Mi unchanged       unmeasured (distroless, no readable cgroup) -- not trimmed on a guess
+  #
+  # WHY jobs-manager AND pods-monitor NOW HAVE requests < limits. #1144 pinned
+  # requests.memory == limits.memory on both so a cluster-recovery mass restart
+  # would not pick them as OOM victims; the PODS were Burstable then and still
+  # are (the unresourced init containers, see above). The trim lowers only the
+  # REQUEST -- what the scheduler and admission subtract -- and leaves the LIMIT
+  # where it was, because the limit is the hard cgroup ceiling and the restart
+  # peak that justifies it is exactly the leg backend#2461's load run has not
+  # produced yet (review on client#1032). The cost is a higher oom_score_adj
+  # under node pressure; the alternative was a hard ceiling nothing has measured.
+  # When the restart leg lands, set BOTH from its p95 and restore the equality.
+  #
+  # What this is NOT: the final trim. Re-derive from the load run; do not
+  # hand-tune here. Guards that read these values: control-plane-footprint.sh
+  # (ceiling), the generated embed in scripts/lib/install-client-helm.sh
+  # (scripts/gen-footprint-embed.sh --check), envelope-schedulability.sh.
+  mysql:
+    requests:
+      cpu: "150m"
+      memory: "704Mi"
+    limits:
+      memory: "704Mi"
+      # No cpu limit — see comment above.
+  jobsManager:
+    requests:
+      cpu: "150m"
+      memory: "192Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+  podsMonitor:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  # requests-proxy serves the Service Bus / backend communication path and
+  # is mostly idle (a few req/min). 50m/128Mi requests (trimmed from 100m/256Mi,
+  # backend#2461) with the limits left at 1000m/512Mi for the occasional burst;
+  # revisit if heap profiling shows growth. Schema at
+  # values.schema.json#resources.requestsProxy validates overrides.
+  requestsProxy:
+    requests:
+      cpu: "50m"
+      memory: "96Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
+
+# -- PriorityClass for the data-plane (mysql).
+# DROPPED BY DEFAULT (create: false, name: ""). mysql doesn't need it: its
+# memory requests==limits (so it's among the last evicted under memory
+# pressure), its data lives on a PVC (eviction = a transient restart, never
+# data loss), and a PodDisruptionBudget guards voluntary disruptions. Dropping
+# this cluster-scoped, fixed-name object also lets multiple tracebloc
+# namespaces coexist in one cluster (BYO) and removes the one-client-per-
+# cluster install collision.
+#
+# Opt back in ONLY on a heavily-contended cluster where you want the scheduler
+# to preempt noisy training jobs to keep mysql scheduled:
+#   create: true, name: <some-name>, value: ~1000000  (above default 0, below
+#   system-cluster-critical 2,000,000,000).
+# For a PriorityClass your platform manages out-of-band, use create: false +
+# name: <existing-name> (mysql references it without the chart templating it).
+priorityClass:
+  create: false
+  name: ""
+  value: 1000000
+
+# -- PodDisruptionBudgets for the single-replica mysql and jobs-manager
+# Deployments. `create` is tri-state and defaults to AUTO (null), tracking the
+# storage/topology mode:
+#   null (default) -> multi-node CSI clusters (hostPath.enabled=false:
+#                     AKS/EKS/OpenShift) RENDER a minAvailable:1 PDB, so a
+#                     surprise autoscaler scale-down / node upgrade can't evict
+#                     the only pod without a deliberate operator drain.
+#                     Single-node / bare-metal installs (hostPath.enabled=true)
+#                     SKIP it: with one replica on one node, minAvailable:1
+#                     allows zero voluntary disruptions, so `kubectl drain`
+#                     (node maintenance, manual k3s upgrade) would block forever
+#                     while the pod has nowhere to reschedule (client#560).
+#   true  -> force render regardless of topology (e.g. a fixed multi-node
+#            bare-metal cluster that still wants drain protection).
+#   false -> never render (e.g. a multi-replica workload managed externally).
+podDisruptionBudget:
+  mysql:
+    create: null
+  jobsManager:
+    create: null
+
+# -- Platform client credentials. Issued by the backend; the chart never
+# generates them. Resolved in three tiers, like every other credential in
+# templates/secrets.yaml:
+#   1. these values, else
+#   2. the CLIENT_ID / CLIENT_PASSWORD keys already in the release Secret, else
+#   3. a hard failure naming both options.
+#
+# WHY YOU WOULD BOTHER: anything passed as a value is stored by Helm in the
+# release's user-supplied values IN CLEARTEXT, in every retained revision (10 by
+# default), so it outlives any rotation and is readable by anyone with
+# `get secret` in the namespace. Tier 2 exists so the credential need never
+# enter release values at all (backend#2571).
+#
+# SIMPLEST — install once with these set, then drop them from your values on the
+# next upgrade. Tier 2 reads them from the Secret from then on, and the Secret is
+# already Helm-managed, so there is nothing else to do.
+#
+# BEFORE THE FIRST INSTALL, the Secret has to be adopted, not just created. This
+# chart emits `<release>-secrets` -- or `<fullnameOverride>-secrets` if you set
+# that (see `fullnameOverride` above; `tracebloc.secretName` follows it). USE THE
+# NAME THIS RENDER RESOLVES TO in the three commands below, substituting your
+# override for `<release>` if you have one. Get it from the chart rather than
+# guessing:
+#
+#   helm template <release> ./client -n <ns> --show-only templates/secrets.yaml \
+#     [-f your-values.yaml] | grep -m1 "  name:"
+#
+# Naming the wrong one is not a cosmetic error: a plain `kubectl create secret`
+# leaves an object Helm does not own and `helm install` aborts with
+# `invalid ownership metadata` rather than reading it (Bugbot, #859). Helm adopts
+# a pre-existing object that already carries its three ownership fields, so add
+# them in the same breath:
+#
+#   kubectl -n <ns> create secret generic <release>-secrets \
+#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=...
+#   kubectl -n <ns> label secret <release>-secrets \
+#     app.kubernetes.io/managed-by=Helm
+#   kubectl -n <ns> annotate secret <release>-secrets \
+#     meta.helm.sh/release-name=<release> \
+#     meta.helm.sh/release-namespace=<ns>
+#
+# `<release>` and `<ns>` must match the install exactly — Helm compares all
+# three fields and refuses the adoption if any of them disagrees. Both keys must
+# be NON-EMPTY: an empty key reads as absent and falls through to the hard
+# failure, because the chart is the only layer left that can see it (the schema
+# cannot, it runs before render).
+#
+# NOT AVAILABLE UNDER A CLIENT-SIDE RENDERER, and worth knowing before you plan
+# around it. Tier 2 is a `lookup`, which needs a live cluster — so it is inert
+# under `helm template`, `--dry-run`, ArgoCD's default renderer and Flux
+# post-render alike. The chart's other five credentials degrade gracefully there
+# (their tier 3 generates a value); these two cannot, because the backend issues
+# them, so tier 3 is a hard failure and the render simply stops. A GitOps install
+# rendering without cluster access must therefore KEEP these two in its values,
+# and for it the cleartext-in-revisions problem above is not solved. Rendering
+# against a live cluster (server-side apply, or `helm upgrade` from CI) is what
+# makes the value-free path reachable.
+#
+# AVOID `--set clientPassword=...`: that puts the credential in your shell
+# history AND in the `helm` process's argv, where anyone who can run `ps` sees
+# it. A values file, or the Secret above, are both better. And do not commit
+# real credentials to version control.
+clientId: ""
+clientPassword: ""
+
+# -- Pod-proxy token signing (client-runtime#79)
+# Shared HMAC secret used by the jobs-manager to MINT and the requests-proxy to
+# VERIFY the per-pod REQUESTS_PROXY_TOKEN. When set (non-empty), the proxy
+# validates tokens statelessly (signature + expiry) and the legacy pod_tokens
+# table is not used — eliminating the token-revoke-while-live race class.
+#
+# Leave empty to AUTO-GENERATE a stable secret: the chart generates one on
+# first install and reuses it on every subsequent upgrade (via `lookup`), so
+# tokens minted before an upgrade still verify after. Set explicitly only to
+# pin a known value or to rotate (rotating invalidates all live tokens at once,
+# forcing pods to be respawned). Never injected into training pods.
+podTokenSigningSecret: ""
+
+# -- Backstop lifetime (seconds) for a signed pod-proxy token. The real bound
+# on a token's usefulness is the pod lifecycle (the pod is deleted on stop);
+# this just caps a leaked token. Set to comfortably exceed the longest expected
+# training-job duration, or a long-running job will 401 mid-run when its token
+# expires. Default 7 days.
+podTokenTtlSeconds: 604800
+
+# -- Docker registry credentials (optional). Two supported shapes, and they are
+# mutually exclusive -- setting both fails the render rather than picking one.
+#
+# 1. LET THE CHART BUILD IT: `create: true` plus the credentials below. The
+#    Secret is named `{{ .Release.Name }}-regcred` (release-scoped, so two
+#    releases in one namespace cannot share it) and is mirrored automatically
+#    into the node-agents and GPU device-plugin namespaces when those are
+#    enabled and differ from the release namespace.
+#
+# 2. BRING YOUR OWN: `existingSecret: <name>` naming a `kubernetes.io/
+#    dockerconfigjson` Secret you created yourself. Use this when registry
+#    credentials must not live in values. The chart references it and never
+#    writes it -- it has no credentials to write it with.
+#
+#    YOU must create that Secret in every namespace that pulls: the release
+#    namespace, plus `nodeAgents.namespace.name` (default
+#    "tracebloc-node-agents") while `resourceMonitor` is true, plus
+#    `gpu.devicePlugin.namespace` (default "kube-system") while the device
+#    plugin is enabled. The chart cannot mirror a Secret whose contents it does
+#    not have. If one is missing, those pods report ImagePullBackOff -- loud and
+#    diagnosable, unlike the failure this option exists to prevent.
+#
+# Omit `dockerRegistry` entirely, or set `create: false` with no
+# `existingSecret`, for public images: no imagePullSecrets are rendered
+# anywhere, and jobs-manager stamps none onto training pods either. That is the
+# honest declaration of an anonymous pull.
+#
+# `existingSecret` was added for a config that used to half-work by accident
+# (client#751): `create: false` plus a hand-made Secret literally named
+# `regcred`. Chart-rendered pods pulled anonymously while TRAINING pods
+# authenticated, because client-runtime's job.yaml carried `regcred` as a
+# hardcoded literal. backend#2119 replaces that literal with the name below, so
+# those installs need to say what they are using. Set `existingSecret: regcred`
+# to keep working, and note that it now covers your control-plane pods too.
+#
+# dockerRegistry:
+#   create: true
+#   server: https://index.docker.io/v1/
+#   username: "<DOCKER_USERNAME>"
+#   password: "<DOCKER_REGISTRY_TOKEN>"
+#   email: "<DOCKER_EMAIL>"
+#
+# dockerRegistry:
+#   existingSecret: regcred
+
+# -- Self-upgrade CronJob (closes tracebloc/client#69).
+# Runs `helm upgrade --reuse-values` against this release on a schedule, so
+# customers do not stay frozen on the version they first installed and miss
+# security fixes / stability work shipped after their install.
+#
+# How it works:
+#   - A CronJob in this namespace runs `helm repo update` against repoUrl,
+#     compares the latest published chart version to the deployed revision,
+#     and upgrades when the published version is newer (semver compare via
+#     `sort -V`, so 1.10 > 1.9 — not a string compare).
+#   - --reuse-values is passed, so secrets (clientId, clientPassword,
+#     dockerRegistry creds) and any operator overrides are preserved.
+#   - NOTE (#569): a chart upgrade no longer picks up new IMAGE content as a
+#     side effect. That used to work because the control-plane pods ran
+#     `imagePullPolicy: Always`, so any restart re-resolved the floating tag;
+#     they now run IfNotPresent so an offline restart cannot fail. New image
+#     content arrives via the image-refresh CronJob's `kubectl set image`
+#     instead. This CronJob still delivers everything else a chart release
+#     carries — template, RBAC, values-default and schema changes.
+#
+# Trust boundary (backend#953, Sec-II): the CronJob's ServiceAccount is NO
+# LONGER cluster-admin. It gets a namespaced Role granting full control inside
+# THIS release's namespace, plus a narrow ClusterRole enumerating only the
+# cluster-scoped kinds the chart templates (Namespace / PersistentVolume /
+# StorageClass / PriorityClass / ClusterRole / ClusterRoleBinding / OpenShift
+# SecurityContextConstraints). So a compromise of this Pod or the chart repo at
+# repoUrl no longer yields a standing cluster-admin: cross-namespace secret
+# reads, pod exec, and node access are gone; widening the grant requires an
+# active, auditable use of the `escalate`/`bind` verbs the ClusterRole needs to
+# manage the chart's own RBAC. See the comment in
+# templates/auto-upgrade-rbac.yaml for the full rationale and the one residual
+# (adding a NEW cluster-scoped kind means extending that ClusterRole in the same
+# release). Mitigations that still apply:
+#   - repoUrl defaults to GitHub Pages over HTTPS (publish controlled by
+#     the tracebloc team via the gh-pages branch).
+#   - Set autoUpgrade.enabled: false to opt out and run upgrades manually
+#     under your own approval gate.
+#
+# Disabled-on-this-cluster check after install:
+#   kubectl get cronjob -n <namespace> -l app.kubernetes.io/component=auto-upgrade
+autoUpgrade:
+  # Default ON: the entire point of #69 is that customers freeze on the
+  # version they installed. Defaulting off would recreate that exact bug.
+  enabled: true
+  # Hourly at :23. The off-hour minute spreads load across the
+  # tracebloc.github.io/client GitHub Pages origin.
+  schedule: "23 * * * *"
+  # A tick with NO newer chart to install is not idle (backend#3550): when the
+  # deployed release recorded the telemetry Collector as `skipped-no-token`
+  # (nobody set telemetryCollector.enabled and jobs-manager had not yet written
+  # the token Secret), the tick asks a server-side dry-run of the DEPLOYED chart
+  # version what it would decide now, and if the answer is `enabled` it re-runs
+  # `helm upgrade` at that same version so the Collector renders. The `lookup`
+  # that decides the three-state rule runs only inside an upgrade, so without
+  # this the Secret appearing changed nothing until the next chart release — the
+  # <release>-telemetry-status ConfigMap names this tick as the trigger. It needs
+  # the deployed version to be one `repoUrl` serves; an edge running a version
+  # AHEAD of that index (a dev chart) cannot be re-rendered and waits for the next
+  # published chart, which the tick says every hour rather than guessing.
+  # Helm chart repo to poll. Override only when mirroring internally.
+  repoUrl: "https://tracebloc.github.io/client"
+  repoName: "tracebloc"
+  chartName: "client"
+  # `helm upgrade --wait --timeout`. Bare-metal first-pull of mysql/jobs-manager
+  # images can take several minutes; 10m gives PVC bind + image pull headroom
+  # without holding the slot all night if something is genuinely wedged.
+  timeout: "10m"
+  # #2877: a release in `pending-upgrade` is NOT necessarily a wedge left by a
+  # killed upgrade — it is ALSO the state of an upgrade that is CURRENTLY RUNNING
+  # (an operator's manual `helm upgrade`, or a slow one of ours). The hourly
+  # wedge-recovery (#554) must not roll back an in-flight upgrade: doing so
+  # silently reverts it and discards the operator's new values (measured turning
+  # a backend#1528 retirement into a fleet-breaking sequence). The discriminator
+  # is AGE — a real wedge is at least ~an hour old by the next hourly tick, an
+  # in-flight upgrade is seconds/minutes old. Only a release that has sat in
+  # pending-upgrade/pending-rollback for AT LEAST this long is treated as an
+  # abandoned wedge and rolled back; anything younger is left untouched and the
+  # tick is skipped. Keep it comfortably ABOVE the longest upgrade an operator
+  # would run by hand (well above `timeout`) and BELOW the ~1h schedule gap, so a
+  # genuine wedge still recovers on the very next tick. Duration string (Ns/Nm/Nh).
+  pendingWedgeMinAge: "45m"
+  # CronJob spec knobs. Override per-cluster if needed.
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  # Hard wall-clock cap on the whole Job (#555). `timeout` above only bounds
+  # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+  # HTTPS fetches have no timeout of their own, so on a TCP black-hole (a
+  # corporate proxy that drops packets with no RST) the Job can hang
+  # indefinitely — and with concurrencyPolicy: Forbid that hung Job makes
+  # every future tick "still active" and skipped, wedging auto-upgrade until a
+  # human kills the pod. activeDeadlineSeconds is the backstop that fails the
+  # Job instead. This is a FLOOR, not the final value: the template renders
+  # activeDeadlineSeconds as max(this, parsed `timeout` + 300s repo-fetch
+  # headroom), so raising `timeout` above ~10m automatically lifts the deadline
+  # too and a slow-but-healthy upgrade is never killed mid-flight. Raise this
+  # only to give even more slack than the timeout-derived value.
+  activeDeadlineSeconds: 900
+  # Pod image: helm CLI only. alpine/helm is small and the tag pins the
+  # helm version, so behaviour cannot drift if upstream re-tags.
+  image:
+    repository: alpine/helm
+    tag: "3.16.4"
+    pullPolicy: IfNotPresent
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. backend#2935:
+  # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
+  # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
+  # container overrunning its own cgroup limit. The helm CLI's peak working set
+  # on this chart is ~50Mi measured (repo update + search + `helm template`
+  # render), a fraction of the 256Mi limit, so no ceiling was ever the binding
+  # constraint. Two independent levers fix the two halves of that:
+  #
+  #  1. The memory REQUEST rising to meet the limit is an honest scheduler
+  #     RESERVATION. It attacks the CAUSE: the node is no longer overcommitted by
+  #     the gap between what these pods reserved and what they use, so it is less
+  #     likely to enter the pressure that triggered the kill. (This is the real
+  #     structural half — NOT an oom_score_adj change: a Burstable pod's
+  #     oom_score_adj is 1000 - 1000*memRequest/nodeCapacity, fixed at start and
+  #     independent of usage, so 128Mi->256Mi barely moves it, ~992->984 on a
+  #     16Gi node, and does nothing on a large node. An earlier revision of this
+  #     comment wrongly credited the memory pin with the victim-preference change
+  #     below — @saadqbal on client#948.)
+  #  2. Pinning CPU too makes the pod GUARANTEED, whose oom_score_adj is -997.
+  #     THAT is what genuinely moves it off the kernel OOM-killer's shortlist
+  #     under pressure, regardless of node size. These two CronJobs (and
+  #     image-refresh) are the only chart pods one line from Guaranteed — zero
+  #     initContainers, memory already equal, cpu the sole blocker. #642 pinned
+  #     jobs-manager's memory but could NOT reach Guaranteed there (it renders an
+  #     unresourced init container); here we can, so we do. auto-upgrade is the
+  #     security-fix delivery path — worth the strongest protection.
+  #
+  # TRADEOFF (reservation vs throttle): Guaranteed reserves the full 500m/256Mi
+  # for the pod's brief hourly run and caps it there (helm is I/O/network-bound,
+  # not CPU-bound, so the 500m cap does not slow a real upgrade). Limits never
+  # moved — only the requests rose to meet them. If a small edge cannot spare the
+  # reservation the pod goes Pending/skipped rather than OOM-looping; `Forbid` +
+  # startingDeadlineSeconds bound that. auto_upgrade_test.yaml pins cpu AND memory
+  # request==limit, which (no initContainers) is the in-manifest proxy for
+  # Guaranteed until client#922's pod-qos-class checker asserts the class directly.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+# -- Image-refresh CronJob (closes tracebloc/client#154; reworked by #569).
+# Re-images the always-running control-plane workloads when a new image
+# digest is published to Docker Hub under the floating CLIENT_ENV tag.
+# Without this, running pods stay on the old image until someone manually
+# restarts them, which is exactly the customer-runs-no-commands UX we want
+# to avoid.
+#
+# #569 changed the ACTION from `kubectl rollout restart` to `kubectl set
+# image repo@digest`, and widened the set of workloads it covers. A restart
+# only picks up a new build when the pods run `imagePullPolicy: Always` —
+# and `Always` is precisely what made an offline Docker/WSL restart fail
+# with ImagePullBackOff on a cached image. The two properties are mutually
+# exclusive unless the image REFERENCE changes on update, so the reference
+# is now what changes; the pods run IfNotPresent (see the images block).
+#
+# How it works:
+#   - A CronJob in this namespace polls Docker Hub for the current
+#     manifest digest of tracebloc/jobs-manager:<CLIENT_ENV>,
+#     tracebloc/pods-monitor:<CLIENT_ENV> and
+#     tracebloc/resource-monitor:<CLIENT_ENV>.
+#   - The script compares each fetched digest to an annotation on the
+#     jobs-manager deployment (`tracebloc.io/last-refreshed-<image>-digest`)
+#     that records the digest the LAST successful refresh moved to. Not
+#     to the running pod's imageID — that value's format varies across
+#     container runtimes (kubernetes/kubernetes#108689 + #115199) and
+#     diverges from the registry's index digest on multi-arch tags.
+#     The annotation makes the comparison entirely server-vs-our-record
+#     with no client-side runtime variation in the loop.
+#   - On a real change: `kubectl set image` + `kubectl rollout status` to
+#     wait for completion, then patch the annotation to the new digest.
+#     (Order matters — annotating first would let a failed rollout
+#     silently freeze the workload.)
+#   - Workloads covered (#569). jobs-manager was always covered; the other
+#     two were NOT, and both were quietly broken as a result:
+#       * deployment/<release>-jobs-manager — containers `api` and
+#         `pods-monitor-container`, re-imaged in ONE patch, one rollout.
+#       * deployment/<release>-requests-proxy — runs the SAME
+#         tracebloc/jobs-manager image, so it follows the jobs-manager
+#         digest with no extra registry call. Before #569 it was never
+#         refreshed: it stayed on its old build until some unrelated
+#         restart, then jumped to whatever the tag pointed at, so the two
+#         pods routinely ran different builds of one image.
+#       * daemonset/<release>-resource-monitor — in the node-agents
+#         namespace, reached via a second, narrower Role. Before #569 it
+#         had no deliberate update path at all (a chart release does not
+#         change its image ref either); it moved only when a pod happened
+#         to restart.
+#   - First observation (annotation absent on a fresh install): record
+#     the current digest without re-imaging. Rewriting repo:tag to
+#     repo@digest for byte-identical content would roll every workload —
+#     including the DaemonSet on every node — for nothing. The NEXT tick,
+#     seeing the digest recorded but the workload still on repo:tag, pins
+#     it (client-runtime#199) — so a fresh edge becomes reproducible ~one interval
+#     post-install, not at the next upstream release. Restart-safe offline
+#     throughout.
+#   - Idle-cheap: when the recorded digest matches today's digest AND the
+#     workload already runs that digest, the script exits without touching
+#     anything. If a helm re-render reverted the pin back to repo:tag it
+#     re-pins that one tick (compared on the @sha256 digest, so a mirror
+#     prefix rewrite is not mistaken for a revert). Steady state is one HEAD
+#     per image per tick, well under Docker Hub's 100/6h anonymous
+#     pull-rate limit.
+#   - The script resolves digests on the SAME registry the pods pull the
+#     tracebloc images from (images.traceblocRegistry, or the
+#     global.imageRegistry mirror when set), and it can only do so
+#     anonymously on docker.io and ghcr.io. Anywhere else -- a private
+#     mirror -- pinning a digest resolved elsewhere could pin an image the
+#     registry does not hold, so it logs and goes INERT instead. Under the
+#     old `rollout restart` the mismatch was merely useless; with
+#     `set image` it has to fail closed.
+#
+# Pinned-digest interaction: if images.jobsManager.digest,
+# images.podsMonitor.digest AND images.resourceMonitor.digest are all set,
+# the chart skips rendering this CronJob entirely — digest pinning is an
+# explicit opt-out from drift, and auto-refresh would defeat the purpose.
+# If only some are pinned the CronJob still runs and the script skips the
+# pinned images at runtime. requests-proxy needs no entry in that test: it
+# follows the jobs-manager pin. Setting images.requestsProxy.digest opts
+# requests-proxy alone out of following jobs-manager.
+#
+# Trust boundary: this CronJob's ServiceAccount is bound to a
+# namespace-scoped Role with get/list/patch/watch on the deployment
+# resource ONLY (no pods, no other resources, no cluster scope) — a
+# compromise can only re-image and annotate the jobs-manager and
+# requests-proxy Deployments in this one namespace. #569 adds a SECOND
+# Role in the node-agents namespace for the resource-monitor DaemonSet:
+# get/patch are resourceNames-scoped to that one DaemonSet, while
+# list/watch (which RBAC cannot scope by name, and `rollout status`
+# requires) are namespace-wide and read-only. Still far narrower than
+# autoUpgrade, which holds cluster-admin.
+#
+# The script reaches out only to the public token + manifest endpoints of
+# the registry the tracebloc images are pulled from (docker.io or ghcr.io);
+# if your cluster requires egress through a proxy, set HTTPS_PROXY via env
+# or disable this CronJob.
+#
+# Disabled-on-this-cluster check after install:
+#   kubectl get cronjob -n <namespace> -l app.kubernetes.io/component=image-refresh
+#
+# Inspect what the controller has recorded so far:
+#   kubectl get deployment <release>-jobs-manager -n <namespace> \
+#     -o jsonpath='{.metadata.annotations}' | tr ',' '\n' \
+#     | grep tracebloc.io/last-refreshed
+imageRefresh:
+  # Default ON: the whole point of #154 is that customers don't have to
+  # run any commands when we publish a new jobs-manager image.
+  enabled: true
+  # Every 15 minutes at minute :07. The off-hour minute spreads load
+  # across Docker Hub's registry-1 origin; 15m balances drift latency
+  # against the 100/6h anonymous pull-rate limit.
+  #
+  # #569 raised the per-tick cost from 2 manifest HEADs to 3 (resource-monitor
+  # joined jobs-manager and pods-monitor; requests-proxy adds none, it reuses
+  # the jobs-manager digest). At this schedule that is 3 x 4/hr = 12/hr, so
+  # 72 per 6h against the cap of 100 — up from 48. Still under, but the
+  # headroom for OTHER workloads sharing the egress IP dropped from ~52 to ~28.
+  #
+  # That matters more than the raw number: exhausting this cap behind a shared
+  # corporate NAT is one of the failure modes in the incident #569 exists to fix
+  # (a rate-limited edge cannot pull for up to ~6h). If an edge shares its
+  # egress IP with other Docker Hub consumers, widen this — "7,27,47 * * * *"
+  # (3/hr) puts the cost back to 9/hr, at the price of slower drift pickup.
+  # A digest pin on any image removes its HEAD from every tick entirely.
+  schedule: "7,22,37,52 * * * *"
+  # `kubectl rollout status --timeout`, applied PER WORKLOAD. Generous;
+  # jobs-manager image pulls on bare-metal first-boot can take minutes, and
+  # the CronJob slot shouldn't hold all night if a rollout genuinely wedges.
+  #
+  # RAISING THIS MEANS RAISING activeDeadlineSeconds BELOW — since #569 a tick
+  # can wait on up to THREE workloads in sequence, so the Job's total budget
+  # must stay above 3 x this value.
+  rolloutTimeout: "10m"
+  # Job-level wall-clock backstop (CronJob jobTemplate.spec.activeDeadlineSeconds).
+  # MUST exceed 3 x rolloutTimeout: a tick re-images jobs-manager, requests-proxy
+  # and the resource-monitor DaemonSet in sequence, waiting on each.
+  #
+  # This was a hardcoded 1800 (30m). With the default 10m rolloutTimeout that is
+  # EXACTLY 3 x 10m, i.e. no headroom at all. Blowing the deadline is not a benign
+  # timeout: the Job is killed mid-wait, so the post-success annotate never runs,
+  # the recorded digest never advances, and the shared `refresh-attempt` counter
+  # stays incremented. Three such ticks trip the flap lockout for EVERY
+  # control-plane image at once, while the CronJob still looks healthy.
+  #
+  # 3600 (60m) = 3 x the default rolloutTimeout plus 100% slack.
+  activeDeadlineSeconds: 3600
+  # #563: consecutive failed rollout attempts after which the refresh STOPS
+  # re-restarting and flags the deployment for a human. A deployment whose
+  # readiness FLAPS (becomes Ready, then crashes after warmup near the
+  # rollout-status timeout) fails the rollout, so `recorded` never advances and
+  # every later settled tick re-issues the same re-image. After this many in-a-row
+  # failures the job stops re-imaging and annotates a "flap detected" marker
+  # (tracebloc.io/refresh-flap-detected) so monitoring can surface it. There is
+  # no auto-resume: a human investigates and clears the
+  # tracebloc.io/refresh-attempt annotation to re-arm (or a rollout that finally
+  # settles resets the counter on its own).
+  maxRefreshAttempts: 3
+  # backend#1964. The OTHER way refresh stops: the job skips a tick whenever the
+  # jobs-manager Deployment is not settled, which is right for a rollout in
+  # flight and wrong forever if the pod never becomes Ready. Because the skip
+  # happens BEFORE anything is reconciled, requests-proxy and resource-monitor
+  # stop updating too — and every tick exits 0, so the CronJob stays green.
+  #
+  # After this many consecutive skips the job FAILS instead, annotating
+  # tracebloc.io/refresh-skip-streak so monitoring can surface it. It auto-resumes
+  # the moment the deployment settles (unlike maxRefreshAttempts, which needs a
+  # human): a skip streak means "it was busy", and settling really does resolve it.
+  #
+  # 8 ticks is ~2h at the default 15m schedule — longer than any legitimate
+  # rollout, including a resource-monitor DaemonSet roll across every node.
+  maxSkipTicks: 8
+  # CronJob spec knobs. Override per-cluster if needed.
+  suspend: false
+  # Lower history limits than autoUpgrade — this Job runs ~96x/day, the
+  # successful runs aren't interesting and 1 is enough for an at-a-glance
+  # "last run succeeded" check.
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  # Pod image: needs `sh`, `kubectl`, and `curl`. alpine/k8s ships all
+  # three in a small image and we pin the tag so behaviour cannot drift
+  # if upstream re-tags.
+  image:
+    repository: alpine/k8s
+    tag: "1.30.5"
+    pullPolicy: IfNotPresent
+  # GUARANTEED QoS: requests == limits for BOTH cpu and memory. See the fuller
+  # note on autoUpgrade.resources for the mechanism. backend#2935: image-refresh
+  # was OOM-killed in lock-step with auto-upgrade (six paired failures — this Job
+  # runs every 15m, so failing only when it coincides with the hourly upgrade
+  # tick is itself the tell), which is what makes the cause SHARED: a node-level
+  # OOM event, not two independent overruns. kubectl's peak here is ~40-80Mi
+  # measured (one `get deployment -o json` + `rollout status` at a time; the curl
+  # HEADs return headers only, jq ~2Mi) — well under 128Mi, so no ceiling was the
+  # constraint. The memory pin is the honest reservation that reduces node
+  # overcommit; pinning cpu makes the pod Guaranteed (oom_score_adj -997), which
+  # is what actually keeps it off the OOM-killer's shortlist — a memory pin alone
+  # barely moves a Burstable pod's oom_score_adj (on a large node, 64Mi->128Mi
+  # moves 999->998, i.e. nothing). Limits never moved; only requests rose to meet
+  # them. image_refresh_test.yaml pins cpu AND memory request==limit.
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# ============================================================
+# Per-ingestion dataset tables (RFC-0003 D16 — backend#1204 / backend#1205)
+# ============================================================
+# When true, jobs-manager stamps PER_INGESTION_TABLES=1 into every ingestion
+# Job it spawns: each ingest run then writes its own IMMUTABLE physical table
+# ds_<uuid4 hex> (append disabled) and reports the handle to the backend,
+# which resolves it into the experiment payload (data_info.tables) for the
+# training read path and for per-experiment grant scoping.
+#
+# FLIP PER ENVIRONMENT, dev first — and only once that environment's
+# backend, engine images, and jobs-manager all carry the D-series (merged to
+# develop 2026-07-29). An edge flipped early ingests datasets its training
+# path cannot locate. File-bearing categories (images/text) are refused
+# under the flag until the per-dataset mount work (client-runtime#203
+# phase 2) — row-only categories (tabular / time-series) are the v1 target.
+# Default false: legacy shared label-named tables, byte-for-byte.
+perIngestionTables: false
+
+# ============================================================
+# Per-dataset PVC mounts (RFC-0003 D9 Track B — client-runtime#203 / #261)
+# ============================================================
+# When true, jobs-manager stamps PER_DATASET_PVCS=1 into its own environment:
+# each spawned training pod then gets one dedicated READ-ONLY hostPath PV/PVC
+# per dataset handle, mounted at /data/shared/<handle>, and the shared data
+# volume is removed from the pod entirely — the mount table references only
+# the pod's own dataset(s), so no other dataset on the edge is even nameable.
+# Off (default), training pods keep the subPath-scoped view of the shared PVC
+# (Track A) — that is also the rollback: flip off and pods revert on the next
+# spawn; the static PV/PVCs left behind are garbage-collected by jobs-manager.
+#
+# Effective only on single-node/hostPath clusters (node-local Option C,
+# client#368): on elastic clusters the runtime logs a warning and falls back
+# to subPath scoping. Requires clusterScope (the default): PersistentVolumes
+# are cluster-scoped, so the namespaced Role cannot grant them — rendering
+# fails on the invalid combination rather than letting Job spawns 403.
+# Grants jobs-manager PV/PVC provisioning + GC verbs only while on (see
+# templates/rbac.yaml). Default false: byte-for-byte identical rendering.
+perDatasetPvcs: false
+
+# ============================================================
+# Per-experiment DB credentials (RFC-0003 D10 — backend#1181)
+# ============================================================
+# When true, jobs-manager mints a short-lived MySQL user for each experiment
+# scoped to ONLY that experiment's physical table(s), and injects it into the
+# training pod via a per-job Secret — instead of every pod sharing the
+# root-equivalent edgeuser (which today can read every dataset + the metadata
+# DB's Service Bus strings). jobs-manager provisions the dedicated tb_credmgr
+# minting identity on startup and revokes each user when its Job ends.
+#
+# Flipped per environment, dev first; now ON for dev, stg and prod (see
+# perExperimentDbCredsByEnv below) since staging and prod have DROPped edgeuser —
+# a fresh install comes up on per-experiment credentials rather than the shared
+# path. Where an operator overrides it off, behaviour is the old shared-credential
+# path, byte-for-byte. Needs no per-edge action — the tb_credmgr password is a
+# generated, upgrade-stable Secret value.
+# LEFT NULL ON PURPOSE, matching serviceDbAccounts. The helper distinguishes
+# "unset" from "explicitly false" with `kindIs "invalid"`, so a literal
+# `false` here is an OPERATOR OVERRIDE that wins over every fleet default and
+# makes the map below dead. Measured: with `perExperimentDbCreds: false` left in
+# place, `dev` still rendered the gate off.
+perExperimentDbCreds:
+
+# -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#1528).
+#
+# An operator `--set perExperimentDbCreds` still wins; with it unset, the fleet
+# default below applies, resolved through the same CLIENT_ENV normalization as
+# serviceDbAccountsByEnv (so `staging` maps to `stg` and cannot miss its entry).
+#
+# WHY THIS EXISTS. Every other gate in this rollout had a `…ByEnv` map; this one
+# did not, so the flag backend#1528's LAST step is gated on was the one whose
+# fleet posture the chart could not record. A fleet taken to the per-experiment
+# shape held that fact only in its stored release values — and a values-resetting
+# upgrade or a fresh-datadir reinstall drops it, which puts the account mint back
+# on edgeuser: the account the ticket exists to retire, silently restored.
+#
+# `dev: true` records a posture already achieved: dev was fully retired on
+# 2026-08-26 (edgeuser DROPped and verified under a driven experiment). Safe to
+# default on, because `credmgrPassword` generates-and-persists when unset —
+# measured, not assumed: `helm template --set perExperimentDbCreds=true` with no
+# companion secret renders clean.
+#
+# `stg: true` and `prod: true`. Staging DROPped edgeuser on 2026-08-31
+# (backend#2776) and prod's edge 713 on 2026-09-01 (backend#2800), so both fleets
+# are retired and their posture is a thing to bake — a fresh install comes up on
+# per-experiment credentials rather than the shared edgeuser identity.
+#
+# SAFE TO BAKE, unlike rotate/reparent below. This gate is ADDITIVE: turning it on
+# mints tb_credmgr (as edgeuser while re-parent stays off) and injects per-Job
+# credentials, adding the per-experiment path without a render guard or a root-
+# password migration. So baking it fires no #2879 guard and no 1045 on an existing
+# fleet whose manual DDL has not run — which is exactly why rotateMysqlRootByEnv and
+# bootstrapDbReparentByEnv below CANNOT be baked the same way (backend#2994).
+#
+# THE DEFAULT IS STILL NOT A POSTURE RECORD (backend#2994): it records what a NEW
+# install of that environment should get, not where existing fleets are. Per-fleet
+# migration state lives in each edge's stored release values and its migration
+# ticket; do not read this as a claim that every existing edge is already there.
+perExperimentDbCredsByEnv:
+  dev: true
+  stg: true
+  prod: true
+
+# Narrow edgeuser to USAGE only at every jobs-manager boot (backend#1528 S3
+# close-out). mysql-client-initdb/10-edgeuser-bridge-grants.sql re-grants edgeuser
+# its broad privileges at every FRESH datadir init and cannot branch on a runtime
+# flag -- it is baked into a digest-frozen image and the mysql entrypoint runs it
+# before jobs-manager exists. So without this, a fleet that completed the entire
+# retirement can be handed a root-equivalent edgeuser again by a reinstall or a
+# datadir loss, silently. With it on, the retired posture is self-sustaining
+# instead of being a property of whoever last ran a REVOKE by hand.
+#
+# It REVOKES; it never DROPs. The account keeps existing with USAGE only -- able
+# to connect, able to do nothing -- which is reversible from the S0
+# `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot. `DROP USER` stays an operator step.
+#
+# ONLY LEGAL WITH ALL THREE PREDECESSORS ON: bootstrapDbReparent (else the REVOKE
+# strips the privileges of the connection issuing it), serviceDbAccounts and
+# perExperimentDbCreds (else a live consumer is still authenticating as edgeuser).
+# Enforced, not documented: the render FAILS on a mis-paired combination, and
+# jobs-manager refuses it again at startup. Verify a fleet is ready with
+# docs/migration-tools/edgeuser-drop-readiness.sh before flipping this.
+#
+# UNSET by default: the effective value comes from narrowEdgeuserByEnv below,
+# keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
+# regardless of environment. Mirrors serviceDbAccounts (backend#1752).
+narrowEdgeuser:
+
+narrowEdgeuserByEnv:
+  dev: true
+  stg: true
+  prod: true
+
+# Optional operator pin for the tb_credmgr account password (mirrors
+# podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
+# on first install. Set it for DR, to match a pre-created MySQL account, or to
+# force a rotation — and to keep the password stable across a
+# perExperimentDbCreds off→on toggle. Must be alphanumeric ([A-Za-z0-9]+);
+# jobs-manager rejects other characters.
+credmgrPassword: ""
+
+# backend#1528 S1 (RFC-0003 D10 close-out): provision the dedicated MySQL
+# service identities tb_meta (owns the metadata DB) and tb_ingest (writes the
+# dataset DB) that replace the root-equivalent edgeuser for jobs-manager,
+# requests-proxy and the ingestor. jobs-manager mints both at startup from the
+# generated Secret below (SERVICE_DB_ACCOUNTS). S2 has SHIPPED, so wherever this
+# flag is on the consumers authenticate as these dedicated identities; only where
+# an operator overrides it off does the old shared-edgeuser path render byte-for-byte.
+#
+# Flipped per environment, dev first; now ON for dev, stg and prod (see
+# serviceDbAccountsByEnv below) — where an operator overrides it off, behaviour is
+# the old shared-edgeuser path, byte-for-byte. Needs no per-edge action — the passwords are
+# generated, upgrade-stable Secret values.
+# UNSET by default: the effective value comes from `serviceDbAccountsByEnv`
+# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
+# edge regardless of environment (an operator override — DR, a fleet held back
+# deliberately, or a customer opt-out). backend#1752.
+serviceDbAccounts:
+
+# -- PER-ENVIRONMENT ROLLOUT (backend#1528 · backend#1752)
+#
+# #1151 records the plan as "flip per environment, dev first". Until now there
+# was no mechanism for that — one global boolean meant "per environment" was
+# hand-editing every edge's values and remembering which fleet was where.
+#
+# That gap had teeth. data-ingestors#468 removed the ingestor's edgeuser
+# fallback on the stated precondition that this flag was "on fleet-wide"; it
+# was on nowhere. dev and staging edges float on the :dev/:stg ingestor
+# channels, took the change the same day, and every ingestion Job now fails at
+# Config() before reading a byte. Prod escaped only because its ingestor is
+# digest-pinned — `prodDigest` is v0.8.2, cut 2026-08-04, a week before #468
+# merged — a caution engineered for D16 and spent on this instead.
+#
+# (That pin was v0.8.2 as of client#490, which merged. An earlier revision of
+# this paragraph said "the 0.7 line" and "one client#490 is about to spend";
+# the first was already wrong and the second described the future. Line 1091
+# below said "past 0.8.2" the whole time, so the file disagreed with itself
+# about which release prod actually runs.)
+#
+# dev/stg: TRUE. Both are already running the ingestor that requires the
+# per-Job credentials, so this is what makes them work again — and it exercises
+# #1528's S2 path where it is supposed to be exercised, before prod.
+#
+# prod: TRUE. Staging and prod both completed the full rollout and DROPped
+# edgeuser (backend#2776 2026-08-31, backend#2800 2026-09-01), so the retired
+# posture is a thing to bake: a fresh prod install (or a values-reset) comes up
+# on the per-Job tb_meta/tb_ingest identities rather than relying on the operator
+# override the live edges carry (backend#2994 on why a default cannot record
+# per-fleet migration state).
+#
+# Flipping serviceDbAccounts ON is the SAFE direction of the ingestor coupling.
+# The danger is repinning a fleet's ingestor PAST 0.8.2 — where the edgeuser
+# fallback is gone (v0.8.8 first dropped it; safe set v0.8.0…v0.8.4) — while this
+# is OFF, which strands ingestion with no credential. With it ON, jobs-manager
+# injects DB_USER=tb_ingest into ingestion Jobs, so `prodDigest` (v0.8.2, still in
+# the safe set) keeps working and a later repin past 0.8.2 is safe. On an existing
+# un-migrated edge the mint runs as edgeuser (re-parent stays off by default), so
+# turning this on auto-provisions tb_meta/tb_ingest without a manual step.
+serviceDbAccountsByEnv:
+  dev: true
+  stg: true
+  prod: true
+
+# Optional operator pins for the tb_meta / tb_ingest account passwords (each
+# mirrors credmgrPassword's 3-tier resolution). Leave "" to generate-and-persist
+# on first install. Set for DR, to match a pre-created MySQL account, or to
+# force a rotation. Must be alphanumeric ([A-Za-z0-9]+); jobs-manager rejects
+# other characters.
+tbMetaPassword: ""
+tbIngestPassword: ""
+
+# ============================================================
+# S3 bootstrap re-parent (backend#1528 D10 close-out — final stage)
+# ============================================================
+# The account-minting DDL (CREATE USER / GRANT for tb_credmgr, tb_meta and
+# tb_ingest) still authenticates AS the root-equivalent edgeuser. While it does,
+# edgeuser cannot be REVOKEd / DROPped. This gate re-parents that mint onto MySQL
+# root — client-runtime#310's _bootstrap_db_config reads DB_BOOTSTRAP_USER /
+# DB_BOOTSTRAP_PASSWORD (both-or-neither) — which is the prerequisite for
+# retiring edgeuser. Additive to the data plane: it changes only which identity
+# runs the mint, never which the scoped accounts hold.
+#
+# This is the LAST, prod-irreversible-adjacent step of the rollout. Baked ON for
+# dev, stg and prod (all three fleets retired) — but the baked default re-parents
+# ONLY a fresh or already-rotated edge (tracebloc.bakedRootRotationOn, backend#947),
+# in lockstep with rotateMysqlRoot, so an existing un-rotated / blind edge falls
+# back to its current mint identity rather than wedging its render. An accessible
+# existing edge is re-parented by the explicit override once its root is rotated
+# (ALTER USER) and its S0 `SHOW GRANTS FOR 'edgeuser'@'%'` snapshot is captured
+# (the rollback reference).
+#
+# UNSET by default: the effective value comes from bootstrapDbReparentByEnv
+# below, keyed on the resolved CLIENT_ENV. Set this to force one answer on an
+# edge regardless of environment (an operator override — DR, a fleet held back
+# deliberately, or a customer opt-out). Mirrors serviceDbAccounts (backend#1752).
+#
+# BAKING THIS ON REQUIRES THE ROTATION ON TOO (backend#2738). The re-parent needs
+# root's password pinned as DB_BOOTSTRAP_PASSWORD, and of the three tiers that can
+# supply it only one works for a DEFAULT: an explicit .Values.bootstrapDbPassword
+# is an operator action, the live Secret is empty on a fresh install and in every
+# `helm template`/dry-run, and the third — derived from rotateMysqlRoot, which is
+# what makes the chart the authority on root's password — renders everywhere. So
+# reparent=true with rotate=false has nothing to fall back on and hard-fails the
+# render for every install of that environment that does not pin the password by
+# hand. Bake the two ByEnv gates as a PAIR; scripts/tests/reparent-requires-
+# rotation.sh refuses the half-baked combination at review time.
+bootstrapDbReparent:
+
+bootstrapDbReparentByEnv:
+  dev: true
+  stg: true
+  prod: true
+
+# REQUIRED when the gate above is on: the password jobs-manager authenticates
+# with, as MySQL root, to run the mint DDL. There is NO generated default —
+# jobs-manager AUTHENTICATES as root (it never runs `ALTER USER root`), so a
+# random value the server was never told to expect would lock the minter out of
+# MySQL and CrashLoop it. Set this to the MySQL root password for the cluster —
+# the `mysql-client` image's baked default (Dockerfile.mysql_client bakes
+# MYSQL_ROOT_PASSWORD; see backend#947 for the value and its rotated replacement).
+# Helm fails the render if the gate is on and this is unset (with an existing
+# Secret value preserved across upgrades in between). NOT constrained to
+# alphanumeric — unlike the credmgr / tb_* passwords it is never interpolated
+# into DDL, only passed as a mysql-connector connection parameter.
+bootstrapDbPassword: ""
+
+# ============================================================
+# Rotate the mysql-client root password (backend#947 · backend#1528 Phase 0)
+# ============================================================
+# The mysql-client image bakes root's password as a literal (Dockerfile
+# MYSQL_ROOT_PASSWORD). backend#947 rotates it off that literal. When this gate
+# is on, the chart generates a random root password into the Secret and injects
+# it as MYSQL_ROOT_PASSWORD on the mysql-client deployment.
+#
+# IMPORTANT — this alone only rotates a FRESH datadir. The mysql entrypoint reads
+# MYSQL_ROOT_PASSWORD at first init and ignores it thereafter, so an EXISTING
+# edge keeps its current root password until the one-time rollout DDL runs:
+#   ALTER USER 'root'@'%'        IDENTIFIED BY '<the generated Secret value>';
+#   ALTER USER 'root'@'localhost' IDENTIFIED BY '<the generated Secret value>';
+# (read the value from the Secret, run via `kubectl exec` as root@localhost).
+# Turning the gate on rolls the mysql pod (a brief restart) — flip it in a window.
+# Any tooling/runbook that dials root with the old literal must move to the
+# Secret first, or it breaks at rotation.
+#
+# GUARDED (backend#2879, backend#2892) — fail-CLOSED. Because that DDL is manual
+# and mandatory, the chart REFUSES to render a rotation that would silently break
+# auth rather than fail at runtime with a 1045. On the MINT path (gate on, no
+# mysqlRootPassword pin, no MYSQL_ROOT_PASSWORD already in the Secret) the render
+# FAILS at template time, naming docs/migration-tools/rotate-mysql-root.md, in
+# THREE cases:
+#   1. the MySQL datadir PVC already exists in the live cluster (`lookup`);
+#   2. mysqlDatadirExists=true is declared (below) — arm 1, asserted for a render
+#      that cannot see the PVC; or
+#   3. the render CANNOT SEE A CLUSTER AT ALL: `helm template`, `--dry-run`,
+#      ArgoCD's default (non-server-side) render, Flux post-render (backend#2892).
+#      Offline the chart can neither check for an existing datadir NOR preserve the
+#      value it mints (tier-2 preservation is a live `lookup` too), so an offline
+#      mint re-randomises every render and never converges — refuse it.
+# The ONLY render that mints is a FRESH install on a LIVE cluster (datadir absent,
+# cluster visible, nothing declared → born rotated, and the next live render's
+# tier 2 preserves it). Acknowledge the manual migration with
+# mysqlRootRotationAcknowledged below to clear all three arms and proceed on an
+# existing fleet; a cluster-less fleet that wants the rotation pins mysqlRootPassword
+# (below) or renders server-side.
+#
+# UNSET by default: the effective value comes from rotateMysqlRootByEnv below,
+# keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge
+# regardless of environment. Mirrors serviceDbAccounts / bootstrapDbReparent.
+rotateMysqlRoot:
+
+rotateMysqlRootByEnv:
+  dev: true
+  stg: true
+  prod: true
+#
+# CLUSTER-LESS DEV NOTE (backend#2892). Because `dev` defaults rotation ON, a dev
+# fleet rendered WITHOUT a live cluster — ArgoCD's default render, Flux
+# post-render, or a bare `helm template` for validation — hits the fail-closed
+# mint guard above (arm 3) and REFUSES. That is correct: such a render cannot
+# preserve the minted value, so it would re-randomise every sync. To render a dev
+# fleet cluster-less, either PIN mysqlRootPassword below (tier 1 — stable, and it
+# bypasses the mint guard) or render SERVER-SIDE (argocd-repo-server against the
+# live cluster). A live install/upgrade — the in-cluster auto-upgrade CronJob
+# included — sees the cluster and is unaffected.
+
+# Optional operator pin for the root password (3-tier resolution, mirrors
+# credmgrPassword). Leave "" to generate-and-persist on first install. Set for
+# DR, or to match a root account you rotated out-of-band. Must be alphanumeric
+# ([A-Za-z0-9]+): the backend#947 rotation runbook embeds this value in an
+# `ALTER USER ... IDENTIFIED BY '...'` statement, so a quote or metacharacter
+# would break the one-time rotation (generated randAlphaNum values already
+# satisfy this). This is why it is constrained where bootstrapDbPassword is not
+# — that one is only ever a mysql-connector connection parameter, this one also
+# lands in DDL.
+mysqlRootPassword: ""
+
+# Acknowledge the manual root-rotation migration on an EXISTING fleet
+# (backend#2879). Normally unset. When rotateMysqlRoot is on and the chart would
+# MINT (see the guard above), the render FAILS at template time (naming
+# docs/migration-tools/rotate-mysql-root.md) unless this is true. Set it ONLY as
+# part of that runbook: it asserts you have read it and will run the one-time
+# `ALTER USER 'root'` DDL to align root's live password to the Secret value in the
+# same maintenance window. It clears ALL of the guard's refuse arms (existing
+# datadir, declared, and the offline fail-closed one), and it runs no DDL itself.
+# It ALSO clears tracebloc.bakedRootRotationOn's own refuse arms and, over a
+# SURVIVING mysql-root-rotated marker whose rotation the Secret no longer backs, its
+# marker-forces-ON arm (backend#3226 / backend#3255). The marker (resource-policy:
+# keep) can OUTLIVE the rotation it recorded — an old, pre-rotation Secret restored
+# over a datadir whose marker survived leaves marker present + Secret present but no
+# MYSQL_ROOT_PASSWORD — and #3226 made the marker force rotation ON there, minting a
+# root password the live database never accepted (1045). SET, the marker yields and
+# bakedRootRotationOn resolves OFF onto the image-baked password; UNSET, the marker
+# still wins (the safe born-rotated default). A born-rotated edge on a NORMAL upgrade
+# (its Secret still carries the root) needs no ack — bakedRoot keeps it ON either way.
+#   This does NOT bypass the SEPARATE credential-collision guard in secrets.yaml
+#   (backend#2571): a reinstall whose `helm uninstall` deleted the WHOLE Secret while
+#   the resource-policy: keep datadir PVC survived is refused THERE, regardless of
+#   this ack — copy the Secret back to the name this render wants, or delete the
+#   datadir (that guard names both). The ack governs root's rotation state, not that
+#   guard. Once past it on the image-baked path, ALSO delete the leftover marker
+#   (`kubectl -n <ns> delete configmap mysql-root-rotated`) AND then UNSET this ack
+#   (clear it from your values — it does NOT self-expire and replays through the
+#   CronJob's `--reset-then-reuse-values`). Both matter: the ack makes the SURVIVING
+#   marker yield but does not remove it, so with the marker still there a later
+#   render that omits the ack would re-arm off the stale marker; and while the ack
+#   stays SET the marker is yielded rather than enforced, so it no longer backstops a
+#   later loss of the root key. Marker deleted + ack cleared leaves a clean un-rotated
+#   edge where the normal marker / bakedRoot guards apply again.
+#
+# SELF-EXPIRING ONLY ON A LIVE OR SERVER-SIDE RENDER (backend#2892): once rotated,
+# tier 2 (a live `lookup` of the Secret) preserves MYSQL_ROOT_PASSWORD and the mint
+# branch is never reached again, so the flag becomes a no-op. On a CLUSTER-LESS
+# render tier 2 is empty EVERY render, so it does NOT self-expire there — an
+# operator who rotates a cluster-less fleet on the ack alone would have to leave it
+# set permanently, which permanently DISARMS the guard (and the ack replays through
+# `--reuse-values` and `--reset-then-reuse-values`, which the auto-upgrade CronJob
+# and runbook use). Do not rotate a cluster-less fleet with the ack alone: pin
+# mysqlRootPassword or render server-side (see the cluster-less note above). A
+# FRESH install on a live cluster never needs this.
+mysqlRootRotationAcknowledged:
+
+# Declare that this fleet's MySQL datadir ALREADY EXISTS (backend#2892; chart
+# `>= 1.9.90`). Normally unset — the fail-closed guard above already covers most
+# fleets: a cluster-less render REFUSES the mint by default (arm 3) and a live
+# render DETECTS the datadir by its PVC (arm 1). This is the explicit arm-2
+# assertion, for the two gaps those leave:
+#   - a LIVE render whose datadir PVC the `lookup` cannot see (a renamed PVC, or
+#     one not yet bound) though you know the datadir exists; and
+#   - message clarity: with it set, the refusal names the existing-datadir
+#     migration specifically, instead of the generic cannot-see-a-cluster message.
+# Pin it in the fleet's checked-in overlay: a DURABLE per-fleet fact (an existing
+# install stays existing). A FRESH install leaves it unset. No drift check against
+# live cluster state is warranted: a stale `true` only ever makes a render REFUSE
+# (fail-closed-safe — clear it, or acknowledge), it can never cause a wrong mint.
+#
+# PROTECTION, not a rotation path — like the acknowledgement, it does NOT make a
+# cluster-less rotation converge (the minted value is not preserved offline: tier-2
+# preservation is a live `lookup` too, the same limit documented for
+# clientId/clientPassword). To actually rotate a cluster-less fleet, pin
+# mysqlRootPassword (tier 1 — deterministic, and it bypasses the mint) or render
+# server-side. Charts `< 1.9.90` ignore this key (open schema). See
+# docs/migration-tools/rotate-mysql-root.md.
+mysqlDatadirExists:
+
+# ============================================================
+# Ingestion endpoint authorization (client-runtime#21)
+# ============================================================
+# jobs-manager's POST /internal/submit-ingestion-run authenticates callers
+# via Kubernetes TokenReview, then authorizes against this policy. Mapping
+# is (namespace, service_account) → list of allowed table-name prefixes;
+# "*" means any table.
+#
+# Default: allow the ingestor subchart's SA (created below by this chart,
+# named `ingestionAuthz.serviceAccountName`) to ingest into any table.
+# Customers tighten via overrides — e.g.:
+#
+#   ingestionAuthz:
+#     allowed:
+#       - service_account: my-dataset-ingestor
+#         namespace: tracebloc
+#         table_prefixes: ["chest_xrays_", "tumors_"]
+ingestionAuthz:
+  # -- Name of the shared ServiceAccount this chart creates for ingestor
+  # subchart releases (client#129). Single source of truth: the SA
+  # template and the default `allowed` entry below both read this value.
+  # Override only if the name "ingestor" collides with something in your
+  # namespace; the matching ingestor subchart's `serviceAccount.name`
+  # must be updated to the same value.
+  serviceAccountName: ingestor
+  allowed:
+    # Default: the SA named `ingestionAuthz.serviceAccountName` above, in
+    # the same namespace as this release, can ingest into any table. When
+    # `service_account` is omitted the ConfigMap template substitutes
+    # `ingestionAuthz.serviceAccountName`; when `namespace` is omitted it
+    # substitutes `.Release.Namespace`. Customers tighten by adding more
+    # specific entries with explicit fields.
+    - table_prefixes: ["*"]

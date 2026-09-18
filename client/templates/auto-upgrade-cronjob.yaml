@@ -1,0 +1,539 @@
+{{- if .Values.autoUpgrade.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+data:
+  auto-upgrade.sh: |
+    #!/bin/sh
+    # Self-upgrade loop. See client/values.yaml `autoUpgrade` for the
+    # design + trust boundary discussion. JSON is parsed with awk (plus a `tr`
+    # newline-strip, backend#2896) on purpose: the upstream alpine/helm image
+    # ships without jq and we don't want to apk-add at runtime under a
+    # runAsNonRoot pod — both `awk` and `tr` are busybox built-ins.
+    set -eu
+
+    # Helm needs writable cache/config/data dirs. The Pod runs with
+    # readOnlyRootFilesystem: true, so point Helm at the emptyDir mounted
+    # at /tmp.
+    export HOME=/tmp
+    export HELM_CACHE_HOME=/tmp/.helm/cache
+    export HELM_CONFIG_HOME=/tmp/.helm/config
+    export HELM_DATA_HOME=/tmp/.helm/data
+    mkdir -p "$HELM_CACHE_HOME" "$HELM_CONFIG_HOME" "$HELM_DATA_HOME"
+
+    log() { printf '[auto-upgrade] %s\n' "$*"; }
+
+    # #2877: minimum age (seconds) a release must have sat in a pending-* state
+    # before we treat it as an ABANDONED wedge (safe to roll back) rather than an
+    # upgrade that is currently IN FLIGHT (must be left alone). Injected from
+    # autoUpgrade.pendingWedgeMinAge; the `:-` fallback keeps a standalone run
+    # (e.g. the discrimination test) working when the env var is absent.
+    WEDGE_MIN_AGE_SECONDS="${WEDGE_MIN_AGE_SECONDS:-2700}"
+
+    # #2877: seconds the release has been in its current (pending) revision, i.e.
+    # now - info.last_deployed. Echoes the age, or nothing if it can't be read.
+    # Takes the `helm status -o json` body as $1 so the caller reads status once.
+    # awk-based, per this script's header (the image has no jq): it lifts the
+    # RFC3339 last_deployed out of the JSON and computes the epoch itself, since
+    # busybox `date` cannot parse an RFC3339 zone offset. The days-since-epoch
+    # math is Howard Hinnant's civil→days algorithm; the zone offset is applied by
+    # hand. now comes from `date -u +%s`, which every date agrees on.
+    #
+    # `tr -d '\n'` FIRST (backend#2896): make the parse independent of helm's JSON
+    # FORMATTING. The awk body below runs once per input line and `exit`s on the
+    # first line that lacks `last_deployed`, so it only works on a body where the
+    # key sits on the same line the scan starts — fine for the single-line output
+    # helm actually emits today (v3.16.4 `EncodeJSON` is `json.NewEncoder(out);
+    # enc.Encode(obj)` with no `SetIndent`, i.e. compact JSON, one line), but it
+    # would return EMPTY on any multi-line body: a bare `{` first line, a future
+    # helm that indents, or a differently-built image. Collapsing to one line
+    # first removes that dependence entirely. NOTE: the backend#2896 Bugbot claim
+    # that this image pretty-prints did NOT reproduce — the gate was never inert
+    # on real fleets; this is defensive hardening, not a live fix. Fail-closed is
+    # unchanged: an unreadable/empty body still yields no age (→ skip).
+    #
+    # backend#2908: the shape regex below proves only that the fields are DIGITS
+    # in the right slots — NOT that they form a real instant. So the field ranges
+    # are validated too, before the civil math is trusted; see the range gate
+    # inside the awk body.
+    pending_age_seconds() {
+      _now="$(date -u +%s 2>/dev/null || true)"
+      [ -n "$_now" ] || return 0
+      printf '%s' "$1" | tr -d '\n' | awk -v now="$_now" '{
+        if (match($0, /"last_deployed":[ ]*"[^"]*"/) == 0) exit
+        ts = substr($0, RSTART, RLENGTH)
+        sub(/^"last_deployed":[ ]*"/, "", ts); sub(/"$/, "", ts)
+        if (match(ts, /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) == 0) exit
+        y = substr(ts, 1, 4) + 0; mo = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
+        hh = substr(ts, 12, 2) + 0; mi = substr(ts, 15, 2) + 0; ss = substr(ts, 18, 2) + 0
+        # backend#2908: the regex above matched the SHAPE, not the field RANGES —
+        # `2026-00-01`, `2026-08-00`, or `...T40:99:99` all pass it, then feed the
+        # civil→days math a nonsensical date. A month/day that rolls the instant
+        # into the deep past yields a LARGE POSITIVE age; the downstream sanitiser
+        # only rejects empty/non-numeric/NEGATIVE, so that bogus-but-positive age
+        # clears WEDGE_MIN_AGE_SECONDS and rolls back a release that was never
+        # wedged. Reject any out-of-range field so a non-instant yields NO age
+        # (→ "cannot tell" → skip), never a fabricated one. Bounds are the RFC3339
+        # ranges (ss<=60 admits a leap second); day is the coarse 1–31 the issue
+        # specifies — enough to kill the deep-past garbage, no per-month calendar.
+        if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mi > 59 || ss > 60) exit
+        # backend#2908, domain floor (fail-safe): the year is only shape-checked
+        # (4 digits), so a valid-RANGE-but-impossible year — `0000`, `1970`,
+        # `1999` — still computes a huge POSITIVE age and would force a rollback,
+        # the same failure via the one field the RFC3339 ranges above cannot
+        # bound. No real deployment predates the project, so treat a pre-2000
+        # stamp as "cannot tell" (skip). Deliberately the SAFE side: were a
+        # release somehow genuinely this old we would skip its rollback (never
+        # clobber), never the reverse. In-RANGE corruption to another plausible
+        # date cannot be told from the stamp alone and is out of scope.
+        if (y < 2000) exit
+        off = 0; rest = substr(ts, 20)
+        if (rest !~ /[Zz]$/ && match(rest, /[+-][0-9][0-9]:[0-9][0-9]$/)) {
+          o = substr(rest, RSTART, RLENGTH)
+          # backend#2908 (same class as the date fields): the offset regex is
+          # SHAPE-only too, so `+40:00` / `+99:99` pass and shift the epoch by up
+          # to ~4 days — enough to age a genuinely RECENT (in-flight) upgrade past
+          # WEDGE_MIN_AGE_SECONDS and roll it back. Bound it to a real RFC3339
+          # numoffset (hour 0–23, minute 0–59); anything else is not an instant.
+          oh = substr(o, 2, 2) + 0; om = substr(o, 5, 2) + 0
+          if (oh > 23 || om > 59) exit
+          sign = (substr(o, 1, 1) == "-") ? -1 : 1
+          off = sign * (oh * 3600 + om * 60)
+        }
+        if (mo <= 2) y = y - 1
+        era = int((y >= 0 ? y : y - 399) / 400)
+        yoe = y - era * 400
+        doy = int((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5) + d - 1
+        doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        days = era * 146097 + doe - 719468
+        print now - (days * 86400 + hh * 3600 + mi * 60 + ss - off)
+      }'
+    }
+
+    # --- telemetry Collector same-version reconcile: begin (backend#3550) -------
+    # The Collector's three-state rule (`telemetryCollector.enabled` unset ->
+    # collect iff the token Secret exists, else record `skipped-no-token`) is
+    # decided by a template `lookup`, and a `lookup` runs ONLY inside a
+    # `helm upgrade`. This tick used to upgrade only onto a NEWER published chart,
+    # so the Secret appearing (jobs-manager writes it minutes after install)
+    # triggered nothing: measured on a fresh edge, three hourly ticks passed with
+    # the Secret present and no Collector, which then rendered a day later only
+    # because a new chart happened to ship. So a tick that has no newer chart to
+    # install now asks the one question that matters and re-renders the DEPLOYED
+    # version in place when the answer is yes.
+    #
+    # DERIVED, NOT RESTATED. The decision is read from the chart's own decider,
+    # twice: the stored state out of `helm get manifest` (what the last render
+    # decided) and the would-be state out of a server-side dry-run of the SAME
+    # chart version (`--dry-run=server`, helm 3.13+, runs the templates' real
+    # `lookup`s against the cluster). No Secret name, Class A rule or DaemonSet
+    # gate is copied here; the three names this needs arrive in env from the same
+    # helpers the templates render with (TELEMETRY_STATUS_NAME,
+    # TELEMETRY_STATUS_ANNOTATION, TELEMETRY_COLLECTOR_NAME).
+    #
+    # TRI-STATE, and "cannot tell" never acts: 0 reconcile / 1 nothing to do /
+    # 2 cannot tell. An unreadable manifest, a failed dry-run, a contradictory
+    # record, or a deployed version the repo cannot serve is not evidence either
+    # way, so the tick leaves the release alone and says so on stdout.
+    #
+    # AHEAD OF THE INDEX IS THE ONE STATE THIS CANNOT FIX, said plainly: a release
+    # deployed from a dev chart (current > latest) runs a version the repo does
+    # not offer, and nothing here can re-render a chart it cannot fetch. That edge
+    # converges on the next published chart, and the verdict names it every tick.
+
+    # Parses the `version:` field out of `helm search repo ... -o yaml` output on
+    # stdin. Search results are newest-first, so with no --version filter on the
+    # search itself the first hit is the latest; with one, it's the served
+    # version for that pin (or nothing, if the repo does not carry it). One
+    # parser for both call sites below so they cannot drift in how they read the
+    # same `helm search repo` output shape.
+    parse_repo_version() {
+      awk '/^[[:space:]]*version:/ {print $2; exit}'
+    }
+
+    # Resolved Collector state carried by the manifest on stdin: the state
+    # annotation of the ConfigMap named TELEMETRY_STATUS_NAME. Prints nothing when
+    # the record is absent (a release rendered by a chart that predates it).
+    telemetry_state_of() {
+      awk -v name="$TELEMETRY_STATUS_NAME" -v key="$TELEMETRY_STATUS_ANNOTATION" '
+        /^---/ { doc = ""; next }
+        /^  name: / && $2 == name { doc = "status"; next }
+        doc == "status" && $1 == key ":" { v = $2; gsub(/"/, "", v); print v; exit }'
+    }
+
+    # Exit 0 iff the manifest on stdin carries a DaemonSet named
+    # TELEMETRY_COLLECTOR_NAME, i.e. the last render DID enable the Collector.
+    telemetry_manifest_has_collector() {
+      awk -v name="$TELEMETRY_COLLECTOR_NAME" '
+        /^---/ { kind = ""; next }
+        /^kind: / { kind = $2; next }
+        kind == "DaemonSet" && /^  name: / && $2 == name { found = 1; exit }
+        END { exit found ? 0 : 1 }'
+    }
+
+    # THE condition, in one place, so the test and its mutation drive this code
+    # and not a copy. Reads helm; prints one reason line; returns the tri-state.
+    # Reconcile iff: the stored record says skipped-no-token (which by the
+    # decider's construction means `enabled` was unset) AND the stored manifest
+    # carries no Collector DaemonSet AND a server-side dry-run of the deployed
+    # chart version now resolves to `enabled` (the token Secret has arrived).
+    telemetry_reconcile_verdict() {
+      if [ -z "${TELEMETRY_STATUS_NAME:-}" ] || [ -z "${TELEMETRY_STATUS_ANNOTATION:-}" ] \
+         || [ -z "${TELEMETRY_COLLECTOR_NAME:-}" ]; then
+        echo "reconcile inputs missing from env (TELEMETRY_STATUS_NAME / TELEMETRY_STATUS_ANNOTATION / TELEMETRY_COLLECTOR_NAME)"
+        return 2
+      fi
+      _manifest="$(helm get manifest "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null)" \
+        || { echo "cannot read the deployed manifest (helm get manifest failed)"; return 2; }
+      [ -n "$_manifest" ] || { echo "cannot read the deployed manifest (empty)"; return 2; }
+      _stored="$(printf '%s\n' "$_manifest" | telemetry_state_of)"
+      case "$_stored" in
+        "") echo "release carries no telemetry status record (chart predates it); nothing to reconcile"; return 1 ;;
+        skipped-no-token) ;;
+        *) echo "telemetry Collector state is '$_stored'; nothing to reconcile"; return 1 ;;
+      esac
+      if printf '%s\n' "$_manifest" | telemetry_manifest_has_collector; then
+        echo "status record says skipped-no-token but the release already carries DaemonSet $TELEMETRY_COLLECTOR_NAME: contradictory, not touching it"
+        return 2
+      fi
+      _search="$(helm search repo "${REPO_NAME}/${CHART_NAME}" --version "$CURRENT" -o yaml 2>&1)" \
+        || { echo "cannot ask $REPO_URL whether it serves $CURRENT: $(printf '%s\n' "$_search" | tail -n 1)"; return 2; }
+      _served="$(printf '%s\n' "$_search" | parse_repo_version)"
+      [ "$_served" = "$CURRENT" ] \
+        || { echo "deployed chart $CURRENT is not served by $REPO_URL (newest there: $LATEST): a same-version re-render is impossible, the Collector renders on the next published chart"; return 2; }
+      # Bounded at 60s: a server-side dry-run only templates and diffs against
+      # the API server, it never waits on a rollout, so it should complete in
+      # seconds. Left unbounded it would share helm's 5m default, which could eat
+      # deep into the 300s repo-fetch buffer activeDeadlineSeconds reserves below
+      # for the REAL --atomic upgrade that follows it on this same tick.
+      _render="$(helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+          --namespace "$RELEASE_NAMESPACE" --version "$CURRENT" \
+          --reset-then-reuse-values --dry-run=server --hide-secret --timeout 60s 2>&1)" \
+        || { echo "server-side dry-run of $CURRENT failed: $(printf '%s\n' "$_render" | tail -n 1)"; return 2; }
+      _would="$(printf '%s\n' "$_render" | telemetry_state_of)"
+      case "$_would" in
+        enabled) echo "token Secret is now present, a re-render of $CURRENT enables the Collector"; return 0 ;;
+        "") echo "dry-run render of $CURRENT carries no telemetry status record; cannot tell"; return 2 ;;
+        *) echo "a re-render would still decide '$_would'; nothing to reconcile"; return 1 ;;
+      esac
+    }
+
+    # Runs where this tick has no newer chart to install. The reconcile IS the
+    # upgrade at the bottom of this script, pinned to the DEPLOYED version, so it
+    # keeps every flag and the same values discipline. Only verdict 0 acts; 2 is
+    # logged because "cannot tell" must never be silent; 1 stays quiet, as today.
+    telemetry_reconcile_if_needed() {
+      if _why="$(telemetry_reconcile_verdict)"; then
+        log "reconcile: $_why; re-rendering $CURRENT in place (same-version upgrade, values reused)"
+        helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+          --namespace "$RELEASE_NAMESPACE" \
+          --version "$CURRENT" \
+          --reset-then-reuse-values \
+          --atomic \
+          --cleanup-on-fail \
+          --timeout "$UPGRADE_TIMEOUT"
+        log "reconcile complete: $CURRENT re-rendered in place"
+      else
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+          log "reconcile: NOT re-rendering, cannot tell whether the Collector is due: $_why"
+        fi
+      fi
+    }
+    # --- telemetry Collector same-version reconcile: end ------------------------
+
+    log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
+
+    helm repo add "$REPO_NAME" "$REPO_URL" >/dev/null
+    helm repo update "$REPO_NAME" >/dev/null
+
+    # #554: auto-recover from an interrupted upgrade BEFORE attempting another
+    # one. If a previous tick's `helm upgrade` was killed mid-operation — a
+    # node-level OOM kill under memory pressure (backend#2935; this pod is now
+    # Guaranteed QoS, oom_score_adj -997, so the kernel OOM-killer picks it last,
+    # but Guaranteed is not unkillable under extreme pressure), node reboot, or a
+    # cluster restart inside the upgrade window — the release is left in a
+    # pending-upgrade state, and every
+    # subsequent hourly tick then fails with "another operation is in progress"
+    # forever: auto-upgrade (the security-fix delivery path) is silently dead
+    # until a human runs `helm rollback`. Detect that wedge and roll back to the
+    # last deployed revision so this tick can proceed. Parsed from the STATUS:
+    # line jq-free — the alpine/helm image ships without jq. (pending-install
+    # can't occur here: this CronJob is part of the release it upgrades, so the
+    # release must have deployed at least once for this script to run.)
+    STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
+      | awk '/^STATUS:/ {print $2; exit}')"
+    case "$STATUS" in
+      pending-upgrade|pending-rollback)
+        # #2877: `pending-upgrade` is NOT proof of a wedge. It is ALSO the state
+        # of an upgrade that is CURRENTLY RUNNING — an operator's manual `helm
+        # upgrade` (e.g. flipping the backend#1528 retirement gates), or a slow
+        # one of ours. Rolling that back silently reverts the in-flight upgrade
+        # and discards the operator's new values, while the operator — seeing
+        # `deployed` — proceeds as if it stuck. The two are indistinguishable by
+        # status alone; the discriminator is AGE. A real wedge was left by an
+        # earlier tick and is at least ~an hour old by now; an in-flight or
+        # just-attempted upgrade is seconds/minutes old. Only reclaim a release
+        # that has sat here past the threshold. Read the release JSON once (for
+        # both the age and the discarded revision number).
+        INFO_JSON="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>/dev/null || true)"
+        AGE="$(pending_age_seconds "$INFO_JSON")"
+        # Guard: only an unsigned/negative integer is a usable age. A negative
+        # age (node clock skew — the pending revision looks "in the future")
+        # falls through as "too recent", which is the safe side: never clobber.
+        case "$AGE" in ''|*[!0-9-]*) AGE="" ;; esac
+        if [ -n "$AGE" ] && [ "$AGE" -ge "$WEDGE_MIN_AGE_SECONDS" ]; then
+          # awk-only; `[0-9][0-9]*` (>=1 digit, no quote) so this matches only the
+          # bare-number top-level release "version":N, never a quoted
+          # chart-metadata "version":"1.2.3" that may also appear in the JSON.
+          # `[ ]*` after the colon (backend#2896) tolerates an optional space so
+          # the match is independent of formatting: helm's real output is compact
+          # (`"version":N`, no space) and `[ ]*` matches zero spaces, so this is a
+          # strict superset of the previous regex — no behaviour change on the
+          # real image, but it also survives a spaced `"version": N` from a
+          # future indented body. Same defensive hardening as the `tr` above.
+          PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[ ]*[0-9][0-9]*/) {
+            v = substr($0, RSTART, RLENGTH); sub(/"version":[ ]*/, "", v); print v; exit }')"
+          # Surface it (#2877): the rollback discards the pending revision's
+          # values. Log it loud and actionable — `restartPolicy: Never`
+          # (backend#2620) keeps this Pod's log readable so an operator can see
+          # what was undone and recover the values.
+          log "=========================== auto-upgrade WARNING ==========================="
+          log "release '$RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
+          log "${WEDGE_MIN_AGE_SECONDS}s): a previous 'helm upgrade' is presumed killed"
+          log "mid-operation and ABANDONED. Rolling back to the last deployed revision so"
+          log "auto-upgrade can proceed (#554). This DISCARDS the values from the"
+          log "interrupted upgrade${PENDING_REV:+ (revision $PENDING_REV)}. If that upgrade was intentional,"
+          log "recover its values BEFORE the next tick re-applies chart defaults:"
+          log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
+          log "  helm get values $RELEASE_NAME -n $RELEASE_NAMESPACE${PENDING_REV:+ --revision $PENDING_REV}"
+          log "============================================================================"
+          helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE"
+          log "rollback complete; continuing"
+        else
+          # Recent (or indeterminate age): far more likely an upgrade in progress
+          # than an abandoned wedge. Do NOT touch it — skip this tick cleanly (we
+          # cannot `helm upgrade` over a pending operation anyway). The next tick
+          # re-evaluates: by then the upgrade has either completed (STATUS:
+          # deployed → normal upgrade path) or aged past the threshold (→ handled
+          # above as a genuine wedge).
+          log "release is '$STATUS' but only ${AGE:-an indeterminate number of} seconds old (< threshold ${WEDGE_MIN_AGE_SECONDS}s): an upgrade is most likely in progress. NOT rolling back — skipping this tick so an in-flight upgrade is never clobbered."
+          exit 0
+        fi
+        ;;
+      uninstalling)
+        # A killed `helm uninstall` leaves this state. We can't clear it here — the
+        # CronJob is part of the release, so completing the uninstall would delete
+        # itself — but skip cleanly rather than fall through to a `helm upgrade`
+        # that fails every tick with an opaque "another operation is in progress".
+        log "release is mid-uninstall ('uninstalling'); skipping this tick until it settles (run 'helm uninstall $RELEASE_NAME -n $RELEASE_NAMESPACE' to finish it)"
+        exit 0
+        ;;
+    esac
+
+    # Latest published version.
+    LATEST="$(helm search repo "${REPO_NAME}/${CHART_NAME}" -o yaml | parse_repo_version)"
+
+    # Currently deployed chart version. `helm list -o yaml` emits
+    # `chart: client-<version>` for the matching release.
+    CURRENT_CHART="$(helm list -n "$RELEASE_NAMESPACE" \
+      --filter "^${RELEASE_NAME}\$" -o yaml \
+      | awk '/^[[:space:]]*chart:/ {print $2; exit}')"
+    CURRENT="${CURRENT_CHART#${CHART_NAME}-}"
+
+    if [ -z "$LATEST" ]; then
+      log "ERROR: could not resolve latest chart version from $REPO_URL"
+      exit 1
+    fi
+    if [ -z "$CURRENT" ] || [ "$CURRENT" = "$CURRENT_CHART" ]; then
+      log "ERROR: could not parse deployed chart version (got '$CURRENT_CHART')"
+      exit 1
+    fi
+
+    log "current=$CURRENT latest=$LATEST"
+
+    if [ "$LATEST" = "$CURRENT" ]; then
+      log "already at latest; nothing to upgrade"
+      telemetry_reconcile_if_needed
+      exit 0
+    fi
+
+    # Semver-aware compare via `sort -V` so 1.10.0 > 1.9.0.
+    NEWER="$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n 1)"
+    if [ "$NEWER" != "$LATEST" ]; then
+      log "deployed version is ahead of repo (current=$CURRENT > latest=$LATEST); skipping the upgrade"
+      telemetry_reconcile_if_needed
+      exit 0
+    fi
+
+    log "upgrading $CURRENT -> $LATEST"
+    # --reset-then-reuse-values (helm 3.14+) is critical here: --reuse-values
+    # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
+    # to values.yaml in the upgraded chart (e.g. a future autoUpgrade.foo
+    # default) would silently fail to render with nil-pointer template errors
+    # — verified on a dev-cluster 1.1.0 -> 1.3.0 dry-run when shipping #69.
+    # --reset-then-reuse-values resets to the new chart's defaults first, then
+    # layers the customer's user-supplied values on top, so operator overrides
+    # (clientId, dockerRegistry creds, autoUpgrade.enabled=false, etc.) are
+    # preserved while new defaults flow through.
+    # --atomic (implies --wait): if the upgrade fails gracefully — bad manifest,
+    # a pod that never goes ready within --timeout — helm rolls the release back
+    # to the prior working revision instead of leaving it broken or pending. It
+    # cannot undo an abrupt SIGKILL (the helm process is gone before it can roll
+    # back); that residual pending-upgrade is caught by the recovery step above
+    # on the next tick. --cleanup-on-fail removes any new resources the failed
+    # attempt created so the rollback is clean.
+    helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+      --namespace "$RELEASE_NAMESPACE" \
+      --version "$LATEST" \
+      --reset-then-reuse-values \
+      --atomic \
+      --cleanup-on-fail \
+      --timeout "$UPGRADE_TIMEOUT"
+    log "upgrade complete: $CURRENT -> $LATEST"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "tracebloc.autoUpgradeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+spec:
+  schedule: {{ .Values.autoUpgrade.schedule | quote }}
+  suspend: {{ .Values.autoUpgrade.suspend }}
+  # Forbid: never run two upgrade attempts at once. A long upgrade that
+  # crosses the next scheduled tick should not stack a second `helm upgrade`
+  # on top of itself.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.autoUpgrade.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.autoUpgrade.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.autoUpgrade.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # #555: hard wall-clock cap on the Job. `timeout` bounds only
+      # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
+      # fetches can hang on a TCP black-hole with no timeout, and with
+      # concurrencyPolicy: Forbid a single hung Job skips every future tick.
+      # This backstop fails the Job so the next tick can run.
+      #
+      # The deadline must never undercut a longer configured autoUpgrade.timeout:
+      # that would kill a healthy `helm upgrade --wait` before its own timeout
+      # fires. So take the MAX of the configured floor (default 900s) and the
+      # parsed timeout plus 300s repo-fetch headroom (the same 900-600 headroom
+      # baked into the defaults). `| default 900` preserves the reuse-values
+      # nil-guard when the key is absent.
+      {{- $deadlineFloor := .Values.autoUpgrade.activeDeadlineSeconds | default 900 | int }}
+      {{- $timeoutSeconds := include "tracebloc.durationSeconds" .Values.autoUpgrade.timeout | int }}
+      activeDeadlineSeconds: {{ max $deadlineFloor (add $timeoutSeconds 300) }}
+      template:
+        metadata:
+          labels:
+            {{- include "tracebloc.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: auto-upgrade
+        spec:
+          serviceAccountName: {{ include "tracebloc.autoUpgradeName" . }}
+          # NEEDED. auto-upgrade-rbac.yaml binds this SA to a Role over `*` in the
+          # release namespace plus a ClusterRole over namespaces, PVs,
+          # StorageClasses and RBAC — it runs `helm upgrade`, which rewrites the
+          # release. Without the token the CronJob cannot upgrade anything.
+          automountServiceAccountToken: true
+          # `Never`, NOT `OnFailure` (backend#2620). Kubernetes DELETES the Pod
+          # of an `OnFailure` Job once `backoffLimit` is exhausted, so a
+          # repeatedly-failing CronJob leaves its Jobs behind and **no logs** —
+          # `failedJobsHistoryLimit` retains the Job object and cannot retain a
+          # Pod that no longer exists. The upstream docs say so outright: "your
+          # Pod running the Job will be terminated once the job backoff limit
+          # has been reached. This can make debugging the Job's executable more
+          # difficult. We suggest setting restartPolicy = 'Never'".
+          #
+          # MEASURED, not theoretical. A customer prod edge's auto-upgrade had
+          # been failing hourly for 2.7 days; five `Failed` Jobs were retained
+          # and every one of their Pods was gone, so the reason was
+          # unrecoverable from the cluster and the namespace event window had
+          # rolled past it. `lastSuccessfulTime` was the only surviving
+          # evidence that anything was wrong.
+          #
+          # Under `Never` each attempt is its own Pod (backoffLimit+1 at most),
+          # and they persist with the Job — so the next failure is readable.
+          # That is the whole point: a scheduled job whose failures leave no
+          # evidence is unobservable by construction.
+          restartPolicy: Never
+          {{- if include "tracebloc.useImagePullSecrets" . }}
+          imagePullSecrets:
+            - name: {{ include "tracebloc.registrySecretName" . }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: helm
+              image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ .Values.autoUpgrade.image.repository }}:{{ .Values.autoUpgrade.image.tag }}"
+              imagePullPolicy: {{ .Values.autoUpgrade.image.pullPolicy }}
+              # `helm` is the entrypoint on alpine/helm; override so we run
+              # our script instead.
+              command: ["/bin/sh", "/scripts/auto-upgrade.sh"]
+              env:
+              {{- include "tracebloc.proxyEnv" . | nindent 16 }}
+                - name: RELEASE_NAME
+                  value: {{ .Release.Name | quote }}
+                - name: RELEASE_NAMESPACE
+                  value: {{ .Release.Namespace | quote }}
+                - name: REPO_URL
+                  value: {{ .Values.autoUpgrade.repoUrl | quote }}
+                - name: REPO_NAME
+                  value: {{ .Values.autoUpgrade.repoName | quote }}
+                - name: CHART_NAME
+                  value: {{ .Values.autoUpgrade.chartName | quote }}
+                - name: UPGRADE_TIMEOUT
+                  value: {{ .Values.autoUpgrade.timeout | quote }}
+                # #2877: the wedge-vs-in-flight age threshold, in whole seconds.
+                # The script's awk does the age math but not duration parsing, so
+                # convert the human duration here. `| default "45m"` preserves the
+                # reset-then-reuse-values nil-guard when an older values.yaml
+                # predates the key (same pattern as activeDeadlineSeconds).
+                - name: WEDGE_MIN_AGE_SECONDS
+                  value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
+                # backend#3550: the names the same-version reconcile reads the
+                # stored manifest and the dry-run render by. Rendered from the SAME
+                # helpers the status template and the Collector DaemonSet use, so
+                # the reader and the writers cannot disagree about a spelling.
+                - name: TELEMETRY_STATUS_NAME
+                  value: {{ include "tracebloc.telemetryStatusName" . | quote }}
+                - name: TELEMETRY_STATUS_ANNOTATION
+                  value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
+                - name: TELEMETRY_COLLECTOR_NAME
+                  value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.autoUpgrade.resources | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "tracebloc.autoUpgradeName" . }}
+                defaultMode: 0555
+            - name: tmp
+              emptyDir: {}
+{{- end }}

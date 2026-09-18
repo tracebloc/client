@@ -1,0 +1,292 @@
+{{- if (include "tracebloc.resourceMonitorEnabled" .) }}
+{{/*
+  Pre-flight: resource-monitor polls the metrics.k8s.io API, so metrics-server
+  must be registered. We probe kube-system via `lookup` first — that returns
+  empty during `helm template` (no cluster access), so offline rendering isn't
+  blocked. On a real install where lookup can see the cluster, we require
+  metrics-server up front.
+
+  WHY UP FRONT, rather than letting the pod report it: because the pod does not
+  report it. This comment used to say the DaemonSet "crash-loops with 404s",
+  which would at least be visible in a restart count. What actually happens is
+  quieter — client-runtime's Node-deploy/resource_monitor.py constructs
+  NodeUtilisation as the first statement inside its `while True:` body and that
+  constructor reads metrics.k8s.io outside any try; the loop's handler catches
+  Exception, logs, and sleeps 5 s. With no liveness or readiness probe on this
+  DaemonSet, the pod stays Running and healthy-looking forever while
+  send_heartbeat is never reached. Node telemetry stops and nothing says so.
+
+  That is the whole argument for the `fail` below: this is the last point where
+  the problem is loud.
+*/}}
+{{/*
+  THREE OUTCOMES, NOT TWO (backend#2469). The comment above used to say `lookup`
+  "returns empty during `helm template`", which is true, and then treated
+  connected-and-permitted as the only other case. There is a third: connected and
+  FORBIDDEN, which RAISES rather than returning empty, and helm cannot catch it.
+
+  `APIService` is cluster-scoped, and Kubernetes' built-in `admin` ClusterRole does
+  not include it. So an operator whose EKS access entry is AmazonEKSAdminPolicy
+  rather than AmazonEKSClusterAdminPolicy could not `helm upgrade` this chart AT
+  ALL -- not this DaemonSet, the whole release -- and the error named
+  resource-monitor and metrics-server, so the obvious first reading was
+  "metrics-server is broken" when metrics-server was fine and the caller's RBAC was
+  the problem.
+
+  WHY THE FIX IS A FLAG AND NOT A CHEAPER PROBE. The first version of this change
+  probed the `metrics-server` Deployment first -- namespaced, readable by any
+  namespace admin -- and granted the auto-upgrade SA a matching read. That is a
+  FLEET-WIDE LOCKOUT, and the reason is worth writing down because it is not
+  obvious: THE TICK THAT WOULD APPLY THE GRANT IS THE TICK THAT NEEDS IT. On the
+  first auto-upgrade onto such a chart the scoped SA renders before the ClusterRole
+  lands, the new `lookup` 403s, helm aborts, `--atomic` rolls back, and every later
+  hourly tick fails identically. The grant can never arrive.
+
+  The general rule: ANY new `lookup` of a resource the CURRENT ServiceAccount
+  cannot already read locks the unattended path permanently. `apiservices` is
+  already granted (backend#953), so keeping that as the only privileged call is
+  what makes this safe. (Bugbot High on client#823.)
+
+  `nodeAgents.metricsServerPreflight: false` is therefore the whole escape hatch,
+  and it gates the ONLY privileged call rather than a fallback. It does not skip
+  silently -- the annotation below records which path decided, so a skipped check
+  is never mistaken for a passed one.
+*/}}
+{{/*
+  Resolved ONCE at template scope, because it is read in three places below
+  (volumeMount, env, volume) and Helm scopes a variable to the block it is
+  defined in. Empty on every install that did not relocate its dataset tree --
+  see tracebloc.resourceMonitorDatasetPath for why that is not a truth test.
+*/}}
+{{- $datasetPath := include "tracebloc.resourceMonitorDatasetPath" . -}}
+{{- $probe := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- $preflight := "skipped-offline" -}}
+{{- if $probe -}}
+  {{/*
+    hasKey, NOT `default`. Sprig's `default` treats boolean FALSE as empty, so
+    `default true false` returns TRUE -- metricsServerPreflight: false would never
+    have taken this branch and the opt-out would have been inert while looking
+    present. Exactly the "mechanism that appears to verify something but is not
+    connected to it" shape backend#1729 is about. (Bugbot Medium on client#823.)
+  */}}
+  {{- if and (hasKey (default dict .Values.nodeAgents) "metricsServerPreflight") (not .Values.nodeAgents.metricsServerPreflight) -}}
+    {{- $preflight = "skipped-by-values" -}}
+  {{- else -}}
+    {{- if not (lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io") -}}
+      {{- fail "resourceMonitor is enabled but the metrics.k8s.io/v1beta1 API is not registered. Install metrics-server (https://github.com/kubernetes-sigs/metrics-server) or set resourceMonitor.enabled: false. See SECURITY.md.\n\nIf THIS line was instead an `apiservices ... is forbidden` error, the problem is the caller's RBAC, not metrics-server: APIService is cluster-scoped and the built-in `admin` ClusterRole excludes it. Set nodeAgents.metricsServerPreflight: false to skip this check, or run the upgrade with cluster-scope read on apiservices (backend#2469)." -}}
+    {{- end -}}
+    {{- $preflight = "satisfied-by-apiservice" -}}
+  {{- end -}}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "tracebloc.resourceMonitorName" . }}
+  namespace: {{ .Values.nodeAgents.namespace.name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    # WHICH check decided this render. A skipped preflight must not be
+    # indistinguishable from a passed one (client#2469).
+    tracebloc.io/metrics-server-preflight: {{ $preflight | quote }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: {{ include "tracebloc.resourceMonitorName" . }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "tracebloc.resourceMonitorName" . }}
+  # #569 (Bugbot): #569 made this DaemonSet a `kubectl set image` target, and the
+  # refresh tick then BLOCKS on `rollout status` for up to imageRefresh.rolloutTimeout
+  # (10m). The Kubernetes default is maxUnavailable: 1 — strictly one node at a time —
+  # so on a multi-node cluster a single digest change takes (nodes x pull+start time)
+  # to converge and blows that wait long before the image is bad. The tick then fails,
+  # the digest annotation never advances, and three of those trip the #563 flap lockout
+  # for every control-plane image, not just this one.
+  #
+  # 10% widens the wave enough that rollout time scales with the cluster instead of
+  # with node COUNT, while never taking out more than a tenth of the fleet's metrics
+  # collection at once. Safe here specifically because resource-monitor is a read-only
+  # node metrics reader: a node without it briefly reports no utilisation, which
+  # degrades scheduling telemetry and nothing else — no training pod, ingestion Job, or
+  # control-plane request depends on it being present. Kubernetes rounds 10% DOWN and
+  # floors it at 1, so small clusters keep exactly today's one-at-a-time behaviour.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "10%"
+  template:
+    metadata:
+      labels:
+        app: {{ include "tracebloc.resourceMonitorName" . }}
+    spec:
+      serviceAccountName: {{ include "tracebloc.resourceMonitorName" . }}
+      # NEEDED. resource-monitor-rbac.yaml binds this SA to a ClusterRole over
+      # pods, nodes, nodes/status and metrics.k8s.io — polling those IS the job.
+      # Contrast telemetry-collector-daemonset.yaml, the other node-agents
+      # DaemonSet: it reads container stdout off the node filesystem, holds no
+      # Role at all, and therefore sets false.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - operator: "Exists"
+      containers:
+        - name: tracebloc-resource-monitor
+          {{- /*
+            images.resourceMonitor was added in 1.0.7; older releases that
+            upgrade via `helm upgrade --reuse-values` won't have the block in
+            their stored values, so read it defensively (nested `default dict`
+            tolerates a missing `images` map AND a missing `resourceMonitor`
+            entry). `dig` is not usable here — it rejects chartutil.Values.
+            Both guards now live inside tracebloc.controlPlaneImage, which also
+            decides whether the pin may be rendered at all (tracebloc.pinFor:
+            only on the registry it was resolved on).
+          */}}
+          image: {{ include "tracebloc.controlPlaneImage" (dict "image" "resourceMonitor" "root" $) | quote }}
+          # #569: IfNotPresent wherever an update path exists without `Always` --
+          # see tracebloc.controlPlanePullPolicy. `Always` made every node's pod
+          # re-pull on restart, so an offline restart wedged the DaemonSet in
+          # ImagePullBackOff fleet-wide. This DaemonSet previously had NO
+          # deliberate update path at all (image-refresh did not touch it, and a
+          # chart release does not change its image ref) -- it only moved when a
+          # pod happened to restart. image-refresh now reconciles it explicitly
+          # with `kubectl set image`, so the update path is intentional for the
+          # first time -- but only where that reconcile can run, which is exactly
+          # what the helper gates on.
+          imagePullPolicy: {{ include "tracebloc.controlPlanePullPolicy" (dict "image" "resourceMonitor" "root" $) }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: host-sys
+              mountPath: /host/sys
+              readOnly: true
+            # The node's filesystem, for the Storage meter (backend#3762). The
+            # cockpit shows the WHOLE storage available to the client, not
+            # `client-pvc`: `pvc.data` is a request, not a reservation, so on the
+            # hostPath / local-path setups this chart supports it describes a
+            # directory on this same disk and can name a size that does not exist.
+            #
+            # Read-only, and no extra privilege: statvfs needs only traverse
+            # permission, so this works under the `MustRunAsNonRoot` SCC exactly
+            # as the two mounts above do.
+            #
+            # The mount point is FIXED, and pairs with `HOST_ROOT_PATH` in
+            # resource_monitor.py. Only the HOST side below is configurable:
+            # which disk gets measured is a per-cluster fact, where it lands
+            # inside the pod is not, and making both adjustable would let the
+            # two drift apart into a mount the collector never looks at.
+            - name: host-root
+              mountPath: /host/root
+              readOnly: true
+            {{- if $datasetPath }}
+            # The DATASET filesystem, when datasets were relocated off the local
+            # tree (backend#3916). The meter measures the client's storage, and
+            # `hostStoragePath` above names one filesystem -- on a HOST_DATASET_DIR
+            # install the datasets, the one thing that grows without anyone
+            # deciding to grow it, are on the disk it is NOT looking at.
+            #
+            # Same posture as host-root: read-only, statvfs-only, no extra
+            # privilege. Mount point FIXED and paired with HOST_DATASET_PATH
+            # below, for the reason spelled out on host-root.
+            - name: host-dataset
+              mountPath: /host/dataset
+              readOnly: true
+            {{- end }}
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "utility"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # The monitor queries workloads in the release namespace, not its
+            # own node-agents namespace — use the release namespace literal
+            # rather than the Downward API pod namespace.
+            - name: NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: MONITOR_INTERVAL
+              value: "30"
+            {{- if $datasetPath }}
+            # Rendered ONLY with the mount above, and that pairing is the whole
+            # contract: the collector adds this path to the set it measures, so
+            # the var without the mount stats nothing and drops every node's
+            # storage reading. Never set one without the other.
+            - name: HOST_DATASET_PATH
+              value: /host/dataset
+            {{- end }}
+            {{- $clientEnv := include "tracebloc.clientEnv" . }}
+            - name: TRACEBLOC_ENV
+              value: {{ $clientEnv | quote }}
+            - name: CLIENT_ENV
+              value: {{ $clientEnv | quote }}
+            - name: CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_ID
+            - name: CLIENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_PASSWORD
+            {{- /* Corporate egress proxy (client-runtime#154): resource-monitor
+                 was the only backend-calling workload without proxyEnv, so its
+                 auth/heartbeat POSTs dialed direct and failed behind a proxy.
+                 Renders nothing when HTTP_PROXY_HOST is unset. requests honours
+                 the URL-form vars ambiently (trust_env); NO_PROXY carries the
+                 cluster-internal ranges, and the k8s python client ignores
+                 ambient proxy env, so in-cluster calls are unaffected. */ -}}
+            {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      terminationGracePeriodSeconds: 15
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+      - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        # `/` by default, because "the client's storage" is the node's root
+        # filesystem. A node whose datasets sit on a DEDICATED disk mounted
+        # deeper in the tree must point this at that mount instead -- statvfs
+        # reports the device backing the path it is given, so measuring `/`
+        # there would report the wrong disk with no error to notice.
+        - name: host-root
+          hostPath:
+            path: {{ include "tracebloc.resourceMonitorHostStoragePath" . | quote }}
+            type: Directory
+        {{- if $datasetPath }}
+        # `type: Directory`, not DirectoryOrCreate, and deliberately: creating a
+        # missing dataset mount would hand the meter a fresh empty directory on
+        # the ROOT disk and read it as the dataset volume -- a wrong number
+        # reported confidently, which is the defect backend#3916 is about. Fail
+        # visibly instead. Both installers bind the volume with k3d's `@all`, so
+        # the path is on every node in the flow that sets this.
+        - name: host-dataset
+          hostPath:
+            path: {{ $datasetPath | quote }}
+            type: Directory
+        {{- end }}
+{{- end }}
