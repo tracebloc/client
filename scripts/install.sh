@@ -25,14 +25,20 @@
 #       a checksum fetched over the same channel an on-path attacker controls.
 #
 #  Usage (macOS / Linux):
-#    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/<TAG>/scripts/install.sh | bash
+#    curl -fsSL https://github.com/tracebloc/client/releases/latest/download/install.sh | bash
 #    bash <(curl -fsSL https://tracebloc.io/i.sh)
+#  (The public mirror serves the installer + its sub-scripts as RELEASE ASSETS;
+#   its source tree carries no scripts/ after the client → client-dev rename —
+#   backend#3998 — so the old raw.githubusercontent .../scripts/... URLs 404.)
 #
-#  Developer / unreleased-branch override (UNVERIFIED — not for customers):
-#    curl -fsSL ... | BRANCH=develop TRACEBLOC_ALLOW_UNVERIFIED=1 bash
+#  Developer / unreleased-branch override (UNVERIFIED — not for customers). The
+#  sub-scripts are fetched from the raw TREE of TRACEBLOC_SOURCE_REPO (default
+#  tracebloc/client, which carries no scripts/ tree), so point it at a source whose
+#  tree is readable — a public fork with your branch pushed:
+#    curl -fsSL ... | TRACEBLOC_SOURCE_REPO=<you>/client BRANCH=<branch> TRACEBLOC_ALLOW_UNVERIFIED=1 bash
 #
 #  Windows (PowerShell as Administrator):
-#    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+#    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
 # =============================================================================
 set -euo pipefail
 
@@ -50,7 +56,7 @@ fi
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     echo "[ERROR] Windows detected. Use PowerShell instead:"
-    echo "  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex"
+    echo "  irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex"
     exit 1 ;;
 esac
 
@@ -191,7 +197,7 @@ if [[ "$REF" == "__TRACEBLOC_RELEASE_REF__" ]]; then
   else
     echo "[ERROR] This installer wasn't stamped with a pinned release tag, so it can't verify what it fetches." >&2
     echo "        Install from a release URL:" >&2
-    echo "          curl -fsSL https://raw.githubusercontent.com/tracebloc/client/<TAG>/scripts/install.sh | bash" >&2
+    echo "          curl -fsSL https://github.com/tracebloc/client/releases/latest/download/install.sh | bash" >&2
     echo "        or, for local development only, re-run with TRACEBLOC_ALLOW_UNVERIFIED=1." >&2
     exit 1
   fi
@@ -235,13 +241,59 @@ case "$REF" in
     exit 1 ;;
 esac
 
-REPO_RAW="https://raw.githubusercontent.com/tracebloc/client/${REF}"
-# The signed manifest + its cosign sig/cert are published as RELEASE ASSETS
-# (not committed into the tagged tree), because signing happens in CI *after*
-# the tag is cut — the same pattern the CLI uses for SHA256SUMS. The sub-script
-# *content* is still pinned to the immutable tag tree above; only the manifest's
-# authenticity material is served from the release.
+# The source repo whose raw TREE the dev/unverified path reads sub-scripts from.
+# Defaults to the public mirror. The public mirror does NOT carry a scripts/ tree
+# — its default branch is .github + README only, and no tag exposes scripts/
+# (verified against tracebloc/client on 2026-09-18) — so BRANCH= against the
+# default here has nothing to fetch. A maintainer iterating on an unreleased ref
+# points this at a source whose raw tree is actually readable: a public fork, or
+# tracebloc/client-dev itself (private, so its raw URLs need a token curl won't
+# send — a public fork is the practical choice). Customer installs never use this.
+SOURCE_REPO="${TRACEBLOC_SOURCE_REPO:-tracebloc/client}"
+# Validate the owner/repo shape before it is interpolated into a URL (same care as
+# $REF above): exactly one '/' and shell-safe chars. The character class admits '.'
+# so a segment could be all dots ('a/..' matches the regex) — reject '..' explicitly,
+# the same parent-dir traversal lever $REF guards against, rather than trusting the
+# shape alone to exclude it.
+if [[ ! "$SOURCE_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || "$SOURCE_REPO" == *..* ]]; then
+  echo "[ERROR] TRACEBLOC_SOURCE_REPO='$SOURCE_REPO' is not a valid owner/repo." >&2
+  exit 1
+fi
+REPO_RAW="https://raw.githubusercontent.com/${SOURCE_REPO}/${REF}"
+# The RELEASE ASSETS for this ref. Everything the customer path fetches — the
+# sub-scripts (attached as flat assets by basename), the signed manifest, and its
+# cosign sig/cert/bundle — is served from here. backend#3998: the public mirror
+# carries no scripts/ tree, so the old raw-by-tag transport 404s for every
+# customer tag; and even where a tree IS present on the mirror it tracks only the
+# newest stable publish (the mirror's tree push is gated to that release), so a
+# raw-by-tag fetch of an older or pre-release tag would serve another release's
+# bytes and fail the signature check. Release assets are per-tag and immutable, so
+# they are the correct transport for the sub-script *content* (signing happens in
+# CI *after* the tag is cut, so the manifest + its cosign material were always
+# release assets — the same pattern the CLI uses for SHA256SUMS). Every fetched
+# byte is still verified against the signed manifest below, so serving the bytes
+# from the release changes the transport, not the integrity guarantee.
 REPO_REL="https://github.com/tracebloc/client/releases/download/${REF}"
+
+# Where to fetch one sub-script from. Customer path → the RELEASE ASSET addressed
+# by basename ($REPO_REL/<name>), and ONLY the release asset: the customer path
+# never reads the source tree, so it can never fetch from raw.githubusercontent.
+# Dev/unverified path (TRACEBLOC_ALLOW_UNVERIFIED=1) → the source TREE
+# ($REPO_RAW/scripts/...), DELIBERATELY tree-only. It does NOT fall back to (or
+# prefer) the release asset — unlike download_manifest, which is release-first and
+# may fall back to raw — because that asymmetry is the point: the manifest can
+# safely try two locations, but a privileged sub-script must come from exactly the
+# one place the operator chose. So the dev path is coherent only against a ref
+# whose tree $REPO_RAW actually serves; set TRACEBLOC_SOURCE_REPO to a source you
+# control (a public fork) when iterating on an unreleased BRANCH.
+subscript_url() {
+  local f="$1"
+  if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
+    printf '%s/%s' "$REPO_RAW" "$f"
+  else
+    printf '%s/%s' "$REPO_REL" "$(basename "$f")"
+  fi
+}
 
 # Who may SIGN the manifest — deliberately a DIFFERENT constant from where it is
 # DOWNLOADED (REPO_RAW / REPO_REL above). Customers fetch from the public mirror
@@ -337,7 +389,7 @@ download_with_retry() {
 printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
 for f in "${FILES[@]}"; do
   dest="$TMPDIR/${f#scripts/}"
-  download_with_retry "$REPO_RAW/$f" "$dest"
+  download_with_retry "$(subscript_url "$f")" "$dest"
 done
 printf '\r\033[K'
 printf '  %s✔%s Installer downloaded — %s files\n' "$_G" "$_R" "${#FILES[@]}"

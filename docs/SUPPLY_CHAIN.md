@@ -24,10 +24,12 @@ binary covered only the *leaf*; everything upstream of it was unverified.
 ## 2. The verification model (what the installer does today)
 
 1. **Immutable ref.** `scripts/install.sh` fetches every sub-script from a fixed
-   release **tag** (`DEFAULT_REF`, e.g. `v2.0.1`), not a branch. GitHub serves
-   tag content immutably, so the tag's bytes can't be moved under us. A `BRANCH`
-   / non-`vX.Y.Z` ref is refused unless the operator sets
-   `TRACEBLOC_ALLOW_UNVERIFIED=1` (developer-only, and it shouts).
+   release **tag** (`DEFAULT_REF`, e.g. `v2.0.1`), not a branch — as the tag's
+   **release assets** (see the note below §2). A `BRANCH` / non-`vX.Y.Z` ref is
+   refused unless the operator sets `TRACEBLOC_ALLOW_UNVERIFIED=1` (developer-only,
+   and it shouts). Whatever the transport, the immutability that matters is the
+   **signed manifest** (item 2): the bytes are trusted because their digest is in
+   a cosign-signed manifest, not because of where they were fetched from.
 
 2. **Signed manifest.** A `manifest.sha256` lists the sha256 of every sub-script
    at that tag. The bootstrap downloads each sub-script, recomputes its digest,
@@ -59,12 +61,26 @@ the pinned tag:
 | `manifest.sha256` | `scripts/gen-manifest.sh` | every sub-script's bytes (both platforms) |
 | `manifest.sha256.sig` | `cosign sign-blob` (keyless) | authenticity of the manifest |
 | `manifest.sha256.cert` | `cosign sign-blob` (keyless) | the cert the sig verifies against |
+| `manifest.sha256.bundle` | `cosign sign-blob --bundle` | offline Sigstore bundle (sig+cert+Rekor proof) |
+| the ~20 sub-scripts | attached flat by basename from `gen-manifest.sh --print-files` | the privileged code the manifest hashes |
 
-Sub-script **content** is still pulled from the immutable tag *tree*
-(`raw.githubusercontent.com/.../<tag>/scripts/...`); only the manifest +
-signature live as release assets (signing happens in CI *after* the tag is cut,
-so they can't be committed into the tagged commit — same reason the CLI serves
-`SHA256SUMS` as a release asset).
+Sub-script **content** is served as **release assets** too, one flat asset per
+sub-script addressed by basename (`$BASE/install-k8s.sh`, `$BASE/common.sh`, …).
+It used to be pulled from the tag *tree* (`raw.githubusercontent.com/.../<tag>/scripts/...`),
+which is **unreliable by construction on the public mirror** (backend#3998), for
+two reasons: the mirror carries no `scripts/` tree at all today (its default
+branch is `.github` + `README.md` only, verified 2026-09-18), so raw-by-tag 404s;
+and even where a tree *is* present on the mirror it tracks only the **newest stable
+publish** (the mirror's tree push is gated to that release), so a raw-by-tag fetch
+of an older or pre-release tag would serve a *different release's* bytes and fail
+the signature check. **Release assets are per-tag and immutable**, so they are the
+correct transport. Only the maintainer/`TRACEBLOC_ALLOW_UNVERIFIED=1` path reads
+the tree, from `TRACEBLOC_SOURCE_REPO` (default `tracebloc/client`; point it at a
+public fork whose branch you pushed — `tracebloc/client-dev` is private, so its raw
+URLs need a token). Either way every fetched byte is verified against the signed
+manifest, so the transport is not a trust boundary. (The manifest + signature were
+always release assets because signing happens in CI *after* the tag is cut — same
+reason the CLI serves `SHA256SUMS` as a release asset.)
 
 ## 3. Why cosign keyless (and not minisign / gpg)
 
@@ -196,9 +212,12 @@ cosign verify-blob \
   manifest.sha256
 # → "Verified OK"
 
-# Then confirm a sub-script matches the manifest:
-curl -fsSL "https://raw.githubusercontent.com/tracebloc/client/$TAG/scripts/lib/provision.sh" \
-  | sha256sum  # compare to the provision.sh line in manifest.sha256
+# Then confirm a sub-script matches the manifest. The sub-scripts ship as flat
+# RELEASE ASSETS addressed by basename (the public mirror carries no source tree
+# after the client → client-dev rename — backend#3998), so fetch from $BASE, not
+# raw.githubusercontent:
+curl -fsSL "$BASE/provision.sh" \
+  | sha256sum  # compare to the "scripts/lib/provision.sh" line in manifest.sha256
 ```
 
 On Windows the same `cosign verify-blob` invocation works verbatim (cosign ships

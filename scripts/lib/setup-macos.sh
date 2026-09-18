@@ -181,14 +181,19 @@ _install_docker_colima() {
 # WHY COLIMA AND NOT DOCKER DESKTOP, which is the asymmetry to understand here.
 # Colima is a CLI with documented flags: `colima stop && colima start --memory N`
 # is a supported operation whose effect can be MEASURED afterwards. Docker
-# Desktop's VM size lives in a settings file whose schema is version-dependent
-# and, on a default install, does not contain a memory key at all -- Docker only
-# persists what the user has changed (verified on macOS 15 / Docker Desktop:
-# settings-store.json held ten keys and none of them was memory). Writing a
-# guessed key name there would produce an installer that SAYS it raised the VM
-# and did nothing, which is worse than the instruction it replaced. So Docker
-# Desktop keeps the instruction that preflight already prints, and this path is
-# deliberately Colima-only.
+# Desktop's VM size lives in a settings file, and until 2026-09-17 this path was
+# deliberately Colima-only: the memory key's name had never been read off a real
+# installation, and a default install does not carry it at all (Docker persists
+# only what the user changed; a fresh settings-store.json held ten keys and none
+# was memory), so a guessed key would have produced an installer that SAYS it
+# raised the VM and did nothing. The key has since been read from a live Desktop
+# (`"MemoryMiB": 12288` beside `"Cpus": 6` in
+# ~/Library/Group Containers/group.com.docker/settings-store.json, Desktop 4.4x,
+# engine 29.7), so _offer_desktop_memory_raise below edits exactly that key --
+# replacing it when present, inserting it when the store has never carried one --
+# and MEASURES the result the same way the Colima path does. Anything it cannot
+# prove (no store, no quit, no restart, a read-back that disagrees) refuses and
+# leaves the preflight's instruction standing.
 #
 # CONSENT IS REQUIRED, because this stops the user's container runtime -- every
 # running container goes down. The ticket asks for it explicitly and it is the
@@ -289,9 +294,8 @@ _offer_colima_memory_raise() {
   #          (PF_WARN_MEM_GB, derived from the generated VM constant; clamped to
   #          this host the way the preflight clamps it): the client runs, and
   #          every training pod stays Pending. RFC-BACKEND-664 §P4 names raising
-  #          the VM as the remedy — and this is the only place the installer can
-  #          apply it itself, since Docker Desktop's on-disk settings are not ours
-  #          to write (see the header above) and get the preflight's hint instead.
+  #          the VM as the remedy; Docker Desktop gets the same offer through its
+  #          settings store in _offer_desktop_memory_raise below.
   local rung_eff short_reason
   rung_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   if (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
@@ -452,16 +456,638 @@ _offer_colima_memory_raise() {
 
   # RE-PROBED, not assumed. A start that succeeded and a VM that grew are
   # different facts, and only the second is worth a success line.
-  local new_kb new_gb
-  new_kb="$(_pf_runtime_mem_kb)"
-  # Same grace-aware arithmetic as the grading above: truncating here would let a
-  # raise that landed exactly ON the floor report that nothing grew.
-  if [[ "$new_kb" =~ ^[0-9]+$ ]] &&
-     (( $(_pf_display_gb_from_mib "$(( new_kb / 1024 ))") > current_gb )); then
-    new_gb="$(_pf_display_gb_from_mib "$(( new_kb / 1024 ))")"
+  # AND A PROBE THAT DID NOT ANSWER IS NEITHER (Bugbot on #1101): the `else` used
+  # to print "still reports ${current_gb} GB" for both a VM that measurably did
+  # not grow AND a runtime that said nothing at all -- one sentence asserting a
+  # size nobody read, with the number carried over from before the restart. They
+  # are separated now, and the measured arm prints the size it measured.
+  local new_gb; new_gb="$(_runtime_probed_gb)"
+  if [[ -z "$new_gb" ]]; then
+    warn "Colima restarted but did not answer when asked what its VM has, so the new size was not measured. Check 'colima status' and raise it manually: ${cmd}"
+  elif (( new_gb > current_gb )); then
     success "Colima VM raised to ${new_gb} GB."
   else
-    warn "Colima restarted but still reports ${current_gb} GB. Check 'colima status' and raise it manually: ${cmd}"
+    warn "Colima restarted but still reports ${new_gb} GB. Check 'colima status' and raise it manually: ${cmd}"
+  fi
+  return 0
+}
+
+# ── Docker Desktop for Mac: the same offer, through Desktop's settings store ──
+#
+# WHERE THE BUDGET LIVES. Desktop keeps its VM size as `"MemoryMiB": <n>` in
+# ~/Library/Group Containers/group.com.docker/settings-store.json (older releases:
+# settings.json in the same directory), read off a real installation -- see the
+# header. Desktop reads the file when it starts and rewrites it when a setting
+# changes, so the order is quit -> edit -> relaunch; an edit under a running
+# Desktop can be overwritten by its next write.
+#
+# THE OLDER FILE CARRIES THE OLDER SPELLING (Bugbot on #1101). The rename to
+# settings-store.json came with PascalCase keys; the settings.json this path falls
+# back to for older Desktops keys the same number as `"memoryMiB"`. Editing only
+# the PascalCase spelling there did not fail loudly -- the key looked absent, a
+# second one Desktop does not read was inserted, and the quit and relaunch were
+# spent on a raise that could not happen. So the SPELLING IS READ OFF THE STORE,
+# never assumed: _desktop_memory_key below, and the editor matches the family.
+#
+# TEXT, NOT A JSON ROUND-TRIP: one anchored substitution (or one inserted line
+# after the opening brace, when the key was never persisted) leaves every other
+# byte as it was. The Windows hook in the e2e harness learned why the hard way: a
+# JSON round-trip flattens one-element arrays. And the write is PROVEN by reading
+# the file back before Desktop is relaunched on it.
+_desktop_settings_store() {
+  local dir="$HOME/Library/Group Containers/group.com.docker"
+  if [[ -f "$dir/settings-store.json" ]]; then printf '%s' "$dir/settings-store.json"
+  elif [[ -f "$dir/settings.json" ]]; then printf '%s' "$dir/settings.json"
+  else return 1; fi
+}
+# Which spelling of the VM-size key this store uses. THE FILE IS THE AUTHORITY and
+# is asked first: a store that already carries one of the two spellings gets that
+# one back, whatever its name, because the key Desktop reads is the key Desktop
+# wrote. Only a store carrying NEITHER -- nothing has ever been persisted -- falls
+# back to the file name, which is the one thing left that says which Desktop
+# generation wrote it: settings.json is the pre-rename file and keys the number as
+# `memoryMiB`; settings-store.json, and anything else, as `MemoryMiB`.
+#
+# The exact spelling matters to the operator too, not just to the editor: every
+# message below that tells someone to set the key by hand names THIS, never a
+# literal, or it sends them to a key their Desktop does not have.
+_desktop_memory_key() {          # <store text> <store path> -> MemoryMiB | memoryMiB
+  local text="$1" store="$2"
+  if   [[ "$text" =~ \"MemoryMiB\"[[:space:]]*: ]]; then printf 'MemoryMiB'
+  elif [[ "$text" =~ \"memoryMiB\"[[:space:]]*: ]]; then printf 'memoryMiB'
+  elif [[ "${store##*/}" == "settings.json" ]];    then printf 'memoryMiB'
+  else printf 'MemoryMiB'; fi
+}
+# Is Docker Desktop the runtime `docker` is actually talking to? The context is
+# `desktop-linux` on a current Desktop; an older install answers on `default`, in
+# which case the engine's own OperatingSystem string decides. Anything else --
+# colima, a remote context, unreadable -- is "not Desktop", and this path declines.
+#
+# THREE OUTCOMES, NOT TWO (bounded-reads-propagate.bats, and Bugbot on #1101):
+#   0  Desktop is the runtime
+#   1  another runtime is, or the engine answered and is not Desktop
+#   2  could not tell -- the bounded read hit its deadline, which is neither
+#      answer, and the caller says so instead of silently skipping the offer
+# AND ONE NON-OUTCOME, the same 3 the two probes above use (Bugbot on #1101):
+#   3  nothing was probed at all, because no temp file could be created. This was
+#      2, which made a failed `mktemp` indistinguishable from a fired deadline and
+#      had the caller announce a timeout that never happened -- "Docker did not
+#      answer within 10s" about a read that was never issued. Callers word 3
+#      through _desktop_unprobed_words, never as a Docker state.
+_desktop_is_active_runtime() {
+  local ctx
+  ctx="$(docker context show 2>/dev/null)" || return 1
+  case "$ctx" in
+    desktop-linux) return 0 ;;
+    default)
+      # BOUNDED, like every daemon read in scripts/lib/ (#744, client#984): the
+      # engine's OperatingSystem string is the one thing that says whether the
+      # `default` context is Desktop's, and a wedged daemon must not hang the offer.
+      local out rc=0 verdict=1
+      out="$(mktemp)" || return 3
+      # `_bounded_capture` keeps stderr with stdout, and a CLI plugin warning there
+      # must not hide the engine's answer (Bugbot on #1101): the answer is a whole
+      # LINE that reads exactly "Docker Desktop", wherever the noise lands. `grep`
+      # reads the FILE -- no pipe, so no early-close under pipefail.
+      _bounded_capture "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$out" docker info --format '{{.OperatingSystem}}' || rc=$?
+      if (( rc == 0 )); then
+        grep -qx 'Docker Desktop' "$out" && verdict=0
+      elif (( rc == 124 )); then
+        verdict=2          # the deadline fired: the engine neither confirmed nor denied
+      fi                   # any other status: docker answered, and it failed -- not Desktop's engine
+      rm -f "$out"
+      return "$verdict" ;;
+    *) return 1 ;;
+  esac
+}
+# Ask Desktop to quit and wait, bounded, until no Desktop process is left. The
+# graceful quit is the one that lets Desktop flush its own state; this path never
+# kills it, because a killed Desktop can rewrite the store on its next start from
+# whatever it held in memory -- exactly the write this edit must not race.
+#
+# Asking for the backend BY NAME is the part that has to be done carefully
+# (Bugbot on #1101): Darwin caps a process's `comm` at MAXCOMLEN (16) chars --
+# `p_comm[MAXCOMLEN+1]` in `struct extern_proc` -- and `pgrep` without `-f`
+# matches that truncated name. "com.docker.backend" is 18, so `pgrep -xq
+# "com.docker.backend"` can NEVER match, whatever is running: the wait would
+# return "gone" the moment the GUI exited, while the backend was still flushing
+# the very keys this edit must not race. The GUI's own "Docker Desktop" is 14
+# and matches fine.
+#
+# Two probes, OR'd, because over-detection is the safe direction here (it costs
+# a wait that times out and warns; under-detection costs the operator's store):
+#   * the truncated `comm`, DERIVED from the real name rather than typed, so a
+#     rename cannot leave a stale 16-char literal behind. `-x` is kept -- an
+#     exact match on the truncated name, not a substring;
+#   * the executable PATH, which `-f` reads off the full argv and does not
+#     truncate, so this still answers if a future Desktop reports a different
+#     `comm` than its binary name.
+_desktop_backend_running() {   # 0 iff Docker Desktop's backend process is alive
+  pgrep -xq "$(printf '%.16s' com.docker.backend)" && return 0
+  pgrep -fq '/Docker\.app/Contents/MacOS/com\.docker\.backend'
+}
+_desktop_processes_gone() {    # 0 iff NEITHER the GUI nor the backend is alive
+  ! pgrep -xq "Docker Desktop" && ! _desktop_backend_running
+}
+# Ask Desktop to quit and wait, bounded, until no Desktop process is left. The
+# graceful quit is the one that lets Desktop flush its own state; this path never
+# kills it, because a killed Desktop can rewrite the store on its next start from
+# whatever it held in memory -- exactly the write this edit must not race.
+_desktop_quit_and_wait() {   # <polls of 2s> -> 0 once "Docker Desktop" and com.docker.backend are gone
+  local polls="$1" i
+  osascript -e 'quit app "Docker"' >/dev/null 2>&1 || true
+  for (( i = 0; i < polls; i++ )); do
+    if _desktop_processes_gone; then return 0; fi
+    sleep 2
+  done
+  _desktop_processes_gone
+}
+# Write <content> to the store WITHOUT aborting the installer (Bugbot on #1101):
+# under `set -e` a bare `printf > "$store"` that fails -- permissions, a full disk,
+# an ACL on the group container -- exits right there, with Desktop already quit
+# and the store possibly truncated (`>` truncates first). So the write goes to a
+# sibling temp file and is moved into place atomically, every step is a
+# condition rather than a statement, and the caller decides what a failure
+# means. Returns non-zero when the store does not hold the new content.
+_desktop_write_store() {   # <store> <content> -> 0 iff the store now holds exactly <content>
+  local store="$1" content="$2" tmp
+  tmp="${store}.tracebloc-tmp.$$"
+  if ! printf '%s' "$content" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 1; fi
+  if ! mv -f "$tmp" "$store" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 1; fi
+  # Byte-for-byte, through cmp: `$(cat ...)` would strip the trailing newline the
+  # content deliberately keeps, and read a good write as a bad one.
+  printf '%s' "$content" | cmp -s - "$store"
+}
+# Wait for Docker to answer, bounded on a stock Mac (Bugbot on #1101): the general
+# _wait_for_docker probes through _docker_answers, whose bound is `_bounded`, a
+# no-op without coreutils -- so a VM that wedges on its new size would block it
+# forever, past the restore this path owes the operator. Each probe here runs
+# under _bounded_capture (spin's background-pid deadline, coreutils-free), and
+# the loop is a wall-clock deadline, not a poll count.
+#
+# THREE OUTCOMES: 0 Docker answered before <secs> elapsed; 124 it never did and
+# the LAST probe hit its deadline (an engine that is up but not answering --
+# wedged); 1 it never did and the last probe failed fast (an engine that is down
+# or refusing). Both non-zero mean "not back"; the caller's words differ.
+# AND ONE NON-OUTCOME (tracebloc-review on #1101): 3 when no temp file could be
+# created, so NOTHING was probed. It used to come back as 1, and a caller that
+# reads 1 as "down" rolls back a raise nobody measured -- the exact failure the
+# tri-state work exists to prevent. Callers word 3 through _desktop_unprobed_words,
+# never as a Docker state, and never act on it as one.
+_desktop_wait_for_docker() {   # <secs>
+  local secs="$1" out deadline rc=1
+  out="$(mktemp)" || return 3
+  deadline=$(( SECONDS + secs ))
+  while (( SECONDS < deadline )); do
+    rc=0
+    _bounded_capture "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$out" docker info >/dev/null 2>&1 || rc=$?
+    if (( rc == 0 )); then rm -f "$out"; return 0; fi
+    sleep 3
+  done
+  rm -f "$out"
+  if (( rc == 124 )); then return 124; fi
+  return 1
+}
+# One bounded "does Docker answer right now" probe, coreutils-free (see above).
+# THREE OUTCOMES, passed through as _bounded_capture reports them: 0 it answered;
+# 124 the deadline fired (up but not answering); any other status is docker's
+# own fast failure (down, or refusing). AND ONE NON-OUTCOME: 3 when no temp file
+# could be created, so nothing was probed at all (tracebloc-review on #1101: it
+# used to be 2, which the caller rendered as "refused the probe -- it has
+# stopped"). The docker CLI reports its own failures as 1 (125-127 for run/exec),
+# so 3 cannot be mistaken for its answer.
+_desktop_docker_answers() {
+  local out rc=0
+  out="$(mktemp)" || return 3
+  _bounded_capture "${TB_DOCKER_PROBE_TIMEOUT:-10}" "$out" docker info >/dev/null 2>&1 || rc=$?
+  rm -f "$out"
+  return "$rc"
+}
+# The one sentence for a probe that never ran (status 3 above), so every arm says
+# the same thing and none of them calls it a Docker state. No directory is named:
+# macOS's mktemp ignores TMPDIR and picks its own per-user location.
+_desktop_unprobed_words() {
+  printf 'could not be probed: no temporary file could be created (mktemp failed), so nothing was measured'
+}
+# The words for the store after a restore attempt, by the restore's OWN status
+# (Bugbot on #1101): never "back to N GB" when the write back failed -- Desktop
+# would boot on the new, untested size while the operator is told the opposite.
+_desktop_restore_words() {   # <restore status> <gb> <store>
+  if (( $1 == 0 )); then
+    printf 'its settings are back to %s GB' "$2"
+  else
+    printf 'its settings could NOT be written back to %s GB -- check %s by hand' "$2" "$3"
+  fi
+}
+# The words for a wait that ended in anything but Docker answering, by the wait's
+# OWN status (Bugbot on #1101). 124 is an engine that is UP and not answering --
+# a wedged VM -- so folding it into "Docker is down" is the wrong diagnosis AND
+# the wrong remedy: `open -a Docker` on an app that is already running does
+# nothing at all, and the operator follows the sentence into a loop. Two halves,
+# both read from the same status, so no arm can word the state one way and the
+# remedy the other -- which is exactly how three arms drifted from the two that
+# already distinguished 124.
+_desktop_wait_words() {   # <wait status> -> what happened
+  if (( $1 == 124 )); then
+    printf 'is up but not answering'
+  else
+    printf 'did not come back'
+  fi
+}
+_desktop_wait_remedy() {   # <wait status> -> what to do about it
+  if (( $1 == 124 )); then
+    printf 'Quit Docker Desktop (force-quit it if the whale menu will not respond) and open it again'
+  else
+    printf 'Open Docker Desktop'
+  fi
+}
+# The size the RUNTIME reports right now, in display GB, or NOTHING when it did
+# not answer (Bugbot on #1101). Every claim in this file about the size a VM is
+# running -- Desktop's and Colima's alike, which is why the name says runtime and
+# not desktop -- has to come from here: a size that was written, asked for, or
+# hoped for is a different fact from the size the VM is running, and the operator
+# acts on the second. The grace
+# arithmetic is the grading's, so a VM sitting exactly on a rung is not reported
+# as short of it. Empty is its own answer, to be said as such rather than filled
+# in with the size the installer expected -- that substitution is the bug this
+# helper exists to make hard, so callers must branch on it before comparing.
+_runtime_probed_gb() {
+  local kb; kb="$(_pf_runtime_mem_kb)"
+  [[ "$kb" =~ ^[0-9]+$ ]] || return 0
+  _pf_display_gb_from_mib "$(( kb / 1024 ))"
+}
+# Rewrite the store's VM-size key to <mib>: replaced in place when present -- in
+# WHICHEVER of the two spellings the store already uses, kept byte for byte --
+# inserted under <key> when the store never carried one. Prints nothing; the caller
+# reads the file back. Returns 1 when the text has no opening brace to insert
+# after, 2 when the key is there in a form this editor will not touch, and 3 when
+# BOTH spellings are there and which one Desktop reads is not this script's to
+# decide.
+_desktop_store_with_memory() {   # <original text> <mib> [key] -> new text on stdout
+  # PREFIX + NEW + SUFFIX around the matched text, not `${text/pattern/repl}`: the
+  # substitution form re-reads the match as a glob (a `[` in the store is a
+  # character class to it), and bash 3.2's quoting inside it is its own trap.
+  # `%%"$m"*` / `#*"$m"` take the match literally on every bash this runs on.
+  # THE VALUE IS A WHOLE BARE INTEGER, delimiter-anchored: `8192.0` must not match
+  # on its integer prefix and come back as `10240.0` (found by the review's own
+  # example).
+  #
+  # AND NOTHING HERE ASKS THE LIBC ABOUT NEWLINES (Bugbot on #1101). The store is
+  # multi-line -- that is the shape Desktop writes, and the one the fixture uses --
+  # and `.`, `^` and `$` are the three atoms whose meaning against a multi-line
+  # subject belongs to regcomp, not to this script: POSIX says `.` spans a newline
+  # and the anchors bind the whole string, REG_NEWLINE says the opposite, and the
+  # only bash that matters for this file is the stock macOS one, which no CI here
+  # can run. A `^(.*"MemoryMiB"…)$` was therefore a claim this repo cannot test.
+  # So it is gone: the key and its value are matched with no `.` and no anchor --
+  # `[[:space:]]` is a positive bracket expression and matches a newline under
+  # either reading -- and the text on both sides is cut off with the same literal
+  # `%%`/`#` ops used above, which mean one thing everywhere.
+  local text="$1" mib="$2" key="${3:-MemoryMiB}"
+  # ONE KEY FAMILY, TWO SPELLINGS (Bugbot on #1101). `MemoryMiB` is what
+  # settings-store.json carries; `memoryMiB` is what the older settings.json this
+  # path still falls back to carries. The pattern matches either, and because the
+  # rebuild below keeps every byte before the value, the spelling the store already
+  # uses is the spelling that comes back out -- the editor never renames a key.
+  local pat='"[Mm]emoryMiB"[[:space:]]*:[[:space:]]*[0-9]+[[:space:]]*[,}]' present='"[Mm]emoryMiB"[[:space:]]*:'
+  # BOTH SPELLINGS AT ONCE IS NOT A STORE THIS SCRIPT WILL GUESS AT. Two keys of
+  # the SAME spelling are last-wins under any JSON parser, which is what the walk
+  # below relies on; two DIFFERENT spellings are only resolved by Go's
+  # case-insensitive field matching -- a property of Desktop's parser, not of JSON,
+  # and not one this repo can test. Desktop never writes such a store, so it means
+  # something edited it; refuse before the quit rather than write the wrong one.
+  if [[ "$text" =~ \"MemoryMiB\"[[:space:]]*: && "$text" =~ \"memoryMiB\"[[:space:]]*: ]]; then
+    return 3
+  fi
+  if [[ "$text" =~ $pat ]]; then
+    # THE LAST match, not the first: two integer memory keys are resolved by Go's
+    # encoding/json -- Desktop's parser -- to the LAST one, so editing an
+    # earlier one would leave the raise silently undone while every proof passed.
+    # The old pattern got that from a greedy `.*`; this walk gets it without one.
+    local head="" rest="$text" m=""
+    while [[ "$rest" =~ $pat ]]; do
+      m="${BASH_REMATCH[0]}"
+      head+="${rest%%"$m"*}$m"
+      rest="${rest#*"$m"}"
+    done
+    head="${head%"$m"}"
+    # Neither spelling carries a digit of its own, so the match's own digits are the
+    # value: everything before the first is the key and its colon, everything after
+    # the last is the spacing and the delimiter. Both kept byte for byte.
+    printf '%s%s%s%s%s' "$head" "${m%%[0-9]*}" "$mib" "${m##*[0-9]}" "$rest"
+  elif [[ "$text" =~ $present ]]; then
+    # PRESENT, IN A FORM THIS EDITOR DOES NOT READ (tracebloc-review on #1101):
+    # `null`, a float, or the managed-settings object `{"value": …, "locked": true}`.
+    # Inserting a second key here would leave a duplicate; Go's encoding/json --
+    # Desktop's parser -- keeps the LAST one, so the raise would silently not
+    # happen while every proof passed. Refuse instead, with its own status.
+    return 2
+  else
+    # Same rule as above, and these two were members of the same class: `^…\{` and
+    # `^…\}` against a multi-line store are anchors whose reading decides whether
+    # the opening brace is the FIRST one or any line's, and whether `{…}` with keys
+    # in it counts as empty and so takes no trailing comma -- a wrong comma is
+    # invalid JSON, which Desktop then refuses to read at all. Cut literally
+    # instead: the brace is the first `{` in the text, and it is the opening brace
+    # only if nothing but whitespace precedes it.
+    local m="${text%%\{*}"
+    [[ "$m" != "$text" && -z "${m//[[:space:]]/}" ]] || return 1
+    m="${m}{"
+    local rest="${text#"$m"}" comma=","
+    # `{}`: a first key takes no trailing comma. The store's first non-space byte
+    # after the brace, found by cutting its leading whitespace off rather than by
+    # anchoring a pattern to it.
+    [[ "${rest#"${rest%%[![:space:]]*}"}" == "}"* ]] && comma=""
+    # THE SPELLING COMES FROM THE CALLER, which read it off the store (Bugbot on
+    # #1101). Hard-coding `MemoryMiB` here is what put a key an older Desktop does
+    # not read into an older Desktop's settings.json, after quitting it.
+    printf '%s\n  %s%s%s' "$m" "\"${key}\": ${mib}" "$comma" "$rest"
+  fi
+}
+_offer_desktop_memory_raise() {
+  [[ "${OS:-$(uname -s)}" == "Darwin" ]] || return 0
+  has docker || return 0
+  _docker_app_installed || return 0
+  # The measured budget must belong to the runtime we are about to restart -- and
+  # "could not tell" is said, not skipped past (bounded-reads-propagate.bats).
+  local active=0
+  _desktop_is_active_runtime || active=$?
+  case "$active" in
+    0) ;;
+    2) hint "Docker did not answer within ${TB_DOCKER_PROBE_TIMEOUT:-10}s, so the installer cannot tell whether Docker Desktop is the runtime it would raise. If it is, raise it yourself: Docker Desktop → Settings → Resources → Memory."
+       return 0 ;;
+    # 3 IS NOT 2: nothing was probed, so no timeout can be quoted (Bugbot on
+    # #1101). Still said rather than skipped in silence -- the offer is declined
+    # either way, and the operator is told which of the two it was.
+    3) hint "Whether Docker Desktop is the runtime the installer would raise $(_desktop_unprobed_words). If it is, raise it yourself: Docker Desktop → Settings → Resources → Memory."
+       return 0 ;;
+    *) return 0 ;;
+  esac
+
+  local current_kb current_mib target_gb current_gb rung_eff short_reason
+  current_kb="$(_pf_runtime_mem_kb)"
+  [[ "$current_kb" =~ ^[0-9]+$ && "$current_kb" -gt 0 ]] || return 0
+  current_mib=$(( current_kb / 1024 ))
+  # Graded in MiB with the guest-MemTotal grace, exactly as the Colima path and
+  # _pf_runtime_mem_status grade it -- a Desktop VM set to the documented floor
+  # reports a few hundred MiB less and must not be "fixed".
+  current_gb="$(_pf_display_gb_from_mib "$current_mib")"
+  target_gb="$(_macos_vm_mem_gb)"
+  [[ "$target_gb" =~ ^[0-9]+$ && "$target_gb" -gt 0 ]] || return 0
+  rung_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  if (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
+    short_reason="floor"
+  elif [[ "$rung_eff" =~ ^[0-9]+$ ]] && (( current_mib < rung_eff * 1024 - PF_VM_MEM_GRACE_MIB )); then
+    short_reason="rung"
+  else
+    return 0
+  fi
+  # The two honest non-offers, in the Colima path's words: a Mac that cannot reach
+  # the floor, and a rung raise the host cannot honour.
+  if [[ "$short_reason" == "floor" ]] && (( target_gb < PF_MIN_MEM_GB )); then
+    hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+    return 0
+  fi
+  if [[ "$short_reason" == "rung" ]] && (( target_gb < PF_WARN_MEM_GB )); then
+    hint "This Mac cannot give Docker the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform (the most it can spare is ${target_gb} GB), so the VM is left as it is. It runs the client; train on a larger machine."
+    return 0
+  fi
+
+  local store text manual
+  manual="Docker Desktop → Settings → Resources → Memory → ${target_gb} GB, then Apply & restart"
+  if ! store="$(_desktop_settings_store)"; then
+    hint "Docker Desktop's settings store was not found under ~/Library/Group Containers/group.com.docker, so the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
+    return 0
+  fi
+  if ! text="$(cat "$store" 2>/dev/null)" || [[ -z "$text" ]]; then
+    hint "Docker Desktop's settings store at ${store} could not be read, so the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
+    return 0
+  fi
+
+  if [[ "$short_reason" == "rung" ]]; then
+    warn "Docker Desktop's VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; training pods would stay Pending."
+  else
+    warn "Docker Desktop's VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
+  fi
+
+  # CONSENT, exactly as the Colima raise takes it: no TTY -> the instruction; a
+  # bare Enter declines; TRACEBLOC_ASSUME_YES=1 takes a FLOOR raise unattended (the
+  # VM would OOM anyway) and never a RUNG raise -- that stops a working runtime,
+  # with every container in it, for capacity nobody asked about (tracebloc-review
+  # on client#1090). Desktop has no size pin to name as consent, so unattended the
+  # rung raise is only ever the instruction.
+  if [[ "${TRACEBLOC_ASSUME_YES:-}" != "1" ]]; then
+    if ! _tty_usable; then
+      hint "Raise it: ${manual}."
+      return 0
+    fi
+    local reply=""
+    prompt_header "Raise Docker Desktop's VM to ${target_gb} GB now?"
+    hint "This QUITS Docker Desktop — every running container goes down — writes the new size into its settings, and relaunches it."
+    _read_sanitized "  Raise it? [y/N] " reply
+    case "$reply" in
+      [Yy]|[Yy][Ee][Ss]) ;;
+      *) hint "Left alone. Raise it later: ${manual}."; return 0 ;;
+    esac
+  elif [[ "$short_reason" == "rung" ]]; then
+    hint "Not raised unattended: Docker Desktop is running, and the raise quits it with every container in it. Raise it yourself: ${manual}."
+    return 0
+  fi
+
+  local new_text mib mem_key
+  mib=$(( target_gb * 1024 ))
+  # WHICH KEY THIS STORE USES, read off the store itself (Bugbot on #1101). It is
+  # both what an inserted key is named and what every by-hand instruction below
+  # quotes; the re-read after the quit recomputes it, because the flush Desktop
+  # does on its way down is allowed to change the file.
+  mem_key="$(_desktop_memory_key "$text" "$store")"
+  # A SHAPE PROBE BEFORE THE QUIT, on the text read above: a store this installer
+  # cannot edit must never cost the operator a Desktop restart. The edit itself is
+  # made below, on the store as it stands AFTER the quit.
+  local shape=0
+  _desktop_store_with_memory "$text" "$mib" "$mem_key" >/dev/null || shape=$?
+  if (( shape == 2 )); then
+    hint "Docker Desktop's settings store at ${store} carries ${mem_key} in a form this installer does not edit (a managed or non-numeric value), so the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
+    return 0
+  elif (( shape == 3 )); then
+    hint "Docker Desktop's settings store at ${store} carries both MemoryMiB and memoryMiB, and which one Docker Desktop reads depends on its version, so this installer will not pick one; the VM is left at ${current_gb} GB. Remove the spelling your Docker Desktop does not use, or raise it yourself: ${manual}."
+    return 0
+  elif (( shape != 0 )); then
+    hint "Docker Desktop's settings store at ${store} is not the JSON object this installer knows how to edit, so the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
+    return 0
+  fi
+
+  # ONE BUDGET FOR EVERY "wait for Desktop to come back" BELOW, and every message
+  # reads it instead of a literal (Bugbot on #1101). 180 s was shorter than the
+  # Desktop start this same file already budgets: the GUI start hands
+  # `_wait_for_docker` 80 polls x 3 s = 240 s, and 120 x 3 = 360 s on a first
+  # launch -- and Colima's matching start is bounded at 900 s. So a Desktop
+  # still coming up, on a LARGER VM than the one that was measured at that, was
+  # declared not-back and the raise rolled back underneath it. Take the
+  # first-launch figure: a relaunch that has to boot a resized VM is the slow
+  # case, not the warm one. Overridable for a Mac slower still, like the probe
+  # timeout beside it.
+  local wait_secs="${TB_DESKTOP_RESTART_WAIT:-360}"
+
+  # QUIT FIRST, THEN WRITE. Bounded: a Desktop that does not quit is left exactly
+  # as it was, and said so -- never killed (see _desktop_quit_and_wait).
+  if ! spin_cmd_bounded 90 "Quitting Docker Desktop…" _desktop_quit_and_wait 30; then
+    # "LEFT AS IT WAS" HAS TO BE CHECKED, NOT ASSUMED (Bugbot on #1101, the same
+    # lesson the Colima path's stop-failure branch records): the quit WAS sent, so
+    # a Desktop still on the process list may be halfway down. If Docker still
+    # answers, nothing changed and the instruction stands; if it does not, this
+    # path relaunches what it started to stop and refuses to continue on a dying
+    # runtime -- every later step needs Docker.
+    local answers=0
+    _desktop_docker_answers || answers=$?
+    case "$answers" in
+      0)   warn "Docker Desktop did not quit within 60 s but Docker still answers; the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
+           return 0 ;;
+      124) warn "Docker Desktop did not finish quitting within 60 s and Docker is not answering within ${TB_DOCKER_PROBE_TIMEOUT:-10}s (shutting down, or wedged); relaunching it unchanged." ;;
+      3)   warn "Docker Desktop did not finish quitting within 60 s and whether Docker still answers $(_desktop_unprobed_words); relaunching it unchanged." ;;
+      *)   warn "Docker Desktop did not finish quitting within 60 s and Docker refused the probe (exit ${answers}) -- it has stopped; relaunching it unchanged." ;;
+    esac
+    open -a Docker 2>/dev/null || true
+    local back=0
+    _desktop_wait_for_docker "$wait_secs" || back=$?
+    if (( back == 0 )); then
+      warn "Docker is back at ${current_gb} GB. Raise it yourself: ${manual}."
+      return 0
+    elif (( back == 3 )); then
+      error "Docker Desktop did not finish quitting, and whether it came back $(_desktop_unprobed_words); its settings are unchanged (${current_gb} GB). Open Docker Desktop, then re-run the installer."
+    else
+      error "Docker Desktop did not finish quitting and $(_desktop_wait_words "$back"); its settings are unchanged (${current_gb} GB). $(_desktop_wait_remedy "$back"), then re-run the installer."
+    fi
+  fi
+  # RE-READ AFTER THE QUIT, THEN EDIT (Bugbot on #1101): the graceful quit exists
+  # to let Desktop flush its in-memory state to this file, so an edit made on the
+  # pre-quit snapshot would put that snapshot back and lose whatever the flush
+  # wrote. The text edited, written and -- on every restore path below -- restored
+  # is the store as it stands now, with Desktop down. A store that cannot be read
+  # or edited any more relaunches Desktop untouched: nothing has been written yet.
+  if ! text="$(cat "$store" 2>/dev/null)" || [[ -z "$text" ]] ||
+     ! mem_key="$(_desktop_memory_key "$text" "$store")" ||
+     ! new_text="$(_desktop_store_with_memory "$text" "$mib" "$mem_key")"; then
+    hint "Docker Desktop's settings store at ${store} could not be re-read or edited after Desktop quit, so it is left as Desktop wrote it and Desktop is being relaunched unchanged. Raise it yourself: ${manual}."
+    open -a Docker 2>/dev/null || error "Docker Desktop could not be relaunched (open -a Docker failed); its settings are as it left them. Open Docker Desktop, then re-run the installer."
+    local back=0
+    _desktop_wait_for_docker "$wait_secs" || back=$?
+    if (( back == 3 )); then
+      error "Whether Docker Desktop came back after being quit $(_desktop_unprobed_words); its settings are as it left them. Open Docker Desktop, then re-run the installer."
+    elif (( back != 0 )); then
+      error "Docker Desktop $(_desktop_wait_words "$back") within ${wait_secs} s after being quit; its settings are as it left them. $(_desktop_wait_remedy "$back"), then re-run the installer."
+    fi
+    return 0
+  fi
+  # Keep the trailing newline the file had (`$(...)` strips it), and PROVE the write:
+  # every write below is a condition, never a bare statement (see _desktop_write_store).
+  local trailing=""
+  [[ "$(tail -c 1 "$store" 2>/dev/null | od -An -c | tr -d ' ')" == '\n' ]] && trailing=$'\n'
+  # THE READ-BACK ACCEPTS EXACTLY THE SPACING THE EDITOR DOES (tracebloc-review on
+  # #1101): the editor keeps a space before the colon, and a read-back that did
+  # not rolled a working edit back -- after Desktop had been quit.
+  # AND IT LOOKS FOR THE KEY THAT WAS ACTUALLY WRITTEN, not for `MemoryMiB`
+  # (Bugbot on #1101): on an older settings.json the editor keeps `memoryMiB`, and
+  # a read-back that only knew the PascalCase name would roll a correct edit
+  # back -- after Desktop had been quit.
+  if ! _desktop_write_store "$store" "${new_text}${trailing}" || ! grep -qE '"'"${mem_key}"'"[[:space:]]*:[[:space:]]*'"${mib}"'[[:space:]]*([,}]|$)' "$store"; then
+    local restored=0
+    _desktop_write_store "$store" "${text}${trailing}" || restored=$?
+    if (( restored == 0 )); then
+      warn "The new size did not read back from ${store}; the previous settings were restored and Docker Desktop is being relaunched unchanged. Raise it yourself: ${manual}."
+    else
+      warn "The new size did not read back from ${store}, and the previous settings could not be written back either -- check the file by hand. Docker Desktop is being relaunched on whatever it holds."
+    fi
+    # AND THE RELAUNCH IS CHECKED (Bugbot on #1101): Desktop was quit by this path,
+    # so a Desktop that does not come back is Docker down for every later step --
+    # the same hard failure the other two arms raise, never a `return 0` that lets
+    # the GUI path print "Docker ready".
+    open -a Docker 2>/dev/null || error "Docker Desktop could not be relaunched (open -a Docker failed) after a settings write that did not read back; $(_desktop_restore_words "$restored" "$current_gb" "$store"). Open Docker Desktop, then re-run the installer."
+    local back=0
+    _desktop_wait_for_docker "$wait_secs" || back=$?
+    if (( back == 3 )); then
+      error "Whether Docker Desktop came back after a settings write that did not read back $(_desktop_unprobed_words); $(_desktop_restore_words "$restored" "$current_gb" "$store"). Open Docker Desktop, then re-run the installer."
+    elif (( back != 0 )); then
+      error "Docker Desktop $(_desktop_wait_words "$back") within ${wait_secs} s after a settings write that did not read back; $(_desktop_restore_words "$restored" "$current_gb" "$store"). $(_desktop_wait_remedy "$back"), then re-run the installer."
+    fi
+    return 0
+  fi
+  if ! open -a Docker 2>/dev/null; then
+    # THE RESTORE IS WORDED BY ITS OWN STATUS (tracebloc-review on #1101): a `|| true`
+    # here told the operator "restored" while Desktop would boot on the new size.
+    if _desktop_write_store "$store" "${text}${trailing}"; then
+      error "Docker Desktop could not be relaunched after the memory change (open -a Docker failed); its settings were restored (${current_gb} GB). Open Docker Desktop, then re-run the installer."
+    else
+      error "Docker Desktop could not be relaunched after the memory change (open -a Docker failed), and the previous settings could not be written back to ${store} either -- it holds ${target_gb} GB. Check the file by hand, open Docker Desktop, then re-run the installer."
+    fi
+  fi
+  local back=0
+  _desktop_wait_for_docker "$wait_secs" || back=$?
+  if (( back == 3 )); then
+    # NOTHING WAS MEASURED, SO NOTHING IS ROLLED BACK (tracebloc-review on #1101):
+    # the recovery below undoes a raise Docker did not answer. A raise nobody could
+    # ask about is left standing and said so, with the way back spelled out.
+    error "Whether Docker Desktop came back with ${target_gb} GB $(_desktop_unprobed_words). Its settings now hold ${target_gb} GB (they were ${current_gb} GB); if Docker does not come up, set ${mem_key} back in ${store}. Open Docker Desktop, then re-run the installer."
+  elif (( back != 0 )); then
+    # WE STOPPED IT, SO WE OWN GETTING IT BACK: restore the size that was working
+    # a moment ago and relaunch on it, the way the Colima path restores its VM.
+    warn "Docker Desktop $(_desktop_wait_words "$back") within ${wait_secs} s with ${target_gb} GB; restoring the previous size."
+    # QUIT FIRST, THEN RESTORE (Bugbot on #1101): the order this whole path exists
+    # to enforce holds on the way back too -- a wedged Desktop still running can
+    # flush its in-memory size over a restore written under it, and the recovery
+    # would relaunch the size that just failed while saying the old one is back.
+    # Bounded like the forward quit (Bugbot on #1101): this is the wedged-VM arm,
+    # and a bare `osascript quit` waits on the Apple Event a wedged Desktop may
+    # never answer -- the restore below has to run whatever Desktop does.
+    spin_cmd_bounded 90 "Quitting Docker Desktop…" _desktop_quit_and_wait 30 || true
+    local restored=0
+    _desktop_write_store "$store" "${text}${trailing}" || restored=$?
+    (( restored == 0 )) || warn "The previous settings could not be written back to ${store}; check the file by hand."
+    open -a Docker 2>/dev/null || true
+    local back2=0
+    _desktop_wait_for_docker "$wait_secs" || back2=$?
+    if (( back2 == 0 )); then
+      if (( restored != 0 )); then
+        warn "Docker is back, but on whatever ${store} holds: the restore to ${current_gb} GB could not be written. Check the file by hand."
+        return 0
+      fi
+      # RE-PROBED, NOT READ OFF THE WRITE (Bugbot on #1101): the recovery quit
+      # above is `|| true` on purpose -- this is the wedged-VM arm, and a Desktop
+      # that never answers the Apple Event must not stop the restore. But a quit
+      # that did not take leaves Desktop UP on the size it booted with; it can
+      # flush that back over the file, `open -a Docker` on a running app does
+      # nothing, and the wait then succeeds because Docker never went away. A
+      # successful restore write is therefore not evidence of the running size --
+      # the happy path below re-probes before it claims one, and so does this.
+      local now_gb; now_gb="$(_runtime_probed_gb)"
+      if [[ -z "$now_gb" ]]; then
+        warn "Docker is back and ${store} was written back to ${current_gb} GB, but Docker did not answer when asked what its VM has, so the running size was not measured. Check Settings → Resources; raise it yourself when the machine can spare it: ${manual}."
+      elif (( now_gb > current_gb )); then
+        warn "Docker is back on ${now_gb} GB, not the ${current_gb} GB written back to ${store}: Docker Desktop did not quit for the restore and has kept the size it was already running. Quit Docker Desktop (force-quit it if the whale menu will not respond) and open it again; if it still reports ${now_gb} GB, set ${mem_key} back in ${store} by hand."
+      else
+        warn "Docker is back at ${now_gb} GB. Raise it yourself when the machine can spare it: ${manual}."
+      fi
+      return 0
+    elif (( back2 == 3 )); then
+      error "Whether Docker Desktop restarted after the memory change $(_desktop_unprobed_words). $(_desktop_restore_words "$restored" "$current_gb" "$store"); open Docker Desktop, then re-run the installer."
+    else
+      error "Docker Desktop $(_desktop_wait_words "$back2") within ${wait_secs} s after the memory change ($(_desktop_restore_words "$restored" "$current_gb" "$store")). $(_desktop_wait_remedy "$back2"), then re-run the installer."
+    fi
+  fi
+
+  # RE-PROBED, not assumed: a relaunch that succeeded and a VM that grew are two facts.
+  # AND A PROBE THAT DID NOT ANSWER IS NEITHER (same class as the recovery arm
+  # above, Bugbot on #1101): the `else` here used to print "still reports
+  # ${current_gb} GB" for both a VM that measurably did not grow AND a Docker that
+  # said nothing at all -- one sentence asserting a size nobody read. They are
+  # separated now, and the measured arm prints the number it measured.
+  local new_gb; new_gb="$(_runtime_probed_gb)"
+  if [[ -z "$new_gb" ]]; then
+    warn "Docker Desktop relaunched, but Docker did not answer when asked what its VM has, so the new size was not measured. Check Settings → Resources: ${manual}."
+  elif (( new_gb > current_gb )); then
+    success "Docker Desktop's VM raised to ${new_gb} GB."
+  else
+    warn "Docker Desktop relaunched but still reports ${new_gb} GB. Check Settings → Resources and raise it yourself: ${manual}."
   fi
   return 0
 }
@@ -523,6 +1149,7 @@ install_docker_desktop() {
     # fresh VM is already sized from physical RAM (#428) and this is a no-op on
     # it; an EXISTING under-sized VM is the case that had nothing but a warning.
     _offer_colima_memory_raise
+    _offer_desktop_memory_raise
     return
   fi
   # The already-running case: on a headless Mac whose Colima VM was started
@@ -531,6 +1158,7 @@ install_docker_desktop() {
   # with an old, small VM -- never sees it.
   if ! _has_gui_session; then
     _offer_colima_memory_raise
+    _offer_desktop_memory_raise
     # RETURN, so a headless Colima machine never falls through into the Docker
     # Desktop arch-detection below (Cursor Bugbot, twice). Docker is already up on
     # this path -- that is the condition that got us here -- so there is nothing
@@ -696,6 +1324,10 @@ install_docker_desktop() {
     error "Docker Desktop did not start in time. Re-run this script once Docker is ready."
   fi
 
+  # THE OFFER BELONGS HERE TOO (Bugbot on #1101): a Mac whose Desktop was installed
+  # but stopped -- autostart off, the common case -- reaches this path, not Tier 0,
+  # and used to be told "Docker ready" with a VM the smallest run cannot use.
+  _offer_desktop_memory_raise
   success "Docker ready"
 }
 
@@ -1084,6 +1716,7 @@ install_macos() {
     # Placed BEFORE the tool install so the consent prompt comes early, rather than
     # after a long download the user then has to sit through twice.
     _offer_colima_memory_raise
+    _offer_desktop_memory_raise
     install_macos_cli_tools
     log "step b: cli tools ready (tier 0)"
     # Autostart stays best-effort here AND must make NO sudo call (client#704):

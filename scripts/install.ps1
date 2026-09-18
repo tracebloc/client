@@ -15,16 +15,21 @@
 #       controls.
 #
 #  Usage (PowerShell as Administrator):
-#    irm https://raw.githubusercontent.com/tracebloc/client/<TAG>/scripts/install.ps1 | iex
-#    # or, from the signed release asset (auto-pins to the latest release):
 #    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
+#  (The public mirror serves the installer + its sub-scripts as RELEASE ASSETS;
+#   its source tree carries no scripts/ after the client -> client-dev rename --
+#   backend#3998 -- so the old raw.githubusercontent .../scripts/... URLs 404.)
 #
-#  Developer / unreleased-branch override (UNVERIFIED — not for customers):
-#    $env:BRANCH = "develop"; $env:TRACEBLOC_ALLOW_UNVERIFIED = "1"
-#    irm https://raw.githubusercontent.com/tracebloc/client/develop/scripts/install.ps1 | iex
+#  Developer / unreleased-branch override (UNVERIFIED — not for customers). The
+#  sub-scripts are fetched from the raw TREE of $env:TRACEBLOC_SOURCE_REPO (default
+#  tracebloc/client, which carries no scripts/ tree), so point it at a source whose
+#  tree is readable — a public fork with your branch pushed — and fetch install.ps1
+#  itself from that same fork:
+#    $env:TRACEBLOC_SOURCE_REPO = "<you>/client"; $env:BRANCH = "<branch>"; $env:TRACEBLOC_ALLOW_UNVERIFIED = "1"
+#    irm https://raw.githubusercontent.com/<you>/client/<branch>/scripts/install.ps1 | iex
 #
 #  macOS / Linux:
-#    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/<TAG>/scripts/install.sh | bash
+#    curl -fsSL https://github.com/tracebloc/client/releases/latest/download/install.sh | bash
 #    bash <(curl -fsSL https://tracebloc.io/i.sh)
 # =============================================================================
 #Requires -Version 5.1
@@ -229,6 +234,30 @@ function Get-Optional {
   } catch {
     return $false
   }
+}
+
+# Where to fetch one sub-script from. Customer path -> the RELEASE ASSET
+# addressed by basename ("$RepoRel/<name>"), and ONLY the release asset: the
+# customer path never reads the source tree, so it can never fetch from
+# raw.githubusercontent (backend#3998). Dev/unverified path -> the source TREE
+# ("$RepoRaw/scripts/..."), DELIBERATELY tree-only: it does not prefer or fall
+# back to the release asset (unlike Confirm-ManifestSignature's manifest fetch,
+# which is release-first), because a privileged sub-script must come from exactly
+# the one place the operator chose. Coherent only against a ref whose tree
+# $RepoRaw serves; set TRACEBLOC_SOURCE_REPO to a source you control (a public
+# fork). Parity with install.sh's subscript_url; a Pester test holds the two in
+# lockstep.
+function Get-SubscriptUrl {
+  param(
+    [string]$File,
+    [string]$RepoRaw,
+    [string]$RepoRel,
+    [bool]$AllowUnverified
+  )
+  if ($AllowUnverified) {
+    return "$RepoRaw/$File"
+  }
+  return "$RepoRel/" + (Split-Path -Leaf $File)
 }
 
 # Print a dim heartbeat dot every $TickSeconds while $Job runs — a quiet window
@@ -566,11 +595,33 @@ function Invoke-Bootstrap {
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
   $ref = Resolve-InstallRef -DefaultRef $DefaultRef -RefEnv $env:REF -BranchEnv $env:BRANCH -AllowUnverified $allowUnverified
 
-  # Sub-script CONTENT is pinned to the immutable tag tree. The signed manifest +
-  # its cosign sig/cert are published as RELEASE ASSETS (signing happens in CI
-  # after the tag is cut), not committed into the tagged tree — same pattern the
-  # CLI uses for SHA256SUMS.
-  $repoRaw = "https://raw.githubusercontent.com/tracebloc/client/$ref"
+  # Everything the customer path fetches -- the sub-scripts (attached as flat
+  # release assets by basename), the signed manifest, and its cosign sig/cert --
+  # is served from the RELEASE ASSETS ($repoRel). backend#3998: the public mirror
+  # carries no scripts/ tree (its default branch is .github + README only, and no
+  # tag exposes scripts/), so the old raw-by-tag transport 404s for every customer
+  # tag; and even where a tree IS present on the mirror it tracks only the newest
+  # stable publish, so raw-by-tag of an older or pre-release tag would serve
+  # another release's bytes and fail the signature check. Release assets are
+  # per-tag and immutable, so they are the correct transport for the sub-script
+  # content. Every fetched byte is still verified against the signed manifest
+  # below, so serving from the release changes the transport, not the integrity
+  # guarantee. (Signing happens in CI after the tag is cut, so the manifest's
+  # authenticity material was always a release asset -- the same pattern the CLI
+  # uses for SHA256SUMS.)
+  #
+  # $repoRaw is the source TREE, a dev/unverified-only transport. It reads from
+  # $TRACEBLOC_SOURCE_REPO (default tracebloc/client, which has no scripts/ tree),
+  # so a maintainer iterating on an unreleased BRANCH points it at a source whose
+  # raw tree is readable -- a public fork. Validate the owner/repo shape before it
+  # is interpolated into a URL: exactly one '/' and shell-safe chars. The character
+  # class admits '.', so a segment could be all dots ('a/..' matches) -- reject '..'
+  # explicitly, the same parent-dir traversal lever $ref guards against.
+  $sourceRepo = if ($env:TRACEBLOC_SOURCE_REPO) { $env:TRACEBLOC_SOURCE_REPO } else { "tracebloc/client" }
+  if ($sourceRepo -notmatch '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' -or $sourceRepo -match '\.\.') {
+    throw "TRACEBLOC_SOURCE_REPO='$sourceRepo' is not a valid owner/repo."
+  }
+  $repoRaw = "https://raw.githubusercontent.com/$sourceRepo/$ref"
   $repoRel = "https://github.com/tracebloc/client/releases/download/$ref"
 
   # Unpredictable, per-run temp dir (a GUID, not Get-Random) that must NOT already
@@ -584,7 +635,7 @@ function Invoke-Bootstrap {
   try {
     Info "Downloading tracebloc client installer (ref: $ref)..."
 
-    # ── Fetch the sub-scripts from the immutable tag tree ──
+    # ── Fetch the sub-scripts (release assets on the customer path) ──
     foreach ($f in $Files) {
       $dest = Join-Path $tmpDir ($f -replace '^scripts/', '')
       # CREATE THE PARENT FIRST. `$Files` gained its first `scripts/lib/` entry
@@ -598,7 +649,8 @@ function Invoke-Bootstrap {
       if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
       }
-      Get-WithRetry -Url "$repoRaw/$f" -Dest $dest
+      $src = Get-SubscriptUrl -File $f -RepoRaw $repoRaw -RepoRel $repoRel -AllowUnverified $allowUnverified
+      Get-WithRetry -Url $src -Dest $dest
     }
 
     # ── Fetch + authenticate the manifest, then check every sub-script ──
@@ -711,7 +763,7 @@ if (-not $env:TB_PESTER) {
   if ($PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) {
     Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline
     Write-Host " This script is for Windows. On macOS / Linux use:" -ForegroundColor Red
-    Write-Host "  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash" -ForegroundColor Cyan
+    Write-Host "  curl -fsSL https://github.com/tracebloc/client/releases/latest/download/install.sh | bash" -ForegroundColor Cyan
     # A BARE exit, deliberately, and the only one outside Complete-Bootstrap. This
     # branch is reachable only on macOS/Linux (`Core -and -not $IsWindows`), where
     # this script runs as a child `pwsh` and `exit` closes no window at all -- and
