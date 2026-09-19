@@ -36,6 +36,7 @@ The standalone installer runs a **preflight** check that verifies this connectiv
 | `registry-1.docker.io` (Docker Hub) | k3s, mysql-client, busybox; the tracebloc control-plane and training images too, only if you roll them back with `images.traceblocRegistry=docker.io` |
 | `ghcr.io` (+ `pkg-containers.githubusercontent.com`, where GHCR redirects layer downloads) | the tracebloc control-plane images (jobs-manager, pods-monitor, resource-monitor, requests-proxy) and the training images jobs-manager spawns — both the default since the GHCR migration — + the ingestor image + k3d node images |
 | `api.tracebloc.io` (`dev-api`/`stg-api` for non-prod) | client credential check + the running client's platform connection |
+| `*.servicebus.windows.net` | Azure Service Bus, the experiment and results queues the running client's jobs-manager, pods-monitor and requests-proxy connect to (AMQP over WebSockets on 443, so it honors the same HTTP proxy). **Not probed by preflight:** the namespace host is issued by the platform after the credential check, so a block here shows up only once the client is running, as experiments that never leave Pending (`tracebloc cluster doctor` checks the requests-proxy) |
 | `tracebloc.github.io` | the tracebloc Helm chart repository |
 
 On **Linux**, the installer also fetches tooling from `get.docker.com`, `raw.githubusercontent.com`, `dl.k8s.io`, and `get.helm.sh` — but only when Docker / k3d / kubectl / Helm aren't already installed.

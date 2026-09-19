@@ -6,12 +6,39 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 data:
+  {{- /*
+  ONE key, shared by every engine major, because both mounts in
+  mysql-deployment.yaml (conf.d for all engines; /etc/mysql/my.cnf on 8.4
+  only, backend#3032) name `mysql.cnf` as their subPath. What differs per
+  engine is decided INSIDE the block, on the same helper that gates the 8.4
+  mount, so the file the 8.4 mount makes mysqld read is one 8.4 accepts.
+
+  The redo-log line is the one place the majors disagree (client-dev#1140):
+  MySQL 8.4 REMOVED innodb_log_file_size (and innodb_log_files_in_group);
+  a removed variable is an unknown one, and mysqld refuses to start on an
+  unknown variable in an option file it reads. 8.0.30+ replaced the pair
+  with innodb_redo_log_capacity, the TOTAL redo size — so 5.7's 64M x the
+  default innodb_log_files_in_group of 2 becomes 128M, the same redo budget
+  spelled the way 8.4 understands. The 8.0 transit hop and an unknown /
+  custom pin keep the 5.7 line: 8.0 still accepts it (deprecated, not
+  removed), and this template does not guess at an engine it cannot name.
+  Every other setting below exists unchanged on 5.7, 8.0 and 8.4.
+
+  scripts/tests/lib/mysql-config-expect.sh parses the RENDERED ConfigMap,
+  never this template — so the e2e's expectation follows whichever branch
+  the installed engine took. client/tests/mysql_test.yaml pins the 5.7
+  render byte-for-byte and the 8.4 render's redo line.
+  */}}
   mysql.cnf: |
     [mysqld]
     max_allowed_packet = 256M
 
     innodb_buffer_pool_size = 128M
+    {{- if eq (include "tracebloc.mysqlEngineMajor" .) "8.4" }}
+    innodb_redo_log_capacity = 128M
+    {{- else }}
     innodb_log_file_size = 64M
+    {{- end }}
     innodb_log_buffer_size = 16M
 
     max_connections = 200

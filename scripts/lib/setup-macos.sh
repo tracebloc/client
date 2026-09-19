@@ -1492,7 +1492,8 @@ _emit_launch_plist() {
 #                    session, which a headless box has none of; #430 Bugbot). Reboot
 #                    recovery needs a system LaunchDaemon (/Library/LaunchDaemons, root)
 #                    that runs `colima start` at BOOT as the install user.
-# Honors TRACEBLOC_NO_AUTOSTART, the same opt-out that gates ensure_cluster_autostart and
+# Honors TRACEBLOC_SKIP_AUTOSTART (and TRACEBLOC_NO_AUTOSTART until remove_by
+# 2026-12-31), the same opt-out that gates ensure_cluster_autostart and
 # the Windows peer (#430 Bugbot). Best-effort; TB_MACOS_AUTOSTART is set ONLY on success,
 # so the summary's reboot promise stays honest.
 _install_macos_autostart() {
@@ -1502,8 +1503,8 @@ _install_macos_autostart() {
   # only the headless LaunchDaemon path — which does — is gated below.
   local _no_sudo=""
   if [[ "${1:-}" == "no-sudo" ]]; then _no_sudo=1; fi
-  if [[ -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
-    log "Autostart skipped (TRACEBLOC_NO_AUTOSTART set)."
+  if [[ -n "${TRACEBLOC_SKIP_AUTOSTART:-}" || -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
+    log "Autostart skipped (TRACEBLOC_SKIP_AUTOSTART/TRACEBLOC_NO_AUTOSTART set)."
     return 0
   fi
   local label="io.tracebloc.runtime"

@@ -219,6 +219,66 @@ spec:
           mountPath: /var/lib/mysql/
         - name: mysql-config
           mountPath: /etc/mysql/conf.d/
+        {{- /*
+          ...AND as /etc/mysql/my.cnf, which mysqld reads directly (backend#3032).
+
+          The conf.d mount alone is reached ONLY through `!includedir
+          /etc/mysql/conf.d/` on the image's /etc/my.cnf. That line is a detail of
+          a foreign image, and it is one unreadable file away from taking this
+          whole ConfigMap out of effect SILENTLY: mysqld skips an option file it
+          cannot open, with no warning and no error -- `mysqld --print-defaults`
+          just comes back empty and the server runs on compiled defaults
+          (max_allowed_packet 64M instead of the 256M declared here).
+
+          That is not hypothetical. MEASURED on the CI k3d runner: the host has
+          mysql-server installed, so AppArmor carries a `/usr/sbin/mysqld`
+          profile; the k3d node is privileged, so pods inherit no container
+          profile and AppArmor attaches the HOST profile to this container's
+          mysqld by executable path (`/proc/1/attr/current` =
+          `/usr/sbin/mysqld (enforce)` while a shell beside it is `unconfined`).
+          That profile permits `/etc/mysql/**` -- the Debian layout -- and NOT
+          `/etc/my.cnf`, which is where the Oracle-Linux-based 8.4 image keeps
+          the include. The 5.7 fleets never hit this because their Debian image
+          already kept its config under /etc/mysql/. Any node with mysql-server
+          installed on the host is the same shape, so this is not CI-only.
+
+          subPath, deliberately: a projected ConfigMap file is a symlink into
+          `..data/`, AppArmor matches on the RESOLVED path, and the profile's
+          `/etc/mysql/conf.d/*` does not match `/etc/mysql/conf.d/..2026_.../x`.
+          subPath bind-mounts the file itself, so the path mysqld opens is
+          exactly `/etc/mysql/my.cnf`. The cost is that subPath mounts do not
+          track later ConfigMap edits -- which changes nothing here, since mysqld
+          reads its options only at startup and the Deployment must be restarted
+          for a config change either way.
+
+          On an 8.4 node with no such profile this file is simply read a second
+          time, after /etc/my.cnf, with identical content: same values, no
+          behaviour change. (The image's OWN settings -- socket,
+          skip-name-resolve -- still live in /etc/my.cnf and are still lost under
+          confinement; recovering those is an image change, tracked on
+          backend#3032.)
+
+          GATED ON 8.4, and that "second read" is exactly why. It holds only for
+          the Oracle-Linux 8.4 layout, where /etc/mysql/my.cnf is a file mysqld
+          reads IN ADDITION to the primary /etc/my.cnf. On the chart's default
+          5.7-lineage Debian image the same path is the PRIMARY option file --
+          it carries that image's own `[mysqld]` settings and the `!includedir`
+          that reaches conf.d -- so a subPath mount there REPLACES it rather
+          than adding a read, dropping the image's settings and the include with
+          them. The diagnosis, the AppArmor measurement and every e2e run behind
+          this mount are 8.4-only; 5.7 keeps the conf.d mount alone, which is
+          what it has always had.
+        */}}
+        {{- if eq (include "tracebloc.mysqlEngineMajor" .) "8.4" }}
+        # Also as /etc/mysql/my.cnf: on 8.4 the conf.d mount is reachable only
+        # via the image's `!includedir` in /etc/my.cnf, which a host AppArmor
+        # mysqld profile silently takes out of reach (backend#3032 -- rationale
+        # above). Never on 5.7, where this path IS the primary option file.
+        - name: mysql-config
+          mountPath: /etc/mysql/my.cnf
+          subPath: mysql.cnf
+          readOnly: true
+        {{- end }}
         - name: mysql-logs
           mountPath: /var/log/mysql/
         # Writable scratch dirs required by mysqld under readOnlyRootFilesystem:
