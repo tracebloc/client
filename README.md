@@ -1,4 +1,4 @@
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Docker](https://img.shields.io/badge/docker-tracebloc%2Fclient-2496ED.svg)](https://hub.docker.com/r/tracebloc/client) [![Platform](https://img.shields.io/badge/platform-tracebloc-00C9A7.svg)](https://ai.tracebloc.io)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Platform](https://img.shields.io/badge/platform-tracebloc-00C9A7.svg)](https://ai.tracebloc.io)
 
 # tracebloc Client 🔒
 
@@ -77,9 +77,9 @@ tracebloc delete --keep-data      # releases this secure environment; keeps your
 k3d cluster delete tracebloc      # then re-run the installer
 ```
 
-(Nothing installed on this machine yet? Then just the `k3d` line.) This is the same two-step the installer itself prints when it detects a drifted cluster. Which data survives depends on the storage mode, selected by `TB_STORAGE_MODE`: in **hostpath** mode your data stays on the host under `HOST_DATA_DIR` and is rebound to the new cluster; in **node-local** mode (RFC-0003 Option C) the data lives inside the node and is destroyed with it. The installer refuses to continue if it cannot see your data directory from inside the new nodes, so a recreate cannot silently start writing into the node instead of onto your disk ([#817](https://github.com/tracebloc/client/pull/817)).
+(Nothing installed on this machine yet? Then just the `k3d` line.) This is the same two-step the installer itself prints when it detects a drifted cluster. Which data survives depends on the storage mode, selected by `TB_STORAGE_MODE`: in **hostpath** mode your data stays on the host under `HOST_DATA_DIR` and is rebound to the new cluster; in **node-local** mode (RFC-0003 Option C) the data lives inside the node and is destroyed with it. The installer refuses to continue if it cannot see your data directory from inside the new nodes, so a recreate cannot silently start writing into the node instead of onto your disk.
 
-**Reinstalling on a machine that still holds data.** A *new* install (one that creates a fresh cluster) will not silently adopt data left behind by an earlier install. If it finds existing data under `HOST_DATA_DIR` (default `~/.tracebloc`, both the flat and per-release layouts), it stops and asks you to choose **reuse** / **wipe** / **a different directory**. In-place upgrades that keep the existing cluster are unaffected — their data stays by design. For non-interactive runs pass `--reuse-data`, `--wipe-data`, or `--data-dir=<path>` (with no choice and no terminal the install aborts rather than adopting). This is the RFC-0003 offboard-hygiene guard ([#376](https://github.com/tracebloc/client/issues/376)).
+**Reinstalling on a machine that still holds data.** A *new* install (one that creates a fresh cluster) will not silently adopt data left behind by an earlier install. If it finds existing data under `HOST_DATA_DIR` (default `~/.tracebloc`, both the flat and per-release layouts), it stops and asks you to choose **reuse** / **wipe** / **a different directory**. In-place upgrades that keep the existing cluster are unaffected — their data stays by design. For non-interactive runs pass `--reuse-data`, `--wipe-data`, or `--data-dir=<path>` (with no choice and no terminal the install aborts rather than adopting). This is the RFC-0003 offboard-hygiene guard.
 
 ### Helm install
 

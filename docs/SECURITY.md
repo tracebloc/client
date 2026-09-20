@@ -801,16 +801,16 @@ Cross-reference for reviewers and contributors.
 
 | Layer | Code path |
 |---|---|
-| Workload label on training pod | [`client-runtime:jobs_manager._prepare_job_config`](https://github.com/tracebloc/client-runtime/blob/develop/jobs_manager.py) |
+| Workload label on training pod | `client-runtime:jobs_manager._prepare_job_config` |
 | `automountServiceAccountToken: false` | same |
 | Pod + container securityContext | same |
 | Shared volume `readOnly` | same |
 | `readOnlyRootFilesystem` + emptyDir mounts | same (gated by `READONLY_ROOTFS_CATEGORIES`) |
 | Training-pod NetworkPolicy | [`client:templates/network-policy-training.yaml`](../client/templates/network-policy-training.yaml) |
 | Namespace PSA labels | [`client:templates/namespace.yaml`](../client/templates/namespace.yaml) (opt-in) |
-| Experiment scratch-path env | [`tracebloc-client:core/utils/general.py`](https://github.com/tracebloc/tracebloc-client/blob/develop/core/utils/general.py) |
-| Stripped Dockerfile CMD credentials | [`tracebloc-client:*.cpu.Dockerfile`, `*.gpu.Dockerfile`](https://github.com/tracebloc/tracebloc-client) |
-| MySQL identity minting (`tb_credmgr` / `tb_meta` / `tb_ingest`, per-experiment users) | [`client-runtime:sql_utils.ensure_*_account`](https://github.com/tracebloc/client-runtime/blob/develop/sql_utils.py) |
+| Experiment scratch-path env | `tracebloc-engine:core/utils/general.py` |
+| Stripped Dockerfile CMD credentials | `tracebloc-engine:*.cpu.Dockerfile`, `*.gpu.Dockerfile` |
+| MySQL identity minting (`tb_credmgr` / `tb_meta` / `tb_ingest`, per-experiment users) | `client-runtime:sql_utils.ensure_*_account` |
 | Service-account minting gate (`serviceDbAccounts`) | [`client:templates/jobs-manager-deployment.yaml`, `templates/secrets.yaml`](../client/templates/jobs-manager-deployment.yaml) |
 
 ---

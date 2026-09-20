@@ -974,11 +974,15 @@ images:
   # the image-refresh CronJob and NOTES.txt cannot disagree about where those
   # images live.
   #
-  # This knob moves ONLY the tracebloc images, and it moves the control plane
-  # and the training-image host TOGETHER: busybox, squid, alpine/*, the device
-  # plugins and the ingestor keep their own registries, and
-  # tracebloc/mysql-client stays on docker.io (frozen, digest-pinned, published
-  # nowhere else -- see images.mysqlClient).
+  # This knob moves ONLY the tracebloc images, and it moves the control plane,
+  # the training-image host AND tracebloc/mysql-client TOGETHER: busybox, squid,
+  # alpine/*, the device plugins and the ingestor keep their own registries.
+  #
+  # mysql-client JOINED this knob at D1 step 6 (backend#3397). It was excluded
+  # while it was published only to Docker Hub; step 6 copies it to ghcr.io at
+  # the same digests and moves the publish there, so excluding it would leave
+  # two answers to "where do the tracebloc images live". It is still frozen and
+  # digest-pinned -- the host moved, the bytes did not.
   #
   # ghcr.io is where the control-plane and training images are published since
   # the GHCR migration, and it is the chart default. They are still
@@ -1373,6 +1377,21 @@ images:
     # (Bugbot, client#713). Both values are what the templates already default
     # to, so the rendered image is byte-identical.
     repository: "tracebloc/mysql-client"
+    # THE REGISTRY THE PIN BELOW WAS RESOLVED ON (backend#3397, D1 step 6).
+    # Same `digest` + `digestRegistry` contract as images.jobsManager: the pin
+    # renders only while this equals the registry the release pulls from
+    # (tracebloc.tbRegistry), and is IGNORED otherwise -- the workload falls
+    # back to `repository:tag`, which both ghcr.io and the frozen Hub namespace
+    # serve. Set explicitly rather than left empty because the LEGACY rule reads
+    # an empty value as docker.io, which would ignore this pin at the ghcr.io
+    # default and silently put every edge back on the floating tag.
+    #
+    # The digest is unchanged by the move: `crane copy` writes the same bytes
+    # under the same digest, so this is a one-word change, not a re-pin.
+    # Rollback is `images.traceblocRegistry: docker.io`, which ignores this pin
+    # (declared ghcr.io) and renders `docker.io/tracebloc/mysql-client:prod` --
+    # the same frozen image, from the retained Hub namespace.
+    digestRegistry: "ghcr.io"
     # mysql-client is only published under the "prod" tag — it has no dev/
     # staging variants, so we decouple it from env.CLIENT_ENV. Override only
     # if you are publishing your own fork with a different tag. Never use

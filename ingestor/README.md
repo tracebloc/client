@@ -21,8 +21,7 @@ helm install my-dataset tracebloc/ingestor \
 
 The SA is shared by every `tracebloc/ingestor` release in the namespace
 — that's the point. Before 0.2.0 this chart created the SA itself,
-which broke as soon as a second ingestor release tried to install
-([tracebloc/client#129](https://github.com/tracebloc/client/issues/129)).
+which broke as soon as a second ingestor release tried to install.
 
 ## Stage your data on the shared PVC
 
@@ -149,7 +148,7 @@ The dominant install path leaves `image.digest` empty and lets jobs-manager spaw
 | Testing a new ingestor release before cluster-wide rollout | `--set image.digest=sha256:<new-digest>` |
 | Air-gapped mirror with frozen versions | Point the parent `tracebloc/client` chart's `images.ingestor.repository` at your mirror (that is what jobs-manager spawns from) and pin `--set image.digest=sha256:...` |
 
-When set, the digest must be the full canonical form (`sha256:` + 64 lowercase hex chars). Tags like `v0.3.0` are rejected by jobs-manager. See the [data-ingestors releases page](https://github.com/tracebloc/data-ingestors/releases) for current digests.
+When set, the digest must be the full canonical form (`sha256:` + 64 lowercase hex chars). Tags like `v0.3.0` are rejected by jobs-manager. Read the digest from the registry you mirror from (`docker buildx imagetools inspect <repository>:<tag>` prints it).
 
 ## Frequently-overridden values
 
@@ -191,6 +190,5 @@ kubectl -n tracebloc delete job -l tracebloc.io/ingestion-run=<key>
 
 ## Related
 
-- [tracebloc/data-ingestors](https://github.com/tracebloc/data-ingestors) — the ingestor image and YAML schema.
-- [tracebloc/client-runtime#21](https://github.com/tracebloc/client-runtime/pull/35) — the `submit-ingestion-run` endpoint this chart calls.
+- The `submit-ingestion-run` endpoint this chart calls is served by jobs-manager, which the parent chart runs.
 - [tracebloc/client](https://github.com/tracebloc/client) — the parent chart that runs jobs-manager and renders the `ingestionAuthz` policy.

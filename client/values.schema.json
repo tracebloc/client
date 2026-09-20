@@ -987,6 +987,15 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "repository": {
+              "type": "string",
+              "description": "Repository for mysql-client, WITHOUT a registry host: the host comes from images.traceblocRegistry / global.imageRegistry (tracebloc.tbRegistry), which mysql-client joined at D1 step 6 (backend#3397). Stated in values.yaml rather than left to the template default so check-digest-drift.sh can pair the pin below with a repository and a float; a block with a pin and no repository is reported UNWATCHABLE, which is how this pin went unchecked (client#713)."
+            },
+            "digestRegistry": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+              "description": "The registry `digest` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. Identical contract to images.jobsManager.digestRegistry: the pin is rendered ONLY when this equals the registry the release pulls from, and is IGNORED otherwise, in which case the Deployment renders `repository:tag` -- which both ghcr.io and the retained, frozen Docker Hub namespace serve. EMPTY with a non-empty `digest` is the legacy rule (deemed resolved on docker.io), so this is set explicitly to ghcr.io at D1 step 6 (backend#3397): left empty, the pin would be ignored at the ghcr.io default and every edge would silently fall back to the floating tag."
             }
           }
         },

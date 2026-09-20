@@ -120,7 +120,18 @@ spec:
           mountPath: /var/lib/mysql/
           readOnly: true
       containers:
-      - image: {{ include "tracebloc.image" (dict "repository" (.Values.images.mysqlClient.repository | default "tracebloc/mysql-client") "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" .Values.images.mysqlClient.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+      # THE REGISTRY IS tracebloc.tbRegistry SINCE D1 STEP 6 (backend#3397).
+      # mysql-client is a tracebloc-published image and now lives beside the
+      # others on ghcr.io; it used to be routed around this helper with a
+      # hardcoded `docker.io` fallback because it was published nowhere else.
+      # THE DIGEST GOES THROUGH tracebloc.honouredPin -- the same one decision
+      # the control-plane sites use -- so a pin resolved on one registry is
+      # never rendered onto another. Passing `.Values.images.mysqlClient.digest`
+      # straight in, the shape this line used to have, is exactly how a Hub
+      # digest was rendered onto ghcr.io and every pull timed out (see
+      # tracebloc.pinFor). An IGNORED pin falls back to `:{{ .Values.images.mysqlClient.tag | default "prod" }}`,
+      # which the frozen Hub namespace and ghcr.io both serve.
+      - image: {{ include "tracebloc.image" (dict "repository" (.Values.images.mysqlClient.repository | default "tracebloc/mysql-client") "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" (include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $)) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
         {{- if (include "tracebloc.rotateMysqlRoot" .) }}

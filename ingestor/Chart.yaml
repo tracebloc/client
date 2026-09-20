@@ -14,11 +14,9 @@ keywords:
   - tracebloc
   - kubernetes
   - data-ingestion
-home: https://github.com/tracebloc/client/tree/develop/ingestor
+home: https://github.com/tracebloc/client/tree/main/ingestor
 sources:
   - https://github.com/tracebloc/client
-  - https://github.com/tracebloc/data-ingestors
-  - https://github.com/tracebloc/client-runtime
 maintainers:
   - name: tracebloc
     email: support@tracebloc.io

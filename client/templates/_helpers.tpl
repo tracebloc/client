@@ -752,11 +752,20 @@ about where those images live:
                                     Docker Hub at the same digests, so
                                     "docker.io" is the documented rollback.
 
-NOT routed through here, on purpose: `tracebloc/mysql-client` (frozen,
-digest-pinned, published only to Docker Hub — see images.mysqlClient), the
-third-party images (each has its own `registry` key), and the ingestor, which is
-named by full repository (images.ingestor.repository, already on ghcr.io) and
-follows only the global mirror.
+ROUTED THROUGH HERE SINCE D1 STEP 6 (backend#3397): `tracebloc/mysql-client`.
+It used to be excluded because it was "published only to Docker Hub", and step 6
+ends that -- the image is copied to ghcr.io at the same digests and
+`build-mysql-client.yml` publishes there. Leaving it out would give the chart two
+answers to "where do the tracebloc-published images live", which is the split
+this helper exists to close. It is still FROZEN and digest-pinned; what changed
+is the host, not the bytes, and `images.traceblocRegistry: docker.io` rolls it
+back with everything else (the Hub namespace is retained, frozen, never deleted
+-- RFC-BACKEND-2610 step 7).
+
+NOT routed through here, on purpose: the third-party images (each has its own
+`registry` key), and the ingestor, which is named by full repository
+(images.ingestor.repository, already on ghcr.io) and follows only the global
+mirror.
 
 Every read is nil-guarded and `| default`-chained: values.yaml ships
 `global.imageRegistry: ""` (the key EXISTS, so `dig`'s own fallback never
@@ -896,6 +905,27 @@ Usage: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) }}
 */}}
 {{- define "tracebloc.pinFor" -}}
 {{- $_ := include "tracebloc.controlPlaneRepository" . -}}
+{{- include "tracebloc.honouredPin" . -}}
+{{- end -}}
+
+{{/*
+tracebloc.honouredPin — THE RULE ITSELF, with no control-plane membership
+check: renders `images.<image>.digest` when it is non-empty AND
+`tracebloc.pinDeclaredRegistry` equals the registry this release pulls from,
+nothing otherwise. Every word of tracebloc.pinFor's contract above applies
+here; pinFor is this function plus "and the key must be a control-plane image".
+
+EXTRACTED, NOT COPIED (backend#3397, CLAUDE.md rule 9). D1 step 6 routes
+`tracebloc/mysql-client` through tracebloc.tbRegistry like every other
+tracebloc-published image, so a SECOND image outside the control-plane set now
+needs the pin decision. Re-spelling `and $digest (eq ...)` at that site would
+have been a copy of the rule that the mutation tests for pinFor cannot see --
+break pinFor and the mysql site goes on rendering, green. One function, both
+callers, so a change to the rule reaches both or neither.
+
+Usage: {{ include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $) }}
+*/}}
+{{- define "tracebloc.honouredPin" -}}
 {{- $img := default dict (index (default dict .root.Values.images) .image) -}}
 {{- $digest := $img.digest | default "" -}}
 {{- if and $digest (eq (include "tracebloc.pinDeclaredRegistry" .) (include "tracebloc.tbRegistry" .root)) -}}

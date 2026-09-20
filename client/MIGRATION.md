@@ -2,6 +2,38 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.129 — `tracebloc/mysql-client` moves to ghcr.io with the rest of the tracebloc images
+
+**What changed.** `tracebloc/mysql-client` was the one tracebloc-published image
+that did not follow `images.traceblocRegistry` / `global.imageRegistry`: its
+Deployment resolved the registry with a hardcoded `docker.io` fallback, because
+the image was published nowhere else. RFC-BACKEND-2610 D1 step 6 ends that — the
+image is copied to `ghcr.io` at the same digests and published there — so it now
+follows the same knob as the control plane, and its pin follows the same
+registry rule (`images.mysqlClient.digestRegistry`, shipped as `ghcr.io`).
+
+**The bytes did not change.** `crane copy` writes the same manifest under the
+same digest, so `images.mysqlClient.digest` is unchanged and the frozen
+5.7-lineage image is still what runs. What changed is the host in front of it.
+
+**What you have to do: nothing, on a default install.** The chart ships the pin
+and its registry together.
+
+**If you set `images.mysqlClient.digest` yourself**, add
+`images.mysqlClient.digestRegistry` beside it naming the registry you resolved it
+on. A pin with no `digestRegistry` is read as resolved on `docker.io` (the legacy
+rule) and is therefore **ignored** at the `ghcr.io` default: the pod falls back to
+`repository:tag`, which both registries serve — safe, but not your pin.
+
+**If you mirror images**, `mysql-client` now comes from `ghcr.io` in the set
+`scripts/list-images.sh` emits; re-run it and re-sync. On a locked-down network,
+`registry-1.docker.io` is still required for k3s and busybox.
+
+**Rolling back** is the same one flag as the rest: `--set
+images.traceblocRegistry=docker.io` moves the control plane, the training-image
+host and mysql-client together. The Docker Hub namespace is retained and frozen
+— never deleted — precisely so that rollback keeps working.
+
 ## Upgrading to 1.9.119 — a control-plane digest pin is honoured only on the registry it was resolved against
 
 **What changed.** The four control-plane pins (`images.jobsManager.digest`,
@@ -583,8 +615,7 @@ wins in any environment.
 
 ## Upgrading to 1.5.1 — single-node gating of the GPU→CPU pending fallback
 
-[client-runtime#92](https://github.com/tracebloc/client-runtime/issues/92) /
-[#222](https://github.com/tracebloc/client/issues/222): jobs-manager's
+jobs-manager's
 GPU→CPU fallback (a GPU pod stuck `Pending` past the scheduling-overdue
 interval is stopped and respun as a CPU job) is now gated on a new
 `env.SINGLE_NODE` flag.
@@ -592,10 +623,15 @@ interval is stopped and respun as a CPU job) is now gated on a new
 **Why:** on a multi-node / elastic cluster (EKS cluster-autoscaler / Karpenter,
 AKS) a `Pending` GPU pod usually just means a GPU node is still autoscaling in
 (3–10 min). Downgrading to CPU after ~180s is premature — it silently moves a
-GPU experiment onto CPU and drives the stop→respin token churn behind the
-[client-runtime#80](https://github.com/tracebloc/client-runtime/issues/80) 401
-race. On a fixed single-node cluster (installer-provisioned k3d) GPU presence is
-known at install time and no node will autoscale in, so the fallback is correct.
+GPU experiment onto CPU and drives a stop→respin cycle that churns the
+experiment's requests-proxy token: on charts of this era, a pod still running
+when its token was retired got a 401 on every result it posted for the rest of
+its life. (That failure is gone wherever `podTokenSigningSecret` is in effect —
+the proxy then validates tokens statelessly and never consults the legacy
+`pod_tokens` table. Leaving the value empty auto-generates it, so it is in
+effect by default.) On a fixed single-node cluster (installer-provisioned k3d)
+GPU presence is known at install time and no node will autoscale in, so the
+fallback is correct.
 
 **What you need to do: nothing for most clusters.** `SINGLE_NODE` defaults to
 `hostPath.enabled`, so the behavior tracks your existing topology across the
@@ -621,7 +657,7 @@ single-node (fallback on), so a single-node cluster is never regressed mid-rollo
 
 ## Upgrading to 1.3.4 — parent chart owns the shared ingestor ServiceAccount
 
-[#129](https://github.com/tracebloc/client/issues/129): the ingestor
+The ingestor
 ServiceAccount has moved from the `tracebloc/ingestor` subchart into this
 parent chart. Background: the SA is shared by every ingestor subchart
 release in a namespace, but per-release Helm ownership meant two concurrent
@@ -686,15 +722,15 @@ prior to 1.3.0, which used that flag) won't get the new
 `ingestionAuthz.serviceAccountName` default. The chart's template
 defaults the value to `"ingestor"` when absent, so the SA is created
 with the expected name and existing `allowed` entries keep matching.
-No template-level breakage; this is the same nil-guard pattern as
-[#124](https://github.com/tracebloc/client/pull/124).
+No template-level breakage; this is the same nil-guard pattern the
+`allowed` entries already use.
 
 ## Upgrading to 1.3.0 — self-upgrade CronJob lands on by default
 
 Releases of 1.3.0+ install a `<release>-auto-upgrade` CronJob that polls
 `https://tracebloc.github.io/client` and runs
 `helm upgrade --reset-then-reuse-values` when a newer chart version is
-published. This closes [tracebloc/client#69](https://github.com/tracebloc/client/issues/69) —
+published, so
 older deployed clients stop drifting from the latest secure / stable release.
 
 The default cadence is **hourly at :23 UTC** as of 1.3.2 (was daily at 02:23
