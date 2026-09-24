@@ -2,6 +2,104 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.135 — the telemetry Collector comes from OpenTelemetry's own registry, so a mirrored install must re-sync it under a new path
+
+**What changed.** `telemetryCollector.image` moved from Docker Hub to
+OpenTelemetry's first-party registry:
+
+    before:  docker.io/otel/opentelemetry-collector-contrib:0.159.0
+    after:   ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0
+
+Both `registry:` and `repository:` changed. **The image did not** — measured
+2026-09-22, the two references resolve to the same manifest,
+`sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc`. The
+tag is unchanged, so the ≥ 0.130 feature floor that
+`tests/telemetry_collector_test.yaml` reads off the rendered tag still binds.
+
+**Why.** OpenTelemetry publishes the contrib Collector themselves, so Docker Hub
+was a second-hand copy of an image with a first-party home — one more pull
+against Docker Hub's shared anonymous rate-limit bucket, for no provenance we
+did not already have upstream (backend#4160). `ghcr.io` is already reached by
+every install for the tracebloc images, so this adds **no host** to a proxied
+install's allowlist and removes one more reason to reach `docker.io`.
+
+**What you have to do: nothing, on a default install.** The chart ships the new
+registry and repository together.
+
+**If you mirror images or run air-gapped, this release does need one action** —
+unlike 1.9.134, whose note below says mirrored installs need nothing.
+`global.imageRegistry` wins over `registry:`, but it does **not** rewrite
+`repository:`, so the path your mirror has to serve moves with this release:
+
+    before:  <your-mirror>/otel/opentelemetry-collector-contrib:0.159.0
+    after:   <your-mirror>/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0
+
+Copy the image under the new path — or re-run `scripts/list-images.sh`, which
+derives the whole set from the chart — and re-sync **before** upgrading. A
+mirror that holds only the old path leaves the Collector DaemonSet in
+`ImagePullBackOff` on every node the Collector runs on, which is every node.
+
+The same applies if you point `telemetryCollector.image.registry` at a mirror
+yourself instead of using `global.imageRegistry`: override
+`telemetryCollector.image.repository` beside it with the path your mirror
+serves, or move the mirrored copy to the new one.
+
+**Nothing is pinned by this change.** `telemetryCollector.image.digest` still
+ships empty, deliberately: the feature-floor guard reads the minor version off
+the rendered tag, and a digest render carries no tag for it to read.
+
+## Upgrading to 1.9.134 — three images gain `registry:`, so a registry host baked into `repository:` must move
+
+**What changed.** `autoUpgrade.image`, `imageRefresh.image` and
+`sealCheck.storageAssertions.image` took `repository` + `tag` only and rendered
+
+    {{ include "tracebloc.mirrorPrefix" $ }}{{ $img.repository }}:{{ $img.tag }}
+
+where `tracebloc.mirrorPrefix` emits **nothing** unless `global.imageRegistry` is
+set. All three now render through `tracebloc.image`, and each block gained a
+`registry:` key (shipped as `docker.io`, which is the registry the bare reference
+already resolved to) and a `digest:` key (shipped empty).
+
+**Why.** A prefix that is usually empty means those three sites could name no
+registry and take no digest: `images.<x>.digest` had nowhere to land, and
+`autoUpgrade.image` is the image that performs auto-upgrades — rate-limited or
+re-tagged, the fleet loses the ability to upgrade itself. There was no `docker.io`
+anywhere in the chart to find them by (backend#4160).
+
+**What you have to do: nothing, on a default install, and nothing if you mirror
+with `global.imageRegistry`.** That knob still wins over `registry:`, so an
+air-gapped install re-homes all three exactly as before.
+
+**If you put a registry HOST in one of those three `repository:` values** —
+`autoUpgrade.image.repository: myhost.io/alpine/helm`, or the same shape under
+`imageRefresh.image` or `sealCheck.storageAssertions.image` — **move the host to
+the new `registry:` key**:
+
+```yaml
+autoUpgrade:
+  image:
+    registry: "myhost.io"          # was the first path segment of `repository`
+    repository: alpine/helm
+```
+
+Before this version, with no `global.imageRegistry` set, the empty prefix left
+your value untouched and the pod pulled `myhost.io/alpine/helm:3.16.4`. From
+1.9.134 the helper always names a registry, so the same values render
+`docker.io/myhost.io/alpine/helm:3.16.4` — a Docker Hub repository named
+`myhost.io/alpine/helm`, which does not exist, and the pod never starts. This is
+the one behaviour change in the release, and it is newly introduced at these
+three sites: they are the sites whose prefix used to be empty.
+
+**A `repository:` whose first segment has no dot, colon or `localhost` is not a
+host and needs no change.** `my-mirror/helm` is a Docker Hub *namespace* by the
+reference grammar Docker and the kubelet share, so it rendered — and still
+renders — the same image; only its spelling in the chart tests changed
+(`docker.io/my-mirror/helm`).
+
+**Nothing is pinned by this change.** `digest:` ships empty at all three sites;
+pinning them is backend#4160's next work item, kept separate so a pin can be
+rolled back without reverting the move to one helper.
+
 ## Upgrading to 1.9.129 — `tracebloc/mysql-client` moves to ghcr.io with the rest of the tracebloc images
 
 **What changed.** `tracebloc/mysql-client` was the one tracebloc-published image
@@ -250,7 +348,7 @@ chart used to fill the absent `GPU_REQUESTS` with a literal `nvidia.com/gpu=1`,
 so the jobs-manager received *requests=1, limits=2*. Kubernetes requires an
 extended resource's request to equal its limit, so every training pod on that
 edge was rejected by the API server — and the runtime's own mirror ("setting
-only one of them now mirrors it into the other", 1.9.104 above) could not help,
+only one of them now mirrors it into the other", 1.9.104 below) could not help,
 because from values both keys always arrived set. From this version the chart
 renders an absent `GPU_REQUESTS` **with `GPU_LIMITS`' own value**, so a lone
 `GPU_LIMITS` gives an equal pair. Both set to different values are still written

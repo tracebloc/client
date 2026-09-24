@@ -704,8 +704,13 @@
             },
             "image": {
               "type": "object",
-              "description": "kubectl-capable image for the assertion pod (same image the image-refresh CronJob uses).",
+              "description": "kubectl-capable image for the assertion pod (same image the image-refresh CronJob uses). Rendered through `tracebloc.image`, so `registry` and `digest` are both honoured.",
               "properties": {
+                "registry": {
+                  "type": "string",
+                  "description": "Registry this image is pulled from. `global.imageRegistry` still wins over it, so an air-gapped mirror re-homes the image exactly as before.",
+                  "default": "docker.io"
+                },
                 "repository": {
                   "type": "string",
                   "default": "alpine/k8s"
@@ -716,6 +721,12 @@
                     "const": "latest"
                   },
                   "default": "1.30.5"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^(sha256:[a-f0-9]{64})?$",
+                  "description": "Pin by manifest digest. Empty means pull by tag. When set it is authoritative and `tag` is only readability.",
+                  "default": ""
                 },
                 "pullPolicy": {
                   "type": "string",
@@ -1345,6 +1356,11 @@
             "tag"
           ],
           "properties": {
+            "registry": {
+              "type": "string",
+              "description": "Registry this image is pulled from. `global.imageRegistry` still wins over it, so an air-gapped mirror re-homes the image exactly as before.",
+              "default": "docker.io"
+            },
             "repository": {
               "type": "string",
               "minLength": 1
@@ -1356,6 +1372,12 @@
                 "const": "latest"
               },
               "description": "Pin the helm version. `latest` is rejected — auto-upgrade behaviour must not drift."
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Pin by manifest digest. Empty means pull by tag. When set it is authoritative and `tag` is only readability.",
+              "default": ""
             },
             "pullPolicy": {
               "type": "string",
@@ -1402,7 +1424,7 @@
     },
     "imageRefresh": {
       "type": "object",
-      "description": "Image-refresh CronJob (issue tracebloc/client#154; reworked by #569). Polls Docker Hub for the jobs-manager, pods-monitor and resource-monitor digests under the floating CLIENT_ENV tag and, on a change, pins the new digest onto the running workloads with `kubectl set image` (jobs-manager + requests-proxy Deployments and the resource-monitor DaemonSet). It used to `kubectl rollout restart` a single Deployment; the reference change is what lets those pods run imagePullPolicy=IfNotPresent and survive an offline restart. Disable to keep the running image in place until manual restart — the chart then renders imagePullPolicy=Always on the unpinned control-plane images, because a floating tag plus a restart is the only update path left.",
+      "description": "Image-refresh CronJob (issue tracebloc/client#154; reworked by #569). Polls the registry the chart pulls the tracebloc images from (global.imageRegistry, else images.traceblocRegistry, else ghcr.io — the default since the GHCR migration in 1.9.113; it resolves anonymously on docker.io and ghcr.io only, and goes inert on any other mirror) for the jobs-manager, pods-monitor and resource-monitor digests under the floating CLIENT_ENV tag and, on a change, pins the new digest onto the running workloads with `kubectl set image` (jobs-manager + requests-proxy Deployments and the resource-monitor DaemonSet). It used to `kubectl rollout restart` a single Deployment; the reference change is what lets those pods run imagePullPolicy=IfNotPresent and survive an offline restart. Disable to keep the running image in place until manual restart — the chart then renders imagePullPolicy=Always on the unpinned control-plane images, because a floating tag plus a restart is the only update path left.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -1412,7 +1434,7 @@
         "schedule": {
           "type": "string",
           "minLength": 1,
-          "description": "Cron expression. Keep the tick rate compatible with Docker Hub's 100/6h anonymous pull-rate limit. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two — at the default 15m that is 12/hr, i.e. 72 per 6h. Widen the schedule on edges that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
+          "description": "Cron expression. Keep the tick rate compatible with the anonymous pull-rate limit of the registry this release pulls from: the 100/6h figure below is DOCKER HUB's, so it binds only where global.imageRegistry / images.traceblocRegistry point at docker.io — on the ghcr.io default it is the worst case rather than the constraint. Since #569 each tick HEADs THREE manifests (jobs-manager, pods-monitor, resource-monitor), not two — at the default 15m that is 12/hr, i.e. 72 per 6h against Docker Hub's 100. Widen the schedule on docker.io edges that share an egress IP with other Docker Hub consumers; a digest pin removes that image's HEAD from every tick."
         },
         "rolloutTimeout": {
           "type": "string",
@@ -1454,6 +1476,11 @@
             "tag"
           ],
           "properties": {
+            "registry": {
+              "type": "string",
+              "description": "Registry this image is pulled from. `global.imageRegistry` still wins over it, so an air-gapped mirror re-homes the image exactly as before.",
+              "default": "docker.io"
+            },
             "repository": {
               "type": "string",
               "minLength": 1
@@ -1465,6 +1492,12 @@
                 "const": "latest"
               },
               "description": "Pin the alpine/k8s version. `latest` is rejected — image-refresh behaviour must not drift."
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Pin by manifest digest. Empty means pull by tag. When set it is authoritative and `tag` is only readability.",
+              "default": ""
             },
             "pullPolicy": {
               "type": "string",

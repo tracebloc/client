@@ -289,12 +289,29 @@ gpu:
       # not run this plugin at all).
       runtimeClassName: ""
     amd:
-      # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin). Set a digest
-      # for air-gapped / reproducible installs.
+      # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin).
+      #
+      # THIS WAS `latest` (backend#4160). A bare `latest` is not a version: it is
+      # whatever AMD pushed most recently, so two installs a day apart could run
+      # different code with nothing in the chart recording which -- the one image
+      # in this file with no immutability of any kind.
+      #
+      # It was carried that way on the belief that this repository publishes no
+      # versioned tags. It does: `1.31.0.11` (2026-09-14), behind `1.31.0.10`,
+      # `1.31.0.9`, `1.31.0.8` on a clean series. `latest` is simply a rolling
+      # build ahead of the last release -- measured 2026-09-23, `latest` was
+      # sha256:50d0c422..., a DIFFERENT image from the one below.
+      #
+      # So this needs no mirror and no arbitrary digest freeze: it pins the same
+      # way every other third-party image here does, and check-digest-drift.sh
+      # now watches this float like the rest.
+      #
+      # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN: set `digest: ""` alongside
+      # your own `repository`/`tag`, or this digest is applied to your image.
       registry: docker.io
       repository: rocm/k8s-device-plugin
-      tag: latest
-      digest: ""
+      tag: "1.31.0.11"
+      digest: "sha256:e4df5dc9a7fa34e2344852256dcc5762171a6d68f1f9a34026ce26786ae335e2"
       # -- Same contract as nvidia.resources above: ONE pair, both sides, Guaranteed
       # (backend#2871). This container also runs privileged, so it is the last thing
       # that should be first in the OOM queue.
@@ -621,6 +638,30 @@ sealCheck:
       repository: alpine/k8s
       tag: "1.30.5"
       pullPolicy: IfNotPresent
+      # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE (backend#4160). This block was
+      # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
+      # with no mirror set, emits a BARE reference, and a bare reference is a Docker
+      # Hub reference. There was no `docker.io` in the chart to grep for, so this
+      # site was invisible to a sweep of these values. It renders through
+      # `tracebloc.image` now, which always names the registry.
+      #
+      # `registry` is the per-image override; `global.imageRegistry` still wins over
+      # it, so an air-gapped mirror re-homes this image exactly as before.
+      #
+      # THE PIN IS WORK ITEM 2, AND THIS IS IT (backend#4160). The comment here used
+      # to say `digest` was empty on purpose because pinning was the next change.
+      # It is this change. The tag already pinned the BEHAVIOUR; the digest pins the
+      # BYTES, so a silent upstream re-tag of the same version cannot move what this
+      # cluster runs, and check-digest-drift.sh now watches this float nightly and
+      # reds when it stops resolving here.
+      #
+      # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN. Helm merges values, so setting
+      # `repository` alone leaves this `digest` in place and the render becomes
+      # `<your repo>@<this digest>` -- a pin from one image applied to another. Set
+      # `digest: ""` alongside your `repository`/`tag`. Asserted in the unit tests,
+      # both the supported shape and what happens without it.
+      registry: "docker.io"
+      digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
 
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
@@ -796,7 +837,7 @@ telemetryCollector:
   #
   # enabled: <unset>
 
-  # otel/opentelemetry-collector-contrib — `contrib`, not `core`, and the
+  # opentelemetry-collector-contrib — `contrib`, not `core`, and the
   # distinction is load-bearing: `filelog`, `bearertokenauth` and `file_storage`
   # are all contrib components and none of them exist in the core distribution.
   # THE TAG HAS A FEATURE FLOOR, and 0.109.0 was below it — the first version of
@@ -811,9 +852,36 @@ telemetryCollector:
   # `tests/telemetry_collector_test.yaml` asserts the pinned minor is at or above
   # that floor, so the pin cannot drift back below the config it has to run.
   image:
-    registry: docker.io
-    repository: otel/opentelemetry-collector-contrib
+    # UPSTREAM'S OWN REGISTRY, NOT DOCKER HUB AND NOT A MIRROR (backend#4160).
+    # OpenTelemetry publishes the contrib Collector themselves, and the artifact
+    # is the same one: measured 2026-09-22, `ghcr.io/open-telemetry/...:0.159.0`
+    # and `docker.io/otel/...:0.159.0` both resolve to
+    # sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc.
+    # Identical bytes, so this changes the PATH and not the image.
+    #
+    # WHY NOT A MIRROR OF OUR OWN. Copying an image that already has a
+    # first-party home adds a hop, a copy to keep fresh, and serves someone
+    # else's bytes under our name. Mirroring is for images with NO other source
+    # -- the Docker Official ones (busybox, alpine/*, curl) and `rocm`, whose
+    # upstream publishes only to a moving `latest`.
+    #
+    # Customers already reach ghcr.io for every tracebloc image, so this adds
+    # nothing to an allowlist; it removes one more reason to reach docker.io.
+    registry: ghcr.io
+    repository: open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
     tag: "0.159.0"
+    # NOT PINNED, and deliberately (backend#4160). The digest is known --
+    # sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc,
+    # the same on both registries (above) -- but pinning
+    # it here DESTROYS a guard: `telemetry_collector_test.yaml`'s "pins a
+    # Collector image new enough for the queue options it configures" reads the
+    # FEATURE FLOOR (>= 0.130) off the rendered tag, and a digest render carries
+    # no tag. The version appears nowhere else in the render, so the floor would
+    # simply stop being checked.
+    #
+    # Pinning this image therefore means relocating that floor to read the
+    # declared `tag:` above instead of the render -- a deliberate change with
+    # its own reasoning, not a rider on a pinning PR.
     digest: ""
 
   # 500m/512Mi per D7's table. The existing node agent runs 200m/256Mi, which a
@@ -1423,8 +1491,23 @@ images:
     # _helpers.tpl in the same commit (mysql_test.yaml enforces the pair).
     digest: "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
   busybox:
+    # A THIRD-PARTY DOCKER HUB IMAGE, which this block does not look like.
+    # `images.busybox` sits beside tracebloc's own images, so it reads as ours;
+    # the template pulls `library/busybox` from docker.io at THREE sites (the
+    # mysql and jobs-manager init containers). It was invisible to a sweep of
+    # this file for third-party registries for exactly that reason.
+    # REPOSITORY AND TAG BOTH DECLARED, so the pin below is WATCHABLE.
+    # `check-digest-drift.sh` resolves a pin by reading the repository and float
+    # from the same block; with `repository` hardcoded in the templates and
+    # absent here, it reported `UNWATCHABLE: images.busybox is pinned ... but
+    # the block declares no repository:` -- a pin nothing can tell you has gone
+    # stale, "the same blind spot as having no watcher at all, just quieter".
+    # The three templates read this value now, so the watch cannot be reading
+    # something the render ignores.
+    repository: library/busybox
     tag: "1.35"
-    digest: ""
+    # PINNED (backend#4160), same provenance and same watch as the collector.
+    digest: "sha256:98ad9d1a2be345201bb0709b0d38655eb1b370145c7d94ca1fe9c421f76e245a"
 
 # -- Container resource requests and limits.
 # Tuned in v1.1.0 after the prod investigation showed mysql being killed
@@ -1869,6 +1952,30 @@ autoUpgrade:
     repository: alpine/helm
     tag: "3.16.4"
     pullPolicy: IfNotPresent
+    # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE (backend#4160). This block was
+    # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
+    # with no mirror set, emits a BARE reference, and a bare reference is a Docker
+    # Hub reference. There was no `docker.io` in the chart to grep for, so this
+    # site was invisible to a sweep of these values. It renders through
+    # `tracebloc.image` now, which always names the registry.
+    #
+    # `registry` is the per-image override; `global.imageRegistry` still wins over
+    # it, so an air-gapped mirror re-homes this image exactly as before.
+    #
+    # THE PIN IS WORK ITEM 2, AND THIS IS IT (backend#4160). The comment here used
+    # to say `digest` was empty on purpose because pinning was the next change.
+    # It is this change. The tag already pinned the BEHAVIOUR; the digest pins the
+    # BYTES, so a silent upstream re-tag of the same version cannot move what this
+    # cluster runs, and check-digest-drift.sh now watches this float nightly and
+    # reds when it stops resolving here.
+    #
+    # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN. Helm merges values, so setting
+    # `repository` alone leaves this `digest` in place and the render becomes
+    # `<your repo>@<this digest>` -- a pin from one image applied to another. Set
+    # `digest: ""` alongside your `repository`/`tag`. Asserted in the unit tests,
+    # both the supported shape and what happens without it.
+    registry: "docker.io"
+    digest: "sha256:9b25e60ae264940b276e32866d37e3088e70c4e2d1784b964dc3f90346281a74"
   # GUARANTEED QoS: requests == limits for BOTH cpu and memory. backend#2935:
   # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
   # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
@@ -1914,7 +2021,11 @@ autoUpgrade:
 
 # -- Image-refresh CronJob (closes tracebloc/client#154; reworked by #569).
 # Re-images the always-running control-plane workloads when a new image
-# digest is published to Docker Hub under the floating CLIENT_ENV tag.
+# digest is published under the floating CLIENT_ENV tag on the registry the
+# chart pulls the tracebloc images from (`tracebloc.tbRegistry`: global.imageRegistry,
+# else images.traceblocRegistry -- ghcr.io by default since the GHCR migration
+# (1.9.113; see MIGRATION.md)). It is NOT tied to Docker Hub; on a private
+# mirror it is inert (see the script).
 # Without this, running pods stay on the old image until someone manually
 # restarts them, which is exactly the customer-runs-no-commands UX we want
 # to avoid.
@@ -1928,10 +2039,11 @@ autoUpgrade:
 # is now what changes; the pods run IfNotPresent (see the images block).
 #
 # How it works:
-#   - A CronJob in this namespace polls Docker Hub for the current
+#   - A CronJob in this namespace polls the tracebloc registry for the current
 #     manifest digest of tracebloc/jobs-manager:<CLIENT_ENV>,
 #     tracebloc/pods-monitor:<CLIENT_ENV> and
-#     tracebloc/resource-monitor:<CLIENT_ENV>.
+#     tracebloc/resource-monitor:<CLIENT_ENV> (anonymous token + manifest HEAD;
+#     docker.io and ghcr.io are the hosts it knows how to resolve on).
 #   - The script compares each fetched digest to an annotation on the
 #     jobs-manager deployment (`tracebloc.io/last-refreshed-<image>-digest`)
 #     that records the digest the LAST successful refresh moved to. Not
@@ -1962,18 +2074,29 @@ autoUpgrade:
 #   - First observation (annotation absent on a fresh install): record
 #     the current digest without re-imaging. Rewriting repo:tag to
 #     repo@digest for byte-identical content would roll every workload —
-#     including the DaemonSet on every node — for nothing. The NEXT tick,
-#     seeing the digest recorded but the workload still on repo:tag, pins
-#     it (client-runtime#199) — so a fresh edge becomes reproducible ~one interval
-#     post-install, not at the next upstream release. Restart-safe offline
+#     including the DaemonSet on every node — for nothing. A FRESH install
+#     therefore stays on repo:tag until the first genuine upstream digest
+#     change, and is pinned by digest from then on (#1008 records the
+#     first-observed / digest-applied markers, which tell the two cases apart
+#     only once the pin case below is excluded); an established edge whose
+#     live ref is off the recorded digest -- a helm re-render, a legacy
+#     install -- is re-pinned at the next tick. Restart-safe offline
 #     throughout.
+#     One case OUTRANKS the markers: an image carrying an images.<image>.digest
+#     pin the render IGNORED (a digest resolved on a registry this release does
+#     not pull from) is never the fresh-install case, whatever the markers say
+#     -- the operator asked for a digest, so the script re-pins it on the first
+#     tick (`pin_ignored`, image-refresh-cronjob.yaml).
 #   - Idle-cheap: when the recorded digest matches today's digest AND the
 #     workload already runs that digest, the script exits without touching
 #     anything. If a helm re-render reverted the pin back to repo:tag it
 #     re-pins that one tick (compared on the @sha256 digest, so a mirror
 #     prefix rewrite is not mistaken for a revert). Steady state is one HEAD
-#     per image per tick, well under Docker Hub's 100/6h anonymous
-#     pull-rate limit.
+#     per image per tick, well under the 100/6h anonymous pull-rate limit --
+#     which is DOCKER HUB's, and so binds only where `tracebloc.tbRegistry`
+#     resolves to docker.io. On the ghcr.io default that cap is not the one
+#     in play (see the schedule block, which keeps the docker.io arithmetic
+#     as the worst case).
 #   - The script resolves digests on the SAME registry the pods pull the
 #     tracebloc images from (images.traceblocRegistry, or the
 #     global.imageRegistry mirror when set), and it can only do so
@@ -2019,21 +2142,32 @@ imageRefresh:
   # Default ON: the whole point of #154 is that customers don't have to
   # run any commands when we publish a new jobs-manager image.
   enabled: true
-  # Every 15 minutes at minute :07. The off-hour minute spreads load
-  # across Docker Hub's registry-1 origin; 15m balances drift latency
-  # against the 100/6h anonymous pull-rate limit.
+  # Every 15 minutes at minute :07. The off-hour minute spreads load across
+  # the origin the script HEADs; 15m balances drift latency against the cap
+  # below.
+  #
+  # WHICH CAP: the 100/6h anonymous pull-rate limit named throughout this block
+  # is DOCKER HUB's, and the script HEADs whatever `tracebloc.tbRegistry`
+  # resolves to — ghcr.io by default since the GHCR migration (1.9.113), and
+  # docker.io only where global.imageRegistry / images.traceblocRegistry say
+  # so. The budget below is therefore the docker.io WORST CASE, kept because it
+  # is the tightest published cap this schedule can hit; on the ghcr.io default
+  # it is not the binding constraint. The numbers are unchanged from #569 —
+  # nothing here re-derives them for ghcr.io.
   #
   # #569 raised the per-tick cost from 2 manifest HEADs to 3 (resource-monitor
   # joined jobs-manager and pods-monitor; requests-proxy adds none, it reuses
   # the jobs-manager digest). At this schedule that is 3 x 4/hr = 12/hr, so
-  # 72 per 6h against the cap of 100 — up from 48. Still under, but the
-  # headroom for OTHER workloads sharing the egress IP dropped from ~52 to ~28.
+  # 72 per 6h against Docker Hub's cap of 100 — up from 48. Still under, but
+  # on a docker.io edge the headroom for OTHER workloads sharing the egress IP
+  # dropped from ~52 to ~28.
   #
-  # That matters more than the raw number: exhausting this cap behind a shared
-  # corporate NAT is one of the failure modes in the incident #569 exists to fix
-  # (a rate-limited edge cannot pull for up to ~6h). If an edge shares its
-  # egress IP with other Docker Hub consumers, widen this — "7,27,47 * * * *"
-  # (3/hr) puts the cost back to 9/hr, at the price of slower drift pickup.
+  # That matters more than the raw number: exhausting Docker Hub's cap behind a
+  # shared corporate NAT is one of the failure modes in the incident #569 exists
+  # to fix (a rate-limited edge cannot pull for up to ~6h). If an edge pulls
+  # from docker.io and shares its egress IP with other Docker Hub consumers,
+  # widen this — "7,27,47 * * * *" (3/hr) puts the cost back to 9/hr, at the
+  # price of slower drift pickup.
   # A digest pin on any image removes its HEAD from every tick entirely.
   schedule: "7,22,37,52 * * * *"
   # `kubectl rollout status --timeout`, applied PER WORKLOAD. Generous;
@@ -2097,6 +2231,30 @@ imageRefresh:
     repository: alpine/k8s
     tag: "1.30.5"
     pullPolicy: IfNotPresent
+    # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE (backend#4160). This block was
+    # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
+    # with no mirror set, emits a BARE reference, and a bare reference is a Docker
+    # Hub reference. There was no `docker.io` in the chart to grep for, so this
+    # site was invisible to a sweep of these values. It renders through
+    # `tracebloc.image` now, which always names the registry.
+    #
+    # `registry` is the per-image override; `global.imageRegistry` still wins over
+    # it, so an air-gapped mirror re-homes this image exactly as before.
+    #
+    # THE PIN IS WORK ITEM 2, AND THIS IS IT (backend#4160). The comment here used
+    # to say `digest` was empty on purpose because pinning was the next change.
+    # It is this change. The tag already pinned the BEHAVIOUR; the digest pins the
+    # BYTES, so a silent upstream re-tag of the same version cannot move what this
+    # cluster runs, and check-digest-drift.sh now watches this float nightly and
+    # reds when it stops resolving here.
+    #
+    # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN. Helm merges values, so setting
+    # `repository` alone leaves this `digest` in place and the render becomes
+    # `<your repo>@<this digest>` -- a pin from one image applied to another. Set
+    # `digest: ""` alongside your `repository`/`tag`. Asserted in the unit tests,
+    # both the supported shape and what happens without it.
+    registry: "docker.io"
+    digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
   # GUARANTEED QoS: requests == limits for BOTH cpu and memory. See the fuller
   # note on autoUpgrade.resources for the mechanism. backend#2935: image-refresh
   # was OOM-killed in lock-step with auto-upgrade (six paired failures — this Job

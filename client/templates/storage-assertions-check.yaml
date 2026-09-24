@@ -100,7 +100,9 @@ spec:
         - name: assert
           # Same kubectl-capable image the image-refresh CronJob uses; the tag
           # pins kubectl so behaviour cannot drift if upstream re-tags.
-          image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ $img.repository | default "alpine/k8s" }}:{{ $img.tag | default "1.30.5" }}"
+          # THROUGH THE ONE HELPER (backend#4160) -- see the note in
+          # auto-upgrade-cronjob.yaml.
+          image: {{ include "tracebloc.image" (dict "repository" ($img.repository | default "alpine/k8s") "tag" ($img.tag | default "1.30.5") "digest" ($img.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default ($img.registry | default "docker.io"))) | quote }}
           imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false

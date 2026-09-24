@@ -704,6 +704,14 @@ When a private mirror is set via global.imageRegistry (#585), returns
 returns "" when no mirror is set, so default installs render byte-identically.
 Nil-guarded for --reset-then-reuse-values upgrades that predate global. Call
 with the ROOT context (e.g. `include "tracebloc.mirrorPrefix" $`).
+
+NO CALLERS IN THIS CHART since backend#4160 moved the last three sites
+(auto-upgrade, image-refresh, storage-assertions) onto `tracebloc.image`, which
+always names a registry and is what a new site should use. Retained, not
+deleted: a chart that vendors this one can `include` it, and deleting a defined
+template is a breaking change to that contract, not a cleanup. If you are adding
+an image site, this is the wrong helper — `tracebloc.image` is the one
+`scripts/tests/one-image-helper.sh` requires.
 */}}
 {{- define "tracebloc.mirrorPrefix" -}}
 {{- with (dig "imageRegistry" "" (.Values.global | default dict)) }}{{ . }}/{{ end -}}
@@ -983,8 +991,61 @@ the unpullable reference. Third-party images keep calling tracebloc.image
 directly; their digests have their own registry keys.
 Usage: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) }}
 */}}
+{{/*
+tracebloc.controlPlaneSeedDigest — client-runtime#199. The digest a control-plane
+image renders when it carries NO honoured operator pin (tracebloc.effectivePin is
+empty), so a `helm upgrade` re-renders the digest image-refresh last applied
+instead of reverting to the bare `:tag` — the #199 revert that dropped
+image-refresh's out-of-band `kubectl set image` pin and, on a node with a stale
+`:tag` layer, silently ran an OLD image.
+
+Read from the LIVE workload spec, NOT the `last-refreshed-*` annotation: the live
+spec IS what image-refresh actually applied, so this can never render a digest
+the live spec has already moved past — which closes the flap-lockout DOWNGRADE
+(annotations stuck at D0 while the workload runs D1; @shujaatTracebloc on #1013).
+
+Gated on image-refresh being the update path (enabled AND resolvable) — the SAME
+gate as controlPlanePullPolicy's IfNotPresent branch, so the pull policy and the
+rendered reference cannot disagree. Returns a digest ONLY when the live ref is
+`<tbRegistry>/<repository>@sha256:…` for THIS release's current registry; a bare
+`:tag` (fresh install), an empty `lookup` (`helm template` / `helm diff` / the
+first install), or a ref on a DIFFERENT registry (a mirror flip image-refresh has
+not yet re-pinned) all yield "" → `:tag`, never a cross-registry ref the kubelet
+rejects with InvalidImageName. The auto-upgrade SA that runs the upgrade `lookup`
+already reads these workloads (its release-ns and node-agents Roles grant all
+verbs), so this adds no RBAC and cannot hit the backend#2469 bootstrap lockout.
+
+Args: (dict "image" <jobsManager|podsMonitor|requestsProxy|resourceMonitor> "root" $)
+*/}}
+{{- define "tracebloc.controlPlaneSeedDigest" -}}
+{{- $root := .root -}}
+{{- $imgKey := .image -}}
+{{- if and (not (include "tracebloc.effectivePin" .)) (include "tracebloc.imageRefreshEnabled" $root) (include "tracebloc.imageRefreshResolvable" $root) -}}
+{{- $kind := "Deployment" -}}
+{{- $ns := $root.Release.Namespace -}}
+{{- $name := printf "%s-jobs-manager" (include "tracebloc.fullname" $root) -}}
+{{- $container := "api" -}}
+{{- if eq $imgKey "podsMonitor" -}}{{- $container = "pods-monitor-container" -}}{{- end -}}
+{{- if eq $imgKey "requestsProxy" -}}{{- $name = include "tracebloc.requestsProxyName" $root -}}{{- $container = "proxy" -}}{{- end -}}
+{{- if eq $imgKey "resourceMonitor" -}}{{- $kind = "DaemonSet" -}}{{- $name = include "tracebloc.resourceMonitorName" $root -}}{{- $ns = $root.Values.nodeAgents.namespace.name -}}{{- $container = "tracebloc-resource-monitor" -}}{{- end -}}
+{{- $wl := lookup "apps/v1" $kind $ns $name -}}
+{{- if $wl -}}
+{{- $live := "" -}}
+{{- range $c := (dig "spec" "template" "spec" "containers" (list) $wl) -}}
+{{- if eq (dig "name" "" $c) $container -}}{{- $live = (dig "image" "" $c) -}}{{- end -}}
+{{- end -}}
+{{- $prefix := printf "%s/%s@" (include "tracebloc.tbRegistry" $root) (include "tracebloc.controlPlaneRepository" .) -}}
+{{- if hasPrefix $prefix $live -}}
+{{- last (splitList "@" $live) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "tracebloc.controlPlaneImage" -}}
-{{- include "tracebloc.image" (dict "repository" (include "tracebloc.controlPlaneRepository" .) "tag" (include "tracebloc.clientEnv" .root) "digest" (include "tracebloc.effectivePin" .) "registry" (include "tracebloc.tbRegistry" .root)) -}}
+{{- $digest := include "tracebloc.effectivePin" . -}}
+{{- if not $digest -}}{{- $digest = include "tracebloc.controlPlaneSeedDigest" . -}}{{- end -}}
+{{- include "tracebloc.image" (dict "repository" (include "tracebloc.controlPlaneRepository" .) "tag" (include "tracebloc.clientEnv" .root) "digest" $digest "registry" (include "tracebloc.tbRegistry" .root)) -}}
 {{- end -}}
 
 {{/*

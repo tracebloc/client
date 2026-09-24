@@ -187,10 +187,29 @@ this PR, and some depend on repo settings or one-time decisions:
    `$SignerRepos` in `install.ps1` — and a test on each side holds the two
    declarations in lockstep and rejects a cert from any third repo.
 
-5. **Branch-protect the release workflow + tags.** The keyless trust root is
-   "whatever the release workflow signs." Protect `release-helm-chart.yaml` and
-   the `gen-manifest.sh` FILES list under CODEOWNERS, and restrict who can push
-   `v*` tags / publish releases. *(Owner: repo admin.)*
+5. **Restrict who can push `v*` tags / publish releases.** The keyless trust
+   root is "whatever the release workflow signs," so the control that still
+   bites is who can make that workflow run on a tag ref. Still **open**.
+   *(Owner: repo admin.)*
+
+   **The CODEOWNERS half of this item was deliberately dropped — do not re-add
+   it (backend#4271).** It used to read *"protect `release-helm-chart.yaml` and
+   the `gen-manifest.sh` FILES list under CODEOWNERS"*, i.e. path rules naming a
+   human owner. Those rules are gone: `.github/CODEOWNERS` is now the single
+   `* @tracebloc-review` rule, human code-owner auto-request was removed
+   fleet-wide, and a path rule re-added here would contradict that file's own
+   header.
+
+   **What covers a trust-root change now, stated plainly:** the `*` rule makes
+   `@tracebloc-review` a code owner of every path — `release-helm-chart.yaml`
+   and `gen-manifest.sh` included — so a change to the signer identity is still
+   auto-requested to, and reviewed by, that account. It is an automated review,
+   not a named human's, and **nothing auto-requests a human on such a change any
+   more.** If you want a named human on a trust-root change, the PR author adds
+   them by name; that is a convention, not a gate. Whether an owner line gates
+   the merge at all is a branch-protection question — see the header of
+   `.github/CODEOWNERS`, which records that this file drives the request and
+   nothing else.
 
 ## 6. Operator guidance — verifying a release by hand
 

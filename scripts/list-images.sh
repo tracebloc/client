@@ -76,7 +76,16 @@ while [ $# -gt 0 ]; do
     --env)   ENV_TAG="${2:?--env needs a value}"; ENV_TAG_EXPLICIT=1; shift 2 ;;
     --chart) CHART="${2:?--chart needs a value}"; shift 2 ;;
     --)      shift; HELM_ARGS=("$@"); break ;;
-    -h|--help) sed -n '2,50p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    # The WHOLE header, not a fixed slice. `sed -n '2,50p'` stopped at line 50
+    # while USAGE sits at 53 and the TRACEBLOC_* seams at 58-66, so --help cut
+    # off mid-sentence and named neither -- the operator asking how to run this
+    # was shown everything except how to run it. Same defect, same cause as
+    # resolve-training-digests.sh's `2,45p` (client-dev#1177 review): a hard-coded
+    # range silently drops whatever the header grows past it. This reads to the
+    # first non-comment line instead, so the slice cannot drift.
+    # Captured, not piped: under `set -o pipefail` an early-closing reader turns
+    # SIGPIPE into exit 141 and this repo has a dedicated check for that class.
+    -h|--help) awk 'NR > 1 { if (!/^#/) exit; sub(/^##? ?/, ""); print }' "$0"; exit 0 ;;
     *) echo "list-images: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -106,8 +115,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 #
 # ONLY IF UNSET. These vars REPLACE the trust store rather than adding to it, so
 # an explicit CURL_CA_BUNDLE is the operator's deliberate choice and must win.
+ca_bundle_mapped=0
 if [ -n "${TRACEBLOC_CA_BUNDLE:-}" ] && [ -z "${CURL_CA_BUNDLE:-}" ]; then
   export CURL_CA_BUNDLE="$TRACEBLOC_CA_BUNDLE"
+  ca_bundle_mapped=1
 fi
 
 command -v helm >/dev/null 2>&1 || { echo "list-images: helm is required" >&2; exit 1; }
@@ -302,9 +313,28 @@ else
       # "set TRACEBLOC_TASK_REPOS" would never reach it.
       case "$(tr -d '\n' <"$CURLERR")" in
         *certificate*|*x509*|*"SSL"*|*"TLS"*)
+          # FOUR states, not two (client-dev#1190 review, then Bugbot on 4d26b954).
+          # Telling an operator who already exported a bundle to "point curl at your
+          # CA bundle" is telling them to do the thing they did. What the message has
+          # to name is the file curl ACTUALLY opened, and TRACEBLOC_CA_BUNDLE alone
+          # cannot answer that: with only CURL_CA_BUNDLE set, the documented knob is
+          # unset and inert, and the bundle that really failed went unnamed.
           echo "  This looks like a TLS trust failure rather than a blocked registry." >&2
-          echo "  Point curl at your corporate CA bundle and retry:" >&2   # style-guard: allow
-          echo "    export CURL_CA_BUNDLE=/path/to/corporate-ca.pem   # or TRACEBLOC_CA_BUNDLE" >&2
+          if [ "$ca_bundle_mapped" -eq 1 ]; then
+            echo "  TRACEBLOC_CA_BUNDLE is set (${TRACEBLOC_CA_BUNDLE}) and this script mapped it" >&2
+            echo "  onto CURL_CA_BUNDLE, so that bundle does not cover this host -- check it." >&2
+          elif [ -n "${CURL_CA_BUNDLE:-}" ] && [ -n "${TRACEBLOC_CA_BUNDLE:-}" ]; then
+            echo "  TRACEBLOC_CA_BUNDLE is set (${TRACEBLOC_CA_BUNDLE}) but CURL_CA_BUNDLE was" >&2
+            echo "  ALREADY set (${CURL_CA_BUNDLE}), and that one wins -- the TRACEBLOC one is" >&2
+            echo "  on and inert. Check that bundle, or unset CURL_CA_BUNDLE to let this map." >&2
+          elif [ -n "${CURL_CA_BUNDLE:-}" ]; then
+            echo "  CURL_CA_BUNDLE is set (${CURL_CA_BUNDLE}) and the fetch used it, so that bundle does" >&2
+            echo "  not cover this host -- check it. Setting TRACEBLOC_CA_BUNDLE now would be inert:" >&2
+            echo "  the mapping is only-if-unset, so yours keeps winning." >&2
+          else
+            echo "  Point the fetch at your corporate CA bundle and retry:" >&2
+            echo "    export TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem   # or CURL_CA_BUNDLE" >&2
+          fi
           echo "  See the TLS-inspecting network notes in docs/INSTALL.md." >&2 ;;
         *"Could not resolve"*|*"resolve host"*)
           echo "  DNS did not resolve the registry host. If this site blocks it outright," >&2

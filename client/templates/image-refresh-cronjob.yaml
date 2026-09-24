@@ -30,6 +30,7 @@ data:
     #
     # Workloads reconciled (all in RELEASE_NAMESPACE unless noted):
     #   deployment/<release>-jobs-manager      api                       (tracebloc/jobs-manager)
+    #                                          wait-for-mysql (init)     (tracebloc/jobs-manager)
     #                                          pods-monitor-container    (tracebloc/pods-monitor)
     #   deployment/<release>-requests-proxy    proxy                     (tracebloc/jobs-manager)
     #   daemonset/<release>-resource-monitor   tracebloc-resource-monitor
@@ -56,17 +57,28 @@ data:
     #   in the same tick); it does not detect and repair skew that predates
     #   it, because it compares registry-vs-annotation, never pod-vs-pod.
     #
-    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (client-runtime#199).
+    # HELM RE-RENDER, by contrast, is HANDLED rather than tolerated (client-runtime#199),
+    # from BOTH sides now. Chart-side (#1013, from 1.9.136): the control-plane
+    # image sites render through `tracebloc.controlPlaneImage`, which seeds the
+    # digest from the LIVE workload spec via `lookup`
+    # (`tracebloc.controlPlaneSeedDigest`) — NOT from THIS annotation — so
     # `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade path)
-    # re-renders the templates, which write `repo:tag` and so revert an earlier
-    # `set image` pin. `recorded == latest` no longer means no-op: the loop reads
-    # each workload's LIVE image and re-pins the digest whenever the workload is
-    # off it. The revert therefore lasts ONE tick — the next tick puts the digest
-    # back — instead of floating on the tag until the next upstream release. It
-    # is compared on the @sha256 digest, so a registry-prefix rewrite (a mutating
-    # webhook) is not mistaken for a revert. This only happens on a chart VERSION
-    # bump anyway — auto-upgrade compares versions and skips otherwise — so it is
-    # not an hourly revert.
+    # re-renders whatever digest the workload is ALREADY running and no longer
+    # writes the bare `repo:tag` that used to revert an earlier `set image` pin.
+    # Reading the live spec holds whether or not this annotation is current,
+    # which is a STRONGER guarantee than re-rendering the annotation would give:
+    # the chart cannot render a digest the workload has already moved past.
+    # Script-side (#1008): `recorded == latest` no longer means no-op — the
+    # loop reads each workload's LIVE image and re-pins the digest whenever the
+    # workload is off it, so any residual revert (an annotation that lags the live
+    # spec — a timed-out rollout, `helm rollback`) lasts ONE tick instead of
+    # floating on the tag until the next upstream release. Compared on the @sha256
+    # digest, so a registry-prefix rewrite (a mutating webhook) is not mistaken
+    # for a revert. This only bites on a chart VERSION bump anyway — auto-upgrade
+    # compares versions and skips otherwise — so it is not an hourly revert. (One
+    # residue the script-side re-pin does not yet cover is the durable flap-lockout
+    # state, where the annotation stays stuck while the live spec has moved on —
+    # tracked as a follow-up; see the first-tick contract below.)
     #
     # Reconciling against the live spec is what makes that possible — the
     # declarative reconcile `set image` enables (`rollout restart` was a blind
@@ -140,6 +152,21 @@ data:
     # something — repairing an established or legacy edge whose pin a helm
     # re-render reverted, including a chart-version bump on such an edge. A fresh
     # install, watched born on `:tag` here, no longer pays it at all.
+    #
+    # First-tick roll: there isn't one (chart 1.9.136, #1013). Once this tick has
+    # RECORDED D0 without re-imaging, the annotation says `@D0` while the live spec
+    # still says `:tag` — and the chart does not read this annotation. The
+    # control-plane image sites render through `tracebloc.controlPlaneImage`, whose
+    # seed (`tracebloc.controlPlaneSeedDigest`) reads the LIVE workload spec, so the
+    # next chart bump renders the `:tag` the workload is already running and rolls
+    # nothing. The first-observation tick therefore genuinely costs nothing until
+    # something actually `set image`s the workload; the roll it used to schedule
+    # onto the next bump — jobs-manager (Recreate), requests-proxy and the
+    # resource-monitor DaemonSet, for byte-identical content, under auto-upgrade's
+    # `--atomic --wait` — cannot occur on this head. What the live-spec seed does
+    # preserve is a pin that already exists: see the COST note above for the price
+    # of a roll that buys something, and the note at controlPlanePullPolicy in
+    # _helpers.tpl for #569's offline guarantee.
     #
     # Parsing: awk/sed/grep + jq. jq used only where JSON-with-dotted-keys
     # or container/env-array filtering motivates it; the rest stays in pure
@@ -544,9 +571,11 @@ data:
     # annotate is what lets them survive a latched-flap tick (see the write site).
     stale_pin_args=""
     # `kubectl set image` argument lists, accumulated per WORKLOAD (a single
-    # `set image` call can carry several container=ref pairs, so the
-    # two-container jobs-manager Deployment is re-imaged in one patch and
-    # therefore one rollout, not two).
+    # `set image` call can carry several container=ref pairs, so the three
+    # image sites of the jobs-manager Deployment -- `api`, the `wait-for-mysql`
+    # init container that runs the SAME jobs-manager image, and
+    # `pods-monitor-container` -- are re-imaged in one patch and therefore one
+    # rollout, not two or three).
     jm_set_args=""
     rp_set_args=""
     rm_set_args=""
@@ -954,10 +983,19 @@ data:
       # Map the image onto the workload+container(s) that run it. Container
       # names are contractual with the templates; keep them in sync with
       # jobs-manager-deployment.yaml, requests-proxy-deployment.yaml and
-      # resource-monitor-daemonset.yaml.
+      # resource-monitor-daemonset.yaml. EVERY container in a workload that
+      # renders this image must be listed, init containers included: since
+      # #1013 `tracebloc.controlPlaneSeedDigest` reads the LIVE `api` digest and
+      # renders it at every jobsManager site, so a container left on `:tag`
+      # here makes the next `helm upgrade` render `@digest` for it and roll the
+      # `strategy: Recreate` Deployment for byte-identical content (#1207).
+      # `kubectl set image` patches init containers by name like any other.
       case "$repo" in
         tracebloc/jobs-manager)
           jm_set_args="$jm_set_args api=${ref}"
+          # The wait-for-mysql init container runs THIS image too
+          # (jobs-manager-deployment.yaml), so it is pinned in the SAME patch.
+          jm_set_args="$jm_set_args wait-for-mysql=${ref}"
           # requests-proxy runs this SAME image. It follows the jobs-manager
           # digest unless the operator pinned it separately via
           # images.requestsProxy.digest, which is a per-workload override.
@@ -1211,7 +1249,10 @@ spec:
               type: RuntimeDefault
           containers:
             - name: refresh
-              image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ .Values.imageRefresh.image.repository }}:{{ .Values.imageRefresh.image.tag }}"
+              # THROUGH THE ONE HELPER (backend#4160) -- see the note in
+              # auto-upgrade-cronjob.yaml. A bare `alpine/k8s:1.30.5` is a Docker
+              # Hub pull with no `docker.io` anywhere in the file to find it by.
+              image: {{ include "tracebloc.image" (dict "repository" (.Values.imageRefresh.image.repository | default "alpine/k8s") "tag" (.Values.imageRefresh.image.tag | default "1.30.5") "digest" (.Values.imageRefresh.image.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default (.Values.imageRefresh.image.registry | default "docker.io"))) | quote }}
               imagePullPolicy: {{ .Values.imageRefresh.image.pullPolicy }}
               # alpine/k8s entrypoint is kubectl; override to run our script.
               command: ["/bin/sh", "/scripts/image-refresh.sh"]

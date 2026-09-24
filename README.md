@@ -6,6 +6,14 @@ The runtime that keeps your data where it belongs — on your infrastructure.
 
 The tracebloc client deploys inside your Kubernetes cluster and executes all model training, fine-tuning, and inference locally. It connects to the tracebloc backend for orchestration only. No data, no model weights, no artifacts ever leave your environment.
 
+## About this repository
+
+This is a **publish-only mirror**. It holds the released Helm charts (`client/`, `ingestor/`), the installer scripts under `scripts/` that the one-line installers fetch at a pinned release tag, the chart index served at `https://tracebloc.github.io/client` (what `helm repo add` and every deployed client's auto-upgrade read), the [docs](docs/), this README and the [licence](LICENSE). Every stable release rewrites it automatically from a private source repository, which means:
+
+- **Pull requests are not accepted here.** Anything merged into this repository would be overwritten by the next publish.
+- **Deployment problems and bugs in a released chart or installer are welcome** as [issues](https://github.com/tracebloc/client/issues) or by mail to [support@tracebloc.io](mailto:support@tracebloc.io) — include the chart version (`helm list -n tracebloc`), your platform, and what you ran. Roadmap and internal work are tracked privately.
+- **Releases are cosign-signed and the installers verify before they run** — see [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for the integrity model and how to verify a release by hand.
+
 ## Architecture
 
 ```
@@ -54,7 +62,7 @@ This repo ships the **tracebloc** unified Helm chart — one chart for AKS, EKS,
 
 ### Quick install
 
-A single command provisions a Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), deploys the tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) (`tracebloc dataset push`). Use this when you don't already have a cluster — the result is a full client install, not a demo.
+A single command provisions a Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), deploys the tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) (`tracebloc data ingest`). Use this when you don't already have a cluster — the result is a full client install, not a demo.
 
 **macOS / Linux**
 
@@ -70,7 +78,7 @@ irm https://tracebloc.io/i.ps1 | iex
 
 The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh) and [`scripts/install-k8s.ps1`](scripts/install-k8s.ps1). Those scripts are pinned to an **immutable release tag** and each is **verified against a cosign-signed manifest** before it runs; the install **fails closed** if verification can't complete (it never silently runs unverified code). See [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for the integrity model and how to verify a release by hand.
 
-**Kubernetes version, and why an existing cluster keeps its old one.** New installs create the cluster on the pinned, validated k3s version (currently **v1.36.3-k3s1** — the single source of truth is [`scripts/spec/facts.env`](scripts/spec/facts.env)). **k3s's version is fixed when the cluster is created** and cannot be changed on a running one, so an existing cluster stays on whatever it was born with, even across correctly-pinned re-runs. The installer detects that and prints the version it found alongside the pin, with the recreate command — it warns, it does not refuse, so a re-run on an older cluster keeps working. To actually move onto the pinned version you have to recreate the cluster — and **release the secure environment first**, because it is anchored to the cluster's identity and deleting the cluster first strands it on your dashboard for good:
+**Kubernetes version, and why an existing cluster keeps its old one.** New installs create the cluster on the pinned, validated k3s version (currently **v1.36.3-k3s1** — the single source of truth is `scripts/spec/facts.env`, which lives in the source repository and is stamped into the installer scripts published here). **k3s's version is fixed when the cluster is created** and cannot be changed on a running one, so an existing cluster stays on whatever it was born with, even across correctly-pinned re-runs. The installer detects that and prints the version it found alongside the pin, with the recreate command — it warns, it does not refuse, so a re-run on an older cluster keeps working. To actually move onto the pinned version you have to recreate the cluster — and **release the secure environment first**, because it is anchored to the cluster's identity and deleting the cluster first strands it on your dashboard for good:
 
 ```bash
 tracebloc delete --keep-data      # releases this secure environment; keeps your local data
@@ -132,7 +140,6 @@ Full ingestor docs → **[ingestor/README.md](ingestor/README.md)** (data stagin
 | Available ingestion categories + example YAMLs | [dataset templates on docs.tracebloc.io](https://docs.tracebloc.io/create-use-case/templates) |
 | Threat model & operator responsibilities | [docs/SECURITY.md](docs/SECURITY.md) |
 | Migrating from `eks-1.0.x` / `aks-*` charts to `client-1.x` | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) |
-| Per-tenant migration runbook | [docs/migration-tools/README.md](docs/migration-tools/README.md) |
 | Per-platform value mapping | [client/MIGRATION.md](client/MIGRATION.md) |
 
 Platform-specific walkthroughs: [Linux](https://docs.tracebloc.io/environment-setup/local-deployment-guide-linux) · [macOS](https://docs.tracebloc.io/environment-setup/local-deployment-guide-macos) · [EKS](https://docs.tracebloc.io/environment-setup/eks-client-deployment-guide) · [Azure / AKS](https://docs.tracebloc.io/environment-setup/azure-deployment-guide)
@@ -149,8 +156,3 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 **Deployment help?** [support@tracebloc.io](mailto:support@tracebloc.io) or [open an issue](https://github.com/tracebloc/client/issues).
 
-## Pre-commit
-
-Optional but recommended: `pip install pre-commit && pre-commit install` sets up the git hooks from [`.pre-commit-config.yaml`](.pre-commit-config.yaml).
-The hooks run automatically on each commit and are lint-only (ShellCheck at the same error-severity gate as CI) — nothing rewrites files, so `scripts/manifest.sha256` always stays true to `scripts/`.
-They are a fast local guard — CI remains the guarantee.

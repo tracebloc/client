@@ -480,7 +480,16 @@ spec:
               type: RuntimeDefault
           containers:
             - name: helm
-              image: "{{ include "tracebloc.mirrorPrefix" $ }}{{ .Values.autoUpgrade.image.repository }}:{{ .Values.autoUpgrade.image.tag }}"
+              # THROUGH THE ONE HELPER (backend#4160). This used to render
+              # `mirrorPrefix + repository:tag`, which emits NOTHING when no
+              # mirror is set -- a BARE reference, and a bare reference is a
+              # Docker Hub reference. That is invisible: there is no `docker.io`
+              # in the file to grep for, which is why three sites like this one
+              # were missed by a sweep of `values.yaml`. `tracebloc.image` always
+              # names the registry and can carry a digest, so both are
+              # expressible here for the first time. `global.imageRegistry` still
+              # wins when set, so an air-gapped install re-homes exactly as before.
+              image: {{ include "tracebloc.image" (dict "repository" (.Values.autoUpgrade.image.repository | default "alpine/helm") "tag" (.Values.autoUpgrade.image.tag | default "3.16.4") "digest" (.Values.autoUpgrade.image.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default (.Values.autoUpgrade.image.registry | default "docker.io"))) | quote }}
               imagePullPolicy: {{ .Values.autoUpgrade.image.pullPolicy }}
               # `helm` is the entrypoint on alpine/helm; override so we run
               # our script instead.

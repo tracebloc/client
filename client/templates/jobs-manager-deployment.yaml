@@ -219,7 +219,7 @@ spec:
       # (Operation not permitted vs Read-only file system) lands in `kubectl logs` beside the
       # verdict; the installer suppresses it because its output is a user-facing progress line.
       - name: init-writable-data
-        image: {{ include "tracebloc.image" (dict "repository" "library/busybox" "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
+        image: {{ include "tracebloc.image" (dict "repository" (.Values.images.busybox.repository | default "library/busybox") "tag" .Values.images.busybox.tag "digest" .Values.images.busybox.digest "registry" (dig "imageRegistry" "docker.io" (.Values.global | default dict))) | quote }}
         securityContext:
           runAsUser: 0
           runAsNonRoot: false

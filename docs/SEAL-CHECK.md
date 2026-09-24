@@ -293,6 +293,15 @@ to values. **That unpinned state is the recommended one**, on every environment:
 it is what keeps the running digest reproducible *and* current, and it needs no
 operator action when the registry moves.
 
+Since chart **1.9.136 (client-runtime#199)** a `helm upgrade` **preserves** that
+image-refresh pin on its own: `tracebloc.controlPlaneImage` seeds the digest from
+the **live workload spec** via `lookup`, so `--reset-then-reuse-values`
+re-renders `repository@digest` instead of reverting to the bare `:tag` (the
+revert that let a stale-`:tag` node cache run an old build). It reads the live
+spec, never an annotation, so it can never render a digest the workload has
+already moved past; a fresh install, a `helm template`/`diff`, `image-refresh`
+disabled, or a live ref on a different registry all fall back to `:tag`.
+
 A **values pin** (`images.jobsManager.digest`) is for a deliberate hold only, and
 since chart 1.9.119 it **must carry the registry it was resolved on**
 (`images.jobsManager.digestRegistry`, a bare host spelled like
