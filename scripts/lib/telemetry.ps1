@@ -72,7 +72,11 @@ $script:TbTelemetryErrorClasses = @(
 # only ever name a script of ours.
 $script:TbTelemetrySources = @('install-k8s.ps1', 'install.ps1', 'telemetry.ps1')
 
-$script:TbTelemetryOptOutVars = @('TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+# UNION, canonical first (RFC-0076 settings-naming S9, backend#4027): must match
+# telemetry.sh's TB_TELEMETRY_OPT_OUT_VARS -- telemetry-vocabulary-agreement.sh
+# fails if the two disagree. TRACEBLOC_NO_TELEMETRY is the legacy alias kept
+# until naming-canon.yml's remove_by (2026-12-31); DO_NOT_TRACK is never renamed.
+$script:TbTelemetryOptOutVars = @('TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
 
 # ── Shape tests ──────────────────────────────────────────────────────────────
 #  ANCHORED \A..\z, NOT ^..$ — and this is the one porting detail most likely to
@@ -214,7 +218,7 @@ function Set-TelemetryRerunHandoff { $script:TbTelemetryRerunHandoff = $true }
 
 # ── Opt-out (telemetry.sh:259) ───────────────────────────────────────────────
 #  Anything other than the explicit "off" spellings counts as opting OUT: a user
-#  who typed TRACEBLOC_NO_TELEMETRY=please meant it.
+#  who typed TRACEBLOC_SKIP_TELEMETRY=please meant it.
 function Test-TelemetryEnabled {
   [OutputType([bool])] param()
   foreach ($name in $script:TbTelemetryOptOutVars) {

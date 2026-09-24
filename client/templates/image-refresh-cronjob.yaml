@@ -412,6 +412,27 @@ data:
       printf '%s\n' "$_json" | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
 
+    # write_digest_records "<annotate args>" -- record a workload's
+    # `last-refreshed-<image>-digest` (+ applied/first-observed) markers on the
+    # jobs-manager Deployment where all records live (#1008). NON-FATAL by design
+    # (backend#3575): this is called AFTER each rollout but BEFORE the #626 success
+    # reset, so a failed annotate must NOT abort the tick under `set -e` -- that
+    # would leave ATTEMPT_KEY raised on a rollout that genuinely settled and could
+    # PERMANENTLY trip the flap lockout while the CronJob stayed green (the exact
+    # class #626 fixed by keeping the reset independent of the digest write). A
+    # transient failure here is re-reconciled next tick (recorded != latest ->
+    # idempotent re-image -> fast rollout -> record again). Bounded like every
+    # other API call. No-op on an empty arg string.
+    write_digest_records() {
+      [ -n "$1" ] || return 0
+      log "updating deployment annotations:$1"
+      # shellcheck disable=SC2086  # word-split the accumulated key=value list
+      if ! _wr_err="$(kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        $1 --overwrite --request-timeout=15s 2>&1 >/dev/null)"; then
+        log "  WARNING: could not record digest annotations on deployment/${DEPLOYMENT_NAME}: ${_wr_err:-unknown error}. The rollout itself settled; this record is re-reconciled on the next tick (recorded != latest re-images idempotently)."
+      fi
+    }
+
     # The image reference the LIVE workload currently runs for $repo's primary
     # container. Used to detect when `helm upgrade --reset-then-reuse-values`
     # (the auto-upgrade) has re-rendered the workload back to the
@@ -562,13 +583,41 @@ data:
     # =================================================================
 
     restart_needed=0
-    annotate_args=""
+    # `last-refreshed-<image>-digest` records, split by WHEN they may be written
+    # so a mid-sequence rollout failure never strands the record of a workload
+    # that already settled (backend#3575). Three buckets, each flushed only after
+    # the rollout(s) that carry its image succeed -- never batched at the tick end:
+    #   record_only_args   first-observation records (line ~794): NO rollout
+    #                      dependency, so written unconditionally before the
+    #                      restart block, and they survive even a latched tick.
+    #   jm_deploy_annotate written after the jobs-manager Deployment rollout --
+    #                      the pods-monitor image (only there), and the
+    #                      jobs-manager image WHEN requests-proxy does not follow
+    #                      it (pinned separately).
+    #   rp_deploy_annotate the jobs-manager image record WHEN requests-proxy
+    #                      follows it: that Deployment is the LAST workload
+    #                      carrying the image, so the record must wait for it or a
+    #                      next tick reads `recorded == latest` and leaves
+    #                      requests-proxy on the old image.
+    #   rm_daemon_annotate the resource-monitor image record, after its DaemonSet
+    #                      rollout.
+    # WHY split rather than one final annotate (the pre-backend#3575 shape): the
+    # rollout calls are unguarded under `set -e`, so a timeout on requests-proxy
+    # or the resource-monitor DaemonSet exited the tick BEFORE the batched
+    # annotate, leaving live=`@D1` while all three records still said `@D0` --
+    # and from client#1013 the chart renders `last-refreshed`, so Helm-3.16
+    # client-side apply then rolled a settled workload BACKWARDS D1->D0 on every
+    # bump while locked. Each record now lands right after its own rollout.
+    record_only_args=""
+    jm_deploy_annotate=""
+    rp_deploy_annotate=""
+    rm_daemon_annotate=""
     # Pass-0 diagnostic annotations -- the `stale-pin-<image>` clears and
-    # finding-sets -- accumulate SEPARATELY from annotate_args and are written in
-    # their own bounded annotate BEFORE the restart block (#1008 item 1).
-    # They touch only the stale-pin keys, never `last-refreshed-<image>-digest`,
-    # so they are safe to land before the rollout; keeping them out of the final
-    # annotate is what lets them survive a latched-flap tick (see the write site).
+    # finding-sets -- accumulate SEPARATELY and are written in their own bounded
+    # annotate BEFORE the restart block (#1008 item 1). They touch only the
+    # stale-pin keys, never `last-refreshed-<image>-digest`, so they are safe to
+    # land before the rollout; keeping them out of the digest records is what lets
+    # them survive a latched-flap tick (see the write site).
     stale_pin_args=""
     # `kubectl set image` argument lists, accumulated per WORKLOAD (a single
     # `set image` call can carry several container=ref pairs, so the three
@@ -791,7 +840,10 @@ data:
           recorded="$latest"
         else
           log "  first observation; recording without re-imaging"
-          annotate_args="$annotate_args ${key}=${latest} ${first_observed_key}=1"
+          # No rollout for a first observation, so this record has no rollout to
+          # wait for: it goes to the write-anytime bucket, flushed before the
+          # restart block (backend#3575).
+          record_only_args="$record_only_args ${key}=${latest} ${first_observed_key}=1"
           continue
         fi
       fi
@@ -965,13 +1017,15 @@ data:
         log "  digest changed (${recorded} -> ${latest}); re-image needed"
       fi
       # Record the digest AND stamp applied_key -- proof a digest has now been
-      # rolled onto this workload (#1008). Both land in the SAME annotate below,
-      # after a successful rollout, so they share one fate: whenever a later tick
-      # reads `recorded == latest`, the applied marker it gates on is present too.
-      # The first-observation arm stamps first_observed_key instead (it applies
+      # rolled onto this workload (#1008). Both land in the SAME annotate, after a
+      # successful rollout, so they share one fate: whenever a later tick reads
+      # `recorded == latest`, the applied marker it gates on is present too. The
+      # first-observation arm stamps first_observed_key instead (it applies
       # nothing), and the two markers are what let the off-digest arm above tell a
       # fresh install from an established edge without stranding the legacy fleet.
-      annotate_args="$annotate_args ${key}=${latest} ${applied_key}=1"
+      # Routed to a per-workload bucket in the case below (backend#3575), so the
+      # record lands right after ITS workload's rollout, not batched at tick end.
+      img_record="${key}=${latest} ${applied_key}=1"
       restart_needed=1
 
       # The reference we pin: the SAME registry the digest above was resolved
@@ -1001,15 +1055,26 @@ data:
           # images.requestsProxy.digest, which is a per-workload override.
           if [ "$REQUESTS_PROXY_PINNED" = "1" ]; then
             log "  requests-proxy is pinned by images.requestsProxy.digest; not following this digest"
+            # Not followed: this Deployment is the only workload carrying the
+            # jobs-manager image, so its record may land after that rollout.
+            jm_deploy_annotate="$jm_deploy_annotate $img_record"
           else
             rp_set_args="$rp_set_args proxy=${ref}"
+            # Followed: requests-proxy also runs this image and rolls AFTER the
+            # jobs-manager Deployment, so the record must wait for THAT rollout --
+            # otherwise a next tick reads `recorded == latest` and never re-images
+            # a requests-proxy left behind (backend#3575).
+            rp_deploy_annotate="$rp_deploy_annotate $img_record"
           fi
           ;;
         tracebloc/pods-monitor)
           jm_set_args="$jm_set_args pods-monitor-container=${ref}"
+          # pods-monitor image lives only in the jobs-manager Deployment.
+          jm_deploy_annotate="$jm_deploy_annotate $img_record"
           ;;
         tracebloc/resource-monitor)
           rm_set_args="$rm_set_args tracebloc-resource-monitor=${ref}"
+          rm_daemon_annotate="$rm_daemon_annotate $img_record"
           ;;
       esac
     done
@@ -1040,10 +1105,20 @@ data:
       fi
     fi
 
+    # First-observation records land HERE too, before the restart block
+    # (backend#3575): they re-image nothing, so they have no rollout to wait for,
+    # and writing them ahead of the restart block means a later rollout timeout --
+    # or the latched-flap `exit 0` -- can never drop them. Same reasoning and same
+    # NON-FATAL contract as the stale-pin clears above.
+    write_digest_records "$record_only_args"
+
     # Order matters: rollout FIRST, annotate AFTER `rollout status`
     # succeeds. Annotating first would let a failed rollout silently
     # freeze the deployment on the old image (next tick sees
-    # recorded == latest and skips).
+    # recorded == latest and skips). Each workload's digest record is written
+    # immediately after ITS OWN rollout below, never batched at the tick end, so a
+    # mid-sequence rollout failure leaves only the not-yet-rolled images' records
+    # stale -- correctly (backend#3575).
     if [ "$restart_needed" -eq 1 ]; then
       # #563: guard a FLAPPING deployment with a plain consecutive-failure
       # counter. If readiness oscillates (becomes Ready, then crashes after
@@ -1117,6 +1192,13 @@ data:
         kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${DEPLOYMENT_NAME}" \
           --timeout="$ROLLOUT_TIMEOUT"
         log "  deployment/${DEPLOYMENT_NAME} rollout complete"
+        # Record the images this rollout carried, NOW -- before the next two
+        # rollouts, either of which can time out and exit the tick under set -e
+        # (backend#3575). Covers pods-monitor (only here) and the jobs-manager
+        # image WHEN requests-proxy is pinned and does not follow it; when it does
+        # follow, the jobs-manager record is deferred to the requests-proxy
+        # rollout below.
+        write_digest_records "$jm_deploy_annotate"
       fi
 
       if [ -n "$rp_set_args" ]; then
@@ -1126,6 +1208,12 @@ data:
         kubectl rollout status -n "$RELEASE_NAMESPACE" "deployment/${REQUESTS_PROXY_DEPLOYMENT}" \
           --timeout="$ROLLOUT_TIMEOUT"
         log "  deployment/${REQUESTS_PROXY_DEPLOYMENT} rollout complete"
+        # requests-proxy is the LAST workload carrying the jobs-manager image, so
+        # its record lands only now that BOTH it and the jobs-manager Deployment
+        # have settled -- writing it earlier would let a next tick read
+        # `recorded == latest` and leave a still-old requests-proxy unrolled
+        # (backend#3575).
+        write_digest_records "$rp_deploy_annotate"
       fi
 
       if [ -n "$rm_set_args" ]; then
@@ -1137,31 +1225,30 @@ data:
         kubectl rollout status -n "$NODE_AGENTS_NAMESPACE" "daemonset/${RESOURCE_MONITOR_DAEMONSET}" \
           --timeout="$ROLLOUT_TIMEOUT"
         log "  daemonset/${RESOURCE_MONITOR_DAEMONSET} rollout complete"
+        # The resource-monitor image lives only on this DaemonSet; record it now
+        # that its rollout has settled (backend#3575).
+        write_digest_records "$rm_daemon_annotate"
       fi
 
       log "re-image complete"
-      # Success (settled rollout): reset the failure counter and clear any flap
-      # marker so a future change starts fresh. #626 (CID 3729110045): do this in
-      # its OWN bounded annotate BEFORE the digest record below -- do NOT batch it
-      # into the final annotate. Batching made the reset contingent on the digest
-      # write: if that later annotate hung or failed under `set -e`, the rollout
-      # had genuinely succeeded yet `refresh-attempt` stayed elevated, so
-      # subsequent ticks could burn the budget and PERMANENTLY trip the flap
-      # lockout while the CronJob stayed green. A dedicated --request-timeout-bounded
-      # annotate makes the success reset reliable and independent of the digest
-      # write. `key-` removes the annotation (a no-op if absent).
+      # Success (all three rollouts settled): reset the failure counter and clear
+      # any flap marker so a future change starts fresh. #626 (CID 3729110045):
+      # this is its OWN bounded annotate, and it stays reliable BECAUSE the
+      # per-workload digest records above are NON-FATAL (write_digest_records
+      # swallows a failed annotate). A digest write that hung or failed can
+      # therefore never abort the tick under `set -e` before this reset -- which
+      # is what would leave `refresh-attempt` elevated on a genuinely-settled
+      # rollout and PERMANENTLY trip the flap lockout while the CronJob stayed
+      # green. The reset itself stays fatal: if IT cannot be written the tick is
+      # genuinely unfinished. `key-` removes the annotation (a no-op if absent).
+      #
+      # backend#3575: the digest records used to be ONE batched annotate AFTER
+      # this reset, at the very end of the tick. That dropped every record when an
+      # earlier rollout timed out (exit under set -e before the batch) -- the
+      # D0-overwrite this change removes by writing each record right after its
+      # own rollout, above.
       kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
         "${ATTEMPT_KEY}-" "${FLAP_KEY}-" --overwrite --request-timeout=15s
-    fi
-
-    if [ -n "$annotate_args" ]; then
-      log "updating deployment annotations:$annotate_args"
-      # shellcheck disable=SC2086  # word-split annotate_args intentional
-      # #626: bound the digest-record annotate too (was unbounded, the root of CID
-      # 3729110045). Even if this fails, the success reset above has already
-      # landed, so a flap lockout can never stick after a successful rollout.
-      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
-        $annotate_args --overwrite --request-timeout=15s
     fi
 
     log "tick complete"
@@ -1252,8 +1339,8 @@ spec:
               # THROUGH THE ONE HELPER (backend#4160) -- see the note in
               # auto-upgrade-cronjob.yaml. A bare `alpine/k8s:1.30.5` is a Docker
               # Hub pull with no `docker.io` anywhere in the file to find it by.
-              image: {{ include "tracebloc.image" (dict "repository" (.Values.imageRefresh.image.repository | default "alpine/k8s") "tag" (.Values.imageRefresh.image.tag | default "1.30.5") "digest" (.Values.imageRefresh.image.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default (.Values.imageRefresh.image.registry | default "docker.io"))) | quote }}
-              imagePullPolicy: {{ .Values.imageRefresh.image.pullPolicy }}
+              image: {{ include "tracebloc.thirdPartyImage" (dict "site" "imageRefresh.image" "root" $) | quote }}
+              imagePullPolicy: {{ (dig "image" "pullPolicy" "" (.Values.imageRefresh | default dict)) | default "IfNotPresent" }}
               # alpine/k8s entrypoint is kubectl; override to run our script.
               command: ["/bin/sh", "/scripts/image-refresh.sh"]
               env:

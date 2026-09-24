@@ -2,6 +2,49 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.146 — a third-party image digest is applied only to the image it was resolved for
+
+**What changed.** The chart pins its third-party images by digest
+(`autoUpgrade.image`, `imageRefresh.image`, `sealCheck.storageAssertions.image`,
+`egressProxy.image`, `gpu.devicePlugin.amd`, `images.busybox`; the same rule
+covers the unpinned `gpu.devicePlugin.nvidia` and `telemetryCollector.image`).
+Helm merges values, so an override of `repository` or `tag` alone used to keep
+the chart's digest and render **our digest on your image**:
+
+    you set:   autoUpgrade.image.repository: my-mirror/helm
+    before:    docker.io/my-mirror/helm@sha256:9b25e60a...   (alpine/helm's digest)
+    after:     docker.io/my-mirror/helm:3.16.4
+
+That reference does not pull, or — in a mirror that happens to hold that
+digest — runs something other than the image you named. A digest is now
+honoured only for the `repository:tag` it was resolved for. When it is not,
+the site renders `repository:tag` and the install/upgrade NOTES print
+`WARNING: third-party image digest(s) NOT applied`, naming the site.
+
+The identity is read from a new key beside each `digest`:
+
+    <site>.digestFor: "<repository>:<tag>"    # the image the digest was resolved for
+
+Left empty (the default), the chart's own digest is deemed resolved for the
+chart's own `repository:tag`, and a digest **you** set is deemed resolved for
+the image you set beside it — so your own digest is always honoured.
+`registry` and `global.imageRegistry` are not part of the identity: a
+registry-only re-home keeps the pin, as before.
+
+**What you have to do: nothing, on a default install** or one that re-homes
+images only through `global.imageRegistry` / `<site>.registry`.
+
+**If you override `repository` or `tag` and left the digest in place**, pick one:
+
+- **your image is different from ours** — nothing to do: it now renders your
+  `repository:tag`. Set `<site>.digest` to your own digest to pin it, or
+  `digest: ""` to silence the warning.
+- **your registry is a mirror serving the SAME bytes under another path**
+  (a proxy cache such as `harbor.example/dockerhub/alpine/helm`) — before this
+  release that shape pulled the right bytes by accident; it now falls back to
+  the tag. Keep the pin by declaring it:
+  `autoUpgrade.image.digestFor: "dockerhub/alpine/helm:3.16.4"`.
+
 ## Upgrading to 1.9.135 — the telemetry Collector comes from OpenTelemetry's own registry, so a mirrored install must re-sync it under a new path
 
 **What changed.** `telemetryCollector.image` moved from Docker Hub to

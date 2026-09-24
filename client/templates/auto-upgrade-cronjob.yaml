@@ -489,8 +489,8 @@ spec:
               # names the registry and can carry a digest, so both are
               # expressible here for the first time. `global.imageRegistry` still
               # wins when set, so an air-gapped install re-homes exactly as before.
-              image: {{ include "tracebloc.image" (dict "repository" (.Values.autoUpgrade.image.repository | default "alpine/helm") "tag" (.Values.autoUpgrade.image.tag | default "3.16.4") "digest" (.Values.autoUpgrade.image.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default (.Values.autoUpgrade.image.registry | default "docker.io"))) | quote }}
-              imagePullPolicy: {{ .Values.autoUpgrade.image.pullPolicy }}
+              image: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) | quote }}
+              imagePullPolicy: {{ (dig "image" "pullPolicy" "" (.Values.autoUpgrade | default dict)) | default "IfNotPresent" }}
               # `helm` is the entrypoint on alpine/helm; override so we run
               # our script instead.
               command: ["/bin/sh", "/scripts/auto-upgrade.sh"]

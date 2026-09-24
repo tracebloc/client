@@ -96,6 +96,28 @@ tracebloc.io/seal-check: "true"
 tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- end }}
 
+{{/*
+  tracebloc.sealTimeout — the per-check seal budget annotation.
+
+  Every runnable seal check (every `helm test` hook Job or Pod) declares, in
+  whole seconds, the longest a healthy run of it may take end to end:
+  scheduling, image pull, the check itself. The tracebloc CLI runs each check
+  with `helm test --timeout` = max(its own --timeout, this value), so the CLI's
+  budget can never be smaller than the chart's own declared worst case.
+
+  The argument is the check's budget as an EXPRESSION derived from the bounds
+  the check's own script uses (the storage check passes the same value its
+  activeDeadlineSeconds reads) — never a number typed a second time.
+  scripts/tests/seal-timeout-declared.sh fails any runnable test hook that
+  renders without it.
+
+  Usage:
+    {{- include "tracebloc.sealTimeout" $budget | nindent 4 }}
+*/}}
+{{- define "tracebloc.sealTimeout" -}}
+"tracebloc.io/seal-timeout": {{ int . | toString | quote }}
+{{- end }}
+
 {{- define "tracebloc.serviceAccountName" -}}
 {{ include "tracebloc.fullname" . }}-jobs-manager
 {{- end }}
@@ -695,6 +717,217 @@ used to show -- is how a Docker Hub digest was rendered onto ghcr.io.
 {{ $registry }}/{{ .repository }}:{{ .tag | default "prod" }}
 {{- end -}}
 {{- end }}
+
+{{/*
+tracebloc.thirdPartyImageDefaults -- THE chart-side copy of every values-backed
+third-party image reference, keyed by its path in values.yaml. It is read ONLY
+by tracebloc.thirdPartyPinDecision (below): for the nil path, and for the
+identity of the chart's own pin.
+
+WHY A COPY EXISTS AT ALL. A template cannot read values.yaml's defaults when
+the block is absent: `.Values` is the merged result, and on a `--reuse-values`
+upgrade from a release that predates the block (or an explicit `<block>: null`)
+the chart default never reaches the render. `.Files` does not serve values.yaml
+either (measured: `len (.Files.Get "values.yaml")` renders 0). So the nil path
+needs its own declaration of the default -- the digest included.
+
+`digestFor` IS THE IDENTITY OF THE CHART PIN: the `<repository>:<tag>` the
+row's `digest` was resolved for. It is what the pin rule compares the rendered
+repository:tag against when the operator has not declared an identity of their
+own, so a pin can never be applied to an image it was not resolved for. An
+unpinned row (`digest: ""`) declares none.
+
+WHY THIS COPY CANNOT DRIFT UNSEEN. Every image site used to restate its own
+defaults inline, and every one defaulted `digest` to "" -- so a nil block
+rendered `registry/repo:tag` where values.yaml pins `@sha256:...`, silently,
+and the AMD site still said `latest` after values.yaml had moved off it.
+Now there is ONE copy, and scripts/tests/third-party-image-defaults-agreement.sh
+(a DRIFT_GUARDS entry) holds it field-for-field against values.yaml, holds each
+`digestFor` against its own row's repository:tag, holds its keys against the
+`site` of every call below, refuses any template that hands a values digest to
+tracebloc.image directly, and renders every override shape per site. Bumping a
+pin in values.yaml means bumping it here in the same PR; the guard names both
+places when you forget.
+
+The table body is plain YAML with no template actions, on purpose: the guard
+parses it as YAML straight out of this file.
+*/}}
+{{- define "tracebloc.thirdPartyImageDefaults" -}}
+egressProxy.image:
+  registry: docker.io
+  repository: ubuntu/squid
+  tag: "6.6-24.04_beta"
+  digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+  digestFor: "ubuntu/squid:6.6-24.04_beta"
+sealCheck.storageAssertions.image:
+  registry: docker.io
+  repository: alpine/k8s
+  tag: "1.30.5"
+  digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
+  digestFor: "alpine/k8s:1.30.5"
+autoUpgrade.image:
+  registry: docker.io
+  repository: alpine/helm
+  tag: "3.16.4"
+  digest: "sha256:9b25e60ae264940b276e32866d37e3088e70c4e2d1784b964dc3f90346281a74"
+  digestFor: "alpine/helm:3.16.4"
+imageRefresh.image:
+  registry: docker.io
+  repository: alpine/k8s
+  tag: "1.30.5"
+  digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
+  digestFor: "alpine/k8s:1.30.5"
+gpu.devicePlugin.amd:
+  registry: docker.io
+  repository: rocm/k8s-device-plugin
+  tag: "1.31.0.11"
+  digest: "sha256:e4df5dc9a7fa34e2344852256dcc5762171a6d68f1f9a34026ce26786ae335e2"
+  digestFor: "rocm/k8s-device-plugin:1.31.0.11"
+gpu.devicePlugin.nvidia:
+  registry: nvcr.io
+  repository: nvidia/k8s-device-plugin
+  tag: "v0.14.5"
+  digest: ""
+  digestFor: ""
+telemetryCollector.image:
+  registry: ghcr.io
+  repository: open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
+  tag: "0.159.0"
+  digest: ""
+  digestFor: ""
+images.busybox:
+  registry: docker.io
+  repository: library/busybox
+  tag: "1.35"
+  digest: "sha256:98ad9d1a2be345201bb0709b0d38655eb1b370145c7d94ca1fe9c421f76e245a"
+  digestFor: "library/busybox:1.35"
+{{- end -}}
+
+{{/*
+tracebloc.thirdPartyPinDecision -- THE ONE decision for a values-backed
+third-party image site: which reference it renders, and whether a digest was
+dropped on the way. Renders JSON:
+
+  ref       the image reference the site renders
+  digest    the digest in effect before the rule (block's own, else the chart's)
+  identity  the rendered `<repository>:<tag>` (registry excluded, see below)
+  for       the identity the digest is deemed resolved for
+  dropped   true when a digest was set but NOT rendered
+
+Arguments: `site` (the block's path in values.yaml; must be a key of
+tracebloc.thirdPartyImageDefaults -- an unknown site FAILS the render, a typo
+must not silently render some default) and `root`. The block is read HERE, by
+walking `site` through `.Values`, and nowhere else: the image sites
+(tracebloc.thirdPartyImage) and NOTES (tracebloc.droppedThirdPartyPins) both
+call this function, so what NOTES reports is exactly what the sites rendered.
+
+THE PIN RULE -- the tracebloc.pinFor mould, with repository:tag in the place of
+the registry. A digest names the bytes of ONE image; applied to another it
+does not pull, or -- in a mirror that happens to hold it -- pulls something
+other than what the operator named. So a digest is honoured only for the image
+it was resolved for:
+
+  <site>.digest     the pin (block's own; the chart's when the block has none,
+                    which is the nil path: an empty block renders the chart
+                    default reference IN FULL, digest included)
+  <site>.digestFor  `<repository>:<tag>` the digest was resolved for
+
+  honoured  <=>  digest non-empty AND for == rendered repository:tag
+  dropped   otherwise: the site renders `registry/repository:tag` and NOTES
+            names the site, the digest's identity and the rendered one.
+
+  `for` is `digestFor` when the block declares one. When it does not:
+    * the digest IS the chart's      -> the chart row's `digestFor` (so a
+      chart pin survives only while repository AND tag equal the chart
+      defaults: an operator who re-homes the image and leaves the digest
+      alone gets their repo:tag, not our digest on their image);
+    * the digest is the operator's own -> the rendered identity (they wrote
+      digest and image together; it is always honoured).
+
+  A PATH-REWRITING MIRROR (e.g. `harbor.corp` + `dockerhub/alpine/helm`)
+  holding the SAME bytes keeps the chart pin by declaring it:
+  `digestFor: "dockerhub/alpine/helm:3.16.4"`. A render cannot tell that mirror
+  from a different image, so it has to be said.
+
+  REGISTRY IS NOT PART OF THE IDENTITY. `registry` and global.imageRegistry
+  (#585) re-home the same repository path, and a mirror of it carries the same
+  digests, so the pin survives a registry-only re-home -- global.imageRegistry
+  wins over every per-site registry, as before.
+
+NEVER `fail` on values. Dropping to the tag is the safe state, as it is for
+tracebloc.pinFor; refusing to render would wedge an auto-upgrade over a pin.
+*/}}
+{{- define "tracebloc.thirdPartyPinDecision" -}}
+{{- $all := include "tracebloc.thirdPartyImageDefaults" . | fromYaml -}}
+{{- if not (hasKey $all .site) -}}
+{{- fail (printf "tracebloc.thirdPartyImage: no chart default declared for image site %q; add it to tracebloc.thirdPartyImageDefaults" .site) -}}
+{{- end -}}
+{{- $d := index $all .site -}}
+{{- $node := .root.Values -}}
+{{- range $k := splitList "." .site -}}
+{{- if kindIs "map" $node -}}
+{{- $node = index $node $k -}}
+{{- else -}}
+{{- $node = dict -}}
+{{- end -}}
+{{- end -}}
+{{- $b := dict -}}
+{{- if kindIs "map" $node -}}
+{{- $b = $node -}}
+{{- end -}}
+{{- $chartDigest := $d.digest | default "" -}}
+{{- $digest := $chartDigest -}}
+{{- if hasKey $b "digest" -}}
+{{- $digest = $b.digest | default "" -}}
+{{- end -}}
+{{- $repository := $b.repository | default $d.repository -}}
+{{- $tag := toString ($b.tag | default $d.tag) -}}
+{{- $identity := printf "%s:%s" $repository $tag -}}
+{{- $for := $b.digestFor | default "" -}}
+{{- if not $for -}}
+{{- if eq $digest $chartDigest -}}
+{{- $for = $d.digestFor | default "" -}}
+{{- else -}}
+{{- $for = $identity -}}
+{{- end -}}
+{{- end -}}
+{{- $honoured := "" -}}
+{{- if and $digest (eq $for $identity) -}}
+{{- $honoured = $digest -}}
+{{- end -}}
+{{- $registry := (dig "imageRegistry" "" (.root.Values.global | default dict)) | default ($b.registry | default $d.registry) -}}
+{{- $ref := include "tracebloc.image" (dict "repository" $repository "tag" $tag "digest" $honoured "registry" $registry) -}}
+{{- dict "ref" $ref "digest" $digest "identity" $identity "for" $for "dropped" (and (ne $digest "") (eq $honoured "")) | toJson -}}
+{{- end -}}
+
+{{/*
+tracebloc.thirdPartyImage -- the image reference for a values-backed
+third-party image site: tracebloc.thirdPartyPinDecision's `ref`, nothing else.
+Every such site calls this, with its values path as `site`.
+Usage: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) }}
+*/}}
+{{- define "tracebloc.thirdPartyImage" -}}
+{{- (include "tracebloc.thirdPartyPinDecision" . | fromJson).ref -}}
+{{- end -}}
+
+{{/*
+tracebloc.droppedThirdPartyPins -- one entry per third-party image site whose
+digest tracebloc.thirdPartyPinDecision DROPPED, for NOTES.txt. Every row of the
+defaults table is read, whether or not its workload is enabled: an entry means
+the values for that site name a digest the site will not render, which is
+worth knowing before the workload is switched on too. Renders nothing when no
+pin was dropped.
+*/}}
+{{- define "tracebloc.droppedThirdPartyPins" -}}
+{{- $root := . -}}
+{{- range $site := (include "tracebloc.thirdPartyImageDefaults" $root | fromYaml | keys | sortAlpha) -}}
+{{- $dec := include "tracebloc.thirdPartyPinDecision" (dict "site" $site "root" $root) | fromJson -}}
+{{- if $dec.dropped }}
+  - {{ $site }}.digest = {{ $dec.digest }}
+    resolved for {{ $dec.for | default "(no identity)" }}; this release renders {{ $dec.identity }}, so it pulls {{ $dec.ref }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 
 {{/*
 tracebloc.mirrorPrefix — registry prefix for images whose repository is a

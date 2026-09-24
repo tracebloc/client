@@ -50,7 +50,7 @@ spec:
           # an empty global would silently drop an explicit per-image registry
           # (Bugbot). dig's own default is "" so the fall-through applies to both an
           # empty and an absent global.
-          image: {{ include "tracebloc.image" (dict "repository" ($img.repository | default "ubuntu/squid") "tag" ($img.tag | default "6.6-24.04_beta") "digest" ($img.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default ($img.registry | default "docker.io"))) | quote }}
+          image: {{ include "tracebloc.thirdPartyImage" (dict "site" "egressProxy.image" "root" $) | quote }}
           imagePullPolicy: IfNotPresent
           command: ["squid"]
           # -N: no daemon (run in foreground). Logs go to the std streams via

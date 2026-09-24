@@ -232,6 +232,20 @@ env: {
   #    anything. RENDERED ONLY WHEN SET, so absence keeps the gate dark
   #    exactly as the runtime intends rather than delivering a chart guess.
   # MULTI_GPU_MIN_PARAMETERS: "50000000"
+  # -- Byte-bounded edge LOG RETENTION (client-runtime#371; backend#2360). The
+  #    edge caps its own rotating logs by total bytes; both knobs are OPTIONAL
+  #    and OFF here on purpose. NO chart-side default is restated: the sole
+  #    source of truth for the defaults is client-runtime's log_retention.py
+  #    (LOG_MAX_TOTAL_BYTES defaults to 512 MiB per writer, LOG_BACKUP_COUNT its
+  #    own default), so the chart omits the env when unset and only forwards an
+  #    explicit override. Delivered to the log-writing processes through the
+  #    generic env passthrough above — jobs-manager is the only workload that
+  #    mounts the logs PVC, and the passthrough reaches both its containers.
+  #    Set these if you shrink pvc.logs below the default 10Gi: the shipped byte
+  #    budget is sized for 10Gi, and without lowering it too the logs fill the
+  #    smaller volume exactly as before the fix.
+  # LOG_MAX_TOTAL_BYTES: "536870912"   # 512 MiB per writer (the runtime default)
+  # LOG_BACKUP_COUNT: "5"
 }
 
 # -- GPU device plugin (client#564)
@@ -265,6 +279,9 @@ gpu:
       repository: nvidia/k8s-device-plugin
       tag: v0.14.5
       digest: ""
+      # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+      # default identity for the chart's own pin, your image for your own digest.
+      digestFor: ""
       # -- Device-plugin pod resources. ONE pair, applied to both requests AND limits,
       # because the pod must be **Guaranteed** (backend#2871) — Guaranteed needs
       # requests == limits on both cpu and memory, so a separate requests/limits
@@ -306,12 +323,23 @@ gpu:
       # way every other third-party image here does, and check-digest-drift.sh
       # now watches this float like the rest.
       #
-      # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN: set `digest: ""` alongside
-      # your own `repository`/`tag`, or this digest is applied to your image.
+      # RE-HOMING THIS IMAGE: THE PIN FOLLOWS ITS IMAGE, NOT ITS KEY. Helm merges
+      # values, so an override of `repository` or `tag` alone leaves this `digest`
+      # in place. It is honoured only for the `repository:tag` it was resolved for
+      # (`digestFor` below; left empty, the chart's own pin is deemed resolved for
+      # the chart's own repository:tag), so such an override renders YOUR repo:tag
+      # and NOTES names the dropped pin. To pin your image, set your own `digest`
+      # (always honoured). A mirror that serves the SAME bytes under another path
+      # keeps this digest by declaring it: `digestFor: "<your repository>:<tag>"`.
+      # `registry` / global.imageRegistry never affect the match -- a registry-only
+      # re-home keeps the pin.
       registry: docker.io
       repository: rocm/k8s-device-plugin
       tag: "1.31.0.11"
       digest: "sha256:e4df5dc9a7fa34e2344852256dcc5762171a6d68f1f9a34026ce26786ae335e2"
+      # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+      # default identity for the chart's own pin, your image for your own digest.
+      digestFor: ""
       # -- Same contract as nvidia.resources above: ONE pair, both sides, Guaranteed
       # (backend#2871). This container also runs privileged, so it is the last thing
       # that should be first in the OOM queue.
@@ -655,13 +683,21 @@ sealCheck:
       # cluster runs, and check-digest-drift.sh now watches this float nightly and
       # reds when it stops resolving here.
       #
-      # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN. Helm merges values, so setting
-      # `repository` alone leaves this `digest` in place and the render becomes
-      # `<your repo>@<this digest>` -- a pin from one image applied to another. Set
-      # `digest: ""` alongside your `repository`/`tag`. Asserted in the unit tests,
-      # both the supported shape and what happens without it.
+      # RE-HOMING THIS IMAGE: THE PIN FOLLOWS ITS IMAGE, NOT ITS KEY. Helm merges
+      # values, so an override of `repository` or `tag` alone leaves this `digest`
+      # in place. It is honoured only for the `repository:tag` it was resolved for
+      # (`digestFor` below; left empty, the chart's own pin is deemed resolved for
+      # the chart's own repository:tag), so such an override renders YOUR repo:tag
+      # and NOTES names the dropped pin. To pin your image, set your own `digest`
+      # (always honoured). A mirror that serves the SAME bytes under another path
+      # keeps this digest by declaring it: `digestFor: "<your repository>:<tag>"`.
+      # `registry` / global.imageRegistry never affect the match -- a registry-only
+      # re-home keeps the pin.
       registry: "docker.io"
       digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
+      # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+      # default identity for the chart's own pin, your image for your own digest.
+      digestFor: ""
 
 # -- Egress gateway (squid) — SECURITY §8.2 / client-runtime#102.
 # In-cluster forward proxy that lets a locked-down training pod reach an FQDN
@@ -682,6 +718,9 @@ egressProxy:
     repository: ubuntu/squid
     tag: "6.6-24.04_beta"
     digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+    # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+    # default identity for the chart's own pin, your image for your own digest.
+    digestFor: ""
   # squid's non-root uid (Ubuntu `proxy`). Image-specific — verify if you swap image.
   runAsUser: 13
   port: 3128
@@ -883,6 +922,9 @@ telemetryCollector:
     # declared `tag:` above instead of the render -- a deliberate change with
     # its own reasoning, not a rider on a pinning PR.
     digest: ""
+    # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+    # default identity for the chart's own pin, your image for your own digest.
+    digestFor: ""
 
   # 500m/512Mi per D7's table. The existing node agent runs 200m/256Mi, which a
   # filelog collector over node stdout will not fit.
@@ -1508,6 +1550,9 @@ images:
     tag: "1.35"
     # PINNED (backend#4160), same provenance and same watch as the collector.
     digest: "sha256:98ad9d1a2be345201bb0709b0d38655eb1b370145c7d94ca1fe9c421f76e245a"
+    # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+    # default identity for the chart's own pin, your image for your own digest.
+    digestFor: ""
 
 # -- Container resource requests and limits.
 # Tuned in v1.1.0 after the prod investigation showed mysql being killed
@@ -1969,13 +2014,21 @@ autoUpgrade:
     # cluster runs, and check-digest-drift.sh now watches this float nightly and
     # reds when it stops resolving here.
     #
-    # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN. Helm merges values, so setting
-    # `repository` alone leaves this `digest` in place and the render becomes
-    # `<your repo>@<this digest>` -- a pin from one image applied to another. Set
-    # `digest: ""` alongside your `repository`/`tag`. Asserted in the unit tests,
-    # both the supported shape and what happens without it.
+    # RE-HOMING THIS IMAGE: THE PIN FOLLOWS ITS IMAGE, NOT ITS KEY. Helm merges
+    # values, so an override of `repository` or `tag` alone leaves this `digest`
+    # in place. It is honoured only for the `repository:tag` it was resolved for
+    # (`digestFor` below; left empty, the chart's own pin is deemed resolved for
+    # the chart's own repository:tag), so such an override renders YOUR repo:tag
+    # and NOTES names the dropped pin. To pin your image, set your own `digest`
+    # (always honoured). A mirror that serves the SAME bytes under another path
+    # keeps this digest by declaring it: `digestFor: "<your repository>:<tag>"`.
+    # `registry` / global.imageRegistry never affect the match -- a registry-only
+    # re-home keeps the pin.
     registry: "docker.io"
     digest: "sha256:9b25e60ae264940b276e32866d37e3088e70c4e2d1784b964dc3f90346281a74"
+    # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+    # default identity for the chart's own pin, your image for your own digest.
+    digestFor: ""
   # GUARANTEED QoS: requests == limits for BOTH cpu and memory. backend#2935:
   # this CronJob AND image-refresh were both exit-137 (SIGKILL) killed hourly on
   # a live edge, TOGETHER — the signature of a NODE-level OOM kill, not either
@@ -2248,13 +2301,21 @@ imageRefresh:
     # cluster runs, and check-digest-drift.sh now watches this float nightly and
     # reds when it stops resolving here.
     #
-    # RE-HOMING THIS IMAGE MEANS CLEARING THE PIN. Helm merges values, so setting
-    # `repository` alone leaves this `digest` in place and the render becomes
-    # `<your repo>@<this digest>` -- a pin from one image applied to another. Set
-    # `digest: ""` alongside your `repository`/`tag`. Asserted in the unit tests,
-    # both the supported shape and what happens without it.
+    # RE-HOMING THIS IMAGE: THE PIN FOLLOWS ITS IMAGE, NOT ITS KEY. Helm merges
+    # values, so an override of `repository` or `tag` alone leaves this `digest`
+    # in place. It is honoured only for the `repository:tag` it was resolved for
+    # (`digestFor` below; left empty, the chart's own pin is deemed resolved for
+    # the chart's own repository:tag), so such an override renders YOUR repo:tag
+    # and NOTES names the dropped pin. To pin your image, set your own `digest`
+    # (always honoured). A mirror that serves the SAME bytes under another path
+    # keeps this digest by declaring it: `digestFor: "<your repository>:<tag>"`.
+    # `registry` / global.imageRegistry never affect the match -- a registry-only
+    # re-home keeps the pin.
     registry: "docker.io"
     digest: "sha256:0d03af14f8539df28e51e8afc12ee6d78891c630b88226243307f08a6fab3538"
+    # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+    # default identity for the chart's own pin, your image for your own digest.
+    digestFor: ""
   # GUARANTEED QoS: requests == limits for BOTH cpu and memory. See the fuller
   # note on autoUpgrade.resources for the mechanism. backend#2935: image-refresh
   # was OOM-killed in lock-step with auto-upgrade (six paired failures — this Job

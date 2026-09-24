@@ -136,7 +136,6 @@ spec:
       containers:
         - name: otel-collector
           {{- $tcImage := default (dict) $tc.image }}
-          {{- $tcDigest := $tcImage.digest | default "" }}
           {{- /*
             REGISTRY PRECEDENCE, matching squid and #585: the global mirror wins,
             then the per-image registry, then docker.io. Passing
@@ -146,7 +145,7 @@ spec:
             `| default` on the dig because the chart default for global.imageRegistry
             is an empty string, which is not absent. (Bugbot on #779.)
           */}}
-          image: {{ include "tracebloc.image" (dict "repository" $tcImage.repository "tag" $tcImage.tag "digest" $tcDigest "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default ($tcImage.registry | default "docker.io"))) | quote }}
+          image: {{ include "tracebloc.thirdPartyImage" (dict "site" "telemetryCollector.image" "root" $) | quote }}
           imagePullPolicy: IfNotPresent
           args: ["--config=/conf/config.yaml"]
           securityContext:

@@ -177,6 +177,12 @@
                 "digest": {
                   "type": "string"
                 },
+                "digestFor": {
+                  "type": "string",
+                  "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+                  "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+                  "default": ""
+                },
                 "resources": {
                   "type": "object",
                   "additionalProperties": false,
@@ -211,6 +217,12 @@
                 },
                 "digest": {
                   "type": "string"
+                },
+                "digestFor": {
+                  "type": "string",
+                  "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+                  "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+                  "default": ""
                 },
                 "resources": {
                   "type": "object",
@@ -728,6 +740,12 @@
                   "description": "Pin by manifest digest. Empty means pull by tag. When set it is authoritative and `tag` is only readability.",
                   "default": ""
                 },
+                "digestFor": {
+                  "type": "string",
+                  "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+                  "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+                  "default": ""
+                },
                 "pullPolicy": {
                   "type": "string",
                   "enum": [
@@ -785,6 +803,12 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "digestFor": {
+              "type": "string",
+              "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+              "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+              "default": ""
             }
           }
         },
@@ -1022,6 +1046,12 @@
             "digest": {
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "digestFor": {
+              "type": "string",
+              "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+              "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+              "default": ""
             }
           }
         },
@@ -1063,8 +1093,8 @@
             },
             "capabilities": {
               "type": "string",
-              "pattern": "^([a-z][a-z0-9_-]*(,[a-z][a-z0-9_-]*)*)?$",
-              "description": "Comma-separated engine capability tokens (e.g. `ddp`), DERIVED from the pinned images' io.tracebloc.engine.capabilities label by scripts/resolve-training-digests.sh. Never hand-typed; refused by the template when `digests` is empty."
+              "pattern": "^([a-z][a-z0-9_-]*(:[a-z0-9][a-z0-9_.-]*)?(,[a-z][a-z0-9_-]*(:[a-z0-9][a-z0-9_.-]*)?)*)?$",
+              "description": "Comma-separated engine capability tokens, DERIVED from the pinned images' io.tracebloc.engine.capabilities label by scripts/resolve-training-digests.sh (which reads THIS pattern before writing, so the two cannot drift). A token is plain (`ddp`, `per_rank_split`) or parameterised `name:value` (`min-micro-batch:2`, `loss-coupled:embeddings` -- RFC-0067 D10, tracebloc-engine core/capabilities.py PARAMETER_SEPARATOR), which client-runtime's engine_capabilities.capability_parameters reads. Never hand-typed; refused by the template when `digests` is empty."
             }
           }
         }
@@ -1379,6 +1409,12 @@
               "description": "Pin by manifest digest. Empty means pull by tag. When set it is authoritative and `tag` is only readability.",
               "default": ""
             },
+            "digestFor": {
+              "type": "string",
+              "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+              "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+              "default": ""
+            },
             "pullPolicy": {
               "type": "string",
               "enum": [
@@ -1497,6 +1533,12 @@
               "type": "string",
               "pattern": "^(sha256:[a-f0-9]{64})?$",
               "description": "Pin by manifest digest. Empty means pull by tag. When set it is authoritative and `tag` is only readability.",
+              "default": ""
+            },
+            "digestFor": {
+              "type": "string",
+              "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+              "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
               "default": ""
             },
             "pullPolicy": {
@@ -1667,6 +1709,12 @@
             },
             "digest": {
               "type": "string"
+            },
+            "digestFor": {
+              "type": "string",
+              "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+              "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+              "default": ""
             }
           }
         },

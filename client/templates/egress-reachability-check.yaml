@@ -28,6 +28,10 @@
      a reachability check that verifies a path the cluster never takes
      (backend#1723). */ -}}
 {{- $env := include "tracebloc.clientEnv" . -}}
+{{- /* The probe is ONE curl bounded by -m $curlMax; the seal budget adds
+       60 s for scheduling and the image pull. Derived, never typed twice. */ -}}
+{{- $curlMax := 10 -}}
+{{- $budget := add $curlMax 60 -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,6 +44,7 @@ metadata:
   annotations:
     "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- include "tracebloc.sealTimeout" $budget | nindent 4 }}
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 120
@@ -92,7 +97,7 @@ spec:
               # resolve (6/5) = host can't be found; a TLS handshake/cert error
               # (35/51/60/…) = reached the host but TLS is broken (commonly a proxy
               # intercepting TLS with an untrusted CA), so the API is unusable.
-              curl -sS -m 10 -o /dev/null "https://${HOST}/"; rc=$?
+              curl -sS -m {{ $curlMax }} -o /dev/null "https://${HOST}/"; rc=$?
               case "$rc" in
                 0)  echo "OK  backend reachable: completed an HTTPS request to ${HOST}:443 (curl exit 0) — the cluster can reach the tracebloc backend."; exit 0 ;;
                 5)  echo "FAIL  could not resolve the configured proxy (curl exit 5) — check HTTP_PROXY settings."; exit 1 ;;

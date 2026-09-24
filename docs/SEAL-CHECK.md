@@ -84,6 +84,14 @@ these):
   preconditions are not declared — e.g. the egress-enforcement probe when an
   operator has opted a fleet back out with `allowExternalHttps=true`) is **not
   part of the suite on that cluster**, and the values that gated it away say why.
+- Every runnable check also declares its own time budget as the annotation
+  `tracebloc.io/seal-timeout` — whole seconds, derived in the template from
+  the bounds the check's script uses (storage-assertions:
+  `timeoutSeconds + 180`, the same value as its `activeDeadlineSeconds`). The
+  `tracebloc` CLI runs each check with `helm test --timeout` set to the larger
+  of its own `--timeout` and this value, so a slow first pull on a cold
+  cluster is not misread as a failed check. A CLI that predates the annotation
+  ignores it.
 - Log lines are human-oriented and not part of the contract; the machine
   contract today is *labels + Job exit status*. (A structured verdict is the
   CLI's job — cli#393.)

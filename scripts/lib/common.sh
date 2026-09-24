@@ -1493,8 +1493,9 @@ Usage reporting:
   It cannot record your arguments, any path, any file name, your username, your
   hostname or your credentials — every field is a number or a value from a fixed
   list, so there is nowhere for those to go.
-  TRACEBLOC_NO_TELEMETRY=1  Turn it off.
-  DO_NOT_TRACK=1            Also turns it off.
+  TRACEBLOC_SKIP_TELEMETRY=1  Turn it off.
+  TRACEBLOC_NO_TELEMETRY=1    Also turns it off (legacy name).
+  DO_NOT_TRACK=1              Also turns it off.
 
 Windows:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex

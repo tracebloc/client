@@ -14,14 +14,19 @@ data:
   mount, so the file the 8.4 mount makes mysqld read is one 8.4 accepts.
 
   The redo-log line is the one place the majors disagree (client-dev#1140):
-  MySQL 8.4 REMOVED innodb_log_file_size (and innodb_log_files_in_group);
-  a removed variable is an unknown one, and mysqld refuses to start on an
-  unknown variable in an option file it reads. 8.0.30+ replaced the pair
-  with innodb_redo_log_capacity, the TOTAL redo size — so 5.7's 64M x the
-  default innodb_log_files_in_group of 2 becomes 128M, the same redo budget
-  spelled the way 8.4 understands. The 8.0 transit hop and an unknown /
-  custom pin keep the 5.7 line: 8.0 still accepts it (deprecated, not
-  removed), and this template does not guess at an engine it cannot name.
+  8.0.30+ replaced innodb_log_file_size and innodb_log_files_in_group with
+  innodb_redo_log_capacity, the TOTAL redo size — so 5.7's 64M x the default
+  innodb_log_files_in_group of 2 becomes 128M, the same redo budget. On 8.4
+  the old pair is DEPRECATED, not removed: measured on mysql:8.4.11
+  (RFC-0150), `innodb_log_file_size = 64M` starts the server with
+  `[Warning] [MY-013907] ... used to compute innodb_redo_log_capacity=134217728`.
+  8.4 still renders the replacement, because on the deprecated spelling
+  @@GLOBAL.innodb_redo_log_capacity reads the 100M default while InnoDB runs
+  on the computed 128M (Innodb_redo_log_capacity_resized) — the server's own
+  variable misreports the budget in effect — and every start logs the
+  warning for a spelling a later major may drop. The 8.0 transit hop and an
+  unknown / custom pin keep the 5.7 line: 8.0 accepts it the same way, and
+  this template does not guess at an engine it cannot name.
   Every other setting below exists unchanged on 5.7, 8.0 and 8.4.
 
   scripts/tests/lib/mysql-config-expect.sh parses the RENDERED ConfigMap,

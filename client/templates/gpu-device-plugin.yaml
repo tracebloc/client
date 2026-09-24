@@ -50,8 +50,8 @@ the nil, so no evaluation order matters.
 {{- end }}
 {{- $ns := $dp.namespace | default "kube-system" }}
 {{- /* global.imageRegistry (#585 mirror / air-gap) re-homes the plugin image
-     exactly like every other chart image; nil-safe for reuse-values. */ -}}
-{{- $g := .Values.global | default dict }}
+     exactly like every other chart image -- tracebloc.thirdPartyImage applies
+     it, nil-safe for reuse-values. */ -}}
 {{- if eq $vendor "nvidia" }}
 {{- $nv := $dp.nvidia | default dict }}
 apiVersion: apps/v1
@@ -113,7 +113,15 @@ spec:
       containers:
         {{- $nvRes := ($nv.resources | default dict) }}
         - name: nvidia-device-plugin-ctr
-          image: {{ include "tracebloc.image" (dict "repository" ($nv.repository | default "nvidia/k8s-device-plugin") "tag" ($nv.tag | default "v0.14.5") "digest" ($nv.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($nv.registry | default "nvcr.io"))) | quote }}
+          image: {{ include "tracebloc.thirdPartyImage" (dict "site" "gpu.devicePlugin.nvidia" "root" $) | quote }}
+          # EXPLICIT, not emergent (backend#2009). The kubelet defaults the pull
+          # policy from the image reference — `:latest` → Always, a digest or any
+          # other tag → IfNotPresent. backend#4160 pins AMD by digest and NVIDIA
+          # is on a fixed tag, so both resolve to IfNotPresent today; but its own
+          # re-home instructions say to CLEAR the digest, and a re-home left on
+          # a floating tag would silently revert to Always (the
+          # ImagePullBackOff-on-offline-restart trap #569). Stating the policy makes it independent of the reference.
+          imagePullPolicy: IfNotPresent
           env:
             # Optional GPU: a node without a working NVIDIA runtime must not
             # crash-loop the plugin — it registers 0 GPUs and the install stays
@@ -196,8 +204,15 @@ spec:
       containers:
         {{- $am := $dp.amd | default dict }}
         {{- $amRes := ($am.resources | default dict) }}
+        # The reference comes from tracebloc.thirdPartyImage (backend#4296): a nil
+        # or empty `amd` block renders the chart default IN FULL, digest included,
+        # and an unset `tag` falls back to the pinned release, never `latest`
+        # (backend#2009) -- the one declaration is tracebloc.thirdPartyImageDefaults.
         - name: amdgpu-dp-cntr
-          image: {{ include "tracebloc.image" (dict "repository" ($am.repository | default "rocm/k8s-device-plugin") "tag" ($am.tag | default "latest") "digest" ($am.digest | default "") "registry" ((dig "imageRegistry" "" $g) | default ($am.registry | default "docker.io"))) | quote }}
+          image: {{ include "tracebloc.thirdPartyImage" (dict "site" "gpu.devicePlugin.amd" "root" $) | quote }}
+          # EXPLICIT — see the nvidia twin above (backend#2009). This is the
+          # vendor #2009 was filed about: values.yaml shipped `tag: latest`.
+          imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
             capabilities:

@@ -46,6 +46,22 @@
     2. drop the pin (images.<image>.digest: "") and let image-refresh pin from the live registry.{{ "\033[0m" }}
 {{- end }}
 
+{{- /* The same rule for the third-party images (tracebloc.thirdPartyPinDecision):
+   a digest is rendered only for the repository:tag it was resolved for. An
+   override of `repository` or `tag` that leaves a digest behind -- Helm merges
+   values, so the chart's own digest stays unless it is cleared -- renders the
+   operator's repo:tag instead, and THIS is where they learn the pin went. */ -}}
+{{- $droppedThirdParty := include "tracebloc.droppedThirdPartyPins" . }}
+{{- if $droppedThirdParty }}
+
+{{ "\033[1;31m" }}WARNING: third-party image digest(s) NOT applied -- resolved for a different repository:tag than the one this release renders:{{ "\033[0m" }}
+{{- $droppedThirdParty }}
+  {{ "\033[0;90m" }}A digest names the bytes of one image; applied to another it does not pull, or pulls something other than the image you named. Each site above therefore renders repository:tag. To pin it, either
+    1. set <site>.digest to a digest of YOUR repository:tag (with no digestFor, your own digest is always honoured), or
+    2. if your registry is a mirror holding the SAME bytes under another path, keep the digest and set <site>.digestFor: "<your repository>:<tag>", or
+    3. set <site>.digest: "" to run the tag and silence this warning.{{ "\033[0m" }}
+{{- end }}
+
 {{ "\033[1;35m" }}PVCs{{ "\033[0m" }} (protected with helm.sh/resource-policy: keep):
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientDataPvc" . }}{{ "\033[0m" }}     {{ "\033[0;90m" }}({{ include "tracebloc.clientDataStorage" . }}){{ "\033[0m" }}
   - {{ "\033[0;36m" }}{{ include "tracebloc.clientLogsPvc" . }}{{ "\033[0m" }}  {{ "\033[0;90m" }}({{ include "tracebloc.clientLogsStorage" . }}){{ "\033[0m" }}

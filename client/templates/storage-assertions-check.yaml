@@ -51,6 +51,12 @@
 */ -}}
 {{- $name := printf "%s-storage-assertions-check" (include "tracebloc.fullname" .) }}
 {{- $timeout := dig "timeoutSeconds" 120 $cfg }}
+{{- /* The check's whole wall-clock budget: the Bound-wait plus 180 s for
+       everything else the script does. ONE expression, read twice -- by the
+       Job's activeDeadlineSeconds backstop and by the seal-timeout annotation
+       the tracebloc CLI sizes its `helm test --timeout` from -- so the two can
+       never disagree (see tracebloc.sealCheckLabels in _helpers.tpl). */}}
+{{- $budget := add $timeout 180 }}
 {{- $img := default dict $cfg.image }}
 {{- $pvScan := ne .Values.clusterScope false }}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled }}
@@ -67,13 +73,14 @@ metadata:
   annotations:
     "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- include "tracebloc.sealTimeout" $budget | nindent 4 }}
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 120
   # The script bounds itself (timeoutSeconds for the Bound-wait, and every
   # kubectl call carries --request-timeout); this is the backstop so a wedged
   # API can never hang `helm test` past its own timeout budget.
-  activeDeadlineSeconds: {{ add $timeout 180 }}
+  activeDeadlineSeconds: {{ $budget }}
   template:
     metadata:
       labels:
@@ -102,7 +109,7 @@ spec:
           # pins kubectl so behaviour cannot drift if upstream re-tags.
           # THROUGH THE ONE HELPER (backend#4160) -- see the note in
           # auto-upgrade-cronjob.yaml.
-          image: {{ include "tracebloc.image" (dict "repository" ($img.repository | default "alpine/k8s") "tag" ($img.tag | default "1.30.5") "digest" ($img.digest | default "") "registry" ((dig "imageRegistry" "" (.Values.global | default dict)) | default ($img.registry | default "docker.io"))) | quote }}
+          image: {{ include "tracebloc.thirdPartyImage" (dict "site" "sealCheck.storageAssertions.image" "root" $) | quote }}
           imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
           securityContext:
             allowPrivilegeEscalation: false

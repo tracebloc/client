@@ -14,6 +14,11 @@
   air-gapped clusters with no external host to test against).
 */ -}}
 {{- $host := dig "enforcementProbeHost" "1.1.1.1" .Values.networkPolicy.training }}
+{{- $probeTimeout := dig "enforcementProbeTimeoutSeconds" 60 .Values.networkPolicy.training }}
+{{- /* Seal budget: the retry loop runs up to $probeTimeout, then one last
+       curl (-m 5) and its 3 s sleep; 60 s more covers scheduling and the image
+       pull. Derived from the loop's own bound, never typed separately. */}}
+{{- $budget := add $probeTimeout 60 }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -26,6 +31,7 @@ metadata:
   annotations:
     "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- include "tracebloc.sealTimeout" $budget | nindent 4 }}
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 120
@@ -59,7 +65,7 @@ spec:
             - -c
             - |
               HOST={{ $host | quote }}
-              TIMEOUT={{ dig "enforcementProbeTimeoutSeconds" 60 .Values.networkPolicy.training }}
+              TIMEOUT={{ $probeTimeout }}
               echo "[egress-enforcement-check] probing direct TCP egress to ${HOST}:443; it must be BLOCKED once the CNI reconciles the training-egress NetworkPolicy (retrying up to ${TIMEOUT}s)..."
               # We only care whether a TCP connection to :443 can be ESTABLISHED — the
               # TLS/HTTP outcome is irrelevant. -k disables cert verification so probing an

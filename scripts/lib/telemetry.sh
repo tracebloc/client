@@ -28,7 +28,8 @@
 #  the install log and to a bounded local spool, and posts nothing. See the
 #  comment on that function for the one thing #1905 changes.
 #
-#  Opt-out (on by default): TRACEBLOC_NO_TELEMETRY=1 or DO_NOT_TRACK=1.
+#  Opt-out (on by default): TRACEBLOC_SKIP_TELEMETRY=1 (canonical),
+#  TRACEBLOC_NO_TELEMETRY=1 (legacy alias, remove_by 2026-12-31) or DO_NOT_TRACK=1.
 # =============================================================================
 
 # ── Identity (contract §10.1) ────────────────────────────────────────────────
@@ -254,9 +255,19 @@ telemetry_rerun_handoff() { _TB_TELEMETRY_RERUN_HANDOFF=1; return 0; }
 # Opt-OUT by design: telemetry only the already-convinced enable measures the
 # wrong population, and the population this exists for is people whose install
 # just failed. Anything other than the explicit "off" spellings counts as opting
-# out — a user who typed TRACEBLOC_NO_TELEMETRY=please meant it, and guessing
+# out — a user who typed TRACEBLOC_SKIP_TELEMETRY=please meant it, and guessing
 # wrong in the other direction sends a record they declined.
-TB_TELEMETRY_OPT_OUT_VARS="TRACEBLOC_NO_TELEMETRY DO_NOT_TRACK"
+#
+# UNION, not fallback (RFC-0076 settings-naming S9, backend#4027): every name is
+# read and ANY one set opts out. TRACEBLOC_SKIP_TELEMETRY is the canonical
+# spelling; TRACEBLOC_NO_TELEMETRY is the legacy alias, kept working until its
+# naming-canon.yml remove_by (2026-12-31) — do not drop it before then. Because
+# both are read, an opt-out a user already set cannot lapse across the rename, so
+# no reader-side migration window is needed. DO_NOT_TRACK is externally mandated
+# and is never renamed. The PowerShell twin (telemetry.ps1) carries the same set;
+# telemetry-vocabulary-agreement.sh fails if the two lists, or the --help text,
+# disagree.
+TB_TELEMETRY_OPT_OUT_VARS="TRACEBLOC_SKIP_TELEMETRY TRACEBLOC_NO_TELEMETRY DO_NOT_TRACK"
 telemetry_enabled() {
   local name value
   for name in $TB_TELEMETRY_OPT_OUT_VARS; do
