@@ -1584,6 +1584,202 @@ _gpu_request_value() {
   return 0
 }
 
+# _detect_device_type GPU_VAL — what kind of machine this is, for the dashboard's
+# secure-environment switcher (backend#4346). Prints one of the backend's enum
+# `workstation | gpu_server | server | cluster`, or NOTHING when the chassis
+# cannot be read: jobs-manager then omits the key from its heartbeat and the
+# dashboard draws its default glyph rather than a guess (frontend-app#993).
+#
+# The installer is the one party that can tell a laptop from a rack server — it
+# runs on the host and can read the chassis — which is why this lives here and
+# not in jobs-manager (which can only count nodes, and node counts cannot tell a
+# workstation from a server). Sources, in order:
+#
+#   TRACEBLOC_DEVICE_TYPE   an explicit override, for unattended installs and
+#                           for the cases no chassis read gets right (a rack
+#                           server used as somebody's desk machine). A value
+#                           outside the enum is IGNORED with a warning, not
+#                           written: the backend would drop it on every ping.
+#   Darwin                  every Mac this installer supports sits on a desk
+#                           (MacBook, iMac, Mac mini, Mac Studio, Mac Pro).
+#   Linux                   `hostnamectl` Chassis (systemd's own verdict:
+#                           laptop / desktop / convertible / tablet / handset /
+#                           server / vm / container), then the SMBIOS
+#                           chassis_type number under /sys/class/dmi/id as the
+#                           fallback for hosts without systemd.
+#
+# A server-class chassis (or a VM — a VM is a server) becomes gpu_server when
+# THIS run wires a GPU request (GPU_VAL, the same value written to GPU_LIMITS),
+# else server. A desk-class chassis is a workstation whether or not it has a GPU:
+# the dashboard's hardware line already names the card, and the glyph is about
+# where the machine sits. `cluster` is never detected here — a k3d install is one
+# host by construction; jobs-manager derives it from SINGLE_NODE on the clusters
+# this installer does not build.
+# Hypervisor signatures, matched case-insensitively as substrings of the DMI
+# `sys_vendor product_name` pair (Windows: `Manufacturer Model`). A match means
+# this host is a virtual machine, and a VM is a server whatever enclosure number
+# its firmware reports: Hyper-V and Azure guests say 3 (Desktop), VMware says 1
+# (Other), so the chassis number alone files them as workstations or as nothing
+# (Bugbot on #1248). Every entry names a hypervisor or a cloud's virtual
+# platform, never a hardware maker -- `Microsoft Corporation` alone is also a
+# Surface laptop, so Hyper-V is matched by its model, `Virtual Machine`.
+# TWIN of `$script:VmSignatures` in install-k8s.ps1; install-client-helm.bats
+# pins the two lists identical.
+_TB_VM_SIGNATURES=("virtual machine" "vmware" "virtualbox" "innotek" "qemu" "kvm" "xen" "bochs" "parallels" "amazon ec2" "google compute engine" "openstack" "digitalocean")
+
+# _is_vm_signature "VENDOR PRODUCT" — 0 when the pair names a hypervisor.
+_is_vm_signature() {
+  local hay sig
+  hay="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "${hay//[[:space:]]/}" ]] || return 1
+  for sig in "${_TB_VM_SIGNATURES[@]}"; do
+    [[ "$hay" == *"$sig"* ]] && return 0
+  done
+  return 1
+}
+
+# _chassis_from_smbios N... — desktop | laptop | server | "" for SMBIOS System
+# Enclosure type numbers (DSP0134 §7.4.1). Any desk or portable number wins over
+# a server one, the same precedence Get-DeviceType applies to Windows'
+# ChassisTypes array; one list for both callers below so they cannot drift.
+_chassis_from_smbios() {
+  local n desk="" lap="" srv=""
+  for n in "$@"; do
+    case "$n" in
+      3|4|5|6|7|13|15|16|24|35|36) desk=1 ;;
+      8|9|10|11|12|14|30|31|32)    lap=1 ;;
+      17|23|25|28|29)              srv=1 ;;
+    esac
+  done
+  if [[ -n "$lap" ]]; then printf 'laptop'
+  elif [[ -n "$desk" ]]; then printf 'desktop'
+  elif [[ -n "$srv" ]]; then printf 'server'
+  fi
+  return 0
+}
+
+# _windows_host_identity — inside WSL2, ask the WINDOWS HOST what it is, over
+# interop. Prints one line, `Manufacturer|Model|ChassisTypes(csv)|PCSystemType`,
+# or returns 1 when it cannot: interop off (no powershell.exe), no `timeout` to
+# bound the call with, a hang, or a failure. The distro itself cannot answer:
+# its DMI is Hyper-V's (`Microsoft Corporation` / `Virtual Machine`) and
+# systemd calls it a `container` (Bugbot on #1248), so this is the only source
+# that describes the machine the user is sitting at. Bounded, because a wedged
+# interop must not stall the install; the verdict is cosmetic. --kill-after as
+# well as the deadline (Bugbot on #1248): interop does not reliably deliver a
+# Unix SIGTERM to a Windows .exe, and GNU timeout without it sends TERM and then
+# WAITS -- a wedged Get-CimInstance would hold the install forever. KILL ends the
+# Linux-side interop process, which closes the pipe this substitution reads.
+# TB_WINDOWS_POWERSHELL is a test seam for the fallback path.
+_windows_host_identity() {
+  local ps="" out="" fallback="${TB_WINDOWS_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+  if command -v powershell.exe >/dev/null 2>&1; then ps="powershell.exe"
+  elif [[ -x "$fallback" ]]; then ps="$fallback"
+  fi
+  [[ -n "$ps" ]] || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+  # shellcheck disable=SC2016  # the $ belong to PowerShell, not to this shell
+  out="$(timeout --kill-after="${TB_WSL_INTEROP_KILL_AFTER:-5}" "${TB_WSL_INTEROP_TIMEOUT:-20}" "$ps" -NoProfile -NonInteractive -Command \
+    '$c = Get-CimInstance Win32_ComputerSystem; $e = Get-CimInstance Win32_SystemEnclosure; "{0}|{1}|{2}|{3}" -f $c.Manufacturer, $c.Model, (@($e.ChassisTypes) -join ","), $c.PCSystemType' \
+    2>/dev/null)" || return 1
+  out="${out//$'\r'/}"
+  [[ "$out" == *"|"*"|"*"|"* ]] || return 1
+  printf '%s' "$out"
+}
+
+# _chassis_from_windows_identity "Manufacturer|Model|ChassisTypes|PCSystemType" —
+# the SAME ladder as Get-DeviceType in install-k8s.ps1, so the bash installer in
+# WSL2 and the PowerShell installer on the same laptop give the same answer:
+# hypervisor signature first (a Windows host that is itself a VM is a server),
+# then the enclosure numbers, then PCSystemType (1/2/3 desk, 4/5 server).
+_chassis_from_windows_identity() {
+  local maker model types pcs chassis=""
+  IFS='|' read -r maker model types pcs <<<"${1:-}"
+  if _is_vm_signature "$maker $model"; then printf 'vm'; return 0; fi
+  # shellcheck disable=SC2086  # word-split the comma list into numbers on purpose
+  chassis="$(_chassis_from_smbios ${types//,/ })"
+  if [[ -z "$chassis" ]]; then
+    case "${pcs//[[:space:]]/}" in
+      1|2|3) chassis="desktop" ;;
+      4|5)   chassis="server" ;;
+    esac
+  fi
+  printf '%s' "$chassis"
+  return 0
+}
+
+_detect_device_type() {
+  local gpu_val="${1:-}" override="${TRACEBLOC_DEVICE_TYPE:-}" chassis=""
+  # TB_DMI_DIR is a test seam only; real installs read the kernel's DMI table.
+  local dmi="${TB_DMI_DIR:-/sys/class/dmi/id}"
+  if [[ -n "$override" ]]; then
+    local wanted
+    wanted="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$wanted" in
+      workstation|gpu_server|server|cluster) printf '%s' "$wanted"; return 0 ;;
+      # To stderr: callers capture this function's stdout as the verdict.
+      *) warn "TRACEBLOC_DEVICE_TYPE=\"${override}\" is not one of workstation|gpu_server|server|cluster — ignoring it and reading the chassis instead." >&2 ;;
+    esac
+  fi
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) chassis="desktop" ;;
+    Linux)
+      # WSL2 FIRST (Bugbot on #1248). Inside WSL2 neither Linux source describes
+      # the machine: systemd reports `container` and DMI is Hyper-V's, which the
+      # VM check below would call a server -- so one laptop came out as nothing
+      # or as a server depending on which source answered. Ask the Windows host
+      # instead; when interop cannot answer, say nothing. `_probe_wsl` lives in
+      # probe.sh, which a stale bootstrap may not have fetched; without it this
+      # branch is skipped, the same rule cluster.sh applies (#1179).
+      if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
+        local ident=""
+        if ident="$(_windows_host_identity)"; then
+          chassis="$(_chassis_from_windows_identity "$ident")"
+        fi
+        case "$chassis" in
+          laptop|desktop) printf 'workstation' ;;
+          server|vm) if [[ -n "$gpu_val" ]]; then printf 'gpu_server'; else printf 'server'; fi ;;
+          *) printf '' ;;
+        esac
+        return 0
+      fi
+      # `hostnamectl` prints "  Chassis: laptop 💻" (the icon is newer systemd);
+      # the first word is the verdict. `hostnamectl chassis` alone needs v249+.
+      # LC_ALL=C on hostnamectl ITSELF: systemd translates the label
+      # ("Gehäuse:", "Châssis:"), and a VM whose label went unmatched fell
+      # through to DMI type 1 (Other) and was reported as "" instead of server.
+      # LC_ALL=C on sed/awk too, so the icon's bytes cannot make them bail
+      # (BSD sed: "illegal byte sequence").
+      # This runs under the caller's errexit+pipefail, so a missing or failing
+      # hostnamectl (no systemd, no D-Bus in a container) must fall through to
+      # the DMI read, not abort the install; awk's NR==1 reads to EOF, so no
+      # reader closes the pipe early.
+      if command -v hostnamectl >/dev/null 2>&1; then
+        chassis="$( { LC_ALL=C hostnamectl 2>/dev/null || true; } | LC_ALL=C sed -n 's/^[[:space:]]*Chassis:[[:space:]]*//p' | LC_ALL=C awk 'NR == 1 { print $1 }')" || chassis=""
+      fi
+      # No verdict from hostnamectl (absent, no systemd bus, or no Chassis line):
+      # read DMI. The hypervisor signature comes FIRST -- hostnamectl reports
+      # `vm` for a guest from systemd-detect-virt, and without it the enclosure
+      # number is the firmware's claim, which for Hyper-V is 3 (Desktop).
+      if [[ -z "$chassis" ]]; then
+        local vendor="" product=""
+        [[ -r "$dmi/sys_vendor" ]] && vendor="$(cat "$dmi/sys_vendor" 2>/dev/null || true)"
+        [[ -r "$dmi/product_name" ]] && product="$(cat "$dmi/product_name" 2>/dev/null || true)"
+        if _is_vm_signature "$vendor $product"; then chassis="vm"; fi
+      fi
+      if [[ -z "$chassis" && -r "$dmi/chassis_type" ]]; then
+        chassis="$(_chassis_from_smbios "$(tr -d '[:space:]' < "$dmi/chassis_type" 2>/dev/null || true)")"
+      fi
+      ;;
+  esac
+  case "$chassis" in
+    laptop|desktop|convertible|tablet|handset) printf 'workstation' ;;
+    server|vm) if [[ -n "$gpu_val" ]]; then printf 'gpu_server'; else printf 'server'; fi ;;
+    *) printf '' ;;   # container / embedded / unknown: say nothing
+  esac
+  return 0
+}
+
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
 # sets TRACEBLOC_CLIENT_ADOPTED=1 when `tracebloc client create` matched this cluster
 # to an EXISTING client on the account (get-or-create keyed on the cluster). Adopt
@@ -1678,6 +1874,11 @@ _reconcile_adopted_client() {
   _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val"
           --set-string "env.GPU_LIMITS=$_gpu_val"
           --set-string "env.RUNTIME_CLASS_NAME=$_rtc")
+  # backend#4346: the chassis verdict rides the same reconcile so an adopted
+  # release from before this key existed picks it up. Empty when unreadable —
+  # the chart skips an empty env value, so jobs-manager sees no DEVICE_TYPE and
+  # omits the key rather than reporting "".
+  _args+=(--set-string "env.DEVICE_TYPE=$(_detect_device_type "$_gpu_val")")
   # Reconcile the device-plugin block too, matching the fresh write, so a stale one
   # can't linger: nvidia only when wired (needs the baked RuntimeClass), amd on
   # detection, else disabled.
@@ -2549,9 +2750,11 @@ install_client_helm() {
   # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
   # a Pending GPU pod to CPU rather than strand it (client-runtime#92). Mirrors the
   # Windows twin.
-  local gpu_val runtime_class=""
+  local gpu_val runtime_class="" device_type=""
   gpu_val="$(_gpu_request_value)"
   if _gpu_wired; then runtime_class="nvidia"; fi
+  device_type="$(_detect_device_type "$gpu_val")"
+  log "Device type for the dashboard: ${device_type:-unknown (not reported)}"
   if [[ -n "$gpu_val" ]]; then
     log "${GPU_VENDOR} GPU wired — GPU_LIMITS/GPU_REQUESTS=${gpu_val}${runtime_class:+, RUNTIME_CLASS_NAME=${runtime_class}}"
   elif [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
@@ -2716,6 +2919,10 @@ $([ -n "$_tb_stage_resolved" ] && printf '  TRACEBLOC_ENV: "%s"\n  CLIENT_ENV: "
   # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node
   # that will never arrive.
   SINGLE_NODE: "true"
+  # backend#4346: what kind of machine this is, for the dashboard's switcher —
+  # the chassis this installer read (TRACEBLOC_DEVICE_TYPE overrides), or ""
+  # when it could not tell, which the chart drops and jobs-manager then omits.
+  DEVICE_TYPE: "${device_type}"
 $([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n' "$(id -u)" "$(id -g)")
 $(if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
 cat <<'STORAGE'

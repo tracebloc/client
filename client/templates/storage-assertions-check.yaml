@@ -128,8 +128,12 @@ spec:
               value: {{ .Release.Name | quote }}
             - name: EXPECTED_STORAGE_CLASS
               value: {{ include "tracebloc.storageClassName" . | quote }}
+            {{- /* mysql-pvc stays listed even when mysqlClaimName moves the datadir
+            to another claim: it is still a release PVC. The datadir claim is
+            added next to it, so the claim that actually holds MySQL's data is
+            checked too. */}}
             - name: EXPECTED_PVCS
-              value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}"
+              value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}{{ if ne (include "tracebloc.mysqlDataClaim" .) (include "tracebloc.mysqlPvc" .) }} {{ include "tracebloc.mysqlDataClaim" . }}{{ end }}"
             # The chart's own (legacy bare-metal) hostPath PV names — in
             # dynamic mode, a claim bound to one of these is a leftover-PV
             # capture, detectable by name alone (no PV read RBAC needed).

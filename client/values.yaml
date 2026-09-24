@@ -129,6 +129,13 @@ env: {
   # installer. Set explicitly to override (e.g. a fixed multi-node bare-metal
   # cluster that wants the fallback). Must be a quoted string.
   # SINGLE_NODE: "true"
+  # What kind of machine this client runs on, for the dashboard's
+  # secure-environment switcher (backend#4346): workstation | gpu_server |
+  # server | cluster. The installer writes it from the chassis it detects
+  # (TRACEBLOC_DEVICE_TYPE overrides). UNSET: jobs-manager reports `cluster`
+  # when SINGLE_NODE is false and otherwise reports nothing, so the dashboard
+  # shows its default glyph rather than a guess.
+  # DEVICE_TYPE: "workstation"
   # -- Per-edge OPERATOR switches for the training pods (RFC-0067 D8,
   #    backend#3149; the runtime half is client-runtime#480).
   #
@@ -2740,6 +2747,30 @@ mysqlRootRotationAcknowledged:
 # server-side. Charts `< 1.9.90` ignore this key (open schema). See
 # docs/migration-tools/rotate-mysql-root.md.
 mysqlDatadirExists:
+
+# The claim the MySQL Deployment mounts as its datadir. Leave empty (the default)
+# and it mounts the chart's own `mysql-pvc`, exactly as before. Set it only to the
+# name of a PersistentVolumeClaim that already exists in the release namespace and
+# holds a datadir provisioned OUTSIDE this chart — for example one an in-cluster
+# engine migration restored into a fresh volume. Set it as a user-supplied value
+# (`--set`), so the auto-upgrade's `--reset-then-reuse-values` carries it forward.
+# Put the claim on the release's own StorageClass: the storage seal check
+# (`helm test`) requires every expected claim, this one included, to be Bound on
+# that class, and fails on a claim anywhere else.
+#
+# `mysql-pvc` is still rendered and kept while this is set, and must NOT be
+# deleted: a `helm rollback` of a failed upgrade needs it in the manifest, the
+# root-password guards look it up by name, and a re-created claim can stay Pending
+# on a WaitForFirstConsumer class and fail every later upgrade. To reclaim its
+# space, empty it in place. Not supported with hostPath.enabled (the render fails).
+mysqlClaimName: ""
+
+# jobs-manager's replica count: 1 (the default) or 0. Setting it to 0 as a
+# user-supplied value holds jobs-manager down across upgrades, where a
+# `kubectl scale` would be reverted by the next `helm upgrade`. Anything else is
+# refused by the schema — jobs-manager is a single-writer controller on
+# ReadWriteOnce volumes.
+jobsManagerReplicas: 1
 
 # ============================================================
 # Ingestion endpoint authorization (client-runtime#21)

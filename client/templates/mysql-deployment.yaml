@@ -309,7 +309,9 @@ spec:
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:
-          claimName: {{ include "tracebloc.mysqlPvc" . }}
+          {{- /* mysql-pvc unless mysqlClaimName names a datadir provisioned outside
+          the chart; mysql-pvc is still rendered either way (see the helper). */}}
+          claimName: {{ include "tracebloc.mysqlDataClaim" . }}
       - name: mysql-config
         configMap:
           name: mysql-client-config

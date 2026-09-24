@@ -14,7 +14,9 @@ spec:
   selector:
     matchLabels:
       app: manager
-  replicas: 1
+  {{- /* 1 by default; jobsManagerReplicas: 0 holds it down through the release's
+  values, so a later upgrade cannot revert it (see the helper). */}}
+  replicas: {{ include "tracebloc.jobsManagerReplicas" . }}
   # Recreate, NOT RollingUpdate: jobs-manager mounts ReadWriteOnce PVCs (client-pvc,
   # client-logs-pvc). RollingUpdate's maxSurge:1 brings up a SECOND pod before the old
   # one is gone; both then contend for the same RWO volume. On a single-node local-path
@@ -894,6 +896,19 @@ spec:
         # --reset-then-reuse-values upgrade can't crash templating.
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
+        # backend#4346: the node this pod runs on, reported as the heartbeat's
+        # `hostname` for the dashboard's secure-environment switcher. Downward
+        # API, so no RBAC and no API call -- the same source the resource
+        # monitor DaemonSet already uses for NODE_NAME. On the installer's
+        # single-host cluster this IS the machine's name. Excluded from the
+        # passthrough range below so `env.NODE_NAME` cannot render it twice.
+        # (`env.DEVICE_TYPE`, the installer's chassis verdict, needs no line of
+        # its own: the range passes it through, and jobs-manager omits the key
+        # when it is unset rather than guessing.)
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         {{- range $key, $value := .Values.env }}
         {{- /* IMAGE_PULL_SECRET_NAME is excluded so `env.IMAGE_PULL_SECRET_NAME`
              cannot render it twice with the passthrough copy winning (Asad on
@@ -912,7 +927,7 @@ spec:
              passing it through there put an ignored value in an unrelated
              process's environment and nothing more. Nobody can depend on that:
              the variable does not exist before this change. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

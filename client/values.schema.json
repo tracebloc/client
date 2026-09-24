@@ -633,6 +633,29 @@
       ],
       "description": "backend#2892 (chart >= 1.9.90): declare that this fleet's MySQL datadir ALREADY EXISTS. Normally unset — the fail-closed root-rotation guard already covers most fleets: a cluster-less render REFUSES the mint by default (it cannot see a cluster), and a live render DETECTS the datadir by its PVC lookup. This is the explicit assertion for the gaps those leave: a LIVE render whose datadir PVC the lookup cannot see (a renamed or not-yet-bound PVC), and message clarity (with it set, the refusal names the existing-datadir migration specifically rather than the generic cannot-see-a-cluster message). Pin it in the fleet's checked-in overlay: a durable per-fleet fact. PROTECTION, not a rotation path — like the acknowledgement it does not make a cluster-less rotation converge (the minted value is not preserved offline: tier-2 preservation is a live lookup too, the clientId/clientPassword limit), so to actually rotate a cluster-less fleet pin mysqlRootPassword (tier 1, stable, and it bypasses the mint) or render server-side. A FRESH install leaves it unset; charts < 1.9.90 ignore it (open schema). See docs/migration-tools/rotate-mysql-root.md."
     },
+    "mysqlClaimName": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": "",
+      "maxLength": 253,
+      "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$",
+      "description": "Name of an existing PersistentVolumeClaim, provisioned outside this chart, that the MySQL Deployment mounts as its datadir in place of mysql-pvc. Empty (the default) mounts mysql-pvc. mysql-pvc stays rendered and kept while this is set and must not be deleted. Not supported with hostPath.enabled."
+    },
+    "jobsManagerReplicas": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "enum": [
+        0,
+        1,
+        null
+      ],
+      "default": 1,
+      "description": "jobs-manager's replica count: 1 (the default) or 0. Set 0 as a user-supplied value to hold jobs-manager down across upgrades."
+    },
     "perIngestionTables": {
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."

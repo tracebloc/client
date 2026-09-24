@@ -377,6 +377,75 @@ function Add-DirToMachinePath {
 $script:SpinnerFrames = @([char]0x2807, [char]0x2819, [char]0x2839, [char]0x2838, [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827, [char]0x2847, [char]0x280F)
 
 # Spin a braille spinner while a process runs, bounded by a deadline (#426):
+# Get-DeviceType GPUVAL -- what kind of machine this is, for the dashboard's
+# secure-environment switcher (backend#4346). Returns one of the backend's enum
+# workstation | gpu_server | server | cluster, or "" when the chassis cannot be
+# read: the chart drops an empty env value and jobs-manager then omits the key,
+# so the dashboard draws its default glyph rather than a guess (frontend-app#993).
+# Twin of install-client-helm.sh's _detect_device_type: the installer is the one
+# party that can tell a laptop from a rack server, so the verdict is made here.
+#   TRACEBLOC_DEVICE_TYPE  explicit override (unattended installs); a value
+#                          outside the enum is ignored with a warning.
+#   Win32_ComputerSystem   Manufacturer + Model against $script:VmSignatures
+#                          FIRST: a virtual machine is a server whatever its
+#                          firmware says, and Hyper-V/Azure guests report
+#                          enclosure 3 (Desktop) while VMware reports 1 (Other)
+#                          with PCSystemType 1 -- read alone, both came out as
+#                          workstations (Bugbot on #1248).
+#   Win32_SystemEnclosure  SMBIOS chassis type(s), DSP0134 7.4.1 -- desk-class
+#                          and portable numbers are a workstation, server-class
+#                          numbers a server (gpu_server when THIS run wires a GPU).
+#   Win32_ComputerSystem   PCSystemType as the fallback (1 Desktop / 2 Mobile /
+#                          3 Workstation -> workstation; 4/5 server; 6/7/8 -> "").
+# Hypervisor signatures, matched case-insensitively as substrings of
+# "Manufacturer Model". Hypervisors and cloud virtual platforms only, never a
+# hardware maker: "Microsoft Corporation" alone is also a Surface, so Hyper-V is
+# matched by its model, "Virtual Machine". NOT HypervisorPresent: that is true on
+# any physical host with Hyper-V, WSL2 or VBS on -- every host this installer
+# targets. TWIN of _TB_VM_SIGNATURES in install-client-helm.sh; the bats suite
+# pins the two lists identical, so keep this on ONE line of single-quoted items.
+$script:VmSignatures = @('virtual machine', 'vmware', 'virtualbox', 'innotek', 'qemu', 'kvm', 'xen', 'bochs', 'parallels', 'amazon ec2', 'google compute engine', 'openstack', 'digitalocean')
+function Test-VmSignature {
+  param([string]$Text = "")
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+  foreach ($sig in $script:VmSignatures) { if ($Text -like "*$sig*") { return $true } }
+  return $false
+}
+function Get-DeviceType {
+  param([string]$GpuVal = "")
+  $override = "$env:TRACEBLOC_DEVICE_TYPE"
+  if ($override) {
+    $wanted = ($override -replace '\s', '').ToLowerInvariant()
+    if ($wanted -in @('workstation', 'gpu_server', 'server', 'cluster')) { return $wanted }
+    Warn "TRACEBLOC_DEVICE_TYPE=`"$override`" is not one of workstation|gpu_server|server|cluster -- ignoring it and reading the chassis instead."
+  }
+  $desk = @(3, 4, 5, 6, 7, 13, 15, 16, 24, 35, 36) + @(8, 9, 10, 11, 12, 14, 30, 31, 32)
+  $serverClass = @(17, 23, 25, 28, 29)
+  $chassis = ""
+  # One read of Win32_ComputerSystem serves both the VM check and the fallback.
+  $cs = $null
+  try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch {}
+  if ($cs -and (Test-VmSignature "$($cs.Manufacturer) $($cs.Model)")) { $chassis = "server" }
+  if (-not $chassis) {
+    try {
+      $types = @((Get-CimInstance Win32_SystemEnclosure -ErrorAction Stop).ChassisTypes | ForEach-Object { [int]$_ })
+      if ($types | Where-Object { $_ -in $desk })        { $chassis = "desktop" }
+      elseif ($types | Where-Object { $_ -in $serverClass }) { $chassis = "server" }
+    } catch {}
+  }
+  if (-not $chassis -and $cs) {
+    switch ([int]$cs.PCSystemType) {
+      { $_ -in 1, 2, 3 } { $chassis = "desktop" }
+      { $_ -in 4, 5 }    { $chassis = "server" }
+    }
+  }
+  switch ($chassis) {
+    "desktop" { return "workstation" }
+    "server"  { if ($GpuVal) { return "gpu_server" } else { return "server" } }
+    default   { return "" }
+  }
+}
+
 # The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
 # Utilization Ladder L0.2). Twin of `_training_limits` in
 # scripts/lib/install-client-helm.sh -- the two are pinned to agree by
@@ -1518,6 +1587,20 @@ function Test-TraceblocCliCurrent {
 function Test-TraceblocCliMachineWide {
   if (-not $script:TOOL_DIR) { return $false }
   return (Test-Path -LiteralPath (Join-Path $script:TOOL_DIR "tracebloc.exe"))
+}
+
+# Is a tracebloc CLI on this machine AT ALL, machine-wide or user-scope? A weaker
+# question than Test-TraceblocCliMachineWide above, and deliberately so: this one
+# answers "does the operator have a `tracebloc` they can run", which is what
+# Print-Summary's "the CLI is NOT installed" line claims the negative of. It is NOT
+# a verdict on THIS run's install — a refused or failed re-install on a machine that
+# already carries the CLI is still a failed install, it is just not an absent CLI
+# (backend#4405 / Bugbot: the summary told such an operator to reinstall a client
+# they could already use). Either half counts, matching Test-TraceblocCli, which
+# reports a User-PATH-only CLI as installed-but-not-machine-wide rather than absent.
+function Test-TraceblocCliPresent {
+  if (Test-TraceblocCliMachineWide) { return $true }
+  return [bool](Has "tracebloc")
 }
 
 # Pure: parse a FULL `k3d cluster list -o json` blob into its entries, or $null
@@ -6938,6 +7021,11 @@ function Install-ClientHelm {
   # wired in, and only non-empty on the WSL2/CDI path ($GPU_DEVICE_SELECTOR). Empty everywhere
   # else so a device-plugin (Linux) node keeps owning NVIDIA_VISIBLE_DEVICES itself (#616).
   $gpuSelector = if ($gpuVal) { $GPU_DEVICE_SELECTOR } else { "" }
+  # backend#4346: the chassis verdict for the dashboard's switcher, decided once
+  # here so the adopted and fresh paths write the same value (bash twin:
+  # _detect_device_type). "" when unreadable -- the chart drops it.
+  $deviceType = Get-DeviceType $gpuVal
+  Log "Device type for the dashboard: $(if ($deviceType) { $deviceType } else { 'unknown (not reported)' })"
   if ($gpuSelector) { Log "GPU device selector for training pods: GPU_VISIBLE_DEVICES=$gpuSelector" }
 
   if (-not $adoptedReuse) {
@@ -7040,6 +7128,7 @@ function Install-ClientHelm {
   GPU_REQUESTS: "$gpuVal"
   RUNTIME_CLASS_NAME: "$runtimeClass"
   GPU_VISIBLE_DEVICES: "$gpuSelector"
+  DEVICE_TYPE: "$deviceType"
 
 storageClass:
   create: true
@@ -7167,7 +7256,8 @@ $envBlock
       --set-string "env.GPU_REQUESTS=$gpuVal" `
       --set-string "env.GPU_LIMITS=$gpuVal" `
       --set-string "env.RUNTIME_CLASS_NAME=$runtimeClass" `
-      --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" 2>&1) | Out-String
+      --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" `
+      --set-string "env.DEVICE_TYPE=$deviceType" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
@@ -7360,6 +7450,13 @@ function Print-Summary {
       Hint "After a reboot, start Docker Desktop to bring your client back (enable 'Start Docker Desktop when you sign in' in Settings -> General to automate)."
       Write-Host ""
       Write-Host "  What to do next" -ForegroundColor Cyan
+      # backend#4405: Step 4's failure was one mid-run warning, and this block
+      # then told the user to run a CLI that was never installed.
+      if ($script:CliInstallFailed) {
+        Write-Host "  0. " -NoNewline; Write-Host "The tracebloc CLI is NOT installed (Step 4 failed -- see $script:LOG_FILE). Install it first:" -ForegroundColor Yellow
+        Write-Host "       irm $TRACEBLOC_CLI_INSTALL_URL | iex" -ForegroundColor Green
+        Log "Summary: tracebloc CLI not installed (Step 4 failed)."
+      }
       Write-Host "  1. Ingest your training and test data with the tracebloc CLI:"
       Write-Host "       tracebloc data ingest ./data" -ForegroundColor Green
       Write-Host "  2. Create your use case and invite other collaborators: $(Get-TraceblocDashboardUrl 'my-use-cases')"
@@ -8531,6 +8628,89 @@ function Test-TraceblocCli {
   Hint "  Or use it now via:  & `"$TRACEBLOC_CLI_INSTALL_DIR\tracebloc.exe`" data ingest .\data"
 }
 
+# THE LAUNCH ITSELF CAN BE REFUSED (backend#4405). On e2e runs 35990398035 and
+# 35995006173 (2026-09-24, v1.9.140) Start-Process threw "This command cannot be
+# run due to the error: Access is denied." in the same second Step 4 began -- the
+# child never ran, nothing was replayed -- and a third run on identical inputs
+# (same installer, CLI v0.10.41, AMI and harness) installed the CLI normally. The
+# cause is NOT known. Windows PowerShell 5.1 opens both redirect files itself
+# before CreateProcess, so a denied write under %TEMP% and a denied process
+# creation (Defender, policy) produce the same message; Start-Process wraps the
+# Win32Exception in an InvalidOperationException and drops the code.
+#
+# So: two redirected attempts a few seconds apart (a transient refusal clears),
+# then one WITHOUT redirection (a %TEMP% file refusal cannot block it; the
+# child's output then reaches the console instead of the log). Every refusal is
+# logged with the exception type, any Win32 code, and a write probe of the
+# redirect dir, so the next failure says WHICH of the two it was. The retry is
+# unproven -- the logging is what makes the next occurrence diagnosable.
+function Format-CliLaunchError($err) {
+  $ex = $err.Exception
+  $types = @()
+  while ($ex) {
+    $types += $ex.GetType().FullName
+    if ($ex -is [System.ComponentModel.Win32Exception]) {
+      return "$err [Win32 error $($ex.NativeErrorCode); $($types -join ' <- ')]"
+    }
+    $ex = $ex.InnerException
+  }
+  return "$err [no Win32 code surfaced; $($types -join ' <- ')]"
+}
+
+function Get-CliRedirectProbe([string]$Path) {
+  $dir = Split-Path -Parent $Path
+  try {
+    $probe = Join-Path $dir "tracebloc-probe-$(Get-Random).tmp"
+    [System.IO.File]::WriteAllText($probe, "")
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    $w = "writable"
+  } catch { $w = "NOT writable ($($_.Exception.Message))" }
+  "redirect dir $dir is $w; TEMP=$env:TEMP; user=$([Environment]::UserName)"
+}
+
+function Start-TraceblocCliInstaller {
+  param([string[]]$ArgumentList, [string]$OutFile, [string]$ErrFile, [int]$RetryDelaySec = 5)
+  $plans = @(
+    @{ Redirect = $true;  Label = "1/3 (redirected)" },
+    @{ Redirect = $true;  Label = "2/3 (redirected, after ${RetryDelaySec}s)" },
+    @{ Redirect = $false; Label = "3/3 (no redirection)" }
+  )
+  $last = $null
+  for ($i = 0; $i -lt $plans.Count; $i++) {
+    $plan = $plans[$i]
+    if ($i -gt 0 -and $RetryDelaySec -gt 0) { Start-Sleep -Seconds $RetryDelaySec }
+    try {
+      if ($plan.Redirect) {
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $ArgumentList -NoNewWindow -PassThru `
+          -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -ErrorAction Stop
+      } else {
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $ArgumentList -NoNewWindow -PassThru -ErrorAction Stop
+      }
+      if ($i -gt 0) { Log "tracebloc CLI installer launched on attempt $($plan.Label)." }
+      return $p
+    } catch {
+      $last = $_
+      Log "tracebloc CLI installer launch $($plan.Label) refused: $(Format-CliLaunchError $_)"
+      if ($plan.Redirect) { Log "  $(Get-CliRedirectProbe $OutFile)" }
+    }
+  }
+  throw $last
+}
+
+# The follow-up line for a failed Step 4, and it depends on the SAME pre-install
+# fact as $script:CliInstallFailed (backend#4405 / Bugbot). "Install it later" is
+# the right advice only when there is nothing to fall back on; on a machine that
+# already carries the CLI, a refused re-install changed nothing the operator has,
+# so say that instead of pointing them at an install they do not need. Both failure
+# branches of Install-TraceblocCli print through here so the two cannot diverge.
+function Write-CliInstallFailedHint([bool]$CliPresentBefore) {
+  if ($CliPresentBefore) {
+    Hint "The tracebloc CLI already on this machine is untouched -- keep using it (re-run the installer later to update it)."
+  } else {
+    Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+  }
+}
+
 function Install-TraceblocCli {
   # -- Step 3/5 (#388): BEFORE connect, as bash does — the CLI mints the machine
   # credential in Step 4 (browser sign-in + `client create`). A failed CLI
@@ -8545,11 +8725,26 @@ function Install-TraceblocCli {
   # exercises.
   $cliOut = Join-Path ([System.IO.Path]::GetTempPath()) "tracebloc-cli-install-$(Get-Random).log"
   $cliErr = "$cliOut.err"
+  # Read by Print-Summary: a failed CLI install must not end in "run tracebloc".
+  # SEEDED FROM PRE-INSTALL STATE, never a hard default (backend#4405 / Bugbot,
+  # learned rule "cross-step state flags must seed from pre-install state"). The
+  # flag drives a summary line that asserts the CLI is NOT INSTALLED, so what it
+  # has to track is PRESENCE, not this run's outcome: on a machine that already
+  # has the CLI from an earlier run, a refused launch or a non-zero installer exit
+  # leaves that CLI exactly where it was, and telling the operator to install a
+  # client they can already use is the failure. Probed BEFORE the launch so the
+  # answer is the pre-install one even if the child half-ran. Best-effort, like
+  # everything else in this non-fatal step, and seeded $false FIRST: a probe that
+  # throws must degrade to the old "install it later" wording, not abort Step 4 --
+  # and the catch below reads this variable, so it has to hold a value on every
+  # path that can reach it.
+  $cliPresentBefore = $false
+  try { $cliPresentBefore = Test-TraceblocCliPresent } catch { Log "CLI presence probe failed: $_" }
+  $script:CliInstallFailed = $false
   try {
-    $p = Start-Process -FilePath "powershell.exe" `
+    $p = Start-TraceblocCliInstaller `
       -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-Command","irm '$TRACEBLOC_CLI_INSTALL_URL' | iex") `
-      -NoNewWindow -PassThru `
-      -RedirectStandardOutput $cliOut -RedirectStandardError $cliErr
+      -OutFile $cliOut -ErrFile $cliErr
     # Caching .Handle before the process exits, then WaitForExit(), makes
     # .ExitCode reliable. (The -Wait -PassThru form can leave .ExitCode $null
     # with redirected output; -PassThru + Handle + WaitForExit does not.)
@@ -8620,12 +8815,14 @@ function Install-TraceblocCli {
       # rendered a code as BLANK (`installer exited `); this one never rendered
       # one at all. Same information loss, different spelling -- which is why a
       # search for `exited $(...)` could not find it.
+      $script:CliInstallFailed = -not $cliPresentBefore
       Warn "Couldn't install the tracebloc CLI automatically (installer exited $(Format-ExitCode $p.ExitCode)) -- you can still connect with existing client credentials."
-      Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+      Write-CliInstallFailedHint $cliPresentBefore
     }
   } catch {
+    $script:CliInstallFailed = -not $cliPresentBefore
     Warn "Couldn't install the tracebloc CLI automatically -- you can still connect with existing client credentials."
-    Hint "Install it later:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    Write-CliInstallFailedHint $cliPresentBefore
     Log "CLI install failed: $_"
   } finally {
     Remove-Item $cliOut, $cliErr -Force -ErrorAction SilentlyContinue

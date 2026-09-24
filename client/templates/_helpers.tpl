@@ -268,6 +268,51 @@ client-pvc
 {{ include "tracebloc.fullname" . }}-data-pv
 {{- end }}
 
+{{/*
+  The claim the mysql Deployment mounts as its datadir. Unset (the default) it is
+  the chart's own `tracebloc.mysqlPvc`, so every existing install renders exactly
+  as before.
+
+  `mysqlClaimName` names a claim this release does NOT render — a datadir
+  provisioned outside the chart, for example by an in-cluster engine migration
+  that restores into a fresh volume. The Deployment then mounts that claim, and
+  `tracebloc.mysqlPvc` keeps being rendered (and kept) alongside it. That is
+  deliberate, not residue:
+    - a `helm rollback` of a failed upgrade rebuilds the previous revision from
+      its manifest, and fails on any object the release still has that the
+      failed revision did not render — so a claim the chart stopped rendering
+      would make the rollback back onto it impossible;
+    - the root-password guards decide "this release already has MySQL data" by
+      looking up `tracebloc.mysqlPvc` by name;
+    - a claim that stopped being rendered and was then deleted would come back
+      empty on the next apply, and on a WaitForFirstConsumer class stay Pending
+      with no pod to bind it, failing every later `--atomic` apply.
+  Never delete `tracebloc.mysqlPvc` while this is set; empty it in place instead.
+
+  hostPath mode pre-binds its one static MySQL volume to `tracebloc.mysqlPvc`, so
+  there is no second volume to mount there: that combination fails the render.
+*/}}
+{{- define "tracebloc.mysqlDataClaim" -}}
+{{- $claim := .Values.mysqlClaimName | default "" -}}
+{{- if and $claim (default dict .Values.hostPath).enabled -}}
+{{- fail "mysqlClaimName is not supported with hostPath.enabled=true: hostPath mode pre-binds its one static MySQL volume to the claim the chart renders, so there is no second volume to mount." -}}
+{{- end -}}
+{{- $claim | default (include "tracebloc.mysqlPvc" .) -}}
+{{- end }}
+
+{{/*
+  jobs-manager's replica count. It is a single-writer controller on ReadWriteOnce
+  volumes (Recreate strategy), so the only meaningful values are 1 (the default)
+  and 0 — scaled down through the release's values, so that a later `helm upgrade`
+  keeps it at 0 instead of reverting live drift back to the template. Nil-guarded
+  rather than `default 1`, because `default` treats 0 as unset and would turn a
+  deliberate 0 back into 1.
+*/}}
+{{- define "tracebloc.jobsManagerReplicas" -}}
+{{- $r := .Values.jobsManagerReplicas -}}
+{{- if kindIs "invalid" $r -}}1{{- else -}}{{- int $r -}}{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientDataStorage" -}}
 {{ .Values.pvc.data | default "50Gi" }}
 {{- end }}
