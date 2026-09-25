@@ -129,9 +129,12 @@ spec:
       # never rendered onto another. Passing `.Values.images.mysqlClient.digest`
       # straight in, the shape this line used to have, is exactly how a Hub
       # digest was rendered onto ghcr.io and every pull timed out (see
-      # tracebloc.pinFor). An IGNORED pin falls back to `:{{ .Values.images.mysqlClient.tag | default "prod" }}`,
+      # tracebloc.pinFor). An IGNORED pin falls back to `:<images.mysqlClient.tag, default prod>`,
       # which the frozen Hub namespace and ghcr.io both serve.
-      - image: {{ include "tracebloc.image" (dict "repository" (.Values.images.mysqlClient.repository | default "tracebloc/mysql-client") "tag" (.Values.images.mysqlClient.tag | default "prod") "digest" (include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $)) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+      # NIL-GUARDED (backend#4372): `images.mysqlClient: null` or `images: null`
+      # renders the defaults below rather than a nil-pointer failure.
+      {{- $mysqlImg := default dict (index (default dict .Values.images) "mysqlClient") }}
+      - image: {{ include "tracebloc.image" (dict "repository" ($mysqlImg.repository | default "tracebloc/mysql-client") "tag" ($mysqlImg.tag | default "prod") "digest" (include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $)) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
         imagePullPolicy: IfNotPresent
         name: mysql-client
         {{- if (include "tracebloc.rotateMysqlRoot" .) }}

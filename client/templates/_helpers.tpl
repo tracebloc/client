@@ -1858,7 +1858,7 @@ true
   touches only one fails CI rather than drifting.
 */}}
 {{- define "tracebloc.ingestorTag" -}}
-{{- $ing := default dict .Values.images.ingestor -}}
+{{- $ing := default dict (index (default dict .Values.images) "ingestor") -}}
 {{- $explicit := $ing.tag | default "" -}}
 {{- if $explicit -}}
 {{- $explicit -}}
@@ -1876,7 +1876,7 @@ true
 {{- end }}
 
 {{- define "tracebloc.ingestorDigest" -}}
-{{- $ing := default dict .Values.images.ingestor -}}
+{{- $ing := default dict (index (default dict .Values.images) "ingestor") -}}
 {{- $explicit := $ing.digest | default "" -}}
 {{- if $explicit -}}
 {{- $explicit -}}
@@ -1942,10 +1942,15 @@ The sha256 literal below MUST equal the images.mysqlClient.digest default in
 values.yaml — mysql_test.yaml pins the default render to "5.7", so re-pinning
 the digest without updating this helper fails CI instead of silently
 disarming the guard.
+Nil-guarded at both levels (backend#4372), as tracebloc.honouredPin is: an
+operator's explicit `images.mysqlClient: null` or `images: null`, or a
+`--reuse-values` replay from before the block existed, reads as the defaults
+(tag `prod` -> "5.7") instead of failing the render on a nil pointer.
 */}}
 {{- define "tracebloc.mysqlEngineMajor" -}}
-{{- $digest := .Values.images.mysqlClient.digest | default "" -}}
-{{- $tag := .Values.images.mysqlClient.tag | default "prod" -}}
+{{- $img := default dict (index (default dict .Values.images) "mysqlClient") -}}
+{{- $digest := $img.digest | default "" -}}
+{{- $tag := $img.tag | default "prod" -}}
 {{- if $digest -}}
 {{- if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
 5.7

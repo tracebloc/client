@@ -655,8 +655,9 @@ spec:
           # re-homed onto that mirror (<mirror>/tracebloc/ingestor) so a single
           # knob points the ingestor at the same registry as the chart's own
           # images. With neither, it falls back to the ghcr.io default. Nil-guarded
-          # for --reset-then-reuse-values upgrades that predate images.ingestor.
-          {{- $ingRepo := (default dict .Values.images.ingestor).repository | default "ghcr.io/tracebloc/ingestor" }}
+          # for --reset-then-reuse-values upgrades that predate images.ingestor,
+          # and for an explicit `images: null` (backend#4372).
+          {{- $ingRepo := (default dict (index (default dict .Values.images) "ingestor")).repository | default "ghcr.io/tracebloc/ingestor" }}
           {{- $ingMirror := dig "imageRegistry" "" (.Values.global | default dict) }}
           {{- if and $ingMirror (eq $ingRepo "ghcr.io/tracebloc/ingestor") }}{{ $ingRepo = printf "%s/tracebloc/ingestor" $ingMirror }}{{ end }}
           value: {{ $ingRepo | quote }}
