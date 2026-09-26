@@ -289,6 +289,36 @@ log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> 
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
 hint()           { echo -e "  ${DIM}$*${RESET}"; }
 
+# The "remove the client that is already here" remedy, printed from ONE place
+# (backend#2077) — peer of cluster.sh::_recreate_cluster_hint, for the sites that
+# mean a FULL removal (switch account, switch Client ID), not a keep-your-data
+# recreate.
+#
+# Why not just `k3d cluster delete`: the backend record is anchored to the
+# cluster's identity (the kube-system namespace UID), which dies with the k3d
+# cluster. `k3d cluster delete` never calls the API, so the record keeps a
+# cluster_id that will never exist again and stays on the dashboard for good.
+# `tracebloc delete` revokes it server-side first (an API call, so it works on a
+# broken cluster too), then uninstalls, tears down the `tracebloc` cluster and —
+# without --keep-data — wipes ~/.tracebloc, which is what these sites promise.
+#
+# It acts on this machine's active client with the SIGNED-IN account's token, so
+# it has to run as the account that owns that client: the switch-account site has
+# just signed in as the OTHER one, hence the `tracebloc login` in front. The k3d
+# line stays for a custom CLUSTER_NAME (`tracebloc delete` only removes the one
+# named `tracebloc`), and the last line covers a machine where `tracebloc delete`
+# can't run — it refuses with "no active client" when the pointer is gone.
+#
+# $1 (optional): the indent to print the command lines at.
+_release_client_hint() {
+  local in="${1:-}"
+  hint "${in}tracebloc login  &&  tracebloc delete   (as the account that owns it: releases it on"
+  hint "${in}                                         its dashboard, then wipes it + its local data)"
+  hint "${in}k3d cluster delete ${CLUSTER_NAME:-tracebloc}"
+  hint "${in}(tracebloc delete refused, or you can't sign in as that account? revoke the client on"
+  hint "${in} that account's dashboard first, then just the k3d line.)"
+}
+
 # step_header LETTER TITLE — bold running header for one of the six install steps
 # (a–f) in the first-run run-through, e.g. `step_header a "Checking your machine"`
 # → "  a) Checking your machine". Prints the header + a single trailing blank; the

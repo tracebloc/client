@@ -876,6 +876,122 @@
         }
       }
     },
+    "restrictedDns": {
+      "type": "object",
+      "description": "Restricted DNS resolver for training and ingestion pods (SECURITY §8.2, DNS exfiltration). When enabled, a CoreDNS answering only clusterDomain + allowlist (NXDOMAIN for everything else, no upstream catch-all) becomes the only DNS server training and ingestion pods can reach, and jobs-manager spawns them with dnsPolicy None + a dnsConfig naming it. Default off.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "clusterDomain": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\\.?$",
+          "default": "cluster.local",
+          "description": "The cluster DNS domain (kubelet --cluster-domain). Only names under it are forwarded to the cluster DNS."
+        },
+        "allowlist": {
+          "type": "array",
+          "description": "Extra DNS zones forwarded to the cluster DNS (and on upstream). A zone matches itself and every name under it; list only zones you own. Never `.`.",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\\.?$"
+          }
+        },
+        "clusterIP": {
+          "type": "string",
+          "description": "Pin the resolver Service's ClusterIP (inside the service CIDR). Empty = assigned; jobs-manager resolves the Service name.",
+          "default": ""
+        },
+        "upstream": {
+          "type": "string",
+          "pattern": "^(([0-9]{1,3}\\.){3}[0-9]{1,3})?$",
+          "description": "A bare IPv4 address the resolver forwards clusterDomain/allowlist queries to, instead of its own /etc/resolv.conf (e.g. a node-local DNS cache). Its NetworkPolicy then allows egress to exactly that address on 53.",
+          "default": ""
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "containerPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 5353,
+          "description": "The unprivileged port CoreDNS listens on inside the pod; the Service maps 53 onto it."
+        },
+        "runAsUser": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "UID for the resolver pod. null = omitted (OpenShift assigns one; the image's own user is numeric 65532)."
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "not": {
+                "const": "latest"
+              }
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "digestFor": {
+              "type": "string",
+              "pattern": "^([a-z0-9]+([._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$",
+              "description": "The `<repository>:<tag>` this block's `digest` was resolved for (registry excluded). The digest is rendered ONLY when this equals the repository:tag the site renders; otherwise it is DROPPED -- the site renders repository:tag and NOTES names it -- because a digest applied to another image does not pull, or pulls something other than the image named. EMPTY: the chart's own digest is deemed resolved for the chart's own repository:tag (so overriding `repository` or `tag` alone drops it), and a digest you set yourself is deemed resolved for the image you set beside it (always honoured). Set it to keep the chart's digest on a mirror that serves the SAME bytes under another repository path.",
+              "default": ""
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string",
+                  "pattern": "^[0-9]+m?$"
+                },
+                "memory": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "images": {
       "type": "object",
       "description": "Container image pinning. Prefer digest over tag for immutability.",
@@ -1081,7 +1197,7 @@
         "training": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES. The chart refuses `capabilities` with an empty `digests`.",
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. The chart refuses `capabilities` with an empty `digests`.",
           "properties": {
             "pinned": {
               "enum": [
@@ -1092,6 +1208,11 @@
                 false
               ],
               "description": "\"\" (auto: pin iff CLIENT_ENV resolves to prod), or an explicit true/false override."
+            },
+            "digestRegistry": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+              "description": "The registry `digests` was resolved on -- a bare host (optional :port and /path), spelled exactly as images.traceblocRegistry or global.imageRegistry would be. Written by scripts/resolve-training-digests.sh beside the map. The map (and `capabilities`) are rendered ONLY when this equals the registry the edge pulls training images from (JOB_IMAGE_HOST: global.imageRegistry, else images.traceblocRegistry, else the chart default); on any other registry neither renders and training pods float on :<CLIENT_ENV>. Empty is honoured nowhere. A mirror that holds the exact digests opts in by setting this to its own host."
             },
             "digests": {
               "type": "object",

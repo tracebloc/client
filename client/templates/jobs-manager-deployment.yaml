@@ -675,6 +675,20 @@ spec:
         - name: EGRESS_PROXY_URL
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}
+        {{- with (default dict .Values.restrictedDns) }}
+        {{- if .enabled }}
+        # SECURITY §8.2 (DNS): jobs-manager spawns training and ingestion pods
+        # with dnsPolicy None + a dnsConfig naming the restricted resolver
+        # (restricted-dns-*.yaml). The value is the pinned ClusterIP when one is
+        # set, else the Service FQDN, which jobs-manager resolves to its ClusterIP
+        # (a pod's nameserver must be an IP). Unset = the pods keep the cluster
+        # DNS -- which the training NetworkPolicy no longer lets them reach.
+        - name: RESTRICTED_DNS_NAMESERVER
+          value: {{ .clusterIP | default (printf "restricted-dns-service.%s.svc.%s" $.Release.Namespace (trimSuffix "." (.clusterDomain | default "cluster.local"))) | quote }}
+        - name: RESTRICTED_DNS_CLUSTER_DOMAIN
+          value: {{ trimSuffix "." (.clusterDomain | default "cluster.local") | quote }}
+        {{- end }}
+        {{- end }}
         # JOB_IMAGE_HOST is the registry prefix jobs-manager stamps onto every
         # training-job image it spawns. Rendered from tracebloc.tbRegistry -- the
         # SAME precedence chain as the control-plane images, so the two cannot
@@ -682,9 +696,12 @@ spec:
         # global.imageRegistry (#585) wins, so an air-gapped/mirrored install
         # pulls job images from the same registry as the chart's own images;
         # else images.traceblocRegistry (the per-edge rollback knob); else the
-        # chart default, ghcr.io since the GHCR migration (the training images
-        # are published there at the same digests as on Docker Hub). The helper
-        # is nil-guarded for pre-this-key --reset-then-reuse-values upgrades.
+        # chart default, ghcr.io since the GHCR migration. Docker Hub is a
+        # frozen archive: it serves the tags it last received and none of the
+        # digests resolved on ghcr.io since, which is why the training digest
+        # map below is rendered only for the registry it was resolved on. The
+        # helper is nil-guarded for pre-this-key --reset-then-reuse-values
+        # upgrades.
         # Trailing slash: the runtime concatenates <host><repo>:<tag> verbatim.
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
@@ -728,13 +745,24 @@ spec:
              byte-identical pod spec -- and the runtime reads absence as exactly
              today: floating tag, auto-pin gate, no capabilities => N=1.
 
+             The map and the capabilities render TOGETHER, and only where
+             tracebloc.trainingPins holds: a map exists, the runtime will pin
+             here, and the map was resolved on the registry this edge pulls
+             training images from (images.training.digestRegistry ==
+             JOB_IMAGE_HOST's registry). On a customer mirror, on
+             images.traceblocRegistry=docker.io, with pinned=false, or on a
+             dev/stg edge in auto mode, neither renders and the edge floats
+             exactly as it does with an empty map -- a digest resolved on one
+             registry is not a reference another registry can serve.
+
              Nil-guarded through `default dict` so a `--reuse-values` upgrade
              from a release predating `images.training` still renders. */}}
         {{- $training := default dict (default dict .Values.images).training }}
         {{- if and $training.capabilities (not $training.digests) }}
         {{- fail "images.training.capabilities is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together." }}
         {{- end }}
-        {{- if $training.digests }}
+        {{- $trainingPins := include "tracebloc.trainingPins" . }}
+        {{- if $trainingPins }}
         - name: TRAINING_IMAGE_DIGESTS
           value: {{ $training.digests | toJson | quote }}
         {{- end }}
@@ -746,7 +774,7 @@ spec:
         - name: TRAINING_IMAGE_PINNED
           value: {{ $training.pinned | toString | quote }}
         {{- end }}
-        {{- if $training.capabilities }}
+        {{- if and $trainingPins $training.capabilities }}
         - name: TRAINING_ENGINE_CAPABILITIES
           value: {{ $training.capabilities | quote }}
         {{- end }}
@@ -910,6 +938,28 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        {{- /* The MySQL 5.7 -> 8.4 migration Job (RFC-0150 D2, backend#4361).
+             jobs-manager creates it when the backend pushes a migrate trigger,
+             and builds it from these: the release it applies to and the Secret
+             its passwords live in, this image (the Job runs its migration code),
+             and -- only where auto-upgrade is enabled -- the auto-upgrade
+             ServiceAccount the Job runs under (the rights a release apply needs;
+             jobs-manager's own account has none) and the helm image auto-upgrade
+             runs, which the Job copies helm out of. With auto-upgrade off the
+             last two are absent and jobs-manager reports a trigger `refused`
+             instead of creating a Job it could not run. */}}
+        - name: RELEASE_NAME
+          value: {{ .Release.Name | quote }}
+        - name: RELEASE_SECRET_NAME
+          value: {{ include "tracebloc.secretName" . | quote }}
+        - name: MYSQL_MIGRATION_JOB_IMAGE
+          value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
+        {{- if .Values.autoUpgrade.enabled }}
+        - name: MYSQL_MIGRATION_SERVICE_ACCOUNT
+          value: {{ include "tracebloc.autoUpgradeName" . | quote }}
+        - name: MYSQL_MIGRATION_HELM_IMAGE
+          value: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) | quote }}
+        {{- end }}
         {{- range $key, $value := .Values.env }}
         {{- /* IMAGE_PULL_SECRET_NAME is excluded so `env.IMAGE_PULL_SECRET_NAME`
              cannot render it twice with the passthrough copy winning (Asad on
@@ -927,8 +977,16 @@ spec:
              is read by jobs_manager.py, which runs in THIS container -- so
              passing it through there put an ignored value in an unrelated
              process's environment and nothing more. Nobody can depend on that:
-             the variable does not exist before this change. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+             the variable does not exist before this change.
+
+             The five migration-Job names above are excluded for the same reason
+             (backend#4361): a passthrough copy renders after the chart's and
+             wins, so `env.RELEASE_NAME` or `env.MYSQL_MIGRATION_*` could point
+             the Job at another release, Secret, image or ServiceAccount -- and
+             with auto-upgrade off, `env.MYSQL_MIGRATION_SERVICE_ACCOUNT` would
+             put back the very var that block withholds so a trigger is
+             `refused`. */}}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

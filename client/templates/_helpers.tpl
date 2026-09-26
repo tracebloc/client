@@ -804,6 +804,12 @@ egressProxy.image:
   tag: "6.6-24.04_beta"
   digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
   digestFor: "ubuntu/squid:6.6-24.04_beta"
+restrictedDns.image:
+  registry: docker.io
+  repository: coredns/coredns
+  tag: "1.14.7"
+  digest: "sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286"
+  digestFor: "coredns/coredns:1.14.7"
 sealCheck.storageAssertions.image:
   registry: docker.io
   repository: alpine/k8s
@@ -1034,9 +1040,13 @@ about where those images live:
                                     per-edge rollback: set it to the previous
                                     registry.
   3. "ghcr.io"                   — the chart default since the GHCR migration.
-                                    The images are still dual-published to
-                                    Docker Hub at the same digests, so
-                                    "docker.io" is the documented rollback.
+                                    Docker Hub is a frozen archive since then:
+                                    "docker.io" is still the documented
+                                    rollback, to the tags it last received,
+                                    and serves none of the digests resolved
+                                    on ghcr.io since (every pin is honoured
+                                    only on its own registry --
+                                    tracebloc.pinRegistryHonoured).
 
 ROUTED THROUGH HERE SINCE D1 STEP 6 (backend#3397): `tracebloc/mysql-client`.
 It used to be excluded because it was "published only to Docker Hub", and step 6
@@ -1214,8 +1224,118 @@ Usage: {{ include "tracebloc.honouredPin" (dict "image" "mysqlClient" "root" $) 
 {{- define "tracebloc.honouredPin" -}}
 {{- $img := default dict (index (default dict .root.Values.images) .image) -}}
 {{- $digest := $img.digest | default "" -}}
-{{- if and $digest (eq (include "tracebloc.pinDeclaredRegistry" .) (include "tracebloc.tbRegistry" .root)) -}}
+{{- if and $digest (include "tracebloc.pinRegistryHonoured" (dict "registry" (include "tracebloc.pinDeclaredRegistry" .) "root" .root)) -}}
 {{- $digest -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.pinRegistryHonoured — THE COMPARISON every digest pin of a
+tracebloc-published image is decided by (the control plane and mysql-client
+through tracebloc.honouredPin, the training map through tracebloc.trainingPins;
+third-party images have their own identity rule, tracebloc.thirdPartyPinDecision):
+"true" when the registry a pin DECLARES it was resolved on equals
+the registry this release pulls the tracebloc-published images from
+(tracebloc.tbRegistry: the mirror, else images.traceblocRegistry, else the chart
+default), empty otherwise. An empty or absent declaration never matches:
+tbRegistry always resolves to a host, so "" is honoured nowhere.
+
+A digest names bytes on the registry it was resolved on, and nothing guarantees
+another registry ever held them. That is the whole rule, and this is the one
+place it is spelled. Its callers differ only in WHERE the declaration comes
+from:
+
+  * tracebloc.honouredPin   one pin per image (control plane, mysql-client):
+                            images.<image>.digestRegistry, else the legacy rule
+                            (tracebloc.pinDeclaredRegistry)
+  * tracebloc.trainingPins  the training digest map: images.training.digestRegistry,
+                            written by the resolver beside the map. NO legacy
+                            rule -- no chart ever shipped a populated map, so a
+                            map without a declared registry has no provenance
+                            and floats.
+
+Extracted rather than copied, so breaking the comparison reddens the
+control-plane suites AND the training suite at once.
+
+Usage: {{ include "tracebloc.pinRegistryHonoured" (dict "registry" "ghcr.io" "root" $) }}
+*/}}
+{{- define "tracebloc.pinRegistryHonoured" -}}
+{{- if eq (.registry | default "" | toString) (include "tracebloc.tbRegistry" .root) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.trainingPinned — "true" when the jobs-manager will PIN training spawns
+on this edge, empty when it will spawn the floating :<CLIENT_ENV> tag. Mirrors
+the jobs-manager's own gate (training_pinning_enabled, which reads
+TRAINING_IMAGE_PINNED and CLIENT_ENV) over the vocabulary values.schema.json
+admits for images.training.pinned:
+
+  true / "true"     pin (a canary, or a fleet flip)
+  false / "false"   float (the break-glass)
+  "" / absent       AUTO: pin iff CLIENT_ENV resolves to prod
+
+The input is tracebloc.clientEnv, the same value this chart renders as the
+jobs-manager's CLIENT_ENV, so the two sides read one fact. Anything the schema
+does not admit reads as AUTO, as it does in the runtime.
+
+WHY THE CHART ASKS AT ALL. The digest map and the capabilities describe the
+PINNED engine. Rendered on an edge that floats, the map is dead weight that rolls
+the jobs-manager on every promotion, and the capabilities are worse: the runtime
+sizes GPU requests from them, so a floating edge would be sized for an engine it
+is not running. So both are rendered only where the runtime will pin. If this
+gate and the runtime's ever disagree, the only reachable direction is "chart
+says float": no map reaches the pod and the runtime floats -- today's behaviour,
+never an unpullable reference.
+
+Call with the ROOT context: {{ include "tracebloc.trainingPinned" . }}
+*/}}
+{{- define "tracebloc.trainingPinned" -}}
+{{- $training := default dict (default dict .Values.images).training -}}
+{{- $choice := "" -}}
+{{- if hasKey $training "pinned" -}}
+{{- $choice = $training.pinned | toString | trim | lower -}}
+{{- end -}}
+{{- if eq $choice "true" -}}
+true
+{{- else if eq $choice "false" -}}
+{{- else if eq (include "tracebloc.clientEnv" .) "prod" -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.trainingPins — "true" when the jobs-manager renders the training
+digest map (TRAINING_IMAGE_DIGESTS) and the pinned engine's capabilities
+(TRAINING_ENGINE_CAPABILITIES), empty when it renders neither and the edge
+floats exactly as an edge with an empty map does. All three must hold:
+
+  1. images.training.digests is non-empty;
+  2. the runtime will pin here (tracebloc.trainingPinned);
+  3. the map is honoured on the registry this edge pulls training images from:
+     images.training.digestRegistry == tracebloc.tbRegistry, the SAME registry
+     rendered as JOB_IMAGE_HOST (tracebloc.pinRegistryHonoured).
+
+Rule 3 is the one that keeps an edge pulling. The runtime prefixes JOB_IMAGE_HOST
+to `tracebloc/client-<task>-<arch>@<digest>`, so a map resolved on ghcr.io and
+rendered on an edge that pulls from a customer mirror or from docker.io (the
+documented per-edge rollback) asks that registry for bytes it may never have
+held -- and Docker Hub, frozen since the move to ghcr.io, holds none of the
+current engine's. Every training spawn would fail to pull. On any registry but
+the declared one the map is therefore not rendered and the edge floats. A mirror
+that does hold the exact digests opts in by declaring itself:
+`--set images.training.digestRegistry=<the mirror, spelled as global.imageRegistry>`.
+
+The map and the capabilities are one decision, never two: the capabilities were
+read off the pinned images, so they are true only where those images run.
+
+Call with the ROOT context: {{ include "tracebloc.trainingPins" . }}
+*/}}
+{{- define "tracebloc.trainingPins" -}}
+{{- $training := default dict (default dict .Values.images).training -}}
+{{- if and $training.digests (include "tracebloc.trainingPinned" .) (include "tracebloc.pinRegistryHonoured" (dict "registry" $training.digestRegistry "root" .)) -}}
+true
 {{- end -}}
 {{- end -}}
 

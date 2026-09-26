@@ -334,8 +334,10 @@ _verify_nodes_see_host_data() {
   Most likely causes:
     * Docker Desktop is not sharing this path. Add it under
       Settings -> Resources -> File sharing, then re-run.
-    * The cluster was created without the data mount. Recreate it:
-      'k3d cluster delete ${CLUSTER_NAME}' then re-run this installer.
+    * The cluster was created without the data mount. Recreate it — releasing this
+      machine's secure environment first, or deleting the cluster strands it on your
+      dashboard: 'tracebloc delete --keep-data' (skip it if nothing is installed yet),
+      then 'k3d cluster delete ${CLUSTER_NAME}' and re-run this installer.
     * HOST_DATA_DIR changed since the cluster was created (currently ${HOST_DATA_DIR})."
     fi
   done

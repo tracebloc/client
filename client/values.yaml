@@ -746,6 +746,84 @@ egressProxy:
       cpu: "500m"
       memory: "384Mi"
 
+# -- Restricted DNS resolver for training and ingestion pods (SECURITY §8.2, DNS).
+#
+# THE HOLE IT CLOSES. The training NetworkPolicy already limits DNS to the
+# cluster DNS service, but the cluster DNS forwards every name it does not own to
+# the internet. A training pod can therefore exfiltrate by encoding data into the
+# query NAME -- `<chunk>.attacker.example` -- and the attacker's authoritative
+# server logs it: no TCP/443, no proxy, no allowlist involved. A NetworkPolicy
+# cannot filter by name, and the cluster DNS belongs to the cluster operator.
+#
+# WHAT `enabled: true` DOES:
+#   1. Deploys a small CoreDNS (`restricted-dns-service`) that answers ONLY
+#      `clusterDomain` (forwarded to the cluster DNS) plus `allowlist`, and
+#      NXDOMAIN for every other name -- reverse (PTR) lookups included. There is
+#      no catch-all upstream forward.
+#   2. Points the training NetworkPolicy's DNS rule at that resolver instead of
+#      the cluster DNS, and adds an ingestion-pod egress policy that does the
+#      same (DNS only via the resolver, no other UDP; all TCP stays open, as
+#      today). A training pod that ignores its resolv.conf and queries the
+#      cluster DNS, or 8.8.8.8, directly is dropped by the CNI.
+#   3. Tells jobs-manager (RESTRICTED_DNS_NAMESERVER) to spawn training and
+#      ingestion pods with `dnsPolicy: None` and a dnsConfig naming the resolver.
+#      Requires a jobs-manager image that reads it; an older one keeps the
+#      cluster DNS, which step 2 then blocks.
+#
+# WHY IT IS SAFE TO RESOLVE ONLY CLUSTER NAMES. With egressProxy.routeWorkloads
+# (the default), these pods reach the backend through the egress gateway: they
+# send `CONNECT host:443` to egress-proxy-service and the GATEWAY resolves the
+# external name, not the pod. The pod itself resolves only in-cluster names
+# (egress-proxy-service, requests-proxy-service, mysql-client). The chart refuses
+# to render `enabled: true` with routing off and an empty allowlist, because
+# those pods would then have to resolve the backend themselves.
+#
+# DEFAULT OFF. Turning it on is a behaviour change for every workload on the
+# edge and needs the jobs-manager image that carries the dnsConfig support; flip
+# it per edge, then run `helm test` and one training run. Keep
+# networkPolicy.training.enforcementProbeHost an IP: a training pod can no
+# longer resolve an external host.
+restrictedDns:
+  enabled: false
+  # The cluster's DNS domain (kubelet --cluster-domain). Only names under it are
+  # forwarded to the cluster DNS. It MUST be the real domain: a wrong one sends
+  # every in-cluster lookup to NXDOMAIN (pods cannot find mysql-client).
+  clusterDomain: cluster.local
+  # Extra DNS zones forwarded to the cluster DNS (and so, for an external zone,
+  # on to the internet). A zone matches itself AND every name under it, so each
+  # entry is a zone whose authoritative servers see those queries -- list only
+  # zones you own. Empty by default: routed workloads need none.
+  allowlist: []
+  # Pin the Service's ClusterIP (must lie inside the cluster's service CIDR).
+  # Empty = assigned by Kubernetes; jobs-manager resolves the Service name.
+  clusterIP: ""
+  # Where the resolver sends `clusterDomain` and `allowlist` queries. Empty = the
+  # resolver pod's own /etc/resolv.conf, i.e. the cluster DNS Service. Set an IP
+  # when the node runs a local DNS cache the resolver pod cannot reach.
+  upstream: ""
+  replicas: 1
+  # CoreDNS listens here inside the pod (unprivileged); the Service maps port
+  # 53 onto it.
+  containerPort: 5353
+  # coredns/coredns is distroless and runs as `nonroot`. Set null on OpenShift
+  # so the restricted SCC assigns a UID from the namespace range.
+  runAsUser: 65532
+  image:
+    registry: docker.io
+    repository: coredns/coredns
+    tag: "1.14.7"
+    digest: "sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286"
+    # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
+    # default identity for the chart's own pin, your image for your own digest.
+    digestFor: ""
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "32Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
 # -- Rename the resources this chart creates, without uninstall + reinstall.
 # backend#2626.
 #
@@ -1102,16 +1180,18 @@ images:
   # digest-pinned -- the host moved, the bytes did not.
   #
   # ghcr.io is where the control-plane and training images are published since
-  # the GHCR migration, and it is the chart default. They are still
-  # dual-published to docker.io at the same digests for now, so "docker.io"
-  # remains a valid value and is the per-edge rollback
-  # (`--set images.traceblocRegistry=docker.io`; user-supplied, so it survives
-  # the fleet auto-upgrade until cleared). Digest pins are NOT registry-
-  # agnostic: a digest names bytes on the registry it was resolved on, and
-  # nothing guarantees another registry ever held them -- a control-plane pin
-  # is therefore rendered only when its `digestRegistry` equals the registry
-  # this knob resolves to (see images.jobsManager below). The training-image
-  # digest pins below are published to both registries by the same pipeline.
+  # the GHCR migration, and it is the chart default. Docker Hub is a FROZEN
+  # archive since then: nothing is published there any more, so it serves the
+  # tags it last received -- older images, never the digests resolved on
+  # ghcr.io since. "docker.io" remains a valid value and is the per-edge
+  # rollback (`--set images.traceblocRegistry=docker.io`; user-supplied, so it
+  # survives the fleet auto-upgrade until cleared), a rollback to those older
+  # tags. Digest pins are NOT registry-agnostic: a digest names bytes on the
+  # registry it was resolved on, and nothing guarantees another registry ever
+  # held them -- so every pin carries the registry it was resolved on and is
+  # rendered only when that equals the registry this knob resolves to: the
+  # control-plane pins through their `digestRegistry` (see images.jobsManager
+  # below), the training digest map through images.training.digestRegistry.
   # No new egress is needed: ghcr.io (+ pkg-containers.githubusercontent.com
   # for layer redirects) is already required for the ingestor image and probed
   # by the installer preflight. Image-refresh follows it: the CronJob resolves
@@ -1206,7 +1286,33 @@ images:
   # and staging edges keep floating with zero per-edge action (they carry
   # env.CLIENT_ENV in user-supplied values). true / false = explicit override for
   # canary edges and transition windows. Rendered as TRAINING_IMAGE_PINNED only
-  # when set; absent means auto on the runtime side too.
+  # when set; absent means auto on the runtime side too. The map and
+  # `capabilities` below are rendered only where this resolves to "pin", so a
+  # floating edge (dev/stg in auto, or pinned=false) renders neither.
+  #
+  # `digestRegistry` -- the registry the map was RESOLVED on, a bare host
+  # spelled exactly as images.traceblocRegistry / global.imageRegistry would
+  # be. Written by the resolver beside the map, never by hand. The map is
+  # honoured ONLY on that registry:
+  #
+  #   honoured  <=>  digests non-empty AND pinning resolves to "pin" AND
+  #                  digestRegistry == the registry this edge pulls training
+  #                  images from (JOB_IMAGE_HOST: global.imageRegistry, else
+  #                  images.traceblocRegistry, else the chart default)
+  #             ->  TRAINING_IMAGE_DIGESTS + TRAINING_ENGINE_CAPABILITIES are
+  #                 rendered, and training pods run repo@digest, IfNotPresent
+  #   otherwise ->  neither is rendered; training pods float on
+  #                 :<CLIENT_ENV>, imagePullPolicy=Always, exactly as with an
+  #                 empty map
+  #
+  # The runtime prefixes JOB_IMAGE_HOST to repo@digest, so a map resolved on
+  # ghcr.io and rendered on a customer mirror or on docker.io would ask that
+  # registry for bytes it may never have held, and every training spawn would
+  # fail to pull. A mirror that DOES hold the exact digests opts in by declaring
+  # itself: `--set images.training.digestRegistry=<the mirror>`. Empty means no
+  # registry was declared, and a map with no declared registry is honoured
+  # nowhere (there is no legacy rule here: no chart ever shipped a populated
+  # map).
   #
   # `capabilities` -- what the PINNED engine can do, as the engine itself
   # declares it: the comma-separated OCI label `io.tracebloc.engine.capabilities`
@@ -1224,7 +1330,8 @@ images:
   # therefore REFUSES to render `capabilities` with an empty `digests` (see the
   # template), because there is nothing it could have been derived from.
   #
-  # Populating the map is the release train's promotion step, not a hand edit:
+  # Populating the map is the release train's promotion step, not a hand edit
+  # (the resolver writes `digests`, `capabilities` and `digestRegistry` together):
   # it moves prod edges from "whatever :prod points at right now" to a fixed
   # engine, and the map must then be advanced on every engine promotion or prod
   # freezes on today's bytes. Until that step exists the map stays EMPTY here,
@@ -1232,6 +1339,7 @@ images:
   # tested render path.
   training:
     pinned: ""
+    digestRegistry: ""
     digests: {}
     capabilities: ""
   # client-runtime#40 / client#125: the ingestor image is spawned by

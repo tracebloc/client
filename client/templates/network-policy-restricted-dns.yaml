@@ -1,0 +1,108 @@
+{{- $rd := default dict .Values.restrictedDns }}
+{{- if $rd.enabled }}
+{{- /*
+  NetworkPolicies of the restricted DNS resolver (SECURITY §8.2, DNS).
+
+  1. <fullname>-restricted-dns: the resolver itself. Ingress on its DNS port
+     from pods in this namespace; egress ONLY to the cluster DNS on 53 (or to
+     restrictedDns.upstream when set). So even a Corefile edit that re-added a
+     catch-all forward could not reach an internet resolver.
+
+  2. <fullname>-ingestion-dns: ingestion pods (label tracebloc.io/ingestion-run,
+     stamped by jobs-manager on every ingestion Job). Their DNS goes to the
+     restricted resolver only; UDP anywhere else is dropped, which is the port
+     every stub resolver uses first. All TCP egress stays open, as it is today
+     without this policy (ingestion reaches MySQL, the egress gateway and, with
+     routing off, the backend) -- so DNS-over-TCP straight to an outside
+     resolver is NOT blocked here. Closing that needs a port-range rule
+     (`endPort`), which a CNI that ignores it would turn into "port 1 only" and
+     break every ingestion; ingestion runs tracebloc's own image, not uploaded
+     code, so the policy is defence in depth behind the pod's dnsConfig.
+
+  The TRAINING pods' DNS rule is switched in network-policy-training.yaml.
+
+  Ports: a NetworkPolicy matches the pod's port AFTER the Service DNAT, so the
+  rules name containerPort (5353), not the Service's 53.
+*/ -}}
+{{- $np := default dict (default dict .Values.networkPolicy).training }}
+{{- $dnsSelector := $np.dnsSelector }}
+{{- if not $dnsSelector }}{{ $dnsSelector = dict "k8s-app" "kube-dns" }}{{- end }}
+{{- $port := $rd.containerPort | default 5353 | int }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-restricted-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: restricted-dns
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: {{ $port }}
+          protocol: UDP
+        - port: {{ $port }}
+          protocol: TCP
+  egress:
+    {{- if $rd.upstream }}
+    - to:
+        - ipBlock:
+            cidr: {{ printf "%s/32" $rd.upstream | quote }}
+    {{- else }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.dnsNamespace | default "kube-system" }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $dnsSelector | nindent 14 }}
+    {{- end }}
+      # 53, and 5353 for platforms whose DNS pods listen there behind the
+      # Service's 53 (OpenShift's dns-default). Policies match the POD port.
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+        - port: 5353
+          protocol: UDP
+        - port: 5353
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-ingestion-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: tracebloc.io/ingestion-run
+        operator: Exists
+  policyTypes:
+    - Egress
+  egress:
+    # DNS: the restricted resolver only.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: restricted-dns
+      ports:
+        - port: {{ $port }}
+          protocol: UDP
+        - port: {{ $port }}
+          protocol: TCP
+    # Everything the ingestor needs is TCP; left open to every destination,
+    # exactly as it is without this policy.
+    - ports:
+        - protocol: TCP
+{{- end }}

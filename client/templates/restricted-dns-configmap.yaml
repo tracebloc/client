@@ -1,0 +1,81 @@
+{{- $rd := default dict .Values.restrictedDns }}
+{{- if $rd.enabled }}
+{{- /*
+  Corefile of the restricted resolver (SECURITY §8.2, DNS exfiltration).
+
+  THE RULE IS STRUCTURAL: the only server blocks that forward anything are the
+  cluster domain and the explicit allowlist, each forwarding ONLY its own zone.
+  The root block (`.`) forwards NOTHING: it answers NXDOMAIN for every other
+  name, reverse (in-addr.arpa / ip6.arpa) lookups included, because a PTR query
+  for an attacker-delegated reverse zone reaches the attacker exactly like a
+  forward one. There is deliberately no `forward . /etc/resolv.conf` in this
+  file; tests/restricted_dns_test.yaml asserts it.
+
+  Guards, each a `fail` because a wrong value here breaks every training and
+  ingestion pod rather than degrading one:
+    - clusterDomain must be a domain name and upstream a bare IPv4 address;
+    - an allowlist entry must be a zone name (no scheme, port, wildcard or
+      whitespace), and never `.` -- a `.` entry is the catch-all forward this
+      switch removes;
+    - with egressProxy.routeWorkloads off, the pods resolve the backend
+      themselves, so an empty allowlist would leave them unable to reach it.
+*/ -}}
+{{- $domain := trimSuffix "." ($rd.clusterDomain | default "cluster.local") }}
+{{- $upstream := $rd.upstream | default "/etc/resolv.conf" }}
+{{- $port := $rd.containerPort | default 5353 | int }}
+{{- if and $rd.upstream (not (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}$" (toString $rd.upstream))) }}
+{{- fail (printf "restrictedDns.upstream %q must be a bare IPv4 address (port 53 is implied): the resolver's NetworkPolicy allows egress to exactly that address." (toString $rd.upstream)) }}
+{{- end }}
+{{- if not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$" $domain) }}
+{{- fail (printf "restrictedDns.clusterDomain %q is not a DNS domain name." $domain) }}
+{{- end }}
+{{- $ep := default dict .Values.egressProxy }}
+{{- if and (not (and $ep.enabled $ep.routeWorkloads)) (not $rd.allowlist) }}
+{{- fail "restrictedDns.enabled is true but egressProxy.enabled/routeWorkloads is off and restrictedDns.allowlist is empty. Without the egress gateway, training and ingestion pods resolve the backend themselves, and the restricted resolver answers only the cluster domain -- every run would fail to reach the backend. Turn gateway routing back on (recommended), or list the backend zones in restrictedDns.allowlist." }}
+{{- end }}
+{{- $zones := list }}
+{{- range $rd.allowlist }}
+{{- $zone := trimSuffix "." (toString .) }}
+{{- $zones = append $zones (lower $zone) }}
+{{- if eq (lower $zone) (lower $domain) }}
+{{- fail (printf "restrictedDns.allowlist entry %q is the cluster domain, which the resolver already serves; remove it (CoreDNS refuses two server blocks for one zone)." (toString .)) }}
+{{- end }}
+{{- if or (eq $zone "") (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$" $zone)) }}
+{{- fail (printf "restrictedDns.allowlist entry %q is not a DNS zone name. Use a bare zone such as `api.tracebloc.io` -- no scheme, port, wildcard or leading dot -- and never `.`, which would forward every name upstream (the exfiltration channel this resolver closes)." (toString .)) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-restricted-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: restricted-dns
+data:
+  Corefile: |
+    # Cluster-internal names only, forwarded to the cluster DNS, which is
+    # authoritative for this zone and forwards none of it.
+    {{ $domain }}:{{ $port }} {
+        errors
+        cache 30
+        forward {{ $domain }} {{ $upstream }}
+    }
+    {{- range $zone := (uniq $zones) }}
+    # Allowlisted zone (restrictedDns.allowlist).
+    {{ $zone }}:{{ $port }} {
+        errors
+        cache 30
+        forward {{ $zone }} {{ $upstream }}
+    }
+    {{- end }}
+    # Everything else, reverse lookups included: NXDOMAIN, never forwarded.
+    .:{{ $port }} {
+        errors
+        health :8080
+        ready :8181
+        template ANY ANY {
+            rcode NXDOMAIN
+        }
+    }
+{{- end }}

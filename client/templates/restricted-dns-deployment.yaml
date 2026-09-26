@@ -1,0 +1,108 @@
+{{- $rd := default dict .Values.restrictedDns }}
+{{- if $rd.enabled }}
+{{- /*
+  Restricted DNS resolver (SECURITY §8.2, DNS exfiltration). A CoreDNS that
+  answers only the cluster domain + restrictedDns.allowlist and NXDOMAINs the
+  rest (Corefile: restricted-dns-configmap.yaml). Training and ingestion pods
+  are spawned with it as their only nameserver, and their NetworkPolicies let
+  them reach no other DNS server.
+
+  Carries label app=restricted-dns, NOT tracebloc.io/workload=training, so it
+  sits OUTSIDE the training policy; its own policy
+  (network-policy-restricted-dns.yaml) lets it reach only the cluster DNS.
+
+  Listens on the unprivileged containerPort (5353) as a non-root user; the
+  Service maps 53 onto it. Nil-guards as in egress-proxy-deployment.yaml.
+*/ -}}
+{{- $img := default dict $rd.image }}
+{{- $res := default dict $rd.resources }}
+{{- $req := default dict $res.requests }}
+{{- $lim := default dict $res.limits }}
+{{- $port := $rd.containerPort | default 5353 | int }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-restricted-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $rd.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: restricted-dns
+  template:
+    metadata:
+      labels:
+        app: restricted-dns
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/restricted-dns-configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        {{- /* Omitted when null, so OpenShift's restricted SCC can assign a UID from
+               the namespace range (it refuses a fixed one outside it). */}}
+        {{- with $rd.runAsUser }}
+        runAsUser: {{ . }}
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coredns
+          image: {{ include "tracebloc.thirdPartyImage" (dict "site" "restrictedDns.image" "root" $) | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["-conf", "/etc/coredns/Corefile"]
+          ports:
+            - name: dns
+              containerPort: {{ $port }}
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: {{ $port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8181
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            # NET_BIND_SERVICE is in the set ONLY because the image's /coredns
+            # carries it as a file capability: with every capability dropped the
+            # kernel refuses to exec that binary at all ("exec /coredns:
+            # operation not permitted", measured on k3s 1.35). It is the one
+            # capability the Pod Security `restricted` profile allows; upstream
+            # CoreDNS manifests add the same one. The resolver still listens on
+            # the unprivileged containerPort.
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: {{ $req.cpu | default "10m" | quote }}
+              memory: {{ $req.memory | default "32Mi" | quote }}
+            limits:
+              cpu: {{ $lim.cpu | default "200m" | quote }}
+              memory: {{ $lim.memory | default "128Mi" | quote }}
+          volumeMounts:
+            - name: corefile
+              mountPath: /etc/coredns
+              readOnly: true
+      volumes:
+        - name: corefile
+          configMap:
+            name: {{ include "tracebloc.fullname" . }}-restricted-dns
+      {{- if include "tracebloc.useImagePullSecrets" . }}
+      imagePullSecrets:
+        - name: {{ include "tracebloc.registrySecretName" . }}
+      {{- end }}
+      restartPolicy: Always
+{{- end }}

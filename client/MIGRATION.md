@@ -2,6 +2,51 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.155 — the training-image digest map is honoured only on the registry it was resolved on
+
+**What changed.** `images.training` gains **`digestRegistry`**: the bare host the
+digest map was resolved on, spelled exactly as `images.traceblocRegistry` or
+`global.imageRegistry` would be. The resolver that writes the map writes this key
+beside it. The jobs-manager now receives the map (`TRAINING_IMAGE_DIGESTS`) and
+the pinned engine's capabilities (`TRAINING_ENGINE_CAPABILITIES`) **only when all
+three hold**:
+
+1. the map is not empty;
+2. the edge will pin — `images.training.pinned: true`, or `""` (auto) on a prod
+   edge;
+3. `digestRegistry` equals the registry the training pods pull from
+   (`JOB_IMAGE_HOST`: `global.imageRegistry`, else `images.traceblocRegistry`,
+   else `ghcr.io`).
+
+Otherwise neither variable is rendered and the training pods float on
+`:<CLIENT_ENV>` with `imagePullPolicy: Always`, exactly as with an empty map.
+
+**Why.** The jobs-manager builds `<JOB_IMAGE_HOST>tracebloc/client-<task>-<arch>@<digest>`.
+A digest names bytes on the registry it was resolved on, and a map resolved on
+`ghcr.io` names bytes that a customer mirror may not hold and that Docker Hub —
+a frozen archive since the move to `ghcr.io` — does not hold. Rendered on such an
+edge, every training pod would fail to pull. The same rule already governs the
+control-plane pins (1.9.119). The capabilities describe the pinned engine, so they
+are no longer sent to an edge that floats either (`pinned: false`, or dev/stg in
+auto mode).
+
+**What you need to do: nothing.** The map still ships empty in this version, so no
+edge changes behaviour on upgrade.
+
+**If your mirror holds the exact digests** and you want pinned training images
+there once the map ships, declare it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> --reset-then-reuse-values \
+  --set images.training.digestRegistry=<your mirror, spelled as global.imageRegistry>
+```
+
+**If you set `images.training.digests` yourself** (for a test install, say), add
+`images.training.digestRegistry` naming the registry you resolved those digests on.
+A map with no `digestRegistry` is honoured nowhere: unlike the control-plane pins
+there is no legacy rule, because no chart version ever shipped a populated map, so
+a map without the key says nothing about where its bytes live.
+
 ## Upgrading to 1.9.146 — a third-party image digest is applied only to the image it was resolved for
 
 **What changed.** The chart pins its third-party images by digest

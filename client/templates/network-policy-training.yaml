@@ -4,7 +4,9 @@
   Training pods run untrusted ML code uploaded by external data scientists.
   This NetworkPolicy:
     1. Denies all ingress to training pods (nothing should connect TO them).
-    2. Allows DNS to the cluster's DNS service.
+    2. Allows DNS to the cluster's DNS service -- or, with restrictedDns.enabled,
+       ONLY to the restricted resolver (restricted-dns-*.yaml), which does not
+       forward arbitrary names to the internet.
     3. Allows TCP/443 egress to addresses OUTSIDE the cluster CIDRs only —
        blocking pod-to-pod, K8s API, jobs-manager pod IPs, etc.
     4. Allows TCP/3306 egress to the in-namespace mysql-client pod.
@@ -48,7 +50,27 @@ spec:
   # Deny all ingress — no one should connect TO a training pod.
   ingress: []
   egress:
-    # 1. DNS to the cluster's DNS service.
+    {{- if (default dict .Values.restrictedDns).enabled }}
+    # 1. DNS to the RESTRICTED resolver only (restrictedDns.enabled). The cluster
+    #    DNS forwards any name it does not own to the internet, so a query NAME
+    #    is an exfiltration channel; the restricted resolver answers the cluster
+    #    domain (+ restrictedDns.allowlist) and NXDOMAINs the rest. The cluster
+    #    DNS, and every other DNS server, is no longer reachable from here.
+    #    Port = the resolver's containerPort: a policy matches after the
+    #    Service's 53 -> 5353 DNAT.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: restricted-dns
+      ports:
+        - port: {{ (default dict .Values.restrictedDns).containerPort | default 5353 | int }}
+          protocol: UDP
+        - port: {{ (default dict .Values.restrictedDns).containerPort | default 5353 | int }}
+          protocol: TCP
+    {{- else }}
+    # 1. DNS to the cluster's DNS service. NOTE (SECURITY §8.2): the cluster DNS
+    #    forwards unknown names upstream, so this rule leaves DNS-name
+    #    exfiltration open; restrictedDns.enabled closes it.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -61,6 +83,7 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+    {{- end }}
     {{- /* Rule 2 (external HTTPS) is the egress hole SECURITY §8.2 closes. The
            shipped default is now `false` (values.yaml — RFC-0003 D6 deny-by-default),
            so a fresh render drops this rule. The `dig` default of TRUE here is the

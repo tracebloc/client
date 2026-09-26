@@ -193,9 +193,17 @@ spec:
 
 **What this still allows:**
 
-- DNS lookups (needed to resolve backend + Azure endpoints)
+- DNS lookups to the cluster DNS — **and the cluster DNS forwards any name it does not own to the internet**, so a pod can leak data by encoding it into query names (`<chunk>.attacker.example`), with no TCP connection at all. Closed by `restrictedDns.enabled` (default off; see [DNS exfiltration](#dns-exfiltration-restricteddns) below).
 - In-cluster egress to MySQL (3306), the requests-proxy (8888), and the egress gateway (3128)
 - Outbound HTTPS/443 to the public internet — **dropped by default as of 1.9.96 (`networkPolicy.training.allowExternalHttps: false`, deny-by-default).** Training pods reach external services only through the in-cluster egress gateway; set `allowExternalHttps: true` to opt a fleet back out (see §8.2).
+
+#### DNS exfiltration (`restrictedDns`)
+
+A NetworkPolicy cannot filter DNS by name, and the cluster DNS is the cluster operator's. So the chart ships its own resolver instead of changing the cluster's: with `restrictedDns.enabled: true` it deploys a small CoreDNS (`restricted-dns-service`) that forwards only `restrictedDns.clusterDomain` (to the cluster DNS) plus any zones in `restrictedDns.allowlist`, and answers NXDOMAIN for every other name, reverse (PTR) lookups included — there is no catch-all forward. The training NetworkPolicy's DNS rule then targets that resolver instead of the cluster DNS, an ingestion-pod policy does the same, and jobs-manager spawns training and ingestion pods with `dnsPolicy: None` and a `dnsConfig` naming it (same search domains and `ndots:5` as the kubelet default). A pod that ignores its `resolv.conf` and queries the cluster DNS or a public resolver directly is dropped by the CNI.
+
+This works because, with `egressProxy.routeWorkloads` on, these pods never resolve an external name themselves: they send `CONNECT host:443` to the egress gateway, which resolves it. The chart refuses to render the switch with routing off and an empty allowlist.
+
+It is **off by default**. Before turning it on for an edge: the jobs-manager image must carry the `dnsConfig` support (an older one leaves pods on the cluster DNS, which the policy then blocks, so every run loses DNS); `clusterDomain` must be the cluster's real domain; and on a node-local DNS cache set `restrictedDns.upstream` to its IP. `networkPolicy.training.enforcementProbeHost` must stay an IP, since a training pod can no longer resolve an external host. What stays open: ingestion pods keep all TCP egress, so DNS-over-TCP straight to an outside resolver is not blocked for them (they run tracebloc's own image, not uploaded code). Like every rule here, the policy half holds only where the CNI enforces egress policy.
 
 **Enforcement prerequisite:** every bullet above is a *request* to the CNI, not a guarantee. It holds only on a CNI that enforces **egress** NetworkPolicy — Calico, Cilium, OpenShift OVN-Kubernetes, Azure CNI created with a network policy, or the **EKS VPC CNI managed add-on with `enableNetworkPolicy=true`**. See [§5.1](#enforcing-cnis) for the full list and the EKS caveat, and §6.2 for how to verify it on a given cluster. On a non-enforcing CNI the policy object exists and blocks nothing.
 

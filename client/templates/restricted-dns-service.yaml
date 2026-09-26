@@ -1,0 +1,33 @@
+{{- $rd := default dict .Values.restrictedDns }}
+{{- if $rd.enabled }}
+{{- /*
+  The restricted resolver's Service. Fixed name, like egress-proxy-service,
+  because jobs-manager is told its FQDN (RESTRICTED_DNS_NAMESERVER) and resolves
+  it to the ClusterIP it writes into each spawned pod's dnsConfig -- a pod's
+  nameserver must be an IP. restrictedDns.clusterIP pins that IP instead.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: restricted-dns-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: restricted-dns
+spec:
+  selector:
+    app: restricted-dns
+  {{- with $rd.clusterIP }}
+  clusterIP: {{ . | quote }}
+  {{- end }}
+  ports:
+    - name: dns
+      port: 53
+      targetPort: {{ $rd.containerPort | default 5353 | int }}
+      protocol: UDP
+    - name: dns-tcp
+      port: 53
+      targetPort: {{ $rd.containerPort | default 5353 | int }}
+      protocol: TCP
+  type: ClusterIP
+{{- end }}

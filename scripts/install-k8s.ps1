@@ -1222,8 +1222,10 @@ Node '$node' cannot see your data directory ($($script:HOST_DATA_DIR)).
   Most likely causes:
     * Docker Desktop is not sharing this path. Add it under
       Settings -> Resources -> File sharing, then re-run.
-    * The cluster was created without the data mount. Recreate it:
-      'k3d cluster delete $($script:CLUSTER_NAME)' then re-run this installer.
+    * The cluster was created without the data mount. Recreate it -- releasing this
+      machine's secure environment first, or deleting the cluster strands it on your
+      dashboard: 'tracebloc delete --keep-data' (skip it if nothing is installed yet),
+      then 'k3d cluster delete $($script:CLUSTER_NAME)' and re-run this installer.
     * HOST_DATA_DIR changed since the cluster was created.
 "@
       }
@@ -4007,6 +4009,37 @@ function Write-RecreateClusterHint {
   Hint "  (nothing installed on this machine yet? then just the k3d line.)"
 }
 
+# The "remove the client that is already here" remedy, printed from ONE place -- peer of
+# common.sh::_release_client_hint (backend#2077). For the sites that mean a FULL removal
+# (switch account, switch Client ID, start fresh), not a keep-your-data recreate.
+#
+# Same root cause as Write-RecreateClusterHint: a bare `k3d cluster delete` leaves the
+# backend record with a cluster_id that will never exist again, stranded on the dashboard.
+# `tracebloc delete` revokes it server-side first, then uninstalls, tears down the
+# `tracebloc` cluster and -- without --keep-data -- wipes the local data, which is what these
+# sites promise. It acts with the SIGNED-IN account's token on this machine's active client,
+# so it has to run as the account that owns that client (the switch-account site has just
+# signed in as the other one): hence `tracebloc login` first. The last line covers a machine
+# where it can't run (it refuses with "no active client" when the pointer is gone).
+#
+# The `;` is NOT the bash peer's `&&`, and the hint says so rather than leaving it implied
+# (review on #1274). Windows PowerShell 5.1 has no `&&`, so these two are SEQUENCED, not
+# chained: a login that fails -- or that the user cancels at the device-code prompt -- does
+# not stop the `tracebloc delete` behind it, and at the switch-account site the token still
+# on the machine is then the OTHER account's, the one this hint exists to keep out of it.
+# The order (login first) is the whole point of the line, so it stays on one line and the
+# caveat is printed underneath it.
+function Write-ReleaseClientHint {
+  param([string]$Indent = "")
+  Hint "${Indent}tracebloc login; tracebloc delete   (as the account that owns it: releases it on"
+  Hint "${Indent}                                    its dashboard, then wipes it + its local data)"
+  Hint "${Indent}                                    (the ';' is not a guard: if that login fails or"
+  Hint "${Indent}                                     you cancel it, stop - do NOT run the delete.)"
+  Hint "${Indent}k3d cluster delete $CLUSTER_NAME"
+  Hint "${Indent}(tracebloc delete refused, or you can't sign in as that account? revoke the client on"
+  Hint "${Indent} that account's dashboard first, then just the k3d line.)"
+}
+
 # Warn (never fatal) when the RUNNING cluster's k3s differs from the validated pin.
 # k3s is baked in at create time; a cluster born unpinned, on an older installer, or
 # with K8S_VERSION=latest keeps its version across later pinned re-runs -- the #547
@@ -6566,8 +6599,8 @@ function Invoke-ProvisionClient {
       Hint "tracebloc runs one client per machine. Provisioning now would register a"
       Hint "second client and strand it (it could never install here). Pick one:"
       Hint "  - Repair / update it     -> sign in as the account that owns it, or re-run with that client's credentials"
-      Hint "  - Switch to this account -> remove the current client first:"
-      Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+      Hint "  - Switch to this account -> release and remove the current client first:"
+      Write-ReleaseClientHint -Indent "        "
       Hint "      then re-run this installer"
       Hint "  - Run both               -> install on a separate machine"
       Write-Host ""
@@ -6946,7 +6979,8 @@ function Install-ClientHelm {
     Hint "a client it cannot see (usually the cluster API is briefly unreachable). Check and re-run:"
     Hint "  kubectl cluster-info         (is the API reachable?)"
     Hint "  helm get values -A           (see what is installed)"
-    Hint "  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+    Hint "  or remove it (wipes this client + its local data):"
+    Write-ReleaseClientHint -Indent "    "
     Write-Host ""
     Err "Refusing to replace an unidentifiable existing client."
   }
@@ -6966,8 +7000,8 @@ function Install-ClientHelm {
     Write-Host ""
     Hint "You entered a different Client ID ('$TB_CLIENT_ID'). Pick one:"
     Hint "  - Repair / update '$existingId'  -> re-run with that same Client ID"
-    Hint "  - Switch to '$TB_CLIENT_ID'       -> remove the current client first:"
-    Hint "        k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data)"
+    Hint "  - Switch to '$TB_CLIENT_ID'       -> release and remove the current client first:"
+    Write-ReleaseClientHint -Indent "        "
     Hint "      then re-run this installer"
     Hint "  - Run both clients                -> install on a separate machine"
     Write-Host ""
@@ -6992,7 +7026,9 @@ function Install-ClientHelm {
     Warn "This cluster is registered as client '$TB_CLIENT_ID', but no release survives locally and the previous configuration (with the client password) is gone."
     Hint "Pick one:"
     Hint "  - Re-run with the client's credentials:  set TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD, then re-run"
-    Hint "  - Start fresh:  k3d cluster delete $CLUSTER_NAME   (wipes this client + its local data), then re-run"
+    Hint "  - Start fresh (wipes this client + its local data):"
+    Write-ReleaseClientHint -Indent "        "
+    Hint "      then re-run this installer"
     Write-Host ""
     Err "Can't reconcile the existing client without its password."
   }
@@ -7486,7 +7522,10 @@ function Print-Summary {
       Write-Host ""
       Write-Host "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
       Write-Host "  pulls fail certificate validation (x509). CA trust is baked in at"
-      Write-Host "  cluster-create, so delete the existing cluster first, then re-run with the CA:"
+      Write-Host "  cluster-create, so release this machine's secure environment and delete the"
+      Write-Host "  cluster first, then re-run with the CA. Releasing comes FIRST: the record is tied"
+      Write-Host "  to the cluster, so deleting the cluster alone strands it on your dashboard:"
+      Write-Host "    tracebloc delete --keep-data" -ForegroundColor Green -NoNewline; Write-Host "   (releases it; keeps your local data)"
       Write-Host "    k3d cluster delete $CLUSTER_NAME" -ForegroundColor Green
       Write-Host "    `$env:TRACEBLOC_CA_BUNDLE = 'C:\path\to\corporate-ca.pem'; irm https://tracebloc.io/i.ps1 | iex" -ForegroundColor Green
       Hint "(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure."

@@ -1384,6 +1384,7 @@ _report_cgroup_delegation() {
   else
     warn "The cgroup delegation drop-in (${conf}) is NOT active in this session yet — pod CPU/memory limits will NOT be enforced until you recreate the cluster after the user manager restarts:"
     hint "  log out and back in — or, with lingering enabled, reboot (a re-login may not restart your user manager) — then:"
+    hint "  tracebloc delete --keep-data   # first, if a client is installed: releases its dashboard record, keeps your data"
     hint "  k3d cluster delete ${CLUSTER_NAME:-tracebloc}   # and re-run"
     hint "  (Until then the install looks healthy, but limit-bearing workloads run unconstrained.)"
   fi
