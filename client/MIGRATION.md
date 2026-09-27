@@ -2,6 +2,73 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading from 1.9.156 — prod training pods run a pinned engine image
+
+**What changed.** `images.training.digests` ships **populated**: one digest per
+training image (every task, `cpu` and `gpu`), resolved on `ghcr.io`, with
+`images.training.digestRegistry: ghcr.io` and the engine's own capabilities beside
+it. On a **prod** edge that pulls from `ghcr.io`, the jobs-manager now spawns every
+training pod as
+
+    ghcr.io/tracebloc/client-<task>-<arch>@sha256:<digest>    imagePullPolicy: IfNotPresent
+
+instead of the floating `:prod` tag with `Always`. Every cycle of an experiment
+runs the same engine bytes, and a node that already holds the image does not pull
+it again. New engine releases reach prod edges as chart releases that advance the
+map.
+
+**Where nothing changes** (the training pods float on `:<CLIENT_ENV>` exactly as
+before, and the jobs-manager pod spec is unchanged):
+
+- dev and staging edges — `images.training.pinned: ""` pins prod only;
+- an edge that pulls from a mirror (`global.imageRegistry`) or from Docker Hub
+  (`images.traceblocRegistry=docker.io`), unless it declared
+  `images.training.digestRegistry` itself (1.9.155);
+- an edge with `images.training.pinned=false`.
+
+**What you need to do: nothing.** The upgrade rolls the jobs-manager once on prod
+edges (two new environment variables). The first experiment of each task after
+it pulls its pinned image once.
+
+**Check an edge:**
+
+```bash
+# what the jobs-manager will spawn from
+kubectl get deploy -n <namespace> <release>-jobs-manager -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+  | grep -E '^(JOB_IMAGE_HOST|CLIENT_ENV|TRAINING_IMAGE_PINNED|TRAINING_ENGINE_CAPABILITIES)='
+# what a running training pod was spawned from
+kubectl get pods -n <namespace> -l tracebloc.io/workload=training \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\t"}{.spec.containers[0].imagePullPolicy}{"\n"}{end}'
+```
+
+**Break-glass: float one edge again.** `pinned=false` returns the edge to the
+floating tag in one upgrade. It is user-supplied, so it survives the hourly
+auto-upgrade until you clear it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.training.pinned=false
+# later, back to the default (auto: pin on prod)
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.training.pinned=""
+```
+
+Use `--reset-then-reuse-values`, never `--reuse-values`: `--reuse-values` replays
+the previous release's values in place of the new chart's defaults, so a chart
+that ships a new map would not reach the edge.
+
+**Roll one edge back to an older chart.** Hold the edge on the chart version you
+want and stop the hourly auto-upgrade from moving it forward again:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> --version <older version> \
+  --reset-then-reuse-values --set autoUpgrade.enabled=false
+```
+
+Not `helm rollback`: it restores the previous revision, and the next auto-upgrade
+tick upgrades the edge straight back. Set `autoUpgrade.enabled=true` again once a
+fixed chart is published.
+
 ## Upgrading to 1.9.155 — the training-image digest map is honoured only on the registry it was resolved on
 
 **What changed.** `images.training` gains **`digestRegistry`**: the bare host the

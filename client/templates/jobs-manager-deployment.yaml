@@ -985,8 +985,17 @@ spec:
              the Job at another release, Secret, image or ServiceAccount -- and
              with auto-upgrade off, `env.MYSQL_MIGRATION_SERVICE_ACCOUNT` would
              put back the very var that block withholds so a trigger is
-             `refused`. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (not (has $key $proxyKeys)) $value }}
+             `refused`.
+
+             RESTRICTED_DNS_NAMESERVER / RESTRICTED_DNS_CLUSTER_DOMAIN are excluded
+             on the same grounds (client-dev#1282): they are rendered above from
+             `restrictedDns` alone. A passthrough copy with the feature OFF put
+             jobs-manager on `dnsPolicy: None` for training and ingestion pods with
+             no resolver deployed, so they lost DNS; with it ON it replaced the
+             restricted resolver with whatever the value named -- the cluster DNS
+             included, which is the exfiltration path restrictedDns closes. The
+             supported knobs are `restrictedDns.clusterIP` / `.clusterDomain`. */}}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
@@ -1092,7 +1101,7 @@ spec:
         - name: SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}

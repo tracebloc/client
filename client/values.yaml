@@ -1330,18 +1330,67 @@ images:
   # therefore REFUSES to render `capabilities` with an empty `digests` (see the
   # template), because there is nothing it could have been derived from.
   #
-  # Populating the map is the release train's promotion step, not a hand edit
-  # (the resolver writes `digests`, `capabilities` and `digestRegistry` together):
-  # it moves prod edges from "whatever :prod points at right now" to a fixed
-  # engine, and the map must then be advanced on every engine promotion or prod
-  # freezes on today's bytes. Until that step exists the map stays EMPTY here,
-  # every edge floats exactly as today, and this block is documentation plus a
-  # tested render path.
+  # THE MAP BELOW IS RESOLVER OUTPUT, never a hand edit: scripts/resolve-
+  # training-digests.sh --write wrote `digests`, `capabilities` and
+  # `digestRegistry` together, from ghcr.io's `:prod` floats. It moves prod edges
+  # from "whatever :prod points at right now" to a fixed engine, so it must be
+  # advanced on every engine prod promotion or prod freezes on these bytes --
+  # that is the release train's promotion step, which re-runs the same resolver.
+  # dev and staging edges (auto) render none of it and keep floating; so do
+  # pinned=false, a mirror and the docker.io rollback (see digestRegistry above).
   training:
     pinned: ""
-    digestRegistry: ""
-    digests: {}
-    capabilities: ""
+    digestRegistry: "ghcr.io"
+    digests:
+      causal_language_modeling:
+        cpu: "sha256:0820f1be1d80078b3119434bb21ec2ac18ed41fc238a409eb2490925ef2705c0"
+        gpu: "sha256:1788bc367bc4b27ed7d7afdd6dc7533cf4de3675be420ccee4a1c9d89dc6d116"
+      embeddings:
+        cpu: "sha256:2cf54313d2728097336a16b9b0479792fd0394bebed35a39e100e01a7953e8a5"
+        gpu: "sha256:42032c6a79c7130517a2ec6248c5fd2b7648d2db3ffa5d19e388263de1f637d8"
+      image_classification:
+        cpu: "sha256:5f2b6e8b5d33e22c035d486bee5a89d6cf9f3958bb02bb7ee653f84b4692e666"
+        gpu: "sha256:6ebf6ff0e19b67e878d8b60944180134fa3b4a1ac2ef8af1aec104fd05e8a42f"
+      keypoint_detection:
+        cpu: "sha256:2676aaa72649f79bdf4f8e9ec1b2bcc91439e8b23c36b7d7a86d95c1db007217"
+        gpu: "sha256:35e818fb1809176b80f01f0ee6be639580c3da700db412ddf75c326085d1d1fd"
+      masked_language_modeling:
+        cpu: "sha256:207207a3a4a3ce0863e78ca8b792fef5cc5dbe0c3c69a6efe174f51acdd59e57"
+        gpu: "sha256:0dedd38fb272715544ea8d8b25683682910b3903ee0d25f80f9772464ba4e29f"
+      object_detection:
+        cpu: "sha256:40d8bbf27c3172f5b6384eadb08200c48947968de790c3f27afc0568294f092a"
+        gpu: "sha256:5b001b637b9ea15042f933677ef6918d8f2663f607f327aa9237523204d84a65"
+      semantic_segmentation:
+        cpu: "sha256:5ea15bb25ec0f30d6951ec7793d631d2078e1d66dad8b0a6e4c27ccbe4187939"
+        gpu: "sha256:c6ae93c4d465723ec59edca0fb1ce065882300aba9ed62023ed6a0ea11b650b5"
+      sentence_pair_classification:
+        cpu: "sha256:4ae4a11f346ee95a2fb9f04b2b2a28ff4b4683c288f0f4da7ee5b5815a56cf47"
+        gpu: "sha256:624cf15f90ef8cee648b58eac8dbcba210919508619aa5e478c693578102aee7"
+      seq2seq:
+        cpu: "sha256:071e402b5869993e2af15bcfa049167d10ba442c42a79370eb5f7910604a018f"
+        gpu: "sha256:6fc1c908afa2a74c62ff5e09fdd627488e88c448d6f9100d062c0364e8b3c22c"
+      tabular_classification:
+        cpu: "sha256:debb3032f8bcbbc1cf3162fff6ec46567ee523dde921701b0cc6a21d9da4f18f"
+        gpu: "sha256:29cc78fb2a9a719960d5c19b3746dd6dd3a81255a7d4c3b5b9ce3f887f2200a6"
+      tabular_regression:
+        cpu: "sha256:9caf51f27d60814974a99d3fdbc53a0c6a79058bc4cf131c3db5f8c02fa659ad"
+        gpu: "sha256:13a41a02aba0e059481cf65d594a48773a7edd4e334f4fbfd03bab11588fa0a1"
+      text_classification:
+        cpu: "sha256:e238bf9e718e12e11a61a2f095fdfb6a050a40e1df97c694c615c1bd192ee42e"
+        gpu: "sha256:31c419e923517e6e17adc8470d44de620076a260459ae46368d174466d8a24d9"
+      time_series_classification:
+        cpu: "sha256:b278bcd725e0ee6322f0c975ef3f50bd3c94b1fec1862f32705963c7ce8275bb"
+        gpu: "sha256:effa82ec0811112e156ddb0860d9f3033f93017ec8c9e45b0af7d5b4262f3e1b"
+      time_series_forecasting:
+        cpu: "sha256:f37e5418f937ab118e52c4358608cdeb398b3cdd4ba2d35f89f52ea32134a4d8"
+        gpu: "sha256:e09b13020a046f53f680fe219b6188db9684abac346f8086791303f6929a8157"
+      time_to_event_prediction:
+        cpu: "sha256:2d606dedd88bbedb541825a8a45fabde40d275b6f17bdce7baaa19562fb372d6"
+        gpu: "sha256:cde31651022d9dab246d685ee703dde1a1ace7fc61970eec10004728241e9d1f"
+      token_classification:
+        cpu: "sha256:8c032826fe3e07a6503c5cf5685f71a4acbcbbd6bbe4bbbeb8409b43911c8973"
+        gpu: "sha256:2c25b3068fcf959fa8d0d7db1eb31ffb16cc3dd76c8beb13fbe21ec693ee0d4e"
+    capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
