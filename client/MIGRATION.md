@@ -2,6 +2,42 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.158 — MySQL requests 1Gi, and training runs shrink to fit beside it
+
+**What changed.** MySQL's memory request and limit rise from `704Mi` to `1Gi`.
+MySQL 8.4 at production data sizes peaks above 704Mi, and at a 704Mi limit it is
+OOM-killed. The platform's own footprint on the node, the part the scheduler
+reserves before any training run, grows by 320 MiB: from 1792 MiB to 2112 MiB
+(envelope contract v5).
+
+**Who is affected.** An edge keeps the training envelope (`RESOURCE_REQUESTS` /
+`RESOURCE_LIMITS`) written when it was set up, by the installer or by
+`tracebloc resources set`. The upgrade does not recalculate it. An envelope sized
+to the old maximum, for example `cpu=7,memory=30Gi` on an 8-core / 32 GiB node,
+no longer fits beside the larger platform.
+
+**What happens, with nothing to do.** When a run's envelope no longer fits beside
+the platform, the jobs-manager shrinks it to the largest one that does and logs a
+WARNING naming both numbers. On that node, for example, `memory=30Gi` becomes a
+little under 30Gi, whatever the node actually leaves. It no longer refuses the
+run.
+- Only CPU and memory are lowered, CPU to whole cores and memory to whole MiB.
+- Disk and GPU counts are never lowered.
+- A run is still refused if the node cannot hold the minimum envelope (1 CPU /
+  2 GiB) beside the platform.
+
+This needs a jobs-manager build that carries the shrink. It reaches edges through
+image-refresh, like any jobs-manager update.
+
+**One transient case.** If the upgrade lands while a training run sized to the old
+maximum is running, the new MySQL pod needs 1Gi and waits until that run
+finishes. The database is unavailable for that time. Runs after it are shrunk,
+so there is room from then on.
+
+**To pin your own numbers instead**, run `tracebloc resources set max` after
+upgrading (or `--cores` / `--memory`). It re-derives the envelope from the node
+and the new footprint, and the shrink then has nothing to do.
+
 ## Upgrading from 1.9.156 — prod training pods run a pinned engine image
 
 **What changed.** `images.training.digests` ships **populated**: one digest per

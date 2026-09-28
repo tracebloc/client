@@ -837,14 +837,13 @@ restrictedDns:
 # `app.kubernetes.io/instance`, Helm's `meta.helm.sh/release-name` bookkeeping,
 # and the RELEASE_NAME env auto-upgrade rolls back with (backend#2620).
 #
-# THE INSTALLER DOES NOT YET UNDERSTAND IT — backend#2888. `helm` renders the
-# overridden names correctly, but the shell and PowerShell installers still derive
-# the client's workload names as `<namespace>-jobs-manager` / `-requests-proxy`
-# (`scripts/lib/common.sh` `_client_workload_deployments`, `scripts/install-k8s.ps1`
-# `Get-ClientDeploymentNames`). So on an overridden release the #420 fast-path
-# health check reads UNHEALTHY and a re-run reinstalls over a working client
-# instead of no-opping. Set this via `helm upgrade` directly until #2888 lands,
-# or accept that the installer's idempotence check is wrong for this release.
+# THE INSTALLERS FOLLOW IT. The shell and PowerShell installers do not rebuild
+# the client's workload names from the namespace: they list the release's
+# Deployments by `app.kubernetes.io/instance` and tell them apart by each
+# Deployment's selector (`scripts/lib/common.sh` `_client_workloads`,
+# `scripts/install-k8s.ps1` `Get-ClientWorkloads`). So the readiness wait, the
+# re-run health check and the support bundle read the overridden names, and a
+# re-run over a healthy overridden release no-ops as it does for any other.
 #
 # IT DOES NOT MOVE DATA. Release-scoped on-disk PATHS -- the dataset directory,
 # the hostPath PV's `path`, the Collector's queue -- keep the RELEASE name,
@@ -1055,6 +1054,15 @@ telemetryCollector:
     # cost -- the worst possible pairing.
     #
     # Cheap: both are hourly CronJobs that log a few lines and exit.
+    #
+    # READ FROM THE BEGINNING. Each tick is a new pod with a new log file, and one
+    # that runs and exits while the Collector restarts would be skipped whole
+    # under the `start_at: end` the long-lived containers use. So these two are
+    # read by a second receiver at `start_at: beginning`; offsets are persisted,
+    # so a file already read is resumed, not replayed. A NEW CronJob or Job
+    # container added here belongs in that receiver too: see `$jobContainers` in
+    # templates/telemetry-collector-configmap.yaml (the chart's own tests fail
+    # until it is there).
     - helm
     - refresh
 
@@ -1787,6 +1795,15 @@ images:
 # a mass restart does not throttle their startup. Same requests.memory==limits
 # philosophy mysql already uses (mysql likewise omits its cpu limit).
 resources:
+  # MYSQL BACK TO 1Gi (2026-09-26). MySQL 8.4 at production data scale (~1.3 GB,
+  # 194 tables, 2.7M rows) was measured peaking at 740 MiB (cgroup memory.peak),
+  # and an 8.4 server was OOM-killed at 704Mi (exit 137) on a 20 MB LONGBLOB
+  # write -- the 704Mi below was sized from 5.7 (468 p95). requests==limits
+  # kept; the render now sums to 2112 MiB / 650 m, and envelope contract v5
+  # carries it. An existing install keeps its training envelope across the
+  # upgrade: jobs-manager shrinks a run that no longer fits beside the larger
+  # platform instead of refusing it (see MIGRATION.md).
+  #
   # MEASURED TRIM (backend#2461, 2026-09-13) -- every request below is sized from the
   # load run, not from the idle snapshot the interim trim used. Four legs on the same
   # edge (11.23 h ambient, one training cycle, a five-deep queue, two full-node
@@ -1799,7 +1816,7 @@ resources:
   #   egress-proxy   160Mi -> 256Mi    176 on restart (1.10x OVER 160)   UP; limit 256 -> 384 so request < limit
   #   collector      128Mi -> 256Mi    158 on restart (1.23x OVER 128)   UP; first measurement of it (was "unmeasured")
   #   resource-mon   128Mi -> 160Mi    101 on restart (0.79x)            UP; hardcoded in its DaemonSet template
-  #   mysql          704Mi (kept)      468 p95 under load                requests==limits kept
+  #   mysql          704Mi (kept)      468 p95 under load                requests==limits kept  [1Gi since 2026-09-26, see above]
   #   requests-proxy 128Mi ->  96Mi     64 on restart                    limits unchanged
   #   pods-monitor   384Mi -> 128Mi     77 on restart                    LIMIT STAYS 512Mi
   #   jobs-manager   640Mi -> 192Mi    105 p95 / 103 restart (0.16x)     LIMIT STAYS 1Gi; QoS unchanged (see below)
@@ -1854,9 +1871,9 @@ resources:
   mysql:
     requests:
       cpu: "150m"
-      memory: "704Mi"
+      memory: "1Gi"
     limits:
-      memory: "704Mi"
+      memory: "1Gi"
       # No cpu limit — see comment above.
   jobsManager:
     requests:

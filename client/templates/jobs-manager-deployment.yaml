@@ -938,7 +938,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        {{- /* The MySQL 5.7 -> 8.4 migration Job (RFC-0150 D2, backend#4361).
+        {{- /* The MySQL 5.7 -> 8.4 migration Job.
              jobs-manager creates it when the backend pushes a migrate trigger,
              and builds it from these: the release it applies to and the Secret
              its passwords live in, this image (the Job runs its migration code),

@@ -235,14 +235,14 @@ _existing_training_resources() {
 #
 # Regenerate after an upstream contract change:
 #   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=4
+_TB_ENVELOPE_CONTRACT_VERSION=5
 _TB_ENVELOPE_OVERHEAD_CPU_MILLI=650
-_TB_ENVELOPE_OVERHEAD_MEM_BYTES=1879048192
+_TB_ENVELOPE_OVERHEAD_MEM_BYTES=2214592512
 _TB_ENVELOPE_FLOOR_CPU_MILLI=1000
 _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
 _TB_ENVELOPE_VM_RESERVE_MEM_BYTES=1073741824
 _TB_ENVELOPE_NODE_MIN_CPU_MILLI=1650
-_TB_ENVELOPE_NODE_MIN_MEM_BYTES=4026531840
+_TB_ENVELOPE_NODE_MIN_MEM_BYTES=4362076160
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
@@ -263,7 +263,7 @@ _TB_ENVELOPE_NODE_MIN_MEM_BYTES=4026531840
 # signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
 # `make drift` (the required Source-of-truth drift job): the value below must
 # equal a fresh render of the chart in the same tree, or CI reddens.
-_TB_CP_FOOTPRINT_MEM_BYTES=1879048192
+_TB_CP_FOOTPRINT_MEM_BYTES=2214592512
 _TB_CP_FOOTPRINT_CPU_MILLI=650
 # The TRANSIENT the chart's CronJobs may have resident on top of the steady state
 # (auto-upgrade + image-refresh, both Forbid, routinely co-resident), summed by
@@ -937,14 +937,39 @@ _measured_system_requests() {
 # `set -e` inline, but as the LAST statement of a function it makes the function
 # return 1 and the caller's errexit fires -- here, on a machine whose envelope
 # FITS, on the way to saying so. Same trap _anchor_largest_schedulable records.
-_print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only)
+_print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only); $2 = lines (default: _TB_FIT_LINES)
   local _l
   while IFS= read -r _l; do
     if [[ -n "$_l" ]]; then
       if [[ "$1" == "log" ]]; then log "envelope fit: $_l"; else "$1" "  $_l"; fi
     fi
-  done <<< "$_TB_FIT_LINES"
+  done <<< "${2-$_TB_FIT_LINES}"
   return 0
+}
+
+# The refusal, worded ONCE for both places it can fire (backend#3535): the fit
+# after values generation and the estimate before `k3d cluster create`. Same
+# arithmetic lines, same remedy, same TRACEBLOC_TRAINING_RESOURCES way out -- so
+# an operator refused early reads exactly what a late refusal would have said.
+# $1 = the headline, $2 = the lines to print, $3 = the closing error.
+_print_fit_refusal() {
+  warn "$1"
+  _print_fit_lines hint "$2"
+  hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+  error "$3"
+}
+
+# FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
+# installer, and nothing sensible can be verified against it. Shared by the fit
+# and the pre-create estimate, so both refuse on the same condition. Returns 0
+# (and sets the verdict) when it refused.
+_fit_footprint_refused() {
+  if [[ ! "${_TB_CP_FOOTPRINT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_FOOTPRINT_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
+    _TB_FIT_VERDICT="refused"
+    _TB_FIT_LINES="the chart footprint constants (_TB_CP_FOOTPRINT_*) are missing or not numeric -- this installer cannot verify any envelope"
+    return 0
+  fi
+  return 1
 }
 
 _fit_training_envelope() {
@@ -954,14 +979,8 @@ _fit_training_envelope() {
   local ours=0
   [[ "$prov" == "installer" ]] && ours=1
 
-  # FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
-  # installer, and nothing sensible can be verified against it.
-  if [[ ! "${_TB_CP_FOOTPRINT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_FOOTPRINT_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
-    _TB_FIT_VERDICT="refused"
-    _TB_FIT_LINES="the chart footprint constants (_TB_CP_FOOTPRINT_*) are missing or not numeric -- this installer cannot verify any envelope"
-    return 0
-  fi
-  local fp_mem_b="$_TB_CP_FOOTPRINT_MEM_BYTES" fp_cpu_m="$_TB_CP_FOOTPRINT_CPU_MILLI"
+  # FAIL CLOSED on the footprint (see _fit_footprint_refused).
+  if _fit_footprint_refused; then return 0; fi
 
   # The envelope's own two dimensions. Case-insensitive keys, trimmed pairs --
   # the same tolerance _training_limits extends to a human-typed override.
@@ -1002,11 +1021,32 @@ _fit_training_envelope() {
   else
     sys_how="NOT measured (${_TB_SYS_NOTE}); verified against the chart derivation only"
   fi
+  _fit_verdict "allocatable on the largest schedulable node" "$alloc_mem_b" "$alloc_cpu_m" \
+    "$sys_mem_b" "$sys_cpu_m" "$sys_how" "$size" "$env_mem_b" "$env_cpu_m" "$ours" "$prov"
+}
+
+# THE FIT RULE, over numbers only (backend#3535). Split out of
+# _fit_training_envelope so the estimate that runs BEFORE `k3d cluster create`
+# (_precreate_fit_estimate) calls the rule itself rather than a copy of it:
+# given what one node offers, what else it must hold, and the envelope, decide
+# fits | reduced | refused | pinned-over and write the arithmetic. Everything
+# about READING the machine stays in the callers.
+#
+# Args: ALLOC_LABEL ALLOC_MEM_B ALLOC_CPU_M SYS_MEM_B SYS_CPU_M SYS_HOW SIZE
+#       ENV_MEM_B ENV_CPU_M OURS PROV
+# Reads the embedded _TB_CP_FOOTPRINT_* (the caller has already refused a broken
+# embed) and the contract floor. Sets _TB_FIT_VERDICT / _TB_FIT_LINES and, on
+# `reduced`, _TB_TRAINING_SIZE (and _TB_TRAINING_UNDERSIZED) -- in the CALLER's
+# scope, so a caller that must not leave a size behind shadows them with locals.
+_fit_verdict() {
+  local alloc_label="$1" alloc_mem_b="$2" alloc_cpu_m="$3" sys_mem_b="$4" sys_cpu_m="$5" sys_how="$6"
+  local size="$7" env_mem_b="$8" env_cpu_m="$9" ours="${10}" prov="${11}"
+  local fp_mem_b="$_TB_CP_FOOTPRINT_MEM_BYTES" fp_cpu_m="$_TB_CP_FOOTPRINT_CPU_MILLI"
   local need_mem_b=$(( fp_mem_b + sys_mem_b ))
   local need_cpu_m=$(( fp_cpu_m + sys_cpu_m ))
   local mib=$(( 1024 * 1024 )) gib=$(( 1024 * 1024 * 1024 ))
 
-  _TB_FIT_LINES="allocatable on the largest schedulable node: $(( alloc_mem_b / mib )) MiB / ${alloc_cpu_m} m"$'\n'
+  _TB_FIT_LINES="${alloc_label}: $(( alloc_mem_b / mib )) MiB / ${alloc_cpu_m} m"$'\n'
   _TB_FIT_LINES+="control plane (chart) $(( fp_mem_b / mib )) MiB / ${fp_cpu_m} m + system pods $(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m = $(( need_mem_b / mib )) MiB / ${need_cpu_m} m (${sys_how})"$'\n'
   _TB_FIT_LINES+="envelope ${size} = $(( env_mem_b / mib )) MiB / ${env_cpu_m} m"$'\n'
 
@@ -1060,6 +1100,134 @@ _fit_training_envelope() {
   if (( new_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || new_gib * gib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
     _TB_TRAINING_UNDERSIZED=1
   fi
+  return 0
+}
+
+# ── the fit, estimated BEFORE the cluster exists (backend#3535) ──────────────
+#
+# The fit above runs when the values are generated, which is AFTER `k3d cluster
+# create`. A host that cannot hold even a 1-core / 1-GiB run beside the platform
+# got the right verdict there -- and was left with an empty k3d cluster to delete
+# by hand. Every fact the refusal rests on is already known before anything is
+# created, so this asks the same question first:
+#
+#   * what one node will offer: the container runtime's memory and CPU (on
+#     Linux the host's; on macOS/Windows the Docker VM's -- every k3d node
+#     reports the whole of it), minus the node reservation this platform's
+#     kubelet is about to be given (cluster.sh's generated TB_KUBELET_* block),
+#     subtracted the way the kubelet subtracts it: capacity - kubeReserved -
+#     systemReserved - evictionHard. An UNMEASURED platform gets no
+#     reservation, here as on the node, and the arithmetic says so;
+#   * what the node must hold: the embedded chart footprint. The k3s addons do
+#     NOT exist yet and are not counted, so this can only be OPTIMISTIC: it
+#     never refuses a host the post-create fit would accept, and the fit after
+#     create stays the authority for everything else;
+#   * the envelope: the contract floor, the size the installer writes when a
+#     machine cannot be sized. Refusal does not depend on it -- the fit refuses
+#     only when what is left beside the platform is under one core or one GiB
+#     -- so the floor asks exactly that.
+#
+# The decision is _fit_verdict itself, the rule the post-create fit applies, so
+# the two cannot drift (rules 1 and 9); install-client-helm.bats drives both over
+# one canned-host table and asserts the estimate never refuses what the fit
+# accepts.
+#
+# NEVER REFUSES WHAT THE FIT WOULD NOT: a size from TRACEBLOC_TRAINING_RESOURCES
+# is a human's, which the fit warns about (pinned-over) and never refuses; a
+# caller's own TRACEBLOC_VALUES_FILE never meets the fit at all; an unreadable
+# runtime is "cannot tell", not "too small". All three are `skipped`.
+#
+# Args: VM_MEM_BYTES VM_CPU_MILLI. Sets _TB_PRECREATE_VERDICT
+# (refused | clear | skipped) and _TB_PRECREATE_LINES. Leaves _TB_FIT_* and
+# _TB_TRAINING_SIZE as it found them: the real fit must not inherit a verdict or
+# a reduced size from an estimate.
+_precreate_fit_estimate() {
+  _TB_PRECREATE_VERDICT=""
+  _TB_PRECREATE_LINES=""
+  local vm_mem_b="${1:-}" vm_cpu_m="${2:-}"
+  if [[ -n "${TRACEBLOC_TRAINING_RESOURCES:-}" ]]; then
+    _TB_PRECREATE_VERDICT="skipped"
+    _TB_PRECREATE_LINES="TRACEBLOC_TRAINING_RESOURCES is set: the size is a human's choice, which the fit warns about and never refuses"
+    return 0
+  fi
+  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
+    _TB_PRECREATE_VERDICT="skipped"
+    _TB_PRECREATE_LINES="TRACEBLOC_VALUES_FILE is set: this install writes no training envelope, so there is nothing to fit"
+    return 0
+  fi
+  if [[ ! "$vm_mem_b" =~ ^[0-9]+$ || ! "$vm_cpu_m" =~ ^[0-9]+$ ]] || (( vm_mem_b == 0 || vm_cpu_m == 0 )); then
+    _TB_PRECREATE_VERDICT="skipped"
+    _TB_PRECREATE_LINES="the container runtime's memory and CPU could not be read, so nothing is refused here; the fit after the cluster is created decides"
+    return 0
+  fi
+
+  # Shadowed: the rule writes these in its caller's scope.
+  local _TB_FIT_VERDICT="" _TB_FIT_LINES="" _TB_TRAINING_SIZE="$_TRAINING_DEFAULT" _TB_TRAINING_UNDERSIZED=0
+  if _fit_footprint_refused; then
+    _TB_PRECREATE_VERDICT="refused"
+    _TB_PRECREATE_LINES="$_TB_FIT_LINES"
+    return 0
+  fi
+
+  local mib=$(( 1024 * 1024 ))
+  local platform="unknown" res_mem_b=0 res_cpu_m=0 res_how kc="" km="" ks=""
+  if declare -F _kubelet_reservation_platform >/dev/null 2>&1; then
+    platform="$(_kubelet_reservation_platform)"
+  fi
+  if declare -F _kubelet_reservation_measured >/dev/null 2>&1 && _kubelet_reservation_measured "$platform"; then
+    if ! read -r kc km ks < <(_kubelet_reservation_values "$platform" 2>/dev/null) || [[ -z "$ks" ]]; then
+      _TB_PRECREATE_VERDICT="skipped"
+      _TB_PRECREATE_LINES="the ${platform} node reservation cannot be read (a broken generated block, which the create path refuses on its own)"
+      return 0
+    fi
+    res_cpu_m="$kc"
+    res_mem_b=$(( (km + ks + TB_KUBELET_EVICTION_MEM_MIB) * mib ))
+    res_how="the ${platform} node reservation (kubeReserved ${km} MiB / ${kc} m, systemReserved ${ks} MiB, eviction ${TB_KUBELET_EVICTION_MEM_MIB} MiB)"
+  else
+    res_how="no node reservation (none is measured for platform '${platform}', so the node will report allocatable == capacity)"
+  fi
+  local alloc_mem_b=$(( vm_mem_b - res_mem_b )) alloc_cpu_m=$(( vm_cpu_m - res_cpu_m ))
+  if (( alloc_mem_b < 0 )); then alloc_mem_b=0; fi
+  if (( alloc_cpu_m < 0 )); then alloc_cpu_m=0; fi
+
+  local env_cpu_m env_mem_b
+  env_cpu_m="$(_cpu_to_milli "$(_envelope_dimension "$_TRAINING_DEFAULT" cpu)")"
+  env_mem_b="$(_mem_to_bytes "$(_envelope_dimension "$_TRAINING_DEFAULT" memory)")"
+  _fit_verdict \
+    "estimated allocatable per node, before the cluster exists (runtime $(( vm_mem_b / mib )) MiB / ${vm_cpu_m} m, minus ${res_how})" \
+    "$alloc_mem_b" "$alloc_cpu_m" 0 0 \
+    "NOT counted: the k3s addons do not exist until the cluster does, so this estimate can only be optimistic" \
+    "$_TRAINING_DEFAULT" "$env_mem_b" "$env_cpu_m" 1 installer
+  _TB_PRECREATE_LINES="$_TB_FIT_LINES"
+  if [[ "$_TB_FIT_VERDICT" == "refused" ]]; then
+    _TB_PRECREATE_VERDICT="refused"
+  else
+    _TB_PRECREATE_VERDICT="clear"
+  fi
+  return 0
+}
+
+# The gate create_cluster runs immediately before `k3d cluster create`
+# (cluster.sh _create_new_cluster). Reads the runtime through preflight.sh's
+# bounded docker-info readers -- the same ones _pf_recheck_runtime_mem uses a
+# moment earlier -- and refuses with the fit's own message shape.
+_precreate_fit_gate() {
+  local kb="" ncpu=""
+  if declare -F _pf_runtime_mem_kb >/dev/null 2>&1; then kb="$(_pf_runtime_mem_kb)"; fi
+  if declare -F _pf_runtime_ncpu >/dev/null 2>&1; then ncpu="$(_pf_runtime_ncpu)"; fi
+  [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+  [[ "$ncpu" =~ ^[0-9]+$ ]] || ncpu=0
+  _precreate_fit_estimate "$(( kb * 1024 ))" "$(( ncpu * 1000 ))"
+  case "$_TB_PRECREATE_VERDICT" in
+    refused)
+      _print_fit_refusal \
+        "This machine cannot schedule a training run beside the platform, so the cluster is not created:" \
+        "$_TB_PRECREATE_LINES" \
+        "Refusing before creating the cluster, so there is no cluster to delete."
+      ;;
+    clear)   _print_fit_lines log "$_TB_PRECREATE_LINES" ;;
+    *)       log "pre-create fit estimate skipped: ${_TB_PRECREATE_LINES}" ;;
+  esac
   return 0
 }
 
@@ -1125,18 +1293,45 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
+# _client_id_from_secret_rows ROWS — the base64 CLIENT_ID out of `NAME CLIENT_ID`
+# rows (the custom-columns read below), or nothing. PURE, so the guard and the
+# tests can drive it without a cluster. Exactly ONE row may carry a CLIENT_ID:
+# none is a release whose Secret is not there, and two cannot be told apart, so
+# either is "couldn't read it" -- never a guess. A Secret without the key (the
+# registry pull Secret) prints `<none>` and is not a candidate.
+_client_id_from_secret_rows() {
+  local rows="$1" name b64 hit="" n=0
+  while read -r name b64 _; do
+    [[ -n "$name" && -n "$b64" && "$b64" != "<none>" ]] || continue
+    hit="$b64"; n=$((n + 1))
+  done <<<"$rows"
+  (( n == 1 )) || return 0
+  printf '%s' "$hit"
+  return 0
+}
+
 # _client_id_from_secret — CLIENT_ID out of release $1's chart-managed Secret in
 # namespace $2, or empty. THE SECOND PLACE THE ID CAN LIVE: backend#2571 lets
 # clientId resolve from the Secret instead of release values, and the chart now
 # recommends dropping it from values once it is there — so "no clientId in
 # values" stopped meaning "not a client" and detect_installed_client has to look
 # here before it may conclude anything.
+# THE SECRET IS READ FROM THE RELEASE, NEVER NAMED (client-dev#1305). The chart
+# names it `tracebloc.secretName` -- `<fullnameOverride or release>-secrets` --
+# and rebuilding that here restated the chart's rule from `helm get values`, so
+# the lookup was right only while the two copies agreed and nothing compared
+# them. The Secrets are listed by `app.kubernetes.io/instance=<release>` instead
+# (the label the chart's `tracebloc.labels` puts on it, which by the chart's own
+# table never follows the override), and the one carrying CLIENT_ID is the one.
+# Same shape as _client_workloads (backend#2888); custom-columns rather than a
+# jsonpath for the same PowerShell-quoting reason. PowerShell peer:
+# Get-ClientIdFromSecret. Guard: scripts/tests/client-secret-read-not-built.sh.
 # CONTRACT: echoes the id or nothing, and ALWAYS returns 0. Callers assign it
 # inside `$( )`; a non-zero rc there would abort the installer under `set -e`
 # (the same trap _extract_yaml_value documents above), and "couldn't read it" is
 # a state the caller handles, not an error it should die on.
 _client_id_from_secret() {
-  local rel="$1" ns="$2" b64 out=""
+  local rel="$1" ns="$2" rows b64 out=""
   # kubectl is not guaranteed this early (the pre-provision pre-flight runs
   # before the cluster exists), and its absence is "couldn't read", not "absent".
   has kubectl || return 0
@@ -1150,7 +1345,10 @@ _client_id_from_secret() {
   # Secret: "couldn't read it" is a state the caller already knows how to treat,
   # and the caller's fail-closed path turns it into an unidentifiable client
   # rather than an absent one.
-  b64="$(kubectl -n "$ns" get secret "${rel}-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>/dev/null)" || return 0
+  rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
+            -o 'custom-columns=NAME:.metadata.name,CLIENT_ID:.data.CLIENT_ID' \
+            --no-headers --request-timeout=5s 2>/dev/null)" || return 0
+  b64="$(_client_id_from_secret_rows "$rows")"
   [[ -n "$b64" ]] || return 0
   # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling. Same
   # both-spellings idiom as scripts/tests/gpu-embed-drift.bats.
@@ -1179,7 +1377,7 @@ detect_installed_client() {
   INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
   has helm || return 0
-  local _gvf _rel _ns _id _fno _list _unreadable=0
+  local _gvf _rel _ns _id _list _unreadable=0
   # A mktemp failure is an environment error, NOT proof of "no client here" — flag
   # UNKNOWN so the guards fail closed rather than skip. Fall back to a path in a
   # dir we own (never a predictable world-writable /tmp path under sudo) before
@@ -1213,18 +1411,11 @@ detect_installed_client() {
       # Fall back to where the id now lives.
       #
       # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on
-      # client#911). `tracebloc.secretName` follows `fullnameOverride`, so on a
-      # release installed with one, `<release>-secrets` does not exist and this
-      # fallback reads nothing -- a live client with its id only in the Secret
-      # then reads as UNIDENTIFIABLE, and `diagnose`/`upgrade` treat it as having
-      # no id.
-      #
-      # The override is in the values file already open above, so the effective
-      # prefix costs one more read of the same file rather than a second API
-      # call. Empty or absent -> the release name, which is exactly the chart's
-      # own `default .Release.Name .Values.fullnameOverride`.
-      _fno="$(_extract_yaml_value "$_gvf" fullnameOverride)"
-      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "${_fno:-$_rel}" "$_ns")"
+      # client#911): `tracebloc.secretName` follows `fullnameOverride`. So the
+      # Secret is found by the RELEASE, whatever the chart named it
+      # (client-dev#1305) -- rebuilding the name from the override in these
+      # values restated the chart's rule, and was right only while it matched.
+      [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
       [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
       # A client-chart release with no id in EITHER place is a client we cannot
       # NAME, not an absent one. Record it and keep scanning; if nothing else
@@ -2827,10 +3018,10 @@ install_client_helm() {
   _fit_training_envelope
   case "$_TB_FIT_VERDICT" in
     refused)
-      warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
-      _print_fit_lines hint
-      hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-      error "Refusing to write a training envelope that cannot be scheduled on this machine."
+      _print_fit_refusal \
+        "This machine cannot schedule a training run beside the platform, so no training envelope is written:" \
+        "$_TB_FIT_LINES" \
+        "Refusing to write a training envelope that cannot be scheduled on this machine."
       ;;
     reduced)
       info "Training envelope reduced to fit beside the platform on this machine:"

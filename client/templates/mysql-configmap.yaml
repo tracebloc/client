@@ -18,7 +18,7 @@ data:
   innodb_redo_log_capacity, the TOTAL redo size — so 5.7's 64M x the default
   innodb_log_files_in_group of 2 becomes 128M, the same redo budget. On 8.4
   the old pair is DEPRECATED, not removed: measured on mysql:8.4.11
-  (RFC-0150), `innodb_log_file_size = 64M` starts the server with
+  `innodb_log_file_size = 64M` starts the server with
   `[Warning] [MY-013907] ... used to compute innodb_redo_log_capacity=134217728`.
   8.4 still renders the replacement, because on the deprecated spelling
   @@GLOBAL.innodb_redo_log_capacity reads the 100M default while InnoDB runs

@@ -707,25 +707,141 @@ _chart_version() {
   helm list -n "$ns" 2>/dev/null | grep -oE 'client-[0-9][^[:space:]]*' | head -1 | sed 's/^client-//' || true
 }
 
-# The client's core workload Deployments in namespace $1 — the set whose
-# readiness DEFINES "the client is up". One source for the two BASH consumers:
-# wait_for_client_ready (summary.sh, the post-install readiness gate) and the
-# installer's stop-and-check gate (assess.sh). It is NOT one source across tiers —
-# `scripts/install-k8s.ps1` carries its own `Get-ClientDeploymentNames`, and
-# nothing checks the two agree.
+# THE CLIENT'S CORE WORKLOADS, READ FROM THE CLUSTER, NEVER BUILT FROM A NAME
+# (backend#2888). These three Deployments are the set whose readiness DEFINES
+# "the client is up": the post-install readiness gate (wait_for_client_ready,
+# summary.sh), the stop-and-check gate (assess.sh) and --diagnose all read them
+# through _client_workloads below.
 #
-# `mysql-client` is fixed. The other two are prefixed by the release's RESOLVED
-# NAME, which equals the namespace only while `fullnameOverride` is unset — the
-# earlier "release-namespace-prefixed" here stated the default as the rule, and
-# that is what made these sites easy to miss when the override landed
-# (@saadqbal on client#911). Under an override the chart renders
-# `<fullnameOverride>-jobs-manager`, this function still looks for
-# `<namespace>-jobs-manager`, and the readiness gate therefore fails on a healthy
-# client. Tracked as backend#2888; deliberately NOT fixed here, because the fix
-# has to land in both tiers at once or they drift further apart.
-_client_workload_deployments() {
-  local ns="${1:-${TB_NAMESPACE:-default}}"
-  printf '%s\n' "mysql-client" "${ns}-jobs-manager" "${ns}-requests-proxy"
+# The installer used to REBUILD two of the names as `<namespace>-jobs-manager`
+# and `<namespace>-requests-proxy`. The chart prefixes them with its resolved
+# name, which equals the namespace only while `fullnameOverride` is unset, so on
+# an overridden release every one of those sites looked for a Deployment that
+# does not exist: the readiness gate read a healthy client as not Ready and
+# --diagnose shipped empty jobs-manager logs. The names are now LISTED from the
+# release instead:
+#
+#   * `app.kubernetes.io/instance=<release>` selects the release's Deployments.
+#     It is the one label the chart keeps equal to the release name under an
+#     override (scripts/tests/fullname-override-completeness.sh asserts it).
+#   * each ROLE is then told apart by the Deployment's own
+#     `spec.selector.matchLabels.app`, the right-hand side below. A Deployment's
+#     selector is immutable, so the chart cannot rename these without replacing
+#     the Deployment, and they never carry the release name.
+#
+# ONE TABLE PER LANGUAGE, HELD TOGETHER BY A GUARD: $script:ClientWorkloadRoles
+# in scripts/install-k8s.ps1 is the PowerShell twin, and
+# scripts/tests/client-workloads-read-not-built.sh holds the two identical AND
+# holds each right-hand side to exactly one Deployment in the rendered chart,
+# with and without an override. Keep this on ONE line of role=app words.
+_TB_CLIENT_WORKLOAD_ROLES="mysql-client=mysql-client jobs-manager=manager requests-proxy=requests-proxy"
+
+# _client_workloads_from_rows ROWS — the pure half: pick each role's Deployment
+# out of `APP NAME` rows (what the kubectl read below prints) and print
+# `ROLE NAME` lines in role order. Returns 1 and prints NOTHING unless every role
+# matches exactly one row: a missing role is a client that is not all there, and
+# two rows claiming one role is a namespace this cannot read unambiguously.
+# Either way the caller must not guess, so every consumer reads rc 1 as "not
+# Ready" / "not healthy" -- the fail-closed direction.
+_client_workloads_from_rows() {
+  local rows="$1" pair role app a name hit n out=""
+  for pair in $_TB_CLIENT_WORKLOAD_ROLES; do
+    role="${pair%%=*}"; app="${pair#*=}"; hit=""; n=0
+    while read -r a name _; do
+      [[ -n "$name" && "$a" == "$app" ]] || continue
+      hit="$name"; n=$((n + 1))
+    done <<<"$rows"
+    (( n == 1 )) || return 1
+    out+="${role} ${hit}"$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# _client_workloads NS [TIMEOUT] [RELEASE] — the client's core workload
+# Deployments in namespace NS, as `ROLE NAME` lines in role order (mysql-client,
+# jobs-manager, requests-proxy). RELEASE defaults to NS: the installer names the
+# release after the namespace (scripts/tests/release-name-equals-namespace.sh).
+# ONE bounded read (TIMEOUT, default 10s); a failed or unanswered read returns 1,
+# the same as a missing role. custom-columns rather than jsonpath so the same
+# argument vector works from PowerShell, where an embedded `"` in a native
+# argument is mangled on Windows PowerShell 5.1.
+_client_workloads() {
+  local ns="${1:-${TB_NAMESPACE:-default}}" timeout="${2:-10s}" rel="${3:-}" rows
+  [[ -n "$rel" ]] || rel="$ns"
+  rows="$(kubectl get deployment -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
+            -o 'custom-columns=APP:.spec.selector.matchLabels.app,NAME:.metadata.name' \
+            --no-headers --request-timeout="$timeout" 2>/dev/null)" || return 1
+  _client_workloads_from_rows "$rows"
+}
+
+# _client_workload_name NS ROLE [TIMEOUT] — one role's Deployment name, or rc 1.
+_client_workload_name() {
+  local rows role name
+  rows="$(_client_workloads "$1" "${3:-10s}")" || return 1
+  while read -r role name; do
+    [[ "$role" == "$2" ]] && { printf '%s' "$name"; return 0; }
+  done <<<"$rows"
+  return 1
+}
+
+# THE RESOURCE-MONITOR DAEMONSET, READ FROM THE CLUSTER, NEVER BUILT FROM A NAME
+# (client-dev#1306). --diagnose used to fetch
+# `kubectl logs -n <client ns> daemonset/tracebloc-resource-monitor`, which is
+# wrong on BOTH halves: the chart puts the DaemonSet in the node-agents namespace
+# (`nodeAgents.namespace.name`, default `tracebloc-node-agents`), never the
+# client's, and names it `<fullname>-resource-monitor`, which follows the release
+# and `fullnameOverride`. So every bundle shipped a NotFound error as the
+# resource-monitor log. It is now LISTED instead:
+#
+#   * `app.kubernetes.io/instance=<release>` across every namespace selects the
+#     release's DaemonSets, wherever `nodeAgents.namespace` put them.
+#   * the chart's `meta.helm.sh/release-namespace` annotation must name the
+#     client namespace: the node-agents namespace is deliberately shareable, and
+#     two releases of one name in two namespaces both match the label.
+#   * the one whose pod template runs the container below is the resource-monitor.
+#     The container name is fixed across releases by design (as
+#     scripts/tests/collector-class-a-agreement.sh also records), so it is the
+#     stable handle the object name is not.
+#
+# TWIN of $script:ResourceMonitorContainer in scripts/install-k8s.ps1;
+# scripts/tests/client-workloads-read-not-built.sh holds the two identical and
+# holds the helper below to the DaemonSet the chart renders, with and without an
+# override.
+_TB_RESOURCE_MONITOR_CONTAINER="tracebloc-resource-monitor"
+
+# _resource_monitor_from_rows ROWS NS — the pure half: out of
+# `RELEASE-NS NAMESPACE NAME CONTAINERS` rows (what the read below prints;
+# CONTAINERS comma-separated), print `NAMESPACE NAME` of the one DaemonSet whose
+# release namespace is NS and whose pod template runs the resource-monitor
+# container. Returns 1 and prints NOTHING unless exactly one row matches -- none
+# is a release without the resource-monitor (or a failed read), two cannot be
+# told apart, and neither is a name to guess.
+_resource_monitor_from_rows() {
+  local rows="$1" want="$2" relns ns name ctrs c hit="" n=0
+  local -a cs
+  while read -r relns ns name ctrs _; do
+    [[ -n "$ctrs" && "$relns" == "$want" ]] || continue
+    IFS=',' read -r -a cs <<<"$ctrs"
+    for c in "${cs[@]}"; do
+      [[ "$c" == "$_TB_RESOURCE_MONITOR_CONTAINER" ]] || continue
+      hit="$ns $name"; n=$((n + 1)); break
+    done
+  done <<<"$rows"
+  (( n == 1 )) || return 1
+  printf '%s\n' "$hit"
+}
+
+# _resource_monitor_daemonset NS [TIMEOUT] [RELEASE] — `NAMESPACE NAME` of the
+# resource-monitor DaemonSet of the client in namespace NS, or rc 1. RELEASE
+# defaults to NS, as in _client_workloads. ONE bounded read (TIMEOUT, default
+# 10s); custom-columns for the same PowerShell-quoting reason.
+_resource_monitor_daemonset() {
+  local ns="${1:-${TB_NAMESPACE:-default}}" timeout="${2:-10s}" rel="${3:-}" rows
+  [[ -n "$rel" ]] || rel="$ns"
+  rows="$(kubectl get daemonset -A -l "app.kubernetes.io/instance=${rel}" \
+            -o 'custom-columns=RELNS:.metadata.annotations.meta\.helm\.sh/release-namespace,NS:.metadata.namespace,NAME:.metadata.name,CONTAINERS:.spec.template.spec.containers[*].name' \
+            --no-headers --request-timeout="$timeout" 2>/dev/null)" || return 1
+  _resource_monitor_from_rows "$rows" "$ns"
 }
 
 # ── Spinner — hides noisy command output behind an animated status line ──────

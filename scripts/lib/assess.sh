@@ -143,24 +143,27 @@ _assess_cluster_servers_running() {
 # _assess_workload_ready NS — are ALL the client's core workloads Ready in
 # namespace NS? "Ready" MUST match the installer's OWN definition, so this
 # iterates the SAME deployment set as wait_for_client_ready (summary.sh) via the
-# shared _client_workload_deployments — mysql-client + jobs-manager +
-# requests-proxy. A machine with jobs-manager up but requests-proxy (training
-# egress) or mysql-client down is NOT healthy, and must reconcile rather than be
-# told "already set up". Read-only + bounded via kubectl --request-timeout, so a
-# stopped/unreachable API returns quickly instead of hanging. A Deployment is
-# Ready when it reports >=1 readyReplicas; ANY one missing / erroring / zero =>
-# not ready (return 1), which degrades toward the normal flow.
+# shared _client_workloads — mysql-client + jobs-manager + requests-proxy, READ
+# from the release rather than rebuilt from the namespace (backend#2888), so an
+# overridden release is judged on its real Deployments. A machine with
+# jobs-manager up but requests-proxy (training egress) or mysql-client down is
+# NOT healthy, and must reconcile rather than be told "already set up".
+# Read-only + bounded via kubectl --request-timeout, so a stopped/unreachable API
+# returns quickly instead of hanging. A Deployment is Ready when it reports >=1
+# readyReplicas; a role that cannot be resolved, or ANY one missing / erroring /
+# zero => not ready (return 1), which degrades toward the normal flow.
 _assess_workload_ready() {
-  local ns="$1" d ready
+  local ns="$1" rows role d ready
   [[ -n "$ns" ]] || return 1
   has kubectl || return 1
-  while IFS= read -r d; do
+  rows="$(_client_workloads "$ns" "$TB_ASSESS_KUBECTL_TIMEOUT")" || return 1
+  while read -r role d; do
     [[ -n "$d" ]] || continue
     ready="$(kubectl get deployment "$d" -n "$ns" \
                --request-timeout="$TB_ASSESS_KUBECTL_TIMEOUT" \
-               -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" || return 1
+               -o jsonpath='{.status.readyReplicas}' </dev/null 2>/dev/null)" || return 1
     [[ "$ready" =~ ^[0-9]+$ ]] && [[ "$ready" -ge 1 ]] || return 1
-  done < <(_client_workload_deployments "$ns")
+  done <<<"$rows"
   return 0
 }
 

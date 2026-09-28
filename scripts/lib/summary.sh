@@ -34,33 +34,39 @@ READY_TIMEOUT="${READY_TIMEOUT:-600}"
 
 wait_for_client_ready() {
   local ns="${TB_NAMESPACE:-default}"
-  # The workloads that must be Ready are shared with the installer's stop-and-check
-  # gate (assess.sh) via _client_workload_deployments, so those two cannot drift.
-  # NOT shared with the PowerShell installer, which holds its own copy — and
-  # neither copy resolves `fullnameOverride` (backend#2888), so an overridden
-  # release reads as not-Ready here while being perfectly healthy.
-  local deploys=() _d
-  while IFS= read -r _d; do [[ -n "$_d" ]] && deploys+=("$_d"); done < <(_client_workload_deployments "$ns")
+  # The workloads that must be Ready are READ from the release, not rebuilt from
+  # the namespace (backend#2888): _client_workloads (common.sh) is the one helper
+  # the stop-and-check gate (assess.sh) and --diagnose use too, and the
+  # PowerShell installer's Get-ClientWorkloads is its guarded twin. A read that
+  # cannot resolve all three is a client that is not all there, so it takes the
+  # not-Ready branch below rather than waiting on names it guessed.
+  local rows="" role d jm="" remaining all_ready=true
   local deadline=$(( $(date +%s) + READY_TIMEOUT ))
-  local all_ready=true d remaining
 
   echo ""
   info "Connecting to the tracebloc network — waiting for your services to come online…"
-  for d in "${deploys[@]}"; do
-    remaining=$(( deadline - $(date +%s) )); (( remaining < 10 )) && remaining=10
-    if kubectl rollout status "deployment/${d}" -n "$ns" --timeout="${remaining}s" \
-        >> "${LOG_FILE:-/dev/null}" 2>&1; then
-      success "${d#${ns}-} ready"
-    else
-      all_ready=false; break
-    fi
-  done
+  if rows="$(_client_workloads "$ns")"; then
+    while read -r role d; do
+      [[ "$role" == "jobs-manager" ]] && jm="$d"
+      remaining=$(( deadline - $(date +%s) )); (( remaining < 10 )) && remaining=10
+      # </dev/null: the loop reads its rows from stdin, and nothing in it may eat them.
+      if kubectl rollout status "deployment/${d}" -n "$ns" --timeout="${remaining}s" \
+          </dev/null >> "${LOG_FILE:-/dev/null}" 2>&1; then
+        success "${role} ready"
+      else
+        all_ready=false; break
+      fi
+    done <<<"$rows"
+  else
+    log "Could not list the client's workload Deployments in namespace ${ns} (release label app.kubernetes.io/instance=${ns}); treating the client as not Ready."
+    all_ready=false
+  fi
 
   _log_cluster_status
   if [[ "$all_ready" == true ]]; then
     CLIENT_STATE="connected"
   else
-    CLIENT_STATE="$(_diagnose_not_ready "$ns")"
+    CLIENT_STATE="$(_diagnose_not_ready "$ns" "$jm")"
   fi
   return 0
 }
@@ -72,10 +78,16 @@ wait_for_client_ready() {
 # match" -- silently downgrading a real bad_creds/image_pull/crash diagnosis
 # to "starting" and handing the user the wrong remedy (backend#1778).
 _diagnose_not_ready() {
-  local ns="$1" pods jm_logs
+  local ns="$1" jm="${2:-}" pods jm_logs=""
   # Wrong credentials: jobs-manager authenticates to the backend on startup and
-  # crash-loops when rejected — surfaced as an auth error in its logs.
-  jm_logs="$(kubectl logs -n "$ns" "deployment/${ns}-jobs-manager" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
+  # crash-loops when rejected — surfaced as an auth error in its logs. The
+  # Deployment's name is the one the readiness gate already READ (backend#2888),
+  # or read here when this is called without it; unresolvable means no logs to
+  # classify, which falls through to the pod-state checks below.
+  [[ -n "$jm" ]] || jm="$(_client_workload_name "$ns" jobs-manager 5s)" || jm=""
+  if [[ -n "$jm" ]]; then
+    jm_logs="$(kubectl logs -n "$ns" "deployment/${jm}" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
+  fi
   if grep -qiE 'authentication failed|unable to log in' <<<"$jm_logs"; then
     printf 'bad_creds'; return
   fi

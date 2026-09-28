@@ -317,13 +317,71 @@ function RefreshPath {
               [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
-# Thin, mockable wrappers around the persistent MACHINE-scope PATH in the
-# registry. Isolated as functions ONLY so the persist logic below (Add-DirToMachinePath)
-# is unit-testable off-Windows: the .NET static setter is a silent no-op on
-# non-Windows and the getter always returns $null there, so a Pester run on
-# Linux/macOS Mocks these two to simulate the registry instead of a real one.
-function Get-MachinePath { [System.Environment]::GetEnvironmentVariable("PATH","Machine") }
-function Set-MachinePath { param([string]$Value) [System.Environment]::SetEnvironmentVariable("PATH",$Value,"Machine") }
+# The persistent MACHINE-scope PATH, read and written through the registry key
+# itself, NOT through [Environment]::Get/SetEnvironmentVariable(..., "Machine")
+# (backend#2916). Windows ships the system Path under
+# HKLM\...\Session Manager\Environment as REG_EXPAND_SZ, so an entry like
+# %SystemRoot%\system32 expands each time it is used. The .NET pair broke that
+# twice in one append: the getter returns the value ALREADY EXPANDED and the
+# setter writes REG_SZ, so every %VAR% entry was baked into its expansion at
+# install time and the value's type flipped. Those entries then stopped
+# following the variable they named. Here the read keeps the %VAR% text
+# (DoNotExpandEnvironmentNames) and the write is REG_EXPAND_SZ.
+#
+# REG_EXPAND_SZ on every write, not "whatever kind was there": a value an older
+# installer already flipped to REG_SZ is put back to the type Windows ships, and
+# a string with no %VAR% in it expands to itself, so nothing else changes.
+#
+# Split into mockable functions so the logic is unit-testable off-Windows. The
+# Pester suite Mocks Open-MachineEnvironmentKey to hand these two a fake key
+# (Linux/macOS) or a scratch HKCU key (Windows), and Mocks Get-/Set-MachinePath
+# themselves to test Add-DirToMachinePath's append/dedup logic.
+$script:MachineEnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+function Open-MachineEnvironmentKey {
+  param([switch]$Writable)
+  [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($script:MachineEnvironmentKey, [bool]$Writable)
+}
+function Get-MachinePath {
+  $key = Open-MachineEnvironmentKey
+  if ($null -eq $key) { return $null }
+  try {
+    return $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  } finally { $key.Close() }
+}
+function Set-MachinePath {
+  param([string]$Value)
+  $key = Open-MachineEnvironmentKey -Writable
+  if ($null -eq $key) { throw "Could not open HKLM\$script:MachineEnvironmentKey for writing." }
+  try {
+    $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+  } finally { $key.Close() }
+  Send-EnvironmentChange
+}
+
+# Tell running programs, Explorer above all, that the persisted environment
+# changed, so a shell opened from them afterwards sees the new PATH without a
+# sign-out. [Environment]::SetEnvironmentVariable sent this as a side effect; a
+# direct registry write does not, so it is sent here: the same
+# WM_SETTINGCHANGE "Environment" broadcast, with SMTO_ABORTIFHUNG and a 1 s
+# per-window timeout (what .NET itself uses) so a hung window cannot stall the
+# install. Best-effort: the registry already holds the value, so a failure here
+# (Add-Type refused under Constrained Language mode, say) only delays when
+# Explorer notices, and it is logged rather than fatal.
+function Send-EnvironmentChange {
+  try {
+    if (-not ('TbInstaller.EnvironmentBroadcast' -as [type])) {
+      Add-Type -Namespace TbInstaller -Name EnvironmentBroadcast -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $result = [UIntPtr]::Zero
+    # HWND_BROADCAST = 0xffff, WM_SETTINGCHANGE = 0x1A, SMTO_ABORTIFHUNG = 0x2.
+    $null = [TbInstaller.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 1000, [ref]$result)
+  } catch {
+    Log "Could not broadcast the environment change (the Machine PATH is saved; programs already running see it after the next sign-in): $_"
+  }
+}
 
 # Is $Dir already an entry in a ';'-delimited PATH string? Splits on ';' and
 # compares each entry EXACTLY (case-insensitive, tolerant of a trailing separator)
@@ -1797,32 +1855,124 @@ function Get-ClusterRunState {
   return (Get-ClusterRunStateFromList -Json (Get-ClusterListJson) -Name $CLUSTER_NAME)
 }
 
-# The client's three workload deployments in a namespace. One source for the two
-# POWERSHELL consumers (the readiness gate and the #420 fast-path health check) --
-# NOT for the installer as a whole: `scripts/lib/common.sh` holds an independent
-# `_client_workload_deployments` with the same list, and nothing checks the two
-# agree. The previous "single source of truth" here named a guarantee that a
-# second implementation makes impossible (@saadqbal on client#911).
+# THE CLIENT'S CORE WORKLOADS, READ FROM THE CLUSTER, NEVER BUILT FROM A NAME
+# (backend#2888). These three Deployments are the set whose readiness DEFINES
+# "the client is up": the readiness gate, the #420 fast-path health check and
+# -Diagnose all read them through Get-ClientWorkloads below.
 #
-# Neither copy resolves `fullnameOverride`: both assume `<namespace>-` prefixes,
-# so an overridden release reads UNHEALTHY on the fast path and a re-run
-# reinstalls over a working client. Tracked as backend#2888.
-function Get-ClientDeploymentNames {
-  param([string]$Namespace)
-  return @("mysql-client", "$Namespace-jobs-manager", "$Namespace-requests-proxy")
+# This used to REBUILD two names as "$Namespace-jobs-manager" and
+# "$Namespace-requests-proxy". The chart prefixes them with its resolved name,
+# which equals the namespace only while `fullnameOverride` is unset, so an
+# overridden release read UNHEALTHY on the fast path and a re-run reinstalled
+# over a working client. The names are now LISTED from the release: the
+# `app.kubernetes.io/instance=<release>` label selects its Deployments (the one
+# label that keeps the release name under an override), and each ROLE is told
+# apart by the Deployment's own immutable `spec.selector.matchLabels.app`, the
+# right-hand side below.
+#
+# TWIN of _TB_CLIENT_WORKLOAD_ROLES in scripts/lib/common.sh.
+# scripts/tests/client-workloads-read-not-built.sh holds the two identical and
+# holds each right-hand side to exactly one Deployment in the rendered chart;
+# keep this on ONE line of single-quoted 'role' = 'app' pairs.
+$script:ClientWorkloadRoles = [ordered]@{ 'mysql-client' = 'mysql-client'; 'jobs-manager' = 'manager'; 'requests-proxy' = 'requests-proxy' }
+
+# The one read, as an argument vector, so the native call (Get-ClientWorkloads)
+# and the bounded -Diagnose capture ask the SAME question. custom-columns, not
+# jsonpath: a jsonpath template needs embedded double quotes, which Windows
+# PowerShell 5.1 mangles in a native argument.
+function Get-ClientWorkloadQuery {
+  param([string]$Namespace, [string]$Release = "", [int]$TimeoutSec = 10)
+  if (-not $Release) { $Release = $Namespace }
+  return @("get", "deployment", "-n", $Namespace, "-l", "app.kubernetes.io/instance=$Release",
+           "-o", "custom-columns=APP:.spec.selector.matchLabels.app,NAME:.metadata.name",
+           "--no-headers", "--request-timeout=${TimeoutSec}s")
+}
+
+# PURE: each role's Deployment out of `APP NAME` rows, as [Role, Name] objects in
+# role order -- or $null unless EVERY role matches exactly one row. A missing
+# role is a client that is not all there and two rows claiming one role cannot be
+# told apart, so callers read $null as "not healthy", never as a name to guess.
+function Select-ClientWorkloads {
+  param([string]$Rows)
+  $pairs = foreach ($line in ("$Rows" -split "`r?`n")) {
+    $f = @($line.Trim() -split '\s+')
+    if ($f.Count -ge 2 -and $f[1]) { [pscustomobject]@{ App = $f[0]; Name = $f[1] } }
+  }
+  $out = @()
+  foreach ($role in $script:ClientWorkloadRoles.Keys) {
+    $app = $script:ClientWorkloadRoles[$role]
+    $hits = @($pairs | Where-Object { $_.App -ceq $app })
+    if ($hits.Count -ne 1) { return $null }
+    $out += [pscustomobject]@{ Role = $role; Name = $hits[0].Name }
+  }
+  return $out
+}
+
+# The client's core workloads in $Namespace, read from release $Release (default:
+# the namespace -- the installer names the release after it). $null when the read
+# fails or does not resolve every role. Bounded by kubectl's --request-timeout.
+function Get-ClientWorkloads {
+  param([string]$Namespace, [string]$Release = "", [int]$TimeoutSec = 10)
+  $q = Get-ClientWorkloadQuery -Namespace $Namespace -Release $Release -TimeoutSec $TimeoutSec
+  $rows = (& kubectl @q 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { return $null }
+  return (Select-ClientWorkloads -Rows $rows)
+}
+
+# THE RESOURCE-MONITOR DAEMONSET, READ FROM THE CLUSTER, NEVER BUILT FROM A NAME
+# (client-dev#1306). The chart puts it in the node-agents namespace
+# (`nodeAgents.namespace.name`), not the client's, under `<fullname>-resource-monitor`,
+# so neither half is the client namespace or a fixed name. It is LISTED: the
+# release label across every namespace, the chart's `meta.helm.sh/release-namespace`
+# annotation equal to the client namespace (the node-agents namespace is
+# shareable), and the pod template running the fixed container below.
+#
+# TWIN of _TB_RESOURCE_MONITOR_CONTAINER in scripts/lib/common.sh;
+# scripts/tests/client-workloads-read-not-built.sh holds the two identical. Keep
+# this on ONE line, single-quoted.
+$script:ResourceMonitorContainer = 'tracebloc-resource-monitor'
+
+# The one read, as an argument vector (custom-columns, no embedded double quote).
+function Get-ResourceMonitorQuery {
+  param([string]$Namespace, [string]$Release = "", [int]$TimeoutSec = 10)
+  if (-not $Release) { $Release = $Namespace }
+  return @("get", "daemonset", "-A", "-l", "app.kubernetes.io/instance=$Release",
+           "-o", "custom-columns=RELNS:.metadata.annotations.meta\.helm\.sh/release-namespace,NS:.metadata.namespace,NAME:.metadata.name,CONTAINERS:.spec.template.spec.containers[*].name",
+           "--no-headers", "--request-timeout=${TimeoutSec}s")
+}
+
+# PURE: the resource-monitor DaemonSet out of `RELEASE-NS NAMESPACE NAME CONTAINERS`
+# rows, as a [Namespace, Name] object -- or $null unless EXACTLY one row has release
+# namespace $Namespace and runs the container. None is a release without the
+# resource-monitor (or a failed read) and two cannot be told apart; neither is a
+# name to guess. Exact, case-sensitive matches, like the bash twin's ==.
+function Select-ResourceMonitor {
+  param([string]$Rows, [string]$Namespace)
+  $hits = @(foreach ($line in ("$Rows" -split "`r?`n")) {
+    $f = @($line.Trim() -split '\s+')
+    if ($f.Count -lt 4 -or $f[0] -cne $Namespace) { continue }
+    if (@($f[3] -split ',') -ccontains $script:ResourceMonitorContainer) {
+      [pscustomobject]@{ Namespace = $f[1]; Name = $f[2] }
+    }
+  })
+  if ($hits.Count -ne 1) { return $null }
+  return $hits[0]
 }
 
 # Is a previously-installed client actually HEALTHY right now? The fast path must not
 # claim "nothing to do" over a running cluster whose client workloads are down (the
-# bash assess path requires Ready workloads too). Finds the installed release's
-# namespace via Get-InstalledClientInfo (bounded), then checks each client deployment
-# with a SHORT rollout deadline -- if any isn't Ready (or the release can't be found),
-# return $false so the run falls through to the repairing walk (#420 Bugbot).
+# bash assess path requires Ready workloads too). Finds the installed release via
+# Get-InstalledClientInfo (bounded), READS its workload Deployments by the release's
+# own name, then checks each with a SHORT rollout deadline -- if any isn't Ready, or
+# the release or its workloads can't be found, return $false so the run falls through
+# to the repairing walk (#420 Bugbot).
 function Test-ClientHealthy {
   $info = Get-InstalledClientInfo
   if ($info.ListUnknown -or -not $info.Ns) { return $false }
-  foreach ($d in (Get-ClientDeploymentNames -Namespace $info.Ns)) {
-    & kubectl rollout status "deployment/$d" -n $info.Ns --timeout=5s 2>&1 | Out-Null
+  $workloads = Get-ClientWorkloads -Namespace $info.Ns -Release $info.Name -TimeoutSec 5
+  if (-not $workloads) { return $false }
+  foreach ($w in $workloads) {
+    & kubectl rollout status "deployment/$($w.Name)" -n $info.Ns --timeout=5s 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { return $false }
   }
   return $true
@@ -4667,6 +4817,12 @@ function New-K3dCluster {
       New-Item -ItemType Directory -Path $HOST_DATA_DIR -Force | Out-Null
     }
 
+    # REFUSE AN UNFITTABLE HOST BEFORE THE CLUSTER EXISTS (backend#3535). The fit
+    # used to run only when the values were written, after the create below, and
+    # left a refused host holding an empty cluster. Same position as the bash
+    # twin's gate at the top of _create_new_cluster.
+    Invoke-TbPreCreateFitGate
+
     # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial
     # out to the platform, and every in-cluster Service is ClusterIP --
     # mysql-client, jobs-manager, requests-proxy-service and egress-proxy-service.
@@ -5363,14 +5519,14 @@ function Get-ImageMirrorYaml {
 # scripts/gen-envelope-embed.sh --check verifies the constants in CI.
 #
 # Regenerate with: scripts/gen-envelope-embed.sh
-$script:TbEnvelopeContractVersion  = 4
+$script:TbEnvelopeContractVersion  = 5
 $script:TbEnvelopeOverheadCpuMilli = 650
-$script:TbEnvelopeOverheadMemBytes = 1879048192
+$script:TbEnvelopeOverheadMemBytes = 2214592512
 $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
 $script:TbEnvelopeVmReserveMemBytes = 1073741824
 $script:TbEnvelopeNodeMinCpuMilli   = 1650
-$script:TbEnvelopeNodeMinMemBytes   = 4026531840
+$script:TbEnvelopeNodeMinMemBytes   = 4362076160
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
@@ -5389,7 +5545,7 @@ $script:TbEnvelopeNodeMinMemBytes   = 4026531840
 # this bootstrap is signed and guarantees neither helm nor python3. What keeps it
 # honest is `scripts/gen-footprint-embed.sh --check` in `make drift`: both
 # installers' values must equal a fresh render of the chart in the same tree.
-$script:TbCpFootprintMemBytes = 1879048192
+$script:TbCpFootprintMemBytes = 2214592512
 $script:TbCpFootprintCpuMilli = 650
 # The TRANSIENT the chart's CronJobs may have resident on top of the steady state
 # (auto-upgrade + image-refresh, both Forbid, routinely co-resident), summed by
@@ -5402,7 +5558,7 @@ $script:TbCpTransientCpuMilli = 700
 # rung + kubelet reservation + k3s addons + control plane + CronJob transient, in
 # bytes (backend#2460, RFC-BACKEND-664 §L0.1/§P4). Mirrors bash _TB_VM_MIN_MEM_BYTES;
 # Get-PfWarnMemGb derives the warn tier from it.
-$script:TbVmMinMemBytes = 10515120128
+$script:TbVmMinMemBytes = 10850664448
 # The rung ITSELF, in GiB: the one typed input of that derivation, embedded here
 # so the preflight's copy can NAME the run it is talking about instead of keeping
 # a second hand-written 4 beside a budget that moves on its own.
@@ -5765,19 +5921,26 @@ function Get-TbEnvelopeFloorString {
 #     is `unverified`.
 # Bash twin: _fit_training_envelope. Emits nothing itself; printing is the
 # caller's job, so the Pester suite can compare the whole return.
+# FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
+# installer, and nothing sensible can be verified against it. Shared by the fit
+# and the pre-create estimate (backend#3535), so both refuse on the same
+# condition. Returns the refusal, or $null when the embed reads.
+function Get-TbFootprintRefusal {
+  if ("$($script:TbCpFootprintMemBytes)" -notmatch '^\d+$' -or "$($script:TbCpFootprintCpuMilli)" -notmatch '^\d+$') {
+    return @{ Verdict = 'refused'
+              Lines   = @('the chart footprint constants ($script:TbCpFootprint*) are missing or not numeric -- this installer cannot verify any envelope') }
+  }
+  return $null
+}
+
 function Resolve-TbTrainingFit {
   param([string]$Size, [string]$Provenance)
   $ours = ($Provenance -eq 'installer')
   $out = @{ Verdict = ''; Lines = @(); Size = $Size; Undersized = $false }
 
-  # FAIL CLOSED on the footprint: a blank or non-numeric embed is a broken
-  # installer, and nothing sensible can be verified against it.
-  if ("$($script:TbCpFootprintMemBytes)" -notmatch '^\d+$' -or "$($script:TbCpFootprintCpuMilli)" -notmatch '^\d+$') {
-    $out.Verdict = 'refused'
-    $out.Lines = @('the chart footprint constants ($script:TbCpFootprint*) are missing or not numeric -- this installer cannot verify any envelope')
-    return $out
-  }
-  $fpMemB = [long]$script:TbCpFootprintMemBytes; $fpCpuM = [long]$script:TbCpFootprintCpuMilli
+  # FAIL CLOSED on the footprint (see Get-TbFootprintRefusal).
+  $fpRefusal = Get-TbFootprintRefusal
+  if ($fpRefusal) { $out.Verdict = $fpRefusal.Verdict; $out.Lines = $fpRefusal.Lines; return $out }
   $floor = Get-TbEnvelopeFloorString
 
   $envCpuM = ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $Size -Key 'cpu')
@@ -5818,11 +5981,32 @@ function Resolve-TbTrainingFit {
   } else {
     $sysHow = "NOT measured ($($sys.Note)); verified against the chart derivation only"
   }
+  return (Get-TbFitVerdict -AllocLabel 'allocatable on the largest schedulable node' `
+            -AllocMemB $allocMemB -AllocCpuM $allocCpuM -SysMemB $sysMemB -SysCpuM $sysCpuM -SysHow $sysHow `
+            -Size $Size -EnvMemB $envMemB -EnvCpuM $envCpuM -Ours $ours -Provenance $Provenance)
+}
+
+# THE FIT RULE, over numbers only (backend#3535). Split out of
+# Resolve-TbTrainingFit so the estimate that runs BEFORE `k3d cluster create`
+# (Get-TbPreCreateFitEstimate) calls the rule itself rather than a copy of it:
+# given what one node offers, what else it must hold, and the envelope, decide
+# fits | reduced | refused | pinned-over and write the arithmetic. Reading the
+# machine stays in the callers, which have already refused a broken footprint
+# embed. Returns @{ Verdict; Lines; Size; Undersized } as Resolve-TbTrainingFit
+# does. Bash twin: _fit_verdict.
+function Get-TbFitVerdict {
+  param([string]$AllocLabel, [long]$AllocMemB, [long]$AllocCpuM, [long]$SysMemB, [long]$SysCpuM,
+        [string]$SysHow, [string]$Size, [long]$EnvMemB, [long]$EnvCpuM, [bool]$Ours, [string]$Provenance)
+  # PowerShell names are case-insensitive: $ours below IS -Ours, $allocMemB IS
+  # -AllocMemB, and so on -- the body reads exactly as it did inside
+  # Resolve-TbTrainingFit.
+  $out = @{ Verdict = ''; Lines = @(); Size = $Size; Undersized = $false }
+  $fpMemB = [long]$script:TbCpFootprintMemBytes; $fpCpuM = [long]$script:TbCpFootprintCpuMilli
   $needMemB = $fpMemB + $sysMemB
   $needCpuM = $fpCpuM + $sysCpuM
   $mib = [long]1MB; $gib = [long]1GB
   $lines = @()
-  $lines += "allocatable on the largest schedulable node: $([math]::Floor($allocMemB / $mib)) MiB / $allocCpuM m"
+  $lines += "${AllocLabel}: $([math]::Floor($allocMemB / $mib)) MiB / $allocCpuM m"
   $lines += "control plane (chart) $([math]::Floor($fpMemB / $mib)) MiB / $fpCpuM m + system pods $([math]::Floor($sysMemB / $mib)) MiB / $sysCpuM m = $([math]::Floor($needMemB / $mib)) MiB / $needCpuM m ($sysHow)"
   $lines += "envelope $Size = $([math]::Floor($envMemB / $mib)) MiB / $envCpuM m"
 
@@ -5871,6 +6055,94 @@ function Resolve-TbTrainingFit {
     $out.Undersized = $true
   }
   return $out
+}
+
+# ── the fit, estimated BEFORE the cluster exists (backend#3535) ──────────────
+#
+# Resolve-TbTrainingFit runs when the values are written, AFTER `k3d cluster
+# create`, so a host it refused was left holding an empty cluster. Every fact the
+# refusal rests on is known before anything is created: the Docker VM's memory
+# and CPU (every k3d node reports the whole VM), minus the node reservation the
+# kubelet is about to be given (the generated TB_KUBELET_* block, subtracted as
+# the kubelet does: capacity - kubeReserved - systemReserved - evictionHard; an
+# unmeasured platform gets none, here as on the node), against the embedded chart
+# footprint. The k3s addons do not exist yet and are NOT counted, so the estimate
+# can only be OPTIMISTIC: it never refuses a host the post-create fit would
+# accept, and that fit stays the authority for everything else. The envelope is
+# the contract floor -- refusal depends only on whether one core and one GiB are
+# left beside the platform, which is exactly what the floor asks.
+#
+# The decision is Get-TbFitVerdict, the post-create fit's own rule (rules 1, 9);
+# install-k8s.Tests.ps1 drives both over fixtures/precreate_fit_hosts.txt, the
+# table the bash twin (_precreate_fit_estimate) is held to. A size from
+# TRACEBLOC_TRAINING_RESOURCES is a human's, which the fit warns about and never
+# refuses, and an unreadable runtime is "cannot tell" -- both `skipped`.
+#
+# Returns @{ Verdict = refused | clear | skipped; Lines }.
+function Get-TbPreCreateFitEstimate {
+  param([long]$VmMemBytes, [long]$VmCpuMilli, [string]$Platform = '')
+  if ($env:TRACEBLOC_TRAINING_RESOURCES) {
+    return @{ Verdict = 'skipped'; Lines = @("TRACEBLOC_TRAINING_RESOURCES is set: the size is a human's choice, which the fit warns about and never refuses") }
+  }
+  if ($VmMemBytes -le 0 -or $VmCpuMilli -le 0) {
+    return @{ Verdict = 'skipped'; Lines = @("the container runtime's memory and CPU could not be read, so nothing is refused here; the fit after the cluster is created decides") }
+  }
+  $fpRefusal = Get-TbFootprintRefusal
+  if ($fpRefusal) { return @{ Verdict = 'refused'; Lines = $fpRefusal.Lines } }
+
+  if (-not $Platform) { $Platform = Get-KubeletReservationPlatform }
+  $resMemB = [long]0; $resCpuM = [long]0
+  if (Test-KubeletReservationMeasured $Platform) {
+    $r = Get-KubeletReservationValues $Platform
+    if ($null -eq $r) {
+      return @{ Verdict = 'skipped'; Lines = @("the $Platform node reservation cannot be read (a broken generated block, which the create path refuses on its own)") }
+    }
+    $resCpuM = [long]$r.KubeCpuMilli
+    $resMemB = ([long]$r.KubeMemMib + [long]$r.SystemMemMib + [long]$r.EvictionMib) * [long]1MB
+    $resHow = "the $Platform node reservation (kubeReserved $($r.KubeMemMib) MiB / $($r.KubeCpuMilli) m, systemReserved $($r.SystemMemMib) MiB, eviction $($r.EvictionMib) MiB)"
+  } else {
+    $resHow = "no node reservation (none is measured for platform '$Platform', so the node will report allocatable == capacity)"
+  }
+  $allocMemB = [long][math]::Max([long]0, $VmMemBytes - $resMemB)
+  $allocCpuM = [long][math]::Max([long]0, $VmCpuMilli - $resCpuM)
+
+  $floor = Get-TbEnvelopeFloorString
+  $fit = Get-TbFitVerdict `
+    -AllocLabel "estimated allocatable per node, before the cluster exists (runtime $([math]::Floor($VmMemBytes / 1MB)) MiB / $VmCpuMilli m, minus $resHow)" `
+    -AllocMemB $allocMemB -AllocCpuM $allocCpuM -SysMemB 0 -SysCpuM 0 `
+    -SysHow 'NOT counted: the k3s addons do not exist until the cluster does, so this estimate can only be optimistic' `
+    -Size $floor -EnvMemB (ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $floor -Key 'memory')) `
+    -EnvCpuM (ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $floor -Key 'cpu')) -Ours $true -Provenance 'installer'
+  $verdict = if ($fit.Verdict -eq 'refused') { 'refused' } else { 'clear' }
+  return @{ Verdict = $verdict; Lines = $fit.Lines }
+}
+
+# The refusal, worded ONCE for both places it can fire (backend#3535): the fit at
+# values time and the estimate before `k3d cluster create` -- the same arithmetic,
+# remedy and TRACEBLOC_TRAINING_RESOURCES way out. Mirrors bash _print_fit_refusal.
+function Write-TbFitRefusal {
+  param([string]$Headline, [string[]]$Lines, [string]$ErrorLine)
+  Warn $Headline
+  foreach ($l in $Lines) { Hint "  $l" }
+  Hint "  The client needs ~$([math]::Floor(($script:TbCpFootprintMemBytes + $script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $($script:TbCpFootprintCpuMilli + $script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+  Err $ErrorLine
+}
+
+# The gate New-K3dCluster runs immediately before `k3d cluster create`. Reads the
+# runtime through the bounded docker-info readers Test-PreflightRuntimeMem uses at
+# the top of the same step. Mirrors bash _precreate_fit_gate.
+function Invoke-TbPreCreateFitGate {
+  $memB = Get-PfRuntimeMemBytes; $cpu = Get-PfRuntimeCpu
+  $est = Get-TbPreCreateFitEstimate -VmMemBytes ([long]$(if ($memB) { $memB } else { 0 })) `
+                                    -VmCpuMilli ([long]$(if ($cpu) { $cpu * 1000 } else { 0 }))
+  switch ($est.Verdict) {
+    'refused' {
+      Write-TbFitRefusal -Headline "This machine cannot schedule a training run beside the platform, so the cluster is not created:" `
+        -Lines $est.Lines -ErrorLine "Refusing before creating the cluster, so there is no cluster to delete."
+    }
+    'clear'   { foreach ($l in $est.Lines) { Log "envelope fit: $l" } }
+    default   { Log "pre-create fit estimate skipped: $($est.Lines -join ' ')" }
+  }
 }
 
 function Get-TrainingResources {
@@ -6406,6 +6678,35 @@ function Wait-MetricsApiService {
 # a client". Returns "" on any failure; the caller treats a client it cannot name
 # as unidentifiable (fail closed), never as absent. Bash peer:
 # _client_id_from_secret in scripts/lib/install-client-helm.sh.
+#
+# THE SECRET IS READ FROM THE RELEASE, NEVER NAMED (client-dev#1305). The chart
+# names it `tracebloc.secretName` -- `<fullnameOverride or release>-secrets` --
+# and rebuilding that here restated the chart's rule from the release values, so
+# the lookup was right only while the two copies agreed. The Secrets are listed
+# by `app.kubernetes.io/instance=<release>` (which never follows the override)
+# and the one carrying CLIENT_ID is the one -- the Get-ClientWorkloads shape
+# (backend#2888). Guard: scripts/tests/client-secret-read-not-built.sh.
+function Get-ClientSecretQuery {
+  param([string]$Release, [string]$Namespace, [int]$TimeoutSec = 5)
+  return @("get", "secret", "-n", $Namespace, "-l", "app.kubernetes.io/instance=$Release",
+           "-o", "custom-columns=NAME:.metadata.name,CLIENT_ID:.data.CLIENT_ID",
+           "--no-headers", "--request-timeout=${TimeoutSec}s")
+}
+
+# PURE: the base64 CLIENT_ID out of `NAME CLIENT_ID` rows, or "". Exactly ONE row
+# may carry one: none is a Secret that is not there, two cannot be told apart.
+# A Secret without the key (the registry pull Secret) prints `<none>`. Bash peer:
+# _client_id_from_secret_rows.
+function Select-ClientIdFromSecretRows {
+  param([string]$Rows)
+  $hits = @(foreach ($line in ("$Rows" -split "`r?`n")) {
+    $f = @($line.Trim() -split '\s+')
+    if ($f.Count -ge 2 -and $f[0] -and $f[1] -and $f[1] -ne '<none>') { $f[1] }
+  })
+  if ($hits.Count -ne 1) { return "" }
+  return $hits[0]
+}
+
 function Get-ClientIdFromSecret {
   param([string]$Release, [string]$Namespace)
   if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return "" }
@@ -6417,9 +6718,10 @@ function Get-ClientIdFromSecret {
   # exits non-zero and falls into the same `return ""` as any unreadable Secret,
   # which the caller turns into an unidentifiable client (fail closed), never an
   # absent one. Bash peer: _client_id_from_secret.
-  $b64 = (kubectl -n $Namespace get secret "$Release-secrets" -o "jsonpath={.data.CLIENT_ID}" --request-timeout=5s 2>$null) | Out-String
+  $q = Get-ClientSecretQuery -Release $Release -Namespace $Namespace -TimeoutSec 5
+  $rows = (& kubectl @q 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) { return "" }
-  $b64 = $b64.Trim()
+  $b64 = Select-ClientIdFromSecretRows -Rows $rows
   if (-not $b64) { return "" }
   try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)).Trim() } catch { return "" }
 }
@@ -6478,21 +6780,13 @@ function Get-InstalledClientInfo {
           # machine. Bash parity: detect_installed_client / _client_id_from_secret.
           #
           # THE SECRET'S NAME IS NOT ALWAYS THE RELEASE NAME (Bugbot, Medium, on
-          # client#911). `tracebloc.secretName` follows `fullnameOverride`, so on
-          # a release installed with one, `<release>-secrets` does not exist and
-          # this fallback reads nothing -- a live client whose id lives only in
-          # the Secret then reads as UNIDENTIFIABLE. The override is in the
-          # values already parsed above; absent -> the release name, which is
-          # the chart's own `default .Release.Name .Values.fullnameOverride`.
-          # Bash parity: detect_installed_client's `_fno` read.
+          # client#911): `tracebloc.secretName` follows `fullnameOverride`. So
+          # the Secret is found by the RELEASE, whatever the chart named it
+          # (client-dev#1305) -- rebuilding the name from the override in these
+          # values restated the chart's rule. Bash parity: detect_installed_client.
           $id = ""
           if ($null -ne $vals -and $null -ne $vals.clientId) { $id = "$($vals.clientId)".Trim() }
-          $prefix = $rel.name
-          if ($null -ne $vals -and $null -ne $vals.fullnameOverride) {
-            $fno = "$($vals.fullnameOverride)".Trim()
-            if ($fno) { $prefix = $fno }
-          }
-          if (-not $id) { $id = Get-ClientIdFromSecret -Release $prefix -Namespace $rel.namespace }
+          if (-not $id) { $id = Get-ClientIdFromSecret -Release $rel.name -Namespace $rel.namespace }
           if ($id) { $existingId = $id; $existingNs = $rel.namespace; $existingName = $rel.name; break }
           # No trailing `continue` here. It is the last statement of the loop
           # body, so it buys nothing -- and PowerShell reported it escaping as an
@@ -7118,10 +7412,8 @@ function Install-ClientHelm {
   $fit = Resolve-TbTrainingFit -Size $trainingSize -Provenance $trainingProvenance
   switch ($fit.Verdict) {
     'refused' {
-      Warn "This machine cannot schedule a training run beside the platform, so no training envelope is written:"
-      foreach ($l in $fit.Lines) { Hint "  $l" }
-      Hint "  The client needs ~$([math]::Floor(($script:TbCpFootprintMemBytes + $script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $($script:TbCpFootprintCpuMilli + $script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
-      Err "Refusing to write a training envelope that cannot be scheduled on this machine."
+      Write-TbFitRefusal -Headline "This machine cannot schedule a training run beside the platform, so no training envelope is written:" `
+        -Lines $fit.Lines -ErrorLine "Refusing to write a training envelope that cannot be scheduled on this machine."
     }
     'reduced' {
       Info "Training envelope reduced to fit beside the platform on this machine:"
@@ -7357,18 +7649,26 @@ function Wait-ForClientReady {
     Start-TelemetryPhase -Letter 'f'
   }
   $ns = $script:TB_NAMESPACE
-  $deploys = Get-ClientDeploymentNames -Namespace $ns
   $deadline = (Get-Date).AddSeconds([int]$ReadyTimeout)
   $allReady = $true
+  $jm = ""
 
   Write-Host ""
   Info "Waiting for the client to start - first run downloads images, this can take a few minutes..."
-  foreach ($d in $deploys) {
+  # READ, not rebuilt from the namespace (backend#2888). A read that cannot
+  # resolve all three is a client that is not all there: not Ready.
+  $workloads = Get-ClientWorkloads -Namespace $ns
+  if (-not $workloads) {
+    Log "Could not list the client's workload Deployments in namespace $ns (release label app.kubernetes.io/instance=$ns); treating the client as not Ready."
+    $allReady = $false
+  }
+  foreach ($w in @($workloads | Where-Object { $_ })) {
+    if ($w.Role -eq 'jobs-manager') { $jm = $w.Name }
     $remaining = [int]((New-TimeSpan -Start (Get-Date) -End $deadline).TotalSeconds)
     if ($remaining -lt 10) { $remaining = 10 }
-    & kubectl rollout status "deployment/$d" -n $ns "--timeout=${remaining}s" 2>&1 | Out-Null
+    & kubectl rollout status "deployment/$($w.Name)" -n $ns "--timeout=${remaining}s" 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
-      Ok ("{0} ready" -f ($d -replace "^$ns-", ""))
+      Ok ("{0} ready" -f $w.Role)
     } else {
       $allReady = $false
       break
@@ -7377,18 +7677,27 @@ function Wait-ForClientReady {
 
   Confirm-Cluster
   if ($allReady) { $script:ClientState = "connected" }
-  else { $script:ClientState = (Get-NotReadyState -Namespace $ns) }
+  else { $script:ClientState = (Get-NotReadyState -Namespace $ns -JobsManager $jm) }
 }
 
 # Classify why the client isn't Ready, for an accurate message. Returns a state.
 function Get-NotReadyState {
-  param([string]$Namespace)
+  param([string]$Namespace, [string]$JobsManager = "")
   # The concrete pod/event text behind the failure, surfaced in the summary so the
   # failure copy contains the actual reason, not just a generic line (#425).
   $script:NotReadyDetail = ""
   # Wrong credentials: jobs-manager authenticates to the backend on startup and
-  # crash-loops when rejected -- surfaced as an auth error in its logs.
-  $jmLogs = (& kubectl logs -n $Namespace "deployment/$Namespace-jobs-manager" --all-containers --tail=50 2>$null | Out-String)
+  # crash-loops when rejected -- surfaced as an auth error in its logs. The
+  # Deployment's name is the one the readiness gate already READ (backend#2888),
+  # or read here; unresolvable means no logs to classify, and the pod-state
+  # checks below still run.
+  if (-not $JobsManager) {
+    $JobsManager = "$((@(Get-ClientWorkloads -Namespace $Namespace -TimeoutSec 5) | Where-Object { $_ -and $_.Role -eq 'jobs-manager' } | Select-Object -First 1).Name)"
+  }
+  $jmLogs = ""
+  if ($JobsManager) {
+    $jmLogs = (& kubectl logs -n $Namespace "deployment/$JobsManager" --all-containers --tail=50 2>$null | Out-String)
+  }
   if ($jmLogs -match '(?i)authentication failed|unable to log in') { return "bad_creds" }
   $pods = (& kubectl get pods -n $Namespace 2>$null | Out-String)
   if ($pods -match '(?i)ImagePullBackOff|ErrImagePull|InvalidImageName') {
@@ -7696,6 +8005,19 @@ function Get-PfRuntimeMemMib {
     if ($r.Code -ne 0) { return $null }
     $v = "$($r.Output)".Trim()
     if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [math]::Floor([int64]$v / 1MB) }
+  } catch {}
+  return $null
+}
+# The same budget in BYTES, unrounded, for the pre-create fit estimate
+# (backend#3535): the kubelet computes capacity from the same MemTotal, and an
+# estimate floored to MiB could refuse a host the post-create fit accepts by
+# less than a MiB. $null if undeterminable.
+function Get-PfRuntimeMemBytes {
+  try {
+    $r = Invoke-DockerCli -DockerArgs @("info", "--format", "{{.MemTotal}}") -TimeoutSec 20 -StdoutOnly
+    if ($r.Code -ne 0) { return $null }
+    $v = "$($r.Output)".Trim()
+    if ($v -match '^\d+$' -and [int64]$v -gt 0) { return [int64]$v }
   } catch {}
   return $null
 }
@@ -8367,14 +8689,17 @@ function Edit-Redaction([string]$Path) {
 # as a missing bundle. 20s is generous for a healthy tool (30s for a log fetch,
 # which legitimately streams more).
 #
-# WORST CASE ~330s, i.e. under 6 minutes -- NOT "well under a minute" as this
+# WORST CASE ~400s, i.e. under 7 minutes -- NOT "well under a minute" as this
 # comment first claimed. The deadlines are SEQUENTIAL:
 #
 #   10 x Invoke-DiagnoseCapture at the 20s default          200s
+#    1 x the workload-Deployment read (backend#2888)          20s
 #    3 x kubectl logs at 30s (one per workload in the loop)   90s
+#    1 x the resource-monitor DaemonSet read (client-dev#1306) 20s
+#    1 x its kubectl logs at 30s                              30s
 #    2 x Invoke-DockerCli at 20s                              40s
 #                                                            ----
-#                                                            330s
+#                                                            400s
 #
 # #934 said 350s, from "13 reads x 20s + 3 kubectl-logs x 30s". That counts the
 # three log fetches TWICE -- 13 is the number of captures (10 sites + 3 loop
@@ -8383,8 +8708,9 @@ function Edit-Redaction([string]$Path) {
 # Invoke-DiagnoseCapture. The two errors partly cancel, which is how a wrong
 # number survived a PR written to correct a wrong number.
 #
-# The test below sums these from the source, so the next drift fails instead of
-# being reviewed.
+# NO test sums these from the source (this line used to say one did, and none
+# exists -- client-dev#1306 found it while adding two rows), so the table is
+# recounted by hand: every capture added to Invoke-DiagnoseBundle adds its row.
 function Invoke-DiagnoseCapture {
   param(
     [Parameter(Mandatory)][string]$FileName,
@@ -8465,11 +8791,33 @@ function Invoke-DiagnoseBundle {
     (@("## nodes",  (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","nodes","-o","wide")),
        "## pods",   (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","pods","-A","-o","wide")),
        "## events", (Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("get","events","-A"))) -join "`n") | Out-File (Join-Path $d "02-kubectl.txt") -Encoding utf8
-    foreach ($w in @("mysql-client", "$ns-jobs-manager", "$ns-requests-proxy")) {
+    # The workload Deployments are READ from the release (backend#2888): rebuilt
+    # as "$ns-jobs-manager" they named a Deployment that does not exist on an
+    # overridden release, and the bundle shipped empty jobs-manager logs. When the
+    # read cannot resolve them the bundle says so in a file of its own.
+    $wlRows = Invoke-DiagnoseCapture -FileName "kubectl" -Arguments (Get-ClientWorkloadQuery -Namespace $ns -TimeoutSec 15)
+    $workloads = Select-ClientWorkloads -Rows $wlRows
+    if (-not $workloads) {
+      ("## client workload logs NOT collected`nCould not list the client's workload Deployments in namespace '$ns' by release label (app.kubernetes.io/instance=$ns). The read returned:`n$wlRows") |
+        Out-File (Join-Path $d "logs/workloads-unresolved.txt") -Encoding utf8
+    }
+    foreach ($w in @($workloads | Where-Object { $_ })) {
       # 30s: a log fetch legitimately streams more than a status read, and each
       # workload gets its own deadline so one wedged deploy cannot eat the bundle.
-      Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("logs","-n",$ns,"deploy/$w","--all-containers","--tail=500") -TimeoutSec 30 |
-        Out-File (Join-Path $d "logs/$w.log") -Encoding utf8
+      Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("logs","-n",$ns,"deploy/$($w.Name)","--all-containers","--tail=500") -TimeoutSec 30 |
+        Out-File (Join-Path $d "logs/$($w.Name).log") -Encoding utf8
+    }
+    # The resource-monitor DaemonSet is READ too (client-dev#1306): it lives in the
+    # node-agents namespace under the release's own name, and this bundle used to
+    # collect no resource-monitor log at all. Unresolved is said in its own file.
+    $rmRows = Invoke-DiagnoseCapture -FileName "kubectl" -Arguments (Get-ResourceMonitorQuery -Namespace $ns -TimeoutSec 15)
+    $rm = Select-ResourceMonitor -Rows $rmRows -Namespace $ns
+    if ($rm) {
+      Invoke-DiagnoseCapture -FileName "kubectl" -Arguments @("logs","-n",$rm.Namespace,"daemonset/$($rm.Name)","--tail=300") -TimeoutSec 30 |
+        Out-File (Join-Path $d "logs/resource-monitor.log") -Encoding utf8
+    } else {
+      ("## resource-monitor logs NOT collected`nCould not find exactly one DaemonSet of release '$ns' (app.kubernetes.io/instance=$ns, any namespace) whose pods run the '$($script:ResourceMonitorContainer)' container. None is expected when the chart runs with the resource-monitor disabled. The read returned:`n$rmRows") |
+        Out-File (Join-Path $d "logs/resource-monitor-unresolved.txt") -Encoding utf8
     }
   }
   if (Get-Command helm -ErrorAction SilentlyContinue) {

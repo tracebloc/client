@@ -82,9 +82,47 @@ data:
             bypassed, and the test drives exactly that flag.
           */}}
           {{- $includes := list }}
+          {{- /*
+            TWO RECEIVERS, SPLIT BY HOW LONG THE POD LIVES (backend#2964).
+
+            `start_at` decides where a file with NO stored offset is read from.
+            For the long-lived workloads `end` is right: a fresh install must not
+            ingest a whole backlog. The auto-upgrade CronJob (`helm`) and the
+            image-refresh Job (`refresh`) are different: every tick is a NEW pod
+            with a NEW log file and no offset, and it can run and exit inside a
+            window the Collector is not watching -- above all a Collector restart,
+            which the very `helm upgrade` being logged can cause. Under `end` such
+            a file is first seen after it was fully written, and skipped WHOLE.
+            That is exactly the window the interesting upgrade failures happen in.
+
+            So those containers get their own receiver at `start_at: beginning`.
+            It cannot mean "replay the world": offsets are persisted (the
+            `storage` below), so a file already read resumes where it stopped,
+            and these pods are garbage-collected by the CronJobs' history limits,
+            so the most it ever reads fresh is the few pods still retained.
+
+            ONE DUPLICATE, ONCE. On the upgrade that introduces this receiver it
+            has no stored offsets yet, so the helm/refresh files already on disk
+            -- at most that retained history -- are read from the start again,
+            although the old single receiver had read them. A few short logs,
+            once; after that each file is read by exactly one receiver, one time.
+
+            THIS LIST IS HELD TO THE RENDER, not trusted:
+            scripts/tests/collector-class-a-agreement.sh reads every workload's
+            kind out of the rendered chart and fails if a Class A container that
+            runs in a CronJob/Job pod is read from `end`, or a long-lived one from
+            `beginning`. A new CronJob container added to classAContainers must be
+            added here, and that guard says so.
+          */}}
+          {{- $jobContainers := list "helm" "refresh" }}
+          {{- $jobIncludes := list }}
           {{- /* Release-namespace Class A containers. */}}
           {{- range $tc.classAContainers }}
+          {{- if has . $jobContainers }}
+          {{- $jobIncludes = append $jobIncludes (printf "%s/%s_*/%s/*.log" $logs $.Release.Namespace .) }}
+          {{- else }}
           {{- $includes = append $includes (printf "%s/%s_*/%s/*.log" $logs $.Release.Namespace .) }}
+          {{- end }}
           {{- end }}
           {{- /*
             NODE-AGENTS namespace, separately. resource-monitor is a DaemonSet in
@@ -170,6 +208,29 @@ data:
           # on `body` and would otherwise scrub the wrapper and miss the payload.
           - type: container
             id: container-parser
+      {{- if $jobIncludes }}
+
+      # THE SHORT-LIVED PODS (backend#2964): the auto-upgrade CronJob and the
+      # image-refresh Job. Same parsing, same persisted offsets (`file_storage`
+      # keys offsets by component, so this receiver's never collide with the
+      # one above), but `beginning` for a file with no stored offset -- so a pod
+      # that ran and exited while the Collector was restarting is read late
+      # instead of skipped. See the template comment above the include list.
+      # scripts/tests/collector-offsets-persisted.sh holds EVERY filelog
+      # receiver to persisted offsets and to the same parser, so this block
+      # cannot lose either while the one above keeps it.
+      filelog/short-lived:
+        include:
+          {{- range $jobIncludes }}
+          - {{ . | quote }}
+          {{- end }}
+        storage: file_storage
+        start_at: beginning
+        include_file_path: true
+        operators:
+          - type: container
+            id: container-parser
+      {{- end }}
 
     processors:
       # THE REDACTION FLOOR — GENERATED, never hand-written (backend#2378).
@@ -277,7 +338,7 @@ data:
       extensions: [bearertokenauth, file_storage]
       pipelines:
         logs:
-          receivers: [filelog]
+          receivers: [filelog{{ if $jobIncludes }}, filelog/short-lived{{ end }}]
           processors: [transform/redaction, batch]
           exporters: [otlphttp/backend]
       telemetry:

@@ -2095,6 +2095,14 @@ _generate_node_cdi_specs() {
 }
 
 _create_new_cluster() {
+  # REFUSE AN UNFITTABLE HOST BEFORE ANYTHING EXISTS (backend#3535). The fit that
+  # decides whether a training run can schedule beside the platform used to run
+  # only at values generation -- after the `k3d cluster create` below -- so a
+  # host it refused was left holding an empty cluster. The estimate asks the
+  # same rule first; guarded because cluster.sh can be sourced without
+  # install-client-helm.sh (the e2e harness).
+  if declare -F _precreate_fit_gate >/dev/null 2>&1; then _precreate_fit_gate; fi
+
   # The tracebloc client is outbound-only: jobs-manager + pods-monitor dial out
   # to the platform, and every in-cluster Service is ClusterIP — mysql-client,
   # jobs-manager, requests-proxy-service and egress-proxy-service. (This comment

@@ -33,7 +33,7 @@ PF_MIN_MEM_GB="${PF_MIN_MEM_GB:-5}"        # hard-fail below this (Linux; warn o
 # rung + kubelet reservation + k3s addons + control plane + CronJob transient, in
 # bytes (backend#2460, RFC-BACKEND-664 §L0.1/§P4). Kept honest by
 # `gen-vm-budget-embed.sh --check` in `make drift`.
-_TB_VM_MIN_MEM_BYTES=10515120128
+_TB_VM_MIN_MEM_BYTES=10850664448
 # ── end generated VM budget ───────────────────────────────────────────────────
 # The warn tier is DERIVED from that constant: below it the smallest training
 # run (XS, 4 GiB) cannot schedule beside the platform, so "comfortable to run" is

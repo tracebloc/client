@@ -371,13 +371,42 @@ run_diagnose() {
         echo; echo "### $p"; kubectl describe pod -n "$ns" "$p" $kt 2>&1
       done
     } > "$d/03-describe.txt" 2>&1
-    # workload logs (current + previous)
-    local w
-    for w in mysql-client "${ns}-jobs-manager" "${ns}-requests-proxy"; do
-      kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           > "$d/logs/${w}.log" 2>&1
-      kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt > "$d/logs/${w}.previous.log" 2>&1
-    done
-    kubectl logs -n "$ns" "daemonset/tracebloc-resource-monitor" --tail=300 $kt   > "$d/logs/resource-monitor.log" 2>&1
+    # workload logs (current + previous). The Deployments are READ from the
+    # release (backend#2888): rebuilt as `<namespace>-jobs-manager` they named a
+    # Deployment that does not exist on an overridden release, and the bundle
+    # shipped empty jobs-manager logs. When the read cannot resolve them, the
+    # bundle says so in a file of its own instead of leaving the logs silently empty.
+    local w _role _wl_rows
+    if _wl_rows="$(_client_workloads "$ns" 5s)"; then
+      while read -r _role w; do
+        kubectl logs -n "$ns" "deploy/$w" --all-containers --tail=500 $kt           </dev/null > "$d/logs/${w}.log" 2>&1
+        kubectl logs -n "$ns" "deploy/$w" --all-containers --previous --tail=500 $kt </dev/null > "$d/logs/${w}.previous.log" 2>&1
+      done <<<"$_wl_rows"
+    else
+      {
+        echo "## client workload logs NOT collected"
+        echo "Could not list the client's workload Deployments in namespace '$ns' by release label"
+        echo "(app.kubernetes.io/instance=$ns). Deployments carrying that label:"
+        kubectl get deployment -n "$ns" -l "app.kubernetes.io/instance=$ns" $kt 2>&1
+      } > "$d/logs/workloads-unresolved.txt" 2>&1
+    fi
+    # The resource-monitor DaemonSet is READ as well (client-dev#1306). The old
+    # literal looked in the CLIENT namespace for a fixed name, but the chart puts
+    # it in the node-agents namespace under `<fullname>-resource-monitor`, so the
+    # log was always a NotFound error. Unresolved (resourceMonitor disabled, or
+    # the read failed) is said in a file of its own, like the workloads above.
+    local _rm
+    if _rm="$(_resource_monitor_daemonset "$ns" 5s)"; then
+      kubectl logs -n "${_rm%% *}" "daemonset/${_rm#* }" --tail=300 $kt </dev/null > "$d/logs/resource-monitor.log" 2>&1
+    else
+      {
+        echo "## resource-monitor logs NOT collected"
+        echo "Could not find exactly one DaemonSet of release '$ns' (app.kubernetes.io/instance=$ns, any namespace)"
+        echo "whose pods run the '$_TB_RESOURCE_MONITOR_CONTAINER' container. None is expected when the"
+        echo "chart runs with the resource-monitor disabled. DaemonSets carrying that label:"
+        kubectl get daemonset -A -l "app.kubernetes.io/instance=$ns" $kt 2>&1
+      } > "$d/logs/resource-monitor-unresolved.txt" 2>&1
+    fi
   fi
 
   # ── helm (redacted afterwards) ──
