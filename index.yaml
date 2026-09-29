@@ -4,6 +4,33 @@ entries:
   - annotations:
       category: Machine Learning
     apiVersion: v2
+    appVersion: 1.9.169
+    created: "2026-09-29T04:05:51Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: a61e1fc7439e253649e06cca28d69cb54c68a4d36916e0bbea06521a8279d9cf
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://github.com/tracebloc/client/releases/download/v1.9.169/client-1.9.169.tgz
+    version: 1.9.169
+  - annotations:
+      category: Machine Learning
+    apiVersion: v2
     appVersion: 1.9.163
     created: "2026-09-28T17:47:24Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
@@ -2380,6 +2407,30 @@ entries:
   ingestor:
   - apiVersion: v2
     appVersion: 0.3.0
+    created: "2026-09-29T04:05:51Z"
+    description: 'Helm chart for submitting a tracebloc data-ingestion run. Renders
+      a customer''s ingest.yaml into a ConfigMap and runs a post-install hook that
+      POSTs it to jobs-manager''s /internal/submit-ingestion-run. jobs-manager validates
+      the YAML, mints a backend token, and creates the ingestor Job directly — this
+      chart owns the config + hook artifacts, not the resulting Job or its data. '
+    digest: e47c71f9570ef70f1ff947846d5457565b64e3411b02957be3c0b9aa68fb3093
+    home: https://github.com/tracebloc/client/tree/main/ingestor
+    keywords:
+    - tracebloc
+    - kubernetes
+    - data-ingestion
+    maintainers:
+    - email: support@tracebloc.io
+      name: tracebloc
+    name: ingestor
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://github.com/tracebloc/client/releases/download/v1.9.169/ingestor-0.2.1.tgz
+    version: 0.2.1
+  - apiVersion: v2
+    appVersion: 0.3.0
     created: "2026-09-16T16:38:13Z"
     description: 'Helm chart for submitting a tracebloc data-ingestion run. Renders
       a customer''s ingest.yaml into a ConfigMap and runs a post-install hook that
@@ -2402,4 +2453,4 @@ entries:
     urls:
     - https://github.com/tracebloc/client/releases/download/v1.9.123/ingestor-0.2.0.tgz
     version: 0.2.0
-generated: "2026-09-28T17:49:57.265944343Z"
+generated: "2026-09-29T04:08:16.434040856Z"
