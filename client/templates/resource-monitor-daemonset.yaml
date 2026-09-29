@@ -205,7 +205,14 @@ spec:
               value: "all"
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: "utility"
+            {{- /* Settings naming: NODE_NAME, MONITOR_INTERVAL and HOST_DATASET_PATH
+                 are emitted under their legacy names and the canonical
+                 TRACEBLOC_<name>, same value (remove_by 2026-12-31). */}}
             - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: TRACEBLOC_NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
@@ -214,7 +221,14 @@ spec:
             # rather than the Downward API pod namespace.
             - name: NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            {{- /* Canonical TRACEBLOC_ names beside the legacy NAMESPACE /
+                 CLIENT_ID / CLIENT_PASSWORD (remove_by 2026-12-31), same
+                 value / Secret key. */}}
+            - name: TRACEBLOC_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
             - name: MONITOR_INTERVAL
+              value: "30"
+            - name: TRACEBLOC_MONITOR_INTERVAL
               value: "30"
             {{- if $datasetPath }}
             # Rendered ONLY with the mount above, and that pairing is the whole
@@ -222,6 +236,8 @@ spec:
             # the var without the mount stats nothing and drops every node's
             # storage reading. Never set one without the other.
             - name: HOST_DATASET_PATH
+              value: /host/dataset
+            - name: TRACEBLOC_HOST_DATASET_PATH
               value: /host/dataset
             {{- end }}
             {{- $clientEnv := include "tracebloc.clientEnv" . }}
@@ -235,6 +251,16 @@ spec:
                   name: {{ include "tracebloc.secretName" . }}
                   key: CLIENT_ID
             - name: CLIENT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_PASSWORD
+            - name: TRACEBLOC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: CLIENT_ID
+            - name: TRACEBLOC_CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}

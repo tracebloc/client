@@ -63,7 +63,11 @@ spec:
             # explicitly to override.
             - name: JOBS_MANAGER_ENDPOINT
               value: {{ .Values.jobsManager.endpoint | default (printf "http://jobs-manager.%s.svc.cluster.local:8080" .Release.Namespace) | quote }}
+            - name: TRACEBLOC_JOBS_MANAGER_ENDPOINT
+              value: {{ .Values.jobsManager.endpoint | default (printf "http://jobs-manager.%s.svc.cluster.local:8080" .Release.Namespace) | quote }}
             - name: SUBMIT_PATH
+              value: {{ .Values.jobsManager.submitPath | quote }}
+            - name: TRACEBLOC_SUBMIT_PATH
               value: {{ .Values.jobsManager.submitPath | quote }}
           command: ["/bin/sh", "-c"]
           # The script:
@@ -95,6 +99,12 @@ spec:
                 exit 1
               fi
 
+              # Settings naming: the hook sets each of these under its canonical
+              # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+              # canonical first; a blank or absent canonical leaves the legacy value --
+              # and any default or `set -u` refusal below -- exactly as before.
+              if [ -n "${TRACEBLOC_JOBS_MANAGER_ENDPOINT:-}" ]; then JOBS_MANAGER_ENDPOINT="$TRACEBLOC_JOBS_MANAGER_ENDPOINT"; fi
+              if [ -n "${TRACEBLOC_SUBMIT_PATH:-}" ]; then SUBMIT_PATH="$TRACEBLOC_SUBMIT_PATH"; fi
               URL="${JOBS_MANAGER_ENDPOINT}${SUBMIT_PATH}"
               echo "POST $URL"
               echo "Body source: $BODY_FILE"

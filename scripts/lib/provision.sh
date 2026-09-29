@@ -9,6 +9,8 @@
 #  (never printed), then handed to the Helm step via the SAME env contract
 #  install_client_helm already consumes:
 #      TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + TB_NAMESPACE
+#  (the namespace exported under both TB_NAMESPACE and its canonical
+#  TRACEBLOC_NAMESPACE, see tb_export_namespace in common.sh)
 #
 #  DUAL-MODE (unchanged, one deprecation cycle): when the operator pre-supplies a
 #  values file (TRACEBLOC_VALUES_FILE) or credentials (TRACEBLOC_CLIENT_ID +
@@ -395,11 +397,17 @@ provision_client() {
   # NOT write TRACEBLOC_CLIENT_ADOPTED, so a stale ADOPTED=1 left in the env would
   # otherwise misroute a fresh mint into the adopt branch and drop the just-minted
   # credential. Same reasoning for id/password/namespace — only the file wins.
-  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+  # TRACEBLOC_NAMESPACE is cleared WITH TB_NAMESPACE: it is the canonical
+  # spelling of the same name, so a value the operator set before the mint
+  # would otherwise outrank the minted slug for any alias-first reader.
+  unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
   # shellcheck disable=SC1090
   source "$cred_file"
   rm -f "$cred_file"
   unset _PROVISION_CRED_FILE
+  # The CLI writes TB_NAMESPACE today; read the canonical first so a CLI that
+  # writes TRACEBLOC_NAMESPACE is honoured without another installer change.
+  if [[ -n "${TRACEBLOC_NAMESPACE:-}" ]]; then TB_NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
 
   if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" == "1" ]]; then
     # Re-run on an already-registered cluster: no fresh credential was minted (the
@@ -412,14 +420,16 @@ provision_client() {
     # this case. A rebuilt host with no local release still reconciles by discovery.
     info "This cluster is already registered (client ${TRACEBLOC_CLIENT_ID:-?}) — reconciling the existing install."
     unset TRACEBLOC_CLIENT_PASSWORD
-    export TRACEBLOC_CLIENT_ID TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+    export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_ADOPTED
+    tb_export_namespace
     return 0
   fi
 
   # Mint: hand the credential + the provisioned namespace to the Helm step. The
   # namespace MUST be the created client's slug (Q2: it equals the heartbeat-
   # reported namespace), so the minted value wins over any TB_NAMESPACE default.
-  export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE
+  export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
+  tb_export_namespace
   # The registered identity is the minted slug (= TB_NAMESPACE = the dashboard
   # name), e.g. "lukas-01" — not the raw typed name (which may be de-duplicated).
   success "Registered as \"${TB_NAMESPACE}\""

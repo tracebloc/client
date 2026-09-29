@@ -90,7 +90,7 @@ For datasets too large to `kubectl cp` (and any production workflow with version
 
 ### Where the PVC name comes from
 
-The default `client-pvc` is set by the parent client chart's PVC block (see `values.yaml#pvc`). If your install renamed it, the ingestor Pod will mount whatever the parent chart configured via `CLIENT_PVC` on jobs-manager. In the rare case of a custom name, `kubectl -n tracebloc get pvc` shows what's actually bound, and that's the value to use as `claimName:` in the pvc-shell manifest above.
+The default `client-pvc` is set by the parent client chart's PVC block (see `values.yaml#pvc`). If your install renamed it, the ingestor Pod will mount whatever the parent chart configured via `TRACEBLOC_CLIENT_PVC` (legacy name `CLIENT_PVC`, set alongside it until 2026-12-31) on jobs-manager. In the rare case of a custom name, `kubectl -n tracebloc get pvc` shows what's actually bound, and that's the value to use as `claimName:` in the pvc-shell manifest above.
 
 ## What this chart owns
 

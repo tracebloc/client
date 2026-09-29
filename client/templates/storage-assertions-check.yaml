@@ -124,9 +124,15 @@ spec:
               value: "/home/kubectl"
             - name: NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            - name: TRACEBLOC_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
             - name: RELEASE
               value: {{ .Release.Name | quote }}
+            - name: TRACEBLOC_RELEASE
+              value: {{ .Release.Name | quote }}
             - name: EXPECTED_STORAGE_CLASS
+              value: {{ include "tracebloc.storageClassName" . | quote }}
+            - name: TRACEBLOC_EXPECTED_STORAGE_CLASS
               value: {{ include "tracebloc.storageClassName" . | quote }}
             {{- /* mysql-pvc stays listed even when mysqlClaimName moves the datadir
             to another claim: it is still a release PVC. The datadir claim is
@@ -134,26 +140,53 @@ spec:
             checked too. */}}
             - name: EXPECTED_PVCS
               value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}{{ if ne (include "tracebloc.mysqlDataClaim" .) (include "tracebloc.mysqlPvc" .) }} {{ include "tracebloc.mysqlDataClaim" . }}{{ end }}"
+            - name: TRACEBLOC_EXPECTED_PVCS
+              value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}{{ if ne (include "tracebloc.mysqlDataClaim" .) (include "tracebloc.mysqlPvc" .) }} {{ include "tracebloc.mysqlDataClaim" . }}{{ end }}"
             # The chart's own (legacy bare-metal) hostPath PV names — in
             # dynamic mode, a claim bound to one of these is a leftover-PV
             # capture, detectable by name alone (no PV read RBAC needed).
             - name: CHART_HOSTPATH_PVS
               value: "{{ include "tracebloc.clientDataPvName" . }} {{ include "tracebloc.clientLogsPvName" . }} {{ include "tracebloc.mysqlPvName" . }}"
+            - name: TRACEBLOC_CHART_HOSTPATH_PVS
+              value: "{{ include "tracebloc.clientDataPvName" . }} {{ include "tracebloc.clientLogsPvName" . }} {{ include "tracebloc.mysqlPvName" . }}"
             - name: HOSTPATH_MODE
+              value: {{ ternary "true" "false" (not (empty $hostPathMode)) | quote }}
+            - name: TRACEBLOC_HOSTPATH_MODE
               value: {{ ternary "true" "false" (not (empty $hostPathMode)) | quote }}
             - name: PV_SCAN
               value: {{ ternary "true" "false" $pvScan | quote }}
+            - name: TRACEBLOC_PV_SCAN
+              value: {{ ternary "true" "false" $pvScan | quote }}
             - name: TIMEOUT_SECONDS
               value: {{ $timeout | quote }}
+            - name: TRACEBLOC_TIMEOUT_SECONDS
+              value: {{ $timeout | quote }}
             - name: NODE_LOCAL_PREFIXES
+              value: {{ join " " $nodeLocalPrefixes | quote }}
+            - name: TRACEBLOC_NODE_LOCAL_PREFIXES
               value: {{ join " " $nodeLocalPrefixes | quote }}
           command:
             - sh
             - -c
             - |
               set -u
+              # Canonical TRACEBLOC_ names first, legacy second (remove_by
+              # 2026-12-31); a blank canonical leaves the legacy value as-is.
+              if [ -n "${TRACEBLOC_NAMESPACE:-}" ]; then NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
+              if [ -n "${TRACEBLOC_RELEASE:-}" ]; then RELEASE="$TRACEBLOC_RELEASE"; fi
               KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
               fail=0
+              # Settings naming: the Job sets each of these under its canonical
+              # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+              # canonical first; a blank or absent canonical leaves the legacy value --
+              # and any default or `set -u` refusal below -- exactly as before.
+              if [ -n "${TRACEBLOC_EXPECTED_STORAGE_CLASS:-}" ]; then EXPECTED_STORAGE_CLASS="$TRACEBLOC_EXPECTED_STORAGE_CLASS"; fi
+              if [ -n "${TRACEBLOC_EXPECTED_PVCS:-}" ]; then EXPECTED_PVCS="$TRACEBLOC_EXPECTED_PVCS"; fi
+              if [ -n "${TRACEBLOC_CHART_HOSTPATH_PVS:-}" ]; then CHART_HOSTPATH_PVS="$TRACEBLOC_CHART_HOSTPATH_PVS"; fi
+              if [ -n "${TRACEBLOC_HOSTPATH_MODE:-}" ]; then HOSTPATH_MODE="$TRACEBLOC_HOSTPATH_MODE"; fi
+              if [ -n "${TRACEBLOC_PV_SCAN:-}" ]; then PV_SCAN="$TRACEBLOC_PV_SCAN"; fi
+              if [ -n "${TRACEBLOC_TIMEOUT_SECONDS:-}" ]; then TIMEOUT_SECONDS="$TRACEBLOC_TIMEOUT_SECONDS"; fi
+              if [ -n "${TRACEBLOC_NODE_LOCAL_PREFIXES:-}" ]; then NODE_LOCAL_PREFIXES="$TRACEBLOC_NODE_LOCAL_PREFIXES"; fi
               echo "[storage-assertions] release=${RELEASE} ns=${NAMESPACE} expected-class=${EXPECTED_STORAGE_CLASS} hostPath-mode=${HOSTPATH_MODE} pv-scan=${PV_SCAN}"
 
               # ── pvc-bound: every release PVC exists and is Bound ──────────

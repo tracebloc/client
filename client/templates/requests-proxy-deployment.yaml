@@ -148,15 +148,31 @@ spec:
           {{- include "tracebloc.proxyEnv" . | nindent 12 }}
             - name: MYSQL_HOST
               value: "mysql-client"
+            {{- /* Settings naming: the queue names follow the service-bus family,
+                 TRACEBLOC_SB_<QUEUE>_QUEUE_NAME, beside the legacy spelling
+                 (remove_by 2026-12-31), same value. */}}
             - name: EXPERIMENTS_QUEUE_NAME
               value: "experiments"
+            - name: TRACEBLOC_SB_EXPERIMENTS_QUEUE_NAME
+              value: "experiments"
             - name: FLOPS_QUEUE_NAME
+              value: "flops"
+            - name: TRACEBLOC_SB_FLOPS_QUEUE_NAME
               value: "flops"
             # client-runtime#79: shared HMAC secret used to VERIFY the per-pod
             # bearer token statelessly (signature + expiry), the same key the
             # jobs-manager uses to mint it. When present, the proxy skips the
             # pod_tokens table entirely.
+            {{- /* Settings naming: each identity name is emitted as the canonical
+                 TRACEBLOC_<name> (a leading TB_ replaced) beside the legacy one, with
+                 the identical secretKeyRef or value. Same Secret keys. Legacy names
+                 stay until remove_by 2026-12-31. */}}
             - name: POD_TOKEN_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: POD_TOKEN_SIGNING_SECRET
+            - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
@@ -171,9 +187,18 @@ spec:
             # byte-identical (mirrors the jobs-manager block).
             - name: SERVICE_DB_ACCOUNTS
               value: "1"
+            - name: TRACEBLOC_SERVICE_DB_ACCOUNTS
+              value: "1"
             - name: TB_META_USER
               value: "tb_meta"
+            - name: TRACEBLOC_META_USER
+              value: "tb_meta"
             - name: TB_META_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tracebloc.secretName" . }}
+                  key: TB_META_PASSWORD
+            - name: TRACEBLOC_META_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}

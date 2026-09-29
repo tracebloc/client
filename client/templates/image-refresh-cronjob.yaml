@@ -177,7 +177,38 @@ data:
     # command-substitution capture sites like `latest="$(...)"`.
     set -eu
 
+    # Settings naming: the chart sets each identity var under its canonical
+    # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+    # canonical first; a blank or absent canonical leaves the legacy value --
+    # and `set -u`'s refusal of an unset one -- exactly as before.
+    if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE_NAME="$TRACEBLOC_RELEASE_NAME"; fi
+    if [ -n "${TRACEBLOC_RELEASE_NAMESPACE:-}" ]; then RELEASE_NAMESPACE="$TRACEBLOC_RELEASE_NAMESPACE"; fi
+
     log() { printf '[image-refresh] %s\n' "$*" >&2; }
+
+    # Settings naming: the CronJob sets each of these under its canonical
+    # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+    # canonical first; a blank or absent canonical leaves the legacy value --
+    # and `set -u`'s refusal of an unset one -- exactly as before.
+    if [ -n "${TRACEBLOC_DEPLOYMENT_NAME:-}" ]; then DEPLOYMENT_NAME="$TRACEBLOC_DEPLOYMENT_NAME"; fi
+    if [ -n "${TRACEBLOC_REQUESTS_PROXY_DEPLOYMENT:-}" ]; then REQUESTS_PROXY_DEPLOYMENT="$TRACEBLOC_REQUESTS_PROXY_DEPLOYMENT"; fi
+    if [ -n "${TRACEBLOC_RESOURCE_MONITOR_DAEMONSET:-}" ]; then RESOURCE_MONITOR_DAEMONSET="$TRACEBLOC_RESOURCE_MONITOR_DAEMONSET"; fi
+    if [ -n "${TRACEBLOC_NODE_AGENTS_NAMESPACE:-}" ]; then NODE_AGENTS_NAMESPACE="$TRACEBLOC_NODE_AGENTS_NAMESPACE"; fi
+    if [ -n "${TRACEBLOC_IMAGE_REGISTRY:-}" ]; then IMAGE_REGISTRY="$TRACEBLOC_IMAGE_REGISTRY"; fi
+    if [ -n "${TRACEBLOC_IMAGE_REGISTRY_RESOLVABLE:-}" ]; then IMAGE_REGISTRY_RESOLVABLE="$TRACEBLOC_IMAGE_REGISTRY_RESOLVABLE"; fi
+    if [ -n "${TRACEBLOC_ROLLOUT_TIMEOUT:-}" ]; then ROLLOUT_TIMEOUT="$TRACEBLOC_ROLLOUT_TIMEOUT"; fi
+    if [ -n "${TRACEBLOC_MAX_REFRESH_ATTEMPTS:-}" ]; then MAX_REFRESH_ATTEMPTS="$TRACEBLOC_MAX_REFRESH_ATTEMPTS"; fi
+    if [ -n "${TRACEBLOC_MAX_SKIP_TICKS:-}" ]; then MAX_SKIP_TICKS="$TRACEBLOC_MAX_SKIP_TICKS"; fi
+    if [ -n "${TRACEBLOC_JOBS_MANAGER_PINNED:-}" ]; then JOBS_MANAGER_PINNED="$TRACEBLOC_JOBS_MANAGER_PINNED"; fi
+    if [ -n "${TRACEBLOC_PODS_MONITOR_PINNED:-}" ]; then PODS_MONITOR_PINNED="$TRACEBLOC_PODS_MONITOR_PINNED"; fi
+    if [ -n "${TRACEBLOC_RESOURCE_MONITOR_PINNED:-}" ]; then RESOURCE_MONITOR_PINNED="$TRACEBLOC_RESOURCE_MONITOR_PINNED"; fi
+    if [ -n "${TRACEBLOC_JOBS_MANAGER_PIN:-}" ]; then JOBS_MANAGER_PIN="$TRACEBLOC_JOBS_MANAGER_PIN"; fi
+    if [ -n "${TRACEBLOC_PODS_MONITOR_PIN:-}" ]; then PODS_MONITOR_PIN="$TRACEBLOC_PODS_MONITOR_PIN"; fi
+    if [ -n "${TRACEBLOC_RESOURCE_MONITOR_PIN:-}" ]; then RESOURCE_MONITOR_PIN="$TRACEBLOC_RESOURCE_MONITOR_PIN"; fi
+    if [ -n "${TRACEBLOC_JOBS_MANAGER_PIN_IGNORED:-}" ]; then JOBS_MANAGER_PIN_IGNORED="$TRACEBLOC_JOBS_MANAGER_PIN_IGNORED"; fi
+    if [ -n "${TRACEBLOC_PODS_MONITOR_PIN_IGNORED:-}" ]; then PODS_MONITOR_PIN_IGNORED="$TRACEBLOC_PODS_MONITOR_PIN_IGNORED"; fi
+    if [ -n "${TRACEBLOC_RESOURCE_MONITOR_PIN_IGNORED:-}" ]; then RESOURCE_MONITOR_PIN_IGNORED="$TRACEBLOC_RESOURCE_MONITOR_PIN_IGNORED"; fi
+    if [ -n "${TRACEBLOC_REQUESTS_PROXY_PINNED:-}" ]; then REQUESTS_PROXY_PINNED="$TRACEBLOC_REQUESTS_PROXY_PINNED"; fi
 
     # #563: guard a FLAPPING deployment. After this many consecutive FAILED
     # rollout attempts in a row, STOP re-restarting and flag the deployment for a
@@ -1353,16 +1384,28 @@ spec:
                   value: "/home/kubectl"
                 - name: RELEASE_NAME
                   value: {{ .Release.Name | quote }}
+                - name: TRACEBLOC_RELEASE_NAME
+                  value: {{ .Release.Name | quote }}
                 - name: RELEASE_NAMESPACE
                   value: {{ .Release.Namespace | quote }}
+                - name: TRACEBLOC_RELEASE_NAMESPACE
+                  value: {{ .Release.Namespace | quote }}
                 - name: DEPLOYMENT_NAME
+                  value: {{ printf "%s-jobs-manager" (include "tracebloc.fullname" .) | quote }}
+                - name: TRACEBLOC_DEPLOYMENT_NAME
                   value: {{ printf "%s-jobs-manager" (include "tracebloc.fullname" .) | quote }}
                 # #569: the two additional workloads reconciled by `set image`.
                 - name: REQUESTS_PROXY_DEPLOYMENT
                   value: {{ include "tracebloc.requestsProxyName" . | quote }}
+                - name: TRACEBLOC_REQUESTS_PROXY_DEPLOYMENT
+                  value: {{ include "tracebloc.requestsProxyName" . | quote }}
                 - name: RESOURCE_MONITOR_DAEMONSET
                   value: {{ include "tracebloc.resourceMonitorName" . | quote }}
+                - name: TRACEBLOC_RESOURCE_MONITOR_DAEMONSET
+                  value: {{ include "tracebloc.resourceMonitorName" . | quote }}
                 - name: NODE_AGENTS_NAMESPACE
+                  value: {{ .Values.nodeAgents.namespace.name | quote }}
+                - name: TRACEBLOC_NODE_AGENTS_NAMESPACE
                   value: {{ .Values.nodeAgents.namespace.name | quote }}
                 # The registry the chart renders into the control-plane pod
                 # images -- ONE helper (tracebloc.tbRegistry: global mirror, else
@@ -1375,6 +1418,8 @@ spec:
                 # "IMAGE_REGISTRY defaults to ..., not the empty string" test).
                 - name: IMAGE_REGISTRY
                   value: {{ include "tracebloc.tbRegistry" . | quote }}
+                - name: TRACEBLOC_IMAGE_REGISTRY
+                  value: {{ include "tracebloc.tbRegistry" . | quote }}
                 # Whether the script can resolve digests on IMAGE_REGISTRY
                 # anonymously -- derived from the same declaration
                 # (tracebloc.imageRefreshResolvableRegistries) that switches the
@@ -1383,6 +1428,8 @@ spec:
                 # log and exit 0 (a mirror install has taken over distribution).
                 - name: IMAGE_REGISTRY_RESOLVABLE
                   value: {{ include "tracebloc.imageRefreshResolvable" . | default "false" | quote }}
+                - name: TRACEBLOC_IMAGE_REGISTRY_RESOLVABLE
+                  value: {{ include "tracebloc.imageRefreshResolvable" . | default "false" | quote }}
                 - name: IMAGE_TAG
                   # RESOLVED, not raw. This is the tag the refresh pulls, so a
                   # documented alias here freezes the edge on a tag the publish
@@ -1390,13 +1437,19 @@ spec:
                   value: {{ include "tracebloc.clientEnv" . | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
+                - name: TRACEBLOC_ROLLOUT_TIMEOUT
+                  value: {{ .Values.imageRefresh.rolloutTimeout | quote }}
                 # #563: consecutive failed-rollout threshold; stop + flag after this.
                 - name: MAX_REFRESH_ATTEMPTS
+                  value: {{ .Values.imageRefresh.maxRefreshAttempts | default 3 | quote }}
+                - name: TRACEBLOC_MAX_REFRESH_ATTEMPTS
                   value: {{ .Values.imageRefresh.maxRefreshAttempts | default 3 | quote }}
                 # backend#1964: consecutive UNSETTLED-skip threshold. The failed-
                 # rollout counter above cannot cover this — it lives after the
                 # settled guard, which a never-Ready pod never gets past.
                 - name: MAX_SKIP_TICKS
+                  value: {{ .Values.imageRefresh.maxSkipTicks | default 8 | quote }}
+                - name: TRACEBLOC_MAX_SKIP_TICKS
                   value: {{ .Values.imageRefresh.maxSkipTicks | default 8 | quote }}
                 # Per-image opt-out flags. A class-1 image is pinned when
                 # tracebloc.pinFor HONOURS `images.<image>.digest`: set, AND
@@ -1414,7 +1467,11 @@ spec:
                 # floating tag; see header.)
                 - name: JOBS_MANAGER_PINNED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $)))) | quote }}
+                - name: TRACEBLOC_JOBS_MANAGER_PINNED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $)))) | quote }}
                 - name: PODS_MONITOR_PINNED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $)))) | quote }}
+                - name: TRACEBLOC_PODS_MONITOR_PINNED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $)))) | quote }}
                 # #569: resource-monitor is refreshed too. It counts as "pinned"
                 # (i.e. skip it) either when an operator set an explicit digest
@@ -1426,6 +1483,8 @@ spec:
                 # twice is what let the render-time and runtime views disagree.
                 - name: RESOURCE_MONITOR_PINNED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.resourceMonitorRefreshPinned" .))) | quote }}
+                - name: TRACEBLOC_RESOURCE_MONITOR_PINNED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.resourceMonitorRefreshPinned" .))) | quote }}
                 # THE PINNED VALUE, not just the fact of a pin (backend#2458).
                 # Skipping before resolving the tag meant nothing ever learned a pin
                 # had gone STALE: a pin set once for a good reason silently became a
@@ -1434,9 +1493,15 @@ spec:
                 # digest the workload actually renders -- an ignored pin is "".
                 - name: JOBS_MANAGER_PIN
                   value: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) | quote }}
+                - name: TRACEBLOC_JOBS_MANAGER_PIN
+                  value: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) | quote }}
                 - name: PODS_MONITOR_PIN
                   value: {{ include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $) | quote }}
+                - name: TRACEBLOC_PODS_MONITOR_PIN
+                  value: {{ include "tracebloc.pinFor" (dict "image" "podsMonitor" "root" $) | quote }}
                 - name: RESOURCE_MONITOR_PIN
+                  value: {{ include "tracebloc.pinFor" (dict "image" "resourceMonitor" "root" $) | quote }}
+                - name: TRACEBLOC_RESOURCE_MONITOR_PIN
                   value: {{ include "tracebloc.pinFor" (dict "image" "resourceMonitor" "root" $) | quote }}
                 # Whether a values pin EXISTS but the render IGNORED it
                 # (tracebloc.pinIgnored: resolved on a registry this release does
@@ -1449,9 +1514,15 @@ spec:
                 # upstream digest change. Same decision as the render and NOTES.
                 - name: JOBS_MANAGER_PIN_IGNORED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "jobsManager" "root" $)))) | quote }}
+                - name: TRACEBLOC_JOBS_MANAGER_PIN_IGNORED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "jobsManager" "root" $)))) | quote }}
                 - name: PODS_MONITOR_PIN_IGNORED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "podsMonitor" "root" $)))) | quote }}
+                - name: TRACEBLOC_PODS_MONITOR_PIN_IGNORED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "podsMonitor" "root" $)))) | quote }}
                 - name: RESOURCE_MONITOR_PIN_IGNORED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "resourceMonitor" "root" $)))) | quote }}
+                - name: TRACEBLOC_RESOURCE_MONITOR_PIN_IGNORED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinIgnored" (dict "image" "resourceMonitor" "root" $)))) | quote }}
                 # requests-proxy follows the jobs-manager digest by default;
                 # this flag is the per-workload override that opts it out -- an
@@ -1459,6 +1530,8 @@ spec:
                 # override: the proxy follows jobs-manager as if it were empty,
                 # which is also what the Deployment renders (tracebloc.effectivePin).
                 - name: REQUESTS_PROXY_PINNED
+                  value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "requestsProxy" "root" $)))) | quote }}
+                - name: TRACEBLOC_REQUESTS_PROXY_PINNED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "requestsProxy" "root" $)))) | quote }}
               securityContext:
                 allowPrivilegeEscalation: false

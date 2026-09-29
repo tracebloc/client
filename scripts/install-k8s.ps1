@@ -22,6 +22,9 @@
 #    $env:TRACEBLOC_ENV = "dev"            optional, canonical name (RFC-0076); if neither this nor the
 #                                            legacy $env:CLIENT_ENV is set, no stage var is added to values
 #    $env:CLIENT_ENV    = "dev"            legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
+#    $env:TRACEBLOC_NAMESPACE = "myns"     default: tracebloc (secure-environment name = k8s namespace;
+#                                            a minted/adopted client uses its own slug instead)
+#    $env:TB_NAMESPACE  = "myns"           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
 #    $env:TRACEBLOC_TRAINING_RESOURCES = "cpu=4,memory=16Gi"   optional; overrides the machine-sized training default
 # =============================================================================
 
@@ -6366,6 +6369,30 @@ function Get-TraceblocClientEnv {
   }
 }
 
+# The secure-environment name from the environment (= the Helm release and the
+# k8s namespace), before sanitising. Settings naming: TRACEBLOC_NAMESPACE is the
+# canonical env var, TB_NAMESPACE the legacy alias (remove_by 2026-12-31). A
+# non-empty canonical wins, else a non-empty legacy value, else "tracebloc" --
+# the same precedence and blank-means-unset rule as the bash installer
+# (common.sh) and Get-TraceblocClientEnv above.
+function Get-TraceblocNamespaceEnv {
+  if ($env:TRACEBLOC_NAMESPACE) { return $env:TRACEBLOC_NAMESPACE }
+  if ($env:TB_NAMESPACE) { return $env:TB_NAMESPACE }
+  return "tracebloc"
+}
+
+# The namespace a `tracebloc client create --credential-file` handed back. The
+# CLI writes TB_NAMESPACE today; the canonical TRACEBLOC_NAMESPACE is read first
+# so a CLI that writes it is honoured without another installer change. Same
+# precedence as Get-TraceblocNamespaceEnv, but NO default: an absent namespace
+# stays empty and the caller's own fallback applies.
+function Get-TraceblocCredentialNamespace {
+  param([hashtable]$Cred)
+  $ns = "$($Cred['TRACEBLOC_NAMESPACE'])".Trim()
+  if (-not $ns) { $ns = "$($Cred['TB_NAMESPACE'])".Trim() }
+  return $ns
+}
+
 # Resolve the backend base URL the same way jobs-manager does
 # (client-runtime/controller.py: TRACEBLOC_ENV/CLIENT_ENV -> backend),
 # defaulting to prod.
@@ -6952,7 +6979,7 @@ function Invoke-ProvisionClient {
   }
 
   $script:TB_PROV_ID = "$($cred['TRACEBLOC_CLIENT_ID'])".Trim()
-  $script:TB_PROV_NS = "$($cred['TB_NAMESPACE'])".Trim()
+  $script:TB_PROV_NS = Get-TraceblocCredentialNamespace -Cred $cred
   if ("$($cred['TRACEBLOC_CLIENT_ADOPTED'])".Trim() -eq "1") {
     # Re-run on an already-registered cluster: no fresh credential was minted
     # (the existing one stands, write-only on the backend). The Helm step
@@ -7239,9 +7266,11 @@ function Install-ClientHelm {
   # Minted/adopted installs land in the client's SLUG namespace (bash parity —
   # it equals the heartbeat-reported namespace). Preset/fallback keep the fixed
   # default ('tracebloc'); advanced/GitOps setups can override with
-  # TB_NAMESPACE=<name>. Never prompted — the client is identified to the
-  # backend by clientId, not this name.
-  if (-not $rawNs) { $rawNs = if ($env:TB_NAMESPACE) { $env:TB_NAMESPACE } else { "tracebloc" } }
+  # TRACEBLOC_NAMESPACE=<name> (canonical) or the legacy TB_NAMESPACE (remove_by
+  # 2026-12-31) -- a non-empty canonical wins, same rule as the bash installer.
+  # Never prompted — the client is identified to the backend by clientId, not
+  # this name.
+  if (-not $rawNs) { $rawNs = Get-TraceblocNamespaceEnv }
   $TB_NAMESPACE = ConvertTo-WorkspaceName -Input_ $rawNs
   $script:TB_NAMESPACE = $TB_NAMESPACE   # share with Wait-ForClientReady / Print-Summary
 

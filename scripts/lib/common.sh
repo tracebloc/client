@@ -1191,6 +1191,25 @@ setup_log_file() {
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
+# The secure-environment name (= the Helm release and the k8s namespace).
+# Settings naming: TRACEBLOC_NAMESPACE is the canonical env var, TB_NAMESPACE
+# the legacy alias (remove_by 2026-12-31). A non-empty TRACEBLOC_NAMESPACE wins,
+# else TB_NAMESPACE, else it stays unset and each reader keeps its own default
+# -- the same precedence and blank-means-unset rule as tb_client_env above.
+# Resolved ONCE, here, into TB_NAMESPACE, the variable the rest of the installer
+# reads and re-assigns (sanitising, adopting an existing release, provisioning);
+# where the installer hands the name on it exports both spellings
+# (tb_export_namespace), so a child that resolves alias-first sees the SAME
+# value and not a stale canonical the user set before the name was decided.
+if [[ -n "${TRACEBLOC_NAMESPACE:-}" ]]; then TB_NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
+
+# tb_export_namespace — export the decided secure-environment name under both
+# spellings. An unset TB_NAMESPACE exports an empty canonical, which every
+# alias-first reader treats as unset.
+tb_export_namespace() {
+  TRACEBLOC_NAMESPACE="${TB_NAMESPACE:-}"
+  export TB_NAMESPACE TRACEBLOC_NAMESPACE
+}
 SERVERS="${SERVERS:-1}"
 AGENTS="${AGENTS:-1}"
 # RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
@@ -1622,7 +1641,7 @@ Leftover data (a new install onto a machine that still holds old data):
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
-  TB_NAMESPACE   Secure-environment name        (default: tracebloc)
+  TRACEBLOC_NAMESPACE  Secure-environment name  (default: tracebloc; legacy: TB_NAMESPACE)
   SERVERS        Control-plane nodes             (default: 1)
   AGENTS         Worker nodes                    (default: 1)
   K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)

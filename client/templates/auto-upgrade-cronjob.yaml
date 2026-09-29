@@ -18,6 +18,13 @@ data:
     # runAsNonRoot pod — both `awk` and `tr` are busybox built-ins.
     set -eu
 
+    # Settings naming: the chart sets each identity var under its canonical
+    # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+    # canonical first; a blank or absent canonical leaves the legacy value --
+    # and `set -u`'s refusal of an unset one -- exactly as before.
+    if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE_NAME="$TRACEBLOC_RELEASE_NAME"; fi
+    if [ -n "${TRACEBLOC_RELEASE_NAMESPACE:-}" ]; then RELEASE_NAMESPACE="$TRACEBLOC_RELEASE_NAMESPACE"; fi
+
     # Helm needs writable cache/config/data dirs. The Pod runs with
     # readOnlyRootFilesystem: true, so point Helm at the emptyDir mounted
     # at /tmp.
@@ -28,6 +35,16 @@ data:
     mkdir -p "$HELM_CACHE_HOME" "$HELM_CONFIG_HOME" "$HELM_DATA_HOME"
 
     log() { printf '[auto-upgrade] %s\n' "$*"; }
+
+    # Settings naming: the CronJob sets each of these under its canonical
+    # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+    # canonical first; a blank or absent canonical leaves the legacy value --
+    # and any default or `set -u` refusal below -- exactly as before.
+    if [ -n "${TRACEBLOC_UPGRADE_TIMEOUT:-}" ]; then UPGRADE_TIMEOUT="$TRACEBLOC_UPGRADE_TIMEOUT"; fi
+    if [ -n "${TRACEBLOC_WEDGE_MIN_AGE_SECONDS:-}" ]; then WEDGE_MIN_AGE_SECONDS="$TRACEBLOC_WEDGE_MIN_AGE_SECONDS"; fi
+    if [ -n "${TRACEBLOC_TELEMETRY_STATUS_NAME:-}" ]; then TELEMETRY_STATUS_NAME="$TRACEBLOC_TELEMETRY_STATUS_NAME"; fi
+    if [ -n "${TRACEBLOC_TELEMETRY_STATUS_ANNOTATION:-}" ]; then TELEMETRY_STATUS_ANNOTATION="$TRACEBLOC_TELEMETRY_STATUS_ANNOTATION"; fi
+    if [ -n "${TRACEBLOC_TELEMETRY_COLLECTOR_NAME:-}" ]; then TELEMETRY_COLLECTOR_NAME="$TRACEBLOC_TELEMETRY_COLLECTOR_NAME"; fi
 
     # #2877: minimum age (seconds) a release must have sat in a pending-* state
     # before we treat it as an ABANDONED wedge (safe to roll back) rather than an
@@ -498,7 +515,11 @@ spec:
               {{- include "tracebloc.proxyEnv" . | nindent 16 }}
                 - name: RELEASE_NAME
                   value: {{ .Release.Name | quote }}
+                - name: TRACEBLOC_RELEASE_NAME
+                  value: {{ .Release.Name | quote }}
                 - name: RELEASE_NAMESPACE
+                  value: {{ .Release.Namespace | quote }}
+                - name: TRACEBLOC_RELEASE_NAMESPACE
                   value: {{ .Release.Namespace | quote }}
                 - name: REPO_URL
                   value: {{ .Values.autoUpgrade.repoUrl | quote }}
@@ -508,6 +529,8 @@ spec:
                   value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: UPGRADE_TIMEOUT
                   value: {{ .Values.autoUpgrade.timeout | quote }}
+                - name: TRACEBLOC_UPGRADE_TIMEOUT
+                  value: {{ .Values.autoUpgrade.timeout | quote }}
                 # #2877: the wedge-vs-in-flight age threshold, in whole seconds.
                 # The script's awk does the age math but not duration parsing, so
                 # convert the human duration here. `| default "45m"` preserves the
@@ -515,15 +538,23 @@ spec:
                 # predates the key (same pattern as activeDeadlineSeconds).
                 - name: WEDGE_MIN_AGE_SECONDS
                   value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
+                - name: TRACEBLOC_WEDGE_MIN_AGE_SECONDS
+                  value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
                 # backend#3550: the names the same-version reconcile reads the
                 # stored manifest and the dry-run render by. Rendered from the SAME
                 # helpers the status template and the Collector DaemonSet use, so
                 # the reader and the writers cannot disagree about a spelling.
                 - name: TELEMETRY_STATUS_NAME
                   value: {{ include "tracebloc.telemetryStatusName" . | quote }}
+                - name: TRACEBLOC_TELEMETRY_STATUS_NAME
+                  value: {{ include "tracebloc.telemetryStatusName" . | quote }}
                 - name: TELEMETRY_STATUS_ANNOTATION
                   value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
+                - name: TRACEBLOC_TELEMETRY_STATUS_ANNOTATION
+                  value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
                 - name: TELEMETRY_COLLECTOR_NAME
+                  value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
+                - name: TRACEBLOC_TELEMETRY_COLLECTOR_NAME
                   value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
               securityContext:
                 allowPrivilegeEscalation: false

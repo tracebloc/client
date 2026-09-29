@@ -15,8 +15,9 @@
 #
 #  Environment variable overrides (optional):
 #    CLUSTER_NAME=myapp          default: tracebloc
-#    TB_NAMESPACE=myns           default: tracebloc  (k8s namespace + local label;
+#    TRACEBLOC_NAMESPACE=myns    default: tracebloc  (k8s namespace + local label;
 #                                not prompted — the client is identified by its credentials)
+#    TB_NAMESPACE=myns           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
 #    SERVERS=1                   default: 1  (control-plane nodes)
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.36.3-k3s1   default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
