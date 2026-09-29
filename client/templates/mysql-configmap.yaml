@@ -29,6 +29,18 @@ data:
   this template does not guess at an engine it cannot name.
   Every other setting below exists unchanged on 5.7, 8.0 and 8.4.
 
+  performance_schema is OFF on every engine, outside the gate. The server
+  default turns it on, and on 8.4 idle it costs 235 MiB: 378 MiB on, 143 MiB
+  off. Nothing in the chart or the services it runs reads it; the one reader,
+  a benchmark harness, already falls back when it is off, and the `sys` schema
+  views it feeds return nothing. It is written `0`, not `OFF`: `SELECT
+  @@GLOBAL.performance_schema` answers `0`, and the e2e compares the derived
+  pair with that answer as a string. It is a startup-only variable, so it takes
+  effect at each MySQL's next NATURAL restart: no checksum annotation rolls the
+  pod, because auto-upgrade would then restart every fleet's MySQL (Recreate,
+  so with downtime) within an hour of the release. The memory request stays as
+  it is until a load test re-derives it.
+
   scripts/tests/lib/mysql-config-expect.sh parses the RENDERED ConfigMap,
   never this template — so the e2e's expectation follows whichever branch
   the installed engine took. client/tests/mysql_test.yaml pins the 5.7
@@ -45,6 +57,8 @@ data:
     innodb_log_file_size = 64M
     {{- end }}
     innodb_log_buffer_size = 16M
+
+    performance_schema = 0
 
     max_connections = 200
     wait_timeout = 28800

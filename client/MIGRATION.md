@@ -2,6 +2,24 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.173 — MySQL runs with `performance_schema` off
+
+**What changed.** The chart's MySQL config (`mysql.cnf`, every engine: 5.7, 8.0
+and 8.4) now sets `performance_schema = 0`. MySQL turns it on by default, and on
+an idle 8.4 server it holds about 235 MiB: 378 MiB with it on, 143 MiB off.
+Nothing in the chart or the services it runs reads it.
+
+**When it takes effect.** `performance_schema` is read only when mysqld starts,
+and this upgrade does not restart MySQL. Each edge picks the setting up at its
+MySQL's next restart for any other reason, such as a node reboot or an image
+change. A restart forced by the chart would take MySQL down on every edge within
+an hour of the release, because MySQL uses the `Recreate` strategy.
+
+**What you have to do: nothing.** The MySQL memory request and limit are
+unchanged. If you query the `performance_schema` or `sys` schemas yourself, they
+return nothing once the setting is in effect. To keep them, set it back in your
+own MySQL config.
+
 ## Upgrading to 1.9.158 — MySQL requests 1Gi, and training runs shrink to fit beside it
 
 **What changed.** MySQL's memory request and limit rise from `704Mi` to `1Gi`.
@@ -69,9 +87,11 @@ it pulls its pinned image once.
 **Check an edge:**
 
 ```bash
-# what the jobs-manager will spawn from
+# what the jobs-manager will spawn from (chart 1.9.171 and later; an older chart
+# sets only the legacy names JOB_IMAGE_HOST, CLIENT_ENV, TRAINING_IMAGE_PINNED
+# and TRAINING_ENGINE_CAPABILITIES, which newer charts still set alongside)
 kubectl get deploy -n <namespace> <release>-jobs-manager -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
-  | grep -E '^(JOB_IMAGE_HOST|CLIENT_ENV|TRAINING_IMAGE_PINNED|TRAINING_ENGINE_CAPABILITIES)='
+  | grep -E '^(TRACEBLOC_JOB_IMAGE_HOST|TRACEBLOC_ENV|TRACEBLOC_TRAINING_IMAGE_PINNED|TRACEBLOC_TRAINING_ENGINE_CAPABILITIES)='
 # what a running training pod was spawned from
 kubectl get pods -n <namespace> -l tracebloc.io/workload=training \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\t"}{.spec.containers[0].imagePullPolicy}{"\n"}{end}'
@@ -478,8 +498,12 @@ Confirm which host the training pods will pull from:
 
 ```bash
 kubectl get deploy -n <namespace> <release>-jobs-manager \
-  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="JOB_IMAGE_HOST")].value}{"\n"}'
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRACEBLOC_JOB_IMAGE_HOST")].value}{"\n"}'
 ```
+
+Chart 1.9.171 and later set this as `TRACEBLOC_JOB_IMAGE_HOST` and still set the
+legacy `JOB_IMAGE_HOST` beside it with the same value. On an older chart, read
+`JOB_IMAGE_HOST`.
 
 ## Upgrading to 1.9.113 — the control-plane images pull from `ghcr.io` by default
 
@@ -892,8 +916,12 @@ Confirm the edge now tracks the chart pin:
 
 ```bash
 kubectl get deploy -n <namespace> <release>-jobs-manager \
-  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="TRACEBLOC_INGESTOR_IMAGE_DIGEST")].value}{"\n"}'
 ```
+
+Chart 1.9.169 and later set this as `TRACEBLOC_INGESTOR_IMAGE_DIGEST` and still
+set the legacy `INGESTOR_IMAGE_DIGEST` beside it with the same value. On an
+older chart, read `INGESTOR_IMAGE_DIGEST`.
 
 **Canary edges.** To float one prod edge on the tag while the rest of the fleet
 stays pinned — e.g. to validate a new ingestor release in place — set

@@ -8933,7 +8933,8 @@ $TRACEBLOC_CLI_INSTALL_DIR = if ($env:LOCALAPPDATA) {
 # CWE-426). Adds NO new PATH entry. Best-effort/non-fatal — the caller wraps it:
 #   * no-op off-Windows ($TRACEBLOC_CLI_INSTALL_DIR / $TOOL_DIR empty), and
 #   * no-op when the source exe isn't where we expect (the CLI installer honored an
-#     INSTALL_PREFIX override) — Test-TraceblocCli then reports the real location.
+#     TRACEBLOC_INSTALL_PREFIX / legacy INSTALL_PREFIX override) — Test-TraceblocCli
+#     then reports the real location.
 # Copy, not a shim: a `tb.cmd`-style shim would bake the admin's LOCALAPPDATA path and
 # reintroduce the unreadable-profile problem for the daily user. The `tb` alias stays
 # on the installing user's own User PATH (the CLI installer's shim); `tracebloc` is the
@@ -9045,16 +9046,17 @@ function Test-TraceblocCli {
 
   if (Has "tracebloc") {
     # Resolvable in THIS process — but only via the installing user's own User PATH, not
-    # the machine-wide copy (the $TOOL_DIR copy didn't land, e.g. an INSTALL_PREFIX
+    # the machine-wide copy (the $TOOL_DIR copy didn't land, e.g. a TRACEBLOC_INSTALL_PREFIX
     # override or a copy that failed). A fresh, non-interactive shell or a different user
     # still won't find it (backend#2915), so say so honestly rather than a false "ready".
     Warn "tracebloc CLI installed for you, but not machine-wide -- a fresh shell or another user may not resolve it."
     if ($machineExe) { Hint "  Expected machine-wide at: $machineExe" }
     # NOT "re-run as Administrator": the installer has already self-elevated, so another
     # run hits the same no-op — the machine-wide copy is absent because the copy FAILED
-    # (see the log) or a custom INSTALL_PREFIX put the CLI somewhere Publish never sees
-    # (Bugbot). Name the real causes instead of a fix that can't work.
-    Hint "  The copy into that dir didn't land -- check the install log, or a custom INSTALL_PREFIX put the CLI elsewhere."
+    # (see the log) or a custom TRACEBLOC_INSTALL_PREFIX (legacy INSTALL_PREFIX) put the
+    # CLI somewhere Publish never sees (Bugbot). Name the real causes instead of a fix
+    # that can't work.
+    Hint "  The copy into that dir didn't land -- check the install log, or a custom TRACEBLOC_INSTALL_PREFIX (or legacy INSTALL_PREFIX) put the CLI elsewhere."
     if ($script:LOG_FILE) { Hint "  Log: $script:LOG_FILE" }
     return
   }
