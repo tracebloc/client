@@ -314,11 +314,12 @@ upgrade_cli_only() {
   # where a CLI hiccup is non-fatal because the client is already connected — a
   # FAILED update here must NOT report success: it would leave the update nag in
   # place while `tracebloc upgrade` looked like it worked (Bugbot). When we know
-  # the target (TB_CLI_LATEST) and the CLI is verifiably STILL behind it, exit
+  # the target (TB_CLI_LATEST, else TRACEBLOC_CLI_LATEST -- the name the CLI sets
+  # comes first, as in assess.sh) and the CLI is verifiably STILL behind it, exit
   # non-zero (install_tracebloc_cli has already printed how to retry). Otherwise
   # — updated, or target/version unreadable so we can't PROVE a failure — exit 0.
   local latest now
-  latest="${TB_CLI_LATEST:-}"; latest="${latest#v}"
+  latest="${TB_CLI_LATEST:-${TRACEBLOC_CLI_LATEST:-}}"; latest="${latest#v}"
   now="$(_cli_version_short 2>/dev/null || true)"; now="${now#v}"
   if [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [[ "$now" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
      && _version_lt "$now" "$latest"; then

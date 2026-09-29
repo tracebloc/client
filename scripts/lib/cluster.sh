@@ -1003,7 +1003,7 @@ guard_leftover_data() {
       error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
   --reuse-data                    ${reuse_desc}
   --wipe-data                     delete it and start fresh
-  HOST_DATA_DIR=<new-path> ...    install into a different directory
+  TRACEBLOC_HOST_DATA_DIR=<new-path> ...  install into a different directory
   (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"
     fi
   fi

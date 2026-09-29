@@ -2428,12 +2428,93 @@ lives in one place (Saqlain, client#996). Three situations, not two (backend#221
                                           the API server rejects beside any other
                                           limit). Two different explicit values are
                                           written as given; the runtime warns once.
+
+Each var renders under its canonical TRACEBLOC_ name too (TRACEBLOC_GPU_REQUESTS /
+TRACEBLOC_GPU_LIMITS), from the same value and behind the same gate (settings
+naming, backend#3846; legacy remove_by 2026-12-31). The values keys stay
+`env.GPU_REQUESTS` / `env.GPU_LIMITS` -- they are the chart's input API.
 */}}
 {{- define "tracebloc.gpuEnv" -}}
 {{- if hasKey .Values.env "GPU_LIMITS" }}
+{{- $req := ternary .Values.env.GPU_REQUESTS .Values.env.GPU_LIMITS (hasKey .Values.env "GPU_REQUESTS") | default "" }}
+{{- $lim := .Values.env.GPU_LIMITS | default "" }}
 - name: GPU_REQUESTS
-  value: {{ if hasKey .Values.env "GPU_REQUESTS" }}{{ .Values.env.GPU_REQUESTS | default "" | quote }}{{ else }}{{ .Values.env.GPU_LIMITS | default "" | quote }}{{ end }}
+  value: {{ $req | quote }}
+- name: TRACEBLOC_GPU_REQUESTS
+  value: {{ $req | quote }}
 - name: GPU_LIMITS
-  value: {{ .Values.env.GPU_LIMITS | default "" | quote }}
+  value: {{ $lim | quote }}
+- name: TRACEBLOC_GPU_LIMITS
+  value: {{ $lim | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
+jobs-manager containers, dual-emitted where the name has a TRACEBLOC_ canonical
+(settings naming, backend#3846; legacy remove_by 2026-12-31).
+Usage: {{ include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) }}
+The caller keeps its own exclusion list; this renders only what passed it.
+
+WHY THE PASSTHROUGH HAS TO DUAL-EMIT. The chart renders a legacy name and its
+canonical side by side, and client-runtime reads the canonical FIRST. A
+passthrough copy renders after the chart's and wins (Kubernetes keeps the last
+duplicate), so an `env.JOB_IMAGE_HOST` override that re-rendered only the
+legacy name would leave the canonical at the chart's value -- and an alias-first
+reader would silently ignore the operator. For every name listed below the
+passthrough therefore renders BOTH spellings with the one value, and either
+spelling of the values key has the same effect:
+
+  * `env.X` alone                  -> X and TRACEBLOC_X, both = env.X.
+  * `env.TRACEBLOC_X` alone        -> the same pair, both = env.TRACEBLOC_X.
+  * both set, canonical non-empty  -> the canonical wins (the alias-first rule);
+                                      env.X renders nothing, so no duplicate.
+  * both set, canonical empty      -> the range already skips the empty one, so
+                                      env.X renders the pair (blank canonical =
+                                      legacy, as every reader treats it).
+
+The list is every legacy name either container dual-emits that the other's (or
+its own) passthrough does not exclude, plus the operator knobs the chart never
+renders itself and only passes through (the last line). TB_X maps to
+TRACEBLOC_X. A name excluded from a container's passthrough never reaches this
+helper there, so listing it is inert in that container. The values keys the
+chart READS (`env.GPU_LIMITS`, `env.RESOURCE_*`, ...) are its input API and are
+not listed: the chart renders both names from them and excludes both from the
+passthrough. scripts/tests/chart-env-passthrough-alias.bats derives the pairs
+from the render and fails on one missing here.
+*/}}
+{{- define "tracebloc.envPassthroughEntry" -}}
+{{- $aliased := list
+      "CLIENT_PASSWORD" "CLIENT_PVC" "CLIENT_LOGS_PVC"
+      "POD_TOKEN_SIGNING_SECRET" "POD_TOKEN_TTL_SECONDS"
+      "PER_INGESTION_TABLES" "PER_DATASET_PVCS" "PER_EXPERIMENT_DB_CREDS" "NARROW_EDGEUSER" "SERVICE_DB_ACCOUNTS"
+      "TB_CREDMGR_USER" "TB_CREDMGR_PASSWORD" "TB_META_USER" "TB_META_PASSWORD" "TB_INGEST_USER" "TB_INGEST_PASSWORD"
+      "INGESTOR_IMAGE_REPOSITORY" "INGESTOR_IMAGE_TAG" "INGESTOR_IMAGE_DIGEST"
+      "REQUESTS_PROXY_URL" "EGRESS_PROXY_URL" "JOB_IMAGE_HOST"
+      "TELEMETRY_TOKEN_SECRET_NAMESPACE" "TELEMETRY_TOKEN_SECRET_NAME" "TELEMETRY_TOKEN_SECRET_KEY"
+      "TRAINING_IMAGE_DIGESTS" "TRAINING_IMAGE_PINNED" "TRAINING_ENGINE_CAPABILITIES"
+      "NODE_AGENTS_NAMESPACE" "NODE_NAME" "RELEASE_NAME" "RELEASE_SECRET_NAME"
+      "GPU_VISIBLE_DEVICES" "GPU_SCALE_FROM_ZERO_GRACE_SECONDS" "GPU_POD_ENVELOPE"
+      "TRAINING_SHM_BOUND" "TRAINING_SHM_SIZE_LIMIT"
+-}}
+{{- $key := .key -}}
+{{- $legacy := "" -}}
+{{- if has $key $aliased -}}
+{{-   $legacy = $key -}}
+{{- else if hasPrefix "TRACEBLOC_" $key -}}
+{{-   $stem := trimPrefix "TRACEBLOC_" $key -}}
+{{-   if has $stem $aliased -}}{{ $legacy = $stem }}{{- else if has (printf "TB_%s" $stem) $aliased -}}{{ $legacy = printf "TB_%s" $stem }}{{- end -}}
+{{- end -}}
+{{- if not $legacy }}
+- name: {{ $key }}
+  value: {{ .value | quote }}
+{{- else -}}
+{{-   $canon := printf "TRACEBLOC_%s" (trimPrefix "TB_" $legacy) -}}
+{{-   if or (eq $key $canon) (not (get .env $canon)) }}
+- name: {{ $legacy }}
+  value: {{ .value | quote }}
+- name: {{ $canon }}
+  value: {{ .value | quote }}
+{{-   end }}
 {{- end }}
 {{- end }}

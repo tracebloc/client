@@ -1496,11 +1496,28 @@ run_prepare_host() {
   # must NOT fall back to $SUDO_USER, which is the ADMIN who ran prepare-host, not
   # the researcher (adding the admin would report success while the researcher
   # still can't install; Bugbot #377). Best-effort: never fail the prep over it.
+  #
+  # TB_PREPARE_USER is the ONLY name this grant reads, although the other CLI
+  # hand-off names also accept a TRACEBLOC_ spelling. Every `tracebloc
+  # prepare-host` clears an inherited TB_PREPARE_USER and sets it only when a
+  # researcher was named, so a bare `tracebloc prepare-host` grants nobody. Older
+  # CLIs clear only that spelling, and they run this same live installer: a
+  # TRACEBLOC_PREPARE_USER left in the admin's shell would pass straight through
+  # them, and reading it here would hand docker-group access (root-equivalent on
+  # this host) to a user the admin did not name on this run. So that spelling is
+  # reported below, never read.
   local target="${TB_PREPARE_USER:-}"
   # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
   # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
   # messaging even though a real username was intended (Bugbot r3).
   target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
+  # A CLI that sets both spellings sets them equal, so only a DIFFERENT value
+  # (or one with no TB_PREPARE_USER beside it) is worth a warning.
+  local _canon="${TRACEBLOC_PREPARE_USER:-}"
+  _canon="${_canon#"${_canon%%[![:space:]]*}"}"; _canon="${_canon%"${_canon##*[![:space:]]}"}"
+  if [[ -n "$_canon" && "$_canon" != "$target" ]]; then
+    warn "Ignoring TRACEBLOC_PREPARE_USER: prepare-host grants docker-group access only to the user named in TB_PREPARE_USER (or on the tracebloc prepare-host command line)."
+  fi
   local granted=0
   if [[ -n "$target" && "$target" != "root" ]]; then
     if sudo usermod -aG docker "$target" 2>/dev/null; then

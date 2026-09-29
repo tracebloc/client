@@ -1280,7 +1280,22 @@ K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 # script is NOT used: it floats on the mutable helm/helm@main and needs
 # openssl, which minimal cloud images don't ship (#395).
 HELM_VERSION="${HELM_VERSION:-v4.2.3}"
+# Settings naming: TRACEBLOC_HOST_DATA_DIR is the canonical env var, HOST_DATA_DIR
+# the legacy one (remove_by 2026-12-31) -- the same rule as TRACEBLOC_NAMESPACE
+# above: a non-empty canonical wins, else the legacy, else the default. Resolved
+# ONCE, here, into HOST_DATA_DIR, the variable the rest of the installer reads
+# and re-assigns (--data-dir, validate_config's normalisation, the leftover
+# guard's new-dir choice); validate_config then exports both spellings
+# (tb_export_host_data_dir), so a child resolving alias-first sees the decided
+# path and not a stale canonical.
+if [[ -n "${TRACEBLOC_HOST_DATA_DIR:-}" ]]; then HOST_DATA_DIR="$TRACEBLOC_HOST_DATA_DIR"; fi
 HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+
+# tb_export_host_data_dir — export the decided data dir under both spellings.
+tb_export_host_data_dir() {
+  TRACEBLOC_HOST_DATA_DIR="${HOST_DATA_DIR:-}"
+  export HOST_DATA_DIR TRACEBLOC_HOST_DATA_DIR
+}
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
 # mount like /data01/tracebloc — the installer bind-mounts it into the cluster
@@ -1343,6 +1358,7 @@ validate_config() {
   [[ "${dir#$HOME/}" == "$dir" ]] && \
     error "HOST_DATA_DIR must be under \$HOME (got: $HOST_DATA_DIR)"
   HOST_DATA_DIR="$dir"
+  tb_export_host_data_dir
 
   # Optional dataset dir (backend#743): unlike HOST_DATA_DIR it MAY live outside
   # $HOME (a mounted network volume like /data01). It must already EXIST and be
@@ -1647,7 +1663,7 @@ Advanced configuration (environment variables):
   K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
   HELM_VERSION   Helm release tag                (default: v4.2.3; "latest" resolves at install time)
-  HOST_DATA_DIR  Persistent data directory       (default: ~/.tracebloc)
+  TRACEBLOC_HOST_DATA_DIR  Persistent data directory  (default: ~/.tracebloc; legacy: HOST_DATA_DIR)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
 

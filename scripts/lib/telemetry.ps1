@@ -193,8 +193,11 @@ function Write-TelemetryDebug {
 #  well-formed. Hence a helper with an explicit precedence rather than two
 #  one-line fixes, and a test that asserts the emitter reads the names the
 #  installer actually sets.
+#  -EnvVar takes one name or several, read IN ORDER, first non-blank wins: the
+#  settings-naming canonical first, then its legacy spelling (remove_by
+#  2026-12-31), e.g. -EnvVar 'TRACEBLOC_HOST_DATA_DIR','HOST_DATA_DIR'.
 function Get-InstallerValue {
-  param([string]$ScriptVar, [string]$EnvVar)
+  param([string]$ScriptVar, [string[]]$EnvVar)
   try {
     if ($ScriptVar) {
       # -Scope Script resolves to the DOT-SOURCING script's scope, which is
@@ -204,8 +207,9 @@ function Get-InstallerValue {
       if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return [string]$v }
     }
   } catch { }
-  if ($EnvVar) {
-    $e = [Environment]::GetEnvironmentVariable($EnvVar)
+  foreach ($name in @($EnvVar)) {
+    if (-not $name) { continue }
+    $e = [Environment]::GetEnvironmentVariable($name)
     if (-not [string]::IsNullOrWhiteSpace($e)) { return $e }
   }
   return ''
@@ -607,7 +611,7 @@ function Get-TelemetryEvent {
 
 # ── Delivery ─────────────────────────────────────────────────────────────────
 function Get-TelemetrySpoolDir {
-  $root = Get-InstallerValue -ScriptVar 'HOST_DATA_DIR' -EnvVar 'HOST_DATA_DIR'
+  $root = Get-InstallerValue -ScriptVar 'HOST_DATA_DIR' -EnvVar 'TRACEBLOC_HOST_DATA_DIR', 'HOST_DATA_DIR'
   if ([string]::IsNullOrWhiteSpace($root)) {
     $home_ = $env:USERPROFILE
     if ([string]::IsNullOrWhiteSpace($home_)) { $home_ = $HOME }
@@ -697,7 +701,7 @@ function Send-TelemetryRecord {
   # Same precedence as Get-TelemetrySpoolDir, and it MUST match it: reading a
   # different name here than the path is built from is how the gate and the write
   # end up disagreeing.
-  $root = Get-InstallerValue -ScriptVar 'HOST_DATA_DIR' -EnvVar 'HOST_DATA_DIR'
+  $root = Get-InstallerValue -ScriptVar 'HOST_DATA_DIR' -EnvVar 'TRACEBLOC_HOST_DATA_DIR', 'HOST_DATA_DIR'
   if (-not [string]::IsNullOrWhiteSpace($root) -and (Test-Path -LiteralPath $root -PathType Container)) {
     try {
       $spool = Get-TelemetrySpoolPath

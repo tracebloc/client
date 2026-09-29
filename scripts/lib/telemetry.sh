@@ -165,7 +165,9 @@ TB_TELEMETRY_VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'
 
 # How many events the local spool keeps. Bounded because it is a file on a
 # customer's machine that nothing drains until #1905's forwarder exists.
-TB_TELEMETRY_SPOOL_MAX="${TB_TELEMETRY_SPOOL_MAX:-50}"
+# Settings naming: TRACEBLOC_TELEMETRY_SPOOL_MAX is canonical, TB_TELEMETRY_SPOOL_MAX
+# the legacy spelling (remove_by 2026-12-31); a non-empty canonical wins.
+TB_TELEMETRY_SPOOL_MAX="${TRACEBLOC_TELEMETRY_SPOOL_MAX:-${TB_TELEMETRY_SPOOL_MAX:-50}}"
 
 # ── Clock ────────────────────────────────────────────────────────────────────
 # Second resolution, multiplied up. BSD date (macOS, which is half the install

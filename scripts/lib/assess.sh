@@ -283,14 +283,18 @@ _assess_cli_outdated() {
 # which is exactly what the user asked for. Only a latest we can read AND that the
 # installed CLI already meets returns "not behind".
 _assess_cli_behind_latest() {
-  [[ "${TB_UPGRADE_CLI:-0}" == 1 ]] || return 1
+  # TB_UPGRADE_CLI / TB_CLI_LATEST are read FIRST, their TRACEBLOC_ spellings
+  # only when the TB_ one is unset or blank. Every released CLI sets the TB_
+  # names and older CLIs set nothing else, so what the CLI set must outrank a
+  # TRACEBLOC_ value left in the user's shell.
+  [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 ]] || return 1
   local bin ver latest
   bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
   ver="$("$bin" version 2>/dev/null || true)"
   ver="${ver%%$'\n'*}"                     # first line
   ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
   ver="${ver#v}"
-  latest="${TB_CLI_LATEST:-}"; latest="${latest#v}"
+  latest="${TB_CLI_LATEST:-${TRACEBLOC_CLI_LATEST:-}}"; latest="${latest#v}"
   # Can't prove current (missing/unparseable latest, or unreadable version) -> update.
   [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
   [[ "$ver"    =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0

@@ -186,8 +186,11 @@ fi
 # INGESTOR_IMAGE_REPOSITORY carries six lines of them between its name and its
 # value -- so "the next line" returned a comment and the ingestor entry came out
 # as prose with a digest glued on. Measured, not guessed: /tmp render line 2351.
+# The name ends at a non-name character: with the canonical read first, an
+# unbounded match would take `TRACEBLOC_ENV` from a `TRACEBLOC_ENV_<X>` entry
+# rendered above it -- a prefix-sharing name, silently the wrong value.
 first_env_value() {   # $1 = env var name; prints the rendered value, or nothing
-  awk -v want="name: $1" '
+  awk -v want="name: $1([^A-Za-z0-9_]|\$)" '
     $0 ~ want { found = 1; next }
     found && /^[[:space:]]*value:/ {
       sub(/^[[:space:]]*value:[[:space:]]*/, "")
@@ -198,13 +201,26 @@ first_env_value() {   # $1 = env var name; prints the rendered value, or nothing
   ' "$RENDER"
 }
 
-job_host=$(first_env_value JOB_IMAGE_HOST)
-[ -n "$job_host" ] || { echo "list-images: JOB_IMAGE_HOST is absent from the render, so the training-image host is UNKNOWN." >&2; exit 1; }
+# Settings naming: the chart sets each of these under its
+# TRACEBLOC_ canonical beside the legacy name, and a render of an OLDER chart
+# (an operator's pinned --chart ref) carries the legacy name alone. So the
+# canonical is read first and the legacy name is the fallback -- a blank or
+# absent canonical leaves the legacy value exactly as before. Legacy reads go
+# with the legacy names, remove_by 2026-12-31.
+env_value_alias() {   # $1 = canonical, $2 = legacy; prints the first non-empty value
+  local v
+  v=$(first_env_value "$1")
+  [ -n "$v" ] || v=$(first_env_value "$2")
+  printf '%s\n' "$v"
+}
 
-ing_repo=$(first_env_value INGESTOR_IMAGE_REPOSITORY)
-ing_tag=$(first_env_value INGESTOR_IMAGE_TAG)
-ing_digest=$(first_env_value INGESTOR_IMAGE_DIGEST)
-[ -n "$ing_repo" ] || { echo "list-images: INGESTOR_IMAGE_REPOSITORY is absent from the render." >&2; exit 1; }
+job_host=$(env_value_alias TRACEBLOC_JOB_IMAGE_HOST JOB_IMAGE_HOST)
+[ -n "$job_host" ] || { echo "list-images: TRACEBLOC_JOB_IMAGE_HOST/JOB_IMAGE_HOST is absent from the render, so the training-image host is UNKNOWN." >&2; exit 1; }
+
+ing_repo=$(env_value_alias TRACEBLOC_INGESTOR_IMAGE_REPOSITORY INGESTOR_IMAGE_REPOSITORY)
+ing_tag=$(env_value_alias TRACEBLOC_INGESTOR_IMAGE_TAG INGESTOR_IMAGE_TAG)
+ing_digest=$(env_value_alias TRACEBLOC_INGESTOR_IMAGE_DIGEST INGESTOR_IMAGE_DIGEST)
+[ -n "$ing_repo" ] || { echo "list-images: TRACEBLOC_INGESTOR_IMAGE_REPOSITORY/INGESTOR_IMAGE_REPOSITORY is absent from the render." >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # The training-image TAG comes from the render, not from a default.
@@ -222,11 +238,11 @@ ing_digest=$(first_env_value INGESTOR_IMAGE_DIGEST)
 # than the values describe, but a disagreement is reported rather than silently
 # resolved: a mismatch is far more likely a mistake than an intention.
 # ---------------------------------------------------------------------------
-rendered_env=$(first_env_value CLIENT_ENV)
+rendered_env=$(env_value_alias TRACEBLOC_ENV CLIENT_ENV)   # the stage canonical is TRACEBLOC_ENV (the canon wins)
 
 if [ -z "$ENV_TAG" ]; then
   if [ -z "$rendered_env" ]; then
-    echo "list-images: CLIENT_ENV is absent from the render, so the training-image tag is UNKNOWN." >&2
+    echo "list-images: TRACEBLOC_ENV/CLIENT_ENV is absent from the render, so the training-image tag is UNKNOWN." >&2
     echo "  Refusing to guess: a wrong tag mirrors the wrong training set, which is the" >&2
     echo "  failure this tool exists to prevent. Pass --env prod|stg|dev to state it." >&2
     exit 1

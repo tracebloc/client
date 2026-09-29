@@ -497,7 +497,11 @@ spec:
         */}}
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
+        {{- /* Each of the three under its canonical TRACEBLOC_ name too, from the
+             same expression (backend#3846; legacy remove_by 2026-12-31). */}}
         - name: TELEMETRY_TOKEN_SECRET_NAMESPACE
+          value: {{ .Values.nodeAgents.namespace.name | quote }}
+        - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
         - name: TELEMETRY_TOKEN_SECRET_NAME
           # Release-scoped, resolved through the one helper the reader and RBAC also
@@ -505,7 +509,11 @@ spec:
           # (backend#2625). jobs-manager writes THIS name; the daemonset's pre-flight
           # additionally tolerates the legacy fixed name until every edge has one.
           value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
+        - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAME
+          value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
         - name: TELEMETRY_TOKEN_SECRET_KEY
+          value: {{ $tokEnv.key | default "token" | quote }}
+        - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
         {{- /* The client identity under both names: TRACEBLOC_CLIENT_ID /
              TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
@@ -591,6 +599,8 @@ spec:
         # only when enabled so default installs stay byte-identical.
         - name: PER_DATASET_PVCS
           value: "1"
+        - name: TRACEBLOC_PER_DATASET_PVCS
+          value: "1"
         {{- end }}
 {{- /* Refuse a mis-paired narrowing before the Deployment is patched. */ -}}
 {{- include "tracebloc.assertNarrowEdgeuserIsSafe" . }}
@@ -601,6 +611,8 @@ spec:
         # a runtime flag). jobs-manager refuses this unless the whole posture is
         # retired; the render refuses it too, above. It REVOKEs, never DROPs.
         - name: NARROW_EDGEUSER
+          value: "1"
+        - name: TRACEBLOC_NARROW_EDGEUSER
           value: "1"
         {{- end }}
         {{- if (include "tracebloc.perExperimentDbCreds" .) }}
@@ -759,7 +771,11 @@ spec:
         # DNS -- which the training NetworkPolicy no longer lets them reach.
         - name: RESTRICTED_DNS_NAMESERVER
           value: {{ .clusterIP | default (printf "restricted-dns-service.%s.svc.%s" $.Release.Namespace (trimSuffix "." (.clusterDomain | default "cluster.local"))) | quote }}
+        - name: TRACEBLOC_RESTRICTED_DNS_NAMESERVER
+          value: {{ .clusterIP | default (printf "restricted-dns-service.%s.svc.%s" $.Release.Namespace (trimSuffix "." (.clusterDomain | default "cluster.local"))) | quote }}
         - name: RESTRICTED_DNS_CLUSTER_DOMAIN
+          value: {{ trimSuffix "." (.clusterDomain | default "cluster.local") | quote }}
+        - name: TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN
           value: {{ trimSuffix "." (.clusterDomain | default "cluster.local") | quote }}
         {{- end }}
         {{- end }}
@@ -778,6 +794,8 @@ spec:
         # upgrades.
         # Trailing slash: the runtime concatenates <host><repo>:<tag> verbatim.
         - name: JOB_IMAGE_HOST
+          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
+        - name: TRACEBLOC_JOB_IMAGE_HOST
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- if include "tracebloc.useImagePullSecrets" . }}
         # IMAGE_PULL_SECRET_NAME is the pull Secret jobs-manager puts on the
@@ -799,6 +817,8 @@ spec:
         # Skew-safe both ways: a client-runtime older than backend#2119 ignores
         # this var, and a newer one treats its absence as "public".
         - name: IMAGE_PULL_SECRET_NAME
+          value: {{ include "tracebloc.registrySecretName" . | quote }}
+        - name: TRACEBLOC_IMAGE_PULL_SECRET_NAME
           value: {{ include "tracebloc.registrySecretName" . | quote }}
         {{- end }}
         {{- $clientEnv := include "tracebloc.clientEnv" . }}
@@ -839,6 +859,8 @@ spec:
         {{- if $trainingPins }}
         - name: TRAINING_IMAGE_DIGESTS
           value: {{ $training.digests | toJson | quote }}
+        - name: TRACEBLOC_TRAINING_IMAGE_DIGESTS
+          value: {{ $training.digests | toJson | quote }}
         {{- end }}
         {{- /* `hasKey` first: on a --reuse-values upgrade from a release that
              predates images.training the key is ABSENT, and `toString` of an
@@ -847,9 +869,13 @@ spec:
         {{- if and (hasKey $training "pinned") (ne (toString $training.pinned) "") }}
         - name: TRAINING_IMAGE_PINNED
           value: {{ $training.pinned | toString | quote }}
+        - name: TRACEBLOC_TRAINING_IMAGE_PINNED
+          value: {{ $training.pinned | toString | quote }}
         {{- end }}
         {{- if and $trainingPins $training.capabilities }}
         - name: TRAINING_ENGINE_CAPABILITIES
+          value: {{ $training.capabilities | quote }}
+        - name: TRACEBLOC_TRAINING_ENGINE_CAPABILITIES
           value: {{ $training.capabilities | quote }}
         {{- end }}
         # Where the resource-monitor DaemonSet lives, for the heartbeat version
@@ -948,6 +974,8 @@ spec:
         # risk overruling a human. Consumers MUST treat `unknown` as `user`.
         - name: RESOURCE_PROVENANCE
           value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
+        - name: TRACEBLOC_RESOURCE_PROVENANCE
+          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
         # #343: never stamp a PHANTOM GPU. Emitting the "nvidia.com/gpu=1"
         # default on a CPU-only install surfaced a GPU that was not there in
@@ -1042,6 +1070,8 @@ spec:
           value: {{ .Release.Name | quote }}
         - name: RELEASE_SECRET_NAME
           value: {{ include "tracebloc.secretName" . | quote }}
+        - name: TRACEBLOC_RELEASE_SECRET_NAME
+          value: {{ include "tracebloc.secretName" . | quote }}
         - name: MYSQL_MIGRATION_JOB_IMAGE
           value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         {{- if .Values.autoUpgrade.enabled }}
@@ -1085,9 +1115,8 @@ spec:
              restricted resolver with whatever the value named -- the cluster DNS
              included, which is the exfiltration path restrictedDns closes. The
              supported knobs are `restrictedDns.clusterIP` / `.clusterDomain`. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
-        - name: {{ $key }}
-          value: {{ $value | quote }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
+        {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}
       - name: pods-monitor-container
@@ -1156,6 +1185,8 @@ spec:
         # images.traceblocRegistry, then the chart default (ghcr.io).
         - name: JOB_IMAGE_HOST
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
+        - name: TRACEBLOC_JOB_IMAGE_HOST
+          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- $clientEnv := include "tracebloc.clientEnv" . }}
         - name: TRACEBLOC_ENV
           value: {{ $clientEnv | quote }}
@@ -1194,6 +1225,8 @@ spec:
         # risk overruling a human. Consumers MUST treat `unknown` as `user`.
         - name: RESOURCE_PROVENANCE
           value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
+        - name: TRACEBLOC_RESOURCE_PROVENANCE
+          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
         # #343: only stamp the GPU vars when a GPU is actually configured (see
         # the api container above) — GPU_REQUESTS and GPU_LIMITS share one gate,
@@ -1215,9 +1248,8 @@ spec:
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
-        - name: {{ $key }}
-          value: {{ $value | quote }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
+        {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}

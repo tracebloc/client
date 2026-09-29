@@ -22,7 +22,8 @@
 #    AGENTS=1                    default: 1  (worker nodes)
 #    K8S_VERSION=v1.36.3-k3s1   default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
-#    HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
+#    HOST_DATA_DIR=~/.tracebloc  legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
 #    TB_STORAGE_MODE=hostpath    default: node-local  (RFC-0003 Option C; D15 flip, client#456)
 #                                node-local (default) stores datasets on k3s local-path
 #                                INSIDE the node — no ~/.tracebloc host dirs, wiped on

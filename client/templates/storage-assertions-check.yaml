@@ -126,9 +126,14 @@ spec:
               value: {{ .Release.Namespace | quote }}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            {{- /* The Helm RELEASE NAME. Its canonical is TRACEBLOC_RELEASE_NAME, the
+                 spelling the rest of this chart uses for the same value -- NOT
+                 TRACEBLOC_RELEASE, which is the PLATFORM release version the
+                 backend serves on /version/ (backend#3850). The script's legacy
+                 name stays RELEASE (remove_by 2026-12-31). */}}
             - name: RELEASE
               value: {{ .Release.Name | quote }}
-            - name: TRACEBLOC_RELEASE
+            - name: TRACEBLOC_RELEASE_NAME
               value: {{ .Release.Name | quote }}
             - name: EXPECTED_STORAGE_CLASS
               value: {{ include "tracebloc.storageClassName" . | quote }}
@@ -173,7 +178,7 @@ spec:
               # Canonical TRACEBLOC_ names first, legacy second (remove_by
               # 2026-12-31); a blank canonical leaves the legacy value as-is.
               if [ -n "${TRACEBLOC_NAMESPACE:-}" ]; then NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
-              if [ -n "${TRACEBLOC_RELEASE:-}" ]; then RELEASE="$TRACEBLOC_RELEASE"; fi
+              if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE="$TRACEBLOC_RELEASE_NAME"; fi
               KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
               fail=0
               # Settings naming: the Job sets each of these under its canonical

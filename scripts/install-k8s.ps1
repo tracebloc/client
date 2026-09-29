@@ -18,7 +18,8 @@
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
 #    $env:AGENTS        = "1"              default: 1  (worker nodes)
 #    $env:K8S_VERSION   = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
-#    $env:HOST_DATA_DIR = "C:\data"        default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
+#    $env:TRACEBLOC_HOST_DATA_DIR = "C:\data"  default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
+#    $env:HOST_DATA_DIR = "C:\data"        legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
 #    $env:TRACEBLOC_ENV = "dev"            optional, canonical name (RFC-0076); if neither this nor the
 #                                            legacy $env:CLIENT_ENV is set, no stage var is added to values
 #    $env:CLIENT_ENV    = "dev"            legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
@@ -1017,7 +1018,18 @@ $CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "traceblo
 $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
 $AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.36.3-k3s1" }
-$HOST_DATA_DIR = if ($env:HOST_DATA_DIR) { $env:HOST_DATA_DIR } else { "$env:USERPROFILE\.tracebloc" }
+# Settings naming: TRACEBLOC_HOST_DATA_DIR is canonical, HOST_DATA_DIR the legacy
+# spelling (remove_by 2026-12-31) -- a non-empty canonical wins, else the legacy,
+# else the default, as in the bash twin (common.sh). Confirm-DataDir exports the
+# decided path under both names (Sync-HostDataDirEnv) so a child process reading
+# either spelling sees the same directory. A function so Pester can re-run the
+# resolution under a chosen environment; this line is its only caller.
+function Resolve-HostDataDir {
+  if ($env:TRACEBLOC_HOST_DATA_DIR) { return $env:TRACEBLOC_HOST_DATA_DIR }
+  if ($env:HOST_DATA_DIR) { return $env:HOST_DATA_DIR }
+  return "$env:USERPROFILE\.tracebloc"
+}
+$HOST_DATA_DIR = Resolve-HostDataDir
 # backend#743: optional separate dir for the big dataset volume. Empty (default)
 # keeps datasets under HOST_DATA_DIR. When set, it is bind-mounted at
 # /tracebloc-data and the chart's dataset PV points there (mysql + logs stay
@@ -1390,7 +1402,7 @@ Advanced configuration (environment variables):
                  has no way to pass a switch (bash twin: same variable name)
   -Resume        Continue an install interrupted by a reboot (set automatically
                  by the registered RunOnce continuation; rarely needed by hand)
-  HOST_DATA_DIR  Persistent data directory       (default: ~\.tracebloc)
+  TRACEBLOC_HOST_DATA_DIR  Persistent data directory  (default: ~\.tracebloc; legacy: HOST_DATA_DIR)
   TRACEBLOC_CA_BUNDLE  Corporate CA bundle (PEM) to trust on a TLS-inspecting
                  network, so in-cluster image pulls don't fail x509 (#424).
                  CURL_CA_BUNDLE is also honored.
@@ -1408,7 +1420,7 @@ Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
   flat and per-release layouts) -- it stops and asks reuse / wipe / different dir.
-  Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or HOST_DATA_DIR=<new-path>
+  Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or TRACEBLOC_HOST_DATA_DIR=<new-path>
   (with no choice and no terminal the install aborts). Bypass entirely with
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
 
@@ -1424,6 +1436,15 @@ Learn more: https://docs.tracebloc.io
 # =============================================================================
 #  INPUT VALIDATION
 # =============================================================================
+
+# Export the decided data dir under both spellings (canonical + legacy), so a
+# child that resolves alias-first sees the path this run settled on -- not a
+# stale canonical the user set before the leftover guard's new-dir choice
+# replaced it.
+function Sync-HostDataDirEnv {
+  $env:TRACEBLOC_HOST_DATA_DIR = $script:HOST_DATA_DIR
+  $env:HOST_DATA_DIR = $script:HOST_DATA_DIR
+}
 
 # Resolve + validate HOST_DATA_DIR: it must be under USERPROFILE and never a
 # system path. Sets $script:HOST_DATA_DIR to the resolved absolute path. Shared
@@ -1442,6 +1463,7 @@ function Confirm-DataDir {
     }
   }
   $script:HOST_DATA_DIR = $dataDir
+  Sync-HostDataDirEnv
 }
 
 function Confirm-Config {
@@ -3922,7 +3944,7 @@ function Set-DailyUserProvisioning {
 #  node-local (RFC-0003 Option C) is the Linux/k3s default since the D15 flip
 #  (client#456) but still has no Windows path, so this is intentionally scoped to
 #  hostpath. Non-interactive knobs mirror the
-#  bash env contract: $env:TB_LEFTOVER_ACTION (reuse|wipe), $env:HOST_DATA_DIR
+#  bash env contract: $env:TB_LEFTOVER_ACTION (reuse|wipe), $env:TRACEBLOC_HOST_DATA_DIR
 #  (a different dir), $env:TRACEBLOC_SKIP_LEFTOVER_GUARD (bypass).
 # =============================================================================
 
@@ -4063,7 +4085,7 @@ function Invoke-LeftoverDataGuard {
       Err ("Existing data found under $HOST_DATA_DIR and no choice was given (no terminal). Re-run with one of:`n" +
            "  `$env:TB_LEFTOVER_ACTION='reuse'   adopt the existing data`n" +
            "  `$env:TB_LEFTOVER_ACTION='wipe'    delete it and start fresh`n" +
-           "  `$env:HOST_DATA_DIR='<new-path>'   install into a different directory`n" +
+           "  `$env:TRACEBLOC_HOST_DATA_DIR='<new-path>'   install into a different directory`n" +
            "  (or `$env:TRACEBLOC_SKIP_LEFTOVER_GUARD='1' to bypass this guard entirely)")
     }
   }
