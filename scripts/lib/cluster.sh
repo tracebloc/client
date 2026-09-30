@@ -2123,6 +2123,16 @@ _generate_node_cdi_specs() {
 # k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
 # data PVC can't follow. Forcing agents=0 alone would leave that hole open. The
 # forcing runs before the validation, as it did when both lived in common.sh.
+#
+# MORE THAN ONE SERVER OR AGENT IS REFUSED (backend#3536; Lukas, 2026-09-09:
+# close the reachable path before the uncalled sizing code goes). Every k3d node
+# is a container on this one machine and none is given a CPU or memory cap, so
+# each reports the WHOLE machine as its capacity and the scheduler counts the
+# machine once per node (backend#2221). 0 and 1 stay valid, so no default
+# changes; that also means hostpath's default of one server plus one agent is
+# still two nodes counted twice. The format checks run first, so a non-integer
+# is named as one; the refusal compares strings, so no value can overflow it.
+# install-k8s.ps1's Confirm-Config is the twin.
 _k3d_node_counts() {
   SERVERS="${SERVERS:-1}"
   AGENTS="${AGENTS:-1}"
@@ -2132,6 +2142,8 @@ _k3d_node_counts() {
   fi
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+  [[ "$SERVERS" == 1 ]]        || error "SERVERS=$SERVERS is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Use one server: unset SERVERS."
+  [[ "$AGENTS" =~ ^0*[01]$ ]]  || error "AGENTS=$AGENTS is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Set AGENTS to 0 (one node) or 1."
 }
 
 _create_new_cluster() {

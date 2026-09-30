@@ -244,12 +244,8 @@ telemetry_run_skipped() { _TB_TELEMETRY_SKIPPED=1; return 0; }
 # survive to be read. A function rather than a documented variable name for the
 # same reason: the producers call code, so there is one spelling of it.
 #
-# There is precedent for the drift this shape prevents: install_cleanup still
-# reads TRACEBLOC_DOCKER_FIRST_RUN_EXIT, whose only producer (an
-# `export` in setup-macos.sh) was deleted in 8c3a3d4 back in March — a marker
-# read by a live branch that nothing has set since. telemetry-vocabulary-
-# agreement.sh therefore fails closed when this marker has ZERO producers,
-# rather than passing forever on a handoff that can no longer happen.
+# telemetry-vocabulary-agreement.sh fails closed when this marker has ZERO
+# producers, rather than passing forever on a handoff that can no longer happen.
 _TB_TELEMETRY_RERUN_HANDOFF=""
 telemetry_rerun_handoff() { _TB_TELEMETRY_RERUN_HANDOFF=1; return 0; }
 

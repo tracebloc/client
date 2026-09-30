@@ -15,8 +15,8 @@
 #
 #  Environment variable overrides (optional, set before running):
 #    $env:CLUSTER_NAME  = "myapp"          default: tracebloc
-#    $env:SERVERS       = "1"              default: 1  (control-plane nodes)
-#    $env:AGENTS        = "1"              default: 1  (worker nodes)
+#    $env:SERVERS       = "1"              default: 1  (control-plane nodes; more than 1 is refused)
+#    $env:AGENTS        = "1"              default: 1  (worker nodes; 0 or 1)
 #    $env:K8S_VERSION   = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    $env:TRACEBLOC_HOST_DATA_DIR = "C:\data"  default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:HOST_DATA_DIR = "C:\data"        legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
@@ -1393,8 +1393,8 @@ Usage:
 
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
-  SERVERS        Control-plane nodes             (default: 1)
-  AGENTS         Worker nodes                    (default: 1)
+  SERVERS        Control-plane nodes             (default: 1; more than 1 is refused)
+  AGENTS         Worker nodes                    (default: 1; 0 or 1)
   K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   TRACEBLOC_SKIP_REBOOT_PROMPT=1
@@ -1472,6 +1472,14 @@ function Confirm-Config {
   }
   if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
   if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
+  # MORE THAN ONE SERVER OR AGENT IS REFUSED -- the bash twin's rule, and its
+  # reasons, in cluster.sh::_k3d_node_counts (backend#3536). Every k3d node reports
+  # this whole machine as its capacity, so the scheduler counts it once per node.
+  # 0 and 1 stay valid, so the default of one server plus one agent (every Windows
+  # install, since this installer is hostpath-only) is still two nodes counted
+  # twice (backend#2221). Strings are compared, so no value can overflow it.
+  if ($SERVERS -ne '1') { Err ("SERVERS=" + $SERVERS + " is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Use one server: unset SERVERS.") }
+  if ($AGENTS -notmatch '^0*[01]$') { Err ("AGENTS=" + $AGENTS + " is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Set AGENTS to 0 (one node) or 1.") }
   Confirm-DataDir   # resolve + validate HOST_DATA_DIR (shared with the leftover-data guard's new-dir path)
 
   # backend#743: optional dataset dir. Unlike HOST_DATA_DIR it MAY live outside
@@ -6199,9 +6207,6 @@ $script:TbEnvelopeOverheadCpuMilli = 650
 $script:TbEnvelopeOverheadMemBytes = 2214592512
 $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
-$script:TbEnvelopeVmReserveMemBytes = 1073741824
-$script:TbEnvelopeNodeMinCpuMilli   = 1650
-$script:TbEnvelopeNodeMinMemBytes   = 4362076160
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
@@ -6909,91 +6914,6 @@ function Get-TrainingResources {
   # forever, so backend#2254 floored it. Rendered the same way as the sized
   # branch above so the two cannot drift.
   return "cpu=$([math]::Floor($script:TbEnvelopeFloorCpuMilli / 1000)),memory=$([math]::Floor($script:TbEnvelopeFloorMemBytes / 1GB))Gi"
-}
-
-# ── the VM beneath the node containers (backend#2221) ────────────────────────
-#
-# Get-TrainingResources above answers "how much may one run have, given a
-# NODE". On a k3d install that premise is false: the node containers are
-# created with `NanoCpus=0 CpuQuota=0 Memory=0`, so each one honestly reports
-# the WHOLE Docker VM and the default topology (SERVERS=1 AGENTS=1) tells
-# Kubernetes the machine is twice its size. Measured on k3d v5.9.0 / k3s
-# v1.35.5 / Docker 29.5.2: a 7.75 GiB VM presented as 15.50 GiB, byte-exactly
-# 2.000x, and two pods at this installer's OWN derived envelope
-# (cpu=9,memory=4Gi) both went Running on a 10 cpu / 7.75 GiB machine.
-#
-# Two asymmetries decide the shape of the fix, and both are measured:
-#
-#   MEMORY IS CAPPABLE, AT CREATE TIME ONLY. `k3d --servers-memory/
-#   --agents-memory` works by bind-mounting a SYNTHETIC /proc/meminfo into the
-#   node container -- not via the cgroup, which kubelet never reads for
-#   capacity. `docker update --memory` on a running node moves the cgroup and
-#   leaves /proc/meminfo alone, so capacity does not budge even across a
-#   restart: an existing cluster cannot be capped in place.
-#
-#   CPU IS NOT CAPPABLE AT ALL. k3d 5.9.0 has no CPU flag, and neither
-#   `--cpus` (a CFS quota) nor `--cpuset-cpus` reaches kubelet, because cadvisor
-#   counts /sys/devices/system/cpu/present and /proc/cpuinfo and no cgroup
-#   namespaces either. So the only lever that makes cpu honest is FEWER NODE
-#   CONTAINERS -- the remedy the GPU path already chose for --gpus=all.
-#
-# Returns "nodes=N,cap=BYTES,cpu_honest=0|1,viable=0|1", or $null when the VM is
-# unreadable. $null means "I cannot answer" and a caller must not read it as one
-# node: collapsing a cluster on a failed probe is worse than leaving the
-# topology alone. A STRING rather than a hashtable so the bash twin and this one
-# are compared byte-for-byte by the same fixture rows.
-#
-# The arithmetic is client-runtime/node_sizing.py::honest_topology, the
-# constants are embedded above, and the vectors are replayed by
-# install-k8s.Tests.ps1. -RequestedNodes below 1 is a caller bug, not a machine
-# state: it returns $null rather than inventing a topology, matching the bash
-# twin's non-zero exit with no output.
-function Get-HonestTopology {
-  param(
-    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$VmCpu,
-    [Parameter(Mandatory=$true)][AllowEmptyString()][string]$VmMemory,
-    [Parameter(Mandatory=$true)][int]$RequestedNodes
-  )
-  if ($RequestedNodes -lt 1) { return $null }
-
-  # Same unit spellings the bash twin accepts. [long] throughout: a byte count
-  # over 2^31 must not touch an Int32 path -- the #2220 lesson, where a bare 0
-  # bound [math]::Max's (Int32, Int32) overload and silently disabled machine
-  # sizing on every box with more than ~2 GiB of headroom.
-  $vmCpuM = if ($VmCpu -match '^(\d+)m$') { [long]$Matches[1] }
-            elseif ($VmCpu -match '^\d+$') { [long]$VmCpu * 1000 }
-            else { $null }
-  $vmMemB = if ($VmMemory -match '^(\d+)Ki$') { [long]$Matches[1] * 1KB }
-            elseif ($VmMemory -match '^(\d+)Mi$') { [long]$Matches[1] * 1MB }
-            elseif ($VmMemory -match '^(\d+)Gi$') { [long]$Matches[1] * 1GB }
-            elseif ($VmMemory -match '^\d+$') { [long]$VmMemory }
-            else { $null }
-  if ($null -eq $vmCpuM -or $null -eq $vmMemB) { return $null }
-
-  # The VM cannot give the node containers everything it has: the k3d serverlb
-  # and tools containers, dockerd/containerd and the guest page cache all live
-  # outside them. Capping to the last byte starves the runtime that runs them.
-  $usable = [long][math]::Max([long]0, $vmMemB - $script:TbEnvelopeVmReserveMemBytes)
-
-  $fits = [long][math]::Floor($usable / $script:TbEnvelopeNodeMinMemBytes)
-  $nodes = [long]$RequestedNodes
-  if ($fits -lt $nodes) { $nodes = $fits }
-  # Never zero: "no cluster at all" is not this function's call to make. The
-  # caller refuses on viable=0.
-  if ($nodes -lt 1) { $nodes = [long]1 }
-
-  # Floored -- a cap that rounds UP is not a cap.
-  $cap = [long][math]::Floor($usable / $nodes)
-
-  # cpu_honest is measured, not chosen: no cap makes capacity.cpu true on more
-  # than one node container.
-  $cpuHonest = if ($nodes -eq 1) { 1 } else { 0 }
-
-  # One honest node needs the platform overhead AND the training floor. Below
-  # that the VM cannot host a run whatever it is capped to.
-  $viable = if ($fits -ge 1 -and $vmCpuM -ge $script:TbEnvelopeNodeMinCpuMilli) { 1 } else { 0 }
-
-  return "nodes=$nodes,cap=$cap,cpu_honest=$cpuHonest,viable=$viable"
 }
 
 function Get-TraceblocYamlValue {
@@ -10122,18 +10042,8 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
       }
       $AGENTS = "0"
     }
-    # SERVERS needs the same collapse (Bugbot): agents=0 alone still leaves SERVERS>1 possible,
-    # and EVERY server node runs the boot reconciler and advertises nvidia.com/gpu=1 for the SAME
-    # physical card -- so a 3-server cluster would offer 3 GPUs and schedule 3 jobs onto one
-    # device. One server => the card is advertised exactly once.
-    if ($SERVERS -ne "1") {
-      if ($env:SERVERS) {
-        Warn ("GPU mode forces a single server (servers=1) so the one physical GPU isn't double-counted; overriding your SERVERS=$SERVERS. Every k3d node shares the same host GPU and would re-advertise it.")
-      } else {
-        Log "GPU mode: using a single server (servers=1) so the one physical GPU is advertised exactly once."
-      }
-      $SERVERS = "1"
-    }
+    # SERVERS needs no collapse here: every server node would advertise the same card too, but
+    # Confirm-Config has already refused any SERVERS other than 1 (backend#3536).
     # Intent, not accomplishment (Bugbot -- third instance of this class): cluster-create, the
     # node's CDI wiring, and Confirm-GpuNode all still run after this and can each clear
     # K3D_GPU_FLAG. Only Confirm-GpuNode's "GPU verified and available" may claim success, so a

@@ -406,10 +406,14 @@ never treated as a pass.
 
 ## CI coverage — what runs where
 
-- **`egress-enforcement`, live on every push/PR** — helm-ci's `seal-check-e2e`
-  job (`scripts/tests/e2e-seal-check.sh`, client#541 + #566): real k3d
-  cluster, lockdown engaged, positive control, then the probe via
-  `helm test --filter`. Zero secrets, so it runs everywhere.
+- **`egress-enforcement`, live on every PR** — seal-check.yaml's
+  `seal-check-e2e` job, `Seal-check egress-enforcement (k3d)`
+  (`scripts/tests/e2e-seal-check.sh`, client#541 + #566), plus develop pushes
+  that touch what it reads. It has its own workflow so it can be a required
+  check: no `pull_request` paths filter, so it runs in full on every PR. Real
+  k3d cluster, lockdown engaged, positive control (its curl image pre-pulled
+  into the node first, backend#3561), then the probe via `helm test --filter`.
+  Zero secrets, so it runs everywhere.
 - **The FULL suite vs the dev backend** — helm-ci's `full-seal-e2e` job
   (`scripts/tests/e2e-full-seal.sh`, the backend#1184 deferred fast-follow):
   installs the working-tree chart on k3d **as the dedicated dev

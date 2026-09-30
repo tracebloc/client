@@ -1527,11 +1527,7 @@ install_cleanup() {
   fi
   if [[ $exit_code -eq 2 ]]; then
     echo ""
-    if [[ -n "${TRACEBLOC_DOCKER_FIRST_RUN_EXIT:-}" ]]; then
-      hint "Docker first-time setup: complete the steps above, then run the script again."
-    else
-      hint "Re-run required. Complete the step above, then run the script again."
-    fi
+    hint "Re-run required. Complete the step above, then run the script again."
     [[ -n "${LOG_FILE:-}" ]] && hint "Logs: $LOG_FILE"
   elif [[ $exit_code -eq 130 || $exit_code -eq 143 ]]; then
     # Interrupted, not broken (client#681). install-k8s.sh routes SIGINT/SIGTERM
