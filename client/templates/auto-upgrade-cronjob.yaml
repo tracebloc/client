@@ -46,6 +46,29 @@ data:
     if [ -n "${TRACEBLOC_TELEMETRY_STATUS_ANNOTATION:-}" ]; then TELEMETRY_STATUS_ANNOTATION="$TRACEBLOC_TELEMETRY_STATUS_ANNOTATION"; fi
     if [ -n "${TRACEBLOC_TELEMETRY_COLLECTOR_NAME:-}" ]; then TELEMETRY_COLLECTOR_NAME="$TRACEBLOC_TELEMETRY_COLLECTOR_NAME"; fi
 
+    # The wait mode, read once for both `helm upgrade --atomic` calls below.
+    # Helm 4 `--rollback-on-failure` (alias `--atomic`) switches the default wait
+    # to the kstatus watcher; `--wait=legacy` keeps Helm 3's per-object readiness
+    # checks. The watcher lists and watches every kind the release renders, and
+    # on a GPU edge this ServiceAccount holds the kube-system Secret, Role and
+    # RoleBinding by NAME only (auto-upgrade-rbac.yaml: no list or watch on them,
+    # on purpose), so every such upgrade would fail its wait and roll back.
+    # Helm 3's `--wait` is a boolean that refuses `=legacy`, and an operator may
+    # pin a Helm 3 `autoUpgrade.image`, so only major 4 gets the flag. An
+    # unreadable version passes nothing, which is what every tick passed before,
+    # and says so.
+    HELM_VERSION_SHORT="$(helm version --short 2>/dev/null || true)"
+    HELM_WAIT_FLAG=""
+    case "$HELM_VERSION_SHORT" in
+      v4.*)
+        HELM_WAIT_FLAG="--wait=legacy"
+        log "helm $HELM_VERSION_SHORT: upgrading with --wait=legacy" ;;
+      v[0-9]*)
+        log "helm $HELM_VERSION_SHORT: upgrading without --wait=legacy" ;;
+      *)
+        log "WARNING: helm version unreadable ('$HELM_VERSION_SHORT'); upgrading without --wait=legacy" ;;
+    esac
+
     # #2877: minimum age (seconds) a release must have sat in a pending-* state
     # before we treat it as an ABANDONED wedge (safe to roll back) rather than an
     # upgrade that is currently IN FLIGHT (must be left alone). Injected from
@@ -66,8 +89,9 @@ data:
     # FORMATTING. The awk body below runs once per input line and `exit`s on the
     # first line that lacks `last_deployed`, so it only works on a body where the
     # key sits on the same line the scan starts — fine for the single-line output
-    # helm actually emits today (v3.16.4 `EncodeJSON` is `json.NewEncoder(out);
-    # enc.Encode(obj)` with no `SetIndent`, i.e. compact JSON, one line), but it
+    # helm actually emits today (`EncodeJSON` is `json.NewEncoder(out);
+    # enc.Encode(obj)` with no `SetIndent`, i.e. compact JSON, one line — in
+    # 3.16.4 and in 4.2.3 alike; the wedge driver runs a captured 4.2.x body), but it
     # would return EMPTY on any multi-line body: a bare `{` first line, a future
     # helm that indents, or a differently-built image. Collapsing to one line
     # first removes that dependence entirely. NOTE: the backend#2896 Bugbot claim
@@ -148,7 +172,7 @@ data:
     # DERIVED, NOT RESTATED. The decision is read from the chart's own decider,
     # twice: the stored state out of `helm get manifest` (what the last render
     # decided) and the would-be state out of a server-side dry-run of the SAME
-    # chart version (`--dry-run=server`, helm 3.13+, runs the templates' real
+    # chart version (`--dry-run=server`, helm 3.13+ and 4, runs the templates' real
     # `lookup`s against the cluster). No Secret name, Class A rule or DaemonSet
     # gate is copied here; the three names this needs arrive in env from the same
     # helpers the templates render with (TELEMETRY_STATUS_NAME,
@@ -253,6 +277,7 @@ data:
           --version "$CURRENT" \
           --reset-then-reuse-values \
           --atomic \
+          ${HELM_WAIT_FLAG:+"$HELM_WAIT_FLAG"} \
           --cleanup-on-fail \
           --timeout "$UPGRADE_TIMEOUT"
         log "reconcile complete: $CURRENT re-rendered in place"
@@ -284,6 +309,10 @@ data:
     # line jq-free — the alpine/helm image ships without jq. (pending-install
     # can't occur here: this CronJob is part of the release it upgrades, so the
     # release must have deployed at least once for this script to run.)
+    # Helm 4 fetches every resource of the release for `helm status` (Helm 3 only
+    # did with --show-resources); a resource it cannot read is logged, not an
+    # error, and STATUS: still prints before the RESOURCES table. The line is
+    # plain text here: helm colours it only on a terminal, and this is a pipe.
     STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
       | awk '/^STATUS:/ {print $2; exit}')"
     case "$STATUS" in
@@ -390,7 +419,7 @@ data:
     fi
 
     log "upgrading $CURRENT -> $LATEST"
-    # --reset-then-reuse-values (helm 3.14+) is critical here: --reuse-values
+    # --reset-then-reuse-values (helm 3.14+ and 4) is critical here: --reuse-values
     # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
     # to values.yaml in the upgraded chart (e.g. a future autoUpgrade.foo
     # default) would silently fail to render with nil-pointer template errors
@@ -406,11 +435,27 @@ data:
     # back); that residual pending-upgrade is caught by the recovery step above
     # on the next tick. --cleanup-on-fail removes any new resources the failed
     # attempt created so the rollback is clean.
+    # --atomic STAYS, under Helm 4 too. Helm 4 renamed it --rollback-on-failure and
+    # binds the old name to the SAME flag (deprecated: it works, and helm prints
+    # one warning line). Helm 3 has no --rollback-on-failure, so the new name
+    # would stop every tick on an edge whose operator pinned their own Helm 3
+    # `autoUpgrade.image` (own tag, or own digest, which is always honoured).
+    # Under Helm 4 it also changes the WAIT: with no explicit `--wait` it moves
+    # helm's default wait to the kstatus watcher, which this ServiceAccount cannot
+    # satisfy on a GPU edge. So a Helm 4 run passes `--wait=legacy` next to it
+    # (HELM_WAIT_FLAG, read at the top), and the rollback on failure uses the same
+    # wait. Re-check the name at the next helm MAJOR, and `--wait=legacy` whenever
+    # the pinned helm image moves: a helm that no longer accepts it fails the tick
+    # loudly rather than silently changing the wait.
+    # No --server-side: Helm 4's `auto` applies with the method the release's
+    # last revision recorded. A revision the Helm 3 image wrote records none, so
+    # those edges stay client-side (3-way merge); see docs/MIGRATIONS.md.
     helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
       --namespace "$RELEASE_NAMESPACE" \
       --version "$LATEST" \
       --reset-then-reuse-values \
       --atomic \
+      ${HELM_WAIT_FLAG:+"$HELM_WAIT_FLAG"} \
       --cleanup-on-fail \
       --timeout "$UPGRADE_TIMEOUT"
     log "upgrade complete: $CURRENT -> $LATEST"

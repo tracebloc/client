@@ -146,13 +146,15 @@ _verify_sha256() {
   local expected="$1" file="$2"
   [[ -n "$expected" ]] || return 2
   # Tool choice: Linux ships GNU sha256sum (coreutils, on even minimal cloud images).
-  # macOS ALSO ships a /sbin/sha256sum, but it's a BSD build (Darwin 1.0) that does
-  # NOT understand GNU --check — only `shasum -a 256` does — so on real macOS prefer
-  # shasum. The `type -t` guard keeps this from disturbing the bats fetch tests, which
-  # run on macOS dev boxes and provide sha256sum as a shell FUNCTION (a mock): a
-  # function means we're under test, so honor it rather than the Darwin fallback.
-  # Both real tools read "<hash>  <file>" on stdin and report via exit code with
-  # --check --status, which is exactly what those mocks stub.
+  # macOS ALSO ships a /sbin/sha256sum (Darwin 1.0). On macOS 26 it accepts --check
+  # --status, but only with a file operand: fed on stdin with none, as below, it
+  # prints its usage and exits 1 (measured on 26.6.2, client-dev#1356), so on real
+  # macOS prefer `shasum -a 256`. The `type -t` guard keeps this from disturbing
+  # the bats fetch tests, which run on macOS dev boxes and provide sha256sum as a
+  # shell FUNCTION (a mock): a function means we're under test, so honor it rather
+  # than the Darwin fallback. GNU sha256sum and shasum both read "<hash>  <file>"
+  # on stdin and report via exit code with --check --status, which is exactly what
+  # those mocks stub.
   local tool=""
   if [[ "$OS" == "Darwin" && "$(type -t sha256sum)" != function ]]; then
     command -v shasum >/dev/null 2>&1 && tool=shasum
@@ -1210,8 +1212,9 @@ tb_export_namespace() {
   TRACEBLOC_NAMESPACE="${TB_NAMESPACE:-}"
   export TB_NAMESPACE TRACEBLOC_NAMESPACE
 }
-SERVERS="${SERVERS:-1}"
-AGENTS="${AGENTS:-1}"
+# SERVERS/AGENTS are k3d's node counts and nothing else: their defaults, the
+# node-local single-node forcing and their validation live in the k3d create path
+# (cluster.sh::_k3d_node_counts), so code that is not k3d never reads them.
 # RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
 # D15 flip (client#456, epic backend#1151), superseding the flag-gated prototype
 # from #367. (D15 gates the flip on a green node-local dev training run on the dev
@@ -1228,21 +1231,12 @@ AGENTS="${AGENTS:-1}"
 #                          delete; world-writable dirs. Select with
 #                          TB_STORAGE_MODE=hostpath (still required for a
 #                          HOST_DATASET_DIR network mount).
-# C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
-# but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
-# schedule on another node with no volume. So node-local forces single-node —
-# and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
-# k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
-# data PVC can't follow. Forcing agents=0 alone would leave that hole open.
+# C1: node-local forces a single k3d node (cluster.sh::_k3d_node_counts says why).
 # Record whether the operator chose the mode or is getting the D15 default: the
 # existing-cluster mismatch guard phrases its remedy differently for "you set
 # node-local" vs "node-local is the default now" (client#456 review, Bugbot High).
 if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
 TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
-if [[ "$TB_STORAGE_MODE" == "node-local" ]]; then
-  AGENTS=0
-  SERVERS=1
-fi
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
 K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
@@ -1311,8 +1305,6 @@ validate_config() {
   [[ "$CLUSTER_NAME" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]] \
     || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '$CLUSTER_NAME')"
 
-  [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
-  [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
   [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
     || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
 
@@ -1402,26 +1394,27 @@ amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
 
 GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
 NVIDIA_DRIVER_OK=false
-K3D_GPU_FLAGS=()           # extra flags appended to k3d cluster create
+# 1 once an NVIDIA GPU is wired into this cluster, else 0. Assigned, never
+# defaulted from the environment: only the installer's own GPU steps may set it.
+TB_GPU_WIRED=0
 PM_INSTALL=""
 PM_UPDATE=""
 
 # True when an NVIDIA GPU has been WIRED INTO THIS CLUSTER — not merely detected.
-# K3D_GPU_FLAGS is populated (--gpus=all) only once the container runtime is ready
-# to expose the GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d
-# node is then created from the GPU-capable image (cluster.sh), and the reuse
-# guard CLEARS it when an existing cluster turns out to be a CPU-only node. So this
-# is the one honest gate for "should we request a GPU for jobs" — the same role the
-# Windows twin's `$K3D_GPU_FLAG -ne ""` plays. Requesting nvidia.com/gpu on a node
-# that advertises 0 GPUs strands every job Pending (client#835), so the GPU chart
+# TB_GPU_WIRED becomes 1 only once the container runtime is ready to expose the
+# GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d node is then
+# created from the GPU-capable image with --gpus=all (cluster.sh, which derives
+# that flag from this gate), and the reuse guard puts it back to 0 when an
+# existing cluster turns out to be a CPU-only node. So this is the one honest
+# gate for "should we request a GPU for jobs" — the same role the Windows twin's
+# `$K3D_GPU_FLAG -ne ""` plays. Requesting nvidia.com/gpu on a node that
+# advertises 0 GPUs strands every job Pending (client#835), so the GPU chart
 # values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
-# set -u safe: K3D_GPU_FLAGS is declared above, but a unit test that sources only a
-# single lib may not have it, so default the length probe.
+# Wired means exactly GPU_VENDOR=nvidia and TB_GPU_WIRED=1; any other value of
+# either is "not wired". set -u safe: a unit test that sources only a single lib
+# may not have TB_GPU_WIRED, so it defaults here.
 _gpu_wired() {
-  [[ "${GPU_VENDOR:-}" == "nvidia" ]] || return 1
-  local n=0
-  [[ "${K3D_GPU_FLAGS+set}" == set ]] && n="${#K3D_GPU_FLAGS[@]}"
-  (( n > 0 ))
+  [[ "${GPU_VENDOR:-}" == "nvidia" && "${TB_GPU_WIRED:-0}" == "1" ]]
 }
 
 # ── Failure diagnostics (client#681) ─────────────────────────────────────────
@@ -1593,7 +1586,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 print_banner() {
   if [[ -n "${TRACEBLOC_BANNER_SHOWN:-}" ]]; then
     log "Banner already shown by the bootstrap — not redrawing."
-    log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
+    log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'"
     return 0
   fi
   echo ""
@@ -1606,7 +1599,7 @@ print_banner() {
   echo ""
   echo -e "  ${DIM}────────────────────────────────────────${RESET}"
   echo ""
-  log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'  Servers=$SERVERS  Agents=$AGENTS"
+  log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'"
   log "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
 }
 

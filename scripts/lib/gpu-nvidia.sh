@@ -250,5 +250,5 @@ install_nvidia_container_toolkit() {
     rm -f "$gpu_marker" 2>/dev/null || true
   fi
 
-  K3D_GPU_FLAGS=("--gpus=all")
+  TB_GPU_WIRED=1
 }

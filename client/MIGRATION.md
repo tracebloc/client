@@ -2,6 +2,54 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.174 — the auto-upgrade CronJob runs Helm 4
+
+**What changed.** The hourly auto-upgrade CronJob, and the MySQL migration Job
+that copies its `helm` binary, move from `alpine/helm:3.16.4` to
+`alpine/helm:4.2.3`, pinned by digest. That is the Helm the installers already
+put on the host. Helm 3 stops receiving security fixes on 2026-11-11, and this
+CronJob is how an edge receives chart fixes, so it has to run a supported Helm.
+The CronJob's requests and limits are unchanged, and so are its flags except one
+(below). A MySQL migration run by Helm 4 needs a jobs-manager build that knows
+two Helm 4 differences: it lists the release without Helm 3's `--all` flag,
+which Helm 4 removed, and on a release that applies server-side it takes back
+the auto-upgrade CronJob's `suspend` field, which the migration changes directly
+while it runs. That build reaches edges through image-refresh, like any
+jobs-manager update.
+
+**What you have to do: nothing, on a default install** or one that re-homes
+images only through `global.imageRegistry` / `autoUpgrade.image.registry`.
+
+**If you mirror images** (`global.imageRegistry`), copy `alpine/helm:4.2.3`
+into your mirror **before** this upgrade reaches the edge.
+`./scripts/list-images.sh` prints it. Without it, the next hourly run and any
+MySQL migration fail to pull. The upgrade that brings this chart in still runs on
+the old image, so it goes through. The runs after it are the ones that need the
+new one.
+
+**If you pinned the image yourself:**
+
+- **A path-rewriting mirror that declared `autoUpgrade.image.digestFor:
+  "<your repository>:3.16.4"`** (see 1.9.146): the declaration names the old tag,
+  so the chart's pin is no longer applied and the image floats on the `4.2.3`
+  tag, with a NOTES warning. Keep the pin by changing it to `"<your
+  repository>:4.2.3"`.
+- **Your own `autoUpgrade.image.digest` or `tag`**: it is still honoured, so you
+  keep running the Helm you pinned. The CronJob's flags work on Helm 3.14 and
+  later as well as on Helm 4. Move the pin to Helm 4 before 2026-11-11 anyway.
+
+**What Helm 4 does differently here.** `helm upgrade` picks client-side or
+server-side apply from the method the release's last revision recorded. A
+revision written by the Helm 3 image records none, so an edge the CronJob has
+already upgraded stays on client-side apply. A release last written by a Helm 4
+install (the installers since they moved to Helm 4) applies server-side. See
+`docs/MIGRATIONS.md` for what a server-side apply conflict looks like and how to
+recover from it. Helm 4's `--atomic` (now an alias of `--rollback-on-failure`)
+also moves the default wait to a watcher that lists and watches every kind the
+release renders, which the CronJob's name-only grants in the GPU device-plugin
+namespace do not allow, so on Helm 4 the CronJob passes `--wait=legacy`, the
+per-object readiness checks Helm 3 made, and on Helm 3 it passes nothing extra.
+
 ## Upgrading to 1.9.173 — MySQL runs with `performance_schema` off
 
 **What changed.** The chart's MySQL config (`mysql.cnf`, every engine: 5.7, 8.0

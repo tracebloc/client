@@ -2052,7 +2052,7 @@ _reconcile_adopted_client() {
   # carries forward a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME
   # and its gpu.devicePlugin block, so an adopted release keeps a STALE GPU decision:
   # a vendor-changed edge trains on the wrong resource, and an NVIDIA edge dropped to
-  # CPU (reuse guard / CDI setup cleared K3D_GPU_FLAGS) keeps requesting a GPU and
+  # CPU (reuse guard / CDI setup set TB_GPU_WIRED=0) keeps requesting a GPU and
   # strands jobs Pending while the summary says CPU. FORCE the GPU keys to THIS run's
   # decision — the SAME values the fresh write chooses (_gpu_request_value +
   # runtime_class) — mirroring the Windows twin's adopt-path --set-string. --set-string
@@ -3127,7 +3127,7 @@ storageClass:
 hostPath:
   enabled: false
 
-# node-local is a single schedulable node (common.sh forces AGENTS=0, SERVERS=1),
+# node-local is a single schedulable node (the k3d create path forces AGENTS=0, SERVERS=1),
 # so the single-replica PDBs would be undrainable here. hostPath.enabled=false
 # would otherwise misclassify this as multi-node, so declare the topology
 # explicitly to skip those PDBs and keep the node drainable (client#560).

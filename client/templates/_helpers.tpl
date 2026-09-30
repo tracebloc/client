@@ -819,9 +819,9 @@ sealCheck.storageAssertions.image:
 autoUpgrade.image:
   registry: docker.io
   repository: alpine/helm
-  tag: "3.16.4"
-  digest: "sha256:9b25e60ae264940b276e32866d37e3088e70c4e2d1784b964dc3f90346281a74"
-  digestFor: "alpine/helm:3.16.4"
+  tag: "4.2.3"
+  digest: "sha256:b97ba4f9b27fe7af16ee3d37e6815783c9d4a51289b6240a9024ec471611ae9b"
+  digestFor: "alpine/helm:4.2.3"
 imageRefresh.image:
   registry: docker.io
   repository: alpine/k8s
@@ -897,7 +897,7 @@ it was resolved for:
 
   A PATH-REWRITING MIRROR (e.g. `harbor.corp` + `dockerhub/alpine/helm`)
   holding the SAME bytes keeps the chart pin by declaring it:
-  `digestFor: "dockerhub/alpine/helm:3.16.4"`. A render cannot tell that mirror
+  `digestFor: "dockerhub/alpine/helm:4.2.3"`. A render cannot tell that mirror
   from a different image, so it has to be said.
 
   REGISTRY IS NOT PART OF THE IDENTITY. `registry` and global.imageRegistry

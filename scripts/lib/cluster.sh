@@ -1919,7 +1919,7 @@ _node_image_gpu_capable() {
 }
 
 # Reconcile the GPU decision against a REUSED cluster (client#835). The GPU gate
-# populates K3D_GPU_FLAGS (=--gpus=all) and the chart requests a GPU BEFORE we know
+# sets TB_GPU_WIRED=1 (hence --gpus=all) and the chart requests a GPU BEFORE we know
 # whether this run creates the cluster or reuses one. GPU capability is fixed at
 # create time (baked into the node image); it cannot be bolted onto a running
 # cluster. A cluster first built in CPU mode — or by an installer predating #835 —
@@ -1938,7 +1938,7 @@ _check_existing_cluster_gpu() {
   [[ -z "$image" ]] && return 0
   _node_image_gpu_capable "$image" && return 0
   # CPU-only node → drop the GPU request so the chart writes CPU values.
-  K3D_GPU_FLAGS=()
+  TB_GPU_WIRED=0
   echo ""
   warn "GPU detected, but the existing '$CLUSTER_NAME' cluster runs a CPU-only node — running CPU mode so jobs aren't stranded Pending."
   hint "The k3s node image (and thus GPU capability) is fixed when the cluster is created; it can't be added to a running cluster."
@@ -2042,7 +2042,7 @@ _check_healthy_cluster_gpu_consistent() {
 # `nvidia-ctk` can exit 0 having written nothing, and on a REUSED cluster a prior
 # install's /etc/cdi/nvidia.yaml already makes the node GPU-capable — so a transient
 # regeneration failure must not tear that down (Bugbot High). Only when NO node has
-# a usable spec do we fall CLOSED to CPU (clear K3D_GPU_FLAGS) so the chart doesn't
+# a usable spec do we fall CLOSED to CPU (TB_GPU_WIRED=0) so the chart doesn't
 # advertise a GPU pods can't use — the same standard the Windows CDI path applies.
 # And a docker-ps that can't LIST the nodes is "cannot tell", not "no GPU": leave
 # the request as-is rather than guess CPU on a probe failure (mirrors
@@ -2084,7 +2084,7 @@ _generate_node_cdi_specs() {
     fi
   done
   if (( ! any_ok )); then
-    K3D_GPU_FLAGS=()
+    TB_GPU_WIRED=0
     warn "No cluster node has a usable NVIDIA CDI spec — running CPU mode so GPU jobs aren't stranded Pending."
     hint "Check the NVIDIA driver + 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG} nvidia-smi' works on this host."
     # GPU wiring is fixed at create time and this CPU cluster now looks healthy, so a
@@ -2094,7 +2094,32 @@ _generate_node_cdi_specs() {
   fi
 }
 
+# _k3d_node_counts — settle SERVERS/AGENTS, k3d's --servers/--agents, right before
+# the one `k3d cluster create` that reads them. They are k3d node counts and
+# nothing else, so the defaults, the node-local forcing and the validation live
+# here rather than in common.sh, where every substrate's code would read them.
+#
+# C1: local-path is RWO + WaitForFirstConsumer and provisions on a single node,
+# but the shared data PVC is mounted by jobs-manager-spawned Jobs that could
+# schedule on another node with no volume. So node-local forces single-node —
+# and that means BOTH agents=0 AND servers=1: unlike a full k8s control plane,
+# k3s server nodes are schedulable, so SERVERS>1 still yields multiple nodes the
+# data PVC can't follow. Forcing agents=0 alone would leave that hole open. The
+# forcing runs before the validation, as it did when both lived in common.sh.
+_k3d_node_counts() {
+  SERVERS="${SERVERS:-1}"
+  AGENTS="${AGENTS:-1}"
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+    AGENTS=0
+    SERVERS=1
+  fi
+  [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
+  [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
+}
+
 _create_new_cluster() {
+  _k3d_node_counts
+
   # REFUSE AN UNFITTABLE HOST BEFORE ANYTHING EXISTS (backend#3535). The fit that
   # decides whether a training run can schedule beside the platform used to run
   # only at values generation -- after the `k3d cluster create` below -- so a
@@ -2333,13 +2358,13 @@ _create_new_cluster() {
       # Refusing it is the POINT of the pin (backend#1867): a republished tag must not
       # put unreviewed bytes on a customer's GPU node. Kept distinct from a failed pull
       # so nobody chases network/creds for a supply-chain answer.
-      K3D_GPU_FLAGS=()
+      TB_GPU_WIRED=0
       warn "The GPU node image no longer resolves to the pinned digest — installing CPU-only rather than running an unreviewed image."
       hint "Expected ${TB_K3S_CUDA_DIGEST}, but ${_prepull_image} resolved to ${_got_digest:-<unknown>}."
       hint "Either that tag was republished, or K8S_VERSION/CUDA_TAG moved without re-resolving K3S_CUDA_DIGEST in scripts/spec/facts.env."
       _recreate_cluster_hint
     elif (( ! _gpu_ok )); then
-      K3D_GPU_FLAGS=()
+      TB_GPU_WIRED=0
       warn "Couldn't pull or validate the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
       hint "Make sure this host can pull AND run ${_prepull_image} (for a private registry set TRACEBLOC_IMAGE_REGISTRY + TRACEBLOC_REGISTRY_USERNAME/PASSWORD)."
       # The node image is fixed at create time and this CPU cluster now looks healthy,
@@ -2370,7 +2395,7 @@ _create_new_cluster() {
     # can't schedule GPU pods — so drop the request (it would otherwise strand every
     # job Pending on a node that advertises 0 GPUs).
     if _gpu_wired; then
-      K3D_GPU_FLAGS=()
+      TB_GPU_WIRED=0
       warn "GPU disabled: K8S_VERSION=latest has no matching GPU node image — pin K8S_VERSION to enable GPU."
     fi
   elif _gpu_wired && [[ -n "$K8S_VERSION" ]]; then
@@ -2381,9 +2406,12 @@ _create_new_cluster() {
     K3D_ARGS+=(--image "rancher/k3s:${K8S_VERSION}")
   fi
 
-  if [[ ${#K3D_GPU_FLAGS[@]} -gt 0 ]]; then
-    K3D_ARGS+=("${K3D_GPU_FLAGS[@]}")
-    log "GPU flag(s) active: ${K3D_GPU_FLAGS[*]}"
+  # The one k3d GPU argument, derived from the gate every other GPU decision reads
+  # (the reuse guard, the pre-pull and the 'latest' branch above may have just put
+  # it back to 0), so the node's passthrough and the chart's GPU request agree.
+  if _gpu_wired; then
+    K3D_ARGS+=(--gpus=all)
+    log "GPU flag(s) active: --gpus=all"
     log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) + GPU passthrough..."
   else
     log "Creating cluster with $SERVERS server(s) + $AGENTS agent(s) (CPU-only)..."

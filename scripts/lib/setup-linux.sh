@@ -436,7 +436,9 @@ install_system_deps() {
     spin_cmd "Updating package index…" $PM_UPDATE || \
       warn "Package index refresh failed — continuing; installs will use the cached index."
     for pkg in "${MISSING_PKGS[@]}"; do
-      spin_cmd "Installing $pkg…" $PM_INSTALL "$pkg" || \
+      # ${pkg}, braced: bash 3.2 in a UTF-8 locale reads the first byte of "…"
+      # into an unbraced name and, under set -u, aborts "pkg\xE2: unbound variable".
+      spin_cmd "Installing ${pkg}…" $PM_INSTALL "$pkg" || \
         log "Could not install $pkg — may already be satisfied by an alternative package."
     done
     log "Dependencies installed: ${MISSING_PKGS[*]}"
@@ -913,9 +915,9 @@ _install_userspace_tools() {
 }
 
 # _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,
-# but create_cluster still needs K3D_GPU_FLAGS to expose an NVIDIA GPU to the k3d
+# but create_cluster still needs TB_GPU_WIRED=1 to expose an NVIDIA GPU to the k3d
 # cluster (--gpus=all). Without it a GPU host gets a CPU-only cluster even when the
-# toolkit is already installed (Bugbot #375). Reuse the flag ONLY when Docker's
+# toolkit is already installed (Bugbot #375). Wire the GPU ONLY when Docker's
 # NVIDIA runtime is already configured — expected on a GPU host with a usable
 # Docker; we can't (and won't) install/configure it here without admin. Otherwise
 # stay CPU-only and tell the user how to enable it. (AMD uses the device plugin
@@ -930,7 +932,7 @@ _tier0_gpu_flags() {
   _runtimes="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
   case "$_runtimes" in
     *'"nvidia"'*)
-      K3D_GPU_FLAGS=("--gpus=all")
+      TB_GPU_WIRED=1
       success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access." ;;
     *)
       warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
