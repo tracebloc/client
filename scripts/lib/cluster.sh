@@ -1242,6 +1242,23 @@ ensure_cluster_autostart() {
   fi
   if [[ -n "$nodes" ]]; then
     for node in $nodes; do
+      # NOT the tools helper (client-dev#1370). k3d makes it `restart=no` on
+      # purpose and recreates it on every `k3d cluster start`; it is the one
+      # container on the cluster network with a DYNAMIC address, so brought back by
+      # Docker ahead of the pinned nodes it can take one of their addresses and
+      # stop a node from starting ("Address already in use").
+      #
+      # PUT BACK, not skipped (Bugbot on client-dev#1380): installers before this
+      # one set unless-stopped on every k3d-<cluster>-* container, the helper
+      # included, and a skip leaves that policy on an environment they touched.
+      # Best effort, like the update below. The pin and the repair need no reset
+      # of their own: both end in `k3d cluster start`, which replaces the helper
+      # with a new restart=no container (measured on k3d v5.9.0: new container ID,
+      # restart=no, after the old one had been set to unless-stopped).
+      if [[ "$node" == "k3d-${CLUSTER_NAME}-tools" ]]; then
+        docker update --restart no "$node" >/dev/null 2>&1 || true
+        continue
+      fi
       docker update --restart unless-stopped "$node" >/dev/null 2>&1 || true
     done
     log "Set restart=unless-stopped on k3d nodes so the cluster returns after a reboot."
@@ -2542,6 +2559,9 @@ _create_new_cluster() {
   # No success line here — _wait_for_api prints the single "Secure environment
   # ready" once the API server actually answers (the true ready signal).
   log "k3d cluster '$CLUSTER_NAME' created."
+  # Fix every node's address before the first Docker restart can reorder them
+  # (client-dev#1370). Best effort; see the function.
+  _pin_k3d_node_addresses_after_create
 }
 
 _merge_kubeconfig() {
@@ -2638,6 +2658,629 @@ _merge_kubeconfig() {
   log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME' (context $want_ctx)."
 }
 
+# =============================================================================
+#  NODE ADDRESSES (client-dev#1370)
+# =============================================================================
+#
+# WHAT GOES WRONG. k3d attaches its node containers to the cluster network with
+# DYNAMIC addresses (IPAMConfig null), and a Docker restart hands them out again
+# in whatever order the containers come back. k3s keeps the node's address in its
+# Node object, and when the node returns on a DIFFERENT address k3s dies on every
+# start with
+#   failed to start networking: unable to initialize network policy controller:
+#   error getting node subnet: failed to find interface with specified node ip
+# The k3d 5.9 entrypoint then sits in `until kubectl uncordon …; do sleep 3; done`,
+# so the server container stays Up, Docker's restart policy never fires, and
+# `k3d cluster list` still reports 1/1. Measured on a Mac on 2026-09-29: the
+# environment was dead for five days and the installer said "already running",
+# then timed out 180 s later naming three causes that did not apply.
+#
+# THREE PARTS, ONE ROUTINE (_k3d_pin_addresses):
+#   detect  — _k3s_node_state, gated on the API not answering: the node runs,
+#             and its k3s process is gone or its latest k3s run ended on that error.
+#   repair  — _ensure_k3s_node_addresses puts a failing node back on the address
+#             its Node object records (the latest kube-proxy "Successfully
+#             retrieved NodeIPs" line in `docker logs`; the failing runs print it
+#             too, just before they die), pins the load balancer high, and starts.
+#   prevent — _pin_k3d_node_addresses_after_create runs the same routine right
+#             after create, with every node on the address it already has.
+#
+# WHY NOT `k3d cluster create --subnet auto`. Measured first (k3d v5.9.0, Docker
+# 29.7.2, throwaway clusters): it gives SERVERS a static address and nothing
+# else. The agent, the load balancer and the tools helper stay dynamic, and a
+# dynamic container that comes back first takes the server's pinned address, so
+# the server then fails to start at all ("Address already in use"): reproduced
+# with the load balancer and with the agent. Every container that Docker restarts
+# must be pinned, which that flag cannot do.
+#
+# Nothing here deletes anything: containers, volumes and the network all stay;
+# only each container's attachment to its network is re-made with a fixed --ip.
+
+# The API answers. ONE definition, read by the detector's gate and by
+# _wait_for_api's loop, so the two cannot disagree about what "answers" means.
+# --request-timeout bounds the call itself (see _wait_for_api).
+_api_answers() {
+  kubectl cluster-info --request-timeout=5s &>/dev/null
+}
+
+# _ipv4_to_int ADDR — a dotted quad as an integer; non-zero for anything else.
+_ipv4_to_int() {
+  local re='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$' a b c d
+  [[ "${1:-}" =~ $re ]] || return 1
+  a=$((10#${BASH_REMATCH[1]})); b=$((10#${BASH_REMATCH[2]}))
+  c=$((10#${BASH_REMATCH[3]})); d=$((10#${BASH_REMATCH[4]}))
+  (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
+  printf '%s\n' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+
+_int_to_ipv4() {
+  printf '%d.%d.%d.%d\n' $(( ($1 >> 24) & 255 )) $(( ($1 >> 16) & 255 )) $(( ($1 >> 8) & 255 )) $(( $1 & 255 ))
+}
+
+# The three log markers the detector reads, declared once: the parser below and
+# the tests' fixtures both go through _k3s_log_facts, never a copy of these.
+_TB_K3S_RUN_MARK='msg="Starting k3s v'
+_TB_K3S_NODEIP_FAIL='failed to find interface with specified node ip'
+_TB_K3S_NODEIPS_MARK='"Successfully retrieved NodeIPs"'
+
+# _k3s_log_facts — a k3s node's log on stdin; prints "<failed> <expected-ip>",
+# both about the LATEST k3s run (from its last "Starting k3s v" line):
+#   failed       1 when that run logged the node-address failure, else 0. Per run,
+#                not per log: a node that failed once and has run cleanly since is
+#                not failing.
+#   expected-ip  the address in that run's "Successfully retrieved NodeIPs" line —
+#                the Node object's address, the one k3s insists on (kube-proxy
+#                prints it just before the failing run dies). Empty when that run
+#                printed none. IPv4 only: the first address of a dual-stack list.
+# THE SAME RUN, never an older one: the failure is a RACE, not a certainty —
+# measured on a throwaway cluster, one swap in three came up healthy because the
+# kubelet moved the Node to the new address first — so an older run's line can
+# name an address the Node object no longer has, and putting the node back there
+# would break it. No line in the failing run means "cannot tell", never "use the
+# last one we saw".
+# POSIX awk (mawk on Debian/Ubuntu, BSD awk on macOS); `failed` is printed FIRST
+# so an empty address cannot shift it into the address slot on `read`.
+_k3s_log_facts() {
+  awk -v run="$_TB_K3S_RUN_MARK" -v fail="$_TB_K3S_NODEIP_FAIL" -v ips="$_TB_K3S_NODEIPS_MARK" '
+    index($0, run)  { failed = 0; ip = "" }
+    index($0, fail) { failed = 1 }
+    index($0, ips)  { if (match($0, /NodeIPs=\["[0-9.]+"/)) ip = substr($0, RSTART + 10, RLENGTH - 11) }
+    END { printf "%d %s\n", failed, ip }'
+}
+
+# _k3s_node_log_facts NODE — _k3s_log_facts over NODE's WHOLE log, bounded. Not a
+# tail: a server stuck in the entrypoint's uncordon loop logs a refused
+# connection every 3 s, so five days bury the failure 500k lines deep (measured:
+# 528k lines, ~100 MB, parsed in ~6 s). Non-zero when the read itself failed —
+# "cannot tell", never "no failure".
+#
+# The read's exit code goes through a file, NOT ${PIPESTATUS[0]} (Bugbot on
+# client-dev#1380, "Failed log read marked dead"). install-k8s.sh runs with
+# `set -E` and an ERR trap, and on the macOS /bin/bash 3.2 the trap that fires
+# for the failed pipeline resets PIPESTATUS: a read that failed or timed out came
+# back 0 with "0 " -- "read, no failure" -- and its node read as dead (measured;
+# bash 5.2 keeps PIPESTATUS). A code that never reached the file, or a file that
+# could not be made, is "cannot tell" too.
+_k3s_node_log_facts() {
+  local out rc rcf
+  rcf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-logread-XXXXXX" 2>/dev/null)" || return 2
+  out="$( { _bounded "${TB_DOCKER_LOGS_TIMEOUT:-90}" docker logs "$1" 2>&1; printf '%s\n' "$?" > "$rcf"; } | _k3s_log_facts )"
+  rc="$(cat "$rcf" 2>/dev/null)"; rm -f "$rcf"
+  [[ "$rc" == 0 ]] || return "${rc:-2}"
+  printf '%s\n' "$out"
+}
+
+# _k3s_running_in NODE — 0 when a k3s process runs in NODE, 1 when none does, 2
+# when that cannot be read. Read from the HOST side (`docker top`), so it works
+# while k3s is dead. Matches the COMMAND word itself (`/bin/k3s server`,
+# `k3s agent`), never a substring: the containerd shims carry
+# /run/k3s/containerd/… in their arguments and outlive k3s.
+_k3s_running_in() {
+  local out
+  out="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker top "$1" 2>/dev/null)" || return 2
+  awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "CMD" || $i == "COMMAND") col = i; next }
+       col && ($col == "k3s" || $col ~ /\/k3s$/) { found = 1 }
+       END { if (!col) exit 2; exit (found ? 0 : 1) }' <<<"$out"
+}
+
+# _k3d_nodes ROLE — this cluster's containers of one k3d role, one per line.
+# By k3d's LABELS, one query per role, never by name — the reasoning is
+# _verify_nodes_see_host_data's (an exact cluster match, and a format the
+# PowerShell twin can pass unchanged). `-a`: a node that is restarting counts.
+_k3d_nodes() {
+  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a \
+    --filter "label=k3d.cluster=${CLUSTER_NAME}" \
+    --filter "label=k3d.role=$1" \
+    --format '{{.Names}}' 2>/dev/null
+}
+
+# _k3d_node_addr NODE — "running|network|address|pinned" for NODE on the network
+# k3d's own label names (derived, not "k3d-$CLUSTER_NAME"). address and pinned are
+# empty when there is none. Raw-string (backtick) template keys, so no argument
+# carries a double quote — the constraint of the PowerShell twin.
+_k3d_node_addr() {
+  _bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect -f \
+    '{{$n := index .Config.Labels `k3d.cluster.network`}}{{.State.Running}}|{{$n}}|{{with index .NetworkSettings.Networks $n}}{{.IPAddress}}|{{with .IPAMConfig}}{{.IPv4Address}}{{end}}{{end}}' \
+    "$1" 2>/dev/null
+}
+
+# _k3d_net_layout NET — the network's IPv4 subnet + gateway and who is on it:
+#   subnet <cidr> <gateway>
+#   member <container> <address>/<prefix>
+_k3d_net_layout() {
+  _bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker network inspect -f \
+    '{{range .IPAM.Config}}subnet {{.Subnet}} {{.Gateway}}{{println}}{{end}}{{range .Containers}}member {{.Name}} {{.IPv4Address}}{{println}}{{end}}' \
+    "$1" 2>/dev/null
+}
+
+# _k3d_high_ip CIDR TAKEN… — the highest free host address of an IPv4 CIDR,
+# skipping every address in TAKEN. The load balancer lives there, far from
+# Docker's dynamic allocations, which start at the bottom: pinned low, the k3d
+# tools helper that `k3d cluster start` brings up first takes the address and the
+# load balancer then fails "Address already in use" (hit on 2026-09-29).
+_k3d_high_ip() {
+  local cidr="$1"; shift
+  local len="${cidr#*/}" net size top n t taken=" $* "
+  case "$len" in ''|*[!0-9]*) return 1 ;; esac
+  (( len >= 8 && len <= 29 )) || return 1
+  net="$(_ipv4_to_int "${cidr%/*}")" || return 1
+  size=$(( 1 << (32 - len) ))
+  net=$(( net - net % size ))
+  top=$(( net + size - 2 ))
+  for (( n = top; n > top - 16 && n > net + 1; n-- )); do
+    t="$(_int_to_ipv4 "$n")"
+    [[ "$taken" == *" $t "* ]] && continue
+    printf '%s\n' "$t"
+    return 0
+  done
+  return 1
+}
+
+# _k3s_node_state NODE — the detector, for one k3s node. Prints
+#   "<verdict> <network> <current-address> <expected-address>"   (- when unknown)
+#   ok          k3s runs (a live k3s trumps any old log line)
+#   swapped     k3s is not running, its latest run failed on the node address,
+#               and the address that run recorded differs from the one the
+#               container has now (or it has none): REPAIRABLE
+#   unreadable  it failed on the node address, but the failing run recorded no
+#               address, so there is nothing to put it back to (fail closed)
+#   dead        k3s is not running, and its log was read and shows no such failure
+#   stopped     the container is not running and its log shows no such failure
+#   unknown     the facts could not be read -- including a running node whose log
+#               read failed or timed out: that could be a swap, so it is not `dead`
+#               (which a repair would pin on the address it has now)
+_k3s_node_state() {
+  local node="$1" line running="" net="" cur="" _pinned alive=1 facts failed="" exp="" logread=0
+  if ! line="$(_k3d_node_addr "$node")"; then
+    printf 'unknown - - -\n'; return 0
+  fi
+  IFS='|' read -r running net cur _pinned <<<"$line"
+  _ipv4_to_int "$cur" >/dev/null || cur=""        # docker prints "invalid IP" when stopped
+  if [[ "$running" == "true" ]]; then
+    alive=0; _k3s_running_in "$node" || alive=$?
+  fi
+  # A live k3s trumps any old log line, and costs no log read (the API may be down
+  # for a reason that is not this one — a proxy — with every node healthy).
+  if [[ "$alive" -eq 0 ]]; then
+    printf 'ok %s %s -\n' "${net:--}" "${cur:--}"; return 0
+  fi
+  if facts="$(_k3s_node_log_facts "$node")"; then
+    logread=1
+    read -r failed exp <<<"$facts"
+    _ipv4_to_int "$exp" >/dev/null || exp=""
+  fi
+
+  # REPAIR ONLY ON THE FAILURE LINE. A dead k3s on a moved address is not proof
+  # on its own (the node may have died of something else after surviving a move),
+  # and the failing run always prints the line before it goes.
+  local verdict
+  if [[ "$failed" == "1" ]]; then
+    if [[ -z "$exp" ]]; then verdict=unreadable
+    elif [[ "$exp" != "$cur" ]]; then verdict=swapped
+    else verdict=dead                               # failed on an address it HAS: not a move
+    fi
+  elif [[ "$running" != "true" ]]; then
+    verdict=stopped
+  elif [[ "$alive" -eq 2 || "$logread" -eq 0 ]]; then
+    verdict=unknown                                 # no k3s, and a log that could not be read
+  else
+    verdict=dead
+  fi
+  printf '%s %s %s %s\n' "$verdict" "${net:--}" "${cur:--}" "${exp:--}"
+}
+
+# _k3d_pin_addresses NET LB_SPEC NODE_SPEC… — give each container a FIXED address
+# on NET and bring the cluster back. A SPEC is "container=address"; LB_SPEC may be
+# empty (a cluster made with --no-lb). NODE_SPECs go servers first, and name EVERY
+# k3s node of the cluster (_k3d_pin_plan refuses a plan that leaves one out).
+#
+# ORDER, all of it load-bearing:
+#   1. stop the cluster: an address can only be re-assigned on a stopped container.
+#   2. disconnect EVERY container before connecting any: in a swap, each address
+#      is held by the other container until both are released.
+#   3. connect each one with its fixed --ip.
+#   4. `k3d cluster start --wait` starts everything, the nodes included; never a
+#      `docker start` first. Docker rebuilds /etc/hosts on every start, and k3d
+#      writes its host aliases back (host.k3d.internal, the name a proxy on the host
+#      is reached by) only into the nodes it starts itself (measured on k3d v5.9.0):
+#      a node started by `docker start` came back without them, and the squid E2E's
+#      image pulls through the host's proxy died there. What that ordering protected
+#      against -- a dynamic container taking a stopped node's pinned address -- is
+#      now refused up front by _k3d_pin_plan: every k3s node is pinned, and none on
+#      the address k3d's tools helper, which it starts first, will take.
+# Status: 0 every container runs on its address; 1 nothing was changed (the stop
+# failed, and the cluster runs as it did); 2 it was stopped and came back, but not
+# every container on its address (a refused --ip is rolled back to a dynamic one,
+# so none is left off its network); 3 it was stopped and did NOT come back -- k3d
+# cluster start failed or a container is not running. The caller decides which of
+# those is fatal; 3 always is, since the environment is down.
+_k3d_pin_addresses() {
+  local net="$1" lbspec="$2"; shift 2
+  local spec c ip line running cur _n _p back=1 pinned=1
+  local logf="${LOG_FILE:-/dev/null}"
+  if ! _bounded "${TB_K3D_STOP_TIMEOUT:-180}" k3d cluster stop "$CLUSTER_NAME" >>"$logf" 2>&1; then
+    # A stop that failed part-way can leave some containers down: bring the
+    # cluster back before reporting "nothing changed", and say so if it isn't.
+    log "k3d cluster stop '$CLUSTER_NAME' failed; no address was changed. Starting it again in case it stopped part-way."
+    _bounded "${TB_K3D_START_TIMEOUT:-360}" k3d cluster start "$CLUSTER_NAME" --wait --timeout 5m >>"$logf" 2>&1 || return 3
+    return 1
+  fi
+  for spec in "$@" ${lbspec:+"$lbspec"}; do
+    c="${spec%%=*}"
+    _bounded "${TB_DOCKER_NET_TIMEOUT:-30}" docker network disconnect "$net" "$c" >>"$logf" 2>&1 \
+      || log "docker network disconnect $net $c failed (not attached?); connecting it anyway."
+  done
+  for spec in "$@" ${lbspec:+"$lbspec"}; do
+    c="${spec%%=*}"; ip="${spec#*=}"
+    if ! _bounded "${TB_DOCKER_NET_TIMEOUT:-30}" docker network connect --ip "$ip" "$net" "$c" >>"$logf" 2>&1; then
+      pinned=0
+      log "Could not attach $c to $net at $ip; re-attaching it with a dynamic address so it is not left off its network."
+      _bounded "${TB_DOCKER_NET_TIMEOUT:-30}" docker network connect "$net" "$c" >>"$logf" 2>&1 \
+        || log "Re-attaching $c to $net failed as well."
+    fi
+  done
+  # Bounded on top of k3d's own --timeout: that one covers the wait for the nodes,
+  # not a Docker daemon that stops answering underneath k3d.
+  _bounded "${TB_K3D_START_TIMEOUT:-360}" k3d cluster start "$CLUSTER_NAME" --wait --timeout 5m >>"$logf" 2>&1 \
+    || { back=0; log "k3d cluster start '$CLUSTER_NAME' failed after re-attaching its nodes."; }
+  for spec in "$@" ${lbspec:+"$lbspec"}; do
+    c="${spec%%=*}"; ip="${spec#*=}"
+    running=""; cur=""
+    if line="$(_k3d_node_addr "$c")"; then IFS='|' read -r running _n cur _p <<<"$line"; fi
+    if [[ "$running" != "true" ]]; then
+      back=0
+      log "$c is not running after the re-attach."
+    elif [[ "$cur" != "$ip" ]]; then
+      pinned=0
+      log "$c runs on ${cur:-no address}, not on $ip, after the re-attach."
+    fi
+  done
+  [[ "$back" -eq 1 ]] || return 3
+  [[ "$pinned" -eq 1 ]] || return 2
+  return 0
+}
+
+# _k3d_node_image NODE — the image NODE runs, for the address check below (it is
+# on the machine: the node was created from it).
+_k3d_node_image() {
+  _bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect -f '{{.Config.Image}}' "$1" 2>/dev/null
+}
+
+# _k3d_static_ip_check NET ADDR IMAGE — can this Docker Engine give a container a
+# fixed address on NET at all? 0 yes, 1 no (the engine said so), 2 cannot tell.
+# Docker Engine 28 and earlier refuse `--ip` on a network whose subnet Docker
+# picked itself, which is how k3d makes one without --subnet ("user specified IP
+# address is supported only when connecting to networks with user configured
+# subnets"; measured on 27.5.1 and 28.5.2, while 29.7.2 accepts it). Asked of the
+# engine rather than read off its version: `docker create` validates the address
+# and nothing is started. The container it creates is this check's own, and is
+# removed again.
+_k3d_static_ip_check() {
+  local net="$1" addr="$2" image="$3" name out rc=0
+  [[ -n "$image" ]] || return 2
+  name="tb-ipcheck-$$-$RANDOM"
+  out="$(_bounded "${TB_DOCKER_NET_TIMEOUT:-30}" docker create --pull never --name "$name" --network "$net" --ip "$addr" "$image" true 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    _bounded "${TB_DOCKER_NET_TIMEOUT:-30}" docker rm "$name" >/dev/null 2>&1 \
+      || log "Could not remove the address-check container $name (it never ran): docker rm $name"
+    return 0
+  fi
+  log "Fixed-address check on $net (docker create --ip $addr) exited $rc: $out"
+  [[ "$out" == *"user configured subnets"* ]] && return 1
+  return 2
+}
+
+# _k3d_pin_plan — shared by repair and prevent: reads the network layout for the
+# node specs in "$@" (container=address), refuses what cannot be pinned safely, and
+# prints the load balancer's spec ("" when the cluster has none) on success.
+# Refusals go to stdout as "refuse <reason>": status 2 when THIS Docker Engine
+# cannot pin addresses on the network at all, 1 for every other refusal.
+_k3d_pin_plan() {
+  local net="$1" lb="$2"; shift 2
+  local layout kind a b subnet="" gw="" members="" ours=" " nodes=" " n spec c ip seen=" " holder lbip=""
+  layout="$(_k3d_net_layout "$net")" || { printf 'refuse the layout of network %s could not be read\n' "$net"; return 1; }
+  while read -r kind a b; do
+    case "$kind" in
+      subnet) [[ -z "$subnet" ]] && _ipv4_to_int "${a%/*}" >/dev/null && { subnet="$a"; gw="$b"; } ;;
+      member) members="$members$a=${b%/*} " ;;
+    esac
+  done <<<"$layout"
+  [[ -n "$subnet" ]] || { printf 'refuse network %s has no IPv4 subnet\n' "$net"; return 1; }
+  local lo hi sz plen="${subnet#*/}"
+  case "$plen" in ''|*[!0-9]*) printf 'refuse network %s has an unreadable subnet %s\n' "$net" "$subnet"; return 1 ;; esac
+  (( plen >= 8 && plen <= 29 )) || { printf 'refuse network %s is a /%s, too small to pin addresses in\n' "$net" "$plen"; return 1; }
+  lo="$(_ipv4_to_int "${subnet%/*}")"; sz=$(( 1 << (32 - plen) )); lo=$(( lo - lo % sz )); hi=$(( lo + sz - 1 ))
+  # Everything k3d labels as this cluster's (the tools helper is `noRole`); any
+  # other container on the network is someone else's and is never moved. A role
+  # that cannot be listed is a refusal: "ours" decides whose address is whose.
+  local list
+  for n in server agent loadbalancer noRole; do
+    list="$(_k3d_nodes "$n")" || { printf 'refuse the %s containers could not be listed\n' "$n"; return 1; }
+    while read -r c; do
+      [[ -n "$c" ]] || continue
+      ours="$ours$c "
+      [[ "$n" == server || "$n" == agent ]] && nodes="$nodes$c "
+    done <<<"$list"
+  done
+  for spec in "$@"; do
+    c="${spec%%=*}"; ip="${spec#*=}"
+    n="$(_ipv4_to_int "$ip")" || { printf 'refuse %s would get %s, which is not an address\n' "$c" "$ip"; return 1; }
+    (( n > lo && n < hi )) || { printf 'refuse %s would get %s, outside the network %s\n' "$c" "$ip" "$subnet"; return 1; }
+    [[ "$ip" != "$gw" ]] || { printf 'refuse %s would get %s, the network gateway\n' "$c" "$ip"; return 1; }
+    [[ "$seen" != *" $ip "* ]] || { printf 'refuse two nodes would share %s\n' "$ip"; return 1; }
+    seen="$seen$ip "
+    for holder in $members; do
+      if [[ "${holder#*=}" == "$ip" && "$ours" != *" ${holder%%=*} "* ]]; then
+        printf 'refuse %s is in use by %s, which is not part of this environment\n' "$ip" "${holder%%=*}"
+        return 1
+      fi
+    done
+  done
+  # EVERY k3s node, or none. `k3d cluster start` starts them all, and a node left
+  # dynamic can take the address of a pinned one that has not started yet: a
+  # stopped container's fixed address is not reserved for it.
+  for c in $nodes; do
+    [[ " $* " == *" $c="* ]] || { printf 'refuse %s is not running on an address this installer could read, so it cannot be given a fixed one, and k3d would start it on a dynamic address another node may need\n' "$c"; return 1; }
+  done
+  # THE TOOLS HELPER. `k3d cluster start` brings it up before any node, on a
+  # dynamic address: the lowest one no running container holds, which with the
+  # cluster stopped is the lowest host address that is neither the gateway nor
+  # someone else's. A node pinned there loses it and fails "Address already in use".
+  local t tools_ip="" foreign
+  for (( t = lo + 1; t < hi; t++ )); do
+    ip="$(_int_to_ipv4 "$t")"
+    [[ "$ip" == "$gw" ]] && continue
+    foreign=0
+    for holder in $members; do
+      [[ "${holder#*=}" == "$ip" && "$ours" != *" ${holder%%=*} "* ]] && { foreign=1; break; }
+    done
+    [[ "$foreign" -eq 0 ]] && { tools_ip="$ip"; break; }
+  done
+  [[ -z "$tools_ip" || "$seen" != *" $tools_ip "* ]] \
+    || { printf 'refuse k3d starts its tools helper first, on %s, the address a node needs\n' "$tools_ip"; return 1; }
+  local taken="$gw"
+  for holder in $members; do taken="$taken ${holder#*=}"; done
+  if [[ -n "$lb" ]]; then
+    # A load balancer ALREADY pinned in the top half (an earlier repair, or one done
+    # by hand) keeps its address: moving it again buys nothing.
+    local line _r _nn _c pinned=""
+    if line="$(_k3d_node_addr "$lb")"; then IFS='|' read -r _r _nn _c pinned <<<"$line"; fi
+    n="$(_ipv4_to_int "$pinned" 2>/dev/null)" || n=""
+    if [[ -n "$n" ]] && (( n >= lo + sz / 2 && n < hi )) && [[ "$seen" != *" $pinned "* ]]; then
+      lbip="$pinned"
+    else
+      # shellcheck disable=SC2086
+      lbip="$(_k3d_high_ip "$subnet" $taken $seen)" || { printf 'refuse no free address is left at the top of %s for the load balancer\n' "$subnet"; return 1; }
+    fi
+  fi
+  # CAN THIS ENGINE PIN AT ALL? Asked last, with an address nothing holds.
+  local probe img rc=0
+  # shellcheck disable=SC2086
+  probe="$(_k3d_high_ip "$subnet" $taken $seen $lbip)" || probe="${lbip:-${seen# }}"
+  probe="${probe%% *}"
+  img="$(_k3d_node_image "${1%%=*}")" || img=""
+  _k3d_static_ip_check "$net" "$probe" "$img" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) printf 'refuse this Docker Engine cannot give a container a fixed address on network %s\n' "$net"; return 2 ;;
+    *) printf 'refuse could not check that this Docker Engine can give a container a fixed address on network %s\n' "$net"; return 1 ;;
+  esac
+  printf '%s\n' "${lb:+$lb=$lbip}"
+}
+
+# _manual_pin_hint NET LB NODE=ADDR… — the repair, spelled out for an operator,
+# for the cases this installer refuses to do itself.
+_manual_pin_hint() {
+  local net="$1" lb="$2" spec; shift 2
+  hint "To put it back by hand (nothing is deleted):"
+  hint "  k3d cluster stop $CLUSTER_NAME"
+  [[ -n "$lb" ]] && hint "  docker network disconnect $net $lb"
+  for spec in "$@"; do hint "  docker network disconnect $net ${spec%%=*}"; done
+  for spec in "$@"; do hint "  docker network connect --ip ${spec#*=} $net ${spec%%=*}"; done
+  [[ -n "$lb" ]] && hint "  docker network connect --ip <a free address at the top of the network> $net $lb"
+  hint "  k3d cluster start $CLUSTER_NAME"
+}
+
+# The finding _wait_for_api names instead of its generic list, when the detector
+# found a node whose k3s is not running for a reason it does not recognise.
+#
+# STICKY across the re-checks of one API wait (_wait_for_api resets it once, at
+# its start). k3s flaps for 10-30 s after a swap, so a later check can land on an
+# API that answers for a moment, or on a read that cannot tell; neither is
+# evidence the earlier finding stopped being true, and clearing it there sent the
+# timeout back to the generic list. Only a completed check that sees every server
+# running k3s clears it, and so does a repair that worked.
+TB_K3S_NODE_FINDING="${TB_K3S_NODE_FINDING:-}"
+
+# _ensure_k3s_node_addresses — the reuse path's check, run at the start of the API
+# wait. Silent unless the API does not answer, and it ACTS only on positive
+# evidence: a node whose k3s is gone or failed on the node address, with a
+# recorded address that differs from its current one.
+_ensure_k3s_node_addresses() {
+  _api_answers && return 0
+
+  # Every k3s node's verdict. A repair pins EVERY node (see _k3d_pin_plan): `ok`
+  # and `dead` ones on the address they have (for them the repair doubles as the
+  # prevention), `swapped` ones on the address their Node object records. A node
+  # that is stopped or could not be read has no address to pin, so a repair that
+  # needs it is refused rather than guessed.
+  local role node st verdict net cur exp netname="" lb="" specs_s="" specs_a=""
+  local swapped="" unreadable="" dead="" rc=0 list servers=0 servers_ok=0
+  for role in server agent; do
+    rc=0; list="$(_k3d_nodes "$role")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      log "The API did not answer and this cluster's $role nodes could not be listed (exit $rc); leaving it to the API wait."
+      return 0
+    fi
+    while read -r node; do
+      [[ -n "$node" ]] || continue
+      st="$(_k3s_node_state "$node")"
+      read -r verdict net cur exp <<<"$st"
+      log "k3s node check: $node $st"
+      if [[ "$net" != "-" && -z "$netname" ]]; then netname="$net"; fi
+      if [[ "$role" == server ]]; then
+        servers=$((servers + 1))
+        [[ "$verdict" == ok ]] && servers_ok=$((servers_ok + 1))
+      fi
+      case "$verdict" in
+        ok|dead)
+          if [[ "$cur" != "-" ]]; then
+            if [[ "$role" == server ]]; then specs_s="$specs_s $node=$cur"; else specs_a="$specs_a $node=$cur"; fi
+          fi
+          if [[ "$verdict" == dead && "$role" == server ]]; then dead="$dead $node"; fi ;;
+        swapped)    if [[ "$role" == server ]]; then specs_s="$specs_s $node=$exp"; else specs_a="$specs_a $node=$exp"; fi
+                    swapped="$swapped $node:$cur:$exp" ;;
+        unreadable) unreadable="$unreadable $node" ;;
+      esac
+    done <<<"$list"
+  done
+  # Positive evidence that the earlier finding is gone: every server runs k3s.
+  if [[ "$servers" -gt 0 && "$servers_ok" -eq "$servers" ]]; then TB_K3S_NODE_FINDING=""; fi
+
+  local first
+  if [[ -n "$unreadable" ]]; then
+    first="${unreadable# }"; first="${first%% *}"
+    warn "Kubernetes inside '$first' stops on every start: its network address changed (usually after a Docker restart), and the address it is registered at can't be read from its log, so this installer won't guess one."
+    hint "The registered address is in the last 'Successfully retrieved NodeIPs' line of:"
+    hint "  docker logs $first 2>&1 | grep 'Successfully retrieved NodeIPs' | tail -1"
+    _manual_pin_hint "${netname:-k3d-$CLUSTER_NAME}" "k3d-${CLUSTER_NAME}-serverlb" "$first=<that address>"
+    error "Stopped without changing anything: the address '$first' needs could not be read."
+  fi
+
+  if [[ -z "$swapped" ]]; then
+    if [[ -n "$dead" ]]; then
+      first="${dead# }"; first="${first%% *}"
+      TB_K3S_NODE_FINDING="Kubernetes is not running inside '$first': the container is up, its k3s process is not, and nothing restarts it. Its last lines: docker logs --tail 50 $first. Restarting the environment often clears this: k3d cluster stop $CLUSTER_NAME && k3d cluster start $CLUSTER_NAME"
+      log "k3s node check: $TB_K3S_NODE_FINDING"
+    fi
+    return 0
+  fi
+
+  local s c was want
+  for s in $swapped; do
+    c="${s%%:*}"; was="${s#*:}"; was="${was%%:*}"; want="${s##*:}"
+    warn "Kubernetes inside '$c' stops on every start: after a Docker restart it came back on ${was/#-/no address}, but it is registered at $want and refuses any other address."
+  done
+
+  # The load balancer holds, in the usual swap, the very address the server needs,
+  # so a listing that could not be read is a refusal, not "there is none".
+  rc=0; lb="$(_k3d_nodes loadbalancer)" || rc=$?
+  lb="${lb%%$'\n'*}"
+  local plan lbname
+  if [[ "$rc" -ne 0 ]]; then
+    plan="refuse the load balancer could not be listed (exit $rc)"; rc=1
+  else
+    # shellcheck disable=SC2086
+    plan="$(_k3d_pin_plan "$netname" "$lb" $specs_s $specs_a)" || rc=$?
+  fi
+  lbname="${lb:-k3d-${CLUSTER_NAME}-serverlb}"
+  if [[ "$rc" -eq 2 ]]; then
+    hint "Can't move it back automatically: ${plan#refuse }."
+    hint "Docker Engine 29 can. Update Docker, then re-run this installer."
+    error "Stopped without changing anything: this Docker Engine can't restore the addresses."
+  elif [[ "$rc" -ne 0 ]]; then
+    hint "Can't move it back automatically: ${plan#refuse }."
+    # shellcheck disable=SC2086
+    _manual_pin_hint "${netname:-k3d-$CLUSTER_NAME}" "$lbname" $specs_s $specs_a
+    error "Stopped without changing anything: the addresses could not be restored safely."
+  fi
+  log "Re-pinning node addresses:${specs_s}${specs_a}${plan:+ $plan}"
+  # shellcheck disable=SC2086
+  ( _k3d_pin_addresses "$netname" "$plan" $specs_s $specs_a ) &
+  rc=0; spin "$!" "Moving your secure environment's nodes back to their addresses (nothing is deleted)…" 900 || rc=$?
+  case "$rc" in
+    0)
+      TB_K3S_NODE_FINDING=""
+      success "Secure environment repaired: its nodes are back on the addresses Kubernetes expects, and fixed there." ;;
+    1)
+      # shellcheck disable=SC2086
+      _manual_pin_hint "$netname" "$lbname" $specs_s $specs_a
+      error "Couldn't stop your secure environment to move its nodes back, so nothing was changed (see the install log)." ;;
+    2)
+      # shellcheck disable=SC2086
+      _manual_pin_hint "$netname" "$lbname" $specs_s $specs_a
+      error "Couldn't put your secure environment's nodes back on their addresses. It is running again, on the addresses Docker gave it (see the install log)." ;;
+    *)
+      hint "It was stopped for the move and did not start again. Start it with:"
+      hint "  k3d cluster start $CLUSTER_NAME"
+      hint "then re-run this installer."
+      error "Your secure environment was stopped to move its nodes back and did not start again (see the install log)." ;;
+  esac
+}
+
+# _pin_k3d_node_addresses_after_create — prevention: fix every node on the address
+# it was just given, and the load balancer high, before a Docker restart can
+# reorder them. BEST EFFORT: a cluster that could not be pinned still works on the
+# addresses Docker gave it, and the reuse path's check repairs one a later restart
+# breaks — so a read that fails skips quietly and a pin that fails warns.
+_pin_k3d_node_addresses_after_create() {
+  local role node line running net cur _p netname="" lb="" specs="" list plan rc=0
+  for role in server agent; do
+    list="$(_k3d_nodes "$role")" || { log "Node addresses not pinned: couldn't list the $role nodes."; return 0; }
+    while read -r node; do
+      [[ -n "$node" ]] || continue
+      line="$(_k3d_node_addr "$node")" || { log "Node addresses not pinned: couldn't read $node."; return 0; }
+      IFS='|' read -r running net cur _p <<<"$line"
+      if [[ "$running" != "true" || -z "$net" ]] || ! _ipv4_to_int "$cur" >/dev/null; then
+        log "Node addresses not pinned: $node is not running on a readable address ($line)."
+        return 0
+      fi
+      netname="$net"; specs="$specs $node=$cur"
+    done <<<"$list"
+  done
+  [[ -n "$specs" ]] || { log "Node addresses not pinned: no k3s nodes listed for '$CLUSTER_NAME'."; return 0; }
+  # A load balancer that could not be listed is a skip, not "there is none": nodes
+  # pinned beside a still-dynamic load balancer are the measured failure (it
+  # starts first and takes a node's address), worse than pinning nothing.
+  lb="$(_k3d_nodes loadbalancer)" || { log "Node addresses not pinned: couldn't list the load balancer."; return 0; }
+  lb="${lb%%$'\n'*}"
+  # Every refusal -- including an engine that cannot pin on this network at all --
+  # is a quiet skip: the cluster runs as it did before this step existed.
+  # shellcheck disable=SC2086
+  if ! plan="$(_k3d_pin_plan "$netname" "$lb" $specs)"; then
+    log "Node addresses not pinned: ${plan#refuse }."
+    return 0
+  fi
+  log "Pinning node addresses:${specs}${plan:+ $plan}"
+  # shellcheck disable=SC2086
+  ( _k3d_pin_addresses "$netname" "$plan" $specs ) &
+  spin "$!" "Fixing your secure environment's network addresses…" 900 || rc=$?
+  # Three different outcomes, three different messages (Bugbot on client-dev#1380):
+  # only "nothing was changed" and "back up on Docker's addresses" are true
+  # enough for "it works as it is"; a cluster this step stopped and could not
+  # start again is down, and the install stops here saying how to start it.
+  case "$rc" in
+    0) ;;
+    1) warn "Couldn't give your secure environment's nodes fixed network addresses, so nothing was changed. It works as it is, but a Docker restart could reorder them; re-running this installer repairs that." ;;
+    2) warn "Couldn't give your secure environment's nodes fixed network addresses. It is running on the addresses Docker gave it, but a Docker restart could reorder them; re-running this installer repairs that." ;;
+    *)
+      hint "It was stopped to fix its network addresses and did not start again. Start it with:"
+      hint "  k3d cluster start $CLUSTER_NAME"
+      hint "then re-run this installer."
+      error "Your secure environment did not start again after its network addresses were fixed (see the install log)." ;;
+  esac
+}
+
 _wait_for_api() {
   local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
   # #562: how long to wait for the API to answer, in seconds. The old hard 60s
@@ -2649,20 +3292,48 @@ _wait_for_api() {
   case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) _budget_s=180 ;; *) _budget_s=$((10#${TB_API_WAIT_S})) ;; esac
   log "Waiting for API server to become ready (up to ${_budget_s}s)..."
 
+  # BEFORE the long wait (client-dev#1370): a node whose k3s died on a moved
+  # address never comes back on its own, so the wait below could only time out.
+  # A no-op when the API answers; repairs a swapped address; fails closed when the
+  # address to restore cannot be read.
+  #
+  # AND AGAIN every TB_NODE_CHECK_EVERY_S while the API stays silent. Measured on
+  # a throwaway cluster: for the first 10-30 s after the swap k3s FLAPS — the
+  # container restarts once, k3s comes up, the API answers for a moment, then k3s
+  # dies for good. A one-shot check that lands in that window sees a live k3s (or
+  # an answering API) and passes, and the wait then runs out its whole budget.
+  TB_K3S_NODE_FINDING=""
+  _ensure_k3s_node_addresses
+  local _every
+  case "${TB_NODE_CHECK_EVERY_S:-}" in ''|*[!0-9]*) _every=30 ;; *) _every=$((10#${TB_NODE_CHECK_EVERY_S})) ;; esac
+  local _next_check=$(( $(date +%s) + _every ))
+
   tput civis 2>/dev/null || true
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local f=0
-  local _deadline=$(( $(date +%s) + _budget_s ))
+  local _deadline=$(( $(date +%s) + _budget_s )) _t0
   while [[ $(date +%s) -lt $_deadline ]]; do
     # --request-timeout bounds the call itself: the budget here is only re-checked
     # BETWEEN iterations, so an unbounded cluster-info against an API that accepts
     # the TCP connection but never responds (corporate-proxy intercept of
     # localhost, half-booted apiserver) would hang this gate forever.
-    if kubectl cluster-info --request-timeout=5s &>/dev/null 2>&1; then
+    if _api_answers; then
       printf "\r\033[K"
       tput cnorm 2>/dev/null || true
       success "Secure environment ready"
       return
+    fi
+    if [[ $(date +%s) -ge $_next_check ]]; then
+      printf "\r\033[K"
+      # The re-check's own time is not the API's (the desk on client-dev#1380): a
+      # repair inside it runs `k3d cluster start --wait`, bounded at 360 s, so
+      # charged to the 180 s budget it ended the wait before the API it had just
+      # fixed could answer. The deadline moves by what the check took. That stays
+      # finite: the probe and a 2 s sleep are charged between any two checks.
+      _t0=$(date +%s)
+      _ensure_k3s_node_addresses
+      _deadline=$(( _deadline + $(date +%s) - _t0 ))
+      _next_check=$(( $(date +%s) + _every ))
     fi
     printf "\r  ${CYAN}%s${RESET} Starting your secure environment…" "${frames[f]}"
     f=$(( (f + 1) % ${#frames[@]} ))
@@ -2676,6 +3347,10 @@ _wait_for_api() {
   # multi-file layouts can adapt the sed command themselves.
   local kc="${KUBECONFIG:-${HOME}/.kube/config}"
   kc="${kc%%:*}"
+  # A cause the node check ESTABLISHED replaces the list of guesses below.
+  if [[ -n "${TB_K3S_NODE_FINDING:-}" ]]; then
+    error "kubectl cluster-info failed for ${_budget_s}s. ${TB_K3S_NODE_FINDING}"
+  fi
   error "kubectl cluster-info failed for ${_budget_s}s. Cluster reports running, but the API is unreachable. It's safe to re-run this installer; on a slow or proxied machine, extend the wait with TB_API_WAIT_S=<seconds>. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
    (b) corporate HTTP/HTTPS proxy intercepting localhost — this installer auto-adds 127.0.0.1/localhost + private ranges to NO_PROXY; a custom proxy wrapper may still override it;

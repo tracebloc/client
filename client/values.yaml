@@ -960,52 +960,26 @@ telemetryCollector:
   #
   # enabled: <unset>
 
-  # opentelemetry-collector-contrib — `contrib`, not `core`, and the
-  # distinction is load-bearing: `filelog`, `bearertokenauth` and `file_storage`
-  # are all contrib components and none of them exist in the core distribution.
-  # THE TAG HAS A FEATURE FLOOR, and 0.109.0 was below it — the first version of
-  # this block pinned that and would not have started at all.
+  # THE TRACEBLOC BUILD OF THE COLLECTOR. `tracebloc/otelcol-tracebloc` is an
+  # OpenTelemetry Collector Builder build that holds exactly the component types
+  # the config above uses (filelog, file_storage, bearertokenauth, transform,
+  # batch, otlphttp), where the contrib distribution carries a few hundred.
+  # tracebloc checks every build against every variant of this config before it
+  # publishes it.
   #
-  # `block_on_overflow` replaced the older `blocking` option upstream in
-  # 2025-03 (deprecated) / 2025-06 (removed), i.e. around 0.122-0.128, and
-  # `sizer: bytes` on a PERSISTENT queue is later still (~0.130). The Collector
-  # rejects unknown configuration keys, so an older image does not silently
-  # ignore them — it fails to start, on every node.
-  #
-  # `tests/telemetry_collector_test.yaml` asserts the pinned minor is at or above
-  # that floor, so the pin cannot drift back below the config it has to run.
+  # THE TAG HAS A FEATURE FLOOR. It reads `<upstream>-tb.<N>`: the upstream part
+  # is the OpenTelemetry Collector release the build is made from.
+  # `block_on_overflow` and `sizer: bytes` on a persistent queue need 0.130 or
+  # later, and the Collector rejects configuration keys it does not know, so an
+  # older build would not start on any node. A digest render carries no tag, so
+  # `scripts/otelcol-components.sh chart` holds the declared `tag:` below to that
+  # floor, and checks that the render applies the pin.
   image:
-    # UPSTREAM'S OWN REGISTRY, NOT DOCKER HUB AND NOT A MIRROR (backend#4160).
-    # OpenTelemetry publishes the contrib Collector themselves, and the artifact
-    # is the same one: measured 2026-09-22, `ghcr.io/open-telemetry/...:0.159.0`
-    # and `docker.io/otel/...:0.159.0` both resolve to
-    # sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc.
-    # Identical bytes, so this changes the PATH and not the image.
-    #
-    # WHY NOT A MIRROR OF OUR OWN. Copying an image that already has a
-    # first-party home adds a hop, a copy to keep fresh, and serves someone
-    # else's bytes under our name. Mirroring is for images with NO other source
-    # -- the Docker Official ones (busybox, alpine/*, curl) and `rocm`, whose
-    # upstream publishes only to a moving `latest`.
-    #
-    # Customers already reach ghcr.io for every tracebloc image, so this adds
-    # nothing to an allowlist; it removes one more reason to reach docker.io.
     registry: ghcr.io
-    repository: open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
-    tag: "0.159.0"
-    # NOT PINNED, and deliberately (backend#4160). The digest is known --
-    # sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc,
-    # the same on both registries (above) -- but pinning
-    # it here DESTROYS a guard: `telemetry_collector_test.yaml`'s "pins a
-    # Collector image new enough for the queue options it configures" reads the
-    # FEATURE FLOOR (>= 0.130) off the rendered tag, and a digest render carries
-    # no tag. The version appears nowhere else in the render, so the floor would
-    # simply stop being checked.
-    #
-    # Pinning this image therefore means relocating that floor to read the
-    # declared `tag:` above instead of the render -- a deliberate change with
-    # its own reasoning, not a rider on a pinning PR.
-    digest: ""
+    repository: tracebloc/otelcol-tracebloc
+    tag: "0.159.0-tb.2"
+    # The bytes the tag above was published as.
+    digest: "sha256:07e6d0b0016de9c2b0f88c4798c6ad3963486d888738a2110aaee00629a5744a"
     # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
     # default identity for the chart's own pin, your image for your own digest.
     digestFor: ""

@@ -110,8 +110,8 @@ spec:
       securityContext:
         # ROOT, SELECTED EXPLICITLY — `runAsNonRoot: false` only PERMITS root, it
         # does not choose it, and that distinction was a live defect (Bugbot on
-        # #779). The pinned image declares `USER 10001` (upstream
-        # otelcol-contrib Dockerfile: `ARG USER_UID=10001`), while the kubelet
+        # #779). The pinned image declares `USER 10001`, as the upstream
+        # contrib image does, while the kubelet
         # creates a `DirectoryOrCreate` hostPath root-owned 0755. UID 10001 could
         # not write `/var/lib/tracebloc/<release>/telemetry`, so D7's disk-backed
         # queue — the whole point of `file_storage` — would have failed the moment

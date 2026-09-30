@@ -2,7 +2,49 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
-## Upgrading to 1.9.174 — the auto-upgrade CronJob runs Helm 4
+## Upgrading to 1.9.181 — the log Collector runs a tracebloc build
+
+**What changed.** The telemetry Collector DaemonSet moves from OpenTelemetry's
+contrib distribution
+(`ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0`)
+to `ghcr.io/tracebloc/otelcol-tracebloc:0.159.0-tb.2`, pinned by digest. It is built
+from the same Collector release, 0.159.0, and holds only the six component types
+the chart's config uses, where the contrib distribution carries a few hundred:
+about 15 MB compressed. The config, the disk-backed queue, the user and the pod
+are unchanged. The tag reads `<upstream>-tb.<N>`: the upstream part is the
+Collector release, and N counts tracebloc builds of it.
+
+**What you have to do: nothing, on a default install.**
+
+**If you mirror images** (`global.imageRegistry`), copy
+`ghcr.io/tracebloc/otelcol-tracebloc:0.159.0-tb.2` into your mirror under the path
+`tracebloc/otelcol-tracebloc` **before** this upgrade reaches the edge.
+`./scripts/list-images.sh` prints it, by digest. The chart's digest is still
+applied on the mirror, because the registry is not part of a pin's identity.
+Without the copy, the new Collector pods fail to pull. The DaemonSet replaces at
+most 10% of them at a time, so the other nodes keep collecting on the old image
+until the copy is there.
+
+**If you set the image yourself:**
+
+- **Your own `repository`, `tag` and `digest`**: still honoured. You keep
+  running the image you pinned.
+- **`telemetryCollector.image.tag` alone** (for example `0.159.0`): the
+  repository is now `tracebloc/otelcol-tracebloc`, whose tags read
+  `<upstream>-tb.<N>`. An upstream tag does not exist there, and the Collector
+  fails to pull. Drop your tag, or set `repository` back to the contrib image
+  beside it.
+- **`telemetryCollector.image.repository` alone** (a mirror path to the contrib
+  image): your repository now renders with the chart's tag, `0.159.0-tb.2`, which
+  the contrib image does not have. Point `repository` at your mirror's copy of
+  `tracebloc/otelcol-tracebloc`. If your mirror rewrites the path, also set
+  `digestFor: "<your repository>:0.159.0-tb.2"` to keep the chart's pin. To stay on
+  contrib instead, set `tag: "0.159.0"`.
+
+Either override alone now also drops the chart's digest, and the install notes
+name it. The previous image carried no digest, so there was none to drop.
+
+## Upgrading to 1.9.177 — the auto-upgrade CronJob runs Helm 4
 
 **What changed.** The hourly auto-upgrade CronJob, and the MySQL migration Job
 that copies its `helm` binary, move from `alpine/helm:3.16.4` to
@@ -11,11 +53,12 @@ put on the host. Helm 3 stops receiving security fixes on 2026-11-11, and this
 CronJob is how an edge receives chart fixes, so it has to run a supported Helm.
 The CronJob's requests and limits are unchanged, and so are its flags except one
 (below). A MySQL migration run by Helm 4 needs a jobs-manager build that knows
-two Helm 4 differences: it lists the release without Helm 3's `--all` flag,
-which Helm 4 removed, and on a release that applies server-side it takes back
-the auto-upgrade CronJob's `suspend` field, which the migration changes directly
-while it runs. That build reaches edges through image-refresh, like any
-jobs-manager update.
+three Helm 4 differences: it lists the release without Helm 3's `--all` flag,
+which Helm 4 removed; on a release that applies server-side it takes back the
+auto-upgrade CronJob's `suspend` field, which the migration changes directly
+while it runs; and it passes `--wait=legacy` to its `helm upgrade --atomic`, for
+the same reason the CronJob does (below). That build reaches edges through
+image-refresh, like any jobs-manager update.
 
 **What you have to do: nothing, on a default install** or one that re-homes
 images only through `global.imageRegistry` / `autoUpgrade.image.registry`.

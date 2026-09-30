@@ -842,10 +842,10 @@ gpu.devicePlugin.nvidia:
   digestFor: ""
 telemetryCollector.image:
   registry: ghcr.io
-  repository: open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
-  tag: "0.159.0"
-  digest: ""
-  digestFor: ""
+  repository: tracebloc/otelcol-tracebloc
+  tag: "0.159.0-tb.2"
+  digest: "sha256:07e6d0b0016de9c2b0f88c4798c6ad3963486d888738a2110aaee00629a5744a"
+  digestFor: "tracebloc/otelcol-tracebloc:0.159.0-tb.2"
 images.busybox:
   registry: docker.io
   repository: library/busybox
