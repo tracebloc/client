@@ -423,7 +423,12 @@ never treated as a pass.
 
   **Activation:** the job skips green with a `::notice` until the dev
   platform has a dedicated `e2e-test-agent` client and the repo carries its
-  two Actions secrets — `TB_E2E_CLIENT_ID` / `TB_E2E_CLIENT_PASSWORD`.
+  two Actions secrets — `TB_E2E_CLIENT_ID` / `TB_E2E_CLIENT_PASSWORD`. The
+  job hands each to the script under both env names, the
+  `TRACEBLOC_E2E_CLIENT_ID` / `TRACEBLOC_E2E_CLIENT_PASSWORD` it reads first
+  and the older `TB_E2E_` spelling it still accepts. The script never reads
+  `TRACEBLOC_CLIENT_ID`, so a real client credential in the caller's shell
+  cannot end up in the throwaway cluster.
   Never use a real customer's or a person's shared dev identity (login
   churn invalidates tokens — the backend#1180 failure class). Record the
   first green run here, with date + run link.

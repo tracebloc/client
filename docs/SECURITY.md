@@ -388,10 +388,14 @@ If `clientId` / `clientPassword` are leaked after install (published to a dashbo
 kubectl -n <ns> create secret generic <release>-secrets \
   --from-literal=CLIENT_ID=<new-id> \
   --from-literal=CLIENT_PASSWORD=<new-password> \
+  --from-literal=TRACEBLOC_CLIENT_ID=<new-id> \
+  --from-literal=TRACEBLOC_CLIENT_PASSWORD=<new-password> \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n <ns> rollout restart deployment/<release>-jobs-manager
 ```
+
+The Secret carries each credential under two keys with the same value: `CLIENT_ID` / `CLIENT_PASSWORD`, which the pods read today, and the canonical `TRACEBLOC_CLIENT_ID` / `TRACEBLOC_CLIENT_PASSWORD`, which a later release moves them onto. Set both. `kubectl apply` merges, so a rotation that sets only the `CLIENT_*` keys leaves the `TRACEBLOC_*` ones holding the old credential until the next `helm upgrade` rewrites them from `CLIENT_*`; the installers read the `TRACEBLOC_*` key first to identify the installed client.
 
 Rotating replaces the credential; it does **not** remove the copies already stored in the release's retained revisions. If this install passes `clientId`/`clientPassword` as values, see §6.7 for how to stop it doing that.
 
@@ -500,6 +504,8 @@ The chart now resolves both three ways (values → the live Secret → hard fail
 kubectl -n <ns> get secret <release>-secrets \
   -o jsonpath='{.data.CLIENT_ID}' | base64 -d
 ```
+
+(`TRACEBLOC_CLIENT_ID` holds the same value on a Secret this chart has written; `CLIENT_ID` is the key the pods read today.)
 
 Empty output means tier 2 has nothing to resolve from, and dropping the values would make the next upgrade **fail** rather than degrade. Create them first, using the labelled/annotated form in `values.yaml` so Helm adopts the Secret instead of colliding with it.
 

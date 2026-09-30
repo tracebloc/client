@@ -1293,15 +1293,21 @@ _extract_yaml_value() {
   _strip_paste_garbage "$line"
 }
 
-# _client_id_from_secret_rows ROWS — the base64 CLIENT_ID out of `NAME CLIENT_ID`
-# rows (the custom-columns read below), or nothing. PURE, so the guard and the
-# tests can drive it without a cluster. Exactly ONE row may carry a CLIENT_ID:
-# none is a release whose Secret is not there, and two cannot be told apart, so
-# either is "couldn't read it" -- never a guess. A Secret without the key (the
-# registry pull Secret) prints `<none>` and is not a candidate.
+# _client_id_from_secret_rows ROWS — the base64 client id out of
+# `NAME TRACEBLOC_CLIENT_ID CLIENT_ID` rows (the custom-columns read below), or
+# nothing. PURE, so the guard and the tests can drive it without a cluster.
+# CANONICAL KEY FIRST: the chart writes the id under both keys, same value
+# (settings naming, the Secret-key expand); a Secret written by an older chart
+# has only CLIENT_ID, so the legacy column is the fallback when the canonical
+# prints `<none>`. Exactly ONE row may carry an id: none is a release whose
+# Secret is not there, and two cannot be told apart, so either is "couldn't read
+# it" -- never a guess. A Secret without either key (the registry pull Secret)
+# prints `<none>` and is not a candidate.
 _client_id_from_secret_rows() {
-  local rows="$1" name b64 hit="" n=0
-  while read -r name b64 _; do
+  local rows="$1" name canon legacy b64 hit="" n=0
+  while read -r name canon legacy _; do
+    b64="$canon"
+    [[ -n "$b64" && "$b64" != "<none>" ]] || b64="$legacy"
     [[ -n "$name" && -n "$b64" && "$b64" != "<none>" ]] || continue
     hit="$b64"; n=$((n + 1))
   done <<<"$rows"
@@ -1322,7 +1328,8 @@ _client_id_from_secret_rows() {
 # the lookup was right only while the two copies agreed and nothing compared
 # them. The Secrets are listed by `app.kubernetes.io/instance=<release>` instead
 # (the label the chart's `tracebloc.labels` puts on it, which by the chart's own
-# table never follows the override), and the one carrying CLIENT_ID is the one.
+# table never follows the override), and the one carrying the id is the one --
+# under TRACEBLOC_CLIENT_ID, else CLIENT_ID (see _client_id_from_secret_rows).
 # Same shape as _client_workloads (backend#2888); custom-columns rather than a
 # jsonpath for the same PowerShell-quoting reason. PowerShell peer:
 # Get-ClientIdFromSecret. Guard: scripts/tests/client-secret-read-not-built.sh.
@@ -1346,7 +1353,7 @@ _client_id_from_secret() {
   # and the caller's fail-closed path turns it into an unidentifiable client
   # rather than an absent one.
   rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
-            -o 'custom-columns=NAME:.metadata.name,CLIENT_ID:.data.CLIENT_ID' \
+            -o 'custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_ID:.data.TRACEBLOC_CLIENT_ID,CLIENT_ID:.data.CLIENT_ID' \
             --no-headers --request-timeout=5s 2>/dev/null)" || return 0
   b64="$(_client_id_from_secret_rows "$rows")"
   [[ -n "$b64" ]] || return 0

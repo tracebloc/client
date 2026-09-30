@@ -6733,24 +6733,29 @@ function Wait-MetricsApiService {
 # and rebuilding that here restated the chart's rule from the release values, so
 # the lookup was right only while the two copies agreed. The Secrets are listed
 # by `app.kubernetes.io/instance=<release>` (which never follows the override)
-# and the one carrying CLIENT_ID is the one -- the Get-ClientWorkloads shape
-# (backend#2888). Guard: scripts/tests/client-secret-read-not-built.sh.
+# and the one carrying the id is the one -- the Get-ClientWorkloads shape
+# (backend#2888). Guard: scripts/tests/client-secret-read-not-built.sh. Both key
+# names are read, canonical first: see Select-ClientIdFromSecretRows.
 function Get-ClientSecretQuery {
   param([string]$Release, [string]$Namespace, [int]$TimeoutSec = 5)
   return @("get", "secret", "-n", $Namespace, "-l", "app.kubernetes.io/instance=$Release",
-           "-o", "custom-columns=NAME:.metadata.name,CLIENT_ID:.data.CLIENT_ID",
+           "-o", "custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_ID:.data.TRACEBLOC_CLIENT_ID,CLIENT_ID:.data.CLIENT_ID",
            "--no-headers", "--request-timeout=${TimeoutSec}s")
 }
 
-# PURE: the base64 CLIENT_ID out of `NAME CLIENT_ID` rows, or "". Exactly ONE row
-# may carry one: none is a Secret that is not there, two cannot be told apart.
-# A Secret without the key (the registry pull Secret) prints `<none>`. Bash peer:
+# PURE: the base64 client id out of `NAME TRACEBLOC_CLIENT_ID CLIENT_ID` rows, or
+# "". CANONICAL KEY FIRST: the chart writes the id under both keys, same value; a
+# Secret an older chart wrote has only CLIENT_ID, so that column is the fallback
+# when the canonical prints `<none>`. Exactly ONE row may carry an id: none is a
+# Secret that is not there, two cannot be told apart. A Secret without either key
+# (the registry pull Secret) prints `<none>`. Bash peer:
 # _client_id_from_secret_rows.
 function Select-ClientIdFromSecretRows {
   param([string]$Rows)
   $hits = @(foreach ($line in ("$Rows" -split "`r?`n")) {
     $f = @($line.Trim() -split '\s+')
-    if ($f.Count -ge 2 -and $f[0] -and $f[1] -and $f[1] -ne '<none>') { $f[1] }
+    $id = if ($f.Count -ge 2 -and $f[1] -and $f[1] -ne '<none>') { $f[1] } elseif ($f.Count -ge 3) { $f[2] } else { "" }
+    if ($f[0] -and $id -and $id -ne '<none>') { $id }
   })
   if ($hits.Count -ne 1) { return "" }
   return $hits[0]

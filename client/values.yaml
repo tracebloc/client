@@ -1947,8 +1947,18 @@ podDisruptionBudget:
 # generates them. Resolved in three tiers, like every other credential in
 # templates/secrets.yaml:
 #   1. these values, else
-#   2. the CLIENT_ID / CLIENT_PASSWORD keys already in the release Secret, else
+#   2. the CLIENT_ID / CLIENT_PASSWORD keys already in the release Secret (or,
+#      only when those are absent, TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD),
+#      else
 #   3. a hard failure naming both options.
+#
+# THE SECRET CARRIES EACH CREDENTIAL UNDER TWO KEYS. The chart writes CLIENT_ID
+# and TRACEBLOC_CLIENT_ID (and CLIENT_PASSWORD / TRACEBLOC_CLIENT_PASSWORD) with
+# the same value -- the TRACEBLOC_ names are the canonical ones, and a later
+# release moves the pods onto them. Pods still read the CLIENT_* keys today, so
+# a Secret that has only those keeps working, and the chart adds the second name
+# on its next render. When you create or rotate the Secret by hand, set BOTH
+# names to the same value, as the commands below do.
 #
 # WHY YOU WOULD BOTHER: anything passed as a value is stored by Helm in the
 # release's user-supplied values IN CLEARTEXT, in every retained revision (10 by
@@ -1977,7 +1987,8 @@ podDisruptionBudget:
 # them in the same breath:
 #
 #   kubectl -n <ns> create secret generic <release>-secrets \
-#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=...
+#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=... \
+#     --from-literal=TRACEBLOC_CLIENT_ID=... --from-literal=TRACEBLOC_CLIENT_PASSWORD=...
 #   kubectl -n <ns> label secret <release>-secrets \
 #     app.kubernetes.io/managed-by=Helm
 #   kubectl -n <ns> annotate secret <release>-secrets \
