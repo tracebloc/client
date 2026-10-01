@@ -2247,10 +2247,14 @@ autoUpgrade:
   # every future tick "still active" and skipped, wedging auto-upgrade until a
   # human kills the pod. activeDeadlineSeconds is the backstop that fails the
   # Job instead. This is a FLOOR, not the final value: the template renders
-  # activeDeadlineSeconds as max(this, parsed `timeout` + 300s repo-fetch
-  # headroom), so raising `timeout` above ~10m automatically lifts the deadline
-  # too and a slow-but-healthy upgrade is never killed mid-flight. Raise this
-  # only to give even more slack than the timeout-derived value.
+  # activeDeadlineSeconds as max(this, 2 x parsed `timeout` + 300s fetch/dry-run
+  # headroom) -- 2 x because `--atomic` waits up to `timeout` on the upgrade and
+  # again on its rollback (client-dev#1519) -- so raising `timeout` lifts the
+  # deadline too and neither a slow-but-healthy upgrade nor its rollback is
+  # killed mid-flight. At the 10m default that is 1500s. A `timeout` of 28m or
+  # more makes the Job outlast the hourly schedule, and Forbid skips the tick
+  # that falls inside it. Raise this only to give even more slack than the
+  # timeout-derived value.
   activeDeadlineSeconds: 900
   # Pod image: helm CLI only. alpine/helm is small and the tag pins the
   # helm version, so behaviour cannot drift if upstream re-tags.

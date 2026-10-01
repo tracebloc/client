@@ -293,7 +293,8 @@ _offer_colima_memory_raise() {
   #   rung   at or above the floor but below the smallest training rung's budget
   #          (PF_WARN_MEM_GB, derived from the generated VM constant; clamped to
   #          this host the way the preflight clamps it): the client runs, and
-  #          every training pod stays Pending. RFC-BACKEND-664 §P4 names raising
+  #          every training run is sized below the smallest training size
+  #          (_pf_below_rung_words). RFC-BACKEND-664 §P4 names raising
   #          the VM as the remedy; Docker Desktop gets the same offer through its
   #          settings store in _offer_desktop_memory_raise below.
   local rung_eff short_reason
@@ -341,7 +342,7 @@ _offer_colima_memory_raise() {
   # below must reach. What the rung path DOES need is a "does the raise reach the
   # rung budget" guard: a sub-rung VM is already a working runtime, and stopping
   # every container to move it from 6 to 8 GB against a 9 GB rung would restart it
-  # and still leave training Pending. Two honest non-offers, each naming its cause:
+  # and still leave every run below the rung. Two honest non-offers, each naming its cause:
   # the operator's COLIMA_MEMORY pin, or a Mac that cannot spare the budget. The
   # macos-vm-memory.bats fixtures for both exercise this line.
   if [[ "$short_reason" == "rung" ]]; then
@@ -357,7 +358,7 @@ _offer_colima_memory_raise() {
 
   local cmd="colima stop && colima start --memory ${target_gb}"
   if [[ "$short_reason" == "rung" ]]; then
-    warn "Docker's Colima VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; training pods would stay Pending."
+    warn "Docker's Colima VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; $(_pf_below_rung_words)."
   else
     warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
   fi
@@ -901,7 +902,7 @@ _offer_desktop_memory_raise() {
   text="$_TB_DESKTOP_STORE_TEXT"
 
   if [[ "$short_reason" == "rung" ]]; then
-    warn "Docker Desktop's VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; training pods would stay Pending."
+    warn "Docker Desktop's VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; $(_pf_below_rung_words)."
   else
     warn "Docker Desktop's VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
   fi

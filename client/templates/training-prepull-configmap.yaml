@@ -35,9 +35,19 @@
   THE POD meets the restricted Pod Security profile the release namespace may
   enforce (namespace.yaml): non-root as the image's own UID 1001, RuntimeDefault
   seccomp, no privilege escalation, every capability dropped. It runs `true`, so
-  the only work is the kubelet's pull; it requests a few millicores and a few
-  MiB and no GPU. backoffLimit 0, a deadline that bounds a slow pull, and a TTL
-  that removes the Job after it finishes. The image stays in the node's store.
+  the only work is the kubelet's pull; it asks for 100m and 32Mi and no GPU, with
+  requests EQUAL to limits, so the pod is Guaranteed QoS
+  (scripts/tests/pod-qos-expect.prepull.txt pins the class). backoffLimit 0, a
+  deadline that bounds a slow pull, and a TTL that removes the Job after it
+  finishes. The image stays in the node's store.
+
+  ITS INSTANCE LABEL FOLLOWS tracebloc.fullname, unlike the chart's own
+  resources. The Job is not a Helm release object: the installer applies it, so
+  the label is not Helm's bookkeeping. The release name inside a ConfigMap blob is
+  free text with no path that scripts/tests/fullname-override-completeness.sh
+  could license, which is what keeps that guard able to catch an unrouted name
+  embedded in a blob. With fullnameOverride unset the helper is .Release.Name
+  verbatim, so the default render is unchanged.
 */ -}}
 {{- $training := default dict (default dict .Values.images).training }}
 {{- if and $training.parents (not $training.digests) }}
@@ -67,7 +77,7 @@ data:
       namespace: {{ .Release.Namespace }}
       labels:
         app.kubernetes.io/name: {{ .Chart.Name }}
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/instance: {{ include "tracebloc.fullname" . }}
         app.kubernetes.io/component: training-prepull
     spec:
       backoffLimit: 0
@@ -77,7 +87,7 @@ data:
         metadata:
           labels:
             app.kubernetes.io/name: {{ .Chart.Name }}
-            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/instance: {{ include "tracebloc.fullname" . }}
             app.kubernetes.io/component: training-prepull
         spec:
           restartPolicy: Never
@@ -99,8 +109,8 @@ data:
                   drop: ["ALL"]
               resources:
                 requests:
-                  cpu: "10m"
-                  memory: "16Mi"
+                  cpu: "100m"
+                  memory: "32Mi"
                 limits:
                   cpu: "100m"
                   memory: "32Mi"

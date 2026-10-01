@@ -251,8 +251,8 @@ data:
       # Bounded at 60s: a server-side dry-run only templates and diffs against
       # the API server, it never waits on a rollout, so it should complete in
       # seconds. Left unbounded it would share helm's 5m default, which could eat
-      # deep into the 300s repo-fetch buffer activeDeadlineSeconds reserves below
-      # for the REAL --atomic upgrade that follows it on this same tick.
+      # deep into the 300s fetch/dry-run headroom activeDeadlineSeconds reserves
+      # below beside the 2 x timeout of the REAL --atomic upgrade that follows.
       _render="$(helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
           --namespace "$RELEASE_NAMESPACE" --version "$CURRENT" \
           --reset-then-reuse-values --dry-run=server --hide-secret --timeout 60s 2>&1)" \
@@ -480,22 +480,36 @@ spec:
   startingDeadlineSeconds: {{ .Values.autoUpgrade.startingDeadlineSeconds }}
   jobTemplate:
     spec:
-      backoffLimit: 2
+      # ONE attempt per tick (client-dev#1519). activeDeadlineSeconds below caps
+      # the whole Job ACROSS retries, not each Pod, so a retry after a timed-out
+      # `--atomic` attempt (which has already spent ~2 x timeout) would start a
+      # fresh `helm upgrade` with only the headroom left and be killed mid-op --
+      # the exact pending-* wedge the deadline is sized to prevent, and one
+      # #2877's age threshold then leaves alone for a tick. Sizing the deadline
+      # for three attempts instead (3 x 1500s at the defaults) crosses the ~1h
+      # Forbid gap. A transient fetch failure therefore waits for the next tick.
+      backoffLimit: 0
       # #555: hard wall-clock cap on the Job. `timeout` bounds only
       # `helm upgrade --wait`; the earlier `helm repo add`/`helm repo update`
       # fetches can hang on a TCP black-hole with no timeout, and with
       # concurrencyPolicy: Forbid a single hung Job skips every future tick.
       # This backstop fails the Job so the next tick can run.
       #
-      # The deadline must never undercut a longer configured autoUpgrade.timeout:
-      # that would kill a healthy `helm upgrade --wait` before its own timeout
-      # fires. So take the MAX of the configured floor (default 900s) and the
-      # parsed timeout plus 300s repo-fetch headroom (the same 900-600 headroom
-      # baked into the defaults). `| default 900` preserves the reuse-values
-      # nil-guard when the key is absent.
+      # The deadline must never undercut the helm op it wraps: killing the Pod
+      # mid-`--atomic` leaves the release pending-upgrade/pending-rollback.
+      # `--atomic` can spend `timeout` TWICE -- once waiting on the upgrade, then
+      # again on the rollback, which uses the same wait (client-dev#1519,
+      # measured: a 10m timeout under the old 900s cap was killed mid-rollback).
+      # So take the MAX of the configured floor (default 900s) and 2 x the parsed
+      # timeout plus 300s headroom for the repo fetch and the 60s server dry-run.
+      # Only one `--atomic` runs per tick (the same-version reconcile runs only
+      # when there is no newer chart), so 2 x timeout covers both sites. At the
+      # 10m default that is 1500s, inside the hourly schedule; a timeout of 28m
+      # or more crosses it, and Forbid skips the tick that falls inside the run.
+      # `| default 900` preserves the reuse-values nil-guard when the key is absent.
       {{- $deadlineFloor := .Values.autoUpgrade.activeDeadlineSeconds | default 900 | int }}
       {{- $timeoutSeconds := include "tracebloc.durationSeconds" .Values.autoUpgrade.timeout | int }}
-      activeDeadlineSeconds: {{ max $deadlineFloor (add $timeoutSeconds 300) }}
+      activeDeadlineSeconds: {{ max $deadlineFloor (add (mul 2 $timeoutSeconds) 300) }}
       template:
         metadata:
           labels:
@@ -524,7 +538,7 @@ spec:
           # rolled past it. `lastSuccessfulTime` was the only surviving
           # evidence that anything was wrong.
           #
-          # Under `Never` each attempt is its own Pod (backoffLimit+1 at most),
+          # Under `Never` each attempt is its own Pod (backoffLimit+1 at most, so one),
           # and they persist with the Job — so the next failure is readable.
           # That is the whole point: a scheduled job whose failures leave no
           # evidence is unobservable by construction.

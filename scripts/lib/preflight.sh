@@ -221,7 +221,7 @@ _macos_vm_mem_gb() {
   # 4 GiB rung needs beside the platform (the constant's figure, whatever the
   # records make it; it moved from 9 to 10 GB when the Windows record landed), not
   # to the stay-Online floor
-  # plus a GB (6), which runs the client and leaves every training pod Pending. The
+  # plus a GB (6), which runs the client and sizes every run below the rung. The
   # half-of-physical rule still wins above it.
   #
   # AND ONLY WHEN THE HOST CAN SPARE THE WHOLE BUDGET (tracebloc-review on #1090).
@@ -323,6 +323,19 @@ _pf_host_too_small_for_floor() {
   (( host_gb - PF_OS_RESERVE_GB < PF_MIN_MEM_GB ))
 }
 
+# What a Docker budget below the smallest training rung's budget COSTS, worded
+# once for every rung warning (preflight here, the Colima and Docker Desktop raise
+# offers in setup-macos.sh). It used to say "training pods stay Pending", and on
+# today's admission path nothing does that (backend#5025 O-20: a CLM run on a
+# 16 GB Mac at an 8 GB VM started in a minute and trained). The installer sizes
+# the run envelope to what the node can hold (_fit_training_envelope ->
+# _fit_verdict, verdict `reduced`) and jobs-manager admits at that envelope, so
+# the real cost is memory per run, not scheduling. Pending stays possible only for
+# a size a human pinned, which _fit_verdict reports itself (`pinned-over`).
+_pf_below_rung_words() {
+  printf 'below it each training run gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
+}
+
 _pf_runtime_mem_status() {
   local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb target_gb
   # Report the CONFIGURED size, not the guest-visible one. A VM asked for N GB
@@ -366,9 +379,24 @@ _pf_runtime_mem_status() {
       warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${warn_eff} GB. Run the client here and train on a larger machine."
       target_gb=""
     else
-      warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); below it training pods stay Pending."
-      # No hard-fail follows this branch, so the remedy can aim at the train figure.
-      target_gb="$rec_eff"
+      warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
+      # THE REMEDY NAMES THE NEED, NOT THE COMFORTABLE FIGURE (backend#5025 O-14).
+      # It used to aim at rec_eff, so a 16 GB Mac read "Give Docker 14 GB" here and
+      # "Memory -> 11 GB" from the Docker Desktop / Colima step a few lines later,
+      # which sizes the VM by _macos_vm_mem_gb (floored at PF_WARN_MEM_GB). The
+      # sentence above already names the comfortable figure, once; every remedy
+      # for this condition quotes the rung budget, as the sub-floor branch does.
+      #
+      # ON macOS THE REMEDY IS THE RAISE'S OWN FIGURE, NOT A SECOND DERIVATION
+      # (Bugbot on client-dev#1510). warn_eff is the rung clamped to the host, which
+      # equals _macos_vm_mem_gb only where half of physical RAM does not exceed the
+      # rung (16 GB: 11 both ways). A 24 or 32 GB Mac gets 12 or 16 from the raise
+      # (half of physical), so quoting warn_eff there printed two sizes in one run.
+      if [[ "$OS" == "Darwin" ]]; then
+        target_gb="$(_macos_vm_mem_gb)"
+      else
+        target_gb="$warn_eff"
+      fi
     fi
   else
     [[ -n "$quiet_ok" ]] || _pf_ok "Docker's memory budget: ${rt_gb} GB"

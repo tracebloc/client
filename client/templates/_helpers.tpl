@@ -39,6 +39,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
     MUST NOT follow it:
       * `app.kubernetes.io/instance`     Helm convention: it IS the release
+                                         (on Helm's objects; the prepull Job
+                                         a ConfigMap carries for the installer
+                                         follows the override, see
+                                         training-prepull-configmap.yaml)
       * `meta.helm.sh/release-name`      Helm's own ownership bookkeeping
       * `RELEASE_NAME` / `RELEASE` env   a HELM IDENTITY -- `helm status`,
                                          `helm rollback`. Rename it and
@@ -2170,8 +2174,8 @@ tracebloc.durationSeconds — parse a Go/Helm duration string (as accepted by
 `helm --timeout`, e.g. "10m", "30m", "1h", "600s", "1h30m") into a whole
 number of seconds. Sums every `<int><unit>` component so compound durations
 work; recognises s/m/h/d, ignores anything else. Empty/nil input -> 0.
-Used by auto-upgrade-cronjob.yaml (#555) so the Job's activeDeadlineSeconds
-can be kept above the configured helm timeout.
+Used by auto-upgrade-cronjob.yaml (#555, client-dev#1519) so the Job's activeDeadlineSeconds
+can be kept above 2 x the configured helm timeout (an --atomic upgrade plus its rollback).
 */}}
 {{- define "tracebloc.durationSeconds" -}}
 {{- $d := . | toString -}}
