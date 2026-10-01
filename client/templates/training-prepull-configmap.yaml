@@ -1,0 +1,111 @@
+{{- /*
+  The training parent prepull: a Job manifest the INSTALLER applies, carried in
+  a ConfigMap.
+
+  Every GPU training image builds FROM one shared torch parent, about 4 GiB of
+  its 4.2-4.5 GiB, and on a fresh host the first GPU training pulls all of it as
+  part of its own start. images.training.parents.gpu names that parent: the
+  resolver reads it off the pinned GPU images' io.tracebloc.engine.torch-parent
+  label in the same pass that writes the digest map, so it is the parent of
+  exactly the images this edge will run. The installer applies the manifest
+  below after the control plane is ready and does not wait for it.
+
+  WHY A CONFIGMAP AND NOT A JOB. Helm never waits on a ConfigMap. A Helm-managed
+  Job -- or a hook -- would put a 4 GiB pull inside `helm upgrade --install`, and
+  inside auto-upgrade's `--atomic` wait, where a slow link rolls the whole
+  release back on every edge whose parent moved. Carried as data, the chart still
+  decides everything about the pod (the image, the registry rule, the pull
+  secret, the security fields) and nothing Helm waits on can stall or roll back.
+  The cost is accepted: nothing re-applies the Job after an engine advance, so
+  the first training after the parent moves pulls cold again.
+
+  WHEN IT RENDERS. Only where tracebloc.trainingParentPin holds: the digest map
+  itself renders (tracebloc.trainingPins: a map exists, the runtime will pin
+  here, and the map was resolved on the registry this edge pulls training images
+  from) AND the GPU entry is set. A floating edge (dev/staging in auto, pinned=false, a mirror, the
+  docker.io rollback) runs whatever its tag points at, so a parent read off the
+  pinned set says nothing about it, and the ConfigMap is absent. GPU only: the
+  installer prepulls on GPU-wired hosts, and the CPU families' parents are not in
+  scope.
+
+  THE NAME OF THE JOB carries the first 12 hex of the digest. A Job's pod
+  template is immutable, so re-applying a same-named Job with a new image would
+  be refused; a new parent is a new Job.
+
+  THE POD meets the restricted Pod Security profile the release namespace may
+  enforce (namespace.yaml): non-root as the image's own UID 1001, RuntimeDefault
+  seccomp, no privilege escalation, every capability dropped. It runs `true`, so
+  the only work is the kubelet's pull; it requests a few millicores and a few
+  MiB and no GPU. backoffLimit 0, a deadline that bounds a slow pull, and a TTL
+  that removes the Job after it finishes. The image stays in the node's store.
+*/ -}}
+{{- $training := default dict (default dict .Values.images).training }}
+{{- if and $training.parents (not $training.digests) }}
+{{- fail "images.training.parents is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together." }}
+{{- end }}
+{{- $parent := default dict (default dict $training.parents).gpu }}
+{{- if include "tracebloc.trainingParentPin" . }}
+{{- /* Hard-coded on purpose: bounds of this one Job, not operator knobs.
+       3600 s covers a 4 GiB pull at about 10 Mbit/s; the TTL keeps the
+       finished Job readable for an hour. */}}
+{{- $deadline := 3600 }}
+{{- $ttl := 3600 }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tracebloc.fullname" . }}-training-prepull
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: training-prepull
+data:
+  job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: tracebloc-prepull-{{ include "tracebloc.trainingParentPin" . | trimPrefix "sha256:" | trunc 12 }}
+      namespace: {{ .Release.Namespace }}
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: training-prepull
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ $deadline }}
+      ttlSecondsAfterFinished: {{ $ttl }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: training-prepull
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: prepull
+              image: {{ include "tracebloc.image" (dict "repository" $parent.repository "digest" (include "tracebloc.trainingParentPin" .) "registry" (include "tracebloc.tbRegistry" .)) | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["true"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: "10m"
+                  memory: "16Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "32Mi"
+          {{- if include "tracebloc.useImagePullSecrets" . }}
+          imagePullSecrets:
+            - name: {{ include "tracebloc.registrySecretName" . }}
+          {{- end }}
+{{- end }}

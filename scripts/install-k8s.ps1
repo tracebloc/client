@@ -16,7 +16,7 @@
 #  Environment variable overrides (optional, set before running):
 #    $env:CLUSTER_NAME  = "myapp"          default: tracebloc
 #    $env:SERVERS       = "1"              default: 1  (control-plane nodes; more than 1 is refused)
-#    $env:AGENTS        = "1"              default: 1  (worker nodes; 0 or 1)
+#    $env:AGENTS        = "0"              default: 0  (worker nodes; 0 or 1 -- 1 warns: a second node counts the machine twice)
 #    $env:K8S_VERSION   = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    $env:TRACEBLOC_HOST_DATA_DIR = "C:\data"  default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:HOST_DATA_DIR = "C:\data"        legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
@@ -1016,7 +1016,7 @@ function Get-ChartVersion {
 
 $CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "tracebloc" }
 $SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
-$AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "1" }
+$AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "0" }
 $K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.36.3-k3s1" }
 # Settings naming: TRACEBLOC_HOST_DATA_DIR is canonical, HOST_DATA_DIR the legacy
 # spelling (remove_by 2026-12-31) -- a non-empty canonical wins, else the legacy,
@@ -1180,7 +1180,7 @@ function Ensure-ReleaseDirs($release) {
 }
 
 # Prove the k3d nodes can actually SEE the host tree, before helm writes anything.
-# Mirrors bash _verify_nodes_see_host_data (scripts/lib/cluster.sh) -- keep the two
+# Mirrors bash _verify_nodes_see_host_data (scripts/lib/k3d.sh) -- keep the two
 # in lockstep.
 #
 # /tracebloc is the k3d bind mount of HOST_DATA_DIR. When it is not in effect
@@ -1271,8 +1271,8 @@ function Assert-NodesSeeHostData {
     }
 
     foreach ($node in $nodes) {
-      # AGENTS defaults to 1 and agents run kubelets, so a training pod can land on
-      # an agent -- every node is checked, not just the server (the same @all-vs-
+      # An explicit AGENTS=1 creates an agent and agents run kubelets, so a training
+      # pod can land on an agent -- every node is checked, not just the server (the same @all-vs-
       # @server trap as the cgroup v1 flag, #806).
       # -StdoutOnly is REQUIRED here, not tidiness: the marker is written -NoNewline,
       # so `cat` emits the token with no trailing newline and any docker stderr
@@ -1352,7 +1352,7 @@ $GPU_HOSTS_UNREACHABLE = ""
 #   • TRACEBLOC_K3S_CUDA_IMAGE or TRACEBLOC_IMAGE_REGISTRY set -> Confirm-GpuImagePullable PULLS
 #     the ref below. Those refs are operator-owned (a mirror legitimately re-pushes under its own
 #     digest), so they are left exactly as given here too.
-# The mutable-tag pull backend#1867 is about is the LINUX path (cluster.sh::_gpu_node_image),
+# The mutable-tag pull backend#1867 is about is the LINUX path (k3d.sh::_gpu_node_image),
 # which is digest-pinned there.
 # TRACEBLOC_K3S_CUDA_IMAGE overrides the whole ref; TRACEBLOC_CUDA_BASE_TAG
 # overrides just the CUDA base used for the capability probe and the default tag. When a private
@@ -1401,7 +1401,7 @@ Usage:
 Advanced configuration (environment variables):
   CLUSTER_NAME   Cluster name                   (default: tracebloc)
   SERVERS        Control-plane nodes             (default: 1; more than 1 is refused)
-  AGENTS         Worker nodes                    (default: 1; 0 or 1)
+  AGENTS         Worker nodes                    (default: 0; 0 or 1)
   K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   TRACEBLOC_SKIP_REBOOT_PROMPT=1
@@ -1480,13 +1480,18 @@ function Confirm-Config {
   if ($SERVERS -notmatch '^[1-9]\d*$') { Err ("SERVERS must be a positive integer >= 1 (got '" + $SERVERS + "')") }
   if ($AGENTS  -notmatch '^\d+$') { Err ("AGENTS must be a non-negative integer (got '" + $AGENTS + "')") }
   # MORE THAN ONE SERVER OR AGENT IS REFUSED -- the bash twin's rule, and its
-  # reasons, in cluster.sh::_k3d_node_counts (backend#3536). Every k3d node reports
+  # reasons, in k3d.sh::_k3d_node_counts (backend#3536). Every k3d node reports
   # this whole machine as its capacity, so the scheduler counts it once per node.
-  # 0 and 1 stay valid, so the default of one server plus one agent (every Windows
-  # install, since this installer is hostpath-only) is still two nodes counted
-  # twice (backend#2221). Strings are compared, so no value can overflow it.
+  # 0 and 1 stay valid. Strings are compared, so no value can overflow it.
+  #
+  # ONE NODE BY DEFAULT (tracebloc/client-dev#1418). The default used to be one
+  # server plus one agent -- every Windows install, since this installer is
+  # hostpath-only -- two nodes counted twice (backend#2221). AGENTS now defaults to
+  # 0. An explicit AGENTS=1 is still accepted, and warns because it is exactly
+  # that double count. cluster.sh::_k3d_node_counts is the twin.
   if ($SERVERS -ne '1') { Err ("SERVERS=" + $SERVERS + " is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Use one server: unset SERVERS.") }
   if ($AGENTS -notmatch '^0*[01]$') { Err ("AGENTS=" + $AGENTS + " is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Set AGENTS to 0 (one node) or 1.") }
+  if ($AGENTS -match '^0*1$') { Warn ("AGENTS=" + $AGENTS + " adds a second k3d node. Both nodes report this whole machine as their capacity, so Kubernetes counts its CPU and memory twice and can schedule more than the machine holds. Unset AGENTS for one node.") }
   Confirm-DataDir   # resolve + validate HOST_DATA_DIR (shared with the leftover-data guard's new-dir path)
 
   # backend#743: optional dataset dir. Unlike HOST_DATA_DIR it MAY live outside
@@ -3702,7 +3707,7 @@ function Write-K3dProxyConfig {
 # the nodes still don't TRUST the corporate CA, so in-node image pulls fail x509
 # and get masked into a generic "an image couldn't be pulled". When the operator
 # supplies the CA bundle we mount it into every node and point containerd at it
-# per-registry. Mirrors scripts/lib/cluster.sh (drift check: check-drift.sh).
+# per-registry. Mirrors scripts/lib/k3d.sh (drift check: check-drift.sh).
 $script:TbCaRegistries = @('docker.io','registry-1.docker.io','auth.docker.io','ghcr.io')
 
 # Return the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
@@ -4250,7 +4255,7 @@ function Write-HostCaCreateHint {
   Write-Host ""
 }
 
-# The recreate remedy, printed from ONE place -- peer of cluster.sh::_recreate_cluster_hint
+# The recreate remedy, printed from ONE place -- peer of k3d.sh::_recreate_cluster_hint
 # (backend#2077).
 #
 # Why it can't just be `k3d cluster delete`: this machine's backend record is anchored to
@@ -4329,6 +4334,35 @@ function Write-ReleaseClientHint {
   Hint "${Indent} that account's dashboard first, then just the k3d line.)"
 }
 
+# Warn (never fatal) when the existing cluster has more than one k3d node
+# (tracebloc/client-dev#1418). New installs create one node, but a node count is
+# fixed at create time, so every cluster built on the old one-server-plus-one-agent
+# default keeps its agent across re-runs and upgrades -- and every node reports
+# this whole machine as its capacity, so the scheduler counts it once per node.
+# Called from BOTH the reuse path in New-K3dCluster AND the completed+healthy fast
+# path in main, like its siblings. Mirrors _check_existing_cluster_node_count in
+# scripts/lib/cluster.sh.
+#
+# WARN, never Err: an operator may have chosen AGENTS=1, and refusing would break
+# every re-run of a working install. BOUNDED through Invoke-DockerCli; a docker
+# that errors or times out is 'cannot tell' and stays silent.
+function Test-ExistingClusterNodeCount {
+  $count = 0
+  foreach ($role in @("server", "agent")) {
+    $psr = Invoke-DockerCli -DockerArgs @(
+      "ps", "-a", "--filter", "label=k3d.cluster=$CLUSTER_NAME",
+      "--filter", "label=k3d.role=$role",
+      "--format", "{{.Names}}") -TimeoutSec 10 -StdoutOnly
+    if ($psr.Code -ne 0) { return }
+    $count += @($psr.Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }).Count
+  }
+  if ($count -le 1) { return }
+  Warn "The existing '$CLUSTER_NAME' cluster has $count k3d nodes. Each one reports this whole machine as its capacity, so Kubernetes counts its CPU and memory $count times and can schedule more than the machine holds."
+  Hint "New installs create one node. A cluster's node count is fixed when it is created, so a re-run or an upgrade keeps it."
+  Hint "Unless you chose the second node on purpose (AGENTS=1), reinstall as one node:"
+  Write-RecreateClusterHint
+}
+
 # Warn (never fatal) when the RUNNING cluster's k3s differs from the validated pin.
 # k3s is baked in at create time; a cluster born unpinned, on an older installer, or
 # with K8S_VERSION=latest keeps its version across later pinned re-runs -- the #547
@@ -4351,7 +4385,7 @@ function Write-ReleaseClientHint {
 # New-K3dCluster: a missing dataset mount puts customer data on ephemeral storage, so
 # refusing is right there. A missing image-GC bound is the status quo on every
 # existing edge, so refusing would turn every ordinary re-run into a hard failure.
-# Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+# Mirrors _check_existing_cluster_kubelet_config in scripts/lib/k3d.sh.
 #
 # BOUNDED, via the same Start-Job + Wait-JobWithProgress pattern as its siblings.
 # Unbounded it would hang an already-healthy machine on a wedged Docker engine, after
@@ -5554,11 +5588,14 @@ function New-K3dCluster {
     # above: a missing dataset mount puts customer data on ephemeral storage, so
     # refusing is right there. A missing image-GC bound is the status quo on every
     # existing edge, so refusing would turn every ordinary re-run into a hard
-    # failure. Mirrors _check_existing_cluster_kubelet_config in scripts/lib/cluster.sh.
+    # failure. Mirrors _check_existing_cluster_kubelet_config in scripts/lib/k3d.sh.
     #
     # Empty output stays silent: 'cannot tell' must not read as 'missing', or the
     # warning trains people to ignore it.
     Test-ExistingClusterKubeletConfig
+
+    # A cluster created before the one-node default keeps its agent (client-dev#1418).
+    Test-ExistingClusterNodeCount
 
     # k3s version drift: a cluster born unpinned/old/latest keeps its k3s across
     # pinned re-runs (#547). Shared with the completed+healthy fast-path in main so
@@ -5605,7 +5642,7 @@ function New-K3dCluster {
     # NodeUtilisation as the first statement of its poll loop, the loop handler
     # logs and sleeps 5 s, and the DaemonSet declares no probes -- so the pod
     # stays Running while node telemetry quietly stops. See the fuller note in
-    # scripts/lib/cluster.sh's _create_new_cluster.
+    # scripts/lib/k3d.sh's _create_new_cluster.
     #
     # Distinct from the RACE on the same APIService: Wait-MetricsApiService (#757)
     # waits out the window where k3s has not yet applied its bundled
@@ -5613,7 +5650,7 @@ function New-K3dCluster {
     # DISABLED metrics-server -- it would spend its whole METRICS_WAIT_TIMEOUT
     # budget and then hand the install to the chart's `fail`.
     #
-    # local-storage is disabled UNCONDITIONALLY here, where cluster.sh gates it on
+    # local-storage is disabled UNCONDITIONALLY here, where k3d.sh gates it on
     # TB_STORAGE_MODE. That is correct only because Windows is hostpath-only:
     # node-local (RFC-0003 Option C) is the Linux/k3s default since the D15 flip
     # (client#456) but has no Windows path, the same reason Invoke-LeftoverDataGuard
@@ -5649,7 +5686,7 @@ function New-K3dCluster {
     # GATED, and the gate is load-bearing: --fail-cgroupv1 was ADDED in kubelet
     # 1.31, so passing it to a pre-1.31 kubelet would be an unknown
     # flag and the kubelet would fail to start. Keep this in lockstep with the
-    # bash twin in scripts/lib/cluster.sh.
+    # bash twin in scripts/lib/k3d.sh.
     # NEVER cast an unvalidated string with [version] -- it THROWS, and this runs
     # BEFORE the `latest` branch below that exists to honour that value (#806
     # review, confirmed under pwsh). "" and "latest" are handled explicitly, the
@@ -5664,7 +5701,7 @@ function New-K3dCluster {
     # refusal -- so emitting is safe today and correct the moment k3d's default
     # crosses 1.35. Empty stays skip: common.sh defaults K8S_VERSION to the pin, so
     # empty only occurs in tests.
-    # `@all`, NOT `@server:*`: $AGENTS defaults to 1 and an agent runs a kubelet too
+    # `@all`, NOT `@server:*`: an explicit AGENTS=1 creates an agent, and it runs a kubelet too
     # (#806 Bugbot, High). Scoping to the server leaves the agent kubelet refusing on
     # a cgroup v1 host -- WSL2's hybrid mode is exactly this path.
     $k8sSemver = ($K8S_VERSION -replace '^v', '') -replace '[-+].*$', ''
@@ -5750,7 +5787,7 @@ function New-K3dCluster {
       Log "GPU flag active: $K3D_GPU_FLAG"
     }
 
-    # Corporate-proxy propagation (mirrors scripts/lib/cluster.sh): pass proxy
+    # Corporate-proxy propagation (mirrors scripts/lib/k3d.sh): pass proxy
     # env via a k3d --config file so authenticated proxies survive and NO_PROXY
     # is auto-augmented with the cluster-internal ranges (prevents in-cluster
     # misroute + the create-time --wait hang).
@@ -5878,7 +5915,7 @@ function New-K3dCluster {
     Ok "Compute environment ready."
   }
 
-  # Peer of cluster.sh::_merge_kubeconfig (client#732). This merge is load-bearing:
+  # Peer of k3d.sh::_merge_kubeconfig (client#732). This merge is load-bearing:
   # the installer passes no --kubeconfig/--context to `tracebloc client create`, so
   # the secure environment is registered against whatever context is CURRENT. The
   # old form piped the output to Out-Null and never looked at $LASTEXITCODE, so a
@@ -5893,6 +5930,17 @@ function New-K3dCluster {
   # Bounded like the bash peer: k3d reads the kubeconfig out of the node through the
   # Docker daemon, so a wedged daemon would otherwise stall a headless install here
   # with no output at all.
+  # The context the user had selected BEFORE the switch below (backend#5025 O-19),
+  # read so Print-Summary can say what changed and how to switch back. Peer of
+  # the bash twin's prev_ctx read. Best effort: unreadable or empty (a fresh
+  # machine) means nothing to report.
+  $script:TbPrevKubeContext = ""
+  $prevCtx = ""
+  try {
+    $prev = Invoke-BoundedProcess -FileName "kubectl" -Arguments @("config", "current-context") -TimeoutSec 10
+    if ($prev.Code -eq 0) { $prevCtx = Get-CurrentContextFromOutput -Output "$($prev.Output)" }
+  } catch { $prevCtx = "" }
+
   $mergeCmd = "k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"
   $merge = Invoke-BoundedProcess -FileName "k3d" -TimeoutSec 60 `
     -Arguments @("kubeconfig", "merge", $CLUSTER_NAME, "--kubeconfig-merge-default", "--kubeconfig-switch-context")
@@ -5950,6 +5998,10 @@ function New-K3dCluster {
   }
 
   Log "kubeconfig updated -- kubectl now points to '$CLUSTER_NAME'."
+  if ($prevCtx -and $prevCtx -ne $wantCtx) {
+    $script:TbPrevKubeContext = $prevCtx
+    Log "kubectl's current context was '$prevCtx' before this install; the summary says how to switch back."
+  }
 
   # A node whose k3s died on a moved address never comes back on its own, so
   # "already running" would be the last true thing this run said (client-dev#1370).
@@ -8462,6 +8514,17 @@ function Write-NotReadyDetail {
 # Reports the outcome based on $script:ClientState (set by Wait-ForClientReady).
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected -- never on a partial/failed run.
+# Peer of summary.sh::_kube_context_note (backend#5025 O-19): the installer switched
+# kubectl's current context to this cluster, and a user who also works on other
+# clusters needs to hear that, with the way back. Set only when a DIFFERENT
+# context was selected before, so a fresh machine and a re-run print nothing.
+function Write-KubeContextNote {
+  if (-not $script:TbPrevKubeContext) { return }
+  Write-Host "  kubectl now points at k3d-$CLUSTER_NAME (it pointed at $($script:TbPrevKubeContext) before). To switch back:"
+  Write-Host "    kubectl config use-context $($script:TbPrevKubeContext)" -ForegroundColor Green
+  Write-Host ""
+}
+
 function Print-Summary {
   # #616: only claim "NVIDIA GPU" when the GPU was actually wired into the cluster
   # ($K3D_GPU_FLAG). A GPU detected but not enabled runs CPU-only, and the summary says so
@@ -8526,6 +8589,7 @@ function Print-Summary {
       Write-Host ""
       Hint "Dashboard: $(Get-TraceblocDashboardUrl '')   Logs: ~\.tracebloc\   Data: /tracebloc/$ns"
       Write-Host ""
+      Write-KubeContextNote
       Write-Host "  $line" -ForegroundColor Green
     }
     "starting" {
@@ -8573,6 +8637,8 @@ function Print-Summary {
     }
   }
   Write-Host ""
+  # Every other outcome sends the user to kubectl too; the connected one said it above.
+  if ($script:ClientState -ne "connected") { Write-KubeContextNote }
 
   # Advanced info for log only
   Log ""
@@ -10061,6 +10127,9 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
     # the stock 85/80 thresholds. A HEALTHY pre-#2634 edge is the entire population
     # the advisory is for, and it is exactly the population this fast path serves.
     Test-ExistingClusterKubeletConfig
+    # And a fourth (client-dev#1418): a node count is fixed at create time too, so a
+    # healthy cluster from before the one-node default keeps its second node.
+    Test-ExistingClusterNodeCount
     # This path exits before Helm, so a cluster installed BEFORE this fix would never
     # get its PV dirs repaired -- the client is healthy, so every re-run shortcuts
     # here and the first ingest keeps failing with "Permission denied". Repair it now:
@@ -10157,8 +10226,8 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
     $GPU_SKIP_REASON = ""
     # Single physical GPU vs multi-node cluster (Bugbot): k3d's --gpus=all exposes the
     # SAME host GPU to EVERY node container, and whatever advertises the resource (a device
-    # plugin on Linux, the node reconciler on WSL2) does so once per node -- so a default
-    # server+agent cluster advertises
+    # plugin on Linux, the node reconciler on WSL2) does so once per node -- so a
+    # server+agent cluster (AGENTS=1; the default is one node since client-dev#1418) advertises
     # nvidia.com/gpu=1 on BOTH nodes (2 allocatable for 1 physical card) and can schedule
     # two jobs onto the same device. Extra k3d nodes live on the same Docker host and all
     # see the same card, so multi-node can NEVER add real GPUs -- it only double-counts.

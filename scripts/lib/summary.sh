@@ -163,6 +163,19 @@ _reboot_note() {
   fi
 }
 
+# The installer switched kubectl's current context to this cluster (it must: the
+# secure environment is registered against the current context), and a user who
+# also works on other clusters needs to hear that, with the way back, or their
+# next kubectl lands here (backend#5025 O-19). _merge_kubeconfig sets
+# TB_PREV_KUBE_CONTEXT only when a DIFFERENT context was selected before, so a
+# fresh machine and a re-run print nothing.
+_kube_context_note() {
+  [[ -n "${TB_PREV_KUBE_CONTEXT:-}" ]] || return 0
+  echo -e "  kubectl now points at ${TB_KUBE_CONTEXT:-k3d-${CLUSTER_NAME:-tracebloc}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
+  echo -e "    ${TB_CMD}kubectl config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
+  echo ""
+}
+
 # Will `tracebloc` resolve in the user's shell? Rely SOLELY on TB_CLI_USABLE_NOW,
 # which install-cli.sh sets from a FRESH-shell probe (_cli_on_fresh_path). A
 # `has tracebloc` fallback would be WRONG here: install.sh and provision.sh both
@@ -227,6 +240,7 @@ print_summary() {
         echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
       fi
       echo ""
+      _kube_context_note
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
       # Data location depends on the storage model: hostpath binds /tracebloc on
       # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
@@ -282,6 +296,9 @@ print_summary() {
       ;;
   esac
   echo ""
+  # Every other outcome sends the user to kubectl too; the connected one says it
+  # above its footer, so the reboot note stays its last line.
+  if [[ "$CLIENT_STATE" != "connected" ]]; then _kube_context_note; fi
 
   _log_advanced_info
 }

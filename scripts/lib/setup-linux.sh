@@ -110,7 +110,7 @@ _ensure_kernel_modules() {
 # daemon, which does NOT inherit the shell's HTTP_PROXY — it reads a systemd
 # drop-in instead. Without it, `k3d cluster create` fails on a strict proxy-only
 # host with "failed to pull rancher/k3s … i/o timeout", BEFORE the client is
-# ever installed. Mirrors cluster.sh (k3d node env, #166) and
+# ever installed. Mirrors k3d.sh (k3d node env, #166) and
 # install-client-helm.sh (chart values, #242): when the host has a proxy,
 # propagate it to every layer that needs it. Idempotent — only restarts dockerd
 # when the drop-in content actually changes, so a re-run never bounces a running

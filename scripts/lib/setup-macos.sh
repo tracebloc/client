@@ -28,9 +28,9 @@ install_homebrew() {
 
 _kill_lingering_docker() {
   # _docker_answers_bounded, not _docker_answers: this is the wedged-Docker cleanup
-  # path, and _docker_answers bounds through _bounded, which is a no-op on a stock
-  # Mac (no coreutils) — so a bare, unbounded `docker info` would hang exactly here
-  # (Bugbot #744). The background-PID bound needs no coreutils.
+  # path, and _docker_answers bounds through _bounded, which was a no-op on a stock
+  # Mac (no coreutils) until client-dev#1357 — so a bare `docker info` hung exactly
+  # here (Bugbot #744). The background-PID bound needs no coreutils.
   if ! _docker_answers_bounded "Checking for a running Docker…" "${TB_DOCKER_PROBE_TIMEOUT:-10}" && pgrep -xq "Docker Desktop"; then
     log "Lingering Docker Desktop process detected — cleaning up…"
     osascript -e 'quit app "Docker"' 2>/dev/null || true
@@ -402,8 +402,9 @@ _offer_colima_memory_raise() {
     # when a timed-out stop may have left the VM half-down, which is also when the
     # daemon is most likely wedged. The earlier version probed via `_docker_answers`,
     # believing it bounded — but `_docker_answers` bounds through `_bounded`, which
-    # runs the bare command when neither timeout(1) nor gtimeout(1) is present, and
-    # NEITHER ships on stock macOS: the one platform this Darwin-only path runs on.
+    # then ran the bare command when neither timeout(1) nor gtimeout(1) is present
+    # (fixed in client-dev#1357), and NEITHER ships on stock macOS: the one platform
+    # this Darwin-only path runs on.
     # So the bound silently vanished and a headless install froze here with no
     # spinner, never reaching the restore below (Cursor Bugbot High, PR #838).
     # `_docker_answers_bounded` bounds via spin's own background-pid + kill
@@ -499,6 +500,37 @@ _desktop_settings_store() {
   if [[ -f "$dir/settings-store.json" ]]; then printf '%s' "$dir/settings-store.json"
   elif [[ -f "$dir/settings.json" ]]; then printf '%s' "$dir/settings.json"
   else return 1; fi
+}
+# Read the store, and when that fails say WHY in words the operator can act on
+# (backend#5025 O-15). `cat … 2>/dev/null` threw the reason away, so a Mac whose
+# privacy protection blocks the read was told only "could not be read". That is
+# the common case on current macOS: ~/Library/Group Containers/group.com.docker
+# is another app's data, `[[ -f ]]` on the store succeeds (so it is "found"), and
+# the read fails with EPERM until the terminal is allowed to access data from
+# other apps (or has Full Disk Access). An empty file is its own reason, not an
+# unreadable one. Sets _TB_DESKTOP_STORE_TEXT and returns 0, or sets
+# _TB_DESKTOP_STORE_WHY (a clause that completes "could not be read: …") and
+# returns 1. cat's stderr is kept with its stdout: on success it writes nothing
+# there, and on failure what it wrote is the reason.
+_desktop_read_store() {
+  local store="$1" out="" rc=0
+  _TB_DESKTOP_STORE_TEXT=""; _TB_DESKTOP_STORE_WHY=""
+  out="$(cat "$store" 2>&1)" || rc=$?
+  if (( rc == 0 )); then
+    if [[ -n "$out" ]]; then _TB_DESKTOP_STORE_TEXT="$out"; return 0; fi
+    _TB_DESKTOP_STORE_WHY="the file is empty"
+    return 1
+  fi
+  case "$out" in
+    *"Operation not permitted"*)
+      _TB_DESKTOP_STORE_WHY="macOS privacy protection blocked it (Operation not permitted), because the folder holds another app's data. Allow your terminal app when macOS asks whether it may access data from other apps, or give it Full Disk Access in System Settings → Privacy & Security → Full Disk Access, then re-run the installer" ;;
+    *"Permission denied"*)
+      _TB_DESKTOP_STORE_WHY="the file's permissions do not let this user read it (Permission denied)" ;;
+    *)
+      local first="${out%%$'\n'*}"
+      _TB_DESKTOP_STORE_WHY="reading it failed (${first:-cat exited ${rc}})" ;;
+  esac
+  return 1
 }
 # Which spelling of the VM-size key this store uses. THE FILE IS THE AUTHORITY and
 # is asked first: a store that already carries one of the two spellings gets that
@@ -619,9 +651,10 @@ _desktop_write_store() {   # <store> <content> -> 0 iff the store now holds exac
   printf '%s' "$content" | cmp -s - "$store"
 }
 # Wait for Docker to answer, bounded on a stock Mac (Bugbot on #1101): the general
-# _wait_for_docker probes through _docker_answers, whose bound is `_bounded`, a
-# no-op without coreutils -- so a VM that wedges on its new size would block it
-# forever, past the restore this path owes the operator. Each probe here runs
+# _wait_for_docker probes through _docker_answers, whose bound is `_bounded`, which
+# was a no-op without coreutils until client-dev#1357 -- so a VM that wedged on its
+# new size would have blocked it forever, past the restore this path owes the
+# operator. Each probe here runs
 # under _bounded_capture (spin's background-pid deadline, coreutils-free), and
 # the loop is a wall-clock deadline, not a poll count.
 #
@@ -859,10 +892,13 @@ _offer_desktop_memory_raise() {
     hint "Docker Desktop's settings store was not found under ~/Library/Group Containers/group.com.docker, so the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
     return 0
   fi
-  if ! text="$(cat "$store" 2>/dev/null)" || [[ -z "$text" ]]; then
-    hint "Docker Desktop's settings store at ${store} could not be read, so the VM is left at ${current_gb} GB. Raise it yourself: ${manual}."
+  if ! _desktop_read_store "$store"; then
+    # Say what was skipped too: with a readable store the installer would have
+    # offered to raise the VM itself, and "left at N GB" alone hid that.
+    hint "Docker Desktop's settings store at ${store} could not be read: ${_TB_DESKTOP_STORE_WHY}. Without it the installer cannot raise the VM from ${current_gb} GB to ${target_gb} GB for you, so raise it yourself: ${manual}."
     return 0
   fi
+  text="$_TB_DESKTOP_STORE_TEXT"
 
   if [[ "$short_reason" == "rung" ]]; then
     warn "Docker Desktop's VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; training pods would stay Pending."
@@ -965,10 +1001,13 @@ _offer_desktop_memory_raise() {
   # wrote. The text edited, written and -- on every restore path below -- restored
   # is the store as it stands now, with Desktop down. A store that cannot be read
   # or edited any more relaunches Desktop untouched: nothing has been written yet.
-  if ! text="$(cat "$store" 2>/dev/null)" || [[ -z "$text" ]] ||
+  # The same reader as before the quit, so a re-read that fails says why too.
+  local reread_why=""
+  if _desktop_read_store "$store"; then text="$_TB_DESKTOP_STORE_TEXT"; else text=""; reread_why=" (${_TB_DESKTOP_STORE_WHY})"; fi
+  if [[ -z "$text" ]] ||
      ! mem_key="$(_desktop_memory_key "$text" "$store")" ||
      ! new_text="$(_desktop_store_with_memory "$text" "$mib" "$mem_key")"; then
-    hint "Docker Desktop's settings store at ${store} could not be re-read or edited after Desktop quit, so it is left as Desktop wrote it and Desktop is being relaunched unchanged. Raise it yourself: ${manual}."
+    hint "Docker Desktop's settings store at ${store} could not be re-read or edited after Desktop quit${reread_why}, so it is left as Desktop wrote it and Desktop is being relaunched unchanged. Raise it yourself: ${manual}."
     open -a Docker 2>/dev/null || error "Docker Desktop could not be relaunched (open -a Docker failed); its settings are as it left them. Open Docker Desktop, then re-run the installer."
     local back=0
     _desktop_wait_for_docker "$wait_secs" || back=$?
@@ -1252,7 +1291,14 @@ install_docker_desktop() {
     log "Detected hardware architecture: $real_arch"
 
     local dmg_url="https://desktop.docker.com/mac/main/${real_arch}/Docker.dmg"
-    local dmg_path="/tmp/Docker.dmg"
+    # A directory mktemp made for this run, never a fixed /tmp name (backend#4279):
+    # in sticky /tmp another account's symlink at /tmp/Docker.dmg survived the
+    # `rm -f` in download_with_progress and curl wrote through it. Registered, so
+    # install_cleanup removes it on a failed download or a failed verify too.
+    local dmg_dir="" dmg_path
+    tb_scratch_dir dmg_dir tracebloc-docker \
+      || error "Could not create a private temporary directory for the Docker Desktop download under ${TMPDIR:-/tmp}. Free some disk space or set TMPDIR to a writable directory, then re-run."
+    dmg_path="${dmg_dir}/Docker.dmg"
 
     log "Downloading Docker Desktop DMG for $real_arch"
     # Real %-by-bytes bar: this is a single-file curl of the .dmg, so the byte
@@ -1268,12 +1314,16 @@ install_docker_desktop() {
     _verify_docker_dmg "$dmg_path" "${dmg_url%/*}/checksums.txt"
 
     # #561: bounded so hdiutil on a bad/corrupt DMG can't hang forever.
+    # The path goes in as $1, not spliced into the script: it now comes from
+    # TMPDIR, which the user controls. The trailing `rm -f` stays where it was
+    # so the chain's exit status is unchanged; tb_scratch_rm then drops the dir.
     spin_cmd_bounded 900 "Installing Docker Desktop…" bash -c \
-      "hdiutil attach '$dmg_path' -nobrowse -quiet && \
-       cp -R '/Volumes/Docker/Docker.app' /Applications/ && \
+      'hdiutil attach "$1" -nobrowse -quiet && \
+       cp -R /Volumes/Docker/Docker.app /Applications/ && \
        xattr -cr /Applications/Docker.app && \
-       hdiutil detach '/Volumes/Docker' -quiet 2>/dev/null; \
-       rm -f '$dmg_path'"
+       hdiutil detach /Volumes/Docker -quiet 2>/dev/null; \
+       rm -f "$1"' _ "$dmg_path"
+    tb_scratch_rm "$dmg_dir"
 
     log "Docker Desktop ($real_arch) installed to /Applications."
   fi

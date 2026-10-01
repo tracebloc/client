@@ -1113,6 +1113,11 @@
               "pattern": "^(sha256:[a-f0-9]{64})?$",
               "description": "Prod reproducibility pin (sha256:<64 hex>), applied when `prodPin` resolves true (i.e. CLIENT_ENV resolves to prod). A CHART DEFAULT by design: `helm upgrade --reset-then-reuse-values` (the fleet auto-upgrade) adopts new chart defaults but re-applies stored user-supplied values, so only a default can update an installed edge (backend#1245). Must be a multi-arch index (#186); regenerate with scripts/resolve-ingestor-digest.sh --write and bump Chart.yaml."
             },
+            "prodDigestServiceDb": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$",
+              "description": "Prod pin for edges whose `serviceDbAccounts` resolves on (every fresh install) — they get DB_USER, so they can run a current ingestor (backend#5099). Applied instead of `prodDigest` when `prodPin` resolves true and service DB accounts are on; empty = use `prodDigest` for every prod edge. Must be a multi-arch index (#186); resolve with scripts/resolve-ingestor-digest.sh and bump Chart.yaml."
+            },
             "prodPin": {
               "type": "boolean",
               "description": "Whether `prodDigest` applies on this edge. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod edge to float it while the rest of the fleet stays pinned."
@@ -1197,7 +1202,7 @@
         "training": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. The chart refuses `capabilities` with an empty `digests`.",
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. The chart refuses `capabilities` or `parents` with an empty `digests`.",
           "properties": {
             "pinned": {
               "enum": [
@@ -1221,24 +1226,58 @@
               },
               "additionalProperties": {
                 "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "cpu": {
-                    "type": "string",
-                    "pattern": "^sha256:[a-f0-9]{64}$"
-                  },
-                  "gpu": {
-                    "type": "string",
-                    "pattern": "^sha256:[a-f0-9]{64}$"
-                  }
+                "propertyNames": {
+                  "$ref": "#/definitions/trainingArch"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}$"
                 }
               },
-              "description": "task -> arch -> digest. Arch is CLOSED to cpu|gpu (the engine builds exactly Dockerfile.task.cpu / .gpu); task keys are open because the task set is the engine's to declare. Every digest must be canonical sha256:<64 lowercase hex>."
+              "description": "task -> arch -> digest. Arch is CLOSED to the domain definitions.trainingArch declares (cpu|gpu: the engine builds exactly Dockerfile.task.cpu / .gpu), the same definition `parents` keys on; task keys are open because the task set is the engine's to declare. Every digest must be canonical sha256:<64 lowercase hex>."
             },
             "capabilities": {
               "type": "string",
               "pattern": "^([a-z][a-z0-9_-]*(:[a-z0-9][a-z0-9_.-]*)?(,[a-z][a-z0-9_-]*(:[a-z0-9][a-z0-9_.-]*)?)*)?$",
               "description": "Comma-separated engine capability tokens, DERIVED from the pinned images' io.tracebloc.engine.capabilities label by scripts/resolve-training-digests.sh (which reads THIS pattern before writing, so the two cannot drift). A token is plain (`ddp`, `per_rank_split`) or parameterised `name:value` (`min-micro-batch:2`, `loss-coupled:embeddings` -- RFC-0067 D10, tracebloc-engine core/capabilities.py PARAMETER_SEPARATOR), which client-runtime's engine_capabilities.capability_parameters reads. Never hand-typed; refused by the template when `digests` is empty."
+            },
+            "parents": {
+              "type": "object",
+              "propertyNames": {
+                "$ref": "#/definitions/trainingArch"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "repository",
+                  "digest",
+                  "platforms"
+                ],
+                "properties": {
+                  "repository": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]+([_-]+[a-z0-9]+)*(/[a-z0-9]+([._-]+[a-z0-9]+)*)*$",
+                    "description": "The parent's repository WITHOUT a registry (the first component carries no dot, so a host cannot be written here): the chart prefixes the registry the edge pulls training images from, as it does for the training images themselves."
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$",
+                    "description": "The parent's index digest, canonical sha256:<64 lowercase hex>. Read off the pinned images' io.tracebloc.engine.torch-parent label, never typed."
+                  },
+                  "platforms": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?$"
+                    },
+                    "description": "The os/arch[/variant] platforms the parent's index carries (attestation manifests excluded), read off the registry by the resolver. The installer prepulls only on a host whose platform is listed."
+                  }
+                }
+              },
+              "description": "arch -> the torch parent every pinned image of that arch builds FROM: {repository, digest, platforms}. DERIVED by scripts/resolve-training-digests.sh from the pinned images' io.tracebloc.engine.torch-parent label, in the same read that yields `capabilities`; written only when every pinned image of the arch names ONE parent (no entry when the images disagree or carry no label). Keys are closed to definitions.trainingArch, the same domain `digests` keys on; only gpu is written today. Renders ConfigMap <release>-training-prepull, a Job manifest the installer applies after readiness and never waits on, only where the map itself renders. Never hand-typed; refused by the template when `digests` is empty."
             }
           }
         },
@@ -1951,6 +1990,15 @@
           "description": "0 = retry forever, so the byte cap is the ONLY bound. Any positive value silently overrides it."
         }
       }
+    }
+  },
+  "definitions": {
+    "trainingArch": {
+      "enum": [
+        "cpu",
+        "gpu"
+      ],
+      "description": "The training-image arch domain: the engine builds exactly Dockerfile.task.cpu and Dockerfile.task.gpu. ONE declaration, read by both images.training.digests and images.training.parents, so the two cannot disagree on which arches exist."
     }
   }
 }

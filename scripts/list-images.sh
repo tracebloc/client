@@ -38,6 +38,13 @@
 #  because exactly that drift already went unnoticed for ~7 months.
 #
 #    chart images   <- `helm template` on YOUR values, so conditionals resolve
+#                      -- the torch parent included: on a GPU-capable edge whose
+#                      training map renders, the chart carries the installer's
+#                      prepull Job (ConfigMap <release>-training-prepull) as YAML
+#                      text, and its `image:` line is read with the rest. A mirror
+#                      that declares itself in images.training.digestRegistry
+#                      must hold that parent at that digest, or the prepull
+#                      waits out its deadline and nothing is warmed.
 #    mirror prefix  <- the rendered JOB_IMAGE_HOST
 #    ingestor       <- the rendered INGESTOR_IMAGE_REPOSITORY + TAG/DIGEST
 #    training tasks <- Docker Hub's `client-*` repository list for the namespace

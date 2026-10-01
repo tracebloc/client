@@ -292,7 +292,7 @@ prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
 hint()           { echo -e "  ${DIM}$*${RESET}"; }
 
 # The "remove the client that is already here" remedy, printed from ONE place
-# (backend#2077) — peer of cluster.sh::_recreate_cluster_hint, for the sites that
+# (backend#2077) — peer of k3d.sh::_recreate_cluster_hint, for the sites that
 # mean a FULL removal (switch account, switch Client ID), not a keep-your-data
 # recreate.
 #
@@ -350,7 +350,7 @@ has() { command -v "$1" &>/dev/null; }
 # INSTALL_TIER==1 AND the opt-in TB_TIER1_ROOTLESS flag; every later slice calls
 # THIS predicate instead of re-testing the pair, so the two markers can never drift
 # (#1221). Lives in common.sh because both setup-linux.sh (the install path) and
-# cluster.sh (the cluster path, sourced standalone by the e2e harness) depend on it.
+# k3d.sh (the cluster path, sourced standalone by the e2e harness) depend on it.
 _rootless_active() {
   [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]
 }
@@ -394,45 +394,48 @@ assert_tool_runs() {
   error "$name was installed but won't run — a corrupt or wrong-architecture binary (this machine is ${ARCH:-$(uname -m)}). Re-run the installer to re-download it; if it recurs, remove ${rm_path:-the $name on your PATH} (and any package-manager copy) first."
 }
 
-# _bounded SECONDS CMD… — run CMD under timeout(1)/gtimeout(1) when either is
-# present, else bare, so a wedged external call can't hang a headless install
-# (installer rule: every docker/kubectl/helm probe must be bounded). Returns CMD's
-# exit status (124 on timeout). Output is NOT redirected — the caller decides.
+# _bounded SECONDS CMD… — run CMD with a deadline, so a wedged external call can't
+# hang a headless install (installer rule: every docker/kubectl/helm probe must be
+# bounded). Returns CMD's exit status, or 124 when the deadline fired. Output is
+# NOT redirected — the caller decides — and stdin reaches CMD.
+#
+# timeout(1)/gtimeout(1) when either is present: they signal the whole process
+# group. Neither ships on a stock Mac, and the bare call this used to fall back to
+# was no bound at all there (#741, #832, backend#2521), so without them the deadline
+# comes from _tb_bounded_bg, the background-PID mechanism _bounded_capture uses.
 _bounded() {
   local t="$1"; shift
   if   has timeout;  then timeout  "$t" "$@"
   elif has gtimeout; then gtimeout "$t" "$@"
-  else "$@"; fi
+  else _tb_bounded_bg "$t" "$@"; fi
 }
 
-# _bounded_capture SECONDS OUTFILE CMD… — run CMD with stdout+stderr captured to
-# OUTFILE, bounded on EVERY platform. Returns CMD's status, or 124 when the
-# deadline fired. THREE OUTCOMES, all distinguishable by the caller: 0 (answered),
-# 124 (did not answer in time), anything else (CMD's own failure).
+# _tb_bounded_bg SECONDS CMD… — the deadline with no coreutils: run CMD in the
+# background, stdin preserved (`<&0`; a background job in a non-interactive shell
+# otherwise reads /dev/null), and poll it. On the deadline: TERM, then KILL, and
+# return 124; otherwise CMD's own status. Only CMD itself is signalled, not a
+# process group (job control is off in the installer's shell). SECONDS reads as
+# timeout(1) reads it: a number with an optional s/m/h/d suffix (a fraction rounds
+# UP, so the bound is never shorter than asked), 0 disables the deadline, and
+# anything else is timeout(1)'s 125, "the interval is invalid".
 #
-# WHY IT EXISTS ALONGSIDE _bounded (client#984). `_bounded` execs timeout(1)/
-# gtimeout(1) and runs the BARE command when neither is on PATH — and neither ships
-# on a stock Mac (both are GNU coreutils), which is the caveat #741/#832/backend#2521
-# have each paid for. `_docker_answers_bounded` already solves that for a yes/no
-# probe by backgrounding it and letting `spin` kill it on a deadline, but spin
-# writes UI and discards the command's OUTPUT, so it cannot serve a read whose
-# output is the point.
-#
-# The --diagnose bundle is exactly that case and the one where the cost is the
-# whole artifact rather than a stall: every read in it goes into a `{ … } > file`
-# group, so ONE call that never returns means no file at all, from the one run
-# collected BECAUSE the machine is already broken. A `docker info` gate passing in
-# 10s does not make a 15s `k3d cluster list` safe — more engine work, different
-# budget (Bugbot High, client#984).
-#
-# Same background-PID + kill mechanism as spin (#426), no coreutils. TERM first,
-# then KILL, so a well-behaved child can clean up. The poll tick is 0.1s where
-# `sleep` accepts fractions and 1s otherwise, detected once per shell — a
-# 1-second floor would have charged the --diagnose bundle a full second for every
-# read that answered instantly.
-_bounded_capture() {
-  local secs="$1" out="$2"; shift 2
-  : > "$out" 2>/dev/null || return 2      # cannot capture => "could not tell", not "empty"
+# The poll tick is 0.1s where `sleep` accepts fractions and 1s otherwise, detected
+# once per shell — a 1-second floor would charge a full second for every call that
+# answered instantly.
+_tb_bounded_bg() {
+  local asked="$1" raw="$1" mult=1 secs; shift
+  case "$raw" in
+    *s) raw="${raw%s}" ;;
+    *m) raw="${raw%m}"; mult=60 ;;
+    *h) raw="${raw%h}"; mult=3600 ;;
+    *d) raw="${raw%d}"; mult=86400 ;;
+  esac
+  case "$raw" in
+    ''|*[!0-9.]*|*.*.*|.*) echo "_bounded: invalid time interval '${asked}'" >&2; return 125 ;;
+    *.*) raw=$(( 10#${raw%%.*} + 1 )) ;;
+  esac
+  secs=$(( 10#$raw * mult ))
+  if [ "$secs" -eq 0 ]; then "$@"; return; fi
   # Poll granularity, detected ONCE per shell and cached: a fast call must not cost
   # a whole tick. GNU and BSD/macOS `sleep` both take fractions; a strictly POSIX
   # one does not, so fall back to 1s rather than spin or fail.
@@ -440,30 +443,46 @@ _bounded_capture() {
     if sleep 0.1 2>/dev/null; then _TB_CAPTURE_TICK=0.1; _TB_CAPTURE_PER_SEC=10
     else                           _TB_CAPTURE_TICK=1;   _TB_CAPTURE_PER_SEC=1; fi
   fi
-  "$@" >"$out" 2>&1 &
-  local pid=$! rc=0 waited=0
-  local limit=$(( secs * _TB_CAPTURE_PER_SEC ))
+  "$@" <&0 &
+  # The waiter's OWN stderr is silenced, never CMD's: a job killed on the deadline
+  # is reaped asynchronously, and bash then prints "PID Terminated: 15 CMD" at its
+  # next command -- inside the loop, outside `wait`'s redirection. Measured on
+  # /bin/bash 3.2; it would land on the user's terminal, or in a --diagnose file.
+  _tb_bounded_wait "$!" "$secs" 2>/dev/null
+}
+
+# _tb_bounded_wait PID SECONDS -- _tb_bounded_bg's deadline loop over a background
+# job of this shell: its status, or 124 once SECONDS have passed.
+#
+# TWO CLOCKS, and the deadline is whichever runs out first. The tick count is never
+# early (each tick sleeps at least one tick), but it is not a bound: every tick also
+# pays a `kill -0` and a `sleep` fork, and on a loaded macOS runner "1s, then a 2s
+# grace" measured 6.6s (client-dev#1514). The wall clock caps it. $SECONDS is whole
+# seconds, so a difference of N means MORE than N-1 have passed: the deadline needs
+# `> secs` to stay never-shorter-than-asked; the grace is best-effort and takes `>= 2`.
+_tb_bounded_wait() {
+  local pid="$1" rc=0 waited=0 t0=$SECONDS
+  local limit=$(( $2 * _TB_CAPTURE_PER_SEC ))
   while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$limit" ]; then
+    if [ "$waited" -ge "$limit" ] || [ $(( SECONDS - t0 )) -gt "$2" ]; then
       # EVERY LINE FAILURE-PROOFED (`|| true`), exactly as spin's deadline path is
-      # and for the reason recorded there (Bugbot #442 r3, and again here on
+      # and for the reason recorded there (Bugbot #442 r3, and again on
       # client#984): `wait` on a TERM'd child reports 143 and `kill` fails outright
       # on an already-exited pid, so under `set -e` either aborted this arm BEFORE
       # `return 124` and the caller saw a fired deadline as "the command failed
-      # with 143". That is the stall/failure conflation this PR exists to remove,
-      # leaking out of the primitive every other branch keys on. Measured:
-      #   bash -c 'set -e; source common.sh; _bounded_capture 1 f sleep 30' -> 143
-      # (Not reproducible through `( set -e; … ) || rc=$?` — bash inherits the
-      # AND-OR errexit suppression into subshells, which is why the first draft of
-      # the guard passed against this bug.)
+      # with 143". That is the stall/failure conflation every caller keys on.
+      # Measured: bash -c 'set -e; source common.sh; _bounded_capture 1 f sleep 30'
+      # -> 143 (Not reproducible through `( set -e; … ) || rc=$?` — bash inherits
+      # the AND-OR errexit suppression into subshells, which is why the first draft
+      # of the guard passed against this bug.)
       kill -TERM "$pid" 2>/dev/null || true
       # ESCALATE IN-LINE, not from a detached subshell that races `wait`: a child
       # ignoring TERM otherwise decides how long the installer waits, and a KILL
       # arriving after `wait` has reaped the child can signal a REUSED pid. While
       # the child is still our own unreaped child its pid cannot be recycled, so
       # escalating here is both bounded and safe.
-      local _kwait=0 _klimit=$(( 2 * _TB_CAPTURE_PER_SEC ))
-      while kill -0 "$pid" 2>/dev/null && [ "$_kwait" -lt "$_klimit" ]; do
+      local _kwait=0 _klimit=$(( 2 * _TB_CAPTURE_PER_SEC )) _kt0=$SECONDS
+      while kill -0 "$pid" 2>/dev/null && [ "$_kwait" -lt "$_klimit" ] && [ $(( SECONDS - _kt0 )) -lt 2 ]; do
         sleep "$_TB_CAPTURE_TICK" || true
         _kwait=$(( _kwait + 1 ))
       done
@@ -478,6 +497,35 @@ _bounded_capture() {
   done
   wait "$pid" 2>/dev/null || rc=$?
   return "$rc"
+}
+
+# _bounded_capture SECONDS OUTFILE CMD… — run CMD with stdout+stderr captured to
+# OUTFILE, bounded on EVERY platform. Returns CMD's status, or 124 when the
+# deadline fired. THREE OUTCOMES, all distinguishable by the caller: 0 (answered),
+# 124 (did not answer in time), anything else (CMD's own failure).
+#
+# WHY IT EXISTS ALONGSIDE _bounded (client#984). `_bounded` leaves the output where
+# the caller put it; this one captures it to a FILE, and uses the background-PID
+# deadline (_tb_bounded_bg) on every host, coreutils or not, so a capture behaves
+# the same everywhere. `_docker_answers_bounded` bounds a yes/no probe by letting
+# `spin` kill it on a deadline, but spin writes UI and discards the command's
+# OUTPUT, so it cannot serve a read whose output is the point.
+#
+# The --diagnose bundle is exactly that case and the one where the cost is the
+# whole artifact rather than a stall: every read in it goes into a `{ … } > file`
+# group, so ONE call that never returns means no file at all, from the one run
+# collected BECAUSE the machine is already broken. A `docker info` gate passing in
+# 10s does not make a 15s `k3d cluster list` safe — more engine work, different
+# budget (Bugbot High, client#984).
+#
+# The mechanism is _tb_bounded_bg's: the same background-PID + kill as spin (#426),
+# no coreutils, TERM first and then KILL, so a well-behaved child can clean up.
+_bounded_capture() {
+  local secs="$1" out="$2"; shift 2
+  : > "$out" 2>/dev/null || return 2      # cannot capture => "could not tell", not "empty"
+  # stdin from /dev/null, as a plain background job had it: a --diagnose read never
+  # takes input, and must not sit on the terminal's.
+  _tb_bounded_bg "$secs" "$@" >"$out" 2>&1 </dev/null
 }
 
 # Deadline for `k3d cluster list` (seconds). Its OWN knob, deliberately LOOSER
@@ -674,7 +722,7 @@ _strip_paste_garbage() {
 # jq. Missing or non-numeric components read as 0, so "0.10" < "0.10.1" and a
 # pre-release suffix ("0.10.0-rc.1") compares as its base version.
 #
-# Lives here rather than in assess.sh (backend#2422) because cluster.sh gates a
+# Lives here rather than in assess.sh (backend#2422) because k3d.sh gates a
 # kubelet flag on the k3s pin and assess.sh is sourced only conditionally.
 #
 # CALLER MUST STRIP A LEADING "v". A non-numeric leading component reads as 0, so
@@ -858,12 +906,13 @@ spin() {
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   local ticks=0                           # one tick ≈ 0.12s
+  local _spin_t0=$SECONDS                 # the deadline's wall clock: ticks alone stretch on a slow host (client-dev#1514)
   local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
   tput civis 2>/dev/null || true          # hide cursor
   while kill -0 "$pid" 2>/dev/null; do
-    if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 )); then
-      # Children FIRST: the pid is often a wrapper subshell (cluster.sh's
+    if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 || SECONDS - _spin_t0 > deadline_s )); then
+      # Children FIRST: the pid is often a wrapper subshell (k3d.sh's
       # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
       # which keeps running (k3d keeps creating the cluster) after the install
       # has already failed, racing any retry (Bugbot #442). Capture the child
@@ -904,10 +953,11 @@ spin() {
 
 # ── Convenience wrapper: run a command quietly behind a spinner ───────────────
 #  Usage:  spin_cmd "Installing foo…" brew install --cask docker
-#  stdout/stderr are captured in the LOG_FILE (if set) or /tmp/tracebloc-spin.log
+#  stdout/stderr are captured in the LOG_FILE (if set) or a private mktemp file
+#  (_tb_spin_logfile; never a fixed /tmp name, backend#4279)
 spin_cmd() {
   local msg="$1"; shift
-  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  local logfile; _tb_spin_logfile; logfile="$_TB_SPIN_LOG"
   "$@" >> "$logfile" 2>&1 &
   local pid=$!
   if ! spin "$pid" "$msg"; then
@@ -926,7 +976,7 @@ spin_cmd() {
 #  killed it (with a timeout note so the user knows it was us, not the tool).
 spin_cmd_bounded() {
   local secs="$1" msg="$2"; shift 2
-  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  local logfile; _tb_spin_logfile; logfile="$_TB_SPIN_LOG"
   "$@" >> "$logfile" 2>&1 &
   local pid=$!
   local rc=0
@@ -1074,7 +1124,7 @@ download_with_progress() {
     total_bytes=0
   fi
 
-  local logfile="${LOG_FILE:-/tmp/tracebloc-spin.log}"
+  local logfile; _tb_spin_logfile; logfile="$_TB_SPIN_LOG"
   rm -f "$dest"
 
   # --connect-timeout bounds the dial; --speed-limit/--speed-time abort a STALLED
@@ -1219,7 +1269,7 @@ tb_export_namespace() {
 }
 # SERVERS/AGENTS are k3d's node counts and nothing else: their defaults, the
 # node-local single-node forcing and their validation live in the k3d create path
-# (cluster.sh::_k3d_node_counts), so code that is not k3d never reads them.
+# (k3d.sh::_k3d_node_counts), so code that is not k3d never reads them.
 # RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
 # D15 flip (client#456, epic backend#1151), superseding the flag-gated prototype
 # from #367. (D15 gates the flip on a green node-local dev training run on the dev
@@ -1236,7 +1286,7 @@ tb_export_namespace() {
 #                          delete; world-writable dirs. Select with
 #                          TB_STORAGE_MODE=hostpath (still required for a
 #                          HOST_DATASET_DIR network mount).
-# C1: node-local forces a single k3d node (cluster.sh::_k3d_node_counts says why).
+# C1: node-local forces a single k3d node (k3d.sh::_k3d_node_counts says why).
 # Record whether the operator chose the mode or is getting the D15 default: the
 # existing-cluster mismatch guard phrases its remedy differently for "you set
 # node-local" vs "node-local is the default now" (client#456 review, Bugbot High).
@@ -1248,14 +1298,14 @@ K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
 # CUDA base tag for the GPU-capable k3d node image (client#616/#835). The custom
 # docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
 # base, and its published tag encodes both (…/k3s-cuda:<K8S_VERSION>-cuda-<this>),
-# so cluster.sh::_gpu_node_image can derive the pull ref deterministically.
+# so k3d.sh::_gpu_node_image can derive the pull ref deterministically.
 # TRACEBLOC_CUDA_BASE_TAG overrides it (mirrors the Windows twin's $CUDA_BASE_TAG).
 # check-facts.sh keeps this in lockstep with facts.env's CUDA_TAG and the four
 # other consumers, so a bump can't derive a GPU image tag that was never built.
-# shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
+# shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
 TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # Exact digest of the published k3s-cuda image for the tag those two derive (backend#1867).
-# The tag is mutable; cluster.sh's pre-pull asserts the tag resolved to THIS digest and
+# The tag is mutable; k3d.sh's pre-pull asserts the tag resolved to THIS digest and
 # drops to CPU if it did not. It is deliberately NOT appended to the pull ref -- see the
 # note in scripts/spec/facts.env for why a tag@digest ref is a lie waiting to happen. No
 # TRACEBLOC_* override on purpose -- an operator who wants a different image already
@@ -1263,7 +1313,7 @@ TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # digest onto a ref it does not belong to. check-facts.sh keeps it in lockstep with
 # facts.env's K3S_CUDA_DIGEST, and --check-published proves it still equals the live
 # digest of the derived tag.
-# shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
+# shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
 TB_K3S_CUDA_DIGEST="sha256:fbb1a8cfebcdf32320b493fc614161cd1115603067135c27080ac380e4742e9d"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR,
 # stamped by check-facts.sh --write). Below the compute-capability floor detect-gpu.sh
@@ -1419,7 +1469,7 @@ PM_UPDATE=""
 # True when an NVIDIA GPU has been WIRED INTO THIS CLUSTER — not merely detected.
 # TB_GPU_WIRED becomes 1 only once the container runtime is ready to expose the
 # GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d node is then
-# created from the GPU-capable image with --gpus=all (cluster.sh, which derives
+# created from the GPU-capable image with --gpus=all (k3d.sh, which derives
 # that flag from this gate), and the reuse guard puts it back to 0 when an
 # existing cluster turns out to be a CPU-only node. So this is the one honest
 # gate for "should we request a GPU for jobs" — the same role the Windows twin's
@@ -1535,6 +1585,61 @@ _record_err() {
   return 0
 }
 
+# ── Private scratch directories (backend#4279) ───────────────────────────────
+#  A download that lands under a FIXED name in /tmp can be written through by
+#  another local account: /tmp is sticky, so a symlink someone else planted at
+#  that name survives our `rm -f` (it fails silently — we don't own the entry)
+#  and `curl -o` then writes wherever it points, as us. So every download and
+#  scratch file goes in a directory mktemp just made for this run: ours, 0700,
+#  with a name nobody could predict. On macOS TMPDIR is already per-user.
+#
+#  tb_scratch_dir VAR PREFIX — make the directory, assign its path to VAR, and
+#  register it so install_cleanup removes it on ANY exit (error()'s exit 1, a
+#  Ctrl-C, set -e). Registered rather than trapped: one EXIT trap per process,
+#  and it is install_cleanup's. Trailing X's only — BSD mktemp needs them last.
+#  Fails (non-zero, VAR untouched) when no directory could be made; the caller
+#  decides, because writing to a fixed /tmp name instead is the bug this fixes.
+#  tb_scratch_rm DIR — remove one now (the success path) and unregister it.
+_TB_SCRATCH_DIRS="${_TB_SCRATCH_DIRS:-}"   # newline-separated, registration order
+tb_scratch_dir() {
+  local __var="$1" __prefix="$2" __dir
+  __dir="$(mktemp -d "${TMPDIR:-/tmp}/${__prefix}-XXXXXX" 2>/dev/null)" || return 1
+  [[ -n "$__dir" && -d "$__dir" ]] || return 1
+  _TB_SCRATCH_DIRS="${_TB_SCRATCH_DIRS}${__dir}"$'\n'
+  printf -v "$__var" '%s' "$__dir"
+}
+tb_scratch_rm() {
+  local __dir="$1" __d __keep=""
+  [[ -n "$__dir" ]] || return 0
+  rm -rf "$__dir" 2>/dev/null || true
+  while IFS= read -r __d; do
+    [[ -n "$__d" && "$__d" != "$__dir" ]] && __keep="${__keep}${__d}"$'\n'
+  done <<<"$_TB_SCRATCH_DIRS"
+  _TB_SCRATCH_DIRS="$__keep"
+}
+# Reap every registered directory. Called from the EXIT traps; never fails.
+tb_scratch_reap() {
+  local __d
+  while IFS= read -r __d; do
+    [[ -n "$__d" ]] && { rm -rf "$__d" 2>/dev/null || true; }
+  done <<<"$_TB_SCRATCH_DIRS"
+  _TB_SCRATCH_DIRS=""
+  return 0
+}
+
+# _tb_spin_logfile — sets _TB_SPIN_LOG to where the spinner helpers append a
+# command's output: LOG_FILE once setup_log_file has run (every real install
+# path), else a private mktemp file made once per shell. The old fallback was a
+# fixed /tmp/tracebloc-spin.log appended with `>>`, which follows a planted
+# symlink the same way (backend#4279). /dev/null only if mktemp itself fails.
+_tb_spin_logfile() {
+  if [[ -n "${LOG_FILE:-}" ]]; then _TB_SPIN_LOG="$LOG_FILE"; return 0; fi
+  [[ -n "${_TB_SPIN_LOG:-}" && -f "$_TB_SPIN_LOG" ]] && return 0
+  _TB_SPIN_LOG="$(mktemp "${TMPDIR:-/tmp}/tracebloc-spin-XXXXXX" 2>/dev/null)" || _TB_SPIN_LOG=""
+  [[ -n "$_TB_SPIN_LOG" ]] || _TB_SPIN_LOG=/dev/null
+  return 0
+}
+
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
 install_cleanup() {
   local exit_code=$?
@@ -1548,6 +1653,9 @@ install_cleanup() {
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
   # backstop for an error/signal between mint and that cleanup.
   [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
+  # The private download/scratch directories (backend#4279): a fatal error mid
+  # download must not leave a ~600 MB Docker.dmg behind in the user's TMPDIR.
+  declare -F tb_scratch_reap >/dev/null 2>&1 && tb_scratch_reap
   # Record WHERE it died, always and first (client#681). The log is the artifact
   # users send to support, and until now a `set -e` death left it with no trace of
   # the failure at all. Logged even on the exit-2 / interrupted paths, so a
@@ -1614,12 +1722,17 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_SUBSTRATE_TOKEN_UNSUPPORTED x-tracebloc-substrate.token-unsupported
 #    TB_INSTALL_RECORD_VERSION      properties.schema_version.const
 #    TB_ARTEFACT_KINDS              $defs.artefact.properties.kind.enum, space-separated
+#    TB_RECORD_USER_PATH            x-tracebloc-record.user-path (a leading ~ is $HOME)
+#    TB_RECORD_ROOT_PATH            x-tracebloc-record.root-path (<user> is the login name)
 TB_SUBSTRATES="k3d"
 TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
 TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release"
+# shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
+TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
+TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"
 # The substrate this run was asked for: TRACEBLOC_SUBSTRATE, else the default
 # (blank means unset, as for every TRACEBLOC_* setting). There is no flag and no
 # alias. main() refuses a value outside TB_SUBSTRATES, by name, AFTER the
@@ -1671,7 +1784,14 @@ refuse_unsupported_substrate() {
 #  library function a unit test or a harness calls directly writes nothing.
 TB_RECORD_ARMED=""
 TB_RECORD_REFRESH_ONLY=""
-tb_record_path() { printf '%s/.tracebloc/install-record.json' "${HOME:-}"; }
+# The user copy: x-tracebloc-record.user-path, its leading ~ as $HOME.
+tb_record_path() { printf '%s%s' "${HOME:-}" "${TB_RECORD_USER_PATH#\~}"; }
+
+# The root copy for login name $1: x-tracebloc-record.root-path with <user> filled
+# in. TB_RECORD_ROOT_DIR, a test seam, replaces the directory above <user>.
+_tb_record_root_path() {
+  printf '%s/%s%s' "${TB_RECORD_ROOT_DIR:-${TB_RECORD_ROOT_PATH%%/<user>*}}" "$1" "${TB_RECORD_ROOT_PATH#*<user>}"
+}
 
 # $1 as a JSON string literal, or null when empty.
 _tb_json() {
@@ -1705,7 +1825,7 @@ _tb_record_field() {
 
 tb_record_write() {
   [[ "${TB_RECORD_ARMED:-}" == "1" && -n "${HOME:-}" ]] || return 0
-  local rec dir now prior="" arts="" out tmp line n i
+  local rec dir now prior="" arts="" root_copy
   rec="$(tb_record_path)"; dir="${rec%/*}"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$dir" 2>/dev/null || { log "Install record: couldn't create ${dir}; not recorded."; return 0; }
@@ -1735,58 +1855,83 @@ tb_record_write() {
     p_sub="$(_tb_record_prior substrate "$prior")"
     if [[ -n "$p_sub" ]]; then substrate="$p_sub"; fi
   fi
-  out="{
-  \"schema_version\": ${TB_INSTALL_RECORD_VERSION},
-  \"substrate\": ${substrate},
-  \"user\": $(_tb_record_field user "$(id -un 2>/dev/null || printf '%s' "${USER:-}")" "$prior"),
-  \"cluster_name\": $(_tb_record_field cluster_name "${CLUSTER_NAME:-}" "$prior"),
-  \"kube_context\": $(_tb_record_field kube_context "${TB_KUBE_CONTEXT:-}" "$prior"),
-  \"data_dir\": $(_tb_record_field data_dir "${HOST_DATA_DIR:-}" "$prior"),
-  \"namespace\": $(_tb_record_field namespace "${TB_NAMESPACE:-}" "$prior"),
-  \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$prior"),
-  \"updated_at\": \"${now}\","
-  if [[ -z "$arts" ]]; then
-    out+=$'\n  "artefacts": []\n}'
-  else
-    out+=$'\n  "artefacts": ['
-    n="$(printf '%s\n' "$arts" | wc -l | tr -d ' ')"; i=0
-    while IFS= read -r line; do
-      i=$((i + 1))
-      out+=$'\n    '"$line"
-      if [[ "$i" -lt "$n" ]]; then out+=","; fi
-    done <<<"$arts"
-    out+=$'\n  ]\n}'
-  fi
-  tmp="$(mktemp "${dir}/.install-record.XXXXXX" 2>/dev/null)" || { log "Install record: couldn't write in ${dir}; not recorded."; return 0; }
-  if printf '%s\n' "$out" >"$tmp" 2>/dev/null && mv -f "$tmp" "$rec" 2>/dev/null; then
+  # root_copy: the root copy's path once one exists. The previous write's value
+  # stands until this run writes the copy; the first write that does re-renders
+  # the user copy with it and copies again, so the two copies stay identical.
+  root_copy="$(_tb_record_field root_copy "" "$prior")"
+  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy")" || return 0
+  _TB_RECORD_ROOT_WRITTEN=""
+  _tb_record_root_copy "$rec"
+  if [[ -n "$_TB_RECORD_ROOT_WRITTEN" && "$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")" != "$root_copy" ]]; then
+    root_copy="$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")"
+    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy")" || return 0
     _tb_record_root_copy "$rec"
-  else
-    rm -f "$tmp" 2>/dev/null
-    log "Install record: couldn't write ${rec}; not recorded."
   fi
   return 0
 }
 
+# The record's text: SUBSTRATE ($1) and ROOT_COPY ($5) as JSON literals, the
+# previous write's text ($2), its artefact lines ($3) and the time ($4).
+_tb_record_render() {
+  local out line n i
+  out="{
+  \"schema_version\": ${TB_INSTALL_RECORD_VERSION},
+  \"substrate\": $1,
+  \"user\": $(_tb_record_field user "$(id -un 2>/dev/null || printf '%s' "${USER:-}")" "$2"),
+  \"cluster_name\": $(_tb_record_field cluster_name "${CLUSTER_NAME:-}" "$2"),
+  \"kube_context\": $(_tb_record_field kube_context "${TB_KUBE_CONTEXT:-}" "$2"),
+  \"data_dir\": $(_tb_record_field data_dir "${HOST_DATA_DIR:-}" "$2"),
+  \"namespace\": $(_tb_record_field namespace "${TB_NAMESPACE:-}" "$2"),
+  \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$2"),
+  \"root_copy\": $5,
+  \"updated_at\": \"$4\","
+  if [[ -z "$3" ]]; then
+    out+=$'\n  "artefacts": []\n}'
+  else
+    out+=$'\n  "artefacts": ['
+    n="$(printf '%s\n' "$3" | wc -l | tr -d ' ')"; i=0
+    while IFS= read -r line; do
+      i=$((i + 1))
+      out+=$'\n    '"$line"
+      if [[ "$i" -lt "$n" ]]; then out+=","; fi
+    done <<<"$3"
+    out+=$'\n  ]\n}'
+  fi
+  printf '%s' "$out"
+}
+
+# Write record text $2 to the user copy $1 atomically. Non-zero (logged) when it
+# could not; the caller stops there.
+_tb_record_put() {
+  local tmp
+  tmp="$(mktemp "${1%/*}/.install-record.XXXXXX" 2>/dev/null)" || { log "Install record: couldn't write in ${1%/*}; not recorded."; return 1; }
+  if printf '%s\n' "$2" >"$tmp" 2>/dev/null && mv -f "$tmp" "$1" 2>/dev/null; then return 0; fi
+  rm -f "$tmp" 2>/dev/null
+  log "Install record: couldn't write ${1}; not recorded."
+  return 1
+}
+
 # Linux keeps a root copy for sudo and headless uninstalls, at
-# /var/lib/tracebloc/<user>/install-record.json. Written only as root, or with a
-# sudo that needs no password; Tier 0 promised no administrator rights and gets
-# none. Never prompts, never fails the install.
+# x-tracebloc-record.root-path (/var/lib/tracebloc/<user>/install-record.json).
+# Written only as root, or with a sudo that needs no password; Tier 0 promised no
+# administrator rights and gets none. Never prompts, never fails the install.
+# Sets _TB_RECORD_ROOT_WRITTEN to the copy's path when this call wrote it.
 _tb_record_root_copy() {
   [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
   [[ "${INSTALL_TIER:-}" != "0" ]] || return 0
   local user dst
   user="$(id -un 2>/dev/null)" || return 0
   [[ -n "$user" ]] || return 0
-  dst="${TB_RECORD_ROOT_DIR:-/var/lib/tracebloc}/${user}/install-record.json"
+  dst="$(_tb_record_root_path "$user")"
   # A CLI-only refresh runs before the tier is known, so the Tier 0 guard above
   # cannot see it: it refreshes a root copy a full install made and never creates one.
   if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]] && ! _tb_record_root_copy_exists "$dst"; then return 0; fi
   if [[ "$(id -u 2>/dev/null)" == "0" ]]; then
-    { mkdir -p "${dst%/*}" && cp "$1" "$dst"; } 2>/dev/null \
-      || log "Install record: couldn't write the root copy ${dst}."
+    if { mkdir -p "${dst%/*}" && cp "$1" "$dst"; } 2>/dev/null; then _TB_RECORD_ROOT_WRITTEN="$dst"
+    else log "Install record: couldn't write the root copy ${dst}."; fi
   elif _have_sudo_bin && _real_sudo -n true 2>/dev/null; then
-    { _real_sudo -n mkdir -p "${dst%/*}" && _real_sudo -n cp "$1" "$dst"; } 2>/dev/null \
-      || log "Install record: couldn't write the root copy ${dst}."
+    if { _real_sudo -n mkdir -p "${dst%/*}" && _real_sudo -n cp "$1" "$dst"; } 2>/dev/null; then _TB_RECORD_ROOT_WRITTEN="$dst"
+    else log "Install record: couldn't write the root copy ${dst}."; fi
   fi
   return 0
 }

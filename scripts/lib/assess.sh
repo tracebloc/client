@@ -75,7 +75,7 @@
 : "${TB_TTY:=/dev/tty}"
 
 # _assess_cluster_servers_running — echo the number of running servers for
-# CLUSTER_NAME. This mirrors ONLY the read half of cluster.sh's
+# CLUSTER_NAME. This mirrors ONLY the read half of k3d.sh's
 # _handle_existing_cluster; that function is off-limits here because it MUTATES
 # (it starts a stopped cluster and runs drift checks). Single jq-free path — jq
 # is NOT a guaranteed installer prerequisite (same rule as common.sh /
@@ -103,7 +103,7 @@ _assess_cluster_servers_running() {
   # CAPTURE-THEN-MATCH, not a pipe (#680): awk's `exit` closes the pipe on our
   # cluster's row — usually row one — so the producer takes SIGPIPE, `pipefail`
   # makes the pipeline 141, and `|| line=""` then DISCARDED a value we had
-  # successfully read, reporting a running cluster as 0 servers. cluster.sh's
+  # successfully read, reporting a running cluster as 0 servers. k3d.sh's
   # _handle_existing_cluster already made exactly this transform and its comment
   # points here as the mirror. That mirroring is what made this the LAST holdout
   # of the tri-state: the #680 SIGPIPE transform and the tri-state transform
@@ -225,7 +225,7 @@ _assess_cli_present() {
   _assess_cli_bin >/dev/null
 }
 
-# _version_lt moved to common.sh (backend#2422): cluster.sh needs it to gate a
+# _version_lt moved to common.sh (backend#2422): k3d.sh needs it to gate a
 # kubelet flag on the k3s pin, and assess.sh is sourced CONDITIONALLY by
 # install-k8s.sh (`[[ -f ]]`, for stale checkouts) while common.sh is not. A
 # second copy here would be the restated-rule defect, so there is exactly one.
@@ -622,6 +622,9 @@ assess_existing_install() {
       # population this fast path serves -- wired only into _handle_existing_cluster
       # it could never once reach them.
       declare -F _check_existing_cluster_kubelet_config >/dev/null 2>&1 && _check_existing_cluster_kubelet_config
+      # And a fourth (tracebloc/client-dev#1418): a two-node cluster from the old
+      # hostpath default is healthy, so this path is the one that reaches it.
+      declare -F _check_existing_cluster_node_count >/dev/null 2>&1 && _check_existing_cluster_node_count
       _assess_handoff        # prints the "already set up" line, runs `tracebloc`, exit 0
       ;;
     degraded)

@@ -1376,6 +1376,33 @@ true
 {{- end -}}
 
 {{/*
+tracebloc.trainingParentPin — the digest of the torch parent the pinned GPU
+training images build FROM (images.training.parents.gpu.digest), when the
+installer's prepull manifest renders; empty otherwise. ONE decision for both
+uses in templates/training-prepull-configmap.yaml: whether the ConfigMap
+renders at all, and the digest its Job pulls.
+
+It holds exactly where tracebloc.trainingPins holds and the GPU entry is set.
+The parent was read off the PINNED images, so it says something only where those
+images run: on a floating edge (dev/staging in auto, pinned=false), on a mirror
+that has not declared itself, or under the docker.io rollback it is empty, and
+nothing is prepulled. GPU only: the CPU families' parents are not in scope.
+
+The pin rule for the parent, beside tracebloc.honouredPin: a template hands
+tracebloc.image this, never the values digest
+(scripts/tests/third-party-image-defaults-agreement.sh, rule 3).
+
+Call with the ROOT context: {{ include "tracebloc.trainingParentPin" . }}
+*/}}
+{{- define "tracebloc.trainingParentPin" -}}
+{{- $training := default dict (default dict .Values.images).training -}}
+{{- $parent := default dict (default dict $training.parents).gpu -}}
+{{- if and $parent.digest (include "tracebloc.trainingPins" .) -}}
+{{- $parent.digest -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 tracebloc.pinIgnored — "1" when this image HAS a values digest pin that
 tracebloc.pinFor did NOT honour (resolved on a registry this release does not
 pull from), else "". The image-refresh CronJob reads it per image: an ignored
@@ -2043,7 +2070,21 @@ true
 {{- end -}}
 {{- $clientEnv := include "tracebloc.clientEnv" . -}}
 {{- if and $prodPin (eq $clientEnv "prod") -}}
+{{- /*
+  Two prod pins, chosen by whether this edge has service DB accounts
+  (backend#5099). Ingestors built from data-ingestors#468 on (v0.8.8+) require
+  DB_USER, which jobs-manager injects (TB_INGEST_USER) only when
+  tracebloc.serviceDbAccounts is on. An edge with it OFF must stay on
+  `prodDigest`, inside the safe set {v0.8.0 … v0.8.4} (docs/SECURITY.md §4.1.1).
+  An edge with it ON — every fresh install — gets `prodDigestServiceDb`, a
+  current build, instead of being held two months back for a fallback it never
+  uses. Empty `prodDigestServiceDb` keeps the old single-pin behaviour.
+*/ -}}
+{{- if and (include "tracebloc.serviceDbAccounts" .) $ing.prodDigestServiceDb -}}
+{{- $ing.prodDigestServiceDb -}}
+{{- else -}}
 {{- $ing.prodDigest | default "" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

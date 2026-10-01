@@ -156,15 +156,15 @@ run_diagnose() {
   #
   # Every one of those reads asks about the same daemon, so the question is asked
   # ONCE, here, before any group opens, through the coreutils-free probe
-  # (_docker_answers_bounded bounds via spin's background PID + kill, #744 — and
-  # --diagnose is Darwin-reachable, where `_bounded` alone is a no-op). Silenced so
+  # (_docker_answers_bounded bounds via spin's background PID + kill, #744, which
+  # needs no coreutils on the Darwin-reachable --diagnose path). Silenced so
   # the spinner does not land in a bundle file.
   #
   # AND EVERY READ IN THIS FUNCTION GOES THROUGH _bounded_capture, not `_bounded`.
   # This gate proves `docker info` answers within ${TB_DOCKER_PROBE_TIMEOUT:-10}s;
-  # it does NOT make a 15s `k3d cluster list` safe, and `_bounded` is a NO-OP on a
-  # stock Mac — so "info answers, one later read stalls" left the group waiting
-  # forever and the bundle unwritten (Bugbot High, client#984). _bounded_capture
+  # it does NOT make a 15s `k3d cluster list` safe, and `_bounded` was a NO-OP on a
+  # stock Mac until client-dev#1357 — so "info answers, one later read stalls" left
+  # the group waiting forever and the bundle unwritten (Bugbot High, client#984). _bounded_capture
   # kills on a deadline via the child PID, needs no coreutils, and reports 124
   # distinguishably so each section can say what it could not collect.
   #
@@ -254,9 +254,9 @@ run_diagnose() {
     # needed: the guard reads `set +e` and does not flag this region.
     df -h 2>/dev/null | head -20
     # Gate on a coreutils-free bounded liveness probe (#744): --diagnose is a
-    # Darwin-reachable path, and `_bounded` is a no-op bound on a stock Mac (no
-    # timeout/gtimeout) — so a bare `docker info` against a wedged daemon would hang
-    # the whole bundle from a machine that is by definition already broken. The guard
+    # Darwin-reachable path, and before client-dev#1357 `_bounded` was no bound on a
+    # stock Mac (no timeout/gtimeout) — so a bare `docker info` against a wedged
+    # daemon would have hung the whole bundle from a machine that is by definition already broken. The guard
     # is silenced (>/dev/null) so its spinner doesn't land in the bundle file; once it
     # confirms the daemon answers, the read below can't hang. `set +e` (run_diagnose
     # top) keeps the intentional pipe from tripping pipefail (backend#1778).
@@ -312,9 +312,9 @@ run_diagnose() {
         # _bounded_capture, NOT _bounded: the group gate only proves `docker info`
         # answers within ${TB_DOCKER_PROBE_TIMEOUT:-10}s, and this call is more
         # engine work on a longer budget — so "info answers, the listing stalls" is
-        # a reachable state, and on a stock Mac `_bounded` is a no-op, so the group
-        # would wait forever and the bundle would never be written (Bugbot High,
-        # client#984). This bound needs no coreutils.
+        # a reachable state, and on a stock Mac `_bounded` was a no-op until
+        # client-dev#1357, so the group would have waited forever and the bundle never
+        # been written (Bugbot High, client#984). This bound needs no coreutils.
         if _bounded_capture_read "${TB_K3D_LIST_TIMEOUT:-15}" "$_cap" "k3d cluster listing" k3d cluster list; then
           cat "$_cap"
         fi

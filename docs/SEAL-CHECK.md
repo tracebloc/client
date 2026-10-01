@@ -301,13 +301,13 @@ workload, never to values. **That unpinned state is the recommended one** there:
 it is what keeps the running digest reproducible *and* current, and it needs no
 operator action when the registry moves.
 
-On a **prod** edge (published chart 1.9.186 and later) the chart pins the
+On a **prod** edge (published chart 1.9.189 and later) the chart pins the
 control plane itself: `images.prodDigests` names the digests that chart release
 was cut with, and no `image-refresh` CronJob renders. So a prod fleet runs the
 jobs-manager its chart version names, and a build reaches it only in a published
 chart that carries it — check `images.prodDigests.jobs-manager` in the chart the
 fleet runs before sealing (`helm show values tracebloc/client --version <v>`;
-`client/MIGRATION.md`, 1.9.186). A chart packaged from the git tree has the map
+`client/MIGRATION.md`, 1.9.189). A chart packaged from the git tree has the map
 empty and floats.
 
 Since chart **1.9.136 (client-runtime#199)** a `helm upgrade` **preserves** that

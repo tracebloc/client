@@ -359,6 +359,7 @@ upgrade_cli_only() {
   declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
   declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
   declare -F _check_existing_cluster_kubelet_config >/dev/null 2>&1 && _check_existing_cluster_kubelet_config
+  declare -F _check_existing_cluster_node_count >/dev/null 2>&1 && _check_existing_cluster_node_count
 
   # The CLI update is the ENTIRE point of this path, so — unlike the full flow,
   # where a CLI hiccup is non-fatal because the client is already connected — a

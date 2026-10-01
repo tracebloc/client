@@ -2,7 +2,11 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
-## Upgrading to 1.9.189 — the egress gateway runs a tracebloc build of squid
+## Upgrading to 1.9.189 — the egress gateway runs a tracebloc build of squid, and prod edges run the control plane this chart version names
+
+This release carries two changes, each with its own instructions below.
+
+### The egress gateway runs a tracebloc build of squid
 
 **What changed.** The egress gateway (`egressProxy`) moves from
 `docker.io/ubuntu/squid:6.6-24.04_beta` (squid 6.13 on Ubuntu 24.04) to
@@ -45,7 +49,7 @@ through it lose their egress until it does.
 - **`egressProxy.runAsUser`**: the new image runs squid as uid 13, like the old
   one. If you changed it, check it against the image you run.
 
-## Upgrading to 1.9.186 — prod edges run the control plane this chart version names
+### Prod edges run the control plane this chart version names
 
 **What changed.** Each published chart release now carries
 `images.prodDigests`: one digest per control-plane image (`jobs-manager`,

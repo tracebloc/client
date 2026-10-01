@@ -22,7 +22,7 @@
 #                                not prompted — the client is identified by its credentials)
 #    TB_NAMESPACE=myns           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
 #    SERVERS=1                   default: 1  (control-plane nodes)
-#    AGENTS=1                    default: 1  (worker nodes)
+#    AGENTS=0                    default: 0  (worker nodes; 0 or 1, hostpath only -- 1 warns)
 #    K8S_VERSION=v1.36.3-k3s1   default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
 #    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
@@ -86,6 +86,7 @@ source "${LIB_DIR}/gpu-amd.sh"
 source "${LIB_DIR}/setup-macos.sh"
 source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
+source "${LIB_DIR}/k3d.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
 # install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-
@@ -170,7 +171,9 @@ main() {
     # messaging don't apply to a host-prep run) with a lightweight reaper that
     # still tears down the sudo keepalive preflight_sudo starts — otherwise it
     # orphans a background loop polling `sudo` every 50s (Bugbot #377).
-    trap 'if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi' EXIT
+    # It reaps the private download directories too (backend#4279): prepare-host
+    # installs the same prerequisites, so it can be mid-download when it dies.
+    trap 'if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi' EXIT
     setup_log_file
     if declare -F run_prepare_host >/dev/null 2>&1; then
       run_prepare_host; exit $?

@@ -52,6 +52,23 @@ else
   _B=""; _C=""; _D=""; _G=""; _R=""
 fi
 
+# ── A current folder that no longer exists ───────────────────────────────────
+# A terminal left in a folder that was deleted meanwhile makes EVERY new bash
+# print "shell-init: error retrieving current directory: getcwd: …" once at
+# start-up, and this bootstrap starts install-k8s.sh, which starts more. Four of
+# those lines read as the installer failing (backend#5025 O-16). The installer
+# never needs the caller's folder -- it works in mktemp dirs and ~/.tracebloc --
+# so move to $HOME once, say so in one line, and every child starts clean. The
+# lines bash printed before this script ran (the shell reading `curl | bash`)
+# cannot be taken back. `-d "$PWD"` is false exactly when the folder is gone:
+# bash keeps the old path in PWD, and the path no longer resolves. The cd's
+# stderr is dropped because bash's own `cd` prints the same getcwd complaint
+# while it records OLDPWD; the cd itself succeeds.
+if [[ -n "${PWD:-}" && ! -d "$PWD" && -n "${HOME:-}" && -d "$HOME" ]]; then
+  cd "$HOME" 2>/dev/null
+  echo "${_D}Your current folder no longer exists, so the installer continues from your home folder.${_R}"
+fi
+
 # ── Platform gate ────────────────────────────────────────────────────────────
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
@@ -357,6 +374,7 @@ FILES=(
   "scripts/lib/setup-macos.sh"
   "scripts/lib/setup-linux.sh"
   "scripts/lib/cluster.sh"
+  "scripts/lib/k3d.sh"
   "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/install-cli.sh"

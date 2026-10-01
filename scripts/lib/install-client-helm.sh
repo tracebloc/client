@@ -329,9 +329,9 @@ _TB_NODE_JSONPATH='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.alloc
 #     heterogeneous cluster a cordoned LARGE node would otherwise win the
 #     anchor outright and every training pod would sit Pending with no obvious
 #     cause. This is NOT a no-op on installer-provisioned clusters just
-#     because they are 'single-node k3d' -- not all are: the k3d create path
-#     defaults SERVERS=1 AGENTS=1 wherever storage is hostpath, so that
-#     topology is TWO nodes (backend#2221). What makes the anchor tie-break a
+#     because they are 'single-node k3d' -- not all are: an explicit AGENTS=1
+#     on hostpath, and every hostpath cluster created before the one-node
+#     default (client-dev#1418), is TWO nodes (backend#2221). What makes the anchor tie-break a
 #     field no-op there is that both k3d node containers report IDENTICAL
 #     figures, because each reports the whole Docker VM (backend#2221).
 #     The cordon skip itself matters on any cluster with a cordoned node.
@@ -1126,7 +1126,7 @@ _precreate_fit_estimate() {
 }
 
 # The gate create_cluster runs immediately before `k3d cluster create`
-# (cluster.sh _create_new_cluster). Reads the runtime through preflight.sh's
+# (k3d.sh _create_new_cluster). Reads the runtime through preflight.sh's
 # bounded docker-info readers -- the same ones _pf_recheck_runtime_mem uses a
 # moment earlier -- and refuses with the fit's own message shape.
 _precreate_fit_gate() {
@@ -1448,7 +1448,7 @@ verify_credentials() {
 }
 
 # ── Corporate-proxy passthrough into the chart (#242) ───────────────────────
-# cluster.sh propagates the host's HTTP(S)_PROXY to the k3d *nodes* so
+# k3d.sh propagates the host's HTTP(S)_PROXY to the k3d *nodes* so
 # containerd can pull images behind a corporate proxy (#166). But the client
 # *workloads* — jobs-manager (api + pods-monitor), requests-proxy, the
 # image-refresh / auto-upgrade cronjobs — only get proxy egress if the CHART

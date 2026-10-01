@@ -67,11 +67,19 @@ install_rocm() {
     deb_name="$(_find_package_name "$deb_dir" "deb")"
     [[ -z "$deb_name" ]] && error "No amdgpu-install .deb found at ${deb_dir}"
 
+    # Private directory, not a fixed /tmp name (backend#4279): the .deb is handed
+    # to `sudo apt-get install`, so a file another account owns at that name in
+    # sticky /tmp could be swapped between our download and root installing it.
+    local deb_tmp="" deb_path
+    tb_scratch_dir deb_tmp tracebloc-amdgpu \
+      || error "Could not create a private temporary directory for the ROCm installer under ${TMPDIR:-/tmp}. Free some disk space or set TMPDIR to a writable directory, then re-run."
+    deb_path="${deb_tmp}/amdgpu-install.deb"
+
     log "Downloading ${deb_name} ..."
-    retry 3 5 curl_secure -fsSL "${deb_dir}${deb_name}" -o /tmp/amdgpu-install.deb
-    sudo apt-get install -y /tmp/amdgpu-install.deb
+    retry 3 5 curl_secure -fsSL "${deb_dir}${deb_name}" -o "$deb_path"
+    sudo apt-get install -y "$deb_path"
     sudo amdgpu-install -y --usecase=rocm
-    rm -f /tmp/amdgpu-install.deb
+    tb_scratch_rm "$deb_tmp"
 
   elif has dnf || has yum; then
     local rhel_ver

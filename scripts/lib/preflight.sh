@@ -151,8 +151,8 @@ _pf_fstype() {
 # then fall back to the host reader. (docker info precedent: _pf_docker_root above.)
 _pf_runtime_mem_kb() {
   # Bounded liveness, coreutils-free (#744): _docker_answers bounds through _bounded,
-  # which is a no-op on a stock Mac (no timeout/gtimeout); _docker_answers_bounded
-  # kills on a deadline via a background PID instead. Silenced (>/dev/null) — this
+  # which was a no-op on a stock Mac until client-dev#1357; _docker_answers_bounded
+  # kills on a deadline via a background PID, with a spinner. Silenced (>/dev/null) — this
   # reader's stdout is captured by the caller, and once the daemon is proven
   # responsive here the --format read below cannot hang.
   has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
@@ -680,7 +680,7 @@ _pf_memory() {
 
 # Re-evaluate memory once Docker is confirmed up. Preflight runs before Docker
 # starts (install-k8s.sh), so on macOS/Windows the first read was host RAM, not the
-# Docker VM's smaller budget. Called from create_cluster (cluster.sh) — the first
+# Docker VM's smaller budget. Called from create_cluster (k3d.sh) — the first
 # point `docker info` is reliably up on every OS. A sub-FLOOR VM HARD-FAILS here with
 # the exact fix (#428): it will OOM-crashloop the client, so proceeding is worse than
 # the jarring stop the WARN path used to avoid. A between-floor-and-warn VM still only

@@ -51,10 +51,10 @@ _probe_runtime_usable() {
   # Bound coreutils-free (#744): a bare `docker info` against a WEDGED daemon hangs
   # forever, and host_audit runs run_host_probes on EVERY install — macOS included —
   # so this is the FIRST thing that freezes at "Checking your machine" on a wedged
-  # Docker Desktop, before _kill_lingering_docker ever gets a chance. `_bounded` is a
-  # no-op bound on a stock Mac (no timeout(1)/gtimeout(1)), so it can't be the seam
-  # here; `_docker_answers_bounded` kills on a deadline via a background PID instead,
-  # and takes the cap as an argument. Silenced (>/dev/null): the rc is the verdict and
+  # Docker Desktop, before _kill_lingering_docker ever gets a chance. `_bounded` was a
+  # no-op bound on a stock Mac (no timeout(1)/gtimeout(1)) until client-dev#1357, which
+  # is why the seam here is `_docker_answers_bounded`: it kills on a deadline via a
+  # background PID, and takes the cap as an argument. Silenced (>/dev/null): the rc is the verdict and
   # the host-audit panel says the rest. Keeps the probe-specific 5s (TB_PROBE_TIMEOUT,
   # deliberately shorter than the 10s default — this fires on every install and only
   # needs a fast liveness read). Read-only and never fatal: a timeout or any failure

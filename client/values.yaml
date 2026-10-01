@@ -1316,9 +1316,33 @@ images:
   # therefore REFUSES to render `capabilities` with an empty `digests` (see the
   # template), because there is nothing it could have been derived from.
   #
+  # `parents` -- the shared torch parent the pinned images of an arch build
+  # FROM, as the images themselves name it: the OCI label
+  # `io.tracebloc.engine.torch-parent`, read by the resolver in the same pass
+  # that reads `capabilities`. One entry per arch, GPU only, written ONLY when
+  # every pinned GPU image names the same parent:
+  #
+  #   parents:
+  #     gpu:
+  #       repository: "tracebloc/torch"     # no registry: the edge's is prefixed
+  #       digest: "sha256:..."
+  #       platforms:
+  #         - "linux/amd64"
+  #
+  # Where the map itself renders (the same rule as above), the chart renders
+  # ConfigMap <release>-training-prepull: a Job manifest that pulls the parent
+  # once, which the installer applies after the control plane is ready on a
+  # GPU host and never waits on, so the first GPU training pulls only its own
+  # layers. When the images disagree or carry no label the resolver writes no
+  # entry (and names the split in its output), and nothing is prepulled.
+  # NEVER HAND-TYPE `parents` either; the chart refuses it with an empty
+  # `digests`. A mirror that declares itself in `digestRegistry` must also hold
+  # the parent at that digest (`scripts/list-images.sh` lists it).
+  #
   # THE MAP BELOW IS RESOLVER OUTPUT, never a hand edit: scripts/resolve-
-  # training-digests.sh --write wrote `digests`, `capabilities` and
-  # `digestRegistry` together, from ghcr.io's `:prod` floats. It moves prod edges
+  # training-digests.sh --write writes `digests`, `capabilities`,
+  # `digestRegistry` and (when the images agree on one) `parents` together,
+  # from ghcr.io's `:prod` floats. It moves prod edges
   # from "whatever :prod points at right now" to a fixed engine, so it must be
   # advanced on every engine prod promotion or prod freezes on these bytes --
   # that is the release train's promotion step, which re-runs the same resolver.
@@ -1530,7 +1554,9 @@ images:
     # so it still gets no DB_USER and still needs the fallback; and the boundary is not
     # a version number — it is whether the release you move to was cut before
     # data-ingestors#468. `prodPin: true` means this digest, not the float, is
-    # what prod spawns, which is exactly the protection being relied on.
+    # what a prod edge with serviceDbAccounts OFF spawns, which is exactly the
+    # protection being relied on. Edges with serviceDbAccounts ON spawn
+    # `prodDigestServiceDb` below instead (backend#5099).
     #
     # WHERE THE BOUNDARY IS, stated so it cannot go stale with the next release:
     # data-ingestors#468 (drops the edgeuser fallback) merged 2026-08-11 10:48.
@@ -1580,6 +1606,30 @@ images:
       line: "0.8"
       reason: "prodDigest pins v0.8.2 deliberately behind the 0.8 float: the float has crossed the data-ingestors#468 boundary (edgeuser DB_USER fallback dropped, first present in v0.8.8). serviceDbAccountsByEnv.prod is now true by default, so a fresh 1.9.98+ install injects DB_USER=tb_ingest and needs no fallback -- but the durable un-migrated population still does: an edge upgraded with plain --reuse-values, or carrying an operator-set serviceDbAccountsByEnv.prod: false (which --reset-then-reuse-values replays verbatim forever), keeps that flag off, gets no DB_USER, and genuinely still needs the v0.8.2 fallback. (A prod edge merely still on a pre-1.9.98 chart self-heals within ~1h of publish via the auto-upgrade CronJob's --reset-then-reuse-values; the two above do not -- see scripts/tests/e2e-auto-upgrade.sh.) Holding the pin inside the safe set {v0.8.0..v0.8.4} is the protection being relied on until those edges adopt serviceDbAccounts=true (or a prod-safe 0.8.x is cut) -- NOT until edgeuser is narrowed/dropped, which is the moment the fallback stops working too."
     prodDigest: "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873"
+
+    # -- PROD PIN FOR EDGES WITH SERVICE DB ACCOUNTS (backend#5099).
+    #
+    # `prodDigest` above is held at v0.8.2 only for edges whose
+    # `serviceDbAccounts` resolves OFF: they get no DB_USER, and every ingestor
+    # from v0.8.8 on requires it. An edge with service DB accounts ON — every
+    # fresh install, since `serviceDbAccountsByEnv.prod` defaults to true — has
+    # TB_INGEST_USER injected and is safe on any current build. Holding those
+    # edges on v0.8.2 too made new prod users run an ingestor that can't do
+    # manifest-less object detection (v0.8.17+, data-ingestors#552): the CLI and
+    # docs submit a config the spawned image rejects (the submit-vs-run drift
+    # class noted at `tag` above).
+    #
+    # So `tracebloc.ingestorDigest` picks THIS digest on prod when service DB
+    # accounts are on, and `prodDigest` when they are off. Empty = fall back to
+    # `prodDigest` for every prod edge (the pre-#5099 behaviour).
+    #
+    # Same rules as `prodDigest`: a canonical multi-arch index, resolved, never
+    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.65` prints it), and a
+    # Chart.yaml bump to publish. CI's `ingestor-multiarch` job checks it.
+    #
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.65** — VERIFIED
+    # against ghcr.io 2026-10-01 (linux/amd64 + linux/arm64 OCI image index).
+    prodDigestServiceDb: "sha256:8005d10a9d8ef05b7d24609f13ff3e03988d93510ac36ac522ed58082e70ac88"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"
