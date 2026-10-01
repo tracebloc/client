@@ -294,12 +294,21 @@ client-runtime#199.
 **Image durability note (client-runtime#199):** the jobs-manager on a fleet must
 run a build carrying client-runtime#416 (the HF-offline injection) *before* the
 seal, or NLP templates fail by network block instead of the clean closed door.
-On each cluster the chart renders control-plane images as `repository:tag` +
-`IfNotPresent`, and the `image-refresh` CronJob pins the live digest — resolved
-on the registry the pods actually pull from and written to the workload, never
-to values. **That unpinned state is the recommended one**, on every environment:
+On a dev or staging edge the chart renders control-plane images as
+`repository:tag` + `IfNotPresent`, and the `image-refresh` CronJob pins the live
+digest — resolved on the registry the pods actually pull from and written to the
+workload, never to values. **That unpinned state is the recommended one** there:
 it is what keeps the running digest reproducible *and* current, and it needs no
 operator action when the registry moves.
+
+On a **prod** edge (published chart 1.9.186 and later) the chart pins the
+control plane itself: `images.prodDigests` names the digests that chart release
+was cut with, and no `image-refresh` CronJob renders. So a prod fleet runs the
+jobs-manager its chart version names, and a build reaches it only in a published
+chart that carries it — check `images.prodDigests.jobs-manager` in the chart the
+fleet runs before sealing (`helm show values tracebloc/client --version <v>`;
+`client/MIGRATION.md`, 1.9.186). A chart packaged from the git tree has the map
+empty and floats.
 
 Since chart **1.9.136 (client-runtime#199)** a `helm upgrade` **preserves** that
 image-refresh pin on its own: `tracebloc.controlPlaneImage` seeds the digest from
@@ -330,7 +339,8 @@ Docker Hub were rendered onto `ghcr.io` when the default moved, the pods could
 not pull, and every auto-upgrade timed out and rolled back. If a fleet still
 carries such a pin, either re-resolve it on the current registry and declare it
 (`crane digest ghcr.io/tracebloc/jobs-manager:prod`, then set both keys), or —
-preferably — drop it and let `image-refresh` pin. The refresh tick additionally
+preferably — drop it: on prod the chart's own map then pins the image, and
+elsewhere `image-refresh` does. The refresh tick additionally
 HEADs every honoured pin by digest on its registry and records one the registry
 cannot serve as `tracebloc.io/stale-pin-jobs-manager=unpullable:<digest>` on the
 jobs-manager Deployment, without touching the workload.

@@ -11,7 +11,7 @@ global:
   # A BARE host (no scheme), e.g. "mirror.corp.example" or "mirror.corp.example:5000".
   # When set, EVERY image the chart pulls is re-homed onto this host — the
   # tracebloc services, the spawned ingestor + training-job images, and the
-  # alpine/*, ubuntu/squid, busybox, curl helper images — which must already host
+  # alpine/*, squid, busybox, curl helper images — which must already host
   # the same repositories + tags/digests. Unset (the default) pulls the
   # tracebloc-published control-plane images from images.traceblocRegistry
   # (below), the helper images from docker.io and the ingestor from ghcr.io. If
@@ -719,16 +719,20 @@ egressProxy:
   routeWorkloads: true
   # squid image, pinned by multi-arch (amd64+arm64) index digest — tracebloc pins
   # all images by digest. `tag` stays for readability; the digest is authoritative.
-  # ubuntu/squid:6.6-24.04_beta (Ubuntu 24.04 LTS base), resolved 2026-06-10.
+  # tracebloc/squid-tracebloc is Alpine's squid package (7.6) on a pinned Alpine
+  # base, tagged `<package>-tb.<N>`. tracebloc checks every build against every
+  # variant of the squid.conf this chart renders before it publishes it: each
+  # allowlisted FQDN tunnels on 443, and anything else is denied.
   image:
-    registry: docker.io
-    repository: ubuntu/squid
-    tag: "6.6-24.04_beta"
-    digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
+    registry: ghcr.io
+    repository: tracebloc/squid-tracebloc
+    tag: "7.6-r0-tb.2"
+    digest: "sha256:551b6f5d296fb91dbe10be7df0c46231cefeb25d3181859939974e6ca90dde80"
     # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
     # default identity for the chart's own pin, your image for your own digest.
     digestFor: ""
-  # squid's non-root uid (Ubuntu `proxy`). Image-specific — verify if you swap image.
+  # squid's non-root uid: the image's `proxy` user, the same uid as Ubuntu's
+  # squid. Image-specific — verify if you swap image.
   runAsUser: 13
   port: 3128
   # FQDNs the gateway permits HTTPS CONNECT to. squid dstdomain syntax: a leading
@@ -1325,53 +1329,53 @@ images:
     digestRegistry: "ghcr.io"
     digests:
       causal_language_modeling:
-        cpu: "sha256:f467181de5dfc21f9ba9a2094ad3c5802166de9ddbdbbf3bfcecc8dc1dfc1005"
-        gpu: "sha256:4f922f941934d2cabc384b6c8cf4f6c55bb19ca1e0ec91682d96380fbaa142fb"
+        cpu: "sha256:f1785e3eeff223d93be77a9b672ba597ce02f40716798fa4c787e9cd09be3807"
+        gpu: "sha256:2aced8fd1cffcc95acf01d0c87ba707da1a01c9b34233344f1798c202696793a"
       embeddings:
-        cpu: "sha256:2a958540e50af1fae094551d853e924b9be09b649ee999df7699033d107099e3"
-        gpu: "sha256:5351d3900273d95b94e7f5ad78d0df0b08fe27a71ba994d41ed08a48ef7686bc"
+        cpu: "sha256:3dbb38c7c0cddfec1a856e270cb0ce1c05e35cf4fdbf583a256e3d5820cd5fc7"
+        gpu: "sha256:578a9a20a998a467f5b5fe31f99579cc141acc899188ec0a306f20c63be84a04"
       image_classification:
-        cpu: "sha256:6b291b6c0023f954795dcb7f42830bdf67f79f21e3823c5547ffbca1dd65332e"
-        gpu: "sha256:fb75a179ceffeeef55fd49c56b7d835c1bec9385d42a2548544a4742ce6e0f50"
+        cpu: "sha256:fc640c2655fbed1725e0f652d4450763207c5203a2bae8f4506016f16ab99b17"
+        gpu: "sha256:0ac68fb46cd2e48e8af91900abe52f70d5fac52655a6bfddd39db1be57f326ae"
       keypoint_detection:
-        cpu: "sha256:780cbdf69f71c6c38620d89ffaddd2bf9c9b7262359bd2672001161107057da0"
-        gpu: "sha256:e0ad78b34e0f0bbb9d45f6c43eccf86b8e49834f5257bcc7b363368d158871eb"
+        cpu: "sha256:9ec4feaf7f7c50e0d4e477c32a1cc9f564fe770484a7f3a66e7b68cb04532d51"
+        gpu: "sha256:942d5bab1136a0bdc3f86b0d2b3212a4446b4c91a0887775d66123fe7e40718d"
       masked_language_modeling:
-        cpu: "sha256:c29b4cc668ec9bb0b1242d1942ea503d8f692c420239473316fd9448c9203fda"
-        gpu: "sha256:63c293314f03dd2adb63ea8ee59f5554f13b5f9027e1cdd16cff9c6e1989587b"
+        cpu: "sha256:d618d283b3312f2c2e42774b1582743829ccd6118718478abe4a2798e04e1a51"
+        gpu: "sha256:bed61b5f2ddae33fd4bde6d4afd125e86d7a07fc12b55d83f83ca0826db4622f"
       object_detection:
-        cpu: "sha256:ce0987e3ec418281b32db9d87c893ade10a02c94c66782397c9b99f49297a3ae"
-        gpu: "sha256:a2c6aab5450c06cee48324a071fb8680556710a1fae6fb08da5b5f732a5719a3"
+        cpu: "sha256:014084a41db36618bea8a944f5a3c66f27dd4de6ef713c91915750e4d736a30d"
+        gpu: "sha256:26a1359efe0a52d28f0dc7b6a40ecccca598863c6fdf7f68b7dfd7c8f925fdb7"
       semantic_segmentation:
-        cpu: "sha256:e780e26658a1ba9820f3334386c4ff8643a553cbc40b6f76ab5d54b7ab7929a8"
-        gpu: "sha256:d2458393e4b683e9ff3bbfeffe87319a310caf079dbd6d50d6d00a627339de51"
+        cpu: "sha256:769f7fe88ebfe80fc95782daaf8d639325a1e6a2255146d0389f2d6898358ca4"
+        gpu: "sha256:495bee0781c14a565d6160864f7ac120256a8fe88f4f2612415329b3d2db9f65"
       sentence_pair_classification:
-        cpu: "sha256:87f502560efb7e80c0c0a906d2cefced96cdfdda4ded5ffe1213d39c5ff15597"
-        gpu: "sha256:882244c66fab641d4a66b6b259d3ff82cd29348b804dba75105c5e27f77ab466"
+        cpu: "sha256:9615f8457a85d1517e9b5c95833b9a87583114d611d084afe979ed6f5a09fbde"
+        gpu: "sha256:4dbfef264da772f1110390dc170f794deb063e1dd54635937640fb691bf98d61"
       seq2seq:
-        cpu: "sha256:a270ed98fe6cbe202d0194b70a63161d66f53ecb17518841c22dfddac35b8821"
-        gpu: "sha256:162776052e1b8cbd3d8959e367c6b1138993a7b87aa9ab57f9dfa48912f99cb2"
+        cpu: "sha256:791dd9759ba20bcd5ab7d41445f9abf30153881609c17943eb39e9b1fc3f417e"
+        gpu: "sha256:a472ff041e37daa98d319485f0fe85b6769b669b92ab8be3bd95ad02cfdc91e4"
       tabular_classification:
-        cpu: "sha256:b60824991def34e153281669be4eddc9850f2cf9ff2b6dc9b829c89143d5f061"
-        gpu: "sha256:b164ca41da93cfd5035db2f97c5a835dfb1c36ba713f1d3c214b78eb5e6481af"
+        cpu: "sha256:673c1aa616efc86ca9dec9241ac6fd61e292cf6386785af53f8b7c6921419f33"
+        gpu: "sha256:77ab4d453b14ff56aa7360bcbd52ac61aec41fe2febf79c7e433957698db33fd"
       tabular_regression:
-        cpu: "sha256:d52065bbe5c7ed5e68da90142027ad0a8cdcd5e2c2dc2b147668eae285f28559"
-        gpu: "sha256:279c564996fe55a4f4496a7c2efe170d68960bc6424064ed826862275b22a660"
+        cpu: "sha256:05b66d0dd284a8c3898288fbf3aa8b7f9b39f723fd2721e737974e7fe4a323b8"
+        gpu: "sha256:2042cd0629ead1555b0b8cf201061d6e94234522aafb38e1051fd3f85157d19f"
       text_classification:
-        cpu: "sha256:032a3f2365d9b532f8dcd9a1254edf2c74c04c5fc04e1cc7ae4ff76e496ec403"
-        gpu: "sha256:03edb1b35a494b4d283c50fb48132afa4f5f77fe06e7247a6c94ffb7c32437b3"
+        cpu: "sha256:378a323ebb413604d6e65923dce30400cca0cec4b15358afaa7809fe7eb1fbce"
+        gpu: "sha256:b8a82fc2bbbf037db89d351ca66e1653fa0666ac6362eafb046d63168ba8efc6"
       time_series_classification:
-        cpu: "sha256:c5553b0f24da8122f902042a111a7a0e412a25160461c4a97300fa0bb44cd4f7"
-        gpu: "sha256:96f2f706ed742fcad2bfb392629d70c73f759f12538cbcbff927c5725e9370f9"
+        cpu: "sha256:76c20d3f334e5d45bc26cf8349e53b437627122e841e94f345528431d1e3e02c"
+        gpu: "sha256:cfccc6837262b9b2d706d0d0b0bfd02a902bde41857dde4c46ebb528daf82452"
       time_series_forecasting:
-        cpu: "sha256:ad05aa50120e88c47135cf2f152e85e39a070f5b3b063aa668cd26f06e42f28a"
-        gpu: "sha256:eaff989cfe3dfe611b5d522cf9ec5618668c45295df900652d7ea9b5cf6c9a62"
+        cpu: "sha256:8fff108be560e6ddfb74c84390ce7bbff59d192cddcf74a5548d77947f74dab7"
+        gpu: "sha256:ede67df57bd0557a5bfa32f77cb5e9b7fcd7b499a1ad79d2541b1eae7b76cfa4"
       time_to_event_prediction:
-        cpu: "sha256:faab108066f97b1efc9be7cd6a3ef02749be9872ba25598fde3f23efbd30e46f"
-        gpu: "sha256:ef6a899c83734b3b3b4a5e22d89824ec78355149272c376dd8d0bd35adc1ad9c"
+        cpu: "sha256:1cf31be3b98504aab20150d913dbd8accc0367764aa395618f2f9ca991da3974"
+        gpu: "sha256:b3b42f58156f14cd6762d801885b229dab80ac4df77e44625907dc80174a63d5"
       token_classification:
-        cpu: "sha256:0c0535ae8fbd5da9a36a1f565a15b19500eca92eff33aa91e90631fc6b9114ae"
-        gpu: "sha256:6632cc540583040af6bebbbf14b9c88490e348ffdf0f95505f9c0af8b5061670"
+        cpu: "sha256:14511f5c3f77299cbb6f415b790032c985c8ddfce5d4f736626dd0d0533d87b5"
+        gpu: "sha256:f4df202e30ec5d6b887b66cfb7ccbc0182cc92be680731fe42f29d06280c07d6"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
@@ -1624,6 +1628,47 @@ images:
   requestsProxy:
     digest: ""
     digestRegistry: ""
+  # -- CONTROL-PLANE PROD DEFAULTS: the published chart is the lockfile
+  #    (RFC-0143 D1, client-dev#1175). The digests a PROD edge runs for
+  #    jobs-manager, pods-monitor and resource-monitor, keyed by the published
+  #    image name (tracebloc/<name>), resolved on `prodDigestsRegistry`.
+  #
+  #    EMPTY IN GIT, FILLED IN THE PUBLISHED CHART. The release train records
+  #    the digests the SAME hop promoted (client-runtime's `:stg` / `:prod`,
+  #    each equal to the develop build it was promoted from) as the
+  #    `control-plane-digests.json` asset on the release it cuts. The packaging
+  #    job (release-helm-chart.yaml) stamps them into a copy of this file before
+  #    `helm package`, and refuses to package without them. So the chart version
+  #    names the bytes, staging reviewed the bytes prod runs, and a chart built
+  #    from git floats. scripts/tests/control-plane-prod-digests.sh holds the
+  #    values here empty: a hand-filled map would pin a git build to bytes no
+  #    release recorded.
+  #
+  #   honoured  <=>  the resolved CLIENT_ENV is prod
+  #                  AND the image's own `images.<image>.digest` is EMPTY
+  #                  AND prodDigestsRegistry == the registry this release pulls
+  #                      from (tracebloc.tbRegistry, the same rule as every pin)
+  #                  AND the map's value for the image is not empty
+  #   otherwise the map is not read: dev and staging edges float on :dev / :stg
+  #   with the image-refresh CronJob, a mirror or docker.io edge floats as it
+  #   does today, and no NOTES warning is printed (nobody set these values).
+  #
+  # PRECEDENCE. A set `images.<image>.digest` wins, honoured or not: an operator
+  # pin on another registry is ignored with the NOTES warning above, and the
+  # image floats rather than falling back to this map. requests-proxy has no
+  # entry: it runs the jobs-manager image and follows the jobs-manager pin, this
+  # map's included.
+  #
+  # With all three honoured, the image-refresh CronJob does not render (nothing
+  # is left for it to refresh; tracebloc.imageRefreshEnabled). The per-edge
+  # unpin valve is `--set images.prodDigests=null`: the CronJob re-renders and
+  # re-pins from the live float within one tick. A mirror that holds these exact
+  # bytes adopts the map by declaring its host: --set images.prodDigestsRegistry=<host>.
+  prodDigests:
+    jobs-manager: ""
+    pods-monitor: ""
+    resource-monitor: ""
+  prodDigestsRegistry: "ghcr.io"
   mysqlClient:
     # Repository and tag are stated rather than left to template defaults so the
     # digest below is WATCHABLE: check-digest-drift.sh pairs a pin with the

@@ -381,7 +381,7 @@ provision_client() {
   # own and just wrote the 0600 credential into) rather than a predictable
   # world-writable /tmp path — that path is a symlink-clobber target under sudo.
   local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${HOST_DATA_DIR}/.client-create.$$.out"
-  if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then
+  if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then  # set-u-safe: seeded with the client create verb
     cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
     _report_create_failure "$_create_out" "$client_location" "$client_location_source"

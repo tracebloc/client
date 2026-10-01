@@ -786,7 +786,7 @@ _write_k3d_registries_config() {
   cfg="$td/registries.yaml"
   {
     echo "configs:"
-    for host in "${TB_CA_REGISTRIES[@]}"; do
+    for host in "${TB_CA_REGISTRIES[@]}"; do  # set-u-safe: TB_CA_REGISTRIES is a file-scope constant
       printf '  "%s":\n    tls:\n      ca_file: "%s"\n' "$host" "$node_ca"
     done
   } > "$cfg"
@@ -854,7 +854,7 @@ _leftover_data_dirs() {
     candidates+=("${sub%/}/mysql" "${sub%/}/data")
   done
   local d
-  for d in "${candidates[@]}"; do
+  for d in "${candidates[@]}"; do  # set-u-safe: seeded with mysql and data at its declaration
     # ! -L: never treat a symlink as a data dir — it would let the wipe traverse
     # outside HOST_DATA_DIR (Bugbot #384). A symlinked data path is out of scope.
     [[ -d "$d" && ! -L "$d" ]] || continue
@@ -954,7 +954,7 @@ guard_leftover_data() {
   [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
 
   warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
-  for d in "${found[@]}"; do hint "  • ${d}"; done
+  for d in "${found[@]}"; do hint "  • ${d}"; done  # set-u-safe: the empty-found check above returns first
   # The "silently adopt" warning is true ONLY for hostpath. Under node-local (the
   # default since D15, client#456) a fresh install does NOT adopt this data — the
   # cluster starts empty in-node and the host data is stranded. Leading with the
@@ -1025,7 +1025,7 @@ guard_leftover_data() {
       # Fail closed: if any data survived the wipe, abort rather than fall
       # through to create_cluster, which would adopt the survivors and silently
       # break the "wipe means gone" guarantee.
-      if ! _wipe_leftover_data "${found[@]}"; then
+      if ! _wipe_leftover_data "${found[@]}"; then  # set-u-safe: the empty-found check at the top of this function returns first
         error "Could not fully wipe existing data under ${HOST_DATA_DIR} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. 'sudo rm -rf ${HOST_DATA_DIR}') and re-run, or choose a different directory. Refusing to proceed and adopt the leftovers."
       fi
       if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
@@ -1189,6 +1189,13 @@ create_cluster() {
        _create_new_cluster ;;
     *) error "The existing-cluster step returned an unrecognised status ($_hrc) and this run can't tell whether your secure environment is ready. Nothing further was changed; see the install log and re-run." ;;
   esac
+
+  # Every path above ends with the cluster present, but only a fresh create
+  # records it (in _create_new_cluster). A reused or adopted cluster would
+  # otherwise leave the install record without its k3d-cluster artefact, and an
+  # uninstall driven by the record would leave the cluster behind. Recording is
+  # keyed on kind + id + path, so this is a no-op after a fresh create.
+  tb_record_write k3d-cluster "$CLUSTER_NAME" ""
 
   ensure_cluster_autostart
   _merge_kubeconfig
@@ -1616,7 +1623,7 @@ _check_existing_cluster_proxy() {
   [[ -z "$cluster_env" ]] && return 0
 
   local missing=()
-  for var in "${candidates[@]}"; do
+  for var in "${candidates[@]}"; do  # set-u-safe: the empty-candidates check above returns first
     # Here-string (#680): `grep -Eq` stops at the first match, so echo can take
     # SIGPIPE and pipefail would report a variable as MISSING when it is present,
     # producing a spurious "cluster is missing proxy env" warning.
@@ -1625,7 +1632,7 @@ _check_existing_cluster_proxy() {
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo ""
-    warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."
+    warn "Host has proxy env set, but the existing '$CLUSTER_NAME' cluster is missing: ${missing[*]}."  # set-u-safe: inside the non-empty check
     hint "k3d bakes proxy settings into containers at create time — they can't be added to a running cluster."
     hint "If image pulls fail or in-cluster traffic misroutes, recreate the cluster:"
     _recreate_cluster_hint
@@ -2495,7 +2502,7 @@ _create_new_cluster() {
   # for the PID, so create_rc is k3d's real exit code (captured WITHOUT tripping
   # `set -e`, so the 'already exists' reuse path, error dump, and temp-dir cleanup
   # below still run) and the proxy-config cleanup can't race the finished create.
-  ( k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 ) &
+  ( k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 ) &  # set-u-safe: K3D_ARGS is assigned the create verb above
   create_rc=0
   # Backstop deadline (#426): k3d's --timeout above should end a stuck create
   # itself; if k3d wedges past it (hung docker daemon), spin's deadline kills
@@ -2568,6 +2575,7 @@ _create_new_cluster() {
   fi
   cat "$create_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
   rm -f "$create_out"
+  tb_record_write k3d-cluster "$CLUSTER_NAME" ""
   # No success line here — _wait_for_api prints the single "Secure environment
   # ready" once the API server actually answers (the true ready signal).
   log "k3d cluster '$CLUSTER_NAME' created."
@@ -2668,6 +2676,8 @@ _merge_kubeconfig() {
   fi
 
   log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME' (context $want_ctx)."
+  TB_KUBE_CONTEXT="$want_ctx"
+  tb_record_write
 }
 
 # =============================================================================
@@ -2760,26 +2770,34 @@ _k3s_log_facts() {
     END { printf "%d %s\n", failed, ip }'
 }
 
-# _k3s_node_log_facts NODE — _k3s_log_facts over NODE's WHOLE log, bounded. Not a
-# tail: a server stuck in the entrypoint's uncordon loop logs a refused
-# connection every 3 s, so five days bury the failure 500k lines deep (measured:
-# 528k lines, ~100 MB, parsed in ~6 s). Non-zero when the read itself failed —
-# "cannot tell", never "no failure".
+# _k3s_node_log_facts NODE — _k3s_log_facts over NODE's WHOLE log, bounded on
+# every platform. Not a tail: a server stuck in the entrypoint's uncordon loop
+# logs a refused connection every 3 s, so five days bury the failure 500k lines
+# deep (measured: 528k lines, ~100 MB, parsed in ~6 s). Non-zero when the read
+# itself failed — "cannot tell", never "no failure".
 #
-# The read's exit code goes through a file, NOT ${PIPESTATUS[0]} (Bugbot on
-# client-dev#1380, "Failed log read marked dead"). install-k8s.sh runs with
-# `set -E` and an ERR trap, and on the macOS /bin/bash 3.2 the trap that fires
-# for the failed pipeline resets PIPESTATUS: a read that failed or timed out came
-# back 0 with "0 " -- "read, no failure" -- and its node read as dead (measured;
-# bash 5.2 keeps PIPESTATUS). A code that never reached the file, or a file that
-# could not be made, is "cannot tell" too.
+# The read goes through _bounded_capture into a file, NOT `_bounded … | awk`
+# (Bugbot on client-dev#1420, "Mac log read has no deadline"). `_bounded` runs
+# the bare command on a stock Mac, which has no timeout/gtimeout, and this is the
+# one read whose time grows with the log. The PowerShell twin already cuts it at
+# the same deadline.
+#
+# No pipeline also means no PIPESTATUS (Bugbot on client-dev#1380, "Failed log
+# read marked dead"). install-k8s.sh runs with `set -E` and an ERR trap, and on
+# the macOS /bin/bash 3.2 the trap that fires for a failed pipeline resets
+# PIPESTATUS: a read that failed came back 0 with "0 " (measured). The status
+# comes straight from _bounded_capture: 124 when the deadline fired, the read's
+# own code when it failed, 2 when no capture file could be made. Each is
+# "cannot tell". The log sits in TMPDIR only for the parse, then is removed.
 _k3s_node_log_facts() {
-  local out rc rcf
-  rcf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-logread-XXXXXX" 2>/dev/null)" || return 2
-  out="$( { _bounded "${TB_DOCKER_LOGS_TIMEOUT:-90}" docker logs "$1" 2>&1; printf '%s\n' "$?" > "$rcf"; } | _k3s_log_facts )"
-  rc="$(cat "$rcf" 2>/dev/null)"; rm -f "$rcf"
-  [[ "$rc" == 0 ]] || return "${rc:-2}"
-  printf '%s\n' "$out"
+  local logf rc=0
+  logf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-logread-XXXXXX" 2>/dev/null)" || return 2
+  _bounded_capture "${TB_DOCKER_LOGS_TIMEOUT:-90}" "$logf" docker logs "$1" || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    _k3s_log_facts < "$logf" || rc=2
+  fi
+  rm -f "$logf"
+  return "$rc"
 }
 
 # _k3s_running_in NODE — 0 when a k3s process runs in NODE, 1 when none does, 2

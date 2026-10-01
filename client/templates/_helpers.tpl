@@ -799,11 +799,11 @@ parses it as YAML straight out of this file.
 */}}
 {{- define "tracebloc.thirdPartyImageDefaults" -}}
 egressProxy.image:
-  registry: docker.io
-  repository: ubuntu/squid
-  tag: "6.6-24.04_beta"
-  digest: "sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029"
-  digestFor: "ubuntu/squid:6.6-24.04_beta"
+  registry: ghcr.io
+  repository: tracebloc/squid-tracebloc
+  tag: "7.6-r0-tb.2"
+  digest: "sha256:551b6f5d296fb91dbe10be7df0c46231cefeb25d3181859939974e6ca90dde80"
+  digestFor: "tracebloc/squid-tracebloc:7.6-r0-tb.2"
 restrictedDns.image:
   registry: docker.io
   repository: coredns/coredns
@@ -1201,7 +1201,43 @@ Usage: {{ include "tracebloc.pinFor" (dict "image" "jobsManager" "root" $) }}
 */}}
 {{- define "tracebloc.pinFor" -}}
 {{- $_ := include "tracebloc.controlPlaneRepository" . -}}
+{{- $img := default dict (index (default dict .root.Values.images) .image) -}}
+{{- if $img.digest -}}
 {{- include "tracebloc.honouredPin" . -}}
+{{- else -}}
+{{- include "tracebloc.prodDefaultPin" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.prodDefaultPin — the chart-default half of tracebloc.pinFor (RFC-0143
+D1, client-dev#1175): the digest `images.prodDigests` names for this
+control-plane image, rendered only when
+
+  * the resolved CLIENT_ENV (tracebloc.clientEnv, aliases normalised) is prod --
+    a chart-default pin never freezes a dev or staging edge;
+  * the map declares the registry this release pulls from
+    (`images.prodDigestsRegistry`, through tracebloc.pinRegistryHonoured, the
+    same comparison as every other pin).
+
+pinFor calls it only when `images.<image>.digest` is empty, so an operator pin
+always wins. The map is keyed by the published image name, derived from
+tracebloc.controlPlaneRepository (tracebloc/<name>). requests-proxy has no
+entry of its own: it runs the jobs-manager image and follows the jobs-manager
+pin through tracebloc.effectivePin, so a jobs-manager operator pin is what it
+runs too, never this map beside it.
+
+Nil-guarded for `--reuse-values` replays that predate the map: no map, no pin.
+*/}}
+{{- define "tracebloc.prodDefaultPin" -}}
+{{- if ne .image "requestsProxy" -}}
+{{- $images := default dict .root.Values.images -}}
+{{- $name := trimPrefix "tracebloc/" (include "tracebloc.controlPlaneRepository" .) -}}
+{{- $digest := get (default dict $images.prodDigests) $name | default "" -}}
+{{- if and $digest (eq (include "tracebloc.clientEnv" .root) "prod") (include "tracebloc.pinRegistryHonoured" (dict "registry" ($images.prodDigestsRegistry | default "") "root" .root)) -}}
+{{- $digest -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

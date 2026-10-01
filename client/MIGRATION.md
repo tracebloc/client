@@ -2,6 +2,159 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.189 — the egress gateway runs a tracebloc build of squid
+
+**What changed.** The egress gateway (`egressProxy`) moves from
+`docker.io/ubuntu/squid:6.6-24.04_beta` (squid 6.13 on Ubuntu 24.04) to
+`ghcr.io/tracebloc/squid-tracebloc:7.6-r0-tb.2`, pinned by digest: Alpine's squid
+7.6 package on a pinned Alpine base, about 11 MB compressed where the Ubuntu
+image is about 70 MB. The squid.conf the chart renders, the allowlist, the port,
+the user (uid 13) and the pod are unchanged. Every build is checked against every
+variant of that config before it is published: each allowlisted FQDN tunnels on
+443, and an unlisted name, a subdomain of an exact entry and a port-80 CONNECT are
+denied. The tag reads `<package>-tb.<N>`: the Alpine package version, and N
+counts tracebloc builds of it.
+
+One new line in the gateway's log at every start is expected and harmless:
+`ERROR: 'pinger_enable' requires --enable-icmp`. Alpine builds squid without ICMP,
+and the chart already turns the pinger off; squid starts normally.
+
+**What you have to do: nothing, on a default install.**
+
+**If you mirror images** (`global.imageRegistry`), copy
+`ghcr.io/tracebloc/squid-tracebloc:7.6-r0-tb.2` into your mirror under the path
+`tracebloc/squid-tracebloc` **before** this upgrade reaches the edge.
+`./scripts/list-images.sh` prints it, by digest. The chart's digest is still
+applied on the mirror, because the registry is not part of a pin's identity.
+Without the copy, the new gateway pod fails to pull, and training pods that route
+through it lose their egress until it does.
+
+**If you set the image yourself:**
+
+- **Your own `repository`, `tag` and `digest`**: still honoured. You keep
+  running the image you pinned.
+- **`egressProxy.image.tag` alone** (for example `6.6-24.04_beta`): the
+  repository is now `tracebloc/squid-tracebloc`, whose tags read
+  `<package>-tb.<N>`. An Ubuntu tag does not exist there, and the gateway fails to
+  pull. Drop your tag, or set `repository` back to `ubuntu/squid` beside it.
+- **`egressProxy.image.repository` alone** (a mirror path to `ubuntu/squid`):
+  your repository now renders with the chart's tag, `7.6-r0-tb.2`, which
+  `ubuntu/squid` does not have. Point `repository` at your mirror's copy of
+  `tracebloc/squid-tracebloc`, and if your mirror rewrites the path, change
+  `digestFor` to `"<your repository>:7.6-r0-tb.2"` to keep the chart's pin.
+- **`egressProxy.runAsUser`**: the new image runs squid as uid 13, like the old
+  one. If you changed it, check it against the image you run.
+
+## Upgrading to 1.9.186 — prod edges run the control plane this chart version names
+
+**What changed.** Each published chart release now carries
+`images.prodDigests`: one digest per control-plane image (`jobs-manager`,
+`pods-monitor`, `resource-monitor`), on `ghcr.io`, with
+`images.prodDigestsRegistry: ghcr.io` beside it. The digests are the
+control-plane build that release was cut and tested with, written into the
+chart when it is packaged. A chart you package yourself from the source
+repository has the map empty, and floats as before. On a **prod** edge that pulls
+from `ghcr.io`, a published chart's control-plane workloads now run
+
+    ghcr.io/tracebloc/<image>@sha256:<digest>    imagePullPolicy: IfNotPresent
+
+instead of the floating `:prod` tag. requests-proxy runs the jobs-manager digest,
+as it runs the jobs-manager image. With all three pinned, the `image-refresh`
+CronJob and its RBAC are no longer rendered, and the upgrade removes them: a new
+control-plane build reaches prod edges as the next chart release, not as an
+in-cluster re-pin. So a chart version names the control-plane
+bytes, and holding an edge on an older chart that ships the map puts that
+chart's control plane back:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> --version <older version> \
+  --reset-then-reuse-values --set autoUpgrade.enabled=false
+```
+
+The same caveat as for the training images (1.9.156): not `helm rollback`, which
+the next hourly auto-upgrade undoes. Set `autoUpgrade.enabled=true` again once a
+fixed chart is published.
+
+**Where nothing changes** (the workloads float on `:<CLIENT_ENV>` and the
+`image-refresh` CronJob stays, exactly as before):
+
+- dev and staging edges. The map pins only where `env.TRACEBLOC_ENV` (or the
+  legacy `env.CLIENT_ENV`) resolves to prod, every spelling of it included:
+  `prod`, `production`, or unset;
+- an edge that pulls from a mirror (`global.imageRegistry`) or from Docker Hub
+  (`images.traceblocRegistry=docker.io`), unless it declares
+  `images.prodDigestsRegistry` as that host (below). The chart's own map never
+  prints the `digest pin(s) IGNORED` warning: that warning is for pins you set;
+- an image you pin yourself. `images.<image>.digest` always wins over the map,
+  whether it is honoured or not. A pin the chart ignores (1.9.119) floats that
+  image and brings the CronJob back; it does not fall back to the map. Setting
+  `images.<image>.digest: ""`, the remedy the 1.9.119 note recommends, now means
+  "run the map's digest" on a prod edge.
+
+**What you need to do: nothing.** On prod edges the upgrade rolls the
+jobs-manager, requests-proxy and resource-monitor workloads once, because their
+image reference changes, even where the bytes are the ones already running.
+
+**Check an edge:**
+
+```bash
+# the control-plane images and their pull policy
+kubectl get deploy,daemonset -n <namespace> \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.template.spec.containers[*]}{.image} {.imagePullPolicy}{"  "}{end}{"\n"}{end}'
+# no image-refresh CronJob on a pinned prod edge
+kubectl get cronjob -n <namespace>
+```
+
+**Stale-pin annotations.** The `tracebloc.io/stale-pin-<image>` annotations are
+written by the `image-refresh` CronJob, which a fully pinned prod edge no longer
+runs. A pin the chart ships cannot go stale on your edge: it names the bytes
+that chart release was tested with, and a newer control plane arrives as a newer
+chart.
+
+**Canary a newer control plane on one prod edge.** Pin the image yourself: your
+pin wins over the map. Declare the registry you resolved it on (1.9.119):
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> --reset-then-reuse-values \
+  --set images.jobsManager.digest=sha256:<digest> \
+  --set images.jobsManager.digestRegistry=ghcr.io
+# leave the canary: back to the map's digest
+helm upgrade <release> tracebloc/client -n <namespace> --reset-then-reuse-values \
+  --set images.jobsManager.digest="" --set images.jobsManager.digestRegistry=""
+```
+
+**Break-glass: float one edge again.** `images.prodDigests=null` clears the map:
+every control-plane image floats on its tag and the `image-refresh` CronJob comes
+back. It is user-supplied, so the hourly auto-upgrade keeps it until you remove
+it:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> \
+  --reset-then-reuse-values --set images.prodDigests=null
+# later, back to the chart's digests: re-supply your values without that key
+helm get values <release> -n <namespace> -o yaml > my-values.yaml
+#   (delete the `prodDigests: null` line under `images:`)
+helm upgrade <release> tracebloc/client -n <namespace> --reset-values -f my-values.yaml
+```
+
+Use `--reset-then-reuse-values`, never `--reuse-values`: `--reuse-values`
+replays the previous release's values in place of the new chart's defaults, so
+the map never reaches the edge and it goes on floating, with the CronJob.
+
+**If you mirror images** by digest (a copy that keeps the index digest, such as
+`crane copy` or `skopeo copy --all`), the map's digests name the same bytes on
+your mirror. Declare it and the mirror adopts the map:
+
+```bash
+helm upgrade <release> tracebloc/client -n <namespace> --reset-then-reuse-values \
+  --set images.prodDigestsRegistry=<your mirror host>
+```
+
+Declare it only for a digest-preserving copy. The render honours the
+declaration, so a mirror that re-pushed the images under new digests would be
+told to pull digests it does not have. `./scripts/list-images.sh --env prod`,
+run without the mirror settings, prints the pinned `ghcr.io` references to copy.
+
 ## Upgrading to 1.9.181 — the log Collector runs a tracebloc build
 
 **What changed.** The telemetry Collector DaemonSet moves from OpenTelemetry's

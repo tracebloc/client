@@ -391,7 +391,7 @@ download_with_retry() {
 # retry/failure inside download_with_retry prints its own [WARN]/[ERROR] and, on
 # hard failure, exits — so we only reach the success line when every file landed.
 printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
-for f in "${FILES[@]}"; do
+for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
   dest="$TMPDIR/${f#scripts/}"
   download_with_retry "$(subscript_url "$f")" "$dest"
 done
@@ -474,7 +474,7 @@ verify_against_manifest() {
   verify_manifest_signature "$manifest"
 
   local f rel expected actual
-  for f in "${FILES[@]}"; do
+  for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
     rel="$f"                              # manifest keys are repo-relative: scripts/...
     # Match the line whose LAST field is exactly this path (independent of how
     # many spaces the sha tool emits); take its first field as the digest.

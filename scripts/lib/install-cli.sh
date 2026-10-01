@@ -38,6 +38,28 @@ _cli_at_system_dir() {
   esac
 }
 
+# _cli_reported_path OUTFILE -> the binary the CLI's own installer says it
+# installed: the path on the last "tracebloc CLI installed: <path>" line of its
+# captured output (cli's install.sh prints it as the final step, with a
+# " (short alias: tb)" note when it made the alias). Empty when it printed none,
+# or named something that is not an absolute path to an executable file. Read
+# from the installer, never from `command -v`: the installer runs as a child
+# process, so where it put the binary never reaches THIS PATH. A lookup finds
+# ~/.local/bin only on the curl|bash path (install.sh prepends it) and ~/bin
+# never, and may return an older brew or pkg copy instead (client-dev#1390).
+_cli_reported_path() {
+  local line p=""
+  [[ -r "${1:-}" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in *"tracebloc CLI installed: "*) p="${line#*tracebloc CLI installed: }" ;; esac
+  done <"$1"
+  p="${p%$'\r'}"
+  p="${p% (short alias:*}"
+  case "$p" in /*) ;; *) return 0 ;; esac
+  [[ -f "$p" && -x "$p" ]] || return 0
+  printf '%s\n' "$p"
+}
+
 # Which rc file a *fresh* interactive shell of the user's $SHELL actually reads,
 # so the PATH fix we print sources the right file. Mirrors how the cli's
 # install.sh routes guidance, but resolved per-shell here:
@@ -250,8 +272,24 @@ install_tracebloc_cli() {
   #    avoids. We surface the failure softly below instead. The CLI installer
   #    verifies SHA256 + cosign and falls back to ~/.local/bin (printing PATH
   #    guidance) when /usr/local/bin isn't writable.
-  sh "$installer" >> "${LOG_FILE:-/dev/null}" 2>&1 &
-  if spin "$!" "Installing the tracebloc CLI…"; then
+  #    Its output is captured, then appended to the install log, because the
+  #    install record needs the path it reports (_cli_reported_path).
+  local _cli_out _cli_rc=0
+  _cli_out="$(mktemp)" || _cli_out=""
+  # Appended, never truncated: without a temp file the fallback is the install log.
+  sh "$installer" >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
+  spin "$!" "Installing the tracebloc CLI…" || _cli_rc=$?
+  if [[ -n "$_cli_out" ]]; then cat "$_cli_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null || true; fi
+  if [[ "$_cli_rc" -eq 0 ]]; then
+    # Recorded where the CLI installer says it put the binary: /usr/local/bin,
+    # ~/bin or ~/.local/bin (see _cli_reported_path). No path, no artefact.
+    local _cli_path=""
+    if [[ -n "$_cli_out" ]]; then _cli_path="$(_cli_reported_path "$_cli_out")"; fi
+    if [[ -n "$_cli_path" ]]; then
+      tb_record_write binary tracebloc "$_cli_path"
+    else
+      log "The CLI installer reported no install path; no tracebloc binary recorded."
+    fi
     # Self-verify usability from a FRESH terminal and print the single ✔ line
     # (or a shell-correct PATH fix). Non-fatal — always returns 0.
     _verify_tracebloc_cli
@@ -261,6 +299,7 @@ install_tracebloc_cli() {
   fi
 
   rm -f "$installer"
+  if [[ -n "$_cli_out" ]]; then rm -f "$_cli_out"; fi
   return 0
 }
 
@@ -294,6 +333,17 @@ upgrade_cli_only() {
   if declare -F wire_ca_trust >/dev/null 2>&1; then
     wire_ca_trust
   fi
+
+  # The install record may gain the new CLI here, but this path never writes the
+  # FIRST one: it reads no cluster, kube context or Helm release, so a record
+  # begun here would say Helm never ran. A machine installed before the record
+  # existed gets its record on the next full install.
+  if declare -F tb_record_path >/dev/null 2>&1 && [[ ! -f "$(tb_record_path)" ]]; then
+    TB_RECORD_ARMED=""
+  fi
+  # Whatever it writes refreshes the CLI's entry only: CLUSTER_NAME and
+  # HOST_DATA_DIR are defaults here, not what the install recorded.
+  TB_RECORD_REFRESH_ONLY=1
 
   # install_tracebloc_cli owns the ✔/✖ line and is non-fatal by contract; it also
   # prints the vX -> vY update verdict. Guarded like main()'s own call so a stale

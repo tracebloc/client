@@ -156,9 +156,9 @@ _configure_docker_proxy() {
     if [[ -f "$conf" ]] && $_sudo grep -qF "$marker" "$conf" 2>/dev/null; then
       # shellcheck disable=SC2086
       $_sudo rm -f "$conf"
-      "${_sc[@]}" daemon-reload 2>/dev/null || true
-      if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then
-        spin_cmd "Removing stale Docker proxy settings…" "${_sc[@]}" restart docker || true
+      "${_sc[@]}" daemon-reload 2>/dev/null || true  # set-u-safe: _sc is set in both branches of the scope test
+      if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then  # set-u-safe: _sc is set in both branches of the scope test
+        spin_cmd "Removing stale Docker proxy settings…" "${_sc[@]}" restart docker || true  # set-u-safe: _sc is set in both branches of the scope test
       fi
       log "Removed stale tracebloc-managed Docker daemon proxy (no host proxy set)."
     fi
@@ -190,12 +190,12 @@ _configure_docker_proxy() {
   $_sudo mkdir -p "$dir"
   # shellcheck disable=SC2086
   printf '%s' "$desired" | $_sudo tee "$conf" >/dev/null
-  "${_sc[@]}" daemon-reload 2>/dev/null || true
+  "${_sc[@]}" daemon-reload 2>/dev/null || true  # set-u-safe: _sc is set in both branches of the scope test
   # Restart only if the daemon is already up; on a fresh install the start in
   # install_docker_engine (system) / install_rootless_docker (user) brings it up
   # with the drop-in already in place.
-  if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then
-    spin_cmd "Applying Docker proxy settings…" "${_sc[@]}" restart docker || true
+  if "${_sc[@]}" is-active --quiet docker 2>/dev/null; then  # set-u-safe: _sc is set in both branches of the scope test
+    spin_cmd "Applying Docker proxy settings…" "${_sc[@]}" restart docker || true  # set-u-safe: _sc is set in both branches of the scope test
   fi
   log "Configured Docker daemon proxy (${scope} scope) for image pulls behind a corporate proxy (HTTP_PROXY=$proxy)."
 }
@@ -435,13 +435,13 @@ install_system_deps() {
     # package genuinely can't be found, the guarded install below surfaces it.
     spin_cmd "Updating package index…" $PM_UPDATE || \
       warn "Package index refresh failed — continuing; installs will use the cached index."
-    for pkg in "${MISSING_PKGS[@]}"; do
+    for pkg in "${MISSING_PKGS[@]}"; do  # set-u-safe: inside the non-empty check
       # ${pkg}, braced: bash 3.2 in a UTF-8 locale reads the first byte of "…"
       # into an unbraced name and, under set -u, aborts "pkg\xE2: unbound variable".
       spin_cmd "Installing ${pkg}…" $PM_INSTALL "$pkg" || \
         log "Could not install $pkg — may already be satisfied by an alternative package."
     done
-    log "Dependencies installed: ${MISSING_PKGS[*]}"
+    log "Dependencies installed: ${MISSING_PKGS[*]}"  # set-u-safe: inside the non-empty check
   fi
   success "System dependencies"
 }
@@ -517,6 +517,7 @@ install_kubectl() {
       || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
+    tb_record_write binary kubectl "$TB_TOOLS_DIR/kubectl"
   fi
   # Gate on both paths (fresh + already-present). --rm removes our TB_TOOLS_DIR copy
   # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
@@ -605,6 +606,7 @@ install_k3d() {
   if ! has k3d; then
     error "System tool installation completed but not found on PATH."
   fi
+  tb_record_write binary k3d "$TB_TOOLS_DIR/k3d"
 
   assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
 }
@@ -631,11 +633,11 @@ _ensure_unpack_tools() {
   # _have_sudo_bin/_real_sudo — as root the shadow would execute "-n true" as a
   # command — mirroring preflight_sudo/_probe_privilege (Bugbot #372).
   if [ "${EUID:-1000}" -ne 0 ] && ! _real_sudo -n true 2>/dev/null; then
-    _have_sudo_bin || error "Couldn't install ${missing[*]} (needed to unpack Helm): you aren't root and this machine has no sudo. Ask an administrator to install ${missing[*]}, then re-run this installer."
+    _have_sudo_bin || error "Couldn't install ${missing[*]} (needed to unpack Helm): you aren't root and this machine has no sudo. Ask an administrator to install ${missing[*]}, then re-run this installer."  # set-u-safe: the empty-missing check above returns first
     # A password IS needed — prompt on a plain line (a spinner would garble the
     # sudo prompt), with the honest reason, before the spin_cmd installs below.
-    info "Your machine is missing ${missing[*]} (needed once, to unpack Helm) — administrator password required to install ${missing[*]}."
-    _real_sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."
+    info "Your machine is missing ${missing[*]} (needed once, to unpack Helm) — administrator password required to install ${missing[*]}."  # set-u-safe: the empty-missing check above returns first
+    _real_sudo -v || error "Couldn't get administrator rights to install ${missing[*]}. Ask an administrator to install ${missing[*]}, then re-run this installer."  # set-u-safe: the empty-missing check above returns first
     # Tier 0 skips preflight_sudo, so keep the just-primed ticket warm ourselves:
     # the dpkg-lock wait below can outlast sudo's timestamp, and an expired
     # ticket re-prompts invisibly behind the spinner (Bugbot r2). Same pattern
@@ -664,8 +666,9 @@ _ensure_unpack_tools() {
     warn "Package index refresh failed — continuing; installs will use the cached index."
   # ONE combined install (not per-package): a single sudo consumer right after
   # the priming, minimizing the window in which the ticket could lapse.
+  # set-u-safe: the empty-missing check above returns first
   spin_cmd "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || \
-    error "Couldn't install ${missing[*]} (needed to unpack Helm). Install with your package manager, then re-run this installer."
+    error "Couldn't install ${missing[*]} (needed to unpack Helm). Install with your package manager, then re-run this installer."  # set-u-safe: the empty-missing check above returns first
   # Kill only the keepalive WE started — never a preflight_sudo one that the
   # rest of the full flow still relies on (Bugbot r3).
   if [ -n "$_unpack_keepalive" ]; then
@@ -674,7 +677,7 @@ _ensure_unpack_tools() {
       SUDO_KEEPALIVE_PID=""
     fi
   fi
-  log "Dependencies installed: ${missing[*]}"
+  log "Dependencies installed: ${missing[*]}"  # set-u-safe: the empty-missing check above returns first
 }
 
 # _fetch_helm_release <tag> <arch> — download the Helm tarball for <tag> plus
@@ -773,6 +776,7 @@ install_helm() {
     if ! has helm; then
       error "System tool installation completed but not found on PATH."
     fi
+    tb_record_write binary helm "$TB_TOOLS_DIR/helm"
   fi
   _ensure_helm_executable
   # bare `helm version` (not --short: it may be dropped like kubectl's was). --rm
@@ -783,9 +787,18 @@ install_helm() {
 }
 
 # ── GPU setup dispatch ───────────────────────────────────────────────────────
+# When the GPU floor skips the GPU (detect_gpu judged it, and printed the remedy)
+# there is no driver install, no toolkit and no wiring: TB_GPU_WIRED stays 0. A
+# driver below the floor only warned, and is set up like any other.
 dispatch_gpu_setup() {
   case "$GPU_VENDOR" in
-    nvidia) install_nvidia_drivers; install_nvidia_container_toolkit ;;
+    nvidia)
+      if _gpu_floor_skips; then
+        log "NVIDIA GPU below the floor (${TB_GPU_FLOOR_VERDICT}) — no driver, toolkit or GPU wiring; CPU mode."
+      else
+        install_nvidia_drivers; install_nvidia_container_toolkit
+      fi
+      ;;
     amd)    install_rocm ;;
     *)      log "No GPU setup required." ;;
   esac
@@ -924,6 +937,12 @@ _install_userspace_tools() {
 # only — no k3d flag — so it needs nothing here.)
 _tier0_gpu_flags() {
   [ "${GPU_VENDOR:-none}" = "nvidia" ] || return 0
+  # When the GPU floor skips the GPU a configured runtime does not help: detect_gpu
+  # has printed why, and the cluster stays CPU-only.
+  if _gpu_floor_skips; then
+    log "NVIDIA GPU below the floor (${TB_GPU_FLOOR_VERDICT}) — not wiring it on Tier 0; CPU mode."
+    return 0
+  fi
   # Capture-then-match (backend#1778): `docker info … | grep -q` lets grep close
   # the pipe on its first hit, docker takes SIGPIPE and pipefail makes it 141 —
   # which the `if` reads as "no nvidia runtime", handing a Tier-0 GPU host a

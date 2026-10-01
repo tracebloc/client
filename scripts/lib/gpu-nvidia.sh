@@ -4,6 +4,19 @@
 # =============================================================================
 
 # ── Drivers ──────────────────────────────────────────────────────────────────
+# _nvidia_driver_pkg_pick FLOOR_MAJOR SEARCH — from `apt-cache search` output, the
+# newest nvidia-driver-<N>[-flavour] package whose series N is at or above the
+# floor's major, or nothing. Pass 0 as FLOOR_MAJOR for the newest of any series.
+_nvidia_driver_pkg_pick() {
+  local picked
+  picked="$(printf '%s\n' "$2" | awk -v floor="$1" '
+    $1 ~ /^nvidia-driver-[0-9]+(-[a-z]+)*$/ {
+      n = $1; sub(/^nvidia-driver-/, "", n); sub(/-.*/, "", n)
+      if (n + 0 >= floor + 0) print $1
+    }' | sort -t- -k3 -n)" || picked=""
+  printf '%s' "${picked##*$'\n'}"
+}
+
 install_nvidia_drivers() {
   if $NVIDIA_DRIVER_OK; then
     success "NVIDIA drivers loaded."
@@ -13,15 +26,35 @@ install_nvidia_drivers() {
   log "Installing NVIDIA drivers..."
   warn "NVIDIA GPU detected but drivers are missing — installing now..."
 
+  # The floor's series (facts.env NVIDIA_DRIVER_FLOOR_LINUX). The package is the
+  # newest the archive lists at or above it; when it lists none, the newest it
+  # does list -- a driver below the floor only warns and keeps the GPU
+  # (client-dev#1355), so naming a series the archive does not carry would turn
+  # that warning into an aborted install. Only an empty listing falls back to
+  # the floor's series by name. ubuntu-drivers is asked for the chosen series.
+  # if/else, never `a && b || c`: a FAILED install of the package found must
+  # fail here, not quietly fall through to another driver.
+  local floor_series="${TB_NVIDIA_DRIVER_FLOOR%%.*}" search pkg series
   $PM_UPDATE
   if has apt-get; then
     $PM_INSTALL ubuntu-drivers-common 2>/dev/null || true
+    search="$(apt-cache search "^nvidia-driver-[0-9]" 2>/dev/null || true)"
+    pkg="$(_nvidia_driver_pkg_pick "$floor_series" "$search")"
+    if [[ -z "$pkg" ]]; then
+      pkg="$(_nvidia_driver_pkg_pick 0 "$search")"
+      if [[ -n "$pkg" ]]; then
+        warn "No NVIDIA driver ${floor_series} or newer is available from this machine's package sources — installing ${pkg}, older than the driver tracebloc recommends for GPU training; upgrade it when a newer one is available."
+      fi
+    fi
+    series="${pkg#nvidia-driver-}"; series="${series%%-*}"; series="${series:-$floor_series}"
     if has ubuntu-drivers; then
-      sudo ubuntu-drivers install --gpgpu 2>/dev/null || sudo ubuntu-drivers autoinstall
+      if ! sudo ubuntu-drivers install --gpgpu "nvidia:${series}-server" 2>/dev/null; then
+        sudo ubuntu-drivers install "nvidia:${series}"
+      fi
+    elif [[ -n "$pkg" ]]; then
+      $PM_INSTALL "$pkg"
     else
-      LATEST_PKG=$(apt-cache search "^nvidia-driver-[0-9]" 2>/dev/null \
-        | awk '{print $1}' | sort -t- -k3 -n | tail -1)
-      [[ -n "$LATEST_PKG" ]] && $PM_INSTALL "$LATEST_PKG" || $PM_INSTALL nvidia-driver-535
+      $PM_INSTALL "nvidia-driver-${floor_series}"
     fi
   elif has dnf; then
     sudo dnf install -y epel-release 2>/dev/null || true

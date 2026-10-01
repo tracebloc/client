@@ -1241,6 +1241,30 @@
               "description": "Comma-separated engine capability tokens, DERIVED from the pinned images' io.tracebloc.engine.capabilities label by scripts/resolve-training-digests.sh (which reads THIS pattern before writing, so the two cannot drift). A token is plain (`ddp`, `per_rank_split`) or parameterised `name:value` (`min-micro-batch:2`, `loss-coupled:embeddings` -- RFC-0067 D10, tracebloc-engine core/capabilities.py PARAMETER_SEPARATOR), which client-runtime's engine_capabilities.capability_parameters reads. Never hand-typed; refused by the template when `digests` is empty."
             }
           }
+        },
+        "prodDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "jobs-manager": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "pods-monitor": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "resource-monitor": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            }
+          },
+          "description": "The control-plane digests a PROD edge runs (RFC-0143 D1, the chart is the lockfile; client-dev#1175), keyed by the published image name tracebloc/<name>. Empty in git: every value ships \"\". A published chart release carries the digests its release recorded, stamped into a copy of values.yaml before helm package (scripts/stamp-control-plane-digests.sh, from the release's control-plane-digests.json). Honoured only when the resolved CLIENT_ENV is prod, the image's own images.<image>.digest is empty, and prodDigestsRegistry equals the registry this release pulls from; otherwise the map is not read and the image floats. requests-proxy has no entry: it follows the jobs-manager pin. An empty value floats that image. The key set is closed: scripts/tests/control-plane-prod-digests.sh holds it equal to the chart's control-plane images."
+        },
+        "prodDigestsRegistry": {
+          "type": "string",
+          "pattern": "^([A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)*)?$",
+          "description": "The registry images.prodDigests was resolved on -- a bare host, spelled exactly as images.traceblocRegistry or global.imageRegistry would be. The stamp refuses a record resolved on any other registry. The map is honoured ONLY when this equals the registry this release pulls from (tracebloc.tbRegistry); empty is honoured nowhere. A mirror that holds the exact digests adopts the map by setting this to its own host."
         }
       }
     },

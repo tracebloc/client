@@ -235,7 +235,7 @@ _existing_training_resources() {
 #
 # Regenerate after an upstream contract change:
 #   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=5
+_TB_ENVELOPE_CONTRACT_VERSION=6
 _TB_ENVELOPE_OVERHEAD_CPU_MILLI=650
 _TB_ENVELOPE_OVERHEAD_MEM_BYTES=2214592512
 _TB_ENVELOPE_FLOOR_CPU_MILLI=1000
@@ -1505,8 +1505,9 @@ _chart_proxy_env_yaml() {
 # chart pulls at a private registry mirror (#585 / restricted-network installs).
 # TRACEBLOC_IMAGE_REGISTRY sets global.imageRegistry: the chart's
 # global.imageRegistry convention re-homes tracebloc/*, the spawned ingestor and
-# training-job images, and the alpine/* + ubuntu/squid utility images onto that
-# host, so an air-gapped / mirror-only network pulls nothing from a public
+# training-job images, and the alpine/* utility images onto that host (the
+# egress gateway's squid-tracebloc is a tracebloc/* image), so an air-gapped /
+# mirror-only network pulls nothing from a public
 # registry. When the mirror needs authentication, TRACEBLOC_REGISTRY_USERNAME /
 # TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
 # (dockerRegistry), whose server defaults to the mirror host. Emits nothing when
@@ -1748,7 +1749,7 @@ _is_vm_signature() {
   local hay sig
   hay="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   [[ -n "${hay//[[:space:]]/}" ]] || return 1
-  for sig in "${_TB_VM_SIGNATURES[@]}"; do
+  for sig in "${_TB_VM_SIGNATURES[@]}"; do  # set-u-safe: _TB_VM_SIGNATURES is a file-scope constant
     [[ "$hay" == *"$sig"* ]] && return 0
   done
   return 1
@@ -2030,7 +2031,7 @@ _reconcile_adopted_client() {
   local _helm_timeout_min
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
-  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?
+  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?  # set-u-safe: assigned the upgrade verb at its declaration
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
     # leave the release pending-*. The next run auto-recovers
@@ -2040,6 +2041,10 @@ _reconcile_adopted_client() {
     hint "  helm -n $_ns rollback $_rel    (returns to the previous, working release)"
     error "Reconcile of the existing client failed. Check the log for details: ${LOG_FILE:-}"
   fi
+  # The release offboarding removes (RFC-0175 D10), by its own name: an adopted
+  # release need not be named after its namespace. The record's namespace is
+  # TB_NAMESPACE, set to this release's above.
+  tb_record_write helm-release "$_rel" ""
 
   kubectl config set-context --current --namespace "$_ns" >/dev/null 2>&1 || true
   return 0
@@ -3205,6 +3210,9 @@ EOF
     hint "  upgrade:        helm -n $TB_NAMESPACE rollback $TB_NAMESPACE     (returns to the previous release)"
     error "Client installation failed. Check the log for details: ${LOG_FILE:-}"
   fi
+  # The release offboarding removes (RFC-0175 D10): named after its namespace on
+  # this path, which is the record's namespace field.
+  tb_record_write helm-release "$TB_NAMESPACE" ""
 
   # Point the kubeconfig's current context at the client namespace, so kubectl and
   # the tracebloc CLI default to it with no -n / --namespace flag. Best-effort:

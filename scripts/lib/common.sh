@@ -131,7 +131,7 @@ curl_secure() {
   # checker false positive: _bounds ALWAYS carries --connect-timeout (plus
   # --max-time unless the call stall-bounds itself) — flags inside a bash
   # array expansion are invisible to the grep. house-rules: ignore=curl-timeout
-  curl --tlsv1.2 "${_bounds[@]}" "$@"
+  curl --tlsv1.2 "${_bounds[@]}" "$@"  # set-u-safe: always carries --connect-timeout
 }
 
 # Verify FILE against an EXPECTED sha256, portably and FAIL-CLOSED. Linux ships
@@ -824,7 +824,7 @@ _resource_monitor_from_rows() {
   while read -r relns ns name ctrs _; do
     [[ -n "$ctrs" && "$relns" == "$want" ]] || continue
     IFS=',' read -r -a cs <<<"$ctrs"
-    for c in "${cs[@]}"; do
+    for c in "${cs[@]}"; do  # set-u-safe: ctrs is non-empty, and read -a of a non-empty line yields a field
       [[ "$c" == "$_TB_RESOURCE_MONITOR_CONTAINER" ]] || continue
       hit="$ns $name"; n=$((n + 1)); break
     done
@@ -1189,6 +1189,11 @@ setup_log_file() {
   LOG_FILE="$(_choose_log_file)"
   exec > >(tee -a "$LOG_FILE") 2>&1
   log "Install log: $LOG_FILE"
+  # The substrate line printed before the log existed goes into it too, verbatim
+  # (not through log(), whose timestamp would bend the grammar).
+  if [[ -n "${TB_SUBSTRATE_TOKEN_PRINTED:-}" ]]; then
+    tb_substrate_token >>"$LOG_FILE" 2>/dev/null || true
+  fi
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
@@ -1260,6 +1265,14 @@ TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # digest of the derived tag.
 # shellcheck disable=SC2034  # consumed cross-file by cluster.sh (_gpu_node_image)
 TB_K3S_CUDA_DIGEST="sha256:fbb1a8cfebcdf32320b493fc614161cd1115603067135c27080ac380e4742e9d"
+# The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR,
+# stamped by check-facts.sh --write). Below the compute-capability floor detect-gpu.sh
+# leaves the GPU unwired and the install runs CPU-only; below the driver floor it
+# warns and wires the GPU anyway. Policy, so no TRACEBLOC_* override.
+# shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh and gpu-nvidia.sh
+TB_NVIDIA_DRIVER_FLOOR="570.26"
+# shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
+TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
 # release at install time instead (an empty value falls back to this pin, like
 # K8S_VERSION above). The binary is fetched directly from the release and
@@ -1394,6 +1407,9 @@ amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
 
 GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
 NVIDIA_DRIVER_OK=false
+# detect-gpu.sh's floor verdict for a present NVIDIA driver: ok | below-driver |
+# below-compute | unreadable. Empty = not judged (no NVIDIA driver on the host yet).
+TB_GPU_FLOOR_VERDICT=""
 # 1 once an NVIDIA GPU is wired into this cluster, else 0. Assigned, never
 # defaulted from the environment: only the installer's own GPU steps may set it.
 TB_GPU_WIRED=0
@@ -1415,6 +1431,20 @@ PM_UPDATE=""
 # may not have TB_GPU_WIRED, so it defaults here.
 _gpu_wired() {
   [[ "${GPU_VENDOR:-}" == "nvidia" && "${TB_GPU_WIRED:-0}" == "1" ]]
+}
+
+# True when detect_gpu's floor verdict skips the GPU: below-compute (the card is too
+# old for the images) or unreadable (cannot tell). The GPU steps then install no
+# toolkit and never set TB_GPU_WIRED, so the install runs CPU-only; detect_gpu has
+# already printed why and the remedy. below-driver does NOT skip: detect_gpu warned,
+# and the GPU is wired (Lukas, 2026-09-30, client-dev#1355: the floor is advice until
+# spike S-G measures it). Not judged (no driver yet, the driver-install path) is not
+# a skip either.
+_gpu_floor_skips() {
+  case "${TB_GPU_FLOOR_VERDICT:-}" in
+    below-compute|unreadable) return 0 ;;
+  esac
+  return 1
 }
 
 # ── Failure diagnostics (client#681) ─────────────────────────────────────────
@@ -1573,6 +1603,201 @@ install_cleanup() {
 # it pinned to, e.g. v1.9.3 — so the title states exactly what is being installed.
 # On the direct ./install-k8s.sh path it's unset and the title drops the suffix.
 TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
+
+# ── The installer contract: substrate switch, substrate line, install record ─
+#  scripts/spec/install-record.schema.json is the one declaration. The
+#  values below are STAMPED from it (the bootstrap ships no spec file), and
+#  install-contract.bats holds each one to the schema:
+#    TB_SUBSTRATES                  properties.substrate.enum, space-separated
+#    TB_SUBSTRATE_DEFAULT           x-tracebloc-substrate.default
+#    TB_SUBSTRATE_TOKEN_PREFIX      x-tracebloc-substrate.token-prefix
+#    TB_SUBSTRATE_TOKEN_UNSUPPORTED x-tracebloc-substrate.token-unsupported
+#    TB_INSTALL_RECORD_VERSION      properties.schema_version.const
+#    TB_ARTEFACT_KINDS              $defs.artefact.properties.kind.enum, space-separated
+TB_SUBSTRATES="k3d"
+TB_SUBSTRATE_DEFAULT="k3d"
+TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
+TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
+TB_INSTALL_RECORD_VERSION=1
+TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release"
+# The substrate this run was asked for: TRACEBLOC_SUBSTRATE, else the default
+# (blank means unset, as for every TRACEBLOC_* setting). There is no flag and no
+# alias. main() refuses a value outside TB_SUBSTRATES, by name, AFTER the
+# substrate line has printed.
+TB_SUBSTRATE="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
+
+tb_substrate_supported() {
+  local s
+  for s in $TB_SUBSTRATES; do
+    [[ "$s" == "${TB_SUBSTRATE:-}" ]] && return 0
+  done
+  return 1
+}
+
+# The substrate line: one line, fixed grammar, no colour, so a harness can read it
+# from the installer's own output. It names the substrate this run resolved, or
+# the "unsupported" sentinel, never the raw request: a free-form value must not
+# be able to bend the grammar.
+tb_substrate_token() {
+  if tb_substrate_supported; then
+    printf '%s%s\n' "$TB_SUBSTRATE_TOKEN_PREFIX" "$TB_SUBSTRATE"
+  else
+    printf '%s%s\n' "$TB_SUBSTRATE_TOKEN_PREFIX" "$TB_SUBSTRATE_TOKEN_UNSUPPORTED"
+  fi
+}
+
+# Printed by main() before anything that can refuse; setup_log_file copies it
+# into the install log once that exists.
+print_substrate_token() {
+  tb_substrate_token
+  TB_SUBSTRATE_TOKEN_PRINTED=1
+}
+
+refuse_unsupported_substrate() {
+  tb_substrate_supported && return 0
+  error "TRACEBLOC_SUBSTRATE='${TB_SUBSTRATE}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use ${TB_SUBSTRATE_DEFAULT}."
+}
+
+# ── Install record ──────────────────────────────────────────────────────────
+#  What this install created, for an uninstall to remove exactly that. Written
+#  as the install goes: tb_record_write KIND ID PATH records one artefact the
+#  moment it exists, and tb_record_write alone refreshes the other fields. The
+#  format is fixed (one artefact object per line) because the writer reads its
+#  own previous output back: an artefact an earlier run recorded is kept, and so
+#  is a field this run has not decided yet. No jq or python3 on this path.
+#  Best-effort: a record that cannot be written is logged, never fatal.
+#  Written only once main() has armed it, after the refusals, when the run is
+#  committed to installing. Assigned here, never read from the environment: a
+#  library function a unit test or a harness calls directly writes nothing.
+TB_RECORD_ARMED=""
+TB_RECORD_REFRESH_ONLY=""
+tb_record_path() { printf '%s/.tracebloc/install-record.json' "${HOME:-}"; }
+
+# $1 as a JSON string literal, or null when empty.
+_tb_json() {
+  if [[ -z "${1:-}" ]]; then printf 'null'; return 0; fi
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '"%s"' "$s"
+}
+
+# The JSON literal a previous write left for top-level KEY ($1) in record text $2.
+_tb_record_prior() {
+  local v
+  v="$(printf '%s\n' "$2" | sed -n "s/^  \"$1\": \(.*[^,]\),\{0,1\}\$/\1/p")"
+  printf '%s' "${v%%$'\n'*}"
+}
+
+# Top-level field KEY ($1): this run's value ($2) wins, else the value the
+# previous write left in record text $3, else null. A CLI-only refresh
+# (TB_RECORD_REFRESH_ONLY=1) never saw the install's facts: what it has for
+# them is a default (CLUSTER_NAME, HOST_DATA_DIR), so the prior value wins.
+_tb_record_field() {
+  local p; p="$(_tb_record_prior "$1" "${3:-}")"
+  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" && -n "$p" ]]; then printf '%s' "$p"; return 0; fi
+  if [[ -n "${2:-}" ]]; then _tb_json "$2"; return 0; fi
+  printf '%s' "${p:-null}"
+}
+
+tb_record_write() {
+  [[ "${TB_RECORD_ARMED:-}" == "1" && -n "${HOME:-}" ]] || return 0
+  local rec dir now prior="" arts="" out tmp line n i
+  rec="$(tb_record_path)"; dir="${rec%/*}"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$dir" 2>/dev/null || { log "Install record: couldn't create ${dir}; not recorded."; return 0; }
+  if [[ -f "$rec" ]]; then prior="$(cat "$rec" 2>/dev/null || true)"; fi
+  arts="$(printf '%s\n' "$prior" | sed -n 's/^    \({"kind": .*}\),\{0,1\}$/\1/p')"
+  if [[ -n "${1:-}" ]]; then
+    # A kind the schema does not declare would make the whole record invalid, so
+    # it is refused by name and the record keeps what it had.
+    case " ${TB_ARTEFACT_KINDS} " in
+      *" $1 "*) ;;
+      *) log "Install record: '${1}' is not an artefact kind the schema declares; not recorded."; return 0 ;;
+    esac
+    # Keyed on kind + id + path: a re-run that finds it already recorded keeps
+    # the first created_at.
+    local key
+    key="{\"kind\": $(_tb_json "$1"), \"id\": $(_tb_json "${2:-}"), \"path\": $(_tb_json "${3:-}"), "
+    case "$arts" in
+      *"$key"*) ;;
+      *) arts="${arts:+${arts}$'\n'}${key}\"created_at\": \"${now}\"}" ;;
+    esac
+  fi
+  # A CLI-only refresh keeps the recorded substrate too: TB_SUBSTRATE there is
+  # the default this process resolved, not the runtime the install set up.
+  local substrate p_sub
+  substrate="$(_tb_json "$TB_SUBSTRATE")"
+  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]]; then
+    p_sub="$(_tb_record_prior substrate "$prior")"
+    if [[ -n "$p_sub" ]]; then substrate="$p_sub"; fi
+  fi
+  out="{
+  \"schema_version\": ${TB_INSTALL_RECORD_VERSION},
+  \"substrate\": ${substrate},
+  \"user\": $(_tb_record_field user "$(id -un 2>/dev/null || printf '%s' "${USER:-}")" "$prior"),
+  \"cluster_name\": $(_tb_record_field cluster_name "${CLUSTER_NAME:-}" "$prior"),
+  \"kube_context\": $(_tb_record_field kube_context "${TB_KUBE_CONTEXT:-}" "$prior"),
+  \"data_dir\": $(_tb_record_field data_dir "${HOST_DATA_DIR:-}" "$prior"),
+  \"namespace\": $(_tb_record_field namespace "${TB_NAMESPACE:-}" "$prior"),
+  \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$prior"),
+  \"updated_at\": \"${now}\","
+  if [[ -z "$arts" ]]; then
+    out+=$'\n  "artefacts": []\n}'
+  else
+    out+=$'\n  "artefacts": ['
+    n="$(printf '%s\n' "$arts" | wc -l | tr -d ' ')"; i=0
+    while IFS= read -r line; do
+      i=$((i + 1))
+      out+=$'\n    '"$line"
+      if [[ "$i" -lt "$n" ]]; then out+=","; fi
+    done <<<"$arts"
+    out+=$'\n  ]\n}'
+  fi
+  tmp="$(mktemp "${dir}/.install-record.XXXXXX" 2>/dev/null)" || { log "Install record: couldn't write in ${dir}; not recorded."; return 0; }
+  if printf '%s\n' "$out" >"$tmp" 2>/dev/null && mv -f "$tmp" "$rec" 2>/dev/null; then
+    _tb_record_root_copy "$rec"
+  else
+    rm -f "$tmp" 2>/dev/null
+    log "Install record: couldn't write ${rec}; not recorded."
+  fi
+  return 0
+}
+
+# Linux keeps a root copy for sudo and headless uninstalls, at
+# /var/lib/tracebloc/<user>/install-record.json. Written only as root, or with a
+# sudo that needs no password; Tier 0 promised no administrator rights and gets
+# none. Never prompts, never fails the install.
+_tb_record_root_copy() {
+  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
+  [[ "${INSTALL_TIER:-}" != "0" ]] || return 0
+  local user dst
+  user="$(id -un 2>/dev/null)" || return 0
+  [[ -n "$user" ]] || return 0
+  dst="${TB_RECORD_ROOT_DIR:-/var/lib/tracebloc}/${user}/install-record.json"
+  # A CLI-only refresh runs before the tier is known, so the Tier 0 guard above
+  # cannot see it: it refreshes a root copy a full install made and never creates one.
+  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]] && ! _tb_record_root_copy_exists "$dst"; then return 0; fi
+  if [[ "$(id -u 2>/dev/null)" == "0" ]]; then
+    { mkdir -p "${dst%/*}" && cp "$1" "$dst"; } 2>/dev/null \
+      || log "Install record: couldn't write the root copy ${dst}."
+  elif _have_sudo_bin && _real_sudo -n true 2>/dev/null; then
+    { _real_sudo -n mkdir -p "${dst%/*}" && _real_sudo -n cp "$1" "$dst"; } 2>/dev/null \
+      || log "Install record: couldn't write the root copy ${dst}."
+  fi
+  return 0
+}
+
+# Whether the root copy $1 exists, looked up the way it is written: as root, or
+# through a password-free sudo. As the user, its directory is unreadable (made
+# through sudo under umask 077), so a plain -f would always answer "absent".
+_tb_record_root_copy_exists() {
+  if [[ "$(id -u 2>/dev/null)" == "0" ]]; then [[ -f "$1" ]]; return; fi
+  _have_sudo_bin && _real_sudo -n test -f "$1" 2>/dev/null
+}
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 #  The first-run title: "Setting up tracebloc on your machine · <version>".

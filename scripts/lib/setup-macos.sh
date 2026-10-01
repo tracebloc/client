@@ -158,7 +158,7 @@ _install_docker_colima() {
     log "Apple Silicon + macOS 13+ (fresh VM): starting Colima with VZ + Rosetta for amd64 acceleration."
   fi
   # #561: bounded so a hung colima start (stale VZ VM) can't hang forever.
-  spin_cmd_bounded 900 "Starting Docker runtime…" colima "${_colima_args[@]}"
+  spin_cmd_bounded 900 "Starting Docker runtime…" colima "${_colima_args[@]}"  # set-u-safe: seeded with the start verb
 
   if ! _docker_answers_bounded "Verifying Docker started…" "${TB_DOCKER_PROBE_TIMEOUT:-10}"; then
     error "Docker did not start. Try running 'colima status' to investigate."
@@ -1520,6 +1520,7 @@ _install_macos_autostart() {
       warn "Couldn't write the login autostart agent at ${plist}; open Docker Desktop manually after a reboot."
       return 1
     }
+    tb_record_write launch-agent "$label" "$plist"
     # RunAtLoad handles every future GUI login; bootstrap it into THIS session too.
     launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
       || launchctl load -w "$plist" 2>/dev/null || true
@@ -1610,6 +1611,7 @@ _install_macos_autostart() {
       warn "Couldn't write the boot autostart daemon at ${plist}; run 'colima start' manually after a reboot."
       return 1
     }
+    tb_record_write launch-daemon "$label" "$plist"
     # System domain, at boot, no login required.
     sudo launchctl bootstrap system "$plist" 2>/dev/null \
       || sudo launchctl load -w "$plist" 2>/dev/null || true

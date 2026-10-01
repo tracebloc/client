@@ -1054,7 +1054,7 @@ _pf_detect_tls_inspection() {
   # failed/timed-out probe from aborting under `set -euo pipefail` (like _pf_probe_url).
   issuer="$(
     export _TB_PROXY_PASS="$pass"
-    echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null
+    echo | _bounded 8 openssl "${args[@]}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null  # set-u-safe: seeded with the s_client verb
   )" || true   # keep a captured issuer: s_client often exits non-zero (SIGPIPE after
                 # x509 finishes) even on a good handshake; a genuinely empty capture is
                 # still caught by the [[ -z ]] below (Bugbot High, client#589).
@@ -1078,7 +1078,7 @@ _pf_network_profile() {
   [[ "$PF_NET_INSPECT" == "yes" ]]    && parts+=("TLS inspection detected")
   [[ -n "$PF_NET_CA" ]]               && parts+=("your company's certificate is configured")
   local joined="" p
-  for p in "${parts[@]}"; do joined="${joined:+$joined; }$p"; done
+  for p in "${parts[@]}"; do joined="${joined:+$joined; }$p"; done  # set-u-safe: past the early return, a proxy or TLS inspection adds a part
   info "Network: ${joined}."
   return 0
 }
@@ -1164,7 +1164,7 @@ _pf_connectivity() {
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') fi=0
   local -a fails=()
   tput civis 2>/dev/null || true
-  for c in "${criticals[@]}"; do
+  for c in "${criticals[@]}"; do  # set-u-safe: criticals is a literal list
     label="${c%%|*}"; rest="${c#*|}"; url="${rest%%|*}"
     mode=""; [[ "$rest" == *"|"* ]] && mode="${rest##*|}"
     printf "\r  ${CYAN}%s${RESET} Checking outbound connectivity…" "${frames[fi]}"
@@ -1185,7 +1185,7 @@ _pf_connectivity() {
     success "Connected: tracebloc.io, Docker Hub (registry-1.docker.io), GitHub (ghcr.io)"
   else
     local ff
-    for ff in "${fails[@]}"; do
+    for ff in "${fails[@]}"; do  # set-u-safe: the else of the empty-fails check
       _pf_fail_line "${ff%%|*} unreachable (${ff#*|})"
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       cfail=$(( cfail + 1 ))
@@ -1248,7 +1248,7 @@ _pf_hw_summary_line() {
   disk_kb="$(_pf_free_kb "$disk_target")"
   if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi
   local joined="" p
-  for p in "${parts[@]}"; do joined="${joined:+$joined · }$p"; done
+  for p in "${parts[@]}"; do joined="${joined:+$joined · }$p"; done  # set-u-safe: seeded with ARCH
   success "$joined"
 }
 

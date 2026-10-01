@@ -14,6 +14,9 @@
 #    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
 #
 #  Environment variable overrides (optional):
+#    TRACEBLOC_SUBSTRATE=k3d     default: k3d  (the Kubernetes runtime to set up; the
+#                                installer prints "tracebloc-installer substrate=<name>"
+#                                first, and refuses a runtime it doesn't support)
 #    CLUSTER_NAME=myapp          default: tracebloc
 #    TRACEBLOC_NAMESPACE=myns    default: tracebloc  (k8s namespace + local label;
 #                                not prompted — the client is identified by its credentials)
@@ -143,6 +146,14 @@ main() {
   # the post-install cleanup message doesn't fire after a diagnose run.
   [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
+  # The substrate line (the installer contract, scripts/spec/install-record.schema.json):
+  # printed BEFORE anything below can refuse, so whoever reads this output can tell
+  # which substrate a refusal belongs to. Only then is an unsupported request
+  # refused, by name. --help and --diagnose above install nothing and refuse
+  # nothing, so they print no line.
+  print_substrate_token
+  refuse_unsupported_substrate
+
   # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
   # installs the privileged prerequisites so a researcher can then install
   # unprivileged at Tier 0, and grants them docker-group access. Terminal like
@@ -218,6 +229,8 @@ main() {
     early_data_dir_guard
   fi
   setup_log_file
+  # Committed to installing: from here every artefact is recorded as it is created.
+  TB_RECORD_ARMED=1
   print_banner
 
   # ── Stop-and-check gate ──────────────────────────────────────────────────
@@ -314,6 +327,7 @@ main() {
   # ── e) Install tracebloc ─────────────────────────────────────────────────
   step_header e "Installing tracebloc"
   install_client_helm
+  tb_record_write   # the namespace is decided now
   # Node-level GPU verification (informational): the chart-managed device plugin
   # (client#564) rolls out as part of the Helm release above, so confirm the node
   # now advertises the GPU here rather than before Helm. verify_gpu no-ops for a

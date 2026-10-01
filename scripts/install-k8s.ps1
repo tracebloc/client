@@ -1328,6 +1328,13 @@ $GPU_DEVICE_SELECTOR = ""
 # Detected NVIDIA driver version, quoted back in a GPU-skip reason so the operator can tell at a
 # glance whether theirs is new enough for WSL2 CUDA (#616). Empty until Confirm-NvidiaDriver runs.
 $NVIDIA_DRIVER_VERSION = ""
+# The NVIDIA GPU floors (scripts/spec/facts.env NVIDIA_DRIVER_FLOOR_WINDOWS /
+# NVIDIA_COMPUTE_CAP_FLOOR, stamped by scripts/check-facts.sh --write). Below the
+# compute-capability floor Confirm-NvidiaDriver leaves the GPU off: the install runs
+# CPU-only and $GPU_SKIP_REASON says why. Below the driver floor it warns and keeps the
+# GPU. Policy, so no TRACEBLOC_* override.
+$NVIDIA_DRIVER_FLOOR = "570.65"
+$NVIDIA_COMPUTE_CAP_FLOOR = "7.5"
 # Set by preflight when a GPU download host (nvcr.io / nvidia.github.io / the configured GPU
 # registry) is unreachable. The GPU gate short-circuits on it so we fail fast to CPU with that
 # reason instead of burning minutes on probes/pulls that cannot succeed (#616 Bugbot).
@@ -2100,6 +2107,53 @@ function Print-Roadmap {
 #  GPU DETECTION
 # =============================================================================
 
+# ConvertTo-FloorVersion -- a dotted version ("576.02", "7.5", "570") as a 4-part
+# [version], or $null when the text is not one. Padding to four parts makes a missing
+# part 0 (570 == 570.0, as the bash twin's _tb_version_ge reads it); [version] reads
+# each part as a decimal number, so 12.0 > 7.5 and 576.02 == 576.2.
+function ConvertTo-FloorVersion([string]$Text) {
+  $t = ($Text -replace '\s', '')
+  if ($t -notmatch '^\d+(\.\d+){0,3}$') { return $null }
+  $parts = @($t.Split('.'))
+  while ($parts.Count -lt 4) { $parts += '0' }
+  try { return [version]($parts -join '.') } catch { return $null }
+}
+
+# Get-NvidiaFloorVerdict -- pure twin of detect-gpu.sh's _nvidia_gpu_floor_verdict: ok,
+# below-driver, below-compute or unreadable. $DriverOutput / $CapOutput are nvidia-smi's
+# driver_version and compute_cap answers, one line per GPU, queried SEPARATELY. The
+# lowest of each across all GPUs counts, and one line that is not a version makes that
+# answer unreadable (cannot tell is never a pass).
+#   - The compute capability is judged before the driver: below-compute skips the GPU,
+#     below-driver only warns, so a card too old for the images is never reported as
+#     merely an old driver.
+#   - A driver too old to know compute_cap (the query fails) still reads below-driver.
+#     A driver at or above the floor always answers compute_cap, so there a failed
+#     answer is unreadable.
+function Get-NvidiaFloorVerdict {
+  param([string]$DriverOutput, [string]$CapOutput, [string]$DriverFloor, [string]$CapFloor)
+  $df = ConvertTo-FloorVersion $DriverFloor
+  $cf = ConvertTo-FloorVersion $CapFloor
+  if ($null -eq $df -or $null -eq $cf) { return "unreadable" }
+  $lowest = {
+    param([string]$Out)
+    $low = $null
+    foreach ($line in ([string]$Out).Trim() -split "\r?\n") {
+      $v = ConvertTo-FloorVersion $line
+      if ($null -eq $v) { return $null }
+      if ($null -eq $low -or $v -lt $low) { $low = $v }
+    }
+    return $low
+  }
+  $drv = & $lowest $DriverOutput
+  if ($null -eq $drv) { return "unreadable" }
+  $cap = & $lowest $CapOutput
+  if ($null -ne $cap -and $cap -lt $cf) { return "below-compute" }
+  if ($drv -lt $df) { return "below-driver" }
+  if ($null -eq $cap) { return "unreadable" }
+  return "ok"
+}
+
 function Confirm-NvidiaDriver {
   try {
     $cmd = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
@@ -2120,15 +2174,46 @@ function Confirm-NvidiaDriver {
     # Bounded (installer external-call timeout rule / Bugbot): a wedged driver must not hang the
     # install -- and Find-Gpu now runs before the fast path, so an unbounded nvidia-smi would hang
     # every "nothing to do" re-run too.
-    $dr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=driver_version","--format=csv,noheader") -TimeoutSec 15
+    # -StdoutOnly on BOTH queries (Bugbot on client-dev#1447): the verdict reads every line
+    # as a version and calls any other line unreadable, so a successful nvidia-smi that also
+    # printed a warning to stderr would lose a working GPU. The bash twin reads stdout only
+    # too (a command substitution, with 2>/dev/null). A failing query keeps its stderr.
+    $dr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=driver_version","--format=csv,noheader") -TimeoutSec 15 -StdoutOnly
     # 124 IS THE TIMEOUT, so the code is what separates the two causes this
     # message names -- "failed or timed out" made the operator guess which.
-    if ($dr.Code -ne 0) { Warn "Couldn't query the NVIDIA driver (nvidia-smi exited $(Format-ExitCode $dr.Code); 124 means it timed out) -- GPU checks skipped."; return }
-    $driverVer = ($dr.Output -split "`n" | Select-Object -First 1).Trim()
-    $majorVer  = [int]($driverVer -replace '\..*', '')
-    if ($majorVer -ge 460) {
+    if ($dr.Code -ne 0) {
+      Warn "Couldn't query the NVIDIA driver (nvidia-smi exited $(Format-ExitCode $dr.Code); 124 means it timed out) -- GPU checks skipped."
+      $script:GPU_SKIP_REASON = "the NVIDIA driver version could not be read (nvidia-smi exited $(Format-ExitCode $dr.Code)) -- running CPU-only"
+      return
+    }
+    $driverVer = ([string]$dr.Output -split "`n" | Select-Object -First 1).Trim()
+    $script:NVIDIA_DRIVER_VERSION = $driverVer   # quoted back in a GPU-skip reason (#616)
+    # compute_cap is its own query: a driver too old to know it fails that query alone,
+    # and the floor still reads the driver version.
+    $cr = Invoke-BoundedProcess -FileName $nvSmi -Arguments @("--query-gpu=compute_cap","--format=csv,noheader") -TimeoutSec 15 -StdoutOnly
+    $capOut = if ($cr.Code -eq 0) { [string]$cr.Output } else { "" }
+    # The LOWEST compute capability, as the verdict judges it: on a mixed host the
+    # message names the card that is too old, not whichever GPU nvidia-smi lists first.
+    $capVer = @($capOut -split "\r?\n" | ForEach-Object { $_.Trim() } |
+      Where-Object { $null -ne (ConvertTo-FloorVersion $_) } |
+      Sort-Object { ConvertTo-FloorVersion $_ } | Select-Object -First 1)
+    $capVer = if ($capVer.Count -gt 0) { [string]$capVer[0] } else { "unknown" }
+    $verdict = Get-NvidiaFloorVerdict -DriverOutput ([string]$dr.Output) -CapOutput $capOut -DriverFloor $NVIDIA_DRIVER_FLOOR -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR
+    Log "GPU floor: $verdict (driver $driverVer, floor $NVIDIA_DRIVER_FLOOR; compute capability $capVer, floor $NVIDIA_COMPUTE_CAP_FLOOR)"
+    if ($verdict -eq "ok" -or $verdict -eq "below-driver") {
+      if ($verdict -eq "below-driver") {
+        # A warning, not a skip (Lukas, 2026-09-30, client-dev#1355): the images admit
+        # older drivers on datacenter cards, so the GPU stays on. Confirm-DockerGpu still
+        # probes it, and a driver too old for the image fails there, with a reason.
+        # A driver too old to answer compute_cap: the card itself could not be checked either.
+        if ($capVer -eq "unknown") {
+          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability -- continuing with the GPU, but it may not work until the driver is updated."
+        } else {
+          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training -- continuing with the GPU; if GPU training fails on this machine, update the driver."
+        }
+        Hint "To update: https://www.nvidia.com/Download/index.aspx, reboot, then re-run the installer."
+      }
       $script:NVIDIA_DRIVER_OK = $true
-      $script:NVIDIA_DRIVER_VERSION = $driverVer   # quoted back in a GPU-skip reason (#616)
       Ok "NVIDIA GPU ready (driver $driverVer)"
       # Expectation-setting only, never a gate (#387): entry-level cards pass
       # every check but are too small for real training (field: a 2 GB GT 710
@@ -2140,9 +2225,14 @@ function Confirm-NvidiaDriver {
           Hint "This GPU has $([math]::Round($vramMiB / 1024, 1)) GB VRAM - fine for setup; real training typically needs 8 GB+."
         }
       } catch {}
+    } elseif ($verdict -eq "below-compute") {
+      $script:GPU_SKIP_REASON = "this NVIDIA GPU (compute capability $capVer) is too old for tracebloc's GPU images, which need $NVIDIA_COMPUTE_CAP_FLOOR or newer -- running CPU-only"
+      Warn "This NVIDIA GPU (compute capability $capVer) is too old for tracebloc's GPU images, which need $NVIDIA_COMPUTE_CAP_FLOOR or newer -- this machine will run in CPU mode."
+      Hint "GPU training needs a newer card (NVIDIA Turing or later). Everything else works on CPU."
     } else {
-      Warn "NVIDIA driver $driverVer is too old (need 460+)."
-      Hint "Download latest: https://www.nvidia.com/Download/index.aspx"
+      $script:GPU_SKIP_REASON = "the NVIDIA driver version and compute capability could not be read -- running CPU-only"
+      Warn "Couldn't read this NVIDIA GPU's driver version and compute capability -- this machine will run in CPU mode to be safe."
+      Hint "Check that 'nvidia-smi --query-gpu=driver_version,compute_cap --format=csv' works, then re-run the installer."
     }
   } catch {
     Warn "Could not verify NVIDIA driver: $_"
@@ -3043,11 +3133,11 @@ function Confirm-DockerGpu {
   if ($r.Code -eq 124) {
     $script:GPU_SKIP_REASON = "the Docker GPU probe (docker run --gpus all) timed out -- Docker Desktop may be busy, or the CUDA base image pull is blocked"
   } else {
-    # Name the DETECTED driver and a concrete minimum: our install gate accepts 460+, but CUDA
-    # on WSL2 realistically needs a much newer driver, so "update the driver" alone left people
-    # guessing whether theirs qualified (#616).
+    # Name the DETECTED driver and the floor: a driver below $NVIDIA_DRIVER_FLOOR only
+    # warned in Confirm-NvidiaDriver, so this probe may be where it fails, and naming
+    # the version lets the operator check it (#616).
     $drv = if ($script:NVIDIA_DRIVER_VERSION) { " (this machine reports driver $($script:NVIDIA_DRIVER_VERSION))" } else { "" }
-    $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container$drv -- enable GPU support in Docker Desktop, and update the NVIDIA Windows driver to 525 or newer (WSL2 CUDA needs a recent driver)"
+    $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container$drv -- enable GPU support in Docker Desktop, and update the NVIDIA Windows driver to $NVIDIA_DRIVER_FLOOR or newer (WSL2 CUDA needs a recent driver)"
   }
   return $false
 }
@@ -6143,7 +6233,8 @@ $TRACEBLOC_CHART_NAME = "client"
 # installs). Bash parity: lib/install-client-helm.sh::_image_mirror_yaml.
 # TRACEBLOC_IMAGE_REGISTRY sets global.imageRegistry (the chart's convention that
 # re-homes tracebloc/*, the spawned ingestor + training-job images, and the
-# alpine/* + ubuntu/squid utility images). When the mirror needs auth,
+# alpine/* utility images; the egress gateway's squid-tracebloc is a tracebloc/*
+# image). When the mirror needs auth,
 # TRACEBLOC_REGISTRY_USERNAME / TRACEBLOC_REGISTRY_PASSWORD also mint the chart's
 # imagePullSecret (dockerRegistry), whose server defaults to https://<mirror>.
 # Returns "" when nothing is configured, so a default install's values are byte-
@@ -6202,7 +6293,7 @@ function Get-ImageMirrorYaml {
 # scripts/gen-envelope-embed.sh --check verifies the constants in CI.
 #
 # Regenerate with: scripts/gen-envelope-embed.sh
-$script:TbEnvelopeContractVersion  = 5
+$script:TbEnvelopeContractVersion  = 6
 $script:TbEnvelopeOverheadCpuMilli = 650
 $script:TbEnvelopeOverheadMemBytes = 2214592512
 $script:TbEnvelopeFloorCpuMilli    = 1000
@@ -7991,8 +8082,9 @@ function Install-ClientHelm {
   # private mirror for restricted-network / air-gapped installs. Bash parity:
   # lib/install-client-helm.sh::_image_mirror_yaml. TRACEBLOC_IMAGE_REGISTRY sets
   # global.imageRegistry (the chart's convention that re-homes tracebloc/*, the
-  # spawned ingestor + training-job images, and the alpine/* + ubuntu/squid
-  # utility images). When the mirror needs auth, TRACEBLOC_REGISTRY_USERNAME /
+  # spawned ingestor + training-job images, and the alpine/* utility images; the
+  # egress gateway's squid-tracebloc is a tracebloc/* image). When the mirror
+  # needs auth, TRACEBLOC_REGISTRY_USERNAME /
   # TRACEBLOC_REGISTRY_PASSWORD also mint the chart's imagePullSecret
   # (dockerRegistry). Empty when no mirror is configured, so default installs are
   # unchanged.
@@ -9659,11 +9751,21 @@ function Test-TraceblocCli {
 # logged with the exception type, any Win32 code, and a write probe of the
 # redirect dir, so the next failure says WHICH of the two it was. The retry is
 # unproven -- the logging is what makes the next occurrence diagnosable.
+#
+# And a FOURTH attempt that does not go through Start-Process at all: on the
+# failing runs all three attempts above were refused, redirection or not, while
+# every other Start-Process in the same run (k3d, wsl, dockerd) succeeded. 5.1's
+# Start-Process calls CreateProcess through its own P/Invoke and throws away the
+# Win32 code; [System.Diagnostics.Process]::Start is a different launch path (the
+# one `&` uses) and throws a Win32Exception that keeps it. Same command line, no
+# shell, no redirection. If it is refused too, its code is the diagnosis. The
+# first refusal also logs the launch context (session, interactive, elevated),
+# because "Access is denied" from CreateProcess reads differently in session 0.
 function Format-CliLaunchError($err) {
   $ex = $err.Exception
   $types = @()
   while ($ex) {
-    $types += $ex.GetType().FullName
+    $types += "$($ex.GetType().FullName) (0x$('{0:X8}' -f $ex.HResult))"
     if ($ex -is [System.ComponentModel.Win32Exception]) {
       return "$err [Win32 error $($ex.NativeErrorCode); $($types -join ' <- ')]"
     }
@@ -9683,30 +9785,57 @@ function Get-CliRedirectProbe([string]$Path) {
   "redirect dir $dir is $w; TEMP=$env:TEMP; user=$([Environment]::UserName)"
 }
 
+# Each fact on its own try: a probe that throws (WindowsIdentity off Windows)
+# must not take the rest of the line, or the launch, with it.
+function Get-CliLaunchContext {
+  $session = $(try { [System.Diagnostics.Process]::GetCurrentProcess().SessionId } catch { "unknown" })
+  $elevated = $(try {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+      [Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { "unknown" })
+  "launch context: session=$session; interactive=$([Environment]::UserInteractive); elevated=$elevated; ps=$($PSVersionTable.PSVersion)"
+}
+
+# The .NET launch path, in its own function so a test can stand in for it. The
+# arguments are joined with spaces and not quoted -- what 5.1's Start-Process
+# does with an -ArgumentList array -- so the child sees the same command line.
+function Start-CliInstallerDirect([string[]]$ArgumentList) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "powershell.exe"
+  $psi.Arguments = $ArgumentList -join ' '
+  $psi.UseShellExecute = $false
+  [System.Diagnostics.Process]::Start($psi)
+}
+
 function Start-TraceblocCliInstaller {
   param([string[]]$ArgumentList, [string]$OutFile, [string]$ErrFile, [int]$RetryDelaySec = 5)
   $plans = @(
-    @{ Redirect = $true;  Label = "1/3 (redirected)" },
-    @{ Redirect = $true;  Label = "2/3 (redirected, after ${RetryDelaySec}s)" },
-    @{ Redirect = $false; Label = "3/3 (no redirection)" }
+    @{ Mode = "redirect"; Label = "1/4 (redirected)" },
+    @{ Mode = "redirect"; Label = "2/4 (redirected, after ${RetryDelaySec}s)" },
+    @{ Mode = "plain";    Label = "3/4 (no redirection)" },
+    @{ Mode = "direct";   Label = "4/4 (Process.Start, no redirection)" }
   )
   $last = $null
   for ($i = 0; $i -lt $plans.Count; $i++) {
     $plan = $plans[$i]
     if ($i -gt 0 -and $RetryDelaySec -gt 0) { Start-Sleep -Seconds $RetryDelaySec }
     try {
-      if ($plan.Redirect) {
+      if ($plan.Mode -eq "redirect") {
         $p = Start-Process -FilePath "powershell.exe" -ArgumentList $ArgumentList -NoNewWindow -PassThru `
           -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -ErrorAction Stop
-      } else {
+      } elseif ($plan.Mode -eq "plain") {
         $p = Start-Process -FilePath "powershell.exe" -ArgumentList $ArgumentList -NoNewWindow -PassThru -ErrorAction Stop
+      } else {
+        $p = Start-CliInstallerDirect -ArgumentList $ArgumentList
+        if (-not $p) { throw "Process.Start returned no process" }
       }
       if ($i -gt 0) { Log "tracebloc CLI installer launched on attempt $($plan.Label)." }
       return $p
     } catch {
       $last = $_
       Log "tracebloc CLI installer launch $($plan.Label) refused: $(Format-CliLaunchError $_)"
-      if ($plan.Redirect) { Log "  $(Get-CliRedirectProbe $OutFile)" }
+      if ($i -eq 0) { Log "  $(Get-CliLaunchContext)" }
+      if ($plan.Mode -eq "redirect") { Log "  $(Get-CliRedirectProbe $OutFile)" }
     }
   }
   throw $last
