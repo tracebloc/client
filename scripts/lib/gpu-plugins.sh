@@ -21,7 +21,7 @@ verify_gpu() {
   # nvidia CPU-fallback (client#835): a reused CPU-only cluster or a failed node
   # CDI-gen leaves GPU_VENDOR=nvidia but no GPU wired in. There is then nothing for
   # the 18×5s node poll below to find, and running it would just stall the finish
-  # with a misleading "GPU may still be initializing". Skip it when we know the GPU
+  # with a misleading "could not read / advertises no GPU" warning. Skip it when we know the GPU
   # wasn't wired. Guarded with `declare -F` so gpu-plugins.sh can still be sourced
   # standalone (its bats suite does) without common.sh's _gpu_wired. amd has no
   # wiring flag, so it keeps verifying on detection as before.
@@ -35,7 +35,7 @@ verify_gpu() {
   # The device plugin now rolls out with the Helm release, and `helm upgrade
   # --install` does not --wait, so give the DaemonSet a bounded chance to become
   # Ready before polling node GPU capacity. Without this the node poll can expire
-  # while the plugin is still pulling and report "may still be initializing" on a
+  # while the plugin is still pulling and report "advertises no GPU" on a
   # healthy install (client#564 / Bugbot). Best-effort: a namespace override or a
   # genuinely stuck rollout falls through to the node poll below, which is the
   # real check.
@@ -51,23 +51,61 @@ verify_gpu() {
       --timeout=120s >/dev/null 2>&1 || true
   fi
 
+  # The node poll reads the advertised COUNT, never the mere presence of a
+  # `…gpu…` key (client-dev#1555): a device plugin that registered but found no
+  # usable device advertises `nvidia.com/gpu: "0"`, and a presence test read that
+  # as "GPU verified" while every GPU pod stayed Pending. Only a count above 0 is
+  # success; a 0 (or no key) and an unreadable count each say what they are. The
+  # last poll's answer decides the message.
+  local _gpu_res="${GPU_VENDOR}.com/gpu" _gpu_count="" _gpu_read=0
   for i in {1..18}; do
-    # --request-timeout bounds the call: the 18×5s cap is only re-checked between
-    # iterations, so an unbounded get-nodes against a wedged API would hang here.
-    # `| head -5` retired (backend#1778): on a large cluster `-o json` outruns the
-    # pipe buffer, sed takes SIGPIPE, and the `|| echo ""` that stops the abort
-    # also turns the truncation into an EMPTY result — i.e. "no GPU" on a GPU
-    # cluster. Capture first, then slice.
-    _gpu_json=$(kubectl get nodes -o json --request-timeout=5s 2>/dev/null || echo "")
-    _gpu_pairs=$(grep -o '"[^"]*gpu[^"]*"\s*:\s*"[^"]*"' <<<"$_gpu_json" \
-      | sed 's/"//g; s/\s*:\s*/=/g' || echo "")
-    RAW=$(head -5 <<<"$_gpu_pairs")
-    if [[ -n "$RAW" ]]; then
-      success "GPU verified and available."
-      log "GPU resource on node: $RAW"
-      return
+    if _gpu_count=$(_gpu_alloc_count "$GPU_VENDOR"); then
+      _gpu_read=1
+      if [[ "$_gpu_count" -gt 0 ]]; then
+        success "GPU verified and available: the node advertises ${_gpu_count} ${_gpu_res}."
+        return
+      fi
+    else
+      _gpu_read=0
     fi
     sleep 5
   done
-  warn "GPU may still be initializing. Check back shortly."
+  if [[ "$_gpu_read" -eq 1 ]]; then
+    warn "The node advertises no GPU (${_gpu_res}: ${_gpu_count}) — GPU jobs will wait until it does."
+    if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+      hint "Enable persistence mode from boot (nvidia-persistenced, or 'sudo nvidia-smi -pm 1' before the cluster starts), reboot, and re-run the installer — or upgrade to NVIDIA driver 550 or later."
+    else
+      hint "Check that the AMD GPU device plugin found the GPU, then re-run the installer."
+    fi
+  else
+    warn "Could not read the node's GPU count (${_gpu_res}) — the GPU is not verified."
+  fi
+}
+
+# _gpu_alloc_count VENDOR — print the allocatable GPU count summed over the
+# nodes, as a whole number (client-dev#1555). A node without the vendor key
+# counts 0. Returns 1 — "cannot tell", never a count — when the read failed, no
+# node came back, or a node's value is not a whole number. jsonpath keeps the
+# output to one short line per node, so nothing is piped through a slicer that
+# could truncate it (the backend#1778 SIGPIPE trap). --request-timeout bounds the
+# call: the 18×5s cap is only re-checked between polls.
+_gpu_alloc_count() {
+  local _key _out _line _val _total=0 _nodes=0
+  case "$1" in
+    nvidia) _key='nvidia\.com/gpu' ;;
+    amd) _key='amd\.com/gpu' ;;
+    *) return 1 ;;
+  esac
+  _out=$(kubectl get nodes --request-timeout=5s \
+    -o "jsonpath={range .items[*]}{.metadata.name}={.status.allocatable.${_key}}{\"\n\"}{end}" 2>/dev/null) || return 1
+  while IFS= read -r _line; do
+    [[ -n "$_line" ]] || continue
+    _nodes=$((_nodes + 1))
+    _val="${_line#*=}"
+    [[ -n "$_val" ]] || continue
+    [[ "$_val" =~ ^[0-9]+$ ]] || return 1
+    _total=$((_total + 10#$_val))
+  done <<<"$_out"
+  [[ "$_nodes" -gt 0 ]] || return 1
+  echo "$_total"
 }

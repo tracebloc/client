@@ -95,6 +95,13 @@ _nvidia_gpu_floor_gate() {
       else
         hint "To upgrade: install NVIDIA driver ${floor} or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
       fi
+      # The measured remedy for keeping an older driver (S-G, tracebloc/backend#4830):
+      # at 535 the GPUs failed to initialise and the node advertised 0, until
+      # persistence mode was on from boot. A driver too old to report compute_cap is
+      # older than anything S-G ran, so it gets the upgrade alone.
+      if [[ "$cap" != unknown ]]; then
+        hint "Or keep this driver: turn persistence mode on from boot (nvidia-persistenced, or 'sudo nvidia-smi -pm 1' before the cluster starts), reboot, then re-run the installer. Driver 535 needed it to bring the GPU up."
+      fi
       ;;
     below-compute)
       warn "This NVIDIA GPU (compute capability ${cap}) is too old for tracebloc's GPU images, which need ${cap_floor} or newer — this machine will run in CPU mode."

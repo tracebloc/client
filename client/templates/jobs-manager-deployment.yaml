@@ -747,6 +747,22 @@ spec:
           value: {{ include "tracebloc.ingestorDigest" . | quote }}
         - name: TRACEBLOC_INGESTOR_IMAGE_DIGEST
           value: {{ include "tracebloc.ingestorDigest" . | quote }}
+        {{- /* What the pinned ingestor image says about itself
+             (tracebloc/cli-dev#971): the CLI reads these off this Deployment
+             before it copies any data and refuses a task the image can't run.
+             Rendered only when the effective digest has a
+             images.ingestor.pinnedImageLabels entry, so a floating tag or an
+             unlisted operator pin renders neither and reads as "unknown". */}}
+        {{- $ingVersion := include "tracebloc.ingestorPinLabel" (dict "root" . "key" "version") }}
+        {{- if $ingVersion }}
+        - name: TRACEBLOC_INGESTOR_IMAGE_VERSION
+          value: {{ $ingVersion | quote }}
+        {{- end }}
+        {{- $ingCaps := include "tracebloc.ingestorPinLabel" (dict "root" . "key" "capabilities") }}
+        {{- if $ingCaps }}
+        - name: TRACEBLOC_INGESTOR_CAPABILITIES
+          value: {{ $ingCaps | quote }}
+        {{- end }}
         - name: REQUESTS_PROXY_URL
           value: "http://requests-proxy-service:8888"
         - name: TRACEBLOC_REQUESTS_PROXY_URL

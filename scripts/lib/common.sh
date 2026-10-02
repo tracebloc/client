@@ -1337,7 +1337,7 @@ TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a716
 # leaves the GPU unwired and the install runs CPU-only; below the driver floor it
 # warns and wires the GPU anyway. Policy, so no TRACEBLOC_* override.
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh and gpu-nvidia.sh
-TB_NVIDIA_DRIVER_FLOOR="570.26"
+TB_NVIDIA_DRIVER_FLOOR="550"
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
 TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d

@@ -2094,6 +2094,31 @@ true
 {{- end }}
 
 {{/*
+tracebloc.ingestorPinLabel — one label of the ingestor image this edge spawns,
+read from images.ingestor.pinnedImageLabels by the EXACT digest
+tracebloc.ingestorDigest picks (tracebloc/cli-dev#971). Empty when no digest
+applies (a floating tag), when that digest has no entry (an operator pin the
+chart never read), or when the entry lacks the key (an image without that
+label). The CLI reads the rendered values before it copies any data.
+
+Keyed by digest so the label can never describe another image: the pin
+decision lives in tracebloc.ingestorDigest alone, and this only looks it up.
+Nil-guarded for --reuse-values from a release that predates the key.
+
+Usage: {{ include "tracebloc.ingestorPinLabel" (dict "root" $ "key" "version") }}
+*/}}
+{{- define "tracebloc.ingestorPinLabel" -}}
+{{- $digest := include "tracebloc.ingestorDigest" .root -}}
+{{- if $digest -}}
+{{- $ing := default dict (index (default dict .root.Values.images) "ingestor") -}}
+{{- $entry := get (default dict $ing.pinnedImageLabels) $digest -}}
+{{- if kindIs "map" $entry -}}
+{{- get $entry .key | default "" | toString -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 tracebloc.proxyEnv — corporate-proxy env for egress-needing workloads.
 Derives HTTP(S)_PROXY + an auto-augmented NO_PROXY from .Values.env.HTTP_PROXY_*
 so workload pods can reach the backend / registries through a corporate proxy.

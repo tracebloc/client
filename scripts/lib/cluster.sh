@@ -424,45 +424,66 @@ _kubelet_reservation_values() {
 
 # Print the kubelet config drop-in: the image-GC thresholds, plus the node
 # reservation for a measured platform. Pure; returns 1 on a broken reservation
-# embed. The writer below and k3s.sh's _native_k3s_write_config both print it
-# through here, so the two substrates cannot write different kubelet configs.
+# embed, or when the one write of the rendering fails. The writer below and
+# k3s.sh's _native_k3s_write_config both print it through here, so the two
+# substrates cannot write different kubelet configs.
+#
+# The text is built in memory with `printf -v` and written ONCE, so the exit
+# status is that write's and a failed write can never pass as a shorter file;
+# and the reservation is read synchronously, never through `< <(...)`. That
+# process substitution was an asynchronous child, its SIGCHLD landed while the
+# lines after it were being printed into the caller's pipe, and bash 3.2's
+# printf reports the interrupted write (EINTR) rather than retrying it: macOS
+# runners failed the install on it (client-dev#1564).
 _render_kubelet_config() {
-  local platform
+  local platform out line
   platform="$(_kubelet_reservation_platform)"
-  {
-    printf 'apiVersion: kubelet.config.k8s.io/v1beta1\n'
-    printf 'kind: KubeletConfiguration\n'
-    printf 'imageGCHighThresholdPercent: %s\n' "${TB_KUBELET_IMAGE_GC_HIGH_PERCENT}"
-    printf 'imageGCLowThresholdPercent: %s\n' "${TB_KUBELET_IMAGE_GC_LOW_PERCENT}"
-    printf 'imageMinimumGCAge: %s\n' "${TB_KUBELET_IMAGE_MIN_GC_AGE}"
-    if _kubelet_reservation_measured "$platform"; then
-      local cpu mem sys
-      read -r cpu mem sys < <(_kubelet_reservation_values "$platform") || return 1
-      [[ -n "$sys" ]] || return 1
-      # `pods` is the kubelet default for enforceNodeAllocatable and k3s's too;
-      # written so the file says what it relies on: the kubepods cgroup is capped
-      # at capacity - kubeReserved - systemReserved, and the eviction threshold is
-      # the kubelet's early warning above that cap. `memory.available` is the ONLY
-      # evictionHard key written: k3s's `imagefs.available` / `nodefs.available`
-      # are merged in from its own drop-in (measured above), and restating them
-      # here would pin k3s's numbers in a second place.
-      printf 'enforceNodeAllocatable:\n- pods\n'
-      printf 'kubeReserved:\n  cpu: %sm\n  memory: %sMi\n' "$cpu" "$mem"
-      printf 'systemReserved:\n  memory: %sMi\n' "$sys"
-      printf 'evictionHard:\n  memory.available: %sMi\n' "${TB_KUBELET_EVICTION_MEM_MIB}"
-    fi
-  }
+  printf -v out 'apiVersion: kubelet.config.k8s.io/v1beta1\nkind: KubeletConfiguration\n'
+  printf -v line 'imageGCHighThresholdPercent: %s\n' "${TB_KUBELET_IMAGE_GC_HIGH_PERCENT}"; out+="$line"
+  printf -v line 'imageGCLowThresholdPercent: %s\n' "${TB_KUBELET_IMAGE_GC_LOW_PERCENT}"; out+="$line"
+  printf -v line 'imageMinimumGCAge: %s\n' "${TB_KUBELET_IMAGE_MIN_GC_AGE}"; out+="$line"
+  if _kubelet_reservation_measured "$platform"; then
+    local vals cpu mem sys
+    vals="$(_kubelet_reservation_values "$platform")" || return 1
+    read -r cpu mem sys <<<"$vals" || return 1
+    [[ -n "$sys" ]] || return 1
+    # `pods` is the kubelet default for enforceNodeAllocatable and k3s's too;
+    # written so the file says what it relies on: the kubepods cgroup is capped
+    # at capacity - kubeReserved - systemReserved, and the eviction threshold is
+    # the kubelet's early warning above that cap. `memory.available` is the ONLY
+    # evictionHard key written: k3s's `imagefs.available` / `nodefs.available`
+    # are merged in from its own drop-in (measured above), and restating them
+    # here would pin k3s's numbers in a second place.
+    printf -v line 'enforceNodeAllocatable:\n- pods\n'; out+="$line"
+    printf -v line 'kubeReserved:\n  cpu: %sm\n  memory: %sMi\n' "$cpu" "$mem"; out+="$line"
+    printf -v line 'systemReserved:\n  memory: %sMi\n' "$sys"; out+="$line"
+    printf -v line 'evictionHard:\n  memory.available: %sMi\n' "${TB_KUBELET_EVICTION_MEM_MIB}"; out+="$line"
+  fi
+  printf '%s' "$out"
 }
 
 # Write the drop-in to $1 (default: _kubelet_config_path) and echo the path. The
 # k3d path; native k3s writes the same rendering as root, with an explicit mode.
+# Each attempt renders, writes a sibling temp file, checks the bytes on disk are
+# the rendering, and only then moves it over the fixed path, so a re-install
+# overwrites and an interrupted write (see the render above) is retried rather
+# than failing the install or leaving a partial file where the kubelet reads.
 _write_kubelet_config() {
-  local cfg="${1:-$(_kubelet_config_path)}" body
-  body="$(_render_kubelet_config)" || return 1
-  # Fixed path, so a re-install must overwrite rather than trip over what is there.
-  mkdir -p "$(dirname "$cfg")" || return 1
-  printf '%s\n' "$body" > "$cfg" || return 1
-  echo "$cfg"
+  local cfg="${1:-$(_kubelet_config_path)}" dir body tmp attempt
+  dir="$(dirname "$cfg")" || return 1
+  mkdir -p "$dir" || return 1
+  tmp="${cfg}.tracebloc-tmp.$$"
+  for attempt in 1 2 3; do
+    if body="$(_render_kubelet_config)" \
+      && printf '%s\n' "$body" > "$tmp" \
+      && printf '%s\n' "$body" | cmp -s - "$tmp" \
+      && mv -f "$tmp" "$cfg"; then
+      echo "$cfg"
+      return 0
+    fi
+    rm -f "$tmp"
+  done
+  return 1
 }
 
 # When a proxy is configured, ensure THIS installer's own kubectl/helm/curl

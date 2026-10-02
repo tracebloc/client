@@ -49,6 +49,8 @@ metadata:
     read_node / read_node_status   -> nodes, nodes/status  get
     list_namespaced_custom_object  -> metrics.k8s.io/pods  list
     get_cluster_custom_object      -> metrics.k8s.io/nodes get
+    read_namespaced_persistent_volume_claim -> persistentvolumeclaims get
+    read_persistent_volume         -> persistentvolumes get
   `pods/log` and `namespaces` were granted but never called; `pods/log` is
   removed because cluster-wide it lets this ServiceAccount read the LOG CONTENTS
   of every pod in the cluster -- including other tenants' training pods, which
@@ -75,6 +77,28 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
+  {{/*
+    The free space for ingest (backend#5118). The monitor reads the data
+    claim's bound PV to find which node directory holds the datasets, and
+    reports the free space of THAT filesystem as `storage_free_gb` -- the
+    room an ingest can actually use, where the Storage pair above measures
+    the node's whole disk (on Docker Desktop, the VM's virtual disk).
+
+    The claim is pinned by NAME: `get` on the one data PVC, not every claim in
+    the cluster. A PV's name is the provisioner's (`pvc-<uid>`), so it cannot
+    be pinned the same way; `get` on a PV returns its spec (path, capacity,
+    node affinity), which holds no data and no secret. No `list`, no `watch`.
+
+    An image older than this grant never calls it; an image newer than an
+    older chart gets a 403 and omits the key. Either order is safe.
+  */}}
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    resourceNames: [{{ include "tracebloc.clientDataPvc" . | quote }}]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

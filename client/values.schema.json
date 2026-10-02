@@ -1118,6 +1118,27 @@
               "pattern": "^(sha256:[a-f0-9]{64})?$",
               "description": "Prod pin for edges whose `serviceDbAccounts` resolves on (every fresh install) — they get DB_USER, so they can run a current ingestor (backend#5099). Applied instead of `prodDigest` when `prodPin` resolves true and service DB accounts are on; empty = use `prodDigest` for every prod edge. Must be a multi-arch index (#186); resolve with scripts/resolve-ingestor-digest.sh and bump Chart.yaml."
             },
+            "pinnedImageLabels": {
+              "type": "object",
+              "description": "What each chart-pinned ingestor image says about itself, keyed by its canonical digest (tracebloc/cli-dev#971): `version` is its org.opencontainers.image.version label, `capabilities` its io.tracebloc.ingestor.capabilities label (omitted when the image has none). Rendered onto jobs-manager as TRACEBLOC_INGESTOR_IMAGE_VERSION / TRACEBLOC_INGESTOR_CAPABILITIES only when the effective ingestor digest has an entry. Read off the image with scripts/ingestor-pin-labels.sh; CI checks every entry against its image.",
+              "propertyNames": {
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
+                  },
+                  "capabilities": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_.:-]*(,[a-z0-9][a-z0-9_.:-]*)*$"
+                  }
+                }
+              }
+            },
             "prodPin": {
               "type": "boolean",
               "description": "Whether `prodDigest` applies on this edge. Default true = pin on prod only; dev/staging carry env.CLIENT_ENV=dev|stg and keep floating on `tag`. Set false on a canary prod edge to float it while the rest of the fleet stays pinned."
