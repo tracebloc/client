@@ -123,7 +123,11 @@ _diagnose_not_ready() {
 # start Docker first; macOS/Windows → Docker Desktop must be launched.
 _reboot_note() {
   # Single dim footer line — the LAST line of the summary.
-  if [[ "$OS" != "Linux" ]]; then
+  # Native k3s (TB_SUBSTRATE=k3s) has no Docker: k3s's install enables the k3s
+  # service on boot, and the node is this host, so the cluster returns with it.
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    echo -e "  ${DIM}After a reboot, tracebloc restarts automatically with the k3s service (check it with: systemctl status k3s).${RESET}"
+  elif [[ "$OS" != "Linux" ]]; then
     if [[ "${TB_MACOS_AUTOSTART:-0}" == "1" ]]; then
       # macOS autostart configured (_install_macos_autostart, #430): the runtime starts on
       # boot/login and the k3d --restart policy brings the cluster back → zero action. Don't
@@ -203,6 +207,7 @@ print_summary() {
   local cver; cver="$(_chart_version "$ns")"
   # Footer log path: HOST_DATA_DIR with $HOME collapsed to ~ (e.g. ~/.tracebloc).
   local logdisp="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  local kdata
   if [[ -n "${HOME:-}" && "$logdisp" == "$HOME"* ]]; then logdisp="~${logdisp#"$HOME"}"; fi
 
   echo ""
@@ -245,7 +250,17 @@ print_summary() {
       # Data location depends on the storage model: hostpath binds /tracebloc on
       # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
       # k3s local-path, so there is no host /tracebloc to point the user at.
-      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+      if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+        # Native k3s: the volumes are on this host, in local-path's storage path.
+        # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
+        # install) with nothing on stdout: say where the data is only when it told us.
+        kdata="$(_native_k3s_storage_path)" || kdata=""
+        if [[ -n "$kdata" ]]; then
+          echo -e "  ${DIM}Logs ${logdisp}  ·  Data ${kdata} (k3s local-path)${RESET}"
+        else
+          echo -e "  ${DIM}Logs ${logdisp}  ·  Data in k3s local-path on this host${RESET}"
+        fi
+      elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         echo -e "  ${DIM}Logs ${logdisp}  ·  Data in-node (k3s local-path)${RESET}"
       else
         echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
@@ -273,12 +288,21 @@ print_summary() {
       echo ""
       echo -e "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
       echo -e "  pulls fail certificate validation (x509). Point the installer at your"
-      echo -e "  corporate CA bundle so the nodes trust it. CA trust is baked in at"
-      echo -e "  cluster-create, so release this machine's secure environment and delete the"
-      echo -e "  cluster first, then re-run with the CA. Releasing comes FIRST: the record is tied"
-      echo -e "  to the cluster, so deleting the cluster alone strands it on your dashboard:"
-      echo -e "    ${TB_CMD}tracebloc delete --keep-data${RESET}   ${DIM}(releases it; keeps your local data)${RESET}"
-      echo -e "    ${TB_CMD}k3d cluster delete ${CLUSTER_NAME:-tracebloc}${RESET}"
+      if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+        # Native k3s reads the CA from /etc/rancher/k3s/registries.yaml each time
+        # the k3s service starts, so a re-run that writes it is the whole remedy:
+        # nothing is released and nothing is deleted.
+        echo -e "  corporate CA bundle so k3s trusts it. k3s reads the CA each time its"
+        echo -e "  service starts, so re-running with the CA rewrites it and restarts k3s"
+        echo -e "  (systemctl restart k3s):"
+      else
+        echo -e "  corporate CA bundle so the nodes trust it. CA trust is baked in at"
+        echo -e "  cluster-create, so release this machine's secure environment and delete the"
+        echo -e "  cluster first, then re-run with the CA. Releasing comes FIRST: the record is tied"
+        echo -e "  to the cluster, so deleting the cluster alone strands it on your dashboard:"
+        echo -e "    ${TB_CMD}tracebloc delete --keep-data${RESET}   ${DIM}(releases it; keeps your local data)${RESET}"
+        echo -e "    ${TB_CMD}k3d cluster delete ${CLUSTER_NAME:-tracebloc}${RESET}"
+      fi
       echo -e "    ${TB_CMD}TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
       echo -e "  ${DIM}(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure.${RESET}"
       echo -e "  Inspect:  ${TB_CMD}kubectl get events -n ${ns} | grep -i x509${RESET}"
@@ -325,17 +349,30 @@ _gpu_test_cmd() {
 }
 
 _log_advanced_info() {
+  local kdata
   log ""
   log "=== Advanced Info (for debugging) ==="
-  log "Volume mount: $HOST_DATA_DIR → /tracebloc"
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    kdata="$(_native_k3s_storage_path)" || kdata=""
+    log "Volumes: ${kdata:-path not readable without root} (k3s local-path, on this host)"
+  else
+    log "Volume mount: $HOST_DATA_DIR → /tracebloc"
+  fi
   log ""
   log "Useful commands:"
   log "  kubectl get nodes -o wide"
   log "  kubectl get pods -A"
   log "  kubectl get pods -n ${TB_NAMESPACE:-default}"
-  log "  k3d cluster stop $CLUSTER_NAME"
-  log "  k3d cluster start $CLUSTER_NAME"
-  log "  k3d cluster delete $CLUSTER_NAME"
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    log "  sudo systemctl stop k3s"
+    log "  sudo systemctl start k3s"
+    log "  systemctl status k3s"
+    log "  journalctl -u k3s"
+  else
+    log "  k3d cluster stop $CLUSTER_NAME"
+    log "  k3d cluster start $CLUSTER_NAME"
+    log "  k3d cluster delete $CLUSTER_NAME"
+  fi
   if _gpu_wired; then
     # runtimeClassName: nvidia is REQUIRED — the GPU node's containerd invokes the
     # NVIDIA runtime only for that class (client#835); a plain pod gets no GPU.

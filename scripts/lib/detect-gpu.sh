@@ -78,6 +78,9 @@ _nvidia_gpu_floor_gate() {
   case "$TB_GPU_FLOOR_VERDICT" in
     ok) ;;
     below-driver)
+      # Native k3s wires no GPU yet, so the install runs CPU-only and the driver
+      # floor is moot: "continuing with the GPU" here would be false.
+      if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then return 0; fi
       if has ubuntu-drivers; then cmd="sudo ubuntu-drivers install --gpgpu nvidia:${floor%%.*}-server"
       elif has apt-get; then cmd="sudo apt-get install -y nvidia-driver-${floor%%.*}"
       elif has dnf; then cmd="sudo dnf module install -y nvidia-driver:latest-dkms"

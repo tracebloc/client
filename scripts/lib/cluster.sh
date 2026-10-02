@@ -360,9 +360,10 @@ _kubelet_config_path() {
   printf '%s/kubelet/kubelet.yaml' "${HOST_DATA_DIR:-$HOME/.tracebloc}"
 }
 
-# The platform key the reservation table is indexed by: `darwin`, `linux` or
-# `windows`. A function, so the bats suite can drive the writer as either
-# platform (and as one with no record) on whatever host runs the tests.
+# The platform key the reservation table is indexed by: `darwin`, `linux`,
+# `windows`, or `linux_k3s` for native k3s. A function, so the bats suite can
+# drive the writer as either platform (and as one with no record) on whatever
+# host runs the tests.
 #
 # NOT THE KERNEL NAME (backend#3861). Inside a WSL2 distro `uname -s` is `Linux`,
 # and the WSL2 route is the one docs/INSTALL.md recommends for Windows -- so a
@@ -379,21 +380,67 @@ _kubelet_config_path() {
 # fixed; `unknown` matches no row in the generated table, so the writer emits no
 # reservation and the create path says why -- unreserved and honest, the same
 # posture as a platform nobody has measured yet.
+#
+# NATIVE k3s IS ITS OWN KEY, `linux_k3s` (TB_SUBSTRATE=k3s on Linux outside WSL).
+# The `linux` row was measured on a k3d node, where Docker and the node container
+# sit outside the kubelet's view; borrowing it for a host that runs k3s directly
+# would restate a number measured on another substrate (rule 1). Until a
+# `linux_k3s` row is measured the writer emits no reservation and the create
+# path says so, the same posture as any unmeasured platform. k3s on darwin or
+# inside WSL is `unknown`: the k3s create path refuses both hosts.
 _kubelet_reservation_platform() {
   local kernel
   kernel="$(uname -s | tr '[:upper:]' '[:lower:]')"
-  [[ "$kernel" == "linux" ]] || { printf '%s' "$kernel"; return 0; }
+  if [[ "$kernel" != "linux" ]]; then
+    if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then printf 'unknown'; else printf '%s' "$kernel"; fi
+    return 0
+  fi
   # SILENT here: this function returns a VALUE, and its callers (the writer, the
   # e2e check) read `$output` as a path or a key. The reason `unknown` was
   # selected is spoken once, by the create path below, where a warning belongs.
   declare -F _probe_wsl >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-  if _probe_wsl; then printf 'windows'; else printf 'linux'; fi
+  if _probe_wsl; then
+    if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then printf 'unknown'; else printf 'windows'; fi
+  elif [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    printf 'linux_k3s'
+  else
+    printf 'linux'
+  fi
 }
 
 # Does the generated table carry a MEASURED entry for this platform?
 _kubelet_reservation_measured() {
   local platforms=" ${TB_KUBELET_RESERVATION_PLATFORMS:-} "
   [[ "$platforms" == *" $1 "* ]]
+}
+
+# The warning for a platform with no measured reservation, said ONCE per run
+# (backend#2460: the operator is told rather than handed a number borrowed from
+# another platform; "cannot tell" is a finding, not a default). Every step that
+# learns it calls this, so one install never warns twice about the same node:
+# k3d's create path, and on native k3s the pre-create fit gate. Silent for a
+# measured platform.
+_kubelet_reservation_warn_unmeasured() {
+  local platform="${1:-$(_kubelet_reservation_platform)}"
+  _kubelet_reservation_measured "$platform" && return 0
+  [[ -z "${TB_RESERVATION_WARNED:-}" ]] || return 0
+  TB_RESERVATION_WARNED=1
+  if [[ "$platform" == "unknown" ]] && declare -F _probe_wsl >/dev/null 2>&1; then
+    # The detector IS loaded: `unknown` is native k3s on a host the k3s create
+    # path refuses (macOS, or WSL), not a missing probe. Say that, not "re-run".
+    warn "No node reservation will be written: native k3s has no measured reservation on this host (macOS or WSL), so allocatable will equal capacity on this node."
+    hint "Native k3s runs on Linux outside WSL; this host needs the installer's default substrate instead."
+  elif [[ "$platform" == "unknown" ]]; then
+    # An absent probe.sh (a stale bootstrap that did not fetch it): this Linux
+    # kernel cannot be told apart from WSL2, and guessing linux is the defect
+    # the detection replaced. Say why, once, here -- not from the selector.
+    warn "No node reservation will be written: the host detector (probe.sh) is not loaded, so this Linux kernel cannot be told apart from WSL2 and no platform's measured numbers apply. Allocatable will equal capacity on this node."
+    hint "Re-run the installer from a fresh bootstrap so probe.sh is fetched; the reservation is then written for the platform detected."
+  else
+    warn "No measured node reservation exists for platform '${platform}' ($(uname -s)) yet, so this node's allocatable will equal its capacity -- the training envelope is sized against a number that includes the kubelet and container runtime."
+    hint "Measure one with scripts/tests/measure-node-reservation.sh (tracebloc/client) and both installers pick it up."
+  fi
+  return 0
 }
 
 # The three reservation values for a measured platform, echoed as
@@ -528,8 +575,16 @@ _tty_usable() { { : <"$TB_TTY"; } 2>/dev/null; }
 # Deliberately scoped to HOST_DATA_DIR only: HOST_DATASET_DIR may be a shared
 # network mount other tools use, so the guard never scans or touches it. Empty
 # dirs, values.yaml and install-*.log are not data and are ignored.
+#
+# On native k3s (TB_SUBSTRATE=k3s) the volumes live in local-path's storage path
+# instead, so the native scan below runs first; HOST_DATA_DIR is still scanned,
+# because data an earlier install left there is stranded either way.
 _leftover_data_dirs() {
-  local base="${HOST_DATA_DIR:-}"
+  local base="${HOST_DATA_DIR:-}" native=""
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    native="$(_leftover_k3s_volume_dirs)"
+    [[ -z "$native" ]] || printf '%s\n' "$native"
+  fi
   [[ -n "$base" && -d "$base" ]] || return 0
   local -a candidates=("$base/mysql" "$base/data")
   local sub
@@ -544,6 +599,10 @@ _leftover_data_dirs() {
     # `mysql` system schema ($base/mysql/mysql) as a second leftover root, which
     # confuses the prompt and doubles up wipe targets (Bugbot #384).
     case "${sub%/}" in "$base/mysql"|"$base/data") continue ;; esac
+    # Likewise a volume the native scan already named: when the operator's data dir
+    # IS the storage path, a pvc-* volume is a root, and the `mysql` system schema
+    # inside it is not a second leftover (Bugbot).
+    [[ -z "$native" ]] || { grep -qxF -- "${sub%/}" <<<"$native" && continue; }
     candidates+=("${sub%/}/mysql" "${sub%/}/data")
   done
   local d
@@ -577,6 +636,61 @@ _leftover_data_dirs() {
   done
 }
 
+# _leftover_k3s_present PATH -- `present` or `absent`, read as root through the sudo
+# shadow (k3s owns the storage path, and a parent it made 0700 hides PATH from the
+# daily user). Empty when root cannot answer, which is "cannot tell", never absent.
+_leftover_k3s_present() {
+  sudo sh -c 'if [ -e "$1" ]; then echo present; else echo absent; fi' _ "$1" 2>/dev/null || true
+}
+
+# The native k3s scan: every local-path volume directory (pvc-*, with anything in
+# it) under the storage path _native_k3s_storage_path names (k3s.sh): k3s's
+# default, or the operator's data dir. Read as root. FAIL CLOSED: a storage path
+# root cannot be read is echoed itself, as data nobody could prove absent, and a
+# storage path that cannot be told (config.yaml unreadable) echoes config.yaml.
+# This runs inside the guard's process substitution, whose status nobody reads, so
+# it must print rather than fail.
+_leftover_k3s_volume_dirs() {
+  local storage out rc=0
+  storage="$(_native_k3s_storage_path)" || { printf '%s\n' "$TB_K3S_CONFIG_PATH"; return 0; }
+  case "$(_leftover_k3s_present "$storage")" in
+    absent)  return 0 ;;
+    present) ;;
+    *)       printf '%s\n' "$storage"; return 0 ;;
+  esac
+  out="$(sudo find "$storage" -mindepth 1 -maxdepth 1 -type d -name 'pvc-*' ! -empty 2>/dev/null)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then printf '%s\n' "$storage"; return 0; fi
+  [[ -z "$out" ]] || printf '%s\n' "$out"
+  return 0
+}
+
+# True only when the k3s service is known to be stopped. Its volumes are open while
+# it runs, so a wipe under it deletes data a live workload holds. No answer from
+# systemctl is "cannot tell", which refuses as a running service does.
+_leftover_k3s_service_stopped() {
+  local state
+  state="$(systemctl is-active k3s 2>/dev/null)" || true
+  case "${state%%$'\n'*}" in
+    inactive|failed|unknown) return 0 ;;
+  esac
+  return 1
+}
+
+# _leftover_where PATH... -- where the found data lies, for the guard's copy:
+# HOST_DATA_DIR (k3d, always), and on native k3s the storage path when a found
+# path is under it.
+_leftover_where() {
+  local storage="" d in_s=0 in_h=0
+  [[ "${TB_SUBSTRATE:-}" == "k3s" ]] && storage="$(_native_k3s_storage_path)"
+  for d in "$@"; do
+    if [[ -n "$storage" && ( "$d" == "$storage" || "$d" == "$storage"/* ) ]]; then in_s=1; else in_h=1; fi
+  done
+  if (( in_s && in_h )); then printf '%s and %s' "$storage" "$HOST_DATA_DIR"
+  elif (( in_s )); then printf '%s' "$storage"
+  else printf '%s' "$HOST_DATA_DIR"
+  fi
+}
+
 # Read one line from $TB_TTY into the named variable, stripping bracketed-paste
 # / CSI escape garbage (arrow keys, pastes survive `read -r`) and trimming
 # surrounding whitespace — so a paste or a spaces-then-Enter can't smuggle
@@ -597,6 +711,10 @@ _read_sanitized() {
 # the host user can't remove) so the caller can fail closed instead of letting
 # create_cluster adopt the survivors — a warn-and-proceed would silently break
 # the "wipe means gone" guarantee.
+#
+# On native k3s it also removes a pvc-* volume directory directly under the
+# storage path, and every removal and its check run as root (through sudo; k3s owns
+# the volumes). It never runs while the k3s service may be running.
 _wipe_leftover_data() {
   # Belt-and-suspenders (Lukas review, #384): never wipe unless HOST_DATA_DIR is
   # a non-empty path strictly under $HOME — exactly what validate_config enforces.
@@ -606,7 +724,21 @@ _wipe_leftover_data() {
   # function itself so it holds for every caller, not just the current one.
   [[ -n "${HOST_DATA_DIR:-}" && "$HOST_DATA_DIR" == "$HOME"/* ]] \
     || error "Refusing to wipe: HOST_DATA_DIR is unset or not under \$HOME (got '${HOST_DATA_DIR:-}')."
-  local d rc=0
+  local d rc=0 storage=""
+  local -a as_root=()
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    _leftover_k3s_service_stopped \
+      || error "Refusing to wipe while the k3s service may be running: its volumes are in use. Stop it with 'sudo systemctl stop k3s', check 'systemctl is-active k3s' says inactive, then re-run."
+    local src=0
+    storage="$(_native_k3s_storage_path)" || src=$?
+    if [[ "$src" -eq 3 ]]; then   # needs the password: ask once, retry once
+      declare -F preflight_sudo >/dev/null 2>&1 && preflight_sudo
+      src=0; storage="$(_native_k3s_storage_path)" || src=$?
+    fi
+    [[ "$src" -eq 0 ]] \
+      || error "Refusing to wipe: couldn't read ${TB_K3S_CONFIG_PATH}, so where k3s keeps its volumes can't be told."
+    as_root=(sudo)
+  fi
   for d in "$@"; do
     case "$d" in
       "$HOST_DATA_DIR"/*)
@@ -616,19 +748,26 @@ _wipe_leftover_data() {
           warn "Refusing to wipe symlink ${d} — it could point outside ${HOST_DATA_DIR}; remove it by hand."
           rc=1; continue
         fi
-        log "Wiping leftover data: ${d}"
-        rm -rf "$d" 2>/dev/null || true
-        # Verify — do not trust rm's exit code alone.
-        if [[ -e "$d" ]]; then
-          warn "Could not remove ${d} — files may be owned by another user (root/container)."
-          rc=1
-        fi
         ;;
       *)
-        warn "Refusing to wipe ${d} — outside ${HOST_DATA_DIR}."
-        rc=1
+        # The native storage path's own volume dirs, and nothing else: one level,
+        # pvc-*, no `..` (detection lists them with find -type d, so no symlink).
+        if [[ -z "$storage" || "$d" != "$storage"/pvc-* || "$d" == *"/.."* || "${d#"$storage"/}" == */* ]]; then
+          warn "Refusing to wipe ${d} — outside ${HOST_DATA_DIR}."
+          rc=1; continue
+        fi
         ;;
     esac
+    log "Wiping leftover data: ${d}"
+    ${as_root[@]+"${as_root[@]}"} rm -rf "$d" 2>/dev/null || true
+    # Verify — do not trust rm's exit code alone. As root on k3s, where a check
+    # that cannot answer is a survivor, never a removal.
+    if [[ -n "$storage" ]]; then
+      [[ "$(_leftover_k3s_present "$d")" == "absent" ]] || { warn "Could not remove ${d} as root."; rc=1; }
+    elif [[ -e "$d" ]]; then
+      warn "Could not remove ${d} — files may be owned by another user (root/container)."
+      rc=1
+    fi
   done
   return "$rc"
 }
@@ -643,16 +782,48 @@ guard_leftover_data() {
 
   local -a found=()
   local d
+  # Native k3s: where the volumes live is read here, in the main shell, so a
+  # config.yaml that cannot be read stops the run by name instead of reading as
+  # an empty scan inside the process substitution below.
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    local src=0
+    _native_k3s_storage_path >/dev/null || src=$?
+    if [[ "$src" -eq 3 ]]; then   # root-only config.yaml: ask for the password once, retry once
+      declare -F preflight_sudo >/dev/null 2>&1 && preflight_sudo
+      src=0; _native_k3s_storage_path >/dev/null || src=$?
+    fi
+    [[ "$src" -eq 0 ]] \
+      || error "Couldn't read ${TB_K3S_CONFIG_PATH}, so whether this machine holds tracebloc data can't be told. Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
+  fi
   while IFS= read -r d; do [[ -n "$d" ]] && found+=("$d"); done < <(_leftover_data_dirs)
   [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
 
-  warn "Existing tracebloc data found under ${HOST_DATA_DIR}:"
+  # Native k3s (TB_SUBSTRATE=k3s) words each line for its own storage: the data
+  # lies in the storage path as well as HOST_DATA_DIR (_leftover_where), and a
+  # fresh install gives its volumes new directories, so nothing found is adopted.
+  # hostpath is never offered there: native k3s has no hostpath mode.
+  local where k3s="" frozen=""
+  where="$(_leftover_where "${found[@]}")"  # set-u-safe: the empty-found check above returns first
+  [[ "${TB_SUBSTRATE:-}" == "k3s" ]] && k3s=1
+  # A config.yaml froze the storage path: another data dir does not move the
+  # volumes, so "install into a different directory" is not an escape and is not
+  # offered (the same scan would find the same volumes and ask again).
+  # A frozen check that cannot answer (rc 2) is treated as frozen: do not offer an
+  # escape that may not exist.
+  if [[ -n "$k3s" ]]; then
+    local frc=0
+    _native_k3s_storage_frozen || frc=$?
+    [[ "$frc" -eq 1 ]] || frozen=1
+  fi
+  warn "Existing tracebloc data found under ${where}:"
   for d in "${found[@]}"; do hint "  • ${d}"; done  # set-u-safe: the empty-found check above returns first
   # The "silently adopt" warning is true ONLY for hostpath. Under node-local (the
   # default since D15, client#456) a fresh install does NOT adopt this data — the
   # cluster starts empty in-node and the host data is stranded. Leading with the
   # adopt claim there would contradict the very next line (client#456 Bugbot).
-  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+  if [[ -n "$k3s" ]]; then
+    hint "A fresh native k3s install does NOT adopt this data: its volumes get new directories, so the data would be stranded, not used."
+  elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     hint "node-local storage keeps data inside the cluster node — a fresh install does NOT adopt this ~/.tracebloc data; it would be stranded, not used."
   else
     hint "A fresh install would silently adopt it, so it would not really be fresh."
@@ -662,7 +833,9 @@ guard_leftover_data() {
   if [[ -z "$action" ]]; then
     if _tty_usable; then
       prompt_header "How should the installer handle it?"
-      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+      if [[ -n "$k3s" ]]; then
+        hint "  [r] keep  — leave the existing data on disk, unused (a fresh install starts empty; it is NOT adopted)"
+      elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local can't adopt the host data (no /tracebloc bind-mount) — the
         # cluster starts empty in-node — so don't offer "reuse = adopt" here (#367).
         hint "  [r] keep  — leave the existing data on disk, unused (node-local starts empty; it is NOT adopted)"
@@ -670,10 +843,14 @@ guard_leftover_data() {
         hint "  [r] reuse — keep and adopt the existing data"
       fi
       hint "  [w] wipe  — delete it and start fresh"
-      hint "  [n] new   — install into a different directory"
+      [[ -n "$frozen" ]] || hint "  [n] new   — install into a different directory"
       hint "  [a] abort — stop and sort it out myself (default)"
       local reply=""
-      _read_sanitized "  Choice [r/w/n/a]: " reply
+      if [[ -n "$frozen" ]]; then
+        _read_sanitized "  Choice [r/w/a]: " reply
+      else
+        _read_sanitized "  Choice [r/w/n/a]: " reply
+      fi
       # Accept the word we SHOW: node-local relabels [r] to "keep", so r/reuse AND
       # k/keep must both map to the reuse action or a user typing the shown "keep"
       # would fall through to abort (Bugbot). Lowercase via tr (bash 3.2-safe — no
@@ -682,7 +859,7 @@ guard_leftover_data() {
       case "$choice" in
         r|reuse|k|keep) action=reuse ;;
         w|wipe)         action=wipe ;;
-        n|new)          action=newdir ;;
+        n|new)          if [[ -n "$frozen" ]]; then action=abort; else action=newdir; fi ;;
         *)              action=abort ;;
       esac
     else
@@ -693,17 +870,24 @@ guard_leftover_data() {
       local reuse_desc="adopt the existing data"
       [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && \
         reuse_desc="keep the data on disk, NOT adopted (node-local starts empty in-node)"
-      error "Existing data found under ${HOST_DATA_DIR} and no choice was given (no terminal). Re-run with one of:
+      [[ -n "$k3s" ]] && reuse_desc="keep the data on disk, NOT adopted (a fresh install starts empty)"
+      local newdir_line="
+  TRACEBLOC_HOST_DATA_DIR=<new-path> ...  install into a different directory"
+      [[ -n "$frozen" ]] && newdir_line=""   # config.yaml froze the volumes' directory: the env cannot move them
+      error "Existing data found under ${where} and no choice was given (no terminal). Re-run with one of:
   --reuse-data                    ${reuse_desc}
-  --wipe-data                     delete it and start fresh
-  TRACEBLOC_HOST_DATA_DIR=<new-path> ...  install into a different directory
+  --wipe-data                     delete it and start fresh${newdir_line}
   (or TRACEBLOC_SKIP_LEFTOVER_GUARD=1 to bypass this guard entirely)"
     fi
   fi
 
   case "$action" in
     reuse)
-      if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+      if [[ -n "$k3s" ]]; then
+        warn "A fresh native k3s install can't adopt the data under ${where} — its volumes start empty."
+        hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest')."
+        log "native k3s: left ${where} on disk (NOT adopted)."
+      elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local starts empty in-node — the host data is NOT adopted (RFC-0003
         # §4 / #367). Keep the files on disk but say so plainly, so "reuse" never
         # silently claims an adoption that node-local can't actually do.
@@ -719,12 +903,16 @@ guard_leftover_data() {
       # through to create_cluster, which would adopt the survivors and silently
       # break the "wipe means gone" guarantee.
       if ! _wipe_leftover_data "${found[@]}"; then  # set-u-safe: the empty-found check at the top of this function returns first
-        error "Could not fully wipe existing data under ${HOST_DATA_DIR} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. 'sudo rm -rf ${HOST_DATA_DIR}') and re-run, or choose a different directory. Refusing to proceed and adopt the leftovers."
+        local rm_eg="'sudo rm -rf ${HOST_DATA_DIR}'"
+        [[ -n "$k3s" ]] && rm_eg="'sudo rm -rf' on each path listed above, with k3s stopped"
+        local or_dir=", or choose a different directory"
+        [[ -n "$frozen" ]] && or_dir=""   # config.yaml froze the volumes' directory: there is no other to choose
+        error "Could not fully wipe existing data under ${where} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. ${rm_eg}) and re-run${or_dir}. Refusing to proceed and adopt the leftovers."
       fi
       if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
         hint "Left HOST_DATASET_DIR (${HOST_DATASET_DIR}) untouched — it is a shared mount, not wiped."
       fi
-      log "Wiped leftover data under ${HOST_DATA_DIR} (user choice)."
+      log "Wiped leftover data under ${where} (user choice)."
       ;;
     newdir)
       local newdir=""
@@ -737,7 +925,11 @@ guard_leftover_data() {
       guard_leftover_data
       ;;
     abort|*)
-      error "Aborted — existing data under ${HOST_DATA_DIR} left untouched. Choose reuse / wipe / a new directory and re-run."
+      if [[ -n "$frozen" ]]; then
+        error "Aborted — existing data under ${where} left untouched. Choose keep / wipe and re-run."
+      else
+        error "Aborted — existing data under ${where} left untouched. Choose reuse / wipe / a new directory and re-run."
+      fi
       ;;
   esac
 }

@@ -1584,21 +1584,9 @@ _create_new_cluster() {
   _kubelet_cfg="$(_write_kubelet_config)" \
     || error "Couldn't write the kubelet config to $(_kubelet_config_path) (disk full, the directory not writable, or a broken reservation embed -- see the line above). Re-run; without it the node would keep the stock 85% image-GC threshold and fill up during training."
   # backend#2460: a platform nobody has measured gets NO reservation, and the
-  # operator is told rather than handed a number borrowed from another platform.
-  # "Cannot tell" is a finding, not a default.
-  local _res_platform; _res_platform="$(_kubelet_reservation_platform)"
-  if ! _kubelet_reservation_measured "$_res_platform"; then
-    if [[ "$_res_platform" == "unknown" ]]; then
-      # An absent probe.sh (a stale bootstrap that did not fetch it): this Linux
-      # kernel cannot be told apart from WSL2, and guessing linux is the defect
-      # the detection replaced. Say why, once, here -- not from the selector.
-      warn "No node reservation will be written: the host detector (probe.sh) is not loaded, so this Linux kernel cannot be told apart from WSL2 and no platform's measured numbers apply. Allocatable will equal capacity on this node."
-      hint "Re-run the installer from a fresh bootstrap so probe.sh is fetched; the reservation is then written for the platform detected."
-    else
-      warn "No measured node reservation exists for platform '${_res_platform}' ($(uname -s)) yet, so this node's allocatable will equal its capacity -- the training envelope is sized against a number that includes the kubelet and container runtime."
-      hint "Measure one with scripts/tests/measure-node-reservation.sh (tracebloc/client) and both installers pick it up."
-    fi
-  fi
+  # operator is told rather than handed a number borrowed from another platform
+  # (cluster.sh, said once per run).
+  _kubelet_reservation_warn_unmeasured
   # `@all`, NOT `@server:*`: an agent runs a kubelet and pulls the same 2.7-11 GB
   # task images, so a server-only drop-in would leave agents unbounded -- the same
   # reasoning the cgroupv1 arg above records.

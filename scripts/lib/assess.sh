@@ -587,6 +587,16 @@ assess_existing_install() {
     return 0
   fi
 
+  # Native k3s (TB_SUBSTRATE=k3s): one log line, and no classification. Every
+  # read below asks Docker or k3d, so on k3s they would call a machine with a
+  # tracebloc k3s on it fresh. The k3s presence checks (a tracebloc k3s, a
+  # foreign one, a live k3d) belong to the k3s create path, where they refuse;
+  # this gate returns to the normal flow.
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    log "assess: native k3s -- the stop-and-check assessment does not read k3s; continuing to the install."
+    return 0
+  fi
+
   _assess_classify
   log "assess: INSTALL_STATE=${INSTALL_STATE} reason=${INSTALL_STATE_REASON:-}"
 

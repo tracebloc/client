@@ -105,19 +105,28 @@ _pf_probe_url() {
 # Free space in KB on the filesystem holding $1.
 _pf_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
 
+# $1, or its nearest existing parent: the directory whose filesystem will hold a
+# path that does not exist yet. Empty when nothing on the way up exists.
+_pf_nearest_existing() {
+  local p="$1" parent
+  while [[ -n "$p" && ! -e "$p" ]]; do
+    parent="$(dirname "$p")"
+    [[ "$parent" == "$p" ]] && break
+    p="$parent"
+  done
+  [[ -n "$p" && -e "$p" ]] && printf '%s' "$p"
+  return 0
+}
+
 # Filesystem type holding $1, lower-cased (e.g. ext4, xfs, apfs, overlay, nfs,
 # nfs4, cifs, smbfs), or empty if undeterminable. $1 may not exist yet at
 # preflight, so walk up to the nearest existing parent. Tries findmnt (util-linux,
 # bind-mount aware), then GNU `stat -f` (Linux only — BSD/macOS `stat -f` means
 # "format string", not filesystem), then df+mount (portable, incl. macOS).
 _pf_fstype() {
-  local p="$1" parent t="" mp fstype_out
-  while [[ -n "$p" && ! -e "$p" ]]; do
-    parent="$(dirname "$p")"
-    [[ "$parent" == "$p" ]] && break
-    p="$parent"
-  done
-  [[ -z "$p" || ! -e "$p" ]] && return 0
+  local p t="" mp fstype_out
+  p="$(_pf_nearest_existing "$1")"
+  [[ -z "$p" ]] && return 0
   if has findmnt; then
     # Capture-then-slice, not `| head -1`: head closes the pipe after line 1 and
     # findmnt takes SIGPIPE, which pipefail turns into 141 — and in an ASSIGNMENT
@@ -149,7 +158,13 @@ _pf_fstype() {
 # host and the number that matters (a 36 GB Mac can cap its Docker VM at 4 GB). Echo
 # a single integer, or nothing if the daemon is down / the value is junk — callers
 # then fall back to the host reader. (docker info precedent: _pf_docker_root above.)
+#
+# ON NATIVE k3s THE HOST IS THE NODE (TB_SUBSTRATE=k3s): there is no Docker and no
+# VM, so the budget the pods get is the host's own -- /proc/meminfo's MemTotal and
+# nproc, through the host readers below, which are the tests' stub seams. Neither
+# reader asks Docker anything there.
 _pf_runtime_mem_kb() {
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then _pf_host_mem_kb; return 0; fi
   # Bounded liveness, coreutils-free (#744): _docker_answers bounds through _bounded,
   # which was a no-op on a stock Mac until client-dev#1357; _docker_answers_bounded
   # kills on a deadline via a background PID, with a spinner. Silenced (>/dev/null) — this
@@ -161,6 +176,7 @@ _pf_runtime_mem_kb() {
   return 0
 }
 _pf_runtime_ncpu() {
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then _pf_host_ncpu; return 0; fi
   # Coreutils-free bounded liveness, silenced — see _pf_runtime_mem_kb (#744).
   has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
   local n; n="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.NCPU}}' 2>/dev/null)"
@@ -509,6 +525,25 @@ _pf_mysql_engine_decision() {
   _mysql_engine_decision
 }
 
+# The command that registers amd64 emulation (QEMU binfmt) here, for the arch
+# refusal's remedy. A k3d node runs under Docker, so k3d's remedy is the binfmt
+# image Docker runs. Native k3s has no Docker: its containerd uses the host's own
+# binfmt_misc handlers (/proc/sys/fs/binfmt_misc, which amd64_emulation_available
+# reads), and the distro's QEMU package registers them.
+_pf_binfmt_remedy() {
+  if [[ "${TB_SUBSTRATE:-}" != "k3s" ]]; then
+    printf 'docker run --privileged --rm tonistiigi/binfmt --install amd64'
+  elif has apt-get; then
+    printf 'sudo apt-get install -y qemu-user-static'
+  elif has dnf; then
+    printf 'sudo dnf install -y qemu-user-static'
+  elif has zypper; then
+    printf 'sudo zypper install -y qemu-linux-user'
+  else
+    printf "install your distribution's qemu-user-static package"
+  fi
+}
+
 _pf_arch() {
   case "$ARCH" in
     x86_64|amd64) _pf_ok "Architecture: ${ARCH} (amd64)"; return 0 ;;
@@ -561,14 +596,14 @@ _pf_arch() {
       _pf_fail_line "Existing MySQL 5.7 data on this host pins the install to the MySQL 5.7 engine, and that image is amd64-only — it can't run on ${ARCH}."
       hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
       hint "Keep this data — enable amd64 emulation, then re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "  $(_pf_binfmt_remedy)"
       hint "Or start fresh on the native engine — install into an empty data directory:"
       hint "  --data-dir=/path/to/new/empty/dir" ;;
     explicit)
       _pf_fail_line "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it can't run on ${ARCH}."
       hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
       hint "To keep 5.7, enable amd64 emulation and re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+      hint "  $(_pf_binfmt_remedy)" ;;
     values-file)
       # Dev mode (caller-supplied values file) that did not pin the multi-arch 8.4
       # engine, so the amd64-only 5.7 chart default is what would render. Two fixes:
@@ -576,7 +611,7 @@ _pf_arch() {
       _pf_fail_line "The supplied values file leaves the amd64-only MySQL 5.7 engine in place (it doesn't pin 8.4), and that image can't run on ${ARCH}."
       hint "Pin the native multi-arch 8.4 engine in your values file (images.mysqlClient.tag: \"8.4\" + digest: \"\") — fresh data directories only."
       hint "Or enable amd64 emulation and re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+      hint "  $(_pf_binfmt_remedy)" ;;
     *)
       # Includes `amd64` (unreachable — this host is not amd64) and
       # `no-engine-rule` (the fail-closed answer when the lib holding the rule
@@ -584,7 +619,7 @@ _pf_arch() {
       # there is no 8.4 opt-in to reach.
       _pf_fail_line "Architecture: ${ARCH} — this install needs the amd64-only MySQL 5.7 image and can't run here."
       hint "Fix: enable amd64 emulation and re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64" ;;
+      hint "  $(_pf_binfmt_remedy)" ;;
   esac
   hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway)"
   return 0
@@ -767,6 +802,7 @@ _pf_recheck_runtime_mem() {
 }
 
 _pf_disk() {
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then _pf_disk_k3s; return 0; fi
   local target free_kb free_gb
   target="$(_pf_docker_root)"
   if [[ ! -d "$target" ]]; then target="/"; fi
@@ -786,6 +822,65 @@ _pf_disk() {
     warn "Disk: ${free_gb} GB free on ${target} — recommended ≥ ${PF_WARN_DISK_GB} GB; images + data may fill it."
   else
     _pf_ok "Disk: ${free_gb} GB free on ${target}"
+  fi
+  return 0
+}
+
+# Native k3s (TB_SUBSTRATE=k3s) keeps nothing under Docker's root. Its disk is two
+# paths, each named in the line, against the same floors as k3d's (PF_MIN_DISK_GB,
+# PF_WARN_DISK_GB):
+#   - k3s's data path (/var/lib/rancher/k3s): the images, containerd and its state;
+#   - the storage path, where local-path keeps the volumes: k3s's default under the
+#     data path, or the operator's data dir (_native_k3s_storage_path, k3s.sh).
+# Neither exists before the install, so each is measured on its nearest existing
+# parent, and the line names the directory it measured. Two paths measured on the
+# same directory are one disk: one line names both, and the floor is asked once.
+#
+# On a re-run the storage path is the one config.yaml froze, which only root reads.
+# This is the first reader of a run and runs in the main shell, so when the reader
+# needs the password it asks here, once, through preflight_sudo (whose keepalive the
+# install then keeps). A config.yaml that cannot be read refuses: where the volumes
+# live is not something to guess.
+_pf_disk_k3s() {
+  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0
+  storage="$(_native_k3s_storage_path)" || rc=$?
+  if [[ "$rc" -eq 3 ]]; then
+    preflight_sudo
+    rc=0; storage="$(_native_k3s_storage_path)" || rc=$?
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    _pf_fail_line "Disk: couldn't read ${TB_K3S_CONFIG_PATH}, so where this machine's k3s keeps its volumes can't be told."
+    PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
+    hint "Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
+    return 0
+  fi
+  _native_k3s_storage_drift_warn
+  at_data="$(_pf_nearest_existing "$data")"; [[ -n "$at_data" ]] || at_data="/"
+  at_storage="$(_pf_nearest_existing "$storage")"; [[ -n "$at_storage" ]] || at_storage="/"
+  if [[ "$at_data" == "$at_storage" ]]; then
+    _pf_disk_grade "$at_data" "k3s's data (${data}) and the training data (${storage})"
+  else
+    _pf_disk_grade "$at_data" "k3s's data (${data})"
+    _pf_disk_grade "$at_storage" "the training data (${storage})"
+  fi
+  return 0
+}
+
+# _pf_disk_grade DIR WHAT -- one disk line: the free space on DIR, which will hold
+# WHAT, graded against the Linux floors.
+_pf_disk_grade() {
+  local at="$1" what="$2" free_kb free_gb
+  free_kb="$(_pf_free_kb "$at")"
+  if [[ -z "$free_kb" ]]; then warn "Disk: couldn't determine free space on ${at} for ${what} (skipping)."; return 0; fi
+  free_gb=$(( free_kb / 1024 / 1024 ))
+  if [[ "$free_gb" -lt "$PF_MIN_DISK_GB" ]]; then
+    _pf_fail_line "Disk: only ${free_gb} GB free on ${at} for ${what} — need ≥ ${PF_MIN_DISK_GB} GB."
+    PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
+    hint "Free up space or attach a larger disk, then re-run."
+  elif [[ "$free_gb" -lt "$PF_WARN_DISK_GB" ]]; then
+    warn "Disk: ${free_gb} GB free on ${at} for ${what} — recommended ≥ ${PF_WARN_DISK_GB} GB; images + data may fill it."
+  else
+    _pf_ok "Disk: ${free_gb} GB free on ${at} for ${what}"
   fi
   return 0
 }
@@ -896,10 +991,21 @@ _pf_network_fs_remedy() {
 # dir lands squashed/nobody-owned) before _pf_storage_type below can print its
 # friendly, named failure. Same classification, run first, output only on
 # failure. TRACEBLOC_ALLOW_NETWORK_FS defers to the full check's warning.
+#
+# Native k3s judges the directory _pf_storage_type judges, the storage path, where
+# its database lives: an NFS home with k3s's default storage holds only logs and
+# config, so it passes here as it passes there. When reading the storage path
+# needs a password (or cannot answer), this pre-log guard defers to the full check,
+# which asks and refuses by name. What k3s gives up: a root login whose own home is
+# on a root_squash NFS gets mkdir's bare error instead of this one (a sudo-wrapped
+# run is refused before this point, refuse_sudo_wrapped_install).
 early_data_dir_guard() {
   local target fstype
   target="${HOST_DATA_DIR:-${HOME:-}/.tracebloc}"
   [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    target="$(_native_k3s_storage_path)" || return 0
+  fi
   # An EXISTING data dir has no at-risk mkdir here, and a healthy machine's
   # re-run must keep reaching the assess hand-off exactly as it did when this
   # check lived only in run_preflight (Bugbot #441). The full preflight guard
@@ -929,6 +1035,13 @@ early_data_dir_guard() {
 _pf_storage_type() {
   local target fstype disp
   target="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  # Native k3s keeps the database in a local-path volume, under the storage path, so
+  # that is the directory that must be local. _pf_disk_k3s has already read it (and
+  # refused when it could not: PF_HARD_FAIL is raised and run_preflight stops), so a
+  # failure here adds nothing (preflight.bats pins it).
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    target="$(_native_k3s_storage_path)" || return 0
+  fi
   disp="$target"
   if [[ -n "${HOME:-}" && "$disp" == "$HOME"* ]]; then disp="~${disp#"$HOME"}"; fi
   fstype="$(_pf_fstype "$target")"
@@ -1111,6 +1224,26 @@ _pf_network_profile() {
   return 0
 }
 
+# True on a host where k3s's install.sh installs the k3s-selinux policy from
+# rpm.rancher.io: /usr/share/selinux is a directory, and the host is one its
+# install_selinux_rpm serves -- an rpm release file, or ID_LIKE starting with
+# suse (read from install.sh at v1.36.3+k3s1: setup_selinux, install_selinux_rpm).
+# The api.github.com version lookup beside it times out to a default, so it is not
+# a host the install needs. ROOT (default /) is the tests' seam.
+_pf_k3s_selinux_rpm_host() {
+  local root="${1:-}" f id_like=""
+  [[ -d "${root}/usr/share/selinux" ]] || return 1
+  for f in redhat-release centos-release oracle-release fedora-release system-release; do
+    [[ -r "${root}/etc/${f}" ]] && return 0
+  done
+  if [[ -r "${root}/etc/os-release" ]]; then
+    id_like="$(sed -n 's/^ID_LIKE=//p' "${root}/etc/os-release")"
+    id_like="${id_like%%$'\n'*}"; id_like="${id_like#\"}"; id_like="${id_like%\"}"
+    [[ "${id_like%% *}" == "suse" ]] && return 0
+  fi
+  return 1
+}
+
 _pf_connectivity() {
   _pf_network_profile   # #582: announce the network profile before the probes
   # Can't probe without curl — and on the direct ./install-k8s.sh path the
@@ -1151,8 +1284,28 @@ _pf_connectivity() {
   # would abort supported paths that never touch it (Bugbot). It goes in `soft`
   # (warn-only) below. On Windows Docker Desktop is the sole path, so install-k8s.ps1
   # keeps desktop.docker.com hard there.
-  local soft=()
-  if [[ "$OS" == "Linux" ]]; then
+  local soft=() tool_hosts="dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com" nodes_trust="The k3d nodes are"
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    # NATIVE k3s fetches no k3d, no kubectl (k3s carries its own) and no Docker, so
+    # none of their hosts is probed. What a first install fetches (k3s.sh; measured
+    # on v1.36.3+k3s1 under 1.1b): the binary from github.com, whose release
+    # download redirects to release-assets.githubusercontent.com, and install.sh at
+    # the tag from raw.githubusercontent.com. Keyed on k3s being absent, as k3d's
+    # hosts are keyed on k3d.
+    if ! has k3s; then
+      criticals+=("k3s download (github.com)|https://github.com/" \
+                  "k3s assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/" \
+                  "k3s install script (raw.githubusercontent.com)|https://raw.githubusercontent.com/")
+      # install.sh installs the k3s-selinux policy from rpm.rancher.io, and on an
+      # SELinux-enforcing host a missing policy is fatal to it.
+      if _pf_k3s_selinux_rpm_host; then
+        criticals+=("k3s SELinux policy (rpm.rancher.io)|https://rpm.rancher.io/")
+      fi
+    fi
+    if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+    tool_hosts="github.com / release-assets.githubusercontent.com / raw.githubusercontent.com / get.helm.sh / rpm.rancher.io"
+    nodes_trust="k3s is"
+  elif [[ "$OS" == "Linux" ]]; then
     if ! has k3d;     then criticals+=("k3d download (github.com)|https://github.com/" \
                                        "k3d assets (objects.githubusercontent.com)|https://objects.githubusercontent.com/"); fi
     if ! has kubectl; then criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
@@ -1231,10 +1384,10 @@ _pf_connectivity() {
 
   if [[ "$tls_seen" -eq 1 ]]; then
     hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
-    hint "Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. The k3d nodes are trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
+    hint "Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. ${nodes_trust} trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
   fi
   if [[ "$cfail" -gt 0 ]]; then
-    hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com) — or set HTTP_PROXY if you use a corporate proxy."
+    hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (${tool_hosts}) — or set HTTP_PROXY if you use a corporate proxy."
   fi
   # #585: when the CONTAINER REGISTRIES themselves are blocked (not just any host),
   # the images can't be pulled directly at all — surface the mirror / offline options
@@ -1270,9 +1423,14 @@ _pf_hw_summary_line() {
   # Through the shared converter so the collapsed summary can never disagree with
   # the memory line above it (Bugbot #445 r6).
   if [[ -n "$mem_kb" ]]; then mem_gb="$(_pf_display_gb_from_mib "$(( mem_kb / 1024 ))")"; parts+=("${mem_gb} GB memory"); fi
-  disk_target="$(_pf_docker_root)"
-  if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
-  if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    # k3s's data path, measured where _pf_disk_k3s measures it.
+    disk_target="$(_pf_nearest_existing "$TB_K3S_DATA_PATH")"; [[ -n "$disk_target" ]] || disk_target="/"
+  else
+    disk_target="$(_pf_docker_root)"
+    if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
+    if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host
+  fi
   disk_kb="$(_pf_free_kb "$disk_target")"
   if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi
   local joined="" p

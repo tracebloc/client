@@ -1363,7 +1363,10 @@ HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 # (tb_export_host_data_dir), so a child resolving alias-first sees the decided
 # path and not a stale canonical.
 if [[ -n "${TRACEBLOC_HOST_DATA_DIR:-}" ]]; then HOST_DATA_DIR="$TRACEBLOC_HOST_DATA_DIR"; fi
-HOST_DATA_DIR="${HOST_DATA_DIR:-$HOME/.tracebloc}"
+# The default, named once: native k3s (k3s.sh) reads a data dir other than this
+# one as the operator's choice of where the volumes live.
+TB_HOST_DATA_DIR_DEFAULT="${HOME:-}/.tracebloc"
+HOST_DATA_DIR="${HOST_DATA_DIR:-$TB_HOST_DATA_DIR_DEFAULT}"
 
 # tb_export_host_data_dir — export the decided data dir under both spellings.
 tb_export_host_data_dir() {

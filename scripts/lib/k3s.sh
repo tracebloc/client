@@ -52,6 +52,119 @@ TB_K3S_BIN_PATH="/usr/local/bin/k3s"
 # cluster.sh's TB_NO_PROXY_DEFAULTS, and out of 10/8. k3s.bats derives both from
 # those two declarations and holds each pair inside them.
 TB_K3S_CIDR_PAIRS=("10.42.0.0/16 10.43.0.0/16" "172.16.0.0/17 172.16.128.0/17")
+# k3s's own data path (its `--data-dir`, which the installer never sets): the
+# images, containerd and the server state. Fixed by upstream.
+TB_K3S_DATA_PATH="/var/lib/rancher/k3s"
+# Where local-path puts the volumes when the operator chose no data dir (decided
+# 2026-10-01): k3s's default, inside its data path.
+TB_K3S_STORAGE_DEFAULT="${TB_K3S_DATA_PATH}/storage"
+
+# ── Storage path ──────────────────────────────────────────────────────────────
+
+# _native_k3s_storage_override -- the STORAGE_PATH _native_k3s_render_config takes:
+# the directory local-path keeps the volumes in, or nothing for k3s's default. It is
+# the ONE answer to "where do the volumes live": preflight's disk and storage checks,
+# the leftover guard and the summary read it through _native_k3s_storage_path below,
+# so the directory they measure is the one config.yaml names.
+#
+# FROZEN at first install, like the node name: the volumes already sit in the
+# directory an existing config.yaml names, so a re-run keeps it and never follows the
+# environment. A re-run that asks for another directory is told so, once, by
+# preflight (_native_k3s_storage_drift_warn). With no config.yaml it is this run's
+# choice (_native_k3s_storage_choice).
+#
+# config.yaml is root's (0600), and preflight runs before preflight_sudo asks for the
+# password, so this reads it only when root needs no prompt. A prompt here would sit
+# inside the caller's $(...) (preflight_sudo's keepalive would hold that pipe open).
+# Returns:
+#   0  the directory, or nothing for k3s's default;
+#   2  config.yaml exists and could not be read: cannot tell;
+#   3  config.yaml may exist (TB_K3S_ETC_DIR's parent does) and reading it needs a
+#      password. The caller asks for it in the main shell (preflight_sudo) and calls
+#      again. A host with no /etc/rancher has no config.yaml, so a fresh install
+#      reads its choice with no root and no prompt.
+_native_k3s_storage_override() {
+  local cfg="$TB_K3S_CONFIG_PATH" have rc=0
+  if [[ -e "$(dirname "$TB_K3S_ETC_DIR")" ]]; then
+    _native_k3s_root_ready || return 3
+    if sudo test -e "$cfg"; then
+      have="$(_native_k3s_config_value default-local-storage-path "$cfg")" || rc=$?
+      [[ "$rc" -eq 0 ]] || return 2
+      printf '%s' "$have"
+      return 0
+    fi
+    # `test -e` fails for a missing file AND for a sudo that did not run (the
+    # password prompt expired between the readiness check and here): a sudo that is
+    # down is "cannot tell", never "no config.yaml" -- the latter re-derives a frozen
+    # storage path from this run's environment. Same probe _native_k3s_config_value
+    # makes.
+    sudo test -d / || return 2
+  fi
+  _native_k3s_storage_choice
+}
+
+# _native_k3s_storage_frozen -- true when a config.yaml already froze the storage
+# path, so this run's HOST_DATA_DIR cannot move the volumes. Same reads, same
+# "cannot tell" as _native_k3s_storage_override: 1 when none exists, 2 when root
+# cannot answer. A caller that has read the storage path has already handled both.
+_native_k3s_storage_frozen() {
+  [[ -e "$(dirname "$TB_K3S_ETC_DIR")" ]] || return 1
+  _native_k3s_root_ready || return 2
+  if sudo test -e "$TB_K3S_CONFIG_PATH"; then return 0; fi
+  sudo test -d / || return 2
+  return 1
+}
+
+# _native_k3s_storage_choice -- this run's choice: the operator's data dir when they
+# chose one, else nothing (k3s's default). "Chose one" is HOST_DATA_DIR naming a
+# directory other than the default. A parent process that exported the default (an
+# upgrade) is not a choice, so the volumes never move into the home directory because
+# the default was passed along. Both sides are compared with their parents resolved
+# physically, as validate_config resolves HOST_DATA_DIR, so a symlinked $HOME is not a
+# choice either.
+_native_k3s_storage_choice() {
+  local dir="${HOST_DATA_DIR:-}" def="${TB_HOST_DATA_DIR_DEFAULT:-}"
+  [[ -n "$dir" ]] || return 0
+  [[ -n "$def" && "$(_native_k3s_resolved_dir "$dir")" == "$(_native_k3s_resolved_dir "$def")" ]] && return 0
+  printf '%s' "$dir"
+}
+
+# _native_k3s_root_ready -- true when a root read needs no password prompt: root
+# itself, or a sudo that answers non-interactively (cached, or NOPASSWD).
+_native_k3s_root_ready() {
+  [ "$(id -u)" -eq 0 ] || _real_sudo -n true 2>/dev/null
+}
+
+# _native_k3s_storage_path -- the directory local-path keeps the volumes in: the
+# frozen or chosen directory, or k3s's default. Returns the override's 2 or 3.
+_native_k3s_storage_path() {
+  local o rc=0
+  o="$(_native_k3s_storage_override)" || rc=$?
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  printf '%s' "${o:-$TB_K3S_STORAGE_DEFAULT}"
+}
+
+# _native_k3s_storage_drift_warn -- one warning when the volumes stay where an
+# existing config.yaml froze them while this run asked for another directory. Main
+# shell only (it warns on stdout); preflight calls it once per run.
+_native_k3s_storage_drift_warn() {
+  local kept chosen
+  kept="$(_native_k3s_storage_path)" || return 0
+  chosen="$(_native_k3s_storage_choice)"
+  chosen="${chosen:-$TB_K3S_STORAGE_DEFAULT}"
+  [[ "$(_native_k3s_resolved_dir "$kept")" != "$(_native_k3s_resolved_dir "$chosen")" ]] || return 0
+  warn "This machine's k3s keeps its volumes in ${kept}; this run asked for ${chosen}, which is not used."
+  hint "The volumes can't move: to use ${chosen}, remove tracebloc from this machine, then install again with that data dir."
+}
+
+# _native_k3s_resolved_dir PATH -- PATH with its parent resolved physically (`cd -P`),
+# the form validate_config leaves HOST_DATA_DIR in. PATH itself may not exist yet; an
+# unresolvable parent leaves PATH as given.
+_native_k3s_resolved_dir() {
+  local p="$1" parent
+  parent="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd)" || { printf '%s' "$p"; return 0; }
+  printf '%s/%s' "${parent%/}" "$(basename "$p")"
+}
 
 # ── Pins ──────────────────────────────────────────────────────────────────────
 
