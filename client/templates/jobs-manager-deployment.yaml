@@ -517,28 +517,30 @@ spec:
           value: {{ $tokEnv.key | default "token" | quote }}
         {{- /* The client identity under both names: TRACEBLOC_CLIENT_ID /
              TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
-             the legacy spellings (remove_by 2026-12-31). Same Secret KEYS --
-             only the env var names are doubled. */}}
+             the legacy spellings (remove_by 2026-12-31). Both env names read
+             the CANONICAL Secret key (the FLIP, backend#4959): secrets.yaml
+             writes it on every render, beside the legacy key it still writes
+             for older readers. */}}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_ID
+              key: TRACEBLOC_CLIENT_ID
         - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_PASSWORD
+              key: TRACEBLOC_CLIENT_PASSWORD
         - name: TRACEBLOC_CLIENT_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_ID
+              key: TRACEBLOC_CLIENT_ID
         - name: TRACEBLOC_CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_PASSWORD
+              key: TRACEBLOC_CLIENT_PASSWORD
         # client-runtime#79: shared HMAC secret used to MINT the per-pod
         # REQUESTS_PROXY_TOKEN. Same Secret key the requests-proxy reads to
         # verify. When present, spin_job mints stateless signed tokens (no
@@ -546,18 +548,20 @@ spec:
         {{- /* Settings naming: every name below is emitted twice, the canonical
              TRACEBLOC_<name> (a leading TB_ replaced) beside the legacy spelling,
              with the identical value or secretKeyRef, so a jobs-manager reading
-             either one resolves the same identity. The Secret KEYS do not change.
-             The legacy names stay until remove_by 2026-12-31. */}}
+             either one resolves the same identity. Every secretKeyRef names the
+             CANONICAL Secret key (the FLIP, backend#4959); secrets.yaml writes
+             it, and still writes the legacy key beside it. The legacy env names
+             stay until remove_by 2026-12-31. */}}
         - name: POD_TOKEN_SIGNING_SECRET
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: POD_TOKEN_SIGNING_SECRET
+              key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
         - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: POD_TOKEN_SIGNING_SECRET
+              key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
         - name: POD_TOKEN_TTL_SECONDS
           value: {{ .Values.podTokenTtlSeconds | default 604800 | quote }}
         - name: TRACEBLOC_POD_TOKEN_TTL_SECONDS
@@ -635,12 +639,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: TB_CREDMGR_PASSWORD
+              key: TRACEBLOC_CREDMGR_PASSWORD
         - name: TRACEBLOC_CREDMGR_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: TB_CREDMGR_PASSWORD
+              key: TRACEBLOC_CREDMGR_PASSWORD
         {{- end }}
         {{- if (include "tracebloc.serviceDbAccounts" .) }}
         # backend#1528 S1 (RFC-0003 D10 close-out): dedicated MySQL service
@@ -661,12 +665,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: TB_META_PASSWORD
+              key: TRACEBLOC_META_PASSWORD
         - name: TRACEBLOC_META_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: TB_META_PASSWORD
+              key: TRACEBLOC_META_PASSWORD
         - name: TB_INGEST_USER
           value: "tb_ingest"
         - name: TRACEBLOC_INGEST_USER
@@ -675,12 +679,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: TB_INGEST_PASSWORD
+              key: TRACEBLOC_INGEST_PASSWORD
         - name: TRACEBLOC_INGEST_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: TB_INGEST_PASSWORD
+              key: TRACEBLOC_INGEST_PASSWORD
         {{- end }}
         {{- if (include "tracebloc.bootstrapDbReparent" .) }}
         # backend#1528 S3 (RFC-0003 D10 close-out): re-parent the account-minting
@@ -1170,28 +1174,30 @@ spec:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         {{- /* The client identity under both names: TRACEBLOC_CLIENT_ID /
              TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
-             the legacy spellings (remove_by 2026-12-31). Same Secret KEYS --
-             only the env var names are doubled. */}}
+             the legacy spellings (remove_by 2026-12-31). Both env names read
+             the CANONICAL Secret key (the FLIP, backend#4959): secrets.yaml
+             writes it on every render, beside the legacy key it still writes
+             for older readers. */}}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_ID
+              key: TRACEBLOC_CLIENT_ID
         - name: CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_PASSWORD
+              key: TRACEBLOC_CLIENT_PASSWORD
         - name: TRACEBLOC_CLIENT_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_ID
+              key: TRACEBLOC_CLIENT_ID
         - name: TRACEBLOC_CLIENT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
-              key: CLIENT_PASSWORD
+              key: TRACEBLOC_CLIENT_PASSWORD
         - name: CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: TRACEBLOC_CLIENT_LOGS_PVC

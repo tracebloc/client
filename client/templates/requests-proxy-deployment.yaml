@@ -165,18 +165,20 @@ spec:
             # pod_tokens table entirely.
             {{- /* Settings naming: each identity name is emitted as the canonical
                  TRACEBLOC_<name> (a leading TB_ replaced) beside the legacy one, with
-                 the identical secretKeyRef or value. Same Secret keys. Legacy names
-                 stay until remove_by 2026-12-31. */}}
+                 the identical secretKeyRef or value. Every secretKeyRef names the
+                 CANONICAL Secret key (the FLIP, backend#4959), which secrets.yaml
+                 writes beside the legacy key. Legacy env names stay until
+                 remove_by 2026-12-31. */}}
             - name: POD_TOKEN_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: POD_TOKEN_SIGNING_SECRET
+                  key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
             - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: POD_TOKEN_SIGNING_SECRET
+                  key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
             {{- if (include "tracebloc.serviceDbAccounts" .) }}
             # backend#1528 S2 (RFC-0003 D10 close-out): authenticate the proxy's
             # metadata-DB access as the dedicated tb_meta identity instead of
@@ -197,12 +199,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: TB_META_PASSWORD
+                  key: TRACEBLOC_META_PASSWORD
             - name: TRACEBLOC_META_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: TB_META_PASSWORD
+                  key: TRACEBLOC_META_PASSWORD
             {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}
       imagePullSecrets:

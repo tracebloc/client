@@ -223,7 +223,9 @@ spec:
               value: {{ .Release.Namespace | quote }}
             {{- /* Canonical TRACEBLOC_ names beside the legacy NAMESPACE /
                  CLIENT_ID / CLIENT_PASSWORD (remove_by 2026-12-31), same
-                 value / Secret key. */}}
+                 value. Both credential env names read the CANONICAL key of the
+                 node-agents mirror (the FLIP, backend#4959), which secrets.yaml
+                 writes beside the legacy key. */}}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: MONITOR_INTERVAL
@@ -249,22 +251,22 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: CLIENT_ID
+                  key: TRACEBLOC_CLIENT_ID
             - name: CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: CLIENT_PASSWORD
+                  key: TRACEBLOC_CLIENT_PASSWORD
             - name: TRACEBLOC_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: CLIENT_ID
+                  key: TRACEBLOC_CLIENT_ID
             - name: TRACEBLOC_CLIENT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "tracebloc.secretName" . }}
-                  key: CLIENT_PASSWORD
+                  key: TRACEBLOC_CLIENT_PASSWORD
             {{- /* Corporate egress proxy (client-runtime#154): resource-monitor
                  was the only backend-calling workload without proxyEnv, so its
                  auth/heartbeat POSTs dialed direct and failed behind a proxy.

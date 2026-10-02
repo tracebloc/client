@@ -6,6 +6,12 @@
 
 # ── Security hardening ───────────────────────────────────────────────────────
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+# In a bats run only, the suite's sudo fence goes back in front of the directories
+# just prepended. Behind them, a case that dropped its own sudo stub would run the
+# host's sudo (scripts/tests/setup_suite.bash). An install never sets either.
+if [[ -n "${TB_HERMETIC_SUDO_BIN:-}" && -n "${BATS_SUITE_TMPDIR:-}" ]]; then
+  export PATH="${TB_HERMETIC_SUDO_BIN}:${PATH}"
+fi
 umask 077
 
 # Minimum TLS version, as a bare flag. Retained for backward compatibility only

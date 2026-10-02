@@ -395,7 +395,7 @@ kubectl -n <ns> create secret generic <release>-secrets \
 kubectl -n <ns> rollout restart deployment/<release>-jobs-manager
 ```
 
-The Secret carries each credential under two keys with the same value: `CLIENT_ID` / `CLIENT_PASSWORD`, which the pods read today, and the canonical `TRACEBLOC_CLIENT_ID` / `TRACEBLOC_CLIENT_PASSWORD`, which a later release moves them onto. Set both. `kubectl apply` merges, so a rotation that sets only the `CLIENT_*` keys leaves the `TRACEBLOC_*` ones holding the old credential until the next `helm upgrade` rewrites them from `CLIENT_*`; the installers read the `TRACEBLOC_*` key first to identify the installed client.
+The Secret carries each credential under two keys with the same value: the canonical `TRACEBLOC_CLIENT_ID` / `TRACEBLOC_CLIENT_PASSWORD`, which the pods read, and the legacy `CLIENT_ID` / `CLIENT_PASSWORD`, kept for older readers until they are retired. Set both. `kubectl apply` merges, so a rotation that sets only the `CLIENT_*` keys changes nothing the pods see -- and the next `helm upgrade` writes the `TRACEBLOC_*` value back over them, because the chart preserves the key the pods read. A rotation that sets only the `TRACEBLOC_*` keys reaches the pods after the restart and is copied into `CLIENT_*` by the next `helm upgrade`. The installers read the `TRACEBLOC_*` key first too, to identify the installed client.
 
 Rotating replaces the credential; it does **not** remove the copies already stored in the release's retained revisions. If this install passes `clientId`/`clientPassword` as values, see §6.7 for how to stop it doing that.
 
@@ -502,10 +502,10 @@ The chart now resolves both three ways (values → the live Secret → hard fail
 
 ```bash
 kubectl -n <ns> get secret <release>-secrets \
-  -o jsonpath='{.data.CLIENT_ID}' | base64 -d
+  -o jsonpath='{.data.TRACEBLOC_CLIENT_ID}' | base64 -d
 ```
 
-(`TRACEBLOC_CLIENT_ID` holds the same value on a Secret this chart has written; `CLIENT_ID` is the key the pods read today.)
+(`TRACEBLOC_CLIENT_ID` is the key the pods read, and the one the chart resolves first. A Secret last written by a chart older than the one that added it has only the legacy `CLIENT_ID`; read that key instead if the command above prints nothing -- the next `helm upgrade` writes both.)
 
 Empty output means tier 2 has nothing to resolve from, and dropping the values would make the next upgrade **fail** rather than degrade. Create them first, using the labelled/annotated form in `values.yaml` so Helm adopts the Secret instead of colliding with it.
 
