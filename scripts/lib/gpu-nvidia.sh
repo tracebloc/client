@@ -186,7 +186,7 @@ install_nvidia_container_toolkit() {
       else
         log "Could not extract GPG key fingerprint — verify manually after install."
       fi
-      sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
+      sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
       rm -f "$nvidia_gpg_tmp"
       # --max-time 30 on all three fetches above/below: each is a few KB of key or
       # repo metadata, so a longer wait only means a hung mirror. They pipe into

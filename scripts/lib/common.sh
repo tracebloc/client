@@ -1315,6 +1315,23 @@ TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # digest of the derived tag.
 # shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
 TB_K3S_CUDA_DIGEST="sha256:fbb1a8cfebcdf32320b493fc614161cd1115603067135c27080ac380e4742e9d"
+# Native k3s (RFC-0175 D4): the digests k3s.sh checks its downloads against, and
+# the K8S_VERSION they were resolved for (facts.env K3S_BIN_SHA256_* /
+# K3S_INSTALL_SH_SHA256 and K8S_VERSION, stamped by check-facts.sh --write). Stamped
+# here, not in k3s.sh, because common.sh is in the signed manifest (RFC-0175 D12).
+# TB_K3S_PIN_K8S_VERSION is a SECOND stamp of the k3s pin, and it exists because
+# K8S_VERSION above takes an environment override: a k3s binary of any other
+# version has no digest here, so the native path refuses an override by name
+# (k3s.sh::_native_k3s_check_version) where k3d keeps honouring it. No TRACEBLOC_*
+# override on any of the four, for the reason TB_K3S_CUDA_DIGEST gives.
+# shellcheck disable=SC2034  # consumed cross-file by k3s.sh
+TB_K3S_PIN_K8S_VERSION="v1.36.3-k3s1"
+# shellcheck disable=SC2034  # consumed cross-file by k3s.sh
+TB_K3S_BIN_SHA256_AMD64="2f98a9f8fe5782479ee2d54e70a1b10a7f6fd4cae8d38ed3098452dc6eed76b5"
+# shellcheck disable=SC2034  # consumed cross-file by k3s.sh
+TB_K3S_BIN_SHA256_ARM64="c9a209103f480f163b7c6a56f00862b4481927b284dc29a3716bb70d886691a8"
+# shellcheck disable=SC2034  # consumed cross-file by k3s.sh
+TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR,
 # stamped by check-facts.sh --write). Below the compute-capability floor detect-gpu.sh
 # leaves the GPU unwired and the install runs CPU-only; below the driver floor it
@@ -1361,6 +1378,16 @@ tb_export_host_data_dir() {
 HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"
 
 # ── Input validation ────────────────────────────────────────────────────────
+# _tb_system_path DIR -- true when the absolute path DIR is `/` or lies in a system
+# tree no install data may live in. ONE list: validate_config refuses HOST_DATA_DIR
+# here, and k3s.sh's renderer refuses the native local-storage path here.
+_tb_system_path() {
+  case "${1:-}" in
+    /|/etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/sbin|/lib|/lib64) return 0 ;;
+  esac
+  return 1
+}
+
 validate_config() {
   [[ -n "${HOME:-}" ]]  || error "\$HOME is not set — cannot determine user home directory"
   [[ -n "${USER:-}" ]]  || USER="$(whoami)" || error "Cannot determine current user"
@@ -1396,13 +1423,8 @@ validate_config() {
   parent="$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd)" || true
   [[ -z "$parent" ]] && error "HOST_DATA_DIR parent directory could not be resolved: $(dirname "$dir")"
   dir="$parent/$(basename "$dir")"
-  case "$dir" in
-    /) error "HOST_DATA_DIR cannot be root (/)"
-      ;;
-    /etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/sbin|/lib|/lib64)
-      error "HOST_DATA_DIR cannot be a system path: $dir"
-      ;;
-  esac
+  [[ "$dir" == "/" ]] && error "HOST_DATA_DIR cannot be root (/)"
+  _tb_system_path "$dir" && error "HOST_DATA_DIR cannot be a system path: $dir"
   # Must be strictly UNDER $HOME — never $HOME itself. $HOME is reachable via a
   # bare '~', HOST_DATA_DIR=$HOME, or --data-dir=$HOME; adopting it would make the
   # installer chmod 777 home-level logs/mysql dirs, bind-mount all of $HOME into
@@ -1729,7 +1751,7 @@ TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
-TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release"
+TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule"
 # shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
 TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"

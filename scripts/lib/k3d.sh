@@ -303,14 +303,13 @@ _verify_nodes_see_host_data() {
 # credentials survive intact. NO_PROXY is always emitted (auto-augmented) when a
 # proxy is present, so in-cluster traffic bypasses the proxy even if the host
 # set only HTTP_PROXY. Echoes nothing when the host has no HTTP(S) proxy set.
+# WHICH variables, and their values, come from cluster.sh's _node_proxy_env, the
+# one definition native k3s reads too.
 _write_k3d_proxy_config() {
-  local var have_http=""
-  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
-    [[ -n "${!var:-}" ]] && have_http=1
-  done
-  [[ -z "$have_http" ]] && return 0
+  local pairs pair
+  pairs="$(_node_proxy_env)"
+  [[ -z "$pairs" ]] && return 0
 
-  local no_proxy_val; no_proxy_val="$(_augment_no_proxy)"
   # mktemp -d with trailing X's is portable across GNU + BSD/macOS mktemp; a
   # plain file template with a '.yaml' suffix is not (BSD needs trailing X's),
   # and k3d/viper needs the '.yaml' extension to parse the config — so the file
@@ -321,12 +320,9 @@ _write_k3d_proxy_config() {
     echo "apiVersion: k3d.io/v1alpha5"
     echo "kind: Simple"
     echo "env:"
-    for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
-      [[ -z "${!var:-}" ]] && continue
-      printf '  - envVar: "%s=%s"\n    nodeFilters:\n      - all\n' "$var" "${!var}"
-    done
-    printf '  - envVar: "NO_PROXY=%s"\n    nodeFilters:\n      - all\n' "$no_proxy_val"
-    printf '  - envVar: "no_proxy=%s"\n    nodeFilters:\n      - all\n' "$no_proxy_val"
+    while IFS= read -r pair; do
+      printf '  - envVar: "%s"\n    nodeFilters:\n      - all\n' "$pair"
+    done <<<"$pairs"
   } > "$cfg"
   echo "$cfg"
 }
@@ -340,15 +336,10 @@ _write_k3d_proxy_config() {
 # whose contract is the opposite -- a fixed persistent path, no temp dir, nothing
 # for a caller to clean up. Reviewer, client#912.)
 _write_k3d_registries_config() {
-  local node_ca="$1" host td cfg
+  local node_ca="$1" td cfg
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3d-reg-XXXXXX")" || return 1
   cfg="$td/registries.yaml"
-  {
-    echo "configs:"
-    for host in "${TB_CA_REGISTRIES[@]}"; do  # set-u-safe: TB_CA_REGISTRIES is a file-scope constant
-      printf '  "%s":\n    tls:\n      ca_file: "%s"\n' "$host" "$node_ca"
-    done
-  } > "$cfg"
+  _render_registries_config "$node_ca" > "$cfg"
   echo "$cfg"
 }
 
@@ -2603,7 +2594,7 @@ _wait_for_api() {
   # Default raised to 180s and made env-tunable (TB_API_WAIT_S); re-running the
   # installer is always safe, so a timeout here is a retryable state in practice.
   local _budget_s
-  case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) _budget_s=180 ;; *) _budget_s=$((10#${TB_API_WAIT_S})) ;; esac
+  _budget_s="$(_api_wait_budget_s)"
   log "Waiting for API server to become ready (up to ${_budget_s}s)..."
 
   # BEFORE the long wait (client-dev#1370): a node whose k3s died on a moved

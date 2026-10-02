@@ -303,6 +303,27 @@ print_summary() {
   _log_advanced_info
 }
 
+# The GPU smoke test the summary prints, one vendor per call (nvidia | amd).
+# `kubectl run` has no --limits (removed in kubectl 1.24: "unknown flag:
+# --limits"), so the GPU limit rides in --overrides with the RuntimeClass.
+# --override-type=strategic merges the container by name, so the image, the
+# command and -it survive. summary.bats runs this line through
+# `kubectl run --dry-run=client` -- a grep for the text could not catch a flag
+# kubectl refuses.
+_gpu_test_cmd() {
+  local vendor="$1" image smi spec
+  case "$vendor" in
+    nvidia)
+      image="nvidia/cuda:12.3.1-base-ubuntu22.04"; smi="nvidia-smi"
+      spec='"runtimeClassName":"nvidia",' ;;
+    amd)
+      image="rocm/rocm-terminal"; smi="rocm-smi"; spec='' ;;
+    *) return 1 ;;
+  esac
+  printf "kubectl run gpu-test --rm -it --restart=Never --image=%s --override-type=strategic --overrides='{\"spec\":{%s\"containers\":[{\"name\":\"gpu-test\",\"resources\":{\"limits\":{\"%s.com/gpu\":\"1\"}}}]}}' -- %s" \
+    "$image" "$spec" "$vendor" "$smi"
+}
+
 _log_advanced_info() {
   log ""
   log "=== Advanced Info (for debugging) ==="
@@ -318,10 +339,10 @@ _log_advanced_info() {
   if _gpu_wired; then
     # runtimeClassName: nvidia is REQUIRED — the GPU node's containerd invokes the
     # NVIDIA runtime only for that class (client#835); a plain pod gets no GPU.
-    log "  GPU test: kubectl run gpu-test --rm -it --image=nvidia/cuda:12.3.1-base-ubuntu22.04 --overrides='{\"spec\":{\"runtimeClassName\":\"nvidia\"}}' --limits='nvidia.com/gpu=1' -- nvidia-smi"
+    log "  GPU test: $(_gpu_test_cmd nvidia)"
   fi
   if [[ "$GPU_VENDOR" == "amd" ]]; then
-    log "  GPU test: kubectl run gpu-test --rm -it --image=rocm/rocm-terminal --limits='amd.com/gpu=1' -- rocm-smi"
+    log "  GPU test: $(_gpu_test_cmd amd)"
   fi
   log "=== End Advanced Info ==="
 }

@@ -2763,7 +2763,7 @@ function Show-GpuManualRemedy {
   param([string]$Distro = "Ubuntu")
   Warn "GPU acceleration isn't set up -- your environment will run in CPU mode."
   Hint "To enable it later, open '$Distro' from the Start Menu and run:"
-  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
   Hint "    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
   Hint "    sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
   Hint "    sudo nvidia-ctk runtime configure --runtime=docker --set-as-default"
@@ -2846,7 +2846,7 @@ if command -v nvidia-ctk &>/dev/null; then echo "NCT already installed."; exit 0
 # common.sh's curl_secure() isn't available, so the floor and the bounds are spelled
 # out the same way the bootstrap (install.sh) spells them out (backend#1252).
 curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
+  | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
 curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
   | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
   | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
@@ -8678,7 +8678,10 @@ function Print-Summary {
 #
 # Three properties the command must keep:
 #   (a) runtimeClassName: nvidia -- pods only receive the GPU under it, so --overrides is
-#       required (kubectl run has no flag for it);
+#       required (kubectl run has no flag for it), and the GPU LIMIT rides in the same
+#       override: `kubectl run --limits` was removed in kubectl 1.24, so a line passing it is
+#       refused by every current kubectl ("unknown flag: --limits", client-dev#1536). The
+#       plugin line merges strategically, so its container entry needs only its name;
 #   (b) on WSL2/CDI suggest a CUDA workload, NOT nvidia-smi: NVML is unsupported through the
 #       paravirtualized GPU, so nvidia-smi fails in a pod even when CUDA works (verified on
 #       real hardware) -- suggesting it would make a working cluster look broken;
@@ -8697,8 +8700,9 @@ function Get-GpuSmokeTestCommand {
       "${q}resources${q}:{${q}limits${q}:{${q}nvidia.com/gpu${q}:${q}1${q}}}}]}}'")
   }
   return ('GPU test: kubectl run gpu-test --rm -it --restart=Never --image=nvidia/cuda:12.3.1-base-ubuntu22.04 ' +
-    "--overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q}}}' " +
-    '--limits="nvidia.com/gpu=1" -- nvidia-smi')
+    "--override-type=strategic --overrides='{${q}spec${q}:{${q}runtimeClassName${q}:${q}nvidia${q}," +
+    "${q}containers${q}:[{${q}name${q}:${q}gpu-test${q},${q}resources${q}:{${q}limits${q}:{${q}nvidia.com/gpu${q}:${q}1${q}}}}]}}' " +
+    '-- nvidia-smi')
 }
 
 # =============================================================================

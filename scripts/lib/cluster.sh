@@ -99,6 +99,26 @@ _augment_no_proxy() {
     | awk -v RS=',' '{ gsub(/[ \t\r\n]/, ""); if ($0 != "" && !seen[$0]++) printf "%s%s", (n++ ? "," : ""), $0 }'
 }
 
+# The proxy environment a cluster node runs with, one NAME=VALUE per line: each
+# HTTP(S) proxy variable the host sets, in this order, then NO_PROXY and no_proxy,
+# both set to the augmented list above. NOTHING when the host sets no HTTP(S)
+# proxy: a NO_PROXY alone proxies nothing. ONE definition for both substrates:
+# k3d.sh writes these into the k3d --config env list, and k3s.sh hands them to
+# upstream's install.sh, which writes them into k3s.service.env.
+_node_proxy_env() {
+  local var have_http="" no_proxy_val
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -n "${!var:-}" ]] && have_http=1
+  done
+  [[ -z "$have_http" ]] && return 0
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -z "${!var:-}" ]] && continue
+    printf '%s=%s\n' "$var" "${!var}"
+  done
+  no_proxy_val="$(_augment_no_proxy)"
+  printf 'NO_PROXY=%s\nno_proxy=%s\n' "$no_proxy_val" "$no_proxy_val"
+}
+
 # --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
 # Proxy REACHABILITY reaches the nodes (above), but on a TLS-inspecting network
 # the nodes still don't TRUST the corporate CA, so every in-node containerd pull
@@ -109,6 +129,18 @@ _augment_no_proxy() {
 # The registries the cluster pulls from; behind a break-and-inspect proxy each
 # needs the corporate CA to validate the intercepted cert.
 TB_CA_REGISTRIES=(docker.io registry-1.docker.io auth.docker.io ghcr.io)
+
+# Print a containerd registries.yaml that points every registry in TB_CA_REGISTRIES
+# at the CA file $1 -- the path containerd reads it from, which is inside the node
+# on k3d and on the host on native k3s. Pure: the writers (k3d.sh's
+# _write_k3d_registries_config, k3s.sh's _native_k3s_write_config) own where it lands.
+_render_registries_config() {
+  local node_ca="$1" host
+  echo "configs:"
+  for host in "${TB_CA_REGISTRIES[@]}"; do  # set-u-safe: TB_CA_REGISTRIES is a file-scope constant
+    printf '  "%s":\n    tls:\n      ca_file: "%s"\n' "$host" "$node_ca"
+  done
+}
 
 # Echo the operator's CA bundle path (absolute) when TRACEBLOC_CA_BUNDLE or
 # CURL_CA_BUNDLE is set and readable. If a var is set but the file is unreadable,
@@ -303,6 +335,11 @@ TB_KUBELET_EVICTION_MEM_MIB=256
 # Path the file is mounted to INSIDE every k3d node. Named once; the mount and the
 # --kubelet-arg must not be able to disagree about it.
 TB_KUBELET_CONFIG_NODE_PATH="/etc/tracebloc/kubelet.yaml"
+# Where native k3s reads it (RFC-0175 D4): the host IS the node, so there is no
+# mount, and this one path is both what the writer writes and what k3s.sh's
+# config.yaml names in `kubelet-arg: config=`. Mode 0644, so the e2e readback
+# (e2e_assert_node_reservation) can read it without root.
+TB_KUBELET_CONFIG_K3S_PATH="/etc/rancher/k3s/tracebloc-kubelet.yaml"
 
 # NOT under /tmp (Bugbot, High, on client#912). This file is BIND-MOUNTED into
 # every k3d node, so the host path has to outlive the install: a bind-mount source
@@ -312,7 +349,16 @@ TB_KUBELET_CONFIG_NODE_PATH="/etc/tracebloc/kubelet.yaml"
 # RESTARTED -- a headless edge looks fine until its first reboot, which is the
 # worst possible moment to find out. HOST_DATA_DIR is the installer's own
 # persistent directory (already bind-mounted into the nodes as /tracebloc).
-_kubelet_config_path() { printf '%s/kubelet/kubelet.yaml' "${HOST_DATA_DIR:-$HOME/.tracebloc}"; }
+#
+# On native k3s (TB_SUBSTRATE=k3s, which main() refuses until 1.1f adds it to the
+# schema) it is the root-owned path above instead, written by k3s.sh as root.
+_kubelet_config_path() {
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    printf '%s' "$TB_KUBELET_CONFIG_K3S_PATH"
+    return 0
+  fi
+  printf '%s/kubelet/kubelet.yaml' "${HOST_DATA_DIR:-$HOME/.tracebloc}"
+}
 
 # The platform key the reservation table is indexed by: `darwin`, `linux` or
 # `windows`. A function, so the bats suite can drive the writer as either
@@ -376,12 +422,13 @@ _kubelet_reservation_values() {
   printf '%s %s %s\n' "$cpu" "$mem" "$sys"
 }
 
-_write_kubelet_config() {
-  local cfg platform
-  cfg="$(_kubelet_config_path)"
+# Print the kubelet config drop-in: the image-GC thresholds, plus the node
+# reservation for a measured platform. Pure; returns 1 on a broken reservation
+# embed. The writer below and k3s.sh's _native_k3s_write_config both print it
+# through here, so the two substrates cannot write different kubelet configs.
+_render_kubelet_config() {
+  local platform
   platform="$(_kubelet_reservation_platform)"
-  # Fixed path, so a re-install must overwrite rather than trip over what is there.
-  mkdir -p "$(dirname "$cfg")" || return 1
   {
     printf 'apiVersion: kubelet.config.k8s.io/v1beta1\n'
     printf 'kind: KubeletConfiguration\n'
@@ -404,7 +451,17 @@ _write_kubelet_config() {
       printf 'systemReserved:\n  memory: %sMi\n' "$sys"
       printf 'evictionHard:\n  memory.available: %sMi\n' "${TB_KUBELET_EVICTION_MEM_MIB}"
     fi
-  } > "$cfg" || return 1
+  }
+}
+
+# Write the drop-in to $1 (default: _kubelet_config_path) and echo the path. The
+# k3d path; native k3s writes the same rendering as root, with an explicit mode.
+_write_kubelet_config() {
+  local cfg="${1:-$(_kubelet_config_path)}" body
+  body="$(_render_kubelet_config)" || return 1
+  # Fixed path, so a re-install must overwrite rather than trip over what is there.
+  mkdir -p "$(dirname "$cfg")" || return 1
+  printf '%s\n' "$body" > "$cfg" || return 1
   echo "$cfg"
 }
 
@@ -700,6 +757,13 @@ _ensure_host_data_dirs() {
 # --request-timeout bounds the call itself (see _wait_for_api).
 _api_answers() {
   kubectl cluster-info --request-timeout=5s &>/dev/null
+}
+
+# The API wait budget in seconds: TB_API_WAIT_S when it is a whole number, else 180.
+# One reading for both waits (k3d.sh's _wait_for_api, k3s.sh's
+# _native_k3s_wait_for_api), so the documented knob means the same on each substrate.
+_api_wait_budget_s() {
+  case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) printf '180' ;; *) printf '%s' "$((10#${TB_API_WAIT_S}))" ;; esac
 }
 
 # _ipv4_to_int ADDR — a dotted quad as an integer; non-zero for anything else.
