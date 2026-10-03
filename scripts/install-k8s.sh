@@ -13,34 +13,41 @@
 #  Windows (PowerShell as Administrator):
 #    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
 #
-#  Environment variable overrides (optional):
-#    TRACEBLOC_SUBSTRATE=k3d     default: k3d  (the Kubernetes runtime to set up; the
-#                                installer prints "tracebloc-installer substrate=<name>"
-#                                first, and refuses a runtime it doesn't support)
-#    CLUSTER_NAME=myapp          default: tracebloc
+#  Environment variable overrides (optional). Each TRACEBLOC_ name's older
+#  spelling -- the name without TRACEBLOC_ (CLUSTER_NAME), or TB_ in its place
+#  (TB_STORAGE_MODE) -- still works until 2026-12-31; a non-empty TRACEBLOC_
+#  one wins:
+#    TRACEBLOC_SUBSTRATE=k3d     default: k3d  (the Kubernetes runtime to set up: k3d,
+#                                or k3s for native k3s, Linux only; a re-run keeps the
+#                                runtime the install recorded; the installer prints
+#                                "tracebloc-installer substrate=<name>" first, and
+#                                refuses a runtime it doesn't support)
+#    TRACEBLOC_CLUSTER_NAME=myapp  default: tracebloc
 #    TRACEBLOC_NAMESPACE=myns    default: tracebloc  (k8s namespace + local label;
 #                                not prompted — the client is identified by its credentials)
 #    TB_NAMESPACE=myns           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
-#    SERVERS=1                   default: 1  (control-plane nodes)
-#    AGENTS=0                    default: 0  (worker nodes; 0 or 1, hostpath only -- 1 warns)
-#    K8S_VERSION=v1.36.3-k3s1   default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
-#    K3D_VERSION=v5.9.0          default: v5.9.0  (k3d release tag; "latest" resolves at install time)
+#    TRACEBLOC_SERVERS=1         default: 1  (control-plane nodes)
+#    TRACEBLOC_AGENTS=0          default: 0  (worker nodes; 0 or 1, hostpath only -- 1 warns)
+#    TRACEBLOC_K8S_VERSION=v1.36.3-k3s1  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
+#    TRACEBLOC_K3D_VERSION=v5.9.0  default: v5.9.0  (k3d release tag; "latest" resolves at install time)
+#    TRACEBLOC_HELM_VERSION=v4.2.3  default: v4.2.3  (Helm release tag; "latest" resolves at install time)
 #    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    HOST_DATA_DIR=~/.tracebloc  legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
-#    TB_STORAGE_MODE=hostpath    default: node-local  (RFC-0003 Option C; D15 flip, client#456)
+#    TRACEBLOC_STORAGE_MODE=hostpath  default: node-local  (RFC-0003 Option C; D15 flip, client#456)
 #                                node-local (default) stores datasets on k3s local-path
 #                                INSIDE the node — no ~/.tracebloc host dirs, wiped on
 #                                cluster delete; forces AGENTS=0/SERVERS=1 (single-node).
-#                                Set TB_STORAGE_MODE=hostpath to keep datasets in
+#                                Set TRACEBLOC_STORAGE_MODE=hostpath to keep datasets in
 #                                ~/.tracebloc on the host (survive cluster delete;
-#                                required for a HOST_DATASET_DIR network mount).
+#                                required for a TRACEBLOC_HOST_DATASET_DIR network mount).
+#    TRACEBLOC_HOST_DATASET_DIR=/data01/tracebloc  optional separate dataset dir (hostpath)
 #                                Linux/k3s path only — install-k8s.ps1 is hostpath-only.
 #    TRACEBLOC_ENV=dev           optional, canonical name (RFC-0076); if neither this nor the
 #                                legacy CLIENT_ENV is set, no stage var is added to values
 #    CLIENT_ENV=dev              legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
 #    TRACEBLOC_FORCE_REINSTALL=1  skip the "already set up" stop-and-check gate
 #                                and re-run every step (same as --force/--reinstall)
-#    TB_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data
+#    TRACEBLOC_LEFTOVER_ACTION=reuse|wipe  non-interactive answer to the leftover-data
 #                                guard (#376) — same as --reuse-data / --wipe-data.
 #                                A new install onto a machine that still holds old
 #                                data STOPS and asks by default rather than
@@ -87,6 +94,8 @@ source "${LIB_DIR}/setup-macos.sh"
 source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/k3d.sh"
+source "${LIB_DIR}/k3s.sh"
+source "${LIB_DIR}/k3s-firewall.sh"
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
 # install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-
@@ -151,9 +160,14 @@ main() {
   # printed BEFORE anything below can refuse, so whoever reads this output can tell
   # which substrate a refusal belongs to. Only then is an unsupported request
   # refused, by name. --help and --diagnose above install nothing and refuse
-  # nothing, so they print no line.
+  # nothing, so they print no line. A re-run without TRACEBLOC_SUBSTRATE keeps
+  # the substrate its install recorded (tb_substrate_resolve, read-only), and a
+  # resolution that cannot tell, or that would put k3d beside native k3s, is
+  # refused by name after the line.
+  tb_substrate_resolve
   print_substrate_token
   refuse_unsupported_substrate
+  refuse_unresolved_substrate
 
   # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
   # installs the privileged prerequisites so a researcher can then install

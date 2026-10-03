@@ -14,6 +14,49 @@ if [[ -n "${TB_HERMETIC_SUDO_BIN:-}" && -n "${BATS_SUITE_TMPDIR:-}" ]]; then
 fi
 umask 077
 
+# ── Settings naming: the TRACEBLOC_ spellings of the tuning knobs ────────────
+# backend#3846. Every timeout, wait and bound below can be set as
+# TRACEBLOC_<name> -- the TB_ prefix REPLACED (TB_PULL_TIMEOUT ->
+# TRACEBLOC_PULL_TIMEOUT), an unprefixed name prefixed (COLIMA_CPU ->
+# TRACEBLOC_COLIMA_CPU). The old spelling still works (remove_by 2026-12-31).
+# A non-empty canonical is copied, ONCE and here at the top of the core, into
+# the legacy-named variable every reader across scripts/lib reads inline
+# (`${TB_PULL_TIMEOUT:-600}`), so those dozens of reads, their defaults and
+# their blank-means-default behaviour are unchanged; a blank canonical is unset.
+# Nothing here is exported, so no child sees a value its parent did not.
+# TB_TIER1_ROOTLESS / TB_FORCE_TIER are the Tier-1 support switches.
+tb_tuning_aliases=(
+  TB_AMD64_SMOKE_IMAGE TB_AMD64_SMOKE_TIMEOUT TB_API_WAIT_S TB_ASSESS_DOCKER_TIMEOUT
+  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLUSTER_START_TIMEOUT_MIN
+  TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
+  TB_DESKTOP_RESTART_WAIT TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
+  TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
+  TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN TB_GPU_VERIFY_TIMEOUT
+  TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
+  TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT
+  TB_KUBECONFIG_MERGE_TIMEOUT TB_KUBECTL_PROBE_TIMEOUT TB_METRICS_WAIT_S
+  TB_NODE_CHECK_EVERY_S TB_PLAIN TB_PROBE_TIMEOUT TB_PROBE_VERIFY
+  TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
+  TB_WSL_INTEROP_KILL_AFTER TB_WSL_INTEROP_TIMEOUT
+  COLIMA_CPU COLIMA_DISK GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
+)
+# tb_canonical_name LEGACY -- the TRACEBLOC_ spelling the naming rule gives.
+tb_canonical_name() {
+  case "$1" in
+    TB_*) printf 'TRACEBLOC_%s' "${1#TB_}" ;;
+    *)    printf 'TRACEBLOC_%s' "$1" ;;
+  esac
+}
+# tb_resolve_tuning_aliases -- copy each non-empty canonical onto its legacy name.
+tb_resolve_tuning_aliases() {
+  local _legacy _canon
+  for _legacy in "${tb_tuning_aliases[@]}"; do  # set-u-safe: a literal list, declared just above
+    _canon="$(tb_canonical_name "$_legacy")"
+    if [[ -n "${!_canon:-}" ]]; then printf -v "$_legacy" '%s' "${!_canon}"; fi
+  done
+}
+tb_resolve_tuning_aliases
+
 # Minimum TLS version, as a bare flag. Retained for backward compatibility only
 # (an out-of-tree caller may still splice it in by hand); everything in this repo
 # goes through curl_secure() below, which names the flag itself rather than
@@ -1079,6 +1122,8 @@ export -f sudo _real_sudo _have_sudo_bin
 #  Call once at the start of install_macos / install_linux. Establishes that the
 #  privileged steps below can run, and (when a password is needed) primes the
 #  sudo credential once so later steps behind spinners don't re-prompt.
+# preflight_sudo [PURPOSE] -- PURPOSE finishes "tracebloc needs your password once
+# to ...": native k3s asks for k3s, and installs no Docker (k3s.sh).
 preflight_sudo() {
   # Already root — nothing to prime; the sudo() shadow runs privileged steps
   # directly and needs no sudo binary. Fixes root containers/VMs and minimal
@@ -1098,7 +1143,7 @@ preflight_sudo() {
   # Prompt once, then keep the credential warm. One line, then the system's own
   # "Password:" prompt. Kept generic so it reads correctly on macOS (Docker
   # Desktop) and Linux (Docker Engine + system packages).
-  hint "tracebloc needs your password once to set up Docker and a few tools."
+  hint "tracebloc needs your password once to ${1:-set up Docker and a few tools}."
   echo ""
   _real_sudo -v || error "Could not obtain administrator privileges (sudo authentication failed). Re-run as a user allowed to sudo, or as root."
   ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
@@ -1250,9 +1295,21 @@ setup_log_file() {
   if [[ -n "${TB_SUBSTRATE_TOKEN_PRINTED:-}" ]]; then
     tb_substrate_token >>"$LOG_FILE" 2>/dev/null || true
   fi
+  log "Substrate: ${TB_SUBSTRATE}, from ${TB_SUBSTRATE_SOURCE:-the default}."
+  if [[ -n "${TB_SUBSTRATE_NOTE:-}" ]]; then log "$TB_SUBSTRATE_NOTE"; fi
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
+# Settings naming (backend#3846): every knob in this block has a TRACEBLOC_
+# canonical name -- TRACEBLOC_<legacy>, a leading TB_ replaced (TB_STORAGE_MODE
+# -> TRACEBLOC_STORAGE_MODE) -- and the legacy spelling still works (remove_by
+# 2026-12-31). The rule TRACEBLOC_NAMESPACE / TRACEBLOC_HOST_DATA_DIR below set:
+# a non-empty canonical wins, else the legacy, else the default. Each is
+# resolved ONCE, here, into the legacy-named variable the rest of the installer
+# reads and re-assigns (flags, validation, the node-local forcing), so a flag
+# still beats the environment and nothing downstream changes. None of these is
+# exported to a child, so no child can see a stale canonical.
+if [[ -n "${TRACEBLOC_CLUSTER_NAME:-}" ]]; then CLUSTER_NAME="$TRACEBLOC_CLUSTER_NAME"; fi
 CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 # The secure-environment name (= the Helm release and the k8s namespace).
 # Settings naming: TRACEBLOC_NAMESPACE is the canonical env var, TB_NAMESPACE
@@ -1275,7 +1332,13 @@ tb_export_namespace() {
 }
 # SERVERS/AGENTS are k3d's node counts and nothing else: their defaults, the
 # node-local single-node forcing and their validation live in the k3d create path
-# (k3d.sh::_k3d_node_counts), so code that is not k3d never reads them.
+# (k3d.sh::_k3d_node_counts), so code that is not k3d never reads them. Only
+# their canonical spellings are resolved here.
+if [[ -n "${TRACEBLOC_SERVERS:-}" ]]; then SERVERS="$TRACEBLOC_SERVERS"; fi
+if [[ -n "${TRACEBLOC_AGENTS:-}" ]]; then AGENTS="$TRACEBLOC_AGENTS"; fi
+# The leftover-data guard's non-interactive answer (cluster.sh). --reuse-data /
+# --wipe-data assign TB_LEFTOVER_ACTION after this, so a flag still wins.
+if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLOC_LEFTOVER_ACTION"; fi
 # RFC-0003 — local dataset storage model. node-local is the DEFAULT as of the
 # D15 flip (client#456, epic backend#1151), superseding the flag-gated prototype
 # from #367. (D15 gates the flip on a green node-local dev training run on the dev
@@ -1290,16 +1353,19 @@ tb_export_namespace() {
 #   hostpath   (opt-out) : the older model — datasets live in ~/.tracebloc on the
 #                          host, bind-mounted into the cluster; survive cluster
 #                          delete; world-writable dirs. Select with
-#                          TB_STORAGE_MODE=hostpath (still required for a
-#                          HOST_DATASET_DIR network mount).
+#                          TRACEBLOC_STORAGE_MODE=hostpath (legacy:
+#                          TB_STORAGE_MODE; still required for a
+#                          TRACEBLOC_HOST_DATASET_DIR network mount).
 # C1: node-local forces a single k3d node (k3d.sh::_k3d_node_counts says why).
 # Record whether the operator chose the mode or is getting the D15 default: the
 # existing-cluster mismatch guard phrases its remedy differently for "you set
 # node-local" vs "node-local is the default now" (client#456 review, Bugbot High).
+if [[ -n "${TRACEBLOC_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE="$TRACEBLOC_STORAGE_MODE"; fi
 if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
 TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
+if [[ -n "${TRACEBLOC_K8S_VERSION:-}" ]]; then K8S_VERSION="$TRACEBLOC_K8S_VERSION"; fi
 K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
 # CUDA base tag for the GPU-capable k3d node image (client#616/#835). The custom
 # docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
@@ -1352,6 +1418,7 @@ TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # verified against its checksums.txt either way (setup-linux.sh). The pin makes
 # installs deterministic and immune to the releases/latest lookup, which breaks
 # under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
+if [[ -n "${TRACEBLOC_K3D_VERSION:-}" ]]; then K3D_VERSION="$TRACEBLOC_K3D_VERSION"; fi
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 # Pinned default; ONLY the literal HELM_VERSION=latest resolves the newest Helm
 # release at install time (an empty value falls back to this pin, like the two
@@ -1359,6 +1426,7 @@ K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 # its published .sha256sum either way (setup-linux.sh) — helm's get-helm-3
 # script is NOT used: it floats on the mutable helm/helm@main and needs
 # openssl, which minimal cloud images don't ship (#395).
+if [[ -n "${TRACEBLOC_HELM_VERSION:-}" ]]; then HELM_VERSION="$TRACEBLOC_HELM_VERSION"; fi
 HELM_VERSION="${HELM_VERSION:-v4.2.3}"
 # Settings naming: TRACEBLOC_HOST_DATA_DIR is the canonical env var, HOST_DATA_DIR
 # the legacy one (remove_by 2026-12-31) -- the same rule as TRACEBLOC_NAMESPACE
@@ -1384,6 +1452,7 @@ tb_export_host_data_dir() {
 # mount like /data01/tracebloc — the installer bind-mounts it into the cluster
 # at /tracebloc-data and the chart's dataset PV points there, while mysql + logs
 # stay on the local HOST_DATA_DIR (InnoDB over NFS is unsafe).
+if [[ -n "${TRACEBLOC_HOST_DATASET_DIR:-}" ]]; then HOST_DATASET_DIR="$TRACEBLOC_HOST_DATASET_DIR"; fi
 HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"
 
 # ── Input validation ────────────────────────────────────────────────────────
@@ -1412,7 +1481,7 @@ validate_config() {
   # storage (gone on 'cluster delete'). Combining the two is a documented follow-up
   # (backend#743 + RFC-0003); until then, refuse it rather than misroute datasets.
   [[ "$TB_STORAGE_MODE" == "node-local" && -n "${HOST_DATASET_DIR:-}" ]] \
-    && error "HOST_DATASET_DIR is not supported with TB_STORAGE_MODE=node-local (datasets would land on ephemeral in-node storage, not the export). Use hostpath mode (TB_STORAGE_MODE=hostpath) for network-mount datasets."
+    && error "TRACEBLOC_HOST_DATASET_DIR is not supported with node-local storage (datasets would land on ephemeral in-node storage, not the export). Use hostpath mode (TRACEBLOC_STORAGE_MODE=hostpath) for network-mount datasets."
 
   # HOST_DATA_DIR must be under $HOME and must not be a system path (security)
   local dir="$HOST_DATA_DIR"
@@ -1710,8 +1779,10 @@ install_cleanup() {
     hint "Nothing is broken — this installer is safe to re-run."
   elif [[ $exit_code -ne 0 ]]; then
     # If print_summary already reported a specific outcome (CLIENT_STATE set),
-    # don't tack on a second, generic "did not complete" message.
-    if [[ -z "${CLIENT_STATE:-}" ]]; then
+    # don't tack on a second, generic "did not complete" message. Nor after a
+    # refusal (TB_EXIT_REFUSED): its own line says what to change, and "just try
+    # again" would send the user straight back into the same refusal.
+    if [[ -z "${CLIENT_STATE:-}" && -z "${TB_EXIT_REFUSED:-}" ]]; then
       echo ""
       warn "Installation did not complete."
       # Name the failing site on screen too. The command text stays in the log
@@ -1755,20 +1826,30 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_ARTEFACT_KINDS              $defs.artefact.properties.kind.enum, space-separated
 #    TB_RECORD_USER_PATH            x-tracebloc-record.user-path (a leading ~ is $HOME)
 #    TB_RECORD_ROOT_PATH            x-tracebloc-record.root-path (<user> is the login name)
-TB_SUBSTRATES="k3d"
+TB_SUBSTRATES="k3d k3s"
 TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
-TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule"
+TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule kube-context group"
 # shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
 TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"
 # The substrate this run was asked for: TRACEBLOC_SUBSTRATE, else the default
 # (blank means unset, as for every TRACEBLOC_* setting). There is no flag and no
-# alias. main() refuses a value outside TB_SUBSTRATES, by name, AFTER the
-# substrate line has printed.
+# alias. main() refines it with tb_substrate_resolve, so a re-run keeps the
+# substrate its install recorded, and refuses a value outside TB_SUBSTRATES, by
+# name, AFTER the substrate line has printed. A library caller that never calls
+# the resolver keeps this source-time value.
 TB_SUBSTRATE="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
+# Where TB_SUBSTRATE came from, and what the resolver could not consult, for the
+# install log; and a finding it refuses by name after the substrate line.
+TB_SUBSTRATE_SOURCE="${TRACEBLOC_SUBSTRATE:+TRACEBLOC_SUBSTRATE}"
+TB_SUBSTRATE_NOTE=""
+TB_SUBSTRATE_REFUSAL=""
+# Set by a refusal just before it exits: install_cleanup then prints no failure
+# footer, because a re-run with nothing changed is refused again.
+TB_EXIT_REFUSED=""
 
 tb_substrate_supported() {
   local s
@@ -1799,7 +1880,117 @@ print_substrate_token() {
 
 refuse_unsupported_substrate() {
   tb_substrate_supported && return 0
-  error "TRACEBLOC_SUBSTRATE='${TB_SUBSTRATE}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use ${TB_SUBSTRATE_DEFAULT}."
+  TB_EXIT_REFUSED=1
+  if [[ "${TB_SUBSTRATE_SOURCE:-TRACEBLOC_SUBSTRATE}" == "TRACEBLOC_SUBSTRATE" ]]; then
+    error "TRACEBLOC_SUBSTRATE='${TB_SUBSTRATE}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use ${TB_SUBSTRATE_DEFAULT}."
+  fi
+  error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TB_SUBSTRATE}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
+}
+
+# The finding tb_substrate_resolve kept, refused by name: main() calls this right
+# after refuse_unsupported_substrate, so the substrate line has printed first.
+refuse_unresolved_substrate() {
+  [[ -n "${TB_SUBSTRATE_REFUSAL:-}" ]] || return 0
+  TB_EXIT_REFUSED=1
+  error "$TB_SUBSTRATE_REFUSAL"
+}
+
+# ── Re-run resolution (1.1f) ─────────────────────────────────────────────────
+# tb_substrate_resolve -- the substrate this run sets up. A machine installed on
+# one runtime stays on it without the variable, so the order is:
+#   1. TRACEBLOC_SUBSTRATE, when set;
+#   2. the substrate in the daily user's install record (tb_record_path);
+#   3. on Linux, the root copy, read only as root or through a password-free sudo.
+#      Without either it is not consulted and the log says so: a plain user
+#      cannot read it by design, so its absence from view is not "cannot tell";
+#   4. on Linux, a tracebloc native k3s this user can see without privileges
+#      (_native_k3s_live_probe), which catches one whose record is out of reach;
+#   5. the default.
+# A record that exists but cannot be read or parsed is "cannot tell", never
+# absent: the finding goes in TB_SUBSTRATE_REFUSAL, which main() refuses by name
+# after the substrate line. So does TRACEBLOC_SUBSTRATE=k3d where a tracebloc
+# k3s is set up: k3d is never set up beside native k3s (the reverse is the k3s
+# path's live-k3d refusal). TB_SUBSTRATE keeps the requested value either way,
+# so the line prints it. Prints nothing and writes nothing.
+tb_substrate_resolve() {
+  local rec sub rc=0 dst
+  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""
+  if [[ -n "${TRACEBLOC_SUBSTRATE:-}" ]]; then
+    TB_SUBSTRATE="$TRACEBLOC_SUBSTRATE"; TB_SUBSTRATE_SOURCE="TRACEBLOC_SUBSTRATE"
+    rc=1
+    if [[ "$TB_SUBSTRATE" == "k3d" ]]; then rc=0; _tb_substrate_k3s_live || rc=$?; fi
+    case "$rc" in
+      1) ;;
+      0) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=k3d, but tracebloc's native k3s is set up on this machine, and k3d is never set up beside native k3s. Unset TRACEBLOC_SUBSTRATE to keep native k3s. Moving this machine to k3d is a reinstall (a new client, datasets ingested again), which this installer cannot do yet." ;;
+      *) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=k3d, and tracebloc's native k3s files are on this machine, but systemctl did not answer, so this run cannot tell whether that k3s is set up to run, and k3d is never set up beside native k3s. Check 'systemctl status k3s', then re-run." ;;
+    esac
+    return 0
+  fi
+  TB_SUBSTRATE="$TB_SUBSTRATE_DEFAULT"; TB_SUBSTRATE_SOURCE="the default"
+  rec="$(tb_record_path)"
+  if [[ -e "$rec" ]]; then
+    if sub="$(_tb_record_substrate_of "$rec")"; then
+      TB_SUBSTRATE="$sub"; TB_SUBSTRATE_SOURCE="the install record ${rec}"
+    else
+      TB_SUBSTRATE_REFUSAL="The install record ${rec} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
+    fi
+    return 0
+  fi
+  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
+  if dst="$(_tb_record_root_copy_path)" && _tb_record_root_access; then
+    if _tb_record_root_run test -e "$dst"; then
+      if sub="$(_tb_record_root_run cat "$dst" 2>/dev/null | _tb_record_substrate_in)"; then
+        TB_SUBSTRATE="$sub"; TB_SUBSTRATE_SOURCE="the root copy ${dst}"
+      else
+        TB_SUBSTRATE_REFUSAL="The install record's root copy ${dst} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
+      fi
+      return 0
+    fi
+  else
+    TB_SUBSTRATE_NOTE="Substrate: the root copy of the install record was not consulted (this run has neither root nor a password-free sudo)."
+  fi
+  rc=0; _tb_substrate_k3s_live || rc=$?
+  case "$rc" in
+    1) ;;
+    0) TB_SUBSTRATE="k3s"; TB_SUBSTRATE_SOURCE="the tracebloc native k3s set up on this machine (systemctl: k3s)" ;;
+    *) TB_SUBSTRATE_REFUSAL="tracebloc's native k3s files are on this machine, but systemctl did not answer, so this run cannot tell whether that k3s is set up to run. Check 'systemctl status k3s', or set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run." ;;
+  esac
+  return 0
+}
+
+# _tb_substrate_k3s_live -- _native_k3s_live_probe's answer: 0 when a tracebloc
+# native k3s is set up here, 1 when not, 2 when it cannot tell. k3s.sh holds the
+# probe; a process that did not source it cannot tell.
+_tb_substrate_k3s_live() {
+  declare -F _native_k3s_live_probe >/dev/null 2>&1 || return 2
+  local rc=0
+  _native_k3s_live_probe || rc=$?
+  case "$rc" in
+    0|1) return "$rc" ;;
+    *) return 2 ;;
+  esac
+}
+
+# _tb_record_substrate_of FILE -- the substrate FILE records. Fails when FILE
+# cannot be read, or names no substrate, or more than one.
+_tb_record_substrate_of() {
+  local text
+  text="$(cat "$1" 2>/dev/null)" || return 1
+  printf '%s' "$text" | _tb_record_substrate_in
+}
+
+# _tb_record_substrate_in -- the substrate in the record text on stdin: the value
+# of its one "substrate" key, as a JSON string of [a-z0-9-]. Not tied to the
+# writer's layout, so a record another tool rewrote still reads; anything else
+# fails, and the value can never bend the substrate line (tb_substrate_token).
+_tb_record_substrate_in() {
+  local flat n v
+  flat="$(tr '\n' ' ')"
+  n="$(printf '%s' "$flat" | grep -o '"substrate"' | wc -l | tr -d ' ')"
+  [[ "$n" == "1" ]] || return 1
+  v="$(printf '%s' "$flat" | sed -n 's/.*"substrate"[[:space:]]*:[[:space:]]*"\([a-z0-9][a-z0-9-]*\)".*/\1/p')"
+  [[ -n "$v" ]] || return 1
+  printf '%s\n' "$v"
 }
 
 # ── Install record ──────────────────────────────────────────────────────────
@@ -1975,6 +2166,28 @@ _tb_record_root_copy_exists() {
   _have_sudo_bin && _real_sudo -n test -f "$1" 2>/dev/null
 }
 
+# The root copy's path for this user. Fails when the user has no name.
+_tb_record_root_copy_path() {
+  local user
+  user="$(id -un 2>/dev/null)" || return 1
+  [[ -n "$user" ]] || return 1
+  _tb_record_root_path "$user"
+}
+
+# Whether this process can reach the root copy at all: it is root, or its sudo
+# needs no password. Never prompts.
+_tb_record_root_access() {
+  [[ "$(id -u 2>/dev/null)" == "0" ]] && return 0
+  _have_sudo_bin && _real_sudo -n true 2>/dev/null
+}
+
+# _tb_record_root_run CMD... -- CMD as root: directly when this is root, else
+# through the password-free sudo _tb_record_root_access found.
+_tb_record_root_run() {
+  if [[ "$(id -u 2>/dev/null)" == "0" ]]; then "$@"; return; fi
+  _real_sudo -n "$@"
+}
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 #  The first-run title: "Setting up tracebloc on your machine · <version>".
 #  In the curl|bash path the bootstrap (install.sh) already drew this above its
@@ -2045,14 +2258,17 @@ Leftover data (a new install onto a machine that still holds old data):
   --data-dir=P   Install into directory P instead (leaves old data untouched).
                  (Bypass the guard entirely with TRACEBLOC_SKIP_LEFTOVER_GUARD=1.)
 
-Advanced configuration (environment variables):
-  CLUSTER_NAME   Cluster name                   (default: tracebloc)
+Advanced configuration (environment variables; each one's older name without
+the TRACEBLOC_ prefix -- TB_STORAGE_MODE for TRACEBLOC_STORAGE_MODE -- still works):
+  TRACEBLOC_CLUSTER_NAME   Cluster name     (default: tracebloc)
   TRACEBLOC_NAMESPACE  Secure-environment name  (default: tracebloc; legacy: TB_NAMESPACE)
-  SERVERS        Control-plane nodes             (default: 1)
-  AGENTS         Worker nodes                    (default: 1)
-  K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
-  K3D_VERSION    k3d release tag                 (default: v5.9.0; "latest" resolves at install time)
-  HELM_VERSION   Helm release tag                (default: v4.2.3; "latest" resolves at install time)
+  TRACEBLOC_SERVERS        Control-plane nodes  (default: 1)
+  TRACEBLOC_AGENTS         Worker nodes         (default: 0)
+  TRACEBLOC_K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
+  TRACEBLOC_K3D_VERSION    k3d release tag  (default: v5.9.0; "latest" resolves at install time)
+  TRACEBLOC_HELM_VERSION   Helm release tag (default: v4.2.3; "latest" resolves at install time)
+  TRACEBLOC_STORAGE_MODE   node-local (default) or hostpath
+  TRACEBLOC_HOST_DATASET_DIR  Separate dataset directory, e.g. a network mount (hostpath only)
   TRACEBLOC_HOST_DATA_DIR  Persistent data directory  (default: ~/.tracebloc; legacy: HOST_DATA_DIR)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.

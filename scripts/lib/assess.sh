@@ -59,7 +59,10 @@
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
 # runs the full flow. Defaulted here so the gate is safe to consult even if the
 # arg scan never set it; main()'s arg parsing flips it to 1 on the flag.
-: "${TB_FORCE_REINSTALL:=${TRACEBLOC_FORCE_REINSTALL:-0}}"
+# Settings naming (backend#3846): TRACEBLOC_FORCE_REINSTALL is the canonical and
+# is read FIRST; TB_FORCE_REINSTALL is the legacy hand-off name (remove_by
+# 2026-12-31), which the bootstrap (install.sh) now exports beside the canonical.
+TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
 
 # Bound on the readiness probe's API call — short so a stopped/unreachable API
 # can never make the gate hang. Overridable for tests.

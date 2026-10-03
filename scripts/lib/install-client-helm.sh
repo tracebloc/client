@@ -1126,14 +1126,16 @@ _precreate_fit_estimate() {
 }
 
 # The gate create_cluster runs immediately before `k3d cluster create`
-# (k3d.sh _create_new_cluster). Reads the runtime through preflight.sh's
+# (k3d.sh _create_new_cluster), and on native k3s before a new k3s's first step
+# (k3s.sh _native_k3s_create_cluster). Reads the runtime through preflight.sh's
 # bounded docker-info readers -- the same ones _pf_recheck_runtime_mem uses a
 # moment earlier -- and refuses with the fit's own message shape.
 #
 # On native k3s (TB_SUBSTRATE=k3s) the same readers answer from the host, which
-# is the node (preflight.sh), and the reservation is the `linux_k3s` key's. No
-# `linux_k3s` row is measured yet, and this gate is the first step of the create
-# path that knows it, so it says so here, once per run (cluster.sh).
+# is the node (preflight.sh), and the reservation is the `linux_k3s` key's,
+# measured on native k3s (client-dev#1469). This gate is the first step of the
+# create path that knows the key, so a table without that row is said here,
+# once per run (cluster.sh).
 _precreate_fit_gate() {
   local kb="" ncpu=""
   if [[ "${TB_SUBSTRATE:-}" == "k3s" ]] && declare -F _kubelet_reservation_warn_unmeasured >/dev/null 2>&1; then

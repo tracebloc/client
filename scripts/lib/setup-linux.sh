@@ -1255,6 +1255,14 @@ install_linux() {
   export NEEDRESTART_MODE=a
   export NEEDRESTART_SUSPEND=1
 
+  # Native k3s (RFC-0175 D3) is its own step b, ahead of every tier below: it runs as
+  # root, so neither Tier 0 (a usable Docker, no administrator rights) nor Tier 1
+  # (rootless) applies to it, and it installs no Docker, k3d or kubectl (k3s.sh).
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+    _native_k3s_install_linux
+    return 0
+  fi
+
   _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
 
   # ── Tier 0 — a usable container runtime already exists → ZERO privileged

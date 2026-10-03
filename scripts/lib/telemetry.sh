@@ -123,7 +123,7 @@ TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed 
 # bootstrap can name itself here. Kept rather than special-cased out, because the
 # day the bootstrap does get an emitter the name must already be admissible —
 # but do not read its presence as coverage. (saadqbal on client#747.)
-TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3d.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh probe.sh summary.sh diagnose.sh telemetry.sh"
+TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3d.sh k3s.sh k3s-firewall.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh probe.sh summary.sh diagnose.sh telemetry.sh"
 
 # ── The value shapes ─────────────────────────────────────────────────────────
 # This is the privacy boundary. Nothing else in this file is allowed to write to

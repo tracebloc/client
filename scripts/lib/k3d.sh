@@ -160,6 +160,44 @@ _cluster_presence() {
   return 1
 }
 
+# _k3d_live_clusters -- for native k3s's D10 refusal (k3s.sh): the name of every k3d
+# cluster on this machine, one per line, and 0; 1 when k3d is not installed or lists
+# none; 2 when k3d is installed but its listing did not answer within
+# TB_K3D_LIST_TIMEOUT (Docker wedged or not up yet); 3 when the listing FAILED fast,
+# with k3d's last stderr line on stdout (a permission error on the Docker socket, a
+# daemon that is down, a k3d that dies on every call). 2 and 3 are both "cannot
+# tell", never "none": the caller refuses on either, but only 2 is "start Docker" --
+# telling a user with a permission error to start a running daemon sends them the
+# wrong way (client-dev#1606).
+#
+# A fast failure of `--no-headers` is retried once without it, as _cluster_presence
+# does: some older k3d builds reject the flag, and the header-ful listing still
+# answers. A timeout is not retried -- a wedged engine would cost a second deadline.
+_k3d_live_clusters() {
+  has k3d || return 1
+  local list rc=0 errf msg
+  errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-k3d-list-XXXXXX" 2>/dev/null)" || errf=/dev/null
+  list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>"$errf")" || rc=$?
+  if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
+    rc=0
+    list="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list 2>"$errf")" || rc=$?
+    # The header-ful table's first row is its column header, not a cluster.
+    [[ "$rc" -ne 0 ]] || list="$(awk 'NR == 1 && $1 == "NAME" { next } { print }' <<<"$list")"
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    msg=""
+    [[ "$rc" -eq 124 || "$errf" == /dev/null ]] || msg="$(awk 'NF { l = $0 } END { print l }' "$errf" 2>/dev/null)"
+    [[ "$errf" == /dev/null ]] || rm -f "$errf"
+    [[ "$rc" -ne 124 ]] || return 2
+    printf '%s\n' "${msg:-k3d cluster list exited ${rc} with no message}"
+    return 3
+  fi
+  [[ "$errf" == /dev/null ]] || rm -f "$errf"
+  list="$(awk 'NF { print $1 }' <<<"$list")"
+  [[ -n "$list" ]] || return 1
+  printf '%s\n' "$list"
+}
+
 # NO `_cluster_exists` BOOLEAN. There was one, and re-adding it is how this bug
 # comes back: a boolean has two values and this question has three, so every
 # caller that takes `if _cluster_exists` inherits somebody else's answer to "what
@@ -343,7 +381,8 @@ _write_k3d_registries_config() {
   echo "$cfg"
 }
 
-create_cluster() {
+# _k3d_create_cluster -- step c on k3d; cluster.sh's create_cluster routes here.
+_k3d_create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
 
   # RFC 0001 #1221 (Tier 1): target the per-user ROOTLESS daemon, not a (missing)
@@ -788,7 +827,7 @@ _check_existing_cluster_node_count() {
   echo ""
   warn "The existing '$CLUSTER_NAME' cluster has ${count} k3d nodes. Each one reports this whole machine as its capacity, so Kubernetes counts its CPU and memory ${count} times and can schedule more than the machine holds."
   hint "New installs create one node. A cluster's node count is fixed when it is created, so a re-run or an upgrade keeps it."
-  hint "Unless you chose the second node on purpose (AGENTS=1), reinstall as one node:"
+  hint "Unless you chose the second node on purpose (TRACEBLOC_AGENTS=1), reinstall as one node:"
   _recreate_cluster_hint
   echo ""
 }
@@ -1130,25 +1169,25 @@ _check_existing_cluster_storage_mode() {
     # node-local — so name the source and lead with the keep-your-cluster remedy
     # (set hostpath), not a recreate they never asked for (Bugbot High + review).
     if [[ "${TB_STORAGE_MODE_SOURCE:-default}" == "explicit" ]]; then
-      warn "TB_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
+      warn "TRACEBLOC_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
     else
       warn "node-local is the default now, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
     fi
     hint "That cluster disabled k3s local-storage, so the 'local-path' StorageClass node-local needs does not exist — PVCs would stay Pending."
     hint "To keep using your existing hostpath cluster, just re-run with the old mode — no recreate needed:"
-    hint "  TB_STORAGE_MODE=hostpath  re-run this installer."
+    hint "  TRACEBLOC_STORAGE_MODE=hostpath  re-run this installer."
     hint "Or, to move this cluster to node-local (storage topology is fixed at create time), recreate it:"
-    _recreate_cluster_hint "TB_STORAGE_MODE=node-local  "
+    _recreate_cluster_hint "TRACEBLOC_STORAGE_MODE=node-local  "
     echo ""
-    error "Existing cluster's storage topology (hostpath) does not match node-local — set TB_STORAGE_MODE=hostpath to keep it, or recreate for node-local."
+    error "Existing cluster's storage topology (hostpath) does not match node-local — set TRACEBLOC_STORAGE_MODE=hostpath to keep it, or recreate for node-local."
   elif [[ "$want" == "hostpath" && "$cluster_is_hostpath" == false ]]; then
     echo ""
-    warn "TB_STORAGE_MODE=hostpath, but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
+    warn "TRACEBLOC_STORAGE_MODE=hostpath, but the existing '$CLUSTER_NAME' cluster was built for node-local storage."
     hint "That cluster has no /tracebloc bind mount, so hostPath volumes would land on ephemeral in-node storage"
     hint "(lost on 'cluster delete'), not ~/.tracebloc. Storage topology is fixed at create time; recreate to switch:"
     _recreate_cluster_hint
     echo ""
-    error "Existing cluster's storage topology (node-local) does not match TB_STORAGE_MODE=hostpath — refusing to install datasets onto ephemeral storage."
+    error "Existing cluster's storage topology (node-local) does not match TRACEBLOC_STORAGE_MODE=hostpath — refusing to install datasets onto ephemeral storage."
   fi
 }
 
@@ -1444,10 +1483,10 @@ _k3d_node_counts() {
   fi
   [[ "$SERVERS" =~ ^[1-9][0-9]*$ ]] || error "SERVERS must be a positive integer >= 1 (got '$SERVERS')"
   [[ "$AGENTS"  =~ ^[0-9]+$ ]]     || error "AGENTS must be a non-negative integer (got '$AGENTS')"
-  [[ "$SERVERS" == 1 ]]        || error "SERVERS=$SERVERS is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Use one server: unset SERVERS."
-  [[ "$AGENTS" =~ ^0*[01]$ ]]  || error "AGENTS=$AGENTS is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Set AGENTS to 0 (one node) or 1."
+  [[ "$SERVERS" == 1 ]]        || error "SERVERS=$SERVERS is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Use one server: unset TRACEBLOC_SERVERS (and the older SERVERS)."
+  [[ "$AGENTS" =~ ^0*[01]$ ]]  || error "AGENTS=$AGENTS is not supported: every k3d node reports this whole machine as its own capacity, so each extra node makes Kubernetes count the same CPU and memory again. Set TRACEBLOC_AGENTS to 0 (one node) or 1."
   if [[ "$AGENTS" =~ ^0*1$ ]]; then
-    warn "AGENTS=$AGENTS adds a second k3d node. Both nodes report this whole machine as their capacity, so Kubernetes counts its CPU and memory twice and can schedule more than the machine holds. Unset AGENTS for one node."
+    warn "AGENTS=$AGENTS adds a second k3d node. Both nodes report this whole machine as their capacity, so Kubernetes counts its CPU and memory twice and can schedule more than the machine holds. Unset TRACEBLOC_AGENTS (and the older AGENTS) for one node."
   fi
 }
 
@@ -1719,7 +1758,7 @@ _create_new_cluster() {
     # job Pending on a node that advertises 0 GPUs).
     if _gpu_wired; then
       TB_GPU_WIRED=0
-      warn "GPU disabled: K8S_VERSION=latest has no matching GPU node image — pin K8S_VERSION to enable GPU."
+      warn "GPU disabled: K8S_VERSION=latest has no matching GPU node image — pin TRACEBLOC_K8S_VERSION to enable GPU."
     fi
   elif _gpu_wired && [[ -n "$K8S_VERSION" ]]; then
     local _gpu_image; _gpu_image="$(_gpu_node_image)"
@@ -2644,7 +2683,7 @@ _wait_for_api() {
   if [[ -n "${TB_K3S_NODE_FINDING:-}" ]]; then
     error "kubectl cluster-info failed for ${_budget_s}s. ${TB_K3S_NODE_FINDING}"
   fi
-  error "kubectl cluster-info failed for ${_budget_s}s. Cluster reports running, but the API is unreachable. It's safe to re-run this installer; on a slow or proxied machine, extend the wait with TB_API_WAIT_S=<seconds>. Possible causes:
+  error "kubectl cluster-info failed for ${_budget_s}s. Cluster reports running, but the API is unreachable. It's safe to re-run this installer; on a slow or proxied machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);
    (b) corporate HTTP/HTTPS proxy intercepting localhost — this installer auto-adds 127.0.0.1/localhost + private ranges to NO_PROXY; a custom proxy wrapper may still override it;
    (c) kubeconfig has 0.0.0.0 — try: sed -i.bak 's|0.0.0.0|127.0.0.1|g' ${kc} && rm ${kc}.bak"

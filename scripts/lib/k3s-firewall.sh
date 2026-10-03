@@ -45,19 +45,32 @@ _NATIVE_K3S_FW_UNIT_DIR="/etc/systemd/system"
 # paths, so a test never renders a file a host would read differently.
 NATIVE_K3S_FW_ROOT="${NATIVE_K3S_FW_ROOT:-}"
 
-# _native_k3s_fw_tool — print `nft` or `iptables`; refuse when neither is there.
+# _native_k3s_fw_pick — the firewall tool this host has, without refusing: `nft`,
+# `iptables` (with ip6tables beside it), `v4-only` (iptables alone) or `none`.
 # iptables counts only with ip6tables beside it: a v4-only fence leaves the API
-# open on every v6 address the host has.
-_native_k3s_fw_tool() {
+# open on every v6 address the host has. The one reading of the host's tools:
+# _native_k3s_fw_tool refuses the last two, and k3s.sh's step b installs nftables
+# for them (_native_k3s_ensure_firewall_tool).
+_native_k3s_fw_pick() {
   if has nft; then
     echo nft
   elif has iptables && has ip6tables; then
     echo iptables
   elif has iptables; then
-    error "ip6tables is missing, so the k3s API (6443) and the kubelet (10250) cannot be kept off IPv6. Install nftables (apt-get install nftables / dnf install nftables) and re-run."
+    echo v4-only
   else
-    error "Neither nft nor iptables is installed, so nothing can keep the k3s API (6443) and the kubelet (10250) off the network. Install nftables (apt-get install nftables / dnf install nftables) and re-run."
+    echo none
   fi
+}
+
+# _native_k3s_fw_tool — print `nft` or `iptables`; refuse when neither is there.
+_native_k3s_fw_tool() {
+  case "$(_native_k3s_fw_pick)" in
+    nft) echo nft ;;
+    iptables) echo iptables ;;
+    v4-only) error "ip6tables is missing, so the k3s API (6443) and the kubelet (10250) cannot be kept off IPv6. Install nftables (apt-get install nftables / dnf install nftables) and re-run." ;;
+    *) error "Neither nft nor iptables is installed, so nothing can keep the k3s API (6443) and the kubelet (10250) off the network. Install nftables (apt-get install nftables / dnf install nftables) and re-run." ;;
+  esac
 }
 
 # _native_k3s_fw_file nft|iptables — the rules file's path on a host.

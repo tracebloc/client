@@ -13,11 +13,15 @@
 #  macOS / Linux:
 #    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
 #
-#  Environment variable overrides (optional, set before running):
-#    $env:CLUSTER_NAME  = "myapp"          default: tracebloc
-#    $env:SERVERS       = "1"              default: 1  (control-plane nodes; more than 1 is refused)
-#    $env:AGENTS        = "0"              default: 0  (worker nodes; 0 or 1 -- 1 warns: a second node counts the machine twice)
-#    $env:K8S_VERSION   = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
+#  Environment variable overrides (optional, set before running). Each
+#  TRACEBLOC_ name's older spelling -- without TRACEBLOC_ ($env:CLUSTER_NAME), or
+#  with TB_ in its place ($env:TB_LEFTOVER_ACTION) -- still works until
+#  2026-12-31; a non-empty TRACEBLOC_ one wins:
+#    $env:TRACEBLOC_CLUSTER_NAME = "myapp"         default: tracebloc
+#    $env:TRACEBLOC_SERVERS      = "1"             default: 1  (control-plane nodes; more than 1 is refused)
+#    $env:TRACEBLOC_AGENTS       = "0"             default: 0  (worker nodes; 0 or 1 -- 1 warns: a second node counts the machine twice)
+#    $env:TRACEBLOC_K8S_VERSION  = "v1.36.3-k3s1"  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
+#    $env:TRACEBLOC_HOST_DATASET_DIR = "D:\datasets"  optional separate dataset directory
 #    $env:TRACEBLOC_HOST_DATA_DIR = "C:\data"  default: $env:USERPROFILE\.tracebloc (LOCAL disk; no NFS/UNC)
 #    $env:HOST_DATA_DIR = "C:\data"        legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
 #    $env:TRACEBLOC_ENV = "dev"            optional, canonical name (RFC-0076); if neither this nor the
@@ -1014,10 +1018,31 @@ function Get-ChartVersion {
 #  CONFIGURATION
 # =============================================================================
 
-$CLUSTER_NAME  = if ($env:CLUSTER_NAME)  { $env:CLUSTER_NAME }  else { "tracebloc" }
-$SERVERS       = if ($env:SERVERS)       { $env:SERVERS }       else { "1" }
-$AGENTS        = if ($env:AGENTS)        { $env:AGENTS }        else { "0" }
-$K8S_VERSION   = if ($env:K8S_VERSION)   { $env:K8S_VERSION }   else { "v1.36.3-k3s1" }
+# Get-TbEnvAlias LEGACY -- settings naming (backend#3846): the value of the
+# first NON-EMPTY of LEGACY's TRACEBLOC_ canonical (a leading TB_ replaced,
+# TB_DOCKER_WAIT_MIN -> TRACEBLOC_DOCKER_WAIT_MIN; else prefixed, PF_MIN_CPU ->
+# TRACEBLOC_PF_MIN_CPU) and LEGACY itself (remove_by 2026-12-31), else $null --
+# the bash twin's rule (common.sh tb_canonical_name). Every tuning knob below
+# reads through it; each caller keeps its own validation and default.
+function Get-TbEnvAlias {
+  param([string]$Legacy)
+  $canon = if ($Legacy -like 'TB_*') { 'TRACEBLOC_' + $Legacy.Substring(3) } else { 'TRACEBLOC_' + $Legacy }
+  $v = [Environment]::GetEnvironmentVariable($canon)
+  if ($v) { return $v }
+  $v = [Environment]::GetEnvironmentVariable($Legacy)
+  if ($v) { return $v }
+  return $null
+}
+
+# Settings naming (backend#3846): each knob below is read under its TRACEBLOC_
+# canonical first, then its legacy spelling (remove_by 2026-12-31), then the
+# default -- a non-empty canonical wins, the rule the bash twin (common.sh) and
+# Resolve-HostDataDir follow. The `else { "..." }` tails are what check-facts.sh
+# reads the pinned defaults from, so they stay last on each line.
+$CLUSTER_NAME  = if ($env:TRACEBLOC_CLUSTER_NAME) { $env:TRACEBLOC_CLUSTER_NAME } elseif ($env:CLUSTER_NAME) { $env:CLUSTER_NAME } else { "tracebloc" }
+$SERVERS       = if ($env:TRACEBLOC_SERVERS) { $env:TRACEBLOC_SERVERS } elseif ($env:SERVERS) { $env:SERVERS } else { "1" }
+$AGENTS        = if ($env:TRACEBLOC_AGENTS) { $env:TRACEBLOC_AGENTS } elseif ($env:AGENTS) { $env:AGENTS } else { "0" }
+$K8S_VERSION   = if ($env:TRACEBLOC_K8S_VERSION) { $env:TRACEBLOC_K8S_VERSION } elseif ($env:K8S_VERSION) { $env:K8S_VERSION } else { "v1.36.3-k3s1" }
 # Settings naming: TRACEBLOC_HOST_DATA_DIR is canonical, HOST_DATA_DIR the legacy
 # spelling (remove_by 2026-12-31) -- a non-empty canonical wins, else the legacy,
 # else the default, as in the bash twin (common.sh). Confirm-DataDir exports the
@@ -1035,7 +1060,7 @@ $HOST_DATA_DIR = Resolve-HostDataDir
 # /tracebloc-data and the chart's dataset PV points there (mysql + logs stay
 # local). The host-uid ingestion mechanism for root_squash NFS is Linux-only; on
 # Windows k3d runs in a Linux VM where Docker Desktop handles mount ownership.
-$HOST_DATASET_DIR = if ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
+$HOST_DATASET_DIR = if ($env:TRACEBLOC_HOST_DATASET_DIR) { $env:TRACEBLOC_HOST_DATASET_DIR } elseif ($env:HOST_DATASET_DIR) { $env:HOST_DATASET_DIR } else { "" }
 
 # Kubelet image-GC thresholds (backend#2634). The bash twin holds the identical
 # three values in scripts/lib/cluster.sh and
@@ -1062,7 +1087,7 @@ $TB_KUBELET_IMAGE_MIN_GC_AGE      = "2m"
 # install SAYS the node is unreserved rather than borrowing another platform's
 # number.
 # ── kubelet node reservation (GENERATED by scripts/gen-node-reservation-embed.sh — do not hand-edit) ──
-$TB_KUBELET_RESERVATION_PLATFORMS = "darwin linux windows"
+$TB_KUBELET_RESERVATION_PLATFORMS = "darwin linux linux_k3s windows"
 # darwin: derived from darwin-arm64.json
 $TB_KUBELET_KUBE_RESERVED_CPU_MILLI_DARWIN = 150
 $TB_KUBELET_KUBE_RESERVED_MEM_MIB_DARWIN = 1088
@@ -1073,6 +1098,12 @@ $TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_DARWIN = 1024
 $TB_KUBELET_KUBE_RESERVED_CPU_MILLI_LINUX = 100
 $TB_KUBELET_KUBE_RESERVED_MEM_MIB_LINUX = 1152
 $TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_LINUX = 1024
+# linux_k3s: derived from linux-amd64-ubuntu-22.04-k3s.json
+# linux_k3s: derived from linux-amd64-ubuntu-24.04-k3s.json
+# linux_k3s: derived from linux-arm64-ubuntu-24.04-k3s.json
+$TB_KUBELET_KUBE_RESERVED_CPU_MILLI_LINUX_K3S = 100
+$TB_KUBELET_KUBE_RESERVED_MEM_MIB_LINUX_K3S = 1408
+$TB_KUBELET_SYSTEM_RESERVED_MEM_MIB_LINUX_K3S = 1024
 # windows: derived from windows-amd64-wsl2-server-2022.json
 $TB_KUBELET_KUBE_RESERVED_CPU_MILLI_WINDOWS = 150
 $TB_KUBELET_KUBE_RESERVED_MEM_MIB_WINDOWS = 2336
@@ -1379,7 +1410,7 @@ $CUDA_PROBE_IMAGE = if ($env:TRACEBLOC_IMAGE_REGISTRY) {
 } else {
   "nvidia/cuda:$CUDA_BASE_TAG"
 }
-$ReadyTimeout     = if ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }   # #562: raised 300 -> 600 for slow/proxied machines; kept in sync with facts.env (check-facts.sh)
+$ReadyTimeout     = if ($env:TRACEBLOC_READY_TIMEOUT) { $env:TRACEBLOC_READY_TIMEOUT } elseif ($env:READY_TIMEOUT) { $env:READY_TIMEOUT } else { "600" }   # #562: raised 300 -> 600 for slow/proxied machines; kept in sync with facts.env (check-facts.sh)
 $script:ClientState = "starting"
 
 # =============================================================================
@@ -1398,11 +1429,12 @@ Usage:
   irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
   .\install-k8s.ps1 [-Help] [-NoReboot] [-Resume]
 
-Advanced configuration (environment variables):
-  CLUSTER_NAME   Cluster name                   (default: tracebloc)
-  SERVERS        Control-plane nodes             (default: 1; more than 1 is refused)
-  AGENTS         Worker nodes                    (default: 0; 0 or 1)
-  K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
+Advanced configuration (environment variables; each one's older name without
+the TRACEBLOC_ prefix -- TB_LEFTOVER_ACTION for TRACEBLOC_LEFTOVER_ACTION -- still works):
+  TRACEBLOC_CLUSTER_NAME   Cluster name     (default: tracebloc)
+  TRACEBLOC_SERVERS        Control-plane nodes  (default: 1; more than 1 is refused)
+  TRACEBLOC_AGENTS         Worker nodes         (default: 0; 0 or 1)
+  TRACEBLOC_K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
   -NoReboot      Skip reboot prompt after enabling Windows features
   TRACEBLOC_SKIP_REBOOT_PROMPT=1
                  Same as -NoReboot, for the `irm ... | iex` entry point, which
@@ -1427,7 +1459,7 @@ Unattended / automation (no console -- CI, Intune/SCCM, a GPO startup script):
 Reinstalling on a machine that still holds data:
   A new install won't silently adopt data left under HOST_DATA_DIR (both the
   flat and per-release layouts) -- it stops and asks reuse / wipe / different dir.
-  Non-interactive: TB_LEFTOVER_ACTION=reuse|wipe, or TRACEBLOC_HOST_DATA_DIR=<new-path>
+  Non-interactive: TRACEBLOC_LEFTOVER_ACTION=reuse|wipe, or TRACEBLOC_HOST_DATA_DIR=<new-path>
   (with no choice and no terminal the install aborts). Bypass entirely with
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
 
@@ -2325,11 +2357,11 @@ function Enable-OneVirtFeature {
 # (#414 reviewer -- matching any dotted number was effectively Test-WslPresent).
 # The floor is Docker Desktop's documented WSL minimum (2.1.5): below it, Docker
 # Desktop prompts to update WSL, the exact symptom this avoids (#414 Bugbot).
-# TB_WSL_MIN_VERSION overrides it.
+# TRACEBLOC_WSL_MIN_VERSION (legacy: TB_WSL_MIN_VERSION) overrides it.
 function Test-WslCurrent {
   param(
     [string]$VersionOutput,
-    [string]$MinVersion = $(if ($env:TB_WSL_MIN_VERSION) { $env:TB_WSL_MIN_VERSION } else { "2.1.5" })
+    [string]$MinVersion = $(if ($tbWslMin = Get-TbEnvAlias 'TB_WSL_MIN_VERSION') { $tbWslMin } else { "2.1.5" })
   )
   $m = [regex]::Match($VersionOutput, '\d+\.\d+\.\d+(\.\d+)?')
   if (-not $m.Success) { return $false }
@@ -2684,7 +2716,8 @@ function Install-DockerDesktop {
     # 3-minute cap turned a normal cold start into a failed install plus a
     # manual re-run (#413). Default 10 minutes; TB_DOCKER_WAIT_MIN overrides.
     $waitMin = 10
-    if ("$env:TB_DOCKER_WAIT_MIN" -match '^\d+$') { $waitMin = [int]$env:TB_DOCKER_WAIT_MIN }
+    $tbWaitRaw = Get-TbEnvAlias 'TB_DOCKER_WAIT_MIN'
+    if ("$tbWaitRaw" -match '^\d+$') { $waitMin = [int]$tbWaitRaw }
     # WALL-CLOCK, NOT ITERATIONS (backend#2849). `$waitMin * 20` assumed each
     # pass costs exactly the 3s sleep, which is only true while `docker info`
     # returns promptly. A WEDGED daemon -- a half-open \\.\pipe\docker_engine,
@@ -2741,7 +2774,7 @@ function Install-DockerDesktop {
         Hint "3. If Docker shows an error window instead (e.g. 'Virtualization support not detected' or a WSL update prompt), fix that first - it may need a reboot"
         Write-Host ""
         Hint "Nothing is broken -- a first start can be slow. Re-run this script once Docker is ready."
-        Hint "(TB_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TB_DOCKER_WAIT_MIN = '20'.)"
+        Hint "(TRACEBLOC_DOCKER_WAIT_MIN overrides the wait, e.g. `$env:TRACEBLOC_DOCKER_WAIT_MIN = '20'.)"
         Write-Host ""
         Err "Docker did not start within $waitMin minutes. Re-run this script once Docker is ready."
       }
@@ -3350,7 +3383,8 @@ function Build-GpuNodeImage {
     # Bounded with a heartbeat (progress bar), same pattern as cluster-create. Generous
     # deadline: the first build downloads a multi-hundred-MB CUDA base + installs packages.
     $buildMin = 20
-    if ("$env:TB_GPU_BUILD_TIMEOUT_MIN" -match '^\d+$') { $buildMin = [int]$env:TB_GPU_BUILD_TIMEOUT_MIN }
+    $tbBuildRaw = Get-TbEnvAlias 'TB_GPU_BUILD_TIMEOUT_MIN'
+    if ("$tbBuildRaw" -match '^\d+$') { $buildMin = [int]$tbBuildRaw }
     if (-not (Wait-ProcessWithDeadline -Process $proc -Deadline (Get-Date).AddMinutes($buildMin) -Message "Building GPU support (one-time, a few minutes)...")) {
       $tail = @()
       if (Test-Path $errLog) { $tail = @(Get-Content $errLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
@@ -3453,8 +3487,8 @@ function Install-Kubectl {
 # releases/latest API, whose 60 req/hour/IP limit a single shared corporate NAT
 # exhausts. Only the literal value "latest" resolves at install time — via the
 # plain /releases/latest redirect or get.helm.sh, never api.github.com.
-$script:K3dVersion  = if ($env:K3D_VERSION)  { $env:K3D_VERSION }  else { "v5.9.0" }
-$script:HelmVersion = if ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
+$script:K3dVersion  = if ($env:TRACEBLOC_K3D_VERSION) { $env:TRACEBLOC_K3D_VERSION } elseif ($env:K3D_VERSION) { $env:K3D_VERSION } else { "v5.9.0" }
+$script:HelmVersion = if ($env:TRACEBLOC_HELM_VERSION) { $env:TRACEBLOC_HELM_VERSION } elseif ($env:HELM_VERSION) { $env:HELM_VERSION } else { "v4.2.3" }
 
 # A tag is interpolated into a download URL — refuse separators and parent-dir
 # tokens (path-traversal lever) and require a release shape. Mirrors the
@@ -4180,7 +4214,10 @@ function Invoke-LeftoverDataGuard {
   Hint "A fresh install would silently adopt it, so it would not really be fresh."
 
   $action = ""
-  switch ("$($env:TB_LEFTOVER_ACTION)".Trim().ToLower()) {
+  # Settings naming (backend#3846): TRACEBLOC_LEFTOVER_ACTION first, the legacy
+  # TB_LEFTOVER_ACTION after it (remove_by 2026-12-31); a non-empty canonical wins.
+  $leftoverEnv = if ($env:TRACEBLOC_LEFTOVER_ACTION) { $env:TRACEBLOC_LEFTOVER_ACTION } else { $env:TB_LEFTOVER_ACTION }
+  switch ("$leftoverEnv".Trim().ToLower()) {
     "reuse" { $action = "reuse" }
     "wipe"  { $action = "wipe" }
   }
@@ -4202,8 +4239,8 @@ function Invoke-LeftoverDataGuard {
       }
     } else {
       Err ("Existing data found under $HOST_DATA_DIR and no choice was given (no terminal). Re-run with one of:`n" +
-           "  `$env:TB_LEFTOVER_ACTION='reuse'   adopt the existing data`n" +
-           "  `$env:TB_LEFTOVER_ACTION='wipe'    delete it and start fresh`n" +
+           "  `$env:TRACEBLOC_LEFTOVER_ACTION='reuse'   adopt the existing data`n" +
+           "  `$env:TRACEBLOC_LEFTOVER_ACTION='wipe'    delete it and start fresh`n" +
            "  `$env:TRACEBLOC_HOST_DATA_DIR='<new-path>'   install into a different directory`n" +
            "  (or `$env:TRACEBLOC_SKIP_LEFTOVER_GUARD='1' to bypass this guard entirely)")
     }
@@ -5015,7 +5052,8 @@ function Get-K3sNodeState {
   # failure ~500k lines deep. NOT -StdoutOnly: k3s logs to stderr (measured: all
   # three markers are on stderr), and the merged output keeps stderr in order.
   $logsTimeout = 90
-  if ("$env:TB_DOCKER_LOGS_TIMEOUT" -match '^[0-9]+$') { $logsTimeout = [int]$env:TB_DOCKER_LOGS_TIMEOUT }
+  $tbLogsRaw = Get-TbEnvAlias 'TB_DOCKER_LOGS_TIMEOUT'
+  if ("$tbLogsRaw" -match '^[0-9]+$') { $logsTimeout = [int]$tbLogsRaw }
   $failed = $false; $exp = ''
   $lr = Invoke-DockerCli -DockerArgs @("logs", $Node) -TimeoutSec $logsTimeout
   if ($lr.Code -eq 0) {
@@ -5374,9 +5412,11 @@ function Invoke-K3sNodeAddressCheck {
 # unless the LAST pass found the API answering.
 function Repair-K3sNodeAddress {
   $every = 15
-  if ("$env:TB_NODE_CHECK_EVERY_S" -match '^[0-9]+$') { $every = [int]$env:TB_NODE_CHECK_EVERY_S }
+  $tbEveryRaw = Get-TbEnvAlias 'TB_NODE_CHECK_EVERY_S'
+  if ("$tbEveryRaw" -match '^[0-9]+$') { $every = [int]$tbEveryRaw }
   $window = 60
-  if ("$env:TB_NODE_CHECK_WINDOW_S" -match '^[0-9]+$') { $window = [int]$env:TB_NODE_CHECK_WINDOW_S }
+  $tbWindowRaw = Get-TbEnvAlias 'TB_NODE_CHECK_WINDOW_S'
+  if ("$tbWindowRaw" -match '^[0-9]+$') { $window = [int]$tbWindowRaw }
   $deadline = (Get-Date).AddSeconds($window)
   $finding = ''
   $check = Invoke-K3sNodeAddressCheck
@@ -5843,7 +5883,8 @@ function New-K3dCluster {
     }
 
     $timeoutMin = 15
-    if ("$env:TB_CREATE_TIMEOUT_MIN" -match '^\d+$') { $timeoutMin = [int]$env:TB_CREATE_TIMEOUT_MIN }
+    $tbCreateRaw = Get-TbEnvAlias 'TB_CREATE_TIMEOUT_MIN'
+    if ("$tbCreateRaw" -match '^\d+$') { $timeoutMin = [int]$tbCreateRaw }
     if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
       # Capture the FULL create output before the logs are deleted, so the
       # host-CA x509 check below can see an x509 that scrolled past the last 5
@@ -5877,7 +5918,7 @@ function New-K3dCluster {
       # A TLS-inspected host pull can log x509 and then hang until the deadline —
       # surface the CA remedy here too, matching bash's timeout fall-through (#474).
       Write-HostCaCreateHint -Output $timeoutOut
-      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN overrides the bound.)"
+      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TRACEBLOC_CREATE_TIMEOUT_MIN overrides the bound.)"
     }
 
     $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
@@ -7373,7 +7414,7 @@ $script:MetricsWaitTimeout = 120
 # wait. The digit cap is not cosmetic: `[int]` on a 20-digit string THROWS, and a
 # typo'd knob must not take the install down.
 function Get-MetricsWaitSeconds {
-  param([string]$Value = $env:TB_METRICS_WAIT_S, [int]$Default = $script:MetricsWaitTimeout)
+  param([string]$Value = (Get-TbEnvAlias 'TB_METRICS_WAIT_S'), [int]$Default = $script:MetricsWaitTimeout)
   if ("$Value" -match '^\d{1,6}$') { return [int]$Value }
   return $Default
 }
@@ -8840,18 +8881,21 @@ $script:PfOsReserveGb = 2
 # producing a budget below the client's own floor on an 8 GB host.
 # The reserve fails CLOSED -- never 0, which would hand WSL2 the entire host.
 function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$script:PfOsReserveGb } else { return 2 } }
-function Get-PfMinMemGb    { if ($env:PF_MIN_MEM_GB)  { return [int]$env:PF_MIN_MEM_GB }  else { return 5 } }
+# Settings naming (backend#3846): every PF_* threshold is read as TRACEBLOC_PF_*
+# first, then the legacy PF_* (remove_by 2026-12-31), through Get-TbEnvAlias --
+# the bash twin's rule (preflight.sh).
+function Get-PfMinMemGb    { if ($v = Get-TbEnvAlias 'PF_MIN_MEM_GB')  { return [int]$v }  else { return 5 } }
 # DERIVED, not typed (backend#2460): the smallest training rung's VM budget, ceiling'd
 # to whole GB, from the generated $script:TbVmMinMemBytes. Mirrors bash _pf_vm_min_gb;
 # the 8 is the pre-derivation fallback and unreachable while `make drift` is green.
 function Get-PfVmMinMemGb  { $b = [long]$script:TbVmMinMemBytes; if ($b -le 0) { return 8 }; return [int][math]::Ceiling($b / 1GB) }
-function Get-PfWarnMemGb   { if ($env:PF_WARN_MEM_GB) { return [int]$env:PF_WARN_MEM_GB } else { return (Get-PfVmMinMemGb) } }
-function Get-PfRecMemGb    { if ($env:PF_REC_MEM_GB)  { return [int]$env:PF_REC_MEM_GB }  else { return 16 } }
+function Get-PfWarnMemGb   { if ($v = Get-TbEnvAlias 'PF_WARN_MEM_GB') { return [int]$v } else { return (Get-PfVmMinMemGb) } }
+function Get-PfRecMemGb    { if ($v = Get-TbEnvAlias 'PF_REC_MEM_GB')  { return [int]$v }  else { return 16 } }
 # How far below the floor a VM may REPORT before the runtime gate calls it sub-floor.
 # A guest's MemTotal runs a few hundred MiB under its configured size, so a VM set to
 # exactly the documented floor must still pass -- otherwise the effective floor is a
 # GB higher than we tell people (bash PF_VM_MEM_GRACE_MIB, #513 reviewer).
-function Get-PfVmMemGraceMib { if ($env:PF_VM_MEM_GRACE_MIB) { return [int]$env:PF_VM_MEM_GRACE_MIB } else { return 512 } }
+function Get-PfVmMemGraceMib { if ($v = Get-TbEnvAlias 'PF_VM_MEM_GRACE_MIB') { return [int]$v } else { return 512 } }
 
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
@@ -9152,12 +9196,12 @@ function Show-NetworkProfile {
 function Test-Preflight {
   if ($env:TRACEBLOC_SKIP_PREFLIGHT) { Info "Preflight checks skipped (TRACEBLOC_SKIP_PREFLIGHT set)."; return }
 
-  $minDiskGb  = if ($env:PF_MIN_DISK_GB)  { [int]$env:PF_MIN_DISK_GB }  else { 10 }
-  $warnDiskGb = if ($env:PF_WARN_DISK_GB) { [int]$env:PF_WARN_DISK_GB } else { 20 }
+  $minDiskGb  = if ($v = Get-TbEnvAlias 'PF_MIN_DISK_GB')  { [int]$v }  else { 10 }
+  $warnDiskGb = if ($v = Get-TbEnvAlias 'PF_WARN_DISK_GB') { [int]$v } else { 20 }
   # Memory thresholds live in Show-MemoryStatus (it reads the PF_*_MEM_GB env vars
   # itself), so they aren't declared here anymore (#417 reviewer).
-  $minCpu     = if ($env:PF_MIN_CPU)      { [int]$env:PF_MIN_CPU }      else { 2 }
-  $recCpu     = if ($env:PF_REC_CPU)      { [int]$env:PF_REC_CPU }      else { 4 }
+  $minCpu     = if ($v = Get-TbEnvAlias 'PF_MIN_CPU')      { [int]$v }      else { 2 }
+  $recCpu     = if ($v = Get-TbEnvAlias 'PF_REC_CPU')      { [int]$v }      else { 4 }
   $hardFail   = 0
 
   # Architecture — the tracebloc client images (e.g. mysql-client) are amd64-only.
@@ -10237,7 +10281,7 @@ if ($GPU_VENDOR -eq "nvidia" -and $NVIDIA_DRIVER_OK -and ($K8S_VERSION -eq "late
     # see the same card, so multi-node can NEVER add real GPUs -- it only double-counts.
     # Collapse to a single node whenever GPU is on: one node -> the card is advertised once.
     if ($AGENTS -ne "0") {
-      if ($env:AGENTS) {
+      if ($env:TRACEBLOC_AGENTS -or $env:AGENTS) {
         Warn ("GPU mode forces a single node (agents=0) so the one physical GPU isn't double-counted; overriding your AGENTS=$AGENTS. Extra k3d nodes share the same host GPU and only re-advertise it.")
       } else {
         Log "GPU mode: using a single node (agents=0) so the one physical GPU is advertised exactly once."

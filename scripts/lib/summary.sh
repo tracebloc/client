@@ -29,7 +29,10 @@ _log_cluster_status() {
 CLIENT_STATE=""
 # #562: default raised 300 -> 600 so a slow/proxied laptop pulling several GB of
 # images isn't reported "not connected" while still healthily starting. Kept in
-# sync with scripts/spec/facts.env (check-facts.sh); override via READY_TIMEOUT.
+# sync with scripts/spec/facts.env (check-facts.sh); override via
+# TRACEBLOC_READY_TIMEOUT (the legacy READY_TIMEOUT still works, remove_by
+# 2026-12-31; a non-empty canonical wins).
+if [[ -n "${TRACEBLOC_READY_TIMEOUT:-}" ]]; then READY_TIMEOUT="$TRACEBLOC_READY_TIMEOUT"; fi
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
 
 wait_for_client_ready() {
@@ -167,16 +170,38 @@ _reboot_note() {
   fi
 }
 
+# _summary_kubeconfig_hint -- the merged kubeconfig a native k3s user must name, with
+# $HOME as ~ for them to type, or nothing (exit 1). Native k3s links kubectl to k3s,
+# and with no KUBECONFIG that kubectl reads k3s's own k3s.yaml (context default, no
+# namespace), never the merged file. _native_k3s_merge_kubeconfig sets the hint only
+# when the user had no KUBECONFIG; k3d never needs it.
+_summary_kubeconfig_hint() {
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" && -n "${TB_K3S_KUBECONFIG_HINT:-}" ]]; then
+    local kc="$TB_K3S_KUBECONFIG_HINT"
+    # shellcheck disable=SC2088  # the ~ is for the user to read, as in logdisp below
+    if [[ -n "${HOME:-}" && "$kc" == "$HOME"/* ]]; then kc="~${kc#"$HOME"}"; fi
+    printf '%s' "$kc"
+    return 0
+  fi
+  return 1
+}
+
 # The installer switched kubectl's current context to this cluster (it must: the
 # secure environment is registered against the current context), and a user who
 # also works on other clusters needs to hear that, with the way back, or their
 # next kubectl lands here (backend#5025 O-19). _merge_kubeconfig sets
 # TB_PREV_KUBE_CONTEXT only when a DIFFERENT context was selected before, so a
 # fresh machine and a re-run print nothing.
+#
+# On native k3s with no KUBECONFIG, the user's kubectl is k3s's, which reads k3s.yaml
+# and never the merged file that holds the previous context, so a bare `use-context`
+# would not reach it; the command names that file (_summary_kubeconfig_hint).
 _kube_context_note() {
   [[ -n "${TB_PREV_KUBE_CONTEXT:-}" ]] || return 0
+  local kc="" kcflag=""
+  if kc="$(_summary_kubeconfig_hint)"; then kcflag="--kubeconfig ${kc} "; fi
   echo -e "  kubectl now points at ${TB_KUBE_CONTEXT:-k3d-${CLUSTER_NAME:-tracebloc}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
-  echo -e "    ${TB_CMD}kubectl config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
+  echo -e "    ${TB_CMD}kubectl ${kcflag}config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
   echo ""
 }
 
@@ -319,6 +344,15 @@ print_summary() {
       echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
       ;;
   esac
+  # A native k3s user with no KUBECONFIG reads the release only through the merged
+  # file (_summary_kubeconfig_hint). Every outcome above names a kubectl command, so
+  # every outcome ends with the line.
+  local kc=""
+  if kc="$(_summary_kubeconfig_hint)"; then
+    echo ""
+    echo -e "  To point kubectl at tracebloc, run this in your shell (add it to your profile to keep it):"
+    echo -e "    ${TB_CMD}export KUBECONFIG=${kc}${RESET}"
+  fi
   echo ""
   # Every other outcome sends the user to kubectl too; the connected one says it
   # above its footer, so the reboot note stays its last line.

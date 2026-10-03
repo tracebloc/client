@@ -196,6 +196,7 @@ data:
     if [ -n "${TRACEBLOC_NODE_AGENTS_NAMESPACE:-}" ]; then NODE_AGENTS_NAMESPACE="$TRACEBLOC_NODE_AGENTS_NAMESPACE"; fi
     if [ -n "${TRACEBLOC_IMAGE_REGISTRY:-}" ]; then IMAGE_REGISTRY="$TRACEBLOC_IMAGE_REGISTRY"; fi
     if [ -n "${TRACEBLOC_IMAGE_REGISTRY_RESOLVABLE:-}" ]; then IMAGE_REGISTRY_RESOLVABLE="$TRACEBLOC_IMAGE_REGISTRY_RESOLVABLE"; fi
+    if [ -n "${TRACEBLOC_IMAGE_TAG:-}" ]; then IMAGE_TAG="$TRACEBLOC_IMAGE_TAG"; fi
     if [ -n "${TRACEBLOC_ROLLOUT_TIMEOUT:-}" ]; then ROLLOUT_TIMEOUT="$TRACEBLOC_ROLLOUT_TIMEOUT"; fi
     if [ -n "${TRACEBLOC_MAX_REFRESH_ATTEMPTS:-}" ]; then MAX_REFRESH_ATTEMPTS="$TRACEBLOC_MAX_REFRESH_ATTEMPTS"; fi
     if [ -n "${TRACEBLOC_MAX_SKIP_TICKS:-}" ]; then MAX_SKIP_TICKS="$TRACEBLOC_MAX_SKIP_TICKS"; fi
@@ -1434,6 +1435,8 @@ spec:
                   # RESOLVED, not raw. This is the tag the refresh pulls, so a
                   # documented alias here freezes the edge on a tag the publish
                   # pipeline never writes (backend#1723).
+                  value: {{ include "tracebloc.clientEnv" . | quote }}
+                - name: TRACEBLOC_IMAGE_TAG
                   value: {{ include "tracebloc.clientEnv" . | quote }}
                 - name: ROLLOUT_TIMEOUT
                   value: {{ .Values.imageRefresh.rolloutTimeout | quote }}

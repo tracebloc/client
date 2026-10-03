@@ -35,7 +35,9 @@
 #  sub-scripts are fetched from the raw TREE of TRACEBLOC_SOURCE_REPO (default
 #  tracebloc/client, which carries no scripts/ tree), so point it at a source whose
 #  tree is readable — a public fork with your branch pushed:
-#    curl -fsSL ... | TRACEBLOC_SOURCE_REPO=<you>/client BRANCH=<branch> TRACEBLOC_ALLOW_UNVERIFIED=1 bash
+#    curl -fsSL ... | TRACEBLOC_SOURCE_REPO=<you>/client TRACEBLOC_BRANCH=<branch> TRACEBLOC_ALLOW_UNVERIFIED=1 bash
+#  (TRACEBLOC_REF=<vX.Y.Z> pins another release instead; the older REF / BRANCH
+#  spellings still work.)
 #
 #  Windows (PowerShell as Administrator):
 #    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
@@ -89,6 +91,12 @@ esac
 # request must always (re)install, never bail).
 _tb_bail_ok=1
 _tb_force=0
+# Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH are the
+# canonical spellings of the release pin and the dev-branch override; REF /
+# BRANCH still work (remove_by 2026-12-31). A non-empty canonical wins, resolved
+# once into the legacy-named variable the rest of this bootstrap reads.
+if [[ -n "${TRACEBLOC_REF:-}" ]]; then REF="$TRACEBLOC_REF"; fi
+if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
 [[ "${TRACEBLOC_FORCE_REINSTALL:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ "${TRACEBLOC_ALLOW_UNVERIFIED:-0}" == "1" ]] && { _tb_bail_ok=0; _tb_force=1; }
 [[ -n "${REF:-}" || -n "${BRANCH:-}" ]] && { _tb_bail_ok=0; _tb_force=1; }
@@ -123,8 +131,10 @@ done
 # pinned-ref re-run would download the new installer and then do nothing. Export
 # TB_FORCE_REINSTALL so the downstream gate is skipped and the full (idempotent)
 # flow runs. (--force/--reinstall pass through via "$@" too, but env is the only
-# channel for the REF/BRANCH/unverified reasons.)
-[[ "$_tb_force" == "1" ]] && export TB_FORCE_REINSTALL=1
+# channel for the REF/BRANCH/unverified reasons.) Under both names: the core
+# reads the canonical TRACEBLOC_FORCE_REINSTALL first, so exporting only the
+# legacy one would lose to a TRACEBLOC_FORCE_REINSTALL=0 left in the shell.
+[[ "$_tb_force" == "1" ]] && export TB_FORCE_REINSTALL=1 TRACEBLOC_FORCE_REINSTALL=1
 
 _tb_check_healthy() {
   # Run `tracebloc doctor` behind a small inline spinner, bounded so a wedged CLI
@@ -375,6 +385,8 @@ FILES=(
   "scripts/lib/setup-linux.sh"
   "scripts/lib/cluster.sh"
   "scripts/lib/k3d.sh"
+  "scripts/lib/k3s.sh"
+  "scripts/lib/k3s-firewall.sh"
   "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/install-cli.sh"
@@ -402,6 +414,43 @@ download_with_retry() {
     echo "[WARN]  Download failed (attempt $attempt/$max_attempts). Retrying in ${delay}s..."
     sleep "$delay"
   done
+}
+
+# Fetch one OPTIONAL asset — the manifest, its sig/cert/bundle, the cosign
+# bootstrap — without exiting: 0 = fetched, 1 = not fetched, and the caller
+# decides between falling through and failing closed. A 404 is an answer (a
+# release cut before signing, or before the offline bundle, has no such asset),
+# so it returns at once. Anything else — a timeout, a reset, a 5xx — is a blip
+# and gets the same three attempts download_with_retry gives every sub-script.
+# These fetches used to be single-shot, so one dropped connection on the manifest
+# refused the whole install as "couldn't fetch the integrity checksums" on a
+# release whose assets had been published for hours (backend#3020). FETCH_STATUS
+# keeps the last outcome — the HTTP code, or 000 for no answer — so a refusal
+# can say which of the two it was.
+FETCH_STATUS=""
+fetch_optional() {
+  local url="$1" dest="$2" attempt max_attempts=3 delay=5
+  for attempt in 1 2 3; do
+    FETCH_STATUS="$(curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 -w '%{http_code}' "$url" -o "$dest" 2>/dev/null)" && return 0
+    [[ "$FETCH_STATUS" == "404" ]] && return 1
+    if [[ $attempt -lt $max_attempts ]]; then
+      echo "[WARN]  Download failed (attempt $attempt/$max_attempts). Retrying in ${delay}s..." >&2
+      sleep "$delay"
+    fi
+  done
+  return 1
+}
+
+# The cause line of a refusal over an optional asset fetch_optional couldn't get.
+# $1 is the advice for a 404 (the release doesn't publish it); any other status
+# was the network, and pinning a different tag would not have helped.
+_fetch_refusal_cause() {
+  if [[ "$FETCH_STATUS" == "404" ]]; then
+    echo "        $1" >&2
+  else
+    echo "        The download failed 3 times (last status: ${FETCH_STATUS:-none}) — check" >&2
+    echo "        your network or proxy and re-run." >&2
+  fi
 }
 
 # ── Fetch the sub-scripts ─────────────────────────────────────────────────
@@ -482,8 +531,8 @@ verify_against_manifest() {
       return 0
     fi
     echo "[ERROR] Couldn't fetch the installer's integrity checksums for ref '$REF' — refusing to run" >&2
-    echo "        unverified installer scripts. If this ref pre-dates" >&2
-    echo "        signed releases, pin a newer release tag." >&2
+    echo "        unverified installer scripts." >&2
+    _fetch_refusal_cause "If this ref pre-dates signed releases, pin a newer release tag."
     exit 1
   fi
 
@@ -519,11 +568,11 @@ download_manifest() {
   # Authoritative source: the signed release asset. Fall back to the in-repo
   # copy in the tag tree only under the unverified dev opt-in (a branch checkout
   # has no release assets).
-  if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256" -o "$dest" 2>/dev/null; then
+  if fetch_optional "$REPO_REL/manifest.sha256" "$dest"; then
     return 0
   fi
   if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
-    curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_RAW/scripts/manifest.sha256" -o "$dest" 2>/dev/null
+    fetch_optional "$REPO_RAW/scripts/manifest.sha256" "$dest"
     return $?
   fi
   return 1
@@ -567,7 +616,7 @@ verify_manifest_signature() {
   # existed simply 404 here and fall through to the online .sig/.cert path below;
   # so does any bundle that doesn't verify — the online path does the SAME full
   # keyless check, just needing live Rekor, so this is a fallback, never a downgrade.
-  if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.bundle" -o "$bundle" 2>/dev/null; then
+  if fetch_optional "$REPO_REL/manifest.sha256.bundle" "$bundle"; then
     if "$COSIGN_BIN" verify-blob \
           --bundle "$bundle" \
           --certificate-identity-regexp "$id_re" \
@@ -579,14 +628,15 @@ verify_manifest_signature() {
     fi
   fi
 
-  if ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.sig"  -o "$sig"  2>/dev/null \
-     || ! curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$REPO_REL/manifest.sha256.cert" -o "$cert" 2>/dev/null; then
+  if ! fetch_optional "$REPO_REL/manifest.sha256.sig"  "$sig" \
+     || ! fetch_optional "$REPO_REL/manifest.sha256.cert" "$cert"; then
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
       echo "[WARN]  The installer's signature isn't published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
     fi
-    echo "[ERROR] The installer's signature isn't published for release '$REF' — can't" >&2
-    echo "        confirm the download is authentic. Pin a release tag that ships it." >&2
+    echo "[ERROR] Couldn't fetch the installer's signature for release '$REF' — can't" >&2
+    echo "        confirm the download is authentic." >&2
+    _fetch_refusal_cause "This release doesn't publish one. Pin a release tag that ships it."
     exit 1
   fi
 
@@ -635,8 +685,8 @@ ensure_cosign() {
   local sums="$TMPDIR/cosign_checksums.txt"
 
   echo "  · Fetching the signature-verification tool (cosign)…"
-  curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/$asset"               -o "$bin"  2>/dev/null || return 1
-  curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$base/cosign_checksums.txt" -o "$sums" 2>/dev/null || return 1
+  fetch_optional "$base/$asset"               "$bin"  || return 1
+  fetch_optional "$base/cosign_checksums.txt" "$sums" || return 1
 
   local want got sums_line
   # Pure-bash slicing, NOT `grep | awk | head -1`. head closes the pipe after the

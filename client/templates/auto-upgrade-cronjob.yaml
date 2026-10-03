@@ -40,6 +40,13 @@ data:
     # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
     # canonical first; a blank or absent canonical leaves the legacy value --
     # and any default or `set -u` refusal below -- exactly as before.
+    # The chart source (REPO_URL / REPO_NAME / CHART_NAME) takes the spelling the
+    # installer and the cli already give the same three facts
+    # (install-client-helm.sh TRACEBLOC_HELM_REPO_URL / _NAME, TRACEBLOC_CHART_NAME),
+    # not TRACEBLOC_<legacy>: one concept, one name.
+    if [ -n "${TRACEBLOC_HELM_REPO_URL:-}" ]; then REPO_URL="$TRACEBLOC_HELM_REPO_URL"; fi
+    if [ -n "${TRACEBLOC_HELM_REPO_NAME:-}" ]; then REPO_NAME="$TRACEBLOC_HELM_REPO_NAME"; fi
+    if [ -n "${TRACEBLOC_CHART_NAME:-}" ]; then CHART_NAME="$TRACEBLOC_CHART_NAME"; fi
     if [ -n "${TRACEBLOC_UPGRADE_TIMEOUT:-}" ]; then UPGRADE_TIMEOUT="$TRACEBLOC_UPGRADE_TIMEOUT"; fi
     if [ -n "${TRACEBLOC_WEDGE_MIN_AGE_SECONDS:-}" ]; then WEDGE_MIN_AGE_SECONDS="$TRACEBLOC_WEDGE_MIN_AGE_SECONDS"; fi
     if [ -n "${TRACEBLOC_TELEMETRY_STATUS_NAME:-}" ]; then TELEMETRY_STATUS_NAME="$TRACEBLOC_TELEMETRY_STATUS_NAME"; fi
@@ -582,9 +589,15 @@ spec:
                   value: {{ .Release.Namespace | quote }}
                 - name: REPO_URL
                   value: {{ .Values.autoUpgrade.repoUrl | quote }}
+                - name: TRACEBLOC_HELM_REPO_URL
+                  value: {{ .Values.autoUpgrade.repoUrl | quote }}
                 - name: REPO_NAME
                   value: {{ .Values.autoUpgrade.repoName | quote }}
+                - name: TRACEBLOC_HELM_REPO_NAME
+                  value: {{ .Values.autoUpgrade.repoName | quote }}
                 - name: CHART_NAME
+                  value: {{ .Values.autoUpgrade.chartName | quote }}
+                - name: TRACEBLOC_CHART_NAME
                   value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: UPGRADE_TIMEOUT
                   value: {{ .Values.autoUpgrade.timeout | quote }}

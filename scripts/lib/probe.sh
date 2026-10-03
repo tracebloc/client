@@ -171,6 +171,14 @@ _classify_from_probes() {
   INSTALL_TIER=2
   INSTALL_TIER_REASON="unknown"
 
+  # Native k3s runs as root whatever runtime is here (RFC-0175 D3), so a usable
+  # Docker is no Tier 0 for it. install_linux routes k3s before reading the tier;
+  # this keeps the panel from promising "zero root" to a run that will ask for sudo.
+  if [[ "${TB_SUBSTRATE:-}" == "k3s" && "${OS:-}" == "Linux" ]]; then
+    INSTALL_TIER=2; INSTALL_TIER_REASON="native-k3s"
+    return 0
+  fi
+
   if [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
     INSTALL_TIER=0; INSTALL_TIER_REASON="runtime-usable"
     return 0
@@ -318,6 +326,7 @@ render_host_audit() {
         unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer directly. On Windows: run this installer inside a WSL2 Linux distro (rootless, no Docker Desktop licence — preferred), or install Docker Desktop via the PowerShell installer (install.ps1)." ;;
         no-cgroup2)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this kernel isn't on cgroup v2; a one-time admin step is needed." ;;
         no-userns)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — unprivileged user namespaces are disabled; a one-time admin step is needed." ;;
+        native-k3s)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — native k3s runs as root; administrator rights are needed once." ;;
         *)                    echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — a one-time admin step is needed to prepare this host." ;;
       esac
       ;;

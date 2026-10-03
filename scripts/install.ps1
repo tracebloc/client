@@ -25,7 +25,9 @@
 #  tracebloc/client, which carries no scripts/ tree), so point it at a source whose
 #  tree is readable — a public fork with your branch pushed — and fetch install.ps1
 #  itself from that same fork:
-#    $env:TRACEBLOC_SOURCE_REPO = "<you>/client"; $env:BRANCH = "<branch>"; $env:TRACEBLOC_ALLOW_UNVERIFIED = "1"
+#    $env:TRACEBLOC_SOURCE_REPO = "<you>/client"; $env:TRACEBLOC_BRANCH = "<branch>"; $env:TRACEBLOC_ALLOW_UNVERIFIED = "1"
+#  ($env:TRACEBLOC_REF = "<vX.Y.Z>" pins another release instead; the older
+#  $env:REF / $env:BRANCH spellings still work.)
 #    irm https://raw.githubusercontent.com/<you>/client/<branch>/scripts/install.ps1 | iex
 #
 #  macOS / Linux:
@@ -220,20 +222,56 @@ function Get-WithRetry {
   }
 }
 
-# Try a download but don't retry/throw — used for optional assets (manifest
-# fall-through, sig/cert) where the caller decides fail-closed vs. opt-out.
+# Try a download and never throw — used for optional assets (manifest
+# fall-through, sig/cert/bundle, the cosign checksums) where the caller decides
+# fail-closed vs. opt-out. A 404 is an answer (a release cut before signing, or
+# before the offline bundle, has no such asset), so it returns at once. Anything
+# else — a timeout, a reset, a 5xx — is a blip and gets the same attempts
+# Get-WithRetry gives every sub-script. These fetches used to be single-shot, so
+# one dropped connection on the manifest refused the whole install as "couldn't
+# fetch the integrity checksums" (backend#3020; parity with install.sh's
+# fetch_optional). $script:FetchStatus keeps the last outcome — the HTTP code, or
+# 'none' for no answer — so a refusal can say which of the two it was.
+$script:FetchStatus = ''
 function Get-Optional {
-  param([string]$Url, [string]$Dest)
+  param(
+    [string]$Url,
+    [string]$Dest,
+    [int]$MaxAttempts = 3,
+    [int]$DelaySeconds = 5
+  )
   # Same PS 5.1 progress-throttle fix as Get-WithRetry (#468); local scope only.
   $ProgressPreference = 'SilentlyContinue'
   $proxyArgs = @{}
   if ($env:HTTPS_PROXY) { $proxyArgs['Proxy'] = $env:HTTPS_PROXY }
-  try {
-    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop @proxyArgs
-    return $true
-  } catch {
-    return $false
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop @proxyArgs
+      $script:FetchStatus = '200'
+      return $true
+    } catch {
+      # PS 5.1 (WebException) and 7 (HttpResponseException) both carry the
+      # response's StatusCode; a network error carries no response at all.
+      $code = 0
+      try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = 0 }
+      if ($code -gt 0) { $script:FetchStatus = "$code" } else { $script:FetchStatus = 'none' }
+      if ($code -eq 404) { return $false }
+      if ($attempt -lt $MaxAttempts) {
+        Warn "Download failed (attempt $attempt/$MaxAttempts). Retrying in ${DelaySeconds}s..."
+        Start-Sleep -Seconds $DelaySeconds
+      }
+    }
   }
+  return $false
+}
+
+# The cause sentence of a refusal over an optional asset Get-Optional couldn't
+# get. $IfMissing is the advice for a 404 (the release doesn't publish it); any
+# other status was the network, and pinning a different tag would not have helped.
+function Get-FetchRefusalCause {
+  param([string]$IfMissing)
+  if ($script:FetchStatus -eq '404') { return $IfMissing }
+  return "The download failed 3 times (last status: $($script:FetchStatus)) -- check your network or proxy and re-run."
 }
 
 # Where to fetch one sub-script from. Customer path -> the RELEASE ASSET
@@ -289,8 +327,10 @@ function Wait-JobWithTicks {
   return $true
 }
 
-# Get-Optional for a LARGE asset: same contract ($true/$false, no retry/throw),
-# but the fetch runs in a background job so the parent can tick a liveness dot.
+# Get-Optional for a LARGE asset: the same $true/$false, never-throw contract,
+# but ONE attempt (a wedged transfer already waits out the timeout below, and a
+# retry would wait it out again), and the fetch runs in a background job so the
+# parent can tick a liveness dot.
 # The job re-applies the TLS 1.2 floor (fresh powershell.exe — PS 5.1 defaults
 # to TLS 1.0), silences the progress overlay (#468), and pins its cwd to a local
 # directory so UNC-homed roaming profiles don't splash red noise (#409). The
@@ -547,7 +587,7 @@ function Confirm-ManifestSignature {
       Warn "The installer's signature isn't published for this ref -- not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)."
       return
     }
-    throw "The installer's signature isn't published for this release -- can't confirm the download is authentic. Pin a release tag that ships it."
+    throw ("Couldn't fetch the installer's signature for this release -- can't confirm the download is authentic. " + (Get-FetchRefusalCause "This release doesn't publish one. Pin a release tag that ships it."))
   }
 
   if (Invoke-CosignVerifyBlob $cosign @(
@@ -593,7 +633,12 @@ function Invoke-Bootstrap {
   param([object[]]$ChildArgs)
 
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
-  $ref = Resolve-InstallRef -DefaultRef $DefaultRef -RefEnv $env:REF -BranchEnv $env:BRANCH -AllowUnverified $allowUnverified
+  # Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH first, the
+  # legacy REF / BRANCH after them (remove_by 2026-12-31); a non-empty canonical
+  # wins, the bash bootstrap's rule.
+  $refEnv    = if ($env:TRACEBLOC_REF) { $env:TRACEBLOC_REF } else { $env:REF }
+  $branchEnv = if ($env:TRACEBLOC_BRANCH) { $env:TRACEBLOC_BRANCH } else { $env:BRANCH }
+  $ref = Resolve-InstallRef -DefaultRef $DefaultRef -RefEnv $refEnv -BranchEnv $branchEnv -AllowUnverified $allowUnverified
 
   # Everything the customer path fetches -- the sub-scripts (attached as flat
   # release assets by basename), the signed manifest, and its cosign sig/cert --
@@ -662,7 +707,7 @@ function Invoke-Bootstrap {
         Warn "No integrity checksums for ref '$ref' -- skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)."
         $manifest = $null
       } else {
-        throw "Couldn't fetch the installer's integrity checksums for ref '$ref' -- refusing to run unverified installer scripts. If this ref pre-dates signed releases, pin a newer release tag."
+        throw ("Couldn't fetch the installer's integrity checksums for ref '$ref' -- refusing to run unverified installer scripts. " + (Get-FetchRefusalCause "If this ref pre-dates signed releases, pin a newer release tag."))
       }
     }
 

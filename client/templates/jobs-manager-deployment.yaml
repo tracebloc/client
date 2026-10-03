@@ -1083,7 +1083,12 @@ spec:
              jobs-manager's own account has none) and the helm image auto-upgrade
              runs, which the Job copies helm out of. With auto-upgrade off the
              last two are absent and jobs-manager reports a trigger `refused`
-             instead of creating a Job it could not run. */}}
+             instead of creating a Job it could not run.
+
+             Settings naming (backend#3846): each MYSQL_MIGRATION_* name is set
+             under its TRACEBLOC_ canonical too, from the same expression, so a
+             jobs-manager that reads the canonical first and an older one that
+             reads only the legacy name resolve the same Job. */}}
         - name: RELEASE_NAME
           value: {{ .Release.Name | quote }}
         - name: TRACEBLOC_RELEASE_NAME
@@ -1094,10 +1099,16 @@ spec:
           value: {{ include "tracebloc.secretName" . | quote }}
         - name: MYSQL_MIGRATION_JOB_IMAGE
           value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
+        - name: TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE
+          value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         {{- if .Values.autoUpgrade.enabled }}
         - name: MYSQL_MIGRATION_SERVICE_ACCOUNT
           value: {{ include "tracebloc.autoUpgradeName" . | quote }}
+        - name: TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT
+          value: {{ include "tracebloc.autoUpgradeName" . | quote }}
         - name: MYSQL_MIGRATION_HELM_IMAGE
+          value: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) | quote }}
+        - name: TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE
           value: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) | quote }}
         {{- end }}
         {{- range $key, $value := .Values.env }}
@@ -1119,8 +1130,8 @@ spec:
              process's environment and nothing more. Nobody can depend on that:
              the variable does not exist before this change.
 
-             The five migration-Job names above are excluded for the same reason
-             (backend#4361): a passthrough copy renders after the chart's and
+             The five migration-Job names above are excluded, under both
+             spellings, for the same reason (backend#4361): a passthrough copy renders after the chart's and
              wins, so `env.RELEASE_NAME` or `env.MYSQL_MIGRATION_*` could point
              the Job at another release, Secret, image or ServiceAccount -- and
              with auto-upgrade off, `env.MYSQL_MIGRATION_SERVICE_ACCOUNT` would
@@ -1135,7 +1146,7 @@ spec:
              restricted resolver with whatever the value named -- the cluster DNS
              included, which is the exfiltration path restrictedDns closes. The
              supported knobs are `restrictedDns.clusterIP` / `.clusterDomain`. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
         {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}
