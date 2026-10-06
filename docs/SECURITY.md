@@ -708,6 +708,8 @@ Previously the tracebloc backend issued Django REST Framework `authtoken` creden
 
 **Intentionally unchanged — edge devices and bots.** Non-interactive service credentials (edge devices, bots) deliberately keep the legacy long-lived DRF `Token`: these are machine identities with no interactive re-login path, so a bounded web-session token doesn't apply. This is by design, not an oversight.
 
+**Ingestion Jobs — per-run token, rolling out per environment.** With `ingestRunToken` on, the jobs-manager gives each ingestion Job its own backend token, scoped to ingestion and valid for one run and 24 hours, instead of the edge's shared long-lived token, so a compromised ingestion pod leaks far less. The chart turns it on for `dev` and leaves it off for `stg` and `prod` (`ingestRunTokenByEnv`) until each environment's ingestor supports the per-run token; an older ingestor fails its backend calls under one. Where the backend does not offer the token yet, the jobs-manager falls back to the shared one.
+
 **Residual risk (open — backend team).** The web-session token is still stored in JS-readable storage (localStorage + a non-`httpOnly` cookie), so it remains exfiltratable via XSS. Moving it out of script-reachable storage is tracked as the **SEC-06 residual follow-up** in tracebloc/backend (successor to backend#590).
 
 ### 8.4 Legacy training image architecture (G4 partial) — **legacy-migration team**
@@ -826,6 +828,7 @@ Cross-reference for reviewers and contributors.
 | Stripped Dockerfile CMD credentials | `tracebloc-engine:*.cpu.Dockerfile`, `*.gpu.Dockerfile` |
 | MySQL identity minting (`tb_credmgr` / `tb_meta` / `tb_ingest`, per-experiment users) | `client-runtime:sql_utils.ensure_*_account` |
 | Service-account minting gate (`serviceDbAccounts`) | [`client:templates/jobs-manager-deployment.yaml`, `templates/secrets.yaml`](../client/templates/jobs-manager-deployment.yaml) |
+| Per-run ingestion token gate (`ingestRunToken`) | [`client:templates/jobs-manager-deployment.yaml`](../client/templates/jobs-manager-deployment.yaml) |
 
 ---
 

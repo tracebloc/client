@@ -103,12 +103,12 @@ _probe_userns() {
 # environment is still Linux, so the Linux install TIERS apply unchanged; only the
 # reservation record differs. Every consumer must source this file — a process
 # that lacks it makes the selector answer `unknown`, which the installer and the
-# e2e check both refuse. Paths overridable (TB_OSRELEASE_FILE /
-# TB_PROC_VERSION_FILE) so it's testable off a real WSL host.
+# e2e check both refuse. Paths overridable (TRACEBLOC_OSRELEASE_FILE /
+# TRACEBLOC_PROC_VERSION_FILE) so it's testable off a real WSL host.
 _probe_wsl() {
   [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]] && return 0
-  grep -qiE 'microsoft|wsl' "${TB_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}" 2>/dev/null && return 0
-  grep -qiE 'microsoft|wsl' "${TB_PROC_VERSION_FILE:-/proc/version}" 2>/dev/null
+  grep -qiE 'microsoft|wsl' "${TRACEBLOC_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}" 2>/dev/null && return 0
+  grep -qiE 'microsoft|wsl' "${TRACEBLOC_PROC_VERSION_FILE:-/proc/version}" 2>/dev/null
 }
 
 # _probe_privilege — echo this shell's privilege posture (for honest messaging,
@@ -135,7 +135,7 @@ _probe_privilege() {
 # /etc/subuid and /etc/subgid? Rootless Docker maps container UIDs into this range
 # and needs BOTH files — a range in only one is unusable → not present. Entries may
 # be keyed by name OR numeric uid, so check both. The files are world-readable; the
-# read is side-effect-free. Paths overridable (TB_SUBUID_FILE/TB_SUBGID_FILE) so the
+# read is side-effect-free. Paths overridable (TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE) so the
 # probe is testable against fixtures. _subid_has_entry lives in common.sh (shared
 # with setup-linux.sh's remediation).
 _probe_subid_ranges() {
@@ -146,8 +146,8 @@ _probe_subid_ranges() {
   local name uid
   name="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
   uid="$(id -u 2>/dev/null)"
-  _subid_has_entry "${TB_SUBUID_FILE:-/etc/subuid}" "$name" "$uid" \
-    && _subid_has_entry "${TB_SUBGID_FILE:-/etc/subgid}" "$name" "$uid"
+  _subid_has_entry "${TRACEBLOC_SUBUID_FILE:-/etc/subuid}" "$name" "$uid" \
+    && _subid_has_entry "${TRACEBLOC_SUBGID_FILE:-/etc/subgid}" "$name" "$uid"
 }
 
 # _probe_uidmap_helpers — are BOTH newuidmap and newgidmap present AND setuid-root?
@@ -174,7 +174,12 @@ _classify_from_probes() {
   # Native k3s runs as root whatever runtime is here (RFC-0175 D3), so a usable
   # Docker is no Tier 0 for it. install_linux routes k3s before reading the tier;
   # this keeps the panel from promising "zero root" to a run that will ask for sudo.
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" && "${OS:-}" == "Linux" ]]; then
+  # Its one Tier 0 is a host an administrator prepared for this user (1.1g).
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Linux" ]]; then
+    if [[ "${PROBE_K3S_PREPARED:-0}" == "1" ]]; then
+      INSTALL_TIER=0; INSTALL_TIER_REASON="native-k3s-prepared"
+      return 0
+    fi
     INSTALL_TIER=2; INSTALL_TIER_REASON="native-k3s"
     return 0
   fi
@@ -233,6 +238,14 @@ run_host_probes() {
   PROBE_SUBID=0
   PROBE_UIDMAP=0
   PROBE_WSL=0
+  # On native k3s: whether an administrator prepared this host for this user, by
+  # k3s.sh's one predicate (read with no privileges).
+  PROBE_K3S_PREPARED=0
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Linux" && "$(id -u 2>/dev/null)" != "0" ]] \
+     && declare -F _native_k3s_prepared_for_me >/dev/null 2>&1 \
+     && _native_k3s_prepared_for_me >/dev/null; then
+    PROBE_K3S_PREPARED=1
+  fi
   if [[ "${OS:-}" == "Linux" ]]; then
     if _probe_cgroup_v2;      then PROBE_CGROUP2=1; fi
     if _probe_userns;         then PROBE_USERNS=1; fi
@@ -318,7 +331,12 @@ render_host_audit() {
   esac
 
   case "${INSTALL_TIER:-2}" in
-    0) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — a container is already runnable; no privileged steps." ;;
+    0)
+      case "${INSTALL_TIER_REASON:-}" in
+        native-k3s-prepared) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — an administrator prepared native k3s for you; no privileged steps." ;;
+        *)                   echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — a container is already runnable; no privileged steps." ;;
+      esac
+      ;;
     1) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 1 — set up Docker for your account; a one-time admin step is still needed for now." ;;
     2)
       case "${INSTALL_TIER_REASON:-}" in

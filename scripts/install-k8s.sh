@@ -189,6 +189,19 @@ main() {
     # installs the same prerequisites, so it can be mid-download when it dies.
     trap 'if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi' EXIT
     setup_log_file
+    # The leftover-data answers apply here too: prepare-host on native k3s refuses
+    # --wipe-data and lists the named user's data with no wipe offered, and the
+    # re-run hint it prints names --reuse-data, and --data-dir is the administrator's
+    # own choice of where the volumes live. The install's own flag loop below
+    # never runs on this path, so they are read before the dispatch.
+    local _a_lf
+    for _a_lf in "$@"; do
+      case "$_a_lf" in
+        --reuse-data) TB_LEFTOVER_ACTION=reuse ;;
+        --wipe-data)  TB_LEFTOVER_ACTION=wipe ;;
+        --data-dir=*) HOST_DATA_DIR="${_a_lf#*=}" ;;
+      esac
+    done
     if declare -F run_prepare_host >/dev/null 2>&1; then
       run_prepare_host; exit $?
     fi
@@ -247,7 +260,7 @@ main() {
   fi
   setup_log_file
   # Committed to installing: from here every artefact is recorded as it is created.
-  TB_RECORD_ARMED=1
+  TRACEBLOC_RECORD_ARMED=1
   print_banner
 
   # ── Stop-and-check gate ──────────────────────────────────────────────────
@@ -360,7 +373,7 @@ main() {
 
   # Exit code reflects reality: connected/starting are OK; failures are non-zero
   # so re-runs and automation can tell the difference.
-  case "${CLIENT_STATE:-}" in
+  case "${TRACEBLOC_CLIENT_STATE:-}" in
     connected|starting) ;;
     *) exit 1 ;;
   esac

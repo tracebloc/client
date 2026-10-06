@@ -4,7 +4,7 @@
 #           (RFC-0175 D3, D4, D9-D11; slim client Stage 1, 1.1b + 1.1e + 1.1f)
 #
 #  OPT-IN, LINUX ONLY. install-k8s.sh sources this file and both bootstraps fetch
-#  it; install_linux and create_cluster route here when TB_SUBSTRATE=k3s, which a
+#  it; install_linux and create_cluster route here when TRACEBLOC_SUBSTRATE_RESOLVED=k3s, which a
 #  customer gets by setting TRACEBLOC_SUBSTRATE=k3s, or by re-running on a machine
 #  whose install record says k3s (common.sh's tb_substrate_resolve, 1.1f). The
 #  default stays k3d until 1.7.
@@ -22,7 +22,9 @@
 #    - the install path (1.1e): step b's sudo-once tool install, and step c's
 #      refusals, firewall, configuration, binary, kubeconfig and re-run, each artefact
 #      recorded the moment it exists;
-#    - the unprivileged probe re-run resolution reads (1.1f).
+#    - the unprivileged probe re-run resolution reads (1.1f);
+#    - the NVIDIA GPU (1.1i): the host toolkit and a CDI spec in step b, and the gate
+#      on k3s's own registered runtime in step c.
 #
 #  Every function carries the `_native_k3s_` prefix (decided 2026-10-01): k3d.sh
 #  already has four `_k3s_*` helpers that read k3s INSIDE a k3d node, and a Stage 4
@@ -55,7 +57,7 @@ TB_K3S_BIN_PATH="/usr/local/bin/k3s"
 # networkPolicy.training.clusterCidrs (172.16/12) and inside the RFC1918 entries of
 # cluster.sh's TB_NO_PROXY_DEFAULTS, and out of 10/8. k3s.bats derives both from
 # those two declarations and holds each pair inside them.
-TB_K3S_CIDR_PAIRS=("10.42.0.0/16 10.43.0.0/16" "172.16.0.0/17 172.16.128.0/17")
+TRACEBLOC_K3S_CIDR_PAIRS=("10.42.0.0/16 10.43.0.0/16" "172.16.0.0/17 172.16.128.0/17")
 # The first line of every config.yaml this installer writes. It is the marker the
 # re-run reads to tell tracebloc's k3s from a k3s someone else set up
 # (_native_k3s_presence), so the renderer prints THIS constant, never a copy of it.
@@ -93,11 +95,24 @@ TB_K3S_STORAGE_DEFAULT="${TB_K3S_DATA_PATH}/storage"
 #      password. The caller asks for it in the main shell (preflight_sudo) and calls
 #      again. A host with no /etc/rancher has no config.yaml, so a fresh install
 #      reads its choice with no root and no prompt.
+#   4  the host was prepared for this user (1.1g), but cannot be adopted as it
+#      stands: _native_k3s_prepared_for_me says what is missing (a session that
+#      started before the group, among others). The caller names that, with step
+#      b's remedy, instead of asking for a password the prepared user may not have.
 _native_k3s_storage_override() {
-  local cfg="$TB_K3S_CONFIG_PATH" have rc=0
+  local cfg="$TB_K3S_CONFIG_PATH" have rc=0 why=""
   if [[ -e "$(dirname "$TB_K3S_ETC_DIR")" ]]; then
-    _native_k3s_root_ready || return 3
-    if sudo test -e "$cfg"; then
+    if [[ "${TB_K3S_ADOPTED:-}" != 1 ]] && ! _native_k3s_root_ready; then
+      # A daily user on a host prepare-host set up for them (1.1g) has no sudo to
+      # be asked for: config.yaml is read through the prepared group instead. The
+      # local reaches the reads below, as bash scopes it into its callees.
+      if ! why="$(_native_k3s_prepared_for_me)"; then
+        [[ -z "$why" ]] || return 4
+        return 3
+      fi
+      local TB_K3S_ADOPTED=1
+    fi
+    if _native_k3s_read test -e "$cfg"; then
       have="$(_native_k3s_config_value default-local-storage-path "$cfg")" || rc=$?
       [[ "$rc" -eq 0 ]] || return 2
       printf '%s' "$have"
@@ -107,8 +122,8 @@ _native_k3s_storage_override() {
     # password prompt expired between the readiness check and here): a sudo that is
     # down is "cannot tell", never "no config.yaml" -- the latter re-derives a frozen
     # storage path from this run's environment. Same probe _native_k3s_config_value
-    # makes.
-    sudo test -d / || return 2
+    # makes, through the same reader: a prepared user has no sudo to probe with.
+    _native_k3s_read test -d / || return 2
   fi
   _native_k3s_storage_choice
 }
@@ -119,9 +134,13 @@ _native_k3s_storage_override() {
 # cannot answer. A caller that has read the storage path has already handled both.
 _native_k3s_storage_frozen() {
   [[ -e "$(dirname "$TB_K3S_ETC_DIR")" ]] || return 1
-  _native_k3s_root_ready || return 2
-  if sudo test -e "$TB_K3S_CONFIG_PATH"; then return 0; fi
-  sudo test -d / || return 2
+  if [[ "${TB_K3S_ADOPTED:-}" != 1 ]] && ! _native_k3s_root_ready; then
+    # A prepared user reads config.yaml through the group, with no sudo (1.1g).
+    _native_k3s_prepared_for_me >/dev/null || return 2
+    local TB_K3S_ADOPTED=1
+  fi
+  if _native_k3s_read test -e "$TB_K3S_CONFIG_PATH"; then return 0; fi
+  _native_k3s_read test -d / || return 2
   return 1
 }
 
@@ -146,7 +165,7 @@ _native_k3s_root_ready() {
 }
 
 # _native_k3s_storage_path -- the directory local-path keeps the volumes in: the
-# frozen or chosen directory, or k3s's default. Returns the override's 2 or 3.
+# frozen or chosen directory, or k3s's default. Returns the override's 2, 3 or 4.
 _native_k3s_storage_path() {
   local o rc=0
   o="$(_native_k3s_storage_override)" || rc=$?
@@ -438,6 +457,39 @@ _native_k3s_kubeconfig_group() {
   printf '%s\n' "$gname"
 }
 
+# The group prepare-host grants k3s.yaml and config.yaml to (RFC-0175 D3, 1.1g; mode
+# 0640). Every member of it is cluster-admin on this k3s, as every member of the
+# docker group is root-equivalent: prepare-host says so, and lists the members.
+TB_K3S_PREPARED_GROUP="tracebloc"
+# The two modes 1.1g adds, assigned here and never read from the environment.
+# TB_K3S_PREPARED: this run is prepare-host, setting k3s up FOR a named user.
+# TB_K3S_ADOPTED: this run is that user's install at Tier 0, using the k3s an
+# administrator prepared for them (_native_k3s_prepared_for_me).
+TB_K3S_PREPARED=""
+TB_K3S_ADOPTED=""
+
+# _native_k3s_read CMD... -- CMD on one of k3s's root-owned files: through sudo,
+# except on an adopted host, where this user reads them through the prepared group
+# and has no sudo to use.
+_native_k3s_read() {
+  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then "$@"; else sudo "$@"; fi
+}
+
+# _native_k3s_kubeconfig_grant -- the group k3s.yaml and config.yaml are granted to,
+# or nothing for none. The prepared group when this run is prepare-host, or when
+# config.yaml already grants it: a later run with sudo, by the user or an
+# administrator, never takes a prepared user's access away. Else the daily user's
+# private group, when it is one (_native_k3s_kubeconfig_group). Returns 2 when
+# config.yaml is there and cannot be read: cannot tell.
+_native_k3s_kubeconfig_grant() {
+  local have rc=0
+  if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then printf '%s\n' "$TB_K3S_PREPARED_GROUP"; return 0; fi
+  have="$(_native_k3s_config_value write-kubeconfig-group)" || rc=$?
+  [[ "$rc" -eq 0 ]] || return 2
+  if [[ "$have" == "$TB_K3S_PREPARED_GROUP" ]]; then printf '%s\n' "$have"; return 0; fi
+  _native_k3s_kubeconfig_group || true
+}
+
 # _native_k3s_kubeconfig_shared_notice -- the grant was not made (the group is not
 # private, or could not be read): say so in the log, and give the user the remedy.
 # k3s's kubectl reads root's k3s.yaml when KUBECONFIG is unset, so without the grant
@@ -469,13 +521,15 @@ _native_k3s_cgroup_v1_notice() {
 #   drop-in 0644 (the e2e readback reads it unprivileged); and, when CA_FILE is
 #   given, the CA 0644 and registries.yaml 0600.
 #
-# The group is granted only when it is private (_native_k3s_kubeconfig_group).
-# config.yaml holds no secret, and k3s's kubectl reads it on every call, warning
-# "permission denied" when it cannot (measured on the 1.1e VM). A shared group is
-# never widened: both stay 0600, and the user is told the one-line remedy.
+# The group is the prepared group on a prepared host (1.1g), and otherwise granted
+# only when it is private (_native_k3s_kubeconfig_grant). config.yaml holds no
+# secret, and k3s's kubectl reads it on every call, warning "permission denied" when
+# it cannot (measured on the 1.1e VM). A shared group is never widened: both stay
+# 0600, and the user is told the one-line remedy.
 _native_k3s_write_config() {
   local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" ca="${6:-}" cfg kubelet ca_body kgroup
-  kgroup="$(_native_k3s_kubeconfig_group)" || kgroup=""
+  kgroup="$(_native_k3s_kubeconfig_grant)" \
+    || error "native k3s: ${TB_K3S_CONFIG_PATH} exists but could not be read, so this run cannot tell which group it grants k3s's kubeconfig to. Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
   cfg="$(_native_k3s_render_config "$mode" "$name" "$cidrs" "$storage" "$cgroup" "$kgroup")" || return 1
   [[ "$cgroup" != v1 ]] || _native_k3s_cgroup_v1_notice
   kubelet="$(_render_kubelet_config)" || return 1
@@ -500,13 +554,13 @@ _native_k3s_write_config() {
 # be read: a value that is there and unreadable is "cannot tell", never "absent".
 _native_k3s_config_value() {
   local key="$1" cfg="${2:-$TB_K3S_CONFIG_PATH}" body line
-  if ! sudo test -e "$cfg"; then
+  if ! _native_k3s_read test -e "$cfg"; then
     # `test -e` fails for a missing file AND for a sudo that did not run: only a root
     # read of a path that always exists tells them apart. sudo down is "cannot tell".
-    sudo test -d / || return 2
+    _native_k3s_read test -d / || return 2
     return 0
   fi
-  body="$(sudo cat "$cfg")" || return 2
+  body="$(_native_k3s_read cat "$cfg")" || return 2
   line="$(printf '%s\n' "$body" | sed -n "s/^${key}:[[:space:]]*//p")"
   line="${line%%$'\n'*}"
   line="${line#\"}"; line="${line%\"}"
@@ -559,10 +613,10 @@ _native_k3s_node_name() {
 # ── Pod and service ranges ────────────────────────────────────────────────────
 
 # _native_k3s_host_routes -- the host's IPv4 routes, as `ip -4 route show` prints
-# them. TB_K3S_ROUTES_STUB is the TEST SEAM: a file whose lines replace the command.
+# them. TRACEBLOC_K3S_ROUTES_STUB is the TEST SEAM: a file whose lines replace the command.
 _native_k3s_host_routes() {
-  if [[ -n "${TB_K3S_ROUTES_STUB:-}" ]]; then
-    cat "$TB_K3S_ROUTES_STUB"
+  if [[ -n "${TRACEBLOC_K3S_ROUTES_STUB:-}" ]]; then
+    cat "$TRACEBLOC_K3S_ROUTES_STUB"
     return
   fi
   ip -4 route show
@@ -586,7 +640,7 @@ _native_k3s_cidr_overlap() {
 
 # _native_k3s_pick_cidrs [CONFIG] -- the "<cluster-cidr> <service-cidr>" pair for this
 # host. An existing CONFIG keeps its pair: pods and services already carry addresses
-# from it. Otherwise the first pair in TB_K3S_CIDR_PAIRS that no host route overlaps --
+# from it. Otherwise the first pair in TRACEBLOC_K3S_CIDR_PAIRS that no host route overlaps --
 # on native Linux the pod routes land on the host, so a collision misroutes the host's
 # own traffic. When every pair overlaps a route, the install is refused and the routes
 # are named; so is a route this cannot read.
@@ -600,7 +654,7 @@ _native_k3s_pick_cidrs() {
     return 0
   fi
   routes="$(_native_k3s_host_routes)" || error "native k3s: couldn't read this machine's routes (ip -4 route show), so it cannot tell which pod and service ranges are free. Install iproute2, then re-run."
-  for pair in "${TB_K3S_CIDR_PAIRS[@]}"; do  # set-u-safe: TB_K3S_CIDR_PAIRS is a file-scope constant
+  for pair in "${TRACEBLOC_K3S_CIDR_PAIRS[@]}"; do  # set-u-safe: TRACEBLOC_K3S_CIDR_PAIRS is a file-scope constant
     hits=""
     while IFS= read -r line; do
       [[ -n "$line" ]] || continue
@@ -636,9 +690,9 @@ _native_k3s_pick_cidrs() {
 
 # _native_k3s_cgroup_version -- v2 when the unified hierarchy is mounted at the
 # cgroup root (it has cgroup.controllers), else v1, which covers hybrid hosts too.
-# TB_K3S_CGROUP_ROOT is the TEST SEAM: point it at a directory with or without that file.
+# TRACEBLOC_K3S_CGROUP_ROOT is the TEST SEAM: point it at a directory with or without that file.
 _native_k3s_cgroup_version() {
-  if [[ -f "${TB_K3S_CGROUP_ROOT:-/sys/fs/cgroup}/cgroup.controllers" ]]; then
+  if [[ -f "${TRACEBLOC_K3S_CGROUP_ROOT:-/sys/fs/cgroup}/cgroup.controllers" ]]; then
     printf 'v2'
   else
     printf 'v1'
@@ -685,7 +739,7 @@ _native_k3s_kubeconfig_target() {
 
 # _native_k3s_merge_kubeconfig -- merge k3s's kubeconfig into the daily user's
 # (_native_k3s_kubeconfig_target), as _native_k3s_context, make it current, and set
-# TB_KUBE_CONTEXT. It is written by this (the daily user's) process, mode 0600, so
+# TRACEBLOC_KUBE_CONTEXT. It is written by this (the daily user's) process, mode 0600, so
 # the user owns it; k3s's own copy stays root's.
 #
 # Merged by `$TB_K3S_BIN_PATH kubectl config view --flatten` with the RENAMED file FIRST in
@@ -709,9 +763,9 @@ _native_k3s_merge_kubeconfig() {
   prev_ctx="$(_bounded 10 env KUBECONFIG="${KUBECONFIG:-$target}" "$TB_K3S_BIN_PATH" kubectl config current-context 2>/dev/null)" || prev_ctx=""
   prev_ctx="${prev_ctx//[$'\r\n']/}"
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-kc-XXXXXX")" || error "native k3s: could not create a temporary directory for the kubeconfig merge."
-  # Read as root, written as the user: the redirect is meant to stay outside sudo.
-  # shellcheck disable=SC2024
-  sudo cat "$TB_K3S_KUBECONFIG_PATH" > "${td}/k3s.yaml" \
+  # Read as root (adopted: through the prepared group), written as the user: the
+  # redirect stays outside the read.
+  _native_k3s_read cat "$TB_K3S_KUBECONFIG_PATH" > "${td}/k3s.yaml" \
     || { rm -rf "$td"; error "native k3s: couldn't read ${TB_K3S_KUBECONFIG_PATH}; k3s writes it when it starts. Check 'sudo systemctl status k3s', then re-run."; }
   _native_k3s_rename_kubeconfig "$ctx" < "${td}/k3s.yaml" > "${td}/renamed.yaml" \
     || { rm -rf "$td"; error "native k3s: ${TB_K3S_KUBECONFIG_PATH} is not the shape k3s writes (one cluster, user and context, all named 'default'), so it was not merged into ${target}."; }
@@ -735,7 +789,7 @@ _native_k3s_merge_kubeconfig() {
   [[ -n "${KUBECONFIG:-}" ]] || export KUBECONFIG="$target"
   log "kubeconfig updated — kubectl now points to '${CLUSTER_NAME}' (context ${ctx})."
   # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write's kube_context)
-  TB_KUBE_CONTEXT="$ctx"
+  TRACEBLOC_KUBE_CONTEXT="$ctx"
 }
 
 # The ONE TB_API_WAIT_S budget the three waits share: the wait for k3s.yaml starts
@@ -755,10 +809,32 @@ _native_k3s_budget_left() {
   (( TB_K3S_WAITED_S < $1 )) && (( $(date +%s) - TB_K3S_WAIT_T0 < $1 ))
 }
 
+# _native_k3s_kubectl_on CTX ARGS... -- kubectl on this k3s: on context CTX, by name,
+# as the daily user; in prepared mode (prepare-host, 1.1g) as root on k3s.yaml,
+# because prepare-host never merges into the administrator's kubeconfig.
+_native_k3s_kubectl_on() {
+  local ctx="$1"; shift
+  if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
+    sudo env KUBECONFIG="$TB_K3S_KUBECONFIG_PATH" "$TB_K3S_BIN_PATH" kubectl "$@"
+  else
+    kubectl --context "$ctx" "$@"
+  fi
+}
+
+# _native_k3s_api_answers CTX -- cluster.sh's _api_answers on context CTX; in
+# prepared mode the same question (cluster-info, 5 s a request) asked as root.
+_native_k3s_api_answers() {
+  if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
+    _native_k3s_kubectl_on "$1" cluster-info --request-timeout=5s &>/dev/null
+  else
+    _api_answers "$1"
+  fi
+}
+
 # _native_k3s_node_ready CTX NAME -- the Ready condition's status of node NAME on
 # context CTX (True, False or Unknown), or nothing when the API does not say.
 _native_k3s_node_ready() {
-  kubectl --context "$1" get node "$2" --request-timeout=5s \
+  _native_k3s_kubectl_on "$1" get node "$2" --request-timeout=5s \
     -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true
 }
 
@@ -789,7 +865,7 @@ _native_k3s_wait_for_api() {
   local budget ctx
   budget="$(_api_wait_budget_s)"; ctx="$(_native_k3s_context)"
   log "Waiting for the k3s API server to answer on context ${ctx}..."
-  until _api_answers "$ctx"; do
+  until _native_k3s_api_answers "$ctx"; do
     _native_k3s_budget_left "$budget" \
       || error "The k3s API server did not answer within ${budget}s. It's safe to re-run this installer; on a slow machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. 'sudo systemctl status k3s' and 'sudo journalctl -u k3s' say why it is not up."
     sleep 2
@@ -825,10 +901,311 @@ _native_k3s_live_probe() {
   esac
 }
 
+# ── The NVIDIA GPU (1.1i) ─────────────────────────────────────────────────────
+#
+# RFC-0175 D8 on native k3s: the host's nvidia-container-toolkit, k3s's own `nvidia`
+# runtime and RuntimeClass, and the chart's device plugin under that class. No
+# k3s-cuda image, no --gpus, no Docker: the k3d GPU path (k3d.sh) stays k3d's (D15).
+#   step b  dispatch_gpu_setup (setup-linux.sh) installs the driver, then
+#           _native_k3s_gpu_prepare: the toolkit package and a CDI spec, before k3s
+#           first starts, so k3s finds the runtime at its first start;
+#   step c  _native_k3s_gpu_wire, after the node is Ready: TRACEBLOC_GPU_WIRED=1 only when
+#           k3s's own containerd has registered the runtime;
+#   step e  _native_k3s_gpu_verify (through verify_gpu), after Helm: "wired" only
+#           when the node advertises at least one nvidia.com/gpu.
+#
+# Built to the driver-floor fallback, then measured by spike S-G (0.18,
+# tracebloc/backend#4830) on 2026-10-01: a g4dn.12xlarge (4x T4, sm_75) at k3s v1.36.3
+# with toolkit 1.20.1 and drivers 580, 570, 550 and 535. Each value below says
+# whether S-G measured it; one still marked "floor, not measured" is a vendor-cited
+# minimum nothing has tested. The driver floor itself is facts.env's
+# NVIDIA_DRIVER_FLOOR_LINUX (0.11), which warns here as it does on k3d.
+
+# The runtime k3s's containerd must register for the GPU to count as wired, and the
+# RuntimeClass the device plugin and the training jobs run under (common.sh
+# _gpu_runtime_class): k3s creates a RuntimeClass of the same name for it.
+# k3s registers its NVIDIA runtimes when it finds the toolkit's binaries on its PATH
+# at start, and pods ask for one with `runtimeClassName: nvidia` (docs.k3s.io/advanced,
+# "NVIDIA Container Runtime Support"). MEASURED (S-G): toolkit 1.20.1 ships only
+# `nvidia-container-runtime`, so k3s registers `nvidia` and no `nvidia-cdi` or
+# `nvidia-experimental` handler, although it creates `nvidia` and `nvidia-experimental`
+# RuntimeClasses; under `nvidia` the toolkit's default `mode = "auto"` runs as jit-CDI
+# ("Auto-detected mode as 'jit-cdi'"), and GEMM, cuDNN, AMP, a 4-GPU NCCL all-reduce
+# and one training per GPU family passed. The CDI path needs no `nvidia-cdi` class: a
+# RuntimeClass of that name is refused ("no runtime for "nvidia-cdi" is configured").
+TB_K3S_GPU_RUNTIME="nvidia"
+# The CDI spec this installer writes when the host has none: where k3s's containerd
+# and the toolkit read specs, and the path the k3d node writes too (k3d.sh
+# _generate_node_cdi_specs). MEASURED (S-G): with toolkit 1.20.1 it is never written,
+# because the toolkit's own spec (below) is there first; it is the path for a toolkit
+# that writes none.
+TB_K3S_GPU_CDI_PATH="/etc/cdi/nvidia.yaml"
+# Where the toolkit's own nvidia-cdi-refresh unit writes its spec, from toolkit 1.18.0
+# on, at install, on a driver change and at boot (NVIDIA Container Toolkit docs,
+# "Support for Container Device Interface"). A spec there is the toolkit's: it is
+# used as it is and never recorded. MEASURED (S-G): toolkit 1.20.1 wrote
+# /var/run/cdi/nvidia.yaml during its own package install, before step b looked, and
+# rewrote it after each driver change.
+TB_K3S_GPU_CDI_RUN_DIR="/var/run/cdi"
+# The oldest NVIDIA Container Toolkit the native path is built for: 1.18.0, the first
+# whose runtime uses a just-in-time CDI spec by default instead of `legacy` mode, and
+# that writes its own spec (NVIDIA Container Toolkit v1.18.0 release notes). That is
+# the path D8 names and S-G tests. FLOOR, NOT MEASURED: S-G ran 1.20.1, which the
+# installer's repository served; nothing has measured an older toolkit on k3s.
+# Below it the run WARNS and goes on, like the driver floor (W17): step c's gate
+# still decides. (`nvidia-ctk cdi generate` itself exists from 1.12.0.)
+TB_K3S_GPU_TOOLKIT_FLOOR="1.18.0"
+
+# _native_k3s_gpu_marker -- the wired-pass marker: the GPU stack signature
+# (gpu-nvidia.sh _gpu_stack_signature) of the last run whose gate passed, beside the
+# k3d smoke test's own marker. A re-run whose signature equals it restarts nothing.
+_native_k3s_gpu_marker() { printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.tracebloc}"; }
+
+# _native_k3s_gpu_cpu REASON -- CPU mode for this run, said ONCE: TRACEBLOC_GPU_WIRED stays 0
+# and the wired-pass marker goes, so the next run asks again. The hint says how to
+# get the GPU: fix REASON and re-run. Native k3s needs no recreate, unlike k3d.
+_native_k3s_gpu_cpu() {
+  TRACEBLOC_GPU_WIRED=0
+  rm -f "$(_native_k3s_gpu_marker)" 2>/dev/null || true
+  [[ -z "${TB_K3S_GPU_WARNED:-}" ]] || return 0
+  TB_K3S_GPU_WARNED=1
+  warn "The NVIDIA GPU is not wired into k3s: ${1}. This machine will run in CPU mode."
+  hint "Fix that, then re-run the installer: it wires the GPU into the k3s already here, with no reinstall."
+}
+
+# _native_k3s_gpu_prepared_cpu -- the GPU on a host prepare-host set up (1.1g). Both
+# of its paths, prepare-host's own (_native_k3s_prepared_finish) and the daily user's
+# Tier 0 adopt (_native_k3s_adopt_cluster), return before step 5's gate: prepare-host
+# does not set the GPU up, and the daily user has no root to ask k3s's containerd.
+# tracebloc/client-dev#1560 holds that fix. Until it ships, a host with an NVIDIA GPU
+# is told so by name and runs in CPU mode, never in silence. prepare-host runs no
+# detect_gpu, so a loaded NVIDIA driver counts as a GPU too. No re-run hint: a re-run
+# cannot fix it.
+_native_k3s_gpu_prepared_cpu() {
+  if [[ "${GPU_VENDOR:-}" != nvidia ]] \
+     && ! { declare -F _nvidia_kernel_module_loaded >/dev/null 2>&1 && _nvidia_kernel_module_loaded; }; then
+    return 0
+  fi
+  TRACEBLOC_GPU_WIRED=0
+  [[ -z "${TB_K3S_GPU_WARNED:-}" ]] || return 0
+  TB_K3S_GPU_WARNED=1
+  warn "The NVIDIA GPU is not set up on a host that prepare-host set up: prepare-host does not wire the GPU into k3s yet. This install runs in CPU mode."
+}
+
+# _native_k3s_gpu_toolkit_floor -- warn, once, when the toolkit is older than
+# TB_K3S_GPU_TOOLKIT_FLOOR, or does not say its version. Never a refusal.
+_native_k3s_gpu_toolkit_floor() {
+  local out ver
+  out="$(_bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version 2>/dev/null)" || out=""
+  ver="$(printf '%s\n' "$out" | sed -n 's/^NVIDIA Container Toolkit CLI version \([0-9][0-9.]*\).*$/\1/p')"
+  ver="${ver%%$'\n'*}"
+  if [[ -z "$ver" ]]; then
+    warn "Couldn't read the NVIDIA Container Toolkit's version ('nvidia-ctk --version'); tracebloc is tested with ${TB_K3S_GPU_TOOLKIT_FLOOR} and later."
+  elif _version_lt "$ver" "$TB_K3S_GPU_TOOLKIT_FLOOR"; then
+    warn "NVIDIA Container Toolkit ${ver} is older than ${TB_K3S_GPU_TOOLKIT_FLOOR}, the version tracebloc is tested with — continuing; if GPU training fails on this machine, upgrade the toolkit."
+  fi
+}
+
+# _native_k3s_gpu_cdi_spec -- a CDI spec for the NVIDIA GPU, after the toolkit. One
+# the host already has (TB_K3S_GPU_CDI_PATH, or a nvidia*.yaml the toolkit wrote under
+# TB_K3S_GPU_CDI_RUN_DIR) is used as it is: it is not this run's, and it is not
+# recorded. Otherwise `nvidia-ctk cdi generate` writes TB_K3S_GPU_CDI_PATH, bounded by
+# TB_GPU_CDI_TIMEOUT as on k3d, and the file is recorded the moment it exists, so
+# delete removes it. Presence is the authority, never the exit code (k3d.sh
+# _generate_node_cdi_specs): 0 when a non-empty spec is in place, 1 (CPU mode, said
+# once) when there is none.
+_native_k3s_gpu_cdi_spec() {
+  local p
+  for p in "$TB_K3S_GPU_CDI_PATH" "$TB_K3S_GPU_CDI_RUN_DIR"/nvidia*.yaml; do
+    sudo test -e "$p" || continue
+    if sudo test -s "$p"; then
+      log "NVIDIA CDI spec already on this machine (${p}); using it as it is."
+      return 0
+    fi
+    # An empty spec is no spec: skip it, and regenerate below (over it, when it is
+    # the one at TB_K3S_GPU_CDI_PATH), rather than staying CPU on a file nothing fills.
+    log "NVIDIA CDI spec at ${p} is empty; generating one."
+  done
+  sudo mkdir -p "$(dirname "$TB_K3S_GPU_CDI_PATH")" || true
+  _bounded_root "${TB_GPU_CDI_TIMEOUT:-60}" nvidia-ctk cdi generate --output="$TB_K3S_GPU_CDI_PATH" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+  if sudo test -e "$TB_K3S_GPU_CDI_PATH"; then
+    tb_record_write file cdi-spec "$TB_K3S_GPU_CDI_PATH"
+  fi
+  if sudo test -s "$TB_K3S_GPU_CDI_PATH"; then
+    log "NVIDIA CDI spec written (${TB_K3S_GPU_CDI_PATH})."
+    return 0
+  fi
+  _native_k3s_gpu_cpu "'nvidia-ctk cdi generate' wrote no CDI spec to ${TB_K3S_GPU_CDI_PATH}; check that 'nvidia-smi' works"
+  return 1
+}
+
+# _native_k3s_gpu_prepare -- step b's NVIDIA half on native k3s: the toolkit package
+# (gpu-nvidia.sh's package half, as on k3d), its version floor, and a CDI spec. It
+# touches no Docker and no host containerd, and leaves TRACEBLOC_GPU_WIRED at 0: step c's
+# gate sets it. TB_K3S_GPU_PREPARED=1 tells that gate the toolkit and a spec are here.
+_native_k3s_gpu_prepare() {
+  TB_K3S_GPU_PREPARED=""
+  _nvidia_container_toolkit_package
+  _native_k3s_gpu_toolkit_floor
+  _native_k3s_gpu_cdi_spec || return 0
+  TB_K3S_GPU_PREPARED=1
+}
+
+# _native_k3s_cri_handlers -- the runtime handlers in `k3s crictl info`'s output on
+# stdin, one name per line: the `name` of each entry of the top-level
+# `runtimeHandlers` list, which is the CRI's own list of the handlers containerd
+# registered (containerd 2.x's Status). crictl prints it with two-space json.Indent
+# and sorted keys (cri-tools cmd/crictl/util.go, outputStatusData), so each entry's
+# keys sit six spaces in. jq-free, like the rest of the installer. MEASURED at the
+# pinned k3s (S-G): a GPU node printed that shape, with the default handler as an
+# entry with no `name`; k3s-gpu.bats holds this parser to that output
+# (crictl-info-measured-g4dn.12xlarge.json) and to the hand-built ones. 0 with the names
+# (none, for an empty list); 1 when the input carries no runtimeHandlers list
+# (cannot tell).
+_native_k3s_cri_handlers() {
+  awk '
+    /^  "runtimeHandlers": \[\],?$/ { seen = 1; next }
+    /^  "runtimeHandlers": \[$/     { seen = 1; inside = 1; next }
+    inside && /^  [^ ]/             { inside = 0; next }
+    inside && /^      "name": "[a-z0-9][-a-z0-9]*",?$/ {
+      v = $0; sub(/^      "name": "/, "", v); sub(/",?$/, "", v); print v
+    }
+    END { exit(seen ? 0 : 1) }'
+}
+
+# _native_k3s_gpu_handler -- has k3s's own containerd registered TB_K3S_GPU_RUNTIME?
+# The runtime's own answer, `k3s crictl info`, bounded by TB_K3S_CRI_TIMEOUT
+# (seconds, default 15). Never the RuntimeClass list: k3s creates the `nvidia` class
+# on a fresh node with no GPU and no toolkit (RFC-0175 §12), so a class is no
+# evidence. 0 = registered, 1 = not registered, 2 = cannot tell (the read failed or
+# timed out, or named no handler list), with the read in TB_K3S_GPU_READ.
+_native_k3s_gpu_handler() {
+  local out names rc=0
+  TB_K3S_GPU_READ=""
+  out="$(_bounded_root "${TB_K3S_CRI_TIMEOUT:-15}" "$TB_K3S_BIN_PATH" crictl info 2>/dev/null)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    TB_K3S_GPU_READ="'k3s crictl info' did not answer (exit ${rc})"
+    return 2
+  fi
+  if ! names="$(_native_k3s_cri_handlers <<<"$out")"; then
+    TB_K3S_GPU_READ="'k3s crictl info' listed no runtime handlers"
+    return 2
+  fi
+  case $'\n'"$names"$'\n' in *$'\n'"${TB_K3S_GPU_RUNTIME}"$'\n'*) return 0 ;; esac
+  return 1
+}
+
+# _native_k3s_gpu_wire NAME -- step c's GPU gate on native k3s, after node NAME is
+# Ready. TRACEBLOC_GPU_WIRED becomes 1 here and nowhere else on k3s: only when step b put the
+# toolkit and a CDI spec in place (TB_K3S_GPU_PREPARED) and k3s's own containerd has
+# registered TB_K3S_GPU_RUNTIME. k3s registers it only when it finds the toolkit at
+# start (docs.k3s.io: "restart it if already installed"), so a k3s that started
+# without it -- a host installed CPU-only before this, or a toolkit installed after
+# k3s -- is restarted ONCE and asked again; no recreate, unlike k3d. The node half of
+# D11: a re-run whose GPU stack signature equals the last wired pass's restarts
+# nothing, and a changed signature restarts once. Every other outcome is CPU mode,
+# with one warning that names why; it is never a guess at GPU. MEASURED (S-G): a fresh
+# install registered the handler at k3s's first start (step b put the toolkit in
+# first), a no-change re-run left k3s's start time alone, and each driver change
+# (580 -> 570 -> 550 -> 535) restarted k3s exactly once. And the restart is needed:
+# with the toolkit removed and k3s restarted, the CRI listed no nvidia handler; the
+# re-run reinstalled the toolkit, k3s still listed none until this gate's one restart,
+# and then it did.
+_native_k3s_gpu_wire() {
+  local name="$1" marker sig last="" rc=0 why=""
+  [[ "${GPU_VENDOR:-}" == "nvidia" && -n "${TB_K3S_GPU_PREPARED:-}" ]] || return 0
+  marker="$(_native_k3s_gpu_marker)"
+  sig="$(_gpu_stack_signature)"
+  if [[ -f "$marker" ]]; then last="$(cat "$marker" 2>/dev/null)" || last=""; fi
+  _native_k3s_gpu_handler || rc=$?
+  case "$rc" in
+    0)
+      if [[ -n "$last" && -n "$sig" && "$last" != "$sig" ]]; then
+        why="the NVIDIA driver or toolkit changed since the last GPU run"
+      fi
+      ;;
+    1)
+      if ! has nvidia-container-runtime; then
+        _native_k3s_gpu_cpu "the NVIDIA container runtime (nvidia-container-runtime) is not on PATH, so k3s cannot register it"
+        return 0
+      fi
+      why="k3s has not registered its '${TB_K3S_GPU_RUNTIME}' runtime"
+      ;;
+    *)
+      _native_k3s_gpu_cpu "$TB_K3S_GPU_READ"
+      return 0
+      ;;
+  esac
+  if [[ -n "$why" ]]; then
+    log "native k3s: ${why}; restarting k3s once so it finds the NVIDIA runtime."
+    sudo systemctl restart k3s || error "k3s did not restart to pick up the NVIDIA runtime. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
+    # A second start of k3s, made on purpose: it gets the one wait budget again.
+    TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
+    _native_k3s_wait_for_api
+    _native_k3s_wait_for_node_ready "$name"
+    rc=0
+    _native_k3s_gpu_handler || rc=$?
+    case "$rc" in
+      0) ;;
+      1) _native_k3s_gpu_cpu "k3s did not register its '${TB_K3S_GPU_RUNTIME}' runtime, even after a restart"; return 0 ;;
+      *) _native_k3s_gpu_cpu "$TB_K3S_GPU_READ"; return 0 ;;
+    esac
+  fi
+  # shellcheck disable=SC2034  # consumed cross-file by common.sh (_gpu_wired)
+  TRACEBLOC_GPU_WIRED=1
+  if [[ -n "$sig" ]]; then
+    { mkdir -p "$(dirname "$marker")" && printf '%s' "$sig" > "$marker"; } 2>/dev/null || true
+  else
+    rm -f "$marker" 2>/dev/null || true
+  fi
+  # Not "wired" yet: the runtime is registered, and the GPUs are counted after the
+  # install, once the device plugin runs (_native_k3s_gpu_verify).
+  success "k3s registered the NVIDIA runtime (${TB_K3S_GPU_RUNTIME}); the GPUs are counted after the install."
+}
+
+# _native_k3s_gpu_verify -- after Helm (install-k8s.sh step e, through verify_gpu):
+# the GPU is wired only when the node advertises at least one nvidia.com/gpu. Step
+# c's gate proves k3s runs the NVIDIA runtime, not that the GPUs are healthy.
+# MEASURED (S-G): driver 535 on T4s, handler registered, and 0 GPUs allocatable,
+# because the GPUs failed when the device plugin re-initialised them (Xid 140, then
+# "RmInitAdapter failed"); persistence mode from boot cured it, and 550 and newer
+# never needed it. So a count of 0 after the plugin's rollout and the poll is a
+# warning that names that remedy, and an unreadable count is a warning too: neither
+# is ever "wired". TB_K3S_GPU_UNCONFIRMED tells the summary.
+_native_k3s_gpu_verify() {
+  local tries=0 n="" rc=0 ns="${GPU_DEVICE_PLUGIN_NAMESPACE:-kube-system}"
+  log "Counting the GPUs the node advertises..."
+  # The plugin rolls out with the release, and `helm upgrade --install` does not
+  # wait: give it the same bounded chance verify_gpu does, then poll.
+  kubectl rollout status daemonset/nvidia-device-plugin-daemonset -n "$ns" --timeout=120s >/dev/null 2>&1 || true
+  while [[ "$tries" -lt 18 ]]; do
+    tries=$((tries + 1))
+    # The one count reader, shared with the k3d branch of verify_gpu (gpu-plugins.sh
+    # _gpu_alloc_count, client-dev#1557): a node without the key counts 0, and a read
+    # that fails, lists no node or is not a number is "cannot tell", never a count.
+    rc=0; n="$(_gpu_alloc_count nvidia)" || rc=$?
+    if [[ "$rc" -eq 0 && "$n" -gt 0 ]]; then
+      TB_K3S_GPU_UNCONFIRMED=""
+      success "NVIDIA GPU wired into k3s: ${n} GPU(s) allocatable (runtime ${TB_K3S_GPU_RUNTIME})."
+      return 0
+    fi
+    sleep 5
+  done
+  # shellcheck disable=SC2034  # consumed cross-file by summary.sh (print_summary)
+  TB_K3S_GPU_UNCONFIRMED=1
+  if [[ "$rc" -ne 0 ]]; then
+    warn "Couldn't read how many GPUs the node advertises ('kubectl get nodes' did not answer), so the NVIDIA GPU is not confirmed."
+    hint "Check with: kubectl get nodes -o jsonpath='{..allocatable.nvidia\\.com/gpu}'"
+    return 0
+  fi
+  warn "k3s runs the NVIDIA runtime, but the node advertises no GPU (allocatable nvidia.com/gpu = 0), so GPU training jobs will wait."
+  hint "If 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"' shows Xid 140 or 'RmInitAdapter failed', the GPUs failed when they re-initialised: turn persistence mode on from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), reboot, then re-run this installer. Drivers 550 and newer did not need it."
+}
+
 # ── The install path (1.1e) ───────────────────────────────────────────────────
 #
 # install_linux (setup-linux.sh) runs _native_k3s_install_linux and create_cluster
-# (cluster.sh) runs _native_k3s_create_cluster when TB_SUBSTRATE=k3s. Native k3s is
+# (cluster.sh) runs _native_k3s_create_cluster when TRACEBLOC_SUBSTRATE_RESOLVED=k3s. Native k3s is
 # Linux-only in Stage 1; macOS gets its node in 2.1 (D6).
 
 # What upstream's install.sh writes. The presence check reads the units; the record
@@ -862,20 +1239,26 @@ _native_k3s_ensure_firewall_tool() {
 # so the run is Tier 2 and the record gets its root copy. Tier 1 (rootless) does not
 # exist on k3s (D3). No Docker, no k3d and no kubectl download: upstream's install.sh
 # links kubectl to k3s wherever root's PATH has none. Helm installs as it does for k3d.
+#
+# The one exception (1.1g): a host an administrator prepared for this user
+# (_native_k3s_prepared_for_me) is adopted at Tier 0, decided before anything asks
+# for a password. Every refusal for administrator rights names prepare-host.
 _native_k3s_install_linux() {
-  if [[ "$(id -u 2>/dev/null)" != "0" ]] && ! _have_sudo_bin; then
-    error "Native k3s runs as root, so installing it needs administrator rights once, and you are not root and this machine has no sudo. Re-run as root, or as a user who can sudo."
+  local why=""
+  if [[ "$(id -u 2>/dev/null)" != "0" ]]; then
+    if why="$(_native_k3s_prepared_for_me)"; then
+      _native_k3s_adopt_tools
+      return 0
+    fi
+    _have_sudo_bin \
+      || error "Native k3s runs as root, so installing it needs administrator rights once, and you are not root and this machine has no sudo. $(_native_k3s_prepare_host_remedy "$why")"
   fi
   # shellcheck disable=SC2034  # consumed cross-file (common.sh's root copy, setup-linux.sh's tools target, diagnose.sh)
   INSTALL_TIER=2
   # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
   INSTALL_TIER_REASON="native-k3s"
   log "step b: native k3s: tier 2 (k3s runs as root; administrator rights once)"
-  preflight_sudo "set up k3s and a few tools"
-  setup_pm
-  apt_wait_for_lock
-  install_system_deps
-  _native_k3s_ensure_firewall_tool
+  _native_k3s_host_prereqs "set up k3s and a few tools" "Re-run as a user allowed to sudo, or as root. $(_native_k3s_prepare_host_remedy "$why")"
   _set_tools_target
   local saved_umask
   saved_umask="$(umask)"
@@ -883,6 +1266,23 @@ _native_k3s_install_linux() {
   install_helm
   umask "$saved_umask"
   log "step b: native k3s: system tools and helm ready (no Docker, no k3d, no kubectl download)"
+  # The NVIDIA driver, toolkit and CDI spec (1.1i), before k3s first starts in step c.
+  # Only for NVIDIA: native k3s sets up no other vendor in step b.
+  if [[ "${GPU_VENDOR:-}" == "nvidia" ]]; then
+    dispatch_gpu_setup
+  fi
+}
+
+# _native_k3s_host_prereqs WHAT [REMEDY] -- the privileged half of step b, which
+# prepare-host runs too: administrator rights once (WHAT is what the password line
+# says they are for, REMEDY what a failed password says to do), the package
+# manager, the system tools, and a firewall tool.
+_native_k3s_host_prereqs() {
+  preflight_sudo "$1" "${2:-}"
+  setup_pm
+  apt_wait_for_lock
+  install_system_deps
+  _native_k3s_ensure_firewall_tool
 }
 
 # _native_k3s_refuse_host -- refuse, each by name, a host or a setting the native path
@@ -905,15 +1305,38 @@ _native_k3s_refuse_host() {
   _native_k3s_check_version
 }
 
-# _native_k3s_refuse_live_k3d -- never k3s beside a live k3d (D10). k3d.sh's
+# Docker's own default socket: where k3d and the docker CLI go with no DOCKER_HOST
+# and no DOCKER_CONTEXT. Assigned, never read from the environment.
+TB_DOCKER_DEFAULT_SOCKET="/var/run/docker.sock"
+
+# _native_k3s_docker_unreachable -- 0 when this user cannot reach Docker at all,
+# read without k3d: nothing points them at another daemon (no DOCKER_HOST, no
+# DOCKER_CONTEXT), and the default socket is absent or not writable by them.
+_native_k3s_docker_unreachable() {
+  [[ -z "${DOCKER_HOST:-}" && -z "${DOCKER_CONTEXT:-}" ]] || return 1
+  [[ ! -w "$TB_DOCKER_DEFAULT_SOCKET" ]]
+}
+
+# _native_k3s_refuse_live_k3d [adopt] -- never k3s beside a live k3d (D10). k3d.sh's
 # _k3d_live_clusters has four answers, and each is acted on here: none (go on), a
 # listed cluster (refused), a k3d that did not answer in time, and a listing that
 # failed fast. The last two are "cannot tell" and refused too -- an unreadable state
 # is not evidence of absence -- but each names its own remedy: "start Docker" is
 # only right for the first, and a fast failure quotes what k3d said instead.
+#
+# One exception, on a prepared host only (adopt): a listing that failed fast goes on
+# when this user cannot reach Docker at all. k3d clusters are the machine's Docker
+# containers; prepare-host listed them as the administrator before it set k3s up,
+# and a user with no way to Docker cannot have started one since. A listed cluster,
+# a listing that did not answer, and a fast failure with Docker reachable (k3d
+# itself is broken) are refused on adopt as everywhere else.
 _native_k3s_refuse_live_k3d() {
   local names rc=0
   names="$(_k3d_live_clusters)" || rc=$?
+  if [[ "$rc" -eq 3 && "${1:-}" == adopt ]] && _native_k3s_docker_unreachable; then
+    info "k3d is installed but cannot list clusters as you (${names%%$'\n'*}). You cannot reach Docker (no DOCKER_HOST, and ${TB_DOCKER_DEFAULT_SOCKET} is not writable for you), so you cannot have started a k3d cluster, and prepare-host checked for one when it set k3s up."
+    return 0
+  fi
   case "$rc" in
     1) return 0 ;;
     0) error "A k3d cluster is running on this machine ($(printf '%s' "$names" | tr '\n' ' ' | sed 's/ *$//')), and native k3s is never set up beside a live k3d. Moving to native k3s is a reinstall (a new client, datasets ingested again), which this installer cannot do yet. Keep k3d with TRACEBLOC_SUBSTRATE=k3d, or remove the k3d cluster first ('tracebloc delete'), then re-run." ;;
@@ -1045,16 +1468,25 @@ _native_k3s_ensure_running() {
 #      budget with the wait for k3s.yaml), then the node password k3s wrote, then
 #      the node Ready on that same budget: success is the node Ready, never
 #      install.sh's exit 0 or an active unit;
-#   5. NO_PROXY for this process.
+#   5. the NVIDIA GPU's gate (1.1i), which may restart k3s once;
+#   6. NO_PROXY for this process.
 # A re-run on tracebloc's k3s (the node half of D11) re-renders every file and keeps
 # the node name and ranges config.yaml froze. It restarts k3s only when a file it
 # writes changed, and replaces the binary only when its version is not the pin. The
 # script runs on every pass: it rewrites the unit and k3s.service.env (the proxy
 # home) and restarts k3s itself only when those or the binary changed. A k3s that is
 # not running after that is started, whatever changed.
+#
+# Two modes (1.1g). Prepared (prepare-host, TB_K3S_PREPARED) runs steps 1 to 3 as
+# the administrator for a named user, then _native_k3s_prepared_finish. Adopted (that
+# user's Tier 0 install, TB_K3S_ADOPTED) runs _native_k3s_adopt_cluster instead.
 _native_k3s_create_cluster() {
   local present=0 tool aid apath name cidrs cgroup storage ca rc=0 src=0 want have tmp replaced=""
   log "Setting up native k3s for '${CLUSTER_NAME}'"
+  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then
+    _native_k3s_adopt_cluster
+    return 0
+  fi
   _native_k3s_refuse_host
   _native_k3s_refuse_live_k3d
   _native_k3s_presence || present=$?
@@ -1124,14 +1556,233 @@ _native_k3s_create_cluster() {
   # Neither the script nor the restart above starts a stopped k3s on an unchanged re-run.
   _native_k3s_ensure_running
 
-  # 4. The kubeconfig, the API and the node password.
+  # 4. The kubeconfig, the API and the node password. Prepared mode finishes on its
+  # own path (_native_k3s_prepared_finish): the administrator's kubeconfig is not
+  # the user's, so it merges nothing and records no context.
   _native_k3s_wait_for_kubeconfig
+  if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
+    _native_k3s_prepared_finish "$name"
+    return 0
+  fi
   _native_k3s_merge_kubeconfig
   tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
   _native_k3s_wait_for_api
   tb_record_write file node-password "$TB_K3S_NODE_PASSWORD_PATH"
   _native_k3s_wait_for_node_ready "$name"
 
-  # 5. This process's NO_PROXY: the RFC1918 defaults cover both range pairs.
+  # 5. The NVIDIA GPU: wired only when k3s's own containerd registered the runtime.
+  _native_k3s_gpu_wire "$name"
+
+  # 6. This process's NO_PROXY: the RFC1918 defaults cover both range pairs.
   _export_host_no_proxy
+}
+
+# ── The prepared host (1.1g) ──────────────────────────────────────────────────
+#
+# RFC-0175 D3's admin half. An administrator runs prepare-host once, naming the daily
+# user; it sets k3s up for them as root, grants k3s.yaml to the prepared group with
+# them in it, and writes their records. Their own install then finds the host
+# prepared and adopts it at Tier 0, with no administrator rights.
+
+# _native_k3s_prepared_for_me -- 0 when an administrator prepared this host for this
+# user, read with no privileges: all three hold -- this user's own record lists
+# tracebloc's k3s-install, k3s is active, and this user can read k3s.yaml. Otherwise
+# 1; on a host prepared for this user (the record lists it), stdout then says which
+# of the other two is missing, for the refusal to name.
+_native_k3s_prepared_for_me() {
+  local rec me members
+  rec="$(tb_record_path)"
+  [[ -f "$rec" ]] || return 1
+  grep -F '"kind": "k3s-install"' "$rec" >/dev/null 2>&1 || return 1
+  # prepare-host is the only thing that adds a user to the prepared group, while a
+  # self-install on a host with sudo writes the same k3s-install record: without
+  # this, that user (sudo since revoked, or k3s.yaml readable another way) would be
+  # adopted onto a cluster nobody prepared for them. Not a member: not prepared.
+  me="$(id -un 2>/dev/null)" || me=""
+  members="$(getent group "$TB_K3S_PREPARED_GROUP" 2>/dev/null)" || members=""
+  case ",${members##*:}," in
+    *",${me},"*) ;;
+    *) return 1 ;;
+  esac
+  if ! _bounded "${TB_PROBE_TIMEOUT:-5}" systemctl is-active --quiet k3s 2>/dev/null; then
+    printf 'k3s is not running on it (systemctl is-active k3s)'
+    return 1
+  fi
+  if [[ ! -r "$TB_K3S_KUBECONFIG_PATH" ]]; then
+    case " $(id -Gn 2>/dev/null) " in
+      *" ${TB_K3S_PREPARED_GROUP} "*) printf 'you cannot read %s' "$TB_K3S_KUBECONFIG_PATH" ;;
+      *) printf 'this session started before you joined the %s group, so you cannot read %s yet: log out and back in, then re-run' "$TB_K3S_PREPARED_GROUP" "$TB_K3S_KUBECONFIG_PATH" ;;
+    esac
+    return 1
+  fi
+  return 0
+}
+
+# _native_k3s_prepare_host_remedy [WHY] -- the way forward for a user who cannot
+# sudo: an administrator prepares the host for them once. WHY, when given, is what
+# is missing on a host already prepared for them.
+_native_k3s_prepare_host_remedy() {
+  local me
+  me="$(id -un 2>/dev/null)" || me=""
+  [[ -z "${1:-}" ]] || printf 'An administrator prepared this machine for you, but %s. ' "$1"
+  printf 'An administrator can prepare this machine for you once: export TRACEBLOC_SUBSTRATE=k3s TB_PREPARE_USER=%s && curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host -- then re-run this installer, with no sudo.' "${me:-<your-username>}"
+}
+
+# _native_k3s_adopt_tools -- step b at Tier 0 on a host prepared for this user. k3s,
+# its files and its firewall are the administrator's, so nothing here asks for
+# administrator rights: helm goes user-local (_set_tools_target), and create_cluster
+# takes the adopt path.
+_native_k3s_adopt_tools() {
+  # shellcheck disable=SC2034  # consumed cross-file (setup-linux.sh's tools target, common.sh's root copy, diagnose.sh)
+  INSTALL_TIER=0
+  # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
+  INSTALL_TIER_REASON="native-k3s-prepared"
+  TB_K3S_ADOPTED=1
+  log "step b: native k3s: tier 0 (an administrator prepared this machine for $(id -un 2>/dev/null); no administrator rights)"
+  info "An administrator prepared native k3s on this machine for you, so this install needs no administrator rights."
+  _set_tools_target
+  local saved_umask
+  saved_umask="$(umask)"
+  umask 022
+  install_helm
+  umask "$saved_umask"
+  log "step b: native k3s: helm ready in ${TRACEBLOC_TOOLS_DIR:-?} (k3s is the administrator's)"
+}
+
+# _native_k3s_adopt_cluster -- step c on a prepared host. The k3s an administrator set
+# up for this user is used as it is: no firewall, file, binary or restart here, and
+# no sudo. k3s.yaml, readable through the prepared group, is merged into this user's
+# kubeconfig and recorded; then the API and the node are waited for on the one
+# budget the full path uses.
+_native_k3s_adopt_cluster() {
+  local name
+  _native_k3s_refuse_host
+  _native_k3s_refuse_live_k3d adopt
+  log "native k3s: using the k3s an administrator prepared for $(id -un 2>/dev/null) (prepare-host)."
+  name="$(_native_k3s_node_name)"
+  TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
+  _native_k3s_merge_kubeconfig
+  tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
+  _native_k3s_wait_for_api
+  _native_k3s_wait_for_node_ready "$name"
+  _native_k3s_gpu_prepared_cpu
+  _export_host_no_proxy
+}
+
+# _native_k3s_prepared_finish NAME -- step 4 and 5 in prepared mode: the API, asked
+# as root on k3s.yaml (_native_k3s_kubectl_on); k3s.yaml's grant to the prepared
+# group, read back; the node password; node NAME Ready; the GPU, named as not set up
+# (_native_k3s_gpu_prepared_cpu); this process's NO_PROXY. The
+# shared wait budget started with the wait for k3s.yaml, as on the full path.
+_native_k3s_prepared_finish() {
+  local name="$1"
+  _native_k3s_wait_for_api
+  _native_k3s_check_prepared_grant
+  tb_record_write file node-password "$TB_K3S_NODE_PASSWORD_PATH"
+  _native_k3s_wait_for_node_ready "$name"
+  _native_k3s_gpu_prepared_cpu
+  _export_host_no_proxy
+}
+
+# _native_k3s_prepared_group USER -- the prepared group exists (a system group, made
+# here when missing) and USER is in it, BEFORE k3s starts: k3s grants k3s.yaml to a
+# group that exists when it writes the file, and only logs one that does not. The
+# members are named to the administrator, since each of them is cluster-admin.
+_native_k3s_prepared_group() {
+  local user="$1" g="$TB_K3S_PREPARED_GROUP" line
+  if ! getent group "$g" >/dev/null 2>&1; then
+    sudo groupadd --system "$g" \
+      || error "prepare-host: couldn't create the '${g}' group. Check 'sudo groupadd --system ${g}', then re-run."
+    log "prepare-host: created the system group '${g}'."
+  fi
+  sudo usermod -aG "$g" "$user" \
+    || error "prepare-host: couldn't add ${user} to the '${g}' group. Check 'sudo usermod -aG ${g} ${user}', then re-run."
+  line="$(getent group "$g" 2>/dev/null)" || line=""
+  log "prepare-host: ${user} is in '${g}' (members: ${line##*:})."
+  warn "Every member of the '${g}' group can administer this machine's k3s cluster, as every member of the docker group can administer Docker. Members now: ${line##*:}."
+}
+
+# _native_k3s_check_prepared_grant -- prepared mode: k3s.yaml must be root's, group
+# TB_K3S_PREPARED_GROUP, mode 0640, or the named user cannot read it. k3s sets the
+# mode and then the group, and a group it cannot set is only a line in its log
+# (pkg/server/server.go, v1.36.3+k3s1), so the grant is read back, and anything else
+# fails the run.
+_native_k3s_check_prepared_grant() {
+  local have want="root:${TB_K3S_PREPARED_GROUP} 640"
+  have="$(sudo stat -c '%U:%G %a' "$TB_K3S_KUBECONFIG_PATH" 2>/dev/null)" || have=""
+  [[ "$have" == "$want" ]] \
+    || error "native k3s: ${TB_K3S_KUBECONFIG_PATH} is '${have:-unreadable}' (owner:group mode), not '${want}', so ${TB_RECORD_FOR_USER:-the named user} cannot read it. 'sudo journalctl -u k3s | grep -i kubeconfig' says why; it's safe to re-run prepare-host."
+  log "native k3s: ${TB_K3S_KUBECONFIG_PATH} is ${have}."
+}
+
+# _native_k3s_check_user_record USER HOME -- USER's own record must be there and
+# list k3s-install: their Tier 0 install adopts the host by it. Record writes are
+# best-effort, so prepare-host reads the copy back, as USER.
+_native_k3s_check_user_record() {
+  local dst="${2}${TB_RECORD_USER_PATH#\~}" body
+  body="$(_tb_record_as_user "$1" cat "$dst" 2>/dev/null)" || body=""
+  case "$body" in
+    *'"kind": "k3s-install"'*) log "prepare-host: ${1}'s install record ${dst} lists k3s-install." ;;
+    *) error "prepare-host: k3s is set up, but ${1}'s install record ${dst} could not be written, and their install adopts k3s by it. Check that 'sudo -u ${1} true' works, then re-run prepare-host." ;;
+  esac
+}
+
+# _native_k3s_prepare_host USER -- prepare-host on native k3s (RFC-0175 D3): an
+# administrator sets k3s up once FOR the daily user USER, who then installs tracebloc
+# with no administrator rights. It refuses before anything is written unless USER is
+# a user of this machine other than root, with a home. It runs step b's privileged
+# half and the whole of step c as the administrator, with k3s.yaml and config.yaml
+# granted to the prepared group (mode 0640) and USER added to it first, and writes
+# USER's two records: their own copy, as them, and the root copy. It never installs
+# helm or the tracebloc release, never mints a credential, and never touches the
+# administrator's kubeconfig or record.
+_native_k3s_prepare_host() {
+  local user="${1:-}" pw home
+  [[ -n "$user" ]] \
+    || error "prepare-host on native k3s sets k3s up for one named user, and none was named. Name them: export TB_PREPARE_USER=<their-username>, then re-run prepare-host."
+  pw="$(getent passwd "$user" 2>/dev/null)" || pw=""
+  [[ -n "$pw" ]] \
+    || error "prepare-host: '${user}' is not a user on this machine (getent passwd ${user}). Name the user who will run tracebloc, then re-run."
+  [[ "$user" != root && "$(printf '%s' "$pw" | cut -d: -f3)" != 0 ]] \
+    || error "prepare-host sets k3s up for a daily user, never for root, and '${user}' is root (uid 0). Name the user who will run tracebloc."
+  home="$(printf '%s' "$pw" | cut -d: -f6)"
+  [[ "$home" == /* && -d "$home" ]] \
+    || error "prepare-host: ${user}'s home directory '${home}' does not exist, and their install record goes there. Create it, then re-run prepare-host."
+  _native_k3s_refuse_host
+  # The data dir is the named user's: the record names it, and the leftover guard
+  # scans it. An administrator's own default is never theirs; a data dir the
+  # administrator chose stays their choice of where the volumes live.
+  if [[ -z "$(_native_k3s_storage_choice)" ]]; then
+    TB_HOST_DATA_DIR_DEFAULT="${home}/.tracebloc"
+    HOST_DATA_DIR="$TB_HOST_DATA_DIR_DEFAULT"
+  fi
+  # Data found there is the named user's, and prepare-host never deletes it: the
+  # leftover guard lists it and offers no wipe (cluster.sh), and --wipe-data is
+  # refused here, before anything is written.
+  [[ "${TB_LEFTOVER_ACTION:-}" != wipe ]] \
+    || error "prepare-host never wipes data, and --wipe-data asks it to: tracebloc data in ${HOST_DATA_DIR} is ${user}'s. ${user} removes it with 'tracebloc delete', or you keep it with --reuse-data; then re-run prepare-host."
+
+  step_header a "Preparing this host for ${user} on native k3s (one-time administrator step)"
+  # A corporate CA, trusted before the first download (as main() does for an install).
+  if declare -F wire_ca_trust >/dev/null 2>&1; then wire_ca_trust; fi
+  # shellcheck disable=SC2034  # consumed cross-file (common.sh's root copy, diagnose.sh)
+  INSTALL_TIER=2
+  # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
+  INSTALL_TIER_REASON="native-k3s"
+  _native_k3s_host_prereqs "set up k3s for ${user}"
+  _native_k3s_prepared_group "$user"
+  tb_record_for_user "$user" "$home" \
+    || error "prepare-host: couldn't make a private directory to build ${user}'s install record in."
+  # shellcheck disable=SC2034  # consumed cross-file by common.sh's tb_record_write
+  TRACEBLOC_RECORD_ARMED=1
+  TB_K3S_PREPARED=1
+  _native_k3s_create_cluster
+  tb_record_write
+  _native_k3s_check_user_record "$user" "$home"
+
+  echo ""
+  success "Host prepared: k3s is running, and ${user} can install tracebloc with no administrator rights."
+  info "After a fresh login (so the ${TB_K3S_PREPARED_GROUP} group applies), ${user} runs:"
+  echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
+  return 0
 }

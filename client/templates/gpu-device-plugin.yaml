@@ -89,7 +89,8 @@ spec:
       # the GPU (the node's containerd invokes the NVIDIA runtime) and NVML can
       # enumerate GPUs — otherwise the pod runs under the default runtime, sees no
       # device, and registers 0. The Linux installer sets this to "nvidia" only when
-      # the GPU is wired; the RuntimeClass is baked into the k3s-cuda node image.
+      # the GPU is wired. On k3d the RuntimeClass is baked into the k3s-cuda node
+      # image; on native k3s, k3s creates it when it finds the host's NVIDIA toolkit.
       # Left unset on Windows/WSL2 (that path doesn't run this plugin) and CPU.
       runtimeClassName: {{ . | quote }}
       {{- end }}

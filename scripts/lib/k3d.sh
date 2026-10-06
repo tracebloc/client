@@ -366,7 +366,7 @@ _write_k3d_proxy_config() {
 }
 
 # Write a k3d registries.yaml pointing containerd at the mounted CA for every
-# registry in TB_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
+# registry in TRACEBLOC_CA_REGISTRIES, and echo its path. $1 = the CA path INSIDE the
 # node (where the -v mount lands). Caller removes the temp dir.
 #
 # (Reunited with its function: the kubelet section above was inserted between the
@@ -1272,7 +1272,7 @@ _node_image_gpu_capable() {
 }
 
 # Reconcile the GPU decision against a REUSED cluster (client#835). The GPU gate
-# sets TB_GPU_WIRED=1 (hence --gpus=all) and the chart requests a GPU BEFORE we know
+# sets TRACEBLOC_GPU_WIRED=1 (hence --gpus=all) and the chart requests a GPU BEFORE we know
 # whether this run creates the cluster or reuses one. GPU capability is fixed at
 # create time (baked into the node image); it cannot be bolted onto a running
 # cluster. A cluster first built in CPU mode — or by an installer predating #835 —
@@ -1291,7 +1291,7 @@ _check_existing_cluster_gpu() {
   [[ -z "$image" ]] && return 0
   _node_image_gpu_capable "$image" && return 0
   # CPU-only node → drop the GPU request so the chart writes CPU values.
-  TB_GPU_WIRED=0
+  TRACEBLOC_GPU_WIRED=0
   echo ""
   warn "GPU detected, but the existing '$CLUSTER_NAME' cluster runs a CPU-only node — running CPU mode so jobs aren't stranded Pending."
   hint "The k3s node image (and thus GPU capability) is fixed when the cluster is created; it can't be added to a running cluster."
@@ -1395,7 +1395,7 @@ _check_healthy_cluster_gpu_consistent() {
 # `nvidia-ctk` can exit 0 having written nothing, and on a REUSED cluster a prior
 # install's /etc/cdi/nvidia.yaml already makes the node GPU-capable — so a transient
 # regeneration failure must not tear that down (Bugbot High). Only when NO node has
-# a usable spec do we fall CLOSED to CPU (TB_GPU_WIRED=0) so the chart doesn't
+# a usable spec do we fall CLOSED to CPU (TRACEBLOC_GPU_WIRED=0) so the chart doesn't
 # advertise a GPU pods can't use — the same standard the Windows CDI path applies.
 # And a docker-ps that can't LIST the nodes is "cannot tell", not "no GPU": leave
 # the request as-is rather than guess CPU on a probe failure (mirrors
@@ -1437,7 +1437,7 @@ _generate_node_cdi_specs() {
     fi
   done
   if (( ! any_ok )); then
-    TB_GPU_WIRED=0
+    TRACEBLOC_GPU_WIRED=0
     warn "No cluster node has a usable NVIDIA CDI spec — running CPU mode so GPU jobs aren't stranded Pending."
     hint "Check the NVIDIA driver + 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG} nvidia-smi' works on this host."
     # GPU wiring is fixed at create time and this CPU cluster now looks healthy, so a
@@ -1720,13 +1720,13 @@ _create_new_cluster() {
       # Refusing it is the POINT of the pin (backend#1867): a republished tag must not
       # put unreviewed bytes on a customer's GPU node. Kept distinct from a failed pull
       # so nobody chases network/creds for a supply-chain answer.
-      TB_GPU_WIRED=0
+      TRACEBLOC_GPU_WIRED=0
       warn "The GPU node image no longer resolves to the pinned digest — installing CPU-only rather than running an unreviewed image."
       hint "Expected ${TB_K3S_CUDA_DIGEST}, but ${_prepull_image} resolved to ${_got_digest:-<unknown>}."
       hint "Either that tag was republished, or K8S_VERSION/CUDA_TAG moved without re-resolving K3S_CUDA_DIGEST in scripts/spec/facts.env."
       _recreate_cluster_hint
     elif (( ! _gpu_ok )); then
-      TB_GPU_WIRED=0
+      TRACEBLOC_GPU_WIRED=0
       warn "Couldn't pull or validate the GPU node image (${_prepull_image}) — installing CPU-only so the cluster still comes up."
       hint "Make sure this host can pull AND run ${_prepull_image} (for a private registry set TRACEBLOC_IMAGE_REGISTRY + TRACEBLOC_REGISTRY_USERNAME/PASSWORD)."
       # The node image is fixed at create time and this CPU cluster now looks healthy,
@@ -1757,7 +1757,7 @@ _create_new_cluster() {
     # can't schedule GPU pods — so drop the request (it would otherwise strand every
     # job Pending on a node that advertises 0 GPUs).
     if _gpu_wired; then
-      TB_GPU_WIRED=0
+      TRACEBLOC_GPU_WIRED=0
       warn "GPU disabled: K8S_VERSION=latest has no matching GPU node image — pin TRACEBLOC_K8S_VERSION to enable GPU."
     fi
   elif _gpu_wired && [[ -n "$K8S_VERSION" ]]; then
@@ -2012,7 +2012,7 @@ _merge_kubeconfig() {
   fi
 
   log "kubeconfig updated — kubectl now points to '$CLUSTER_NAME' (context $want_ctx)."
-  TB_KUBE_CONTEXT="$want_ctx"
+  TRACEBLOC_KUBE_CONTEXT="$want_ctx"
   if [[ -n "$prev_ctx" && "$prev_ctx" != "$want_ctx" ]]; then
     TB_PREV_KUBE_CONTEXT="$prev_ctx"
     log "kubectl's current context was '$prev_ctx' before this install; the summary says how to switch back."
@@ -2488,7 +2488,7 @@ _ensure_k3s_node_addresses() {
     done <<<"$list"
   done
   # Positive evidence that the earlier finding is gone: every server runs k3s.
-  if [[ "$servers" -gt 0 && "$servers_ok" -eq "$servers" ]]; then TB_K3S_NODE_FINDING=""; fi
+  if [[ "$servers" -gt 0 && "$servers_ok" -eq "$servers" ]]; then TRACEBLOC_K3S_NODE_FINDING=""; fi
 
   local first
   if [[ -n "$unreadable" ]]; then
@@ -2503,8 +2503,8 @@ _ensure_k3s_node_addresses() {
   if [[ -z "$swapped" ]]; then
     if [[ -n "$dead" ]]; then
       first="${dead# }"; first="${first%% *}"
-      TB_K3S_NODE_FINDING="Kubernetes is not running inside '$first': the container is up, its k3s process is not, and nothing restarts it. Its last lines: docker logs --tail 50 $first. Restarting the environment often clears this: k3d cluster stop $CLUSTER_NAME && k3d cluster start $CLUSTER_NAME"
-      log "k3s node check: $TB_K3S_NODE_FINDING"
+      TRACEBLOC_K3S_NODE_FINDING="Kubernetes is not running inside '$first': the container is up, its k3s process is not, and nothing restarts it. Its last lines: docker logs --tail 50 $first. Restarting the environment often clears this: k3d cluster stop $CLUSTER_NAME && k3d cluster start $CLUSTER_NAME"
+      log "k3s node check: $TRACEBLOC_K3S_NODE_FINDING"
     fi
     return 0
   fi
@@ -2543,7 +2543,7 @@ _ensure_k3s_node_addresses() {
   rc=0; spin "$!" "Moving your secure environment's nodes back to their addresses (nothing is deleted)…" 900 || rc=$?
   case "$rc" in
     0)
-      TB_K3S_NODE_FINDING=""
+      TRACEBLOC_K3S_NODE_FINDING=""
       success "Secure environment repaired: its nodes are back on the addresses Kubernetes expects, and fixed there." ;;
     1)
       # shellcheck disable=SC2086
@@ -2634,13 +2634,13 @@ _wait_for_api() {
   # container restarts once, k3s comes up, the API answers for a moment, then k3s
   # dies for good. A one-shot check that lands in that window sees a live k3s (or
   # an answering API) and passes, and the wait then runs out its whole budget.
-  TB_K3S_NODE_FINDING=""
+  TRACEBLOC_K3S_NODE_FINDING=""
   _ensure_k3s_node_addresses
   local _every
   case "${TB_NODE_CHECK_EVERY_S:-}" in ''|*[!0-9]*) _every=30 ;; *) _every=$((10#${TB_NODE_CHECK_EVERY_S})) ;; esac
   local _next_check=$(( $(date +%s) + _every ))
 
-  tput civis 2>/dev/null || true
+  _tb_progress_start "Starting your secure environment…"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local f=0
   local _deadline=$(( $(date +%s) + _budget_s )) _t0
@@ -2650,13 +2650,12 @@ _wait_for_api() {
     # the TCP connection but never responds (corporate-proxy intercept of
     # localhost, half-booted apiserver) would hang this gate forever.
     if _api_answers; then
-      printf "\r\033[K"
-      tput cnorm 2>/dev/null || true
+      _tb_progress_end
       success "Secure environment ready"
       return
     fi
     if [[ $(date +%s) -ge $_next_check ]]; then
-      printf "\r\033[K"
+      _tb_progress_clear
       # The re-check's own time is not the API's (the desk on client-dev#1380): a
       # repair inside it runs `k3d cluster start --wait`, bounded at 360 s, so
       # charged to the 180 s budget it ended the wait before the API it had just
@@ -2667,12 +2666,11 @@ _wait_for_api() {
       _deadline=$(( _deadline + $(date +%s) - _t0 ))
       _next_check=$(( $(date +%s) + _every ))
     fi
-    printf "\r  ${CYAN}%s${RESET} Starting your secure environment…" "${frames[f]}"
+    _tb_progress_frame "${frames[f]}" "Starting your secure environment…"
     f=$(( (f + 1) % ${#frames[@]} ))
     sleep 2
   done
-  printf "\r\033[K"
-  tput cnorm 2>/dev/null || true
+  _tb_progress_end
 
   # Surface the actual kubeconfig path. KUBECONFIG can be colon-separated
   # (kubectl supports a list); point at the first entry — users with custom
@@ -2680,8 +2678,8 @@ _wait_for_api() {
   local kc="${KUBECONFIG:-${HOME}/.kube/config}"
   kc="${kc%%:*}"
   # A cause the node check ESTABLISHED replaces the list of guesses below.
-  if [[ -n "${TB_K3S_NODE_FINDING:-}" ]]; then
-    error "kubectl cluster-info failed for ${_budget_s}s. ${TB_K3S_NODE_FINDING}"
+  if [[ -n "${TRACEBLOC_K3S_NODE_FINDING:-}" ]]; then
+    error "kubectl cluster-info failed for ${_budget_s}s. ${TRACEBLOC_K3S_NODE_FINDING}"
   fi
   error "kubectl cluster-info failed for ${_budget_s}s. Cluster reports running, but the API is unreachable. It's safe to re-run this installer; on a slow or proxied machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. Possible causes:
    (a) Docker daemon stopped (run 'docker ps' to verify);

@@ -44,10 +44,10 @@ _cli_supports_provisioning() {
 # out as a function so tests can force the non-interactive path deterministically.
 _prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
 
-# TB_TTY: where interactive prompts READ from. Under `curl | bash` stdin is the
+# TRACEBLOC_TTY: where interactive prompts READ from. Under `curl | bash` stdin is the
 # piped installer, not the keyboard, so reads must come from the controlling
-# terminal. Overridable so tests can feed canned input on stdin (TB_TTY=/dev/stdin).
-: "${TB_TTY:=/dev/tty}"
+# terminal. Overridable so tests can feed canned input on stdin (TRACEBLOC_TTY=/dev/stdin).
+: "${TRACEBLOC_TTY:=/dev/tty}"
 
 # _login_tty_ok: is /dev/tty openable for the sign-in's redirection? Split out
 # as its own function (rather than reusing _prompt_tty) purely so tests can force
@@ -108,9 +108,9 @@ _device_sign_in() {
     warn "Sign-in didn't complete — the code lapsed or wasn't approved."
     hint "Nothing is lost: the install is paused right here, not restarted."
     # The prompt WRITE is guarded (|| true) so a test without a real /dev/tty
-    # doesn't abort; the read comes from TB_TTY, like every other prompt here.
+    # doesn't abort; the read comes from TRACEBLOC_TTY, like every other prompt here.
     printf '\n  Press Enter for a fresh code (or Ctrl-C to stop): ' >/dev/tty 2>/dev/null || true
-    IFS= read -r _ <"$TB_TTY" || break
+    IFS= read -r _ <"$TRACEBLOC_TTY" || break
     echo ""
   done
   error "Sign-in didn't complete — re-run the installer to try again."
@@ -327,11 +327,11 @@ provision_client() {
     # (customer-reported 2026-07-09). A FAILED read (rc!=0 = EOF / no live input,
     # e.g. a non-PTY ssh or IDE terminal) can't be fixed by re-prompting, so stop
     # and let that actionable error fire. The prompt WRITE is guarded (|| true) so
-    # a test without a real /dev/tty doesn't abort; reads use TB_TTY.
+    # a test without a real /dev/tty doesn't abort; reads use TRACEBLOC_TTY.
     local _name_try _name_read_ok
     for _name_try in 1 2 3; do
       printf '\n  Name your secure environment (shown on your tracebloc dashboard): ' >/dev/tty 2>/dev/null || true
-      _name_read_ok=1; IFS= read -r client_name <"$TB_TTY" || _name_read_ok=0
+      _name_read_ok=1; IFS= read -r client_name <"$TRACEBLOC_TTY" || _name_read_ok=0
       # Plain `read` (NOT `read -e`): setup_log_file has already redirected this
       # process's stdout+stderr through `exec > >(tee …) 2>&1`, and readline
       # (`read -e`) echoes typed characters to stderr — so under the tee pipe the

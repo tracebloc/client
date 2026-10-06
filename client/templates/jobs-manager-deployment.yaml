@@ -196,7 +196,8 @@ spec:
       #
       # Each dir is fixed INDEPENDENTLY and best-effort, and so is each OPERATION (#672). The chown
       # and the chmod used to be chained with a logical AND, which meant that on any mount that
-      # refused the chown — a pre-provisioned volume, an NFS root_squash export via HOST_DATASET_DIR,
+      # refused the chown — a pre-provisioned volume, an NFS root_squash export via TRACEBLOC_HOST_DATASET_DIR
+      # (old name HOST_DATASET_DIR still works),
       # a Windows/Docker-Desktop bind mount — the chmod was never attempted, while the log still
       # said "leaving as-is". That is backwards: the MODE is the load-bearing half (these dirs must
       # be other-writable for writers this chart does not own, see above), the chown to 1000 is
@@ -686,6 +687,16 @@ spec:
               name: {{ include "tracebloc.secretName" . }}
               key: TRACEBLOC_INGEST_PASSWORD
         {{- end }}
+        # backend#2073: give each ingestion Job its own short-lived, ingest-scoped
+        # backend token instead of the edge's shared one (client-runtime#868).
+        # Resolved per environment by tracebloc.ingestRunToken -- on for dev only,
+        # see ingestRunTokenByEnv in values.yaml for why stg/prod wait. Always
+        # rendered, "true" or "false", so the edge's posture reads off the pod.
+        # Canonical name only: client-runtime has never read a legacy spelling.
+        # Excluded from the env passthrough below, so `ingestRunToken` is the one
+        # knob and an `env.` copy cannot render a second, winning entry.
+        - name: TRACEBLOC_INGEST_RUN_TOKEN
+          value: {{ if (include "tracebloc.ingestRunToken" .) }}"true"{{ else }}"false"{{ end }}
         {{- if (include "tracebloc.bootstrapDbReparent" .) }}
         # backend#1528 S3 (RFC-0003 D10 close-out): re-parent the account-minting
         # bootstrap DDL OFF the root-equivalent edgeuser onto MySQL root, so
@@ -1145,8 +1156,15 @@ spec:
              no resolver deployed, so they lost DNS; with it ON it replaced the
              restricted resolver with whatever the value named -- the cluster DNS
              included, which is the exfiltration path restrictedDns closes. The
-             supported knobs are `restrictedDns.clusterIP` / `.clusterDomain`. */}}
-        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (not (has $key $proxyKeys)) $value }}
+             supported knobs are `restrictedDns.clusterIP` / `.clusterDomain`.
+
+             TRACEBLOC_INGEST_RUN_TOKEN is rendered above, always, from
+             `ingestRunToken` / `ingestRunTokenByEnv` (backend#2073). A passthrough
+             copy would render after it and win, turning the bound per-run token
+             on for a fleet whose ingestor cannot use it, or off for one the chart
+             turned on. pods-monitor's list is left alone: it never renders or
+             reads the var. */}}
+        {{- if and (ne $key "CLIENT_ENV") (ne $key "TRACEBLOC_ENV") (ne $key "RESOURCE_REQUESTS") (ne $key "TRACEBLOC_RESOURCE_REQUESTS") (ne $key "RESOURCE_LIMITS") (ne $key "TRACEBLOC_RESOURCE_LIMITS") (ne $key "RESOURCE_PROVENANCE") (ne $key "TRACEBLOC_RESOURCE_PROVENANCE") (ne $key "GPU_REQUESTS") (ne $key "TRACEBLOC_GPU_REQUESTS") (ne $key "GPU_LIMITS") (ne $key "TRACEBLOC_GPU_LIMITS") (ne $key "RUNTIME_CLASS_NAME") (ne $key "TRACEBLOC_RUNTIME_CLASS_NAME") (ne $key "SINGLE_NODE") (ne $key "TRACEBLOC_SINGLE_NODE") (ne $key "NODE_NAME") (ne $key "TRACEBLOC_NODE_NAME") (ne $key "CLIENT_ID") (ne $key "TRACEBLOC_CLIENT_ID") (ne $key "IMAGE_PULL_SECRET_NAME") (ne $key "TRACEBLOC_IMAGE_PULL_SECRET_NAME") (ne $key "RELEASE_NAME") (ne $key "TRACEBLOC_RELEASE_NAME") (ne $key "RELEASE_SECRET_NAME") (ne $key "TRACEBLOC_RELEASE_SECRET_NAME") (ne $key "MYSQL_MIGRATION_JOB_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE") (ne $key "MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT") (ne $key "MYSQL_MIGRATION_HELM_IMAGE") (ne $key "TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE") (ne $key "RESTRICTED_DNS_NAMESERVER") (ne $key "TRACEBLOC_RESTRICTED_DNS_NAMESERVER") (ne $key "RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN") (ne $key "TRACEBLOC_INGEST_RUN_TOKEN") (not (has $key $proxyKeys)) $value }}
         {{- include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) | nindent 8 }}
         {{- end }}
         {{- end }}

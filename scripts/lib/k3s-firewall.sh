@@ -43,7 +43,7 @@ _NATIVE_K3S_FW_UNIT_DIR="/etc/systemd/system"
 # Where the files are WRITTEN. Empty on a host; the bats suite points it at a
 # temp dir, the way DESTDIR works. The rendered unit always names the real
 # paths, so a test never renders a file a host would read differently.
-NATIVE_K3S_FW_ROOT="${NATIVE_K3S_FW_ROOT:-}"
+TRACEBLOC_NATIVE_K3S_FW_ROOT="${TRACEBLOC_NATIVE_K3S_FW_ROOT:-}"
 
 # _native_k3s_fw_pick — the firewall tool this host has, without refusing: `nft`,
 # `iptables` (with ip6tables beside it), `v4-only` (iptables alone) or `none`.
@@ -170,11 +170,11 @@ EOF
   printf '\n[Install]\nWantedBy=multi-user.target\n'
 }
 
-# _native_k3s_fw_install_file MODE DEST — stdin to DEST (under NATIVE_K3S_FW_ROOT)
+# _native_k3s_fw_install_file MODE DEST — stdin to DEST (under TRACEBLOC_NATIVE_K3S_FW_ROOT)
 # at MODE. The core runs under umask 077, so the mode is always explicit. Written
 # to a temp file first and moved with `install`, so a reader never sees half.
 _native_k3s_fw_install_file() {
-  local mode="$1" dest="$NATIVE_K3S_FW_ROOT$2" tmp
+  local mode="$1" dest="$TRACEBLOC_NATIVE_K3S_FW_ROOT$2" tmp
   tmp=$(mktemp) || error "could not create a temporary file for $2"
   if ! cat >"$tmp"; then rm -f "$tmp"; error "could not render $2"; fi
   if ! sudo mkdir -p "$(dirname "$dest")" || ! sudo install -m "$mode" "$tmp" "$dest"; then
@@ -274,8 +274,8 @@ _native_k3s_fw_remove() {
       ;;
     *) error "_native_k3s_fw_remove: unknown tool '$tool' (want nft or iptables)" ;;
   esac
-  sudo rm -f "$NATIVE_K3S_FW_ROOT$_NATIVE_K3S_FW_UNIT_DIR/$_NATIVE_K3S_FW_UNIT" \
-             "$NATIVE_K3S_FW_ROOT$(_native_k3s_fw_file "$tool")"
+  sudo rm -f "$TRACEBLOC_NATIVE_K3S_FW_ROOT$_NATIVE_K3S_FW_UNIT_DIR/$_NATIVE_K3S_FW_UNIT" \
+             "$TRACEBLOC_NATIVE_K3S_FW_ROOT$(_native_k3s_fw_file "$tool")"
   sudo systemctl daemon-reload || :
   if [ "$(_native_k3s_fw_status "$tool")" != absent ]; then
     error "the firewall rule is still live after removal"

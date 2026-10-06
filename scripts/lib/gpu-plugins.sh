@@ -30,6 +30,14 @@ verify_gpu() {
     return
   fi
 
+  # Native k3s counts the GPUs through the same reader (_gpu_alloc_count, below), and
+  # says what a count of 0 means there: k3s.sh _native_k3s_gpu_verify (1.1i) names the
+  # remedy S-G measured and marks the summary "not confirmed".
+  if [[ "$GPU_VENDOR" == "nvidia" && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    _native_k3s_gpu_verify
+    return
+  fi
+
   log "Verifying GPU on node..."
 
   # The device plugin now rolls out with the Helm release, and `helm upgrade

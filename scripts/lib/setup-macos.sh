@@ -59,10 +59,10 @@ _has_gui_session() {
 
 # Is the current user a macOS administrator (or root)? Admin group members can sudo
 # (default /etc/sudoers: `%admin ALL=(ALL) ALL`); a managed/standard account can't.
-# Overridable for tests via TB_MACOS_ADMIN_GROUPS.
+# Overridable for tests via TRACEBLOC_MACOS_ADMIN_GROUPS.
 _macos_user_is_admin() {
   [ "$(id -u)" -eq 0 ] && return 0
-  local groups="${TB_MACOS_ADMIN_GROUPS:-$(id -Gn 2>/dev/null)}"
+  local groups="${TRACEBLOC_MACOS_ADMIN_GROUPS:-$(id -Gn 2>/dev/null)}"
   # Capture-then-match, NOT `printf … | grep -qx` (#680's transform; its fleet
   # sweep of this hazard did not reach setup-macos.sh). `grep -q` closes the pipe
   # on its FIRST match and `admin` sits near the FRONT of a macOS group list, so
@@ -96,10 +96,10 @@ _macos_require_admin() {
 # Does this Mac support Apple Virtualization.framework (colima --vm-type vz)? It needs
 # macOS 13+ (Ventura); Rosetta x86_64 translation (--vz-rosetta) rides on VZ. Below 13,
 # colima falls back to its QEMU default (amd64 still runs, just slower). Overridable
-# for tests via TB_MACOS_VER (#433).
+# for tests via TRACEBLOC_MACOS_VER (#433).
 _macos_supports_vz() {
   local v major
-  v="${TB_MACOS_VER:-$(sw_vers -productVersion 2>/dev/null)}"
+  v="${TRACEBLOC_MACOS_VER:-$(sw_vers -productVersion 2>/dev/null)}"
   major="${v%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 13 ]
 }
@@ -1399,20 +1399,18 @@ _wait_for_docker() {
   # polls*3s — true either way.
   local start=$SECONDS
   local deadline=$(( SECONDS + polls * 3 ))
-  tput civis 2>/dev/null || true
+  _tb_progress_start "Waiting for Docker Desktop…"
   while [ "$SECONDS" -lt "$deadline" ]; do
     if _docker_answers; then
-      printf "\r\033[K"
-      tput cnorm 2>/dev/null || true
+      _tb_progress_end
       return 0
     fi
     elapsed=$(( SECONDS - start ))
-    printf "\r  ${CYAN}%s${RESET} Waiting for Docker Desktop… (%ds)" "${frames[f]}" "$elapsed"
+    _tb_progress_frame "${frames[f]}" "Waiting for Docker Desktop… (${elapsed}s)"
     f=$(( (f + 1) % ${#frames[@]} ))
     sleep 3
   done
-  printf "\r\033[K"
-  tput cnorm 2>/dev/null || true
+  _tb_progress_end
   _docker_answers
 }
 
@@ -1480,14 +1478,14 @@ install_macos_cli_tools() {
   # needed. It needs sudo to write and may not exist yet on Apple Silicon
   # (Homebrew uses /opt/homebrew), so create it best-effort.
   if [ "${INSTALL_TIER:-}" = "0" ]; then
-    TB_TOOLS_DIR="${HOME}/.local/bin"
-    TB_TOOLS_SUDO=""
-    mkdir -p "$TB_TOOLS_DIR"
-    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+    TRACEBLOC_TOOLS_DIR="${HOME}/.local/bin"
+    TRACEBLOC_TOOLS_SUDO=""
+    mkdir -p "$TRACEBLOC_TOOLS_DIR"
+    case ":$PATH:" in *":$TRACEBLOC_TOOLS_DIR:"*) ;; *) export PATH="$TRACEBLOC_TOOLS_DIR:$PATH" ;; esac
   else
-    TB_TOOLS_DIR="/usr/local/bin"
-    TB_TOOLS_SUDO="sudo"
-    sudo mkdir -p "$TB_TOOLS_DIR" 2>/dev/null || true
+    TRACEBLOC_TOOLS_DIR="/usr/local/bin"
+    TRACEBLOC_TOOLS_SUDO="sudo"
+    sudo mkdir -p "$TRACEBLOC_TOOLS_DIR" 2>/dev/null || true
   fi
   local _saved_umask
   _saved_umask=$(umask)
@@ -1496,7 +1494,7 @@ install_macos_cli_tools() {
   install_k3d
   install_helm             # ends with success "System tools"
   umask "$_saved_umask"
-  # Self-gates on TB_TOOLS_DIR being ~/.local/bin, so this is a no-op on every
+  # Self-gates on TRACEBLOC_TOOLS_DIR being ~/.local/bin, so this is a no-op on every
   # other tier. It is already macOS-aware (_tools_rc_for_shell → ~/.zshrc for
   # zsh, the default shell on modern macOS).
   _persist_tools_on_path
@@ -1507,7 +1505,7 @@ install_macos_cli_tools() {
 # action (#430). A per-user LaunchAgent (no admin needed) runs at each login:
 # `open -a Docker` on a GUI Mac, `colima start` on a headless one. Best-effort — never
 # fail the install over autostart. Sets TB_MACOS_AUTOSTART=1 so the summary can honestly
-# promise auto-restart. Dir overridable (TB_LAUNCHAGENTS_DIR) + launchctl mockable for tests.
+# promise auto-restart. Dir overridable (TRACEBLOC_LAUNCHAGENTS_DIR) + launchctl mockable for tests.
 # Emit a launchd plist to stdout: Label, RunAtLoad, ProgramArguments=$@, a per-user
 # LOGPATH for std{out,err}, plus any raw EXTRA XML (e.g. a boot daemon's UserName/
 # EnvironmentVariables). Kept separate so the GUI LaunchAgent and the headless
@@ -1560,7 +1558,7 @@ _install_macos_autostart() {
   fi
   local label="io.tracebloc.runtime"
   if _has_gui_session; then
-    local dir="${TB_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+    local dir="${TRACEBLOC_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
     local plist="$dir/${label}.plist"
     mkdir -p "$dir" 2>/dev/null || {
       warn "Couldn't create ${dir}; skipping login autostart — open Docker Desktop manually after a reboot."
@@ -1588,7 +1586,7 @@ _install_macos_autostart() {
       # the write is still correct (we hold no sudo), but reporting "start it
       # yourself" would be false — autostart is configured, just not by us.
       # Checked before the warn so a solved machine says nothing alarming.
-      local _dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+      local _dir="${TRACEBLOC_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
       if [[ -f "$_dir/${label}.plist" ]]; then
         log "Headless Tier 0: boot LaunchDaemon ${label} is already installed; autostart needs nothing from us."
         TB_MACOS_AUTOSTART=1
@@ -1628,7 +1626,7 @@ _install_macos_autostart() {
       warn "Headless autostart needs colima, but it isn't installed on this host; skipping boot autostart — start your Docker runtime manually after a reboot."
       return 1
     fi
-    local dir="${TB_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
+    local dir="${TRACEBLOC_LAUNCHDAEMONS_DIR:-/Library/LaunchDaemons}"
     local plist="$dir/${label}.plist"
     local _user; _user="$(id -un)"
     local _home="${HOME:-/Users/$_user}"

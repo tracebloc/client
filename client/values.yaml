@@ -199,7 +199,12 @@ env: {
   # Reach the training pod only through a jobs-manager that forwards them
   # (client-runtime's OPERATOR_TRAINING_SWITCHES carries both since
   # client-runtime#507); on an older runtime they land on the jobs-manager
-  # container and go no further.
+  # container and go no further. The chart renders each key under BOTH env
+  # names on jobs-manager -- EMIT_TOPOLOGY and TRACEBLOC_EMIT_TOPOLOGY, from the
+  # one value (RFC-0076; jobs-manager reads the TRACEBLOC_ name first). Keep
+  # setting the key as written here; `env.TRACEBLOC_EMIT_TOPOLOGY` works too.
+  # TRAINING_RESUME_ENABLED (the engine's in-pod checkpoint resume) travels the
+  # same way.
   # EMIT_TOPOLOGY: "0"
   # EMIT_OOM_RESCUE: "0"
   # -- Per-run LEASE for multi-GPU runs (RFC-0067 D7/H4; client-runtime#486,
@@ -304,11 +309,12 @@ gpu:
       resources:
         cpu: 50m
         memory: 64Mi
-      # RuntimeClass for the plugin pod (client#835). On native Linux the k3s-cuda
-      # node runs the NVIDIA runtime in CDI mode, and the plugin can only enumerate
-      # GPUs (init NVML) if its own pod runs under that runtime — so the Linux
-      # installer sets this to "nvidia" (the RuntimeClass baked into the node image)
-      # whenever the GPU is wired. Empty = plugin runs under the default runtime
+      # RuntimeClass for the plugin pod (client#835). On Linux the node runs the
+      # NVIDIA runtime in CDI mode, and the plugin can only enumerate GPUs (init
+      # NVML) if its own pod runs under that runtime — so the Linux installer sets
+      # this to "nvidia" whenever the GPU is wired: on k3d the RuntimeClass baked into
+      # the k3s-cuda node image, on native k3s the one k3s creates for the host's
+      # NVIDIA toolkit. Empty = plugin runs under the default runtime
       # (the correct choice for CPU clusters and the Windows/WSL2 path, which does
       # not run this plugin at all).
       runtimeClassName: ""
@@ -378,7 +384,8 @@ hostPath:
   # Base host path for the DATASET PV ONLY (shared training data). Default
   # /tracebloc keeps datasets on the local mount alongside mysql/logs. The
   # installer sets this to /tracebloc-data when a customer network (NFS) dataset
-  # mount is provided via HOST_DATASET_DIR (backend#743) — mysql + logs ALWAYS
+  # mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR
+  # still works; backend#743) — mysql + logs ALWAYS
   # stay on the local /tracebloc tree (InnoDB over NFS is unsafe). The chart
   # appends /<release>/data. mysql/logs PV paths are not affected by this key.
   #
@@ -401,7 +408,8 @@ hostPath:
 # This is DELIBERATELY separate from env.SINGLE_NODE (which gates the
 # jobs-manager GPU->CPU pending-job fallback and may be true on a FIXED
 # MULTI-NODE cluster). The installer sets singleNode=true for the node-local
-# single-node k3d path (hostPath.enabled=false, local-path CSI, AGENTS=0), where
+# single-node k3d path (hostPath.enabled=false, local-path CSI,
+# TRACEBLOC_AGENTS=0 -- old name AGENTS still works), where
 # hostPath alone would misclassify it as multi-node.
 singleNode: null
 
@@ -454,7 +462,8 @@ resourceMonitor:
   # on such a node measures the wrong disk and reports nothing wrong.
   #
   # NOT THE ONLY PATH MEASURED, since backend#3916. An install that relocated
-  # its datasets (hostPath.datasetPath, the HOST_DATASET_DIR flow) gets that
+  # its datasets (hostPath.datasetPath, the TRACEBLOC_HOST_DATASET_DIR flow --
+  # old name HOST_DATASET_DIR still works) gets that
   # mount measured TOO, and the two are summed after de-duplicating by backing
   # device -- so you no longer have to choose between seeing the dataset volume
   # and seeing mysql/logs/scratch, and pointing this key at the dataset mount by
@@ -2273,7 +2282,8 @@ autoUpgrade:
   # abandoned wedge and rolled back; anything younger is left untouched and the
   # tick is skipped. Keep it comfortably ABOVE the longest upgrade an operator
   # would run by hand (well above `timeout`) and BELOW the ~1h schedule gap, so a
-  # genuine wedge still recovers on the very next tick. Duration string (Ns/Nm/Nh).
+  # genuine wedge still recovers on the very next tick. That tick only rolls back;
+  # the upgrade runs on the tick after it. Duration string (Ns/Nm/Nh).
   pendingWedgeMinAge: "45m"
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
@@ -2290,7 +2300,8 @@ autoUpgrade:
   # Job instead. This is a FLOOR, not the final value: the template renders
   # activeDeadlineSeconds as max(this, 2 x parsed `timeout` + 300s fetch/dry-run
   # headroom) -- 2 x because `--atomic` waits up to `timeout` on the upgrade and
-  # again on its rollback (client-dev#1519) -- so raising `timeout` lifts the
+  # again on its rollback (client-dev#1519); a wedge recovery's rollback runs in
+  # a tick of its own, never beside an upgrade -- so raising `timeout` lifts the
   # deadline too and neither a slow-but-healthy upgrade nor its rollback is
   # killed mid-flight. At the 10m default that is 1500s. A `timeout` of 28m or
   # more makes the Job outlast the hourly schedule, and Forbid skips the tick
@@ -2301,9 +2312,12 @@ autoUpgrade:
   # helm version, so behaviour cannot drift if upstream re-tags.
   #
   # THE SAME HELM THE INSTALLERS RUN. The tag is `scripts/spec/facts.env`
-  # HELM_VERSION without its `v`: the installers put that helm on the host, and
+  # HELM_VERSION without its `v` (the installers' default; an operator
+  # overrides it with TRACEBLOC_HELM_VERSION -- old name HELM_VERSION still
+  # works): the installers put that helm on the host, and
   # this image runs it for the hourly upgrade and the MySQL migration Job
-  # (`MYSQL_MIGRATION_HELM_IMAGE` copies `/usr/bin/helm` out of it). Helm 3's
+  # (`TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE`, rendered beside the old
+  # MYSQL_MIGRATION_HELM_IMAGE, copies `/usr/bin/helm` out of it). Helm 3's
   # security fixes end on 2026-11-11, and this CronJob is how an edge receives
   # security fixes, so it must run a supported helm. helm-version-agreement.sh (a
   # drift guard) holds this tag, and the defaults-table row, to facts.env: bump
@@ -2862,6 +2876,54 @@ serviceDbAccountsByEnv:
 # other characters.
 tbMetaPassword: ""
 tbIngestPassword: ""
+
+# ============================================================
+# Per-run ingest token (backend#2073)
+# ============================================================
+# When on, jobs-manager gives each ingestion Job its own backend token: minted
+# per run through the backend's POST /ingest-token/, scoped to ingestion, valid
+# 24h (client-runtime#868) -- instead of handing every ingestion Job the edge's
+# shared, long-lived backend token. A leaked ingestion pod then leaks a token
+# that can only ingest, for one run, for a day. Rendered into jobs-manager as
+# TRACEBLOC_INGEST_RUN_TOKEN, always, "true" or "false".
+#
+# If the backend answers 404 (no endpoint yet) jobs-manager falls back to the
+# shared token; any other mint failure fails the ingestion submit with a 502.
+#
+# UNSET by default: the effective value comes from ingestRunTokenByEnv below,
+# keyed on the resolved CLIENT_ENV. Set true/false to force one answer on this
+# edge regardless of environment. Mirrors serviceDbAccounts -- and LEFT NULL ON
+# PURPOSE for the same reason: a literal `false` here is an OPERATOR OVERRIDE
+# that wins over the map and makes it dead.
+ingestRunToken:
+
+# -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#2073).
+#
+# The token is BOUND to one ingestor, so the ingestor has to know who it is: it
+# must read TRACEBLOC_INGESTOR_ID and BACKEND_TOKEN_SCHEME (data-ingestors#931).
+# An ingestor built before #931 ignores them, and under a bound token every one
+# of its backend calls fails. So each fleet turns on when ITS ingestor carries
+# #931 and ITS backend serves the endpoint -- not before.
+#
+# dev: TRUE. dev floats on the :dev ingestor channel, which publishes from
+# data-ingestors `develop` and carries #931, and the dev API serves
+# /ingest-token/ (backend#5223).
+#
+# stg: FALSE. The :stg channel publishes from data-ingestors `staging`, which
+# does not carry #931 until the release train promotes it, and backend#5223 must
+# reach backend staging too. Flip this when BOTH are true.
+#
+# prod: FALSE. Prod runs images.ingestor.prodDigest (v0.8.2), which predates
+# #931. Flip this only once prodDigest moves past a release containing #931.
+#
+# An edge upgraded with plain `--reuse-values` from a chart without these keys
+# has neither: the gate resolves off there, the shared-token behaviour it already
+# had, and the render does not fail. Use --reset-then-reuse-values (Helm >= 3.14)
+# to pick up this map.
+ingestRunTokenByEnv:
+  dev: true
+  stg: false
+  prod: false
 
 # ============================================================
 # S3 bootstrap re-parent (backend#1528 D10 close-out — final stage)

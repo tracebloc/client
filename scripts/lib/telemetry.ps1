@@ -175,7 +175,7 @@ function Write-TelemetryDebug {
 #  THE INSTALLER'S SCRIPT VARIABLE WINS, THEN THE ENVIRONMENT.
 #
 #  This is the one place the port was wrong as a CLASS rather than a line. The bash
-#  twin reads `$CLIENT_STATE`, `$HOST_DATA_DIR`, `$TB_VERSION` out of the
+#  twin reads `$TRACEBLOC_CLIENT_STATE`, `$HOST_DATA_DIR`, `$TB_VERSION` out of the
 #  environment because in bash a sourced lib and its caller share one variable
 #  namespace. install-k8s.ps1 does not work that way: it RESOLVES these into script
 #  variables — `$script:ClientState` (set by Wait-ForClientReady) and
@@ -485,7 +485,7 @@ function Get-TelemetryEvent {
   }
   if (-not (Test-InClosedSet -Value $event -Set $script:TbTelemetryEventNames)) { return $null }
 
-  # $script:ClientState is what Wait-ForClientReady sets; CLIENT_STATE is the
+  # $script:ClientState is what Wait-ForClientReady sets; TRACEBLOC_CLIENT_STATE is the
   # bash spelling and is never set on Windows. Still checked against the closed
   # vocabulary afterwards, so a state the installer invents does not reach the record.
   # Phase first, because the state's validity depends on it (below).
@@ -495,7 +495,7 @@ function Get-TelemetryEvent {
 
   # ONLY ONCE THE READINESS GATE HAS RUN. install-k8s.ps1 SEEDS
   # `$script:ClientState = "starting"` at load (:772), long before anything has
-  # diagnosed the client — where the bash twin leaves `CLIENT_STATE=""`
+  # diagnosed the client — where the bash twin leaves `TRACEBLOC_CLIENT_STATE=""`
   # (summary.sh:29) and fills it only at the gate (:59/:61), for exactly this
   # reason.
   #
@@ -515,7 +515,7 @@ function Get-TelemetryEvent {
   # `starting` is honestly `not_ready`: we waited, and it did not become ready.
   $state = ''
   if ($phase -ceq 'connect') {
-    $state = Get-InstallerValue -ScriptVar 'ClientState' -EnvVar 'CLIENT_STATE'
+    $state = Get-InstallerValue -ScriptVar 'ClientState' -EnvVar 'TRACEBLOC_CLIENT_STATE'
     $state = Get-CanonicalMember -Value $state -Set $script:TbTelemetryClientStates
   }
 
@@ -535,8 +535,8 @@ function Get-TelemetryEvent {
   # -cin, though digits have no case: one rule for closed-set membership in this
   # file, so a reviewer scanning for a bare `-in` finds none and does not have to
   # decide which ones were deliberate.
-  if ($env:TB_CLI_ON_FRESH_PATH -cin @('0', '1')) {
-    Add-TelemetryAttr 'tracebloc.install.cli_on_path' $env:TB_CLI_ON_FRESH_PATH 'int'
+  if ($env:TRACEBLOC_CLI_ON_FRESH_PATH -cin @('0', '1')) {
+    Add-TelemetryAttr 'tracebloc.install.cli_on_path' $env:TRACEBLOC_CLI_ON_FRESH_PATH 'int'
   }
 
   foreach ($name in (Get-TelemetryPhaseNames)) {
@@ -559,10 +559,10 @@ function Get-TelemetryEvent {
     # A line number with no file is not a partial answer, it is a confident wrong
     # one — it reads, sorts and groups like information while pointing at line 9
     # of nothing (Bugbot on client#747).
-    # $script:TbErrLoc is what Err and Show-FatalError set; TB_ERR_LOC is the bash
+    # $script:TbErrLoc is what Err and Show-FatalError set; TRACEBLOC_ERR_LOC is the bash
     # spelling, kept as a fallback so the value can be injected in a test or by a
     # future caller.
-    $loc = Get-InstallerValue -ScriptVar 'TbErrLoc' -EnvVar 'TB_ERR_LOC'
+    $loc = Get-InstallerValue -ScriptVar 'TbErrLoc' -EnvVar 'TRACEBLOC_ERR_LOC'
     if (-not [string]::IsNullOrEmpty($loc)) {
       $src = Get-TelemetrySourceBasename -Loc $loc
       if ($src) {

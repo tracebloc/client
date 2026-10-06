@@ -165,7 +165,12 @@ _gpu_stack_signature() {
   return 0
 }
 
-install_nvidia_container_toolkit() {
+# _nvidia_container_toolkit_package -- the package half of the toolkit setup, on both
+# substrates: nvidia-container-toolkit from NVIDIA's repository, unless an nvidia-ctk
+# that answers is already here. It touches no container runtime. k3d's half, Docker's
+# default runtime and the Docker smoke test, is install_nvidia_container_toolkit
+# below; native k3s's half is k3s.sh's _native_k3s_gpu_prepare (slim client 1.1i).
+_nvidia_container_toolkit_package() {
   log "Setting up NVIDIA container toolkit"
 
   if has nvidia-ctk && nvidia-ctk --version &>/dev/null 2>&1; then
@@ -210,6 +215,14 @@ install_nvidia_container_toolkit() {
     fi
     log "NVIDIA Container Toolkit installed."
   fi
+}
+
+# install_nvidia_container_toolkit -- the toolkit on k3d: the package half, then
+# Docker's default runtime, the k3d cluster's restart with Docker, the host containerd
+# and the Docker smoke test. Only k3d runs it (setup-linux.sh dispatch_gpu_setup);
+# native k3s runs the package half alone and never touches Docker.
+install_nvidia_container_toolkit() {
+  _nvidia_container_toolkit_package
 
   log "Setting NVIDIA as the default Docker runtime..."
   # Skip-when-satisfied (#431): restarting Docker takes a live k3d cluster down, so
@@ -283,5 +296,5 @@ install_nvidia_container_toolkit() {
     rm -f "$gpu_marker" 2>/dev/null || true
   fi
 
-  TB_GPU_WIRED=1
+  TRACEBLOC_GPU_WIRED=1
 }

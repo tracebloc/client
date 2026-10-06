@@ -189,7 +189,8 @@ spec:
             {{- if $datasetPath }}
             # The DATASET filesystem, when datasets were relocated off the local
             # tree (backend#3916). The meter measures the client's storage, and
-            # `hostStoragePath` above names one filesystem -- on a HOST_DATASET_DIR
+            # `hostStoragePath` above names one filesystem -- on a
+            # TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works)
             # install the datasets, the one thing that grows without anyone
             # deciding to grow it, are on the disk it is NOT looking at.
             #
@@ -275,6 +276,10 @@ spec:
                  cluster-internal ranges, and the k8s python client ignores
                  ambient proxy env, so in-cluster calls are unaffected. */ -}}
             {{- include "tracebloc.proxyEnv" . | nindent 12 }}
+            {{- /* Why the GPU was left off as unsupported (client-dev#1633): the
+                 monitor puts both on every heartbeat (client-runtime#879).
+                 Renders nothing unless an installer set them. */ -}}
+            {{- include "tracebloc.gpuUnsupportedEnv" . | nindent 12 }}
           resources:
             requests:
               cpu: 50m

@@ -799,11 +799,11 @@ function Complete-Bootstrap {
 }
 
 # =============================================================================
-#  Main. $env:TB_PESTER lets the test suite dot-source this file to load the
+#  Main. $env:TRACEBLOC_PESTER lets the test suite dot-source this file to load the
 #  functions without tripping the platform gate (which exits off-Windows) or
 #  running the bootstrap.
 # =============================================================================
-if (-not $env:TB_PESTER) {
+if (-not $env:TRACEBLOC_PESTER) {
   # ── Platform gate ──
   if ($PSVersionTable.PSEdition -eq "Core" -and -not $IsWindows) {
     Write-Host "  " -NoNewline; Write-Host ([char]0x2716) -ForegroundColor Red -NoNewline

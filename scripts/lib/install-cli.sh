@@ -123,6 +123,16 @@ _cli_version_short() {
   tracebloc version 2>/dev/null | head -1 | awk '{print $2}' || true
 }
 
+# _cli_first_install_next_step — the pointer at the install summary's "What to do
+# next" (`tracebloc data ingest ./data`). A full install prints that summary; the
+# CLI-only `tracebloc upgrade` path (upgrade_cli_only, TRACEBLOC_CLI_UPGRADE_ONLY=1)
+# exits without one, so there the line would name a step that never comes
+# (client-dev#1642). upgrade_cli_only closes with its own upgrade line instead.
+_cli_first_install_next_step() {
+  [[ "${TRACEBLOC_CLI_UPGRADE_ONLY:-0}" == "1" ]] && return 0
+  info "Then the 'tracebloc data ingest ./data' step below will work."
+}
+
 _verify_tracebloc_cli() {
   if _cli_on_fresh_path; then
     # A brand-new terminal resolves tracebloc — the rc PATH edit persisted. But
@@ -140,7 +150,7 @@ _verify_tracebloc_cli() {
     # summary CTA uses this to pick "open a new terminal" (case A) over the
     # PATH-fix guidance it must give when even a new shell can't find it (case B,
     # the outer fall-through below) — Bugbot #371.
-    TB_CLI_ON_FRESH_PATH=1
+    TRACEBLOC_CLI_ON_FRESH_PATH=1
     local ver; ver="$(_cli_version_short)"
     # Prefer the short `tb` alias (the CLI installer symlinks it next to
     # `tracebloc`); fall back to `tracebloc` when that alias wasn't created — its
@@ -187,7 +197,7 @@ _verify_tracebloc_cli() {
       local rc; rc="$(_cli_rc_for_shell || true)"
       hint "This shell won't see it yet — open a new terminal, or load it now:  source ${rc}"
     fi
-    info "Then the 'tracebloc data ingest ./data' step below will work."
+    _cli_first_install_next_step
     return 0
   fi
 
@@ -197,7 +207,7 @@ _verify_tracebloc_cli() {
   # Not usable now AND a new shell won't resolve it either (case B): the summary
   # CTA must point at the PATH fix below, NOT "open a new terminal" (Bugbot #371).
   TB_CLI_USABLE_NOW=0
-  TB_CLI_ON_FRESH_PATH=0
+  TRACEBLOC_CLI_ON_FRESH_PATH=0
   # `|| true` so a hiccup in rc-resolution can't trip the orchestrator's set -e.
   local rc; rc="$(_cli_rc_for_shell || true)"
   local export_line; export_line="$(_cli_path_export_line || true)"
@@ -215,7 +225,7 @@ _verify_tracebloc_cli() {
     hint "  echo '${export_line}' >> ${rc}"
     hint "  source ${rc}"
   fi
-  info "Then the 'tracebloc data ingest ./data' step below will work."
+  _cli_first_install_next_step
   return 0
 }
 
@@ -339,11 +349,14 @@ upgrade_cli_only() {
   # begun here would say Helm never ran. A machine installed before the record
   # existed gets its record on the next full install.
   if declare -F tb_record_path >/dev/null 2>&1 && [[ ! -f "$(tb_record_path)" ]]; then
-    TB_RECORD_ARMED=""
+    TRACEBLOC_RECORD_ARMED=""; TB_RECORD_ARMED=""   # both: the read falls back to the old name
   fi
   # Whatever it writes refreshes the CLI's entry only: CLUSTER_NAME and
   # HOST_DATA_DIR are defaults here, not what the install recorded.
   TB_RECORD_REFRESH_ONLY=1
+  # No full-install summary follows this path, so the CLI step must not point at
+  # one (_cli_first_install_next_step, client-dev#1642).
+  TRACEBLOC_CLI_UPGRADE_ONLY=1
 
   # install_tracebloc_cli owns the ✔/✖ line and is non-fatal by contract; it also
   # prints the vX -> vY update verdict. Guarded like main()'s own call so a stale
@@ -376,6 +389,14 @@ upgrade_cli_only() {
      && _version_lt "$now" "$latest"; then
     warn "Couldn't update the tracebloc CLI to ${latest} — still on ${now}. The update reminder will keep showing until it succeeds."
     exit 1
+  fi
+  # The upgrade's closing line, in place of the first-install next steps this
+  # path never reaches (client-dev#1642). The version is the CLI's own answer;
+  # unreadable, the line still says what did not change.
+  if [[ -n "$now" ]]; then
+    info "Now on v${now}; your environment is unchanged."
+  else
+    info "Your environment is unchanged."
   fi
   exit 0
 }

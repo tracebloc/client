@@ -1032,7 +1032,7 @@ _fit_verdict() {
 #   * what one node will offer: the container runtime's memory and CPU (on
 #     Linux the host's; on macOS/Windows the Docker VM's -- every k3d node
 #     reports the whole of it), minus the node reservation this platform's
-#     kubelet is about to be given (cluster.sh's generated TB_KUBELET_* block),
+#     kubelet is about to be given (cluster.sh's generated TRACEBLOC_KUBELET_* block),
 #     subtracted the way the kubelet subtracts it: capacity - kubeReserved -
 #     systemReserved - evictionHard. An UNMEASURED platform gets no
 #     reservation, here as on the node, and the arithmetic says so;
@@ -1099,8 +1099,8 @@ _precreate_fit_estimate() {
       return 0
     fi
     res_cpu_m="$kc"
-    res_mem_b=$(( (km + ks + TB_KUBELET_EVICTION_MEM_MIB) * mib ))
-    res_how="the ${platform} node reservation (kubeReserved ${km} MiB / ${kc} m, systemReserved ${ks} MiB, eviction ${TB_KUBELET_EVICTION_MEM_MIB} MiB)"
+    res_mem_b=$(( (km + ks + TRACEBLOC_KUBELET_EVICTION_MEM_MIB) * mib ))
+    res_how="the ${platform} node reservation (kubeReserved ${km} MiB / ${kc} m, systemReserved ${ks} MiB, eviction ${TRACEBLOC_KUBELET_EVICTION_MEM_MIB} MiB)"
   else
     res_how="no node reservation (none is measured for platform '${platform}', so the node will report allocatable == capacity)"
   fi
@@ -1131,14 +1131,14 @@ _precreate_fit_estimate() {
 # bounded docker-info readers -- the same ones _pf_recheck_runtime_mem uses a
 # moment earlier -- and refuses with the fit's own message shape.
 #
-# On native k3s (TB_SUBSTRATE=k3s) the same readers answer from the host, which
+# On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) the same readers answer from the host, which
 # is the node (preflight.sh), and the reservation is the `linux_k3s` key's,
 # measured on native k3s (client-dev#1469). This gate is the first step of the
 # create path that knows the key, so a table without that row is said here,
 # once per run (cluster.sh).
 _precreate_fit_gate() {
   local kb="" ncpu=""
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]] && declare -F _kubelet_reservation_warn_unmeasured >/dev/null 2>&1; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] && declare -F _kubelet_reservation_warn_unmeasured >/dev/null 2>&1; then
     _kubelet_reservation_warn_unmeasured
   fi
   if declare -F _pf_runtime_mem_kb >/dev/null 2>&1; then kb="$(_pf_runtime_mem_kb)"; fi
@@ -1590,6 +1590,25 @@ _resolve_chart_ref() {
   fi
 }
 
+# _last_deployed_helm_revision — the highest revision whose status is `deployed`
+# in a `helm history -o json` body ($1), or nothing when there is none
+# (backend#5273). jq-free, the same parse as the auto-upgrade cronjob's
+# last_deployed_revision: split the body on each record's leading
+# `{"revision":`, so a description (helm escapes its quotes) cannot forge one.
+_last_deployed_helm_revision() {
+  printf '%s' "$1" | tr -d '\n' | awk '{
+    n = split($0, recs, /\{[ ]*"revision":[ ]*/)
+    best = ""
+    for (i = 2; i <= n; i++) {
+      r = recs[i]
+      if (match(r, /^[0-9][0-9]*/) == 0) continue
+      rev = substr(r, 1, RLENGTH) + 0
+      if (r ~ /"status":[ ]*"deployed"/ && (best == "" || rev > best)) best = rev
+    }
+    if (best != "") print best
+  }'
+}
+
 # _recover_pending_helm_release — auto-clear a wedged pending-* release before a
 # helm upgrade/install (#554). A helm process killed mid-operation (Ctrl-C, OOM,
 # host reboot, laptop sleep) leaves the release stuck in a transient state; every
@@ -1603,7 +1622,9 @@ _resolve_chart_ref() {
 # Reads the STATUS: line of `helm status` (jq-free on purpose — parsed the same
 # way the auto-upgrade cronjob does, whose alpine/helm image ships without jq):
 #   deployed / failed / superseded / uninstalled / "" → healthy or absent; no-op
-#   pending-upgrade / pending-rollback → roll back to the last deployed revision
+#   pending-upgrade / pending-rollback → roll back to the last deployed revision,
+#                                        named from `helm history` (backend#5273);
+#                                        none in the history → refuse (return 1)
 #   pending-install                    → revision 1 never deployed; there is no
 #                                        good revision to roll back to, so remove
 #                                        the half-installed release (matches the
@@ -1635,9 +1656,9 @@ _recover_pending_helm_release() {
   # bounded upgrade, which surfaces the API failure with its own deadline. The
   # mutating ops below are NOT wrapped in a kill-based bound on purpose: SIGKILLing
   # a helm rollback/uninstall midway would recreate the very pending-* wedge we are
-  # clearing. rollback is a fast metadata write (and only runs once this read has
-  # proven the API responsive); uninstall is bounded gracefully by helm's own
-  # --wait --timeout.
+  # clearing. The history read before a rollback is bounded like this one; the
+  # rollback and the uninstall are bounded gracefully by helm's own --wait
+  # --timeout (and only run once this read has proven the API responsive).
   # Capture the whole `helm status`, then parse it from a here-string — NEVER
   # through an early-exit awk pipeline. Under `set -o pipefail` awk's `exit`
   # SIGPIPEs helm (rc 141) as it writes the rest of the status body, and the
@@ -1650,12 +1671,30 @@ _recover_pending_helm_release() {
   case "$_status" in
     pending-upgrade|pending-rollback)
       warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
-      info "Rolling back '$_rel' to the last working release before continuing…"
-      if ! helm rollback "$_rel" -n "$_ns" >> "${LOG_FILE:-/dev/null}" 2>&1; then
-        warn "Automatic rollback of '$_rel' failed."
+      # Name the target (backend#5273): a revision-less `helm rollback` goes to
+      # current-1, which in a pending-rollback wedge (N deployed, N+1 failed,
+      # N+2 pending-rollback) is the FAILED upgrade, not the last working one.
+      # Read the history and return to the highest `deployed` revision; with
+      # none to return to, refuse rather than roll onto a broken revision.
+      local _history _target
+      _history="$(_bounded 30 helm history "$_rel" -n "$_ns" -o json 2>/dev/null)" || _history=""
+      _target="$(_last_deployed_helm_revision "$_history")"
+      if [[ -z "$_target" ]]; then
+        warn "The history of '$_rel' names no deployed revision to roll back to — refusing an automatic rollback."
+        hint "Inspect it and roll back by hand to a revision you trust:"
+        hint "  helm -n $_ns history $_rel"
+        hint "  helm -n $_ns rollback $_rel <revision> --wait"
         return 1
       fi
-      log "Recovered '$_rel' from $_status via helm rollback."
+      info "Rolling back '$_rel' to its last deployed revision ($_target) before continuing…"
+      # --wait --timeout: helm's own graceful bound, as on the uninstall below —
+      # the release is not healthy until its pods are, and the caller's upgrade
+      # must not start on top of a rollback that is still rolling out.
+      if ! helm rollback "$_rel" "$_target" -n "$_ns" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1; then
+        warn "Automatic rollback of '$_rel' to revision $_target failed."
+        return 1
+      fi
+      log "Recovered '$_rel' from $_status via helm rollback to revision $_target."
       ;;
     pending-install|uninstalling)
       warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
@@ -1686,6 +1725,28 @@ _recover_pending_helm_release() {
       ;;
   esac
   return 0
+}
+
+# _helm_set_string_escape VALUE -- VALUE as one `helm --set-string key=VALUE` value:
+# helm splits --set on an unescaped comma and reads a backslash as an escape, so both
+# are escaped: a backslash becomes two, then a comma becomes backslash-comma.
+# Everything else, apostrophes and = included, is literal there. Pure.
+_helm_set_string_escape() {
+  local v="${1//\\/\\\\}"
+  printf '%s' "${v//,/\\,}"
+}
+
+# _gpu_unsupported_set_args -- the two --set-string pairs that tell the chart why the
+# GPU was left off as unsupported (client-dev#1633, the contract shared with
+# client-runtime#879 and backend#5256): env.GPU_UNSUPPORTED_REASON (one sentence) and
+# env.GPU_UNSUPPORTED_NAME (the card), from detect-gpu.sh's floor gate. ALWAYS both
+# keys, empty when the GPU is supported or absent, so a reconciled release never keeps
+# a stale reason. Into _TB_GPU_UNSUPPORTED_ARGS (an array, bash-3.2 safe).
+_gpu_unsupported_set_args() {
+  _TB_GPU_UNSUPPORTED_ARGS=(
+    --set-string "env.GPU_UNSUPPORTED_REASON=$(_helm_set_string_escape "${TB_GPU_UNSUPPORTED_REASON:-}")"
+    --set-string "env.GPU_UNSUPPORTED_NAME=$(_helm_set_string_escape "${TB_GPU_UNSUPPORTED_NAME:-}")"
+  )
 }
 
 # _gpu_request_value — the GPU resource a spawned training pod should request,
@@ -1797,9 +1858,9 @@ _chassis_from_smbios() {
 # Unix SIGTERM to a Windows .exe, and GNU timeout without it sends TERM and then
 # WAITS -- a wedged Get-CimInstance would hold the install forever. KILL ends the
 # Linux-side interop process, which closes the pipe this substitution reads.
-# TB_WINDOWS_POWERSHELL is a test seam for the fallback path.
+# TRACEBLOC_WINDOWS_POWERSHELL is a test seam for the fallback path.
 _windows_host_identity() {
-  local ps="" out="" fallback="${TB_WINDOWS_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+  local ps="" out="" fallback="${TRACEBLOC_WINDOWS_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
   if command -v powershell.exe >/dev/null 2>&1; then ps="powershell.exe"
   elif [[ -x "$fallback" ]]; then ps="$fallback"
   fi
@@ -1837,8 +1898,8 @@ _chassis_from_windows_identity() {
 
 _detect_device_type() {
   local gpu_val="${1:-}" override="${TRACEBLOC_DEVICE_TYPE:-}" chassis=""
-  # TB_DMI_DIR is a test seam only; real installs read the kernel's DMI table.
-  local dmi="${TB_DMI_DIR:-/sys/class/dmi/id}"
+  # TRACEBLOC_DMI_DIR is a test seam only; real installs read the kernel's DMI table.
+  local dmi="${TRACEBLOC_DMI_DIR:-/sys/class/dmi/id}"
   if [[ -n "$override" ]]; then
     local wanted
     wanted="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
@@ -1988,7 +2049,7 @@ _reconcile_adopted_client() {
   # carries forward a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME
   # and its gpu.devicePlugin block, so an adopted release keeps a STALE GPU decision:
   # a vendor-changed edge trains on the wrong resource, and an NVIDIA edge dropped to
-  # CPU (reuse guard / CDI setup set TB_GPU_WIRED=0) keeps requesting a GPU and
+  # CPU (reuse guard / CDI setup set TRACEBLOC_GPU_WIRED=0) keeps requesting a GPU and
   # strands jobs Pending while the summary says CPU. FORCE the GPU keys to THIS run's
   # decision — the SAME values the fresh write chooses (_gpu_request_value +
   # runtime_class) — mirroring the Windows twin's adopt-path --set-string. --set-string
@@ -1997,7 +2058,7 @@ _reconcile_adopted_client() {
   # (client-runtime#80: an explicit "" means "no GPU here").
   local _gpu_val _rtc=""
   _gpu_val="$(_gpu_request_value)"
-  if _gpu_wired; then _rtc="nvidia"; fi
+  if _gpu_wired; then _rtc="$(_gpu_runtime_class)"; fi
   _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val"
           --set-string "env.GPU_LIMITS=$_gpu_val"
           --set-string "env.RUNTIME_CLASS_NAME=$_rtc")
@@ -2006,13 +2067,19 @@ _reconcile_adopted_client() {
   # the chart skips an empty env value, so jobs-manager sees no DEVICE_TYPE and
   # omits the key rather than reporting "".
   _args+=(--set-string "env.DEVICE_TYPE=$(_detect_device_type "$_gpu_val")")
+  # client-dev#1633: why the GPU was left off as unsupported, THIS run's answer, so a
+  # reused release cannot keep a stale reason (empty clears it).
+  _gpu_unsupported_set_args
+  _args+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns four words
   # Reconcile the device-plugin block too, matching the fresh write, so a stale one
-  # can't linger: nvidia only when wired (needs the baked RuntimeClass), amd on
+  # can't linger: nvidia only when wired (it needs the NVIDIA RuntimeClass: on k3d
+  # the one baked into the k3s-cuda node image, on native k3s the one k3s creates
+  # for the runtime step c's gate found; common.sh _gpu_runtime_class), amd on
   # detection, else disabled.
   if _gpu_wired; then
     _args+=(--set "gpu.devicePlugin.enabled=true"
             --set "gpu.devicePlugin.vendor=nvidia"
-            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=nvidia")
+            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=$(_gpu_runtime_class)")
   elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
     _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
   else
@@ -2060,25 +2127,25 @@ _reconcile_adopted_client() {
   return 0
 }
 
-# TB_TTY is where interactive credential prompts READ from. Under `curl … | bash`
+# TRACEBLOC_TTY is where interactive credential prompts READ from. Under `curl … | bash`
 # stdin is the piped script, not the terminal, so an unredirected `read` hits EOF
 # and (under set -e) aborts the installer with an opaque failure — read the
 # controlling terminal directly instead. Overridable so tests can feed canned
-# input on stdin (TB_TTY=/dev/stdin).
-: "${TB_TTY:=/dev/tty}"
+# input on stdin (TRACEBLOC_TTY=/dev/stdin).
+: "${TRACEBLOC_TTY:=/dev/tty}"
 
-# _tty_available: true when there's a terminal we can prompt on (TB_TTY readable).
+# _tty_available: true when there's a terminal we can prompt on (TRACEBLOC_TTY readable).
 # Mirrors provision.sh's _prompt_tty; defined locally because provision.sh is
 # sourced conditionally and AFTER this file, so its helper may not exist when
 # install_client_helm runs.
-_tty_available() { [[ -r "$TB_TTY" ]]; }
+_tty_available() { [[ -r "$TRACEBLOC_TTY" ]]; }
 
 # _no_interactive_creds_die: abort with actionable env-var guidance when we can't
 # collect credentials interactively. Covers BOTH no-terminal-at-all AND a
 # readable-but-dead-input tty (non-PTY ssh, an IDE terminal, a drained/queued
-# tty): _tty_available only checks `-r`, so a `read <"$TB_TTY"` can still hit EOF
+# tty): _tty_available only checks `-r`, so a `read <"$TRACEBLOC_TTY"` can still hit EOF
 # and would otherwise abort opaquely under set -e (Bugbot / #326 review) — the
-# same failure class the TB_TTY change set out to remove. Mirrors provision.sh,
+# same failure class the TRACEBLOC_TTY change set out to remove. Mirrors provision.sh,
 # whose name read breaks on rc!=0 and falls through to the same guidance.
 _no_interactive_creds_die() {
   error "No credentials supplied and no terminal to prompt on.
@@ -2093,7 +2160,7 @@ _no_interactive_creds_die() {
 # imageID (image present) out of the total the pods declare — never a fabricated
 # aggregate percentage. Best-effort, BOUNDED, and NON-FATAL: it must never block
 # or fail the install — the authoritative readiness gate is wait_for_client_ready
-# (step f). Skipped entirely when TB_NO_SERVICE_PROGRESS is set (the bats suite,
+# (step f). Skipped entirely when TRACEBLOC_SKIP_SERVICE_PROGRESS is set (the bats suite,
 # where kubectl is mocked and a poll loop would hang) or kubectl is unavailable.
 # Detect a PERMANENT image-pull failure among the namespace's pods, so the progress
 # copy can tell the truth instead of "still downloading" (#425). On a visible pull
@@ -2145,7 +2212,7 @@ _progress_end_message() {
 
 _download_services_progress() {
   local ns="$1"
-  if [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]]; then return 0; fi
+  if [[ -n "${TRACEBLOC_SKIP_SERVICE_PROGRESS:-}" ]]; then return 0; fi
   has kubectl || return 0
   [[ -n "$ns" ]] || return 0
 
@@ -2169,7 +2236,7 @@ _download_services_progress() {
 
   local deadline pulled=0 max_pulled=0
   deadline=$(( $(date +%s) + ${TB_PULL_TIMEOUT:-300} ))
-  tput civis 2>/dev/null || true
+  _tb_progress_start "Downloading ${total} services…"
   while :; do
     pulled="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
       -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' 2>/dev/null \
@@ -2177,13 +2244,12 @@ _download_services_progress() {
     [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
     if (( pulled > total )); then pulled=$total; fi
     if (( pulled > max_pulled )); then max_pulled=$pulled; fi
-    count_bar "$pulled" "$total" "services"
+    if _tb_animate; then count_bar "$pulled" "$total" "services"; fi
     if (( pulled >= total )); then break; fi
     if (( $(date +%s) >= deadline )); then break; fi
     sleep 2
   done
-  printf "\r\033[K"
-  tput cnorm 2>/dev/null || true
+  _tb_progress_end
 
   # Tell the truth on timeout: a permanent pull failure (x509/blocked registry/auth)
   # must NOT be sold as "downloading in the background" (#425). Classify, then print
@@ -2553,7 +2619,7 @@ _assert_engine_runs_on_this_arch() {
 # the chart's render-time guard produce its actionable error, so a genuinely
 # missing metrics-server is still caught (issue's preferred option (a)).
 _wait_for_metrics_apiservice() {
-  # Skipped entirely under the bats suite (TB_NO_SERVICE_PROGRESS, set in setup())
+  # Skipped entirely under the bats suite (TRACEBLOC_SKIP_SERVICE_PROGRESS, set in setup())
   # or when kubectl is unavailable — same guard the neighbouring network-y step
   # _download_services_progress uses. Without this the poll loop below would
   # `sleep 3` up to the full ${TB_METRICS_WAIT_S:-120}s in every mocked
@@ -2561,7 +2627,7 @@ _wait_for_metrics_apiservice() {
   # `kubectl get` fail instantly, so the loop still burns its whole deadline),
   # blowing the job's 10-min deadline. Real installs never set the flag and
   # always have kubectl, so the wait is unchanged for them.
-  [[ -n "${TB_NO_SERVICE_PROGRESS:-}" ]] && return 0
+  [[ -n "${TRACEBLOC_SKIP_SERVICE_PROGRESS:-}" ]] && return 0
   has kubectl || return 0
   local _timeout_s="${TB_METRICS_WAIT_S:-}"
   case "$_timeout_s" in ''|*[!0-9]*) _timeout_s="$METRICS_WAIT_TIMEOUT" ;; *) _timeout_s=$((10#$_timeout_s)) ;; esac
@@ -2687,7 +2753,7 @@ install_client_helm() {
   if [[ "$_noninteractive_creds" == 0 && -f "$values_file" && "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 ]] && _tty_available; then
     hint "Previous configuration found."
     while true; do
-      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TB_TTY" || _no_interactive_creds_die
+      read -r -p "  Use previous settings as defaults? [Y/n]: " use_existing <"$TRACEBLOC_TTY" || _no_interactive_creds_die
       use_existing="$(echo "${use_existing}" | tr '[:upper:]' '[:lower:]')"
       [[ "$use_existing" == "y" || "$use_existing" == "yes" || "$use_existing" == "n" || "$use_existing" == "no" || -z "$use_existing" ]] && break
       warn "Please enter y or n."
@@ -2759,20 +2825,20 @@ install_client_helm() {
   local _cred_attempt=0 _cred_max=5 _cred_status
   while true; do
     if [[ -n "$default_client_id" ]]; then
-      read -r -p "  Client ID [${default_client_id}]: " TB_CLIENT_ID_INPUT <"$TB_TTY" || _no_interactive_creds_die
-      TB_CLIENT_ID="${TB_CLIENT_ID_INPUT:-$default_client_id}"
+      read -r -p "  Client ID [${default_client_id}]: " TRACEBLOC_CLIENT_ID_INPUT <"$TRACEBLOC_TTY" || _no_interactive_creds_die
+      TB_CLIENT_ID="${TRACEBLOC_CLIENT_ID_INPUT:-$default_client_id}"
     else
-      read -r -p "  Client ID: " TB_CLIENT_ID <"$TB_TTY" || _no_interactive_creds_die
+      read -r -p "  Client ID: " TB_CLIENT_ID <"$TRACEBLOC_TTY" || _no_interactive_creds_die
     fi
     TB_CLIENT_ID=$(_sanitize_credential "$TB_CLIENT_ID")
     if [[ -z "$TB_CLIENT_ID" ]]; then warn "Client ID cannot be empty."; continue; fi
 
     if [[ -n "$default_client_password" ]]; then
-      read -r -s -p "  Client password [press Enter to keep existing]: " TB_CLIENT_PASSWORD_INPUT <"$TB_TTY" || _no_interactive_creds_die
+      read -r -s -p "  Client password [press Enter to keep existing]: " TRACEBLOC_CLIENT_PASSWORD_INPUT <"$TRACEBLOC_TTY" || _no_interactive_creds_die
       echo ""
-      TB_CLIENT_PASSWORD="${TB_CLIENT_PASSWORD_INPUT:-$default_client_password}"
+      TB_CLIENT_PASSWORD="${TRACEBLOC_CLIENT_PASSWORD_INPUT:-$default_client_password}"
     else
-      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD <"$TB_TTY" || _no_interactive_creds_die
+      read -r -s -p "  Client password: " TB_CLIENT_PASSWORD <"$TRACEBLOC_TTY" || _no_interactive_creds_die
       echo ""
     fi
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
@@ -2875,15 +2941,16 @@ install_client_helm() {
   # that value is gated on the GPU being WIRED into the cluster (inside
   # _gpu_request_value): requesting nvidia.com/gpu on a node that advertises 0
   # strands every job Pending (the pre-#835 Linux bug), so gate on what PROVISIONS
-  # the GPU, not bare detection. NVIDIA training pods also run under the `nvidia`
-  # RuntimeClass (baked into the GPU node image) so the node's containerd invokes
-  # the NVIDIA runtime; AMD needs no RuntimeClass. A request this fixed single-node
+  # the GPU, not bare detection. NVIDIA training pods also run under the NVIDIA
+  # RuntimeClass (_gpu_runtime_class: on k3d baked into the GPU node image, on
+  # native k3s created by k3s itself) so the node's containerd invokes the NVIDIA
+  # runtime; AMD needs no RuntimeClass. A request this fixed single-node
   # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
   # a Pending GPU pod to CPU rather than strand it (client-runtime#92). Mirrors the
   # Windows twin.
   local gpu_val runtime_class="" device_type=""
   gpu_val="$(_gpu_request_value)"
-  if _gpu_wired; then runtime_class="nvidia"; fi
+  if _gpu_wired; then runtime_class="$(_gpu_runtime_class)"; fi
   device_type="$(_detect_device_type "$gpu_val")"
   log "Device type for the dashboard: ${device_type:-unknown (not reported)}"
   if [[ -n "$gpu_val" ]]; then
@@ -2903,16 +2970,17 @@ install_client_helm() {
   # (disabled) stands. The matching GPU *request* (gpu_val) is wired per-vendor
   # above — nvidia.com/gpu or amd.com/gpu (backend#2033).
   #
-  # NVIDIA (client#835): the plugin must run under the `nvidia` RuntimeClass so it
+  # NVIDIA (client#835): the plugin must run under the NVIDIA RuntimeClass so it
   # can init NVML on native Linux — the plugin pod otherwise runs under the default
   # runtime, sees no GPU, and registers 0. So it is enabled only when the GPU is
   # actually wired (a stock CPU node has no `nvidia` RuntimeClass, which would leave
   # the pod unschedulable). AMD is unchanged: its plugin needs no k3d flag or
   # RuntimeClass, so it stays gated on bare detection.
-  local gpu_block=""
+  local gpu_block="" rtc
   if _gpu_wired; then
-    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: nvidia\n    nvidia:\n      runtimeClassName: nvidia\n')"
-    log "Helm-managed GPU device plugin enabled (vendor=nvidia, runtimeClassName=nvidia)"
+    rtc="$(_gpu_runtime_class)"
+    gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: nvidia\n    nvidia:\n      runtimeClassName: %s\n' "$rtc")"
+    log "Helm-managed GPU device plugin enabled (vendor=nvidia, runtimeClassName=${rtc})"
   elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
     gpu_block="$(printf 'gpu:\n  devicePlugin:\n    enabled: true\n    vendor: amd\n')"
     log "Helm-managed GPU device plugin enabled (vendor=amd)"
@@ -3204,12 +3272,17 @@ EOF
   _adopt_orphaned_gpu_device_plugin
 
   local _helm_rc=0
+  # client-dev#1633: the unsupported-GPU reason and card ride --set-string, not the
+  # values heredoc: the sentence is free text (apostrophes, commas), and
+  # _helm_set_string_escape is the one quoting rule both install paths share.
+  _gpu_unsupported_set_args
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
     --cleanup-on-fail \
-    --values "$values_file" || _helm_rc=$?
+    --values "$values_file" \
+    "${_TB_GPU_UNSUPPORTED_ARGS[@]}" || _helm_rc=$?  # set-u-safe: _gpu_unsupported_set_args always assigns four words
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
     # leave the release pending-*. The next run auto-recovers

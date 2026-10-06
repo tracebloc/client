@@ -9,8 +9,8 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH
 # In a bats run only, the suite's sudo fence goes back in front of the directories
 # just prepended. Behind them, a case that dropped its own sudo stub would run the
 # host's sudo (scripts/tests/setup_suite.bash). An install never sets either.
-if [[ -n "${TB_HERMETIC_SUDO_BIN:-}" && -n "${BATS_SUITE_TMPDIR:-}" ]]; then
-  export PATH="${TB_HERMETIC_SUDO_BIN}:${PATH}"
+if [[ -n "${TRACEBLOC_HERMETIC_SUDO_BIN:-}" && -n "${BATS_SUITE_TMPDIR:-}" ]]; then
+  export PATH="${TRACEBLOC_HERMETIC_SUDO_BIN}:${PATH}"
 fi
 umask 077
 
@@ -33,7 +33,7 @@ tb_tuning_aliases=(
   TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
   TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN TB_GPU_VERIFY_TIMEOUT
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
-  TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT
+  TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT TB_K3S_CRI_TIMEOUT
   TB_KUBECONFIG_MERGE_TIMEOUT TB_KUBECTL_PROBE_TIMEOUT TB_METRICS_WAIT_S
   TB_NODE_CHECK_EVERY_S TB_PLAIN TB_PROBE_TIMEOUT TB_PROBE_VERIFY
   TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
@@ -228,12 +228,12 @@ _verify_sha256() {
 # size read (GNU `stat -c%s` vs BSD `stat -f%z` differ). FAIL-CLOSED: a missing or
 # unreadable file reads as 0 bytes and fails.
 _assert_download_size() {
-  # TB_MIN_DOWNLOAD_BYTES overrides the floor (set to 0 by the bats fetch tests,
+  # TRACEBLOC_MIN_DOWNLOAD_BYTES overrides the floor (set to 0 by the bats fetch tests,
   # whose curl mocks write tiny fixture files); unset in production, so the real
   # per-tool floor passed as $2 applies. $4 (optional) is the caller's mktemp -d
   # tree to remove before erroring, so a truncated transfer cleans up its partial
   # payload exactly like the checksum-mismatch branches do (Bugbot).
-  local file="$1" min="${TB_MIN_DOWNLOAD_BYTES:-$2}" label="$3" cleanup="${4:-}" size=0
+  local file="$1" min="${TRACEBLOC_MIN_DOWNLOAD_BYTES:-$2}" label="$3" cleanup="${4:-}" size=0
   [ -f "$file" ] && size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$size" ] || size=0
   if [ "$size" -lt "$min" ]; then
@@ -414,7 +414,7 @@ _rootless_active() {
 # removed in kubectl 1.28+); helm with bare `version` (—short may go the same way).
 #
 # Removal is OPT-IN via a leading `--rm <path>`: pass it with the path where the
-# installer PLACES the binary (TB_TOOLS_DIR/<tool>). On failure we remove that path
+# installer PLACES the binary (TRACEBLOC_TOOLS_DIR/<tool>). On failure we remove that path
 # ONLY when the binary that actually ran is that exact file (same inode, `-ef`).
 # So: a broken binary WE installed there (fresh OR left by a prior run) is cleared,
 # letting a re-run self-heal (Bugbot: otherwise `has` stays true → stuck loop);
@@ -943,8 +943,43 @@ _resource_monitor_daemonset() {
   _resource_monitor_from_rows "$rows" "$ns"
 }
 
+# ── Progress-line gate — animate only where a redraw reads (client-dev#1642) ──
+# A spinner redraws its line with \r, \033[K and tput. Where colour is off
+# (NO_COLOR / not a TTY / TERM=dumb / TB_PLAIN=1, decided once above as
+# _tb_mode=none) those bytes land in a log as frame after frame of garbage, so
+# every in-place progress line goes through these four helpers: animating, they
+# draw and clear as before; plain, _tb_progress_start prints the message ONCE as a
+# static line (the Go CLI's `  · msg` form) and the rest print nothing.
+_tb_animate() { [[ "${_tb_mode:-none}" != "none" ]]; }
+# _tb_progress_start MSG — hide the cursor (animating) or print MSG once (plain).
+_tb_progress_start() {
+  if _tb_animate; then
+    tput civis 2>/dev/null || true
+  else
+    printf '  · %s\n' "$1"
+  fi
+}
+# _tb_progress_frame GLYPH MSG — draw one frame in place; nothing when plain.
+_tb_progress_frame() {
+  _tb_animate || return 0
+  printf "\r  ${CYAN}%s${RESET} %s" "$1" "$2"
+}
+# _tb_progress_clear — wipe the line in place (more output follows); nothing when plain.
+_tb_progress_clear() {
+  _tb_animate || return 0
+  printf "\r\033[K"
+}
+# _tb_progress_end — wipe the line and restore the cursor; nothing when plain.
+_tb_progress_end() {
+  _tb_animate || return 0
+  printf "\r\033[K"
+  tput cnorm 2>/dev/null || true
+}
+
 # ── Spinner — hides noisy command output behind an animated status line ──────
 #  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
+#  Animates only through the progress-line gate above: with colour off it prints
+#  "  · Installing foo…" once and no frame, \r or escape (client-dev#1642).
 #  The background process's stdout/stderr should already be redirected to a file
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
 #  With the optional third argument, a still-running PID is killed once the
@@ -958,7 +993,7 @@ spin() {
   local _spin_t0=$SECONDS                 # the deadline's wall clock: ticks alone stretch on a slow host (client-dev#1514)
   local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
-  tput civis 2>/dev/null || true          # hide cursor
+  _tb_progress_start "$msg"               # hide cursor, or the one static line
   while kill -0 "$pid" 2>/dev/null; do
     if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 || SECONDS - _spin_t0 > deadline_s )); then
       # Children FIRST: the pid is often a wrapper subshell (k3d.sh's
@@ -983,11 +1018,10 @@ spin() {
       done
       kill -9 "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
-      printf "\r\033[K"
-      tput cnorm 2>/dev/null || true
+      _tb_progress_end
       return 124
     fi
-    printf "\r  ${CYAN}%s${RESET} %s" "${frames[i]}" "$msg"
+    _tb_progress_frame "${frames[i]}" "$msg"
     i=$(( (i + 1) % ${#frames[@]} ))
     ticks=$(( ticks + 1 ))
     sleep 0.12
@@ -995,8 +1029,7 @@ spin() {
 
   wait "$pid"
   local rc=$?
-  printf "\r\033[K"                       # clear the spinner line
-  tput cnorm 2>/dev/null || true          # restore cursor
+  _tb_progress_end                        # clear the spinner line, restore cursor
   return $rc
 }
 
@@ -1145,7 +1178,7 @@ preflight_sudo() {
   # Desktop) and Linux (Docker Engine + system packages).
   hint "tracebloc needs your password once to ${1:-set up Docker and a few tools}."
   echo ""
-  _real_sudo -v || error "Could not obtain administrator privileges (sudo authentication failed). Re-run as a user allowed to sudo, or as root."
+  _real_sudo -v || error "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
   ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
   SUDO_KEEPALIVE_PID=$!
 }
@@ -1191,10 +1224,12 @@ download_with_progress() {
   local curl_pid=$!
 
   local bar_width=30
-  tput civis 2>/dev/null || true
+  # Plain (client-dev#1642): the label line above is the whole progress report —
+  # no bar redraws, no \r, no escapes in the log.
+  if _tb_animate; then tput civis 2>/dev/null || true; fi
 
   while kill -0 "$curl_pid" 2>/dev/null; do
-    if [[ -f "$dest" ]] && (( total_bytes > 0 )); then
+    if _tb_animate && [[ -f "$dest" ]] && (( total_bytes > 0 )); then
       local cur_bytes
       cur_bytes=$(wc -c < "$dest" 2>/dev/null || echo 0)
       cur_bytes=${cur_bytes// /}
@@ -1217,20 +1252,21 @@ download_with_progress() {
   wait "$curl_pid"
   local rc=$?
 
-  if [[ $rc -eq 0 ]] && [[ -n "$total_mb" ]]; then
+  if _tb_animate && [[ $rc -eq 0 ]] && [[ -n "$total_mb" ]]; then
     local bar=""
     for (( j=0; j<bar_width; j++ )); do bar+="█"; done
     printf "\r  ${CYAN}%s${RESET} 100%%  %s / %s MB\n" "$bar" "$total_mb" "$total_mb"
   fi
-  printf "\r\033[K"
-  tput cnorm 2>/dev/null || true
+  _tb_progress_end
   return $rc
 }
 
 # ── Count bar — honest N-of-M progress for things pulled in discrete units ────
 #  Usage:  count_bar <current> <total> [noun]      (renders ONE frame)
 #  Draws a bar plus an "N of M <noun>" counter and NO newline, so a caller loop
-#  can overwrite it in place (with \r) and clear it at the end via printf "\r\033[K".
+#  can overwrite it in place (with \r) and clear it at the end via _tb_progress_end.
+#  It always renders; a caller draws it only when _tb_animate says a redraw reads
+#  (client-dev#1642), so plain its _tb_progress_start line and verdict are the report.
 #  Use this — never a fabricated aggregate percentage — for multi-image pulls
 #  (e.g. the client's container images), where the only honest signal is how many
 #  of a known count have completed. The %-by-bytes bar (download_with_progress) is
@@ -1295,7 +1331,7 @@ setup_log_file() {
   if [[ -n "${TB_SUBSTRATE_TOKEN_PRINTED:-}" ]]; then
     tb_substrate_token >>"$LOG_FILE" 2>/dev/null || true
   fi
-  log "Substrate: ${TB_SUBSTRATE}, from ${TB_SUBSTRATE_SOURCE:-the default}."
+  log "Substrate: ${TRACEBLOC_SUBSTRATE_RESOLVED}, from ${TB_SUBSTRATE_SOURCE:-the default}."
   if [[ -n "${TB_SUBSTRATE_NOTE:-}" ]]; then log "$TB_SUBSTRATE_NOTE"; fi
 }
 
@@ -1366,7 +1402,7 @@ TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 # Pinned default; an empty value falls back to this pin (`:-` treats empty and
 # unset the same — there is no opt-out to "latest" for k3s).
 if [[ -n "${TRACEBLOC_K8S_VERSION:-}" ]]; then K8S_VERSION="$TRACEBLOC_K8S_VERSION"; fi
-K8S_VERSION="${K8S_VERSION:-v1.36.3-k3s1}"
+K8S_VERSION="${K8S_VERSION:-v1.36.5-k3s1}"
 # CUDA base tag for the GPU-capable k3d node image (client#616/#835). The custom
 # docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
 # base, and its published tag encodes both (…/k3s-cuda:<K8S_VERSION>-cuda-<this>),
@@ -1386,7 +1422,7 @@ TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
 # facts.env's K3S_CUDA_DIGEST, and --check-published proves it still equals the live
 # digest of the derived tag.
 # shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
-TB_K3S_CUDA_DIGEST="sha256:fbb1a8cfebcdf32320b493fc614161cd1115603067135c27080ac380e4742e9d"
+TB_K3S_CUDA_DIGEST="sha256:06248888a302f578ee74bd094ee5effb79a860553ba2ea79fdb4b48489330f9d"
 # Native k3s (RFC-0175 D4): the digests k3s.sh checks its downloads against, and
 # the K8S_VERSION they were resolved for (facts.env K3S_BIN_SHA256_* /
 # K3S_INSTALL_SH_SHA256 and K8S_VERSION, stamped by check-facts.sh --write). Stamped
@@ -1397,19 +1433,22 @@ TB_K3S_CUDA_DIGEST="sha256:fbb1a8cfebcdf32320b493fc614161cd1115603067135c27080ac
 # (k3s.sh::_native_k3s_check_version) where k3d keeps honouring it. No TRACEBLOC_*
 # override on any of the four, for the reason TB_K3S_CUDA_DIGEST gives.
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
-TB_K3S_PIN_K8S_VERSION="v1.36.3-k3s1"
+TB_K3S_PIN_K8S_VERSION="v1.36.5-k3s1"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
-TB_K3S_BIN_SHA256_AMD64="2f98a9f8fe5782479ee2d54e70a1b10a7f6fd4cae8d38ed3098452dc6eed76b5"
+TB_K3S_BIN_SHA256_AMD64="d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
-TB_K3S_BIN_SHA256_ARM64="c9a209103f480f163b7c6a56f00862b4481927b284dc29a3716bb70d886691a8"
+TB_K3S_BIN_SHA256_ARM64="135e34cb9e8a1cfae3cb55577789e93501efe7edc080a8b2630458a85b07721e"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
 TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
-# The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR,
-# stamped by check-facts.sh --write). Below the compute-capability floor detect-gpu.sh
+# The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR /
+# NVIDIA_DRIVER_HARD_FLOOR_LINUX, stamped by check-facts.sh --write). Below the
+# compute-capability floor or the hard driver floor (the CUDA 12 minimum) detect-gpu.sh
 # leaves the GPU unwired and the install runs CPU-only; below the driver floor it
 # warns and wires the GPU anyway. Policy, so no TRACEBLOC_* override.
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh and gpu-nvidia.sh
 TB_NVIDIA_DRIVER_FLOOR="550"
+# shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
+TB_NVIDIA_DRIVER_HARD_FLOOR="525.60.13"
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
 TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
@@ -1558,43 +1597,70 @@ amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
 GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
 NVIDIA_DRIVER_OK=false
 # detect-gpu.sh's floor verdict for a present NVIDIA driver: ok | below-driver |
-# below-compute | unreadable. Empty = not judged (no NVIDIA driver on the host yet).
+# below-hard-floor | below-compute | unreadable. Empty = not judged (no NVIDIA driver
+# on the host yet).
 TB_GPU_FLOOR_VERDICT=""
+# Why the GPU was left off as UNSUPPORTED, for the platform (client-dev#1633): one
+# human sentence and the card's name, set by detect-gpu.sh's floor gate on
+# below-compute and below-hard-floor ONLY, and passed to the chart as
+# env.GPU_UNSUPPORTED_REASON / env.GPU_UNSUPPORTED_NAME (install-client-helm.sh).
+# Empty otherwise: an unreadable host or a failed GPU step is not "unsupported".
+# Assigned, never defaulted from the environment.
+TB_GPU_UNSUPPORTED_REASON=""
+TB_GPU_UNSUPPORTED_NAME=""
 # 1 once an NVIDIA GPU is wired into this cluster, else 0. Assigned, never
 # defaulted from the environment: only the installer's own GPU steps may set it.
-TB_GPU_WIRED=0
+TRACEBLOC_GPU_WIRED=0
 PM_INSTALL=""
 PM_UPDATE=""
 
 # True when an NVIDIA GPU has been WIRED INTO THIS CLUSTER — not merely detected.
-# TB_GPU_WIRED becomes 1 only once the container runtime is ready to expose the
+# TRACEBLOC_GPU_WIRED becomes 1 only once the container runtime is ready to expose the
 # GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d node is then
 # created from the GPU-capable image with --gpus=all (k3d.sh, which derives
 # that flag from this gate), and the reuse guard puts it back to 0 when an
-# existing cluster turns out to be a CPU-only node. So this is the one honest
+# existing cluster turns out to be a CPU-only node. On native k3s it becomes 1 only
+# in step c, once k3s's own containerd has registered the NVIDIA runtime (k3s.sh
+# _native_k3s_gpu_wire, slim client 1.1i). So this is the one honest
 # gate for "should we request a GPU for jobs" — the same role the Windows twin's
 # `$K3D_GPU_FLAG -ne ""` plays. Requesting nvidia.com/gpu on a node that
 # advertises 0 GPUs strands every job Pending (client#835), so the GPU chart
 # values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
-# Wired means exactly GPU_VENDOR=nvidia and TB_GPU_WIRED=1; any other value of
+# Wired means exactly GPU_VENDOR=nvidia and TRACEBLOC_GPU_WIRED=1; any other value of
 # either is "not wired". set -u safe: a unit test that sources only a single lib
-# may not have TB_GPU_WIRED, so it defaults here.
+# may not have TRACEBLOC_GPU_WIRED, so it defaults here.
 _gpu_wired() {
-  [[ "${GPU_VENDOR:-}" == "nvidia" && "${TB_GPU_WIRED:-0}" == "1" ]]
+  [[ "${GPU_VENDOR:-}" == "nvidia" && "${TRACEBLOC_GPU_WIRED:-0}" == "1" ]]
 }
 
 # True when detect_gpu's floor verdict skips the GPU: below-compute (the card is too
-# old for the images) or unreadable (cannot tell). The GPU steps then install no
-# toolkit and never set TB_GPU_WIRED, so the install runs CPU-only; detect_gpu has
+# old for the images), below-hard-floor (the driver is older than the CUDA 12 minimum,
+# so the images cannot initialise CUDA, client-dev#1632) or unreadable (cannot tell).
+# The GPU steps then install no
+# toolkit and never set TRACEBLOC_GPU_WIRED, so the install runs CPU-only; detect_gpu has
 # already printed why and the remedy. below-driver does NOT skip: detect_gpu warned,
 # and the GPU is wired (Lukas, 2026-09-30, client-dev#1355: the floor is advice until
 # spike S-G measures it). Not judged (no driver yet, the driver-install path) is not
 # a skip either.
 _gpu_floor_skips() {
   case "${TB_GPU_FLOOR_VERDICT:-}" in
-    below-compute|unreadable) return 0 ;;
+    below-compute|below-hard-floor|unreadable) return 0 ;;
   esac
   return 1
+}
+
+# The RuntimeClass a wired NVIDIA GPU runs under: the device plugin's
+# runtimeClassName, the client's RUNTIME_CLASS_NAME and the summary's GPU test all
+# read it here (install-client-helm.sh, summary.sh). On k3d it is `nvidia`, the class
+# baked into the k3s-cuda node image. On native k3s it is the runtime k3s's own
+# containerd registered and step c's gate asked for (k3s.sh TB_K3S_GPU_RUNTIME; k3s
+# creates the RuntimeClass of the same name), so the two can never disagree.
+_gpu_runtime_class() {
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    printf '%s' "${TB_K3S_GPU_RUNTIME:-}"
+  else
+    printf 'nvidia'
+  fi
 }
 
 # ── Failure diagnostics (client#681) ─────────────────────────────────────────
@@ -1609,7 +1675,7 @@ _gpu_floor_skips() {
 #  functions and subshells — without it an ERR trap fires only at top level, and
 #  every failure inside install_macos/install_linux (i.e. nearly all of them)
 #  would still be invisible.
-TB_ERR_LOC=""    # "file:line" of the LAST failing command — see _record_err
+TRACEBLOC_ERR_LOC=""    # "file:line" of the LAST failing command — see _record_err
 _TB_IN_RECORD_ERR=""   # re-entrancy guard; the recorder inherits its own trap
 TB_ERR_CMD=""    # what failed. TWO producers, and they differ — read on before
                  # writing a message that ends up here.
@@ -1673,13 +1739,13 @@ _record_err() {
   # command and the trap fires once per failing command, with no per-frame
   # re-firing as the error unwinds — verified on bash 3.2 (macOS) and 5.x.
   TB_ERR_CODE="$_code"
-  TB_ERR_LOC="${1:-?}"
+  TRACEBLOC_ERR_LOC="${1:-?}"
   TB_ERR_CMD="${2:-}"
 
   # The full trail, log only. The benign entries are not noise: they are how you
   # tell a probe that always fails from the command that actually ended the run,
   # and reading them in order is what identified this bug.
-  log "err: ${TB_ERR_LOC} exit=${TB_ERR_CODE} cmd=${TB_ERR_CMD}"
+  log "err: ${TRACEBLOC_ERR_LOC} exit=${TB_ERR_CODE} cmd=${TB_ERR_CMD}"
 
   _TB_IN_RECORD_ERR=""
   return 0
@@ -1761,7 +1827,7 @@ install_cleanup() {
   # the failure at all. Logged even on the exit-2 / interrupted paths, so a
   # re-run-required stop that was actually caused by an error is still traceable.
   if [[ -n "${TB_ERR_CODE:-}" ]]; then
-    log "FAILED at ${TB_ERR_LOC} — exit ${TB_ERR_CODE} — command: ${TB_ERR_CMD}"
+    log "FAILED at ${TRACEBLOC_ERR_LOC} — exit ${TB_ERR_CODE} — command: ${TB_ERR_CMD}"
   fi
   if [[ $exit_code -eq 2 ]]; then
     echo ""
@@ -1778,18 +1844,18 @@ install_cleanup() {
     [[ -n "${LOG_FILE:-}" ]] && hint "Log: $LOG_FILE"
     hint "Nothing is broken — this installer is safe to re-run."
   elif [[ $exit_code -ne 0 ]]; then
-    # If print_summary already reported a specific outcome (CLIENT_STATE set),
+    # If print_summary already reported a specific outcome (TRACEBLOC_CLIENT_STATE set),
     # don't tack on a second, generic "did not complete" message. Nor after a
     # refusal (TB_EXIT_REFUSED): its own line says what to change, and "just try
     # again" would send the user straight back into the same refusal.
-    if [[ -z "${CLIENT_STATE:-}" && -z "${TB_EXIT_REFUSED:-}" ]]; then
+    if [[ -z "${TRACEBLOC_CLIENT_STATE:-}" && -z "${TB_EXIT_REFUSED:-}" ]]; then
       echo ""
       warn "Installation did not complete."
       # Name the failing site on screen too. The command text stays in the log
       # only: it is unexpanded, but it is still installer internals, and the
       # PowerShell side deliberately shows a reason without a stack trace (#577).
       if [[ -n "${TB_ERR_CODE:-}" ]]; then
-        hint "Stopped at ${TB_ERR_LOC} (exit ${TB_ERR_CODE})."
+        hint "Stopped at ${TRACEBLOC_ERR_LOC} (exit ${TB_ERR_CODE})."
       fi
       [[ -n "${LOG_FILE:-}" ]] && hint "Check the install log: $LOG_FILE"
       hint "This installer is safe to re-run — just try again."
@@ -1801,7 +1867,7 @@ install_cleanup() {
   # the EXIT trap, so it runs on every path — success, the re-run-required stop,
   # Ctrl-C, and the fatal one — which is what §6.5 of the telemetry contract
   # requires and what makes a failure RATE computable rather than just a count.
-  # Everything it reads (CLIENT_STATE, TB_ERR_*, the phase clock) is final by
+  # Everything it reads (TRACEBLOC_CLIENT_STATE, TB_ERR_*, the phase clock) is final by
   # this point. Guarded for an older bootstrap that did not fetch telemetry.sh.
   if declare -F telemetry_emit_outcome >/dev/null 2>&1; then
     telemetry_emit_outcome "$exit_code" || true
@@ -1841,8 +1907,8 @@ TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"
 # substrate its install recorded, and refuses a value outside TB_SUBSTRATES, by
 # name, AFTER the substrate line has printed. A library caller that never calls
 # the resolver keeps this source-time value.
-TB_SUBSTRATE="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
-# Where TB_SUBSTRATE came from, and what the resolver could not consult, for the
+TRACEBLOC_SUBSTRATE_RESOLVED="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
+# Where TRACEBLOC_SUBSTRATE_RESOLVED came from, and what the resolver could not consult, for the
 # install log; and a finding it refuses by name after the substrate line.
 TB_SUBSTRATE_SOURCE="${TRACEBLOC_SUBSTRATE:+TRACEBLOC_SUBSTRATE}"
 TB_SUBSTRATE_NOTE=""
@@ -1854,7 +1920,7 @@ TB_EXIT_REFUSED=""
 tb_substrate_supported() {
   local s
   for s in $TB_SUBSTRATES; do
-    [[ "$s" == "${TB_SUBSTRATE:-}" ]] && return 0
+    [[ "$s" == "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" ]] && return 0
   done
   return 1
 }
@@ -1865,7 +1931,7 @@ tb_substrate_supported() {
 # be able to bend the grammar.
 tb_substrate_token() {
   if tb_substrate_supported; then
-    printf '%s%s\n' "$TB_SUBSTRATE_TOKEN_PREFIX" "$TB_SUBSTRATE"
+    printf '%s%s\n' "$TB_SUBSTRATE_TOKEN_PREFIX" "$TRACEBLOC_SUBSTRATE_RESOLVED"
   else
     printf '%s%s\n' "$TB_SUBSTRATE_TOKEN_PREFIX" "$TB_SUBSTRATE_TOKEN_UNSUPPORTED"
   fi
@@ -1882,9 +1948,9 @@ refuse_unsupported_substrate() {
   tb_substrate_supported && return 0
   TB_EXIT_REFUSED=1
   if [[ "${TB_SUBSTRATE_SOURCE:-TRACEBLOC_SUBSTRATE}" == "TRACEBLOC_SUBSTRATE" ]]; then
-    error "TRACEBLOC_SUBSTRATE='${TB_SUBSTRATE}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use ${TB_SUBSTRATE_DEFAULT}."
+    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use ${TB_SUBSTRATE_DEFAULT}."
   fi
-  error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TB_SUBSTRATE}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
+  error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TRACEBLOC_SUBSTRATE_RESOLVED}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
 }
 
 # The finding tb_substrate_resolve kept, refused by name: main() calls this right
@@ -1910,15 +1976,15 @@ refuse_unresolved_substrate() {
 # absent: the finding goes in TB_SUBSTRATE_REFUSAL, which main() refuses by name
 # after the substrate line. So does TRACEBLOC_SUBSTRATE=k3d where a tracebloc
 # k3s is set up: k3d is never set up beside native k3s (the reverse is the k3s
-# path's live-k3d refusal). TB_SUBSTRATE keeps the requested value either way,
+# path's live-k3d refusal). TRACEBLOC_SUBSTRATE_RESOLVED keeps the requested value either way,
 # so the line prints it. Prints nothing and writes nothing.
 tb_substrate_resolve() {
   local rec sub rc=0 dst
   TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""
   if [[ -n "${TRACEBLOC_SUBSTRATE:-}" ]]; then
-    TB_SUBSTRATE="$TRACEBLOC_SUBSTRATE"; TB_SUBSTRATE_SOURCE="TRACEBLOC_SUBSTRATE"
+    TRACEBLOC_SUBSTRATE_RESOLVED="$TRACEBLOC_SUBSTRATE"; TB_SUBSTRATE_SOURCE="TRACEBLOC_SUBSTRATE"
     rc=1
-    if [[ "$TB_SUBSTRATE" == "k3d" ]]; then rc=0; _tb_substrate_k3s_live || rc=$?; fi
+    if [[ "$TRACEBLOC_SUBSTRATE_RESOLVED" == "k3d" ]]; then rc=0; _tb_substrate_k3s_live || rc=$?; fi
     case "$rc" in
       1) ;;
       0) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=k3d, but tracebloc's native k3s is set up on this machine, and k3d is never set up beside native k3s. Unset TRACEBLOC_SUBSTRATE to keep native k3s. Moving this machine to k3d is a reinstall (a new client, datasets ingested again), which this installer cannot do yet." ;;
@@ -1926,11 +1992,11 @@ tb_substrate_resolve() {
     esac
     return 0
   fi
-  TB_SUBSTRATE="$TB_SUBSTRATE_DEFAULT"; TB_SUBSTRATE_SOURCE="the default"
+  TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_DEFAULT"; TB_SUBSTRATE_SOURCE="the default"
   rec="$(tb_record_path)"
   if [[ -e "$rec" ]]; then
     if sub="$(_tb_record_substrate_of "$rec")"; then
-      TB_SUBSTRATE="$sub"; TB_SUBSTRATE_SOURCE="the install record ${rec}"
+      TRACEBLOC_SUBSTRATE_RESOLVED="$sub"; TB_SUBSTRATE_SOURCE="the install record ${rec}"
     else
       TB_SUBSTRATE_REFUSAL="The install record ${rec} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
     fi
@@ -1940,7 +2006,7 @@ tb_substrate_resolve() {
   if dst="$(_tb_record_root_copy_path)" && _tb_record_root_access; then
     if _tb_record_root_run test -e "$dst"; then
       if sub="$(_tb_record_root_run cat "$dst" 2>/dev/null | _tb_record_substrate_in)"; then
-        TB_SUBSTRATE="$sub"; TB_SUBSTRATE_SOURCE="the root copy ${dst}"
+        TRACEBLOC_SUBSTRATE_RESOLVED="$sub"; TB_SUBSTRATE_SOURCE="the root copy ${dst}"
       else
         TB_SUBSTRATE_REFUSAL="The install record's root copy ${dst} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
       fi
@@ -1952,7 +2018,7 @@ tb_substrate_resolve() {
   rc=0; _tb_substrate_k3s_live || rc=$?
   case "$rc" in
     1) ;;
-    0) TB_SUBSTRATE="k3s"; TB_SUBSTRATE_SOURCE="the tracebloc native k3s set up on this machine (systemctl: k3s)" ;;
+    0) TRACEBLOC_SUBSTRATE_RESOLVED="k3s"; TB_SUBSTRATE_SOURCE="the tracebloc native k3s set up on this machine (systemctl: k3s)" ;;
     *) TB_SUBSTRATE_REFUSAL="tracebloc's native k3s files are on this machine, but systemctl did not answer, so this run cannot tell whether that k3s is set up to run. Check 'systemctl status k3s', or set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run." ;;
   esac
   return 0
@@ -2004,15 +2070,89 @@ _tb_record_substrate_in() {
 #  Written only once main() has armed it, after the refusals, when the run is
 #  committed to installing. Assigned here, never read from the environment: a
 #  library function a unit test or a harness calls directly writes nothing.
+#  TRACEBLOC_RECORD_ARMED and TRACEBLOC_KUBE_CONTEXT are the canonical names
+#  (backend#3846). cli-dev's install-record drift check and its delete e2e source
+#  this file at a pinned ref and ASSIGN the two after sourcing, under their old
+#  TB_RECORD_ARMED / TB_KUBE_CONTEXT spellings, so the reads below are
+#  canonical-first with the old name as the fallback (blank counts as unset;
+#  remove_by 2026-12-31). The old armed flag is reset here too: with a fallback
+#  read, an inherited TB_RECORD_ARMED=1 would otherwise arm the writer.
+TRACEBLOC_RECORD_ARMED=""
 TB_RECORD_ARMED=""
+# _tb_record_armed -- true once main() (or a harness) has armed the writer.
+_tb_record_armed() { [[ "${TRACEBLOC_RECORD_ARMED:-${TB_RECORD_ARMED:-}}" == "1" ]]; }
+# _tb_kube_context -- the kube context this run pointed kubectl at, if any.
+_tb_kube_context() { printf '%s' "${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-}}"; }
 TB_RECORD_REFRESH_ONLY=""
-# The user copy: x-tracebloc-record.user-path, its leading ~ as $HOME.
-tb_record_path() { printf '%s%s' "${HOME:-}" "${TB_RECORD_USER_PATH#\~}"; }
+# Prepared mode (prepare-host on native k3s, 1.1g): the record belongs to the user
+# the administrator named, never to the administrator who runs it. TB_RECORD_FOR_USER
+# is that user's login name (the record's `user`, and the root copy's <user>),
+# TB_RECORD_FOR_HOME their home from passwd, where their own copy goes, and
+# TB_RECORD_HOME the private directory this process builds the record in. Set only by
+# tb_record_for_user, and assigned here like TRACEBLOC_RECORD_ARMED, so the environment can
+# never point a record at another user.
+TB_RECORD_FOR_USER=""
+TB_RECORD_FOR_HOME=""
+TB_RECORD_HOME=""
+# The user copy: x-tracebloc-record.user-path, its leading ~ as $HOME (in prepared
+# mode, as the directory the record is built in).
+tb_record_path() { printf '%s%s' "${TB_RECORD_HOME:-${HOME:-}}" "${TB_RECORD_USER_PATH#\~}"; }
+
+# The login name the record is written for: the named user in prepared mode, else
+# the user this process runs as.
+_tb_record_user() {
+  if [[ -n "${TB_RECORD_FOR_USER:-}" ]]; then printf '%s' "$TB_RECORD_FOR_USER"; return 0; fi
+  id -un 2>/dev/null || printf '%s' "${USER:-}"
+}
+
+# tb_record_for_user USER HOME -- prepared mode: from here this process's record is
+# USER's. It is built in a private scratch directory, seeded with USER's own record
+# when they have one, so an artefact an earlier install recorded is kept. Every write
+# then copies it to USER's own record path under HOME, written as USER
+# (_tb_record_user_copy), and to the root copy keyed on USER. Fails when the scratch
+# directory cannot be made.
+tb_record_for_user() {
+  local u="$1" h="$2" scratch=""
+  [[ -n "$u" && "$h" == /* ]] || return 1
+  tb_scratch_dir scratch tracebloc-record || return 1
+  mkdir -p "${scratch}/.tracebloc" || return 1
+  TB_RECORD_FOR_USER="$u"; TB_RECORD_FOR_HOME="$h"; TB_RECORD_HOME="$scratch"
+  _tb_record_as_user "$u" cat "${h}${TB_RECORD_USER_PATH#\~}" > "$(tb_record_path)" 2>/dev/null \
+    || rm -f "$(tb_record_path)"
+  return 0
+}
+
+# _tb_record_as_user USER CMD... -- CMD as USER, never prompting: through sudo when
+# this process can sudo without a password (preflight_sudo primed it), else through
+# runuser when it is root. The sudo() shadow cannot do this: as root it runs its
+# arguments as a command.
+_tb_record_as_user() {
+  local u="$1"; shift
+  if _have_sudo_bin && _real_sudo -n true 2>/dev/null; then _real_sudo -n -u "$u" -- "$@"; return; fi
+  if [[ "$(id -u 2>/dev/null)" == "0" ]] && type -P runuser >/dev/null 2>&1; then runuser -u "$u" -- "$@"; return; fi
+  return 1
+}
+
+# _tb_record_user_copy REC -- prepared mode: REC to the named user's own record path
+# under their home, written AS that user under umask 077, so the directory comes out
+# 0700 and the file 0600, both theirs, and root never writes into a directory the
+# user controls. Logged, never fatal, like every record write: prepare-host reads
+# the copy back at its end.
+_tb_record_user_copy() {
+  [[ -n "${TB_RECORD_FOR_USER:-}" && -n "${TB_RECORD_FOR_HOME:-}" ]] || return 0
+  local dst="${TB_RECORD_FOR_HOME}${TB_RECORD_USER_PATH#\~}"
+  # shellcheck disable=SC2016  # $1 is the inner sh's, on purpose
+  if _tb_record_as_user "$TB_RECORD_FOR_USER" sh -c 'umask 077 && mkdir -p "${1%/*}" && cat > "$1.tmp" && mv -f "$1.tmp" "$1"' sh "$dst" < "$1" 2>/dev/null; then
+    return 0
+  fi
+  log "Install record: couldn't write ${TB_RECORD_FOR_USER}'s copy ${dst}."
+  return 0
+}
 
 # The root copy for login name $1: x-tracebloc-record.root-path with <user> filled
-# in. TB_RECORD_ROOT_DIR, a test seam, replaces the directory above <user>.
+# in. TRACEBLOC_RECORD_ROOT_DIR, a test seam, replaces the directory above <user>.
 _tb_record_root_path() {
-  printf '%s/%s%s' "${TB_RECORD_ROOT_DIR:-${TB_RECORD_ROOT_PATH%%/<user>*}}" "$1" "${TB_RECORD_ROOT_PATH#*<user>}"
+  printf '%s/%s%s' "${TRACEBLOC_RECORD_ROOT_DIR:-${TB_RECORD_ROOT_PATH%%/<user>*}}" "$1" "${TB_RECORD_ROOT_PATH#*<user>}"
 }
 
 # $1 as a JSON string literal, or null when empty.
@@ -2046,7 +2186,9 @@ _tb_record_field() {
 }
 
 tb_record_write() {
-  [[ "${TB_RECORD_ARMED:-}" == "1" && -n "${HOME:-}" ]] || return 0
+  # The record's home is tb_record_path's: in prepared mode the scratch directory,
+  # so a prepare-host run with HOME unset (systemd, cloud-init, env -i) still records.
+  _tb_record_armed && [[ -n "${TB_RECORD_HOME:-${HOME:-}}" ]] || return 0
   local rec dir now prior="" arts="" root_copy
   rec="$(tb_record_path)"; dir="${rec%/*}"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -2069,10 +2211,10 @@ tb_record_write() {
       *) arts="${arts:+${arts}$'\n'}${key}\"created_at\": \"${now}\"}" ;;
     esac
   fi
-  # A CLI-only refresh keeps the recorded substrate too: TB_SUBSTRATE there is
+  # A CLI-only refresh keeps the recorded substrate too: TRACEBLOC_SUBSTRATE_RESOLVED there is
   # the default this process resolved, not the runtime the install set up.
   local substrate p_sub
-  substrate="$(_tb_json "$TB_SUBSTRATE")"
+  substrate="$(_tb_json "$TRACEBLOC_SUBSTRATE_RESOLVED")"
   if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]]; then
     p_sub="$(_tb_record_prior substrate "$prior")"
     if [[ -n "$p_sub" ]]; then substrate="$p_sub"; fi
@@ -2089,6 +2231,7 @@ tb_record_write() {
     _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy")" || return 0
     _tb_record_root_copy "$rec"
   fi
+  _tb_record_user_copy "$rec"
   return 0
 }
 
@@ -2099,9 +2242,9 @@ _tb_record_render() {
   out="{
   \"schema_version\": ${TB_INSTALL_RECORD_VERSION},
   \"substrate\": $1,
-  \"user\": $(_tb_record_field user "$(id -un 2>/dev/null || printf '%s' "${USER:-}")" "$2"),
+  \"user\": $(_tb_record_field user "$(_tb_record_user)" "$2"),
   \"cluster_name\": $(_tb_record_field cluster_name "${CLUSTER_NAME:-}" "$2"),
-  \"kube_context\": $(_tb_record_field kube_context "${TB_KUBE_CONTEXT:-}" "$2"),
+  \"kube_context\": $(_tb_record_field kube_context "$(_tb_kube_context)" "$2"),
   \"data_dir\": $(_tb_record_field data_dir "${HOST_DATA_DIR:-}" "$2"),
   \"namespace\": $(_tb_record_field namespace "${TB_NAMESPACE:-}" "$2"),
   \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$2"),
@@ -2141,8 +2284,8 @@ _tb_record_put() {
 _tb_record_root_copy() {
   [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
   [[ "${INSTALL_TIER:-}" != "0" ]] || return 0
-  local user dst
-  user="$(id -un 2>/dev/null)" || return 0
+  local user="${TB_RECORD_FOR_USER:-}" dst
+  [[ -n "$user" ]] || user="$(id -un 2>/dev/null)" || return 0
   [[ -n "$user" ]] || return 0
   dst="$(_tb_record_root_path "$user")"
   # A CLI-only refresh runs before the tier is known, so the Tier 0 guard above
@@ -2264,7 +2407,7 @@ the TRACEBLOC_ prefix -- TB_STORAGE_MODE for TRACEBLOC_STORAGE_MODE -- still wor
   TRACEBLOC_NAMESPACE  Secure-environment name  (default: tracebloc; legacy: TB_NAMESPACE)
   TRACEBLOC_SERVERS        Control-plane nodes  (default: 1)
   TRACEBLOC_AGENTS         Worker nodes         (default: 0)
-  TRACEBLOC_K8S_VERSION    k3s image tag                   (default: v1.36.3-k3s1)
+  TRACEBLOC_K8S_VERSION    k3s image tag                   (default: v1.36.5-k3s1)
   TRACEBLOC_K3D_VERSION    k3d release tag  (default: v5.9.0; "latest" resolves at install time)
   TRACEBLOC_HELM_VERSION   Helm release tag (default: v4.2.3; "latest" resolves at install time)
   TRACEBLOC_STORAGE_MODE   node-local (default) or hostpath

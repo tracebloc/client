@@ -314,6 +314,20 @@ leaves the elevation standing while appearing to have reverted.
 > means a value set as a one-off does not stay a one-off. Note also that the CronJob
 > **skips entirely** when the installed chart already matches the latest published
 > version, so an hourly schedule is not an hourly `helm upgrade`.
+>
+> **When an unattended upgrade fails**, the Job's log says which way. An upgrade whose
+> workloads do not become ready within `autoUpgrade.timeout` logs one
+> `ERROR: UPGRADE TIMEOUT <from> -> <to>` line naming the timeout, whether Helm's
+> automatic rollback worked, and the Deployments, StatefulSets, DaemonSets and Jobs
+> that were not ready; the Job exits 1 and the next tick tries again. A timeout is
+> rarely fixed by raising the timeout: a workload that never becomes ready (a pod that
+> cannot reach or log in to its database, an image that cannot be pulled) fails every
+> attempt the same way, so look at those pods first
+> (`kubectl -n <namespace> get pods`, then `kubectl describe` / `kubectl logs` on the
+> one that is not ready). If Helm's rollback **also** fails, the log adds
+> `ERROR: ROLLBACK FAILED` with the status the release was left in and the Job exits
+> **3**: the release is then `failed` rather than back on its old version, so check
+> `helm history <release> -n <namespace>` before anything else.
 
 ---
 

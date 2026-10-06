@@ -2,6 +2,38 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.198 — `ingestRunToken`: each ingestion run gets its own backend token
+
+**What changed.** The jobs-manager can give every ingestion Job its own backend
+token — scoped to ingestion, valid for one run and 24 hours — instead of the
+edge's shared backend token. The chart now sets `TRACEBLOC_INGEST_RUN_TOKEN` on
+the jobs-manager, always, to `"true"` or `"false"`, resolved per environment by
+`ingestRunTokenByEnv` and overridable per edge by `ingestRunToken`:
+
+| Environment | Default | Why |
+|---|---|---|
+| `dev` | `true` | Its ingestor channel already reads the per-run token's identity. |
+| `stg` | `false` | Turns on once the staging ingestor and backend both support it. |
+| `prod` | `false` | Turns on once the pinned prod ingestor moves to a release that supports it. |
+
+**What you have to do: nothing.** On staging and production nothing changes. On
+dev, ingestion runs use per-run tokens; if the backend does not offer them yet,
+the jobs-manager falls back to the shared token.
+
+**To force one answer on an edge**, set `ingestRunToken: true` or `false`. Turn it
+on only where the edge's ingestor supports the per-run token: an older ingestor
+fails its backend calls under one. Leave it unset (`null`) to follow
+`ingestRunTokenByEnv`.
+
+**`env.TRACEBLOC_INGEST_RUN_TOKEN` is no longer passed through** to the
+jobs-manager: `ingestRunToken` is the one setting. If you set the env var
+directly, move it to `ingestRunToken`.
+
+**Upgrading with plain `--reuse-values`** keeps the old release's values, which
+have neither key, so the setting resolves to `false` on every environment — the
+behaviour that edge already had — and the upgrade renders normally. Use
+`--reset-then-reuse-values` (Helm ≥ 3.14) to pick up the per-environment default.
+
 ## Upgrading to 1.9.189 — the egress gateway runs a tracebloc build of squid, and prod edges run the control plane this chart version names
 
 This release carries two changes, each with its own instructions below.

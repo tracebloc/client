@@ -17,16 +17,16 @@ _log_cluster_status() {
 # ── Readiness gate (#716) ─────────────────────────────────────────────────
 # helm install only *applies* manifests; it does not wait for pods. After it
 # returns we wait for the client's workloads to actually become Ready and set
-# CLIENT_STATE so the summary reports the truth instead of an unconditional
+# TRACEBLOC_CLIENT_STATE so the summary reports the truth instead of an unconditional
 # "installed successfully":
 #   connected | starting | bad_creds | image_pull | image_pull_ca | crash
 # (image_pull_ca is the TLS-inspecting-network case, #424. It was added to
 # _diagnose_not_ready and not to this list; backend#1907's vocabulary-agreement
 # guard derives the set from the function and caught the omission.)
 # Empty until wait_for_client_ready runs — so install_cleanup can distinguish an
-# early failure (before the readiness gate, CLIENT_STATE still empty) from a
+# early failure (before the readiness gate, TRACEBLOC_CLIENT_STATE still empty) from a
 # reported outcome, and still print the "check the log / safe to re-run" hint.
-CLIENT_STATE=""
+TRACEBLOC_CLIENT_STATE=""
 # #562: default raised 300 -> 600 so a slow/proxied laptop pulling several GB of
 # images isn't reported "not connected" while still healthily starting. Kept in
 # sync with scripts/spec/facts.env (check-facts.sh); override via
@@ -67,9 +67,9 @@ wait_for_client_ready() {
 
   _log_cluster_status
   if [[ "$all_ready" == true ]]; then
-    CLIENT_STATE="connected"
+    TRACEBLOC_CLIENT_STATE="connected"
   else
-    CLIENT_STATE="$(_diagnose_not_ready "$ns" "$jm")"
+    TRACEBLOC_CLIENT_STATE="$(_diagnose_not_ready "$ns" "$jm")"
   fi
   return 0
 }
@@ -117,7 +117,7 @@ _diagnose_not_ready() {
   printf 'starting'
 }
 
-# Reports the outcome based on CLIENT_STATE (set by wait_for_client_ready).
+# Reports the outcome based on TRACEBLOC_CLIENT_STATE (set by wait_for_client_ready).
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
 # One-line note in the success summary so the user knows how the client comes
@@ -126,9 +126,9 @@ _diagnose_not_ready() {
 # start Docker first; macOS/Windows → Docker Desktop must be launched.
 _reboot_note() {
   # Single dim footer line — the LAST line of the summary.
-  # Native k3s (TB_SUBSTRATE=k3s) has no Docker: k3s's install enables the k3s
+  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) has no Docker: k3s's install enables the k3s
   # service on boot, and the node is this host, so the cluster returns with it.
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     echo -e "  ${DIM}After a reboot, tracebloc restarts automatically with the k3s service (check it with: systemctl status k3s).${RESET}"
   elif [[ "$OS" != "Linux" ]]; then
     if [[ "${TB_MACOS_AUTOSTART:-0}" == "1" ]]; then
@@ -176,7 +176,7 @@ _reboot_note() {
 # namespace), never the merged file. _native_k3s_merge_kubeconfig sets the hint only
 # when the user had no KUBECONFIG; k3d never needs it.
 _summary_kubeconfig_hint() {
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" && -n "${TB_K3S_KUBECONFIG_HINT:-}" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && -n "${TB_K3S_KUBECONFIG_HINT:-}" ]]; then
     local kc="$TB_K3S_KUBECONFIG_HINT"
     # shellcheck disable=SC2088  # the ~ is for the user to read, as in logdisp below
     if [[ -n "${HOME:-}" && "$kc" == "$HOME"/* ]]; then kc="~${kc#"$HOME"}"; fi
@@ -200,7 +200,7 @@ _kube_context_note() {
   [[ -n "${TB_PREV_KUBE_CONTEXT:-}" ]] || return 0
   local kc="" kcflag=""
   if kc="$(_summary_kubeconfig_hint)"; then kcflag="--kubeconfig ${kc} "; fi
-  echo -e "  kubectl now points at ${TB_KUBE_CONTEXT:-k3d-${CLUSTER_NAME:-tracebloc}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
+  echo -e "  kubectl now points at ${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-k3d-${CLUSTER_NAME:-tracebloc}}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
   echo -e "    ${TB_CMD}kubectl ${kcflag}config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
   echo ""
 }
@@ -225,6 +225,9 @@ print_summary() {
   local mode="CPU"
   if _gpu_wired; then
     mode="NVIDIA GPU"
+    # Native k3s: the runtime is wired, but the node advertised no GPU after the
+    # install (k3s.sh _native_k3s_gpu_verify, which warned with the remedy).
+    [[ -z "${TB_K3S_GPU_UNCONFIRMED:-}" ]] || mode="NVIDIA GPU, not confirmed (see the GPU warning above)"
   elif [[ "$GPU_VENDOR" == "amd" ]]; then
     mode="AMD GPU"
   fi
@@ -236,7 +239,7 @@ print_summary() {
   if [[ -n "${HOME:-}" && "$logdisp" == "$HOME"* ]]; then logdisp="~${logdisp#"$HOME"}"; fi
 
   echo ""
-  case "$CLIENT_STATE" in
+  case "$TRACEBLOC_CLIENT_STATE" in
     connected)
       echo -e "  ${TB_GO}✔${RESET} ${BOLD}Connected to tracebloc${RESET}"
       echo ""
@@ -255,7 +258,7 @@ print_summary() {
       echo ""
       if _cli_runnable_now; then
         echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
-      elif [[ "${TB_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
+      elif [[ "${TRACEBLOC_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
         # Case B: install-cli.sh RAN and set the flag to 0 — it printed the EXACT
         # PATH fix above and a new terminal won't help. Point at that fix, not a
         # useless "open a new terminal" (Bugbot #371). The explicit "0" test matters:
@@ -275,7 +278,7 @@ print_summary() {
       # Data location depends on the storage model: hostpath binds /tracebloc on
       # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
       # k3s local-path, so there is no host /tracebloc to point the user at.
-      if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s: the volumes are on this host, in local-path's storage path.
         # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
         # install) with nothing on stdout: say where the data is only when it told us.
@@ -313,7 +316,7 @@ print_summary() {
       echo ""
       echo -e "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
       echo -e "  pulls fail certificate validation (x509). Point the installer at your"
-      if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s reads the CA from /etc/rancher/k3s/registries.yaml each time
         # the k3s service starts, so a re-run that writes it is the whole remedy:
         # nothing is released and nothing is deleted.
@@ -335,8 +338,8 @@ print_summary() {
       ;;
     image_pull|crash)
       local reason="a component didn't start"
-      [[ "$CLIENT_STATE" == "image_pull" ]] && reason="an image couldn't be pulled"
-      [[ "$CLIENT_STATE" == "crash" ]] && reason="a container is restarting (crash loop)"
+      [[ "$TRACEBLOC_CLIENT_STATE" == "image_pull" ]] && reason="an image couldn't be pulled"
+      [[ "$TRACEBLOC_CLIENT_STATE" == "crash" ]] && reason="a container is restarting (crash loop)"
       echo -e "  ${TB_ERR}✖ Setup didn't finish — ${reason}.${RESET}" >&2
       echo ""
       echo -e "  Inspect:  ${TB_CMD}kubectl get pods -n ${ns}${RESET}"
@@ -356,7 +359,7 @@ print_summary() {
   echo ""
   # Every other outcome sends the user to kubectl too; the connected one says it
   # above its footer, so the reboot note stays its last line.
-  if [[ "$CLIENT_STATE" != "connected" ]]; then _kube_context_note; fi
+  if [[ "$TRACEBLOC_CLIENT_STATE" != "connected" ]]; then _kube_context_note; fi
 
   _log_advanced_info
 }
@@ -372,8 +375,10 @@ _gpu_test_cmd() {
   local vendor="$1" image smi spec
   case "$vendor" in
     nvidia)
+      # The class is `nvidia` on k3d, and the runtime step c's gate found on native
+      # k3s (common.sh _gpu_runtime_class).
       image="nvidia/cuda:12.3.1-base-ubuntu22.04"; smi="nvidia-smi"
-      spec='"runtimeClassName":"nvidia",' ;;
+      spec="\"runtimeClassName\":\"$(_gpu_runtime_class)\"," ;;
     amd)
       image="rocm/rocm-terminal"; smi="rocm-smi"; spec='' ;;
     *) return 1 ;;
@@ -386,7 +391,7 @@ _log_advanced_info() {
   local kdata
   log ""
   log "=== Advanced Info (for debugging) ==="
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     kdata="$(_native_k3s_storage_path)" || kdata=""
     log "Volumes: ${kdata:-path not readable without root} (k3s local-path, on this host)"
   else
@@ -397,7 +402,7 @@ _log_advanced_info() {
   log "  kubectl get nodes -o wide"
   log "  kubectl get pods -A"
   log "  kubectl get pods -n ${TB_NAMESPACE:-default}"
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     log "  sudo systemctl stop k3s"
     log "  sudo systemctl start k3s"
     log "  systemctl status k3s"

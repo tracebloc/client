@@ -47,11 +47,17 @@ set -euo pipefail
 # ── Minimal colours for THIS script's own output ─────────────────────────────
 # common.sh (which owns the shared colour palette + helpers) is one of the files
 # this bootstrap is about to fetch and verify, so it isn't sourced yet. Define a
-# small local palette, disabled when stdout isn't a terminal or NO_COLOR is set.
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+# small local palette, disabled under the same rule as common.sh's: stdout not a
+# terminal, NO_COLOR, TERM=dumb or TB_PLAIN=1 (TRACEBLOC_PLAIN=1). _tb_anim says
+# whether this script's own spinner frames may redraw in place; plain, each step
+# prints one static line instead (client-dev#1642).
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" \
+      && "${TRACEBLOC_PLAIN:-${TB_PLAIN:-}}" != "1" ]]; then
   _B=$'\033[1m'; _C=$'\033[0;36m'; _D=$'\033[2m'; _G=$'\033[0;32m'; _R=$'\033[0m'
+  _tb_anim=1
 else
   _B=""; _C=""; _D=""; _G=""; _R=""
+  _tb_anim=0
 fi
 
 # ── A current folder that no longer exists ───────────────────────────────────
@@ -151,19 +157,20 @@ _tb_check_healthy() {
   # diagnostic that reads stdin would consume/block on the script bytes.
   tracebloc doctor </dev/null >/dev/null 2>&1 &
   local pid=$!
-  tput civis 2>/dev/null || true
+  if [[ "$_tb_anim" == 1 ]]; then tput civis 2>/dev/null || true
+  else printf '  · Checking your tracebloc setup…\n'; fi
   while kill -0 "$pid" 2>/dev/null; do
     f="${frames[i]}"; i=$(( (i + 1) % ${#frames[@]} ))
-    printf '\r  %s%s%s Checking your tracebloc setup…' "$_C" "$f" "$_R"
+    if [[ "$_tb_anim" == 1 ]]; then printf '\r  %s%s%s Checking your tracebloc setup…' "$_C" "$f" "$_R"; fi
     if [[ "$tick" -ge "$maxticks" ]]; then
       kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
-      printf '\r\033[K'; tput cnorm 2>/dev/null || true
+      if [[ "$_tb_anim" == 1 ]]; then printf '\r\033[K'; tput cnorm 2>/dev/null || true; fi
       return 124
     fi
     sleep 0.2; tick=$(( tick + 1 ))
   done
   wait "$pid"; rc=$?
-  printf '\r\033[K'; tput cnorm 2>/dev/null || true
+  if [[ "$_tb_anim" == 1 ]]; then printf '\r\033[K'; tput cnorm 2>/dev/null || true; fi
   return "$rc"
 }
 
@@ -457,12 +464,13 @@ _fetch_refusal_cause() {
 # One transient status frame while the (quiet on success) fetch loop runs; a
 # retry/failure inside download_with_retry prints its own [WARN]/[ERROR] and, on
 # hard failure, exits — so we only reach the success line when every file landed.
-printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
+if [[ "$_tb_anim" == 1 ]]; then printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
+else printf '  · Fetching the installer…\n'; fi
 for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
   dest="$TMPDIR/${f#scripts/}"
   download_with_retry "$(subscript_url "$f")" "$dest"
 done
-printf '\r\033[K'
+if [[ "$_tb_anim" == 1 ]]; then printf '\r\033[K'; fi
 printf '  %s✔%s Installer downloaded — %s files\n' "$_G" "$_R" "${#FILES[@]}"
 
 # ── Pick a sha256 tool (coreutils on Linux, shasum on macOS) ───────────────

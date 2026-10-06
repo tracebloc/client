@@ -171,12 +171,12 @@ _pf_fstype() {
 # a single integer, or nothing if the daemon is down / the value is junk — callers
 # then fall back to the host reader. (docker info precedent: _pf_docker_root above.)
 #
-# ON NATIVE k3s THE HOST IS THE NODE (TB_SUBSTRATE=k3s): there is no Docker and no
+# ON NATIVE k3s THE HOST IS THE NODE (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): there is no Docker and no
 # VM, so the budget the pods get is the host's own -- /proc/meminfo's MemTotal and
 # nproc, through the host readers below, which are the tests' stub seams. Neither
 # reader asks Docker anything there.
 _pf_runtime_mem_kb() {
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then _pf_host_mem_kb; return 0; fi
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_host_mem_kb; return 0; fi
   # Bounded liveness, coreutils-free (#744): _docker_answers bounds through _bounded,
   # which was a no-op on a stock Mac until client-dev#1357; _docker_answers_bounded
   # kills on a deadline via a background PID, with a spinner. Silenced (>/dev/null) — this
@@ -188,7 +188,7 @@ _pf_runtime_mem_kb() {
   return 0
 }
 _pf_runtime_ncpu() {
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then _pf_host_ncpu; return 0; fi
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_host_ncpu; return 0; fi
   # Coreutils-free bounded liveness, silenced — see _pf_runtime_mem_kb (#744).
   has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
   local n; n="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.NCPU}}' 2>/dev/null)"
@@ -543,7 +543,7 @@ _pf_mysql_engine_decision() {
 # binfmt_misc handlers (/proc/sys/fs/binfmt_misc, which amd64_emulation_available
 # reads), and the distro's QEMU package registers them.
 _pf_binfmt_remedy() {
-  if [[ "${TB_SUBSTRATE:-}" != "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
     printf 'docker run --privileged --rm tonistiigi/binfmt --install amd64'
   elif has apt-get; then
     printf 'sudo apt-get install -y qemu-user-static'
@@ -814,7 +814,7 @@ _pf_recheck_runtime_mem() {
 }
 
 _pf_disk() {
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then _pf_disk_k3s; return 0; fi
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_disk_k3s; return 0; fi
   local target free_kb free_gb
   target="$(_pf_docker_root)"
   if [[ ! -d "$target" ]]; then target="/"; fi
@@ -838,7 +838,7 @@ _pf_disk() {
   return 0
 }
 
-# Native k3s (TB_SUBSTRATE=k3s) keeps nothing under Docker's root. Its disk is two
+# Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) keeps nothing under Docker's root. Its disk is two
 # paths, each named in the line, against the same floors as k3d's (PF_MIN_DISK_GB,
 # PF_WARN_DISK_GB):
 #   - k3s's data path (/var/lib/rancher/k3s): the images, containerd and its state;
@@ -861,8 +861,18 @@ _pf_disk() {
 # journey: 13 GB free before the first install, 9 to 10 GB at the re-run's
 # preflight, where an unchanged re-run pulls nothing ("No change detected").
 _pf_disk_k3s() {
-  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0 reused store_at
+  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0 reused store_at why=""
   storage="$(_native_k3s_storage_path)" || rc=$?
+  if [[ "$rc" -eq 4 ]]; then
+    # A host prepared for this user that cannot be adopted yet (1.1g): a password
+    # would end in preflight_sudo's Docker wording, and is not what is missing. Say
+    # what is, with the remedy step b gives (_native_k3s_prepare_host_remedy).
+    why="$(_native_k3s_prepared_for_me)" || true
+    _pf_fail_line "Disk: where this machine's k3s keeps its volumes is in ${TB_K3S_CONFIG_PATH}, which you cannot read yet."
+    PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
+    hint "$(_native_k3s_prepare_host_remedy "$why")"
+    return 0
+  fi
   if [[ "$rc" -eq 3 ]]; then
     preflight_sudo
     rc=0; storage="$(_native_k3s_storage_path)" || rc=$?
@@ -899,7 +909,9 @@ _pf_disk_k3s() {
 # "Set up by this installer" is the install record listing `k3s-install`. The credit
 # is given only when it is known: no record, a record that cannot be read, a root that
 # cannot answer without a prompt, or a store du cannot measure all give 0, and the
-# floor then counts the store as on a fresh host (fail closed).
+# floor then counts the store as on a fresh host (fail closed). A user on a host
+# prepared for them (1.1g) gets 0 the same way, on purpose: the store sits below
+# k3s's 0700 agent/, so only root can measure it, and prepared mode asks for no root.
 _pf_k3s_reused_kb() {
   local rec kb
   rec="$(tb_record_path)"
@@ -1069,7 +1081,7 @@ early_data_dir_guard() {
   local target fstype
   target="${HOST_DATA_DIR:-${HOME:-}/.tracebloc}"
   [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     target="$(_native_k3s_storage_path)" || return 0
   fi
   # An EXISTING data dir has no at-risk mkdir here, and a healthy machine's
@@ -1105,7 +1117,7 @@ _pf_storage_type() {
   # that is the directory that must be local. _pf_disk_k3s has already read it (and
   # refused when it could not: PF_HARD_FAIL is raised and run_preflight stops), so a
   # failure here adds nothing (preflight.bats pins it).
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     target="$(_native_k3s_storage_path)" || return 0
   fi
   disp="$target"
@@ -1351,7 +1363,7 @@ _pf_connectivity() {
   # (warn-only) below. On Windows Docker Desktop is the sole path, so install-k8s.ps1
   # keeps desktop.docker.com hard there.
   local soft=() tool_hosts="dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com" nodes_trust="The k3d nodes are"
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     # NATIVE k3s fetches no k3d, no kubectl (k3s carries its own) and no Docker, so
     # none of their hosts is probed. What a first install fetches (k3s.sh; measured
     # on v1.36.3+k3s1 under 1.1b): the binary from github.com, whose release
@@ -1410,11 +1422,11 @@ _pf_connectivity() {
   # can never hang. Failures are collected and printed after the line is cleared.
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') fi=0
   local -a fails=()
-  tput civis 2>/dev/null || true
+  _tb_progress_start "Checking outbound connectivity…"
   for c in "${criticals[@]}"; do  # set-u-safe: criticals is a literal list
     label="${c%%|*}"; rest="${c#*|}"; url="${rest%%|*}"
     mode=""; [[ "$rest" == *"|"* ]] && mode="${rest##*|}"
-    printf "\r  ${CYAN}%s${RESET} Checking outbound connectivity…" "${frames[fi]}"
+    _tb_progress_frame "${frames[fi]}" "Checking outbound connectivity…"
     fi=$(( (fi + 1) % ${#frames[@]} ))
     status="$(_pf_probe_url "$url" "$mode")"
     if [[ "$status" != "ok" ]]; then status="$(_pf_probe_url "$url" "$mode")"; fi   # one retry (transient blips)
@@ -1423,8 +1435,7 @@ _pf_connectivity() {
       if [[ "$status" == "tls" ]]; then tls_seen=1; fi
     fi
   done
-  printf "\r\033[K"
-  tput cnorm 2>/dev/null || true
+  _tb_progress_end
 
   if [[ ${#fails[@]} -eq 0 ]]; then
     # Collapsed happy-path line (always shown — this IS the connectivity result,
@@ -1489,7 +1500,7 @@ _pf_hw_summary_line() {
   # Through the shared converter so the collapsed summary can never disagree with
   # the memory line above it (Bugbot #445 r6).
   if [[ -n "$mem_kb" ]]; then mem_gb="$(_pf_display_gb_from_mib "$(( mem_kb / 1024 ))")"; parts+=("${mem_gb} GB memory"); fi
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     # k3s's data path, measured where _pf_disk_k3s measures it.
     disk_target="$(_pf_nearest_existing "$TB_K3S_DATA_PATH")"; [[ -n "$disk_target" ]] || disk_target="/"
   else

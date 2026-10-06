@@ -221,7 +221,8 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
   The meter reports the client's storage -- every filesystem this client stores
   on -- and `hostStoragePath` above can only name one. An install that relocated
   its datasets off the local tree therefore has a disk the meter cannot see, and
-  that is not a narrow case: it is exactly the HOST_DATASET_DIR flow (backend#743),
+  that is not a narrow case: it is exactly the TRACEBLOC_HOST_DATASET_DIR flow
+  (old name HOST_DATASET_DIR still works; backend#743),
   where the installer bind-mounts the customer's network volume at /tracebloc-data
   and points `hostPath.datasetPath` there, while mysql + logs stay local. Both are
   consumed client storage; measuring either alone reports a plausible wrong number.
@@ -325,7 +326,8 @@ client-pvc
   hostPath base for the DATASET (shared-images) PV ONLY. Defaults to the
   historical local path /tracebloc so installs without a network dataset mount
   render byte-identically. When the installer bind-mounts a customer network
-  (NFS) dir at /tracebloc-data (HOST_DATASET_DIR set), it passes
+  (NFS) dir at /tracebloc-data (TRACEBLOC_HOST_DATASET_DIR set -- old name
+  HOST_DATASET_DIR still works), it passes
   hostPath.datasetPath=/tracebloc-data to relocate datasets onto that mount,
   while mysql + logs ALWAYS stay on the local /tracebloc tree (InnoDB over NFS
   is unsafe — backend#743). The /<release>/data suffix is appended here.
@@ -1638,6 +1640,45 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end }}
 
 {{/*
+  Whether jobs-manager gives each ingestion Job its own backend token for THIS
+  edge (backend#2073): a per-run, ingest-scoped, 24h token minted through the
+  backend's POST /ingest-token/ (client-runtime#868), instead of the edge's
+  shared backend token. jobs-manager reads TRACEBLOC_INGEST_RUN_TOKEN; a 404
+  from the endpoint falls back to the shared token, any other failure fails the
+  submit with 502.
+
+  Resolution, highest first -- identical to tracebloc.serviceDbAccounts:
+    1. `ingestRunToken` -- an explicit operator override, true or false.
+    2. `ingestRunTokenByEnv[<resolved CLIENT_ENV>]` -- the fleet default.
+
+  Shipped default: on for dev only. stg and prod are off because the token is
+  BOUND to one ingestor: an ingestor that does not read TRACEBLOC_INGESTOR_ID /
+  BACKEND_TOKEN_SCHEME (data-ingestors#931) breaks under it. dev floats on the
+  :dev ingestor channel, which carries #931, and the dev API has the endpoint
+  (backend#5223). stg turns on once data-ingestors `staging` carries #931 (the
+  :stg channel publishes from it) and backend staging serves /ingest-token/;
+  prod turns on once images.ingestor.prodDigest moves past a release that
+  contains #931 (it pins v0.8.2, which predates it).
+
+  NIL-SAFE BOTH WAYS. An edge upgraded with plain `--reuse-values` from a chart
+  that predates these keys has NEITHER of them: the override reads as unset and
+  the map as empty, so the gate resolves off -- the shared-token behaviour that
+  edge already had -- and the render never fails. The result is always a string,
+  "true" or empty, like every sibling gate; the template renders it as an
+  explicit "true" / "false" so the edge's posture is visible on the pod.
+*/}}
+{{- define "tracebloc.ingestRunToken" -}}
+{{- $override := (default dict .Values).ingestRunToken -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.ingestRunTokenByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether jobs-manager mints a throwaway MySQL account per experiment
   (backend#1528 D10) for THIS edge.
 
@@ -2556,6 +2597,33 @@ naming, backend#3846; legacy remove_by 2026-12-31). The values keys stay
 {{- end }}
 
 {{/*
+tracebloc.gpuUnsupportedEnv -- why the installer left the GPU off as UNSUPPORTED
+(client-dev#1633): env.GPU_UNSUPPORTED_REASON (one human sentence) and
+env.GPU_UNSUPPORTED_NAME (the card, e.g. "NVIDIA GeForce GT 710"), which BOTH
+installers set with --set-string, empty unless the card or its driver is too old
+for the GPU images. The resource monitor sends them on every heartbeat as
+gpu_unsupported_reason / gpu_unsupported_name (client-runtime#879), so the web
+app can say why the client runs on CPU (backend#5256). The names are a
+cross-repo contract: do not rename one side alone.
+
+Each renders only when non-empty, under its legacy name and its TRACEBLOC_
+canonical, same value (settings naming, backend#3846); either spelling of the
+values key works, the canonical first (the passthrough's alias-first rule).
+*/}}
+{{- define "tracebloc.gpuUnsupportedEnv" -}}
+{{- $env := default dict .Values.env -}}
+{{- range $key := list "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" }}
+{{- $value := (get $env (printf "TRACEBLOC_%s" $key)) | default (get $env $key) | default "" | toString }}
+{{- if $value }}
+- name: {{ $key }}
+  value: {{ $value | quote }}
+- name: TRACEBLOC_{{ $key }}
+  value: {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
 jobs-manager containers, dual-emitted where the name has a TRACEBLOC_ canonical
 (settings naming, backend#3846; legacy remove_by 2026-12-31).
@@ -2581,7 +2649,14 @@ spelling of the values key has the same effect:
 
 The list is every legacy name either container dual-emits that the other's (or
 its own) passthrough does not exclude, plus the operator knobs the chart never
-renders itself and only passes through (the last line). TB_X maps to
+renders itself and only passes through (the GPU / SHM line and the lines after
+it: every such knob client-runtime's jobs-manager or pods-monitor reads
+TRACEBLOC_<name> first -- the RFC-0067 switches EMIT_OOM_RESCUE / EMIT_TOPOLOGY /
+TRAINING_RESUME_ENABLED, which jobs-manager also writes onto the training pod
+under both names, and the timing, envelope and ingestion knobs), plus the
+installer-set GPU_UNSUPPORTED_REASON / GPU_UNSUPPORTED_NAME (the last line;
+client-dev#1633), which the resource monitor renders too
+(tracebloc.gpuUnsupportedEnv). TB_X maps to
 TRACEBLOC_X. A name excluded from a container's passthrough never reaches this
 helper there, so listing it is inert in that container. The values keys the
 chart READS (`env.GPU_LIMITS`, `env.RESOURCE_*`, ...) are its input API and are
@@ -2603,6 +2678,13 @@ from the render and fails on one missing here.
       "MYSQL_MIGRATION_JOB_IMAGE" "MYSQL_MIGRATION_SERVICE_ACCOUNT" "MYSQL_MIGRATION_HELM_IMAGE"
       "GPU_VISIBLE_DEVICES" "GPU_SCALE_FROM_ZERO_GRACE_SECONDS" "GPU_POD_ENVELOPE"
       "TRAINING_SHM_BOUND" "TRAINING_SHM_SIZE_LIMIT"
+      "EMIT_OOM_RESCUE" "EMIT_TOPOLOGY" "TRAINING_RESUME_ENABLED" "DERIVE_JOB_ENVELOPE" "MULTI_GPU_LEASE_SECONDS"
+      "MULTI_GPU_MIN_PARAMETERS"
+      "DEVICE_TYPE" "JOB_TTL_SECONDS_AFTER_FINISHED" "JOB_ACTIVE_DEADLINE_SECONDS"
+      "IMAGE_PULL_STUCK_GRACE_SECONDS" "RESPIN_RECOVER_GRACE_SECONDS" "HF_HUB_OFFLINE_ENFORCE"
+      "INGESTION_HTTP_PORT" "INGESTION_SUBMIT_MAX_BODY_BYTES" "SB_MAX_DELIVERY_COUNT" "POD_TOKEN_REQUIRE_BOUND_CLAIMS"
+      "HOST_UID" "HOST_GID" "DATASET_SCOPED_MOUNTS" "LOGS_SCOPED_MOUNTS" "TELEMETRY_COLLECTOR_NAMESPACE"
+      "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME"
 -}}
 {{- $key := .key -}}
 {{- $legacy := "" -}}

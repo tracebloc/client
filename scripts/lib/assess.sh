@@ -73,9 +73,9 @@ TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
 : "${TB_ASSESS_DOCKER_TIMEOUT:=10}"
 
 # Where the healthy-machine hand-off points the interactive home screen (see
-# _assess_handoff). Mirrors provision.sh's TB_TTY so tests can redirect it to a
+# _assess_handoff). Mirrors provision.sh's TRACEBLOC_TTY so tests can redirect it to a
 # real file instead of the controlling terminal.
-: "${TB_TTY:=/dev/tty}"
+: "${TRACEBLOC_TTY:=/dev/tty}"
 
 # _assess_cluster_servers_running — echo the number of running servers for
 # CLUSTER_NAME. This mirrors ONLY the read half of k3d.sh's
@@ -503,14 +503,14 @@ _assess_handoff() {
     # setup_log_file — `exec > >(tee …) 2>&1` — so this shell's stdout/stderr are a
     # pipe to `tee`, and its stdin is the install pipe under `curl … | bash`. An
     # interactive TUI needs a tty on stdout/stderr too, not just stdin: point all
-    # three at the terminal ($TB_TTY, /dev/tty) when it's openable (bypassing tee
+    # three at the terminal ($TRACEBLOC_TTY, /dev/tty) when it's openable (bypassing tee
     # for the interactive screen, exactly as the bootstrap does), else fall back to
     # </dev/null and leave stdout/stderr on the tee pipe (non-interactive / CI —
     # never the input pipe). Deliberately NO `exec` (see above) so the EXIT trap
     # still runs. `|| true` keeps a non-zero render from flipping our exit code — a
     # healthy machine exits 0.
-    if { : <"$TB_TTY"; } 2>/dev/null; then
-      tracebloc <"$TB_TTY" >"$TB_TTY" 2>"$TB_TTY" || true
+    if { : <"$TRACEBLOC_TTY"; } 2>/dev/null; then
+      tracebloc <"$TRACEBLOC_TTY" >"$TRACEBLOC_TTY" 2>"$TRACEBLOC_TTY" || true
     else
       tracebloc </dev/null || true
     fi
@@ -590,12 +590,12 @@ assess_existing_install() {
     return 0
   fi
 
-  # Native k3s (TB_SUBSTRATE=k3s): one log line, and no classification. Every
+  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): one log line, and no classification. Every
   # read below asks Docker or k3d, so on k3s they would call a machine with a
   # tracebloc k3s on it fresh. The k3s presence checks (a tracebloc k3s, a
   # foreign one, a live k3d) belong to the k3s create path, where they refuse;
   # this gate returns to the normal flow.
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     log "assess: native k3s -- the stop-and-check assessment does not read k3s; continuing to the install."
     return 0
   fi

@@ -82,6 +82,21 @@
           ],
           "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and CPU is a request-only share weight with NO limit since backend#2418, so the job pod is Burstable - not Guaranteed QoS, as this description claimed for both dimensions until backend#2872. With the flag OFF (the default) jobs-manager uses its built-in literal on requests AND limits, so a CPU job pod is Guaranteed. THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU: cpu-only + off -> Guaranteed, cpu-only + on -> Burstable, GPU -> BestEffort either way. A GPU job's envelope resolves to nvidia.com/gpu (and ephemeral-storage) only; neither is QoS-relevant, so the container sets no cpu/memory request or limit at all and the flag changes nothing on that cluster (backend#2871). Do not read 'Burstable' as the default, and do not turn this on expecting to escape Burstable on a GPU node. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and both installers write that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on an uncapped multi-node k3d cluster every node over-reports the whole Docker VM, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
         },
+        "TRACEBLOC_DERIVE_JOB_ENVELOPE": {
+          "type": "string",
+          "enum": [
+            "1",
+            "true",
+            "yes",
+            "on",
+            "0",
+            "false",
+            "no",
+            "off",
+            ""
+          ],
+          "description": "The RFC-0076 canonical spelling of DERIVE_JOB_ENVELOPE (backend#3846): the same closed vocabulary, and either spelling renders both env names, DERIVE_JOB_ENVELOPE and TRACEBLOC_DERIVE_JOB_ENVELOPE, on jobs-manager. See DERIVE_JOB_ENVELOPE for what it does; the documented key stays DERIVE_JOB_ENVELOPE."
+        },
         "GPU_REQUESTS": {
           "type": "string",
           "description": "Optional GPU requests for spawned jobs. GPU_REQUESTS and GPU_LIMITS are ONE number (client#995): GPU_LIMITS is the gate, and when it is set without this key the chart renders this with GPU_LIMITS' value, because Kubernetes requires an extended resource's request to equal its limit -- so set GPU_LIMITS alone and this follows it. This key ALONE renders nothing (the runtime's legacy default, 'nvidia.com/gpu=1', then applies). Set both to different values and the chart writes them as given; the runtime warns once and the API server rejects that pod. No schema default: Helm injects none, and the chart emits nothing when GPU_LIMITS is absent. Bounds SCHEDULING, not visibility. Kubernetes uses this to decide how many GPU pods fit on a node -- one at a time at the default -- so concurrent jobs do not contend. It does NOT restrict which devices a container can see when the GPU arrives via CDI: that injection happens outside the Kubernetes resource limit, so on a CDI node (Docker Desktop / WSL2, see GPU_VISIBLE_DEVICES) a pod sees every GPU on the machine regardless of this value. On a device-plugin node the plugin does pin concrete GPU UUIDs, so there the limit is also an isolation boundary -- same key, two meanings, which is why this says so (backend#2657). Setting this to 'nvidia.com/gpu=1' on a multi-GPU CDI box does not cap a job at one device."
@@ -116,20 +131,40 @@
           "pattern": "^\\s*([1-9][0-9]*|0|[Oo][Ff][Ff]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo])?\\s*$",
           "description": "Per-run lease for MULTI-GPU runs (RFC-0067 D7/H4; client-runtime#486): applied by jobs-manager as the pod-level activeDeadlineSeconds only when the resolved nvidia.com/gpu limit is above 1, min()'d with the fleet cap. Digits = seconds (jobs-manager defaults to 86400 when unset); 0 / off / false / no disable it. Rendered only when set: the runtime reads an empty value as DISABLED, so an unconditional chart default would switch the lease off fleet-wide. THE VOCABULARY IS CLOSED because the runtime falls back to its default on anything unrecognised, which would make a typo indistinguishable from the default. Digits are canonical (no leading zeros): `00` is not in the runtime's falsy set, would parse to 0, trip its <= 0 guard and silently become the default — the one spelling that does what the closed vocabulary exists to prevent."
         },
+        "TRACEBLOC_MULTI_GPU_LEASE_SECONDS": {
+          "type": "string",
+          "pattern": "^\\s*([1-9][0-9]*|0|[Oo][Ff][Ff]|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo])?\\s*$",
+          "description": "The RFC-0076 canonical spelling of MULTI_GPU_LEASE_SECONDS (backend#3846): the same closed vocabulary, and either spelling renders both env names, MULTI_GPU_LEASE_SECONDS and TRACEBLOC_MULTI_GPU_LEASE_SECONDS, on jobs-manager. See MULTI_GPU_LEASE_SECONDS for what it does; the documented key stays MULTI_GPU_LEASE_SECONDS."
+        },
         "MULTI_GPU_MIN_PARAMETERS": {
           "type": "string",
           "pattern": "^\\s*([1-9][0-9]*)?\\s*$",
           "description": "Multi-GPU size floor (RFC-0067 D2 gate 2; client-runtime#513 @ f42d5e9): the smallest server-computed parameter_count (backend#3171) jobs-manager expands into more than one GPU. NO DEFAULT: unset, empty, non-numeric or non-positive all read as unset and the size gate REFUSES every run (GPU_COUNT_SIZE_FLOOR_UNSET), so multi-GPU needs BOTH TRACEBLOC_DDP=1 and this floor. Rendered only when set. THE VOCABULARY IS CLOSED to a positive integer because a non-numeric or non-positive value reads as unset (one WARNING, then the same refusal as the deliberate dark default), so a typo would be indistinguishable from never having set the key. Leading zeros are excluded for a DIFFERENT reason than MULTI_GPU_LEASE_SECONDS above: the runtime parses int(value.strip()), so `007` would read as 7, `+50` as 50 and `1_000` as 1000 -- valid floors, no warning. The pattern admits one canonical spelling per floor so two values files cannot disagree about the same number."
+        },
+        "TRACEBLOC_MULTI_GPU_MIN_PARAMETERS": {
+          "type": "string",
+          "pattern": "^\\s*([1-9][0-9]*)?\\s*$",
+          "description": "The RFC-0076 canonical spelling of MULTI_GPU_MIN_PARAMETERS (backend#3846): the same closed vocabulary, and either spelling renders both env names, MULTI_GPU_MIN_PARAMETERS and TRACEBLOC_MULTI_GPU_MIN_PARAMETERS, on jobs-manager (client-runtime reads the canonical first). See MULTI_GPU_MIN_PARAMETERS for what it does; the documented key stays MULTI_GPU_MIN_PARAMETERS."
         },
         "EMIT_TOPOLOGY": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
           "description": "Per-edge OPERATOR switch: the training pod records world_size + effective_batch in its cycle payload (backend#3160's columns; RFC-0067 D5/D9). Contract: tracebloc-engine#879 @ 383b0daa — default off, truthy 1|true|yes (case-insensitive, whitespace-stripped). ORDER MATTERS: the backend carrying #3160 must be deployed to the edge's environment first, or the emitted key destroys the cycle row (update_cycle_data deletes before it creates). Forwarded to the training pod by client-runtime's OPERATOR_TRAINING_SWITCHES (client-runtime#507), so the ordering rule is live: set this only after that backend is deployed. The vocabulary is closed for the same reason as TRACEBLOC_DDP: the engine reads anything unrecognised as off."
         },
+        "TRACEBLOC_EMIT_TOPOLOGY": {
+          "type": "string",
+          "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
+          "description": "The RFC-0076 canonical spelling of EMIT_TOPOLOGY (backend#3846): the same closed vocabulary, and either spelling renders both env names, EMIT_TOPOLOGY and TRACEBLOC_EMIT_TOPOLOGY, on jobs-manager. See EMIT_TOPOLOGY for what it does; the documented key stays EMIT_TOPOLOGY."
+        },
         "EMIT_OOM_RESCUE": {
           "type": "string",
           "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
           "description": "Per-edge OPERATOR switch: the training pod records oom_rescue_rung + oom_rescue_epoch in its cycle payload when a CUDA-OOM rescue fired (backend#2175's columns; the engine's _emit_oom_rescue_fields gate). Default off, truthy 1|true|yes; same ordering rule as EMIT_TOPOLOGY — backend with the columns first. Forwarded to the training pod by client-runtime's OPERATOR_TRAINING_SWITCHES (client-runtime#507), so the ordering rule is live: set this only after that backend is deployed. Closed vocabulary, same reason as TRACEBLOC_DDP."
+        },
+        "TRACEBLOC_EMIT_OOM_RESCUE": {
+          "type": "string",
+          "pattern": "^\\s*([01]|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])?\\s*$",
+          "description": "The RFC-0076 canonical spelling of EMIT_OOM_RESCUE (backend#3846): the same closed vocabulary, and either spelling renders both env names, EMIT_OOM_RESCUE and TRACEBLOC_EMIT_OOM_RESCUE, on jobs-manager. See EMIT_OOM_RESCUE for what it does; the documented key stays EMIT_OOM_RESCUE."
         }
       },
       "additionalProperties": {
@@ -309,7 +344,7 @@
           "type": "string",
           "default": "/tracebloc",
           "pattern": "^/",
-          "description": "Base host path for the DATASET (shared-images) PV ONLY. Default /tracebloc keeps datasets local alongside mysql/logs; the installer sets /tracebloc-data when a customer network (NFS) dataset mount is provided via HOST_DATASET_DIR (backend#743). mysql + logs PV paths always stay on /tracebloc. The chart appends /<release>/data. Any value other than the default ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
+          "description": "Base host path for the DATASET (shared-images) PV ONLY. Default /tracebloc keeps datasets local alongside mysql/logs; the installer sets /tracebloc-data when a customer network (NFS) dataset mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works; backend#743). mysql + logs PV paths always stay on /tracebloc. The chart appends /<release>/data. Any value other than the default ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
         }
       }
     },
@@ -596,6 +631,13 @@
     "tbIngestPassword": {
       "type": "string",
       "description": "backend#1528 S1: optional operator pin for the tb_ingest account password (3-tier resolution, mirrors credmgrPassword). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation. Must be alphanumeric."
+    },
+    "ingestRunToken": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from ingestRunTokenByEnv keyed on the resolved CLIENT_ENV (backend#2073), mirroring serviceDbAccounts. Set true/false to force one answer on this edge regardless of environment. When on, jobs-manager gives each ingestion Job its own per-run, ingest-scoped, 24h backend token minted through the backend's POST /ingest-token/ (client-runtime#868) instead of the edge's shared token; rendered as TRACEBLOC_INGEST_RUN_TOKEN \"true\"/\"false\". A 404 from the endpoint falls back to the shared token; any other mint failure fails the ingestion submit with 502. Forcing it on needs an ingestor that reads TRACEBLOC_INGESTOR_ID / BACKEND_TOKEN_SCHEME (data-ingestors#931): an older ingestor breaks under a bound token."
     },
     "bootstrapDbReparent": {
       "type": [
@@ -1883,6 +1925,13 @@
     "serviceDbAccountsByEnv": {
       "type": "object",
       "description": "Per-environment default for the dedicated tb_meta/tb_ingest identities, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). This is the mechanism behind #1151's 'flip per environment, dev first'; before it, that plan had no implementation and the fleet's posture could not be read in one place. backend#1752.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "ingestRunTokenByEnv": {
+      "type": "object",
+      "description": "Per-environment default for the per-run ingest token (backend#2073), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors serviceDbAccountsByEnv. dev is true: the :dev ingestor channel carries data-ingestors#931 and the dev API serves /ingest-token/ (backend#5223). stg is false until data-ingestors staging carries data-ingestors#931 (the :stg channel publishes from it) AND backend staging has the /ingest-token/ endpoint. prod is false until images.ingestor.prodDigest moves past a release containing data-ingestors#931 (it pins v0.8.2, which predates it). An edge upgraded with plain --reuse-values from a chart without this key has no fleet default to read, so it keeps the shared token it already had, and the render does not fail; --reset-then-reuse-values picks this map up.",
       "additionalProperties": {
         "type": "boolean"
       }

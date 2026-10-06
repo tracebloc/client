@@ -9,10 +9,10 @@
 # system location; _set_tools_target() overrides at runtime (Tier 0 flips these
 # to a no-sudo ~/.local/bin). Defaulted here so any caller that reaches the
 # install_* functions WITHOUT going through _set_tools_target — the bats suite,
-# e2e harnesses — still gets the system behaviour, not an empty TB_TOOLS_DIR
+# e2e harnesses — still gets the system behaviour, not an empty TRACEBLOC_TOOLS_DIR
 # (kubectl → "/kubectl") or a spurious no-sudo branch (Bugbot #1175 r2).
-: "${TB_TOOLS_DIR:=/usr/local/bin}"
-: "${TB_TOOLS_SUDO:=sudo}"
+: "${TRACEBLOC_TOOLS_DIR:=/usr/local/bin}"
+: "${TRACEBLOC_TOOLS_SUDO:=sudo}"
 
 # ── Package manager detection ────────────────────────────────────────────────
 setup_pm() {
@@ -131,11 +131,11 @@ _configure_docker_proxy() {
   local dir _sudo
   local -a _sc                                    # systemctl invocation (never empty)
   if [[ "$scope" == "user" ]]; then
-    dir="${TB_DOCKER_USER_DROPIN_DIR:-$HOME/.config/systemd/user/docker.service.d}"
+    dir="${TRACEBLOC_DOCKER_USER_DROPIN_DIR:-$HOME/.config/systemd/user/docker.service.d}"
     _sudo=""                                       # user-scoped: no root
     _sc=(systemctl --user)
   else
-    dir="${TB_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
+    dir="${TRACEBLOC_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
     _sudo="sudo"
     _sc=(sudo systemctl)
   fi
@@ -202,10 +202,10 @@ _configure_docker_proxy() {
 
 # ── Docker Engine ────────────────────────────────────────────────────────────
 install_docker_engine() {
-  # os-release path is overridable (TB_OS_RELEASE_FILE) so the distro detection
+  # os-release path is overridable (TRACEBLOC_OS_RELEASE_FILE) so the distro detection
   # below stays testable on hosts without one — e.g. macOS dev machines, where a
   # bash `[[ -f ]]` file-test can't be mocked the way a command like `grep` can.
-  local os_release="${TB_OS_RELEASE_FILE:-/etc/os-release}"
+  local os_release="${TRACEBLOC_OS_RELEASE_FILE:-/etc/os-release}"
   # The invoking user we grant docker to AND re-exec under — resolved once so the
   # grant and the sg-docker re-exec guard below always agree, even in the USER-unset
   # edge (#427 reviewer). A sudo-wrapped full run is already refused, so this is the
@@ -453,7 +453,7 @@ install_system_deps() {
 # without root would otherwise fail (or hit a hidden password prompt under
 # spin_cmd) at the "zero privileged steps" step. Install them into ~/.local/bin
 # (user-owned) and put it on this process's PATH so create_cluster finds them.
-# Otherwise the system location, with sudo. Sets TB_TOOLS_DIR + TB_TOOLS_SUDO.
+# Otherwise the system location, with sudo. Sets TRACEBLOC_TOOLS_DIR + TRACEBLOC_TOOLS_SUDO.
 _set_tools_target() {
   # Tier 0 (a usable runtime, no admin) AND rootless Tier 1 (#1221, possibly no root
   # at all) both install user-space with NO sudo: a `sudo mv → /usr/local/bin` here
@@ -462,13 +462,13 @@ _set_tools_target() {
   # LINUX target-selector; macOS (no Tier/rootless model) sets its own target in
   # install_macos_cli_tools.
   if [ "${INSTALL_TIER:-}" = "0" ] || _rootless_active; then
-    TB_TOOLS_DIR="${HOME}/.local/bin"
-    TB_TOOLS_SUDO=""
-    mkdir -p "$TB_TOOLS_DIR"
-    case ":$PATH:" in *":$TB_TOOLS_DIR:"*) ;; *) export PATH="$TB_TOOLS_DIR:$PATH" ;; esac
+    TRACEBLOC_TOOLS_DIR="${HOME}/.local/bin"
+    TRACEBLOC_TOOLS_SUDO=""
+    mkdir -p "$TRACEBLOC_TOOLS_DIR"
+    case ":$PATH:" in *":$TRACEBLOC_TOOLS_DIR:"*) ;; *) export PATH="$TRACEBLOC_TOOLS_DIR:$PATH" ;; esac
   else
-    TB_TOOLS_DIR="/usr/local/bin"
-    TB_TOOLS_SUDO="sudo"
+    TRACEBLOC_TOOLS_DIR="/usr/local/bin"
+    TRACEBLOC_TOOLS_SUDO="sudo"
   fi
 }
 
@@ -495,11 +495,11 @@ _fetch_kubectl() {
   _verify_sha256 "$(cat "${tmpdir}/kubectl.sha256")" "${tmpdir}/kubectl" \
     || { rm -rf "$tmpdir"; error "System tool checksum verification failed"; }
   chmod +x "${tmpdir}/kubectl"
-  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
-  if [ -n "$TB_TOOLS_SUDO" ]; then
-    sudo mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+  # Tier 0 → no sudo (TRACEBLOC_TOOLS_SUDO empty, TRACEBLOC_TOOLS_DIR under $HOME).
+  if [ -n "$TRACEBLOC_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/kubectl" "$TRACEBLOC_TOOLS_DIR/kubectl"
   else
-    mv "${tmpdir}/kubectl" "$TB_TOOLS_DIR/kubectl"
+    mv "${tmpdir}/kubectl" "$TRACEBLOC_TOOLS_DIR/kubectl"
   fi
   rm -rf "$tmpdir"
 }
@@ -517,17 +517,17 @@ install_kubectl() {
       || error "Couldn't resolve the kubectl version from dl.k8s.io/release/stable.txt — check network connectivity to dl.k8s.io and re-run."
     spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
     log "kubectl $KUBE_VER installed."
-    tb_record_write binary kubectl "$TB_TOOLS_DIR/kubectl"
+    tb_record_write binary kubectl "$TRACEBLOC_TOOLS_DIR/kubectl"
   fi
-  # Gate on both paths (fresh + already-present). --rm removes our TB_TOOLS_DIR copy
+  # Gate on both paths (fresh + already-present). --rm removes our TRACEBLOC_TOOLS_DIR copy
   # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
   # installer-placed kubectl self-heals on re-run while a pkg copy elsewhere is safe.
-  assert_tool_runs --rm "$TB_TOOLS_DIR/kubectl" kubectl version --client
+  assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/kubectl" kubectl version --client
 }
 
 # ── k3d ──────────────────────────────────────────────────────────────────────
 # Download the k3d release binary + checksums.txt at the given tag, verify, and
-# install into TB_TOOLS_DIR (mirrors _fetch_kubectl; fail-closed). We install
+# install into TRACEBLOC_TOOLS_DIR (mirrors _fetch_kubectl; fail-closed). We install
 # the binary OURSELVES because upstream's install.sh performs NO checksum
 # verification — its downloadFile fetches the bare binary and installFile just
 # chmod+cp's it (review of the pinned v5.9.0 script, PR #382) — so piping it
@@ -559,18 +559,18 @@ _fetch_k3d_release() {
     error "System tool checksum verification failed"
   fi
   chmod +x "${tmpdir}/k3d"
-  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
-  if [ -n "$TB_TOOLS_SUDO" ]; then
-    sudo mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+  # Tier 0 → no sudo (TRACEBLOC_TOOLS_SUDO empty, TRACEBLOC_TOOLS_DIR under $HOME).
+  if [ -n "$TRACEBLOC_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/k3d" "$TRACEBLOC_TOOLS_DIR/k3d"
   else
-    mv "${tmpdir}/k3d" "$TB_TOOLS_DIR/k3d"
+    mv "${tmpdir}/k3d" "$TRACEBLOC_TOOLS_DIR/k3d"
   fi
   rm -rf "$tmpdir"
 }
 
 install_k3d() {
   if has k3d; then
-    assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
+    assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/k3d" k3d version
     return 0
   fi
 
@@ -606,9 +606,9 @@ install_k3d() {
   if ! has k3d; then
     error "System tool installation completed but not found on PATH."
   fi
-  tb_record_write binary k3d "$TB_TOOLS_DIR/k3d"
+  tb_record_write binary k3d "$TRACEBLOC_TOOLS_DIR/k3d"
 
-  assert_tool_runs --rm "$TB_TOOLS_DIR/k3d" k3d version
+  assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/k3d" k3d version
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
@@ -682,7 +682,7 @@ _ensure_unpack_tools() {
 
 # _fetch_helm_release <tag> <arch> — download the Helm tarball for <tag> plus
 # its published .sha256sum from get.helm.sh, verify (FAIL-CLOSED), unpack, and
-# move the binary into TB_TOOLS_DIR. Runs under spin_cmd — no output of its own.
+# move the binary into TRACEBLOC_TOOLS_DIR. Runs under spin_cmd — no output of its own.
 # Direct download replaces helm's get-helm-3: that script floats on the MUTABLE
 # helm/helm@main (unpinned code executed on the host), needs openssl for its
 # checksum step (absent on minimal images — Bugbot #383), and its own fetches
@@ -714,11 +714,11 @@ _fetch_helm_release() {
   fi
   tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir" "${os}-${arch}/helm"
   chmod +x "${tmpdir}/${os}-${arch}/helm"
-  # Tier 0 → no sudo (TB_TOOLS_SUDO empty, TB_TOOLS_DIR under $HOME).
-  if [ -n "$TB_TOOLS_SUDO" ]; then
-    sudo mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
+  # Tier 0 → no sudo (TRACEBLOC_TOOLS_SUDO empty, TRACEBLOC_TOOLS_DIR under $HOME).
+  if [ -n "$TRACEBLOC_TOOLS_SUDO" ]; then
+    sudo mv "${tmpdir}/${os}-${arch}/helm" "$TRACEBLOC_TOOLS_DIR/helm"
   else
-    mv "${tmpdir}/${os}-${arch}/helm" "$TB_TOOLS_DIR/helm"
+    mv "${tmpdir}/${os}-${arch}/helm" "$TRACEBLOC_TOOLS_DIR/helm"
   fi
   rm -rf "$tmpdir"
 }
@@ -731,9 +731,9 @@ _ensure_helm_executable() {
     # Tier 0 (no admin): helm is in the user's ~/.local/bin — a plain owner chmod
     # works and MUST NOT sudo (would prompt on the tty after the zero-privilege
     # promise, like the systemctl guard). Full flow: /usr/local/bin needs sudo.
-    # TB_TOOLS_SUDO is set by _set_tools_target (empty on Tier 0), defaulted to
+    # TRACEBLOC_TOOLS_SUDO is set by _set_tools_target (empty on Tier 0), defaulted to
     # "sudo" at module scope for direct callers (Bugbot #1175 r3).
-    if [[ -n "${TB_TOOLS_SUDO:-}" ]]; then
+    if [[ -n "${TRACEBLOC_TOOLS_SUDO:-}" ]]; then
       sudo chmod 755 "$helm_bin" 2>/dev/null || true
     else
       chmod 755 "$helm_bin" 2>/dev/null || true
@@ -776,25 +776,31 @@ install_helm() {
     if ! has helm; then
       error "System tool installation completed but not found on PATH."
     fi
-    tb_record_write binary helm "$TB_TOOLS_DIR/helm"
+    tb_record_write binary helm "$TRACEBLOC_TOOLS_DIR/helm"
   fi
   _ensure_helm_executable
   # bare `helm version` (not --short: it may be dropped like kubectl's was). --rm
-  # removes our TB_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
+  # removes our TRACEBLOC_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
   # never a pre-existing / pkg-managed helm elsewhere on PATH (#411 review).
-  assert_tool_runs --rm "$TB_TOOLS_DIR/helm" helm version
+  assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/helm" helm version
   success "System tools"
 }
 
 # ── GPU setup dispatch ───────────────────────────────────────────────────────
 # When the GPU floor skips the GPU (detect_gpu judged it, and printed the remedy)
-# there is no driver install, no toolkit and no wiring: TB_GPU_WIRED stays 0. A
+# there is no driver install, no toolkit and no wiring: TRACEBLOC_GPU_WIRED stays 0. A
 # driver below the floor only warned, and is set up like any other.
+# On native k3s (slim client 1.1i) the driver installs as on k3d, then the toolkit
+# package and a CDI spec (k3s.sh _native_k3s_gpu_prepare), and nothing touches Docker
+# or a host containerd: k3s finds the toolkit when it first starts in step c, and step
+# c's gate (_native_k3s_gpu_wire) is the only thing that sets TRACEBLOC_GPU_WIRED there.
 dispatch_gpu_setup() {
   case "$GPU_VENDOR" in
     nvidia)
       if _gpu_floor_skips; then
         log "NVIDIA GPU below the floor (${TB_GPU_FLOOR_VERDICT}) — no driver, toolkit or GPU wiring; CPU mode."
+      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+        install_nvidia_drivers; _native_k3s_gpu_prepare
       else
         install_nvidia_drivers; install_nvidia_container_toolkit
       fi
@@ -854,7 +860,7 @@ _tools_rc_for_shell() {
 # and best-effort — a PATH-persist hiccup must never fail an otherwise-good
 # install. No-op unless we actually used the user-local dir (i.e. Tier 0).
 _persist_tools_on_path() {
-  [ "${TB_TOOLS_DIR:-}" = "${HOME}/.local/bin" ] || return 0
+  [ "${TRACEBLOC_TOOLS_DIR:-}" = "${HOME}/.local/bin" ] || return 0
   # fish reads ~/.config/fish, not the POSIX rc files, and uses `set`/fish_add_path
   # rather than `export PATH=`. Appending a bash `export` line to ~/.profile would
   # be dead (fish never loads it), so hint the fish-correct command instead — it
@@ -928,7 +934,7 @@ _install_userspace_tools() {
 }
 
 # _tier0_gpu_flags — on Tier 0 we skip the privileged GPU driver/toolkit install,
-# but create_cluster still needs TB_GPU_WIRED=1 to expose an NVIDIA GPU to the k3d
+# but create_cluster still needs TRACEBLOC_GPU_WIRED=1 to expose an NVIDIA GPU to the k3d
 # cluster (--gpus=all). Without it a GPU host gets a CPU-only cluster even when the
 # toolkit is already installed (Bugbot #375). Wire the GPU ONLY when Docker's
 # NVIDIA runtime is already configured — expected on a GPU host with a usable
@@ -951,7 +957,7 @@ _tier0_gpu_flags() {
   _runtimes="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{json .Runtimes}}' 2>/dev/null || true)"
   case "$_runtimes" in
     *'"nvidia"'*)
-      TB_GPU_WIRED=1
+      TRACEBLOC_GPU_WIRED=1
       success "Reusing the NVIDIA container runtime already configured — your environment will have GPU access." ;;
     *)
       warn "NVIDIA GPU detected, but Docker's NVIDIA runtime isn't configured (installing the toolkit needs admin) — your environment will be CPU-only."
@@ -1141,7 +1147,7 @@ _ensure_subid_ranges() {
       if [ "${PROBE_SUBID:-0}" != "1" ]; then
         # Compute a non-overlapping start for THIS host so the paste-in remedy can't
         # collide with an existing allocation (Bugbot #458).
-        local _start; _start="$(_next_subid_start "${TB_SUBUID_FILE:-/etc/subuid}" "${TB_SUBGID_FILE:-/etc/subgid}")"
+        local _start; _start="$(_next_subid_start "${TRACEBLOC_SUBUID_FILE:-/etc/subuid}" "${TRACEBLOC_SUBGID_FILE:-/etc/subgid}")"
         hint "Missing — a subordinate UID/GID range. An admin can add it directly:"
         hint "  echo '${_user}:${_start}:65536' | sudo tee -a /etc/subuid"
         hint "  echo '${_user}:${_start}:65536' | sudo tee -a /etc/subgid"
@@ -1160,11 +1166,11 @@ _ensure_subid_ranges() {
 # then (unless the user already owns a range) allocates a non-overlapping 65536-wide
 # block and writes it via `usermod --add-subuids/--add-subgids`, falling back to a
 # direct file append on older shadow-utils. Idempotent: an existing range is left
-# untouched. Paths overridable (TB_SUBUID_FILE/TB_SUBGID_FILE) for tests.
+# untouched. Paths overridable (TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE) for tests.
 _provision_subid_ranges() {
   local user="${1:-$(id -un 2>/dev/null || printf '%s' "${USER:-}")}"
-  local subuid="${TB_SUBUID_FILE:-/etc/subuid}"
-  local subgid="${TB_SUBGID_FILE:-/etc/subgid}"
+  local subuid="${TRACEBLOC_SUBUID_FILE:-/etc/subuid}"
+  local subgid="${TRACEBLOC_SUBGID_FILE:-/etc/subgid}"
 
   # The helpers must be present AND privileged (setuid bit OR cap_setuid) to write ID
   # maps — present-but-unprivileged is as useless as missing. Install if not usable,
@@ -1258,7 +1264,7 @@ install_linux() {
   # Native k3s (RFC-0175 D3) is its own step b, ahead of every tier below: it runs as
   # root, so neither Tier 0 (a usable Docker, no administrator rights) nor Tier 1
   # (rootless) applies to it, and it installs no Docker, k3d or kubectl (k3s.sh).
-  if [[ "${TB_SUBSTRATE:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     _native_k3s_install_linux
     return 0
   fi
@@ -1346,10 +1352,10 @@ _cgroup_controllers_path() {
 # `daemon-reload` writes the drop-in but does NOT restart the running user@$(id -u).service,
 # so the delegated controllers only appear after a re-login — this is how we tell
 # "written" from "in effect" instead of assuming. Path overridable
-# (TB_USER_CGROUP_CONTROLLERS) for tests. memory/pids are delegated by default;
+# (TRACEBLOC_USER_CGROUP_CONTROLLERS) for tests. memory/pids are delegated by default;
 # cpu/cpuset/io are the ones this adds.
 _cgroup_controllers_active() {
-  local f="${TB_USER_CGROUP_CONTROLLERS:-$(_cgroup_controllers_path)}"
+  local f="${TRACEBLOC_USER_CGROUP_CONTROLLERS:-$(_cgroup_controllers_path)}"
   [[ -r "$f" ]] || return 1
   local c; c="$(cat "$f" 2>/dev/null)" || return 1
   [[ " $c " == *" cpu "* && " $c " == *" cpuset "* && " $c " == *" io "* ]]
@@ -1359,10 +1365,10 @@ _cgroup_controllers_active() {
 # delegation drop-in, used by BOTH the sudo-available installer path
 # (_ensure_cgroup_delegation) and admin-run prepare-host (run_prepare_host). Always
 # writes with sudo; returns non-zero on failure so each caller decides how fatal it
-# is — mirroring _provision_subid_ranges. Path overridable (TB_USER_UNIT_DROPIN_DIR)
+# is — mirroring _provision_subid_ranges. Path overridable (TRACEBLOC_USER_UNIT_DROPIN_DIR)
 # for tests.
 _write_cgroup_delegation() {
-  local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
+  local dir="${TRACEBLOC_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
   local conf="$dir/delegate.conf"
   local marker="# Managed by tracebloc installer (RFC 0001 #1221)"
   local desired
@@ -1434,7 +1440,7 @@ _report_cgroup_delegation() {
 # once limit-bearing workloads schedule — so the Tier-1 branch calls this best-effort
 # and a no-sudo host gets a (degraded, clearly-warned) cluster rather than an abort.
 _ensure_cgroup_delegation() {
-  local dir="${TB_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
+  local dir="${TRACEBLOC_USER_UNIT_DROPIN_DIR:-/etc/systemd/system/user@.service.d}"
   local conf="$dir/delegate.conf"
   # Fast path: drop-in already present → no privileged call at all (an unprivileged
   # read; it's world-readable under /etc). But still VERIFY it's active and re-surface
@@ -1489,6 +1495,37 @@ refuse_sudo_wrapped_install() {
   error "Don't run the installer with sudo. It elevates each privileged step itself, and running the whole thing as root would grant Docker to root (not you) and root-own ${SUDO_USER}'s ~/.tracebloc + ~/.kube. Re-run WITHOUT sudo as '${SUDO_USER}'. Admin setting up for someone else? Name the RESEARCHER (not yourself) so they get docker-group access:  export TB_PREPARE_USER=<researcher-username>  &&  curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
 }
 
+# _prepare_host_named_user WHAT -- set TB_PREPARE_TARGET to the user prepare-host is
+# run for: TB_PREPARE_USER, trimmed. WHAT finishes the warning's "prepare-host ..."
+# for this path. The user must be named EXPLICITLY: never $SUDO_USER, which is the
+# ADMIN who ran prepare-host, not the researcher (granting the admin would report
+# success while the researcher still can't install; Bugbot #377).
+#
+# TB_PREPARE_USER is the ONLY name read here, although the other CLI hand-off names
+# also accept a TRACEBLOC_ spelling. Every `tracebloc prepare-host` clears an
+# inherited TB_PREPARE_USER and sets it only when a researcher was named, so a bare
+# `tracebloc prepare-host` grants nobody. Older CLIs clear only that spelling, and
+# they run this same live installer: a TRACEBLOC_PREPARE_USER left in the admin's
+# shell would pass straight through them, and reading it here would hand
+# docker-group access (root-equivalent on this host), or on k3s cluster-admin, to a
+# user the admin did not name on this run. So that spelling is reported, never read.
+TB_PREPARE_TARGET=""
+_prepare_host_named_user() {
+  local target="${TB_PREPARE_USER:-}"
+  # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
+  # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
+  # messaging even though a real username was intended (Bugbot r3).
+  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
+  # A CLI that sets both spellings sets them equal, so only a DIFFERENT value
+  # (or one with no TB_PREPARE_USER beside it) is worth a warning.
+  local _canon="${TRACEBLOC_PREPARE_USER:-}"
+  _canon="${_canon#"${_canon%%[![:space:]]*}"}"; _canon="${_canon%"${_canon##*[![:space:]]}"}"
+  if [[ -n "$_canon" && "$_canon" != "$target" ]]; then
+    warn "Ignoring TRACEBLOC_PREPARE_USER: prepare-host ${1} the user named in TB_PREPARE_USER (or on the tracebloc prepare-host command line)."
+  fi
+  TB_PREPARE_TARGET="$target"
+}
+
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
 # administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
 # `tracebloc prepare-host`) on a host a researcher can't install on unprivileged
@@ -1503,6 +1540,15 @@ run_prepare_host() {
     error "prepare-host is for Linux hosts. On macOS/Windows, install Docker Desktop (or enable WSL2) as an administrator, then run the installer normally."
   fi
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
+  # Native k3s (RFC-0175 D3, 1.1g): k3s itself, set up FOR the named user, who
+  # then installs with no administrator rights (k3s.sh, _native_k3s_prepare_host).
+  # No Docker is installed on this path.
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    _prepare_host_named_user "sets k3s up only for"
+    _native_k3s_prepare_host "$TB_PREPARE_TARGET"
+    return $?
+  fi
 
   step_header a "Preparing this host for tracebloc (one-time administrator step)"
   if declare -F host_audit >/dev/null 2>&1; then host_audit; fi
@@ -1521,32 +1567,10 @@ run_prepare_host() {
   install_system_deps
 
   # Grant the researcher docker-group access so THEIR later install is Tier 0
-  # (zero root). The researcher must be named EXPLICITLY via TB_PREPARE_USER — we
-  # must NOT fall back to $SUDO_USER, which is the ADMIN who ran prepare-host, not
-  # the researcher (adding the admin would report success while the researcher
-  # still can't install; Bugbot #377). Best-effort: never fail the prep over it.
-  #
-  # TB_PREPARE_USER is the ONLY name this grant reads, although the other CLI
-  # hand-off names also accept a TRACEBLOC_ spelling. Every `tracebloc
-  # prepare-host` clears an inherited TB_PREPARE_USER and sets it only when a
-  # researcher was named, so a bare `tracebloc prepare-host` grants nobody. Older
-  # CLIs clear only that spelling, and they run this same live installer: a
-  # TRACEBLOC_PREPARE_USER left in the admin's shell would pass straight through
-  # them, and reading it here would hand docker-group access (root-equivalent on
-  # this host) to a user the admin did not name on this run. So that spelling is
-  # reported below, never read.
-  local target="${TB_PREPARE_USER:-}"
-  # Trim surrounding whitespace BEFORE the non-empty gate: a pasted value with
-  # stray spaces passes [[ -n ]], fails usermod, and skips the honest no-grant
-  # messaging even though a real username was intended (Bugbot r3).
-  target="${target#"${target%%[![:space:]]*}"}"; target="${target%"${target##*[![:space:]]}"}"
-  # A CLI that sets both spellings sets them equal, so only a DIFFERENT value
-  # (or one with no TB_PREPARE_USER beside it) is worth a warning.
-  local _canon="${TRACEBLOC_PREPARE_USER:-}"
-  _canon="${_canon#"${_canon%%[![:space:]]*}"}"; _canon="${_canon%"${_canon##*[![:space:]]}"}"
-  if [[ -n "$_canon" && "$_canon" != "$target" ]]; then
-    warn "Ignoring TRACEBLOC_PREPARE_USER: prepare-host grants docker-group access only to the user named in TB_PREPARE_USER (or on the tracebloc prepare-host command line)."
-  fi
+  # (zero root). The researcher must be named EXPLICITLY via TB_PREPARE_USER
+  # (_prepare_host_named_user). Best-effort: never fail the prep over it.
+  _prepare_host_named_user "grants docker-group access only to"
+  local target="$TB_PREPARE_TARGET"
   local granted=0
   if [[ -n "$target" && "$target" != "root" ]]; then
     if sudo usermod -aG docker "$target" 2>/dev/null; then
@@ -1562,8 +1586,8 @@ run_prepare_host() {
     if ! _provision_subid_ranges "$target"; then
       # Non-overlapping start for the manual fallback too — don't hardcode 100000,
       # which collides on a host that already allocated that block (Bugbot #458).
-      # Honor the TB_SUBUID_FILE/TB_SUBGID_FILE overrides like every other subid path.
-      local _s; _s="$(_next_subid_start "${TB_SUBUID_FILE:-/etc/subuid}" "${TB_SUBGID_FILE:-/etc/subgid}")"
+      # Honor the TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE overrides like every other subid path.
+      local _s; _s="$(_next_subid_start "${TRACEBLOC_SUBUID_FILE:-/etc/subuid}" "${TRACEBLOC_SUBGID_FILE:-/etc/subgid}")"
       warn "Couldn't provision subuid/subgid ranges for ${target}; add later with:  sudo usermod --add-subuids ${_s}-$(( _s + 65535 )) --add-subgids ${_s}-$(( _s + 65535 )) ${target}"
     fi
   else

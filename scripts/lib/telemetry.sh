@@ -82,9 +82,9 @@ TB_TELEMETRY_EVENT_NAMES="install.run.succeeded install.run.failed install.run.c
 
 # ── Client-state vocabulary ──────────────────────────────────────────────────
 # summary.sh's wait_for_client_ready + _diagnose_not_ready are the only writers
-# of CLIENT_STATE. The agreement test derives THAT set from summary.sh and
+# of TRACEBLOC_CLIENT_STATE. The agreement test derives THAT set from summary.sh and
 # compares; anything not in this list is reported as `unknown` rather than
-# passed through, because CLIENT_STATE is a shell variable and a shell variable
+# passed through, because TRACEBLOC_CLIENT_STATE is a shell variable and a shell variable
 # is not a closed set until something closes it.
 TB_TELEMETRY_CLIENT_STATES="connected starting bad_creds image_pull image_pull_ca crash"
 
@@ -111,14 +111,14 @@ TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed 
 # ── Source-file vocabulary ───────────────────────────────────────────────────
 # The installer already records WHERE it died (common.sh's _record_err), and
 # "died in setup-linux.sh at line 412" is the difference between an actionable
-# failure and an unclassified one. The full TB_ERR_LOC is a PATH, though —
+# failure and an unclassified one. The full TRACEBLOC_ERR_LOC is a PATH, though —
 # under curl|bash it is a temp directory, which on macOS sits under
 # /var/folders/<hash> — so only the basename is emitted, and only if it is one
 # of the installer's own scripts. That set is gen-manifest.sh's FILES array plus
 # the bootstrap; the agreement test derives it from there.
 #
 # `install.sh` is in the set for derivation symmetry and is UNREACHABLE today:
-# TB_ERR_LOC has exactly one writer, common.sh's _record_err (common.sh:988), and
+# TRACEBLOC_ERR_LOC has exactly one writer, common.sh's _record_err (common.sh:988), and
 # common.sh is only ever sourced inside install-k8s.sh's process. Nothing in the
 # bootstrap can name itself here. Kept rather than special-cased out, because the
 # day the bootstrap does get an emitter the name must already be admissible —
@@ -359,7 +359,7 @@ _telemetry_phase_ms() {
 
 # ── Classification ───────────────────────────────────────────────────────────
 
-# telemetry_error_class EXIT_CODE PHASE CLIENT_STATE HANDOFF — the closed error.type.
+# telemetry_error_class EXIT_CODE PHASE TRACEBLOC_CLIENT_STATE HANDOFF — the closed error.type.
 #
 # Every input is a closed set (HANDOFF is a boolean), so this cannot see — and
 # therefore cannot forward — an error message, a path or an argument. A readiness
@@ -600,7 +600,7 @@ telemetry_render_event() {
   # parsing this function rather than by reading the declaration twice.
   _telemetry_in_set "$event" "$TB_TELEMETRY_EVENT_NAMES" || return 1
 
-  state="${CLIENT_STATE:-}"
+  state="${TRACEBLOC_CLIENT_STATE:-}"
   _telemetry_in_set "$state" "$TB_TELEMETRY_CLIENT_STATES" || state=""
 
   # The phase is checked here as well as at the point it is set. telemetry_phase_begin
@@ -628,8 +628,8 @@ telemetry_render_event() {
   # The #736 PATH case, as a number. install-cli.sh already computes this — it
   # asks whether a FRESH login shell resolves `tracebloc` — and until now only
   # ever printed advice about it. 1/0 rather than true/false so it sums.
-  case "${TB_CLI_ON_FRESH_PATH:-}" in
-    0|1) _telemetry_attr "tracebloc.install.cli_on_path" "${TB_CLI_ON_FRESH_PATH}" int ;;
+  case "${TRACEBLOC_CLI_ON_FRESH_PATH:-}" in
+    0|1) _telemetry_attr "tracebloc.install.cli_on_path" "${TRACEBLOC_CLI_ON_FRESH_PATH}" int ;;
   esac
 
   # Per-phase durations: a fixed, finite set of keys, one per phase name.
@@ -679,13 +679,13 @@ telemetry_render_event() {
     #
     # Deliberately NOT gated the other way (source kept, line missing): that
     # cannot happen, and a branch for it would be belt and braces no test could
-    # redden. TB_ERR_LOC has exactly one writer in the whole tree, the ERR trap at
+    # redden. TRACEBLOC_ERR_LOC has exactly one writer in the whole tree, the ERR trap at
     # install-k8s.sh:118, which always appends `:${LINENO}` — so the line half is
     # always a number. And a file with no line is honest information anyway; a
     # line with no file is the only one of the two that lies.
-    if [ -n "${TB_ERR_LOC:-}" ] && src="$(_telemetry_source_basename "$TB_ERR_LOC")"; then
+    if [ -n "${TRACEBLOC_ERR_LOC:-}" ] && src="$(_telemetry_source_basename "$TRACEBLOC_ERR_LOC")"; then
       _telemetry_attr "tracebloc.install.source" "$src"
-      _telemetry_attr "tracebloc.install.source_line" "$(_telemetry_source_line "$TB_ERR_LOC")" int
+      _telemetry_attr "tracebloc.install.source_line" "$(_telemetry_source_line "$TRACEBLOC_ERR_LOC")" int
     fi
   fi
 

@@ -76,6 +76,143 @@ data:
         log "WARNING: helm version unreadable ('$HELM_VERSION_SHORT'); upgrading without --wait=legacy" ;;
     esac
 
+    # --- failed --atomic upgrade classification: begin (backend#2961) ----------
+    # EXIT CODES of this script, the whole interface a Job's status carries:
+    #   0  nothing to do, upgraded, or a skip the log names (pending-* in flight,
+    #      mid-uninstall, ahead of the index, "cannot tell" on the reconcile), or
+    #      an abandoned wedge rolled back, with the upgrade deferred to the next
+    #      tick (backend#5273: recovery and upgrade never share a tick)
+    #   1  any other failure: the repo fetch, version resolution, a `helm upgrade`
+    #      that failed and was rolled back (timeout or not), a wedge recovery that
+    #      was refused (no deployed revision) or whose rollback failed, and set -e
+    #      aborts
+    #   3  a `helm upgrade` failed AND the release is not `deployed` afterwards:
+    #      helm's own --atomic rollback failed, or the release reads failed /
+    #      pending-* after it. Distinct from 1 because the edge is now left
+    #      broken rather than on its old version, and telemetry counts it apart.
+    #
+    # Why the classification exists. An upgrade whose wait cannot finish inside
+    # --timeout ("context deadline exceeded") is rolled back by --atomic and
+    # retried by the next hourly tick, for ever, with nothing but helm's own
+    # error to tell it from any other failure. Measured on a live edge: every
+    # attempt for three days timed out because a Deployment never went Ready
+    # (its pod could not log in to MySQL), and from 2026-10-02 the rollback
+    # timed out on the same Deployment too, leaving the release `failed`. So on
+    # a failure this names, in one line each: a TIMEOUT with the versions, the
+    # timeout and what was not ready; a ROLLBACK FAILED with the status the
+    # release was left in. It changes no flag and no timeout: the same argv
+    # runs, only its output is read.
+    #
+    # Read from helm, not inferred: the last `Error:` line helm printed, and
+    # `helm status` after the attempt. "an error occurred while rolling back the
+    # release. original upgrade error: X" is helm's wording (3 and 4) for a
+    # failed rollback; the timeout is judged on X alone, so a non-timeout upgrade
+    # failure whose ROLLBACK timed out is not miscounted as an upgrade timeout.
+
+    # What the release's resources table says is not ready, one comma-separated
+    # line, at most 10 entries. Reads `helm status --show-resources` (Helm 3) or
+    # plain `helm status` (Helm 4 lists resources by default and may refuse the
+    # flag) on stdin: a `==> v1/<Kind>` heading, a NAME header, one row per
+    # object. READY `a/b` with a != b, COMPLETIONS `a/b` likewise, or a DaemonSet
+    # READY below DESIRED, is not ready; a STATUS column (pods) is appended. No
+    # kubectl: the alpine/helm image has none, and helm reads only what the
+    # release owns, through the Role it already upgrades with -- no new RBAC.
+    not_ready_workloads() {
+      awk '
+        /^==> / { kind = $2; sub(/.*\//, "", kind); sub(/\(.*$/, "", kind); hdr = 0; next }
+        kind == "" { next }
+        /^NAME[ \t]/ {
+          r = 0; d = 0; s = 0
+          for (i = 1; i <= NF; i++) {
+            if ($i == "READY" || $i == "COMPLETIONS") r = i
+            if ($i == "DESIRED") d = i
+            if ($i == "STATUS") s = i
+          }
+          hdr = 1; next
+        }
+        NF == 0 { kind = ""; hdr = 0; next }
+        hdr && r {
+          v = $r; item = ""
+          if (d) { if (v + 0 < $d + 0) item = tolower(kind) "/" $1 " " v "/" $d " ready" }
+          else if (split(v, a, "/") == 2 && a[1] != a[2]) item = tolower(kind) "/" $1 " " v " ready"
+          if (item == "") next
+          if (s) item = item " (" $s ")"
+          n++
+          if (n <= 10) { out = out sep item; sep = ", " }
+        }
+        END {
+          if (n > 10) out = out ", +" (n - 10) " more"
+          print out
+        }'
+    }
+
+    # One `helm upgrade --atomic`, run as given ($3...), with its outcome read.
+    # $1/$2 are the from/to chart versions the log names. Output still streams
+    # (tee), so a Job killed mid-op keeps what helm printed. Returns 0 on
+    # success; on failure prints the classification and EXITS (1 or 3).
+    atomic_upgrade() {
+      _au_from="$1"; _au_to="$2"; shift 2
+      _au_out=/tmp/auto-upgrade-helm.out
+      _au_rcf=/tmp/auto-upgrade-helm.rc
+      rm -f "$_au_out" "$_au_rcf"
+      { "$@" 2>&1 && echo 0 >"$_au_rcf" || echo "$?" >"$_au_rcf"; } | tee "$_au_out"
+      _au_rc="$(cat "$_au_rcf" 2>/dev/null || true)"
+      case "$_au_rc" in ''|*[!0-9]*) _au_rc=1 ;; esac
+      [ "$_au_rc" -eq 0 ] && return 0
+
+      _au_err="$(grep '^Error: ' "$_au_out" 2>/dev/null | tail -n 1 || true)"
+      [ -n "$_au_err" ] || _au_err="$(tail -n 1 "$_au_out" 2>/dev/null || true)"
+      # The ORIGINAL upgrade error, which is what the timeout is judged on.
+      # Helm 4 logs it on its own line before rolling back
+      # (`level=WARN msg="upgrade failed" ... error="..."`); otherwise it is the
+      # middle of helm's rollback-failure wording, "... original upgrade error:
+      # <upgrade error>: release <name> failed: <rollback error>", so cut at the
+      # last ": release <name> failed: ". A rollback error in any other shape
+      # stays attached, and is read as part of the upgrade error.
+      _au_rollback_err=no
+      _au_orig="$_au_err"
+      case "$_au_err" in
+        *"an error occurred while rolling back the release"*)
+          _au_rollback_err=yes
+          _au_orig="${_au_err#*original upgrade error: }"
+          _au_orig="${_au_orig%": release $RELEASE_NAME failed: "*}" ;;
+      esac
+      _au_warn="$(grep 'msg="upgrade failed"' "$_au_out" 2>/dev/null | tail -n 1 || true)"
+      case "$_au_warn" in
+        *' error="'*) _au_orig="${_au_warn#* error=\"}"; _au_orig="${_au_orig%%\"*}" ;;
+      esac
+      _au_kind=other
+      case "$_au_orig" in
+        *"context deadline exceeded"*|*"timed out waiting for the condition"*) _au_kind=timeout ;;
+      esac
+      _au_status="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
+        | awk '/^STATUS:/ {print $2; exit}' || true)"
+      if [ "$_au_rollback_err" = yes ]; then
+        _au_rb=failed
+      else
+        case "$_au_status" in
+          deployed) _au_rb=ok ;;
+          failed|pending-*) _au_rb=failed ;;
+          *) _au_rb=unknown ;;
+        esac
+      fi
+
+      if [ "$_au_kind" = timeout ]; then
+        _au_res="$( { helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" --show-resources 2>/dev/null \
+          || helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null; } | not_ready_workloads || true)"
+        log "ERROR: UPGRADE TIMEOUT $_au_from -> $_au_to: helm's wait did not see the release ready within --timeout $UPGRADE_TIMEOUT; rollback: $_au_rb (release status: ${_au_status:-unreadable}); not ready: ${_au_res:-none named by helm status, check: kubectl -n $RELEASE_NAMESPACE get pods}"
+      fi
+      case "$_au_rb" in
+        failed)
+          log "ERROR: ROLLBACK FAILED after the $_au_kind failure of $_au_from -> $_au_to: release '$RELEASE_NAME' is '${_au_status:-unreadable}', not 'deployed'; it is left broken, not on $_au_from. Inspect: helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
+          exit 3 ;;
+        unknown)
+          log "ERROR: upgrade $_au_from -> $_au_to failed and the release status cannot be read afterwards ('${_au_status}'): cannot tell whether helm's rollback left it deployed" ;;
+      esac
+      exit 1
+    }
+    # --- failed --atomic upgrade classification: end -----------------------------
+
     # #2877: minimum age (seconds) a release must have sat in a pending-* state
     # before we treat it as an ABANDONED wedge (safe to roll back) rather than an
     # upgrade that is currently IN FLIGHT (must be left alone). Injected from
@@ -279,7 +416,7 @@ data:
     telemetry_reconcile_if_needed() {
       if _why="$(telemetry_reconcile_verdict)"; then
         log "reconcile: $_why; re-rendering $CURRENT in place (same-version upgrade, values reused)"
-        helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+        atomic_upgrade "$CURRENT" "$CURRENT" helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
           --namespace "$RELEASE_NAMESPACE" \
           --version "$CURRENT" \
           --reset-then-reuse-values \
@@ -312,7 +449,8 @@ data:
     # subsequent hourly tick then fails with "another operation is in progress"
     # forever: auto-upgrade (the security-fix delivery path) is silently dead
     # until a human runs `helm rollback`. Detect that wedge and roll back to the
-    # last deployed revision so this tick can proceed. Parsed from the STATUS:
+    # last deployed revision; the tick then ENDS, and the next one upgrades from a
+    # `deployed` release (backend#5273, see the deadline below). Parsed from the STATUS:
     # line jq-free — the alpine/helm image ships without jq. (pending-install
     # can't occur here: this CronJob is part of the release it upgrades, so the
     # release must have deployed at least once for this script to run.)
@@ -320,6 +458,27 @@ data:
     # did with --show-resources); a resource it cannot read is logged, not an
     # error, and STATUS: still prints before the RESOURCES table. The line is
     # plain text here: helm colours it only on a terminal, and this is a pipe.
+    # backend#5273: the highest revision `helm history -o json` reports as
+    # `deployed`, or nothing. jq-free like the rest of this script: collapse the
+    # body to one line, then split it into records on `{"revision":`, the key
+    # helm writes first in every history entry. A description that quotes that
+    # text, or `"status":"deployed"`, carries it backslash-escaped, so it can
+    # neither start a record nor match the status test. An unreadable body, or
+    # one with no deployed entry, prints nothing: the caller refuses.
+    last_deployed_revision() {
+      printf '%s' "$1" | tr -d '\n' | awk '{
+        n = split($0, recs, /\{[ ]*"revision":[ ]*/)
+        best = ""
+        for (i = 2; i <= n; i++) {
+          r = recs[i]
+          if (match(r, /^[0-9][0-9]*/) == 0) continue
+          rev = substr(r, 1, RLENGTH) + 0
+          if (r ~ /"status":[ ]*"deployed"/ && (best == "" || rev > best)) best = rev
+        }
+        if (best != "") print best
+      }'
+    }
+
     STATUS="$(helm status "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" 2>/dev/null \
       | awk '/^STATUS:/ {print $2; exit}')"
     case "$STATUS" in
@@ -353,6 +512,26 @@ data:
           # future indented body. Same defensive hardening as the `tr` above.
           PENDING_REV="$(printf '%s' "$INFO_JSON" | awk 'match($0, /"version":[ ]*[0-9][0-9]*/) {
             v = substr($0, RSTART, RLENGTH); sub(/"version":[ ]*/, "", v); print v; exit }')"
+          # backend#5273: the target is the last revision whose status is
+          # `deployed`, read from `helm history` -- never helm's revision-less
+          # default, which is "current - 1". In a pending-rollback wedge (a Job
+          # killed while `--atomic` was undoing a failed upgrade) history reads
+          # N deployed, N+1 failed, N+2 pending-rollback, so "current - 1" is the
+          # FAILED upgrade: the recovery re-applied the new chart, unwaited, and
+          # called it a rollback. No deployed revision means there is nothing
+          # known-good to return to, so refuse rather than guess.
+          HISTORY_JSON="$(helm history "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>/dev/null || true)"
+          TARGET_REV="$(last_deployed_revision "$HISTORY_JSON")"
+          if [ -z "$TARGET_REV" ]; then
+            log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS' and its history names no"
+            log "'deployed' revision to return to. Refusing the rollback: a revision-less one"
+            log "would land on whatever revision precedes the wedge, which may be the failed"
+            log "upgrade itself (backend#5273). Recover by hand: read the history, then roll"
+            log "back to the last revision that worked:"
+            log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
+            log "  helm rollback $RELEASE_NAME <revision> -n $RELEASE_NAMESPACE --wait"
+            exit 1
+          fi
           # Surface it (#2877): the rollback discards the pending revision's
           # values. Log it loud and actionable — `restartPolicy: Never`
           # (backend#2620) keeps this Pod's log readable so an operator can see
@@ -360,15 +539,35 @@ data:
           log "=========================== auto-upgrade WARNING ==========================="
           log "release '$RELEASE_NAME' has been stuck in '$STATUS' for ${AGE}s (>= threshold"
           log "${WEDGE_MIN_AGE_SECONDS}s): a previous 'helm upgrade' is presumed killed"
-          log "mid-operation and ABANDONED. Rolling back to the last deployed revision so"
-          log "auto-upgrade can proceed (#554). This DISCARDS the values from the"
+          log "mid-operation and ABANDONED. Rolling back to the last deployed revision"
+          log "(revision $TARGET_REV) so auto-upgrade can proceed (#554). This DISCARDS the values from the"
           log "interrupted upgrade${PENDING_REV:+ (revision $PENDING_REV)}. If that upgrade was intentional,"
           log "recover its values BEFORE the next tick re-applies chart defaults:"
           log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
           log "  helm get values $RELEASE_NAME -n $RELEASE_NAMESPACE${PENDING_REV:+ --revision $PENDING_REV}"
           log "============================================================================"
-          helm rollback "$RELEASE_NAME" -n "$RELEASE_NAMESPACE"
-          log "rollback complete; continuing"
+          # Wait on it (backend#5273): the rollback is this tick's only readiness
+          # check on the revision it restores. The wait mode is the upgrade's
+          # (--wait=legacy on Helm 4, for the GPU edge's name-only RBAC) and
+          # Helm 3's boolean --wait on any other readable major; an unreadable
+          # version passes no --wait, the same choice the upgrade makes, said above.
+          ROLLBACK_WAIT_FLAG="$HELM_WAIT_FLAG"
+          case "$HELM_VERSION_SHORT" in
+            v[0-9]*) [ -n "$ROLLBACK_WAIT_FLAG" ] || ROLLBACK_WAIT_FLAG="--wait" ;;
+          esac
+          if ! helm rollback "$RELEASE_NAME" "$TARGET_REV" -n "$RELEASE_NAMESPACE" \
+              ${ROLLBACK_WAIT_FLAG:+"$ROLLBACK_WAIT_FLAG"} \
+              --timeout "$UPGRADE_TIMEOUT"; then
+            log "ERROR: rollback of '$RELEASE_NAME' to revision $TARGET_REV failed; not upgrading this tick"
+            exit 1
+          fi
+          # The tick ENDS here (backend#5273). The rollback just waited up to
+          # $UPGRADE_TIMEOUT, and an `--atomic` upgrade can wait that twice more,
+          # which is past the Job's activeDeadlineSeconds (sized for ONE
+          # `--atomic`, below): killed mid-op, the release would be wedged again.
+          # The next hourly tick finds it `deployed` and upgrades as usual.
+          log "rollback to revision $TARGET_REV complete; the upgrade is deferred to the next tick"
+          exit 0
         else
           # Recent (or indeterminate age): far more likely an upgrade in progress
           # than an abandoned wedge. Do NOT touch it — skip this tick cleanly (we
@@ -379,6 +578,13 @@ data:
           log "release is '$STATUS' but only ${AGE:-an indeterminate number of} seconds old (< threshold ${WEDGE_MIN_AGE_SECONDS}s): an upgrade is most likely in progress. NOT rolling back — skipping this tick so an in-flight upgrade is never clobbered."
           exit 0
         fi
+        ;;
+      failed)
+        # backend#2961: a release left `failed` by an earlier upgrade, e.g. a tick whose
+        # rollback failed (exit 3). Not a wedge -- helm upgrades over `failed`
+        # -- so the tick proceeds, but it says so, so the state is never
+        # readable only from `helm status`.
+        log "WARNING: release '$RELEASE_NAME' is 'failed' before this tick (an earlier upgrade or its rollback failed; see helm history $RELEASE_NAME -n $RELEASE_NAMESPACE); attempting the upgrade over it"
         ;;
       uninstalling)
         # A killed `helm uninstall` leaves this state. We can't clear it here — the
@@ -457,7 +663,8 @@ data:
     # No --server-side: Helm 4's `auto` applies with the method the release's
     # last revision recorded. A revision the Helm 3 image wrote records none, so
     # those edges stay client-side (3-way merge); see docs/MIGRATIONS.md.
-    helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
+    # Through atomic_upgrade (backend#2961): same argv, its failure classified.
+    atomic_upgrade "$CURRENT" "$LATEST" helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
       --namespace "$RELEASE_NAMESPACE" \
       --version "$LATEST" \
       --reset-then-reuse-values \
@@ -508,9 +715,14 @@ spec:
       # again on the rollback, which uses the same wait (client-dev#1519,
       # measured: a 10m timeout under the old 900s cap was killed mid-rollback).
       # So take the MAX of the configured floor (default 900s) and 2 x the parsed
-      # timeout plus 300s headroom for the repo fetch and the 60s server dry-run.
+      # timeout plus 300s headroom for the repo fetch, the 60s server dry-run and
+      # the `helm status` reads that classify a failed upgrade (backend#2961).
       # Only one `--atomic` runs per tick (the same-version reconcile runs only
-      # when there is no newer chart), so 2 x timeout covers both sites. At the
+      # when there is no newer chart), so 2 x timeout covers both sites. The
+      # wedge recovery's rollback also waits up to `timeout`, but a tick that
+      # recovers a wedge ends after that rollback and leaves the upgrade to the
+      # next tick (backend#5273), so it never shares a tick with an `--atomic`:
+      # that tick costs at most 1 x timeout + 300s. At the
       # 10m default that is 1500s, inside the hourly schedule; a timeout of 28m
       # or more crosses it, and Forbid skips the tick that falls inside the run.
       # `| default 900` preserves the reuse-values nil-guard when the key is absent.
