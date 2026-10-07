@@ -135,13 +135,17 @@ _nvidia_unsupported_name() {
 #                               the GPU steps install and wire nothing
 #                               (_gpu_floor_skips), so the install runs CPU-only
 # below-compute and below-hard-floor also set TB_GPU_UNSUPPORTED_REASON / _NAME, which
-# the chart passes to the platform (client-dev#1633); every other verdict clears them.
+# the chart passes to the platform (client-dev#1633), and TB_GPU_UNSUPPORTED_CODE, the
+# machine-readable kind beside the sentence (compute_too_old / driver_too_old,
+# backend#5296); every other verdict clears all three.
 _nvidia_gpu_floor_gate() {
   local floor="$TB_NVIDIA_DRIVER_FLOOR" cap_floor="$TB_NVIDIA_COMPUTE_CAP_FLOOR"
   local hard="$TB_NVIDIA_DRIVER_HARD_FLOOR" names="${3:-}"
   local drv cap cmd old_name
   TB_GPU_FLOOR_VERDICT="$(_nvidia_gpu_floor_verdict "$1" "$2" "$floor" "$cap_floor" "$hard" "$names")"
   TB_GPU_UNSUPPORTED_REASON=""; TB_GPU_UNSUPPORTED_NAME=""
+  TB_GPU_UNSUPPORTED_CODE=""
+  TB_GPU_NVIDIA_NAMES="$names"
   drv="$(_tb_lowest_version "$1")" || drv="unknown"
   cap="$(_tb_lowest_version "$2")" || cap="unknown"
   log "GPU floor: ${TB_GPU_FLOOR_VERDICT} (driver ${drv}, floor ${floor}, hard floor ${hard}; compute capability ${cap}, floor ${cap_floor})"
@@ -178,6 +182,7 @@ _nvidia_gpu_floor_gate() {
       # the GPU would be advertised and unusable (client-dev#1632).
       warn "NVIDIA driver ${drv} is older than ${hard}, the oldest driver tracebloc's GPU images can use (CUDA 12) — this machine will run in CPU mode."
       TB_GPU_UNSUPPORTED_REASON="The NVIDIA driver on this machine (${drv}) is older than ${hard}, the oldest driver tracebloc's GPU training images can use, so this machine runs on CPU until the driver is updated."
+      TB_GPU_UNSUPPORTED_CODE="driver_too_old"
       TB_GPU_UNSUPPORTED_NAME="$(_nvidia_unsupported_name "$names" "$2" "$cap_floor")"
       if [[ -n "$cmd" ]]; then
         hint "To use the GPU: ${cmd}, reboot, then re-run the installer."
@@ -195,6 +200,7 @@ _nvidia_gpu_floor_gate() {
         warn "This NVIDIA GPU (compute capability ${cap}) is too old for tracebloc's GPU images, which need ${cap_floor} or newer — this machine will run in CPU mode."
         TB_GPU_UNSUPPORTED_REASON="This GPU (compute capability ${cap}) is too old for tracebloc's GPU training images, which need ${cap_floor} or newer (NVIDIA Turing or later), so this machine runs on CPU."
       fi
+      TB_GPU_UNSUPPORTED_CODE="compute_too_old"
       TB_GPU_UNSUPPORTED_NAME="$(_nvidia_unsupported_name "$names" "$2" "$cap_floor")"
       hint "GPU training needs a newer card (NVIDIA Turing or later). Everything else works on CPU."
       ;;
@@ -205,20 +211,119 @@ _nvidia_gpu_floor_gate() {
   esac
 }
 
+# ── The GPU that is not NVIDIA, and the NVIDIA GPU no container can see (backend#5296) ──
+# TB_GPU_UNSUPPORTED_CODE is one of a CLOSED vocabulary the backend stores beside the
+# sentence and the dashboard switches on: compute_too_old and driver_too_old (the floor
+# gate above), not_nvidia and docker_cannot_see_gpu (below). install-k8s.ps1 sets the
+# same four, with the same sentences.
+
+# _GPU_NOT_NVIDIA_VENDOR_RE -- the vendors whose GPU counts as "a GPU, but not NVIDIA",
+# matched against the NORMALISED name (_nvidia_name_normalised). An allowlist, on
+# purpose: a server's BMC or a VM's virtual display (ASPEED, Matrox G200, VMware SVGA,
+# QXL, Cirrus, Hyper-V, bochs) is a display adapter, not a GPU, and must keep reading
+# as "no GPU". Intel counts, the integrated GPU included: a machine whose ONLY GPU is
+# an Intel iGPU has a GPU, and "only NVIDIA GPUs are supported" is the true answer.
+# install-k8s.ps1 carries the SAME string as $GPU_NOT_NVIDIA_VENDOR_RE (detect-gpu.bats
+# holds the two equal).
+_GPU_NOT_NVIDIA_VENDOR_RE=' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|INTEL|APPLE) '
+# _GPU_NOT_NVIDIA_DISCRETE_RE -- of those, the ones named first when a machine has
+# several: a discrete AMD card or the Apple GPU over an Intel iGPU.
+_GPU_NOT_NVIDIA_DISCRETE_RE=' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|APPLE) '
+
+# _gpu_not_nvidia_name NAMES -- pure: NAMES is one GPU description per line (lspci's
+# display-class devices, system_profiler's chipset models). Prints the GPU to report
+# as not_nvidia and returns 0 when NAMES has a GPU of a _GPU_NOT_NVIDIA_VENDOR_RE vendor
+# and NO NVIDIA one; returns 1 otherwise. Any NVIDIA line wins: NVIDIA plus an iGPU is
+# an NVIDIA machine, judged by the floor gate, never not_nvidia.
+_gpu_not_nvidia_name() {
+  local line norm first="" discrete=""
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    norm="$(_nvidia_name_normalised "$line")"
+    [[ "$norm" == *" NVIDIA "* ]] && return 1
+    [[ "$norm" =~ $_GPU_NOT_NVIDIA_VENDOR_RE ]] || continue
+    [[ -n "$first" ]] || first="$line"
+    if [[ -z "$discrete" && "$norm" =~ $_GPU_NOT_NVIDIA_DISCRETE_RE ]]; then discrete="$line"; fi
+  done <<<"$1"
+  [[ -n "$first" ]] || return 1
+  printf '%s\n' "${discrete:-$first}"
+}
+
+# _lspci_display_devices LSPCI -- pure: the description of every display-class device
+# (VGA compatible / 3D / Display controller) in lspci's default output, one per line,
+# without the "(rev NN)" suffix. Nothing for a listing with none.
+_lspci_display_devices() {
+  printf '%s\n' "$1" | sed -nE 's/^[^ ]+ (VGA compatible controller|3D controller|Display controller)[^:]*: (.*)$/\2/p' \
+    | sed -E 's/ *\(rev [0-9a-fA-F]+\)$//'
+}
+
+# _macos_gpu_names PROFILE -- pure: the "Chipset Model:" of every GPU in
+# `system_profiler SPDisplaysDataType` output, one per line.
+_macos_gpu_names() {
+  printf '%s\n' "$1" | sed -n 's/^[[:space:]]*Chipset Model:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p'
+}
+
+# _gpu_not_nvidia_report NAME -- the machine has a GPU and it is not NVIDIA: tell the
+# platform (not_nvidia), with the card's name.
+_gpu_not_nvidia_report() {
+  TB_GPU_UNSUPPORTED_CODE="not_nvidia"
+  TB_GPU_UNSUPPORTED_REASON="This machine's GPU is not an NVIDIA GPU, and tracebloc's GPU training images need one (NVIDIA Turing or later), so this machine runs on CPU."
+  TB_GPU_UNSUPPORTED_NAME="$1"
+}
+
+# _gpu_container_blind RUNTIME -- the container runtime's own GPU probe has just said it
+# cannot give a container this machine's NVIDIA GPU: k3d's `docker run --gpus all` of the
+# GPU node image (k3d.sh), or k3s's containerd not registering the NVIDIA runtime
+# (k3s.sh). RUNTIME names it in the sentence ("Docker", "k3s"). Reports
+# docker_cannot_see_gpu ONLY for a GPU the floor gate let through (ok or below-driver,
+# with a driver that answered nvidia-smi): a card or driver already reported unsupported
+# keeps that reason, and a GPU this run could not read is "cannot tell", never blind.
+_gpu_container_blind() {
+  [[ "${GPU_VENDOR:-}" == nvidia && "${NVIDIA_DRIVER_OK:-false}" == true ]] || return 0
+  case "${TB_GPU_FLOOR_VERDICT:-}" in ok|below-driver) ;; *) return 0 ;; esac
+  [[ -z "${TB_GPU_UNSUPPORTED_CODE:-}" ]] || return 0
+  local name="${TB_GPU_NVIDIA_NAMES:-}"
+  name="${name%%$'\n'*}"; name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+  TB_GPU_UNSUPPORTED_CODE="docker_cannot_see_gpu"
+  TB_GPU_UNSUPPORTED_REASON="${1} can't see this machine's NVIDIA GPU, so this machine runs on CPU until containers can use the GPU."
+  TB_GPU_UNSUPPORTED_NAME="$name"
+}
+
+# _GPU_CONTAINER_BLIND_RE -- the container runtime's own words for "I cannot give this
+# container a GPU", as `docker run --gpus all` prints them: no NVIDIA runtime at all
+# (Docker Desktop without GPU support), the toolkit's CLI failing, NVML refused (WSL2
+# passthrough off). A pull or network failure prints none of them, so it is never read
+# as a blind runtime. install-k8s.ps1 carries the SAME string as $GPU_CONTAINER_BLIND_RE.
+_GPU_CONTAINER_BLIND_RE='could not select device driver|nvidia-container-cli|Failed to initialize NVML|no adapters were found|capabilities: \[\[gpu\]\]'
+
 # A function so bats can model the /proc path (same idiom as common.sh's
 # amd64_emulation_available).
 _nvidia_kernel_module_loaded() { [[ -d /proc/driver/nvidia ]]; }
 
 detect_gpu() {
   log "GPU detection starting — OS=$OS ARCH=$ARCH"
+  TB_GPU_NVIDIA_NAMES=""
+  local lspci_out="" amd_line not_nvidia
 
   if [[ "$OS" == "Darwin" ]]; then
+    TB_GPU_UNSUPPORTED_REASON=""; TB_GPU_UNSUPPORTED_NAME=""; TB_GPU_UNSUPPORTED_CODE=""
     if [[ "$ARCH" == "arm64" ]]; then
       GPU_VENDOR="apple_silicon"
     fi
     echo ""
     warn "GPU training isn't supported on macOS yet — this machine will run in CPU mode."
     hint "For GPU-accelerated training, deploy on a Linux machine with NVIDIA GPUs."
+    # The Mac's GPU (Apple, AMD or Intel) is not NVIDIA: say so to the platform, by
+    # name. Bounded: system_profiler is slow on a busy Mac, and an unreadable answer
+    # is no report, never a guess.
+    local profile=""
+    if has system_profiler; then
+      profile="$(_bounded "${TB_GPU_PROFILER_TIMEOUT:-20}" system_profiler SPDisplaysDataType 2>/dev/null)" || profile=""
+    fi
+    if not_nvidia="$(_gpu_not_nvidia_name "$(_macos_gpu_names "$profile")")"; then
+      _gpu_not_nvidia_report "$not_nvidia"
+    fi
     return
   fi
 
@@ -248,13 +353,15 @@ detect_gpu() {
     return
   fi
 
+  # Past the nvidia-smi path, which the floor gate clears and judges: what follows
+  # reports a GPU that is not NVIDIA, or nothing.
+  TB_GPU_UNSUPPORTED_REASON=""; TB_GPU_UNSUPPORTED_NAME=""; TB_GPU_UNSUPPORTED_CODE=""
   if has lspci; then
     # Capture ONCE, then match the captured value. `lspci | grep -qi` lets grep
     # close the pipe on its first hit; lspci takes SIGPIPE and pipefail makes the
     # pipeline 141, which the `if` reads as "no such GPU" — a CPU-mode cluster on
     # a GPU host. lspci streams device-per-line, so an NVIDIA/AMD card early in
     # the enumeration is exactly the case that loses the race (backend#1778).
-    local lspci_out amd_line
     lspci_out="$(lspci 2>/dev/null || true)"
     if grep -qi "NVIDIA" <<<"$lspci_out"; then
       GPU_VENDOR="nvidia"
@@ -266,6 +373,10 @@ detect_gpu() {
       GPU_VENDOR="amd"
       amd_line="$(grep -i 'Radeon\|AMD.*VGA' <<<"$lspci_out" || true)"
       success "AMD GPU detected: ${amd_line%%$'\n'*}"
+      # The AMD setup still runs, but tracebloc's GPU training images are NVIDIA's.
+      if not_nvidia="$(_gpu_not_nvidia_name "$(_lspci_display_devices "$lspci_out")")"; then
+        _gpu_not_nvidia_report "$not_nvidia"
+      fi
       return
     fi
   fi
@@ -276,6 +387,14 @@ detect_gpu() {
     GPU_VENDOR="nvidia"; NVIDIA_DRIVER_OK=true
     success "NVIDIA GPU detected."
     _nvidia_gpu_floor_gate "" ""
+    return
+  fi
+
+  # A GPU that is not NVIDIA (an Intel GPU, the integrated one included) is a GPU
+  # this machine cannot train on: named, not "no GPU".
+  if not_nvidia="$(_gpu_not_nvidia_name "$(_lspci_display_devices "$lspci_out")")"; then
+    _gpu_not_nvidia_report "$not_nvidia"
+    info "This machine's GPU (${not_nvidia}) is not an NVIDIA GPU. Your environment will run in CPU mode."
     return
   fi
 

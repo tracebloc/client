@@ -328,12 +328,29 @@ _native_k3s_run_install_script() {
   # bypassing a root-aware sudo(). It is resolved HERE, on the caller's PATH, and run
   # by absolute path: env -i resets PATH to the fixed one above, which would not find
   # a timeout(1) installed anywhere else, and env would then fail 127 on an install
-  # that checked for it. No timeout(1) is no bound.
-  local -a bound=()
+  # that checked for it.
+  # A host with no timeout(1) is bounded by _tb_bounded_bg, the pure-bash deadline
+  # _bounded falls back to, answering 124 on the deadline (client-dev#1618). What it
+  # backgrounds must be a BINARY, never the sudo() shadow: it signals the pid it
+  # started, and a function runs in a subshell whose death leaves env and the script
+  # running (measured: the script ran to its end). So the shadow's one rule is
+  # applied here -- root runs bare, non-root runs the real sudo binary -- and with
+  # neither, sudo() fails at once (127) and needs no bound.
+  local secs="${TB_K3S_INSTALL_SH_TIMEOUT:-600}"
   local tmo; tmo="$(command -v timeout 2>/dev/null)" || tmo=""
-  if [[ "$tmo" == /* ]]; then bound=("$tmo" 600); fi
-  # set-u-safe: env_args is seeded with PATH, HOME and the skip flag; bound may be empty
-  sudo env -i "${env_args[@]}" ${bound[@]+"${bound[@]}"} sh "$script" </dev/null
+  if [[ "$tmo" == /* ]]; then
+    # set-u-safe: env_args is seeded with PATH, HOME and INSTALL_K3S_SKIP_DOWNLOAD
+    sudo env -i "${env_args[@]}" "$tmo" "$secs" sh "$script" </dev/null
+    return
+  fi
+  local -a priv=()
+  if [ "$(id -u)" -ne 0 ]; then
+    # set-u-safe: env_args is seeded with PATH, HOME and INSTALL_K3S_SKIP_DOWNLOAD
+    local real; real="$(type -P sudo)" || { sudo env -i "${env_args[@]}" sh "$script" </dev/null; return; }
+    priv=("$real")
+  fi
+  # set-u-safe: priv is empty as root
+  _tb_bounded_bg "$secs" ${priv[@]+"${priv[@]}"} env -i "${env_args[@]}" sh "$script" </dev/null
 }
 
 # ── config.yaml ───────────────────────────────────────────────────────────────
@@ -961,12 +978,19 @@ TB_K3S_GPU_TOOLKIT_FLOOR="1.18.0"
 # k3d smoke test's own marker. A re-run whose signature equals it restarts nothing.
 _native_k3s_gpu_marker() { printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.tracebloc}"; }
 
-# _native_k3s_gpu_cpu REASON -- CPU mode for this run, said ONCE: TRACEBLOC_GPU_WIRED stays 0
-# and the wired-pass marker goes, so the next run asks again. The hint says how to
-# get the GPU: fix REASON and re-run. Native k3s needs no recreate, unlike k3d.
+# _native_k3s_gpu_cpu REASON [blind] -- CPU mode for this run, said ONCE: TRACEBLOC_GPU_WIRED
+# stays 0 and the wired-pass marker goes, so the next run asks again. The hint says how
+# to get the GPU: fix REASON and re-run. Native k3s needs no recreate, unlike k3d.
+# `blind` marks a REASON that is k3s's container runtime itself saying it has no GPU
+# for a container (no NVIDIA runtime, no CDI spec, the runtime never registered), told
+# to the platform as docker_cannot_see_gpu (backend#5296); a read that could not tell
+# passes no flag.
 _native_k3s_gpu_cpu() {
   TRACEBLOC_GPU_WIRED=0
   rm -f "$(_native_k3s_gpu_marker)" 2>/dev/null || true
+  if [[ "${2:-}" == blind ]] && declare -F _gpu_container_blind >/dev/null; then
+    _gpu_container_blind "k3s"
+  fi
   [[ -z "${TB_K3S_GPU_WARNED:-}" ]] || return 0
   TB_K3S_GPU_WARNED=1
   warn "The NVIDIA GPU is not wired into k3s: ${1}. This machine will run in CPU mode."
@@ -1035,7 +1059,7 @@ _native_k3s_gpu_cdi_spec() {
     log "NVIDIA CDI spec written (${TB_K3S_GPU_CDI_PATH})."
     return 0
   fi
-  _native_k3s_gpu_cpu "'nvidia-ctk cdi generate' wrote no CDI spec to ${TB_K3S_GPU_CDI_PATH}; check that 'nvidia-smi' works"
+  _native_k3s_gpu_cpu "'nvidia-ctk cdi generate' wrote no CDI spec to ${TB_K3S_GPU_CDI_PATH}; check that 'nvidia-smi' works" blind
   return 1
 }
 
@@ -1126,7 +1150,7 @@ _native_k3s_gpu_wire() {
       ;;
     1)
       if ! has nvidia-container-runtime; then
-        _native_k3s_gpu_cpu "the NVIDIA container runtime (nvidia-container-runtime) is not on PATH, so k3s cannot register it"
+        _native_k3s_gpu_cpu "the NVIDIA container runtime (nvidia-container-runtime) is not on PATH, so k3s cannot register it" blind
         return 0
       fi
       why="k3s has not registered its '${TB_K3S_GPU_RUNTIME}' runtime"
@@ -1147,7 +1171,7 @@ _native_k3s_gpu_wire() {
     _native_k3s_gpu_handler || rc=$?
     case "$rc" in
       0) ;;
-      1) _native_k3s_gpu_cpu "k3s did not register its '${TB_K3S_GPU_RUNTIME}' runtime, even after a restart"; return 0 ;;
+      1) _native_k3s_gpu_cpu "k3s did not register its '${TB_K3S_GPU_RUNTIME}' runtime, even after a restart" blind; return 0 ;;
       *) _native_k3s_gpu_cpu "$TB_K3S_GPU_READ"; return 0 ;;
     esac
   fi

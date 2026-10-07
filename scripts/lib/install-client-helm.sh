@@ -1736,16 +1736,18 @@ _helm_set_string_escape() {
   printf '%s' "${v//,/\\,}"
 }
 
-# _gpu_unsupported_set_args -- the two --set-string pairs that tell the chart why the
+# _gpu_unsupported_set_args -- the three --set-string pairs that tell the chart why the
 # GPU was left off as unsupported (client-dev#1633, the contract shared with
-# client-runtime#879 and backend#5256): env.GPU_UNSUPPORTED_REASON (one sentence) and
-# env.GPU_UNSUPPORTED_NAME (the card), from detect-gpu.sh's floor gate. ALWAYS both
-# keys, empty when the GPU is supported or absent, so a reconciled release never keeps
-# a stale reason. Into _TB_GPU_UNSUPPORTED_ARGS (an array, bash-3.2 safe).
+# client-runtime#879 and backend#5256): env.GPU_UNSUPPORTED_REASON (one sentence),
+# env.GPU_UNSUPPORTED_NAME (the card) and env.GPU_UNSUPPORTED_CODE (the kind the
+# dashboard switches on, backend#5296), from detect-gpu.sh. ALWAYS all three keys,
+# empty when the GPU is supported or absent, so a reconciled release never keeps a
+# stale reason. Into _TB_GPU_UNSUPPORTED_ARGS (an array, bash-3.2 safe).
 _gpu_unsupported_set_args() {
   _TB_GPU_UNSUPPORTED_ARGS=(
     --set-string "env.GPU_UNSUPPORTED_REASON=$(_helm_set_string_escape "${TB_GPU_UNSUPPORTED_REASON:-}")"
     --set-string "env.GPU_UNSUPPORTED_NAME=$(_helm_set_string_escape "${TB_GPU_UNSUPPORTED_NAME:-}")"
+    --set-string "env.GPU_UNSUPPORTED_CODE=$(_helm_set_string_escape "${TB_GPU_UNSUPPORTED_CODE:-}")"
   )
 }
 
@@ -2070,7 +2072,7 @@ _reconcile_adopted_client() {
   # client-dev#1633: why the GPU was left off as unsupported, THIS run's answer, so a
   # reused release cannot keep a stale reason (empty clears it).
   _gpu_unsupported_set_args
-  _args+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns four words
+  _args+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
   # Reconcile the device-plugin block too, matching the fresh write, so a stale one
   # can't linger: nvidia only when wired (it needs the NVIDIA RuntimeClass: on k3d
   # the one baked into the k3s-cuda node image, on native k3s the one k3s creates
@@ -2084,6 +2086,29 @@ _reconcile_adopted_client() {
     _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
   else
     _args+=(--set "gpu.devicePlugin.enabled=false")
+  fi
+  # The local API (backend#5208) rides the same reconcile, for the same reason:
+  # a release from before localApi existed reuses the chart default, off, while
+  # create_cluster's _ensure_local_api_port has just mapped 127.0.0.1 to its
+  # NodePort. Force THIS run's decision, the one _local_api_values_block writes on
+  # a fresh install: on with the two ports k3d mapped, else off, so a mapping
+  # that is gone (opted out, port busy, edit refused) can't leave a stale "on".
+  # Unknown (docker could not say whether the port is published): no localApi
+  # args at all, so the stored value stands rather than a transient read
+  # switching a working listener off.
+  if [[ "${TB_LOCAL_API_UNKNOWN:-0}" == "1" ]]; then
+    :
+  elif [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]]; then
+    # singleMachine: this run just mapped the port with k3d on this machine, and
+    # a release from the window when node-local was opt-in stores neither
+    # singleNode nor hostPath.enabled=true, so without it the chart's guard would
+    # refuse the upgrade.
+    _args+=(--set "localApi.enabled=true"
+            --set "localApi.nodePort=$TB_LOCAL_API_NODE_PORT"
+            --set "localApi.hostPort=$TB_LOCAL_API_HOST_PORT"
+            --set "localApi.singleMachine=true")
+  else
+    _args+=(--set "localApi.enabled=false")
   fi
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
@@ -2699,6 +2724,18 @@ _adopt_orphaned_gpu_device_plugin() {
   return 0
 }
 
+# The `localApi` block of the generated values: present only when k3d.sh's
+# _ensure_local_api_port recorded the mapping (TB_LOCAL_API_MAPPED=1, with the
+# two ports it mapped), because the chart opens the NodePort only when it
+# exists. Peer of install-k8s.ps1's Get-LocalApiValuesBlock. An existing
+# release gets the same decision as --set args in _reconcile_adopted_client.
+_local_api_values_block() {
+  [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]] || return 0
+  printf '\n# The local API the dashboard reaches on this machine: on, because k3d maps\n'
+  printf '# 127.0.0.1:%s to its NodePort (create_cluster, _ensure_local_api_port).\n' "$TB_LOCAL_API_HOST_PORT"
+  printf 'localApi:\n  enabled: true\n  nodePort: %s\n  hostPort: %s\n  singleMachine: true\n' "$TB_LOCAL_API_NODE_PORT" "$TB_LOCAL_API_HOST_PORT"
+}
+
 install_client_helm() {
   # Step e (Install tracebloc) — main() prints the "e) Installing tracebloc"
   # header. The credential + namespace were provisioned in step d
@@ -3155,6 +3192,7 @@ hostPath:
 STORAGE
 [ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n'
 fi)
+$(_local_api_values_block)
 $(if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" == "8.4" ]]; then
 cat <<'MYSQL84'
 
@@ -3282,7 +3320,7 @@ EOF
     --create-namespace \
     --cleanup-on-fail \
     --values "$values_file" \
-    "${_TB_GPU_UNSUPPORTED_ARGS[@]}" || _helm_rc=$?  # set-u-safe: _gpu_unsupported_set_args always assigns four words
+    "${_TB_GPU_UNSUPPORTED_ARGS[@]}" || _helm_rc=$?  # set-u-safe: _gpu_unsupported_set_args always assigns six words
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
     # leave the release pending-*. The next run auto-recovers

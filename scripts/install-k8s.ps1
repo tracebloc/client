@@ -1351,11 +1351,29 @@ $K3D_GPU_FLAG     = ""
 $GPU_SKIP_REASON  = ""
 # client-dev#1633: why the GPU was left off as UNSUPPORTED, for the platform -- one human
 # sentence and the card's name, set by Confirm-NvidiaDriver on below-compute and
-# below-hard-floor ONLY and passed to the chart as env.GPU_UNSUPPORTED_REASON /
-# env.GPU_UNSUPPORTED_NAME (Install-ClientHelm). Empty otherwise: an unreadable driver or a
+# below-hard-floor, by Find-Gpu for a GPU that is not NVIDIA and by Confirm-DockerGpu for an
+# NVIDIA GPU Docker cannot see (backend#5296) -- ONLY those -- and passed to the chart as
+# env.GPU_UNSUPPORTED_REASON / env.GPU_UNSUPPORTED_NAME (Install-ClientHelm). Empty otherwise: an unreadable driver or a
 # failed GPU step is not "unsupported". The bash twin is TB_GPU_UNSUPPORTED_REASON / _NAME.
 $GPU_UNSUPPORTED_REASON = ""
 $GPU_UNSUPPORTED_NAME   = ""
+# backend#5296: the kind beside the sentence, a CLOSED vocabulary the dashboard switches on:
+# compute_too_old / driver_too_old (Confirm-NvidiaDriver), not_nvidia (Find-Gpu) and
+# docker_cannot_see_gpu (Confirm-DockerGpu). Passed as env.GPU_UNSUPPORTED_CODE. The bash
+# twin is TB_GPU_UNSUPPORTED_CODE, with the same codes and the same sentences.
+$GPU_UNSUPPORTED_CODE   = ""
+# nvidia-smi's name answer (one line per GPU), for a docker_cannot_see_gpu report.
+$NVIDIA_GPU_NAMES       = ""
+# The vendors whose GPU counts as "a GPU, but not NVIDIA", matched against the NORMALISED name
+# (ConvertTo-GpuNormalisedName). An allowlist, so a virtual or BMC display adapter (Hyper-V,
+# VMware SVGA, ASPEED, Matrox, Parsec, Citrix) still reads as "no GPU". Intel counts, the
+# integrated GPU included. detect-gpu.sh carries the SAME strings (detect-gpu.bats holds them equal).
+$GPU_NOT_NVIDIA_VENDOR_RE   = ' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|INTEL|APPLE) '
+$GPU_NOT_NVIDIA_DISCRETE_RE = ' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|APPLE) '
+# Docker's own words for "no GPU for this container" (Docker Desktop without GPU support, the
+# toolkit's CLI failing, NVML refused when WSL2 passthrough is off). A pull or network failure
+# prints none of them. detect-gpu.sh carries the SAME string as _GPU_CONTAINER_BLIND_RE.
+$GPU_CONTAINER_BLIND_RE = 'could not select device driver|nvidia-container-cli|Failed to initialize NVML|no adapters were found|capabilities: \[\[gpu\]\]'
 # #616: CDI device selector for GPU training pods, set ONLY on the Docker Desktop/WSL2 path
 # (where the NVML device plugin can't work and pods get the GPU via a CDI spec). Written to the
 # chart as env.GPU_VISIBLE_DEVICES, which jobs-manager threads into GPU pods as
@@ -2254,6 +2272,53 @@ function Get-NvidiaUnsupportedName {
   return $first
 }
 
+# ConvertTo-GpuNormalisedName -- twin of detect-gpu.sh's _nvidia_name_normalised: upper case,
+# every run of characters that are not a letter or digit one space, one space either side.
+function ConvertTo-GpuNormalisedName([string]$Name) {
+  $n = ([string]$Name).ToUpperInvariant() -replace '[^A-Z0-9]+', ' '
+  return " $($n.Trim()) "
+}
+
+# Get-GpuNotNvidiaName -- pure twin of detect-gpu.sh's _gpu_not_nvidia_name (backend#5296):
+# $Names are GPU names (Win32_VideoController.Name). Returns the GPU to report as not_nvidia
+# when there is a GPU of a $GPU_NOT_NVIDIA_VENDOR_RE vendor and NO NVIDIA one; "" otherwise.
+# Any NVIDIA GPU wins: NVIDIA plus an iGPU is an NVIDIA machine. A discrete AMD card is named
+# before an Intel iGPU.
+function Get-GpuNotNvidiaName {
+  param([string[]]$Names)
+  $first = ""; $discrete = ""
+  foreach ($raw in @($Names)) {
+    $n = ([string]$raw).Trim()
+    if (-not $n) { continue }
+    $norm = ConvertTo-GpuNormalisedName $n
+    if ($norm -clike '* NVIDIA *') { return "" }
+    if ($norm -cnotmatch $GPU_NOT_NVIDIA_VENDOR_RE) { continue }
+    if (-not $first) { $first = $n }
+    if (-not $discrete -and $norm -cmatch $GPU_NOT_NVIDIA_DISCRETE_RE) { $discrete = $n }
+  }
+  if ($discrete) { return $discrete }
+  return $first
+}
+
+# Set-GpuNotNvidia -- the machine has a GPU and it is not NVIDIA: tell the platform (not_nvidia).
+# The sentence is detect-gpu.sh's _gpu_not_nvidia_report's, byte for byte.
+function Set-GpuNotNvidia([string]$Name) {
+  $script:GPU_UNSUPPORTED_CODE = "not_nvidia"
+  $script:GPU_UNSUPPORTED_REASON = "This machine's GPU is not an NVIDIA GPU, and tracebloc's GPU training images need one (NVIDIA Turing or later), so this machine runs on CPU."
+  $script:GPU_UNSUPPORTED_NAME = $Name
+}
+
+# Set-GpuContainerBlind -- Confirm-DockerGpu's probe said Docker cannot give a container the NVIDIA
+# GPU: tell the platform (docker_cannot_see_gpu). Only for a GPU Confirm-NvidiaDriver let through
+# (NVIDIA_DRIVER_OK) and nothing already reported: twin of detect-gpu.sh's _gpu_container_blind.
+function Set-GpuContainerBlind([string]$Runtime) {
+  if ($GPU_VENDOR -ne "nvidia" -or -not $NVIDIA_DRIVER_OK) { return }
+  if ($script:GPU_UNSUPPORTED_CODE) { return }
+  $script:GPU_UNSUPPORTED_CODE = "docker_cannot_see_gpu"
+  $script:GPU_UNSUPPORTED_REASON = "$Runtime can't see this machine's NVIDIA GPU, so this machine runs on CPU until containers can use the GPU."
+  $script:GPU_UNSUPPORTED_NAME = ((([string]$script:NVIDIA_GPU_NAMES) -split "\r?\n") | Select-Object -First 1).Trim()
+}
+
 # ConvertTo-HelmSetValue -- $Value as one `helm --set-string key=VALUE` value (bash twin:
 # install-client-helm.sh _helm_set_string_escape): helm splits --set on an unescaped comma and
 # reads a backslash as an escape, so both are escaped: a backslash becomes two, then a comma
@@ -2312,6 +2377,8 @@ function Confirm-NvidiaDriver {
     $nameOut = if ($nr.Code -eq 0) { [string]$nr.Output } else { "" }
     $verdict = Get-NvidiaFloorVerdict -DriverOutput ([string]$dr.Output) -CapOutput $capOut -DriverFloor $NVIDIA_DRIVER_FLOOR -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR -HardFloor $NVIDIA_DRIVER_HARD_FLOOR -NameOutput $nameOut
     $script:GPU_UNSUPPORTED_REASON = ""; $script:GPU_UNSUPPORTED_NAME = ""
+    $script:GPU_UNSUPPORTED_CODE = ""
+    $script:NVIDIA_GPU_NAMES = $nameOut
     Log "GPU floor: $verdict (driver $driverVer, floor $NVIDIA_DRIVER_FLOOR, hard floor $NVIDIA_DRIVER_HARD_FLOOR; compute capability $capVer, floor $NVIDIA_COMPUTE_CAP_FLOOR)"
     if ($verdict -eq "ok" -or $verdict -eq "below-driver") {
       if ($verdict -eq "below-driver") {
@@ -2351,6 +2418,7 @@ function Confirm-NvidiaDriver {
         Warn "This NVIDIA GPU (compute capability $capVer) is too old for tracebloc's GPU images, which need $NVIDIA_COMPUTE_CAP_FLOOR or newer -- this machine will run in CPU mode."
         $script:GPU_UNSUPPORTED_REASON = "This GPU (compute capability $capVer) is too old for tracebloc's GPU training images, which need $NVIDIA_COMPUTE_CAP_FLOOR or newer (NVIDIA Turing or later), so this machine runs on CPU."
       }
+      $script:GPU_UNSUPPORTED_CODE = "compute_too_old"
       $script:GPU_UNSUPPORTED_NAME = Get-NvidiaUnsupportedName -NameOutput $nameOut -CapOutput $capOut -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR
       Hint "GPU training needs a newer card (NVIDIA Turing or later). Everything else works on CPU."
     } elseif ($verdict -eq "below-hard-floor") {
@@ -2359,6 +2427,7 @@ function Confirm-NvidiaDriver {
       $script:GPU_SKIP_REASON = "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the oldest driver tracebloc's GPU images can use (CUDA 12) -- running CPU-only"
       Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the oldest driver tracebloc's GPU images can use (CUDA 12) -- this machine will run in CPU mode."
       $script:GPU_UNSUPPORTED_REASON = "The NVIDIA driver on this machine ($driverVer) is older than $NVIDIA_DRIVER_HARD_FLOOR, the oldest driver tracebloc's GPU training images can use, so this machine runs on CPU until the driver is updated."
+      $script:GPU_UNSUPPORTED_CODE = "driver_too_old"
       $script:GPU_UNSUPPORTED_NAME = Get-NvidiaUnsupportedName -NameOutput $nameOut -CapOutput $capOut -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR
       Hint "To use the GPU: install NVIDIA driver $NVIDIA_DRIVER_FLOOR or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
     } else {
@@ -2373,27 +2442,36 @@ function Confirm-NvidiaDriver {
 
 function Find-Gpu {
   Log "GPU detection starting"
+  $script:GPU_UNSUPPORTED_REASON = ""; $script:GPU_UNSUPPORTED_NAME = ""; $script:GPU_UNSUPPORTED_CODE = ""
 
   try {
-    $gpus = Get-CimInstance Win32_VideoController |
-            Where-Object { $_.Name -notmatch "Microsoft|Basic|VirtualBox" }
-    foreach ($gpu in $gpus) {
-      if ($gpu.Name -match "NVIDIA") {
-        $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU detected: $($gpu.Name)"; break
-      }
-      if ($gpu.Name -match "AMD|Radeon") {
-        $script:GPU_VENDOR = "amd"; Ok "AMD GPU detected: $($gpu.Name)"; break
-      }
+    $gpus = @(Get-CimInstance Win32_VideoController |
+            Where-Object { $_.Name -notmatch "Microsoft|Basic|VirtualBox" })
+    # NVIDIA first, wherever WMI lists it: an NVIDIA card beside an Intel iGPU or an AMD card
+    # is an NVIDIA machine (backend#5296), never judged by whichever adapter came first.
+    $nv = @($gpus | Where-Object { $_.Name -match "NVIDIA" })
+    $amd = @($gpus | Where-Object { $_.Name -match "AMD|Radeon" })
+    if ($nv.Count -gt 0) {
+      $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU detected: $($nv[0].Name)"
+    } elseif ($amd.Count -gt 0) {
+      $script:GPU_VENDOR = "amd"; Ok "AMD GPU detected: $($amd[0].Name)"
     }
-    if ($GPU_VENDOR -eq "none") { Info "No GPU detected. Your environment will run in CPU mode." }
+    # A GPU that is not NVIDIA (AMD, or Intel -- the integrated one included) is a GPU this
+    # machine cannot train on: named to the platform as not_nvidia, not "no GPU".
+    $notNvidia = Get-GpuNotNvidiaName -Names @($gpus | ForEach-Object { [string]$_.Name })
+    if ($notNvidia) { Set-GpuNotNvidia $notNvidia }
+    if ($script:GPU_VENDOR -eq "none") {
+      if ($notNvidia) { Info "This machine's GPU ($notNvidia) is not an NVIDIA GPU. Your environment will run in CPU mode." }
+      else { Info "No GPU detected. Your environment will run in CPU mode." }
+    }
   } catch {
     Info "No GPU detected. Your environment will run in CPU mode."
     Log "GPU detection failed: $_"
   }
 
-  if ($GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
+  if ($script:GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
 
-  if ($GPU_VENDOR -eq "amd") {
+  if ($script:GPU_VENDOR -eq "amd") {
     Warn "AMD GPU detected."
     Info "GPU acceleration is not available via Docker Desktop on Windows."
     Hint "For AMD GPU workloads, deploy tracebloc on a Linux machine."
@@ -3271,6 +3349,9 @@ function Confirm-DockerGpu {
     # the version lets the operator check it (#616).
     $drv = if ($script:NVIDIA_DRIVER_VERSION) { " (this machine reports driver $($script:NVIDIA_DRIVER_VERSION))" } else { "" }
     $script:GPU_SKIP_REASON = "Docker Desktop can't expose the GPU to a container$drv -- enable GPU support in Docker Desktop, and update the NVIDIA Windows driver to $NVIDIA_DRIVER_FLOOR or newer (WSL2 CUDA needs a recent driver)"
+    # backend#5296: Docker answered in its own words that it has no GPU for a container (not
+    # a pull or network failure): the platform is told docker_cannot_see_gpu.
+    if ([string]$r.Output -match $GPU_CONTAINER_BLIND_RE) { Set-GpuContainerBlind "Docker Desktop" }
   }
   return $false
 }
@@ -3901,6 +3982,250 @@ function Write-K3dRegistriesConfig {
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllLines($cfg, $lines, $utf8NoBom)
   return $cfg
+}
+
+# -- The local dashboard port ---------------------------------------------------
+# Peer of k3d.sh's "The local dashboard port" block, and it must agree with it.
+# The tracebloc dashboard, open in a browser on this machine, asks the client
+# whether the two are on one machine, on 127.0.0.1:$TB_LOCAL_API_HOST_PORT. The
+# k3d load balancer forwards that host port to the chart's NodePort
+# (localApi.nodePort); the chart turns the listener on only when this installer
+# says the mapping exists ($script:TbLocalApiMapped). Bound to 127.0.0.1, so
+# nothing beyond this machine can reach it. Fail-soft everywhere: a port already
+# in use, or a k3d that will not add it, turns the feature off with a warning and
+# never stops the install. TRACEBLOC_LOCAL_API=off opts out.
+$TB_LOCAL_API_HOST_PORT_DEFAULT = "47910"   # = k3d.sh _TB_LOCAL_API_HOST_PORT_DEFAULT = chart localApi.hostPort
+$TB_LOCAL_API_NODE_PORT_DEFAULT = "30910"   # = k3d.sh _TB_LOCAL_API_NODE_PORT_DEFAULT = chart localApi.nodePort
+# Overridable, for a host whose 47910 is spoken for, under the TRACEBLOC_ names
+# (k3d.sh reads the same two).
+$TB_LOCAL_API_HOST_PORT = if ($env:TRACEBLOC_LOCAL_API_HOST_PORT) { $env:TRACEBLOC_LOCAL_API_HOST_PORT } else { $TB_LOCAL_API_HOST_PORT_DEFAULT }
+$TB_LOCAL_API_NODE_PORT = if ($env:TRACEBLOC_LOCAL_API_NODE_PORT) { $env:TRACEBLOC_LOCAL_API_NODE_PORT } else { $TB_LOCAL_API_NODE_PORT_DEFAULT }
+$script:TbLocalApiMapped = $false
+# Set by New-K3dCluster when THIS run's `k3d cluster create` carries the mapping
+# (a failed create stops the install, and a create that failed on binding the
+# port is re-run without it and clears this, so only a successful one leaves it set).
+$script:TbLocalApiCreateMapped = $false
+# $true when docker could not say whether the port is published: the reconcile
+# then leaves the release's stored localApi as it is instead of forcing it.
+$script:TbLocalApiUnknown = $false
+
+function Get-LocalApiPortSpec {
+  return "127.0.0.1:${TB_LOCAL_API_HOST_PORT}:${TB_LOCAL_API_NODE_PORT}@loadbalancer"
+}
+
+function Test-LocalApiWanted {
+  $v = "$env:TRACEBLOC_LOCAL_API".Trim().ToLowerInvariant()
+  return -not ($v -in @("off", "0", "false", "no"))
+}
+
+# Whether the cluster's load balancer already publishes the NodePort on
+# 127.0.0.1:$TB_LOCAL_API_HOST_PORT. Any other answer, an unreadable one
+# included, is "not mapped".
+# THREE answers, the bash twin's 0/1/2, because "could not read" is not "not
+# published": "mapped" (127.0.0.1:$TB_LOCAL_API_HOST_PORT is published), "unmapped"
+# (docker answered and it is not, its own "No public port" refusal included) or
+# "unknown" (docker did not answer). A read right after a create can be slow, so
+# a timeout (Code 124) is retried.
+function Get-LocalApiPortState {
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      $r = Invoke-DockerCli -DockerArgs @("port", "k3d-$CLUSTER_NAME-serverlb", "${TB_LOCAL_API_NODE_PORT}/tcp") -TimeoutSec 15
+    } catch { return "unknown" }
+    $lines = @("$($r.Output)" -split "`r?`n" | ForEach-Object { $_.Trim() })
+    if ($r.Code -eq 0) {
+      if ($lines -contains "127.0.0.1:${TB_LOCAL_API_HOST_PORT}") { return "mapped" }
+      return "unmapped"
+    }
+    if ("$($r.Output)" -match '(?i)no public port') { return "unmapped" }
+    if ($r.Code -ne 124) { break }
+    Start-Sleep -Seconds $attempt
+  }
+  return "unknown"
+}
+
+function Test-LocalApiPortMapped {
+  return ((Get-LocalApiPortState) -eq "mapped")
+}
+
+# Whether something on this machine already listens on the host port.
+function Test-LocalApiHostPortBusy {
+  param([string]$Port = $TB_LOCAL_API_HOST_PORT)
+  $client = New-Object System.Net.Sockets.TcpClient
+  try {
+    $task = $client.ConnectAsync("127.0.0.1", [int]$Port)
+    return ($task.Wait(1000) -and $client.Connected)
+  } catch {
+    return $false
+  } finally {
+    $client.Dispose()
+  }
+}
+
+# The new-cluster half: the mapping goes into `k3d cluster create` itself when
+# the port is free, so a fresh install never restarts its load balancer for it.
+# Returns the -p spec, or "" when the mapping is off or the port is busy. A
+# string, never an array: Windows PowerShell 5.1 turns a returned empty array
+# into $null, and `$k3dArgs += $null` would hand k3d an empty positional
+# argument and fail the very create this must never fail. The caller adds
+# `-p <spec>` only for a non-empty answer.
+function Get-LocalApiCreatePortSpec {
+  if (-not (Test-LocalApiWanted)) { return "" }
+  if (-not (Test-LocalApiPortValid)) {
+    Write-LocalApiInvalidWarning
+    return ""
+  }
+  if (-not (Test-LocalApiHostPortBusy)) {
+    return (Get-LocalApiPortSpec)
+  }
+  return ""
+}
+
+# Whether both ports are a TCP port k3d can take (1..65535, digits only). The
+# overrides are free text; a bad one must turn the feature off, never reach
+# `k3d cluster create` and fail the install (client-dev#1665). Peer of k3d.sh's
+# _local_api_port_valid.
+function Test-LocalApiPortValid {
+  foreach ($p in @("$TB_LOCAL_API_HOST_PORT", "$TB_LOCAL_API_NODE_PORT")) {
+    if ($p -notmatch '^[0-9]{1,5}$') { return $false }
+    $n = [int]$p
+    if ($n -lt 1 -or $n -gt 65535) { return $false }
+  }
+  return $true
+}
+
+function Write-LocalApiInvalidWarning {
+  Warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=$TB_LOCAL_API_HOST_PORT, TRACEBLOC_LOCAL_API_NODE_PORT=$TB_LOCAL_API_NODE_PORT) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set them to numbers from 1 to 65535 and re-run the installer to turn it on."
+}
+
+# Whether a failed `k3d cluster create` failed on the optional dashboard port:
+# this run put the -p in, a line of k3d's output names the host port AND a bind
+# failure (k3d logs the port mapping on every create, so the port alone proves
+# nothing), and k3d did not report a rollback that failed (a half-made cluster
+# left behind would be taken for an existing one by the re-run). The free-port probe is a snapshot, so k3d's own
+# bind can still lose the port (a listener that starts in between, a range
+# Windows reserves); that must cost the dashboard, never the install
+# (client-dev#1665). Peer of k3d.sh's _local_api_create_bind_failed.
+function Test-LocalApiCreateBindFailed {
+  param([string]$Output)
+  if (-not $script:TbLocalApiCreateMapped) { return $false }
+  if ($Output -match '(?i)failed to rollback') { return $false }
+  $portRe = ":" + [regex]::Escape("$TB_LOCAL_API_HOST_PORT") + '([^0-9]|$)'
+  foreach ($line in ($Output -split "`r?`n")) {
+    if ($line -match $portRe -and $line -match '(?i)bind|already allocated|not available|already in use|access permissions') { return $true }
+  }
+  return $false
+}
+
+# This run's create argv without its `-p <spec>` pair, as an array (never $null:
+# the caller re-joins it into k3d's command line). Clears the create-time flag.
+function Remove-LocalApiCreateArgs {
+  param([object[]]$K3dArgs)
+  $spec = Get-LocalApiPortSpec
+  $kept = New-Object System.Collections.Generic.List[object]
+  for ($i = 0; $i -lt $K3dArgs.Count; $i++) {
+    if ($K3dArgs[$i] -eq "-p" -and ($i + 1) -lt $K3dArgs.Count -and $K3dArgs[$i + 1] -eq $spec) { $i++; continue }
+    $kept.Add($K3dArgs[$i])
+  }
+  $script:TbLocalApiCreateMapped = $false
+  return ,$kept.ToArray()
+}
+
+# After the cluster exists, new or reused: record whether the port is mapped,
+# and add it to a cluster created before this installer knew about it.
+function Update-LocalApiPort {
+  $script:TbLocalApiMapped = $false
+  $script:TbLocalApiUnknown = $false
+  if (-not (Test-LocalApiWanted)) {
+    Log "Local dashboard connection: off (TRACEBLOC_LOCAL_API=$env:TRACEBLOC_LOCAL_API)."
+    return
+  }
+  if (-not (Test-LocalApiPortValid)) {
+    Write-LocalApiInvalidWarning
+    return
+  }
+  $state = Get-LocalApiPortState
+  if ($state -eq "mapped") {
+    $script:TbLocalApiMapped = $true
+    return
+  }
+  if ($state -eq "unknown") {
+    # docker could not say. A create that carried -p and succeeded this run had
+    # docker bind that port, so its listener is our own load balancer; never take
+    # it for a stranger and turn the feature off.
+    if ($script:TbLocalApiCreateMapped) {
+      $script:TbLocalApiMapped = $true
+      Log "Couldn't read the load balancer's ports, but this run created '$CLUSTER_NAME' with the local dashboard port mapped."
+      return
+    }
+    # Not "off": a transient docker hiccup must not switch off a listener a
+    # previous run set up. The reconcile keeps the stored localApi as it is.
+    $script:TbLocalApiUnknown = $true
+    Warn "Couldn't read whether '$CLUSTER_NAME' publishes the local dashboard port (docker did not answer), so the local dashboard setting is left as it was. Everything else works; re-run the installer to check it again."
+    return
+  }
+  if (Test-LocalApiHostPortBusy) {
+    Warn "Port $TB_LOCAL_API_HOST_PORT on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+    return
+  }
+  Log "Adding the local dashboard port 127.0.0.1:$TB_LOCAL_API_HOST_PORT to '$CLUSTER_NAME' (its k3d load balancer restarts once)."
+  $edit = $null
+  try {
+    $edit = Invoke-BoundedProcess -FileName "k3d" -Arguments @("cluster", "edit", $CLUSTER_NAME, "--port-add", (Get-LocalApiPortSpec)) -TimeoutSec 300
+  } catch { $edit = $null }
+  $editCode = if ($edit) { $edit.Code } else { $null }
+  if ($edit -and $edit.Output) { Log "k3d cluster edit: $($edit.Output)" }
+  $after = if ($editCode -eq 0) { Get-LocalApiPortState } else { "" }
+  if ($editCode -eq 0 -and $after -ne "unmapped") {
+    # Published, or docker could not say right after the edit: k3d's edit
+    # succeeded, which means it bound the port, so it is mapped.
+    $script:TbLocalApiMapped = $true
+  } elseif ($editCode -eq 0) {
+    Warn "k3d accepted the local dashboard port for '$CLUSTER_NAME' but its load balancer does not publish it, so the dashboard won't be able to tell it is on this machine. Everything else works."
+  } else {
+    Warn "Couldn't add the local dashboard port to '$CLUSTER_NAME' (k3d exited $(Format-ExitCode $editCode)), so the dashboard won't be able to tell it is on this machine. Everything else works; the install log has k3d's answer."
+  }
+  # Peer of the bash twin: the edit recreates the load balancer on a dynamic
+  # address, and beside nodes pinned at create that is the failure the pinning
+  # exists to prevent. Read, not inferred from k3d's exit code: an edit k3d refused
+  # and rolled back keeps the load balancer it had.
+  if (Test-K3dLbLostItsPin) {
+    Log "The k3d load balancer came back from the edit on a dynamic address; fixing the addresses again."
+    Invoke-K3dAddressPinAfterCreate
+  }
+}
+
+# The `localApi` block of the generated values: present only when the mapping
+# exists, because the chart opens the NodePort only when it is.
+function Get-LocalApiValuesBlock {
+  if (-not $script:TbLocalApiMapped) { return "" }
+  return @"
+
+# The local API the dashboard reaches on this machine: on, because k3d maps
+# 127.0.0.1:$TB_LOCAL_API_HOST_PORT to its NodePort (New-K3dCluster, Update-LocalApiPort).
+localApi:
+  enabled: true
+  nodePort: $TB_LOCAL_API_NODE_PORT
+  hostPort: $TB_LOCAL_API_HOST_PORT
+  singleMachine: true
+"@
+}
+
+# The same decision as `--set` args, for the adopted reconcile in
+# Install-ClientHelm. It reuses the release's stored values, so a release from
+# before localApi existed keeps the chart default, off, while Update-LocalApiPort
+# has just mapped the port: on with the two ports k3d mapped, else off, so a
+# mapping that is gone can't leave a stale "on". `--set`, not `--set-string`: the
+# schema types enabled as a boolean and the ports as integers. Peer of the
+# localApi arm in install-client-helm.sh's _reconcile_adopted_client.
+function Get-LocalApiReconcileArgs {
+  # Unknown: no localApi args, so the stored value stands. The caller wraps this
+  # in @(): an empty answer must splat as nothing, never as one $null argument.
+  if ($script:TbLocalApiUnknown) { return @() }
+  if (-not $script:TbLocalApiMapped) { return @("--set", "localApi.enabled=false") }
+  return @("--set", "localApi.enabled=true",
+           "--set", "localApi.nodePort=$TB_LOCAL_API_NODE_PORT",
+           "--set", "localApi.hostPort=$TB_LOCAL_API_HOST_PORT",
+           "--set", "localApi.singleMachine=true")
 }
 
 # Guarantee the cluster returns after a reboot: ensure the k3d node containers
@@ -5534,6 +5859,29 @@ function Repair-K3sNodeAddress {
 # that is refused skips quietly, and a pin that fails but leaves the cluster
 # running warns. A pin that stopped the cluster and could not start it again Errs
 # with the remedy: the environment is down, so "ready" must not follow.
+# Peer of k3d.sh::_k3d_lb_lost_its_pin. $true when the load balancer runs without a
+# fixed address while a k3s node of the cluster has one: the state `k3d cluster edit`
+# leaves behind, since it recreates the load balancer on a dynamic address. $false
+# otherwise, and $false when anything cannot be read: the re-pin it gates is best
+# effort, and the reuse path's check repairs a cluster a later Docker restart breaks.
+function Test-K3dLbLostItsPin {
+  $lbl = Get-K3dRoleNode -Role 'loadbalancer'
+  if (-not $lbl.Ok -or @($lbl.Names).Count -eq 0) { return $false }
+  $a = Get-K3dNodeAddress -Node (@($lbl.Names)[0])
+  if ($null -eq $a -or -not $a.Net -or $a.Pinned) { return $false }
+  $any = $false
+  foreach ($role in 'server', 'agent') {
+    $list = Get-K3dRoleNode -Role $role
+    if (-not $list.Ok) { return $false }
+    foreach ($node in @($list.Names)) {
+      $n = Get-K3dNodeAddress -Node $node
+      if ($null -eq $n) { return $false }
+      if ($n.Pinned) { $any = $true }
+    }
+  }
+  return $any
+}
+
 function Invoke-K3dAddressPinAfterCreate {
   $netname = ''; $specs = @()
   foreach ($role in 'server', 'agent') {
@@ -5581,6 +5929,8 @@ function Invoke-K3dAddressPinAfterCreate {
 
 function New-K3dCluster {
   Log "Creating k3d cluster: '$CLUSTER_NAME'"
+  # Only the create branch below may set it; a reused cluster read its own ports.
+  $script:TbLocalApiCreateMapped = $false
 
   # Docker is up now (unlike at preflight); re-check the runtime's real memory budget.
   Test-PreflightRuntimeMem
@@ -5810,6 +6160,9 @@ function New-K3dCluster {
       "--k3s-arg", "--disable=local-storage@server:*",
       "--wait"
     )
+    $localApiSpec = Get-LocalApiCreatePortSpec
+    if ($localApiSpec) { $k3dArgs += @("-p", $localApiSpec) }
+    $script:TbLocalApiCreateMapped = [bool]$localApiSpec
 
     # cgroup v1 hosts (backend#2422). Kubernetes 1.35 flipped the kubelet's
     # failCgroupV1 default to TRUE, so from k3s 1.35 the kubelet REFUSES TO START
@@ -5956,77 +6309,94 @@ function New-K3dCluster {
     # had its inner quotes silently consumed. `@` is not special to CommandLineToArgvW -- a bare
     # `-v host:node@all` needs no quoting and re-splits to the identical single token either way, so
     # dropping its quote branch is a no-op; the fix is escaping the quote the old branch ignored.
-    $k3dArgString = ($k3dArgs | ForEach-Object { ConvertTo-Win32Arg $_ }) -join " "
-    $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
-    $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
+    # The dashboard port is optional: a create that failed on binding it is run
+    # once more without it (client-dev#1665), before the config files it reads
+    # are removed below. k3d rolled its half-made cluster back (a rollback that
+    # failed is excluded), and Update-LocalApiPort tries the port again,
+    # fail-soft, afterwards. Peer of the retry in k3d.sh's _create_new_cluster.
+    $createRetry = $true
+    while ($true) {
+      $k3dArgString = ($k3dArgs | ForEach-Object { ConvertTo-Win32Arg $_ }) -join " "
+      $k3dOutLog = Join-Path $env:TEMP "k3d-create-$(Get-Random).log"
+      $k3dErrLog = Join-Path $env:TEMP "k3d-create-err-$(Get-Random).log"
 
-    # -ErrorAction Stop + catch: a failed spawn (broken/invalid k3d.exe) used
-    # to leave $k3dProc null, and `while (-not $null.HasExited)` spun the
-    # spinner forever over a dead install (#412). Fail fast instead.
-    $k3dProc = $null
-    try {
-      $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
-        -NoNewWindow -PassThru -ErrorAction Stop `
-        -RedirectStandardOutput $k3dOutLog `
-        -RedirectStandardError $k3dErrLog
-    } catch {
-      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
-      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
-      Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
-    }
-
-    $timeoutMin = 15
-    $tbCreateRaw = Get-TbEnvAlias 'TB_CREATE_TIMEOUT_MIN'
-    if ("$tbCreateRaw" -match '^\d+$') { $timeoutMin = [int]$tbCreateRaw }
-    if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
-      # Capture the FULL create output before the logs are deleted, so the
-      # host-CA x509 check below can see an x509 that scrolled past the last 5
-      # lines (a hung TLS-inspected pull logs x509 then wedges until the deadline).
-      $timeoutOut = ""
-      if (Test-Path $k3dErrLog) { $timeoutOut += ([string](Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue)) }
-      if (Test-Path $k3dOutLog) { $timeoutOut += "`n" + ([string](Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue)) }
-      $tail = @()
-      if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
-      if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
-      foreach ($line in $tail) { Warn "k3d: $line" }
-      # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
-      Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
-      if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
-      # Killing k3d mid --wait skips its own rollback; a leftover partial
-      # cluster would be adopted as "already running" by the next run's
-      # reuse path (Bugbot #439). Remove it — bounded — before failing.
-      Info "Removing the partially created environment..."
-      $partialDeleted = $false
+      # -ErrorAction Stop + catch: a failed spawn (broken/invalid k3d.exe) used
+      # to leave $k3dProc null, and `while (-not $null.HasExited)` spun the
+      # spinner forever over a dead install (#412). Fail fast instead.
+      $k3dProc = $null
       try {
-        $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
-          -NoNewWindow -PassThru -ErrorAction Stop
-        if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
-          $partialDeleted = ($delProc.ExitCode -eq 0)
-        }
-      } catch {}
-      if (-not $partialDeleted) {
-        Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+        $k3dProc = Start-Process -FilePath $k3dExe -ArgumentList $k3dArgString `
+          -NoNewWindow -PassThru -ErrorAction Stop `
+          -RedirectStandardOutput $k3dOutLog `
+          -RedirectStandardError $k3dErrLog
+      } catch {
+        Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+        if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+        # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
+        Err "Couldn't start k3d ($k3dExe): $($_.Exception.Message). Reinstall it (re-run this script) or check that the binary runs: k3d version"
       }
-      # A TLS-inspected host pull can log x509 and then hang until the deadline —
-      # surface the CA remedy here too, matching bash's timeout fall-through (#474).
-      Write-HostCaCreateHint -Output $timeoutOut
-      Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TRACEBLOC_CREATE_TIMEOUT_MIN overrides the bound.)"
-    }
 
-    $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
-    $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
-    $k3dExitCode = $k3dProc.ExitCode
-    # Defense-in-depth (#611): if the exit code is STILL unreadable after
-    # WaitForExit (Wait-ProcessWithDeadline), do not fail a cluster that k3d itself
-    # reported up -- trust its authoritative success marker over a null code. k3d
-    # logs via logrus to STDERR, so its "Cluster created successfully!" line lands in
-    # $k3dStderr, not $k3dStdout -- check BOTH streams or a real success is misread
-    # as failure (Bugbot).
-    if ($null -eq $k3dExitCode) {
-      $k3dExitCode = if ("$k3dStdout`n$k3dStderr" -match 'created successfully') { 0 } else { 1 }
+      $timeoutMin = 15
+      $tbCreateRaw = Get-TbEnvAlias 'TB_CREATE_TIMEOUT_MIN'
+      if ("$tbCreateRaw" -match '^\d+$') { $timeoutMin = [int]$tbCreateRaw }
+      if (-not (Wait-ProcessWithDeadline -Process $k3dProc -Deadline (Get-Date).AddMinutes($timeoutMin) -Message "Creating compute environment...")) {
+        # Capture the FULL create output before the logs are deleted, so the
+        # host-CA x509 check below can see an x509 that scrolled past the last 5
+        # lines (a hung TLS-inspected pull logs x509 then wedges until the deadline).
+        $timeoutOut = ""
+        if (Test-Path $k3dErrLog) { $timeoutOut += ([string](Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue)) }
+        if (Test-Path $k3dOutLog) { $timeoutOut += "`n" + ([string](Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue)) }
+        $tail = @()
+        if (Test-Path $k3dErrLog) { $tail = @(Get-Content $k3dErrLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+        if (-not $tail -and (Test-Path $k3dOutLog)) { $tail = @(Get-Content $k3dOutLog -ErrorAction SilentlyContinue | Select-Object -Last 5) }
+        foreach ($line in $tail) { Warn "k3d: $line" }
+        # Err prints the log path + -Diagnose itself now (#423); no inline Hint here.
+        Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+        if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($registriesCfg) { Remove-Item (Split-Path $registriesCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
+        # Killing k3d mid --wait skips its own rollback; a leftover partial
+        # cluster would be adopted as "already running" by the next run's
+        # reuse path (Bugbot #439). Remove it — bounded — before failing.
+        Info "Removing the partially created environment..."
+        $partialDeleted = $false
+        try {
+          $delProc = Start-Process -FilePath $k3dExe -ArgumentList "cluster delete $CLUSTER_NAME" `
+            -NoNewWindow -PassThru -ErrorAction Stop
+          if (Wait-ProcessWithDeadline -Process $delProc -Deadline (Get-Date).AddMinutes(2) -Message "Removing partial environment...") {
+            $partialDeleted = ($delProc.ExitCode -eq 0)
+          }
+        } catch {}
+        if (-not $partialDeleted) {
+          Warn "Couldn't remove the partial cluster automatically - run 'k3d cluster delete $CLUSTER_NAME' before re-running."
+        }
+        # A TLS-inspected host pull can log x509 and then hang until the deadline —
+        # surface the CA remedy here too, matching bash's timeout fall-through (#474).
+        Write-HostCaCreateHint -Output $timeoutOut
+        Err "Compute environment creation timed out after $timeoutMin minutes. Check that Docker is healthy and this network can pull images, then re-run. (TRACEBLOC_CREATE_TIMEOUT_MIN overrides the bound.)"
+      }
+
+      $k3dStdout = if (Test-Path $k3dOutLog) { Get-Content $k3dOutLog -Raw -ErrorAction SilentlyContinue } else { "" }
+      $k3dStderr = if (Test-Path $k3dErrLog) { Get-Content $k3dErrLog -Raw -ErrorAction SilentlyContinue } else { "" }
+      $k3dExitCode = $k3dProc.ExitCode
+      # Defense-in-depth (#611): if the exit code is STILL unreadable after
+      # WaitForExit (Wait-ProcessWithDeadline), do not fail a cluster that k3d itself
+      # reported up -- trust its authoritative success marker over a null code. k3d
+      # logs via logrus to STDERR, so its "Cluster created successfully!" line lands in
+      # $k3dStderr, not $k3dStdout -- check BOTH streams or a real success is misread
+      # as failure (Bugbot).
+      if ($null -eq $k3dExitCode) {
+        $k3dExitCode = if ("$k3dStdout`n$k3dStderr" -match 'created successfully') { 0 } else { 1 }
+      }
+      if ($k3dExitCode -ne 0 -and $createRetry -and (Test-LocalApiCreateBindFailed -Output "$k3dStdout`n$k3dStderr")) {
+        $createRetry = $false
+        Warn "Couldn't reserve the local dashboard port 127.0.0.1:$TB_LOCAL_API_HOST_PORT while creating your compute environment (k3d exit code $k3dExitCode), so it is being created without it. Everything else works; the install log has k3d's answer."
+        Log "k3d cluster create (with the local dashboard port) exited $(Format-ExitCode $k3dExitCode): $k3dStdout`n$k3dStderr"
+        Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
+        $k3dArgs = Remove-LocalApiCreateArgs -K3dArgs $k3dArgs
+        continue
+      }
+      break
     }
     Remove-Item $k3dOutLog, $k3dErrLog -Force -ErrorAction SilentlyContinue
     if ($proxyCfg) { Remove-Item (Split-Path $proxyCfg -Parent) -Recurse -Force -ErrorAction SilentlyContinue }
@@ -6050,6 +6420,12 @@ function New-K3dCluster {
     Invoke-K3dAddressPinAfterCreate
     Ok "Compute environment ready."
   }
+
+  # Peer of k3d.sh's _ensure_local_api_port call in create_cluster, and placed
+  # where that one is: after both branches, before the kubeconfig merge, so the
+  # load balancer a `k3d cluster edit` recreates is back before anything waits on
+  # the API (and before autostart sets the new one's restart policy).
+  Update-LocalApiPort
 
   # Peer of k3d.sh::_merge_kubeconfig (client#732). This merge is load-bearing:
   # the installer passes no --kubeconfig/--context to `tracebloc client create`, so
@@ -8382,7 +8758,7 @@ pvc:
 pvcAccessMode: ReadWriteOnce
 
 clusterScope: true
-$imageMirrorBlock
+$imageMirrorBlock$(Get-LocalApiValuesBlock)
 clientId: "$TB_CLIENT_ID"
 clientPassword: '$passwordEscaped'
 
@@ -8481,7 +8857,10 @@ $envBlock
     # older release's GPU_REQUESTS/GPU_LIMITS would otherwise survive after cluster reconciliation
     # cleared $K3D_GPU_FLAG, stranding every job Pending on a CPU-only node. --set-string wins over
     # the reused values, so we force the three GPU keys to match $gpuVal/$runtimeClass (empty = CPU).
-    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId + GPU request)..."
+    # The local API is forced the same way (backend#5208): New-K3dCluster's
+    # Update-LocalApiPort has mapped the port on this run, or found it gone.
+    $localApiArgs = @(Get-LocalApiReconcileArgs)
+    Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId + GPU request + local API)..."
     Ensure-ReleaseDirs $existingName
     $helmOutput = (helm upgrade $existingName $chartRef `
       --namespace $existingNs `
@@ -8493,7 +8872,9 @@ $envBlock
       --set-string "env.GPU_VISIBLE_DEVICES=$gpuSelector" `
       --set-string "env.DEVICE_TYPE=$deviceType" `
       --set-string "env.GPU_UNSUPPORTED_REASON=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_REASON)" `
-      --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" 2>&1) | Out-String
+      --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" `
+      --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" `
+      @localApiArgs 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
@@ -8513,13 +8894,15 @@ $envBlock
     Ensure-ReleaseDirs $TB_NAMESPACE
     # client-dev#1633: why the GPU was left off as unsupported rides --set-string, not the
     # values here-string: the sentence is free text, and ConvertTo-HelmSetValue is the one
-    # quoting rule both paths share. Always both keys; empty = supported (or no GPU).
+    # quoting rule both paths share. Always all three keys (the reason, the name and the code,
+    # backend#5296); empty = supported (or no GPU).
     $helmOutput = (helm upgrade --install $TB_NAMESPACE $chartRef `
       --namespace $TB_NAMESPACE `
       --create-namespace `
       --values $valuesFile `
       --set-string "env.GPU_UNSUPPORTED_REASON=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_REASON)" `
-      --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" 2>&1) | Out-String
+      --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" `
+      --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client installation failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
   }

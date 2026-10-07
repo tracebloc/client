@@ -31,9 +31,11 @@ tb_tuning_aliases=(
   TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
   TB_DESKTOP_RESTART_WAIT TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
   TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
-  TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN TB_GPU_VERIFY_TIMEOUT
+  TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN
+  TB_GPU_VERIFY_TIMEOUT
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
-  TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT TB_K3S_CRI_TIMEOUT
+  TB_K3D_EDIT_TIMEOUT TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT
+  TB_K3S_CRI_TIMEOUT TB_K3S_INSTALL_SH_TIMEOUT
   TB_KUBECONFIG_MERGE_TIMEOUT TB_KUBECTL_PROBE_TIMEOUT TB_METRICS_WAIT_S
   TB_NODE_CHECK_EVERY_S TB_PLAIN TB_PROBE_TIMEOUT TB_PROBE_VERIFY
   TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
@@ -1393,9 +1395,9 @@ if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLO
 #                          TB_STORAGE_MODE; still required for a
 #                          TRACEBLOC_HOST_DATASET_DIR network mount).
 # C1: node-local forces a single k3d node (k3d.sh::_k3d_node_counts says why).
-# Record whether the operator chose the mode or is getting the D15 default: the
-# existing-cluster mismatch guard phrases its remedy differently for "you set
-# node-local" vs "node-local is the default now" (client#456 review, Bugbot High).
+# Record whether the operator chose the mode or is getting the D15 default: on an
+# existing hostpath cluster the mismatch guard refuses an explicit node-local but
+# adopts hostpath when node-local is only the default (client#456, client-dev#1669).
 if [[ -n "${TRACEBLOC_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE="$TRACEBLOC_STORAGE_MODE"; fi
 if [[ -n "${TB_STORAGE_MODE:-}" ]]; then TB_STORAGE_MODE_SOURCE="explicit"; else TB_STORAGE_MODE_SOURCE="default"; fi
 TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
@@ -1440,6 +1442,16 @@ TB_K3S_BIN_SHA256_AMD64="d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a46175
 TB_K3S_BIN_SHA256_ARM64="135e34cb9e8a1cfae3cb55577789e93501efe7edc080a8b2630458a85b07721e"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
 TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
+# Apple's `container` runtime for the macOS node (RFC-0175 D6): the release, the
+# package's digest and the Team ID that signs it (facts.env APPLE_CONTAINER_*, stamped
+# by check-facts.sh --write). Stamped here, not in mac-container.sh, for the reason the
+# k3s pins above are. No TRACEBLOC_* override: a different runtime has no digest here.
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_APPLE_CONTAINER_VERSION="1.4.1"
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_APPLE_CONTAINER_PKG_SHA256="c0d2716afefbb194c93fae662e9cae7cc186bcbcf746816608ec673dd648a6a4"
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR /
 # NVIDIA_DRIVER_HARD_FLOOR_LINUX, stamped by check-facts.sh --write). Below the
 # compute-capability floor or the hard driver floor (the CUDA 12 minimum) detect-gpu.sh
@@ -1602,12 +1614,19 @@ NVIDIA_DRIVER_OK=false
 TB_GPU_FLOOR_VERDICT=""
 # Why the GPU was left off as UNSUPPORTED, for the platform (client-dev#1633): one
 # human sentence and the card's name, set by detect-gpu.sh's floor gate on
-# below-compute and below-hard-floor ONLY, and passed to the chart as
+# below-compute and below-hard-floor, by detect_gpu for a GPU that is not NVIDIA, and
+# by the container runtime's GPU probe for an NVIDIA GPU no container can see
+# (backend#5296) -- ONLY those -- and passed to the chart as
 # env.GPU_UNSUPPORTED_REASON / env.GPU_UNSUPPORTED_NAME (install-client-helm.sh).
 # Empty otherwise: an unreadable host or a failed GPU step is not "unsupported".
 # Assigned, never defaulted from the environment.
 TB_GPU_UNSUPPORTED_REASON=""
 TB_GPU_UNSUPPORTED_NAME=""
+# The kind beside the sentence (backend#5296): compute_too_old | driver_too_old |
+# not_nvidia | docker_cannot_see_gpu, or empty. Passed as env.GPU_UNSUPPORTED_CODE.
+TB_GPU_UNSUPPORTED_CODE=""
+# nvidia-smi's name answer, one line per GPU, for a docker_cannot_see_gpu report.
+TB_GPU_NVIDIA_NAMES=""
 # 1 once an NVIDIA GPU is wired into this cluster, else 0. Assigned, never
 # defaulted from the environment: only the installer's own GPU steps may set it.
 TRACEBLOC_GPU_WIRED=0

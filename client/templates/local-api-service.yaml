@@ -1,0 +1,34 @@
+{{- if (default dict .Values.localApi).enabled }}
+{{- /* One machine only: the installer says so (localApi.singleMachine, set
+     wherever it enables this), or the PDBs' own topology rule does -- singleNode
+     when it is set, else hostPath.enabled. The installer's word is needed
+     because some of its releases store neither topology key. */ -}}
+{{- $hostPathMode := (default dict .Values.hostPath).enabled | default false -}}
+{{- $isSingleNode := ternary .Values.singleNode $hostPathMode (kindIs "bool" .Values.singleNode) -}}
+{{- if not (or $isSingleNode (eq .Values.localApi.singleMachine true)) }}
+{{- fail "localApi.enabled needs a single-machine cluster (localApi.singleMachine: true, which the installer sets; or singleNode: true; or hostPath.enabled with singleNode unset). The local API is for the installer's k3d cluster; on a shared cluster its NodePort would open a port on every node, and there is no browser on the same machine to use it." }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  # The local API the tracebloc dashboard reaches on this machine (values.yaml
+  # `localApi`). A NodePort so the k3d load balancer can forward the
+  # installer's 127.0.0.1 host port to it; on k3d the node addresses live on
+  # the host's private Docker network, so nothing beyond this machine reaches
+  # it. Rendered only when the installer turned the local API on.
+  name: jobs-manager-local-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app: manager
+spec:
+  type: NodePort
+  selector:
+    app: manager
+  ports:
+    - name: local-api
+      port: {{ .Values.localApi.port | default 8091 }}
+      targetPort: local-api
+      nodePort: {{ .Values.localApi.nodePort | default 30910 }}
+      protocol: TCP
+{{- end }}

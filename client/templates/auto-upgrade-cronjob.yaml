@@ -464,7 +464,10 @@ data:
     # helm writes first in every history entry. A description that quotes that
     # text, or `"status":"deployed"`, carries it backslash-escaped, so it can
     # neither start a record nor match the status test. An unreadable body, or
-    # one with no deployed entry, prints nothing: the caller refuses.
+    # one with no deployed entry, prints nothing: the caller refuses. A FAILED
+    # read never reaches here (client-dev#1674): the caller checks helm's exit
+    # status first, so "could not read the history" and "the history names no
+    # deployed revision" are two different log lines.
     last_deployed_revision() {
       printf '%s' "$1" | tr -d '\n' | awk '{
         n = split($0, recs, /\{[ ]*"revision":[ ]*/)
@@ -520,7 +523,25 @@ data:
           # FAILED upgrade: the recovery re-applied the new chart, unwaited, and
           # called it a rollback. No deployed revision means there is nothing
           # known-good to return to, so refuse rather than guess.
-          HISTORY_JSON="$(helm history "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>/dev/null || true)"
+          # client-dev#1674: a failed read (RBAC, an API timeout) must not look
+          # like an empty history, or the refusal below names the wrong fact and
+          # sends the operator to the history instead of the CronJob's access.
+          # stderr goes to a file so a warning helm prints there on success can
+          # never land in the JSON body.
+          _hist_err=/tmp/auto-upgrade-history.err
+          _hist_rc=0
+          HISTORY_JSON="$(helm history "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>"$_hist_err")" \
+            || _hist_rc=$?
+          if [ "$_hist_rc" -ne 0 ]; then
+            log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS', but its history could not"
+            log "be read (helm history exited $_hist_rc: $(tail -n 1 "$_hist_err" 2>/dev/null))."
+            log "This is a failed read, not an empty history. Refusing the rollback: without the"
+            log "history there is no known-good revision to return to (backend#5273). Check that"
+            log "this CronJob can read the release, then recover by hand:"
+            log "  helm history $RELEASE_NAME -n $RELEASE_NAMESPACE"
+            log "  helm rollback $RELEASE_NAME <revision> -n $RELEASE_NAMESPACE --wait"
+            exit 1
+          fi
           TARGET_REV="$(last_deployed_revision "$HISTORY_JSON")"
           if [ -z "$TARGET_REV" ]; then
             log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS' and its history names no"

@@ -127,6 +127,15 @@ for _a in "$@"; do
     # _tb_force — so host-prep is never mislabeled as a forced reinstall (the
     # sub-script dispatches prepare-host before its assess gate anyway).
     prepare-host|--prepare-host) _tb_bail_ok=0 ;;
+    # install-k8s.sh's terminal commands: the support bundle and the help text.
+    # They install nothing, and a healthy machine is where people ask for the
+    # bundle ("which version am I on?"). The bailout used to open the home screen
+    # instead, so `bash -s -- --diagnose` produced no bundle there
+    # (client-dev#1671). Like prepare-host, they skip ONLY the bailout, with no
+    # _tb_force. install-bootstrap.bats derives this list from install-k8s.sh's
+    # dispatch, so a new terminal flag there fails that test until it is added
+    # here.
+    --diagnose|--help|-h) _tb_bail_ok=0 ;;
   esac
 done
 

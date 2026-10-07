@@ -2601,10 +2601,14 @@ tracebloc.gpuUnsupportedEnv -- why the installer left the GPU off as UNSUPPORTED
 (client-dev#1633): env.GPU_UNSUPPORTED_REASON (one human sentence) and
 env.GPU_UNSUPPORTED_NAME (the card, e.g. "NVIDIA GeForce GT 710"), which BOTH
 installers set with --set-string, empty unless the card or its driver is too old
-for the GPU images. The resource monitor sends them on every heartbeat as
+for the GPU images, the GPU is not NVIDIA, or the container runtime cannot see
+the NVIDIA GPU (backend#5296). The resource monitor sends them on every heartbeat as
 gpu_unsupported_reason / gpu_unsupported_name (client-runtime#879), so the web
-app can say why the client runs on CPU (backend#5256). The names are a
-cross-repo contract: do not rename one side alone.
+app can say why the client runs on CPU (backend#5256). env.GPU_UNSUPPORTED_CODE
+is the machine-readable kind beside the sentence (compute_too_old /
+driver_too_old / not_nvidia / docker_cannot_see_gpu), sent as
+gpu_unsupported_code (backend#5296). The names are a cross-repo contract: do
+not rename one side alone.
 
 Each renders only when non-empty, under its legacy name and its TRACEBLOC_
 canonical, same value (settings naming, backend#3846); either spelling of the
@@ -2612,7 +2616,7 @@ values key works, the canonical first (the passthrough's alias-first rule).
 */}}
 {{- define "tracebloc.gpuUnsupportedEnv" -}}
 {{- $env := default dict .Values.env -}}
-{{- range $key := list "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" }}
+{{- range $key := list "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" "GPU_UNSUPPORTED_CODE" }}
 {{- $value := (get $env (printf "TRACEBLOC_%s" $key)) | default (get $env $key) | default "" | toString }}
 {{- if $value }}
 - name: {{ $key }}
@@ -2654,8 +2658,8 @@ it: every such knob client-runtime's jobs-manager or pods-monitor reads
 TRACEBLOC_<name> first -- the RFC-0067 switches EMIT_OOM_RESCUE / EMIT_TOPOLOGY /
 TRAINING_RESUME_ENABLED, which jobs-manager also writes onto the training pod
 under both names, and the timing, envelope and ingestion knobs), plus the
-installer-set GPU_UNSUPPORTED_REASON / GPU_UNSUPPORTED_NAME (the last line;
-client-dev#1633), which the resource monitor renders too
+installer-set GPU_UNSUPPORTED_REASON / GPU_UNSUPPORTED_NAME / GPU_UNSUPPORTED_CODE
+(the last line; client-dev#1633, backend#5296), which the resource monitor renders too
 (tracebloc.gpuUnsupportedEnv). TB_X maps to
 TRACEBLOC_X. A name excluded from a container's passthrough never reaches this
 helper there, so listing it is inert in that container. The values keys the
@@ -2684,7 +2688,7 @@ from the render and fails on one missing here.
       "IMAGE_PULL_STUCK_GRACE_SECONDS" "RESPIN_RECOVER_GRACE_SECONDS" "HF_HUB_OFFLINE_ENFORCE"
       "INGESTION_HTTP_PORT" "INGESTION_SUBMIT_MAX_BODY_BYTES" "SB_MAX_DELIVERY_COUNT" "POD_TOKEN_REQUIRE_BOUND_CLAIMS"
       "HOST_UID" "HOST_GID" "DATASET_SCOPED_MOUNTS" "LOGS_SCOPED_MOUNTS" "TELEMETRY_COLLECTOR_NAMESPACE"
-      "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME"
+      "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" "GPU_UNSUPPORTED_CODE"
 -}}
 {{- $key := .key -}}
 {{- $legacy := "" -}}

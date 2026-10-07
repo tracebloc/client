@@ -381,6 +381,223 @@ _write_k3d_registries_config() {
   echo "$cfg"
 }
 
+# ── The local dashboard port ─────────────────────────────────────────────────
+# The tracebloc dashboard, open in a browser on this machine, asks the client
+# whether the two are on one machine, on 127.0.0.1:TB_LOCAL_API_HOST_PORT. The
+# k3d load balancer forwards that host port to the chart's NodePort
+# (localApi.nodePort); the chart turns the listener on only when this installer
+# says the mapping exists (TB_LOCAL_API_MAPPED=1, read by install-client-helm.sh).
+# Bound to 127.0.0.1, so nothing beyond this machine can reach it.
+#
+# Fail-soft everywhere: a port already in use, or a k3d that will not add it,
+# turns the feature off with a warning and never stops the install.
+# TRACEBLOC_LOCAL_API=off opts out.
+# The defaults are the chart's localApi.hostPort / localApi.nodePort, and
+# install-k8s.ps1 carries the same two; install-k8s.Tests.ps1 holds all three
+# to one value.
+_TB_LOCAL_API_HOST_PORT_DEFAULT="47910"
+_TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
+# Overridable, for a host whose 47910 is spoken for, under the TRACEBLOC_ names
+# only: TB_LOCAL_API_* are this installer's internal state, never env inputs.
+TB_LOCAL_API_HOST_PORT="${TRACEBLOC_LOCAL_API_HOST_PORT:-$_TB_LOCAL_API_HOST_PORT_DEFAULT}"
+TB_LOCAL_API_NODE_PORT="${TRACEBLOC_LOCAL_API_NODE_PORT:-$_TB_LOCAL_API_NODE_PORT_DEFAULT}"
+TB_LOCAL_API_MAPPED=0
+# Set by _local_api_create_args when THIS run's `k3d cluster create` carries the
+# mapping; cleared when that create turns out to have adopted an existing cluster.
+TB_LOCAL_API_CREATE_MAPPED=0
+# 1 when docker could not say whether the port is published: the reconcile then
+# leaves the release's stored localApi as it is instead of forcing it either way.
+TB_LOCAL_API_UNKNOWN=0
+
+_local_api_port_spec() {
+  printf '127.0.0.1:%s:%s@loadbalancer' "$TB_LOCAL_API_HOST_PORT" "$TB_LOCAL_API_NODE_PORT"
+}
+
+_local_api_wanted() {
+  case "$(printf '%s' "${TRACEBLOC_LOCAL_API:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) return 1 ;;
+  esac
+  return 0
+}
+
+# Whether the cluster's load balancer already publishes the NodePort on
+# 127.0.0.1:TB_LOCAL_API_HOST_PORT. Any other answer, an unreadable one
+# included, is "not mapped".
+# THREE answers, because "could not read" is not "not published": 0 = the load
+# balancer publishes 127.0.0.1:TB_LOCAL_API_HOST_PORT; 1 = docker answered and it
+# does not (including docker's own "No public port" refusal); 2 = docker did not
+# answer (a timeout, a daemon error) -- cannot tell. A read right after a create
+# can be slow, so a timeout is retried; CR is stripped because Docker Desktop on
+# WSL can answer with CRLF lines.
+_local_api_port_mapped() {
+  local out rc attempt
+  for attempt in 1 2 3; do
+    rc=0
+    out="$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker port "k3d-${CLUSTER_NAME}-serverlb" "${TB_LOCAL_API_NODE_PORT}/tcp" 2>&1)" || rc=$?
+    out="$(printf '%s\n' "$out" | tr -d '\r')"
+    if [[ "$rc" -eq 0 ]]; then
+      grep -qx "127.0.0.1:${TB_LOCAL_API_HOST_PORT}" <<<"$out" && return 0
+      return 1
+    fi
+    if grep -qi "no public port" <<<"$out"; then
+      return 1
+    fi
+    [[ "$rc" -eq 124 ]] || break
+    _local_api_backoff "$attempt"
+  done
+  return 2
+}
+
+# The pause between timed-out port reads (1 s, then 2 s). Its own function so a
+# test can skip the wait without turning `sleep` itself into a no-op.
+_local_api_backoff() {
+  sleep "$1"
+}
+
+# Whether something on this machine already listens on the host port. A
+# connect that succeeds means busy; bash's /dev/tcp works in 3.2 as well.
+# Bounded (client-dev#1664): /dev/tcp has no connect timeout of its own, so a
+# listener whose backlog is full -- a SYN nobody answers -- held the install for
+# the kernel's whole SYN-retry window. The deadline (1 s, as the Windows twin's
+# Test-LocalApiHostPortBusy waits 1000 ms) reads as "not busy", as it does there.
+_local_api_host_port_busy() {
+  _bounded 1 "${BASH:-bash}" -c \
+    'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TB_LOCAL_API_HOST_PORT}" 2>/dev/null
+}
+
+# Whether both ports are a TCP port k3d can take (1..65535, digits only). The
+# overrides are free text; a bad one must turn the feature off, never reach
+# `k3d cluster create` and fail the install (client-dev#1665).
+_local_api_port_valid() {
+  local p
+  for p in "$TB_LOCAL_API_HOST_PORT" "$TB_LOCAL_API_NODE_PORT"; do
+    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( 10#$p >= 1 && 10#$p <= 65535 )) || return 1
+  done
+  return 0
+}
+
+_local_api_invalid_warn() {
+  warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TB_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TB_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set them to numbers from 1 to 65535 and re-run the installer to turn it on."
+}
+
+# The new-cluster half: the mapping goes into `k3d cluster create` itself when
+# the port is free, so a fresh install never restarts its load balancer for it.
+_local_api_create_args() {
+  TB_LOCAL_API_CREATE_MAPPED=0
+  _local_api_wanted || return 0
+  if ! _local_api_port_valid; then
+    _local_api_invalid_warn
+    return 0
+  fi
+  if ! _local_api_host_port_busy; then
+    K3D_ARGS+=(-p "$(_local_api_port_spec)")
+    TB_LOCAL_API_CREATE_MAPPED=1
+  fi
+}
+
+# Whether a failed `k3d cluster create` failed on the optional dashboard port:
+# this run put the -p in, a line of k3d's output names the host port AND a bind
+# failure (k3d logs the port mapping on every create, so the port alone proves
+# nothing), and k3d did not report a rollback that failed (a half-made cluster
+# left behind would be taken for an existing one by the re-run). The free-port
+# probe is a snapshot, so k3d's own bind can still lose the port (a listener
+# that starts in between, a range the OS reserves); that must cost the
+# dashboard, never the install (client-dev#1665).
+_local_api_create_bind_failed() {
+  local out="$1"
+  [[ "${TB_LOCAL_API_CREATE_MAPPED:-0}" == "1" ]] || return 1
+  [[ -r "$out" ]] || return 1
+  grep -qi "failed to rollback" "$out" && return 1
+  # Two steps, not a pipe: under pipefail a `grep -q` that stops early can
+  # SIGPIPE the first grep and turn a match into a failure.
+  local lines
+  lines="$(grep -E ":${TB_LOCAL_API_HOST_PORT}([^0-9]|$)" "$out" 2>/dev/null)" || return 1
+  grep -Eqi "bind|already allocated|not available|already in use|access permissions" <<<"$lines"
+}
+
+# Take this run's `-p <spec>` pair back out of K3D_ARGS (bash 3.2: no negative
+# indices, and an empty array under `set -u` needs the ${a[@]+...} form).
+_local_api_drop_create_args() {
+  local spec kept=() i n=${#K3D_ARGS[@]}
+  spec="$(_local_api_port_spec)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    if [[ "${K3D_ARGS[$i]}" == "-p" && "$((i + 1))" -lt "$n" && "${K3D_ARGS[$((i + 1))]}" == "$spec" ]]; then
+      i=$((i + 2))
+      continue
+    fi
+    kept+=("${K3D_ARGS[$i]}")
+    i=$((i + 1))
+  done
+  K3D_ARGS=(${kept[@]+"${kept[@]}"})
+  TB_LOCAL_API_CREATE_MAPPED=0
+}
+
+# After the cluster exists, new or reused: record whether the port is mapped,
+# and add it to a cluster created before this installer knew about it.
+_ensure_local_api_port() {
+  TB_LOCAL_API_MAPPED=0
+  TB_LOCAL_API_UNKNOWN=0
+  if ! _local_api_wanted; then
+    log "Local dashboard connection: off (TRACEBLOC_LOCAL_API=${TRACEBLOC_LOCAL_API:-})."
+    return 0
+  fi
+  if ! _local_api_port_valid; then
+    _local_api_invalid_warn
+    return 0
+  fi
+  local state=0
+  _local_api_port_mapped || state=$?
+  if [[ "$state" -eq 0 ]]; then
+    TB_LOCAL_API_MAPPED=1
+    return 0
+  fi
+  if [[ "$state" -eq 2 ]]; then
+    # docker could not say. A `k3d cluster create` that carried -p and succeeded
+    # this run had docker bind that port, so its listener is our own load
+    # balancer; never take it for a stranger and turn the feature off.
+    if [[ "${TB_LOCAL_API_CREATE_MAPPED:-0}" == "1" ]]; then
+      TB_LOCAL_API_MAPPED=1
+      log "Couldn't read the load balancer's ports, but this run created '$CLUSTER_NAME' with the local dashboard port mapped."
+      return 0
+    fi
+    # Not "off": a transient docker hiccup must not switch off a listener a
+    # previous run set up. The reconcile keeps the stored localApi as it is.
+    TB_LOCAL_API_UNKNOWN=1
+    warn "Couldn't read whether '$CLUSTER_NAME' publishes the local dashboard port (docker did not answer), so the local dashboard setting is left as it was. Everything else works; re-run the installer to check it again."
+    return 0
+  fi
+  if _local_api_host_port_busy; then
+    warn "Port ${TB_LOCAL_API_HOST_PORT} on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+    return 0
+  fi
+  log "Adding the local dashboard port 127.0.0.1:${TB_LOCAL_API_HOST_PORT} to '$CLUSTER_NAME' (its k3d load balancer restarts once)."
+  local rc=0
+  _bounded "${TB_K3D_EDIT_TIMEOUT:-300}" k3d cluster edit "$CLUSTER_NAME" --port-add "$(_local_api_port_spec)" >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
+  local after=0
+  [[ "$rc" -eq 0 ]] && { _local_api_port_mapped || after=$?; }
+  if [[ "$rc" -eq 0 && "$after" -ne 1 ]]; then
+    # Published, or docker could not say right after the edit: k3d's edit
+    # succeeded, which means it bound the port, so it is mapped.
+    TB_LOCAL_API_MAPPED=1
+  elif [[ "$rc" -eq 0 ]]; then
+    warn "k3d accepted the local dashboard port for '$CLUSTER_NAME' but its load balancer does not publish it, so the dashboard won't be able to tell it is on this machine. Everything else works."
+  else
+    warn "Couldn't add the local dashboard port to '$CLUSTER_NAME' (k3d exited $rc), so the dashboard won't be able to tell it is on this machine. Everything else works; the install log has k3d's answer."
+  fi
+  # The edit recreates the load balancer, and the new one comes up on a dynamic
+  # address. Beside nodes pinned at create, that is the failure the pinning exists
+  # to prevent: after a Docker restart the load balancer can start first and take
+  # a node's address. Read, not inferred from k3d's exit code: an edit k3d refused
+  # and rolled back keeps the load balancer it had.
+  if _k3d_lb_lost_its_pin; then
+    log "The k3d load balancer came back from the edit on a dynamic address; fixing the addresses again."
+    _pin_k3d_node_addresses_after_create
+  fi
+  return 0
+}
+
 # _k3d_create_cluster -- step c on k3d; cluster.sh's create_cluster routes here.
 _k3d_create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
@@ -497,6 +714,10 @@ _k3d_create_cluster() {
   # otherwise leave the install record without its k3d-cluster artefact, and an
   # uninstall driven by the record would leave the cluster behind. Recording is
   # keyed on kind + id + path, so this is a no-op after a fresh create.
+  # Before autostart: a `k3d cluster edit` recreates the load balancer, and
+  # ensure_cluster_autostart must set the restart policy on the new one.
+  _ensure_local_api_port
+
   tb_record_write k3d-cluster "$CLUSTER_NAME" ""
 
   ensure_cluster_autostart
@@ -1152,6 +1373,15 @@ _check_existing_cluster_dataset_mount() {
 # /tracebloc (datasets on ephemeral in-node storage). The /tracebloc bind mount
 # is the discriminator: present ⟺ hostpath cluster. Fail fast with the recreate
 # remedy. No-op when the node can't be inspected.
+#
+# One mismatch is not refused: node-local reached only as the DEFAULT (the
+# operator set nothing) onto a hostpath cluster. That is every unmodified re-run
+# and `tracebloc upgrade` of an install made before the D15 flip (client#456), and
+# refusing it failed every such upgrade with a remedy -- "set hostpath" -- the
+# installer can apply itself (client-dev#1669). The cluster's topology is the
+# answer there, so this run adopts hostpath, in this shell: create_cluster's
+# later steps and the chart values read TB_STORAGE_MODE after this returns. The
+# host data dirs create_cluster skipped under node-local are made here.
 _check_existing_cluster_storage_mode() {
   local mounts
   mounts=$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" \
@@ -1162,17 +1392,18 @@ _check_existing_cluster_storage_mode() {
   grep -qx '/tracebloc' <<<"$mounts" && cluster_is_hostpath=true
   local want="${TB_STORAGE_MODE:-node-local}"
 
+  if [[ "$want" == "node-local" && "$cluster_is_hostpath" == true \
+        && "${TB_STORAGE_MODE_SOURCE:-default}" != "explicit" ]]; then
+    TB_STORAGE_MODE=hostpath
+    log "Storage mode: hostpath — kept from the existing '$CLUSTER_NAME' cluster (node-local is only the default, and this cluster was built for hostpath)."
+    info "Keeping hostpath storage: the existing '$CLUSTER_NAME' cluster was built for it, and your data stays in ${HOST_DATA_DIR:-~/.tracebloc}."
+    _ensure_host_data_dirs
+    return 0
+  fi
+
   if [[ "$want" == "node-local" && "$cluster_is_hostpath" == true ]]; then
     echo ""
-    # After the D15 flip (client#456) this branch fires on an unmodified re-run of
-    # every pre-existing hostpath install, not just someone who asked for
-    # node-local — so name the source and lead with the keep-your-cluster remedy
-    # (set hostpath), not a recreate they never asked for (Bugbot High + review).
-    if [[ "${TB_STORAGE_MODE_SOURCE:-default}" == "explicit" ]]; then
-      warn "TRACEBLOC_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
-    else
-      warn "node-local is the default now, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
-    fi
+    warn "TRACEBLOC_STORAGE_MODE=node-local, but the existing '$CLUSTER_NAME' cluster was built for hostpath storage."
     hint "That cluster disabled k3s local-storage, so the 'local-path' StorageClass node-local needs does not exist — PVCs would stay Pending."
     hint "To keep using your existing hostpath cluster, just re-run with the old mode — no recreate needed:"
     hint "  TRACEBLOC_STORAGE_MODE=hostpath  re-run this installer."
@@ -1571,6 +1802,7 @@ _create_new_cluster() {
       --k3s-arg "--disable=local-storage@server:*"
     )
   fi
+  _local_api_create_args
   # cgroup v1 hosts (backend#2422). Kubernetes 1.35 flipped the kubelet's
   # `failCgroupV1` default to TRUE, so from k3s 1.35 the kubelet REFUSES TO START
   # on a cgroup v1 or hybrid host. That is not an exotic case for us: WSL2
@@ -1710,10 +1942,24 @@ _create_new_cluster() {
     # bakes NVIDIA_DISABLE_REQUIRE, so it passes on any driver). Capture-then-match,
     # never `docker run | grep -q` — grep closing the pipe would SIGPIPE the run under
     # pipefail and read as a spurious failure.
+    # Its stderr is kept apart (never matched for "k3s": the image's own name says
+    # k3s): when the run fails in Docker's own words for "no GPU for this container"
+    # (_GPU_CONTAINER_BLIND_RE), the pull worked and Docker cannot see the GPU, which
+    # the platform is told as docker_cannot_see_gpu (backend#5296).
     if (( _gpu_ok )); then
-      local _ver_out
-      _ver_out="$(_bounded "${TB_GPU_VERIFY_TIMEOUT:-90}" docker run --rm --gpus all "$_prepull_image" --version 2>/dev/null)" || _ver_out=""
-      grep -qi k3s <<<"$_ver_out" || _gpu_ok=0
+      local _ver_out _ver_err="" _ver_errf
+      _ver_errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-gpu-run-XXXXXX" 2>/dev/null || echo /dev/null)"
+      _ver_out="$(_bounded "${TB_GPU_VERIFY_TIMEOUT:-90}" docker run --rm --gpus all "$_prepull_image" --version 2>"$_ver_errf")" || _ver_out=""
+      if [[ "$_ver_errf" != /dev/null ]]; then
+        _ver_err="$(cat "$_ver_errf" 2>/dev/null)" || _ver_err=""
+        rm -f "$_ver_errf"
+      fi
+      if ! grep -qi k3s <<<"$_ver_out"; then
+        _gpu_ok=0
+        if [[ -n "${_GPU_CONTAINER_BLIND_RE:-}" ]] && grep -qiE "$_GPU_CONTAINER_BLIND_RE" <<<"$_ver_err"; then
+          _gpu_fail_reason="blind"
+        fi
+      fi
     fi
     if (( ! _gpu_ok )) && [[ "$_gpu_fail_reason" == "digest" ]]; then
       # The tag exists and pulled, but its content is not the reviewed, pinned image.
@@ -1724,6 +1970,13 @@ _create_new_cluster() {
       warn "The GPU node image no longer resolves to the pinned digest — installing CPU-only rather than running an unreviewed image."
       hint "Expected ${TB_K3S_CUDA_DIGEST}, but ${_prepull_image} resolved to ${_got_digest:-<unknown>}."
       hint "Either that tag was republished, or K8S_VERSION/CUDA_TAG moved without re-resolving K3S_CUDA_DIGEST in scripts/spec/facts.env."
+      _recreate_cluster_hint
+    elif (( ! _gpu_ok )) && [[ "$_gpu_fail_reason" == "blind" ]]; then
+      # The image pulled, and Docker refused it the GPU: the runtime, not the image.
+      TRACEBLOC_GPU_WIRED=0
+      if declare -F _gpu_container_blind >/dev/null; then _gpu_container_blind "Docker"; fi
+      warn "Docker can't give a container this machine's NVIDIA GPU — installing CPU-only so the cluster still comes up."
+      hint "Check that 'docker run --rm --gpus all ${TB_CUDA_BASE_TAG:+nvidia/cuda:$TB_CUDA_BASE_TAG }nvidia-smi' works (the NVIDIA Container Toolkit and Docker's 'nvidia' runtime), then recreate the cluster to enable GPU:"
       _recreate_cluster_hint
     elif (( ! _gpu_ok )); then
       TRACEBLOC_GPU_WIRED=0
@@ -1834,11 +2087,27 @@ _create_new_cluster() {
   # itself; if k3d wedges past it (hung docker daemon), spin's deadline kills
   # it 5 minutes later and the error path below dumps the output.
   spin "$!" "Creating your secure environment…" "$(( (_create_timeout_min + 5) * 60 ))" || create_rc=$?
+  # The dashboard port is optional: a create that failed on binding it is run
+  # once more without it, before the config dirs it reads are removed below.
+  # k3d rolled its half-made cluster back (a rollback that failed is excluded),
+  # and _ensure_local_api_port tries the port again, fail-soft, afterwards.
+  if [[ $create_rc -ne 0 && $create_rc -ne 124 ]] && _local_api_create_bind_failed "$create_out"; then
+    warn "Couldn't reserve the local dashboard port 127.0.0.1:${TB_LOCAL_API_HOST_PORT} while creating your secure environment (k3d exit code ${create_rc}), so it is being created without it. Everything else works; the install log has k3d's answer."
+    { echo "k3d cluster create (with the local dashboard port) exited $create_rc:"; cat "$create_out"; } >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
+    _local_api_drop_create_args
+    : >"$create_out"
+    ( k3d "${K3D_ARGS[@]}" >"$create_out" 2>&1 ) &  # set-u-safe: K3D_ARGS still holds the create verb
+    create_rc=0
+    spin "$!" "Creating your secure environment…" "$(( (_create_timeout_min + 5) * 60 ))" || create_rc=$?
+  fi
   [[ -n "$proxy_cfg" ]] && rm -rf "${proxy_cfg%/*}"
   [[ -n "$reg_cfg" ]] && rm -rf "${reg_cfg%/*}"
   if [[ $create_rc -ne 0 ]]; then
     if grep -qi "already exists\|a cluster with that name already exists" "$create_out" 2>/dev/null; then
       log "Cluster '$CLUSTER_NAME' already exists (detected from k3d message). Using existing cluster."
+      # This create never ran, so its -p mapped nothing: the port is read from
+      # the existing cluster instead (_ensure_local_api_port).
+      TB_LOCAL_API_CREATE_MAPPED=0
       rm -f "$create_out"
       # THE THIRD CALL SITE OF _handle_existing_cluster (LukasWodka, client#984
       # round 7). It grew rc 3 — "my own listing answered and there is no such
@@ -2559,6 +2828,33 @@ _ensure_k3s_node_addresses() {
       hint "then re-run this installer."
       error "Your secure environment was stopped to move its nodes back and did not start again (see the install log)." ;;
   esac
+}
+
+# _k3d_lb_lost_its_pin — 0 when the load balancer runs without a fixed address
+# while a k3s node of the cluster has one: the state `k3d cluster edit` leaves
+# behind, since it recreates the load balancer on a dynamic address. 1 otherwise,
+# and 1 when anything cannot be read: the re-pin it gates is best effort, and the
+# reuse path's check repairs a cluster that a later Docker restart breaks.
+_k3d_lb_lost_its_pin() {
+  local lb line role list node _r net _c pinned any=0
+  lb="$(_k3d_nodes loadbalancer)" || return 1
+  lb="${lb%%$'\n'*}"
+  [[ -n "$lb" ]] || return 1
+  line="$(_k3d_node_addr "$lb")" || return 1
+  IFS='|' read -r _r net _c pinned <<<"$line"
+  [[ -n "$net" ]] || return 1
+  if _ipv4_to_int "$pinned" >/dev/null 2>&1; then return 1; fi
+  for role in server agent; do
+    list="$(_k3d_nodes "$role")" || return 1
+    while read -r node; do
+      [[ -n "$node" ]] || continue
+      line="$(_k3d_node_addr "$node")" || return 1
+      pinned=""
+      IFS='|' read -r _r net _c pinned <<<"$line"
+      if _ipv4_to_int "$pinned" >/dev/null 2>&1; then any=1; fi
+    done <<<"$list"
+  done
+  [[ "$any" -eq 1 ]]
 }
 
 # _pin_k3d_node_addresses_after_create — prevention: fix every node on the address

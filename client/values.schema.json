@@ -356,6 +356,40 @@
       "default": null,
       "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for node-local single-node k3d (client#560)."
     },
+    "localApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The local API the dashboard reaches on 127.0.0.1 on a laptop or desktop install. Off by default; the installer enables it after mapping hostPort on 127.0.0.1 to nodePort on the k3d load balancer.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8091
+        },
+        "nodePort": {
+          "type": "integer",
+          "minimum": 30000,
+          "maximum": 32767,
+          "default": 30910
+        },
+        "hostPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 47910
+        },
+        "singleMachine": {
+          "type": "boolean",
+          "default": false,
+          "description": "Set by the installer: this cluster is its k3d environment on one machine. Lets the local API render where the stored topology values cannot say so."
+        }
+      }
+    },
     "pvc": {
       "type": "object",
       "description": "PVC storage sizes",
