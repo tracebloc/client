@@ -214,8 +214,9 @@ _nvidia_gpu_floor_gate() {
 # ── The GPU that is not NVIDIA, and the NVIDIA GPU no container can see (backend#5296) ──
 # TB_GPU_UNSUPPORTED_CODE is one of a CLOSED vocabulary the backend stores beside the
 # sentence and the dashboard switches on: compute_too_old and driver_too_old (the floor
-# gate above), not_nvidia and docker_cannot_see_gpu (below). install-k8s.ps1 sets the
-# same four, with the same sentences.
+# gate above), not_nvidia, docker_cannot_see_gpu and arch_unsupported (below).
+# install-k8s.ps1 sets the same five, with the same sentences. A code the backend does
+# not know yet is stored blank and the sentence still shows (backend#5296).
 
 # _GPU_NOT_NVIDIA_VENDOR_RE -- the vendors whose GPU counts as "a GPU, but not NVIDIA",
 # matched against the NORMALISED name (_nvidia_name_normalised). An allowlist, on
@@ -270,6 +271,43 @@ _gpu_not_nvidia_report() {
   TB_GPU_UNSUPPORTED_CODE="not_nvidia"
   TB_GPU_UNSUPPORTED_REASON="This machine's GPU is not an NVIDIA GPU, and tracebloc's GPU training images need one (NVIDIA Turing or later), so this machine runs on CPU."
   TB_GPU_UNSUPPORTED_NAME="$1"
+}
+
+# ── The GPU tracebloc has no training image for (client-dev#1697, #1698) ──
+# The GPU training images are CUDA and linux/amd64 only: there is no ROCm image and no
+# arm64 GPU image. So an AMD GPU, and an NVIDIA GPU on a machine that is not x86_64, are
+# GPUs this installer cannot use, and it treats them as it treats an NVIDIA card below
+# the compute floor: nothing is installed or requested for them (no ROCm, no NVIDIA
+# driver or container toolkit, no device plugin, no GPU_REQUESTS), the install runs
+# CPU-only, it says why, and the platform is told. detect_gpu gives the vendor the
+# _unsupported suffix (amd_unsupported, nvidia_unsupported; install-k8s.ps1 has always
+# called a Windows AMD GPU amd_unsupported), so every GPU step, which keys on exactly
+# nvidia or amd, passes over it.
+
+# _gpu_arch_supported -- 0 when this machine can run the GPU training images (x86_64).
+_gpu_arch_supported() { [[ "${ARCH:-}" == x86_64 || "${ARCH:-}" == amd64 ]]; }
+
+# _gpu_arch_label -- this machine's architecture as the reason names it: arm64 for
+# uname's aarch64 too, so the sentence is the same as install-k8s.ps1's.
+_gpu_arch_label() {
+  case "${ARCH:-}" in
+    aarch64|arm64) printf 'arm64' ;;
+    *) printf '%s' "${ARCH:-unknown}" ;;
+  esac
+}
+
+# _gpu_arch_unsupported_report NAME -- an NVIDIA GPU on a machine that is not x86_64:
+# leave it off (nvidia_unsupported), say why, and tell the platform (arch_unsupported),
+# with the card's name. Never judged by the floor gate: no driver or card can help.
+_gpu_arch_unsupported_report() {
+  local arch
+  arch="$(_gpu_arch_label)"
+  GPU_VENDOR="nvidia_unsupported"; NVIDIA_DRIVER_OK=false; TB_GPU_FLOOR_VERDICT=""
+  TB_GPU_UNSUPPORTED_CODE="arch_unsupported"
+  TB_GPU_UNSUPPORTED_REASON="This machine is ${arch}, and tracebloc's GPU training images are built for x86_64 machines only, so this machine runs on CPU."
+  TB_GPU_UNSUPPORTED_NAME="$1"
+  warn "tracebloc's GPU training images are built for x86_64 machines only, and this machine is ${arch} — the NVIDIA GPU is not set up, and this machine will run in CPU mode."
+  hint "Everything else works on CPU. GPU training needs an x86_64 machine with an NVIDIA GPU."
 }
 
 # _gpu_container_blind RUNTIME -- the container runtime's own GPU probe has just said it
@@ -349,6 +387,11 @@ detect_gpu() {
     _gpu_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null)" || _gpu_cap=""
     success "NVIDIA GPU detected: ${_gpu_name%%$'\n'*}"
     log "Driver: ${_gpu_drv%%$'\n'*}"
+    if ! _gpu_arch_supported; then
+      _gpu_name="${_gpu_name%%$'\n'*}"; _gpu_name="${_gpu_name#"${_gpu_name%%[![:space:]]*}"}"
+      _gpu_arch_unsupported_report "${_gpu_name%"${_gpu_name##*[![:space:]]}"}"
+      return
+    fi
     _nvidia_gpu_floor_gate "$_gpu_drv" "$_gpu_cap" "$_gpu_name"
     return
   fi
@@ -366,14 +409,21 @@ detect_gpu() {
     if grep -qi "NVIDIA" <<<"$lspci_out"; then
       GPU_VENDOR="nvidia"
       NVIDIA_DRIVER_OK=false
+      if ! _gpu_arch_supported; then
+        _gpu_arch_unsupported_report "$(_lspci_display_devices "$lspci_out" | grep -i -m1 'NVIDIA' || true)"
+        return
+      fi
       warn "NVIDIA GPU detected — drivers not yet installed."
       return
     fi
     if grep -qi "AMD.*VGA\|Advanced Micro Devices.*VGA\|Radeon" <<<"$lspci_out"; then
-      GPU_VENDOR="amd"
+      # No ROCm image exists (client-dev#1697): the AMD GPU is left off, like any other
+      # GPU that is not NVIDIA. No ROCm, no AMD device plugin, no amd.com/gpu request.
+      GPU_VENDOR="amd_unsupported"
       amd_line="$(grep -i 'Radeon\|AMD.*VGA' <<<"$lspci_out" || true)"
       success "AMD GPU detected: ${amd_line%%$'\n'*}"
-      # The AMD setup still runs, but tracebloc's GPU training images are NVIDIA's.
+      warn "tracebloc's GPU training images need an NVIDIA GPU, so the AMD GPU is not set up — this machine will run in CPU mode."
+      hint "Everything else works on CPU. GPU training needs an NVIDIA GPU (Turing or later) on an x86_64 machine."
       if not_nvidia="$(_gpu_not_nvidia_name "$(_lspci_display_devices "$lspci_out")")"; then
         _gpu_not_nvidia_report "$not_nvidia"
       fi
@@ -386,6 +436,7 @@ detect_gpu() {
   if _nvidia_kernel_module_loaded; then
     GPU_VENDOR="nvidia"; NVIDIA_DRIVER_OK=true
     success "NVIDIA GPU detected."
+    if ! _gpu_arch_supported; then _gpu_arch_unsupported_report ""; return; fi
     _nvidia_gpu_floor_gate "" ""
     return
   fi

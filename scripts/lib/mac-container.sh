@@ -128,7 +128,7 @@ _mac_ct_check_pkg() {
 # ships beside the programs are not codesign's to judge, and a program Apple adds in a
 # later release is checked without a list here to update.
 _mac_ct_check_binaries() {
-  local root="$1" team="${TB_APPLE_CONTAINER_TEAM_ID:-}" list f kind got n=0 cli=""
+  local root="$1" team="${TB_APPLE_CONTAINER_TEAM_ID:-}" list f kind got out rc n=0 cli=""
   [[ -n "$team" ]] || { echo "no pinned Team ID is stamped in common.sh to check it against (run scripts/check-facts.sh --write)"; return 1; }
   command -v file >/dev/null 2>&1 \
     || { echo "file(1) is not on this Mac, so this run cannot tell which of its files are programs"; return 1; }
@@ -140,11 +140,25 @@ _mac_ct_check_binaries() {
     [[ "$kind" == *Mach-O* ]] || continue
     n=$((n + 1))
     [[ "$f" != "${root}/bin/container" ]] || cli=1
-    if ! _bounded 60 codesign --verify --strict "$f" >/dev/null 2>&1; then
+    rc=0; _bounded 60 codesign --verify --strict "$f" >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -eq 124 ]]; then
+      echo "codesign did not answer within 60s about ${f#"${root}"/}, so this run cannot tell whether it passes the strict check"
+      return 1
+    elif [[ "$rc" -ne 0 ]]; then
       echo "${f#"${root}"/} does not pass codesign's strict check"
       return 1
     fi
-    got="$(_bounded 60 codesign -dv "$f" 2>&1 | sed -n 's/^TeamIdentifier=//p')" || got=""
+    # Read first, parse second: piped into sed, codesign's status would be sed's, and a
+    # timeout would read as a program signed by nobody.
+    rc=0; out="$(_bounded 60 codesign -dv "$f" 2>&1)" || rc=$?
+    if [[ "$rc" -eq 124 ]]; then
+      echo "codesign did not answer within 60s about ${f#"${root}"/}, so this run cannot tell who signed it"
+      return 1
+    elif [[ "$rc" -ne 0 ]]; then
+      echo "codesign could not read ${f#"${root}"/} (exit ${rc}), so this run cannot tell who signed it"
+      return 1
+    fi
+    got="$(sed -n 's/^TeamIdentifier=//p' <<<"$out")"
     if [[ "$got" != "$team" ]]; then
       echo "${f#"${root}"/} is signed by Team ID '${got:-none}', not ${team}"
       return 1

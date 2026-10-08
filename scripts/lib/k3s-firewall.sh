@@ -52,7 +52,9 @@ TRACEBLOC_NATIVE_K3S_FW_ROOT="${TRACEBLOC_NATIVE_K3S_FW_ROOT:-}"
 # _native_k3s_fw_tool refuses the last two, and k3s.sh's step b installs nftables
 # for them (_native_k3s_ensure_firewall_tool).
 _native_k3s_fw_pick() {
-  if has nft; then
+  if [[ -n "${TRACEBLOC_K3S_FW_PLANNED:-}" ]] && tb_root_planning; then
+    echo "$TRACEBLOC_K3S_FW_PLANNED"
+  elif has nft; then
     echo nft
   elif has iptables && has ip6tables; then
     echo iptables
@@ -175,9 +177,9 @@ EOF
 # to a temp file first and moved with `install`, so a reader never sees half.
 _native_k3s_fw_install_file() {
   local mode="$1" dest="$TRACEBLOC_NATIVE_K3S_FW_ROOT$2" tmp
-  tmp=$(mktemp) || error "could not create a temporary file for $2"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/tracebloc-fw-XXXXXX") || error "could not create a temporary file for $2"
   if ! cat >"$tmp"; then rm -f "$tmp"; error "could not render $2"; fi
-  if ! sudo mkdir -p "$(dirname "$dest")" || ! sudo install -m "$mode" "$tmp" "$dest"; then
+  if ! tb_root mkdir -p "$(dirname "$dest")" || ! tb_root install -m "$mode" "$tmp" "$dest"; then
     rm -f "$tmp"
     error "could not write $2"
   fi
@@ -198,7 +200,7 @@ _native_k3s_fw_status() {
   fi
   case "$tool" in
     nft)
-      rc=0; out=$(sudo nft list table inet "$_NATIVE_K3S_FW_TABLE" 2>&1) || rc=$?
+      rc=0; out=$(tb_root nft list table inet "$_NATIVE_K3S_FW_TABLE" 2>&1) || rc=$?
       if [ "$rc" -ne 0 ]; then
         case "$out" in
           *"No such file or directory"*) echo absent; return 1 ;;
@@ -213,7 +215,7 @@ _native_k3s_fw_status() {
       ;;
     iptables)
       for fam in iptables ip6tables; do
-        rc=0; out=$(sudo "$fam" -S "$_NATIVE_K3S_FW_CHAIN" 2>&1) || rc=$?
+        rc=0; out=$(tb_root "$fam" -S "$_NATIVE_K3S_FW_CHAIN" 2>&1) || rc=$?
         if [ "$rc" -ne 0 ]; then
           case "$out" in
             *"No chain"*|*"does not exist"*) echo absent; return 1 ;;
@@ -221,7 +223,7 @@ _native_k3s_fw_status() {
           esac
         fi
         case "$out" in *"--dports $(printf '%s' "$_NATIVE_K3S_FW_PORTS" | tr ' ' ',')"*"DROP"*) ;; *) echo absent; return 1 ;; esac
-        if ! sudo "$fam" -C INPUT -j "$_NATIVE_K3S_FW_CHAIN" >/dev/null 2>&1; then echo absent; return 1; fi
+        if ! tb_root "$fam" -C INPUT -j "$_NATIVE_K3S_FW_CHAIN" >/dev/null 2>&1; then echo absent; return 1; fi
       done
       ;;
     *) echo "cannot tell"; return 2 ;;
@@ -237,13 +239,14 @@ _native_k3s_fw_apply() {
   file=$(_native_k3s_fw_file "$tool") || return 1
   _native_k3s_fw_render "$tool" | _native_k3s_fw_install_file 0600 "$file" || return 1
   _native_k3s_fw_render_unit "$tool" | _native_k3s_fw_install_file 0644 "$_NATIVE_K3S_FW_UNIT_DIR/$_NATIVE_K3S_FW_UNIT" || return 1
-  if ! sudo systemctl daemon-reload || ! sudo systemctl enable "$_NATIVE_K3S_FW_UNIT" >/dev/null 2>&1; then
+  if ! tb_root systemctl daemon-reload || ! tb_root systemctl enable "$_NATIVE_K3S_FW_UNIT" >/dev/null 2>&1; then
     error "could not enable $_NATIVE_K3S_FW_UNIT, so the firewall rule would not survive a reboot"
   fi
-  if ! sudo systemctl restart "$_NATIVE_K3S_FW_UNIT"; then
+  if ! tb_root systemctl restart "$_NATIVE_K3S_FW_UNIT"; then
     error "$_NATIVE_K3S_FW_UNIT failed to load $file (see: journalctl -u $_NATIVE_K3S_FW_UNIT)"
   fi
-  if [ "$(_native_k3s_fw_status "$tool")" != present ]; then
+  # --print loaded nothing, so it has no rule to prove.
+  if ! tb_root_planning && [ "$(_native_k3s_fw_status "$tool")" != present ]; then
     error "$_NATIVE_K3S_FW_UNIT ran, but the rule is not live -- the k3s API would listen unfenced"
   fi
   IFS=$'\t' read -r aid apath < <(_native_k3s_fw_artefact "$tool")

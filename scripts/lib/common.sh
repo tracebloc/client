@@ -5,6 +5,18 @@
 # =============================================================================
 
 # ── Security hardening ───────────────────────────────────────────────────────
+# The launching shell's PATH, read before the prepend below (install.sh sets it
+# first on the curl|bash path; this covers install-k8s.sh run directly). See
+# install-cli.sh _cli_on_launch_path.
+# A bootstrap older than this file never set it, and has already put ~/.local/bin in
+# front of PATH: that entry is the installer's, not the user's, so it is dropped from
+# the capture. The cost is one conservative "open a new terminal" for a user whose
+# own PATH starts with ~/.local/bin and who pairs a stale bootstrap with these libs.
+if [[ -z "${TB_LAUNCH_PATH:-}" ]]; then
+  TB_LAUNCH_PATH="${PATH:-}"
+  TB_LAUNCH_PATH="${TB_LAUNCH_PATH#"${HOME}/.local/bin:"}"
+fi
+export TB_LAUNCH_PATH
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 # In a bats run only, the suite's sudo fence goes back in front of the directories
 # just prepended. Behind them, a case that dropped its own sudo stub would run the
@@ -396,6 +408,20 @@ step_header()    {
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
+# _valid_cluster_name NAME -- the cluster-name rule, in one place: validate_config
+# holds CLUSTER_NAME to it, and reinstall.sh holds a name to it before the name
+# reaches _cluster_presence's awk and grep (that detection runs before
+# validate_config).
+_valid_cluster_name() { [[ "${1:-}" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]]; }
+
+# _refuse_invalid_cluster_name NAME -- validate_config's refusal of a name outside
+# that rule, in one place: the k3d detection in reinstall.sh runs before
+# validate_config and refuses an invalid CLUSTER_NAME in the same words.
+_refuse_invalid_cluster_name() {
+  _valid_cluster_name "${1:-}" \
+    || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '${1:-}')"
+}
+
 # _rootless_active — the single source of truth for "this run is a rootless Tier-1
 # install" (RFC 0001 #1177). Slice 1 (#1219) established the condition as
 # INSTALL_TIER==1 AND the opt-in TB_TIER1_ROOTLESS flag; every later slice calls
@@ -593,17 +619,19 @@ _bounded_capture() {
 # rather than UNKNOWN.
 : "${TB_K3D_LIST_TIMEOUT:=15}"
 
-# _bounded_root SECONDS CMD… — like _bounded, but for a command that would
-# otherwise be prefixed with `sudo`. `_bounded` execs `timeout`, a BINARY, which
-# resolves `sudo` from PATH and so bypasses the root-aware `sudo()` shadow below —
-# and as root (the normal `--prepare-host` path, where RFC 0001 often has no sudo
-# binary at all) `timeout sudo CMD` then fails to find sudo and the caller misreads
-# a live daemon as dead (Bugbot, #744). Mirror the shadow's one rule: root needs no
-# sudo; non-root uses the real sudo binary (preflight_sudo has guaranteed it by now).
+# _bounded_root SECONDS CMD… — like _bounded, but for a command that runs as root.
+# `_bounded` execs `timeout`, a BINARY, which resolves `sudo` from PATH and so
+# bypasses the root-aware `sudo()` shadow below — and as root (the normal
+# `--prepare-host` path, where RFC 0001 often has no sudo binary at all)
+# `timeout sudo CMD` then fails to find sudo and the caller misreads a live daemon
+# as dead (Bugbot, #744). So the bound goes INSIDE the executor: `tb_root timeout
+# SECS CMD` runs bare as root and through the real sudo otherwise, and under
+# --print a read stays a read (`timeout` is on _tb_root_reads' list).
 _bounded_root() {
   local t="$1"; shift
-  if [ "$(id -u)" -eq 0 ]; then _bounded "$t" "$@"
-  else                          _bounded "$t" sudo "$@"; fi
+  if   has timeout;  then tb_root timeout  "$t" "$@"
+  elif has gtimeout; then tb_root gtimeout "$t" "$@"
+  else tb_root_bounded "$t" "$@"; fi   # a binary under the deadline, never the tb_root function (a killed subshell leaves CMD running)
 }
 
 # _docker_answers — `docker info`, bounded and silent. The single probe every
@@ -1144,14 +1172,169 @@ sudo() {
   fi
 }
 
+# ── The root executor (RFC-0175 D3, client-dev#1541) ─────────────────────────
+#  Every privileged command prepare-host can reach is one call of:
+#    tb_root CMD...          as root; may ask for the password (the sudo() shadow);
+#    tb_root_n CMD...        as root, never asking (the install record's root copy);
+#    tb_root_as USER CMD...  as USER, never asking (the named user's own record).
+#  They are the one place `prepare-host --print` lists its plan from, so the plan
+#  cannot drift from the run (CLAUDE.md rule 9). --print sets TRACEBLOC_ROOT_PLAN to a
+#  file: a command that changes the host is appended to it and NOT run, and a read
+#  (_tb_root_reads) runs as this user, never through sudo, so the plan follows
+#  what the run would find. Without TRACEBLOC_ROOT_PLAN each runs exactly what the code
+#  ran before it: tb_root through the sudo() shadow, the other two with `sudo -n`
+#  (or runuser, as root). prepare-host-root-guard.py holds every function
+#  prepare-host reaches to this: only the functions exported at the end of this
+#  block may name sudo, _real_sudo or runuser.
+tb_root()    { _tb_root root "$@"; }
+tb_root_n()  { _tb_root root-n "$@"; }
+tb_root_as() { local u="$1"; shift; _tb_root "user:${u}" "$@"; }
+
+# tb_root_planning -- 0 under --print. A check of what an earlier step DID (a wait,
+# a read-back) has nothing to check while nothing runs, and is skipped on it.
+tb_root_planning() { [[ -n "${TRACEBLOC_ROOT_PLAN:-}" ]]; }
+
+# tb_root_bounded SECS CMD... -- CMD as root under _tb_bounded_bg, the pure-bash
+# deadline, for a host with no timeout(1) (client-dev#1618). _tb_bounded_bg signals
+# the pid it started, so what it backgrounds must be a BINARY, never a function: a
+# function runs in a subshell whose death leaves CMD running (measured: install.sh
+# ran to its end). So the sudo() shadow's one rule is applied here -- root runs CMD
+# bare, anyone else the real sudo binary -- and with neither, tb_root fails at once
+# (127) and needs no bound. Under --print CMD is listed like any write, and nothing
+# runs. A function of the executor: export -f below.
+tb_root_bounded() {
+  local secs="$1" real; shift
+  if tb_root_planning; then tb_root "$@"; return; fi
+  if [ "$(id -u)" -eq 0 ]; then _tb_bounded_bg "$secs" "$@"; return; fi
+  real="$(type -P sudo)" || { tb_root "$@"; return; }
+  _tb_bounded_bg "$secs" "$real" "$@"
+}
+
+_tb_root() {
+  local how="$1"; shift
+  if [[ -z "${TRACEBLOC_ROOT_PLAN:-}" ]]; then _tb_root_run "$how" "$@"; return; fi
+  if _tb_root_reads "$@"; then "$@"; return; fi
+  if ! printf '%s\n' "$(_tb_root_line "$how" "$@")" >> "$TRACEBLOC_ROOT_PLAN" 2>/dev/null; then
+    # A plan that lost a line is no plan: the --print wrapper refuses to show it.
+    : > "${TRACEBLOC_ROOT_PLAN}.broken" 2>/dev/null
+    return 1
+  fi
+  # A body piped to the command (`printf … | tb_root tee FILE`) is read and dropped,
+  # so the writer never dies of SIGPIPE. --print runs the plan with stdin from
+  # /dev/null, so this never reads the installer itself under `curl | bash`.
+  if [ -p /dev/stdin ]; then cat >/dev/null 2>&1 || :; fi
+  return 0
+}
+
+# _tb_root_run HOW CMD... -- the run itself, one way per HOW.
+_tb_root_run() {
+  local how="$1" u; shift
+  case "$how" in
+    root) sudo "$@" ;;
+    root-n)
+      if [ "$(id -u)" -eq 0 ]; then "$@"; return; fi
+      _have_sudo_bin && _real_sudo -n "$@" ;;
+    user:*)
+      u="${how#user:}"
+      if _have_sudo_bin && _real_sudo -n true 2>/dev/null; then _real_sudo -n -u "$u" -- "$@"; return; fi
+      if [[ "$(id -u 2>/dev/null)" == "0" ]] && type -P runuser >/dev/null 2>&1; then runuser -u "$u" -- "$@"; return; fi
+      return 1 ;;
+    *) echo "tb_root: unknown mode '${how}'" >&2; return 2 ;;
+  esac
+}
+
+# A script run as root that only reads: does PATH ($1) exist? It answers
+# present or absent, and nothing when sudo itself failed, which is cannot-tell.
+# shellcheck disable=SC2016  # $1 is the inner sh's, on purpose
+TRACEBLOC_ROOT_SH_EXISTS='if [ -e "$1" ]; then echo present; else echo absent; fi'
+
+# _tb_root_reads CMD... -- 0 when CMD only reads: the probes prepare-host makes as
+# root, which --print makes as this user instead. A closed list: anything else
+# changes the host, is listed, and never runs under --print, even as root.
+_tb_root_reads() {
+  local a
+  case "${1:-}" in
+    true|test|cat|ls|stat|grep|cmp) return 0 ;;
+    # fuser -k kills what holds the file; journalctl can delete or rotate the journal.
+    fuser) for a in "$@"; do case "$a" in -*k*) return 1 ;; esac; done; return 0 ;;
+    journalctl)
+      for a in "$@"; do
+        case "$a" in --vacuum-*|--rotate|--flush|--sync|--relinquish-var|--smart-relinquish-var|--setup-keys|--update-catalog) return 1 ;; esac
+      done
+      return 0 ;;
+    find)
+      for a in "$@"; do
+        case "$a" in -delete|-exec|-execdir|-ok|-okdir|-fprint|-fprint0|-fprintf|-fls) return 1 ;; esac
+      done
+      return 0 ;;
+    nft) [[ "${2:-}" == list ]] ;;
+    iptables|ip6tables) case "${2:-}" in -S|-C|-L|--list|--check|--list-rules) return 0 ;; esac; return 1 ;;
+    systemctl)
+      shift
+      for a in "$@"; do
+        case "$a" in
+          -*) continue ;;
+          is-active|is-enabled|is-failed|status|show|cat) return 0 ;;
+          *) return 1 ;;
+        esac
+      done
+      return 1 ;;
+    docker) [[ "${2:-}" == info || "${2:-}" == version ]] ;;
+    timeout|gtimeout|*/timeout|*/gtimeout) shift; [[ $# -ge 2 ]] && shift && _tb_root_reads "$@" ;;
+    env)
+      shift
+      while [[ $# -gt 0 && ( "$1" == -i || "$1" == *=* ) ]]; do shift; done
+      [[ $# -gt 0 ]] && _tb_root_reads "$@" ;;
+    # Two fixed scripts read, word for word: the existence check and cluster.sh's
+    # leftover scan. Not exported: a `bash -c` child has neither, and no sh is a read there.
+    sh)
+      [[ "${2:-}" == -c && -n "${3:-}" ]] || return 1
+      [[ "$3" == "${TRACEBLOC_ROOT_SH_EXISTS:-}" || "$3" == "${TRACEBLOC_ROOT_SH_LEFTOVER_SCAN:-}" ]] ;;
+    k3s|*/k3s) [[ "${2:-}" == kubectl ]] && case "${3:-}" in get|cluster-info|version) return 0 ;; esac; return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _tb_root_line HOW CMD... -- the plan's line for one command: its words, quoted
+# for a shell, `as USER: ` before a command run as that user. A scratch path's
+# random suffix reads XXXXXX, so the plan and a run name the same file, and a
+# proxy URL's credentials read ***.
+_tb_root_line() {
+  local how="$1" a q out=""; shift
+  case "$how" in user:*) out="as ${how#user:}: " ;; esac
+  for a in "$@"; do
+    a="$(printf '%s' "$a" | sed -E 's#(/tracebloc-[A-Za-z0-9-]*-)[A-Za-z0-9]{6}(/|$)#\1XXXXXX\2#g; s#(://)[^/@[:space:]]+@#\1***@#g')"
+    case "$a" in
+      '' | *[!A-Za-z0-9_./:=@%+,-]*) q="'$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'" ;;
+      *) q="$a" ;;
+    esac
+    out+="${q} "
+  done
+  printf '%s' "${out% }"
+}
+
+# _tb_root_credential cached|prime|keepalive -- the password, for preflight_sudo:
+# whether sudo answers without one, asking for it once, and keeping it warm.
+_tb_root_credential() {
+  case "$1" in
+    cached) _real_sudo -n true 2>/dev/null ;;
+    prime) _real_sudo -v ;;
+    keepalive)
+      ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
+      SUDO_KEEPALIVE_PID=$! ;;
+  esac
+}
+
 # Export the shadow (+ its helpers) so `sudo <cmd>` inside `bash -c '…'` subshells
 # also routes through it — e.g. the apt-lock wait and the RHEL-rebuild (Alma/Rocky/
 # OL) Docker install in setup-linux.sh both run `bash -c '… sudo … …'`. Without
 # export, those child shells resolve the REAL sudo binary, so a root box without
 # sudo installed would still hit "sudo: command not found" there — the exact case
 # A2 fixes everywhere else (review #372). Harmless to non-bash children, which
-# ignore the BASH_FUNC_* environment entries.
-export -f sudo _real_sudo _have_sudo_bin
+# ignore the BASH_FUNC_* environment entries. The executor goes with it, so a
+# `bash -c` child plans under --print too. prepare-host-root-guard.py reads this
+# line as the executor: only these functions may name sudo.
+export -f sudo _real_sudo _have_sudo_bin tb_root tb_root_n tb_root_as tb_root_planning tb_root_bounded _tb_root _tb_root_run _tb_root_reads _tb_root_line _tb_root_credential
 
 # ── Sudo preflight — warm the credential cache before spinners hide prompts ──
 #  Call once at the start of install_macos / install_linux. Establishes that the
@@ -1160,6 +1343,10 @@ export -f sudo _real_sudo _have_sudo_bin
 # preflight_sudo [PURPOSE] -- PURPOSE finishes "tracebloc needs your password once
 # to ...": native k3s asks for k3s, and installs no Docker (k3s.sh).
 preflight_sudo() {
+  # --print runs nothing as root, so it asks for no password.
+  if tb_root_planning; then
+    return 0
+  fi
   # Already root — nothing to prime; the sudo() shadow runs privileged steps
   # directly and needs no sudo binary. Fixes root containers/VMs and minimal
   # images without sudo (A2).
@@ -1172,7 +1359,7 @@ preflight_sudo() {
     error "This machine needs administrator rights to install Docker and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again."
   fi
   # Sudo present and already usable without a password (cached / NOPASSWD).
-  if _real_sudo -n true 2>/dev/null; then
+  if _tb_root_credential cached; then
     return 0
   fi
   # Prompt once, then keep the credential warm. One line, then the system's own
@@ -1180,9 +1367,8 @@ preflight_sudo() {
   # Desktop) and Linux (Docker Engine + system packages).
   hint "tracebloc needs your password once to ${1:-set up Docker and a few tools}."
   echo ""
-  _real_sudo -v || error "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
-  ( while _real_sudo -n true 2>/dev/null; do sleep 50; done ) &
-  SUDO_KEEPALIVE_PID=$!
+  _tb_root_credential prime || error "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
+  _tb_root_credential keepalive
 }
 
 # ── Download with live progress bar ───────────────────────────────────────────
@@ -1521,8 +1707,7 @@ validate_config() {
   [[ -n "${HOME:-}" ]]  || error "\$HOME is not set — cannot determine user home directory"
   [[ -n "${USER:-}" ]]  || USER="$(whoami)" || error "Cannot determine current user"
 
-  [[ "$CLUSTER_NAME" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]] \
-    || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '$CLUSTER_NAME')"
+  _refuse_invalid_cluster_name "$CLUSTER_NAME"
 
   [[ "$TB_STORAGE_MODE" == "hostpath" || "$TB_STORAGE_MODE" == "node-local" ]] \
     || error "TB_STORAGE_MODE must be 'hostpath' or 'node-local' (got '$TB_STORAGE_MODE')"
@@ -1606,7 +1791,11 @@ fi
 # that ticket describes. Wrapped in a function so bats can override it.
 amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
 
-GPU_VENDOR="none"          # nvidia | amd | apple_silicon | none
+# nvidia | amd | apple_silicon | none, or amd_unsupported / nvidia_unsupported for a GPU
+# detect_gpu found and left off, because tracebloc has no training image for it (an AMD
+# GPU; an NVIDIA GPU on a machine that is not x86_64: client-dev#1697, #1698). Every GPU
+# step keys on exactly nvidia or amd, so an _unsupported vendor sets nothing up.
+GPU_VENDOR="none"
 NVIDIA_DRIVER_OK=false
 # detect-gpu.sh's floor verdict for a present NVIDIA driver: ok | below-driver |
 # below-hard-floor | below-compute | unreadable. Empty = not judged (no NVIDIA driver
@@ -1614,7 +1803,8 @@ NVIDIA_DRIVER_OK=false
 TB_GPU_FLOOR_VERDICT=""
 # Why the GPU was left off as UNSUPPORTED, for the platform (client-dev#1633): one
 # human sentence and the card's name, set by detect-gpu.sh's floor gate on
-# below-compute and below-hard-floor, by detect_gpu for a GPU that is not NVIDIA, and
+# below-compute and below-hard-floor, by detect_gpu for a GPU that is not NVIDIA or an
+# NVIDIA GPU on a machine that is not x86_64 (client-dev#1698), and
 # by the container runtime's GPU probe for an NVIDIA GPU no container can see
 # (backend#5296) -- ONLY those -- and passed to the chart as
 # env.GPU_UNSUPPORTED_REASON / env.GPU_UNSUPPORTED_NAME (install-client-helm.sh).
@@ -1623,7 +1813,8 @@ TB_GPU_FLOOR_VERDICT=""
 TB_GPU_UNSUPPORTED_REASON=""
 TB_GPU_UNSUPPORTED_NAME=""
 # The kind beside the sentence (backend#5296): compute_too_old | driver_too_old |
-# not_nvidia | docker_cannot_see_gpu, or empty. Passed as env.GPU_UNSUPPORTED_CODE.
+# not_nvidia | docker_cannot_see_gpu | arch_unsupported, or empty. Passed as
+# env.GPU_UNSUPPORTED_CODE.
 TB_GPU_UNSUPPORTED_CODE=""
 # nvidia-smi's name answer, one line per GPU, for a docker_cannot_see_gpu report.
 TB_GPU_NVIDIA_NAMES=""
@@ -1911,6 +2102,8 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_ARTEFACT_KINDS              $defs.artefact.properties.kind.enum, space-separated
 #    TB_RECORD_USER_PATH            x-tracebloc-record.user-path (a leading ~ is $HOME)
 #    TB_RECORD_ROOT_PATH            x-tracebloc-record.root-path (<user> is the login name)
+#    TB_K3D_REINSTALL               x-tracebloc-reinstall.release
+#    TB_REINSTALL_CONSENT_VAR       x-tracebloc-reinstall.consent-variable
 TB_SUBSTRATES="k3d k3s"
 TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
@@ -1920,6 +2113,11 @@ TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3
 # shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
 TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"
+# The k3d-to-native-k3s release switch (reinstall.sh): `refuse` refuses every k3s
+# request on a k3d machine; `offboard` lets a consented one offboard the old client
+# and reinstall. The consent variable is read only under `offboard`.
+TB_K3D_REINSTALL="refuse"
+TB_REINSTALL_CONSENT_VAR="TRACEBLOC_REINSTALL_CONSENT"
 # The substrate this run was asked for: TRACEBLOC_SUBSTRATE, else the default
 # (blank means unset, as for every TRACEBLOC_* setting). There is no flag and no
 # alias. main() refines it with tb_substrate_resolve, so a re-run keeps the
@@ -2141,15 +2339,13 @@ tb_record_for_user() {
   return 0
 }
 
-# _tb_record_as_user USER CMD... -- CMD as USER, never prompting: through sudo when
-# this process can sudo without a password (preflight_sudo primed it), else through
-# runuser when it is root. The sudo() shadow cannot do this: as root it runs its
-# arguments as a command.
+# _tb_record_as_user USER CMD... -- CMD as USER, never prompting: tb_root_as, which
+# goes through sudo when this process can sudo without a password (preflight_sudo
+# primed it), else through runuser when it is root. The sudo() shadow cannot do
+# this: as root it runs its arguments as a command.
 _tb_record_as_user() {
   local u="$1"; shift
-  if _have_sudo_bin && _real_sudo -n true 2>/dev/null; then _real_sudo -n -u "$u" -- "$@"; return; fi
-  if [[ "$(id -u 2>/dev/null)" == "0" ]] && type -P runuser >/dev/null 2>&1; then runuser -u "$u" -- "$@"; return; fi
-  return 1
+  tb_root_as "$u" "$@"
 }
 
 # _tb_record_user_copy REC -- prepared mode: REC to the named user's own record path
@@ -2310,11 +2506,8 @@ _tb_record_root_copy() {
   # A CLI-only refresh runs before the tier is known, so the Tier 0 guard above
   # cannot see it: it refreshes a root copy a full install made and never creates one.
   if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]] && ! _tb_record_root_copy_exists "$dst"; then return 0; fi
-  if [[ "$(id -u 2>/dev/null)" == "0" ]]; then
-    if { mkdir -p "${dst%/*}" && cp "$1" "$dst"; } 2>/dev/null; then _TB_RECORD_ROOT_WRITTEN="$dst"
-    else log "Install record: couldn't write the root copy ${dst}."; fi
-  elif _have_sudo_bin && _real_sudo -n true 2>/dev/null; then
-    if { _real_sudo -n mkdir -p "${dst%/*}" && _real_sudo -n cp "$1" "$dst"; } 2>/dev/null; then _TB_RECORD_ROOT_WRITTEN="$dst"
+  if tb_root_n true 2>/dev/null; then
+    if { tb_root_n mkdir -p "${dst%/*}" && tb_root_n cp "$1" "$dst"; } 2>/dev/null; then _TB_RECORD_ROOT_WRITTEN="$dst"
     else log "Install record: couldn't write the root copy ${dst}."; fi
   fi
   return 0
@@ -2324,8 +2517,7 @@ _tb_record_root_copy() {
 # through a password-free sudo. As the user, its directory is unreadable (made
 # through sudo under umask 077), so a plain -f would always answer "absent".
 _tb_record_root_copy_exists() {
-  if [[ "$(id -u 2>/dev/null)" == "0" ]]; then [[ -f "$1" ]]; return; fi
-  _have_sudo_bin && _real_sudo -n test -f "$1" 2>/dev/null
+  tb_root_n test -f "$1" 2>/dev/null
 }
 
 # The root copy's path for this user. Fails when the user has no name.

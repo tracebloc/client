@@ -658,10 +658,10 @@ _leftover_data_dirs() {
 # two under each real subdir; no symlinks; a subdir the native scan already named is
 # not a second root (NATIVE, one per line); a dir counts when it holds a file, and
 # root cannot be refused one. When sudo cannot answer, BASE is echoed itself: data
-# nobody could prove absent, never a clean slate.
-_leftover_base_dirs_as_root() {
-  local out
-  out="$(sudo sh -c '
+# nobody could prove absent, never a clean slate. The scan is a fixed script that
+# only reads, so --print makes it as this user (_tb_root_reads, word for word).
+# shellcheck disable=SC2016  # $1, $2 and the rest are the inner sh's, on purpose
+TRACEBLOC_ROOT_SH_LEFTOVER_SCAN='
     b="$1"; native="$2"
     [ -e "$b" ] || exit 0
     [ -d "$b" ] && [ ! -L "$b" ] || { echo "$b"; exit 0; }
@@ -681,7 +681,10 @@ $s
         [ -d "$d" ] && [ ! -L "$d" ] && [ -n "$(find "$d" -type f -print -quit 2>&1)" ] && echo "$d"
       done
     done
-    exit 0' _ "$1" "$2" 2>/dev/null)" || { printf '%s\n' "$1"; return 0; }
+    exit 0'
+_leftover_base_dirs_as_root() {
+  local out
+  out="$(tb_root sh -c "$TRACEBLOC_ROOT_SH_LEFTOVER_SCAN" _ "$1" "$2" 2>/dev/null)" || { printf '%s\n' "$1"; return 0; }
   [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
@@ -689,7 +692,7 @@ $s
 # shadow (k3s owns the storage path, and a parent it made 0700 hides PATH from the
 # daily user). Empty when root cannot answer, which is "cannot tell", never absent.
 _leftover_k3s_present() {
-  sudo sh -c 'if [ -e "$1" ]; then echo present; else echo absent; fi' _ "$1" 2>/dev/null || true
+  tb_root sh -c "$TRACEBLOC_ROOT_SH_EXISTS" _ "$1" 2>/dev/null || true
 }
 
 # The native k3s scan: every local-path volume directory (pvc-*, with anything in
@@ -707,7 +710,7 @@ _leftover_k3s_volume_dirs() {
     present) ;;
     *)       printf '%s\n' "$storage"; return 0 ;;
   esac
-  out="$(sudo find "$storage" -mindepth 1 -maxdepth 1 -type d -name 'pvc-*' ! -empty 2>/dev/null)" || rc=$?
+  out="$(tb_root find "$storage" -mindepth 1 -maxdepth 1 -type d -name 'pvc-*' ! -empty 2>/dev/null)" || rc=$?
   if [[ "$rc" -ne 0 ]]; then printf '%s\n' "$storage"; return 0; fi
   [[ -z "$out" ]] || printf '%s\n' "$out"
   return 0
@@ -787,7 +790,7 @@ _wipe_leftover_data() {
     fi
     [[ "$src" -eq 0 ]] \
       || error "Refusing to wipe: couldn't read ${TB_K3S_CONFIG_PATH}, so where k3s keeps its volumes can't be told."
-    as_root=(sudo)
+    as_root=(tb_root)
   fi
   for d in "$@"; do
     case "$d" in
@@ -958,11 +961,11 @@ guard_leftover_data() {
       # through to create_cluster, which would adopt the survivors and silently
       # break the "wipe means gone" guarantee.
       if ! _wipe_leftover_data "${found[@]}"; then  # set-u-safe: the empty-found check at the top of this function returns first
-        local rm_eg="'sudo rm -rf ${HOST_DATA_DIR}'"
-        [[ -n "$k3s" ]] && rm_eg="'sudo rm -rf' on each path listed above, with k3s stopped"
+        local rm_tail=" ${HOST_DATA_DIR}'"
+        [[ -n "$k3s" ]] && rm_tail="' on each path listed above, with k3s stopped"
         local or_dir=", or choose a different directory"
         [[ -n "$frozen" ]] && or_dir=""   # config.yaml froze the volumes' directory: there is no other to choose
-        error "Could not fully wipe existing data under ${where} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. ${rm_eg}) and re-run${or_dir}. Refusing to proceed and adopt the leftovers."
+        error "Could not fully wipe existing data under ${where} — some files could not be removed (often root/container-owned MySQL files). Remove them manually (e.g. 'sudo rm -rf${rm_tail}) and re-run${or_dir}. Refusing to proceed and adopt the leftovers."
       fi
       if [[ -n "${HOST_DATASET_DIR:-}" ]]; then
         hint "Left HOST_DATASET_DIR (${HOST_DATASET_DIR}) untouched — it is a shared mount, not wiped."

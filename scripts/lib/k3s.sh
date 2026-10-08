@@ -161,7 +161,7 @@ _native_k3s_storage_choice() {
 # _native_k3s_root_ready -- true when a root read needs no password prompt: root
 # itself, or a sudo that answers non-interactively (cached, or NOPASSWD).
 _native_k3s_root_ready() {
-  [ "$(id -u)" -eq 0 ] || _real_sudo -n true 2>/dev/null
+  [ "$(id -u)" -eq 0 ] || tb_root_n true 2>/dev/null
 }
 
 # _native_k3s_storage_path -- the directory local-path keeps the volumes in: the
@@ -270,13 +270,17 @@ _native_k3s_fetch_binary() {
   [[ -n "$want" ]] || error "native k3s: no pinned digest for the ${arch} k3s binary is stamped in common.sh -- run scripts/check-facts.sh --write."
   url="$(_native_k3s_release_url "$asset")" || error "native k3s: cannot derive the k3s release from K8S_VERSION=${K8S_VERSION:-<empty>}."
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-bin-XXXXXX")" || error "native k3s: could not create a temporary directory for the k3s download."
-  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "$url" -o "${tmpdir}/k3s" \
-    || { rm -rf "$tmpdir"; error "Couldn't download the k3s binary from ${url}. Check that this machine can reach github.com and release-assets.githubusercontent.com, then re-run."; }
-  _assert_download_size "${tmpdir}/k3s" 20000000 "k3s" "$tmpdir"
-  _verify_sha256 "$want" "${tmpdir}/k3s" \
-    || { rm -rf "$tmpdir"; error "The k3s binary downloaded from ${url} does not match its pinned sha256 (${want}), so it was not installed. Something between this machine and GitHub changed the file; do not install it by hand. Re-run on a network that does not rewrite downloads."; }
-  sudo install -m 0755 "${tmpdir}/k3s" "$dest" \
+  # --print downloads nothing: it lists the install, which the run makes only after
+  # the binary matched its pinned digest.
+  if ! tb_root_planning; then
+    retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+      "$url" -o "${tmpdir}/k3s" \
+      || { rm -rf "$tmpdir"; error "Couldn't download the k3s binary from ${url}. Check that this machine can reach github.com and release-assets.githubusercontent.com, then re-run."; }
+    _assert_download_size "${tmpdir}/k3s" 20000000 "k3s" "$tmpdir"
+    _verify_sha256 "$want" "${tmpdir}/k3s" \
+      || { rm -rf "$tmpdir"; error "The k3s binary downloaded from ${url} does not match its pinned sha256 (${want}), so it was not installed. Something between this machine and GitHub changed the file; do not install it by hand. Re-run on a network that does not rewrite downloads."; }
+  fi
+  tb_root install -m 0755 "${tmpdir}/k3s" "$dest" \
     || { rm -rf "$tmpdir"; error "Couldn't install the k3s binary at ${dest}."; }
   rm -rf "$tmpdir"
 }
@@ -287,6 +291,8 @@ _native_k3s_fetch_install_script() {
   local dest="$1" want="${TB_K3S_INSTALL_SH_SHA256:-}" url
   [[ -n "$want" ]] || error "native k3s: no pinned digest for k3s's install.sh is stamped in common.sh -- run scripts/check-facts.sh --write."
   url="$(_native_k3s_install_script_url)" || error "native k3s: cannot derive the k3s release from K8S_VERSION=${K8S_VERSION:-<empty>}."
+  # --print downloads nothing; the run verifies the script before running it.
+  if tb_root_planning; then return 0; fi
   retry 3 5 curl_secure -fsSL "$url" -o "$dest" \
     || error "Couldn't download k3s's install script from ${url}. Check that this machine can reach raw.githubusercontent.com, then re-run."
   # 37 KB at v1.36.3+k3s1; an error page or a truncated stream is far shorter.
@@ -329,28 +335,18 @@ _native_k3s_run_install_script() {
   # by absolute path: env -i resets PATH to the fixed one above, which would not find
   # a timeout(1) installed anywhere else, and env would then fail 127 on an install
   # that checked for it.
-  # A host with no timeout(1) is bounded by _tb_bounded_bg, the pure-bash deadline
-  # _bounded falls back to, answering 124 on the deadline (client-dev#1618). What it
-  # backgrounds must be a BINARY, never the sudo() shadow: it signals the pid it
-  # started, and a function runs in a subshell whose death leaves env and the script
-  # running (measured: the script ran to its end). So the shadow's one rule is
-  # applied here -- root runs bare, non-root runs the real sudo binary -- and with
-  # neither, sudo() fails at once (127) and needs no bound.
+  # A host with no timeout(1) is bounded by bash's own deadline, through the executor
+  # (tb_root_bounded, client-dev#1618): it backgrounds a binary, never the sudo()
+  # shadow, and under --print lists the script and runs nothing.
   local secs="${TB_K3S_INSTALL_SH_TIMEOUT:-600}"
   local tmo; tmo="$(command -v timeout 2>/dev/null)" || tmo=""
   if [[ "$tmo" == /* ]]; then
     # set-u-safe: env_args is seeded with PATH, HOME and INSTALL_K3S_SKIP_DOWNLOAD
-    sudo env -i "${env_args[@]}" "$tmo" "$secs" sh "$script" </dev/null
+    tb_root env -i "${env_args[@]}" "$tmo" "$secs" sh "$script" </dev/null
     return
   fi
-  local -a priv=()
-  if [ "$(id -u)" -ne 0 ]; then
-    # set-u-safe: env_args is seeded with PATH, HOME and INSTALL_K3S_SKIP_DOWNLOAD
-    local real; real="$(type -P sudo)" || { sudo env -i "${env_args[@]}" sh "$script" </dev/null; return; }
-    priv=("$real")
-  fi
-  # set-u-safe: priv is empty as root
-  _tb_bounded_bg "$secs" ${priv[@]+"${priv[@]}"} env -i "${env_args[@]}" sh "$script" </dev/null
+  # set-u-safe: env_args is seeded with PATH, HOME and INSTALL_K3S_SKIP_DOWNLOAD
+  tb_root_bounded "$secs" env -i "${env_args[@]}" sh "$script" </dev/null
 }
 
 # ── config.yaml ───────────────────────────────────────────────────────────────
@@ -435,12 +431,12 @@ _native_k3s_render_config() {
 TB_K3S_FILES_CHANGED=""
 _native_k3s_install_file() {
   local mode="$1" dest="$2" body="$3" group="${4:-}" have tmp
-  if have="$(sudo cat "$dest" 2>/dev/null)" && [[ "$have" == "$body" ]]; then
+  if have="$(tb_root cat "$dest" 2>/dev/null)" && [[ "$have" == "$body" ]]; then
     return 0
   fi
   tmp="$(mktemp "${TMPDIR:-/tmp}/tracebloc-k3s-XXXXXX")" || return 1
   printf '%s\n' "$body" > "$tmp" || { rm -f "$tmp"; return 1; }
-  sudo install -m "$mode" ${group:+-g "$group"} "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+  tb_root install -m "$mode" ${group:+-g "$group"} "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
   rm -f "$tmp"
   TB_K3S_FILES_CHANGED="${TB_K3S_FILES_CHANGED:+${TB_K3S_FILES_CHANGED} }${dest}"
 }
@@ -489,7 +485,7 @@ TB_K3S_ADOPTED=""
 # except on an adopted host, where this user reads them through the prepared group
 # and has no sudo to use.
 _native_k3s_read() {
-  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then "$@"; else sudo "$@"; fi
+  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then "$@"; else tb_root "$@"; fi
 }
 
 # _native_k3s_kubeconfig_grant -- the group k3s.yaml and config.yaml are granted to,
@@ -550,8 +546,8 @@ _native_k3s_write_config() {
   cfg="$(_native_k3s_render_config "$mode" "$name" "$cidrs" "$storage" "$cgroup" "$kgroup")" || return 1
   [[ "$cgroup" != v1 ]] || _native_k3s_cgroup_v1_notice
   kubelet="$(_render_kubelet_config)" || return 1
-  sudo install -d -m 0755 /etc/rancher || return 1
-  sudo install -d -m 0755 "$TB_K3S_ETC_DIR" || return 1
+  tb_root install -d -m 0755 /etc/rancher || return 1
+  tb_root install -d -m 0755 "$TB_K3S_ETC_DIR" || return 1
   if [[ -n "$kgroup" ]]; then
     _native_k3s_install_file 0640 "$TB_K3S_CONFIG_PATH" "$cfg" "$kgroup" || return 1
   else
@@ -832,7 +828,7 @@ _native_k3s_budget_left() {
 _native_k3s_kubectl_on() {
   local ctx="$1"; shift
   if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
-    sudo env KUBECONFIG="$TB_K3S_KUBECONFIG_PATH" "$TB_K3S_BIN_PATH" kubectl "$@"
+    tb_root env KUBECONFIG="$TB_K3S_KUBECONFIG_PATH" "$TB_K3S_BIN_PATH" kubectl "$@"
   else
     kubectl --context "$ctx" "$@"
   fi
@@ -862,6 +858,8 @@ _native_k3s_node_ready() {
 # ~14 s, and the API answers in between (S-R2, tracebloc/backend#5072).
 _native_k3s_wait_for_node_ready() {
   local name="$1" budget ctx
+  # --print: nothing ran, so there is nothing to wait for or read back.
+  if tb_root_planning; then return 0; fi
   budget="$(_api_wait_budget_s)"; ctx="$(_native_k3s_context)"
   log "Waiting for node '${name}' to be Ready..."
   until [[ "$(_native_k3s_node_ready "$ctx" "$name")" == True ]]; do
@@ -880,6 +878,8 @@ _native_k3s_wait_for_node_ready() {
 # count _native_k3s_wait_for_kubeconfig started.
 _native_k3s_wait_for_api() {
   local budget ctx
+  # --print: nothing ran, so there is nothing to wait for or read back.
+  if tb_root_planning; then return 0; fi
   budget="$(_api_wait_budget_s)"; ctx="$(_native_k3s_context)"
   log "Waiting for the k3s API server to answer on context ${ctx}..."
   until _native_k3s_api_answers "$ctx"; do
@@ -1162,7 +1162,7 @@ _native_k3s_gpu_wire() {
   esac
   if [[ -n "$why" ]]; then
     log "native k3s: ${why}; restarting k3s once so it finds the NVIDIA runtime."
-    sudo systemctl restart k3s || error "k3s did not restart to pick up the NVIDIA runtime. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
+    tb_root systemctl restart k3s || error "k3s did not restart to pick up the NVIDIA runtime. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
     # A second start of k3s, made on purpose: it gets the one wait budget again.
     TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
     _native_k3s_wait_for_api
@@ -1254,6 +1254,9 @@ _native_k3s_ensure_firewall_tool() {
   # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
   spin_cmd "Installing nftables…" $PM_INSTALL nftables || \
     log "Could not install nftables; the firewall step names what is missing."
+  # --print installed nothing: the rule it plans is for the nftables it plans.
+  # shellcheck disable=SC2034  # consumed cross-file by k3s-firewall.sh (_native_k3s_fw_pick)
+  if tb_root_planning; then TRACEBLOC_K3S_FW_PLANNED=nft; fi
 }
 
 # _native_k3s_install_linux -- step b on native k3s (D3, D9). k3s runs as root, so
@@ -1341,34 +1344,6 @@ _native_k3s_docker_unreachable() {
   [[ ! -w "$TB_DOCKER_DEFAULT_SOCKET" ]]
 }
 
-# _native_k3s_refuse_live_k3d [adopt] -- never k3s beside a live k3d (D10). k3d.sh's
-# _k3d_live_clusters has four answers, and each is acted on here: none (go on), a
-# listed cluster (refused), a k3d that did not answer in time, and a listing that
-# failed fast. The last two are "cannot tell" and refused too -- an unreadable state
-# is not evidence of absence -- but each names its own remedy: "start Docker" is
-# only right for the first, and a fast failure quotes what k3d said instead.
-#
-# One exception, on a prepared host only (adopt): a listing that failed fast goes on
-# when this user cannot reach Docker at all. k3d clusters are the machine's Docker
-# containers; prepare-host listed them as the administrator before it set k3s up,
-# and a user with no way to Docker cannot have started one since. A listed cluster,
-# a listing that did not answer, and a fast failure with Docker reachable (k3d
-# itself is broken) are refused on adopt as everywhere else.
-_native_k3s_refuse_live_k3d() {
-  local names rc=0
-  names="$(_k3d_live_clusters)" || rc=$?
-  if [[ "$rc" -eq 3 && "${1:-}" == adopt ]] && _native_k3s_docker_unreachable; then
-    info "k3d is installed but cannot list clusters as you (${names%%$'\n'*}). You cannot reach Docker (no DOCKER_HOST, and ${TB_DOCKER_DEFAULT_SOCKET} is not writable for you), so you cannot have started a k3d cluster, and prepare-host checked for one when it set k3s up."
-    return 0
-  fi
-  case "$rc" in
-    1) return 0 ;;
-    0) error "A k3d cluster is running on this machine ($(printf '%s' "$names" | tr '\n' ' ' | sed 's/ *$//')), and native k3s is never set up beside a live k3d. Moving to native k3s is a reinstall (a new client, datasets ingested again), which this installer cannot do yet. Keep k3d with TRACEBLOC_SUBSTRATE=k3d, or remove the k3d cluster first ('tracebloc delete'), then re-run." ;;
-    3) error "k3d is installed but 'k3d cluster list' failed (${names}), so this run cannot tell whether a k3d cluster is live, and native k3s is never set up beside one. Fix what k3d reports (start Docker if it is not running), or remove k3d, then re-run." ;;
-    *) error "k3d is installed but did not answer, so this run cannot tell whether a k3d cluster is live, and native k3s is never set up beside one. Start Docker so the check can run, or remove k3d, then re-run." ;;
-  esac
-}
-
 # _native_k3s_refuse_server_state -- refuse a fresh install over the cluster state an
 # earlier k3s left in TB_K3S_DATA_PATH (D5: no install silently adopts earlier data).
 # The unit and config.yaml can be removed by hand while ${TB_K3S_DATA_PATH}/server
@@ -1378,11 +1353,11 @@ _native_k3s_refuse_live_k3d() {
 # server/ is refused, and one root cannot read is "cannot tell", refused the same way.
 _native_k3s_refuse_server_state() {
   local srv="${TB_K3S_DATA_PATH}/server" entries
-  if ! sudo test -e "$srv"; then
-    sudo test -d / || error "native k3s: sudo did not answer, so this run cannot tell whether an earlier k3s left its cluster state in ${srv}. Check that 'sudo true' runs, then re-run."
+  if ! tb_root test -e "$srv"; then
+    tb_root test -d / || error "native k3s: sudo did not answer, so this run cannot tell whether an earlier k3s left its cluster state in ${srv}. Check that 'sudo true' runs, then re-run."
     return 0
   fi
-  entries="$(sudo ls -A "$srv")" \
+  entries="$(tb_root ls -A "$srv")" \
     || error "native k3s: ${srv} exists but could not be listed, so this run cannot tell whether an earlier k3s left its cluster state there. Check it with 'sudo ls -A ${srv}', then re-run."
   [[ -n "$entries" ]] || return 0
   error "native k3s: an earlier k3s left its cluster state in ${srv}, though its unit and config.yaml are gone, and tracebloc never starts a new k3s on an old cluster's data. Remove that k3s with ${TB_K3S_UNINSTALL_PATH} if it is still there: it deletes ${TB_K3S_DATA_PATH} (the old cluster's state, its images and the volumes under it), /etc/rancher/k3s and the k3s binary. Or move ${TB_K3S_DATA_PATH} aside to keep it. Then re-run."
@@ -1398,7 +1373,7 @@ _native_k3s_refuse_server_state() {
 _native_k3s_presence() {
   local found="" p body rec
   for p in "$TB_K3S_UNIT_PATH" "$TB_K3S_AGENT_UNIT_PATH" "$TB_K3S_CONFIG_PATH"; do
-    if sudo test -e "$p"; then found="${found:+${found}, }${p}"; fi
+    if tb_root test -e "$p"; then found="${found:+${found}, }${p}"; fi
   done
   if [[ -z "$found" ]]; then
     # `test -e` fails for a missing path AND for a sudo that did not run (a dropped
@@ -1407,17 +1382,17 @@ _native_k3s_presence() {
     # skip the foreign-k3s refusal below and run the leftover guard over a live
     # cluster. Same probe _native_k3s_config_value makes, after the reads it
     # disambiguates.
-    sudo test -d / || error "native k3s: sudo did not answer, so this run cannot tell whether a k3s is already on this machine, and it never sets up k3s over one it cannot see. Check that 'sudo true' runs, then re-run."
+    tb_root test -d / || error "native k3s: sudo did not answer, so this run cannot tell whether a k3s is already on this machine, and it never sets up k3s over one it cannot see. Check that 'sudo true' runs, then re-run."
     _native_k3s_refuse_server_state
     return 1
   fi
-  if ! sudo test -e "$TB_K3S_AGENT_UNIT_PATH"; then
+  if ! tb_root test -e "$TB_K3S_AGENT_UNIT_PATH"; then
     # Same probe as above: this `test -e` also fails when sudo stopped answering after
     # the first reads, and an agent unit root could not see must not read as no agent
     # unit, which would let a foreign agent be adopted as ours.
-    sudo test -d / || error "native k3s: sudo did not answer, so this run cannot tell whether an agent unit is on this machine, and it never adopts a k3s it cannot fully see. Check that 'sudo true' runs, then re-run."
-    if sudo test -e "$TB_K3S_CONFIG_PATH"; then
-      body="$(sudo cat "$TB_K3S_CONFIG_PATH")" \
+    tb_root test -d / || error "native k3s: sudo did not answer, so this run cannot tell whether an agent unit is on this machine, and it never adopts a k3s it cannot fully see. Check that 'sudo true' runs, then re-run."
+    if tb_root test -e "$TB_K3S_CONFIG_PATH"; then
+      body="$(tb_root cat "$TB_K3S_CONFIG_PATH")" \
         || error "native k3s: ${TB_K3S_CONFIG_PATH} exists but could not be read, so this run cannot tell whether the k3s on this machine is the one tracebloc set up. Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
       case $'\n'"$body"$'\n' in *$'\n'"${TB_K3S_CONFIG_MARKER}"$'\n'*) return 0 ;; esac
     fi
@@ -1448,8 +1423,10 @@ _native_k3s_wait_for_kubeconfig() {
   local budget
   budget="$(_api_wait_budget_s)"
   TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
+  # --print: nothing ran, so there is nothing to wait for or read back.
+  if tb_root_planning; then return 0; fi
   log "Waiting for k3s to start and its API server to answer (up to ${budget}s)..."
-  until sudo test -s "$TB_K3S_KUBECONFIG_PATH"; do
+  until tb_root test -s "$TB_K3S_KUBECONFIG_PATH"; do
     _native_k3s_budget_left "$budget" \
       || error "k3s did not write ${TB_K3S_KUBECONFIG_PATH} within ${budget}s. It's safe to re-run this installer; 'sudo systemctl status k3s' and 'sudo journalctl -u k3s' say why it is not up."
     sleep 2
@@ -1473,8 +1450,11 @@ _native_k3s_ensure_running() {
     inactive|failed|activating|deactivating|maintenance) ;;
     *) error "native k3s: this run cannot tell whether k3s is running ('systemctl is-active k3s' answered '${state:-nothing}'), so it neither starts k3s nor waits on it. Check that 'systemctl status k3s' answers, then re-run; it's safe to re-run this installer." ;;
   esac
+  # --print ran no install.sh, and on a new k3s that is what starts it: here only a k3s
+  # already set up (its unit on disk) and stopped is started, so only that one is listed.
+  if tb_root_planning && ! tb_root test -e "$TB_K3S_UNIT_PATH"; then return 0; fi
   log "native k3s: k3s is not running (systemd state '${state}'); starting it."
-  sudo systemctl start k3s \
+  tb_root systemctl start k3s \
     || error "native k3s: k3s was not running (systemd state '${state}') and did not start. 'sudo systemctl status k3s' and 'sudo journalctl -u k3s' say why; it's safe to re-run this installer."
 }
 
@@ -1512,7 +1492,7 @@ _native_k3s_create_cluster() {
     return 0
   fi
   _native_k3s_refuse_host
-  _native_k3s_refuse_live_k3d
+  # k3s beside a live k3d is refused before this, in main() (reinstall.sh, D10).
   _native_k3s_presence || present=$?
   # A new k3s only. A re-run of tracebloc's own k3s keeps its node and its data by
   # design, as k3d's existing cluster does.
@@ -1575,7 +1555,7 @@ _native_k3s_create_cluster() {
   # hash set, so a changed file of ours is this function's restart to make.
   if [[ -n "$TB_K3S_FILES_CHANGED" && -z "$replaced" && "$present" -eq 0 ]]; then
     log "native k3s: ${TB_K3S_FILES_CHANGED} changed; restarting k3s to read it."
-    sudo systemctl restart k3s || error "k3s did not restart after its configuration changed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
+    tb_root systemctl restart k3s || error "k3s did not restart after its configuration changed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
   fi
   # Neither the script nor the restart above starts a stopped k3s on an unchanged re-run.
   _native_k3s_ensure_running
@@ -1677,11 +1657,12 @@ _native_k3s_adopt_tools() {
 # up for this user is used as it is: no firewall, file, binary or restart here, and
 # no sudo. k3s.yaml, readable through the prepared group, is merged into this user's
 # kubeconfig and recorded; then the API and the node are waited for on the one
-# budget the full path uses.
+# budget the full path uses. The live-k3d check ran in main(), before step b
+# (reinstall.sh's refuse_k3s_beside_live_k3d), with the adopt exception for a user
+# who cannot reach Docker (_reinstall_adopt_blind).
 _native_k3s_adopt_cluster() {
   local name
   _native_k3s_refuse_host
-  _native_k3s_refuse_live_k3d adopt
   log "native k3s: using the k3s an administrator prepared for $(id -un 2>/dev/null) (prepare-host)."
   name="$(_native_k3s_node_name)"
   TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
@@ -1715,11 +1696,11 @@ _native_k3s_prepared_finish() {
 _native_k3s_prepared_group() {
   local user="$1" g="$TB_K3S_PREPARED_GROUP" line
   if ! getent group "$g" >/dev/null 2>&1; then
-    sudo groupadd --system "$g" \
+    tb_root groupadd --system "$g" \
       || error "prepare-host: couldn't create the '${g}' group. Check 'sudo groupadd --system ${g}', then re-run."
     log "prepare-host: created the system group '${g}'."
   fi
-  sudo usermod -aG "$g" "$user" \
+  tb_root usermod -aG "$g" "$user" \
     || error "prepare-host: couldn't add ${user} to the '${g}' group. Check 'sudo usermod -aG ${g} ${user}', then re-run."
   line="$(getent group "$g" 2>/dev/null)" || line=""
   log "prepare-host: ${user} is in '${g}' (members: ${line##*:})."
@@ -1733,7 +1714,9 @@ _native_k3s_prepared_group() {
 # fails the run.
 _native_k3s_check_prepared_grant() {
   local have want="root:${TB_K3S_PREPARED_GROUP} 640"
-  have="$(sudo stat -c '%U:%G %a' "$TB_K3S_KUBECONFIG_PATH" 2>/dev/null)" || have=""
+  # --print: nothing ran, so there is nothing to wait for or read back.
+  if tb_root_planning; then return 0; fi
+  have="$(tb_root stat -c '%U:%G %a' "$TB_K3S_KUBECONFIG_PATH" 2>/dev/null)" || have=""
   [[ "$have" == "$want" ]] \
     || error "native k3s: ${TB_K3S_KUBECONFIG_PATH} is '${have:-unreadable}' (owner:group mode), not '${want}', so ${TB_RECORD_FOR_USER:-the named user} cannot read it. 'sudo journalctl -u k3s | grep -i kubeconfig' says why; it's safe to re-run prepare-host."
   log "native k3s: ${TB_K3S_KUBECONFIG_PATH} is ${have}."
@@ -1744,6 +1727,8 @@ _native_k3s_check_prepared_grant() {
 # best-effort, so prepare-host reads the copy back, as USER.
 _native_k3s_check_user_record() {
   local dst="${2}${TB_RECORD_USER_PATH#\~}" body
+  # --print: nothing ran, so there is nothing to wait for or read back.
+  if tb_root_planning; then return 0; fi
   body="$(_tb_record_as_user "$1" cat "$dst" 2>/dev/null)" || body=""
   case "$body" in
     *'"kind": "k3s-install"'*) log "prepare-host: ${1}'s install record ${dst} lists k3s-install." ;;

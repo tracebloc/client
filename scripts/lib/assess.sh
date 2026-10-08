@@ -318,6 +318,25 @@ _assess_release_pending() {
   [[ -n "$_out" ]]
 }
 
+# _assess_gpu_request_unsupported NS — true when the release in NS requests a GPU this
+# installer no longer sets up (client-dev#1697, #1698): amd.com/gpu (there is no ROCm
+# training image), or nvidia.com/gpu on a Linux machine that is not x86_64 (the GPU
+# images are linux/amd64 only). Such a release was installed before the fix; the
+# healthy hand-off would keep its request forever, so the caller degrades to the
+# normal flow, whose step e writes this run's CPU-only GPU_REQUESTS / GPU_LIMITS.
+# Values that cannot be read are NOT a reason to reinstall a healthy machine: false.
+# Read-only and bounded. The release is named after its namespace.
+_assess_gpu_request_unsupported() {
+  local _ns="$1" _vals _re='^[[:space:]]*(TRACEBLOC_)?GPU_(REQUESTS|LIMITS):[[:space:]]*"?'
+  [[ -n "$_ns" ]] || return 1
+  _vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$_ns" -n "$_ns" 2>/dev/null)" || return 1
+  grep -Eq "${_re}amd\.com/gpu" <<<"$_vals" && return 0
+  if [[ "${OS:-}" == Linux && "${ARCH:-}" != x86_64 && "${ARCH:-}" != amd64 ]]; then
+    grep -Eq "${_re}nvidia\.com/gpu" <<<"$_vals" && return 0
+  fi
+  return 1
+}
+
 # _assess_classify — set INSTALL_STATE (+ INSTALL_STATE_REASON). Pure read-only
 # detection; no mutation, never fatal.
 _assess_classify() {
@@ -460,6 +479,15 @@ _assess_classify() {
   # and silently — the ONE thing on the machine that no auto-upgrade reaches.
   if _assess_cli_outdated; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-outdated"
+    return 0
+  fi
+
+  # A release that requests a GPU no tracebloc image can use (client-dev#1697, #1698):
+  # the normal flow re-stamps its GPU request to CPU-only. Ahead of cli-behind-latest, so
+  # an explicit `tracebloc upgrade` runs that flow (it updates the CLI too) rather than
+  # updating only the CLI and keeping the request.
+  if _assess_gpu_request_unsupported "$ns"; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="gpu-unsupported"
     return 0
   fi
 
@@ -649,6 +677,7 @@ assess_existing_install() {
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
         cli-outdated)       info "Your tracebloc CLI is out of date — updating it." ;;
         pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
+        gpu-unsupported)    info "Your secure environment asks for a GPU tracebloc's training images can't use — switching it to CPU mode." ;;
         # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (Bugbot Medium, client#984).
         # _assess_classify degrades to this when the k3d listing does not answer, and
         # without its own arm it fell into the generic line below — which claims an

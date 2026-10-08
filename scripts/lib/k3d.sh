@@ -160,7 +160,7 @@ _cluster_presence() {
   return 1
 }
 
-# _k3d_live_clusters -- for native k3s's D10 refusal (k3s.sh): the name of every k3d
+# _k3d_live_clusters -- for native k3s's D10 refusal (reinstall.sh): the name of every k3d
 # cluster on this machine, one per line, and 0; 1 when k3d is not installed or lists
 # none; 2 when k3d is installed but its listing did not answer within
 # TB_K3D_LIST_TIMEOUT (Docker wedged or not up yet); 3 when the listing FAILED fast,

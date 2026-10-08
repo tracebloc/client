@@ -38,6 +38,32 @@ _cli_at_system_dir() {
   esac
 }
 
+# _cli_on_launch_path BIN -> 0 when BIN's directory was on the PATH of the shell
+# that started the install (TB_LAUNCH_PATH, captured by install.sh / common.sh
+# before either prepends anything). That shell is the one the user types the next
+# command into, so a CLI in ~/.local/bin is usable there right away when the user's
+# PATH already had ~/.local/bin -- the common case on a re-install. Without this,
+# such a user was told "open a new terminal" while their shell already found the
+# CLI (backend#5025 O-103). Conservative: an unset or empty TB_LAUNCH_PATH, or a BIN
+# that is not an absolute path, is "no". A bootstrap older than common.sh has already
+# prepended ~/.local/bin by the time common.sh captures the PATH, so common.sh drops
+# that leading entry from the capture instead of trusting it.
+_cli_on_launch_path() {
+  local bin="${1:-}" dir
+  case "$bin" in /*) ;; *) return 1 ;; esac
+  [[ -n "${TB_LAUNCH_PATH:-}" ]] || return 1
+  dir="${bin%/*}"
+  case ":${TB_LAUNCH_PATH}:" in *":${dir}:"* | *":${dir}/:"*) return 0 ;; esac
+  return 1
+}
+
+# _cli_usable_in_launch_shell BIN -> 0 when the user's own shell resolves BIN now:
+# it sits in a system dir (always on that PATH) or in a directory that was already
+# on it (_cli_on_launch_path). The one gate behind TB_CLI_USABLE_NOW.
+_cli_usable_in_launch_shell() {
+  _cli_at_system_dir "${1:-}" || _cli_on_launch_path "${1:-}"
+}
+
 # _cli_reported_path OUTFILE -> the binary the CLI's own installer says it
 # installed: the path on the last "tracebloc CLI installed: <path>" line of its
 # captured output (cli's install.sh prints it as the final step, with a
@@ -162,7 +188,7 @@ _verify_tracebloc_cli() {
     # PATH was mutated with ~/.local/bin by install.sh, so it resolves the CLI even
     # when the user's returning shell won't). Only a system dir is unconditionally
     # on that shell's PATH (Bugbot #371).
-    if has tracebloc && _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+    if has tracebloc && _cli_usable_in_launch_shell "$(command -v tracebloc 2>/dev/null)"; then
       TB_CLI_USABLE_NOW=1
       # Usable right now AND in new terminals — the fully-clean verdict, collapsed
       # to ONE line (old→new when this was an update), so the step shows a single
@@ -252,7 +278,7 @@ install_tracebloc_cli() {
   # install.sh prepends ~/.local/bin to THIS process, which would false-positive a
   # ~/.local/bin install the returning shell can't yet see.
   # shellcheck disable=SC2034  # consumed cross-file by summary.sh (_cli_runnable_now)
-  if has tracebloc && _cli_at_system_dir "$(command -v tracebloc 2>/dev/null)"; then
+  if has tracebloc && _cli_usable_in_launch_shell "$(command -v tracebloc 2>/dev/null)"; then
     TB_CLI_USABLE_NOW=1
   else
     TB_CLI_USABLE_NOW=0

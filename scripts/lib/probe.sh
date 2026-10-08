@@ -127,7 +127,7 @@ _probe_privilege() {
   # (Bugbot #372). Reuse the same primitives preflight_sudo uses: _have_sudo_bin
   # (type -P, ignores functions) and _real_sudo (command sudo, bypasses it).
   if ! _have_sudo_bin; then echo "no_sudo"; return 0; fi
-  if _real_sudo -n true 2>/dev/null; then echo "sudo_nopw"; return 0; fi
+  if tb_root_n true 2>/dev/null; then echo "sudo_nopw"; return 0; fi
   echo "sudo_pw"
 }
 

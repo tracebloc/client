@@ -1666,12 +1666,17 @@ images:
     # `prodDigest` for every prod edge (the pre-#5099 behaviour).
     #
     # Same rules as `prodDigest`: a canonical multi-arch index, resolved, never
-    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.65` prints it), and a
+    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.72` prints it), and a
     # Chart.yaml bump to publish. CI's `ingestor-multiarch` job checks it.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.65** — VERIFIED
-    # against ghcr.io 2026-10-01 (linux/amd64 + linux/arm64 OCI image index).
-    prodDigestServiceDb: "sha256:8005d10a9d8ef05b7d24609f13ff3e03988d93510ac36ac522ed58082e70ac88"
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.72** — VERIFIED
+    # against ghcr.io 2026-10-07 (linux/amd64 + linux/arm64 OCI image index;
+    # the same digest the v0.8.72 GitHub Release names). v0.8.72 is the first
+    # release that keeps the emitter's "telemetry: not exporting … A deployment
+    # gap, not a quiet mode." line off the user's `tracebloc data ingest`
+    # output (data-ingestors#945, backend#5025 O-81); v0.8.65 printed it on
+    # every prod ingest.
+    prodDigestServiceDb: "sha256:0cd2153ec22ad35bbaddc49b694a6d448f73103ffb00edcd93df55f0259226fa"
 
     # -- What each chart-pinned ingestor image says about itself, keyed by its
     # digest (tracebloc/cli-dev#971). When the digest `tracebloc.ingestorDigest`
@@ -1702,8 +1707,9 @@ images:
     pinnedImageLabels:
       "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873":
         version: "0.8.2"
-      "sha256:8005d10a9d8ef05b7d24609f13ff3e03988d93510ac36ac522ed58082e70ac88":
-        version: "0.8.65"
+      "sha256:0cd2153ec22ad35bbaddc49b694a6d448f73103ffb00edcd93df55f0259226fa":
+        version: "0.8.72"
+        capabilities: "ingest:v1,layout:4,object_detection:manifestless,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
     # "pin on prod only": it takes effect when the resolved CLIENT_ENV is "prod"

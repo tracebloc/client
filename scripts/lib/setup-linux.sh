@@ -24,17 +24,17 @@ setup_pm() {
   # package the installer no longer installs; the hang class is what matters).
   # DEBIAN_FRONTEND=noninteractive + NEEDRESTART_MODE=a make apt fully
   # non-interactive; they are passed *through*
-  # `sudo env` because sudo resets the environment by default.
+  # `tb_root env` because sudo resets the environment by default.
   #
   # apt also waits *indefinitely* on the dpkg lock while apt-daily / unattended-
   # upgrades hold it on a freshly-booted host (#210); -o DPkg::Lock::Timeout=600
   # bounds that wait so the install fails with a clear error rather than hanging
   # silently behind the spinner.
-  if   has apt-get; then PM_UPDATE="sudo apt-get update -qq -o DPkg::Lock::Timeout=600"; PM_INSTALL="sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
-  elif has dnf;     then PM_UPDATE="sudo dnf makecache -q";             PM_INSTALL="sudo dnf install -y -q"
-  elif has yum;     then PM_UPDATE="sudo yum makecache -q";             PM_INSTALL="sudo yum install -y -q"
-  elif has zypper;  then PM_UPDATE="sudo zypper refresh";               PM_INSTALL="sudo zypper install -y"
-  elif has pacman;  then PM_UPDATE="sudo pacman -Sy --noconfirm";       PM_INSTALL="sudo pacman -S --noconfirm"
+  if   has apt-get; then PM_UPDATE="tb_root apt-get update -qq -o DPkg::Lock::Timeout=600"; PM_INSTALL="tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+  elif has dnf;     then PM_UPDATE="tb_root dnf makecache -q";             PM_INSTALL="tb_root dnf install -y -q"
+  elif has yum;     then PM_UPDATE="tb_root yum makecache -q";             PM_INSTALL="tb_root yum install -y -q"
+  elif has zypper;  then PM_UPDATE="tb_root zypper refresh";               PM_INSTALL="tb_root zypper install -y"
+  elif has pacman;  then PM_UPDATE="tb_root pacman -Sy --noconfirm";       PM_INSTALL="tb_root pacman -S --noconfirm"
   else error "No supported package manager found."; fi
 }
 
@@ -50,10 +50,10 @@ setup_pm() {
 apt_wait_for_lock() {
   has apt-get && has fuser || return 0
   local locks="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
-  sudo fuser $locks >/dev/null 2>&1 || return 0   # free already → silent fast path
+  tb_root fuser $locks >/dev/null 2>&1 || return 0   # free already → silent fast path
   spin_cmd "Waiting for background system updates to finish…" bash -c '
     waited=0
-    while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    while tb_root fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
       [ "$waited" -ge 600 ] && exit 0
       sleep 5; waited=$((waited + 5))
     done' || true
@@ -77,17 +77,20 @@ apt_wait_for_lock() {
 _ensure_kernel_modules() {
   local mods="overlay br_netfilter xt_addrtype iptable_nat ip_tables"
   local m missing=""
-  for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
+  for m in $mods; do tb_root modprobe "$m" 2>/dev/null || missing=1; done
+  # --print runs no modprobe, so nothing is found missing: list the package a host that
+  # needs it would install, rather than a plan short of a root command the run may run.
+  tb_root_planning && missing=1
   if [[ -n "$missing" ]] && has dnf; then
     # The netfilter modules live in kernel-modules-extra, NOT the base
     # kernel-modules package. Install unversioned so dnf pulls the extra set
     # (and a matching newer kernel, if the repo has moved on) for the current repo.
     spin_cmd "Installing kernel modules for Docker/k3s…" \
-      sudo dnf install -y -q kernel-modules-extra || true
+      tb_root dnf install -y -q kernel-modules-extra || true
     missing=""
-    for m in $mods; do sudo modprobe "$m" 2>/dev/null || missing=1; done
+    for m in $mods; do tb_root modprobe "$m" 2>/dev/null || missing=1; done
   fi
-  printf '%s\n' $mods | sudo tee /etc/modules-load.d/tracebloc.conf >/dev/null 2>&1 || true
+  printf '%s\n' $mods | tb_root tee /etc/modules-load.d/tracebloc.conf >/dev/null 2>&1 || true
 
   # Still unloadable, but the module file exists for a DIFFERENT (installed but
   # not-yet-booted) kernel → a reboot will bring it in via modules-load.d.
@@ -136,8 +139,8 @@ _configure_docker_proxy() {
     _sc=(systemctl --user)
   else
     dir="${TRACEBLOC_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}"
-    _sudo="sudo"
-    _sc=(sudo systemctl)
+    _sudo="tb_root"
+    _sc=(tb_root systemctl)
   fi
   local conf="$dir/http-proxy.conf"
   local marker="# Managed by tracebloc installer (#244)"
@@ -213,25 +216,26 @@ install_docker_engine() {
   local _grant_user="${USER:-$(id -un 2>/dev/null)}"
   if ! has docker; then
     if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
-      if has dnf; then spin_cmd "Installing Docker…" sudo dnf install -y docker
-      else              spin_cmd "Installing Docker…" sudo yum install -y docker; fi
+      if has dnf; then spin_cmd "Installing Docker…" tb_root dnf install -y docker
+      else              spin_cmd "Installing Docker…" tb_root yum install -y docker; fi
     elif has pacman; then
-      spin_cmd "Installing Docker…" sudo pacman -S --noconfirm docker
+      spin_cmd "Installing Docker…" tb_root pacman -S --noconfirm docker
     elif has zypper; then
-      spin_cmd "Installing Docker…" sudo zypper install -y docker
+      spin_cmd "Installing Docker…" tb_root zypper install -y docker
     elif [[ -f "$os_release" ]] && grep -qiE '^ID="?(almalinux|rocky|ol|oracle)"?' "$os_release"; then
       # get.docker.com rejects RHEL rebuilds (almalinux/rocky/ol) with
       # "Unsupported distribution". Install docker-ce from Docker's official
       # CentOS repo instead — it is RHEL-compatible and works on these distros.
       spin_cmd "Installing Docker…" bash -c '
         set -e
-        sudo dnf -y -q install dnf-plugins-core
-        sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        sudo dnf -y -q install docker-ce docker-ce-cli containerd.io'
+        tb_root dnf -y -q install dnf-plugins-core
+        tb_root dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        tb_root dnf -y -q install docker-ce docker-ce-cli containerd.io'
     else
       local docker_script
-      docker_script="$(mktemp)"
-      retry 3 5 curl_secure -fsSL https://get.docker.com -o "$docker_script"
+      docker_script="$(mktemp "${TMPDIR:-/tmp}/tracebloc-docker-XXXXXX")"
+      # --print downloads nothing; it lists the script's run as root.
+      tb_root_planning || retry 3 5 curl_secure -fsSL https://get.docker.com -o "$docker_script"
       chmod +x "$docker_script"
       # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
       # internally, so under spin_cmd it can hit the same hidden prompt and hang.
@@ -245,7 +249,7 @@ install_docker_engine() {
       # 124 ONLY on the deadline, so a fast real apt/script failure keeps its own
       # error instead of being mislabelled as a stall (Bugbot).
       local _dk_rc=0
-      spin_cmd_bounded 600 "Installing Docker…" sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
+      spin_cmd_bounded 600 "Installing Docker…" tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
       rm -f "$docker_script"
       # Re-run advice by mode, matching the daemon-check errors below: telling a
       # prepare-host ADMIN to "re-run the installer" points them at a full
@@ -261,7 +265,7 @@ install_docker_engine() {
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.
-    sudo systemctl enable docker >/dev/null 2>&1 || true
+    tb_root systemctl enable docker >/dev/null 2>&1 || true
     success "Docker"
   else
     success "Docker"
@@ -288,7 +292,7 @@ install_docker_engine() {
     _grant_groups="$(id -nG "$_grant_user" 2>/dev/null || true)"
     case " $_grant_groups " in
       *" docker "*) ;;
-      *) sudo usermod -aG docker "$_grant_user" 2>/dev/null \
+      *) tb_root usermod -aG docker "$_grant_user" 2>/dev/null \
            || warn "Couldn't add ${_grant_user} to the docker group; add it manually:  sudo usermod -aG docker ${_grant_user}" ;;
     esac
   fi
@@ -305,8 +309,8 @@ install_docker_engine() {
   # daemon leaves the unit in "Start request repeated too quickly", which makes
   # systemctl refuse a plain start (so a bare re-run can never recover). Both
   # commands are best-effort; the `docker info` check below is the real gate.
-  sudo systemctl reset-failed docker 2>/dev/null || true
-  sudo systemctl start docker 2>/dev/null || true
+  tb_root systemctl reset-failed docker 2>/dev/null || true
+  tb_root systemctl start docker 2>/dev/null || true
 
   # prepare-host mode: the admin verifies the DAEMON via sudo and never joins
   # or re-execs into the docker group — the sg re-exec below re-runs the script
@@ -320,20 +324,22 @@ install_docker_engine() {
     # from PATH and bypasses the root-aware `sudo()` shadow — and this path is normally
     # run AS ROOT, where RFC 0001 often has no sudo binary, so `timeout sudo docker info`
     # would fail to find sudo and misreport a live daemon as dead (Bugbot #744, LukasWodka).
-    # `_bounded_root` runs bare when root, real `sudo` otherwise.
-    if _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then
+    # `_bounded_root` bounds the executor itself, which runs bare when root and
+    # through the real sudo otherwise. --print started nothing, so it plans as if
+    # the daemon answers.
+    if tb_root_planning || _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then
       # Running NOW isn't enough for host-prep: after a reboot the Tier-0
       # researcher can't start the daemon themselves, so make sure it's also
       # enabled on boot (best-effort — non-systemd hosts manage this their own
       # way, and the daemon is verifiably up either way) (Bugbot r5).
-      sudo systemctl enable docker 2>/dev/null || true
+      tb_root systemctl enable docker 2>/dev/null || true
       log "Docker daemon running (verified via sudo — prepare-host mode)."
       return 0
     fi
     # Daemon ACTIVE but not answering even via sudo: terminal HERE — the
     # shared tail's "log out and back in" advice is docker-group advice, wrong
     # for an admin who never joins the group (Bugbot).
-    if sudo systemctl is-active --quiet docker 2>/dev/null; then
+    if tb_root systemctl is-active --quiet docker 2>/dev/null; then
       error "Docker's daemon is active but not answering (even via sudo). Check 'sudo docker info', then re-run prepare-host."
     fi
     # Daemon DOWN: starting it IS host preparation — try, then re-verify. Every
@@ -342,7 +348,7 @@ install_docker_engine() {
     # provision as themselves — the exact outcome prepare-host exists to
     # prevent (Bugbot r3).
     log "Docker daemon not active (prepare-host) — starting it."
-    sudo systemctl enable --now docker 2>/dev/null || true
+    tb_root systemctl enable --now docker 2>/dev/null || true
     if _bounded_root "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info &>/dev/null; then   # root-aware bound, as above (#744)
       log "Docker daemon started (prepare-host mode)."
       return 0
@@ -354,7 +360,7 @@ install_docker_engine() {
     # || true: `systemctl status` exits 3 for an inactive unit, and under
     # set -e -o pipefail the failing pipeline would abort BEFORE the error
     # below — a silent death with no re-run guidance (Bugbot r6).
-    { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /' || true
+    { tb_root systemctl status docker.service --no-pager -l 2>&1 | tail -6; } | sed 's/^/    /' || true
     error "Fix the Docker error above, then re-run prepare-host."
   fi
   if ! _docker_answers; then
@@ -378,7 +384,7 @@ install_docker_engine() {
     # (b) The daemon itself isn't running → a Docker/host problem, not a group
     # one. Surface Docker's OWN error (a 'log out and back in' hint would just
     # send the user in circles, as it can't fix a crashing daemon).
-    if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
+    if ! tb_root systemctl is-active --quiet docker 2>/dev/null; then
       echo ""
       # Modules were just installed for a newer, not-yet-booted kernel → the only
       # remedy is a reboot; a re-run without it would loop on the same failure.
@@ -398,8 +404,8 @@ install_docker_engine() {
       # `systemctl status` exits 3 on an inactive unit and a no-match `grep`
       # exits 1, so under set -e -o pipefail this diagnostics pipeline would
       # abort before the error message below ever printed (Bugbot r6).
-      { sudo systemctl status docker.service --no-pager -l 2>&1 | tail -6
-        sudo journalctl -u docker.service --no-pager 2>/dev/null \
+      { tb_root systemctl status docker.service --no-pager -l 2>&1 | tail -6
+        tb_root journalctl -u docker.service --no-pager 2>/dev/null \
           | grep -iE 'level=(error|fatal)|failed to|cannot |unable |no such' | tail -12; } | sed 's/^/    /' || true
       echo ""
       error "Start Docker manually (fix the error above), then re-run this installer."
@@ -627,7 +633,7 @@ _ensure_unpack_tools() {
   has gzip || missing+=(gzip)
   [ ${#missing[@]} -eq 0 ] && return 0
   setup_pm    # variable setup only (PM_UPDATE/PM_INSTALL); errors on unknown PM
-  # PM_INSTALL leads with `sudo` — that's the common.sh shadow (A2): as root it
+  # PM_INSTALL leads with `tb_root` — the common.sh executor (A2): as root it
   # runs the command directly (fine with no sudo binary at all), so nothing to
   # strip here. The OPTION-led probes below must BYPASS the shadow via
   # _have_sudo_bin/_real_sudo — as root the shadow would execute "-n true" as a
@@ -1179,7 +1185,8 @@ _provision_subid_ranges() {
   # install_rootless_docker precondition gave (Bugbot/Asad, client#458).
   if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
     _install_uidmap_pkg
-    if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
+    # --print installed nothing, so it plans as if the install gave both helpers.
+    if ! tb_root_planning && { ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; }; then
       # Return non-zero (don't error/exit): the sudo-path caller turns this into a
       # hard failure via `|| error`, but run_prepare_host wants it best-effort
       # (`if ! _provision_subid_ranges`) so an unknown-distro uidmap gap warns and
@@ -1214,13 +1221,13 @@ _provision_subid_ranges() {
   # pipeline (and two forks) from the probe (backend#1778).
   case "$_um_help" in
     *'--add-subuids'*)
-      sudo usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user" \
+      tb_root usermod --add-subuids "${start}-${end}" --add-subgids "${start}-${end}" "$user" \
         || { warn "Couldn't add the subuid/subgid range for ${user} via usermod."; return 1; }
       ;;
     *)
-      printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subuid" >/dev/null \
+      printf '%s:%s:%s\n' "$user" "$start" "$count" | tb_root tee -a "$subuid" >/dev/null \
         || { warn "Couldn't append the subuid range for ${user} to ${subuid}."; return 1; }
-      printf '%s:%s:%s\n' "$user" "$start" "$count" | sudo tee -a "$subgid" >/dev/null \
+      printf '%s:%s:%s\n' "$user" "$start" "$count" | tb_root tee -a "$subgid" >/dev/null \
         || { warn "Couldn't append the subgid range for ${user} to ${subgid}."; return 1; }
       ;;
   esac
@@ -1387,11 +1394,11 @@ _write_cgroup_delegation() {
     # an unguarded failure would fall through to success and let the install proceed
     # with pods that can't be given limits (the exact silent breakage this slice
     # exists to prevent).
-    sudo mkdir -p "$dir" \
+    tb_root mkdir -p "$dir" \
       || { warn "Couldn't create ${dir} for the cgroup delegation drop-in."; return 1; }
-    printf '%s' "$desired" | sudo tee "$conf" >/dev/null \
+    printf '%s' "$desired" | tb_root tee "$conf" >/dev/null \
       || { warn "Couldn't write the cgroup delegation drop-in at ${conf}."; return 1; }
-    sudo systemctl daemon-reload 2>/dev/null || true
+    tb_root systemctl daemon-reload 2>/dev/null || true
   fi
   # Verify + report on EVERY path (#496 Bugbot).
   _report_cgroup_delegation "$conf"
@@ -1526,6 +1533,47 @@ _prepare_host_named_user() {
   TB_PREPARE_TARGET="$target"
 }
 
+# _prepare_host_print — `prepare-host --print` (RFC-0175 D3, client-dev#1541):
+# run_prepare_host itself, with TRACEBLOC_ROOT_PLAN set, so each privileged command it
+# would run is listed by the root executor (common.sh's tb_root) and none runs.
+# The list cannot drift from a run: it IS the run's own calls. The dry run's
+# messages go to the log, stdin is /dev/null (nothing is read from the installer
+# under `curl | bash`), and a refusal still reaches the terminal, on stderr. Prints
+# the plan, numbered, and exits 0; a dry run that stopped prints no plan.
+_prepare_host_print() {
+  local dir plan rc=0 n=0 line
+  tb_scratch_dir dir tracebloc-plan \
+    || error "prepare-host --print: couldn't make a private directory for the plan. Nothing ran."
+  plan="${dir}/plan"
+  : > "$plan" || error "prepare-host --print: couldn't write the plan under ${dir}. Nothing ran."
+  # The subshell reaps what it makes itself (a subshell starts with no EXIT trap),
+  # from an empty list, so the plan's own directory is never among them.
+  ( export TRACEBLOC_ROOT_PLAN="$plan"; _TB_SCRATCH_DIRS=""; trap 'tb_scratch_reap' EXIT; run_prepare_host ) \
+    </dev/null >>"${LOG_FILE:-/dev/null}" || rc=$?
+  if [[ -e "${plan}.broken" ]]; then
+    tb_scratch_rm "$dir"
+    error "prepare-host --print: a line of the plan could not be written, so no plan is shown. Nothing ran."
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    tb_scratch_rm "$dir"
+    error "prepare-host --print stopped before the end of its plan (above), so no plan is shown. Nothing ran. It reads this machine as $(id -un 2>/dev/null), without sudo; to plan for files only root can read, run it as root."
+  fi
+  echo ""
+  info "prepare-host --print: what prepare-host would run as root on this machine, in order. None of it ran."
+  info "Not listed: the reads it makes first (getent, systemctl is-active, the k3s config read and the like). --print made them as $(id -un 2>/dev/null), without sudo."
+  info "Not made: the downloads. The run checks each against its pinned sha256 before it uses it."
+  echo ""
+  while IFS= read -r line; do
+    n=$((n + 1))
+    printf '  %3d  %s\n' "$n" "$line"
+  done < "$plan"
+  [[ "$n" -gt 0 ]] || echo "  (nothing: this machine needs no command run as root)"
+  echo ""
+  info "To run them: the same command without --print."
+  tb_scratch_rm "$dir"
+  return 0
+}
+
 # run_prepare_host — the standalone, admin-run Tier-2 step (RFC 0001 #1178). An
 # administrator runs this ONCE (`curl … | bash -s -- prepare-host`, or
 # `tracebloc prepare-host`) on a host a researcher can't install on unprivileged
@@ -1538,6 +1586,11 @@ _prepare_host_named_user() {
 run_prepare_host() {
   if [[ "$OS" != "Linux" ]]; then
     error "prepare-host is for Linux hosts. On macOS/Windows, install Docker Desktop (or enable WSL2) as an administrator, then run the installer normally."
+  fi
+  # --print: this same function, once more, under the plan (_prepare_host_print).
+  if [[ "${TRACEBLOC_PREPARE_PRINT:-}" == 1 ]] && ! tb_root_planning; then
+    _prepare_host_print
+    return $?
   fi
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
 
@@ -1573,7 +1626,7 @@ run_prepare_host() {
   local target="$TB_PREPARE_TARGET"
   local granted=0
   if [[ -n "$target" && "$target" != "root" ]]; then
-    if sudo usermod -aG docker "$target" 2>/dev/null; then
+    if tb_root usermod -aG docker "$target" 2>/dev/null; then
       success "Added ${target} to the docker group — they can now install with no admin."
       granted=1
     else

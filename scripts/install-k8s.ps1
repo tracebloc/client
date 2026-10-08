@@ -1358,9 +1358,10 @@ $GPU_SKIP_REASON  = ""
 $GPU_UNSUPPORTED_REASON = ""
 $GPU_UNSUPPORTED_NAME   = ""
 # backend#5296: the kind beside the sentence, a CLOSED vocabulary the dashboard switches on:
-# compute_too_old / driver_too_old (Confirm-NvidiaDriver), not_nvidia (Find-Gpu) and
-# docker_cannot_see_gpu (Confirm-DockerGpu). Passed as env.GPU_UNSUPPORTED_CODE. The bash
-# twin is TB_GPU_UNSUPPORTED_CODE, with the same codes and the same sentences.
+# compute_too_old / driver_too_old (Confirm-NvidiaDriver), not_nvidia and arch_unsupported
+# (Find-Gpu, client-dev#1698) and docker_cannot_see_gpu (Confirm-DockerGpu). Passed as
+# env.GPU_UNSUPPORTED_CODE. The bash twin is TB_GPU_UNSUPPORTED_CODE, with the same codes and
+# the same sentences.
 $GPU_UNSUPPORTED_CODE   = ""
 # nvidia-smi's name answer (one line per GPU), for a docker_cannot_see_gpu report.
 $NVIDIA_GPU_NAMES       = ""
@@ -2308,6 +2309,25 @@ function Set-GpuNotNvidia([string]$Name) {
   $script:GPU_UNSUPPORTED_NAME = $Name
 }
 
+# Test-GpuArchSupported -- $true unless Windows runs on arm64: the GPU training images are
+# linux/amd64 only (client-dev#1698). Reads the environment, never Err: an unknown value is
+# not arm64. PROCESSOR_ARCHITEW6432 is the machine's own answer in an x64-emulated shell.
+function Test-GpuArchSupported {
+  return -not ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64")
+}
+
+# Set-GpuArchUnsupported -- an NVIDIA GPU on a machine that is not x86_64: leave it off
+# (nvidia_unsupported, so no driver check and no GPU wiring) and tell the platform
+# (arch_unsupported). The sentence is detect-gpu.sh's _gpu_arch_unsupported_report's.
+function Set-GpuArchUnsupported([string]$Name) {
+  $script:GPU_VENDOR = "nvidia_unsupported"; $script:NVIDIA_DRIVER_OK = $false
+  $script:GPU_UNSUPPORTED_CODE = "arch_unsupported"
+  $script:GPU_UNSUPPORTED_REASON = "This machine is arm64, and tracebloc's GPU training images are built for x86_64 machines only, so this machine runs on CPU."
+  $script:GPU_UNSUPPORTED_NAME = $Name
+  Warn "tracebloc's GPU training images are built for x86_64 machines only, and this machine is arm64 -- the NVIDIA GPU is not set up, and this machine will run in CPU mode."
+  Hint "Everything else works on CPU. GPU training needs an x86_64 machine with an NVIDIA GPU."
+}
+
 # Set-GpuContainerBlind -- Confirm-DockerGpu's probe said Docker cannot give a container the NVIDIA
 # GPU: tell the platform (docker_cannot_see_gpu). Only for a GPU Confirm-NvidiaDriver let through
 # (NVIDIA_DRIVER_OK) and nothing already reported: twin of detect-gpu.sh's _gpu_container_blind.
@@ -2469,12 +2489,14 @@ function Find-Gpu {
     Log "GPU detection failed: $_"
   }
 
+  if ($script:GPU_VENDOR -eq "nvidia" -and -not (Test-GpuArchSupported)) { Set-GpuArchUnsupported $nv[0].Name }
   if ($script:GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
 
+  # No ROCm training image exists, on any platform (client-dev#1697): CPU mode, never
+  # "use Linux for AMD".
   if ($script:GPU_VENDOR -eq "amd") {
-    Warn "AMD GPU detected."
-    Info "GPU acceleration is not available via Docker Desktop on Windows."
-    Hint "For AMD GPU workloads, deploy tracebloc on a Linux machine."
+    Warn "tracebloc's GPU training images need an NVIDIA GPU, so the AMD GPU is not set up -- this machine will run in CPU mode."
+    Hint "Everything else works on CPU. GPU training needs an NVIDIA GPU (Turing or later) on an x86_64 machine."
     $script:GPU_VENDOR = "amd_unsupported"
   }
 }
@@ -5032,6 +5054,17 @@ function Test-LiveReleaseRequestsGpu {
   return $requested
 }
 
+# Test-FastPathGpuArchStale -- $true when Find-Gpu left an NVIDIA GPU off because this machine is
+# arm64 (arch_unsupported) AND the live release still requests a GPU (client-dev#1706, Bugbot).
+# Such a release was installed before #1698; $gpuPresent is false for it, so the healthy fast path
+# would exit before the helm step that writes this run's CPU-only GPU_REQUESTS / GPU_LIMITS and
+# keep nvidia.com/gpu forever. The fast path falls through instead. Twin of assess.sh's
+# _assess_gpu_request_unsupported (degraded / gpu-unsupported). Helm is read only on arm64.
+function Test-FastPathGpuArchStale {
+  if ($script:GPU_UNSUPPORTED_CODE -ne "arch_unsupported") { return $false }
+  return [bool](Test-LiveReleaseRequestsGpu)
+}
+
 function Test-HealthyClusterGpuConsistent {
   if (-not (Test-LiveReleaseRequestsGpu)) { return }   # live release doesn't request GPU -> nothing to reconcile
   $img = ""
@@ -5851,14 +5884,6 @@ function Repair-K3sNodeAddress {
   }
 }
 
-# Invoke-K3dAddressPinAfterCreate -- prevention: fix every node on the address it
-# was just given, and the load balancer high, before a Docker restart can reorder
-# them. Peer of _pin_k3d_node_addresses_after_create. BEST EFFORT: a cluster that
-# could not be pinned still works on the addresses Docker gave it, and the reuse
-# path's check repairs one a later restart breaks -- so a read that fails or a plan
-# that is refused skips quietly, and a pin that fails but leaves the cluster
-# running warns. A pin that stopped the cluster and could not start it again Errs
-# with the remedy: the environment is down, so "ready" must not follow.
 # Peer of k3d.sh::_k3d_lb_lost_its_pin. $true when the load balancer runs without a
 # fixed address while a k3s node of the cluster has one: the state `k3d cluster edit`
 # leaves behind, since it recreates the load balancer on a dynamic address. $false
@@ -5882,6 +5907,14 @@ function Test-K3dLbLostItsPin {
   return $any
 }
 
+# Invoke-K3dAddressPinAfterCreate -- prevention: fix every node on the address it
+# was just given, and the load balancer high, before a Docker restart can reorder
+# them. Peer of _pin_k3d_node_addresses_after_create. BEST EFFORT: a cluster that
+# could not be pinned still works on the addresses Docker gave it, and the reuse
+# path's check repairs one a later restart breaks -- so a read that fails or a plan
+# that is refused skips quietly, and a pin that fails but leaves the cluster
+# running warns. A pin that stopped the cluster and could not start it again Errs
+# with the remedy: the environment is down, so "ready" must not follow.
 function Invoke-K3dAddressPinAfterCreate {
   $netname = ''; $specs = @()
   foreach ($role in 'server', 'agent') {
@@ -6889,6 +6922,24 @@ $script:TbCpFootprintCpuMilli = 650
 $script:TbCpTransientMemBytes = 402653184
 $script:TbCpTransientCpuMilli = 700
 # ── end generated footprint ─────────────────────────────────────────────────
+# ── k3s's own addons, as a FLOOR (client-dev#1693, #1700) ──────────────────
+#
+# What k3s's bundled addons request on the k3d node this installer creates:
+# coredns 100m / 70Mi and metrics-server 100m / 70Mi (k3s's packaged
+# manifests; traefik and servicelb are disabled, local-path requests nothing).
+# Hand-typed, not generated: the numbers live in k3s's binary. Mirrors bash
+# _TB_K3S_ADDON_MEM_BYTES / _TB_K3S_ADDON_CPU_MILLI; install-k8s.Tests.ps1 pins
+# that the two installers carry the same values.
+#
+# WHY A FLOOR. Resolve-TbTrainingFit MEASURES the system pods, but only the ones
+# scheduled when values are written. Right after `k3d cluster create` the addons
+# can still be Pending (no nodeName), so the measurement came back 0 and the run
+# was sized against the chart alone: on a node where rounding to whole GiB left
+# under 140 MiB to spare, the run fit only until the addons landed, and
+# `tracebloc doctor` then said Not ready. The fit never counts less than this,
+# per dimension; a measurement that already includes the addons is used as-is.
+$script:TbK3sAddonMemBytes = 146800640
+$script:TbK3sAddonCpuMilli = 200
 # ── VM budget for the smallest training rung (GENERATED by scripts/gen-vm-budget-embed.sh — do not hand-edit) ──
 # rung + kubelet reservation + k3s addons + control plane + CronJob transient, in
 # bytes (backend#2460, RFC-BACKEND-664 §L0.1/§P4). Mirrors bash _TB_VM_MIN_MEM_BYTES;
@@ -7316,6 +7367,15 @@ function Resolve-TbTrainingFit {
   } else {
     $sysHow = "NOT measured ($($sys.Note)); verified against the chart derivation only"
   }
+  # Never count less than the addons k3s is about to schedule (client-dev#1700,
+  # see $script:TbK3sAddon*). Per dimension, so a measurement that already
+  # includes them -- or more -- is used as-is. Bash twin: _fit_training_envelope.
+  $floorMemB = [long]$script:TbK3sAddonMemBytes; $floorCpuM = [long]$script:TbK3sAddonCpuMilli
+  if ($sysMemB -lt $floorMemB -or $sysCpuM -lt $floorCpuM) {
+    if ($sysMemB -lt $floorMemB) { $sysMemB = $floorMemB }
+    if ($sysCpuM -lt $floorCpuM) { $sysCpuM = $floorCpuM }
+    $sysHow = "$sysHow; raised to the k3s addon floor ($([math]::Floor($floorMemB / 1MB)) MiB / $floorCpuM m: coredns + metrics-server, which may not be scheduled yet)"
+  }
   return (Get-TbFitVerdict -AllocLabel 'allocatable on the largest schedulable node' `
             -AllocMemB $allocMemB -AllocCpuM $allocCpuM -SysMemB $sysMemB -SysCpuM $sysCpuM -SysHow $sysHow `
             -Size $Size -EnvMemB $envMemB -EnvCpuM $envCpuM -Ours $ours -Provenance $Provenance)
@@ -7401,9 +7461,10 @@ function Get-TbFitVerdict {
 # kubelet is about to be given (the generated TRACEBLOC_KUBELET_* block, subtracted as
 # the kubelet does: capacity - kubeReserved - systemReserved - evictionHard; an
 # unmeasured platform gets none, here as on the node), against the embedded chart
-# footprint. The k3s addons do not exist yet and are NOT counted, so the estimate
-# can only be OPTIMISTIC: it never refuses a host the post-create fit would
-# accept, and that fit stays the authority for everything else. The envelope is
+# footprint and the k3s addon floor ($script:TbK3sAddon*: the addons do not exist
+# yet, but the post-create fit never counts less than them, client-dev#1700). So
+# the estimate is never PESSIMISTIC: it never refuses a host the post-create fit
+# would accept, and that fit stays the authority for everything else. The envelope is
 # the contract floor -- refusal depends only on whether one core and one GiB are
 # left beside the platform, which is exactly what the floor asks.
 #
@@ -7441,11 +7502,15 @@ function Get-TbPreCreateFitEstimate {
   $allocMemB = [long][math]::Max([long]0, $VmMemBytes - $resMemB)
   $allocCpuM = [long][math]::Max([long]0, $VmCpuMilli - $resCpuM)
 
+  # The addons the post-create fit counts whether or not they are scheduled by
+  # then (its floor), so a host refused only because of them is refused here,
+  # before there is a cluster to delete. Bash twin: _precreate_fit_estimate.
+  $addonMemB = [long]$script:TbK3sAddonMemBytes; $addonCpuM = [long]$script:TbK3sAddonCpuMilli
   $floor = Get-TbEnvelopeFloorString
   $fit = Get-TbFitVerdict `
     -AllocLabel "estimated allocatable per node, before the cluster exists (runtime $([math]::Floor($VmMemBytes / 1MB)) MiB / $VmCpuMilli m, minus $resHow)" `
-    -AllocMemB $allocMemB -AllocCpuM $allocCpuM -SysMemB 0 -SysCpuM 0 `
-    -SysHow 'NOT counted: the k3s addons do not exist until the cluster does, so this estimate can only be optimistic' `
+    -AllocMemB $allocMemB -AllocCpuM $allocCpuM -SysMemB $addonMemB -SysCpuM $addonCpuM `
+    -SysHow "the k3s addon floor ($([math]::Floor($addonMemB / 1MB)) MiB / $addonCpuM m: coredns + metrics-server, which the fit after create counts too); other system pods do not exist until the cluster does" `
     -Size $floor -EnvMemB (ConvertTo-TbMemBytes (Get-TbEnvelopeDimension -Size $floor -Key 'memory')) `
     -EnvCpuM (ConvertTo-TbCpuMilli (Get-TbEnvelopeDimension -Size $floor -Key 'cpu')) -Ours $true -Provenance 'installer'
   $verdict = if ($fit.Verdict -eq 'refused') { 'refused' } else { 'clear' }
@@ -7459,7 +7524,9 @@ function Write-TbFitRefusal {
   param([string]$Headline, [string[]]$Lines, [string]$ErrorLine)
   Warn $Headline
   foreach ($l in $Lines) { Hint "  $l" }
-  Hint "  The client needs ~$([math]::Floor(($script:TbCpFootprintMemBytes + $script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $($script:TbCpFootprintCpuMilli + $script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+  # The k3s addons scheduled beside the platform are part of what the node must
+  # hold, so they are part of what the remedy asks for (client-dev#1700).
+  Hint "  The client needs ~$([math]::Floor(([long]$script:TbCpFootprintMemBytes + [long]$script:TbK3sAddonMemBytes + [long]$script:TbEnvelopeFloorMemBytes) / 1MB)) MiB and $([long]$script:TbCpFootprintCpuMilli + [long]$script:TbK3sAddonCpuMilli + [long]$script:TbEnvelopeFloorCpuMilli) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
   Err $ErrorLine
 }
 
@@ -8083,6 +8150,27 @@ function Get-InstalledClientInfo {
   return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; Name = $existingName; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
 }
 
+# Print the parts of a successful `client create`'s output the user must see
+# (backend#5365): a warning that this machine's previous client is being left
+# behind, or that the existing client is being reconnected with a new
+# credential. The rest stays in the log. Each block starting with a warning
+# line or a "Reconnecting" success line is printed with the plain hint lines
+# under it. The credential goes to its 0600 file, never into this output.
+# Bash parity: _show_create_notices.
+function Show-CreateNotices {
+  param([string]$Path)
+  if (-not $Path -or -not (Test-Path $Path)) { return }
+  $warn = [char]0x26A0; $tick = [char]0x2714; $dot = [char]0x00B7
+  $show = $false
+  foreach ($raw in (Get-Content $Path -ErrorAction SilentlyContinue)) {
+    $line = $raw -replace "$([char]27)\[[0-9;]*m", ""
+    if ($line.StartsWith("  $warn ") -or $line.StartsWith("  $tick Reconnecting ")) { $show = $true; Write-Host $line; continue }
+    if ($show -and $line -match '^  Credential ') { continue }
+    if ($show -and $line -match '^  [^ ]' -and -not ($line[2] -in @($warn, $tick, $dot))) { Write-Host $line; continue }
+    $show = $false
+  }
+}
+
 # Ask the operator to name this client, on a console that can answer. Returns
 # the sanitized name, or "" when there is nobody to ask (Test-CanPrompt false) or
 # three empty tries -- the caller then fails closed naming TRACEBLOC_CLIENT_NAME.
@@ -8153,6 +8241,9 @@ function Invoke-ProvisionClient {
   # 'tracebloc' namespace defers to `client create` + the Helm guard (they key
   # on clientId, which `client list` doesn't expose here).
   $inst = Get-InstalledClientInfo
+  # Namespace of a client installed here that the signed-in account owns: this
+  # run reconnects it instead of naming a new one (backend#5365).
+  $reuseNs = ""
   if ($inst.ListUnknown -or ($inst.UnreadableNs -and -not $inst.Id)) {
     Write-Host ""
     Warn "Couldn't determine whether a tracebloc client is already installed here."
@@ -8180,6 +8271,10 @@ function Invoke-ProvisionClient {
       Err "Refusing to provision a second client on this machine. See the options above."
     } elseif ($own -eq "absent") {
       Log "installed client is in the legacy 'tracebloc' namespace (not listed by its slug); deferring ownership to client create + the Helm one-client guard"
+    } elseif ($own -eq "owned") {
+      # `client create` below adopts it and keeps its name: asking for a new one
+      # would only suggest a second client is about to be made.
+      $reuseNs = $inst.Ns
     }
   }
 
@@ -8191,6 +8286,12 @@ function Invoke-ProvisionClient {
   # straight through to the Err instead of blocking on Read-Host (backend#2836).
   $clientName = ""
   if ($env:TRACEBLOC_CLIENT_NAME) { $clientName = $env:TRACEBLOC_CLIENT_NAME.Trim() }
+  if (-not $clientName -and $reuseNs) {
+    # Reusing the client installed here: no prompt. The name only satisfies the
+    # required --name; an adopt keeps the registered one.
+    $clientName = $reuseNs
+    Info "Reconnecting your secure environment '$reuseNs' - it's already installed here."
+  }
   if (-not $clientName) { $clientName = Read-ClientName }
   if (-not $clientName) { Err "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME for an unattended install." }
 
@@ -8223,6 +8324,8 @@ function Invoke-ProvisionClient {
       Print-CreateFailure -OutFile $createOut -Location $clientLocation
       Err "Couldn't provision the client (tracebloc exited $(Format-ExitCode $createRc)). Re-run to retry."
     }
+    Show-CreateNotices -Path $createOut
+    $reconnected = [bool](Select-String -Path $createOut -SimpleMatch -Quiet -Pattern "Reconnecting this machine's existing client" -ErrorAction SilentlyContinue)
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
   } finally {
@@ -8236,7 +8339,9 @@ function Invoke-ProvisionClient {
     # Re-run on an already-registered cluster: no fresh credential was minted
     # (the existing one stands, write-only on the backend). The Helm step
     # reconciles the existing release and heals a stale clientId to this UUID.
-    Info "This cluster is already registered (client $($script:TB_PROV_ID)) - reconciling the existing install."
+    # Name it by namespace (= the dashboard handle), not the client's UUID login;
+    # said once, since a reuse found above was announced before the create.
+    if (-not $reuseNs) { Info "Reconnecting your secure environment '$($script:TB_PROV_NS)' - it's already registered with tracebloc." }
     $script:TB_PROV_PASSWORD = ""
     $script:TB_PROV_MODE = "adopted"
     return
@@ -8246,7 +8351,7 @@ function Invoke-ProvisionClient {
   $script:TB_PROV_MODE = "minted"
   # The registered identity is the minted slug (= the dashboard name), which
   # may be de-duplicated from the raw typed name.
-  Ok "Registered as `"$($script:TB_PROV_NS)`""
+  if (-not $reconnected) { Ok "Registered as `"$($script:TB_PROV_NS)`"" }
   Log "Provisioned - credential handed to the install (not shown)."
 }
 
@@ -10646,6 +10751,11 @@ if ((-not $Resume) -and $script:InstallState.completed -and (Test-ToolsPresent) 
   if ($gpuPresent -and -not $gpuFullyEnabled) {
     Info "An NVIDIA GPU is present but not fully enabled here -- re-checking to reconcile GPU (node advertisement + chart request)."
     Log "Fast-path skipped: GPU present but not fully enabled; re-evaluating GPU."
+  } elseif (Test-FastPathGpuArchStale) {
+    # client-dev#1706: the release still requests the GPU Find-Gpu left off on arm64 -- fall
+    # through so the helm step restamps a CPU-only request (twin of bash's gpu-unsupported).
+    Info "This release still requests the NVIDIA GPU this arm64 machine cannot use -- re-checking to switch it to CPU."
+    Log "Fast-path skipped: live release requests a GPU but this machine is arm64 (arch_unsupported); restamping CPU-only."
   } else {
     Ok "tracebloc is already installed and the client is healthy -- nothing to do."
     # A healthy cluster can still be running a DRIFTED k3s (the #547 steady state);

@@ -195,6 +195,26 @@ _account_owns_namespace() {
   grep -Eq "namespace=${ns}([[:space:]]|$)" <<<"$out"
 }
 
+# _show_create_notices FILE — print the parts of a successful `client create`'s
+# output the user must see. Its output goes to the log (the credential path and
+# trace lines are noise on screen), but some of it is a decision about THEIR
+# client: a warning that this machine's previous client is being left behind,
+# or that the existing client is being reconnected with a new credential
+# (backend#5365). Before this, those lines reached only the log. Prints each
+# block that starts with a `⚠` line or a `✔ Reconnecting` line, plus the plain
+# hint lines under it; nothing else. The credential never appears in this output
+# (it goes to the 0600 file), so the passthrough cannot leak it.
+_show_create_notices() {
+  local _f="$1"
+  [[ -s "$_f" ]] || return 0
+  sed $'s/\x1b\\[[0-9;]*m//g' "$_f" | awk '
+    /^  ⚠ / || /^  ✔ Reconnecting / { show = 1; print; next }
+    show && /^  Credential / { next }
+    show && /^  [^ ✔⚠·]/ { print; next }
+    { show = 0 }
+  '
+}
+
 provision_client() {
   # No step header here — main() prints "d) Registering this machine". The
   # tracebloc CLI was installed in step b (Install what tracebloc needs); this
@@ -234,6 +254,11 @@ provision_client() {
   echo -e "  (on this or any device) and enter the code:"
   echo ""
   _device_sign_in
+
+  # Namespace of a client installed here that the signed-in account owns, when
+  # the pre-flight below finds one: this run reconnects it rather than naming a
+  # new one.
+  local _reuse_ns=""
 
   # ── One-client-per-machine pre-flight (#303) ─────────────────────────────
   # `client create` below mints a fresh client whenever the backend can't match
@@ -292,6 +317,11 @@ provision_client() {
         error "Refusing to provision a second client on this machine. See the options above."
       elif [[ "$_own_rc" -eq 1 ]]; then
         log "installed client is in the legacy 'tracebloc' namespace (not listed by its slug); deferring ownership to client create + the Helm one-client guard, which key on clientId"
+      elif [[ "$_own_rc" -eq 0 ]]; then
+        # The signed-in account owns the client installed here, so `client create`
+        # below adopts it and keeps its name: asking for a new one would only
+        # suggest a second client is about to be made (backend#5365).
+        _reuse_ns="$INSTALLED_CLIENT_NS"
       fi
     fi
   fi
@@ -316,6 +346,12 @@ provision_client() {
   # yields nothing, provision with NO location rather than asking. A pinned
   # TRACEBLOC_CLIENT_LOCATION still overrides for unattended installs.
   local client_name="${TRACEBLOC_CLIENT_NAME:-}" client_location="${TRACEBLOC_CLIENT_LOCATION:-}"
+  if [[ -z "$client_name" && -n "$_reuse_ns" ]]; then
+    # Reusing the client installed here: no prompt. The name only satisfies the
+    # required --name; an adopt keeps the registered one.
+    client_name="$_reuse_ns"
+    info "Reconnecting your secure environment '${_reuse_ns}' — it's already installed here."
+  fi
   # Track where the location came from so a rejected-zone hint can name the real
   # source ("env" = pinned via TRACEBLOC_CLIENT_LOCATION, "auto" = timezone-derived).
   local client_location_source="auto"
@@ -389,6 +425,11 @@ provision_client() {
     error "Couldn't provision the client. Re-run to retry — full log: ${LOG_FILE:-the install log}."
   fi
   cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
+  _show_create_notices "$_create_out"
+  # A reconnect (the CLI reissued the existing client's credential) is handed
+  # over like a mint; remember it so the summary below doesn't say "Registered".
+  local _reconnected=0
+  grep -q "Reconnecting this machine's existing client" "$_create_out" 2>/dev/null && _reconnected=1
   rm -f "$_create_out"
   [[ -f "$cred_file" ]] || error "client create did not write the credential file ($cred_file)."
 
@@ -418,7 +459,9 @@ provision_client() {
     # authenticate. Drop only the (absent) password: with no password, the partial
     # creds never reach the non-interactive install path, so the ADOPTED branch owns
     # this case. A rebuilt host with no local release still reconciles by discovery.
-    info "This cluster is already registered (client ${TRACEBLOC_CLIENT_ID:-?}) — reconciling the existing install."
+    # Name it by namespace (= the dashboard handle), not the client's UUID login.
+    # Said once: a reuse found by the pre-flight was announced before the create.
+    [[ -n "$_reuse_ns" ]] || info "Reconnecting your secure environment '${TB_NAMESPACE:-${TRACEBLOC_NAMESPACE:-?}}' — it's already registered with tracebloc."
     unset TRACEBLOC_CLIENT_PASSWORD
     export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_ADOPTED
     tb_export_namespace
@@ -432,6 +475,6 @@ provision_client() {
   tb_export_namespace
   # The registered identity is the minted slug (= TB_NAMESPACE = the dashboard
   # name), e.g. "lukas-01" — not the raw typed name (which may be de-duplicated).
-  success "Registered as \"${TB_NAMESPACE}\""
+  [[ "$_reconnected" == 1 ]] || success "Registered as \"${TB_NAMESPACE}\""
   log "Provisioned — credential handed to the install (not shown)."
 }

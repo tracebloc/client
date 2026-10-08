@@ -119,6 +119,12 @@ fi
 if [[ -f "${LIB_DIR}/assess.sh" ]]; then
   source "${LIB_DIR}/assess.sh"
 fi
+# reinstall.sh (D10: native k3s never beside a live k3d) may likewise be absent
+# under a stale bootstrap. Guarded like the others, but main() never SKIPS its
+# check when it is missing: a native k3s request then refuses by name.
+if [[ -f "${LIB_DIR}/reinstall.sh" ]]; then
+  source "${LIB_DIR}/reinstall.sh"
+fi
 # probe.sh (RFC 0001 host capability/privilege audit) may likewise be absent
 # under a stale bootstrap that didn't fetch it — guard the source so `--diagnose`
 # simply omits the install-tier section instead of aborting under `set -e`.
@@ -168,6 +174,15 @@ main() {
   print_substrate_token
   refuse_unsupported_substrate
   refuse_unresolved_substrate
+  # Native k3s is never set up beside a live k3d (D10): read-only detection, then a
+  # refusal, before anything below installs, writes or starts. A bootstrap too old
+  # to have fetched reinstall.sh must not become k3s beside k3d, so a native k3s
+  # request without the check refuses by name; a k3d request runs as before.
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    declare -F refuse_k3s_beside_live_k3d >/dev/null 2>&1 \
+      || error "This installer build can't check for a live k3d cluster (stale bootstrap), and native k3s is never set up beside one. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+    refuse_k3s_beside_live_k3d
+  fi
 
   # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
   # installs the privileged prerequisites so a researcher can then install
@@ -178,7 +193,11 @@ main() {
   # install.sh's bailout exemption scans all args, so a run like
   # `--force prepare-host` must dispatch here too, never fall through into a
   # (forced) full provision as the admin (Bugbot r4).
-  local _a_ph
+  # --print (RFC-0175 D3, client-dev#1541): list every command prepare-host would
+  # run as root, and run none. Read from the arguments only, never the environment.
+  local _a_ph _a_pr
+  TRACEBLOC_PREPARE_PRINT=""
+  for _a_pr in "$@"; do [[ "$_a_pr" == "--print" ]] && TRACEBLOC_PREPARE_PRINT=1; done
   for _a_ph in "$@"; do
     [[ "$_a_ph" == "prepare-host" || "$_a_ph" == "--prepare-host" ]] || continue
     # Replace the full install_cleanup (its credential-shred + "did not complete"
@@ -207,6 +226,10 @@ main() {
     fi
     error "This installer build doesn't include prepare-host (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
   done
+  # --print lists prepare-host's commands; an install has no --print, and must never
+  # start one when an administrator asked only to see a plan.
+  [[ -z "$TRACEBLOC_PREPARE_PRINT" ]] \
+    || error "--print lists what prepare-host would run as root, and runs none of it. Ask for it with prepare-host: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host --print"
 
   # Past this line the run is committed to installing, so it is the one that
   # produces an outcome event (backend#1907). Everything above is terminal and

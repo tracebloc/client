@@ -171,19 +171,25 @@ _reboot_note() {
 }
 
 # _summary_kubeconfig_hint -- the merged kubeconfig a native k3s user must name, with
-# $HOME as ~ for them to type, or nothing (exit 1). Native k3s links kubectl to k3s,
-# and with no KUBECONFIG that kubectl reads k3s's own k3s.yaml (context default, no
-# namespace), never the merged file. _native_k3s_merge_kubeconfig sets the hint only
-# when the user had no KUBECONFIG; k3d never needs it.
+# $HOME as ~ for them to type, or NO OUTPUT when there is none. Native k3s links
+# kubectl to k3s, and with no KUBECONFIG that kubectl reads k3s's own k3s.yaml
+# (context default, no namespace), never the merged file.
+# _native_k3s_merge_kubeconfig sets the hint only when the user had no KUBECONFIG;
+# k3d never needs it.
+#
+# It always exits 0; callers test the output (`[[ -n "$kc" ]]`). A "no hint" exit 1
+# was recorded as a failure by the installer's ERR trap: `set -E` carries the trap
+# into the `$(...)` of `if kc="$(...)"`, where the status is not in a condition, so
+# every successful k3d install logged `err: … summary.sh … cmd=return 1` after its
+# success screen (backend#5025 O-103).
 _summary_kubeconfig_hint() {
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && -n "${TB_K3S_KUBECONFIG_HINT:-}" ]]; then
     local kc="$TB_K3S_KUBECONFIG_HINT"
     # shellcheck disable=SC2088  # the ~ is for the user to read, as in logdisp below
     if [[ -n "${HOME:-}" && "$kc" == "$HOME"/* ]]; then kc="~${kc#"$HOME"}"; fi
     printf '%s' "$kc"
-    return 0
   fi
-  return 1
+  return 0
 }
 
 # The installer switched kubectl's current context to this cluster (it must: the
@@ -199,7 +205,8 @@ _summary_kubeconfig_hint() {
 _kube_context_note() {
   [[ -n "${TB_PREV_KUBE_CONTEXT:-}" ]] || return 0
   local kc="" kcflag=""
-  if kc="$(_summary_kubeconfig_hint)"; then kcflag="--kubeconfig ${kc} "; fi
+  kc="$(_summary_kubeconfig_hint)"
+  if [[ -n "$kc" ]]; then kcflag="--kubeconfig ${kc} "; fi
   echo -e "  kubectl now points at ${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-k3d-${CLUSTER_NAME:-tracebloc}}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
   echo -e "    ${TB_CMD}kubectl ${kcflag}config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
   echo ""
@@ -351,7 +358,8 @@ print_summary() {
   # file (_summary_kubeconfig_hint). Every outcome above names a kubectl command, so
   # every outcome ends with the line.
   local kc=""
-  if kc="$(_summary_kubeconfig_hint)"; then
+  kc="$(_summary_kubeconfig_hint)"
+  if [[ -n "$kc" ]]; then
     echo ""
     echo -e "  To point kubectl at tracebloc, run this in your shell (add it to your profile to keep it):"
     echo -e "    ${TB_CMD}export KUBECONFIG=${kc}${RESET}"

@@ -183,6 +183,13 @@ _tb_check_healthy() {
   return "$rc"
 }
 
+# The PATH of the shell that started this install, before anything below or the
+# core libs prepends to it: the shell the user types `tracebloc` into next. The CLI
+# step reads it to say "run it now" when the CLI's directory was already on it,
+# and "open a new terminal" only when it was not (install-cli.sh,
+# _cli_on_launch_path). Kept when already set, so a nested run keeps the first.
+export TB_LAUNCH_PATH="${TB_LAUNCH_PATH:-${PATH:-}}"
+
 # The CLI installer drops the binary in ~/.local/bin when /usr/local/bin isn't
 # writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
 # provision_client's prepend before probing, or a healthy ~/.local/bin install
@@ -408,6 +415,7 @@ FILES=(
   "scripts/lib/install-cli.sh"
   "scripts/lib/provision.sh"
   "scripts/lib/assess.sh"
+  "scripts/lib/reinstall.sh"
   "scripts/lib/probe.sh"
   "scripts/lib/summary.sh"
   "scripts/lib/diagnose.sh"

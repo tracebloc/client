@@ -272,6 +272,45 @@ _TB_CP_TRANSIENT_MEM_BYTES=402653184
 _TB_CP_TRANSIENT_CPU_MILLI=700
 # ── end generated ───────────────────────────────────────────────────────────
 
+# ── k3s's own addons, as a FLOOR (client-dev#1693, #1700) ──────────────────
+#
+# What k3s's bundled addons request on the node this installer sets up, native
+# k3s or k3d (which runs the same k3s inside Docker): coredns 100m / 70Mi and
+# metrics-server 100m / 70Mi (k3s's packaged manifests). k3s.sh's config and
+# k3d.sh's `--disable` flags drop traefik and servicelb, and the
+# local-path-provisioner, where it is kept, requests nothing, so these two are
+# the whole of it. Hand-typed, not generated: the numbers live in k3s's
+# binary, not in this tree. A k3s bump that changes them is caught only by `tracebloc doctor`
+# on a small machine -- which is how this was found.
+#
+# WHY A FLOOR. _fit_training_envelope already MEASURES the system pods -- but
+# only the ones that are scheduled when values are generated. On a fresh native
+# k3s the addons can still be Pending (no nodeName) or not yet created at that
+# moment, so the measurement came back 0 and the envelope was checked against
+# the chart alone. On a 2 vCPU / 7 GB machine that is 5250 MiB allocatable -
+# 2112 MiB chart = 3138 MiB -> 3 GiB, which "fits" with 66 MiB to spare; once
+# the addons land, 2998 MiB is free and doctor says Not ready. The floor makes
+# the fit count what WILL be on the node, whatever has been scheduled so far.
+#
+# Both substrates. k3d runs the same addons, the same fit and the same timing,
+# and bites when rounding to whole GiB leaves under 140 MiB to spare
+# (client-dev#1700). The PowerShell twin (k3d only) carries the same two
+# constants as $script:TbK3sAddon* and applies them in Resolve-TbTrainingFit;
+# install-k8s.Tests.ps1 pins that they equal these.
+_TB_K3S_ADDON_MEM_BYTES=146800640
+_TB_K3S_ADDON_CPU_MILLI=200
+
+# Echo "<mem bytes> <cpu m>" -- the system-pod floor this substrate guarantees
+# will be on the node -- or NOTHING when there is no known floor (a substrate
+# this installer does not set up).
+_system_requests_floor() {
+  case "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" in
+    k3s|k3d) ;;
+    *) return 0 ;;
+  esac
+  printf '%s %s' "$_TB_K3S_ADDON_MEM_BYTES" "$_TB_K3S_ADDON_CPU_MILLI"
+}
+
 # ── the fallback training envelope (precedence step 4) ──────────────────────
 # The contract FLOOR — cpu=1,memory=2Gi — DERIVED from the embedded floor
 # constants so it cannot drift from envelope_contract.json. Written when the
@@ -871,9 +910,14 @@ _print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only); 
 # an operator refused early reads exactly what a late refusal would have said.
 # $1 = the headline, $2 = the lines to print, $3 = the closing error.
 _print_fit_refusal() {
+  # The addons k3s schedules beside the platform (native k3s and k3d) are part
+  # of what the node must hold, so they are part of what the remedy asks for.
+  local _rf _rf_mem=0 _rf_cpu=0
+  _rf="$(_system_requests_floor)"
+  if [[ -n "$_rf" ]]; then read -r _rf_mem _rf_cpu <<< "$_rf"; fi
   warn "$1"
   _print_fit_lines hint "$2"
-  hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
+  hint "  The client needs ~$(( (_TB_CP_FOOTPRINT_MEM_BYTES + _rf_mem + _TB_ENVELOPE_FLOOR_MEM_BYTES) / 1024 / 1024 )) MiB and $(( _TB_CP_FOOTPRINT_CPU_MILLI + _rf_cpu + _TB_ENVELOPE_FLOOR_CPU_MILLI )) m free on one node for the smallest run. To install anyway, set TRACEBLOC_TRAINING_RESOURCES=cpu=N,memory=MGi yourself."
   error "$3"
 }
 
@@ -938,6 +982,19 @@ _fit_training_envelope() {
     sys_how="measured: ${_TB_SYS_NOTE}"
   else
     sys_how="NOT measured (${_TB_SYS_NOTE}); verified against the chart derivation only"
+  fi
+  # Native k3s and k3d: never count less than the addons k3s is about to
+  # schedule (client-dev#1693, #1700; see _TB_K3S_ADDON_*). Per dimension, so
+  # a measurement that already includes them -- or more -- is used as-is.
+  local floor floor_mem_b floor_cpu_m
+  floor="$(_system_requests_floor)"
+  if [[ -n "$floor" ]]; then
+    read -r floor_mem_b floor_cpu_m <<< "$floor"
+    if (( sys_mem_b < floor_mem_b || sys_cpu_m < floor_cpu_m )); then
+      if (( sys_mem_b < floor_mem_b )); then sys_mem_b=$floor_mem_b; fi
+      if (( sys_cpu_m < floor_cpu_m )); then sys_cpu_m=$floor_cpu_m; fi
+      sys_how="${sys_how}; raised to the k3s addon floor ($(( floor_mem_b / 1024 / 1024 )) MiB / ${floor_cpu_m} m: coredns + metrics-server, which may not be scheduled yet)"
+    fi
   fi
   _fit_verdict "allocatable on the largest schedulable node" "$alloc_mem_b" "$alloc_cpu_m" \
     "$sys_mem_b" "$sys_cpu_m" "$sys_how" "$size" "$env_mem_b" "$env_cpu_m" "$ours" "$prov"
@@ -1036,10 +1093,12 @@ _fit_verdict() {
 #     subtracted the way the kubelet subtracts it: capacity - kubeReserved -
 #     systemReserved - evictionHard. An UNMEASURED platform gets no
 #     reservation, here as on the node, and the arithmetic says so;
-#   * what the node must hold: the embedded chart footprint. The k3s addons do
-#     NOT exist yet and are not counted, so this can only be OPTIMISTIC: it
-#     never refuses a host the post-create fit would accept, and the fit after
-#     create stays the authority for everything else;
+#   * what the node must hold: the embedded chart footprint, plus the k3s addon
+#     floor (_system_requests_floor) -- the addons do not exist yet, but they
+#     will, and the post-create fit never counts less than that floor
+#     (client-dev#1693, #1700). So this is still never PESSIMISTIC: it never
+#     refuses a host the post-create fit would accept, and the fit after create
+#     stays the authority for everything else (system pods beyond the addons);
 #   * the envelope: the contract floor, the size the installer writes when a
 #     machine cannot be sized. Refusal does not depend on it -- the fit refuses
 #     only when what is left beside the platform is under one core or one GiB
@@ -1108,13 +1167,25 @@ _precreate_fit_estimate() {
   if (( alloc_mem_b < 0 )); then alloc_mem_b=0; fi
   if (( alloc_cpu_m < 0 )); then alloc_cpu_m=0; fi
 
+  # The addons the post-create fit will count whether or not they are scheduled
+  # by then (its floor), so a host refused only because of them is refused here,
+  # before there is a cluster to delete.
+  local sys_mem_b=0 sys_cpu_m=0 sys_how floor
+  floor="$(_system_requests_floor)"
+  if [[ -n "$floor" ]]; then
+    read -r sys_mem_b sys_cpu_m <<< "$floor"
+    sys_how="the k3s addon floor ($(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m: coredns + metrics-server, which the fit after create counts too); other system pods do not exist until the cluster does"
+  else
+    sys_how="NOT counted: the k3s addons do not exist until the cluster does, so this estimate can only be optimistic"
+  fi
+
   local env_cpu_m env_mem_b
   env_cpu_m="$(_cpu_to_milli "$(_envelope_dimension "$_TRAINING_DEFAULT" cpu)")"
   env_mem_b="$(_mem_to_bytes "$(_envelope_dimension "$_TRAINING_DEFAULT" memory)")"
   _fit_verdict \
     "estimated allocatable per node, before the cluster exists (runtime $(( vm_mem_b / mib )) MiB / ${vm_cpu_m} m, minus ${res_how})" \
-    "$alloc_mem_b" "$alloc_cpu_m" 0 0 \
-    "NOT counted: the k3s addons do not exist until the cluster does, so this estimate can only be optimistic" \
+    "$alloc_mem_b" "$alloc_cpu_m" "$sys_mem_b" "$sys_cpu_m" \
+    "$sys_how" \
     "$_TRAINING_DEFAULT" "$env_mem_b" "$env_cpu_m" 1 installer
   _TB_PRECREATE_LINES="$_TB_FIT_LINES"
   if [[ "$_TB_FIT_VERDICT" == "refused" ]]; then
