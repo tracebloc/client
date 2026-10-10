@@ -28,6 +28,12 @@
   installer prepulls on GPU-wired hosts, and the CPU families' parents are not in
   scope.
 
+  TWO KEYS. `job.yaml` is the manifest the installer applies; `platforms` is the
+  GPU entry's platform list, comma-joined (the schema's platform pattern holds no
+  comma). The installer reads it to stop on a host whose arch the parent is not
+  published for, before it applies anything: a pod there would only wait out its
+  deadline in ErrImagePull.
+
   THE NAME OF THE JOB carries the first 12 hex of the digest. A Job's pod
   template is immutable, so re-applying a same-named Job with a new image would
   be refused; a new parent is a new Job.
@@ -69,6 +75,7 @@ metadata:
     {{- include "tracebloc.labels" . | nindent 4 }}
     app.kubernetes.io/component: training-prepull
 data:
+  platforms: {{ join "," $parent.platforms | quote }}
   job.yaml: |
     apiVersion: batch/v1
     kind: Job

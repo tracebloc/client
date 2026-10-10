@@ -224,6 +224,184 @@ _cli_runnable_now() {
   [[ "${TB_CLI_USABLE_NOW:-0}" == "1" ]]
 }
 
+# ── The training parent prepull (slim client B.13) ─────────────────────────────
+#
+# Every GPU training image builds FROM one shared torch parent, about 4 GiB of its
+# 4.2-4.5 GiB, and on a fresh host the first GPU training pulls all of it as part of
+# its own start. The chart carries a Job that pulls only that parent, as data: ConfigMap
+# <release>-training-prepull (client/templates/training-prepull-configmap.yaml), which
+# renders only where the chart pins the training images (tracebloc.trainingParentPin).
+# This step applies that Job once the control plane is ready, so the 4 GiB pull never
+# shares the link with the control plane's own pulls, and returns without waiting.
+#
+# It stops, with one log line naming the reason, when the host is not GPU-wired,
+# TRACEBLOC_SKIP_TRAINING_PREPULL is set, the ConfigMap is absent or unreadable, the
+# host's platform is not one the parent is published for, the image store's path cannot
+# be told, or the disk rule (_prepull_disk_rule) fails. It never fails the install and
+# never waits on the pull: a pull that cannot finish waits out the Job's own deadline.
+#
+# The Job lives in the release namespace and deletes itself after its TTL; the image
+# lives in the substrate's store, which the substrate's own removal deletes. So the
+# install record gains nothing. The k3d node-image prepull (k3d.sh) is a different
+# pull, with its own switch (TRACEBLOC_SKIP_GPU_IMAGE_PREPULL).
+
+# The component label the chart puts on the ConfigMap: how it is found. Its name is
+# <fullname>-training-prepull, and fullname follows fullnameOverride, so the label is
+# the one handle that does not move with it.
+TB_PREPULL_COMPONENT="training-prepull"
+# The bound on each of this step's calls: the two cluster reads, the apply, and the
+# disk rule's df (a wedged mount under the store must not hang the install either).
+TB_PREPULL_CALL_S=10
+# The step's verdict, for print_summary: empty until it runs, then `applied` or
+# `skipped` (the reason is in the install log).
+TB_PREPULL_VERDICT=""
+
+# _prepull_store_path SUBSTRATE -- the directory whose filesystem holds SUBSTRATE's
+# image store. k3d's node keeps its images inside its container, under Docker's data
+# root. Native k3s keeps them in its containerd root, TB_K3S_DATA_PATH/agent/containerd:
+# the kubelet's image filesystem, which a mount of its own can put on another disk
+# than the data path (preflight measures it there too, _pf_disk_k3s). Exit 1, printing
+# nothing, for a substrate this step does not know: the caller skips it by name.
+_prepull_store_path() {
+  case "$1" in
+    k3d) _pf_docker_root ;;
+    k3s) printf '%s' "${TB_K3S_DATA_PATH}/agent/containerd" ;;
+    *) return 1 ;;
+  esac
+}
+
+# _prepull_df SUBSTRATE DIR -- `df -Pk DIR`, bounded by TB_PREPULL_CALL_S. Native
+# k3s's store sits below its agent/ directory, which k3s creates 0700
+# (pkg/agent/run.go), so this user's df cannot reach it: it is read as root, as
+# preflight reads it, and only when root answers without a password prompt -- this
+# step never asks for one (exit 3). No fallback to the data path: that would measure
+# another filesystem in exactly the case the store has its own, and a skipped prepull
+# costs only the first training's pull. Exit 124 when df did not answer in time.
+_prepull_df() {
+  if [[ "$1" == k3s ]]; then
+    _native_k3s_root_ready || return 3
+    _bounded_root "$TB_PREPULL_CALL_S" df -Pk "$2"
+  else
+    _bounded "$TB_PREPULL_CALL_S" df -Pk "$2"
+  fi
+}
+
+# _prepull_disk_rule DIR [SUBSTRATE] -- 0 when DIR's filesystem can take the parent's unpacked
+# footprint (TB_PREPULL_PARENT_DISK_GB, stamped from facts.env) and still hold both:
+# its use stays below the kubelet's image GC threshold
+# (TB_KUBELET_IMAGE_GC_HIGH_PERCENT, the value the installer writes into the kubelet
+# config: past it the kubelet collects images nothing references, the parent first),
+# and at least PF_WARN_DISK_GB stays free (preflight's floor). Prints one line with
+# the numbers either way: the free GB now and after, the threshold, DIR. Exit 1 when
+# the rule fails, 2 when df cannot tell: it did not answer in time, root could not
+# be asked without a prompt (k3s), or its answer was not numbers. SUBSTRATE decides
+# how DIR is read (_prepull_df).
+_prepull_disk_rule() {
+  local dir="$1" sizes="" total_kb="" avail_kb="" need_kb after_kb pct_after rc=0
+  sizes="$(_prepull_df "${2:-}" "$dir" 2>/dev/null)" || rc=$?
+  case "$rc" in
+    124|137) printf 'df did not answer within %ss on %s' "$TB_PREPULL_CALL_S" "$dir"; return 2 ;;
+    3) printf 'root could not be asked without a password prompt to read %s (k3s keeps it below a 0700 directory), and this step never prompts' "$dir"; return 2 ;;
+  esac
+  sizes="$(printf '%s\n' "$sizes" | awk 'NR==2 {print $2, $4}')"
+  read -r total_kb avail_kb <<<"$sizes" || true
+  case "${total_kb}${avail_kb}" in
+    ''|*[!0-9]*) printf 'df could not tell the free space on %s' "$dir"; return 2 ;;
+  esac
+  if [[ -z "$avail_kb" || "$total_kb" -eq 0 ]]; then printf 'df could not tell the free space on %s' "$dir"; return 2; fi
+  need_kb=$(( TB_PREPULL_PARENT_DISK_GB * 1024 * 1024 ))
+  after_kb=$(( avail_kb - need_kb ))
+  # The kubelet's measure: used = capacity - available, as a share of capacity,
+  # rounded up so the rule never reads a filesystem as emptier than it is.
+  pct_after=$(( ( (total_kb - after_kb) * 100 + total_kb - 1 ) / total_kb ))
+  printf '%s GB free on %s, %s GB after the parent (about %s GB): %s%% used against the kubelet image GC threshold of %s%%, with a floor of %s GB free' \
+    "$(( avail_kb / 1024 / 1024 ))" "$dir" "$(( after_kb / 1024 / 1024 ))" "$TB_PREPULL_PARENT_DISK_GB" \
+    "$pct_after" "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" "$PF_WARN_DISK_GB"
+  [[ "$pct_after" -lt "$TB_KUBELET_IMAGE_GC_HIGH_PERCENT" ]] || return 1
+  [[ "$after_kb" -ge $(( PF_WARN_DISK_GB * 1024 * 1024 )) ]] || return 1
+  return 0
+}
+
+# _prepull_host_platform -- this host's platform as an image index spells it
+# (linux/amd64).
+_prepull_host_platform() {
+  printf '%s/%s' "$(printf '%s' "${OS:-$(uname -s)}" | tr '[:upper:]' '[:lower:]')" "$ARCH_DL"
+}
+
+# _prepull_platform_listed PLATFORM LIST -- 0 when PLATFORM is in LIST, the
+# ConfigMap's comma-joined platforms. An entry with a variant (linux/arm64/v8) lists
+# the platform it is a variant of.
+_prepull_platform_listed() {
+  case ",$2," in
+    *",$1,"*|*",$1/"*) return 0 ;;
+  esac
+  return 1
+}
+
+# _prepull_skip REASON -- the one log line for a stop, and the verdict.
+_prepull_skip() {
+  TB_PREPULL_VERDICT="skipped"
+  log "training prepull: skipped: $1"
+}
+
+# _prepull_training_parent -- the step. Runs from main() after wait_for_client_ready
+# and before print_summary; returns 0 always.
+_prepull_training_parent() {
+  local ns="${TB_NAMESPACE:-default}" out rc=0 name="" platforms="" manifest host store disk image
+  log "training prepull: start"
+  if ! _gpu_wired; then _prepull_skip "not GPU-wired (only the GPU training images build FROM the torch parent)"; return 0; fi
+  if [[ -n "${TRACEBLOC_SKIP_TRAINING_PREPULL:-}" ]]; then _prepull_skip "TRACEBLOC_SKIP_TRAINING_PREPULL is set"; return 0; fi
+  out="$(_bounded "$TB_PREPULL_CALL_S" kubectl get configmap -n "$ns" -l "app.kubernetes.io/component=${TB_PREPULL_COMPONENT}" \
+    --request-timeout="${TB_PREPULL_CALL_S}s" \
+    -o 'go-template={{range .items}}{{.metadata.name}}{{"\t"}}{{index .data "platforms"}}{{"\n"}}{{end}}' 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then _prepull_skip "the ${TB_PREPULL_COMPONENT} ConfigMap could not be read in namespace ${ns} (kubectl exit ${rc}; its error is above in the log)"; return 0; fi
+  if [[ -z "$out" ]]; then _prepull_skip "nothing is pinned for this edge (no ${TB_PREPULL_COMPONENT} ConfigMap in namespace ${ns})"; return 0; fi
+  if [[ "$out" == *$'\n'* ]]; then _prepull_skip "more than one ${TB_PREPULL_COMPONENT} ConfigMap in namespace ${ns}, so which one to apply cannot be told"; return 0; fi
+  IFS=$'\t' read -r name platforms <<<"$out" || true
+  if [[ -z "$name" || -z "$platforms" ]]; then
+    _prepull_skip "the ${TB_PREPULL_COMPONENT} ConfigMap in namespace ${ns} names no platforms, so whether this host can run the image cannot be told"; return 0
+  fi
+  host="$(_prepull_host_platform)"
+  if ! _prepull_platform_listed "$host" "$platforms"; then
+    _prepull_skip "this host is ${host}, and the parent is published for ${platforms} only"; return 0
+  fi
+  if ! store="$(_prepull_store_path "${TRACEBLOC_SUBSTRATE_RESOLVED:-}")"; then
+    _prepull_skip "substrate '${TRACEBLOC_SUBSTRATE_RESOLVED:-}' has no image store this step knows"; return 0
+  fi
+  rc=0; disk="$(_prepull_disk_rule "$store" "${TRACEBLOC_SUBSTRATE_RESOLVED:-}")" || rc=$?
+  case "$rc" in
+    0) log "training prepull: disk: $disk" ;;
+    1) _prepull_skip "the disk rule fails: $disk"; return 0 ;;
+    *) _prepull_skip "the disk rule cannot tell: $disk"; return 0 ;;
+  esac
+  rc=0
+  manifest="$(_bounded "$TB_PREPULL_CALL_S" kubectl get configmap "$name" -n "$ns" --request-timeout="${TB_PREPULL_CALL_S}s" \
+    -o 'go-template={{index .data "job.yaml"}}' 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  if [[ "$rc" -ne 0 || "$manifest" != *"kind: Job"* ]]; then
+    _prepull_skip "ConfigMap ${name} carries no Job manifest that could be read (kubectl exit ${rc})"; return 0
+  fi
+  image="$(printf '%s\n' "$manifest" | sed -n 's/^[[:space:]]*image:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p')"
+  image="${image%%$'\n'*}"
+  rc=0
+  out="$(printf '%s\n' "$manifest" | _bounded "$TB_PREPULL_CALL_S" kubectl apply -n "$ns" --request-timeout="${TB_PREPULL_CALL_S}s" -f - 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then _prepull_skip "the Job in ConfigMap ${name} could not be applied (kubectl exit ${rc}; its error is above in the log)"; return 0; fi
+  TB_PREPULL_VERDICT="applied"
+  log "training prepull: applied: ${out%%$'\n'*} (${image:-?}, about ${TB_PREPULL_PARENT_DISK_GB} GB on disk); not waiting for it"
+  info "Downloading the GPU training base image in the background (${image:-?}, about ${TB_PREPULL_PARENT_DISK_GB} GB on disk)."
+  return 0
+}
+
+# _prepull_summary_line -- the step's verdict, under Mode, on a GPU-wired host only:
+# a CPU host has nothing to download ahead, and the line would be noise there.
+_prepull_summary_line() {
+  _gpu_wired || return 0
+  case "${TB_PREPULL_VERDICT:-}" in
+    applied) echo -e "  ${TB_LABEL}GPU images${RESET}  : downloading in the background" ;;
+    skipped) echo -e "  ${TB_LABEL}GPU images${RESET}  : not downloaded yet; your first GPU training downloads them (the install log says why)" ;;
+  esac
+  return 0
+}
+
 print_summary() {
   # NVIDIA "GPU mode" only when the GPU was actually WIRED into the cluster
   # (_gpu_wired) — a detected-but-not-wired GPU runs CPU-only, and printing
@@ -253,6 +431,7 @@ print_summary() {
       echo -e "  ${TB_LABEL}Environment${RESET} : ${ns}"
       echo -e "  ${TB_LABEL}Version${RESET}     : ${cver:-unknown}"
       echo -e "  ${TB_LABEL}Mode${RESET}        : ${mode}"
+      _prepull_summary_line
       echo ""
       echo -e "  ${TB_HEADING}Your secure environment is live${RESET} 🟢"
       echo -e "    See it on your dashboard:  ${TB_LINK}$(_dashboard_url)${RESET}"

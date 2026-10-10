@@ -397,6 +397,11 @@ _write_k3d_registries_config() {
 # to one value.
 _TB_LOCAL_API_HOST_PORT_DEFAULT="47910"
 _TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
+# The NodePort range the chart's values.schema.json allows for localApi.nodePort
+# (Kubernetes' default service-node-port-range). install-k8s.ps1 carries the same
+# two and install-k8s.Tests.ps1 holds them to the schema (client-dev#1688).
+_TB_LOCAL_API_NODE_PORT_MIN="30000"
+_TB_LOCAL_API_NODE_PORT_MAX="32767"
 # Overridable, for a host whose 47910 is spoken for, under the TRACEBLOC_ names
 # only: TB_LOCAL_API_* are this installer's internal state, never env inputs.
 TB_LOCAL_API_HOST_PORT="${TRACEBLOC_LOCAL_API_HOST_PORT:-$_TB_LOCAL_API_HOST_PORT_DEFAULT}"
@@ -465,20 +470,23 @@ _local_api_host_port_busy() {
     'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TB_LOCAL_API_HOST_PORT}" 2>/dev/null
 }
 
-# Whether both ports are a TCP port k3d can take (1..65535, digits only). The
-# overrides are free text; a bad one must turn the feature off, never reach
-# `k3d cluster create` and fail the install (client-dev#1665).
+# Whether both ports are ones the install can take (digits only): the host port
+# any TCP port (1..65535), the node port one the chart's schema accepts
+# (30000..32767) -- anything else passes k3d and fails `helm install` on
+# localApi.nodePort (client-dev#1688). The overrides are free text; a bad one must
+# turn the feature off, never reach `k3d cluster create` and fail the install
+# (client-dev#1665).
 _local_api_port_valid() {
-  local p
-  for p in "$TB_LOCAL_API_HOST_PORT" "$TB_LOCAL_API_NODE_PORT"; do
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    (( 10#$p >= 1 && 10#$p <= 65535 )) || return 1
-  done
+  local p="$TB_LOCAL_API_HOST_PORT" n="$TB_LOCAL_API_NODE_PORT"
+  [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+  (( 10#$p >= 1 && 10#$p <= 65535 )) || return 1
+  [[ "$n" =~ ^[0-9]{1,5}$ ]] || return 1
+  (( 10#$n >= _TB_LOCAL_API_NODE_PORT_MIN && 10#$n <= _TB_LOCAL_API_NODE_PORT_MAX )) || return 1
   return 0
 }
 
 _local_api_invalid_warn() {
-  warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TB_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TB_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set them to numbers from 1 to 65535 and re-run the installer to turn it on."
+  warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TB_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TB_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set the host port to a number from 1 to 65535 and the node port to one from ${_TB_LOCAL_API_NODE_PORT_MIN} to ${_TB_LOCAL_API_NODE_PORT_MAX}, then re-run the installer to turn it on."
 }
 
 # The new-cluster half: the mapping goes into `k3d cluster create` itself when
@@ -598,9 +606,26 @@ _ensure_local_api_port() {
   return 0
 }
 
+# _kube_current_context -- kubectl's current context, or empty when none is
+# selected or it cannot be read (bounded: never a failed install).
+_kube_current_context() {
+  local ctx=""
+  ctx="$(_bounded 10 kubectl config current-context 2>/dev/null)" || ctx=""
+  printf '%s' "${ctx//[$'\r\n']/}"
+}
+
 # _k3d_create_cluster -- step c on k3d; cluster.sh's create_cluster routes here.
 _k3d_create_cluster() {
   log "Creating k3d cluster: '$CLUSTER_NAME'"
+
+  # The context kubectl pointed at BEFORE this install (backend#5025 O-19), read
+  # before ANY k3d call. `k3d cluster create` defaults to
+  # --kubeconfig-update-default and --kubeconfig-switch-context, so by the time
+  # _merge_kubeconfig runs a fresh cluster has already moved the context to
+  # k3d-<name>: read there, "before" equalled "after" and the summary never said
+  # kubectl was switched (backend#5384). Handed to the merge below.
+  local _ctx_before=""
+  _ctx_before="$(_kube_current_context)"
 
   # RFC 0001 #1221 (Tier 1): target the per-user ROOTLESS daemon, not a (missing)
   # system daemon. Slice 1 exports DOCKER_HOST during install, but create_cluster
@@ -721,7 +746,7 @@ _k3d_create_cluster() {
   tb_record_write k3d-cluster "$CLUSTER_NAME" ""
 
   ensure_cluster_autostart
-  _merge_kubeconfig
+  _merge_kubeconfig "$_ctx_before"
   _export_host_no_proxy
   _wait_for_api
 
@@ -2195,15 +2220,19 @@ _merge_kubeconfig() {
   # Bounded: k3d reads the kubeconfig out of the server node through the Docker
   # daemon, so a wedged daemon would otherwise hang the install here with no
   # output at all (installer rule: every docker probe carries a deadline).
-  # The context the user had selected BEFORE the switch below (backend#5025 O-19).
+  # The context the user had selected BEFORE this install (backend#5025 O-19).
   # The switch is required (see above), but it was silent: someone who also works
-  # on other clusters ran their next kubectl against this one. Read it now, so the
-  # summary can say what changed and how to switch back. Best effort -- an
-  # unreadable or empty context (a fresh machine) just means nothing to report.
+  # on other clusters ran their next kubectl against this one. Kept so the summary
+  # can say what changed and how to switch back. Best effort -- an unreadable or
+  # empty context (a fresh machine) just means nothing to report.
+  #
+  # $1, when given, is that context as the caller read it before ANY k3d call:
+  # `k3d cluster create` has already switched to k3d-<name> by now, so a read
+  # here only sees our own context (backend#5384). Given but empty means "none
+  # was selected" and is NOT re-read. Without $1 it is read here.
   TB_PREV_KUBE_CONTEXT=""
   local prev_ctx=""
-  prev_ctx="$(_bounded 10 kubectl config current-context 2>/dev/null)" || prev_ctx=""
-  prev_ctx="${prev_ctx//[$'\r\n']/}"
+  if (( $# )); then prev_ctx="$1"; else prev_ctx="$(_kube_current_context)"; fi
 
   local merge_out merge_rc=0
   merge_out="$(_bounded "${TB_KUBECONFIG_MERGE_TIMEOUT:-60}" \

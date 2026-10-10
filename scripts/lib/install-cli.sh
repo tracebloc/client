@@ -424,5 +424,6 @@ upgrade_cli_only() {
   else
     info "Your environment is unchanged."
   fi
+  _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
   exit 0
 }

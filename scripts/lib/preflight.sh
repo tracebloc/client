@@ -364,6 +364,12 @@ _pf_below_rung_words() {
   printf 'below it each training run gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
 }
 
+# The same consequence for the arms that name what the machine can spare: there is
+# no budget left to point "below it" at, so the sentence names the cost directly.
+_pf_spare_rung_words() {
+  printf 'each training run gets less memory than the smallest training size (4 GiB), so a larger model can run out of memory'
+}
+
 _pf_runtime_mem_status() {
   local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb target_gb
   # Report the CONFIGURED size, not the guest-visible one. A VM asked for N GB
@@ -404,7 +410,7 @@ _pf_runtime_mem_status() {
     # warn's own last sentence is the whole of the advice; the latch below still
     # sets, so the recheck does not say it twice.
     if (( warn_eff < PF_WARN_MEM_GB )); then
-      warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${warn_eff} GB. Run the client here and train on a larger machine."
+      warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${warn_eff} GB, so $(_pf_spare_rung_words)."
       target_gb=""
     else
       warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
@@ -724,7 +730,7 @@ _pf_memory() {
     # survives only where the clamp did not bite (an unreadable host graded on
     # its Docker VM), where it is honest.
     if (( rec_gb < PF_WARN_MEM_GB )); then
-      warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${rec_gb} GB. Run the client here and train on a larger machine."
+      warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${rec_gb} GB, so $(_pf_spare_rung_words)."
     else
       warn "Memory: ${gb} GB (${label}) — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted. ${rec_gb} GB of RAM recommended to train locally."
     fi

@@ -210,6 +210,17 @@ _native_k3s_release_tag() {
   printf '%s' "${v%-k3s*}+k3s${v##*-k3s}"
 }
 
+# _native_k3s_image_ref [K8S_VERSION] -- the k3s node image for a k3s image tag:
+# docker.io/rancher/k3s:<tag>, the image k3d's --image names. The macOS node pulls its
+# linux/arm64 manifest by digest (TB_K3S_IMAGE_ARM64_DIGEST, 2.1 part 3), and
+# check-facts.sh resolves that digest through this function, so the image pinned is the
+# image pulled. Refuses (return 1) anything that is not a k3s image tag.
+_native_k3s_image_ref() {
+  local v="${1:-${K8S_VERSION:-}}"
+  _native_k3s_release_tag "$v" >/dev/null || return 1
+  printf 'docker.io/rancher/k3s:%s' "$v"
+}
+
 # _native_k3s_check_version -- refuse, by name, a K8S_VERSION that is not the pin.
 # k3d honours a K8S_VERSION override (common.sh); native k3s cannot, because the
 # binary is checked against a digest and common.sh stamps digests for the pinned
@@ -474,6 +485,10 @@ _native_k3s_kubeconfig_group() {
 # 0640). Every member of it is cluster-admin on this k3s, as every member of the
 # docker group is root-equivalent: prepare-host says so, and lists the members.
 TB_K3S_PREPARED_GROUP="tracebloc"
+# TB_K3S_GROUP_MADE: 1 when this run's own groupadd made the prepared group, else 0
+# (client-dev#1542). Assigned, never read from the environment: it becomes the
+# record's created_by_prepare_host, and delete removes the group only on true.
+TB_K3S_GROUP_MADE=""
 # The two modes 1.1g adds, assigned here and never read from the environment.
 # TB_K3S_PREPARED: this run is prepare-host, setting k3s up FOR a named user.
 # TB_K3S_ADOPTED: this run is that user's install at Tier 0, using the k3s an
@@ -1437,8 +1452,9 @@ _native_k3s_wait_for_kubeconfig() {
 # _native_k3s_ensure_running -- start k3s when it is not running, after step 3.
 # Upstream's script starts the unit only when its own hashes changed
 # (service_enable_and_start: "No change detected so skipping service start"), and
-# step 3 restarts it only when a file of ours changed. So on an unchanged re-run a
-# stopped k3s would stay down, and the waits would spend their whole budget on it.
+# step 3 restarts it only when it replaced the binary or a file of ours changed. So
+# on an unchanged re-run a stopped k3s would stay down, and the waits would spend
+# their whole budget on it.
 # A running k3s is left alone: INSTALL_K3S_FORCE_RESTART would restart it on every
 # re-run. The state is systemd's own word (`systemctl is-active`, which needs no
 # root); one it cannot give is "cannot tell", refused, never read as running.
@@ -1475,11 +1491,12 @@ _native_k3s_ensure_running() {
 #   5. the NVIDIA GPU's gate (1.1i), which may restart k3s once;
 #   6. NO_PROXY for this process.
 # A re-run on tracebloc's k3s (the node half of D11) re-renders every file and keeps
-# the node name and ranges config.yaml froze. It restarts k3s only when a file it
-# writes changed, and replaces the binary only when its version is not the pin. The
-# script runs on every pass: it rewrites the unit and k3s.service.env (the proxy
-# home) and restarts k3s itself only when those or the binary changed. A k3s that is
-# not running after that is started, whatever changed.
+# the node name and ranges config.yaml froze. It replaces the binary only when its
+# version is not the pin, and restarts k3s once, after the script, when it replaced
+# the binary or a file it writes changed. The script runs on every pass: it rewrites
+# the unit and k3s.service.env (the proxy home) and restarts k3s itself only when
+# those changed while it ran; the binary is swapped before it, so a new binary is no
+# change to it. A k3s that is not running after that is started, whatever changed.
 #
 # Two modes (1.1g). Prepared (prepare-host, TB_K3S_PREPARED) runs steps 1 to 3 as
 # the administrator for a named user, then _native_k3s_prepared_finish. Adopted (that
@@ -1551,11 +1568,20 @@ _native_k3s_create_cluster() {
     || { rm -rf "$tmp"; error "k3s's install script failed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."; }
   rm -rf "$tmp"
   tb_record_write k3s-install "$CLUSTER_NAME" "$TB_K3S_UNINSTALL_PATH"
-  # The script restarts k3s itself when the binary changed. config.yaml is not in its
-  # hash set, so a changed file of ours is this function's restart to make.
-  if [[ -n "$TB_K3S_FILES_CHANGED" && -z "$replaced" && "$present" -eq 0 ]]; then
-    log "native k3s: ${TB_K3S_FILES_CHANGED} changed; restarting k3s to read it."
-    tb_root systemctl restart k3s || error "k3s did not restart after its configuration changed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
+  # On a re-run the script never restarts k3s for us: it restarts only when its own
+  # hashes changed while it ran, and it hashes the binary at its start, after the
+  # swap above, so a replaced binary is no change to it ("No change detected so
+  # skipping service start"). config.yaml is not in its set at all. So a replaced
+  # binary or a changed file of ours is this function's one restart to make, or the
+  # old k3s keeps running until a reboot (client-dev#1767, D11). A new k3s is
+  # started by the script itself.
+  if [[ "$present" -eq 0 && ( -n "$replaced" || -n "$TB_K3S_FILES_CHANGED" ) ]]; then
+    if [[ -n "$replaced" ]]; then
+      log "native k3s: k3s ${want} replaced ${have:-the previous binary}; restarting k3s to run it."
+    else
+      log "native k3s: ${TB_K3S_FILES_CHANGED} changed; restarting k3s to read it."
+    fi
+    tb_root systemctl restart k3s || error "k3s did not restart after its binary or configuration changed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."
   fi
   # Neither the script nor the restart above starts a stopped k3s on an unchanged re-run.
   _native_k3s_ensure_running
@@ -1589,20 +1615,28 @@ _native_k3s_create_cluster() {
 # prepared and adopts it at Tier 0, with no administrator rights.
 
 # _native_k3s_prepared_for_me -- 0 when an administrator prepared this host for this
-# user, read with no privileges: all three hold -- this user's own record lists
-# tracebloc's k3s-install, k3s is active, and this user can read k3s.yaml. Otherwise
-# 1; on a host prepared for this user (the record lists it), stdout then says which
-# of the other two is missing, for the refusal to name.
+# user, read with no privileges: all four hold -- this user's own record names them
+# in prepared_for (prepare-host writes it; tracebloc delete reads the same field), the
+# prepared group lists them (root's, so a record they edit alone does not count), k3s
+# is active, and this user can read k3s.yaml. Otherwise 1; on a host prepared for
+# this user (the record names them), stdout then says what is missing, for the
+# refusal to name: k3s itself, gone after an administrator's offboard (their delete
+# cannot edit this user's record, so it still names them); k3s not running; or
+# k3s.yaml. A record prepare-host wrote before prepared_for existed names no one: the
+# remedy, prepare-host again, writes it.
 _native_k3s_prepared_for_me() {
   local rec me members
   rec="$(tb_record_path)"
   [[ -f "$rec" ]] || return 1
-  grep -F '"kind": "k3s-install"' "$rec" >/dev/null 2>&1 || return 1
-  # prepare-host is the only thing that adds a user to the prepared group, while a
-  # self-install on a host with sudo writes the same k3s-install record: without
-  # this, that user (sudo since revoked, or k3s.yaml readable another way) would be
-  # adopted onto a cluster nobody prepared for them. Not a member: not prepared.
-  me="$(id -un 2>/dev/null)" || me=""
+  me="$(id -un 2>/dev/null)" || return 1
+  [[ -n "$me" && "$(_tb_record_prior prepared_for "$(cat "$rec" 2>/dev/null)")" == "$(_tb_json "$me")" ]] || return 1
+  if [[ ! -e "$TB_K3S_BIN_PATH" ]]; then
+    printf 'the k3s they set up is gone from it (no %s)' "$TB_K3S_BIN_PATH"
+    return 1
+  fi
+  # The record is this user's to edit; the prepared group is root's, and only prepare-host
+  # adds a user to it. A record that names them while the group does not (edited by hand,
+  # or the administrator took them out) is not a host prepared for them.
   members="$(getent group "$TB_K3S_PREPARED_GROUP" 2>/dev/null)" || members=""
   case ",${members##*:}," in
     *",${me},"*) ;;
@@ -1695,9 +1729,11 @@ _native_k3s_prepared_finish() {
 # members are named to the administrator, since each of them is cluster-admin.
 _native_k3s_prepared_group() {
   local user="$1" g="$TB_K3S_PREPARED_GROUP" line
+  TB_K3S_GROUP_MADE=0
   if ! getent group "$g" >/dev/null 2>&1; then
     tb_root groupadd --system "$g" \
       || error "prepare-host: couldn't create the '${g}' group. Check 'sudo groupadd --system ${g}', then re-run."
+    TB_K3S_GROUP_MADE=1
     log "prepare-host: created the system group '${g}'."
   fi
   tb_root usermod -aG "$g" "$user" \
@@ -1746,7 +1782,7 @@ _native_k3s_check_user_record() {
 # helm or the tracebloc release, never mints a credential, and never touches the
 # administrator's kubeconfig or record.
 _native_k3s_prepare_host() {
-  local user="${1:-}" pw home
+  local user="${1:-}" pw home made=false
   [[ -n "$user" ]] \
     || error "prepare-host on native k3s sets k3s up for one named user, and none was named. Name them: export TB_PREPARE_USER=<their-username>, then re-run prepare-host."
   pw="$(getent passwd "$user" 2>/dev/null)" || pw=""
@@ -1785,6 +1821,14 @@ _native_k3s_prepare_host() {
   # shellcheck disable=SC2034  # consumed cross-file by common.sh's tb_record_write
   TRACEBLOC_RECORD_ARMED=1
   TB_K3S_PREPARED=1
+  # The group, recorded in both of USER's records as soon as they are armed, before
+  # k3s (client-dev#1542). created_by_prepare_host is true only when this run's
+  # groupadd made it; a group found already there is false, so delete removes only
+  # USER's membership and never a group it cannot prove tracebloc made. An earlier
+  # record's line is kept as it is (the writer keys on kind + id + path), so one
+  # that said true stays true. A schema without the kind refuses it by name.
+  if [[ "${TB_K3S_GROUP_MADE:-}" == 1 ]]; then made=true; fi
+  tb_record_write group "$TB_K3S_PREPARED_GROUP" "" "created_by_prepare_host=${made}"
   _native_k3s_create_cluster
   tb_record_write
   _native_k3s_check_user_record "$user" "$home"

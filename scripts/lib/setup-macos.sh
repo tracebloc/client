@@ -348,9 +348,9 @@ _offer_colima_memory_raise() {
   if [[ "$short_reason" == "rung" ]]; then
     if (( target_gb < PF_WARN_MEM_GB )); then
       if [[ -n "${COLIMA_MEMORY:-}" ]]; then
-        hint "COLIMA_MEMORY is set to ${COLIMA_MEMORY} GB, below the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform. Raise or unset it to train locally."
+        hint "COLIMA_MEMORY is set to ${COLIMA_MEMORY} GB, below the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform. Raise or unset it to give each training run more memory."
       else
-        hint "This Mac cannot give Docker the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform (the most it can spare is ${target_gb} GB), so the VM is left as it is. It runs the client; train on a larger machine."
+        hint "This Mac cannot give Docker the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform (the most it can spare is ${target_gb} GB), so the VM is left as it is: the client runs and trains, with less memory per training run than the smallest training size (4 GiB)."
       fi
       return 0
     fi
@@ -883,7 +883,7 @@ _offer_desktop_memory_raise() {
     return 0
   fi
   if [[ "$short_reason" == "rung" ]] && (( target_gb < PF_WARN_MEM_GB )); then
-    hint "This Mac cannot give Docker the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform (the most it can spare is ${target_gb} GB), so the VM is left as it is. It runs the client; train on a larger machine."
+    hint "This Mac cannot give Docker the ${PF_WARN_MEM_GB} GB the smallest training run (4 GiB) needs beside the platform (the most it can spare is ${target_gb} GB), so the VM is left as it is: the client runs and trains, with less memory per training run than the smallest training size (4 GiB)."
     return 0
   fi
 

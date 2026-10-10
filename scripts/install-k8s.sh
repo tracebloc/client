@@ -134,7 +134,12 @@ fi
 source "${LIB_DIR}/summary.sh"
 source "${LIB_DIR}/diagnose.sh"
 
-trap install_cleanup EXIT
+# The run is not finished until it says so (client-dev#1752): bash 3.2 hands the
+# EXIT trap a 0 for a `set -u` abort, so a 0 counts only with _tb_done=1, which
+# main's normal end and each intended `exit 0` set (tb_exit_rc, common.sh). Set
+# here, not inherited: an exported _tb_done=1 must not vouch for this run.
+_tb_done=0
+trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT
 # Record the site of the first failing command (client#681). `set -E` (errtrace)
 # is what makes this useful: without it an ERR trap fires only at top level, so
 # every failure inside install_macos / install_linux — i.e. nearly all of them —
@@ -177,7 +182,10 @@ main() {
   # Native k3s is never set up beside a live k3d (D10): read-only detection, then a
   # refusal, before anything below installs, writes or starts. A bootstrap too old
   # to have fetched reinstall.sh must not become k3s beside k3d, so a native k3s
-  # request without the check refuses by name; a k3d request runs as before.
+  # request without the check refuses by name; a k3d request runs as before. Only
+  # that check decides an offboard: a decision inherited from the environment is
+  # cleared first.
+  TB_REINSTALL_DECISION=""
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     declare -F refuse_k3s_beside_live_k3d >/dev/null 2>&1 \
       || error "This installer build can't check for a live k3d cluster (stale bootstrap), and native k3s is never set up beside one. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
@@ -206,7 +214,9 @@ main() {
     # orphans a background loop polling `sudo` every 50s (Bugbot #377).
     # It reaps the private download directories too (backend#4279): prepare-host
     # installs the same prerequisites, so it can be mid-download when it dies.
-    trap 'if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi' EXIT
+    # Its status takes tb_exit_rc's rule (client-dev#1752), inlined: like the
+    # declare -F guard above it, this trap cannot assume the libs loaded.
+    trap '_tb_rc=$?; if [ -n "${SUDO_KEEPALIVE_PID:-}" ]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi; if declare -F tb_scratch_reap >/dev/null 2>&1; then tb_scratch_reap; fi; [ "$_tb_rc" -ne 0 ] || [ "${_tb_done:-0}" = 1 ] || _tb_rc=1; exit "$_tb_rc"' EXIT
     setup_log_file
     # The leftover-data answers apply here too: prepare-host on native k3s refuses
     # --wipe-data and lists the named user's data with no wipe offered, and the
@@ -221,8 +231,14 @@ main() {
         --data-dir=*) HOST_DATA_DIR="${_a_lf#*=}" ;;
       esac
     done
+    # prepare-host never offboards a k3d cluster: the offboard runs only in the
+    # install's own step a, which this path exits before. An offboard decision
+    # reaching here would start native k3s beside the live k3d (D10), so refuse.
+    if [[ "${TB_REINSTALL_DECISION:-}" == "offboard" ]]; then
+      error "prepare-host never replaces a live k3d cluster, and native k3s is never set up beside one. Run the installer as the user to offboard k3d first, then re-run prepare-host."
+    fi
     if declare -F run_prepare_host >/dev/null 2>&1; then
-      run_prepare_host; exit $?
+      run_prepare_host; _ph_rc=$?; [[ $_ph_rc -ne 0 ]] || _tb_done=1; exit "$_ph_rc"
     fi
     error "This installer build doesn't include prepare-host (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash -s -- prepare-host"
   done
@@ -292,8 +308,11 @@ main() {
   # box is handed straight to the `tracebloc` home screen and exits 0; a fresh or
   # half-set-up box falls through to the normal flow below. Guarded so a stale
   # bootstrap that didn't fetch assess.sh — or --force/--reinstall — simply runs
-  # the full flow.
-  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 ]] && declare -F assess_existing_install >/dev/null 2>&1; then
+  # the full flow. A consented k3d-to-native-k3s reinstall bypasses it as --force
+  # does: on a healthy k3d machine the gate would hand off and exit 0, and the
+  # offboard below would never run.
+  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 && "${TB_REINSTALL_DECISION:-}" != "offboard" ]] \
+     && declare -F assess_existing_install >/dev/null 2>&1; then
     assess_existing_install
   fi
 
@@ -330,6 +349,12 @@ main() {
   # exactly as before).
   if declare -F host_audit >/dev/null 2>&1; then
     host_audit
+  fi
+  # A consented k3d-to-native-k3s reinstall offboards the old client here (D10):
+  # after every refusal step a makes, and before step b installs anything. The
+  # decision exists only where reinstall.sh does (refuse_k3s_beside_live_k3d).
+  if [[ "${TB_REINSTALL_DECISION:-}" == "offboard" ]]; then
+    reinstall_offboard_k3d
   fi
   echo ""; echo ""
 
@@ -392,6 +417,9 @@ main() {
   #     Wait for the client's workloads to actually come up, then the rich summary.
   step_header f "Connecting to the tracebloc network"
   wait_for_client_ready
+  # The GPU training base image, after readiness so its pull never shares the link
+  # with the control plane's (slim client B.13). It does not wait for the pull.
+  _prepull_training_parent
   print_summary
 
   # Exit code reflects reality: connected/starting are OK; failures are non-zero
@@ -403,3 +431,4 @@ main() {
 }
 
 main "$@"
+_tb_done=1   # the normal end: a 0 from here on is a real success (tb_exit_rc)

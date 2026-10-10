@@ -1547,8 +1547,12 @@ _prepare_host_print() {
   plan="${dir}/plan"
   : > "$plan" || error "prepare-host --print: couldn't write the plan under ${dir}. Nothing ran."
   # The subshell reaps what it makes itself (a subshell starts with no EXIT trap),
-  # from an empty list, so the plan's own directory is never among them.
-  ( export TRACEBLOC_ROOT_PLAN="$plan"; _TB_SCRATCH_DIRS=""; trap 'tb_scratch_reap' EXIT; run_prepare_host ) \
+  # from an empty list, so the plan's own directory is never among them. Its exit
+  # goes through tb_exit_rc (client-dev#1752): on bash 3.2 an abort in the dry run
+  # would otherwise exit 0 here and show a partial plan as the whole one.
+  ( export TRACEBLOC_ROOT_PLAN="$plan"; _TB_SCRATCH_DIRS=""; _tb_done=0
+    trap '_tb_rc=$?; tb_scratch_reap; exit "$(tb_exit_rc "$_tb_rc")"' EXIT
+    run_prepare_host && _tb_done=1 ) \
     </dev/null >>"${LOG_FILE:-/dev/null}" || rc=$?
   if [[ -e "${plan}.broken" ]]; then
     tb_scratch_rm "$dir"

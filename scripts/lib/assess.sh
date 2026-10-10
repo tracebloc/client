@@ -542,9 +542,11 @@ _assess_handoff() {
     else
       tracebloc </dev/null || true
     fi
+    _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
     exit 0
   fi
   info "Open the tracebloc home screen any time with:  tracebloc"
+  _tb_done=1
   exit 0
 }
 

@@ -93,8 +93,9 @@ esac
 # EXIT CODE is the gate: an old CLI that doesn't know `doctor` returns non-zero, so
 # we simply fall through to a normal install. Skipped on a forced reinstall
 # (--force/--reinstall or TRACEBLOC_FORCE_REINSTALL=1), on the dev/unverified path,
-# and whenever the operator explicitly pinned a REF/BRANCH (an explicit version
-# request must always (re)install, never bail).
+# whenever the operator explicitly pinned a REF/BRANCH (an explicit version
+# request must always (re)install, never bail), and on an explicit substrate
+# request (TRACEBLOC_SUBSTRATE, below).
 _tb_bail_ok=1
 _tb_force=0
 # Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH are the
@@ -117,6 +118,19 @@ if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
 # below-floor CLI still forces a full reinstall there via the gate's
 # cli-outdated path, so the floor keeps its stricter meaning.
 [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
+# An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything): only the
+# substrate and consent decision in install-k8s.sh may answer it. The bailout
+# used to answer first, so on a healthy k3d machine a consented
+# TRACEBLOC_SUBSTRATE=k3s re-run opened the home screen and never reached the
+# offboard (client-dev#1761). Like prepare-host it skips ONLY the bailout, with no
+# _tb_force. The machine's own substrate reaches install-k8s.sh's stop-and-check
+# gate, which hands a healthy machine to the home screen as before. Any other
+# request is decided there too: a k3s request on k3d is refused without consent
+# (D10) and offboarded with it, and a request it cannot serve is refused by name.
+# Empty is no request, as install-k8s.sh reads it. install-bootstrap.bats reads the
+# variable's name and the substrates from the install contract
+# (scripts/spec/install-record.schema.json).
+[[ -n "${TRACEBLOC_SUBSTRATE:-}" ]] && _tb_bail_ok=0
 for _a in "$@"; do
   case "$_a" in
     --force|--reinstall) _tb_bail_ok=0; _tb_force=1 ;;
@@ -370,7 +384,14 @@ SIGNER_REPOS='client|client-dev'
 # cosign matches the regexp unanchored otherwise.
 SIGNER_ID_RE="^https://github\.com/tracebloc/(${SIGNER_REPOS})/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*"
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+# The trap must not turn an abort into a success. On macOS /bin/bash 3.2 a
+# `set -u` abort under an EXIT trap exits with the trap's last status (0 after
+# the rm), and `$?` inside the trap is the last COMPLETED command's status, so
+# `rc=$?; ...; exit $rc` exits 0 too (client-dev#1751, measured on 3.2.57). So the
+# trap fails closed: a 0 becomes 1 unless the script reached its normal end
+# and set _tb_done=1. Every other exit below the trap is `exit 1`.
+_tb_done=0
+trap '_tb_rc=$?; rm -rf "$TMPDIR"; if [ "$_tb_rc" -eq 0 ] && [ "$_tb_done" != 1 ]; then _tb_rc=1; fi; exit "$_tb_rc"' EXIT
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 # Draw the first-run title here (mirrors common.sh::print_banner) so the
@@ -747,3 +768,4 @@ printf '\n\n'
 chmod +x "$TMPDIR/install-k8s.sh"
 
 bash "$TMPDIR/install-k8s.sh" "$@"
+_tb_done=1

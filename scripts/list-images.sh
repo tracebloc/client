@@ -142,7 +142,11 @@ RENDER=$(mktemp); ERRLOG=$(mktemp); CURLERR=$(mktemp)
 # CURLERR is created here, with the other scratch files, so the ONE trap covers
 # it. It was previously mktemp'd inside the paging loop and removed by explicit
 # `rm -f`, which a SIGINT mid-fetch skipped (@aptracebloc on #881, nit).
-trap 'rm -f "$RENDER" "$ERRLOG" "$CURLERR"' EXIT INT TERM HUP
+trap 'rm -f "$RENDER" "$ERRLOG" "$CURLERR"' INT TERM HUP
+# _tb_done: macOS /bin/bash 3.2 exits 0 when `set -u` aborts under an EXIT trap, so the
+# trap turns a 0 nobody sentinelled into 1; every intended exit sets it first (client-dev#1753).
+_tb_done=0 _tb_rc=0
+trap '_tb_rc=$?; rm -f "$RENDER" "$ERRLOG" "$CURLERR"; if [ "$_tb_rc" -eq 0 ] && [ "${_tb_done:-}" != 1 ]; then _tb_rc=1; fi; exit "$_tb_rc"' EXIT
 
 if ! helm template "$CHART" \
       --set storageClass.create=false \
@@ -445,3 +449,7 @@ echo "# --- spawned at run time: training images (tag :${ENV_TAG}) ---"
 printf '%s\n' "$task_repos" | while IFS= read -r r; do
   [ -n "$r" ] && echo "${job_host}${REGISTRY_NAMESPACE}/${r}:${ENV_TAG}"
 done
+
+# _tb_done: the normal end -- keep its status (client-dev#1753).
+# shellcheck disable=SC2320 # the last command's status is the one to keep
+_tb_rc=$?; _tb_done=1; exit "$_tb_rc"

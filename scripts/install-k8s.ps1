@@ -4018,6 +4018,10 @@ function Write-K3dRegistriesConfig {
 # never stops the install. TRACEBLOC_LOCAL_API=off opts out.
 $TB_LOCAL_API_HOST_PORT_DEFAULT = "47910"   # = k3d.sh _TB_LOCAL_API_HOST_PORT_DEFAULT = chart localApi.hostPort
 $TB_LOCAL_API_NODE_PORT_DEFAULT = "30910"   # = k3d.sh _TB_LOCAL_API_NODE_PORT_DEFAULT = chart localApi.nodePort
+# The NodePort range the chart's values.schema.json allows for localApi.nodePort
+# (= k3d.sh _TB_LOCAL_API_NODE_PORT_MIN / _MAX; client-dev#1688).
+$TB_LOCAL_API_NODE_PORT_MIN = 30000
+$TB_LOCAL_API_NODE_PORT_MAX = 32767
 # Overridable, for a host whose 47910 is spoken for, under the TRACEBLOC_ names
 # (k3d.sh reads the same two).
 $TB_LOCAL_API_HOST_PORT = if ($env:TRACEBLOC_LOCAL_API_HOST_PORT) { $env:TRACEBLOC_LOCAL_API_HOST_PORT } else { $TB_LOCAL_API_HOST_PORT_DEFAULT }
@@ -4102,21 +4106,26 @@ function Get-LocalApiCreatePortSpec {
   return ""
 }
 
-# Whether both ports are a TCP port k3d can take (1..65535, digits only). The
-# overrides are free text; a bad one must turn the feature off, never reach
-# `k3d cluster create` and fail the install (client-dev#1665). Peer of k3d.sh's
-# _local_api_port_valid.
+# Whether both ports are ones the install can take (digits only): the host port
+# any TCP port (1..65535), the node port one the chart's schema accepts
+# (30000..32767) -- anything else passes k3d and fails `helm install` on
+# localApi.nodePort (client-dev#1688). The overrides are free text; a bad one must
+# turn the feature off, never reach `k3d cluster create` and fail the install
+# (client-dev#1665). Peer of k3d.sh's _local_api_port_valid.
 function Test-LocalApiPortValid {
-  foreach ($p in @("$TB_LOCAL_API_HOST_PORT", "$TB_LOCAL_API_NODE_PORT")) {
-    if ($p -notmatch '^[0-9]{1,5}$') { return $false }
-    $n = [int]$p
-    if ($n -lt 1 -or $n -gt 65535) { return $false }
-  }
+  $hostPort = "$TB_LOCAL_API_HOST_PORT"
+  $nodePort = "$TB_LOCAL_API_NODE_PORT"
+  if ($hostPort -notmatch '^[0-9]{1,5}$') { return $false }
+  $n = [int]$hostPort
+  if ($n -lt 1 -or $n -gt 65535) { return $false }
+  if ($nodePort -notmatch '^[0-9]{1,5}$') { return $false }
+  $n = [int]$nodePort
+  if ($n -lt $TB_LOCAL_API_NODE_PORT_MIN -or $n -gt $TB_LOCAL_API_NODE_PORT_MAX) { return $false }
   return $true
 }
 
 function Write-LocalApiInvalidWarning {
-  Warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=$TB_LOCAL_API_HOST_PORT, TRACEBLOC_LOCAL_API_NODE_PORT=$TB_LOCAL_API_NODE_PORT) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set them to numbers from 1 to 65535 and re-run the installer to turn it on."
+  Warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=$TB_LOCAL_API_HOST_PORT, TRACEBLOC_LOCAL_API_NODE_PORT=$TB_LOCAL_API_NODE_PORT) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set the host port to a number from 1 to 65535 and the node port to one from $TB_LOCAL_API_NODE_PORT_MIN to $TB_LOCAL_API_NODE_PORT_MAX, then re-run the installer to turn it on."
 }
 
 # Whether a failed `k3d cluster create` failed on the optional dashboard port:
@@ -5965,6 +5974,20 @@ function New-K3dCluster {
   # Only the create branch below may set it; a reused cluster read its own ports.
   $script:TbLocalApiCreateMapped = $false
 
+  # The context the user had selected BEFORE this install (backend#5025 O-19),
+  # read so Print-Summary can say what changed and how to switch back. Peer of
+  # the bash twin's _ctx_before read. Read HERE, before any k3d call:
+  # `k3d cluster create` defaults to --kubeconfig-update-default and
+  # --kubeconfig-switch-context, so read at the merge below a fresh cluster had
+  # already made k3d-<name> current and the switch went unreported (backend#5384).
+  # Best effort: unreadable or empty (a fresh machine) means nothing to report.
+  $script:TbPrevKubeContext = ""
+  $prevCtx = ""
+  try {
+    $prev = Invoke-BoundedProcess -FileName "kubectl" -Arguments @("config", "current-context") -TimeoutSec 10
+    if ($prev.Code -eq 0) { $prevCtx = Get-CurrentContextFromOutput -Output "$($prev.Output)" }
+  } catch { $prevCtx = "" }
+
   # Docker is up now (unlike at preflight); re-check the runtime's real memory budget.
   Test-PreflightRuntimeMem
 
@@ -6475,17 +6498,6 @@ function New-K3dCluster {
   # Bounded like the bash peer: k3d reads the kubeconfig out of the node through the
   # Docker daemon, so a wedged daemon would otherwise stall a headless install here
   # with no output at all.
-  # The context the user had selected BEFORE the switch below (backend#5025 O-19),
-  # read so Print-Summary can say what changed and how to switch back. Peer of
-  # the bash twin's prev_ctx read. Best effort: unreadable or empty (a fresh
-  # machine) means nothing to report.
-  $script:TbPrevKubeContext = ""
-  $prevCtx = ""
-  try {
-    $prev = Invoke-BoundedProcess -FileName "kubectl" -Arguments @("config", "current-context") -TimeoutSec 10
-    if ($prev.Code -eq 0) { $prevCtx = Get-CurrentContextFromOutput -Output "$($prev.Output)" }
-  } catch { $prevCtx = "" }
-
   $mergeCmd = "k3d kubeconfig merge $CLUSTER_NAME --kubeconfig-merge-default --kubeconfig-switch-context"
   $merge = Invoke-BoundedProcess -FileName "k3d" -TimeoutSec 60 `
     -Arguments @("kubeconfig", "merge", $CLUSTER_NAME, "--kubeconfig-merge-default", "--kubeconfig-switch-context")
@@ -8150,6 +8162,22 @@ function Get-InstalledClientInfo {
   return [pscustomobject]@{ Id = $existingId; Ns = $existingNs; Name = $existingName; UnreadableNs = $unreadableNs; ListUnknown = $listUnknown }
 }
 
+# What `tracebloc client create` would do here, from its --plan line (action, id,
+# namespace, name; tab-separated), or $null from a CLI without the flag or with
+# nothing to say. Side-effect free by the CLI's contract. Bash parity: _create_plan.
+function Get-CreatePlan {
+  $help = ""
+  try { $help = (& tracebloc client create --help 2>$null | Out-String) } catch { return $null }
+  if ($help -notmatch '--plan') { return $null }
+  $line = ""
+  try { $line = "$(& tracebloc client create --plan 2>$null | Select-Object -First 1)" } catch { return $null }
+  $f = $line.Split("`t")
+  if ($f.Count -lt 4) { return $null }
+  $name = ($f[3..($f.Count - 1)] -join "`t")
+  if (-not $name) { $name = $f[2] }
+  return [pscustomobject]@{ Action = $f[0]; Id = $f[1]; Namespace = $f[2]; Name = $name }
+}
+
 # Print the parts of a successful `client create`'s output the user must see
 # (backend#5365): a warning that this machine's previous client is being left
 # behind, or that the existing client is being reconnected with a new
@@ -8291,6 +8319,23 @@ function Invoke-ProvisionClient {
     # required --name; an adopt keeps the registered one.
     $clientName = $reuseNs
     Info "Reconnecting your secure environment '$reuseNs' - it's already installed here."
+  } elseif (-not $clientName) {
+    # Nothing installed here, but the CLI may still reuse a client (registered for
+    # this cluster, or this machine's own from a rebuilt cluster). Ask it, side-effect
+    # free, and ask the user for a name only before a real mint. Bash parity.
+    $plan = Get-CreatePlan
+    if ($plan -and $plan.Namespace) {
+      switch ($plan.Action) {
+        'adopt' {
+          $clientName = $plan.Namespace; $reuseNs = $plan.Namespace
+          Info "Found your secure environment '$($plan.Name)' - it's already registered for this machine."
+        }
+        'reconnect' {
+          $clientName = $plan.Namespace; $reuseNs = $plan.Namespace
+          Info "Found your secure environment '$($plan.Name)' - reconnecting it to this machine's new cluster."
+        }
+      }
+    }
   }
   if (-not $clientName) { $clientName = Read-ClientName }
   if (-not $clientName) { Err "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME for an unattended install." }
@@ -9599,7 +9644,7 @@ function Show-MemoryStatus {
       # twin's _pf_memory; the figure survives only where the clamp did not bite
       # (a Docker budget smaller than a host that can hold the rung).
       Warn "Memory: $label$budgetNote - enough to run the client; $rungNeed, and this machine can spare at most $recTrain GB."
-      Hint "Run the client here and train on a larger machine."
+      Hint "Each training run gets less memory than the smallest training size ($script:TbLadderRungMemGib GiB), so a larger model can run out of memory."
     } else {
       Warn "Memory: $label$budgetNote - enough to run the client; $rungNeed. $recTrain GB recommended to train locally."
       Hint "For local training, give Docker up to $recTrain GB: WSL2 backend - [wsl2] memory=${recTrain}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."

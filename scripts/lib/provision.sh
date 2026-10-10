@@ -27,6 +27,26 @@ _provisioning_preset() {
   return 1
 }
 
+# _create_plan — what `tracebloc client create` would do here, as its --plan line
+# (action, id, namespace, name; tab-separated), or NO OUTPUT from a CLI without the
+# flag or one that cannot answer. Side-effect free by the CLI's contract.
+#
+# It always exits 0; callers test the output (`[[ -n "$plan" ]]`). A "no plan" exit 1
+# was recorded as a failure by the installer's ERR trap: `set -E` carries the trap
+# into the `$(...)` of `if plan="$(...)"`, so every install against a CLI without
+# --plan logged an error on the normal fallback (the class of backend#5025 O-103,
+# see _summary_kubeconfig_hint). Both probes read /dev/null: under `curl | bash`
+# the installer's stdin is the script itself, and a CLI that reads stdin would eat it.
+_create_plan() {
+  # Captured, not piped: under `set -o pipefail` grep -q exits on its first match,
+  # which can SIGPIPE the writer mid-output and fail the probe (exit 141).
+  local help
+  help="$(tracebloc client create --help </dev/null 2>/dev/null || true)"
+  [[ "$help" == *--plan* ]] || return 0
+  tracebloc client create --plan </dev/null 2>>"${LOG_FILE:-/dev/null}" || true
+  return 0
+}
+
 # _cli_supports_provisioning: does the installed CLI ship the browser-auth mint
 # commands (`tracebloc login` + `tracebloc client create`)? install_tracebloc_cli
 # pulls the latest RELEASE, which can lag this installer until the cli#104 release
@@ -351,6 +371,33 @@ provision_client() {
     # required --name; an adopt keeps the registered one.
     client_name="$_reuse_ns"
     info "Reconnecting your secure environment '${_reuse_ns}' — it's already installed here."
+  elif [[ -z "$client_name" ]]; then
+    # Nothing installed here, but the CLI may still reuse a client: one already
+    # registered for this cluster (its install was removed), or this machine's own
+    # client from a cluster that was rebuilt. Ask it (`client create --plan`,
+    # side-effect free) and ask the user for a name only before a real mint.
+    local _plan _plan_action _plan_ns _plan_name
+    _plan="$(_create_plan)"
+    if [[ -n "$_plan" ]]; then
+      # -s: a line with no tab is no plan line. Without it `cut -f3` prints the
+      # whole line, so a bare `adopt` would be taken for the namespace.
+      _plan_action="$(printf '%s' "$_plan" | cut -s -f1)"
+      _plan_ns="$(printf '%s' "$_plan" | cut -s -f3)"
+      _plan_name="$(printf '%s' "$_plan" | cut -s -f4-)"
+      log "client create --plan: ${_plan_action} ns=${_plan_ns}"
+      if [[ -n "$_plan_ns" ]]; then
+        case "$_plan_action" in
+          adopt)
+            client_name="$_plan_ns"; _reuse_ns="$_plan_ns"
+            info "Found your secure environment '${_plan_name:-$_plan_ns}' — it's already registered for this machine."
+            ;;
+          reconnect)
+            client_name="$_plan_ns"; _reuse_ns="$_plan_ns"
+            info "Found your secure environment '${_plan_name:-$_plan_ns}' — reconnecting it to this machine's new cluster."
+            ;;
+        esac
+      fi
+    fi
   fi
   # Track where the location came from so a rejected-zone hint can name the real
   # source ("env" = pinned via TRACEBLOC_CLIENT_LOCATION, "auto" = timezone-derived).

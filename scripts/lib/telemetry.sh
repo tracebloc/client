@@ -49,8 +49,8 @@ TB_TELEMETRY_COMPONENT="install"
 # `bootstrap` is the phase before step a — and only the part of it that runs in
 # THIS process: install-k8s.sh's preamble, validate_config, the leftover-data
 # guard, the assess gate. Download and verify are NOT in it. They happen in
-# install.sh, which never sources this file and whose EXIT trap is
-# `rm -rf "$TMPDIR"`, not install_cleanup — so a fetch, manifest or cosign
+# install.sh, which never sources this file and whose EXIT trap only removes
+# `$TMPDIR` (and keeps an abort non-zero), not install_cleanup — so a fetch, manifest or cosign
 # failure emits nothing at all, and `bootstrap` means "install-k8s.sh before
 # step a", not "everything before step a". (saadqbal on client#747; verified —
 # install.sh's only mention of telemetry.sh is the FILES list it downloads.)

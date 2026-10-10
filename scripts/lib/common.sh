@@ -39,7 +39,7 @@ umask 077
 # TB_TIER1_ROOTLESS / TB_FORCE_TIER are the Tier-1 support switches.
 tb_tuning_aliases=(
   TB_AMD64_SMOKE_IMAGE TB_AMD64_SMOKE_TIMEOUT TB_API_WAIT_S TB_ASSESS_DOCKER_TIMEOUT
-  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLUSTER_START_TIMEOUT_MIN
+  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT TB_CLUSTER_START_TIMEOUT_MIN
   TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
   TB_DESKTOP_RESTART_WAIT TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
   TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
@@ -49,7 +49,7 @@ tb_tuning_aliases=(
   TB_K3D_EDIT_TIMEOUT TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT
   TB_K3S_CRI_TIMEOUT TB_K3S_INSTALL_SH_TIMEOUT
   TB_KUBECONFIG_MERGE_TIMEOUT TB_KUBECTL_PROBE_TIMEOUT TB_METRICS_WAIT_S
-  TB_NODE_CHECK_EVERY_S TB_PLAIN TB_PROBE_TIMEOUT TB_PROBE_VERIFY
+  TB_NODE_CHECK_EVERY_S TB_OFFBOARD_TIMEOUT TB_PLAIN TB_PROBE_TIMEOUT TB_PROBE_VERIFY
   TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
   TB_WSL_INTEROP_KILL_AFTER TB_WSL_INTEROP_TIMEOUT
   COLIMA_CPU COLIMA_DISK GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
@@ -246,13 +246,16 @@ _assert_download_size() {
   # whose curl mocks write tiny fixture files); unset in production, so the real
   # per-tool floor passed as $2 applies. $4 (optional) is the caller's mktemp -d
   # tree to remove before erroring, so a truncated transfer cleans up its partial
-  # payload exactly like the checksum-mismatch branches do (Bugbot).
+  # payload exactly like the checksum-mismatch branches do (Bugbot). $5 (optional)
+  # names the hosts to allowlist when the download does not come from the tool hosts
+  # below (the Apple container kernel is pulled from ghcr.io).
   local file="$1" min="${TRACEBLOC_MIN_DOWNLOAD_BYTES:-$2}" label="$3" cleanup="${4:-}" size=0
+  local hosts="${5:-github.com / objects.githubusercontent.com / dl.k8s.io / get.helm.sh}"
   [ -f "$file" ] && size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$size" ] || size=0
   if [ "$size" -lt "$min" ]; then
     [ -n "$cleanup" ] && rm -rf "$cleanup"
-    error "Download of ${label} was truncated or blocked — got ${size} bytes (expected at least ${min}). On a filtered network a proxy or antivirus may be cutting the transfer; allowlist the download host (github.com / objects.githubusercontent.com / dl.k8s.io / get.helm.sh) or exclude the tools directory from AV scanning, then re-run."
+    error "Download of ${label} was truncated or blocked — got ${size} bytes (expected at least ${min}). On a filtered network a proxy or antivirus may be cutting the transfer; allowlist the download host (${hosts}) or exclude the tools directory from AV scanning, then re-run."
   fi
 }
 
@@ -634,8 +637,11 @@ _bounded_root() {
   else tb_root_bounded "$t" "$@"; fi   # a binary under the deadline, never the tb_root function (a killed subshell leaves CMD running)
 }
 
-# _docker_answers — `docker info`, bounded and silent. The single probe every
-# "is the runtime up?" check should route through.
+# _docker_answers [ERRFILE] — `docker info`, bounded and silent. The single probe
+# every "is the runtime up?" check should route through. Returns _bounded's status:
+# 124 is the deadline, any other non-zero is Docker's own failure. ERRFILE, when
+# given, receives docker's stderr instead of /dev/null, for a caller that quotes
+# why a fast failure failed (client-dev#1748).
 #
 # A bare `docker info` does not return when the daemon is WEDGED, as opposed to
 # stopped — and wedged is precisely the state that lands a machine in
@@ -647,7 +653,7 @@ _bounded_root() {
 # TB_DOCKER_PROBE_TIMEOUT defaults to the same 10s as TB_ASSESS_DOCKER_TIMEOUT;
 # they answer the same question about the same daemon and should not disagree.
 _docker_answers() {
-  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>&1
+  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>"${1:-/dev/null}"
 }
 
 # ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
@@ -1628,6 +1634,11 @@ TB_K3S_BIN_SHA256_AMD64="d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a46175
 TB_K3S_BIN_SHA256_ARM64="135e34cb9e8a1cfae3cb55577789e93501efe7edc080a8b2630458a85b07721e"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
 TB_K3S_INSTALL_SH_SHA256="46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
+# The k3s node image the macOS node pulls, by its linux/arm64 manifest digest at the pinned
+# K8S_VERSION (facts.env K3S_IMAGE_ARM64_DIGEST; the image is k3s.sh's
+# _native_k3s_image_ref). No TRACEBLOC_* override, for the same reason.
+# shellcheck disable=SC2034  # read by the macOS node from 2.1 part 3b (RFC-0175 D6)
+TB_K3S_IMAGE_ARM64_DIGEST="sha256:4ceb591dd1e592b98b7c51ff3bdb7143914e1bee0677e7bf3c4f6addde2c93b3"
 # Apple's `container` runtime for the macOS node (RFC-0175 D6): the release, the
 # package's digest and the Team ID that signs it (facts.env APPLE_CONTAINER_*, stamped
 # by check-facts.sh --write). Stamped here, not in mac-container.sh, for the reason the
@@ -1638,6 +1649,17 @@ TB_APPLE_CONTAINER_VERSION="1.4.1"
 TB_APPLE_CONTAINER_PKG_SHA256="c0d2716afefbb194c93fae662e9cae7cc186bcbcf746816608ec673dd648a6a4"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
 TB_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
+# The VM's init image and our kernel, each a repository and a digest (facts.env
+# APPLE_VMINIT_IMAGE / _DIGEST and MAC_KERNEL_IMAGE / _SHA256, the same stamping):
+# mac-container.sh starts the runtime on them.
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_APPLE_VMINIT_IMAGE="ghcr.io/tracebloc/apple-container-vminit"
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_APPLE_VMINIT_DIGEST="sha256:aa6ab59d0938f7fadb54ac27e80959bdd2f1dafa8050011086d5f8ab1350fd6c"
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_MAC_KERNEL_IMAGE="ghcr.io/tracebloc/apple-container-kernel"
+# shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+TB_MAC_KERNEL_SHA256="fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR /
 # NVIDIA_DRIVER_HARD_FLOOR_LINUX, stamped by check-facts.sh --write). Below the
 # compute-capability floor or the hard driver floor (the CUDA 12 minimum) detect-gpu.sh
@@ -1665,6 +1687,12 @@ K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 # openssl, which minimal cloud images don't ship (#395).
 if [[ -n "${TRACEBLOC_HELM_VERSION:-}" ]]; then HELM_VERSION="$TRACEBLOC_HELM_VERSION"; fi
 HELM_VERSION="${HELM_VERSION:-v4.2.3}"
+# The GPU training base image's footprint on a node, in GB (facts.env
+# PREPULL_PARENT_DISK_GB, measured; stamped by check-facts.sh --write): what
+# summary.sh's training prepull adds to the image store, which its disk rule weighs.
+# A measurement, so no TRACEBLOC_* override.
+# shellcheck disable=SC2034  # consumed cross-file by summary.sh
+TB_PREPULL_PARENT_DISK_GB="11"
 # Settings naming: TRACEBLOC_HOST_DATA_DIR is the canonical env var, HOST_DATA_DIR
 # the legacy one (remove_by 2026-12-31) -- the same rule as TRACEBLOC_NAMESPACE
 # above: a non-empty canonical wins, else the legacy, else the default. Resolved
@@ -2016,7 +2044,21 @@ _tb_spin_logfile() {
   return 0
 }
 
+# tb_exit_rc RC — the status an EXIT trap exits with (client-dev#1752). On
+# macOS's bash 3.2 a `set -u` abort ("unbound variable") reaches the EXIT trap
+# with `$?` = 0, and the trap's own last command then sets the process's status:
+# an installer that died mid-run exited 0 and reported success. `exit N` and a
+# `set -e` failure keep their status on every bash, so only a 0 is in doubt, and
+# a 0 counts only once the script has said it meant one: every intended `exit 0`
+# under the trap, and the normal end of install-k8s.sh, sets _tb_done=1 first.
+# Any other 0 is read as the failure it was. Unset counts as not done.
+tb_exit_rc() {
+  if [[ "$1" -eq 0 && "${_tb_done:-0}" != 1 ]]; then echo 1; else echo "$1"; fi
+}
+
 # ── Cleanup on exit ──────────────────────────────────────────────────────────
+# install-k8s.sh wires it as `trap 'install_cleanup; exit "${_TB_EXIT_RC:-1}"' EXIT`:
+# the explicit exit is what makes the status tb_exit_rc's on bash 3.2 too.
 install_cleanup() {
   local exit_code=$?
   # Stop recording before doing anything else. This handler's own lines can fail
@@ -2024,6 +2066,13 @@ install_cleanup() {
   # each of those fires the ERR trap — which under last-wins would overwrite the
   # fatal command with a cleanup detail before the report below ever reads it.
   trap - ERR
+  # A 0 nobody declared is an abort bash 3.2 lost the status of (tb_exit_rc), so
+  # everything below — the footer and the telemetry outcome — sees a failure.
+  if [[ $exit_code -eq 0 && "${_tb_done:-0}" != 1 ]]; then
+    log "Exited 0 before the run declared it finished — read as a failure (an abort, e.g. an unbound variable under bash 3.2)."
+  fi
+  exit_code="$(tb_exit_rc "$exit_code")"
+  _TB_EXIT_RC="$exit_code"
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
   # Never leave the transient machine credential on disk (#838): provision.sh sets
   # _PROVISION_CRED_FILE before minting and removes it after sourcing — this is the
@@ -2100,8 +2149,10 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_SUBSTRATE_TOKEN_UNSUPPORTED x-tracebloc-substrate.token-unsupported
 #    TB_INSTALL_RECORD_VERSION      properties.schema_version.const
 #    TB_ARTEFACT_KINDS              $defs.artefact.properties.kind.enum, space-separated
+#    TB_ARTEFACT_FLAGS              $defs.artefact's boolean properties, space-separated
 #    TB_RECORD_USER_PATH            x-tracebloc-record.user-path (a leading ~ is $HOME)
 #    TB_RECORD_ROOT_PATH            x-tracebloc-record.root-path (<user> is the login name)
+#    TB_RECORD_LAST_IN_USE          x-tracebloc-last-in-use.kinds, space-separated
 #    TB_K3D_REINSTALL               x-tracebloc-reinstall.release
 #    TB_REINSTALL_CONSENT_VAR       x-tracebloc-reinstall.consent-variable
 TB_SUBSTRATES="k3d k3s"
@@ -2109,14 +2160,16 @@ TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
-TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule kube-context group"
+TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule kube-context group apple-container container-node"
+TB_ARTEFACT_FLAGS="created_by_prepare_host"
 # shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
 TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"
+TB_RECORD_LAST_IN_USE="apple-container"
 # The k3d-to-native-k3s release switch (reinstall.sh): `refuse` refuses every k3s
 # request on a k3d machine; `offboard` lets a consented one offboard the old client
 # and reinstall. The consent variable is read only under `offboard`.
-TB_K3D_REINSTALL="refuse"
+TB_K3D_REINSTALL="offboard"
 TB_REINSTALL_CONSENT_VAR="TRACEBLOC_REINSTALL_CONSENT"
 # The substrate this run was asked for: TRACEBLOC_SUBSTRATE, else the default
 # (blank means unset, as for every TRACEBLOC_* setting). There is no flag and no
@@ -2278,8 +2331,10 @@ _tb_record_substrate_in() {
 
 # ── Install record ──────────────────────────────────────────────────────────
 #  What this install created, for an uninstall to remove exactly that. Written
-#  as the install goes: tb_record_write KIND ID PATH records one artefact the
-#  moment it exists, and tb_record_write alone refreshes the other fields. The
+#  as the install goes: tb_record_write KIND ID PATH [FLAG=true|false] records
+#  one artefact the moment it exists, and tb_record_write alone refreshes the
+#  other fields. FLAG is one boolean member the schema declares for an artefact
+#  (TB_ARTEFACT_FLAGS: created_by_prepare_host, on a group). The
 #  format is fixed (one artefact object per line) because the writer reads its
 #  own previous output back: an artefact an earlier run recorded is kept, and so
 #  is a field this run has not decided yet. No jq or python3 on this path.
@@ -2404,7 +2459,7 @@ tb_record_write() {
   # The record's home is tb_record_path's: in prepared mode the scratch directory,
   # so a prepare-host run with HOME unset (systemd, cloud-init, env -i) still records.
   _tb_record_armed && [[ -n "${TB_RECORD_HOME:-${HOME:-}}" ]] || return 0
-  local rec dir now prior="" arts="" root_copy
+  local rec dir now prior="" arts="" root_copy prepared_for
   rec="$(tb_record_path)"; dir="${rec%/*}"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$dir" 2>/dev/null || { log "Install record: couldn't create ${dir}; not recorded."; return 0; }
@@ -2417,13 +2472,33 @@ tb_record_write() {
       *" $1 "*) ;;
       *) log "Install record: '${1}' is not an artefact kind the schema declares; not recorded."; return 0 ;;
     esac
-    # Keyed on kind + id + path: a re-run that finds it already recorded keeps
-    # the first created_at.
-    local key
+    # FLAG: one boolean member the schema declares, NAME=true|false. Anything else
+    # would make the whole record invalid, so it is refused by name like a kind.
+    local flag=""
+    if [[ -n "${4:-}" ]]; then
+      local name="${4%%=*}" val="${4#*=}"
+      if [[ "$name" == *[!a-z_]* || " ${TB_ARTEFACT_FLAGS} " != *" ${name} "* || ( "$val" != true && "$val" != false ) ]]; then
+        log "Install record: '${4}' is not a NAME=true|false flag the schema declares; ${1} not recorded."; return 0
+      fi
+      flag="\"${name}\": ${val}, "
+    fi
+    # Keyed on kind + id + path, never the flag: a re-run that finds it already
+    # recorded keeps the first line, its created_at and its flag. For a kind whose
+    # last entry is the one in use (TB_RECORD_LAST_IN_USE), that line also moves to
+    # the end, so a downgrade to a version recorded earlier is what the record
+    # names last.
+    local key line kept="" rest=""
     key="{\"kind\": $(_tb_json "$1"), \"id\": $(_tb_json "${2:-}"), \"path\": $(_tb_json "${3:-}"), "
     case "$arts" in
-      *"$key"*) ;;
-      *) arts="${arts:+${arts}$'\n'}${key}\"created_at\": \"${now}\"}" ;;
+      *"$key"*)
+        case " ${TB_RECORD_LAST_IN_USE} " in
+          *" $1 "*)
+            while IFS= read -r line; do
+              if [[ "$line" == "$key"* ]]; then kept="${kept:+${kept}$'\n'}${line}"; else rest="${rest:+${rest}$'\n'}${line}"; fi
+            done <<<"$arts"
+            arts="${rest:+${rest}$'\n'}${kept}" ;;
+        esac ;;
+      *) arts="${arts:+${arts}$'\n'}${key}${flag}\"created_at\": \"${now}\"}" ;;
     esac
   fi
   # A CLI-only refresh keeps the recorded substrate too: TRACEBLOC_SUBSTRATE_RESOLVED there is
@@ -2438,12 +2513,17 @@ tb_record_write() {
   # stands until this run writes the copy; the first write that does re-renders
   # the user copy with it and copies again, so the two copies stay identical.
   root_copy="$(_tb_record_field root_copy "" "$prior")"
-  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy")" || return 0
+  # prepared_for: the user an administrator prepared this host for. Only prepared mode
+  # (tb_record_for_user, prepare-host) names one; that user's own later writes keep the
+  # previous write's value; any other record has none, so the key is left out.
+  if [[ -n "${TB_RECORD_FOR_USER:-}" ]]; then prepared_for="$(_tb_json "$TB_RECORD_FOR_USER")"
+  else prepared_for="$(_tb_record_prior prepared_for "$prior")"; fi
+  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for")" || return 0
   _TB_RECORD_ROOT_WRITTEN=""
   _tb_record_root_copy "$rec"
   if [[ -n "$_TB_RECORD_ROOT_WRITTEN" && "$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")" != "$root_copy" ]]; then
     root_copy="$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")"
-    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy")" || return 0
+    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for")" || return 0
     _tb_record_root_copy "$rec"
   fi
   _tb_record_user_copy "$rec"
@@ -2451,7 +2531,8 @@ tb_record_write() {
 }
 
 # The record's text: SUBSTRATE ($1) and ROOT_COPY ($5) as JSON literals, the
-# previous write's text ($2), its artefact lines ($3) and the time ($4).
+# previous write's text ($2), its artefact lines ($3) and the time ($4). PREPARED_FOR
+# ($6), a JSON literal, is written only when there is one.
 _tb_record_render() {
   local out line n i
   out="{
@@ -2463,7 +2544,9 @@ _tb_record_render() {
   \"data_dir\": $(_tb_record_field data_dir "${HOST_DATA_DIR:-}" "$2"),
   \"namespace\": $(_tb_record_field namespace "${TB_NAMESPACE:-}" "$2"),
   \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$2"),
-  \"root_copy\": $5,
+  \"root_copy\": $5,"
+  if [[ -n "${6:-}" ]]; then out+=$'\n  "prepared_for": '"$6"','; fi
+  out+="
   \"updated_at\": \"$4\","
   if [[ -z "$3" ]]; then
     out+=$'\n  "artefacts": []\n}'
@@ -2643,5 +2726,6 @@ Windows:
 
 Learn more: https://docs.tracebloc.io
 HELP
+  _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
   exit 0
 }
