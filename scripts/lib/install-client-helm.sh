@@ -1822,6 +1822,52 @@ _gpu_unsupported_set_args() {
   )
 }
 
+# _gpu_decision_set_args -- THIS run's GPU decision as helm args, for the two paths that
+# install over values the installer did not just write: the adopt reconcile (a release's
+# stored values, --reuse-values) and dev mode (the caller's TRACEBLOC_VALUES_FILE,
+# client-dev#1764). Both would otherwise keep a GPU decision this run did not make: a
+# vendor-changed edge training on the wrong resource, an NVIDIA edge dropped to CPU (reuse
+# guard / CDI setup set TRACEBLOC_GPU_WIRED=0) still requesting a GPU and stranding jobs
+# Pending, or a wired GPU host with every key empty and no device plugin, so the node
+# advertises 0 GPUs (backend#2033, client#835). The values are the SAME the fresh write
+# chooses (_gpu_request_value, _gpu_runtime_class, _detect_device_type), mirroring the
+# Windows twin's adopt-path --set-string:
+#   env.GPU_REQUESTS, env.GPU_LIMITS, env.RUNTIME_CLASS_NAME: --set-string, so helm does
+#     not type-infer the value's '='/'/' or read dots as key navigation; empty
+#     deliberately clears a stale request (client-runtime#80: "" means "no GPU here");
+#   env.DEVICE_TYPE (backend#4346): the chassis verdict; empty when unreadable, which the
+#     chart skips, so jobs-manager omits the key;
+#   the unsupported reason (_gpu_unsupported_set_args, client-dev#1633), empty clears it;
+#   the device-plugin block: nvidia only when wired (it needs the NVIDIA RuntimeClass: on
+#     k3d the one baked into the k3s-cuda node image, on native k3s the one k3s creates
+#     for the runtime step c's gate found; common.sh _gpu_runtime_class), amd on
+#     detection, else disabled.
+# --set and --set-string outrank --values in helm whatever their order, so this run's
+# decision wins over a values file's own GPU keys, an explicit "" included. Into
+# _TB_GPU_DECISION_ARGS (an array, bash-3.2 safe, never empty).
+_gpu_decision_set_args() {
+  local gpu_val rtc=""
+  gpu_val="$(_gpu_request_value)"
+  if _gpu_wired; then rtc="$(_gpu_runtime_class)"; fi
+  _TB_GPU_DECISION_ARGS=(
+    --set-string "env.GPU_REQUESTS=$gpu_val"
+    --set-string "env.GPU_LIMITS=$gpu_val"
+    --set-string "env.RUNTIME_CLASS_NAME=$rtc"
+    --set-string "env.DEVICE_TYPE=$(_detect_device_type "$gpu_val")"
+  )
+  _gpu_unsupported_set_args
+  _TB_GPU_DECISION_ARGS+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
+  if _gpu_wired; then
+    _TB_GPU_DECISION_ARGS+=(--set "gpu.devicePlugin.enabled=true"
+                            --set "gpu.devicePlugin.vendor=nvidia"
+                            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=$rtc")
+  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
+    _TB_GPU_DECISION_ARGS+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
+  else
+    _TB_GPU_DECISION_ARGS+=(--set "gpu.devicePlugin.enabled=false")
+  fi
+}
+
 # _gpu_request_value — the GPU resource a spawned training pod should request,
 # keyed to the vendor (backend#2033). Each vendor advertises its card as a different
 # Kubernetes resource, so the request key must match: nvidia.com/gpu for nvidia,
@@ -2118,46 +2164,11 @@ _reconcile_adopted_client() {
   local _uuid; _uuid="$(_sanitize_credential "${TRACEBLOC_CLIENT_ID:-}")"
   [[ -n "$_uuid" ]] && _args+=(--set "clientId=$_uuid")
 
-  # GPU keys are NOT --reuse-values-safe (backend#2033 + client#835). --reuse-values
-  # carries forward a prior release's env.GPU_REQUESTS/GPU_LIMITS/RUNTIME_CLASS_NAME
-  # and its gpu.devicePlugin block, so an adopted release keeps a STALE GPU decision:
-  # a vendor-changed edge trains on the wrong resource, and an NVIDIA edge dropped to
-  # CPU (reuse guard / CDI setup set TRACEBLOC_GPU_WIRED=0) keeps requesting a GPU and
-  # strands jobs Pending while the summary says CPU. FORCE the GPU keys to THIS run's
-  # decision — the SAME values the fresh write chooses (_gpu_request_value +
-  # runtime_class) — mirroring the Windows twin's adopt-path --set-string. --set-string
-  # so helm doesn't type-infer the value's '='/'/' or read dots as key navigation, and
-  # it overrides the reused value; empty deliberately clears a stale request
-  # (client-runtime#80: an explicit "" means "no GPU here").
-  local _gpu_val _rtc=""
-  _gpu_val="$(_gpu_request_value)"
-  if _gpu_wired; then _rtc="$(_gpu_runtime_class)"; fi
-  _args+=(--set-string "env.GPU_REQUESTS=$_gpu_val"
-          --set-string "env.GPU_LIMITS=$_gpu_val"
-          --set-string "env.RUNTIME_CLASS_NAME=$_rtc")
-  # backend#4346: the chassis verdict rides the same reconcile so an adopted
-  # release from before this key existed picks it up. Empty when unreadable —
-  # the chart skips an empty env value, so jobs-manager sees no DEVICE_TYPE and
-  # omits the key rather than reporting "".
-  _args+=(--set-string "env.DEVICE_TYPE=$(_detect_device_type "$_gpu_val")")
-  # client-dev#1633: why the GPU was left off as unsupported, THIS run's answer, so a
-  # reused release cannot keep a stale reason (empty clears it).
-  _gpu_unsupported_set_args
-  _args+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
-  # Reconcile the device-plugin block too, matching the fresh write, so a stale one
-  # can't linger: nvidia only when wired (it needs the NVIDIA RuntimeClass: on k3d
-  # the one baked into the k3s-cuda node image, on native k3s the one k3s creates
-  # for the runtime step c's gate found; common.sh _gpu_runtime_class), amd on
-  # detection, else disabled.
-  if _gpu_wired; then
-    _args+=(--set "gpu.devicePlugin.enabled=true"
-            --set "gpu.devicePlugin.vendor=nvidia"
-            --set-string "gpu.devicePlugin.nvidia.runtimeClassName=$(_gpu_runtime_class)")
-  elif [[ "${GPU_VENDOR:-}" == "amd" ]]; then
-    _args+=(--set "gpu.devicePlugin.enabled=true" --set "gpu.devicePlugin.vendor=amd")
-  else
-    _args+=(--set "gpu.devicePlugin.enabled=false")
-  fi
+  # GPU keys are NOT --reuse-values-safe (backend#2033 + client#835): --reuse-values
+  # carries forward a prior release's GPU keys and device-plugin block, so FORCE them to
+  # THIS run's decision, the one dev mode applies too (_gpu_decision_set_args).
+  _gpu_decision_set_args
+  _args+=("${_TB_GPU_DECISION_ARGS[@]}")  # set-u-safe: _gpu_decision_set_args always assigns
   # The local API (backend#5208) rides the same reconcile, for the same reason:
   # a release from before localApi existed reuses the chart default, off, while
   # create_cluster's _ensure_local_api_port has just mapped 127.0.0.1 to its
@@ -2583,7 +2594,8 @@ _mysql_engine_decision() {
 
 # Dev-mode (TRACEBLOC_VALUES_FILE) engine resolution — DELIBERATELY not the auto
 # rule above. When the caller supplies a values file, install_client_helm deploys
-# it AS-IS and never generates the mysqlClient override the normal path writes, so
+# it as-is (only this run's GPU decision rides on top, client-dev#1764) and never
+# generates the mysqlClient override the normal path writes, so
 # the engine that RUNS is simply what the file declares: 8.4 iff it affirmatively
 # pins 8.4 (_values_pin_mysql_84), else the chart default, which is the amd64-only
 # 5.7 image. _mysql_engine_decision answers "8.4 fresh" for a fresh arm64 host
@@ -2825,8 +2837,9 @@ install_client_helm() {
 
   # ── Dev-mode override: caller-supplied values file ───────────────────────
   # When TRACEBLOC_VALUES_FILE is set, skip prompts and values.yaml generation
-  # and use the provided file as-is. Used for local testing against an
-  # unreleased chart (pair with TRACEBLOC_CHART_PATH).
+  # and use the provided file as-is, except that the helm call below sets this
+  # run's GPU decision over it (_gpu_decision_set_args, client-dev#1764). Used for
+  # local testing against an unreleased chart (pair with TRACEBLOC_CHART_PATH).
   if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
     [[ -f "$TRACEBLOC_VALUES_FILE" ]] || error "TRACEBLOC_VALUES_FILE not found: $TRACEBLOC_VALUES_FILE"
     values_file="$TRACEBLOC_VALUES_FILE"
@@ -3380,18 +3393,28 @@ EOF
   # optional). Only runs on the GPU path; a no-op everywhere else.
   _adopt_orphaned_gpu_device_plugin
 
-  local _helm_rc=0
+  local _helm_rc=0 _gpu_args
   # client-dev#1633: the unsupported-GPU reason and card ride --set-string, not the
   # values heredoc: the sentence is free text (apostrophes, commas), and
   # _helm_set_string_escape is the one quoting rule both install paths share.
-  _gpu_unsupported_set_args
+  # client-dev#1764: dev mode installs a values file the installer did not write, so
+  # it gets THIS run's whole GPU decision, the adopt reconcile's: the caller's file
+  # supplies everything else, the GPU keys and the device plugin stay the installer's.
+  if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
+    _gpu_decision_set_args
+    _gpu_args=("${_TB_GPU_DECISION_ARGS[@]}")  # set-u-safe: _gpu_decision_set_args always assigns
+    log "Dev mode: this run's GPU decision overrides the values file's GPU keys: ${_gpu_args[*]}"  # set-u-safe: _gpu_decision_set_args always assigns
+  else
+    _gpu_unsupported_set_args
+    _gpu_args=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
+  fi
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
     --cleanup-on-fail \
     --values "$values_file" \
-    "${_TB_GPU_UNSUPPORTED_ARGS[@]}" || _helm_rc=$?  # set-u-safe: _gpu_unsupported_set_args always assigns six words
+    "${_gpu_args[@]}" || _helm_rc=$?  # set-u-safe: both branches above assign at least six words
   if [[ "$_helm_rc" -ne 0 ]]; then
     # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
     # leave the release pending-*. The next run auto-recovers

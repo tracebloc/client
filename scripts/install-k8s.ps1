@@ -1742,7 +1742,7 @@ $script:TB_CLI_MIN_VERSION = "0.10.0"
 function Test-TraceblocCliCurrent {
   if (-not (Has "tracebloc")) { return $false }
   $ver = ""
-  try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
+  try { $ver = ($null | & tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
   if ($ver -notmatch '(\d+(?:\.\d+)+)') { return $true }
   try { return ([version]$Matches[1] -ge [version]$script:TB_CLI_MIN_VERSION) } catch { return $true }
 }
@@ -7803,7 +7803,7 @@ function Get-ProvisioningPreset {
 # doesn't set $LASTEXITCODE, so the callers below never shell out directly).
 function Invoke-TraceblocProbe {
   param([string[]]$Args_)
-  try { & tracebloc @Args_ *> $null } catch { return $false }
+  try { $null | & tracebloc @Args_ *> $null } catch { return $false }
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -7820,7 +7820,7 @@ function Test-CliProvisioningSupport {
 # Fetch wrapper for `tracebloc client list --plain` (mockable, like the probe).
 function Get-TraceblocClientList {
   $text = ""
-  try { $text = (& tracebloc client list --plain 2>$null) | Out-String } catch { return [pscustomobject]@{ Ok = $false; Text = "" } }
+  try { $text = ($null | & tracebloc client list --plain 2>$null) | Out-String } catch { return [pscustomobject]@{ Ok = $false; Text = "" } }
   if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Ok = $false; Text = "" } }
   return [pscustomobject]@{ Ok = $true; Text = $text }
 }
@@ -8165,12 +8165,16 @@ function Get-InstalledClientInfo {
 # What `tracebloc client create` would do here, from its --plan line (action, id,
 # namespace, name; tab-separated), or $null from a CLI without the flag or with
 # nothing to say. Side-effect free by the CLI's contract. Bash parity: _create_plan.
+# `$null |` closes the child's stdin, as bash's `</dev/null` does: a probe never
+# reads input, and one that inherited it could swallow the rest of a piped
+# installer or block on an open pipe (client-dev#1784). Every captured-output
+# tracebloc call below is fed the same way; only login and the mint stay attached.
 function Get-CreatePlan {
   $help = ""
-  try { $help = (& tracebloc client create --help 2>$null | Out-String) } catch { return $null }
+  try { $help = ($null | & tracebloc client create --help 2>$null | Out-String) } catch { return $null }
   if ($help -notmatch '--plan') { return $null }
   $line = ""
-  try { $line = "$(& tracebloc client create --plan 2>$null | Select-Object -First 1)" } catch { return $null }
+  try { $line = "$($null | & tracebloc client create --plan 2>$null | Select-Object -First 1)" } catch { return $null }
   $f = $line.Split("`t")
   if ($f.Count -lt 4) { return $null }
   $name = ($f[3..($f.Count - 1)] -join "`t")
@@ -10364,7 +10368,7 @@ function Get-TraceblocExeVersion {
   param([string]$ExePath)
   if ([string]::IsNullOrWhiteSpace($ExePath) -or -not (Test-Path -LiteralPath $ExePath)) { return $null }
   $out = ""
-  try { $out = (& $ExePath version 2>$null | Select-Object -First 1) } catch { return $null }
+  try { $out = ($null | & $ExePath version 2>$null | Select-Object -First 1) } catch { return $null }
   if ($out -match '(\d+(?:\.\d+)+)') { try { return [version]$Matches[1] } catch { return $null } }
   return $null
 }
@@ -10447,7 +10451,7 @@ function Test-TraceblocCli {
     # "tracebloc data ingest ./data" next step lives in Print-Summary's "What to
     # do next" — don't duplicate it; just confirm the verdict.
     $ver = ""
-    try { $ver = (& tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
+    try { $ver = ($null | & tracebloc version 2>$null | Select-Object -First 1) } catch { $ver = "" }
     $short = if ($ver -match '\s(\S+)') { "v" + $Matches[1] } else { "" }
     # Name `tracebloc`, the MACHINE-WIDE command — the exe we copied into $TOOL_DIR — NOT
     # `tb`. `Has tb` is true in THIS process only because RefreshPath pulled in the
