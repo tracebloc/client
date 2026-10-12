@@ -175,7 +175,15 @@ _pf_fstype() {
 # VM, so the budget the pods get is the host's own -- /proc/meminfo's MemTotal and
 # nproc, through the host readers below, which are the tests' stub seams. Neither
 # reader asks Docker anything there.
+#
+# EXCEPT ON macOS, WHERE k3s RUNS IN A VM on Apple's runtime (slim client 2.1,
+# _pf_on_mac_node): the budget is the node's size, never the Mac's (see
+# _pf_mac_node_size).
 _pf_runtime_mem_kb() {
+  if _pf_on_mac_node; then
+    local s; s="$(_pf_mac_node_size)" || return 0
+    s="${s#* }"; echo $(( ${s%g} * 1024 * 1024 )); return 0
+  fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_host_mem_kb; return 0; fi
   # Bounded liveness, coreutils-free (#744): _docker_answers bounds through _bounded,
   # which was a no-op on a stock Mac until client-dev#1357; _docker_answers_bounded
@@ -188,12 +196,34 @@ _pf_runtime_mem_kb() {
   return 0
 }
 _pf_runtime_ncpu() {
+  if _pf_on_mac_node; then
+    local s; s="$(_pf_mac_node_size)" || return 0
+    echo $(( ${s%% *} + 1 )); return 0
+  fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_host_ncpu; return 0; fi
   # Coreutils-free bounded liveness, silenced — see _pf_runtime_mem_kb (#744).
   has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
   local n; n="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.NCPU}}' 2>/dev/null)"
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && echo "$n"
   return 0
+}
+
+# _pf_on_mac_node -- true when k3s runs in a VM on Apple's runtime: native k3s on a Mac
+# (slim client 2.1). There the pods' budget, disk and wording are the node's, not
+# the Mac's and not Docker's.
+_pf_on_mac_node() { [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; }
+
+# _pf_mac_node_size -- "<cpus> <N>g", the macOS node's size, from mac-container.sh's
+# _mac_ct_node_size: what the node is created with, asked, never restated. Its memory
+# is _macos_vm_mem_gb's, the rule Colima and Docker Desktop are sized by. The node
+# advertises one CPU more than <cpus>: the VM adds a vCPU of its own (RFC-0175's
+# measurement), so the runtime CPU reader adds it back. Fails when mac-container.sh is
+# not loaded (it is sourced from 2.1 part 6) or cannot size the node, and the readers
+# then answer nothing: the Mac's own figures would overstate the budget, and the fit
+# gate says it skipped instead.
+_pf_mac_node_size() {
+  declare -F _mac_ct_node_size >/dev/null 2>&1 || return 1
+  _mac_ct_node_size 2>/dev/null
 }
 
 # Total physical RAM of the HOST in KB.
@@ -371,7 +401,10 @@ _pf_spare_rung_words() {
 }
 
 _pf_runtime_mem_status() {
-  local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb target_gb
+  local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb target_gb what="Docker's memory budget"
+  # On macOS k3s runs in Apple's VM, sized by the installer's own rule
+  # (_pf_mac_node_size): the line names the node, and no Docker setting is a remedy.
+  ! _pf_on_mac_node || what="The node's memory"
   # Report the CONFIGURED size, not the guest-visible one. A VM asked for N GB
   # reports a few hundred MiB less as MemTotal (kernel + firmware reservations),
   # so plain rt_mib/1024 showed a VM set to exactly the documented floor as one
@@ -383,7 +416,7 @@ _pf_runtime_mem_status() {
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
   if (( rt_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
-    warn "Docker's memory budget: ${rt_gb} GB — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
+    warn "${what}: ${rt_gb} GB — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
     # Sub-floor is the ONE condition where _pf_recheck_runtime_mem also hard-fails
     # (the latch suppresses a duplicate warning, never the hard-fail), so this
     # remedy has to quote the SAME size that failure quotes or one install prints
@@ -410,10 +443,10 @@ _pf_runtime_mem_status() {
     # warn's own last sentence is the whole of the advice; the latch below still
     # sets, so the recheck does not say it twice.
     if (( warn_eff < PF_WARN_MEM_GB )); then
-      warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${warn_eff} GB, so $(_pf_spare_rung_words)."
+      warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${warn_eff} GB, so $(_pf_spare_rung_words)."
       target_gb=""
     else
-      warn "Docker's memory budget: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
+      warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
       # THE REMEDY NAMES THE NEED, NOT THE COMFORTABLE FIGURE (backend#5025 O-14).
       # It used to aim at rec_eff, so a 16 GB Mac read "Give Docker 14 GB" here and
       # "Memory -> 11 GB" from the Docker Desktop / Colima step a few lines later,
@@ -433,7 +466,7 @@ _pf_runtime_mem_status() {
       fi
     fi
   else
-    [[ -n "$quiet_ok" ]] || _pf_ok "Docker's memory budget: ${rt_gb} GB"
+    [[ -n "$quiet_ok" ]] || _pf_ok "${what}: ${rt_gb} GB"
     return 0
   fi
   # A machine that cannot reach the floor even with the OS reserve honoured is too
@@ -443,6 +476,7 @@ _pf_runtime_mem_status() {
   # recheck's own host-too-small branch then stops the install honestly. Mirrors
   # the PowerShell installer's host-too-small branch (#444).
   host_gb="$(_pf_host_mem_gb)"
+  [[ "$what" == "Docker's memory budget" ]] || target_gb=""
   if [[ -z "$target_gb" ]]; then
     :   # the clamped warn above carries its own advice; no concrete target exists to print
   elif _pf_host_too_small_for_floor "$host_gb"; then
@@ -667,7 +701,8 @@ _pf_memory() {
   # two across re-runs of the SAME installer on the SAME machine — "16 GB
   # (host)" cold, "6 GB (Docker VM)" warm — depending only on whether Docker
   # happened to already be running.
-  local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb
+  local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb budget="Docker budget"
+  ! _pf_on_mac_node || budget="node"   # k3s in Apple's VM: no Docker (2.1)
   host_kb="$(_pf_host_mem_kb)"
   rt_kb="$(_pf_runtime_mem_kb)"
   # Same converter as $gb below: this feeds the "is the VM meaningfully smaller
@@ -718,7 +753,7 @@ _pf_memory() {
     # line's "use a larger machine" in the same preflight (Bugbot #445 r3). On
     # native Linux the daemon sees host RAM directly, so the reserve arithmetic
     # does not apply and that path keeps the original wording.
-    warn "Memory: ${gb} GB (${label}) — the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
+    warn "Memory: ${gb} GB (${label}) — the client needs a ${PF_MIN_MEM_GB} GB ${budget} and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
   elif [[ "$mib" -lt "$warn_mib" ]]; then
     # The DERIVED budget, not its clamp (Bugbot on client#1085) — the same rule as
     # _pf_runtime_mem_status and the PowerShell twin's Show-MemoryStatus. AND NO
@@ -820,6 +855,7 @@ _pf_recheck_runtime_mem() {
 }
 
 _pf_disk() {
+  if _pf_on_mac_node; then _pf_disk_mac_node; return 0; fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_disk_k3s; return 0; fi
   local target free_kb free_gb
   target="$(_pf_docker_root)"
@@ -842,6 +878,30 @@ _pf_disk() {
     _pf_ok "Disk: ${free_gb} GB free on ${target}"
   fi
   return 0
+}
+
+# On macOS, native k3s runs in a VM on Apple's runtime (slim client 2.1), and all it
+# writes lands under the runtime's app root (mac-container.sh's _mac_ct_app_root): the
+# images, the kernel, and the node's volume, a sparse image that takes only what is
+# written. That is one disk, graded against the same floors as Linux's
+# (PF_MIN_DISK_GB, PF_WARN_DISK_GB). It does not exist before the install, so it is
+# measured on its nearest existing parent (_pf_mac_node_disk_at), as the summary line
+# measures it. A re-run gets no credit for the images it reuses: nothing has measured
+# them on a Mac yet, so the floor counts them as on a fresh one. Until 2.1 part 6
+# sources mac-container.sh, where the app root is cannot be told, and the line says so.
+_pf_mac_node_disk_at() {
+  local root at
+  declare -F _mac_ct_app_root >/dev/null 2>&1 || return 1
+  root="$(_mac_ct_app_root 2>/dev/null)" || return 1
+  [[ "$root" == /* ]] || return 1
+  at="$(_pf_nearest_existing "$root")"; [[ -n "$at" ]] || at="/"
+  printf '%s\t%s' "$at" "$root"
+}
+_pf_disk_mac_node() {
+  local both tab=$'\t'
+  both="$(_pf_mac_node_disk_at)" \
+    || { warn "Disk: couldn't tell where Apple's container runtime will keep the node (skipping)."; return 0; }
+  _pf_disk_grade "${both%%"$tab"*}" "the node's images and volume (${both#*"$tab"})"
 }
 
 # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) keeps nothing under Docker's root. Its disk is two
@@ -1582,7 +1642,7 @@ _pf_connectivity() {
 # leads). Printed by run_preflight only when nothing hard-failed — a ✔ summary
 # above a ✖ would contradict itself.
 _pf_hw_summary_line() {
-  local cpu mem_kb mem_gb disk_target disk_kb disk_gb
+  local cpu mem_kb mem_gb disk_target disk_kb disk_gb tab=$'\t'
   local -a parts=("$ARCH")
   cpu="$(_pf_ncpu)"
   if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
@@ -1594,7 +1654,11 @@ _pf_hw_summary_line() {
   # Through the shared converter so the collapsed summary can never disagree with
   # the memory line above it (Bugbot #445 r6).
   if [[ -n "$mem_kb" ]]; then mem_gb="$(_pf_display_gb_from_mib "$(( mem_kb / 1024 ))")"; parts+=("${mem_gb} GB memory"); fi
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+  if _pf_on_mac_node; then
+    # The node's app root, measured where _pf_disk_mac_node measures it; none when
+    # that cannot be told, so the field is dropped rather than guessed.
+    disk_target="$(_pf_mac_node_disk_at)" && disk_target="${disk_target%%"$tab"*}" || disk_target=""
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     # k3s's data path, measured where _pf_disk_k3s measures it.
     disk_target="$(_pf_nearest_existing "$TB_K3S_DATA_PATH")"; [[ -n "$disk_target" ]] || disk_target="/"
   else
@@ -1602,7 +1666,7 @@ _pf_hw_summary_line() {
     if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
     if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host
   fi
-  disk_kb="$(_pf_free_kb "$disk_target")"
+  disk_kb=""; [[ -z "$disk_target" ]] || disk_kb="$(_pf_free_kb "$disk_target")"
   if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi
   local joined="" p
   for p in "${parts[@]}"; do joined="${joined:+$joined · }$p"; done  # set-u-safe: seeded with ARCH

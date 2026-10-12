@@ -769,7 +769,7 @@ _telemetry_spool_path() {
 # comments in this file used to say #1906's forwarder would read or drain these
 # files.
 # It cannot. #1906 is an OpenTelemetry Collector running as a pod INSIDE the
-# customer's Kubernetes cluster, reading container stdout through a `filelog`
+# customer's Kubernetes cluster, reading container stdout through a `file_log`
 # receiver. Neither spool this function writes is container stdout and neither is
 # reachable from a pod: `$HOST_DATA_DIR/telemetry/pending.jsonl` and the
 # `$TMPDIR` fallback are both files on the operator's own machine, written before

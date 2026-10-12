@@ -453,6 +453,23 @@ provision_client() {
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
   local -a _create_args=(client create --yes --name "$client_name" --credential-file "$cred_file")
+  # The credential-rejected repair (backend#5365): the client runs here, so a plain
+  # create adopts it and keeps the credential tracebloc refuses. Ask for a new one.
+  if [[ "${INSTALL_STATE_REASON:-}" == credential-rejected ]]; then
+    # Capture, then match: piping into a grep that quits early sends the CLI a
+    # SIGPIPE, which pipefail reads as "no --reissue" (the early-close lint).
+    local _create_help; _create_help="$(tracebloc client create --help </dev/null 2>/dev/null)" || _create_help=""
+    if [[ "$_create_help" == *--reissue* ]]; then
+      _create_args+=(--reissue)
+      # shellcheck disable=SC2034  # consumed cross-file by install-client-helm.sh
+      TB_CREDENTIAL_REISSUED=1
+    else
+      # Stop before the create (client-dev#1846): without --reissue it adopts the
+      # running client and hands back the credential tracebloc refuses, and the run
+      # would end "installed" with the machine still offline.
+      error "This tracebloc CLI can't issue a new credential to a running client yet — update it and re-run the installer."
+    fi
+  fi
   [[ -n "$client_location" ]] && _create_args+=(--location "$client_location")
   # umask 077 so the credential file lands 0600 even if a future CLI build
   # regresses on its explicit chmod — defense in depth (cli#104 already sets 0600).

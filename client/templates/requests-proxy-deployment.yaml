@@ -198,12 +198,12 @@ spec:
             - name: TB_META_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
+                  name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
                   key: TRACEBLOC_META_PASSWORD
             - name: TRACEBLOC_META_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
+                  name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
                   key: TRACEBLOC_META_PASSWORD
             {{- end }}
       {{- if include "tracebloc.useImagePullSecrets" . }}

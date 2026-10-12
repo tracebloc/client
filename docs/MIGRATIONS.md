@@ -70,28 +70,45 @@ If you find yourself reaching for Option B, you actually want Option A or Option
 
 If neither A nor B works and the underlying storage is `Retain`, the data survives PVC deletion. You'll need to rebuild the PVCs manually after uninstall:
 
-**Save the credentials Secret FIRST.** The PVCs carry
-`helm.sh/resource-policy: keep`; the Secret does **not**, so `helm uninstall`
-deletes it while the MySQL datadir survives on the retained PV. The re-install
-would then find a datadir with no matching credentials, and since backend#2626 it
-**refuses at template time** rather than silently re-minting them:
+**Save the credentials Secrets FIRST.** The release has two:
 
-> already has MySQL data (PersistentVolumeClaim "mysql-pvc" …), but there is no
-> Secret named …
+- `mysql-credentials` (chart 1.9.205 and later) holds the local MySQL passwords.
+  It carries `helm.sh/resource-policy: keep`, like the PVCs, so `helm uninstall`
+  leaves it in the namespace, and a reinstall **into the same namespace** reads it
+  and opens the retained datadir with no further step.
+- `<release>-secrets` holds the client credentials and the pod token signing key.
+  It does **not** carry `keep`, so `helm uninstall` deletes it. On a chart older
+  than 1.9.205 it also holds the MySQL passwords, and there is no
+  `mysql-credentials`.
+
+Option C deletes the PVCs and rebuilds them, often in a new namespace or under a
+new release, so do not rely on `keep`: back up both. If a reinstall finds the
+datadir and neither Secret, it **refuses at template time** (since backend#2626)
+rather than silently re-minting the MySQL passwords:
+
+> already has MySQL data (PersistentVolumeClaim "mysql-pvc" …), but neither Secret
+> that holds its passwords exists …
 
 That refusal is correct — without it the install would report `deployed` and MySQL
 would refuse every login — but in this flow there is nothing left to copy from
 unless you saved it in step 0. So:
 
 ```bash
-# 0. SAVE THE SECRET. Do this before the uninstall; there is no recovering it
-#    afterwards, and the re-install in step 4 will refuse without it.
+# 0. SAVE THE SECRETS. Do this before the uninstall. The release Secret cannot be
+#    recovered afterwards, and the re-install in step 4 will refuse without the
+#    MySQL passwords.
 #    Get the name this release actually rendered (it follows fullnameOverride if
-#    that is set) rather than assuming <release>-secrets:
+#    that is set) rather than assuming <release>-secrets. Select by the `-secrets`
+#    suffix: `mysql-credentials` deliberately does not end in it.
 SECRET=$(kubectl -n <ns> get secret -l app.kubernetes.io/instance=<release> \
   -o jsonpath='{.items[?(@.type=="Opaque")].metadata.name}' | tr ' ' '\n' \
   | grep -- '-secrets$' | head -1)
 kubectl -n <ns> get secret "$SECRET" -o json > /tmp/tracebloc-secret-backup.json
+# The MySQL passwords' own Secret: a constant name, it never follows
+# fullnameOverride. Absent on a chart older than 1.9.205 -- then the release
+# Secret backed up above holds the MySQL passwords and this read fails; that is
+# expected.
+kubectl -n <ns> get secret mysql-credentials -o json > /tmp/tracebloc-mysql-credentials-backup.json
 ```
 
 If you are deliberately starting from an empty database, delete the datadir PVC
@@ -149,13 +166,21 @@ jq --arg n "<new-release-name>-secrets" --arg ns "<ns>" --arg rel "<new-release-
 If the new release uses `fullnameOverride`, use `<override>-secrets` as the name
 in step 4 — that is what the chart will look for.
 
+Restoring the release Secret is enough for the chart to open the database: when
+`mysql-credentials` is missing, the install copies the MySQL passwords out of the
+release Secret into it. If you backed up `mysql-credentials` too, restore it the
+same way **before** the install (keep its name, `mysql-credentials`; re-stamp the
+same three ownership fields for the new release), and the install reads it in
+preference to the release Secret. Restore it only into the namespace whose
+datadir it belongs to.
+
 Only safe if the PV's `reclaimPolicy` is `Retain`. With `Delete` you lose data the moment the PV goes Released.
 
 ---
 
 ## Before uninstall: checklist
 
-1. `helm get manifest <release> -n <ns> | grep resource-policy` — keep annotation present for every resource you must preserve?
+1. `helm get manifest <release> -n <ns> | grep resource-policy` — keep annotation present for every resource you must preserve? On chart 1.9.205 and later this includes the `mysql-credentials` Secret beside the PVCs; on an older chart there is none, and the MySQL passwords leave with the release Secret. Either way, back up `<release>-secrets` and, on 1.9.205 and later, `mysql-credentials` before an Option C uninstall (step 0).
 2. `kubectl get pv $(kubectl get pvc -n <ns> -o jsonpath='{.items[*].spec.volumeName}') -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy` — all `Retain`?
 3. Logical backup taken (for MySQL: `mysqldump | gzip > backup.sql.gz` **inside the pod**, then `kubectl cp` out — `kubectl exec > file` streams of >100 MB silently truncate)?
 4. Snapshot of the underlying storage (EFS / EBS / NFS) taken?

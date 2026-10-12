@@ -280,6 +280,9 @@ spec:
                  monitor puts both on every heartbeat (client-runtime#879).
                  Renders nothing unless an installer set them. */ -}}
             {{- include "tracebloc.gpuUnsupportedEnv" . | nindent 12 }}
+            {{- /* The host's OS (client-runtime#914), sent on every heartbeat as
+                 `os`. Renders nothing unless an installer set it. */ -}}
+            {{- include "tracebloc.hostOsEnv" . | nindent 12 }}
           resources:
             requests:
               cpu: 50m

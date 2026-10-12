@@ -237,7 +237,7 @@ spec:
           - 'sh'
           - '-c'
           - |
-            for e in /data/shared:2777 /data/logs:3777; do
+            for e in /data/shared:2777 /data/logs:3777{{ if (include "tracebloc.trainingResumeEnabled" .) }} /data/resume:3777{{ end }}; do
               d=${e%:*}; want=${e#*:}
               # Two statements, never chained (#672): the chmod is attempted even when the chown
               # is refused. Each records which call failed; neither is fatal.
@@ -265,6 +265,10 @@ spec:
           mountPath: /data/shared
         - name: logs-volume
           mountPath: /data/logs
+        {{- if (include "tracebloc.trainingResumeEnabled" .) }}
+        - name: training-resume
+          mountPath: /data/resume
+        {{- end }}
       {{- end }}
       containers:
       - name: api
@@ -467,6 +471,14 @@ spec:
             mountPath: /etc/tracebloc/ingestion-authz.yaml
             subPath: ingestion-authz.yaml
             readOnly: true
+          {{- if (include "tracebloc.trainingResumeEnabled" .) }}
+          # Durable pause/resume (client-runtime#882): the same claim the
+          # training pods mount per experiment. jobs-manager pre-creates
+          # /data/resume/<pk> before a spawn and removes it on a stop; without
+          # this mount both are skipped.
+          - name: training-resume
+            mountPath: /data/resume
+          {{- end }}
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         {{- /*
@@ -582,6 +594,19 @@ spec:
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
+        {{- if (include "tracebloc.trainingResumeEnabled" .) }}
+        # client-runtime#882: arms the durable resume volume and the stop-kind
+        # signal in jobs-manager. New setting, canonical name only (RFC-0076 S6).
+        - name: TRACEBLOC_TRAINING_RESUME_PVC
+          value: {{ include "tracebloc.trainingResumePvc" . | quote }}
+        {{- end }}
+        {{- if (include "tracebloc.stopKindSignalEnabled" .) }}
+        # client-runtime#882: training pods get the stop-kind file and stops
+        # annotate pause | stop, so a paused pod exits 0 (tracebloc-engine#1588).
+        # No weights: on by default. Canonical name only (new, RFC-0076 S6).
+        - name: TRACEBLOC_STOP_KIND_SIGNAL
+          value: "1"
+        {{- end }}
         {{- /* Settings naming: the edge runtime names in this container
              (CLIENT_PVC above, the ingestor image, proxy URLs, envelope,
              runtime class, single-node, node name) are emitted twice, legacy
@@ -627,6 +652,21 @@ spec:
         - name: TRACEBLOC_NARROW_EDGEUSER
           value: "1"
         {{- end }}
+{{- /* Refuse a mis-paired DROP before the Deployment is patched. */ -}}
+{{- include "tracebloc.assertDropEdgeuserIsSafe" . }}
+        {{- if (include "tracebloc.dropEdgeuser" .) }}
+        # backend#5427: DROP edgeuser entirely on boot — the step backend#1528 left
+        # to an operator, automated for edges we cannot reach. Separate gate, and
+        # the resolver only turns it on where narrowEdgeuser is already on, so the
+        # account is USAGE-only and inert by the time this runs. jobs-manager
+        # refuses it unless the posture is retired; the render refuses it too, above.
+        # DROP USER IF EXISTS, so a fresh datadir (no edgeuser since backend#947) and
+        # an already-dropped edge are both clean no-ops.
+        - name: DROP_EDGEUSER
+          value: "1"
+        - name: TRACEBLOC_DROP_EDGEUSER
+          value: "1"
+        {{- end }}
         {{- if (include "tracebloc.perExperimentDbCreds" .) }}
         # RFC-0003 D10 (backend#1181): per-experiment MySQL credentials. When
         # on, jobs-manager mints a short-lived MySQL user per experiment scoped
@@ -646,12 +686,12 @@ spec:
         - name: TB_CREDMGR_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_CREDMGR_PASSWORD
         - name: TRACEBLOC_CREDMGR_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_CREDMGR_PASSWORD
         {{- end }}
         {{- if (include "tracebloc.serviceDbAccounts" .) }}
@@ -672,12 +712,12 @@ spec:
         - name: TB_META_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_META_PASSWORD
         - name: TRACEBLOC_META_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_META_PASSWORD
         - name: TB_INGEST_USER
           value: "tb_ingest"
@@ -686,12 +726,12 @@ spec:
         - name: TB_INGEST_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_INGEST_PASSWORD
         - name: TRACEBLOC_INGEST_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_INGEST_PASSWORD
         {{- end }}
         # backend#2073: give each ingestion Job its own short-lived, ingest-scoped
@@ -719,7 +759,7 @@ spec:
         - name: DB_BOOTSTRAP_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: DB_BOOTSTRAP_PASSWORD
         {{- end }}
         # Ingestor image wiring for the POST /internal/submit-ingestion-run
@@ -1123,15 +1163,21 @@ spec:
              Settings naming (backend#3846): each MYSQL_MIGRATION_* name is set
              under its TRACEBLOC_ canonical too, from the same expression, so a
              jobs-manager that reads the canonical first and an older one that
-             reads only the legacy name resolve the same Job. */}}
+             reads only the legacy name resolve the same Job.
+
+             RELEASE_SECRET_NAME names `mysql-credentials` (client-dev#1702), not
+             the release Secret: the Job reads only the MySQL passwords from it
+             (DB_BOOTSTRAP_PASSWORD and the TB_META / TB_INGEST / TB_CREDMGR
+             pairs), and those moved there. The env name is client-runtime's
+             contract and stays. */}}
         - name: RELEASE_NAME
           value: {{ .Release.Name | quote }}
         - name: TRACEBLOC_RELEASE_NAME
           value: {{ .Release.Name | quote }}
         - name: RELEASE_SECRET_NAME
-          value: {{ include "tracebloc.secretName" . | quote }}
+          value: {{ include "tracebloc.mysqlCredentialsSecret" . | quote }}
         - name: TRACEBLOC_RELEASE_SECRET_NAME
-          value: {{ include "tracebloc.secretName" . | quote }}
+          value: {{ include "tracebloc.mysqlCredentialsSecret" . | quote }}
         - name: MYSQL_MIGRATION_JOB_IMAGE
           value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         - name: TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE
@@ -1341,4 +1387,9 @@ spec:
         - name: ingestion-authz
           configMap:
             name: {{ include "tracebloc.fullname" . }}-ingestion-authz
+        {{- if (include "tracebloc.trainingResumeEnabled" .) }}
+        - name: training-resume
+          persistentVolumeClaim:
+            claimName: {{ include "tracebloc.trainingResumePvc" . }}
+        {{- end }}
       restartPolicy: Always

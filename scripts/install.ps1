@@ -16,9 +16,9 @@
 #
 #  Usage (PowerShell as Administrator):
 #    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
-#  (The public mirror serves the installer + its sub-scripts as RELEASE ASSETS;
-#   its source tree carries no scripts/ after the client -> client-dev rename --
-#   backend#3998 -- so the old raw.githubusercontent .../scripts/... URLs 404.)
+#  (Only the release asset is stamped with its pinned tag. The raw.githubusercontent
+#   .../main/scripts/... copy is this file unstamped, so it refuses to run -- never
+#   hand a customer that URL.)
 #
 #  Developer / unreleased-branch override (UNVERIFIED — not for customers). The
 #  sub-scripts are fetched from the raw TREE of $env:TRACEBLOC_SOURCE_REPO (default

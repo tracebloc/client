@@ -6,12 +6,12 @@
 #  your infrastructure — without exposing your data.
 #
 #  Usage (PowerShell as Administrator):
-#    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+#    irm https://tracebloc.io/i.ps1 | iex
 #    -- OR locally --
 #    Set-ExecutionPolicy Bypass -Scope Process -Force; .\install-k8s.ps1
 #
 #  macOS / Linux:
-#    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+#    curl -fsSL https://tracebloc.io/i.sh | bash
 #
 #  Environment variable overrides (optional, set before running). Each
 #  TRACEBLOC_ name's older spelling -- without TRACEBLOC_ ($env:CLUSTER_NAME), or
@@ -1460,7 +1460,7 @@ tracebloc -- client setup
   and connect it to the tracebloc network.
 
 Usage:
-  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+  irm https://tracebloc.io/i.ps1 | iex
   .\install-k8s.ps1 [-Help] [-NoReboot] [-Resume]
 
 Advanced configuration (environment variables; each one's older name without
@@ -1498,7 +1498,7 @@ Reinstalling on a machine that still holds data:
   TRACEBLOC_SKIP_LEFTOVER_GUARD=1.
 
 macOS / Linux:
-  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+  curl -fsSL https://tracebloc.io/i.sh | bash
 
 Learn more: https://docs.tracebloc.io
 
@@ -2337,6 +2337,19 @@ function Set-GpuContainerBlind([string]$Runtime) {
   $script:GPU_UNSUPPORTED_CODE = "docker_cannot_see_gpu"
   $script:GPU_UNSUPPORTED_REASON = "$Runtime can't see this machine's NVIDIA GPU, so this machine runs on CPU until containers can use the GPU."
   $script:GPU_UNSUPPORTED_NAME = ((([string]$script:NVIDIA_GPU_NAMES) -split "\r?\n") | Select-Object -First 1).Trim()
+}
+
+# Get-HostOsLabel -- this machine's OS as the dashboard shows it (client-runtime#914):
+# "Windows 11", "Windows 10", "Windows Server 2022", from the OS caption ("Microsoft
+# Windows 11 Pro") without the vendor and the edition. Empty when it cannot tell.
+# Passed as env.TRACEBLOC_HOST_OS, canonical name only; the bash twin is
+# _host_os_label in common.sh. $Caption is for the tests.
+function Get-HostOsLabel([string]$Caption = $null) {
+  if (-not $Caption) {
+    try { $Caption = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { return "" }
+  }
+  if ($Caption -match 'Windows\s+(Server\s+\d{4}(\s+R2)?|\d+)') { return "Windows $($Matches[1])" }
+  return ""
 }
 
 # ConvertTo-HelmSetValue -- $Value as one `helm --set-string key=VALUE` value (bash twin:
@@ -9028,6 +9041,7 @@ $envBlock
       --set-string "env.GPU_UNSUPPORTED_REASON=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_REASON)" `
       --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" `
       --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" `
+      --set-string "env.TRACEBLOC_HOST_OS=$(ConvertTo-HelmSetValue (Get-HostOsLabel))" `
       @localApiArgs 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
@@ -9049,14 +9063,16 @@ $envBlock
     # client-dev#1633: why the GPU was left off as unsupported rides --set-string, not the
     # values here-string: the sentence is free text, and ConvertTo-HelmSetValue is the one
     # quoting rule both paths share. Always all three keys (the reason, the name and the code,
-    # backend#5296); empty = supported (or no GPU).
+    # backend#5296); empty = supported (or no GPU). The host's OS (client-runtime#914) rides
+    # the same route, on both paths.
     $helmOutput = (helm upgrade --install $TB_NAMESPACE $chartRef `
       --namespace $TB_NAMESPACE `
       --create-namespace `
       --values $valuesFile `
       --set-string "env.GPU_UNSUPPORTED_REASON=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_REASON)" `
       --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" `
-      --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" 2>&1) | Out-String
+      --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" `
+      --set-string "env.TRACEBLOC_HOST_OS=$(ConvertTo-HelmSetValue (Get-HostOsLabel))" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client installation failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
   }

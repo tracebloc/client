@@ -941,7 +941,7 @@ restrictedDns:
 
 # -- Edge telemetry Collector (RFC-BACKEND-1872 D6/D7, backend#1906).
 # An OpenTelemetry Collector DaemonSet that reads Class A container stdout with a
-# `filelog` receiver and forwards it to the tracebloc backend's ingest endpoint.
+# `file_log` receiver and forwards it to the tracebloc backend's ingest endpoint.
 #
 # SHIPS DISABLED, and that is a deliberate safety decision rather than caution.
 # The exporter authenticates with a token this chart does not create: it is
@@ -1007,8 +1007,8 @@ telemetryCollector:
 
   # THE TRACEBLOC BUILD OF THE COLLECTOR. `tracebloc/otelcol-tracebloc` is an
   # OpenTelemetry Collector Builder build that holds exactly the component types
-  # the config above uses (filelog, file_storage, bearertokenauth, transform,
-  # batch, otlphttp), where the contrib distribution carries a few hundred.
+  # the config above uses (file_log, file_storage, bearertokenauth, transform,
+  # batch, otlp_http), where the contrib distribution carries a few hundred.
   # tracebloc checks every build against every variant of this config before it
   # publishes it.
   #
@@ -1030,7 +1030,7 @@ telemetryCollector:
     digestFor: ""
 
   # 500m/512Mi per D7's table. The existing node agent runs 200m/256Mi, which a
-  # filelog collector over node stdout will not fit.
+  # file_log collector over node stdout will not fit.
   resources:
     requests:
       cpu: "100m"
@@ -1042,7 +1042,7 @@ telemetryCollector:
   # The containers whose stdout is collected — CONTAINER names, taken from the
   # rendered chart, not workload or image names. The first version of this list
   # invented `tracebloc-jobs-manager`, `egress-proxy` and `requests-proxy`, none
-  # of which exist: `filelog`'s include globs match the kubelet's on-disk path,
+  # of which exist: `file_log`'s include globs match the kubelet's on-disk path,
   # which carries the CONTAINER name, so the Collector would have run, reported
   # healthy, and shipped nothing. (Bugbot on #779.)
   #
@@ -2746,6 +2746,56 @@ perIngestionTables: false
 perDatasetPvcs: false
 
 # ============================================================
+# Durable pause/resume volume (client-runtime#882)
+# ============================================================
+# OFF BY DEFAULT, PENDING A PRODUCT DECISION (backend#5266): keeping a paused
+# cycle's resume payload (model weights + optimizer state) on a volume that
+# outlives the training pod changes the RFC-0003 §6.4 model-IP bound, and how
+# long an abandoned pause may keep it is not decided either. Off, the render is
+# byte for byte what it was before this block existed.
+#
+# On, the chart:
+# - creates the PVC `training-resume-pvc` (or uses `existingClaim`), with the
+#   same access mode as the logs PVC (ReadWriteMany, or ReadWriteOnce on a
+#   hostPath single-node install): jobs-manager and the training pods share it;
+# - sets TRACEBLOC_TRAINING_RESUME_PVC on jobs-manager to that claim, so
+#   training pods mount `<claim>/<experiment_pk>` at /data/resume/<pk> and the
+#   engine is told which kind of stop a SIGTERM is (client-runtime#887);
+# - mounts the same claim into jobs-manager at /data/resume, where it
+#   pre-creates each experiment's directory and removes it on a stop;
+# - grants jobs-manager `patch` on pods, to write the tracebloc.io/stop-kind
+#   annotation the training pod reads (templates/rbac.yaml).
+# Set it here, not as env.TRACEBLOC_TRAINING_RESUME_PVC: rendering refuses the
+# env key, because on its own it arms the runtime without the mount or the RBAC.
+# The engine only resumes when TRAINING_RESUME_ENABLED is also on (backend#2617).
+trainingResume:
+  enabled: false
+  # -- Use a claim you created yourself instead of the chart's. It must be
+  #    mountable by jobs-manager and every training pod at once.
+  existingClaim: ""
+  # -- Size of the chart-created claim.
+  storage: 10Gi
+
+# ============================================================
+# Stop-kind signal for pause (client-runtime#882)
+# ============================================================
+# A pause deletes the training Job, and the pod used to end as `Error` because
+# it could not tell a pause from a stop or a node drain. On, jobs-manager
+# writes tracebloc.io/stop-kind (pause | stop) on the Job's pods before the
+# delete, and the pod reads it through a downward-API file, so the engine exits
+# 0 on a pause and the pod reads `Completed` (tracebloc-engine#1588). Any other
+# stop still exits 143.
+#
+# It holds no model weights, so it is ON by default and does not wait on the
+# model-IP decision that gates trainingResume (backend#5266). On, the chart sets
+# TRACEBLOC_STOP_KIND_SIGNAL=1 on jobs-manager and grants it `patch` on pods
+# (templates/rbac.yaml). trainingResume.enabled always implies it. Set it here,
+# not as env.TRACEBLOC_STOP_KIND_SIGNAL: rendering refuses the env key, because
+# on its own it would leave out the grant.
+stopKindSignal:
+  enabled: true
+
+# ============================================================
 # Per-experiment DB credentials (RFC-0003 D10 — backend#1181)
 # ============================================================
 # When true, jobs-manager mints a short-lived MySQL user for each experiment
@@ -2837,6 +2887,29 @@ narrowEdgeuserByEnv:
   dev: true
   stg: true
   prod: true
+
+# DROP edgeuser entirely at jobs-manager boot (backend#5427) — the step
+# backend#1528 left as a deliberate operator action, made automatic for edges we
+# cannot reach. jobs-manager runs `DROP USER IF EXISTS` on boot, idempotent and
+# fail-safe (a fresh datadir has no edgeuser since backend#947; an already-dropped
+# edge is a no-op).
+#
+# ONLY RESOLVES ON WHERE narrowEdgeuser IS ALREADY ON: the baked default below is
+# gated on it, so an edge is dropped only once it is narrowed (edgeuser USAGE-only
+# and unused). DROP is the step PAST the risky one, not the risky one — and unlike
+# the REVOKE it is NOT reversible from the S0 snapshot, so it is staged behind
+# narrowing, one fleet at a time. The render FAILS a mis-paired explicit override
+# (tracebloc.assertDropEdgeuserIsSafe) and jobs-manager refuses it again at startup.
+#
+# Shipped OFF everywhere; flip per environment (dev first) only after narrowing has
+# soaked on that fleet. UNSET override => the effective value comes from
+# dropEdgeuserByEnv, keyed on the resolved CLIENT_ENV. Mirrors narrowEdgeuser.
+dropEdgeuser:
+
+dropEdgeuserByEnv:
+  dev: false
+  stg: false
+  prod: false
 
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist
@@ -3027,6 +3100,18 @@ bootstrapDbPassword: ""
 # is on, the chart generates a random root password into the Secret and injects
 # it as MYSQL_ROOT_PASSWORD on the mysql-client deployment.
 #
+# WHICH SECRET (client-dev#1702): every MySQL password -- this one,
+# bootstrapDbPassword's DB_BOOTSTRAP_PASSWORD, and the credmgr / tb_meta /
+# tb_ingest passwords above -- lives in `mysql-credentials`, a constant-named
+# Secret carrying helm.sh/resource-policy: keep, so it survives `helm uninstall`
+# beside the `mysql-pvc` datadir it opens and a reinstall over that datadir just
+# works. "The Secret" below means that one. The release Secret
+# (`<release>-secrets`) keeps clientId / clientPassword / the pod token signing
+# key, and for one release a copy of the MySQL passwords for a rollback; the
+# chart reads that copy only when `mysql-credentials` does not exist yet (the
+# first upgrade onto the split), and then as a whole, never key by key. Rotate or
+# remove a MySQL password by hand in `mysql-credentials`.
+#
 # IMPORTANT — this alone only rotates a FRESH datadir. The mysql entrypoint reads
 # MYSQL_ROOT_PASSWORD at first init and ignores it thereafter, so an EXISTING
 # edge keeps its current root password until the one-time rollout DDL runs:
@@ -3035,7 +3120,8 @@ bootstrapDbPassword: ""
 # (read the value from the Secret, run via `kubectl exec` as root@localhost).
 # Turning the gate on rolls the mysql pod (a brief restart) — flip it in a window.
 # Any tooling/runbook that dials root with the old literal must move to the
-# Secret first, or it breaks at rotation.
+# Secret first, or it breaks at rotation. selfRotateMysqlRoot (below) has mysqld
+# run that DDL itself at every start, so an existing edge needs no manual step.
 #
 # GUARDED (backend#2879, backend#2892) — fail-CLOSED. Because that DDL is manual
 # and mandatory, the chart REFUSES to render a rotation that would silently break
@@ -3108,10 +3194,12 @@ mysqlRootPassword: ""
 # still wins (the safe born-rotated default). A born-rotated edge on a NORMAL upgrade
 # (its Secret still carries the root) needs no ack — bakedRoot keeps it ON either way.
 #   This does NOT bypass the SEPARATE credential-collision guard in secrets.yaml
-#   (backend#2571): a reinstall whose `helm uninstall` deleted the WHOLE Secret while
-#   the resource-policy: keep datadir PVC survived is refused THERE, regardless of
-#   this ack — copy the Secret back to the name this render wants, or delete the
-#   datadir (that guard names both). The ack governs root's rotation state, not that
+#   (backend#2571): a render that finds the resource-policy: keep datadir PVC but
+#   NEITHER `mysql-credentials` NOR the release Secret (an uninstall by a chart
+#   older than the split, or both deleted by hand) is refused THERE, regardless of
+#   this ack — copy the release Secret back to the name this render wants, or delete
+#   the datadir (that guard names both). A reinstall whose uninstall kept
+#   `mysql-credentials` is not refused at all (client-dev#1702). The ack governs root's rotation state, not that
 #   guard. Once past it on the image-baked path, ALSO delete the leftover marker
 #   (`kubectl -n <ns> delete configmap mysql-root-rotated`) AND then UNSET this ack
 #   (clear it from your values — it does NOT self-expire and replays through the
@@ -3156,6 +3244,41 @@ mysqlRootRotationAcknowledged:
 # server-side. Charts `< 1.9.90` ignore this key (open schema). See
 # docs/migration-tools/rotate-mysql-root.md.
 mysqlDatadirExists:
+
+# ============================================================
+# Let mysqld rotate root itself (backend#5427)
+# ============================================================
+# The rotation above only reaches an EXISTING datadir through the manual
+# `ALTER USER 'root'` runbook, which needs access to the cluster. With this gate
+# on, mysqld does it itself: at every start on an existing datadir it sets root's
+# password to the Secret's MYSQL_ROOT_PASSWORD through `init_file`, which runs
+# before the server accepts connections and needs no authentication, so the old
+# password is never needed. An init container decides at each pod start:
+#   - existing datadir  -> hand mysqld the SQL (root is set from the Secret);
+#   - fresh datadir     -> do nothing (the entrypoint initialises root itself);
+#   - Secret key absent -> do nothing and log a warning (root is left as it is).
+#
+# What it changes:
+#   - An existing un-rotated edge on a live cluster now resolves rotation ON (it
+#     used to stay on its install-time password), so the next upgrade mints root,
+#     re-parents jobs-manager onto it and lays down the born-rotated marker.
+#   - The rotation guard's existing-datadir refusal no longer applies; its
+#     cluster-less refusal still does (an offline mint is never preserved).
+#   - Root always equals the Secret after a restart, so a Secret and a database
+#     that disagree heal at the next mysql restart instead of failing with 1045.
+#   - The mysql pod rolls once when the gate first reaches it.
+# The render REFUSES if the root password it would apply is not alphanumeric, or
+# if bootstrapDbPassword pins a different value (jobs-manager would be locked out).
+#
+# UNSET by default: the effective value comes from selfRotateMysqlRootByEnv below,
+# keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge.
+selfRotateMysqlRoot:
+
+# Off for dev, stg and prod until the rollout flips it, one environment at a time.
+selfRotateMysqlRootByEnv:
+  dev: false
+  stg: false
+  prod: false
 
 # The claim the MySQL Deployment mounts as its datadir. Leave empty (the default)
 # and it mounts the chart's own `mysql-pvc`, exactly as before. Set it only to the

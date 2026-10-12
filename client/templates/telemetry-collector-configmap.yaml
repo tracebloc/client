@@ -22,12 +22,12 @@
 {{- /*
   The edge Collector's pipeline — RFC-BACKEND-1872 D6/D7, backend#1906.
 
-  filelog -> transform (redaction floor) -> batch -> otlphttp
+  file_log -> transform (redaction floor) -> batch -> otlp_http
 
   D6's own words: "the redaction processor carries controller.py:158-184's secret
   patterns as a FLOOR — the same _LOG_REDACTIONS set, moved from the app to the
   Collector — so the credential scrubbing that exists today is relocated with the
-  pipeline, not lost in the move." Reading stdout through `filelog` bypasses the
+  pipeline, not lost in the move." Reading stdout through `file_log` bypasses the
   app-side handler that used to do it, so without this the move would silently
   REMOVE a protection.
 */}}
@@ -59,7 +59,7 @@ data:
           directory: /var/lib/tracebloc/telemetry
 
     receivers:
-      filelog:
+      file_log:
         include:
           {{- $logs := trimSuffix "/" ($tc.hostLogsPath | default "/var/log/pods") }}
           {{- /*
@@ -74,7 +74,7 @@ data:
             THE DANGEROUS CASE IS PARTIAL, NOT TOTAL. Nulling ONE list leaves a
             valid config with a shorter include list: the Collector starts, reports
             Ready, and silently omits three of the four Class A containers. Nulling
-            both empties it, which filelog refuses outright — loud, and therefore
+            both empties it, which file_log refuses outright — loud, and therefore
             the safer of the two. This guard exists for the quiet one.
 
             The schema catches this first. This is not belt-and-braces: helm has
@@ -167,7 +167,7 @@ data:
             matters: nulling ONE list leaves a non-empty include (one glob instead of
             four), which renders a perfectly valid config that starts, reports Ready,
             and silently omits three Class A containers. The combined check fires only
-            on total blindness — which filelog refuses on its own anyway. Checking the
+            on total blindness — which file_log refuses on its own anyway. Checking the
             lists separately is what makes this guard about the quiet failure.
           */}}
           {{- if not $tc.classAContainers }}
@@ -216,10 +216,10 @@ data:
       # one above), but `beginning` for a file with no stored offset -- so a pod
       # that ran and exited while the Collector was restarting is read late
       # instead of skipped. See the template comment above the include list.
-      # scripts/tests/collector-offsets-persisted.sh holds EVERY filelog
+      # scripts/tests/collector-offsets-persisted.sh holds EVERY file_log
       # receiver to persisted offsets and to the same parser, so this block
       # cannot lose either while the one above keeps it.
-      filelog/short-lived:
+      file_log/short-lived:
         include:
           {{- range $jobIncludes }}
           - {{ . | quote }}
@@ -307,8 +307,8 @@ data:
         timeout: 10s
 
     exporters:
-      otlphttp/backend:
-        # logs_endpoint, NOT endpoint: otlphttp appends /v1/logs to `endpoint`,
+      otlp_http/backend:
+        # logs_endpoint, NOT endpoint: otlp_http appends /v1/logs to `endpoint`,
         # and the ingest boundary is a versioned path of our own.
         logs_endpoint: {{ printf "%stelemetry/v1/records/" (include "tracebloc.backendUrl" .) | quote }}
         encoding: json
@@ -338,9 +338,9 @@ data:
       extensions: [bearertokenauth, file_storage]
       pipelines:
         logs:
-          receivers: [filelog{{ if $jobIncludes }}, filelog/short-lived{{ end }}]
+          receivers: [file_log{{ if $jobIncludes }}, file_log/short-lived{{ end }}]
           processors: [transform/redaction, batch]
-          exporters: [otlphttp/backend]
+          exporters: [otlp_http/backend]
       telemetry:
         logs:
           level: warn

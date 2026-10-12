@@ -402,6 +402,22 @@ _mac_ct_write_vminit_config() {
     || { rm -f "${conf}.tmp"; error "Apple container: could not write ${conf}."; }
 }
 
+# _mac_ct_stop_system -- stop the container system this installer's home runs, with its
+# own binary, bounded, and show it is stopped: launchd no longer lists it. No system, or
+# anyone else's, is left alone and is a success. A launchd that cannot say is "cannot
+# tell", by name, and so is a system still registered after the stop. The live proof's
+# EXIT trap and the darwin_k3s measurement (2.1 part 5b) stop the system through it.
+_mac_ct_stop_system() {
+  local state
+  state="$(_mac_ct_system_state)" || { echo "Apple container: launchd cannot say whether the container system stopped."; return 1; }
+  case "$state" in
+    none | foreign) return 0 ;;
+  esac
+  _bounded 120 "${state#ours }/bin/container" system stop </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+  state="$(_mac_ct_system_state)" || { echo "Apple container: launchd cannot say whether the container system stopped."; return 1; }
+  [[ "$state" == none ]] || { echo "Apple container: the container system did not stop (state: ${state})."; return 1; }
+}
+
 # _mac_ct_start_failed ROOT LOGS -- `system start` failed or was cut off. Apple's CLI
 # registers the apiserver with launchd before it waits on --timeout, so a failure can
 # leave this installer's system registered, and the next run would find an `ours` it
@@ -523,6 +539,27 @@ printf "%s\n" "$2" > /etc/rancher/k3s/tracebloc-kubelet.yaml
 ip addr add "$3/32" dev lo 2>/dev/null || case "$(ip -4 addr show dev lo)" in *"inet $3/32"*) ;; *) exit 1 ;; esac
 exec /bin/k3s server'
 
+# _mac_ct_refuse_host -- refuse, each by name, a host or a setting the macOS node does
+# not serve, before anything is written. Called by the darwin_k3s measurement (2.1 part
+# 5b) and by part 6's routing, which runs it where Linux runs _native_k3s_refuse_host.
+#   - A Mac with Apple silicon only: Apple's container runtime is arm64-only.
+#   - No hostPath storage and no dataset folder: the node is a VM, so either would be
+#     inside it, not on this Mac. (Linux serves both: there the node is the host.)
+#   - k3d's node counts, refused as on Linux (_native_k3s_refuse_k3d_nodes), and the
+#     pinned k3s version (_native_k3s_check_version).
+_mac_ct_refuse_host() {
+  [[ "${OS:-}" == "Darwin" ]] \
+    || error "The macOS node runs on a Mac only, and this machine runs ${OS:-an unknown OS}."
+  [[ "${ARCH:-}" == "arm64" ]] \
+    || error "The macOS node needs a Mac with Apple silicon: Apple's container runtime is arm64-only, and this Mac is ${ARCH:-of an unknown architecture}. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d."
+  [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]] \
+    || error "TRACEBLOC_STORAGE_MODE=hostpath is not available on the macOS node yet: the node is a VM, so its hostPath volumes would be inside the VM, not on this Mac. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE), or set TRACEBLOC_SUBSTRATE=k3d to keep hostpath on k3d."
+  [[ -z "${HOST_DATASET_DIR:-}" ]] \
+    || error "HOST_DATASET_DIR is not available on the macOS node yet: a folder on this Mac is not mounted into the node's VM. Unset TRACEBLOC_HOST_DATASET_DIR (and the older HOST_DATASET_DIR), or set TRACEBLOC_SUBSTRATE=k3d to keep the mount on k3d."
+  _native_k3s_refuse_k3d_nodes
+  _native_k3s_check_version
+}
+
 # _mac_ct_node_name -- the node container's name, and its volume's: the kube context's
 # name (_native_k3s_context), so `container list` and kubectl name the node alike.
 _mac_ct_node_name() {
@@ -575,16 +612,36 @@ _mac_ct_node_config() {
   printf 'flannel-iface: "%s"\n' "$TB_MAC_CT_NODE_IFACE"
 }
 
-# _mac_ct_node_size -- "<cpus> <memory>" for the node: spike S-M's shape, 4 CPUs and
-# 8 GB, or 4 GB on a Mac with less than 12 GB. Part 5 replaces it with the sizing rule.
+# _mac_ct_node_size -- "<cpus> <memory>" for the node.
+#   Memory: the installer's one macOS VM rule, preflight.sh's _macos_vm_mem_gb, which
+#           sizes Colima and Docker Desktop too, on the Mac's RAM as preflight reads it
+#           (_pf_host_mem_gb). Asked, never restated: one Mac gets one VM size whichever
+#           runtime holds the node. Lukas decided this on 2026-10-11
+#           (tracebloc/backend#4827), departing from RFC-0175's proposal, a quarter of
+#           the RAM between 4 and 16 GB.
+#   CPUs:   the Mac's cores less one, at least 1. The VM adds a vCPU of its own
+#           (RFC-0175's measurement), so the node advertises the Mac's cores.
+# The VM never returns memory (no balloon), so this is what the Mac gives up while the
+# node runs.
 _mac_ct_node_size() {
-  local bytes
-  bytes="$(sysctl -n hw.memsize 2>/dev/null)" || bytes=""
-  if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then
+  local spare=1 phys ncpu cpus re='^[1-9][0-9]*$'
+  if ! declare -F _macos_vm_mem_gb _pf_host_mem_gb >/dev/null 2>&1; then
+    echo "Apple container: the installer's macOS VM sizing (preflight.sh) is not loaded, so this run cannot size the node."
+    return 1
+  fi
+  phys="$(_pf_host_mem_gb)" || phys=""
+  if [[ ! "$phys" =~ $re ]]; then
     echo "Apple container: sysctl did not say how much memory this Mac has (hw.memsize), so this run cannot size the node."
     return 1
   fi
-  if (( bytes < 12 * 1024 * 1024 * 1024 )); then printf '4 4g'; else printf '4 8g'; fi
+  ncpu="$(sysctl -n hw.ncpu 2>/dev/null)" || ncpu=""
+  if [[ ! "$ncpu" =~ $re ]]; then
+    echo "Apple container: sysctl did not say how many cores this Mac has (hw.ncpu), so this run cannot size the node."
+    return 1
+  fi
+  cpus=$(( ncpu - spare ))
+  (( cpus >= 1 )) || cpus=1
+  printf '%s %sg' "$cpus" "$(_macos_vm_mem_gb "$phys")"
 }
 
 # _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE -- the `container run` argv, into
@@ -771,4 +828,166 @@ _mac_ct_merge_kubeconfig() {
   TB_K3S_ON_MAC=1
   _native_k3s_merge_kubeconfig "${dir}/k3s.yaml"
   tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
+}
+
+# ── Part 4: the login item io.tracebloc.node ────────────────────────────────
+#  Apple's runtime has no restart policy: after a login, a reboot, a stopped node or a
+#  killed VM, nothing brings the node back (RFC-0175 §12.6). A per-user LaunchAgent does,
+#  as in spike S-M. launchd runs our signed CLI's `tracebloc node ensure` at load and every
+#  60 s (cli-dev#1124): it starts the container system when none runs, then the node, and
+#  waits for it to be Ready. It reads the runtime and the node from the install record, so
+#  the plist names neither.
+#    - ProgramArguments is [the CLI's absolute path, node, ensure] (backend#5245 box 3):
+#      launchd has no PATH, and the login item then reads "tracebloc". The caller passes
+#      the path the CLI's installer reported. A binary without the verb is refused by
+#      name; the binary itself is asked, so no version is restated here.
+#    - Before anything is written, the binary's `node ensure` runs once, as launchd will
+#      run it. A command that fails would fail every minute with nobody told: measured on
+#      the e2e Mac, a CLI whose record schema predates this install's kinds refuses the
+#      record each time ("newer than this tracebloc reads"). That one, any other failure,
+#      and a run past its bound are each refused by name.
+#    - EnvironmentVariables: HOME is the home this run records into (tb_record_path), so
+#      the agent reads the record the installer wrote; TRACEBLOC_SKIP_TELEMETRY=1, or each
+#      tick would record a CLI outcome, about 1,440 a day.
+#    - LimitLoadToSessionType Aqua: it loads in a login session only, so a headless Mac
+#      never runs it (#1615 open decision 4). ProcessType Background.
+#  The plist is rewritten and the agent reloaded only when its bytes change: that is how
+#  a CLI that moved (an upgrade between /usr/local/bin and ~/.local/bin) is followed.
+#  On this path it replaces io.tracebloc.runtime (setup-macos.sh); part 6 wires both.
+TB_MAC_CT_AGENT_LABEL="io.tracebloc.node"
+TB_MAC_CT_AGENT_INTERVAL=60
+
+# _mac_ct_agent_home -- the home the install record is written under: tb_record_path
+# without the record's user path. It is the agent's HOME, and its plist and log live
+# under it.
+_mac_ct_agent_home() {
+  local rec home
+  rec="$(tb_record_path)"
+  home="${rec%"${TB_RECORD_USER_PATH#\~}"}"
+  if [[ "$home" == "$rec" || "$home" != /?* ]]; then
+    echo "Apple container: the install record's path is '${rec}', which is not under a home folder, so the login item has no home."
+    return 1
+  fi
+  printf '%s\n' "$home"
+}
+
+TB_MAC_CT_AGENT_HELP_S=30
+# _mac_ct_agent_bin_check BIN -- prints nothing and returns 0 when the login item can
+# run BIN: an absolute path to an executable file that knows `node ensure`. Otherwise
+# prints why and returns 1. `--help` runs nothing: an older tracebloc fails it, because
+# its root takes no unknown command.
+_mac_ct_agent_bin_check() {
+  local bin="$1" out rc
+  case "$bin" in
+    /*) ;;
+    *) echo "Apple container: the tracebloc CLI's path '${bin}' is not absolute, and launchd starts the login item with no PATH."; return 1 ;;
+  esac
+  [[ -f "$bin" && -x "$bin" ]] \
+    || { echo "Apple container: ${bin} is not an executable file, so the login item would have nothing to run."; return 1; }
+  rc=0
+  out="$(TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TB_MAC_CT_AGENT_HELP_S" "$bin" node ensure --help </dev/null 2>/dev/null)" || rc=$?
+  if [[ "$rc" -eq 124 ]]; then
+    echo "Apple container: \`${bin} node ensure --help\` did not finish within ${TB_MAC_CT_AGENT_HELP_S} s, so this run cannot tell whether the CLI knows the command the login item runs. It's safe to re-run this installer."
+    return 1
+  fi
+  [[ "$rc" -eq 0 && "$out" == *"node ensure"* ]] \
+    || { echo "Apple container: ${bin} does not know \`tracebloc node ensure\`, the command the login item runs, so it is older than this installer needs. Run \`tracebloc upgrade\`, then re-run this installer."; return 1; }
+}
+
+# _mac_ct_agent_trial BIN HOME -- prints nothing and returns 0 when BIN's `node ensure`,
+# run once as the login item runs it (HOME the record's home, telemetry off), succeeds
+# within TB_MAC_CT_AGENT_TRIAL_S; its output goes to the install log. Otherwise prints
+# why and returns 1. Step c calls it just after the node is Ready, so `node ensure` only
+# probes; a run past the bound cannot tell, and fails closed.
+TB_MAC_CT_AGENT_TRIAL_S=120
+_mac_ct_agent_trial() {
+  local bin="$1" home="$2" out rc=0 ver="" first _w _rest nl=$'\n'
+  out="$(HOME="$home" TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TB_MAC_CT_AGENT_TRIAL_S" "$bin" node ensure </dev/null 2>&1)" || rc=$?
+  printf '%s\n' "$out" >>"${LOG_FILE:-/dev/null}"
+  [[ "$rc" -ne 0 ]] || return 0
+  if [[ "$rc" -eq 124 ]]; then
+    echo "Apple container: \`${bin} node ensure\`, the command the login item runs, did not finish within ${TB_MAC_CT_AGENT_TRIAL_S} s, so this run cannot tell whether the login item would bring the node back. It's safe to re-run this installer."
+    return 1
+  fi
+  if [[ "$out" == *"newer than this tracebloc reads"* ]]; then
+    first="$(HOME="$home" TRACEBLOC_SKIP_TELEMETRY=1 _bounded 30 "$bin" version </dev/null 2>/dev/null)" || first=""
+    first="${first%%"$nl"*}"
+    read -r _w ver _rest <<<"$first" || true
+    echo "Apple container: the tracebloc CLI at ${bin} (${ver:-version unknown}) cannot read this install's record, which is newer than it, so the login item's \`node ensure\` would fail every ${TB_MAC_CT_AGENT_INTERVAL} s and the node would not come back after a restart. Run \`tracebloc upgrade\`, then re-run this installer."
+    return 1
+  fi
+  echo "Apple container: \`${bin} node ensure\`, the command the login item runs every ${TB_MAC_CT_AGENT_INTERVAL} s, failed (exit ${rc}), so the node would not come back after a restart. It said:"
+  printf '%s\n' "$out" | tail -n 10 | sed 's/^/    /'
+  return 1
+}
+
+# _mac_ct_agent_plist BIN HOME -- the login item's plist, by setup-macos.sh's writer.
+_mac_ct_agent_plist() {
+  local extra
+  extra="  <key>StartInterval</key><integer>${TB_MAC_CT_AGENT_INTERVAL}</integer>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>${2}</string>
+    <key>TRACEBLOC_SKIP_TELEMETRY</key><string>1</string>
+  </dict>"
+  _emit_launch_plist "$TB_MAC_CT_AGENT_LABEL" "$extra" "${2}/Library/Logs/tracebloc-node.log" "$1" node ensure
+}
+
+# _mac_ct_agent_loaded -- 0 when this user's GUI domain has the login item, 1 when it
+# does not (launchctl's 113), 2 when launchctl cannot say.
+_mac_ct_agent_loaded() {
+  local rc=0
+  _bounded 30 launchctl print "gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}" </dev/null >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    113) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# _mac_ct_ensure_agent BIN -- the login item io.tracebloc.node, running BIN's
+# `node ensure`: written, recorded as a launch-agent and loaded into this login session.
+# A loaded agent whose plist is already these bytes is left as it is.
+_mac_ct_ensure_agent() {
+  local bin="$1" why home dir plist want have="" loaded=0
+  if [[ -n "${TRACEBLOC_SKIP_AUTOSTART:-}" || -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
+    warn "Login item skipped (TRACEBLOC_SKIP_AUTOSTART/TRACEBLOC_NO_AUTOSTART set): after a reboot, or when its VM stops, the node stays down until you run \`tracebloc node ensure\`."
+    return 0
+  fi
+  why="$(_mac_ct_agent_bin_check "$bin")" || error "$why"
+  home="$(_mac_ct_agent_home)" || error "$home"
+  # A plist string holds these only escaped, and the writer prints values as they are.
+  case "${bin}${home}" in
+    *[\&\<\>]*) error "Apple container: '${bin}' or '${home}' holds &, < or >, which the login item's plist cannot hold as it is." ;;
+  esac
+  # Run as launchd will, before anything is written or loaded.
+  why="$(_mac_ct_agent_trial "$bin" "$home")" || error "$why"
+  dir="${TRACEBLOC_LAUNCHAGENTS_DIR:-${home}/Library/LaunchAgents}"
+  plist="${dir}/${TB_MAC_CT_AGENT_LABEL}.plist"
+  want="$(_mac_ct_agent_plist "$bin" "$home")"
+  if [[ -e "$plist" ]]; then
+    have="$(cat "$plist")" || error "Apple container: ${plist} cannot be read, so this run cannot tell what the login item runs."
+  fi
+  _mac_ct_agent_loaded || loaded=$?
+  [[ "$loaded" -ne 2 ]] \
+    || error "Apple container: launchctl could not say whether the login item ${TB_MAC_CT_AGENT_LABEL} is loaded, so this run leaves it as it is."
+  if [[ "$loaded" -eq 0 && "$have" == "$want" ]]; then
+    tb_record_write launch-agent "$TB_MAC_CT_AGENT_LABEL" "$plist"
+    log "Apple container: the login item ${TB_MAC_CT_AGENT_LABEL} is loaded and runs ${bin} node ensure."
+    return 0
+  fi
+  if [[ "$loaded" -eq 0 ]]; then
+    _bounded 30 launchctl bootout "gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+      || error "Apple container: could not unload the login item ${TB_MAC_CT_AGENT_LABEL} to rewrite it. Run launchctl bootout gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}, then re-run."
+  fi
+  mkdir -p "$dir" "${home}/Library/Logs" || error "Apple container: could not create ${dir}."
+  printf '%s\n' "$want" > "${plist}.tmp" && mv "${plist}.tmp" "$plist" \
+    || { rm -f "${plist}.tmp"; error "Apple container: could not write ${plist}."; }
+  # Recorded before it loads: a run cut off here leaves an artefact delete knows.
+  tb_record_write launch-agent "$TB_MAC_CT_AGENT_LABEL" "$plist"
+  _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+    || error "Apple container: launchd did not load the login item ${plist}, so the node would not come back after a reboot. It's safe to re-run this installer."
+  log "Apple container: the login item ${TB_MAC_CT_AGENT_LABEL} is loaded and runs ${bin} node ensure every ${TB_MAC_CT_AGENT_INTERVAL} s."
 }

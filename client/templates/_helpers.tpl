@@ -366,6 +366,41 @@ client-logs-pvc
 {{ .Values.pvc.logs | default "10Gi" }}
 {{- end }}
 
+{{/*
+  Durable pause/resume volume (client-runtime#882). OFF by default, pending the
+  model-IP and retention decision on backend#5266. "true" or "" so callers can
+  gate with `if (include ...)`.
+*/}}
+{{- define "tracebloc.trainingResumeEnabled" -}}
+{{- if (default dict .Values.trainingResume).enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+  The claim jobs-manager names in TRACEBLOC_TRAINING_RESUME_PVC and mounts at
+  /data/resume. A fixed literal like client-logs-pvc, unless the operator brings
+  their own claim (`trainingResume.existingClaim`).
+*/}}
+{{- define "tracebloc.trainingResumePvc" -}}
+{{- (default dict .Values.trainingResume).existingClaim | default "training-resume-pvc" -}}
+{{- end -}}
+
+{{/*
+  Stop-kind signal (client-runtime#882, tracebloc-engine#1539): jobs-manager
+  tells a training pod whether its SIGTERM is a pause or a stop, so a paused
+  pod exits 0 and reads Completed instead of Error. It holds no weights, so it
+  is ON by default and does not wait on backend#5266. `stopKindSignal.enabled:
+  false` turns it off; durable resume (trainingResume) always implies it.
+  "true" or "" so callers can gate with `if (include ...)`.
+*/}}
+{{- define "tracebloc.stopKindSignalEnabled" -}}
+{{- $on := (default dict .Values.stopKindSignal).enabled -}}
+{{- if or (include "tracebloc.trainingResumeEnabled" .) (kindIs "invalid" $on) $on -}}true{{- end -}}
+{{- end -}}
+
+{{- define "tracebloc.trainingResumePvName" -}}
+{{ include "tracebloc.fullname" . }}-training-resume-pv
+{{- end -}}
+
 {{- define "tracebloc.mysqlPvc" -}}
 mysql-pvc
 {{- end }}
@@ -382,6 +417,28 @@ mysql-pvc
 */}}
 {{- define "tracebloc.mysqlRootRotatedMarker" -}}
 mysql-root-rotated
+{{- end }}
+
+{{/*
+  Name of the Secret that holds the local MySQL passwords (client-dev#1702):
+  MYSQL_ROOT_PASSWORD, DB_BOOTSTRAP_PASSWORD and TB_CREDMGR / TB_META /
+  TB_INGEST_PASSWORD with their TRACEBLOC_ twins. Rendered by secrets.yaml with
+  helm.sh/resource-policy: keep, so it survives `helm uninstall` beside the
+  `mysql-pvc` datadir those passwords open.
+
+  A CONSTANT LITERAL, like tracebloc.mysqlPvc and tracebloc.mysqlRootRotatedMarker
+  and unlike tracebloc.secretName: it lives and dies with the data, so it must not
+  move when fullnameOverride does -- a rename or a reinstall under another name
+  still finds it, and its `lookup` needs no rename refusal under
+  fullname-override-completeness.sh. Two releases in one namespace already share
+  `mysql-pvc`, so sharing this is no new constraint.
+
+  It MUST NOT end in `-secrets`: docs/MIGRATIONS.md step 0 picks the release
+  Secret out of the release's Secrets by that suffix, and a second match would
+  make it back up the wrong one.
+*/}}
+{{- define "tracebloc.mysqlCredentialsSecret" -}}
+mysql-credentials
 {{- end }}
 
 {{- define "tracebloc.mysqlPvName" -}}
@@ -1867,6 +1924,63 @@ true
 {{- end }}
 
 {{/*
+  Whether to DROP edgeuser entirely at jobs-manager boot (backend#5427) -- the
+  step backend#1528 left as a deliberate operator action, made automatic for edges
+  we cannot reach. Resolves like tracebloc.narrowEdgeuser (operator override first,
+  else the per-env default), but the BAKED default is additionally conditional on
+  narrowEdgeuser ALREADY resolving on: a fleet is only dropped once it is narrowed
+  (edgeuser USAGE-only and unused), so DROP is the step past the risky one, staged
+  behind narrowing per fleet. An explicit `.Values.dropEdgeuser: true` is honoured
+  as given and guarded by tracebloc.assertDropEdgeuserIsSafe, exactly as narrowing's
+  override is.
+*/}}
+{{- define "tracebloc.dropEdgeuser" -}}
+{{- $override := (default dict .Values).dropEdgeuser -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.dropEdgeuserByEnv -}}
+{{- if get $byEnv $env -}}
+{{-   if (include "tracebloc.narrowEdgeuser" .) -}}
+true
+{{-   end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+  Refuse a DROP this fleet cannot survive, AT RENDER TIME. Mirrors
+  tracebloc.assertNarrowEdgeuserIsSafe: jobs-manager refuses the same combinations
+  at startup, but the render happens before the Deployment is patched, so an
+  operator who forces `dropEdgeuser: true` on an unready posture gets a refused
+  `helm upgrade` rather than a CrashLoop. The baked default cannot reach here with
+  an incomplete posture (it requires narrowEdgeuser, which requires all three
+  predecessors), so like its narrow sibling this fires in practice only for an
+  explicit override -- kept resolved-value-scoped for the same reason.
+*/}}
+{{- define "tracebloc.assertDropEdgeuserIsSafe" -}}
+{{- if (include "tracebloc.dropEdgeuser" .) -}}
+{{-   $missing := list -}}
+{{-   if not (include "tracebloc.narrowEdgeuser" .) -}}
+{{-     $missing = append $missing "narrowEdgeuser is off, so edgeuser has not been REVOKEd to USAGE-only -- a DROP must follow a soaked narrow, never precede it (the baked default already stages behind narrow; this is the guard for an explicit dropEdgeuser override)" -}}
+{{-   end -}}
+{{-   if not (include "tracebloc.bootstrapDbReparent" .) -}}
+{{-     $missing = append $missing "bootstrapDbReparent is off, so the account-minting bootstrap still authenticates AS edgeuser -- dropping it would strip the identity issuing the mint" -}}
+{{-   end -}}
+{{-   if not (include "tracebloc.serviceDbAccounts" .) -}}
+{{-     $missing = append $missing "serviceDbAccounts is off, so the metadata and dataset data plane still connects as edgeuser" -}}
+{{-   end -}}
+{{-   if not (include "tracebloc.perExperimentDbCreds" .) -}}
+{{-     $missing = append $missing "perExperimentDbCreds is off, so training pods still receive the shared edgeuser credential" -}}
+{{-   end -}}
+{{-   if $missing -}}
+{{-     fail (printf "dropEdgeuser is on but this fleet is not ready to retire edgeuser (backend#1528 S3 / backend#5427). Blocking reasons: %s. Dropping now would break a live consumer still authenticating as edgeuser, and because the heartbeat's information_schema enumeration is privilege-filtered it would degrade SILENTLY rather than error. Complete the posture first (serviceDbAccounts, then perExperimentDbCreds, then bootstrapDbReparent), narrow it, then drop. A DROP is NOT reversible from the S0 snapshot." (join "; " $missing)) -}}
+{{-   end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether a BAKED-DEFAULT rotateMysqlRoot / bootstrapDbReparent may resolve ON for
   THIS render without wedging an existing un-rotated edge (backend#947; @LukasWodka
   sign-off 2026-09-02; pre-marker case backend#3189). Consulted ONLY on the
@@ -1895,7 +2009,12 @@ true
       one-way door described above -- a SILENT loss of root on fleets that were
       already rotated. The live Secret's MYSQL_ROOT_PASSWORD key is the only signal
       that separates such an edge from an existing un-rotated one, so it is read here
-      (see the refusal in the define for why that Secret lookup is rename-safe). This
+      (see the refusal in the define for why that Secret lookup is rename-safe). Since
+      client-dev#1702 that key lives in `mysql-credentials`; it is read from there,
+      or from the release Secret when that does not exist yet (the first upgrade onto
+      the split), as one WHOLE object exactly as secrets.yaml's `$dbSource` -- so a
+      root key removed from `mysql-credentials` is not resurrected from the stale
+      copy the dual-write leaves in the release Secret. This
       render also resolves rotation on, so it lays the marker down -- backfilling it,
       after which every later render resolves via the rename-safe marker arm instead.
     - NEW / fresh datadir on a live cluster (no marker yet, no mysql-pvc, no baked
@@ -1905,6 +2024,9 @@ true
     - EXISTING datadir (mysql-pvc present, no marker, no baked root in the Secret), OR
       a BLIND / cluster-less render that cannot prove the datadir fresh -> OFF. Fall
       back to the edge's existing password (the image-baked literal); no mint, no wedge.
+      EXCEPT with selfRotateMysqlRoot on and the cluster visible (backend#5427) -> ON:
+      mysqld applies the minted password itself at its next start, so the existing
+      datadir is rotated rather than wedged.
 
   An accessible existing edge we DO want rotated carries an explicit
   `rotateMysqlRoot=true` override (the manual-rotation path -- how dev and edge 713
@@ -1924,6 +2046,12 @@ true
 {{- $pvc := (lookup "v1" "PersistentVolumeClaim" .Release.Namespace (include "tracebloc.mysqlPvc" .)) -}}
 {{- $clusterVisible := (lookup "v1" "Namespace" "" "kube-system") -}}
 {{- $secret := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.secretName" .)) -}}
+{{- $dbSecret := (lookup "v1" "Secret" .Release.Namespace (include "tracebloc.mysqlCredentialsSecret" .)) -}}
+{{- /* The MySQL passwords' source, as ONE object: secrets.yaml's `$dbSource`. */ -}}
+{{- $dbSource := $secret -}}
+{{- if $dbSecret -}}
+{{-   $dbSource = $dbSecret -}}
+{{- end -}}
 {{- /*
     The datadir's presence, live OR declared. `mysqlDatadirExists` is the same
     values-level surrogate secrets.yaml's root-mint guard uses (backend#2892): it
@@ -1974,7 +2102,11 @@ true
     the only signal left; it is read WITH the refusal that turns that silent miss
     into a loud fail. If the datadir is present but no Secret resolves under the
     current name, that is a rename, or a reinstall over a kept datadir whose
-    uninstall deleted the Secret. GATED ON `mysqlRootRotationAcknowledged`: that
+    uninstall deleted the Secret. Since client-dev#1702 the root key's home is the
+    kept, constant-named `mysql-credentials`, so the refusal needs BOTH Secrets
+    missing: with that one present the state is readable and nothing is refused --
+    which is what makes a reinstall over a kept datadir just work. GATED ON
+    `mysqlRootRotationAcknowledged`: that
     flag clears ALL of the guard's refuse arms (values.yaml -- the same three in
     secrets.yaml's mint), this one included, so an operator reinstalling over a kept
     datadir of an UN-ROTATED edge (no marker, Secret gone) can acknowledge and
@@ -1985,8 +2117,8 @@ true
     the Secret, and a cluster-less render (helm template / helm-unittest / GitOps)
     has neither the PVC nor the Secret, so none of them fail here.
 */ -}}
-{{- if and $datadirPresent (not $secret) (not .Values.mysqlRootRotationAcknowledged) -}}
-{{-   fail (printf "release %q in namespace %q has MySQL data (PersistentVolumeClaim %q) but no Secret named %q -- the name this render resolves to -- and no born-rotated marker. bakedRootRotationOn cannot read root's rotation state from a Secret that is not there, and treating the miss as \"not rotated\" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. TWO CAUSES look like this. (1) A RENAME (fullnameOverride changed on a live release): the Secret still exists under the OLD name -- copy it to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command), or put fullnameOverride back to the value this release was last rendered with. (2) A REINSTALL over a kept datadir whose uninstall DELETED the Secret (docs/MIGRATIONS.md): there is no Secret to copy. A born-rotated edge keeps its marker across the uninstall and this render resolves rotated from it; an un-rotated edge has no marker, so set mysqlRootRotationAcknowledged=true to proceed on the image-baked password -- the ack clears this arm the same way it clears the secrets.yaml mint arms. See docs/MIGRATIONS.md." .Release.Name .Release.Namespace (include "tracebloc.mysqlPvc" .) (include "tracebloc.secretName" .)) -}}
+{{- if and $datadirPresent (not $dbSecret) (not $secret) (not .Values.mysqlRootRotationAcknowledged) -}}
+{{-   fail (printf "release %q in namespace %q has MySQL data (PersistentVolumeClaim %q) but neither a Secret named %q (the MySQL passwords' own Secret, kept across helm uninstall) nor one named %q (the release Secret this render resolves to), and no born-rotated marker. bakedRootRotationOn cannot read root's rotation state from a Secret that is not there, and treating the miss as \"not rotated\" would drop MYSQL_ROOT_PASSWORD and revert jobs-manager to the root-equivalent edgeuser this epic retires. TWO CAUSES look like this. (1) A RENAME (fullnameOverride changed on a live release) of a release that never ran a chart with %q: the Secret still exists under the OLD name -- copy it to the name this render wants, then re-run (secrets.yaml prints the exact kubectl/jq command), or put fullnameOverride back to the value this release was last rendered with. (2) A REINSTALL over a kept datadir whose uninstall DELETED both (docs/MIGRATIONS.md): restore them from a backup if you took one. Otherwise a born-rotated edge keeps its marker across the uninstall and this render resolves rotated from it; an un-rotated edge has no marker, so set mysqlRootRotationAcknowledged=true to proceed on the image-baked password -- the ack clears this arm the same way it clears the secrets.yaml mint arms. See docs/MIGRATIONS.md." .Release.Name .Release.Namespace (include "tracebloc.mysqlPvc" .) (include "tracebloc.mysqlCredentialsSecret" .) (include "tracebloc.secretName" .) (include "tracebloc.mysqlCredentialsSecret" .)) -}}
 {{- end -}}
 {{- /*
     PRE-MARKER ROTATED (backend#3189): the live Secret already carries a baked
@@ -1995,10 +2127,22 @@ true
     post-dates the rotation. Same `and $secret $secret.data (hasKey ...)` shape as
     secrets.yaml's tier-2 reads, so an empty offline lookup is nil-safe.
 */ -}}
-{{- $bakedRoot := (and $secret $secret.data (hasKey $secret.data "MYSQL_ROOT_PASSWORD")) -}}
+{{- $bakedRoot := (and $dbSource $dbSource.data (hasKey $dbSource.data "MYSQL_ROOT_PASSWORD")) -}}
 {{- if $bakedRoot -}}
 true
 {{- else if and $clusterVisible (not $datadirPresent) -}}
+true
+{{- else if and $clusterVisible $datadirPresent (include "tracebloc.selfRotateMysqlRootGate" .) -}}
+{{- /*
+    EXISTING UN-ROTATED, SELF-ROTATING (backend#5427). The one case above that
+    resolves OFF does so because nothing could make the live database accept a
+    freshly minted root password. With selfRotateMysqlRoot on, mysqld does it
+    itself: the init file (tracebloc.selfRotateMysqlRoot) hands it the minted
+    value at its next start, which needs no authentication and so never
+    needs the old password. So this edge rotates like a fresh one. Still
+    requires a VISIBLE cluster: the mint below it is only safe where tier 2 can
+    preserve the value on the next render.
+*/ -}}
 true
 {{- end -}}
 {{- end -}}
@@ -2025,6 +2169,60 @@ true
 {{- $byEnv := default dict .Values.rotateMysqlRootByEnv -}}
 {{- if and (get $byEnv $env) (include "tracebloc.bakedRootRotationOn" .) }}true{{ end -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+  The selfRotateMysqlRoot GATE as set (backend#5427 Part B): operator override
+  first, else the per-environment default, like its siblings. Consulted directly
+  only by tracebloc.bakedRootRotationOn, which cannot ask
+  tracebloc.selfRotateMysqlRoot (that one includes rotateMysqlRoot, which
+  includes bakedRootRotationOn). Every template asks tracebloc.selfRotateMysqlRoot.
+
+  WHY. An existing datadir keeps the root password it was initialised with, and
+  on an edge that predates rotation that is the leaked image literal. The manual
+  fix (docs/migration-tools/rotate-mysql-root.md) needs cluster access, which we
+  do not have on customer edges, and jobs-manager cannot do it either: on such
+  an edge it has no root credential at all (backend#5272). mysqld can, through
+  init_file, which runs at startup without authentication.
+
+  Off for dev, stg and prod until the rollout flips it, one environment at a
+  time.
+*/}}
+{{- define "tracebloc.selfRotateMysqlRootGate" -}}
+{{- $override := (default dict .Values).selfRotateMysqlRoot -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.selfRotateMysqlRootByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+  Whether self-rotation is IN EFFECT for this render (backend#5427): the gate on
+  AND rotation resolved on, so there is a chart-owned root password for mysqld
+  to apply. This is what templates read, never the raw gate.
+  The ONE condition every piece is rendered on -- the MYSQL_ROOT_INIT_SQL key in
+  secrets.yaml, and the init container, emptyDir and MYSQL_HOME env in
+  mysql-deployment.yaml -- so they cannot disagree.
+
+  It is safe to render on ANY edge because the init container decides at
+  runtime, not at render time. Rehearsed on MySQL 5.7.41 and 8.4.11 (backend#5427):
+    - init_file on a FRESH datadir breaks the image entrypoint's initialisation
+      (its temporary server runs init_file too, changes root@localhost, and the
+      entrypoint then fails to log in). So the init container writes nothing
+      unless /var/lib/mysql/mysql exists -- the entrypoint's own test.
+    - an init_file that is missing or unreadable ABORTS mysqld. So the option
+      that names it is never in a ConfigMap, which a running pod picks up live:
+      the init container writes it, beside the SQL, into a memory emptyDir that
+      mysqld reads as $MYSQL_HOME/my.cnf, a server-only option file it skips
+      silently when absent. Both files exist together or not at all.
+    - a failing statement inside init_file is logged and skipped; the server
+      starts and runs the statements after it.
+*/}}
+{{- define "tracebloc.selfRotateMysqlRoot" -}}
+{{- if and (include "tracebloc.selfRotateMysqlRootGate" .) (include "tracebloc.rotateMysqlRoot" .) }}true{{ end -}}
 {{- end }}
 
 {{/*
@@ -2645,6 +2843,23 @@ values key works, the canonical first (the passthrough's alias-first rule).
 {{- end }}
 
 {{/*
+tracebloc.hostOsEnv -- the host machine's operating system (client-runtime#914):
+env.TRACEBLOC_HOST_OS, e.g. "Ubuntu 22.04" or "Windows 11", which BOTH installers
+set with --set-string (empty when they cannot tell). The resource monitor sends it
+on every heartbeat as `os`, and the web app shows it beside the machine's name.
+Only the installer can answer: the monitor's own /etc/os-release is its image's.
+Renders only when non-empty, and under the canonical name only: the variable is new,
+so it has no legacy spelling (settings naming, backend#3846).
+*/}}
+{{- define "tracebloc.hostOsEnv" -}}
+{{- $value := (get (default dict .Values.env) "TRACEBLOC_HOST_OS") | default "" | toString }}
+{{- if $value }}
+- name: TRACEBLOC_HOST_OS
+  value: {{ $value | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
 jobs-manager containers, dual-emitted where the name has a TRACEBLOC_ canonical
 (settings naming, backend#3846; legacy remove_by 2026-12-31).
@@ -2689,7 +2904,7 @@ from the render and fails on one missing here.
 {{- $aliased := list
       "CLIENT_PASSWORD" "CLIENT_PVC" "CLIENT_LOGS_PVC"
       "POD_TOKEN_SIGNING_SECRET" "POD_TOKEN_TTL_SECONDS"
-      "PER_INGESTION_TABLES" "PER_DATASET_PVCS" "PER_EXPERIMENT_DB_CREDS" "NARROW_EDGEUSER" "SERVICE_DB_ACCOUNTS"
+      "PER_INGESTION_TABLES" "PER_DATASET_PVCS" "PER_EXPERIMENT_DB_CREDS" "NARROW_EDGEUSER" "DROP_EDGEUSER" "SERVICE_DB_ACCOUNTS"
       "TB_CREDMGR_USER" "TB_CREDMGR_PASSWORD" "TB_META_USER" "TB_META_PASSWORD" "TB_INGEST_USER" "TB_INGEST_PASSWORD"
       "INGESTOR_IMAGE_REPOSITORY" "INGESTOR_IMAGE_TAG" "INGESTOR_IMAGE_DIGEST"
       "REQUESTS_PROXY_URL" "EGRESS_PROXY_URL" "JOB_IMAGE_HOST"

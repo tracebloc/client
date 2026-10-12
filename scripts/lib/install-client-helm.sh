@@ -1204,7 +1204,9 @@ _precreate_fit_estimate() {
 #
 # On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) the same readers answer from the host, which
 # is the node (preflight.sh), and the reservation is the `linux_k3s` key's,
-# measured on native k3s (client-dev#1469). This gate is the first step of the
+# measured on native k3s (client-dev#1469). On macOS they answer the node's size, the
+# VM mac-container.sh's rule gives, and the key is `unknown` until darwin_k3s is
+# measured (2.1 part 5b). This gate is the first step of the
 # create path that knows the key, so a table without that row is said here,
 # once per run (cluster.sh).
 _precreate_fit_gate() {
@@ -1365,6 +1367,63 @@ _client_id_from_secret() {
   return 0
 }
 
+# _client_password_from_secret REL NS — the machine credential the client's pods
+# authenticate with, from the release's Secret (canonical key first, the legacy
+# one as fallback), or "" when it can't be read. Same bounded, one-Secret read as
+# _client_id_from_secret; the value never reaches argv (verify_credentials feeds
+# it to curl on stdin).
+_client_password_from_secret() {
+  local rel="$1" ns="$2" rows b64 out=""
+  has kubectl || return 0
+  rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
+            -o 'custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_PASSWORD:.data.TRACEBLOC_CLIENT_PASSWORD,CLIENT_PASSWORD:.data.CLIENT_PASSWORD' \
+            --no-headers --request-timeout=5s 2>/dev/null)" || return 0
+  b64="$(_client_id_from_secret_rows "$rows")"
+  [[ -n "$b64" ]] || return 0
+  out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
+    || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
+    || out=""
+  printf '%s' "$out"
+  return 0
+}
+
+# _restart_credential_consumers REL — roll the workloads that authenticate with the
+# machine credential: the release's Deployments except MySQL (`mysql-client`,
+# which never uses it) and its node-agent DaemonSets (they read the mirrored
+# Secret). The DaemonSets are found by the release's instance label across ALL
+# namespaces, never by a namespace named here, so a chart that moves them does not
+# silently leave them on the rejected credential. Bounded and best-effort, but
+# never silent: a listing that fails or finds no Deployment counts as a failed
+# restart, because "nothing to roll" is the state that leaves every pod on the old
+# credential. Returns 1 when any restart failed: the Secret already holds the new,
+# valid credential, so no later run classifies `credential-rejected` and nothing
+# would roll these pods again. The caller makes that fatal; the hint is the fix.
+_restart_credential_consumers() {
+  local rel="$1" d ns nm row failed=0 listed rows
+  listed="$(kubectl get deployment -n "$rel" -l "app.kubernetes.io/instance=${rel}" \
+              -o 'jsonpath={.items[*].metadata.name}' --request-timeout=15s 2>/dev/null)" || failed=1
+  [[ -n "$listed" ]] || failed=1
+  for d in $listed; do
+    [[ "$d" == mysql-client ]] && continue
+    kubectl rollout restart "deployment/$d" -n "$rel" --request-timeout=15s >>"${LOG_FILE:-/dev/null}" 2>&1 || failed=1
+  done
+  rows="$(kubectl get daemonset -A -l "app.kubernetes.io/instance=${rel}" \
+            -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name' \
+            --no-headers --request-timeout=15s 2>/dev/null)" || failed=1
+  while read -r ns nm; do
+    [[ -n "$ns" && -n "$nm" ]] || continue
+    kubectl rollout restart "daemonset/$nm" -n "$ns" --request-timeout=15s >>"${LOG_FILE:-/dev/null}" 2>&1 || failed=1
+  done <<<"$rows"
+  if [[ "$failed" == 1 ]]; then
+    warn "Couldn't restart every tracebloc service onto the new credential, so this machine stays offline until they restart. Re-running the installer won't redo it. Run:"
+    hint "  kubectl rollout restart deployment -n ${rel} -l app.kubernetes.io/instance=${rel}"
+    hint "  kubectl get daemonset -A -l app.kubernetes.io/instance=${rel}   # then: kubectl rollout restart daemonset/<name> -n <namespace>"
+    return 1
+  fi
+  log "restarted the services that authenticate, onto the new credential"
+  return 0
+}
+
 # detect_installed_client — report the tracebloc client already installed on this
 # cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
 # (both empty when none is found). Enumerate client-chart releases across ALL
@@ -1380,7 +1439,8 @@ _client_id_from_secret() {
 # (_client_id_from_secret): since backend#2571 either place is legitimate, and a
 # client-chart release that names an id in NEITHER is UNKNOWN, not absent.
 detect_installed_client() {
-  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_UNKNOWN=0
+  # shellcheck disable=SC2034  # INSTALLED_CLIENT_RELEASE is consumed cross-file by assess.sh
+  INSTALLED_CLIENT_ID=""; INSTALLED_CLIENT_NS=""; INSTALLED_CLIENT_RELEASE=""; INSTALLED_CLIENT_UNKNOWN=0
   # No helm => nothing helm-installed here; a genuine (documented) "no client".
   has helm || return 0
   local _gvf _rel _ns _id _list _unreadable=0
@@ -1422,7 +1482,8 @@ detect_installed_client() {
       # (client-dev#1305) -- rebuilding the name from the override in these
       # values restated the chart's rule, and was right only while it matched.
       [[ -z "$_id" ]] && _id="$(_client_id_from_secret "$_rel" "$_ns")"
-      [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; break; }
+      # shellcheck disable=SC2034  # INSTALLED_CLIENT_RELEASE: consumed by assess.sh
+      [[ -n "$_id" ]] && { INSTALLED_CLIENT_ID="$_id"; INSTALLED_CLIENT_NS="$_ns"; INSTALLED_CLIENT_RELEASE="$_rel"; break; }
       # A client-chart release with no id in EITHER place is a client we cannot
       # NAME, not an absent one. Record it and keep scanning; if nothing else
       # names one, the fail-closed check below reports UNKNOWN.
@@ -1822,6 +1883,17 @@ _gpu_unsupported_set_args() {
   )
 }
 
+# _host_os_set_args -- the host's OS for the dashboard (client-runtime#914), as one
+# --set-string pair: env.TRACEBLOC_HOST_OS from _host_os_label (common.sh). The
+# canonical name only: the variable is new, so it has no legacy spelling (RFC-0076).
+# ALWAYS passed, empty when the host cannot be read, so a reconciled release never
+# keeps another machine's answer. Into _TB_HOST_OS_ARGS (an array, bash-3.2 safe).
+_host_os_set_args() {
+  _TB_HOST_OS_ARGS=(
+    --set-string "env.TRACEBLOC_HOST_OS=$(_helm_set_string_escape "$(_host_os_label)")"
+  )
+}
+
 # _gpu_decision_set_args -- THIS run's GPU decision as helm args, for the two paths that
 # install over values the installer did not just write: the adopt reconcile (a release's
 # stored values, --reuse-values) and dev mode (the caller's TRACEBLOC_VALUES_FILE,
@@ -2169,6 +2241,10 @@ _reconcile_adopted_client() {
   # THIS run's decision, the one dev mode applies too (_gpu_decision_set_args).
   _gpu_decision_set_args
   _args+=("${_TB_GPU_DECISION_ARGS[@]}")  # set-u-safe: _gpu_decision_set_args always assigns
+  # The host's OS (client-runtime#914) rides the reconcile too: --reuse-values
+  # would keep whatever an earlier run, or no run, wrote.
+  _host_os_set_args
+  _args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
   # The local API (backend#5208) rides the same reconcile, for the same reason:
   # a release from before localApi existed reuses the chart default, off, while
   # create_cluster's _ensure_local_api_port has just mapped 127.0.0.1 to its
@@ -3569,6 +3645,10 @@ EOF
     _gpu_unsupported_set_args
     _gpu_args=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
   fi
+  # The host's OS (client-runtime#914), on both branches: not a GPU word, but the
+  # same --set-string route, so it rides this array into the one helm call.
+  _host_os_set_args
+  _gpu_args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
@@ -3594,6 +3674,15 @@ EOF
   # the tracebloc CLI default to it with no -n / --namespace flag. Best-effort:
   # a failure here must not abort an otherwise-successful install.
   kubectl config set-context --current --namespace "$TB_NAMESPACE" >/dev/null 2>&1 || true
+
+  # A credential issued to a client that is already running here (the
+  # credential-rejected repair, backend#5365) is in the Secret now, but the pods
+  # read it from their environment at start and the chart doesn't roll them on a
+  # Secret change. Restart the ones that authenticate so they use it.
+  if [[ "${TB_CREDENTIAL_REISSUED:-0}" == 1 ]]; then
+    _restart_credential_consumers "$TB_NAMESPACE" \
+      || error "This machine's new credential is in place, but its services are still on the old one."
+  fi
 
   # Honest N-of-M count bar as the service images pull onto the node. Best-effort +
   # bounded + non-fatal — the real readiness gate is step f (wait_for_client_ready).

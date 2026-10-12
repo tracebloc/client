@@ -25,6 +25,14 @@
   backend#2626). A render that resolves on via that Secret probe lays this marker
   down, so the edge converges onto the rename-safe signal from then on.
 
+  SINCE client-dev#1702 the baked root key lives in `mysql-credentials`, which is
+  constant-named and kept across `helm uninstall` exactly like this marker, so the
+  two now persist or perish together with the datadir. bakedRootRotationOn reads
+  that Secret first and the release Secret only when it does not exist yet (the
+  first upgrade onto the split), as a whole; the marker is still looked up first
+  and still backfilled, because a pre-split edge's root key is in the release
+  Secret, whose name moves with fullnameOverride.
+
   Rendered IFF rotation resolves on (fresh install, marker/PVC-driven upgrades, an
   explicit override, or a pin). resource-policy: keep so it survives a helm
   uninstall the way the datadir PVC does -- the datadir and its "is rotated" bit

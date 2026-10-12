@@ -655,6 +655,20 @@
         "type": "boolean"
       }
     },
+    "dropEdgeuser": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from dropEdgeuserByEnv keyed on the resolved CLIENT_ENV. backend#5427 Part A: the terminal step past narrowEdgeuser — DROP USER 'edgeuser'@'%' and @'localhost' at every jobs-manager boot, so an inaccessible customer edge retires the leaked-literal account itself (we never reach those edges to run the DDL by hand). STRICTLY STRONGER THAN narrowEdgeuser AND GATED ON IT, enforced two ways: the BAKED default (dropEdgeuserByEnv) resolves on only where narrowEdgeuser also resolves on (tracebloc.dropEdgeuser returns empty otherwise), and an explicit dropEdgeuser:true override is honored by the helper but then REFUSED at render by tracebloc.assertDropEdgeuserIsSafe — and again by jobs-manager at startup — when narrowEdgeuser is not on. So the effect is the same whichever path you take: an edge is never dropped before it is narrowed. It therefore inherits narrowEdgeuser's full predecessor requirement (bootstrapDbReparent, serviceDbAccounts, perExperimentDbCreds all on), checked in the same assert. The DROP is IF EXISTS and idempotent: once the account is gone each subsequent boot is a no-op. Unlike narrow (reversible from the S0 SHOW GRANTS snapshot) this is NOT reversible — only flip it where the fleet's posture is verified and narrowEdgeuser has already soaked."
+    },
+    "dropEdgeuserByEnv": {
+      "type": "object",
+      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). Shipped FALSE for dev, stg and prod: Part A lands the mechanism inert so the chart can record it before any environment opts in, and the dev→stg→prod flip follows once narrowEdgeuser has soaked on each. The baked default declines on any edge whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
     "credmgrPassword": {
       "type": "string",
       "description": "RFC-0003 D10 (backend#1181): optional operator pin for the tb_credmgr account password (3-tier resolution, mirrors podTokenSigningSecret). Empty = generate-and-persist. Set for DR / a pre-created MySQL account / forced rotation, or to keep it stable across a perExperimentDbCreds toggle. Must be alphanumeric."
@@ -697,7 +711,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from rotateMysqlRootByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. backend#947 / backend#1528 Phase 0: chart-manage the mysql-client root password (generated Secret + MYSQL_ROOT_PASSWORD env) so a FRESH datadir is born rotated off the image's baked literal. Off everywhere by default. Only rotates a fresh datadir; an existing edge needs the one-time ALTER USER 'root' rollout DDL (reads the same Secret). Turning it on rolls the mysql pod."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from rotateMysqlRootByEnv keyed on the resolved CLIENT_ENV, mirroring serviceDbAccounts. backend#947 / backend#1528 Phase 0: chart-manage the mysql-client root password (generated Secret + MYSQL_ROOT_PASSWORD env) so a FRESH datadir is born rotated off the image's baked literal. Off everywhere by default. Only rotates a fresh datadir; an existing edge needs the one-time ALTER USER 'root' rollout DDL (reads the same Secret), or selfRotateMysqlRoot, which has mysqld run it at every start. Turning it on rolls the mysql pod."
     },
     "mysqlRootPassword": {
       "type": "string",
@@ -716,6 +730,20 @@
         "null"
       ],
       "description": "backend#2892 (chart >= 1.9.90): declare that this fleet's MySQL datadir ALREADY EXISTS. Normally unset — the fail-closed root-rotation guard already covers most fleets: a cluster-less render REFUSES the mint by default (it cannot see a cluster), and a live render DETECTS the datadir by its PVC lookup. This is the explicit assertion for the gaps those leave: a LIVE render whose datadir PVC the lookup cannot see (a renamed or not-yet-bound PVC), and message clarity (with it set, the refusal names the existing-datadir migration specifically rather than the generic cannot-see-a-cluster message). Pin it in the fleet's checked-in overlay: a durable per-fleet fact. PROTECTION, not a rotation path — like the acknowledgement it does not make a cluster-less rotation converge (the minted value is not preserved offline: tier-2 preservation is a live lookup too, the clientId/clientPassword limit), so to actually rotate a cluster-less fleet pin mysqlRootPassword (tier 1, stable, and it bypasses the mint) or render server-side. A FRESH install leaves it unset; charts < 1.9.90 ignore it (open schema). See docs/migration-tools/rotate-mysql-root.md."
+    },
+    "selfRotateMysqlRoot": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from selfRotateMysqlRootByEnv keyed on the resolved CLIENT_ENV. backend#5427: let mysqld rotate root itself. At every start on an EXISTING datadir it sets root's password to the Secret's MYSQL_ROOT_PASSWORD through init_file, which runs before the server accepts connections and needs no authentication; a fresh datadir is left to the entrypoint. An existing un-rotated edge on a live cluster then resolves rotation ON, and the rotation guard's existing-datadir refusal no longer applies (its cluster-less refusal still does). The render refuses a root password that is not alphanumeric, or a bootstrapDbPassword pin that differs from it. Turning it on rolls the mysql pod once."
+    },
+    "selfRotateMysqlRootByEnv": {
+      "type": "object",
+      "description": "Per-environment default for selfRotateMysqlRoot (backend#5427), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Off for dev, stg and prod until the rollout flips it, one environment at a time.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
     },
     "mysqlClaimName": {
       "type": [
@@ -747,6 +775,40 @@
     "perDatasetPvcs": {
       "type": "boolean",
       "description": "RFC-0003 D9 Track B (client-runtime#203/#261): stamp PER_DATASET_PVCS=1 into jobs-manager — training pods get one read-only hostPath PV/PVC per dataset handle instead of a subPath view of the shared PVC. Single-node/hostPath clusters only; requires clusterScope (PVs are cluster-scoped)."
+    },
+    "stopKindSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Stop-kind signal for pause (client-runtime#882). On by default: TRACEBLOC_STOP_KIND_SIGNAL=1 on jobs-manager and `patch` on pods, so a paused training pod exits 0. Holds no weights. trainingResume.enabled implies it.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "trainingResume": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Durable pause/resume volume (client-runtime#882). Off by default pending backend#5266. On: a PVC shared by jobs-manager (at /data/resume) and training pods (per-experiment subPath), TRACEBLOC_TRAINING_RESUME_PVC on jobs-manager, and `patch` on pods for the stop-kind annotation.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "existingClaim": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$",
+          "default": "",
+          "description": "Name of a PVC you created; empty means the chart creates training-resume-pvc."
+        },
+        "storage": {
+          "type": "string",
+          "default": "10Gi",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$",
+          "description": "Size of the chart-created claim."
+        }
+      }
     },
     "ingestionAuthz": {
       "type": "object",
@@ -1992,7 +2054,7 @@
     },
     "rotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Baked ON for dev, stg and prod, but the baked default rotates ONLY a fresh datadir on a live cluster (born rotated) or an already-rotated edge (preserved); an existing un-rotated / blind edge falls back to its current password rather than wedging (tracebloc.bakedRootRotationOn, backend#947). An accessible existing edge is rotated by the explicit override plus the one-time ALTER USER 'root' DDL.",
+      "description": "Per-environment default for the backend#947 mysql-client root-password rotation, keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). Baked ON for dev, stg and prod, but the baked default rotates ONLY a fresh datadir on a live cluster (born rotated) or an already-rotated edge (preserved); an existing un-rotated / blind edge falls back to its current password rather than wedging (tracebloc.bakedRootRotationOn, backend#947); with selfRotateMysqlRoot on, an existing un-rotated edge on a live cluster is rotated too (backend#5427). An accessible existing edge is rotated by the explicit override plus the one-time ALTER USER 'root' DDL.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -2059,7 +2121,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Class A containers in nodeAgents.namespace rather than the release namespace — the namespace is part of the filelog path."
+          "description": "Class A containers in nodeAgents.namespace rather than the release namespace — the namespace is part of the file_log path."
         },
         "hostLogsPath": {
           "type": "string",

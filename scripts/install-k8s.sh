@@ -6,12 +6,12 @@
 #  GPUs    : NVIDIA (Linux)  ✓     AMD (Linux) ✓     macOS passthrough ✗
 #
 #  Usage (macOS / Linux):
-#    curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+#    curl -fsSL https://tracebloc.io/i.sh | bash
 #    -- OR --
 #    chmod +x install-k8s.sh && ./install-k8s.sh
 #
 #  Windows (PowerShell as Administrator):
-#    irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+#    irm https://tracebloc.io/i.ps1 | iex
 #
 #  Environment variable overrides (optional). Each TRACEBLOC_ name's older
 #  spelling -- the name without TRACEBLOC_ (CLUSTER_NAME), or TB_ in its place
@@ -378,7 +378,7 @@ main() {
     Linux)    install_linux ;;
     MINGW*|MSYS*|CYGWIN*)
       error "Windows detected. Use PowerShell instead:
-  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex" ;;
+  irm https://tracebloc.io/i.ps1 | iex" ;;
     *)        error "Unsupported OS: $OS" ;;
   esac
   # Guarded: a stale bootstrap may not have fetched install-cli.sh — then step d's

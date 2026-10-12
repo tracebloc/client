@@ -1360,11 +1360,19 @@ _native_k3s_refuse_host() {
   # so the chart's hostPath PVs name HOST_DATA_DIR and the dataset dir themselves
   # (install-client-helm.sh, _hostpath_paths_block). validate_config still refuses a
   # dataset dir under node-local, on both substrates.
+  _native_k3s_refuse_k3d_nodes
+  _native_k3s_check_version
+}
+
+# _native_k3s_refuse_k3d_nodes -- AGENTS and SERVERS, k3d's node counts, refused by name:
+# native k3s is one server with no agent, on Linux (_native_k3s_refuse_host) and in the
+# macOS node (mac-container.sh, _mac_ct_refuse_host) alike. Outside k3d's create path,
+# the one reader of either (shared-state.bats).
+_native_k3s_refuse_k3d_nodes() {
   [[ -z "${AGENTS:-}" ]] \
     || error "AGENTS=${AGENTS} is a k3d setting: native k3s is one server with no agent. Unset TRACEBLOC_AGENTS (and the older AGENTS)."
   [[ -z "${SERVERS:-}" || "${SERVERS}" == "1" ]] \
     || error "SERVERS=${SERVERS} is a k3d setting: native k3s is exactly one server. Unset TRACEBLOC_SERVERS (and the older SERVERS)."
-  _native_k3s_check_version
 }
 
 # Docker's own default socket: where k3d and the docker CLI go with no DOCKER_HOST

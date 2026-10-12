@@ -795,7 +795,9 @@ install_helm() {
 # ── GPU setup dispatch ───────────────────────────────────────────────────────
 # When the GPU floor skips the GPU (detect_gpu judged it, and printed the remedy)
 # there is no driver install, no toolkit and no wiring: TRACEBLOC_GPU_WIRED stays 0. A
-# driver below the floor only warned, and is set up like any other.
+# driver below the floor only warned, and is set up like any other. A driver install
+# that put no driver in (install_nvidia_drivers returns 1, client-dev#1699) is CPU mode
+# the same way: nothing past it runs.
 # On native k3s (slim client 1.1i) the driver installs as on k3d, then the toolkit
 # package and a CDI spec (k3s.sh _native_k3s_gpu_prepare), and nothing touches Docker
 # or a host containerd: k3s finds the toolkit when it first starts in step c, and step
@@ -805,10 +807,13 @@ dispatch_gpu_setup() {
     nvidia)
       if _gpu_floor_skips; then
         log "NVIDIA GPU below the floor (${TB_GPU_FLOOR_VERDICT}) — no driver, toolkit or GPU wiring; CPU mode."
+      elif ! install_nvidia_drivers; then
+        # No driver went in: it said so and how to install one; CPU mode, no toolkit.
+        log "No NVIDIA driver — no toolkit or GPU wiring; CPU mode."
       elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-        install_nvidia_drivers; _native_k3s_gpu_prepare
+        _native_k3s_gpu_prepare
       else
-        install_nvidia_drivers; install_nvidia_container_toolkit
+        install_nvidia_container_toolkit
       fi
       ;;
     amd)    install_rocm ;;
@@ -1166,18 +1171,10 @@ _ensure_subid_ranges() {
   esac
 }
 
-# _provision_subid_ranges USER — the shared, idempotent subuid/subgid remediation
-# used by BOTH the sudo-available installer path (_ensure_subid_ranges) and the
-# admin-run prepare-host (run_prepare_host). Installs the uidmap helpers if absent,
-# then (unless the user already owns a range) allocates a non-overlapping 65536-wide
-# block and writes it via `usermod --add-subuids/--add-subgids`, falling back to a
-# direct file append on older shadow-utils. Idempotent: an existing range is left
-# untouched. Paths overridable (TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE) for tests.
-_provision_subid_ranges() {
-  local user="${1:-$(id -un 2>/dev/null || printf '%s' "${USER:-}")}"
-  local subuid="${TRACEBLOC_SUBUID_FILE:-/etc/subuid}"
-  local subgid="${TRACEBLOC_SUBGID_FILE:-/etc/subgid}"
-
+# _ensure_uidmap_helpers — the setuid newuidmap/newgidmap helpers rootless Docker
+# maps IDs with: installed if absent, then re-verified. Host-wide, so it needs no
+# user. Returns non-zero (after a warning) when they are still unusable.
+_ensure_uidmap_helpers() {
   # The helpers must be present AND privileged (setuid bit OR cap_setuid) to write ID
   # maps — present-but-unprivileged is as useless as missing. Install if not usable,
   # then RE-VERIFY and fail HONESTLY rather than printing success and letting rootless
@@ -1188,13 +1185,34 @@ _provision_subid_ranges() {
     # --print installed nothing, so it plans as if the install gave both helpers.
     if ! tb_root_planning && { ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; }; then
       # Return non-zero (don't error/exit): the sudo-path caller turns this into a
-      # hard failure via `|| error`, but run_prepare_host wants it best-effort
-      # (`if ! _provision_subid_ranges`) so an unknown-distro uidmap gap warns and
-      # lets the rest of the host-prep finish (Bugbot/Asad + self-review, client#458).
+      # hard failure via `|| error`, but run_prepare_host wants it best-effort so an
+      # unknown-distro uidmap gap warns and lets the rest of the host-prep finish
+      # (Bugbot/Asad + self-review, client#458).
       warn "The uidmap helpers (newuidmap/newgidmap) are still missing or not privileged (no setuid bit / cap_setuid) after install — rootless Docker can't map IDs. Install the 'uidmap' package (Debian/Ubuntu) or 'shadow'/'shadow-utils' (setuid or filecaps) for this distro."
       return 1
     fi
   fi
+  return 0
+}
+
+# _provision_subid_ranges USER — the shared, idempotent subuid/subgid remediation
+# used by the sudo-available installer path (_ensure_subid_ranges): the uidmap
+# helpers (_ensure_uidmap_helpers), then the user's range (_add_subid_range).
+# Admin-run prepare-host (run_prepare_host) calls the two halves itself, because it
+# ensures the helpers whether or not a user is named (client-dev#1369).
+_provision_subid_ranges() {
+  _ensure_uidmap_helpers || return 1
+  _add_subid_range "$@"
+}
+
+# _add_subid_range USER — unless the user already owns a range, allocates a
+# non-overlapping 65536-wide block and writes it via `usermod --add-subuids/--add-subgids`,
+# falling back to a direct file append on older shadow-utils. Idempotent: an existing
+# range is left untouched. Paths overridable (TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE) for tests.
+_add_subid_range() {
+  local user="${1:-$(id -un 2>/dev/null || printf '%s' "${USER:-}")}"
+  local subuid="${TRACEBLOC_SUBUID_FILE:-/etc/subuid}"
+  local subgid="${TRACEBLOC_SUBGID_FILE:-/etc/subgid}"
 
   # Idempotent: a user that already owns a range in both files needs nothing.
   local uid; uid="$(id -u "$user" 2>/dev/null)"
@@ -1629,6 +1647,13 @@ run_prepare_host() {
   _prepare_host_named_user "grants docker-group access only to"
   local target="$TB_PREPARE_TARGET"
   local granted=0
+  # The rootless (Tier 1) uidmap helpers are host-wide, so they are installed
+  # whether or not a researcher is named: a bare prepare-host that printed "the
+  # prerequisites are installed" without them left the next host check showing
+  # the one-time admin step as still to do (client-dev#1369). Only the per-user
+  # subuid/subgid range below needs a name. Best-effort, like the rest of the prep.
+  local idmap_ok=1
+  _ensure_uidmap_helpers || idmap_ok=0
   if [[ -n "$target" && "$target" != "root" ]]; then
     if tb_root usermod -aG docker "$target" 2>/dev/null; then
       success "Added ${target} to the docker group — they can now install with no admin."
@@ -1639,8 +1664,9 @@ run_prepare_host() {
     # Also provision the rootless (Tier 1) prerequisites for the researcher, so a
     # host where docker-group access isn't wanted still supports a fully rootless
     # install (RFC 0001 #1220). Idempotent + non-overlapping; best-effort — never
-    # fail the whole prep over it.
-    if ! _provision_subid_ranges "$target"; then
+    # fail the whole prep over it. The helpers were ensured above, once: a second
+    # attempt would retry a failed install, and --print would list it twice.
+    if [[ "$idmap_ok" != 1 ]] || ! _add_subid_range "$target"; then
       # Non-overlapping start for the manual fallback too — don't hardcode 100000,
       # which collides on a host that already allocated that block (Bugbot #458).
       # Honor the TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE overrides like every other subid path.

@@ -318,6 +318,57 @@ _assess_release_pending() {
   [[ -n "$_out" ]]
 }
 
+# _assess_release_client_env REL NS — echo the stage (dev|stg|prod) the release
+# was installed for: its stored env.TRACEBLOC_ENV, else env.CLIENT_ENV, else prod,
+# reduced through tb_client_env as the chart's tracebloc.clientEnv does. Returns 1
+# when the values can't be read. Read-only and bounded.
+_assess_release_client_env() {
+  local rel="$1" ns="$2" vals raw
+  vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm get values "$rel" -n "$ns" 2>/dev/null)" || return 1
+  raw="$(awk '
+    /^[^[:space:]#]/ { in_env = ($0 ~ /^env:/); next }
+    in_env && /^[[:space:]]+(TRACEBLOC_ENV|CLIENT_ENV):/ {
+      k=$1; sub(/:$/, "", k); v=$0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/["\047[:space:]]/, "", v)
+      if (v != "") val[k] = v
+    }
+    END { print (val["TRACEBLOC_ENV"] != "" ? val["TRACEBLOC_ENV"] : val["CLIENT_ENV"]) }' <<<"$vals")"
+  raw="$(tb_client_env "${raw:-prod}")"
+  printf '%s' "${raw:-prod}"
+}
+
+# _assess_credential_rejected NS — true only when tracebloc DEFINITELY refuses the
+# machine credential in this release's Secret (verify_credentials: invalid or
+# inactive). Read-only; any read that doesn't answer is "not rejected".
+#
+# `unverified` (unreachable, throttled, a TLS failure) is deliberately NOT a
+# rejection: a credential is never rotated on a guess. Running this before
+# wire_ca_trust does not change that answer, because wire_ca_trust never wires
+# curl's trust (curl reads the user's CURL_CA_BUNDLE itself, see cluster.sh).
+#
+# verify_credentials asks the backend of THIS run's stage (the shell's
+# TRACEBLOC_ENV/CLIENT_ENV, default prod), and a `--reissue` would mint against
+# that same stage. So the probe only judges a release installed for that stage: a
+# dev or staging client re-checked from a shell without its env would read
+# `invalid` on prod and have a working credential rotated.
+_assess_credential_rejected() {
+  local ns="$1" rel id pw verdict rel_env run_env
+  rel="${INSTALLED_CLIENT_RELEASE:-$ns}"
+  declare -F verify_credentials >/dev/null 2>&1 || return 1
+  declare -F _client_password_from_secret >/dev/null 2>&1 || return 1
+  rel_env="$(_assess_release_client_env "$rel" "$ns")" || return 1
+  run_env="$(tb_client_env)"; run_env="${run_env:-prod}"
+  if [[ "$rel_env" != "$run_env" ]]; then
+    log "assess: ${ns} is a ${rel_env} client but this run targets ${run_env}; not checking its credential."
+    return 1
+  fi
+  id="$(_client_id_from_secret "$rel" "$ns")"
+  pw="$(_client_password_from_secret "$rel" "$ns")"
+  [[ -n "$id" && -n "$pw" ]] || return 1
+  verdict="$(verify_credentials "$id" "$pw")"
+  log "assess: stored credential for ${ns}: ${verdict}"
+  [[ "$verdict" == invalid || "$verdict" == inactive ]]
+}
+
 # _assess_gpu_request_unsupported NS — true when the release in NS requests a GPU this
 # installer no longer sets up (client-dev#1697, #1698): amd.com/gpu (there is no ROCm
 # training image), or nvidia.com/gpu on a Linux machine that is not x86_64 (the GPU
@@ -454,6 +505,17 @@ _assess_classify() {
   # runs and _recover_pending_helm_release clears it.
   if _assess_release_pending "$ns"; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="pending-wedge"
+    return 0
+  fi
+
+  # Does tracebloc still accept the credential this client runs with? A revoked one
+  # looks healthy here (or crash-loops jobs-manager, which reads as
+  # workload-not-ready) while the dashboard shows the client offline, and neither
+  # repair path would ever renew it (backend#5365). Checked BEFORE readiness for
+  # that reason. Only a definite rejection counts: an unreadable Secret or an
+  # unreachable backend is not a reason to rotate a credential.
+  if _assess_credential_rejected "$ns"; then
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="credential-rejected"
     return 0
   fi
 
@@ -679,6 +741,7 @@ assess_existing_install() {
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
         cli-outdated)       info "Your tracebloc CLI is out of date — updating it." ;;
         pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
+        credential-rejected) info "tracebloc no longer accepts this machine's credential, so it shows offline — issuing it a new one and reconnecting." ;;
         gpu-unsupported)    info "Your secure environment asks for a GPU tracebloc's training images can't use — switching it to CPU mode." ;;
         # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (Bugbot Medium, client#984).
         # _assess_classify degrades to this when the k3d listing does not answer, and

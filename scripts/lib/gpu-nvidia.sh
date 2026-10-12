@@ -17,6 +17,19 @@ _nvidia_driver_pkg_pick() {
   printf '%s' "${picked##*$'\n'}"
 }
 
+# _nvidia_driver_not_installed REASON -- the driver step put no driver in: say so, name
+# the manual route. install_nvidia_drivers then returns 1, so dispatch_gpu_setup skips
+# the toolkit and there is no reboot flow: the install goes on CPU-only
+# (client-dev#1699). A "drivers installed, reboot" over nothing installed only led to
+# a reboot, still no driver, and the same again on the next run.
+_nvidia_driver_not_installed() {
+  warn "The NVIDIA driver was NOT installed: ${1}. This install continues in CPU mode."
+  hint "To use the GPU, install the NVIDIA driver for your distribution yourself, then re-run this installer."
+}
+
+# install_nvidia_drivers -- returns 0 when the driver is loaded or went in (then the
+# reboot flow), 1 when it did not (_nvidia_driver_not_installed). Its caller runs it as
+# an `if` condition, where `set -e` is off, so every install below is checked by hand.
 install_nvidia_drivers() {
   if $NVIDIA_DRIVER_OK; then
     success "NVIDIA drivers loaded."
@@ -34,8 +47,19 @@ install_nvidia_drivers() {
   # the floor's series by name. ubuntu-drivers is asked for the chosen series.
   # if/else, never `a && b || c`: a FAILED install of the package found must
   # fail here, not quietly fall through to another driver.
-  local floor_series="${TB_NVIDIA_DRIVER_FLOOR%%.*}" search pkg series
-  $PM_UPDATE
+  local floor_series="${TB_NVIDIA_DRIVER_FLOOR%%.*}" search pkg series failed=""
+  # Only apt-get, dnf and pacman have a driver install here. yum and zypper hosts
+  # (setup-linux.sh knows both) are told so, never told a driver went in.
+  if ! has apt-get && ! has dnf && ! has pacman; then
+    local pm="this machine's package manager"
+    if has zypper; then pm="zypper"; elif has yum; then pm="yum"; fi
+    _nvidia_driver_not_installed "the installer has no automatic NVIDIA driver install for ${pm}"
+    return 1
+  fi
+  if ! $PM_UPDATE; then
+    _nvidia_driver_not_installed "the package index refresh failed"
+    return 1
+  fi
   if has apt-get; then
     $PM_INSTALL ubuntu-drivers-common 2>/dev/null || true
     search="$(apt-cache search "^nvidia-driver-[0-9]" 2>/dev/null || true)"
@@ -55,7 +79,7 @@ install_nvidia_drivers() {
       $PM_INSTALL "$pkg"
     else
       $PM_INSTALL "nvidia-driver-${floor_series}"
-    fi
+    fi || failed="the NVIDIA driver package did not install"
   elif has dnf; then
     sudo dnf install -y epel-release 2>/dev/null || true
     # Detect RHEL/CentOS major and arch for correct NVIDIA repo (rhel8/rhel9, x86_64/aarch64)
@@ -75,10 +99,16 @@ install_nvidia_drivers() {
     esac
     sudo dnf config-manager --add-repo \
       "https://developer.download.nvidia.com/compute/cuda/repos/rhel${rhel_major}/${rhel_arch}/cuda-rhel${rhel_major}.repo" 2>/dev/null || true
+    # The akmod package is the fallback; when both fail, that is a failed install.
     sudo dnf module install -y nvidia-driver:latest-dkms 2>/dev/null || \
-      sudo dnf install -y akmod-nvidia || true
+      sudo dnf install -y akmod-nvidia || \
+      failed="neither 'dnf module install nvidia-driver:latest-dkms' nor 'dnf install akmod-nvidia' succeeded"
   elif has pacman; then
-    $PM_INSTALL nvidia nvidia-utils
+    $PM_INSTALL nvidia nvidia-utils || failed="'pacman -S nvidia nvidia-utils' failed"
+  fi
+  if [[ -n "$failed" ]]; then
+    _nvidia_driver_not_installed "$failed"
+    return 1
   fi
 
   warn "GPU drivers installed — a reboot is likely required."

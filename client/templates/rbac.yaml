@@ -66,6 +66,19 @@ rules:
     # content matches before reusing it. Without `get`, those reads return
     # Forbidden and the endpoint 500s instead of the intended 409/replay.
     verbs: ["create", "get"]
+{{- if (include "tracebloc.stopKindSignalEnabled" .) }}
+  # Stop-kind signal (client-runtime#882): jobs-manager's stop_job annotates
+  # each of the Job's pods with tracebloc.io/stop-kind (pause | stop) before the
+  # Foreground delete; the training pod reads it through a downward-API file and
+  # exits 0 on a pause (tracebloc-engine#1588). Without `patch` the annotation
+  # 403s (logged, the stop still runs) and a pause ends as Error. Gated on the
+  # same switch the runtime reads (stopKindSignal, on by default; trainingResume
+  # implies it), so an install that turns the signal off grants nothing it does
+  # not use.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch"]
+{{- end }}
 {{- if (include "tracebloc.perExperimentDbCreds" .) }}
   # Per-experiment DB creds only: jobs-manager's revoke/sweep path reaps the
   # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but
@@ -175,6 +188,13 @@ rules:
     # content matches before reusing it. Without `get`, those reads return
     # Forbidden and the endpoint 500s instead of the intended 409/replay.
     verbs: ["create", "get"]
+{{- if (include "tracebloc.stopKindSignalEnabled" .) }}
+  # Stop-kind signal: the same gated grant as the ClusterRole branch above
+  # (client-runtime#882) -- pods are namespaced, so a Role can.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch"]
+{{- end }}
 {{- if (include "tracebloc.perExperimentDbCreds" .) }}
   # Per-experiment DB creds only: jobs-manager's revoke/sweep path reaps the
   # per-job cred Secret. `delete` alone handles delete-by-name at Job end, but

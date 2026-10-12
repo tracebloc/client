@@ -27,9 +27,9 @@
 #  Usage (macOS / Linux):
 #    curl -fsSL https://github.com/tracebloc/client/releases/latest/download/install.sh | bash
 #    bash <(curl -fsSL https://tracebloc.io/i.sh)
-#  (The public mirror serves the installer + its sub-scripts as RELEASE ASSETS;
-#   its source tree carries no scripts/ after the client → client-dev rename —
-#   backend#3998 — so the old raw.githubusercontent .../scripts/... URLs 404.)
+#  (Only the release asset is stamped with its pinned tag. The raw.githubusercontent
+#   .../main/scripts/... copy is this file unstamped, so it refuses to run — never
+#   hand a customer that URL.)
 #
 #  Developer / unreleased-branch override (UNVERIFIED — not for customers). The
 #  sub-scripts are fetched from the raw TREE of TRACEBLOC_SOURCE_REPO (default
@@ -37,7 +37,10 @@
 #  tree is readable — a public fork with your branch pushed:
 #    curl -fsSL ... | TRACEBLOC_SOURCE_REPO=<you>/client TRACEBLOC_BRANCH=<branch> TRACEBLOC_ALLOW_UNVERIFIED=1 bash
 #  (TRACEBLOC_REF=<vX.Y.Z> pins another release instead; the older REF / BRANCH
-#  spellings still work.)
+#  spellings still work.) A source tree served from elsewhere -- a per-commit
+#  installer bundle unpacked and served on this machine, say -- is named whole
+#  with TRACEBLOC_SOURCE_URL (https, or http to 127.0.0.1 / localhost / [::1]):
+#    TRACEBLOC_SOURCE_URL=http://127.0.0.1:8765 TRACEBLOC_ALLOW_UNVERIFIED=1 bash install.sh
 #
 #  Windows (PowerShell as Administrator):
 #    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
@@ -328,6 +331,32 @@ if [[ ! "$SOURCE_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || "$SOURCE_REPO" ==
   exit 1
 fi
 REPO_RAW="https://raw.githubusercontent.com/${SOURCE_REPO}/${REF}"
+# TRACEBLOC_SOURCE_URL replaces that whole tree base, for a source that is not a
+# GitHub tree at all: a per-commit installer bundle a test harness serves on this
+# machine (`<base>/scripts/install-k8s.sh`, `<base>/scripts/manifest.sha256`, ...).
+# It is the same trust as TRACEBLOC_SOURCE_REPO -- the operator names where the
+# dev path reads its sub-scripts -- so it is honoured ONLY under
+# TRACEBLOC_ALLOW_UNVERIFIED=1, and refused rather than ignored without it, so a
+# customer path can never be redirected by it. https anywhere; plain http only to
+# this machine, so it never becomes a cleartext fetch across a network. Its shape
+# is checked before it is interpolated into a URL, as $REF's is above.
+if [[ -n "${TRACEBLOC_SOURCE_URL:-}" ]]; then
+  if [[ "$ALLOW_UNVERIFIED" != "1" ]]; then
+    echo "[ERROR] TRACEBLOC_SOURCE_URL is a development override: it is honoured only with" >&2
+    echo "        TRACEBLOC_ALLOW_UNVERIFIED=1. Unset it to install from the pinned release." >&2
+    exit 1
+  fi
+  _tb_src_path='(/[A-Za-z0-9._~-]+)*/?'
+  _tb_src_https="^https://[A-Za-z0-9.-]+(:[0-9]+)?${_tb_src_path}\$"
+  _tb_src_local="^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?${_tb_src_path}\$"
+  if [[ "$TRACEBLOC_SOURCE_URL" == *..* ]] \
+     || { [[ ! "$TRACEBLOC_SOURCE_URL" =~ $_tb_src_https ]] && [[ ! "$TRACEBLOC_SOURCE_URL" =~ $_tb_src_local ]]; }; then
+    echo "[ERROR] TRACEBLOC_SOURCE_URL='$TRACEBLOC_SOURCE_URL' is not an https URL, or an http URL" >&2
+    echo "        to 127.0.0.1 / localhost / [::1], of plain path segments." >&2
+    exit 1
+  fi
+  REPO_RAW="${TRACEBLOC_SOURCE_URL%/}"
+fi
 # The RELEASE ASSETS for this ref. Everything the customer path fetches — the
 # sub-scripts (attached as flat assets by basename), the signed manifest, and its
 # cosign sig/cert/bundle — is served from here. backend#3998: the public mirror

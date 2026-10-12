@@ -1,0 +1,57 @@
+{{- /*
+  Durable pause/resume volume (client-runtime#882). OFF by default, pending
+  backend#5266 (model-IP + retention); see `trainingResume` in values.yaml.
+
+  The env key is refused rather than passed through: on its own it arms the
+  runtime's spawn and stop paths without the jobs-manager mount (so the
+  pre-create and the cleanup are skipped) and without the pods/patch grant (so
+  the stop-kind annotation 403s and a pause still ends as Error).
+*/ -}}
+{{- if hasKey (default dict .Values.env) "TRACEBLOC_TRAINING_RESUME_PVC" }}
+{{- fail "env.TRACEBLOC_TRAINING_RESUME_PVC is set by the chart from trainingResume: set trainingResume.enabled (and trainingResume.existingClaim for your own claim) instead, so jobs-manager also gets the /data/resume mount and the pods/patch grant (client-runtime#882)." }}
+{{- end }}
+{{- if hasKey (default dict .Values.env) "TRACEBLOC_STOP_KIND_SIGNAL" }}
+{{- fail "env.TRACEBLOC_STOP_KIND_SIGNAL is set by the chart from stopKindSignal: set stopKindSignal.enabled instead, so jobs-manager also gets the pods/patch grant the stop-kind annotation needs (client-runtime#882)." }}
+{{- end }}
+{{- if and (include "tracebloc.trainingResumeEnabled" .) (not (default dict .Values.trainingResume).existingClaim) }}
+{{- $name := include "tracebloc.trainingResumePvc" . -}}
+{{- $storage := (default dict .Values.trainingResume).storage | default "10Gi" -}}
+{{- if (default dict .Values.hostPath).enabled }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "tracebloc.trainingResumePvName" . }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  capacity:
+    storage: {{ $storage }}
+  accessModes:
+    - ReadWriteOnce
+  claimRef:
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+  hostPath:
+    path: {{ include "tracebloc.hostPathRoot" . }}/{{ .Release.Name }}/resume
+    type: DirectoryOrCreate
+---
+{{- end }}
+{{- /* No "helm.sh/resource-policy: keep", unlike the logs and data claims: this
+     one holds model weights, and whether they may outlive the release is the
+     retention half of backend#5266. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  accessModes:
+    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .Values.hostPath).enabled | default false)) }}
+  resources:
+    requests:
+      storage: {{ $storage }}
+{{- end }}

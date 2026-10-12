@@ -1853,6 +1853,44 @@ TB_GPU_UNSUPPORTED_NAME=""
 TB_GPU_UNSUPPORTED_CODE=""
 # nvidia-smi's name answer, one line per GPU, for a docker_cannot_see_gpu report.
 TB_GPU_NVIDIA_NAMES=""
+
+# _host_os_label -- this host's operating system as the dashboard shows it
+# (client-runtime#914): "Ubuntu 22.04", "Debian GNU/Linux 12", "macOS 15". Printed
+# to stdout, empty when it cannot tell. Passed to the chart as env.TRACEBLOC_HOST_OS
+# (install-client-helm.sh _host_os_set_args), and the resource monitor sends it on
+# every heartbeat as `os`. Only the installer can answer: the monitor runs in a pod,
+# whose /etc/os-release is the image's, and a k3d node's osImage is k3s's.
+# os-release is READ, never sourced (it is the host's file, and sourcing it would run
+# it); its path and the macOS version take the overrides the setup steps already
+# honour (TRACEBLOC_OS_RELEASE_FILE, TRACEBLOC_MACOS_VER). The Windows twin is
+# Get-HostOsLabel in install-k8s.ps1.
+_os_release_value() {  # $1 = key, $2 = file: the value, unquoted, or nothing
+  sed -n "/^$1=/{s/^$1=//;p;q;}" "$2" 2>/dev/null \
+    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+_host_os_label() {
+  local os name ver major
+  os="${OS:-$(uname -s 2>/dev/null)}"
+  case "$os" in
+    Darwin)
+      ver="${TRACEBLOC_MACOS_VER:-$(sw_vers -productVersion 2>/dev/null)}"
+      major="${ver%%.*}"
+      [[ "$major" =~ ^[0-9]+$ ]] || return 0
+      # 10.x named its release by the minor (10.15 Catalina); 11 on, by the major.
+      if [[ "$major" == 10 ]]; then printf 'macOS %s' "$(cut -d. -f1-2 <<<"$ver")"
+      else printf 'macOS %s' "$major"; fi
+      ;;
+    Linux)
+      local f="${TRACEBLOC_OS_RELEASE_FILE:-/etc/os-release}"
+      [[ -r "$f" ]] || return 0
+      name="$(_os_release_value NAME "$f")"
+      ver="$(_os_release_value VERSION_ID "$f")"
+      [[ -n "$name" ]] || return 0
+      if [[ -n "$ver" ]]; then printf '%s %s' "$name" "$ver"; else printf '%s' "$name"; fi
+      ;;
+  esac
+  return 0
+}
 # 1 once an NVIDIA GPU is wired into this cluster, else 0. Assigned, never
 # defaulted from the environment: only the installer's own GPU steps may set it.
 TRACEBLOC_GPU_WIRED=0
@@ -2683,7 +2721,7 @@ tracebloc — client setup
   and connect it to the tracebloc network.
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.sh | bash
+  curl -fsSL https://tracebloc.io/i.sh | bash
   ./install-k8s.sh [--help] [--diagnose] [--force] [--reuse-data|--wipe-data|--data-dir=PATH]
 
 Commands:
@@ -2729,7 +2767,7 @@ Usage reporting:
   DO_NOT_TRACK=1              Also turns it off.
 
 Windows:
-  irm https://raw.githubusercontent.com/tracebloc/client/main/scripts/install.ps1 | iex
+  irm https://tracebloc.io/i.ps1 | iex
 
 Learn more: https://docs.tracebloc.io
 HELP

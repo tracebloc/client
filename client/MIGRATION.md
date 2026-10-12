@@ -2,6 +2,98 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.205 — `selfRotateMysqlRoot`: MySQL can rotate its own root password
+
+**What changed.** A MySQL datadir created before root-password rotation keeps
+the root password it was installed with until someone runs a one-time
+`ALTER USER 'root'` against it. The new `selfRotateMysqlRoot` setting lets MySQL
+do that itself. At each start on an existing datadir it sets root's password to
+the value in the release Secret, before it accepts connections and without
+needing the old password. A small `mysql-root-init` init container decides at
+each pod start:
+
+| Datadir | What happens |
+|---|---|
+| Existing | MySQL sets root from the release Secret at startup. |
+| New (first install) | Nothing; MySQL initialises root from the Secret as before. |
+| Existing, but the Secret has no root SQL | Nothing; a warning is logged and MySQL starts on its current password. |
+
+It is resolved per environment by `selfRotateMysqlRootByEnv` and overridable
+per edge by `selfRotateMysqlRoot`:
+
+| Environment | Default |
+|---|---|
+| `dev` | `false` |
+| `stg` | `false` |
+| `prod` | `false` |
+
+**What you have to do: nothing.** With the setting off, the chart renders
+exactly as before.
+
+**When it is turned on** for an edge whose datadir predates rotation:
+
+- The next upgrade generates a root password into the release Secret, the
+  jobs-manager logs in to MySQL as root with it, and the MySQL pod restarts once.
+- Anything that still logs in as MySQL root with the old password stops
+  working. Read the password from the release Secret's `MYSQL_ROOT_PASSWORD`.
+- The upgrade refuses to render if the root password it would apply is not
+  alphanumeric, or if `bootstrapDbPassword` is pinned to a different value.
+  Pin `mysqlRootPassword` to an alphanumeric value, or unset
+  `bootstrapDbPassword`; with rotation on it follows root's password.
+- A render that cannot see the cluster (`helm template`, a GitOps renderer that
+  renders without cluster access) still refuses to generate a root password.
+  Pin `mysqlRootPassword` or render server-side, as for rotation itself.
+
+**To force one answer on an edge**, set `selfRotateMysqlRoot: true` or `false`.
+Leave it unset (`null`) to follow `selfRotateMysqlRootByEnv`.
+
+## Upgrading to 1.9.205 — the MySQL passwords move to their own Secret, kept across uninstall
+
+**What changed.** The local MySQL passwords now live in a Secret of their own,
+`mysql-credentials`, instead of in the release Secret (`<release>-secrets`):
+
+| Key | Now in |
+|---|---|
+| `MYSQL_ROOT_PASSWORD`, `DB_BOOTSTRAP_PASSWORD` | `mysql-credentials` |
+| `TB_CREDMGR_PASSWORD`, `TB_META_PASSWORD`, `TB_INGEST_PASSWORD` and their `TRACEBLOC_` twins | `mysql-credentials` |
+| `CLIENT_ID`, `CLIENT_PASSWORD`, `POD_TOKEN_SIGNING_SECRET` and their `TRACEBLOC_` twins | `<release>-secrets` (unchanged) |
+
+`mysql-credentials` carries `helm.sh/resource-policy: keep`, like `mysql-pvc`, so
+`helm uninstall` leaves it in the namespace beside the database it opens. Before
+this version, uninstall deleted the passwords with the release Secret while it
+kept the database, and a reinstall over that database refused to render. Now a
+reinstall under the same release name into the same namespace reads the kept
+passwords and opens the database. The client credentials still leave on
+uninstall.
+
+The name is fixed: it does not follow `fullnameOverride`, so renaming a release
+no longer loses the MySQL passwords.
+
+**What you have to do: nothing.** The first upgrade copies every MySQL password
+from `<release>-secrets` into `mysql-credentials` verbatim; nothing is
+regenerated, and every pod (and the MySQL migration Job) reads the new Secret.
+The values are also still written into `<release>-secrets` for this release, so
+`helm rollback` or `helm upgrade --version` to an older chart finds them where it
+reads them.
+
+**After you change a MySQL password by hand**, change it in `mysql-credentials`.
+Once that Secret exists the chart reads it as a whole and ignores the copies in
+`<release>-secrets`: a key you delete from `mysql-credentials` is not read back
+from there.
+
+**Offboarding.** Because uninstall keeps `mysql-credentials`, removing the
+database for good means deleting it with the data:
+`kubectl -n <ns> delete secret mysql-credentials` alongside
+`kubectl -n <ns> delete pvc mysql-pvc`. Backing up before an uninstall now means
+both Secrets — see `docs/MIGRATIONS.md`, Option C, step 0.
+
+**A rollback, then a roll forward.** Rolling back to an older chart leaves
+`mysql-credentials` in place (Helm does not delete a `keep` resource). If a MySQL
+password changes while the older chart runs, it changes only in
+`<release>-secrets`, and the next upgrade reads the stale `mysql-credentials`.
+Copy the changed key into `mysql-credentials` before upgrading again, or delete
+`mysql-credentials` so the upgrade copies it afresh from `<release>-secrets`.
+
 ## Upgrading to 1.9.198 — `ingestRunToken`: each ingestion run gets its own backend token
 
 **What changed.** The jobs-manager can give every ingestion Job its own backend
