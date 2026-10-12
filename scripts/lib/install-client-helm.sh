@@ -2531,6 +2531,163 @@ _release_pins_mysql_84() {
   _values_pin_mysql_84 <<<"$_vals"
 }
 
+# _values_hostpath_storage -- the top-level hostPath block of `helm get values` on
+# STDIN, as three lines: enabled=<v>, root=<v>, datasetPath=<v> (absent is empty;
+# null and ~ are empty too). Values are unquoted the way helm serializes them:
+# plain, '...' with '' for a quote, or "..." without escapes. Anything else -- a
+# "..." holding a backslash, a block scalar, a root or datasetPath folded onto a
+# second line -- prints the single word `unreadable`: a path read half-right is
+# worse than none. Reads to EOF (no early exit, so a producer is never SIGPIPE'd).
+_values_hostpath_storage() {
+  awk -v sq="'" '
+    function unq(v,   dq) {
+      dq = "\""
+      if (v == "null" || v == "~") return ""
+      if (length(v) >= 2 && substr(v, 1, 1) == sq && substr(v, length(v), 1) == sq) {
+        v = substr(v, 2, length(v) - 2); gsub(sq sq, sq, v); return v
+      }
+      if (length(v) >= 2 && substr(v, 1, 1) == dq && substr(v, length(v), 1) == dq) {
+        v = substr(v, 2, length(v) - 2)
+        if (index(v, "\\")) bad = 1
+        return v
+      }
+      if (substr(v, 1, 1) == sq || substr(v, 1, 1) == dq || v ~ /^[|>&*!%@`]/) bad = 1
+      return v
+    }
+    /^[[:space:]]*$/ { next }
+    { match($0, /^ */); ind = RLENGTH }
+    ind == 0 { inblk = ($0 ~ /^hostPath:[[:space:]]*$/); child = -1; last = ""; next }
+    !inblk { next }
+    child < 0 { child = ind }
+    ind > child { if (last == "root" || last == "datasetPath") bad = 1; next }
+    {
+      line = $0; sub(/^ */, "", line)
+      key = line; sub(/:.*/, "", key)
+      v = line; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+      last = key
+      if (key == "enabled") en = v
+      else if (key == "root") root = unq(v)
+      else if (key == "datasetPath") ds = unq(v)
+    }
+    END {
+      if (bad) { print "unreadable"; exit 0 }
+      print "enabled=" en; print "root=" root; print "datasetPath=" ds
+    }
+  '
+}
+
+# _native_k3s_release_storage -- native k3s only (client-dev#1782): keep the storage
+# an installed release was made with. The k3d twin is _check_existing_cluster_storage_mode
+# (k3d.sh), which reads the node's bind mount; native k3s has no node to inspect, so
+# the answer is the release's own stored hostPath values. A release's volumes cannot
+# change in place -- a PV's path and a PVC's class are immutable, so a re-run that
+# rendered the other mode, or another root, would fail the upgrade.
+#   - a hostpath release, this run's node-local only the default: hostpath is kept,
+#     in this shell, for the values and the dirs below (every bare re-run and
+#     `tracebloc upgrade`, which passes no storage mode and no data dir);
+#   - an explicit mode that differs from the release's: refused by name;
+#   - a hostpath release's root and datasetPath are kept (TB_HOSTPATH_KEPT, read by
+#     _hostpath_paths_block), with one warning when this run asked for others --
+#     as config.yaml's storage path is kept for node-local
+#     (_native_k3s_storage_drift_warn, k3s.sh).
+# No namespace, or no release in it, is a fresh install. A read that does not answer
+# is "cannot tell" and stops the run by name, never "no release".
+#
+# TWICE, ONE READ. install-k8s.sh calls it EARLY, right after validate_config, so
+# every pre-install reader of TB_STORAGE_MODE -- the pre-log guard, preflight's disk
+# and storage-type checks, guard_leftover_data -- judges the release's storage, not
+# the default's (Bugbot + tracebloc-review on #1790). Before the create path nothing
+# else has set the cluster up for this run, so the early read only acts when it can
+# see the release: a k3s this installer recorded (`k3s-install`), the tracebloc
+# context in the kubeconfig, an API that answers, and the release in the namespace.
+# Anything short of that is a fresh install, or a k3s the create path is about to
+# start, and the call returns without deciding; install_client_helm's call then
+# reads it once the cluster is up, as before. Once a read has decided
+# (TB_RELEASE_STORAGE_READ), the second call returns at once.
+# Both calls name the kubeconfig the merge writes and the tracebloc context: before
+# the create path, the current context can be any cluster the user works with.
+_native_k3s_release_storage() {
+  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
+  [[ "${TB_RELEASE_STORAGE_READ:-}" != 1 ]] || return 0
+  local early="" ns="${TB_NAMESPACE:-}" out rc=0 vals line enabled="" root="" ds="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
+  if [[ "${1:-}" == early ]]; then early=1; ns="$(_client_default_namespace)"; fi
+  [[ -n "$ns" ]] || return 0
+  kc="$(_native_k3s_kubeconfig_target)"; ctx="$(_native_k3s_context)"
+  if [[ -n "$early" ]]; then
+    rec="$(tb_record_path)"
+    if [[ ! -r "$rec" ]] || ! grep -qF '"kind": "k3s-install"' "$rec" 2>/dev/null; then return 0; fi
+    if ! has kubectl || ! has helm; then return 0; fi
+    out="$(kubectl --kubeconfig "$kc" config get-contexts -o name 2>/dev/null)" || out=""
+    grep -qxF -- "$ctx" <<<"$out" || return 0
+    if ! kubectl --kubeconfig "$kc" --context "$ctx" get --raw /readyz --request-timeout=5s >/dev/null 2>&1; then
+      log "Storage mode: this machine's k3s API is not answering yet, so its release's storage is read once k3s is up."
+      return 0
+    fi
+  fi
+  local cant="native k3s: couldn't read this machine's tracebloc release '${ns}', so which storage its volumes use can't be told"
+  out="$(kubectl --kubeconfig "$kc" --context "$ctx" get namespace "$ns" --ignore-not-found -o name --request-timeout=5s 2>/dev/null)" || rc=$?
+  [[ "$rc" -eq 0 ]] || error "${cant}. Check that 'kubectl --context ${ctx} get namespace ${ns}' answers, then re-run."
+  if [[ -z "$out" ]]; then [[ -n "$early" ]] || TB_RELEASE_STORAGE_READ=1; return 0; fi
+  out="$(_bounded "${TB_HELM_LIST_TIMEOUT:-20}" helm --kubeconfig "$kc" --kube-context "$ctx" list -n "$ns" -q --deployed --failed --pending --uninstalling 2>/dev/null)" || rc=$?
+  [[ "$rc" -eq 0 ]] || error "${cant}. Check that 'helm --kube-context ${ctx} list -n ${ns}' answers, then re-run."
+  if ! grep -qxF -- "$ns" <<<"$out"; then [[ -n "$early" ]] || TB_RELEASE_STORAGE_READ=1; return 0; fi
+  TB_RELEASE_STORAGE_READ=1
+  vals="$(_bounded "${TB_HELM_VALUES_TIMEOUT:-20}" helm --kubeconfig "$kc" --kube-context "$ctx" get values "$ns" -n "$ns" 2>/dev/null)" || rc=$?
+  [[ "$rc" -eq 0 ]] || error "${cant}. Check that 'helm --kube-context ${ctx} get values ${ns} -n ${ns}' answers, then re-run."
+  out="$(_values_hostpath_storage <<<"$vals")"
+  [[ "$out" != unreadable ]] \
+    || error "${cant}: its stored hostPath values are in a form this installer does not read. Check them with 'helm get values ${ns} -n ${ns}', then re-run."
+  while IFS= read -r line; do
+    case "$line" in
+      enabled=*)     enabled="${line#enabled=}" ;;
+      root=*)        root="${line#root=}" ;;
+      datasetPath=*) ds="${line#datasetPath=}" ;;
+    esac
+  done <<<"$out"
+
+  if [[ "$enabled" != true ]]; then
+    [[ "$want" != hostpath ]] \
+      || error "TRACEBLOC_STORAGE_MODE=hostpath, but this machine's tracebloc release '${ns}' keeps its data in k3s's local-path volumes (node-local), and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE) to keep node-local, or remove tracebloc from this machine and install again with hostpath."
+    return 0
+  fi
+  root="${root:-/tracebloc}"   # the chart's default, which is what rendered
+  if [[ "$want" == node-local ]]; then
+    [[ "${TB_STORAGE_MODE_SOURCE:-default}" != explicit ]] \
+      || error "TRACEBLOC_STORAGE_MODE=node-local, but this machine's tracebloc release '${ns}' keeps its data in hostPath volumes under ${root}, and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE) to keep hostpath, or remove tracebloc from this machine and install again with node-local."
+    TB_STORAGE_MODE=hostpath
+    log "Storage mode: hostpath — kept from the release '${ns}' (node-local is only the default, and the release was installed with hostpath)."
+    info "Keeping hostpath storage: this machine's tracebloc release was installed with it, and its data stays in ${root}."
+  fi
+  TB_HOSTPATH_KEPT=1
+  TB_HOSTPATH_ROOT="$root"
+  TB_HOSTPATH_DATASET="$ds"
+  if [[ "$root" != "${HOST_DATA_DIR:-}" || "${ds:-$root}" != "${HOST_DATASET_DIR:-${HOST_DATA_DIR:-}}" ]]; then
+    warn "This machine's tracebloc release keeps its data in ${root}${ds:+ (datasets in ${ds})}; this run asked for ${HOST_DATA_DIR:-}${HOST_DATASET_DIR:+ (datasets in ${HOST_DATASET_DIR})}, which is not used."
+    hint "hostPath volumes can't move: to use the new directory, remove tracebloc from this machine, then install again with it."
+  fi
+  return 0
+}
+
+# _hostpath_paths_block -- the hostPath keys after `enabled: true` in the values file.
+#   k3d: the node sees HOST_DATA_DIR at /tracebloc, the chart's default root, and a
+#        dataset dir at /tracebloc-data, so only datasetPath is written, and only
+#        with a dataset dir.
+#   native k3s (client-dev#1782): the node is the host, so the PVs name the host's
+#        own directories: root is HOST_DATA_DIR, datasetPath HOST_DATASET_DIR when
+#        one is set (unset, the chart follows root). An installed release keeps the
+#        two it was made with (_native_k3s_release_storage).
+# Single-quoted (_yaml_sq_escape): a data dir is a path the operator chose.
+_hostpath_paths_block() {
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
+    [[ -z "${HOST_DATASET_DIR:-}" ]] || printf '  datasetPath: /tracebloc-data\n'
+    return 0
+  fi
+  local ds="${HOST_DATASET_DIR:-}"
+  [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
+  printf "  root: '%s'\n" "$(_yaml_sq_escape "$(_hostpath_root)")"
+  [[ -z "$ds" ]] || printf "  datasetPath: '%s'\n" "$(_yaml_sq_escape "$ds")"
+}
+
 # The engine decision itself, with NO logging and NO globals set, so a second
 # caller can ask this rule a question instead of restating it (backend#2047:
 # preflight's arch gate refused a fresh arm64 install that this rule was about
@@ -2893,6 +3050,10 @@ install_client_helm() {
   # invent one. It's just the local k8s namespace / Helm release name.
   # Advanced / GitOps setups can override with TB_NAMESPACE=<name>.
   TB_NAMESPACE=$(_client_default_namespace)
+
+  # Native k3s: an installed release keeps the storage it was made with, before the
+  # reconcile and the values below read TB_STORAGE_MODE (client-dev#1782).
+  _native_k3s_release_storage
 
   # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
   # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
@@ -3274,7 +3435,7 @@ storageClass:
 hostPath:
   enabled: true
 STORAGE
-[ -n "${HOST_DATASET_DIR:-}" ] && printf '  datasetPath: /tracebloc-data\n'
+_hostpath_paths_block
 fi)
 $(_local_api_values_block)
 $(if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" == "8.4" ]]; then

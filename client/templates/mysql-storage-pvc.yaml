@@ -17,7 +17,7 @@ spec:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: /tracebloc/{{ .Release.Name }}/mysql
+    path: {{ include "tracebloc.hostPathRoot" . }}/{{ .Release.Name }}/mysql
     type: DirectoryOrCreate
 ---
 {{- end }}

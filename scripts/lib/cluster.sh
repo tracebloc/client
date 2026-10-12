@@ -42,8 +42,15 @@ TB_LOGS_DIR_MODE="3777"
 # stays local. logs (and mysql, below) always stay on the local HOST_DATA_DIR.
 _release_dirs_spec() {
   local release="$1"
-  local base="$HOST_DATA_DIR/$release"
-  local data_base="${HOST_DATASET_DIR:+$HOST_DATASET_DIR/$release}"
+  # An installed native-k3s hostpath release keeps the root and dataset dir it was made
+  # with (_native_k3s_release_storage, client-dev#1782): those are the dirs its PVs name,
+  # so those are the ones to prepare, not this run's. _hostpath_root is HOST_DATA_DIR
+  # unless a release's root is kept.
+  local root; root="$(_hostpath_root)"; root="${root:-$HOST_DATA_DIR}"
+  local ds="${HOST_DATASET_DIR:-}"
+  [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
+  local base="$root/$release"
+  local data_base="${ds:+$ds/$release}"
   data_base="${data_base:-$base}"
   printf '%s\n' "$data_base/data:$TB_SHARED_DIR_MODE" "$base/logs:$TB_LOGS_DIR_MODE"
 }
@@ -57,7 +64,7 @@ _release_dirs_spec() {
 _ensure_release_dirs() {
   local release="$1"
   [[ -z "$release" ]] && return 0
-  local base="$HOST_DATA_DIR/$release"
+  local base root; root="$(_hostpath_root)"; base="${root:-$HOST_DATA_DIR}/$release"
   # mysql is deliberately left on the flat recursive 777 this function has always used:
   # it has ONE writer (uid 999) and its own init container in the chart, and its datadir
   # permissions are the database's business — the same reason it is out of scope for the
@@ -852,12 +859,15 @@ guard_leftover_data() {
   [[ ${#found[@]} -eq 0 ]] && return 0   # clean slate — nothing to guard
 
   # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) words each line for its own storage: the data
-  # lies in the storage path as well as HOST_DATA_DIR (_leftover_where), and a
-  # fresh install gives its volumes new directories, so nothing found is adopted.
-  # hostpath is never offered there: native k3s has no hostpath mode.
-  local where k3s="" frozen=""
+  # lies in the storage path as well as HOST_DATA_DIR (_leftover_where). Under
+  # node-local (native_nl) a fresh install gives its volumes new directories, so
+  # nothing found is adopted. Under hostpath (client-dev#1782) the chart's PVs name
+  # HOST_DATA_DIR itself, so what lies there IS adopted, as on k3d; only a k3s
+  # volume (pvc-*) is not.
+  local where k3s="" native_nl="" frozen=""
   where="$(_leftover_where "${found[@]}")"  # set-u-safe: the empty-found check above returns first
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] && k3s=1
+  [[ -n "$k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && native_nl=1
   # A config.yaml froze the storage path: another data dir does not move the
   # volumes, so "install into a different directory" is not an escape and is not
   # offered (the same scan would find the same volumes and ask again).
@@ -874,29 +884,48 @@ guard_leftover_data() {
   local wipe=1
   [[ -n "$k3s" && "${TB_K3S_PREPARED:-}" == 1 ]] && wipe=""
   warn "Existing tracebloc data found under ${where}:"
-  for d in "${found[@]}"; do hint "  • ${d}"; done  # set-u-safe: the empty-found check above returns first
+  # vols: a native scan's volume is a pvc-* directory; the data dir scan only ever
+  # yields .../mysql and .../data (client-dev#1782).
+  local vols="" kept=""
+  for d in "${found[@]}"; do hint "  • ${d}"; case "${d##*/}" in pvc-*) vols=1 ;; *) kept=1 ;; esac; done  # set-u-safe: the empty-found check above returns first
+  # hostpath on native k3s never mounts a k3s volume, so every line below words what
+  # was found (Bugbot on #1790): only k3s volumes (hp_vols=all) and nothing is
+  # adopted; k3s volumes beside data under HOST_DATA_DIR (some) and only the data is.
+  local hp_vols=""
+  if [[ -n "$k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" && -n "$vols" ]]; then
+    if [[ -n "$kept" ]]; then hp_vols=some; else hp_vols=all; fi
+  fi
   # The "silently adopt" warning is true ONLY for hostpath. Under node-local (the
   # default since D15, client#456) a fresh install does NOT adopt this data — the
   # cluster starts empty in-node and the host data is stranded. Leading with the
   # adopt claim there would contradict the very next line (client#456 Bugbot).
-  if [[ -n "$k3s" ]]; then
+  if [[ -n "$native_nl" ]]; then
     hint "A fresh native k3s install does NOT adopt this data: its volumes get new directories, so the data would be stranded, not used."
   elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     hint "node-local storage keeps data inside the cluster node — a fresh install does NOT adopt this ~/.tracebloc data; it would be stranded, not used."
+  elif [[ "$hp_vols" == all ]]; then
+    hint "A fresh install does NOT adopt these: they are k3s volumes (pvc-*), and hostpath keeps its data under ${HOST_DATA_DIR}, so they would be stranded, not used."
   else
     hint "A fresh install would silently adopt it, so it would not really be fresh."
+    # hostpath never mounts a k3s volume, so one found on native k3s is stranded.
+    [[ -z "$k3s" || -z "$vols" ]] \
+      || hint "The k3s volumes (pvc-*) among them are not adopted: hostpath keeps its data under ${HOST_DATA_DIR}, so those would be stranded, not used."
   fi
 
   local action="${TB_LEFTOVER_ACTION:-}"
   if [[ -z "$action" ]]; then
     if _tty_usable; then
       prompt_header "How should the installer handle it?"
-      if [[ -n "$k3s" ]]; then
+      if [[ -n "$native_nl" ]]; then
         hint "  [r] keep  — leave the existing data on disk, unused (a fresh install starts empty; it is NOT adopted)"
       elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
         # node-local can't adopt the host data (no /tracebloc bind-mount) — the
         # cluster starts empty in-node — so don't offer "reuse = adopt" here (#367).
         hint "  [r] keep  — leave the existing data on disk, unused (node-local starts empty; it is NOT adopted)"
+      elif [[ "$hp_vols" == all ]]; then
+        hint "  [r] keep  — leave the k3s volumes on disk, unused (hostpath does not mount them; they are NOT adopted)"
+      elif [[ "$hp_vols" == some ]]; then
+        hint "  [r] reuse — keep and adopt the data under ${HOST_DATA_DIR}; the k3s volumes stay on disk, NOT adopted"
       else
         hint "  [r] reuse — keep and adopt the existing data"
       fi
@@ -926,7 +955,9 @@ guard_leftover_data() {
       local reuse_desc="adopt the existing data"
       [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && \
         reuse_desc="keep the data on disk, NOT adopted (node-local starts empty in-node)"
-      [[ -n "$k3s" ]] && reuse_desc="keep the data on disk, NOT adopted (a fresh install starts empty)"
+      [[ -n "$native_nl" ]] && reuse_desc="keep the data on disk, NOT adopted (a fresh install starts empty)"
+      [[ "$hp_vols" == some ]] && reuse_desc="adopt the data under ${HOST_DATA_DIR}; the k3s volumes (pvc-*) stay on disk, NOT adopted"
+      [[ "$hp_vols" == all ]] && reuse_desc="keep the k3s volumes on disk, NOT adopted (hostpath does not mount them)"
       local newdir_line="
   TRACEBLOC_HOST_DATA_DIR=<new-path> ...  install into a different directory"
       [[ -n "$frozen" ]] && newdir_line=""   # config.yaml froze the volumes' directory: the env cannot move them
@@ -941,7 +972,7 @@ guard_leftover_data() {
 
   case "$action" in
     reuse)
-      if [[ -n "$k3s" ]]; then
+      if [[ -n "$native_nl" ]]; then
         warn "A fresh native k3s install can't adopt the data under ${where} — its volumes start empty."
         hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest')."
         log "native k3s: left ${where} on disk (NOT adopted)."
@@ -952,8 +983,13 @@ guard_leftover_data() {
         warn "node-local storage can't adopt ${HOST_DATA_DIR} — the new cluster starts empty inside the node."
         hint "Your existing data is left on disk, untouched but unused. Re-ingest it after setup ('tracebloc data ingest'), or use hostpath storage (TRACEBLOC_STORAGE_MODE=hostpath) to keep using it in place."
         log "node-local: left ${HOST_DATA_DIR} on disk (NOT adopted — no host bind-mount)."
+      elif [[ "$hp_vols" == all ]]; then
+        warn "hostpath can't adopt the k3s volumes under ${where} — it keeps its data under ${HOST_DATA_DIR}."
+        hint "They are left on disk, untouched but unused. Re-ingest the data after setup ('tracebloc data ingest')."
+        log "hostpath: left the k3s volumes under ${where} on disk (NOT adopted)."
       else
         log "Reusing existing data under ${HOST_DATA_DIR} (user choice)."
+        [[ "$hp_vols" != some ]] || log "hostpath: the k3s volumes (pvc-*) found beside it are left on disk (NOT adopted)."
       fi
       ;;
     wipe)

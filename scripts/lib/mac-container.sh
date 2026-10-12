@@ -473,3 +473,302 @@ _mac_ct_start_system() {
     || error "Apple container: the running container system does not boot the pinned init image ${ref}."
   log "Apple container ${TB_APPLE_CONTAINER_VERSION}: running on kernel sha256:${TB_MAC_KERNEL_SHA256} and init image ${ref}."
 }
+
+# =============================================================================
+#  Part 3: the node.
+# -----------------------------------------------------------------------------
+#  k3s runs as one container on the system part 2 started, in the shape spike S-M
+#  measured (RFC-0175 section 12.6, the fresh-Mac kit's node_run):
+#    - the image is rancher/k3s's linux/arm64 manifest, pulled by its digest
+#      (K3S_IMAGE_ARM64_DIGEST, at the pinned K8S_VERSION);
+#    - all its state is one volume, named like the container, at /var/lib/rancher/k3s;
+#    - --cap-add ALL --read-only-path NONE --masked-path NONE, without which k3s stops
+#      at "open /proc/sys/kernel/panic: read-only file system";
+#    - the API published on 127.0.0.1:6443 only;
+#    - --rosetta when Rosetta is installed, while the chart's MySQL pin is amd64;
+#    - a fixed node IP: the container's address changes on every start, so the node
+#      advertises a loopback alias, TB_MAC_CT_NODE_IP, that the entrypoint adds.
+#  The config is _native_k3s_render_config's, never a fork, plus the Mac's own keys.
+#  It reaches the node as ARGUMENTS (open decision 1, option b): the entrypoint
+#  writes it, and the kubelet drop-in, into /etc/rancher/k3s, then execs k3s. The
+#  host keeps its own copies in _mac_ct_node_dir: config.yaml (the node name and the
+#  ranges, frozen there as on Linux), run-args (the argv the node was created with)
+#  and k3s.yaml (fetched from the node).
+#
+#  A run whose argv differs from run-args recreates the node on its volume (measured:
+#  the data is kept). A container or a volume of the node's name that run-args does
+#  not vouch for is refused, never adopted (D5): nothing shows this installer made it.
+#
+#  "Ready" is a Ready condition whose heartbeat is newer than the start this run
+#  made: for about 40 s after a restart the stored status is the old one (S-M).
+#
+#  Nothing calls this yet: part 6 makes the path reachable.
+# =============================================================================
+
+# The node's address: TEST-NET-1 (RFC 5737), never routed, so it is free on any network.
+TB_MAC_CT_NODE_IP="192.0.2.10"
+# The interface flannel uses inside the node (the container's only one).
+TB_MAC_CT_NODE_IFACE="eth0"
+# The volume's size: a sparse ext4 image, so it takes only what is written.
+TB_MAC_CT_NODE_VOLUME_SIZE="64g"
+# What the node needs Rosetta for is an amd64 image; this file is there once it is installed.
+TB_MAC_CT_ROSETTA_RUNTIME="/Library/Apple/usr/libexec/oah/libRosettaRuntime"
+# The node's entrypoint. $1 is config.yaml, $2 the kubelet drop-in, $3 the node IP. An
+# address it cannot add, and that lo does not already carry, stops the node: k3s would
+# advertise an address nothing answers on.
+TB_MAC_CT_NODE_ENTRY='set -e
+mkdir -p /etc/rancher/k3s
+printf "%s\n" "$1" > /etc/rancher/k3s/config.yaml
+printf "%s\n" "$2" > /etc/rancher/k3s/tracebloc-kubelet.yaml
+ip addr add "$3/32" dev lo 2>/dev/null || case "$(ip -4 addr show dev lo)" in *"inet $3/32"*) ;; *) exit 1 ;; esac
+exec /bin/k3s server'
+
+# _mac_ct_node_name -- the node container's name, and its volume's: the kube context's
+# name (_native_k3s_context), so `container list` and kubectl name the node alike.
+_mac_ct_node_name() {
+  local n; n="$(_native_k3s_context)"
+  if [[ ! "$n" =~ ^[a-z0-9][a-z0-9_.-]*$ ]]; then
+    echo "Apple container: '${n}' is not a name the node's container can take (lowercase letters, digits, '.', '_', '-'); set TRACEBLOC_CLUSTER_NAME to one."
+    return 1
+  fi
+  printf '%s' "$n"
+}
+
+# _mac_ct_node_dir -- the host's copies of what the node runs on (see above).
+_mac_ct_node_dir() { local home; home="$(_mac_ct_home)" || return 1; printf '%s/node' "$home"; }
+
+# _mac_ct_node_image -- rancher/k3s at the pinned K8S_VERSION, by its linux/arm64
+# digest: the repository from _native_k3s_image_ref, the one derivation check-facts.sh
+# resolves the digest through, and no tag, so the digest alone decides what runs.
+_mac_ct_node_image() {
+  local digest="${TB_K3S_IMAGE_ARM64_DIGEST:-}" ref
+  if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Apple container: the stamped k3s node image digest is '${digest}', not sha256:<64 hex> (run scripts/check-facts.sh --write)."
+    return 1
+  fi
+  ref="$(_native_k3s_image_ref "${TB_K3S_PIN_K8S_VERSION:-}" 2>&1)" \
+    || { echo "Apple container: no k3s node image for the pinned version: ${ref}"; return 1; }
+  printf '%s@%s' "${ref%:*}" "$digest"
+}
+
+# _mac_ct_node_cidrs CONFIG -- the node's "<cluster-cidr> <service-cidr>": the pair
+# CONFIG froze, else the first of TRACEBLOC_K3S_CIDR_PAIRS. Unlike Linux, no host route
+# is read: the pod and service routes live in the VM, never on the Mac, so they cannot
+# misroute the Mac's own traffic (the reason _native_k3s_pick_cidrs reads them).
+_mac_ct_node_cidrs() {
+  local cfg="$1" c s rc=0
+  c="$(_native_k3s_config_value cluster-cidr "$cfg")" || rc=$?
+  [[ "$rc" -eq 0 ]] && { s="$(_native_k3s_config_value service-cidr "$cfg")" || rc=$?; }
+  [[ "$rc" -eq 0 ]] || error "Apple container: ${cfg} exists but could not be read, so the pod and service ranges it holds cannot be kept. Check it, then re-run."
+  if [[ -n "$c" && -n "${s:-}" ]]; then printf '%s %s\n' "$c" "$s"; return 0; fi
+  printf '%s\n' "${TRACEBLOC_K3S_CIDR_PAIRS[0]}"
+}
+
+# _mac_ct_node_config NAME CIDRS -- the node's config.yaml: _native_k3s_render_config's
+# (node-local storage on the volume, cgroup v2, the kubeconfig root's only), then the
+# Mac's own keys.
+_mac_ct_node_config() {
+  _native_k3s_render_config node-local "$1" "$2" "" v2 "" || return 1
+  printf 'node-ip: "%s"\n' "$TB_MAC_CT_NODE_IP"
+  printf 'advertise-address: "%s"\n' "$TB_MAC_CT_NODE_IP"
+  printf 'tls-san: ["127.0.0.1"]\n'
+  printf 'flannel-iface: "%s"\n' "$TB_MAC_CT_NODE_IFACE"
+}
+
+# _mac_ct_node_size -- "<cpus> <memory>" for the node: spike S-M's shape, 4 CPUs and
+# 8 GB, or 4 GB on a Mac with less than 12 GB. Part 5 replaces it with the sizing rule.
+_mac_ct_node_size() {
+  local bytes
+  bytes="$(sysctl -n hw.memsize 2>/dev/null)" || bytes=""
+  if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then
+    echo "Apple container: sysctl did not say how much memory this Mac has (hw.memsize), so this run cannot size the node."
+    return 1
+  fi
+  if (( bytes < 12 * 1024 * 1024 * 1024 )); then printf '4 4g'; else printf '4 8g'; fi
+}
+
+# _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE -- the `container run` argv, into
+# TB_MAC_CT_NODE_ARGV (an array: the config holds newlines and quotes). --rosetta is in
+# it when TRACEBLOC_MAC_CT_ROSETTA (the TEST SEAM), else TB_MAC_CT_ROSETTA_RUNTIME, exists.
+TB_MAC_CT_NODE_ARGV=()
+_mac_ct_node_argv() {
+  local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }"
+  TB_MAC_CT_NODE_ARGV=(run -d --name "$name"
+    --cap-add ALL --read-only-path NONE --masked-path NONE)
+  [[ ! -e "${TRACEBLOC_MAC_CT_ROSETTA:-$TB_MAC_CT_ROSETTA_RUNTIME}" ]] || TB_MAC_CT_NODE_ARGV+=(--rosetta)
+  TB_MAC_CT_NODE_ARGV+=(--cpus "$cpus" --memory "$mem"
+    -v "${name}:/var/lib/rancher/k3s" --tmpfs /run --tmpfs /var/run
+    -p 127.0.0.1:6443:6443
+    --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY" sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP")
+}
+
+# _mac_ct_node_running CT NAME -- 0 when `container list` (running containers only)
+# has NAME in its first column; 1 when it does not; 2 when the list fails (cannot tell).
+_mac_ct_node_running() {
+  local out
+  out="$(_bounded 30 "$1" list </dev/null 2>/dev/null)" || return 2
+  awk -v n="$2" 'NR > 1 && $1 == n { found = 1 } END { exit !found }' <<<"$out"
+}
+
+# _mac_ct_node_exists CT NAME -- 0 when container NAME exists (running or not); 1 when it
+# does not; 2 when this run cannot tell. A failed `inspect` is not "absent": it may be a
+# timeout or a runtime hiccup beside a node that is there, so it is settled by the
+# list of all containers, and a list that fails is cannot tell.
+_mac_ct_node_exists() {
+  local out
+  _bounded 30 "$1" inspect "$2" </dev/null >/dev/null 2>&1 && return 0
+  out="$(_bounded 30 "$1" list --all </dev/null 2>/dev/null)" || return 2
+  awk -v n="$2" 'NR > 1 && $1 == n { found = 1 } END { exit !found }' <<<"$out"
+}
+
+# _mac_ct_volume_exists CT NAME -- 0 when volume NAME exists; 1 when it does not; 2 when
+# this run cannot tell. As for the container: a failed `volume inspect` may be a timeout
+# beside a volume that is there, so it is settled by the list of volumes, and a list that
+# fails is cannot tell.
+_mac_ct_volume_exists() {
+  local out
+  _bounded 30 "$1" volume inspect "$2" </dev/null >/dev/null 2>&1 && return 0
+  out="$(_bounded 30 "$1" volume list </dev/null 2>/dev/null)" || return 2
+  awk -v n="$2" 'NR > 1 && $1 == n { found = 1 } END { exit !found }' <<<"$out"
+}
+
+# _mac_ct_node_ready_since CT NAME NODE SINCE -- 0 when node NODE's Ready condition is
+# True with a heartbeat at or after SINCE (UTC, %Y-%m-%dT%H:%M:%SZ), asked inside the
+# node. Both times are that format, so their digits compare as numbers. The heartbeat
+# it read is left in TB_MAC_CT_NODE_HB, for the log.
+TB_MAC_CT_NODE_HB=""
+_mac_ct_node_ready_since() {
+  local out hb st
+  out="$(_bounded 15 "$1" exec "$2" kubectl get node "$3" --request-timeout=5s \
+    -o 'jsonpath={.status.conditions[?(@.type=="Ready")].lastHeartbeatTime} {.status.conditions[?(@.type=="Ready")].status}' \
+    </dev/null 2>/dev/null)" || return 1
+  hb="${out%% *}"; st="${out##* }"; TB_MAC_CT_NODE_HB="$hb"
+  [[ "$st" == True && "$hb" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  (( 10#${hb//[^0-9]/} >= 10#${4//[^0-9]/} ))
+}
+
+# _mac_ct_wait_node_ready CT NAME NODE SINCE -- wait on the API budget the Linux waits
+# share (_native_k3s_budget_left) for _mac_ct_node_ready_since.
+_mac_ct_wait_node_ready() {
+  local budget
+  budget="$(_api_wait_budget_s)"
+  log "Waiting for node '${3}' to be Ready..."
+  until _mac_ct_node_ready_since "$@"; do
+    _native_k3s_budget_left "$budget" \
+      || error "Node '${3}' did not become Ready within ${budget}s. It's safe to re-run this installer; on a slow machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. \"${1}\" logs ${2} says why k3s is not up."
+    sleep 2
+    TB_K3S_WAITED_S=$(( TB_K3S_WAITED_S + 2 ))
+  done
+  log "Node '${3}' is Ready (heartbeat ${TB_MAC_CT_NODE_HB}, asked for one at or after ${4})."
+}
+
+# _mac_ct_ensure_node -- the node on the running system (part 2), Ready, recorded, and
+# its kubeconfig copied to _mac_ct_node_dir/k3s.yaml. Reuses a running node created with
+# this argv, starts a stopped one, recreates one created with another argv on its
+# volume, and refuses a container or a volume of its name that nothing shows this
+# installer made.
+_mac_ct_ensure_node() {
+  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol=""
+  _native_k3s_check_version
+  TB_K3S_ON_MAC=1
+  root="$(_mac_ct_install_root)" && dir="$(_mac_ct_node_dir)" \
+    || error "Apple container: cannot tell where the runtime lives (above)."
+  ct="${root}/bin/container"
+  name="$(_mac_ct_node_name)" || error "$name"
+  image="$(_mac_ct_node_image)" || error "$image"
+  size="$(_mac_ct_node_size)" || error "$size"
+  mkdir -p "$dir" || error "Apple container: could not create ${dir}."
+  cfgfile="${dir}/config.yaml"
+  cidrs="$(_mac_ct_node_cidrs "$cfgfile")" || exit 1
+  node="$(_native_k3s_node_name "$cfgfile")" || exit 1
+  cfg="$(_mac_ct_node_config "$node" "$cidrs")" || error "Apple container: could not render the node's k3s config (above)."
+  # The node is k3s whatever this run resolved: never k3d's Docker Desktop reservation.
+  kubelet="$(TRACEBLOC_SUBSTRATE_RESOLVED=k3s _render_kubelet_config)" || error "Apple container: could not render the node's kubelet drop-in."
+  _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size"
+  want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
+  if [[ -e "${dir}/run-args" ]]; then
+    have="$(cat "${dir}/run-args")" || error "Apple container: ${dir}/run-args cannot be read, so this run cannot tell how the node was created."
+  fi
+  # The config is frozen before the node first reads it, as on Linux.
+  printf '%s\n' "$cfg" > "${cfgfile}.tmp" && mv "${cfgfile}.tmp" "$cfgfile" \
+    || { rm -f "${cfgfile}.tmp"; error "Apple container: could not write ${cfgfile}."; }
+  rc=0; _mac_ct_node_exists "$ct" "$name" || rc=$?
+  [[ "$rc" != 2 ]] \
+    || error "Apple container: the container system did not answer whether a container named ${name} exists, so this run cannot tell. It's safe to re-run this installer."
+  if [[ "$rc" == 0 ]]; then
+    [[ -n "$have" ]] \
+      || error "Apple container: a container named ${name} already exists, and nothing shows this installer created it (${dir}/run-args is missing). This installer does not delete it: remove it yourself (\"${ct}\" delete --force ${name}), then re-run."
+    if [[ "$have" != "$want" ]]; then
+      log "Apple container: the node's settings changed since it was created, so it is recreated on its volume ${name}; its data is kept."
+      # A stop that fails is not the end: a node that is already stopped may refuse it,
+      # and the delete below is what says whether the node is gone.
+      _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+      _bounded 60 "$ct" delete "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+        || error "Apple container: could not remove the node ${name} to recreate it. Its volume is untouched. Run \"${ct}\" delete --force ${name}, then re-run."
+      start=run
+    else
+      rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
+      case "$rc" in
+        0) ;;
+        1) start=start ;;
+        *) error "Apple container: the container system did not list its containers, so this run cannot tell whether the node ${name} is running." ;;
+      esac
+    fi
+  else
+    rc=0; _mac_ct_volume_exists "$ct" "$name" || rc=$?
+    [[ "$rc" != 2 ]] \
+      || error "Apple container: the container system did not answer whether a volume named ${name} exists, so this run cannot tell. It's safe to re-run this installer."
+    if [[ "$rc" == 0 ]]; then
+      [[ -n "$have" ]] \
+        || error "Apple container: a volume named ${name} already exists, and nothing shows this installer created it, so a new node would silently take over its data. This installer does not delete it: remove it yourself (\"${ct}\" volume delete ${name}), then re-run."
+    else
+      mkvol=1
+    fi
+    start=run
+  fi
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  case "$start" in
+    run)
+      # The image is needed only to create a node: reusing or starting one works with the
+      # registry unreachable.
+      log "Apple container: pulling the k3s node image ${image}..."
+      _bounded 900 "$ct" image pull --platform linux/arm64 --progress none "$image" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+        || error "Couldn't pull the k3s node image ${image}. Check that this machine can reach registry-1.docker.io, then re-run."
+      # run-args goes first, before the volume and the container: whatever a run cut off
+      # half-way leaves, a re-run must recognise as this installer's.
+      printf '%s\n' "$want" > "${dir}/run-args.tmp" && mv "${dir}/run-args.tmp" "${dir}/run-args" \
+        || { rm -f "${dir}/run-args.tmp"; error "Apple container: could not write ${dir}/run-args."; }
+      [[ -z "$mkvol" ]] || _bounded 60 "$ct" volume create --opt "size=${TB_MAC_CT_NODE_VOLUME_SIZE}" "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+        || error "Apple container: could not create the node's volume ${name}."
+      # set-u-safe: _mac_ct_node_argv seeds it with the run verb
+      _bounded 300 "$ct" "${TB_MAC_CT_NODE_ARGV[@]}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+        || error "Apple container: the node ${name} did not start. \"${ct}\" logs ${name} says why. It's safe to re-run this installer." ;;
+    start)
+      _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+        || error "Apple container: the node ${name} did not start. \"${ct}\" logs ${name} says why. It's safe to re-run this installer." ;;
+    *) since="" ;;
+  esac
+  tb_record_write container-node "$name" "$(_mac_ct_home)"
+  # A node this run did not start is Ready on its current status; one it started must
+  # say so with a heartbeat newer than the start.
+  # Each wait spends its own budget: _native_k3s_budget_left reads these two as it
+  # goes, and a second call in one process (the live test makes three) would
+  # otherwise inherit the first wait's elapsed time and time out at once.
+  TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
+  _mac_ct_wait_node_ready "$ct" "$name" "$node" "${since:-0000-00-00T00:00:00Z}"
+  (umask 077; _bounded 30 "$ct" exec "$name" cat /etc/rancher/k3s/k3s.yaml </dev/null > "${dir}/k3s.yaml.tmp") \
+    && [[ -s "${dir}/k3s.yaml.tmp" ]] && mv "${dir}/k3s.yaml.tmp" "${dir}/k3s.yaml" \
+    || { rm -f "${dir}/k3s.yaml.tmp"; error "Apple container: could not copy the node's kubeconfig out of ${name}. It's safe to re-run this installer."; }
+  log "Apple container: node '${node}' is Ready in ${name}, its API on 127.0.0.1:6443."
+}
+
+# _mac_ct_merge_kubeconfig -- the node's kubeconfig merged into the user's, as a
+# kube-context, by the Linux merge (_native_k3s_merge_kubeconfig), from the copy
+# _mac_ct_ensure_node took. It needs a kubectl on PATH: part 6 installs the pinned one.
+_mac_ct_merge_kubeconfig() {
+  local dir
+  dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's kubeconfig is (above)."
+  TB_K3S_ON_MAC=1
+  _native_k3s_merge_kubeconfig "${dir}/k3s.yaml"
+  tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
+}

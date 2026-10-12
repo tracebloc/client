@@ -380,22 +380,27 @@ storageClass:
 # When disabled, only dynamic PVCs are created (AKS/EKS/OC pattern).
 hostPath:
   enabled: false
-  # PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql (→ ~/.tracebloc/{data,logs,mysql} when HOST_DATA_DIR is mounted at /tracebloc). Directories are created automatically via hostPath type: DirectoryOrCreate.
-  # Base host path for the DATASET PV ONLY (shared training data). Default
-  # /tracebloc keeps datasets on the local mount alongside mysql/logs. The
-  # installer sets this to /tracebloc-data when a customer network (NFS) dataset
-  # mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR
-  # still works; backend#743) — mysql + logs ALWAYS
-  # stay on the local /tracebloc tree (InnoDB over NFS is unsafe). The chart
-  # appends /<release>/data. mysql/logs PV paths are not affected by this key.
+  # Base host path of the local tree: the PVs are <root>/<release>/{mysql,logs},
+  # and the dataset PV is <datasetPath>/<release>/data. Directories are created
+  # automatically via hostPath type: DirectoryOrCreate. The default /tracebloc is
+  # the node path k3d bind-mounts HOST_DATA_DIR at (→ ~/.tracebloc). On native
+  # k3s the node is the host, so the installer sets root to HOST_DATA_DIR itself
+  # (client-dev#1782).
+  root: /tracebloc
+  # Base host path for the DATASET PV ONLY (shared training data). Unset, it is
+  # root, so datasets stay on the local tree alongside mysql/logs. The installer
+  # sets it when a customer network (NFS) dataset mount is provided via
+  # TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works;
+  # backend#743): /tracebloc-data on k3d, the mount itself on native k3s. mysql +
+  # logs ALWAYS stay on the local root tree (InnoDB over NFS is unsafe). The
+  # chart appends /<release>/data. mysql/logs PV paths are not affected by this key.
   #
   # It is ALSO what tells the Storage meter there is a second filesystem to
-  # measure (backend#3916): set to anything other than the default /tracebloc,
-  # it adds a read-only resource-monitor mount of that path so the meter reports
-  # the client's whole storage instead of just the local disk. Leaving it at the
-  # default renders no second mount at all -- see
-  # tracebloc.resourceMonitorDatasetPath for why "unset" cannot be the signal.
-  datasetPath: /tracebloc
+  # measure (backend#3916): set to anything other than root, it adds a read-only
+  # resource-monitor mount of that path so the meter reports the client's whole
+  # storage instead of just the local disk. Unset, or equal to root, renders no
+  # second mount at all -- see tracebloc.resourceMonitorDatasetPath.
+  # datasetPath: /tracebloc-data
 
 # -- Cluster topology: does this cluster have a single schedulable node?
 # Gates the AUTO-mode single-replica PodDisruptionBudgets (podDisruptionBudget
@@ -1387,6 +1392,7 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
+    engineCommit: "4183982c997d5209da8c75f344fffd340fa4ab3a"
     digests:
       causal_language_modeling:
         cpu: "sha256:36726202b5c45eb8f862c3e77cc68824e776a59d4bfb68c3ff10c0933b7a9d35"

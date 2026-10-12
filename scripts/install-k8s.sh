@@ -289,6 +289,14 @@ main() {
   fi
 
   validate_config
+  # A native k3s re-run keeps the storage its release was installed with
+  # (client-dev#1782): read it here, before the first pre-install reader of
+  # TB_STORAGE_MODE (the guard below, preflight, guard_leftover_data), so each judges
+  # where the release keeps its data. It decides only when it can see the release;
+  # otherwise install_client_helm reads it once k3s is up. Guarded like its neighbours.
+  if declare -F _native_k3s_release_storage >/dev/null 2>&1; then
+    _native_k3s_release_storage early
+  fi
   # Pre-log network-FS guard (#432): setup_log_file mkdirs HOST_DATA_DIR and
   # redirects the whole session's output onto it — refuse a network-FS target
   # BEFORE that unguarded mkdir can fail (or land root-squashed) on an NFS

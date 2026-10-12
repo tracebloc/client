@@ -377,8 +377,10 @@ _native_k3s_group_name_ok() {
 
 # _native_k3s_render_config MODE NODE_NAME CIDR_PAIR STORAGE_PATH CGROUP
 #   -- print /etc/rancher/k3s/config.yaml. PURE: no reads, no writes, one fixed format.
-#   MODE          TB_STORAGE_MODE. Only node-local: the native path has no hostpath
-#                 mode (1.1e), so hostpath is refused by name.
+#   MODE          TB_STORAGE_MODE: node-local or hostpath. Both render the same file
+#                 (client-dev#1782): hostpath's volumes are the chart's own hostPath
+#                 PVs on its own manual class, so k3s's local-path stays for anything
+#                 else and nothing here depends on the mode.
 #   NODE_NAME     _native_k3s_node_name's answer.
 #   CIDR_PAIR     "<cluster-cidr> <service-cidr>", _native_k3s_pick_cidrs's answer.
 #   STORAGE_PATH  empty for k3s's default (/var/lib/rancher/k3s/storage, decided
@@ -394,9 +396,8 @@ _native_k3s_group_name_ok() {
 _native_k3s_render_config() {
   local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" kgroup="${6:-}" cluster_cidr service_cidr kubelet_args
   case "$mode" in
-    node-local) ;;
-    hostpath) echo "native k3s: TRACEBLOC_STORAGE_MODE=hostpath is not supported on native k3s; it keeps datasets in k3s's local-path storage (node-local)." >&2; return 1 ;;
-    *) echo "native k3s: '${mode}' is not a storage mode (node-local)." >&2; return 1 ;;
+    node-local|hostpath) ;;
+    *) echo "native k3s: '${mode}' is not a storage mode (node-local or hostpath)." >&2; return 1 ;;
   esac
   [[ -n "$name" ]] || { echo "native k3s: no node name to render." >&2; return 1; }
   cluster_cidr="${cidrs%% *}"; service_cidr="${cidrs#* }"
@@ -495,12 +496,16 @@ TB_K3S_GROUP_MADE=""
 # administrator prepared for them (_native_k3s_prepared_for_me).
 TB_K3S_PREPARED=""
 TB_K3S_ADOPTED=""
+# TB_K3S_ON_MAC: this run installs the macOS node (mac-container.sh, 2.1 part 3). k3s
+# runs in a container there, the files this file reads are the daily user's own copies
+# in the runtime's folder, and the Mac has no k3s binary: nothing here may use sudo.
+TB_K3S_ON_MAC=""
 
 # _native_k3s_read CMD... -- CMD on one of k3s's root-owned files: through sudo,
 # except on an adopted host, where this user reads them through the prepared group
-# and has no sudo to use.
+# and has no sudo to use, and on the macOS node, whose copies are the user's.
 _native_k3s_read() {
-  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then "$@"; else tb_root "$@"; fi
+  if [[ "${TB_K3S_ADOPTED:-}" == 1 || "${TB_K3S_ON_MAC:-}" == 1 ]]; then "$@"; else tb_root "$@"; fi
 }
 
 # _native_k3s_kubeconfig_grant -- the group k3s.yaml and config.yaml are granted to,
@@ -774,13 +779,19 @@ _native_k3s_kubeconfig_target() {
 # KUBECONFIG: the first file wins a conflict, so a re-install's fresh credentials
 # replace the previous install's, and its current-context becomes the user's.
 #
+# SRC, when given, is a k3s.yaml this user already holds, read without sudo: the macOS
+# node's copy, which mac-container.sh fetches from the node. There the Mac has no k3s
+# binary, so the kubectl is the one on PATH (TB_K3S_ON_MAC).
+#
 # With KUBECONFIG unset it is then EXPORTED as the merged file, for the rest of the
 # run. Upstream links kubectl to k3s (D3), and k3s's kubectl reads root's k3s.yaml,
 # never ~/.kube/config, whenever KUBECONFIG is unset and that file exists: on the
 # 1.1e VM every kubectl the run made failed "permission denied" and the API wait
 # ran out. A KUBECONFIG the user set already names the target, and is left alone.
 _native_k3s_merge_kubeconfig() {
-  local ctx target td prev_ctx=""
+  local src="${1:-}" ctx target td prev_ctx="" kc
+  kc=("$TB_K3S_BIN_PATH" kubectl)
+  [[ "${TB_K3S_ON_MAC:-}" != 1 ]] || kc=(kubectl)
   ctx="$(_native_k3s_context)"; target="$(_native_k3s_kubeconfig_target)"
   # What kubectl pointed at before this install, so the summary can say how to switch
   # back (k3d's merge does the same). Read before the merge changes it; a read that
@@ -788,18 +799,24 @@ _native_k3s_merge_kubeconfig() {
   # names the user's kubeconfig: with KUBECONFIG unset, k3s's kubectl reads
   # /etc/rancher/k3s/k3s.yaml (context `default`) and never ~/.kube/config.
   TB_PREV_KUBE_CONTEXT=""
-  prev_ctx="$(_bounded 10 env KUBECONFIG="${KUBECONFIG:-$target}" "$TB_K3S_BIN_PATH" kubectl config current-context 2>/dev/null)" || prev_ctx=""
+  prev_ctx="$(_bounded 10 env KUBECONFIG="${KUBECONFIG:-$target}" "${kc[@]}" config current-context 2>/dev/null)" || prev_ctx=""  # set-u-safe: kc is seeded with the kubectl in both branches
   prev_ctx="${prev_ctx//[$'\r\n']/}"
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-kc-XXXXXX")" || error "native k3s: could not create a temporary directory for the kubeconfig merge."
   # Read as root (adopted: through the prepared group), written as the user: the
   # redirect stays outside the read.
-  _native_k3s_read cat "$TB_K3S_KUBECONFIG_PATH" > "${td}/k3s.yaml" \
-    || { rm -rf "$td"; error "native k3s: couldn't read ${TB_K3S_KUBECONFIG_PATH}; k3s writes it when it starts. Check 'sudo systemctl status k3s', then re-run."; }
+  if [[ -n "$src" ]]; then
+    cat "$src" > "${td}/k3s.yaml" \
+      || { rm -rf "$td"; error "native k3s: couldn't read ${src}, the node's kubeconfig. It's safe to re-run this installer."; }
+  else
+    _native_k3s_read cat "$TB_K3S_KUBECONFIG_PATH" > "${td}/k3s.yaml" \
+      || { rm -rf "$td"; error "native k3s: couldn't read ${TB_K3S_KUBECONFIG_PATH}; k3s writes it when it starts. Check 'sudo systemctl status k3s', then re-run."; }
+  fi
   _native_k3s_rename_kubeconfig "$ctx" < "${td}/k3s.yaml" > "${td}/renamed.yaml" \
-    || { rm -rf "$td"; error "native k3s: ${TB_K3S_KUBECONFIG_PATH} is not the shape k3s writes (one cluster, user and context, all named 'default'), so it was not merged into ${target}."; }
+    || { rm -rf "$td"; error "native k3s: ${src:-$TB_K3S_KUBECONFIG_PATH} is not the shape k3s writes (one cluster, user and context, all named 'default'), so it was not merged into ${target}."; }
   mkdir -p "$(dirname "$target")" \
     || { rm -rf "$td"; error "native k3s: couldn't create $(dirname "$target")."; }
-  KUBECONFIG="${td}/renamed.yaml:${target}" "$TB_K3S_BIN_PATH" kubectl config view --flatten > "${td}/merged.yaml" \
+  # set-u-safe: kc is seeded with the kubectl in both branches
+  KUBECONFIG="${td}/renamed.yaml:${target}" "${kc[@]}" config view --flatten > "${td}/merged.yaml" \
     || { rm -rf "$td"; error "native k3s: couldn't merge the k3s kubeconfig into ${target}."; }
   install -m 0600 "${td}/merged.yaml" "$target" \
     || { rm -rf "$td"; error "native k3s: couldn't write ${target}."; }
@@ -1328,7 +1345,10 @@ _native_k3s_host_prereqs() {
 }
 
 # _native_k3s_refuse_host -- refuse, each by name, a host or a setting the native path
-# does not serve in Stage 1, before anything is written.
+# does not serve in Stage 1, before anything is written. refuse_k3s_beside_live_k3d
+# (reinstall.sh) also calls it before step a, ahead of a k3d offboard
+# (client-dev#1805), so it stays read-only and reads nothing step a sets;
+# reinstall.bats' #1805 case holds that for both hosts and a setting.
 _native_k3s_refuse_host() {
   [[ "${OS:-}" == "Linux" ]] \
     || error "Native k3s runs on Linux only for now, and this machine runs ${OS:-an unknown OS}. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d."
@@ -1336,10 +1356,10 @@ _native_k3s_refuse_host() {
     || error "native k3s: probe.sh is not loaded, so this run cannot tell whether it is inside WSL. Re-run the installer from a fresh download."
   ! _probe_wsl \
     || error "Native k3s does not run inside WSL yet. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d."
-  [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]] \
-    || error "TRACEBLOC_STORAGE_MODE=hostpath is not available on native k3s yet: native k3s keeps datasets in k3s's local-path storage. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE), or set TRACEBLOC_SUBSTRATE=k3d to keep hostpath on k3d."
-  [[ -z "${HOST_DATASET_DIR:-}" ]] \
-    || error "HOST_DATASET_DIR is not available on native k3s yet: a dataset directory cannot be mounted into native k3s. Unset TRACEBLOC_HOST_DATASET_DIR (and the older HOST_DATASET_DIR), or set TRACEBLOC_SUBSTRATE=k3d to keep the mount on k3d."
+  # hostpath and HOST_DATASET_DIR are served (client-dev#1782): the node is the host,
+  # so the chart's hostPath PVs name HOST_DATA_DIR and the dataset dir themselves
+  # (install-client-helm.sh, _hostpath_paths_block). validate_config still refuses a
+  # dataset dir under node-local, on both substrates.
   [[ -z "${AGENTS:-}" ]] \
     || error "AGENTS=${AGENTS} is a k3d setting: native k3s is one server with no agent. Unset TRACEBLOC_AGENTS (and the older AGENTS)."
   [[ -z "${SERVERS:-}" || "${SERVERS}" == "1" ]] \

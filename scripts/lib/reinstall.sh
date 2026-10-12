@@ -280,6 +280,19 @@ _reinstall_explain() {
 refuse_k3s_beside_live_k3d() {
   TB_REINSTALL_DECISION="proceed"
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
+  # A request native k3s refuses is refused FIRST, before detection decides
+  # anything: an offboard for it removes the k3d client at step a, and step c then
+  # refuses the k3s, leaving no client at all (client-dev#1805). Every refusal in
+  # _native_k3s_refuse_host reads only what is known now (the OS, WSL, settings read
+  # when common.sh is sourced), so it is called as it is, the one declaration of
+  # where and how native k3s runs; step c calls it again. Each exit from it is a
+  # refusal: a re-run with nothing changed is refused again.
+  declare -F _native_k3s_refuse_host >/dev/null 2>&1 \
+    || error "This installer build can't check whether native k3s can run here (stale bootstrap), and it never moves a k3d machine to a native k3s it cannot set up. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  TB_EXIT_REFUSED=1
+  _native_k3s_refuse_host
+  TB_EXIT_REFUSED=""
   _reinstall_detect
   TB_REINSTALL_DECISION="$(_reinstall_decision)"
   case "$TB_REINSTALL_DECISION" in

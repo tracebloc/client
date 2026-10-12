@@ -893,6 +893,9 @@ spec:
         {{- if and $training.capabilities (not $training.digests) }}
         {{- fail "images.training.capabilities is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is nothing it could have been read from. Unset it, or populate the digest map with the resolver, which writes both together." }}
         {{- end }}
+        {{- if and $training.engineCommit (not $training.digests) }}
+        {{- fail "images.training.engineCommit is DERIVED from the pinned digests by scripts/resolve-training-digests.sh and cannot be set while images.training.digests is empty -- there is no pinned image whose commit it could be. Unset it, or populate the digest map with the resolver, which writes both together." }}
+        {{- end }}
         {{- $trainingPins := include "tracebloc.trainingPins" . }}
         {{- if $trainingPins }}
         - name: TRAINING_IMAGE_DIGESTS

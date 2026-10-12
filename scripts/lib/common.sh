@@ -1712,6 +1712,13 @@ tb_export_host_data_dir() {
   TRACEBLOC_HOST_DATA_DIR="${HOST_DATA_DIR:-}"
   export HOST_DATA_DIR TRACEBLOC_HOST_DATA_DIR
 }
+# _hostpath_root -- the host directory a native k3s hostpath install's PVs sit under:
+# the root an installed release keeps (TB_HOSTPATH_KEPT, _native_k3s_release_storage),
+# else HOST_DATA_DIR (client-dev#1782). The values file (_hostpath_paths_block) and the
+# summary both read it, so they name the same directory.
+_hostpath_root() {
+  if [[ "${TB_HOSTPATH_KEPT:-}" == 1 ]]; then printf '%s' "${TB_HOSTPATH_ROOT:-}"; else printf '%s' "${HOST_DATA_DIR:-}"; fi
+}
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
 # mount like /data01/tracebloc — the installer bind-mounts it into the cluster

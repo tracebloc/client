@@ -237,8 +237,10 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
     install. That is not a cosmetic difference. The mount is `type: Directory`,
     the DaemonSet tolerates every taint, and /tracebloc need not exist on an
     AKS/EKS node -- so a truth test parks resource-monitor in ContainerCreating
-    fleet-wide, with no probe to flag it. Comparing against the default is what
-    keeps this to installs that moved the tree somewhere real.
+    fleet-wide, with no probe to flag it. Comparing against the hostPath root
+    (tracebloc.hostPathRoot, /tracebloc by default) is what keeps this to
+    installs that moved the tree somewhere real: native k3s sets both to
+    HOST_DATA_DIR, and its datasets have not moved (client-dev#1782).
 
   The collector de-duplicates by backing device, so a datasetPath that turns out
   to share a disk with the root mount is measured once rather than doubled --
@@ -256,8 +258,9 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 {{- define "tracebloc.resourceMonitorDatasetPath" -}}
 {{- $hp := default dict .Values.hostPath -}}
 {{- if $hp.enabled -}}
-{{- $ds := $hp.datasetPath | default "/tracebloc" -}}
-{{- if ne $ds "/tracebloc" -}}{{- $ds -}}{{- end -}}
+{{- $root := include "tracebloc.hostPathRoot" . -}}
+{{- $ds := $hp.datasetPath | default $root -}}
+{{- if ne $ds $root -}}{{- $ds -}}{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -334,7 +337,21 @@ client-pvc
   Nil-guarded (default dict) for `--reuse-values` upgrades predating this key.
 */}}
 {{- define "tracebloc.clientDataHostPath" -}}
-{{ printf "%s/%s/data" ((default dict .Values.hostPath).datasetPath | default "/tracebloc") .Release.Name }}
+{{ printf "%s/%s/data" ((default dict .Values.hostPath).datasetPath | default (include "tracebloc.hostPathRoot" .)) .Release.Name }}
+{{- end -}}
+
+{{/*
+  hostPath base for the mysql and logs PVs: <root>/<release>/{mysql,logs}. The
+  historical /tracebloc by default, which on k3d is the node's bind mount of
+  HOST_DATA_DIR, so every existing release renders byte-identically. On native
+  k3s the node IS the host and there is no bind mount, so the installer sets it
+  to HOST_DATA_DIR itself (client-dev#1782). It is also what an unset
+  datasetPath falls back to, and what tracebloc.resourceMonitorDatasetPath
+  compares datasetPath against: the dataset tree moved only if it left the root.
+  Nil-guarded (default dict) for `--reuse-values` upgrades predating the key.
+*/}}
+{{- define "tracebloc.hostPathRoot" -}}
+{{- (default dict .Values.hostPath).root | default "/tracebloc" -}}
 {{- end -}}
 
 {{- define "tracebloc.clientLogsPvc" -}}

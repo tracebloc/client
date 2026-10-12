@@ -464,7 +464,11 @@ print_summary() {
       # Data location depends on the storage model: hostpath binds /tracebloc on
       # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
       # k3s local-path, so there is no host /tracebloc to point the user at.
-      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
+        # Native k3s, hostpath (client-dev#1782): the PVs name the host directory itself.
+        kdata="$(_hostpath_root)"
+        echo -e "  ${DIM}Logs ${logdisp}  ·  Data ${kdata}/${ns} (hostPath)${RESET}"
+      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s: the volumes are on this host, in local-path's storage path.
         # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
         # install) with nothing on stdout: say where the data is only when it told us.
@@ -578,7 +582,9 @@ _log_advanced_info() {
   local kdata
   log ""
   log "=== Advanced Info (for debugging) ==="
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
+    log "Volumes: $(_hostpath_root) (hostPath, on this host)"
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     kdata="$(_native_k3s_storage_path)" || kdata=""
     log "Volumes: ${kdata:-path not readable without root} (k3s local-path, on this host)"
   else

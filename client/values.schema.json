@@ -338,13 +338,21 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Enable hostPath PVs (bare-metal only). PV paths are fixed: /tracebloc/data, /tracebloc/logs, /tracebloc/mysql. Directories are created via hostPath type: DirectoryOrCreate."
+          "description": "Enable hostPath PVs (bare-metal only). The PVs are <root>/<release>/{mysql,logs} and <datasetPath>/<release>/data. Directories are created via hostPath type: DirectoryOrCreate."
         },
-        "datasetPath": {
+        "root": {
           "type": "string",
           "default": "/tracebloc",
           "pattern": "^/",
-          "description": "Base host path for the DATASET (shared-images) PV ONLY. Default /tracebloc keeps datasets local alongside mysql/logs; the installer sets /tracebloc-data when a customer network (NFS) dataset mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works; backend#743). mysql + logs PV paths always stay on /tracebloc. The chart appends /<release>/data. Any value other than the default ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
+          "description": "Base host path of the local hostPath tree: the mysql and logs PVs are <root>/<release>/{mysql,logs}, and an unset datasetPath is root. Default /tracebloc, the node path k3d bind-mounts HOST_DATA_DIR at; on native k3s the node is the host, so the installer sets it to HOST_DATA_DIR (client-dev#1782). Must be absolute, like datasetPath."
+        },
+        "datasetPath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^/",
+          "description": "Base host path for the DATASET (shared-images) PV ONLY. Unset (or null), it is hostPath.root, so datasets stay local alongside mysql/logs; the installer sets it (/tracebloc-data on k3d, the mount itself on native k3s) when a customer network (NFS) dataset mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works; backend#743). mysql + logs PV paths always stay on hostPath.root. The chart appends /<release>/data. Any value other than hostPath.root ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
         }
       }
     },
@@ -1299,7 +1307,7 @@
         "training": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. The chart refuses `capabilities` or `parents` with an empty `digests`.",
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. `engineCommit` is the tracebloc-engine source commit every pinned image was built from, read off their org.opencontainers.image.revision label by the same resolver; it is a record for whoever reads the values file (the release train's changelog), not rendered. The chart refuses `capabilities`, `parents` or `engineCommit` with an empty `digests`.",
           "properties": {
             "pinned": {
               "enum": [
@@ -1332,6 +1340,11 @@
                 }
               },
               "description": "task -> arch -> digest. Arch is CLOSED to the domain definitions.trainingArch declares (cpu|gpu: the engine builds exactly Dockerfile.task.cpu / .gpu), the same definition `parents` keys on; task keys are open because the task set is the engine's to declare. Every digest must be canonical sha256:<64 lowercase hex>."
+            },
+            "engineCommit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "The full 40-hex tracebloc-engine commit the pinned images were built from, DERIVED from every pinned image's org.opencontainers.image.revision label (tracebloc-engine scripts/oci_labels.py) by scripts/resolve-training-digests.sh, which reads THIS pattern before writing and refuses when the images disagree or carry no label. Never hand-typed; refused by the template when `digests` is empty."
             },
             "capabilities": {
               "type": "string",

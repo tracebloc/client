@@ -854,7 +854,8 @@ _pf_disk() {
 # parent, and the line names the directory it measured. Two paths measured on the
 # same directory are one disk: one line names both, and the floor is asked once.
 #
-# On a re-run the storage path is the one config.yaml froze, which only root reads.
+# On a node-local re-run the storage path is the one config.yaml froze, which only
+# root reads.
 # This is the first reader of a run and runs in the main shell, so when the reader
 # needs the password it asks here, once, through preflight_sudo (whose keepalive the
 # install then keeps). A config.yaml that cannot be read refuses: where the volumes
@@ -866,9 +867,26 @@ _pf_disk() {
 # store's filesystem counts them back (_pf_k3s_reused_kb). Measured on the k3s
 # journey: 13 GB free before the first install, 9 to 10 GB at the re-run's
 # preflight, where an unchanged re-run pulls nothing ("No change detected").
+#
+# A consented move off k3d (D10) frees space the same way, later in step a:
+# reinstall_offboard_k3d runs after this check and removes the k3d cluster's
+# volumes, 2.9 GB of them on the measured host (client-dev#1816). The check stays
+# where it is, before the offboard (client-dev#1805), so each line counts back the
+# volumes on its own disk (_pf_k3d_offboard_volumes). An estimate that cannot be
+# read counts nothing, and the line says so.
 _pf_disk_k3s() {
-  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0 reused store_at why=""
-  storage="$(_native_k3s_storage_path)" || rc=$?
+  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0 reused store_at why="" freed="" frc=0
+  # hostpath (client-dev#1782): the volumes are the chart's hostPath PVs under
+  # HOST_DATA_DIR (an installed release's own root, _hostpath_root), so that is the
+  # disk the training data needs. The storage path config.yaml names holds none of
+  # it, so config.yaml is not read at all: a file this check then ignores must not
+  # refuse the run, or ask for the password (Bugbot on #1790). Its drift is no news
+  # here either. rc stays 0, so the reader's branches below are node-local's.
+  if [[ "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
+    storage="$(_hostpath_root)"; storage="${storage:-${HOST_DATA_DIR:-}}"
+  else
+    storage="$(_native_k3s_storage_path)" || rc=$?
+  fi
   if [[ "$rc" -eq 4 ]]; then
     # A host prepared for this user that cannot be adopted yet (1.1g): a password
     # would end in preflight_sudo's Docker wording, and is not what is missing. Say
@@ -889,7 +907,9 @@ _pf_disk_k3s() {
     hint "Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
     return 0
   fi
-  _native_k3s_storage_drift_warn
+  if [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]]; then
+    _native_k3s_storage_drift_warn
+  fi
   at_data="$(_pf_nearest_existing "$data")"; [[ -n "$at_data" ]] || at_data="/"
   at_storage="$(_pf_nearest_existing "$storage")"; [[ -n "$at_storage" ]] || at_storage="/"
   reused="$(_pf_k3s_reused_kb)"; store_at=""
@@ -901,11 +921,12 @@ _pf_disk_k3s() {
   if [[ "$reused" -gt 0 ]]; then
     store_at="$(_pf_mount_of "${TB_K3S_DATA_PATH}/agent/containerd" sudo)" || store_at=""
   fi
+  freed="$(_pf_k3d_offboard_volumes)" || frc=$?
   if [[ "$at_data" == "$at_storage" ]]; then
-    _pf_disk_grade "$at_data" "k3s's data (${data}) and the training data (${storage})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")"
+    _pf_disk_grade "$at_data" "k3s's data (${data}) and the training data (${storage})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")" "$(_pf_k3d_freed_on "$at_data" "$frc" "$freed")"
   else
-    _pf_disk_grade "$at_data" "k3s's data (${data})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")"
-    _pf_disk_grade "$at_storage" "the training data (${storage})" "$(_pf_k3s_credit_on "$at_storage" "$store_at" "$reused")"
+    _pf_disk_grade "$at_data" "k3s's data (${data})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")" "$(_pf_k3d_freed_on "$at_data" "$frc" "$freed")"
+    _pf_disk_grade "$at_storage" "the training data (${storage})" "$(_pf_k3s_credit_on "$at_storage" "$store_at" "$reused")" "$(_pf_k3d_freed_on "$at_storage" "$frc" "$freed")"
   fi
   return 0
 }
@@ -944,17 +965,78 @@ _pf_k3s_credit_on() {
   if [[ -n "$m" && "$m" == "$2" ]]; then echo "$3"; else echo 0; fi
 }
 
-# _pf_disk_grade DIR WHAT [REUSED_KB] -- one disk line: the free space on DIR, which
-# will hold WHAT, graded against the Linux floors. REUSED_KB, the images a re-run of
-# this installer's k3s already holds on DIR's disk, counts as free, and the line says so.
+# _pf_k3d_offboard_volumes -- on a consented move off k3d, one "KB MOUNT" line per
+# volume of tracebloc's k3d cluster (TB_REINSTALL_CLUSTER), which
+# reinstall_offboard_k3d removes: its size and the mount point of its filesystem.
+# 1 and nothing when this run does not offboard. 2 and nothing when the estimate
+# cannot be read: Docker does not answer, no container carries the cluster's label,
+# root would need the password, or a volume's size or disk cannot be read. The
+# credit is then 0 (fail closed). The offboard's own removal list is what counts:
+# the cluster's volumes. Its node images stay. The containers' own layers are
+# removed but not counted, so the estimate errs low, which can only refuse more.
+# Each volume is measured as root: Docker's data root is root's.
+_pf_k3d_offboard_volumes() {
+  local name="${TB_REINSTALL_CLUSTER:-}" ids vols v mp kb m t="${TB_DOCKER_PROBE_TIMEOUT:-10}" out=""
+  [[ "${TB_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 1
+  [[ -n "$name" ]] || return 2
+  _native_k3s_root_ready || return 2
+  ids="$(_bounded "$t" docker ps -aq --filter "label=k3d.cluster=${name}" 2>/dev/null)" || return 2
+  [[ -n "$ids" ]] || return 2
+  # shellcheck disable=SC2086  # one argument per container ID
+  vols="$(_bounded "$t" docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' $ids 2>/dev/null)" || return 2
+  vols="$(printf '%s' "$vols" | tr ' ' '\n' | sort -u)"
+  [[ -n "$vols" ]] || return 2
+  while IFS= read -r v; do
+    [[ -n "$v" ]] || continue
+    mp="$(_bounded "$t" docker volume inspect --format '{{.Mountpoint}}' "$v" 2>/dev/null)" || return 2
+    [[ -n "$mp" ]] || return 2
+    kb="$(sudo du -sxk "$mp" 2>/dev/null | awk 'NR==1 {print $1}')"
+    [[ "$kb" =~ ^[0-9]+$ ]] || return 2
+    m="$(_pf_mount_of "$mp" sudo)" || m=""
+    [[ -n "$m" ]] || return 2
+    out="${out}${kb} ${m}"$'\n'
+  done <<<"$vols"
+  printf '%s' "$out"
+}
+
+# _pf_k3d_freed_on DIR RC VOLUMES -- what the offboard frees on DIR's disk, from
+# _pf_k3d_offboard_volumes' status RC and its VOLUMES: the KB of the volumes on DIR's
+# filesystem; "none" when this run does not offboard (RC 1); "unknown" when the
+# estimate cannot be read (RC 2), or DIR's own disk cannot.
+_pf_k3d_freed_on() {
+  local m kb mount sum=0
+  case "$2" in 0) ;; 1) echo none; return 0 ;; *) echo unknown; return 0 ;; esac
+  m="$(_pf_mount_of "$1")"
+  [[ -n "$m" ]] || { echo unknown; return 0; }
+  while read -r kb mount; do
+    [[ -n "$kb" && "$mount" == "$m" ]] && sum=$(( sum + kb ))
+  done <<<"$3"
+  echo "$sum"
+}
+
+# _pf_disk_grade DIR WHAT [REUSED_KB] [FREED] -- one disk line: the free space on DIR,
+# which will hold WHAT, graded against the Linux floors. REUSED_KB, the images a re-run
+# of this installer's k3s already holds on DIR's disk, counts as free, and the line says
+# so. FREED is what a consented move off k3d frees on DIR's disk before step b
+# (_pf_k3d_freed_on): KB, counted as free and named; "unknown", named and not counted;
+# "none" (the default), no move.
 _pf_disk_grade() {
-  local at="$1" what="$2" reused="${3:-0}" free_kb free_gb rq ru=GB
+  local at="$1" what="$2" reused="${3:-0}" freed="${4:-none}" free_kb free_gb rq ru=GB
   free_kb="$(_pf_free_kb "$at")"
   if [[ -z "$free_kb" ]]; then warn "Disk: couldn't determine free space on ${at} for ${what} (skipping)."; return 0; fi
   if [[ "$reused" -gt 0 ]]; then
     free_kb=$(( free_kb + reused ))
     rq=$(( reused / 1024 / 1024 )); [[ "$rq" -gt 0 ]] || { rq=$(( reused / 1024 )); ru=MB; }
     what="${what}, counting the ${rq} ${ru} of images this k3s already holds, which the re-run reuses"
+  fi
+  if [[ "$freed" == 0 ]]; then
+    what="${what}; the move off k3d frees nothing on this disk (cluster '${TB_REINSTALL_CLUSTER:-}' keeps its volumes on another)"
+  elif [[ "$freed" =~ ^[0-9]+$ ]]; then
+    free_kb=$(( free_kb + freed ))
+    ru=GB; rq=$(( freed / 1024 / 1024 )); [[ "$rq" -gt 0 ]] || { rq=$(( freed / 1024 )); ru=MB; }
+    what="${what}, counting the ${rq} ${ru} the move off k3d frees on this disk (cluster '${TB_REINSTALL_CLUSTER:-}' and its volumes)"
+  elif [[ "$freed" == "unknown" ]]; then
+    what="${what}, not counting what the move off k3d frees, which could not be measured"
   fi
   free_gb=$(( free_kb / 1024 / 1024 ))
   if [[ "$free_gb" -lt "$PF_MIN_DISK_GB" ]]; then
@@ -1076,8 +1158,8 @@ _pf_network_fs_remedy() {
 # friendly, named failure. Same classification, run first, output only on
 # failure. TRACEBLOC_ALLOW_NETWORK_FS defers to the full check's warning.
 #
-# Native k3s judges the directory _pf_storage_type judges, the storage path, where
-# its database lives: an NFS home with k3s's default storage holds only logs and
+# Native k3s under node-local judges the directory _pf_storage_type judges, the
+# storage path, where its database lives (under hostpath, HOST_DATA_DIR, as on k3d): an NFS home with k3s's default storage holds only logs and
 # config, so it passes here as it passes there. When reading the storage path
 # needs a password (or cannot answer), this pre-log guard defers to the full check,
 # which asks and refuses by name. What k3s gives up: a root login whose own home is
@@ -1087,7 +1169,8 @@ early_data_dir_guard() {
   local target fstype
   target="${HOST_DATA_DIR:-${HOME:-}/.tracebloc}"
   [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+  # hostpath keeps the database under HOST_DATA_DIR on native k3s too (client-dev#1782).
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     target="$(_native_k3s_storage_path)" || return 0
   fi
   # An EXISTING data dir has no at-risk mkdir here, and a healthy machine's
@@ -1122,9 +1205,14 @@ _pf_storage_type() {
   # Native k3s keeps the database in a local-path volume, under the storage path, so
   # that is the directory that must be local. _pf_disk_k3s has already read it (and
   # refused when it could not: PF_HARD_FAIL is raised and run_preflight stops), so a
-  # failure here adds nothing (preflight.bats pins it).
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+  # failure here adds nothing (preflight.bats pins it). Under hostpath the database
+  # is the chart's hostPath PV under HOST_DATA_DIR, on native k3s as on k3d
+  # (client-dev#1782), so HOST_DATA_DIR is the directory judged -- on native k3s an
+  # installed release's own root (_hostpath_root).
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     target="$(_native_k3s_storage_path)" || return 0
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && -n "$(_hostpath_root)" ]]; then
+    target="$(_hostpath_root)"
   fi
   disp="$target"
   if [[ -n "${HOME:-}" && "$disp" == "$HOME"* ]]; then disp="~${disp#"$HOME"}"; fi
