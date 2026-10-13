@@ -1030,6 +1030,60 @@ entries:
   - annotations:
       category: Machine Learning
     apiVersion: v2
+    appVersion: 1.9.131
+    created: "2026-09-22T07:03:49Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: 4d03ad5e45982b4264cf0cb626ae69dfa8613d553933e7ea5c0df3fd2b3f1610
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://github.com/tracebloc/client/releases/download/v1.9.131/client-1.9.131.tgz
+    version: 1.9.131
+  - annotations:
+      category: Machine Learning
+    apiVersion: v2
+    appVersion: 1.9.130
+    created: "2026-09-22T04:39:48Z"
+    description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
+    digest: 28bae1f40b9b751794b3b0471a1ced0c0262a59fd335fc1a54dc61b5011fa3b0
+    home: https://github.com/tracebloc/client
+    keywords:
+    - tracebloc
+    - kubernetes
+    - machine-learning
+    - aks
+    - eks
+    - openshift
+    - bare-metal
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - name: Tracebloc Team
+      url: https://tracebloc.com
+    name: client
+    sources:
+    - https://github.com/tracebloc/client
+    type: application
+    urls:
+    - https://github.com/tracebloc/client/releases/download/v1.9.130/client-1.9.130.tgz
+    version: 1.9.130
+  - annotations:
+      category: Machine Learning
+    apiVersion: v2
     appVersion: 1.9.129
     created: "2026-09-20T21:58:38Z"
     description: A unified Helm chart for tracebloc on AKS, EKS, bare-metal, and OpenShift
@@ -3155,4 +3209,4 @@ entries:
     urls:
     - https://github.com/tracebloc/client/releases/download/v1.9.123/ingestor-0.2.0.tgz
     version: 0.2.0
-generated: "2026-10-13T04:13:07.245572805Z"
+generated: "2026-10-13T09:06:36.763573874Z"
