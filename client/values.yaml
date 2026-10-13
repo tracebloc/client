@@ -1392,56 +1392,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "701e94ae291e7d971237b8a4479c26479facc425"
+    engineCommit: "e26f149d53e781f7a80959f21d9ec30f64229229"
     digests:
       causal_language_modeling:
-        cpu: "sha256:74e2cd16eb4c573e4ea2cef3bb655e46f648a354135c9173b90aef55db1e9392"
-        gpu: "sha256:a5f1c2d6d9d08c346ae29dde11716fcbeaed1fb529d547df6c3f4c529271e24e"
+        cpu: "sha256:952bbb72781f1211569626b6ac2441b2ea5385f249a6c8b85c5c18a81a552205"
+        gpu: "sha256:278e8b53e68fb6a22a5e09ebaa2203fadeb87fa7108b451bfb1e537236c3cb48"
       embeddings:
-        cpu: "sha256:f6b48346dda4ce5144f7e3bf8fff72fc2ce775743dfef698e47396a60623a1ee"
-        gpu: "sha256:7c6af4985d12d47033ca76f972d47ce35d7b2aadcf066ee65c8f2e073b9565a4"
+        cpu: "sha256:0585fb4e390b7de9fca8afa741e47193e959eb73a6591c9f294f254c2d70b216"
+        gpu: "sha256:893e5d1db1a5df902971b28a44220d82868c94587690a51dd1424481f0d6e1c3"
       image_classification:
-        cpu: "sha256:b10ef06b9d7ad055ab51e7aad8a992bc3a2bfed59e7dea8451bf07566746aeb6"
-        gpu: "sha256:bc97952f94dc0105211a8bf933c73f2d9ae7ee53cbfcb43c0c49620cdd94e250"
+        cpu: "sha256:16b006a9926224f1d857024ea6711d58a99454a4a98f2964668ad117b65de520"
+        gpu: "sha256:01f153fc1247562856aa840866d26e193ea68cb1c42e97035a8ca19551926730"
       keypoint_detection:
-        cpu: "sha256:28b3c7426286fb21f246d266c9d28d450a6832dc06efadb94479635c91440928"
-        gpu: "sha256:afe5c0d28b5412db0c19a86cc7ed70af991eaf087f1b412917b470f611da3db0"
+        cpu: "sha256:125ff422904ef4fdade2d3709b664e7eebc36f035b7f33c842c80aad879ea94e"
+        gpu: "sha256:fa3580a1d39bf4996ccb642a44abc46a7c6da7c0a235b33d0ee85c3d340dfa60"
       masked_language_modeling:
-        cpu: "sha256:4e12f2fa1df7e21993b9fb5090029c394743dd0a49aaac759bf46287b5392780"
-        gpu: "sha256:c39e229b6fcd3e6fe6b1df982c4cb0f082ddb9f21b7ff291bf91169a96f38cd2"
+        cpu: "sha256:7122509cce2630e124ae8998315c95e611dac053ae175237ddc1c6340c6dfb4d"
+        gpu: "sha256:79e5561efc53189bc10b0024dd23487d7970313f4017620eff5f5ad36aa2880a"
       object_detection:
-        cpu: "sha256:bdff2ae11871bcc1b5a1d299de6a5f07d96273146704e6a598a009e82b07de38"
-        gpu: "sha256:7d734ffb212017bdccec67f986dabf87ec5b932a2a290a5f5879b5ee373a131a"
+        cpu: "sha256:56908f1d0fed0f46a2fdb275475bd401ebc957b000d4ad991f3a43b55a53f191"
+        gpu: "sha256:091650b41791076bdad0243f8ee3cf678539a0958b5855191ef04f8c3d724c81"
       semantic_segmentation:
-        cpu: "sha256:14281ec0f170f7767fc9bf5b93f8cee8acceb529af36207476e9640e9ebeceb1"
-        gpu: "sha256:392a49caf2a009141faef9cff3993afd265080c820560c1d71624b9470b53e1b"
+        cpu: "sha256:357ec0e5efd966627346c25bf16c7e9d40feaf0e53b1cbbff4ca6f3b511842c1"
+        gpu: "sha256:299c9b8b517d558a410f2dc6d2d71a829f5b44a9e4a3a4afeb112dc3553ac30e"
       sentence_pair_classification:
-        cpu: "sha256:7f4f9de6c5f90a3544fda6638b6c0e289f1918f5e0f3aa0230df69e40917d3ab"
-        gpu: "sha256:cc3f4d18b580b501927af9038639b48a4b200edc4084e5eae213ef9d6d9da44f"
+        cpu: "sha256:e14433a1e870ec4396658908f85f812f01f5faf37ef2063dee07b55920535752"
+        gpu: "sha256:5091d3c65dd67b0cf6cfa173724958369c7ebbc4491ea22d5bedca442226cd38"
       seq2seq:
-        cpu: "sha256:a4904239352fe36a246a84a8cb4340513eba6ac6528661ea136d52afe3596462"
-        gpu: "sha256:eb8f57c244f34ded371936a610a8eb3f9b6d486f557690b3a8ab567adf4252cb"
+        cpu: "sha256:c63aef31ffe7a424adacb4a53ae5fa3936d9f924328c29c5074fe01bb3cc10b9"
+        gpu: "sha256:b7a611571d0ffd0dded80bea1153075f8809ddb281d55d5e9805697f60a7d142"
       tabular_classification:
-        cpu: "sha256:68e6e5210b5dd3965a980cc4e21e55edb277d82e2fd863ac1d1fbd732cced0d1"
-        gpu: "sha256:245a8bb4fd3f8c70b44bf226db900b225a0655b33039fc729033e5a223c28a83"
+        cpu: "sha256:f3452a1747a2ea067ae202a23717dcd6b27440d83d8d19f682c4bafee1b6f87b"
+        gpu: "sha256:603b8a3c5bf6b4840f4a10c0898caa336a162545f32185ad80fab7f5e31cb9f1"
       tabular_regression:
-        cpu: "sha256:e4c679d871d42ace2d8f95d273d02d42770105eed39cf4b72c440de5718dc2d9"
-        gpu: "sha256:be2af2458baaa8f64dfa44144ef6c8dc449e8c6bbe2bc1b86dd1a20ec800fa2a"
+        cpu: "sha256:37245c1d8fce7e28dc5cc74fa05aba558119f3cdc84b61f4e03978dd2578b1e2"
+        gpu: "sha256:410411cc65dac54d5ab8c3de727b7741eb1381f28dea61454d080f98aa1a4d40"
       text_classification:
-        cpu: "sha256:181cfb3df2aa05797e0684a138d82cb710c96d5f2f42108df6d598eacce82f27"
-        gpu: "sha256:a2671a10c762ae27016d6bbb7939b5a85252bdbbe39ce1458031cd85c6be9664"
+        cpu: "sha256:b84b4be59753c7b4233792c511163d8012e59a93af29cdc92e014ed1a72f5fcf"
+        gpu: "sha256:6a92cdd3d4d42d5658491d6466f5ab1734d8dbf4efd48a36b50751043faf4b6c"
       time_series_classification:
-        cpu: "sha256:a0b09517a4bcf001bc252ea704377b19776c734cdeaca8c7a66e2c2870f7f1cb"
-        gpu: "sha256:67ef61e9b797941de0cf5aa6e05ab2802dd9e36457ece6419db1d183ad3600f2"
+        cpu: "sha256:32ee89378edfede35c763f3bccc88e06b6677b8e5c53e364d2284d79c4dc0294"
+        gpu: "sha256:f04fdd940243430245fba2b5ca59cd8f3034072f85b48fe981e83977b50eb376"
       time_series_forecasting:
-        cpu: "sha256:478a28e9a9c2b6ad573d44f7a969526251f5da85525c6873fc993f5c7841f5c5"
-        gpu: "sha256:0880eaaee9dc151f63fcce90e2b27b12aab6e1c535c8c6b630f510263124e4a8"
+        cpu: "sha256:c540ca117d806a2bb5840e062681d75bfdddfe995a9322e125901b5c4ea12115"
+        gpu: "sha256:b4c7e1d38a523f7c49dbc0f1ae21023aa4a088273c017fff62ddbb4f040931d6"
       time_to_event_prediction:
-        cpu: "sha256:566755c1a80e8c2125d75262e2beffacb6e0b2a8e055939c89f33b37d309f604"
-        gpu: "sha256:f074daba55fb3da99b958fc8e2ba15500e7354748173b979cc79aaff443d1578"
+        cpu: "sha256:c264efeb93bc619016a6cf67d25887fbd26673ed51c51b3dfa486f4ddf835a46"
+        gpu: "sha256:0f53c21b4673ee81c989edbffbea82d341862b034a7ba6b8bee5bd7404619f66"
       token_classification:
-        cpu: "sha256:31a18c47159807b425afe79439a1de47d4dc1ca53bac5660ab3568684a244820"
-        gpu: "sha256:3df9139494919584d2bf59b4e6ee2d7d43a10fd36983907bd09037ec9cb4c13f"
+        cpu: "sha256:f81412b3679bb8083aa466fb7cc26b09332463a4353d1dd856d776b471ef2bcd"
+        gpu: "sha256:b2551bfaf063d530ad7fc83dfdd1af06b506a1b89b9b84631054a7958334d707"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:
@@ -2901,13 +2901,17 @@ narrowEdgeuserByEnv:
 # narrowing, one fleet at a time. The render FAILS a mis-paired explicit override
 # (tracebloc.assertDropEdgeuserIsSafe) and jobs-manager refuses it again at startup.
 #
-# Shipped OFF everywhere; flip per environment (dev first) only after narrowing has
-# soaked on that fleet. UNSET override => the effective value comes from
-# dropEdgeuserByEnv, keyed on the resolved CLIENT_ENV. Mirrors narrowEdgeuser.
+# Flipped per environment (dev first) only after narrowing has soaked on that
+# fleet. TRUE for dev (backend#5427): narrowEdgeuser has been baked-on across dev
+# for weeks, so edgeuser is already USAGE-only and unused there — DROP is the clean
+# finish. stg and prod stay OFF until dev has soaked dropped and the Part C
+# telemetry confirms the fleet is edgeuser-free. UNSET override => the effective
+# value comes from dropEdgeuserByEnv, keyed on the resolved CLIENT_ENV. Mirrors
+# narrowEdgeuser.
 dropEdgeuser:
 
 dropEdgeuserByEnv:
-  dev: false
+  dev: true
   stg: false
   prod: false
 
@@ -3251,12 +3255,14 @@ mysqlDatadirExists:
 # The rotation above only reaches an EXISTING datadir through the manual
 # `ALTER USER 'root'` runbook, which needs access to the cluster. With this gate
 # on, mysqld does it itself: at every start on an existing datadir it sets root's
-# password to the Secret's MYSQL_ROOT_PASSWORD through `init_file`, which runs
+# password to MYSQL_ROOT_PASSWORD in `mysql-credentials` (the same Secret and key
+# every other root reader uses, client-dev#1852) through `init_file`, which runs
 # before the server accepts connections and needs no authentication, so the old
 # password is never needed. An init container decides at each pod start:
-#   - existing datadir  -> hand mysqld the SQL (root is set from the Secret);
+#   - existing datadir  -> hand mysqld the SQL (root is set from mysql-credentials);
 #   - fresh datadir     -> do nothing (the entrypoint initialises root itself);
-#   - Secret key absent -> do nothing and log a warning (root is left as it is).
+#   - key absent, empty or not alphanumeric -> do nothing and log a warning
+#     (root is left as it is).
 #
 # What it changes:
 #   - An existing un-rotated edge on a live cluster now resolves rotation ON (it

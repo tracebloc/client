@@ -828,9 +828,10 @@ _native_k3s_merge_kubeconfig() {
   fi
   # The user's own shell has no KUBECONFIG either, and there k3s's kubectl reads
   # k3s.yaml (context default, no namespace), never this file: print_summary
-  # prints the export line for it.
+  # prints the export line for it. Not on the macOS node: there kubectl is the one
+  # step b installed, which reads this file by default.
   # shellcheck disable=SC2034  # consumed cross-file by summary.sh (print_summary)
-  [[ -n "${KUBECONFIG:-}" ]] || TB_K3S_KUBECONFIG_HINT="$target"
+  [[ -n "${KUBECONFIG:-}" || "${TB_K3S_ON_MAC:-}" == 1 ]] || TB_K3S_KUBECONFIG_HINT="$target"
   [[ -n "${KUBECONFIG:-}" ]] || export KUBECONFIG="$target"
   log "kubeconfig updated — kubectl now points to '${CLUSTER_NAME}' (context ${ctx})."
   # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write's kube_context)
@@ -1338,6 +1339,13 @@ _native_k3s_install_linux() {
 # manager, the system tools, and a firewall tool.
 _native_k3s_host_prereqs() {
   preflight_sudo "$1" "${2:-}"
+  # tracebloc's WSL distro: its image carries what this would install
+  # (scripts/spec/wsl-distro.env), nftables included; were nft ever missing there,
+  # the firewall step refuses a host it cannot fence.
+  if _native_k3s_on_wsl; then
+    log "step b: native k3s in tracebloc's WSL distro: no package installs (the distro's image carries its tools)"
+    return 0
+  fi
   setup_pm
   apt_wait_for_lock
   install_system_deps
@@ -1349,19 +1357,87 @@ _native_k3s_host_prereqs() {
 # (reinstall.sh) also calls it before step a, ahead of a k3d offboard
 # (client-dev#1805), so it stays read-only and reads nothing step a sets;
 # reinstall.bats' #1805 case holds that for both hosts and a setting.
+# The OS case below is the one declaration of where native k3s runs: on Linux, the
+# host itself; on a Mac, a node in Apple's VM (mac-container.sh, 2.1 part 6), whose
+# own refusals (_mac_ct_refuse_host) say which Mac and which settings it serves;
+# inside WSL, tracebloc's own distro only (_probe_wsl_ours, client-dev#1810 part 2),
+# with its data off the Windows drives.
 _native_k3s_refuse_host() {
-  [[ "${OS:-}" == "Linux" ]] \
-    || error "Native k3s runs on Linux only for now, and this machine runs ${OS:-an unknown OS}. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d."
+  case "${OS:-}" in
+    Linux) ;;
+    Darwin)
+      declare -F _mac_ct_refuse_host >/dev/null 2>&1 \
+        || error "This installer build can't check whether this Mac can run native k3s (mac-container.sh is missing: stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+      _mac_ct_refuse_host
+      return 0 ;;
+    *) error "Native k3s runs on Linux and on a Mac with Apple silicon only for now, and this machine runs ${OS:-an unknown OS}. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d." ;;
+  esac
   declare -F _probe_wsl >/dev/null \
     || error "native k3s: probe.sh is not loaded, so this run cannot tell whether it is inside WSL. Re-run the installer from a fresh download."
-  ! _probe_wsl \
-    || error "Native k3s does not run inside WSL yet. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d."
+  # Inside WSL, native k3s runs in tracebloc's own distro, where the Windows
+  # installer runs this core (client-dev#1810), and nowhere else.
+  if _probe_wsl; then
+    declare -F _probe_wsl_ours >/dev/null \
+      || error "native k3s: this probe.sh cannot tell tracebloc's WSL distro from another (stale bootstrap). Re-run the installer from a fresh download."
+    _probe_wsl_ours \
+      || error "Inside WSL, native k3s runs only in tracebloc's own distro, '${TB_WSL_DISTRO}', which the Windows installer sets up, and this is $(_native_k3s_wsl_which). Install from Windows with install.ps1, or set TRACEBLOC_SUBSTRATE=k3d to install on k3d here."
+    _native_k3s_refuse_windows_drive
+  fi
   # hostpath and HOST_DATASET_DIR are served (client-dev#1782): the node is the host,
   # so the chart's hostPath PVs name HOST_DATA_DIR and the dataset dir themselves
   # (install-client-helm.sh, _hostpath_paths_block). validate_config still refuses a
   # dataset dir under node-local, on both substrates.
   _native_k3s_refuse_k3d_nodes
   _native_k3s_check_version
+}
+
+# _native_k3s_on_wsl -- native k3s inside tracebloc's WSL distro: Linux, and
+# _probe_wsl_ours. The one predicate the WSL steps read (client-dev#1810 part 2):
+# step b runs no package manager (_native_k3s_host_prereqs), because the distro's
+# image carries what it would install, nftables for step c's firewall among them
+# (scripts/spec/wsl-distro.env, client-dev#1809). Any other WSL distro never gets
+# that far: _native_k3s_refuse_host refuses it first.
+_native_k3s_on_wsl() {
+  [[ "${OS:-}" == "Linux" ]] && declare -F _probe_wsl_ours >/dev/null 2>&1 && _probe_wsl_ours
+}
+
+# _native_k3s_wsl_which -- the WSL distro this run is in, for a refusal: its name,
+# that WSL passed none, or that the name came without a WSL kernel (exported by
+# hand on another Linux, or a stale probe of the kernel).
+_native_k3s_wsl_which() {
+  if [[ -z "${WSL_DISTRO_NAME:-}" ]]; then
+    printf '%s' "a WSL distro whose name this run was not given (WSL_DISTRO_NAME is empty)"
+  elif declare -F _probe_wsl_kernel >/dev/null 2>&1 && _probe_wsl_kernel; then
+    printf "the distro '%s'" "$WSL_DISTRO_NAME"
+  else
+    printf "a shell whose WSL_DISTRO_NAME says '%s', on a kernel that is not WSL's" "$WSL_DISTRO_NAME"
+  fi
+}
+
+# _native_k3s_refuse_windows_drive -- in tracebloc's WSL distro, refuse by name a data
+# path on a Windows drive (drvfs, _probe_windows_drive): k3s's data and its default
+# volumes (TB_K3S_DATA_PATH), the data dir (HOST_DATA_DIR: the volumes' directory when
+# it is not the default, and hostpath's), and the dataset dir. RFC-0175 D5: on
+# Windows the volumes, the database's among them, live on the distro's own disk, and a
+# dataset is a Linux-side mount, never drvfs. A path whose filesystem this run cannot
+# read is "cannot tell", refused the same way. Read-only.
+_native_k3s_refuse_windows_drive() {
+  local name path what rc
+  for name in TB_K3S_DATA_PATH HOST_DATA_DIR HOST_DATASET_DIR; do
+    path="${!name:-}"
+    [[ -n "$path" ]] || continue
+    case "$name" in
+      TB_K3S_DATA_PATH) what="k3s's data directory ${path}" ;;
+      HOST_DATA_DIR)    what="The data directory ${path} (TRACEBLOC_HOST_DATA_DIR, --data-dir)" ;;
+      *)                what="The dataset directory ${path} (TRACEBLOC_HOST_DATASET_DIR)" ;;
+    esac
+    rc=0; _probe_windows_drive "$path" || rc=$?
+    case "$rc" in
+      1) ;;
+      0) error "${what} is on a Windows drive (drvfs). In tracebloc's WSL distro, tracebloc keeps its data on the distro's own disk and mounts datasets Linux-side, never from a Windows drive. Choose a path inside the distro, then re-run." ;;
+      *) error "native k3s: this run cannot read which filesystem holds ${path} (${what%% (*}), so it cannot tell whether it is on a Windows drive (drvfs), where tracebloc never keeps its data. Check that /proc/self/mounts is readable, then re-run." ;;
+    esac
+  done
 }
 
 # _native_k3s_refuse_k3d_nodes -- AGENTS and SERVERS, k3d's node counts, refused by name:
@@ -1531,6 +1607,13 @@ _native_k3s_ensure_running() {
 # user's Tier 0 install, TB_K3S_ADOPTED) runs _native_k3s_adopt_cluster instead.
 _native_k3s_create_cluster() {
   local present=0 tool aid apath name cidrs cgroup storage ca rc=0 src=0 want have tmp replaced=""
+  # On a Mac, native k3s is the node in Apple's VM (mac-container.sh, 2.1 part 6).
+  if [[ "${OS:-}" == "Darwin" ]]; then
+    declare -F _mac_ct_create_cluster >/dev/null 2>&1 \
+      || error "This installer build can't set up native k3s on a Mac (mac-container.sh is missing: stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+    _mac_ct_create_cluster
+    return 0
+  fi
   log "Setting up native k3s for '${CLUSTER_NAME}'"
   if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then
     _native_k3s_adopt_cluster

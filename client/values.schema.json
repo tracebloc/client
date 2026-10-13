@@ -664,7 +664,7 @@
     },
     "dropEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). Shipped FALSE for dev, stg and prod: Part A lands the mechanism inert so the chart can record it before any environment opts in, and the dev→stg→prod flip follows once narrowEdgeuser has soaked on each. The baked default declines on any edge whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
+      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev (backend#5427): narrowEdgeuser has been baked-on across dev for weeks, so edgeuser is already USAGE-only and unused and DROP is the clean finish; stg and prod stay FALSE until dev has soaked dropped and the Part C telemetry confirms the fleet is edgeuser-free. The baked default declines on any edge whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }
@@ -736,7 +736,7 @@
         "boolean",
         "null"
       ],
-      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from selfRotateMysqlRootByEnv keyed on the resolved CLIENT_ENV. backend#5427: let mysqld rotate root itself. At every start on an EXISTING datadir it sets root's password to the Secret's MYSQL_ROOT_PASSWORD through init_file, which runs before the server accepts connections and needs no authentication; a fresh datadir is left to the entrypoint. An existing un-rotated edge on a live cluster then resolves rotation ON, and the rotation guard's existing-datadir refusal no longer applies (its cluster-less refusal still does). The render refuses a root password that is not alphanumeric, or a bootstrapDbPassword pin that differs from it. Turning it on rolls the mysql pod once."
+      "description": "OPERATOR OVERRIDE, normally unset. When null the effective value comes from selfRotateMysqlRootByEnv keyed on the resolved CLIENT_ENV. backend#5427: let mysqld rotate root itself. At every start on an EXISTING datadir it sets root's password to MYSQL_ROOT_PASSWORD in mysql-credentials (the same Secret and key every other root reader uses, client-dev#1852) through init_file, which runs before the server accepts connections and needs no authentication; a fresh datadir is left to the entrypoint. An existing un-rotated edge on a live cluster then resolves rotation ON, and the rotation guard's existing-datadir refusal no longer applies (its cluster-less refusal still does). The render refuses a root password that is not alphanumeric, or a bootstrapDbPassword pin that differs from it. Turning it on rolls the mysql pod once."
     },
     "selfRotateMysqlRootByEnv": {
       "type": "object",

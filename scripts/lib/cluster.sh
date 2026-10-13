@@ -402,8 +402,16 @@ _kubelet_config_path() {
 # sit outside the kubelet's view; borrowing it for a host that runs k3s directly
 # would restate a number measured on another substrate (rule 1). The
 # `linux_k3s` row is measured on native k3s itself, on Ubuntu 22.04 and 24.04,
-# amd64 and arm64 (client-dev#1469). k3s on darwin or inside WSL is `unknown`:
-# the k3s create path refuses both hosts.
+# amd64 and arm64 (client-dev#1469). k3s on darwin (the macOS node, 2.1 part 6) is
+# `unknown` until its row is measured on the node (2.1 part 5b).
+#
+# k3s INSIDE WSL IS `windows_k3s` in tracebloc's own distro (_probe_wsl_ours,
+# client-dev#1810 part 2): the generator's own key for a record the harness stamps
+# Windows (a WSL2 shell, as for the `windows` row) on substrate k3s
+# (gen-node-reservation-embed.sh --key Windows k3s). No record measures it yet, so
+# the table has no row, the writer reserves nothing and the fit gate says so once,
+# until 3.3's Windows cell measures it (tracebloc/backend#4828). In any other WSL
+# distro it is `unknown`, because the k3s create path refuses that host.
 _kubelet_reservation_platform() {
   local kernel
   kernel="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -416,11 +424,23 @@ _kubelet_reservation_platform() {
   # selected is spoken once, by the create path below, where a warning belongs.
   declare -F _probe_wsl >/dev/null 2>&1 || { printf 'unknown'; return 0; }
   if _probe_wsl; then
-    if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then printf 'unknown'; else printf 'windows'; fi
+    if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _kubelet_reservation_wsl_k3s; else printf 'windows'; fi
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     printf 'linux_k3s'
   else
     printf 'linux'
+  fi
+}
+
+# The key for native k3s inside WSL: `windows_k3s` in tracebloc's own distro, the one
+# WSL host the k3s create path serves, through the same predicate it asks
+# (_probe_wsl_ours, probe.sh); `unknown` in any other, and when that predicate is
+# not loaded (a stale probe.sh cannot tell the distros apart).
+_kubelet_reservation_wsl_k3s() {
+  if declare -F _probe_wsl_ours >/dev/null 2>&1 && _probe_wsl_ours; then
+    printf 'windows_k3s'
+  else
+    printf 'unknown'
   fi
 }
 
@@ -441,11 +461,15 @@ _kubelet_reservation_warn_unmeasured() {
   _kubelet_reservation_measured "$platform" && return 0
   [[ -z "${TB_RESERVATION_WARNED:-}" ]] || return 0
   TB_RESERVATION_WARNED=1
-  if [[ "$platform" == "unknown" ]] && declare -F _probe_wsl >/dev/null 2>&1; then
-    # The detector IS loaded: `unknown` is native k3s on a host the k3s create
-    # path refuses (macOS, or WSL), not a missing probe. Say that, not "re-run".
+  if [[ "$platform" == "windows_k3s" ]]; then
+    # tracebloc's WSL distro: served, and not measured yet. Provisional until 3.3's
+    # Windows cell measures the row (see _kubelet_reservation_platform).
+    warn "No node reservation will be written: native k3s in tracebloc's WSL distro has no measured reservation yet, so allocatable will equal capacity on this node for now."
+  elif [[ "$platform" == "unknown" ]] && declare -F _probe_wsl >/dev/null 2>&1; then
+    # The detector IS loaded: `unknown` is native k3s in the macOS node, whose row
+    # is not measured yet (2.1 part 5b), or in a WSL distro the k3s create path
+    # refuses before this runs. Not a missing probe, so not "re-run".
     warn "No node reservation will be written: native k3s has no measured reservation on this host (macOS or WSL), so allocatable will equal capacity on this node."
-    hint "Native k3s runs on Linux outside WSL; this host needs the installer's default substrate instead."
   elif [[ "$platform" == "unknown" ]]; then
     # An absent probe.sh (a stale bootstrap that did not fetch it): this Linux
     # kernel cannot be told apart from WSL2, and guessing linux is the defect

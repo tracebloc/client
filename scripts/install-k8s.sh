@@ -20,12 +20,13 @@
 #  one wins:
 #    TRACEBLOC_SUBSTRATE=k3d     default: k3s on a new Linux machine, k3d otherwise
 #                                (the Kubernetes runtime to set up: k3d, or k3s for
-#                                native k3s, Linux only. A new Linux machine, outside
-#                                WSL, with no k3d, no k3d cluster in Docker and no
-#                                setting native k3s refuses (TRACEBLOC_AGENTS,
-#                                TRACEBLOC_SERVERS other than 1, a K8S_VERSION it has
-#                                no digest for), gets k3s; any other gets
-#                                k3d, and on an otherwise new Linux machine the line
+#                                native k3s, on Linux or on a Mac with Apple silicon
+#                                and macOS 26 or later, where k3s runs in Apple's VM.
+#                                A new Linux machine, outside WSL, with no k3d, no k3d
+#                                cluster in Docker and no setting native k3s refuses
+#                                (TRACEBLOC_AGENTS, TRACEBLOC_SERVERS other than 1, a
+#                                K8S_VERSION it has no digest for), gets k3s; any other
+#                                gets k3d, and on an otherwise new Linux machine the line
 #                                after the substrate line names what kept k3d. A re-run
 #                                keeps the runtime the install recorded; the installer
 #                                prints "tracebloc-installer substrate=<name>" first,
@@ -104,6 +105,12 @@ source "${LIB_DIR}/cluster.sh"
 source "${LIB_DIR}/k3d.sh"
 source "${LIB_DIR}/k3s.sh"
 source "${LIB_DIR}/k3s-firewall.sh"
+# mac-container.sh (2.1 part 6: native k3s on a Mac, in Apple's VM) may be absent under
+# a stale bootstrap. Guarded like the late additions below; a native k3s request on a
+# Mac without it is refused by name (_native_k3s_refuse_host), and nothing else reads it.
+if [[ -f "${LIB_DIR}/mac-container.sh" ]]; then
+  source "${LIB_DIR}/mac-container.sh"
+fi
 source "${LIB_DIR}/gpu-plugins.sh"
 source "${LIB_DIR}/install-client-helm.sh"
 # install-cli.sh may be absent if an older bootstrap copy (e.g. a not-yet-

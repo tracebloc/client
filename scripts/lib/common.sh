@@ -673,6 +673,19 @@ tb_k3d_cluster_names() {
   return "$rc"
 }
 
+# _tb_docker_why RC ERRFILE -- what a Docker read that failed on its own (RC is
+# neither 0 nor 124, the deadline) said, for a line that quotes it: the last
+# non-empty line Docker wrote to ERRFILE, or the exit code when it wrote none. A
+# fast refusal (a socket this user may not open) is not a Docker that did not
+# answer, and saying so names the wrong fix (client-dev#1886). reinstall.sh's
+# _reinstall_read_how reads ERRFILE the same way; this copy is common.sh's own
+# because a stale bootstrap may fetch no reinstall.sh.
+_tb_docker_why() {
+  local msg=""
+  [[ "${2:-/dev/null}" == /dev/null ]] || msg="$(awk 'NF { l = $0 } END { print l }' "$2" 2>/dev/null)"
+  printf '%s' "${msg:-exited $1 with no message}"
+}
+
 # ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
 # Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
 # both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
@@ -2225,7 +2238,7 @@ TB_SUBSTRATE_FRESH_LINUX="k3s"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
-TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule kube-context group apple-container container-node"
+TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule wsl-distro logon-task kube-context group apple-container container-node"
 TB_ARTEFACT_FLAGS="created_by_prepare_host"
 # shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
@@ -2300,6 +2313,62 @@ refuse_unresolved_substrate() {
   error "$TB_SUBSTRATE_REFUSAL"
 }
 
+# ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────
+# Apple silicon with macOS 26 or later (D6, decided 2026-09-29). macOS 26 is the last
+# release for Intel Macs, and every M1 or later Mac runs it. This is the floor's one
+# declaration, and its words: the macOS node refuses a Mac below it
+# (_mac_ct_refuse_host, behind TRACEBLOC_SUBSTRATE), and 2.4's refusal on every path
+# (client-dev#1623, with 2.1's flip) reuses both (tracebloc/cli-dev#1056, decision F).
+TB_MACOS_FLOOR_MAJOR=26
+
+# _tb_macos_version -- this Mac's macOS version, `sw_vers -productVersion`.
+# TRACEBLOC_MACOS_VER is the test seam.
+_tb_macos_version() { printf '%s' "${TRACEBLOC_MACOS_VER:-$(sw_vers -productVersion 2>/dev/null)}"; }
+
+# tb_mac_floor_verdict -- whether this Mac meets the floor. Prints "ok", "intel",
+# "old VERSION", or "unknown [ANSWER]" when sw_vers gave no version; nothing off macOS.
+# The processor is ARCH, which the runtime globals above take from `sysctl
+# hw.optional.arm64`, never from `uname -m` alone: a shell running under Rosetta on
+# Apple silicon is Apple silicon. Intel is named first, because updating macOS cannot
+# fix it.
+tb_mac_floor_verdict() {
+  [[ "${OS:-}" == "Darwin" ]] || return 0
+  if [[ "${ARCH:-}" != "arm64" ]]; then
+    printf 'intel\n'
+    return 0
+  fi
+  local v major
+  v="$(_tb_macos_version)"
+  major="${v%%.*}"
+  if ! [[ "$major" =~ ^[0-9]+$ ]]; then
+    printf 'unknown%s\n' "${v:+ $v}"
+    return 0
+  fi
+  if [ "$major" -lt "$TB_MACOS_FLOOR_MAJOR" ]; then
+    printf 'old %s\n' "$v"
+    return 0
+  fi
+  printf 'ok\n'
+}
+
+# tb_mac_floor_reason VERDICT -- the words for a verdict below the floor: what this Mac
+# is, and what tracebloc needs. They are (a)'s, cli-dev scripts/install.sh. Each caller
+# adds only what its own path does next.
+tb_mac_floor_reason() {
+  local answer
+  case "${1:-}" in
+    intel)
+      printf '%s' "This Mac has an Intel processor (${ARCH:-x86_64}). tracebloc for macOS needs Apple silicon (M1 or later) with macOS ${TB_MACOS_FLOOR_MAJOR} or later." ;;
+    old\ *)
+      printf '%s' "This Mac runs macOS ${1#old }. tracebloc needs macOS ${TB_MACOS_FLOOR_MAJOR} or later. Update macOS (System Settings > General > Software Update), then run this again." ;;
+    unknown|unknown\ *)
+      answer="${1#unknown}"
+      answer="${answer# }"
+      printf '%s' "This installer couldn't read this Mac's macOS version ('sw_vers -productVersion' answered '${answer:-nothing}'), so it can't tell whether this Mac has Apple silicon with macOS ${TB_MACOS_FLOOR_MAJOR} or later." ;;
+    *) return 1 ;;
+  esac
+}
+
 # ── Re-run resolution (1.1f) ─────────────────────────────────────────────────
 # tb_substrate_resolve -- the substrate this run sets up. A machine installed on
 # one runtime stays on it without the variable, so the order is:
@@ -2368,7 +2437,9 @@ tb_substrate_resolve() {
 # native k3s) on a fresh Linux machine, the default on every other. Called only
 # when steps 2 to 4 found no record and no tracebloc k3s: that is the record half
 # of "fresh". The machine half, each read from the producer that already answers it:
-#   - Linux, outside WSL (_probe_wsl): the k3s path refuses WSL;
+#   - Linux, outside WSL (_probe_wsl): the k3s path refuses every WSL distro but
+#     tracebloc's own, and there the Windows installer names the substrate on the
+#     line it runs this core with (client-dev#1810), so this rule never guesses it;
 #   - no k3d on PATH (`has k3d`, assess.sh's own fresh rule);
 #   - no Docker, or a Docker that answers (_docker_answers) and lists no k3d
 #     cluster's container, stopped ones included (tb_k3d_cluster_names).
@@ -2383,11 +2454,14 @@ tb_substrate_resolve() {
 # digest for. Its error() is caught in a subshell, never raised, so nothing is
 # recorded and the run goes on with the default. hostpath and a dataset dir are not
 # refused since client-dev#1782, so they get native k3s. Each kept run, and a Docker
-# that cannot tell, says why in TB_SUBSTRATE_KEPT. A GPU is not one of them: each GPU
+# that cannot tell, says why in TB_SUBSTRATE_KEPT. A Docker read that hit the
+# deadline (124) did not answer; one that failed on its own is quoted in Docker's
+# words (_tb_docker_why), so a refused socket is not reported as a silent daemon
+# (client-dev#1886). A GPU is not one of them: each GPU
 # this installer sets up, it sets up on native k3s too (client-dev#1546). Prints
 # nothing.
 _tb_substrate_fresh() {
-  local rc names why kept="Setting up ${TB_SUBSTRATE_DEFAULT}, not native ${TB_SUBSTRATE_FRESH_LINUX}, the default for a new Linux machine:"
+  local rc names why what errf kept="Setting up ${TB_SUBSTRATE_DEFAULT}, not native ${TB_SUBSTRATE_FRESH_LINUX}, the default for a new Linux machine:"
   [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
   if ! declare -F _probe_wsl >/dev/null 2>&1; then
     TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether it runs inside WSL, so it keeps ${TB_SUBSTRATE_DEFAULT}."
@@ -2396,15 +2470,18 @@ _tb_substrate_fresh() {
   _probe_wsl && return 0
   has k3d && return 0
   if has docker; then
-    if ! _docker_answers; then
-      TB_SUBSTRATE_KEPT="${kept} Docker is installed here but did not answer, so this run cannot tell whether a k3d cluster is already on this machine."
-      return 0
-    fi
-    rc=0; names="$(tb_k3d_cluster_names)" || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-      TB_SUBSTRATE_KEPT="${kept} Docker answered but did not list its containers, so this run cannot tell whether a k3d cluster is already on this machine."
-      return 0
-    fi
+    errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-docker-read-XXXXXX" 2>/dev/null)" || errf=/dev/null
+    rc=0; what="info"; names=""; _docker_answers "$errf" || rc=$?
+    if [[ "$rc" -eq 0 ]]; then what="ps"; names="$(tb_k3d_cluster_names "$errf")" || rc=$?; fi
+    why=""; [[ "$rc" -eq 0 || "$rc" -eq 124 ]] || why="$(_tb_docker_why "$rc" "$errf")"
+    [[ "$errf" == /dev/null ]] || rm -f "$errf"
+    case "${what}:${rc}" in
+      *:0) ;;
+      info:124) TB_SUBSTRATE_KEPT="${kept} Docker is installed here but did not answer, so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
+      info:*) TB_SUBSTRATE_KEPT="${kept} Docker is installed here but 'docker info' failed (${why}), so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
+      ps:124) TB_SUBSTRATE_KEPT="${kept} Docker answered but did not list its containers, so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
+      *) TB_SUBSTRATE_KEPT="${kept} Docker answered but 'docker ps' failed (${why}), so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
+    esac
     if [[ -n "$names" ]]; then
       TB_SUBSTRATE_KEPT="${kept} Docker lists the containers of a k3d cluster on this machine."
       return 0

@@ -96,10 +96,10 @@ _macos_require_admin() {
 # Does this Mac support Apple Virtualization.framework (colima --vm-type vz)? It needs
 # macOS 13+ (Ventura); Rosetta x86_64 translation (--vz-rosetta) rides on VZ. Below 13,
 # colima falls back to its QEMU default (amd64 still runs, just slower). Overridable
-# for tests via TRACEBLOC_MACOS_VER (#433).
+# for tests via TRACEBLOC_MACOS_VER (#433), which common.sh's _tb_macos_version reads.
 _macos_supports_vz() {
   local v major
-  v="${TRACEBLOC_MACOS_VER:-$(sw_vers -productVersion 2>/dev/null)}"
+  v="$(_tb_macos_version)"
   major="${v%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 13 ]
 }
@@ -1732,6 +1732,15 @@ assert_amd64_emulation() {
 }
 
 install_macos() {
+  # Native k3s on a Mac (RFC-0175 D6, 2.1 part 6) is its own step b, ahead of every
+  # tier below: the node runs in Apple's VM from the user's own folder, so it installs
+  # no Homebrew, Docker, colima or k3d, and needs no administrator (mac-container.sh).
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    declare -F _mac_ct_install_macos >/dev/null 2>&1 \
+      || error "This installer build can't set up native k3s on a Mac (mac-container.sh is missing: stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+    _mac_ct_install_macos
+    return 0
+  fi
   # Breadcrumbs (client#681). Step b was the one step that could fail before ANY
   # of its stages printed, leaving a log whose last line was the step header — so
   # even the ERR trap's location had nothing to corroborate it. These cost one

@@ -510,8 +510,24 @@ _fetch_kubectl() {
   rm -rf "$tmpdir"
 }
 
+# install_kubectl [VERSION] -- with no VERSION, a kubectl already on PATH is kept and a
+# missing one is fetched at dl.k8s.io's stable release. With VERSION (the macOS node's
+# pinned kubectl, _mac_ct_install_macos), the copy in TRACEBLOC_TOOLS_DIR is kept only
+# when it is that release, and fetched at VERSION otherwise; another kubectl elsewhere on
+# PATH is left alone, and TRACEBLOC_TOOLS_DIR comes first on this process's PATH.
 install_kubectl() {
-  if ! has kubectl; then
+  local pin="${1:-}" have=""
+  if [[ -n "$pin" ]]; then
+    if [[ -x "$TRACEBLOC_TOOLS_DIR/kubectl" ]]; then
+      have="$(_bounded 30 "$TRACEBLOC_TOOLS_DIR/kubectl" version --client 2>/dev/null </dev/null | sed -n 's/^Client Version: //p')" || have=""
+    fi
+    if [[ "$have" != "$pin" ]]; then
+      KUBE_VER="$pin"
+      spin_cmd "Installing system tools…" _fetch_kubectl "$KUBE_VER" "$ARCH_DL"
+      log "kubectl $KUBE_VER installed."
+      tb_record_write binary kubectl "$TRACEBLOC_TOOLS_DIR/kubectl"
+    fi
+  elif ! has kubectl; then
     # tail -1 + tr: retry's attempt notices go to STDOUT and, on a failed-then-
     # successful fetch, concatenate into the capture — polluting the version and
     # breaking the download URL. The endpoint body (the version) is the last line

@@ -9,8 +9,9 @@
 #  package at the pinned version, checks it, and unpacks it into the user's own
 #  folder: no password, no dialog, nothing written outside the home (D6).
 #
-#  Part 1 puts the runtime on disk, and part 2 (below) starts it. Nothing calls either
-#  yet: part 6 makes the path reachable behind TRACEBLOC_SUBSTRATE=k3s on a Mac.
+#  Part 1 puts the runtime on disk, and part 2 (below) starts it. Part 6 (the end of
+#  this file) makes the path reachable behind TRACEBLOC_SUBSTRATE=k3s on a Mac: step b
+#  runs _mac_ct_install_macos, step c _mac_ct_create_cluster.
 #
 #  Three checks, in order, each refused by name, and nothing is put in place until
 #  all three pass:
@@ -518,7 +519,7 @@ _mac_ct_start_system() {
 #  "Ready" is a Ready condition whose heartbeat is newer than the start this run
 #  made: for about 40 s after a restart the stored status is the old one (S-M).
 #
-#  Nothing calls this yet: part 6 makes the path reachable.
+#  Step c reaches it through _mac_ct_create_cluster (part 6).
 # =============================================================================
 
 # The node's address: TEST-NET-1 (RFC 5737), never routed, so it is free on any network.
@@ -540,9 +541,17 @@ ip addr add "$3/32" dev lo 2>/dev/null || case "$(ip -4 addr show dev lo)" in *"
 exec /bin/k3s server'
 
 # _mac_ct_refuse_host -- refuse, each by name, a host or a setting the macOS node does
-# not serve, before anything is written. Called by the darwin_k3s measurement (2.1 part
-# 5b) and by part 6's routing, which runs it where Linux runs _native_k3s_refuse_host.
-#   - A Mac with Apple silicon only: Apple's container runtime is arm64-only.
+# not serve, before anything is written. _native_k3s_refuse_host, the one declaration of
+# where native k3s runs, calls it for a Mac (2.1 part 6), so it runs where Linux's
+# refusals run, including before a k3d offboard (reinstall.sh): it stays read-only and
+# reads nothing step a sets. The darwin_k3s measurement (2.1 part 5b) calls it too.
+#   - The macOS floor, common.sh's one declaration (tb_mac_floor_verdict): Apple silicon,
+#     since Apple's container runtime is arm64-only, with macOS TB_MACOS_FLOOR_MAJOR or
+#     later, which the runtime needs (RFC-0175 D6). Its words are the floor's own
+#     (tb_mac_floor_reason); this path adds the way back to k3d, which serves those Macs
+#     until 2.1's flip. 2.4 (client-dev#1623) refuses them on every path at the flip.
+#   - No corporate CA: the node's image pulls do not take one yet, so a network that
+#     inspects TLS would fail them after the node is up.
 #   - No hostPath storage and no dataset folder: the node is a VM, so either would be
 #     inside it, not on this Mac. (Linux serves both: there the node is the host.)
 #   - k3d's node counts, refused as on Linux (_native_k3s_refuse_k3d_nodes), and the
@@ -550,8 +559,16 @@ exec /bin/k3s server'
 _mac_ct_refuse_host() {
   [[ "${OS:-}" == "Darwin" ]] \
     || error "The macOS node runs on a Mac only, and this machine runs ${OS:-an unknown OS}."
-  [[ "${ARCH:-}" == "arm64" ]] \
-    || error "The macOS node needs a Mac with Apple silicon: Apple's container runtime is arm64-only, and this Mac is ${ARCH:-of an unknown architecture}. Set TRACEBLOC_SUBSTRATE=k3d to install on k3d."
+  local verdict
+  verdict="$(tb_mac_floor_verdict)"
+  case "$verdict" in
+    '' | ok) ;;
+    *) error "$(tb_mac_floor_reason "$verdict") Set TRACEBLOC_SUBSTRATE=k3d to install on k3d." ;;
+  esac
+  local ca="" carc=0
+  if declare -F _resolve_ca_bundle >/dev/null 2>&1; then ca="$(_resolve_ca_bundle)" || carc=$?; fi
+  [[ -z "$ca" && "$carc" -eq 0 ]] \
+    || error "A corporate CA (TRACEBLOC_CA_BUNDLE or CURL_CA_BUNDLE) is not available on the macOS node yet: the node's image pulls would not trust it. Unset it, or set TRACEBLOC_SUBSTRATE=k3d to install on k3d with it."
   [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]] \
     || error "TRACEBLOC_STORAGE_MODE=hostpath is not available on the macOS node yet: the node is a VM, so its hostPath volumes would be inside the VM, not on this Mac. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE), or set TRACEBLOC_SUBSTRATE=k3d to keep hostpath on k3d."
   [[ -z "${HOST_DATASET_DIR:-}" ]] \
@@ -821,7 +838,8 @@ _mac_ct_ensure_node() {
 
 # _mac_ct_merge_kubeconfig -- the node's kubeconfig merged into the user's, as a
 # kube-context, by the Linux merge (_native_k3s_merge_kubeconfig), from the copy
-# _mac_ct_ensure_node took. It needs a kubectl on PATH: part 6 installs the pinned one.
+# _mac_ct_ensure_node took. It needs a kubectl on PATH: step b installs the pinned one
+# (_mac_ct_install_macos).
 _mac_ct_merge_kubeconfig() {
   local dir
   dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's kubeconfig is (above)."
@@ -853,7 +871,9 @@ _mac_ct_merge_kubeconfig() {
 #      never runs it (#1615 open decision 4). ProcessType Background.
 #  The plist is rewritten and the agent reloaded only when its bytes change: that is how
 #  a CLI that moved (an upgrade between /usr/local/bin and ~/.local/bin) is followed.
-#  On this path it replaces io.tracebloc.runtime (setup-macos.sh); part 6 wires both.
+#  On this path it replaces io.tracebloc.runtime (setup-macos.sh): step b on the macOS
+#  node installs no Docker, so nothing writes that one, and step c loads this one
+#  (_mac_ct_create_cluster).
 TB_MAC_CT_AGENT_LABEL="io.tracebloc.node"
 TB_MAC_CT_AGENT_INTERVAL=60
 
@@ -990,4 +1010,163 @@ _mac_ct_ensure_agent() {
   _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
     || error "Apple container: launchd did not load the login item ${plist}, so the node would not come back after a reboot. It's safe to re-run this installer."
   log "Apple container: the login item ${TB_MAC_CT_AGENT_LABEL} is loaded and runs ${bin} node ensure every ${TB_MAC_CT_AGENT_INTERVAL} s."
+}
+
+# ── Part 6: reachable behind TRACEBLOC_SUBSTRATE=k3s on a Mac ───────────────
+#  _native_k3s_refuse_host (k3s.sh), the one declaration of where native k3s runs, lets
+#  a Mac through to _mac_ct_refuse_host. Step b's install_macos routes native k3s to
+#  _mac_ct_install_macos (setup-macos.sh), and step c's _native_k3s_create_cluster routes
+#  a Mac to _mac_ct_create_cluster (k3s.sh). The default stays k3d on every OS: only
+#  TRACEBLOC_SUBSTRATE=k3s, or a re-run of a Mac whose install record says k3s
+#  (tb_substrate_resolve), comes here.
+
+# _mac_ct_kubectl_version -- the kubectl the macOS node is driven with: the pinned k3s
+# version's Kubernetes release (v1.36.5-k3s1 -> v1.36.5), so client and node never skew.
+# Exit 1, printing why, when the pin has another shape.
+_mac_ct_kubectl_version() {
+  local v="${TB_K3S_PIN_K8S_VERSION:-}" re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+  v="${v%%-k3s*}"
+  [[ "$v" =~ $re ]] \
+    || { echo "Apple container: the pinned k3s version '${TB_K3S_PIN_K8S_VERSION:-}' names no Kubernetes release (like v1.36.5-k3s1)."; return 1; }
+  printf '%s' "$v"
+}
+
+# _mac_ct_install_macos -- step b on the macOS node (RFC-0175 D6). Nothing here needs an
+# administrator: the runtime unpacks into the user's own folder and kubectl and helm go
+# to ~/.local/bin, so the run is Tier 0. It installs no Homebrew, Docker, colima or k3d,
+# and no io.tracebloc.runtime. kubectl is the node's release (_mac_ct_kubectl_version),
+# helm HELM_VERSION as on Linux. Then the runtime is unpacked and checked, and its system
+# started, so step c has only the node to run. It refuses nothing itself: a Mac the node
+# does not serve never gets here, because main()'s refuse_k3s_beside_live_k3d
+# (reinstall.sh) runs _native_k3s_refuse_host before step a on every native k3s request,
+# k3d or not. reinstall.bats' #1913 case holds that order (client-dev#1913).
+_mac_ct_install_macos() {
+  local kver saved_umask
+  # shellcheck disable=SC2034  # consumed cross-file (setup-linux.sh's tools target, diagnose.sh)
+  INSTALL_TIER=0
+  # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
+  INSTALL_TIER_REASON="mac-node"
+  log "step b: macOS node: tier 0 (Apple's container runtime in your own folder; no administrator rights)"
+  kver="$(_mac_ct_kubectl_version)" || error "$kver"
+  # shellcheck disable=SC2034  # consumed cross-file by setup-linux.sh's _fetch_* (the download's OS)
+  OS_DL=darwin
+  _set_tools_target
+  saved_umask="$(umask)"
+  umask 022
+  install_kubectl "$kver"
+  install_helm
+  umask "$saved_umask"
+  _persist_tools_on_path
+  log "step b: macOS node: kubectl ${kver} and helm ready (no Homebrew, no Docker, no k3d)"
+  _mac_ct_ensure_runtime
+  _mac_ct_start_system
+}
+
+# _mac_ct_create_cluster -- step c on the macOS node: the k3s node in Apple's VM, Ready,
+# its kubeconfig merged as a kube-context, NO_PROXY for this process (before the Local
+# Network gate's first curl of the API), and the login item that keeps it running. As
+# on Linux, the host is refused first, and a Mac with no node yet meets the fit gate
+# before one is created, sized from the node (preflight's readers, 2.1 part 5a). A node
+# of this installer's keeps its volume and its data, and a container or volume nothing
+# shows this installer made is refused (_mac_ct_ensure_node): that is this path's
+# leftover guard (D5).
+# The login item runs the CLI step b installed (TB_CLI_BIN, install-cli.sh). Without it
+# the node would not come back after a restart, so a run without it stops before the
+# node is touched.
+_mac_ct_create_cluster() {
+  local dir
+  log "Setting up the macOS node for '${CLUSTER_NAME}'"
+  _native_k3s_refuse_host
+  dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's files are (above)."
+  if [[ ! -e "${dir}/run-args" ]] && declare -F _precreate_fit_gate >/dev/null 2>&1; then
+    _precreate_fit_gate
+  fi
+  [[ -n "${TB_CLI_BIN:-}" ]] \
+    || error "The macOS node's login item runs the tracebloc CLI, and step b did not install it (above). Without the login item the node would not come back after a restart. Install the tracebloc CLI, then re-run this installer."
+  _mac_ct_ensure_node
+  _mac_ct_merge_kubeconfig
+  # NO_PROXY before the gate (client-dev#1892), for the kubectl calls after it: the gate's
+  # own probe of 127.0.0.1:6443 bypasses every proxy itself (client-dev#1914).
+  _export_host_no_proxy
+  _mac_ct_local_network_gate
+  _mac_ct_ensure_agent "$TB_CLI_BIN"
+}
+
+# ── The Local Network prompt (backend#5407, option a) ──────────────────────────
+#  The node's API reaches this Mac through Apple's container-runtime-linux helper, which
+#  forwards 127.0.0.1:6443 into the VM. It is a launchd agent, so macOS's Local Network
+#  privacy gates it (TN3179). Until the user allows "container-runtime-linux" in
+#  System Settings › Privacy & Security › Local Network, every connection to the port is
+#  accepted and then reset (curl exit 35, or 56 once a TLS session was open), while the
+#  API answers inside the node. Measured on the e2e Mac: a grant turned 31 resets into
+#  an answer 0 s after the node's Ready, and the grant is kept per bundle id, so a
+#  fresh unpack, or any later install, is not asked again.
+#  So before the first API call from this Mac, the installer says the prompt may come
+#  and what the helper is for, makes the call, and waits for the answer. A reset that
+#  outlasts the wait is the missing permission, refused by name with where to allow it.
+#  The node is Ready by then: the installer never reports it as a broken cluster.
+
+TB_MAC_CT_LAN_HELPER="container-runtime-linux"
+TB_MAC_CT_LAN_SETTINGS="System Settings › Privacy & Security › Local Network"
+# How long the first call waits for the user to answer the prompt.
+TB_MAC_CT_LAN_WAIT_S=120
+
+# _mac_ct_api_try KUBECONFIG -- one /readyz on 127.0.0.1:6443 from this Mac, with the
+# node's own CA and client certificate read from KUBECONFIG (the copy _mac_ct_ensure_node
+# took), as the live proof asks it (mac-container-live.sh _live_api_readyz). Prints the
+# body and returns curl's exit code; 100, printing why, when KUBECONFIG cannot be read,
+# lacks one of them, or holds one that does not decode.
+# --noproxy '*': the port is this Mac's own loopback, so no proxy is ever asked, ALL_PROXY
+# included, which NO_PROXY's export does not cover. A proxy's own refusal is a curl 56, the
+# gate's reading of the Local Network refusal (client-dev#1914).
+# Capture-then-slice, never `sed | head -n 1`: head closes the pipe early (the
+# early-close rule, .cursor/BUGBOT.md). base64's own status is read, so a value that
+# does not decode is refused by name rather than handed to curl as a partial file.
+_mac_ct_api_try() {
+  local kc="$1" d f v rc=0
+  d="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-api-XXXXXX")" || { echo "could not create a temporary folder"; return 100; }
+  for f in certificate-authority-data client-certificate-data client-key-data; do
+    v="$(sed -n "s/^ *${f}: *//p" "$kc" 2>/dev/null)" || { rm -rf "$d"; echo "${kc} cannot be read"; return 100; }
+    v="${v%%$'\n'*}"
+    [[ -n "$v" ]] || { rm -rf "$d"; echo "${kc} holds no ${f}"; return 100; }
+    printf '%s' "$v" | base64 --decode > "${d}/${f}" 2>/dev/null && [[ -s "${d}/${f}" ]] \
+      || { rm -rf "$d"; echo "${kc} holds a ${f} that does not decode"; return 100; }
+  done
+  curl_secure -sS --max-time 15 --noproxy '*' --cacert "${d}/certificate-authority-data" \
+    --cert "${d}/client-certificate-data" --key "${d}/client-key-data" \
+    https://127.0.0.1:6443/readyz 2>/dev/null || rc=$?
+  rm -rf "$d"
+  return "$rc"
+}
+
+# _mac_ct_local_network_gate -- the node's API answering from this Mac, or a refusal that
+# names what stops it. Says the prompt may come before the first call, then calls until
+# /readyz says ok or TB_MAC_CT_LAN_WAIT_S have passed. A last answer that was a reset
+# (curl 35 or 56) is the Local Network permission; any other is the port, said as it is.
+_mac_ct_local_network_gate() {
+  local dir kc body="" rc t0
+  dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's kubeconfig is (above)."
+  kc="${dir}/k3s.yaml"
+  info "macOS may now ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find devices on your local network. It is part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:6443. Click Allow. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for your answer."
+  t0=$SECONDS
+  while :; do
+    rc=0; body="$(_mac_ct_api_try "$kc")" || rc=$?
+    [[ "$rc" -ne 100 ]] \
+      || error "Apple container: the node's kubeconfig cannot be used to ask its API from this Mac: ${body}. It's safe to re-run this installer."
+    if [[ "$rc" -eq 0 && "$body" == ok ]]; then
+      log "Apple container: the node's API answers from this Mac on 127.0.0.1:6443."
+      return 0
+    fi
+    (( SECONDS - t0 < TB_MAC_CT_LAN_WAIT_S )) || break
+    sleep 3
+  done
+  case "$rc" in
+    35|56)
+      # A refusal: nothing changes until the user allows it, so no "try again" footer.
+      # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+      TB_EXIT_REFUSED=1
+      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_HELPER}\", the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. The node is running and keeps its data." ;;
+    *)
+      error "The node is Ready, but its API on 127.0.0.1:6443 did not answer from this Mac within ${TB_MAC_CT_LAN_WAIT_S}s (the last try exited ${rc}${body:+ and said: ${body}}). It's safe to re-run this installer." ;;
+  esac
 }

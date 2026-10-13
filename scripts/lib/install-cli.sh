@@ -26,6 +26,11 @@ TRACEBLOC_CLI_INSTALL_URL="https://github.com/tracebloc/cli/releases/latest/down
 # writable (see cli's install.sh) — the dir we tell the user to put on PATH.
 TRACEBLOC_CLI_FALLBACK_BIN="${HOME}/.local/bin"
 
+# The absolute path of the CLI this run installed, as its installer reported it; empty
+# until install_tracebloc_cli records one. Set here, not inherited: a path from the
+# environment must not stand in for a binary this run did not install.
+TB_CLI_BIN=""
+
 # _cli_at_system_dir PATH → true if the CLI lives in a SYSTEM location that's
 # unconditionally on the user's shell PATH (so the summary CTA may say "run it
 # now"); false for a $HOME bin (~/.local/bin, ~/bin) or an empty path — those may
@@ -263,6 +268,7 @@ install_tracebloc_cli() {
   # clean "vX → vY" update instead of an already-present / re-running / installing
   # pileup. Cosmetic — a failing `tracebloc version` just yields "" (guarded).
   TB_CLI_OLD_VER=""
+  TB_CLI_BIN=""
   if has tracebloc; then
     TB_CLI_OLD_VER="$(_cli_version_short)"
   fi
@@ -323,6 +329,10 @@ install_tracebloc_cli() {
     if [[ -n "$_cli_out" ]]; then _cli_path="$(_cli_reported_path "$_cli_out")"; fi
     if [[ -n "$_cli_path" ]]; then
       tb_record_write binary tracebloc "$_cli_path"
+      # The macOS node's login item runs this binary by its absolute path (launchd has
+      # no PATH): mac-container.sh's _mac_ct_create_cluster reads it.
+      # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
+      TB_CLI_BIN="$_cli_path"
     else
       log "The CLI installer reported no install path; no tracebloc binary recorded."
     fi

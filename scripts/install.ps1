@@ -56,7 +56,17 @@ $Files = @(
   # unit suite (scripts/tests/telemetry.Tests.ps1), and it is verified against
   # the signed manifest exactly like every other fetched script.
   "scripts/lib/telemetry.ps1"
+  # The distro path (RFC-0175 D2, D7), run instead of install-k8s.ps1 under
+  # TRACEBLOC_SUBSTRATE=k3s. Fetched and verified on every run like the rest, so
+  # the tree it is handed always holds a verified copy of it.
+  "scripts/install-wsl.ps1"
 )
+
+# The TRACEBLOC_SUBSTRATE value that runs install-wsl.ps1 instead of
+# install-k8s.ps1. The vocabulary is the install-record schema's
+# (properties.substrate.enum); a Pester test holds this value, and the
+# variable's name, to it.
+$WslSubstrate = 'k3s'
 
 # Keep in lockstep with install.sh COSIGN_VERSION and cli release.yml's
 # cosign-installer pin.
@@ -724,6 +734,21 @@ function Invoke-Bootstrap {
     # that says WHICH installer failed, on the platform this feature was added for.
     # (Found by the derived ScriptVar test, not by review.)
     $env:TRACEBLOC_INSTALL_REF = $ref
+
+    # TRACEBLOC_SUBSTRATE=k3s runs the distro path instead (RFC-0175 D2, D7;
+    # client-dev#1810), behind the switch until 3.3's cell is green on it. Its one
+    # input is the tree verified just above: install-wsl.ps1 checks it again and
+    # refuses any other, and there is no way to hand it an unverified one. Its exit
+    # code goes through unchanged, as install-k8s.ps1's does: 2 is the declared
+    # "restart, then re-run" handoff.
+    if ($env:TRACEBLOC_SUBSTRATE -ceq $WslSubstrate) {
+      $wsl = Join-Path $tmpDir "install-wsl.ps1"
+      Info "Running tracebloc WSL setup..."
+      & powershell.exe -ExecutionPolicy Bypass -File $wsl -CoreDir $tmpDir
+      Complete-Bootstrap -Code $LASTEXITCODE
+      return
+    }
+
     $k8s = Join-Path $tmpDir "install-k8s.ps1"
     Info "Running tracebloc environment setup..."
     if ($ChildArgs -and $ChildArgs.Count -gt 0) {

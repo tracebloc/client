@@ -1206,7 +1206,9 @@ _precreate_fit_estimate() {
 # is the node (preflight.sh), and the reservation is the `linux_k3s` key's,
 # measured on native k3s (client-dev#1469). On macOS they answer the node's size, the
 # VM mac-container.sh's rule gives, and the key is `unknown` until darwin_k3s is
-# measured (2.1 part 5b). This gate is the first step of the
+# measured (2.1 part 5b). In tracebloc's WSL distro they read the distro's own
+# /proc, which is the WSL VM's size, and the key is `windows_k3s`, a row 3.3's
+# Windows cell measures (client-dev#1810 part 2). This gate is the first step of the
 # create path that knows the key, so a table without that row is said here,
 # once per run (cluster.sh).
 _precreate_fit_gate() {

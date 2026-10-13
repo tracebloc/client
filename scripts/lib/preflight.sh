@@ -607,6 +607,12 @@ _pf_arch() {
     warn "Architecture: ${ARCH} — proceeding (TRACEBLOC_ALLOW_ARM64 set); if this install keeps the amd64-only MySQL 5.7 engine it may crash without emulation."
     return 0
   fi
+  if _pf_on_mac_node; then
+    # The macOS node runs amd64 images under Rosetta, which the node gets when this Mac
+    # has it installed (mac-container.sh, --rosetta); there is no Docker setting to name.
+    _pf_note "Architecture: ${ARCH} — the macOS node runs the amd64 client images under Rosetta when this Mac has it (softwareupdate --install-rosetta)."
+    return 0
+  fi
   if [[ "$OS" != "Linux" ]]; then
     # Don't ASSUME emulation works here — Docker isn't up yet at preflight, so the real
     # amd64 smoke runs post-Docker (assert_amd64_emulation, #433). Name the setting now
@@ -887,8 +893,8 @@ _pf_disk() {
 # (PF_MIN_DISK_GB, PF_WARN_DISK_GB). It does not exist before the install, so it is
 # measured on its nearest existing parent (_pf_mac_node_disk_at), as the summary line
 # measures it. A re-run gets no credit for the images it reuses: nothing has measured
-# them on a Mac yet, so the floor counts them as on a fresh one. Until 2.1 part 6
-# sources mac-container.sh, where the app root is cannot be told, and the line says so.
+# them on a Mac yet, so the floor counts them as on a fresh one. Without mac-container.sh
+# (a stale bootstrap), where the app root is cannot be told, and the line says so.
 _pf_mac_node_disk_at() {
   local root at
   declare -F _mac_ct_app_root >/dev/null 2>&1 || return 1
@@ -1230,7 +1236,9 @@ early_data_dir_guard() {
   target="${HOST_DATA_DIR:-${HOME:-}/.tracebloc}"
   [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
   # hostpath keeps the database under HOST_DATA_DIR on native k3s too (client-dev#1782).
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+  # The macOS node keeps its data in its own volume, so the directory created here is
+  # HOST_DATA_DIR, as on k3d (_pf_storage_type checks where the volume lives).
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && ! _pf_on_mac_node; then
     target="$(_native_k3s_storage_path)" || return 0
   fi
   # An EXISTING data dir has no at-risk mkdir here, and a healthy machine's
@@ -1260,7 +1268,7 @@ early_data_dir_guard() {
 # root chown init-container is blocked by NFS root_squash — so a network data dir
 # fails ~20 min in with a cryptic CrashLoopBackOff. Catch it in seconds here.
 _pf_storage_type() {
-  local target fstype disp
+  local target fstype disp tab=$'\t'
   target="${HOST_DATA_DIR:-$HOME/.tracebloc}"
   # Native k3s keeps the database in a local-path volume, under the storage path, so
   # that is the directory that must be local. _pf_disk_k3s has already read it (and
@@ -1269,7 +1277,13 @@ _pf_storage_type() {
   # is the chart's hostPath PV under HOST_DATA_DIR, on native k3s as on k3d
   # (client-dev#1782), so HOST_DATA_DIR is the directory judged -- on native k3s an
   # installed release's own root (_hostpath_root).
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
+  # The macOS node keeps it in the node's volume, a sparse image under the runtime's app
+  # root, so that directory must be local: measured where the disk line measures it, and
+  # when that cannot be told the disk line has already said so.
+  if _pf_on_mac_node; then
+    target="$(_pf_mac_node_disk_at)" || return 0
+    target="${target%%"$tab"*}"
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
     target="$(_native_k3s_storage_path)" || return 0
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && -n "$(_hostpath_root)" ]]; then
     target="$(_hostpath_root)"
@@ -1517,7 +1531,21 @@ _pf_connectivity() {
   # (warn-only) below. On Windows Docker Desktop is the sole path, so install-k8s.ps1
   # keeps desktop.docker.com hard there.
   local soft=() tool_hosts="dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com" nodes_trust="The k3d nodes are"
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+  if _pf_on_mac_node; then
+    # The macOS node (2.1 part 6) fetches no Docker, k3d or Homebrew. Apple's runtime
+    # package comes from its GitHub release, whose download redirects to
+    # release-assets.githubusercontent.com (keyed on the runtime's folder, which a
+    # re-run reuses); kubectl, pinned to the node's release, from dl.k8s.io; helm from
+    # get.helm.sh when absent. The kernel and init image (ghcr.io) and the node image
+    # (Docker Hub) are in the always-needed set above.
+    if [[ ! -e "$(_mac_ct_install_root 2>/dev/null)" ]]; then
+      criticals+=("Apple container package (github.com)|https://github.com/" \
+                  "Apple container assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/")
+    fi
+    criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/")
+    if ! has helm; then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
+    tool_hosts="github.com / release-assets.githubusercontent.com / dl.k8s.io / get.helm.sh"
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     # NATIVE k3s fetches no k3d, no kubectl (k3s carries its own) and no Docker, so
     # none of their hosts is probed. What a first install fetches (k3s.sh; measured
     # on v1.36.3+k3s1 under 1.1b): the binary from github.com, whose release
@@ -1615,7 +1643,12 @@ _pf_connectivity() {
 
   if [[ "$tls_seen" -eq 1 ]]; then
     hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."
-    hint "Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. ${nodes_trust} trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
+    if _pf_on_mac_node; then
+      # _mac_ct_refuse_host refuses a CA bundle on this path: the node cannot take one yet.
+      hint "The macOS node can't trust a corporate CA yet, so it can't install on a network that inspects TLS. Install on k3d instead (TRACEBLOC_SUBSTRATE=k3d), which takes your CA via TRACEBLOC_CA_BUNDLE. Ask IT for the bundle if unsure."
+    else
+      hint "Fix THESE host checks with CURL_CA_BUNDLE=/path/to/corporate-ca.pem (the installer's HTTPS downloads honor it) or by adding the CA to the system trust store. ${nodes_trust} trusted separately via TRACEBLOC_CA_BUNDLE (or CURL_CA_BUNDLE) at cluster-create — so CURL_CA_BUNDLE covers both, TRACEBLOC_CA_BUNDLE only the nodes. Ask IT for the bundle if unsure."
+    fi
   fi
   if [[ "$cfail" -gt 0 ]]; then
     hint "Allow HTTPS (443) egress to the host(s) named above — the always-needed set is registry-1.docker.io, auth.docker.io, ghcr.io, ${backend_host}, tracebloc.github.io, plus any tool-download host listed (${tool_hosts}) — or set HTTP_PROXY if you use a corporate proxy."

@@ -460,6 +460,7 @@ FILES=(
   "scripts/lib/k3d.sh"
   "scripts/lib/k3s.sh"
   "scripts/lib/k3s-firewall.sh"
+  "scripts/lib/mac-container.sh"
   "scripts/lib/gpu-plugins.sh"
   "scripts/lib/install-client-helm.sh"
   "scripts/lib/install-cli.sh"

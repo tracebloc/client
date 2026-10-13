@@ -2203,9 +2203,11 @@ true
   Whether self-rotation is IN EFFECT for this render (backend#5427): the gate on
   AND rotation resolved on, so there is a chart-owned root password for mysqld
   to apply. This is what templates read, never the raw gate.
-  The ONE condition every piece is rendered on -- the MYSQL_ROOT_INIT_SQL key in
-  secrets.yaml, and the init container, emptyDir and MYSQL_HOME env in
-  mysql-deployment.yaml -- so they cannot disagree.
+  The ONE condition every piece is rendered on -- the init container, emptyDir and
+  MYSQL_HOME env in mysql-deployment.yaml, and the alphanumeric / bootstrap-pin
+  refusals in secrets.yaml -- so they cannot disagree. The init container reads
+  root's password from mysql-credentials, the one source every other root reader
+  uses; the chart renders no second copy of it (client-dev#1852).
 
   It is safe to render on ANY edge because the init container decides at
   runtime, not at render time. Rehearsed on MySQL 5.7.41 and 8.4.11 (backend#5427):
@@ -2223,6 +2225,41 @@ true
 */}}
 {{- define "tracebloc.selfRotateMysqlRoot" -}}
 {{- if and (include "tracebloc.selfRotateMysqlRootGate" .) (include "tracebloc.rotateMysqlRoot" .) }}true{{ end -}}
+{{- end }}
+
+{{/*
+  Refusals for the root self-rotation (backend#5427), called from secrets.yaml with
+  the root password that render resolved: dict "root" <top context> "password"
+  <MYSQL_ROOT_PASSWORD>. A helper rather than inline because they render nothing:
+  an inline read of tracebloc.selfRotateMysqlRoot whose only effect is a refusal
+  is a call site gate-byenv-resolution.sh cannot see react (client-dev#1852).
+  The password itself reaches mysqld from mysql-credentials through the
+  mysql-root-init init container, which re-checks the alphanumeric rule at
+  runtime for a value written there by hand.
+*/}}
+{{- define "tracebloc.assertSelfRotateMysqlRootIsSafe" -}}
+{{- $root := .root -}}
+{{- if (include "tracebloc.selfRotateMysqlRoot" $root) -}}
+{{-   if not (regexMatch "^[A-Za-z0-9]+$" .password) -}}
+{{-     fail "selfRotateMysqlRoot is on, but the MYSQL_ROOT_PASSWORD this release already holds is not alphanumeric ([A-Za-z0-9]+). mysqld would run it inside `ALTER USER ... IDENTIFIED BY '...'` at every start, so a quote or other SQL metacharacter would break the statement (backend#5427). Pin mysqlRootPassword to an alphanumeric value, or set selfRotateMysqlRoot=false for this edge." -}}
+{{-   end -}}
+{{-   if and $root.Values.bootstrapDbPassword (ne $root.Values.bootstrapDbPassword .password) -}}
+{{-     fail "selfRotateMysqlRoot is on, so mysqld sets root to MYSQL_ROOT_PASSWORD at every start, but bootstrapDbPassword pins a DIFFERENT value. jobs-manager logs in as root with bootstrapDbPassword, so it would be locked out (1045) on every start (backend#5427). Unset bootstrapDbPassword: with rotation on it is derived from root's password (backend#2738)." -}}
+{{-   end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+  The rotateMysqlRoot mint's existing-datadir refusal (backend#2892), called from
+  secrets.yaml only when an existing datadir is known: dict "root" <top context>
+  "pvc" <the datadir PVC's name>. Self-rotation lifts it, because mysqld then
+  applies the minted value at its next start (backend#5427). A helper for the
+  same reason as tracebloc.assertSelfRotateMysqlRootIsSafe.
+*/}}
+{{- define "tracebloc.assertRootMintOnExistingDatadirIsSafe" -}}
+{{- if not (include "tracebloc.selfRotateMysqlRoot" .root) -}}
+{{-   fail (printf "rotateMysqlRoot is on for this fleet, but its MySQL datadir already exists (PersistentVolumeClaim %q in namespace %q) and predates the rotation, so root still holds its install-time password. Rendering now would mint a NEW random root password into the Secret that the live database was never told about; because the mysql entrypoint reads MYSQL_ROOT_PASSWORD only at FRESH datadir init, root would then authenticate with neither value and the fleet would lose MySQL auth (helm reports success, jobs-manager CrashLoops on `1045 Access denied for user 'root'`, the upgrade times out on `Deployment not ready`). Enabling the rotation on an existing datadir REQUIRES the one-time, manual `ALTER USER 'root'` migration in docs/migration-tools/rotate-mysql-root.md -- the chart cannot run it (it would have to authenticate as root with the CURRENT password). Follow that runbook: it has you set `mysqlRootRotationAcknowledged=true` to acknowledge the manual step and let this render through. Or, from chart 1.9.205, set `selfRotateMysqlRoot=true` and mysqld runs that ALTER USER itself at its next start, with no manual step and no acknowledgement (backend#5427). A FRESH install needs none of this -- with no datadir yet, root is initialised with the generated value and is born rotated. (A leftover EMPTY datadir -- a first install that failed before MySQL ever initialised, whose PVC persists under resource-policy: keep -- is the same fresh case wearing a PVC: there is no live password to migrate, so set mysqlRootRotationAcknowledged=true and the next init is born rotated; the ALTER USER step then has nothing to run against and is skipped.)" .pvc .root.Release.Namespace) -}}
+{{- end -}}
 {{- end }}
 
 {{/*

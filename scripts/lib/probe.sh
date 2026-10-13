@@ -107,8 +107,70 @@ _probe_userns() {
 # TRACEBLOC_PROC_VERSION_FILE) so it's testable off a real WSL host.
 _probe_wsl() {
   [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]] && return 0
+  _probe_wsl_kernel
+}
+
+# _probe_wsl_kernel — the kernel half of _probe_wsl alone: WSL's kernel stamps
+# "microsoft"/"WSL" into its release. An environment variable can be exported
+# anywhere; the kernel cannot, so _probe_wsl_ours needs this half.
+_probe_wsl_kernel() {
   grep -qiE 'microsoft|wsl' "${TRACEBLOC_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}" 2>/dev/null && return 0
   grep -qiE 'microsoft|wsl' "${TRACEBLOC_PROC_VERSION_FILE:-/proc/version}" 2>/dev/null
+}
+
+# TB_WSL_DISTRO — the name of tracebloc's own WSL distro: the one the Windows
+# installer imports and runs this core in, `wsl -d tracebloc -u root -- bash …`
+# (client-dev#1810 part 1). Inside WSL, native k3s serves this distro only
+# (_native_k3s_refuse_host); a user's own distro stays refused.
+TB_WSL_DISTRO="tracebloc"
+
+# _probe_wsl_ours — inside WSL, in tracebloc's own distro: a WSL kernel
+# (_probe_wsl_kernel, never the environment alone), and WSL_DISTRO_NAME, which
+# WSL sets in every process `wsl -d NAME` starts, naming TB_WSL_DISTRO. A Linux
+# host that merely exports the name is not WSL, so it is not this distro, and
+# keeps every Linux step (client-dev#1810 part 2). Read-only.
+_probe_wsl_ours() {
+  _probe_wsl_kernel && [[ "${WSL_DISTRO_NAME:-}" == "$TB_WSL_DISTRO" ]]
+}
+
+# _probe_windows_drive PATH — does PATH live on a Windows drive that WSL mounts
+# into the distro (drvfs)? 0 yes, 1 no (a Linux filesystem: the distro's own ext4,
+# or any other Linux-side mount), 2 cannot tell (no mount table, or nothing of
+# PATH resolves). Read from the mount table for the mount that holds PATH's
+# nearest existing ancestor, symlinks resolved, so a link into /mnt/c is seen.
+# drvfs is mounted as `9p` with `aname=drvfs` on WSL2 and as `drvfs` on WSL1, and
+# its source is the drive (`C:\`); any one of the three marks it. RFC-0175 D5: a
+# volume, the database's InnoDB files among them, never lives on drvfs. The mount
+# table is overridable (TRACEBLOC_PROC_MOUNTS_FILE) so it's testable off WSL.
+_probe_windows_drive() {
+  local p="$1" mounts="${TRACEBLOC_PROC_MOUNTS_FILE:-/proc/self/mounts}" real verdict
+  [[ -r "$mounts" ]] || return 2
+  [[ "$p" == /* ]] || p="${PWD}/${p}"
+  while [[ ! -d "$p" ]]; do
+    p="${p%/*}"
+    [[ -n "$p" ]] || p=/
+  done
+  real="$(cd -P "$p" 2>/dev/null && pwd -P)" || return 2
+  verdict="$(awk -v path="$real" '
+    function unoct(s) {
+      gsub(/\\040/, " ", s); gsub(/\\011/, "\t", s); gsub(/\\012/, "\n", s); gsub(/\\134/, "\\", s)
+      return s
+    }
+    NF >= 4 {
+      mnt = unoct($2)
+      if (mnt != "/" && path != mnt && index(path, mnt "/") != 1) next
+      if (length(mnt) < best) next
+      best = length(mnt)
+      win = ($3 == "drvfs" || $4 ~ /(^|[,;])aname=drvfs([,;]|$)/ || unoct($1) ~ /^[A-Za-z]:/)
+      found = 1
+    }
+    END { if (!found) print "none"; else if (win) print "windows"; else print "linux" }
+  ' "$mounts" 2>/dev/null)" || return 2
+  case "$verdict" in
+    windows) return 0 ;;
+    linux)   return 1 ;;
+    *)       return 2 ;;
+  esac
 }
 
 # _probe_privilege — echo this shell's privilege posture (for honest messaging,
@@ -175,6 +237,12 @@ _classify_from_probes() {
   # Docker is no Tier 0 for it. install_linux routes k3s before reading the tier;
   # this keeps the panel from promising "zero root" to a run that will ask for sudo.
   # Its one Tier 0 is a host an administrator prepared for this user (1.1g).
+  # On a Mac it is always Tier 0: the node runs in Apple's VM from the user's own
+  # folder, and nothing on that path asks for administrator rights (2.1 part 6).
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]]; then
+    INSTALL_TIER=0; INSTALL_TIER_REASON="mac-node"
+    return 0
+  fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Linux" ]]; then
     if [[ "${PROBE_K3S_PREPARED:-0}" == "1" ]]; then
       INSTALL_TIER=0; INSTALL_TIER_REASON="native-k3s-prepared"
@@ -279,7 +347,10 @@ render_host_audit() {
   echo ""
   echo -e "  ${BOLD}Host check${RESET}"
 
-  if [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
+  if [[ "${INSTALL_TIER_REASON:-}" == "mac-node" ]]; then
+    # The macOS node brings its own runtime: whether Docker answers is beside the point.
+    _audit_row "Container runtime" "Apple container ${TB_APPLE_CONTAINER_VERSION:-} (set up for you)" note
+  elif [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
     # BOUNDED (client#984): `docker version` reports the SERVER version, so it
     # talks to the daemon and blocks on a wedged one exactly like `docker info`.
     # This renders the host-audit panel, so an unbounded read froze the panel that
@@ -334,6 +405,7 @@ render_host_audit() {
     0)
       case "${INSTALL_TIER_REASON:-}" in
         native-k3s-prepared) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — an administrator prepared native k3s for you; no privileged steps." ;;
+        mac-node)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — the macOS node runs from your own folder on Apple's container runtime; no privileged steps." ;;
         *)                   echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — a container is already runnable; no privileged steps." ;;
       esac
       ;;

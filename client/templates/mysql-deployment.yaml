@@ -130,13 +130,19 @@ spec:
           readOnly: true
       {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
       # Root init file (backend#5427; tracebloc.selfRotateMysqlRoot). On an EXISTING
-      # datadir, write the release Secret's root SQL and an option file naming it
+      # datadir, write root's ALTER USER statements and an option file naming them
       # into mysql-root-init, which mysqld reads as $MYSQL_HOME/my.cnf: mysqld then
-      # sets root to the Secret's value at startup, before it accepts connections.
+      # sets root at startup, before it accepts connections.
+      # THE PASSWORD IS mysql-credentials' MYSQL_ROOT_PASSWORD (client-dev#1852):
+      # the same Secret and key every other root reader names, so a password
+      # changed by hand there is the one mysqld sets. It used to be SQL rendered
+      # into the release Secret at render time -- a second copy of the password
+      # that reverted a hand rotation at the next pod start.
       # On a FRESH datadir write NOTHING -- the entrypoint initialises root from
       # MYSQL_ROOT_PASSWORD, and an init_file there breaks that initialisation.
-      # With the Secret key missing, also write nothing and say so: mysqld starts
-      # on its current password instead of aborting on an init_file it cannot open.
+      # With the key missing, empty or not alphanumeric, also write nothing and
+      # say so: mysqld starts on its current password instead of aborting on an
+      # init_file it cannot open, and nothing unquoted reaches the SQL.
       - name: mysql-root-init
         image: {{ include "tracebloc.thirdPartyImage" (dict "site" "images.busybox" "root" $) | quote }}
         securityContext:
@@ -155,25 +161,32 @@ spec:
           - |
             set -eu
             umask 0337
-            src=/run/secrets/mysql-root-init/MYSQL_ROOT_INIT_SQL
             dst=/etc/mysql/tracebloc
             if [ ! -d /var/lib/mysql/mysql ]; then
               echo "mysql-root-init: no datadir yet, nothing to do: the entrypoint initialises root from MYSQL_ROOT_PASSWORD"
               exit 0
             fi
-            if [ ! -s "$src" ] || [ ! -r "$src" ]; then
-              echo "mysql-root-init: WARNING the release Secret has no readable MYSQL_ROOT_INIT_SQL, so root is NOT set on this start"
-              exit 0
-            fi
-            cp "$src" "$dst/root-init.sql"
+            p="${MYSQL_ROOT_PASSWORD:-}"
+            case "$p" in
+              ""|*[!A-Za-z0-9]*)
+                echo "mysql-root-init: WARNING mysql-credentials has no usable (non-empty, alphanumeric) MYSQL_ROOT_PASSWORD, so root is NOT set on this start"
+                exit 0 ;;
+            esac
+            printf "ALTER USER IF EXISTS 'root'@'%%' IDENTIFIED BY '%s';\nALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY '%s';\n" "$p" "$p" > "$dst/root-init.sql"
             printf '[mysqld]\ninit_file=%s/root-init.sql\n' "$dst" > "$dst/my.cnf"
-            echo "mysql-root-init: existing datadir: mysqld sets root from the release Secret at startup"
+            echo "mysql-root-init: existing datadir: mysqld sets root from mysql-credentials at startup"
+        env:
+        # The same Secret and key as mysql-client's MYSQL_ROOT_PASSWORD (client-dev#1852).
+        # optional: a missing key is reported and skipped above, not a pod that cannot start.
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
+              key: MYSQL_ROOT_PASSWORD
+              optional: true
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql/
-          readOnly: true
-        - name: mysql-root-init-sql
-          mountPath: /run/secrets/mysql-root-init
           readOnly: true
         - name: mysql-root-init
           mountPath: /etc/mysql/tracebloc
@@ -400,19 +413,7 @@ spec:
       - name: mysql-files
         emptyDir: {}
       {{- if (include "tracebloc.selfRotateMysqlRoot" .) }}
-      # backend#5427. The root SQL alone, projected out of the release Secret.
-      # optional: a missing key leaves the file absent, which the init container
-      # reports and skips, instead of a pod that cannot start. 0440 + fsGroup 999
-      # makes it readable by the init container's uid 999 and no one else.
-      - name: mysql-root-init-sql
-        secret:
-          secretName: {{ include "tracebloc.secretName" . }}
-          optional: true
-          defaultMode: 0440
-          items:
-          - key: MYSQL_ROOT_INIT_SQL
-            path: MYSQL_ROOT_INIT_SQL
-      # In memory, because it holds root's password. Written once per pod start
+      # backend#5427. In memory, because it holds root's password. Written once per pod start
       # by the init container; mysqld mounts it read-only.
       - name: mysql-root-init
         emptyDir:

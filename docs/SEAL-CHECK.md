@@ -169,6 +169,8 @@ on the live cluster when the corresponding check runs.*
 | No unmanaged hostPath backing (dynamic mode) | **Verified** once the Option C flip lands (today's installer still declares hostPath mode → sub-check SKIPs, honestly) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
 | Nothing under `~/.tracebloc` on the host (post-Option-C) | Not observable in-cluster — CLI/installer-side check (see follow-ups) | n/a | n/a | n/a | n/a |
 
+**Native k3s (Linux) is not a column yet: nothing above is measured on it.** On a new Linux machine the installer sets up native k3s rather than k3d (see [PREREQUISITES.md § Linux](PREREQUISITES.md#linux)). It runs k3s directly on the machine, with k3s's embedded NetworkPolicy controller left on. The seal-check job, however, runs on k3d only, and no `helm test` run on native k3s has been recorded here. Until one is, read every guarantee in the table as **not yet measured** on native k3s, not as verified. To close the gap, run the suite (`helm test` on the release) on a native-k3s machine and record the result here.
+
 Two lockdown caveats the suite states rather than hides:
 
 - `egress-enforcement` renders **by default** as of chart 1.9.96

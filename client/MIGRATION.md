@@ -8,15 +8,16 @@ This guide explains how to migrate from the legacy per-platform charts (`aks/`, 
 the root password it was installed with until someone runs a one-time
 `ALTER USER 'root'` against it. The new `selfRotateMysqlRoot` setting lets MySQL
 do that itself. At each start on an existing datadir it sets root's password to
-the value in the release Secret, before it accepts connections and without
-needing the old password. A small `mysql-root-init` init container decides at
+`MYSQL_ROOT_PASSWORD` in `mysql-credentials`, before it accepts connections and
+without needing the old password.
+That is the same Secret and key every other reader of root's password uses. A small `mysql-root-init` init container decides at
 each pod start:
 
 | Datadir | What happens |
 |---|---|
-| Existing | MySQL sets root from the release Secret at startup. |
+| Existing | MySQL sets root from `mysql-credentials` at startup. |
 | New (first install) | Nothing; MySQL initialises root from the Secret as before. |
-| Existing, but the Secret has no root SQL | Nothing; a warning is logged and MySQL starts on its current password. |
+| Existing, but `mysql-credentials` has no `MYSQL_ROOT_PASSWORD`, or one that is not alphanumeric | Nothing; a warning is logged and MySQL starts on its current password. |
 
 It is resolved per environment by `selfRotateMysqlRootByEnv` and overridable
 per edge by `selfRotateMysqlRoot`:
@@ -32,10 +33,13 @@ exactly as before.
 
 **When it is turned on** for an edge whose datadir predates rotation:
 
-- The next upgrade generates a root password into the release Secret, the
+- The next upgrade generates a root password into `mysql-credentials`, the
   jobs-manager logs in to MySQL as root with it, and the MySQL pod restarts once.
 - Anything that still logs in as MySQL root with the old password stops
-  working. Read the password from the release Secret's `MYSQL_ROOT_PASSWORD`.
+  working. Read the password from `mysql-credentials`' `MYSQL_ROOT_PASSWORD`.
+- To change root's password by hand, change `MYSQL_ROOT_PASSWORD` in
+  `mysql-credentials` (letters and digits only) and restart the MySQL pod: MySQL
+  sets root to it at that start, and the next upgrade keeps it.
 - The upgrade refuses to render if the root password it would apply is not
   alphanumeric, or if `bootstrapDbPassword` is pinned to a different value.
   Pin `mysqlRootPassword` to an alphanumeric value, or unset
@@ -79,7 +83,9 @@ reads them.
 **After you change a MySQL password by hand**, change it in `mysql-credentials`.
 Once that Secret exists the chart reads it as a whole and ignores the copies in
 `<release>-secrets`: a key you delete from `mysql-credentials` is not read back
-from there.
+from there. With `selfRotateMysqlRoot` on, MySQL also sets root from
+`mysql-credentials` at every start, so a root password changed there is the one
+the next MySQL start applies.
 
 **Offboarding.** Because uninstall keeps `mysql-credentials`, removing the
 database for good means deleting it with the data:
