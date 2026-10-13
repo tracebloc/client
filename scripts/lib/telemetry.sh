@@ -249,6 +249,17 @@ telemetry_run_skipped() { _TB_TELEMETRY_SKIPPED=1; return 0; }
 _TB_TELEMETRY_RERUN_HANDOFF=""
 telemetry_rerun_handoff() { _TB_TELEMETRY_RERUN_HANDOFF=1; return 0; }
 
+# ── "the next run reports this install" ──────────────────────────────────────
+# In tracebloc's WSL distro install.ps1 runs this core twice for ONE install
+# (client-dev#1810 section 5): the cluster run exits 0 after step c, and the client
+# run that follows carries the install to its outcome. Reported as it stands, the
+# cluster run's exit 0 is install.run.succeeded: a second success for one install,
+# and a success for an install whose client run may yet fail. So the cluster run
+# withdraws the latch just before that exit 0 and emits nothing, as `--help` does.
+# Only the success path withdraws it: a cluster run that fails before it is a
+# failed install attempt and is still reported.
+telemetry_run_handed_on() { _TB_TELEMETRY_RUN_STARTED=""; return 0; }
+
 # ── Opt-out ──────────────────────────────────────────────────────────────────
 # Opt-OUT by design: telemetry only the already-convinced enable measures the
 # wrong population, and the population this exists for is people whose install

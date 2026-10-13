@@ -1,6 +1,7 @@
 {{- /*
-  Durable pause/resume volume (client-runtime#882). OFF by default, pending
-  backend#5266 (model-IP + retention); see `trainingResume` in values.yaml.
+  Durable pause/resume volume (client-runtime#882). Staged per environment by
+  backend#5266 (7-day retention in jobs-manager); see `trainingResume` and
+  `trainingResumeEnabledByEnv` in values.yaml.
 
   The env key is refused rather than passed through: on its own it arms the
   runtime's spawn and stop paths without the jobs-manager mount (so the

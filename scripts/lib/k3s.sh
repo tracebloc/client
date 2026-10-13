@@ -1398,7 +1398,7 @@ _native_k3s_refuse_host() {
 # (scripts/spec/wsl-distro.env, client-dev#1809). Any other WSL distro never gets
 # that far: _native_k3s_refuse_host refuses it first.
 _native_k3s_on_wsl() {
-  [[ "${OS:-}" == "Linux" ]] && declare -F _probe_wsl_ours >/dev/null 2>&1 && _probe_wsl_ours
+  tb_in_wsl_distro
 }
 
 # _native_k3s_wsl_which -- the WSL distro this run is in, for a refusal: its name,

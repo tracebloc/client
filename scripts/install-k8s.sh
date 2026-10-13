@@ -182,6 +182,19 @@ main() {
   # the post-install cleanup message doesn't fire after a diagnose run.
   [[ "${1:-}" == "--diagnose" ]] && { trap - EXIT; run_diagnose; exit $?; }
 
+  # The Windows installer's client run hands over the credential on stdin
+  # (TRACEBLOC_CREDENTIAL_STDIN=1, tracebloc's WSL distro): read it before anything
+  # else, so the write that sent it is always read. It refuses nothing here: what it
+  # found wrong, and a build without provision.sh, is refused by name after the
+  # substrate line (refuse_wsl_run).
+  # Both are set by that read alone, never inherited: a stale TB_STDIN_CRED_FILE would
+  # hand step d a credential this run never read, and a stale refusal would refuse a run
+  # that was never handed one.
+  TB_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
+  if [[ "${TRACEBLOC_CREDENTIAL_STDIN:-}" == 1 ]] && declare -F provision_read_stdin_credential >/dev/null 2>&1; then
+    provision_read_stdin_credential
+  fi
+
   # The substrate line (the installer contract, scripts/spec/install-record.schema.json):
   # printed BEFORE anything below can refuse, so whoever reads this output can tell
   # which substrate a refusal belongs to. Only then is an unsupported request
@@ -195,6 +208,9 @@ main() {
   print_substrate_token
   refuse_unsupported_substrate
   refuse_unresolved_substrate
+  # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s,
+  # and one of its two runs (common.sh, client-dev#1810 section 5).
+  refuse_wsl_run
   # Native k3s is never set up beside a live k3d (D10): read-only detection, then a
   # refusal, before anything below installs, writes or starts. A bootstrap too old
   # to have fetched reinstall.sh must not become k3s beside k3d, so a native k3s
@@ -398,8 +414,10 @@ main() {
     *)        error "Unsupported OS: $OS" ;;
   esac
   # Guarded: a stale bootstrap may not have fetched install-cli.sh — then step d's
-  # guard (or install_client_helm's dual-mode path) surfaces it.
-  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
+  # guard (or install_client_helm's dual-mode path) surfaces it. Not in tracebloc's
+  # WSL distro: the CLI is the Windows host's, which signs in and creates the client
+  # there (RFC-0175 D2), so step d here takes the credential it handed over.
+  if [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] && declare -F install_tracebloc_cli >/dev/null 2>&1; then
     install_tracebloc_cli
   fi
   echo ""; echo ""
@@ -407,6 +425,19 @@ main() {
   # ── c) Create your secure environment ────────────────────────────────────
   step_header c "Creating your secure environment"
   create_cluster
+  # The Windows installer's cluster run ends here: the cluster is up and its
+  # kubeconfig merged on the host, which now signs in and creates the client with
+  # its own CLI, then runs this core again for the client run.
+  if [[ "$(tb_wsl_phase 2>/dev/null)" == "cluster" ]]; then
+    tb_record_write
+    # One install, one event: the client run reports it (telemetry.sh).
+    if declare -F telemetry_run_handed_on >/dev/null 2>&1; then
+      telemetry_run_handed_on
+    fi
+    success "The cluster is ready. The Windows installer registers this machine next."
+    _tb_done=1
+    exit 0
+  fi
   # The GPU device plugin is no longer applied imperatively here (client#564):
   # the chart now renders it as a Helm-managed DaemonSet, gated on
   # gpu.devicePlugin.enabled, which install_client_helm sets in step (e) from

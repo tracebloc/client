@@ -43,15 +43,31 @@ TB_MAC_CT_MARKER=".tracebloc-verified"
 # _mac_ct_version_ok VERSION -- 0 when VERSION is a release tag like 1.4.1.
 _mac_ct_version_ok() { [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
-# _mac_ct_home -- the runtime's folder (D6). TRACEBLOC_MAC_CT_HOME is the TEST SEAM. A HOME
-# that is empty, relative or / would put the runtime in a system folder, so it is refused.
+# _mac_ct_norm_path PATH -- PATH with repeated / collapsed and a trailing / dropped (/ stays
+# /). Apple's container CLI hands launchd its roots in this spelling, so every root this
+# installer derives, and every root it reads back from launchd, is compared in it: a HOME
+# ending in / (macOS's TMPDIR does) would otherwise read this installer's own system as
+# another's (client-dev#1941).
+_mac_ct_norm_path() {
+  local p="${1:-}" one=/ two=//
+  # Through variables, not \/ in the replacement: bash 3.2 keeps that backslash inside "".
+  while [[ "$p" == *//* ]]; do p="${p//$two/$one}"; done
+  [[ "$p" == ?*/ ]] && p="${p%/}"
+  printf '%s' "$p"
+}
+
+# _mac_ct_home -- the runtime's folder (D6), normalised. TRACEBLOC_MAC_CT_HOME is the TEST
+# SEAM. A HOME that is empty, relative or / (in any spelling, // included) would put the
+# runtime in a system folder, so it is refused.
 _mac_ct_home() {
-  if [[ -n "${TRACEBLOC_MAC_CT_HOME:-}" ]]; then printf '%s' "$TRACEBLOC_MAC_CT_HOME"; return 0; fi
-  if [[ "${HOME:-}" != /?* ]]; then
+  local h
+  if [[ -n "${TRACEBLOC_MAC_CT_HOME:-}" ]]; then _mac_ct_norm_path "$TRACEBLOC_MAC_CT_HOME"; return 0; fi
+  h="$(_mac_ct_norm_path "${HOME:-}")"
+  if [[ "$h" != /?* ]]; then
     echo "Apple container: HOME is '${HOME:-}', not a home folder, so there is nowhere to unpack the runtime." >&2
     return 1
   fi
-  printf '%s/Library/Application Support/tracebloc/container' "$HOME"
+  printf '%s/Library/Application Support/tracebloc/container' "$h"
 }
 
 # _mac_ct_install_root [VERSION] -- where VERSION (default: the pin) is unpacked: one
@@ -320,8 +336,8 @@ _mac_ct_check_pins() {
 }
 
 # _mac_ct_system_state -- this user's container system: "none", "ours ROOT" (its app
-# root is ours and its install root ROOT is one of this installer's version folders),
-# or "foreign". launchctl exits 113 for a service it does not know; any other failure
+# root is ours and its install root ROOT is one of this installer's version folders,
+# both sides compared as _mac_ct_norm_path spells them), or "foreign". launchctl exits 113 for a service it does not know; any other failure
 # is "cannot tell" (return 1), never "none", so a run never starts a second system
 # beside one it could not see.
 _mac_ct_system_state() {
@@ -333,8 +349,8 @@ _mac_ct_system_state() {
     echo "Apple container: launchctl could not say whether a container system is registered for this user (exit ${rc}), so this run cannot tell whether one is running." >&2
     return 1
   fi
-  have_app="$(awk -F' => ' '$1 ~ /^[[:space:]]*CONTAINER_APP_ROOT$/ { print $2; exit }' <<<"$out")"
-  have_root="$(awk -F' => ' '$1 ~ /^[[:space:]]*CONTAINER_INSTALL_ROOT$/ { print $2; exit }' <<<"$out")"
+  have_app="$(_mac_ct_norm_path "$(awk -F' => ' '$1 ~ /^[[:space:]]*CONTAINER_APP_ROOT$/ { print $2; exit }' <<<"$out")")"
+  have_root="$(_mac_ct_norm_path "$(awk -F' => ' '$1 ~ /^[[:space:]]*CONTAINER_INSTALL_ROOT$/ { print $2; exit }' <<<"$out")")"
   if [[ "$have_app" == "$app" && "${have_root%/*}" == "$home" ]] && _mac_ct_version_ok "${have_root##*/}"; then
     echo "ours ${have_root}"
   else

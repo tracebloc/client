@@ -599,6 +599,18 @@ spec:
         # signal in jobs-manager. New setting, canonical name only (RFC-0076 S6).
         - name: TRACEBLOC_TRAINING_RESUME_PVC
           value: {{ include "tracebloc.trainingResumePvc" . | quote }}
+        {{- $opEnv := default dict .Values.env }}
+        {{- if not (or (hasKey $opEnv "TRAINING_RESUME_ENABLED") (hasKey $opEnv "TRACEBLOC_TRAINING_RESUME_ENABLED")) }}
+        # backend#5266: a volume the engine ignores keeps nothing, so the same
+        # switch arms the engine's resume. jobs-manager forwards it to every
+        # training pod (client-runtime operator_training_switches). Both names,
+        # as the env passthrough writes them (RFC-0076); an operator's own
+        # env.TRAINING_RESUME_ENABLED wins and is rendered by the passthrough.
+        - name: TRACEBLOC_TRAINING_RESUME_ENABLED
+          value: "1"
+        - name: TRAINING_RESUME_ENABLED
+          value: "1"
+        {{- end }}
         {{- end }}
         {{- if (include "tracebloc.stopKindSignalEnabled" .) }}
         # client-runtime#882: training pods get the stop-kind file and stops

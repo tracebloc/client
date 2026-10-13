@@ -7901,7 +7901,7 @@ function ConvertTo-SanitizedInput {
   $s = $Value -replace "$esc(\[[0-9;]*|O)[A-Za-z~]", ""
   $s = $s.Replace("[200~", "").Replace("[201~", "")
   # The floor. The strip above knows CSI, SS3 and the paste markers; it cannot
-  # know the escape family nobody has reported yet — and that is exactly how SS3
+  # know the escape family nobody has reported yet -- and that is exactly how SS3
   # got here, one rule hand-copied into three languages with only CSI ever
   # tested. So if an ESC SURVIVED the strip, this value carries a shape we do not
   # recognise and its printable bytes are not trustworthy content. Require one
@@ -7912,7 +7912,7 @@ function ConvertTo-SanitizedInput {
   # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
   # making keep-vs-reject depend on the script the name is written in (Bugbot,
   # #736). An escape final is one byte, an intro plus a final is two, and every
-  # keyboard-input escape family fits in that. The probe is a yes/no only — it is
+  # keyboard-input escape family fits in that. The probe is a yes/no only -- it is
   # never returned. Nothing but residue => return empty, which callers already
   # treat as "no answer" (re-prompt, or auto-name).
   if ($s.Contains($esc)) {

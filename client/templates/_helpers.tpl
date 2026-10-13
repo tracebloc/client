@@ -367,12 +367,21 @@ client-logs-pvc
 {{- end }}
 
 {{/*
-  Durable pause/resume volume (client-runtime#882). OFF by default, pending the
-  model-IP and retention decision on backend#5266. "true" or "" so callers can
-  gate with `if (include ...)`.
+  Durable pause/resume volume (client-runtime#882). Allowed with a 7-day
+  retention by backend#5266 and staged per environment: `trainingResume.enabled`
+  true or false is the per-edge override and always wins; unset (null), the
+  value is trainingResumeEnabledByEnv's for this install's environment
+  (tracebloc.clientEnv). "true" or "" so callers can gate with `if (include ...)`.
 */}}
 {{- define "tracebloc.trainingResumeEnabled" -}}
-{{- if (default dict .Values.trainingResume).enabled -}}true{{- end -}}
+{{- $override := (default dict .Values.trainingResume).enabled -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.trainingResumeEnabledByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -388,7 +397,7 @@ client-logs-pvc
   Stop-kind signal (client-runtime#882, tracebloc-engine#1539): jobs-manager
   tells a training pod whether its SIGTERM is a pause or a stop, so a paused
   pod exits 0 and reads Completed instead of Error. It holds no weights, so it
-  is ON by default and does not wait on backend#5266. `stopKindSignal.enabled:
+  is ON by default, whatever trainingResume says. `stopKindSignal.enabled:
   false` turns it off; durable resume (trainingResume) always implies it.
   "true" or "" so callers can gate with `if (include ...)`.
 */}}
@@ -2185,8 +2194,8 @@ true
   either: on such an edge it has no root credential at all (backend#5272).
   mysqld can, through init_file, which runs at startup without authentication.
 
-  Off for dev, stg and prod until the rollout flips it, one environment at a
-  time.
+  True for dev, false for stg and prod: the rollout flips one environment at a
+  time, dev first.
 */}}
 {{- define "tracebloc.selfRotateMysqlRootGate" -}}
 {{- $override := (default dict .Values).selfRotateMysqlRoot -}}

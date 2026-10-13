@@ -56,17 +56,33 @@ function Find-ManifestDigest {
   return $null
 }
 
+# Byte-identical to install.ps1's: the bash core's scripts in a manifest, every
+# scripts/*.sh key. The manifest is their list, so nothing here restates it.
+function Get-CoreScriptKeys {
+  param([string]$ManifestPath)
+  $keys = @()
+  foreach ($line in Get-Content -LiteralPath $ManifestPath) {
+    $parts = @($line -split '\s+' | Where-Object { $_ -ne '' })
+    if ($parts.Count -ge 2 -and $parts[-1] -cmatch '^scripts/[A-Za-z0-9._/-]+\.sh$' -and $parts[-1] -notmatch '\.\.') {
+      $keys += $parts[-1]
+    }
+  }
+  return $keys
+}
+
 # Byte-identical to install.ps1's: someone at this console can answer a prompt.
 function Test-BootstrapCanPrompt {
   try { return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) }
   catch { return $false }
 }
 
-# What this script uses from -CoreDir, as manifest keys. This script is one of
-# them: the tree it is handed must hold the same verified copy of it.
+# What this script uses from -CoreDir, as manifest keys, beside the core's scripts
+# (Get-CoreScriptKeys). This script is one of them: the tree it is handed must
+# hold the same verified copy of it.
 $CoreFiles = @('scripts/install-wsl.ps1')
 
-# Refuses, by name, a -CoreDir it cannot verify against the manifest.sha256 in it.
+# Refuses, by name, a -CoreDir it cannot verify against the manifest.sha256 in it:
+# FILES and every core script that manifest lists.
 function Confirm-CoreDir {
   param([string]$CoreDir, [string[]]$Files = $CoreFiles)
   if (-not $CoreDir) {
@@ -79,7 +95,13 @@ function Confirm-CoreDir {
   if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
     throw "$CoreDir is not a verified installer tree: it has no manifest.sha256, so nothing in it can be checked."
   }
-  foreach ($f in $Files) {
+  # The core this path runs in the distro, by the manifest's own list. A manifest
+  # that lists none of it cannot vouch for what section 5 would run.
+  $core = @(Get-CoreScriptKeys -ManifestPath $manifest)
+  if ($core.Count -eq 0) {
+    throw "$CoreDir is not a verified installer tree: its manifest.sha256 lists none of the installer's core scripts."
+  }
+  foreach ($f in @($Files) + $core) {
     $expected = Find-ManifestDigest -ManifestPath $manifest -Key $f
     if (-not $expected) {
       throw "$CoreDir is not a verified installer tree: its manifest.sha256 lists no $f."
@@ -137,6 +159,12 @@ $WslEnableOkCodes = @(0, 3010, 1641)
 
 $WslProbeTimeoutSec  = 30
 $WslEnableTimeoutSec = 1200
+# The first command that enters the distro STARTS it, and a cold start is not
+# bounded by the 30 s a `wsl --version` gets. 300 s is the bound S-W's kit gives
+# the distro to be running after a logon (backend#5416 rows 5c and 8), not a
+# measured worst case: the VM measured 10 s, and the first start right after the
+# import is unmeasured.
+$WslDistroStartTimeoutSec = 300
 
 # "2.5" or "2.5.10.0" as a four-part [version], so 2.5.0 and 2.5.0.0 compare equal
 # ([version] ranks a missing part below 0). $null for anything else.
@@ -1055,16 +1083,337 @@ function Invoke-BoundedProcess {
 }
 
 # =============================================================================
-#  5. The core. TODO: `wsl -d tracebloc -u root -- bash` on CoreDir's
-#     install-k8s.sh, its output teed into %USERPROFILE%\.tracebloc\install-<stamp>.log.
-#     Its files then join $CoreFiles, and install.ps1 fetches them.
+#  5. The core: install-k8s.sh, run twice inside the distro.
+#
+#  The caller contract is client-dev#1810's (issue comment 6141263609), and part 2
+#  builds the core's side to it. RFC-0175 D2 puts the account steps on the HOST
+#  CLI, and `client create` is keyed on the cluster's kube-system UID, so:
+#    1. the core's cluster run: checks, step b without the CLI, the cluster, and
+#       its kubeconfig merged into the host's kubeconfig;
+#    2. the account steps here: `tracebloc login`, then `tracebloc client create
+#       --credential-file` into a folder only this user can read;
+#    3. the core's client run: the credential's bytes on its stdin, then Helm.
+#  The credential is never on wsl.exe's command line, which other processes can
+#  read, and never in a line this script prints.
+#
+#  NOTHING CALLS THESE YET: they wait on the import and the logon task (sections 2
+#  and 3, S-W rows 3 and 5) and on part 2's phases in the core.
+#    TODO(part 1, 5b): the host CLI's own install, per user (install-k8s.ps1's
+#      Install-TraceblocCli publishes machine-wide, which needs an administrator).
+#    TODO(part 1, 5b): provision.sh's reuse of an installed client (`client create
+#      --plan`), its check that the account owns it, and the credential-rejected
+#      `--reissue` repair. The core's one-client guard at the Helm step and its
+#      adopt branch hold until then.
+#    TODO(S-W): measure that /dev/tty answers in the distro while stdin is a pipe.
 # =============================================================================
+
+# The distro the core runs in, the substrate named on its command line (a Pester
+# test holds it to install.ps1's $WslSubstrate), and the core's two runs.
+# TODO(part 2b): once lib/common.sh declares TB_WSL_PHASES ("cluster client"), a
+# Pester case holds the two phases below to its two words.
+$WslDistroName = 'tracebloc'
+$CoreSubstrate = 'k3s'
+$CorePhaseCluster = 'cluster'
+$CorePhaseClient = 'client'
+
+# What the core reads from this process's environment, carried onto its line,
+# because no Windows variable crosses into the distro: the release the bootstrap
+# resolved (lib/common.sh's TB_VERSION reads it), and every telemetry opt-out the
+# core honours (lib/telemetry.sh's TB_TELEMETRY_OPT_OUT_VARS, which a Pester test
+# holds this list to), so an opt-out set on Windows still opts out. Each goes on
+# the line only when it is set, with the value as it was set.
+$CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+
+# One Windows command-line argument, quoted so that CommandLineToArgvW, and the
+# .NET runtime on any OS, reads back exactly VALUE. wsl.exe --exec hands the
+# words it reads to the command as they are, with no shell between.
+function ConvertTo-WindowsArgument {
+  param([string]$Value)
+  if ($Value -ne '' -and $Value -notmatch '[\s"]') { return $Value }
+  $sb = New-Object System.Text.StringBuilder
+  [void]$sb.Append('"')
+  $slashes = 0
+  foreach ($c in $Value.ToCharArray()) {
+    if ($c -eq [char]92) { $slashes++; continue }
+    if ($c -eq [char]34) {
+      [void]$sb.Append([char]92, 2 * $slashes + 1)
+      [void]$sb.Append([char]34)
+    } else {
+      if ($slashes) { [void]$sb.Append([char]92, $slashes) }
+      [void]$sb.Append($c)
+    }
+    $slashes = 0
+  }
+  if ($slashes) { [void]$sb.Append([char]92, 2 * $slashes) }
+  [void]$sb.Append('"')
+  return $sb.ToString()
+}
+
+# The host kubeconfig the core merges into: the first file of KUBECONFIG, else
+# %USERPROFILE%\.kube\config. That is the core's own rule on Linux
+# (_native_k3s_kubeconfig_target), applied on the host. Its folder is created.
+function Get-HostKubeconfigTarget {
+  $first = $null
+  if ($env:KUBECONFIG) { $first = @($env:KUBECONFIG -split ';' | Where-Object { $_.Trim() })[0] }
+  if (-not $first) { $first = Join-Path (Join-Path $env:USERPROFILE '.kube') 'config' }
+  $dir = Split-Path -Parent $first
+  if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  return $first
+}
+
+# PATH as the distro sees it (wslpath -u, run inside the distro), or a refusal by
+# name: the core reads every host path through this, never a path computed here.
+# The first call starts the distro, so each gets the start's budget.
+function ConvertTo-DistroPath {
+  param([string]$Path)
+  $r = Invoke-WslProbe -ArgumentList @('-d', $WslDistroName, '-u', 'root', '--exec', 'wslpath', '-u', (ConvertTo-WindowsArgument $Path)) -TimeoutSec $WslDistroStartTimeoutSec
+  if ($r.TimedOut) {
+    throw "The tracebloc WSL distro did not start within $WslDistroStartTimeoutSec seconds, so the core cannot be started. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  }
+  $out = ''
+  if ($r.Output) { $out = @($r.Output -split "`r?`n" | Where-Object { $_ })[0] }
+  if (-not $r.Started -or $r.TimedOut -or $r.ExitCode -ne 0 -or $out -notmatch '^/') {
+    throw "The tracebloc WSL distro could not translate $Path into its own path, so the core cannot be started. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  }
+  return $out.Trim()
+}
+
+# wsl.exe's words for one run of the core. Every value is the distro's own path.
+# -CredentialStdin tells the core to read the credential from its stdin first.
+function New-CoreRunArguments {
+  param(
+    [string]$Phase,
+    [string]$Core,
+    [string]$Kubeconfig,
+    [string]$LogDir,
+    [switch]$CredentialStdin
+  )
+  $a = @('-d', $WslDistroName, '-u', 'root', '--exec', 'env',
+    "TRACEBLOC_SUBSTRATE=$CoreSubstrate",
+    "TRACEBLOC_WSL_PHASE=$Phase",
+    "KUBECONFIG=$Kubeconfig",
+    "TRACEBLOC_LOG_DIR=$LogDir")
+  foreach ($name in $CorePassThroughVars) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($value) { $a += "$name=$value" }
+  }
+  if ($CredentialStdin) { $a += 'TRACEBLOC_CREDENTIAL_STDIN=1' }
+  $a += @('bash', "$Core/install-k8s.sh")
+  return $a
+}
+
+# The console's input encoding, read and set: seams for Invoke-CoreRun, since the
+# test suite's .NET Core console never has a preamble to take out.
+function Get-ConsoleInputEncoding { return [Console]::InputEncoding }
+function Set-ConsoleInputEncoding {
+  param([System.Text.Encoding]$Encoding)
+  [Console]::InputEncoding = $Encoding
+}
+
+# Runs the core once: FILEPATH (wsl.exe; a seam for the test suite) with
+# ARGUMENTLIST, each word quoted for the command line. The console stays the
+# core's: its output is not redirected, and stdin is redirected only to hand in
+# STDIN, which is written and then closed. Returns the core's exit code.
+function Invoke-CoreRun {
+  param(
+    [string[]]$ArgumentList,
+    [byte[]]$Stdin,
+    [string]$FilePath = 'wsl.exe'
+  )
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  $psi.Arguments = (@($ArgumentList | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardInput = ($null -ne $Stdin)
+  # .NET Framework's Process.Start (Windows PowerShell 5.1) wraps a redirected stdin
+  # in a writer on the console's input encoding and flushes it at once, which puts
+  # that encoding's preamble in the pipe before a byte of STDIN: on a console set to
+  # UTF-8 (code page 65001, the only console code page with one), a BOM in front of
+  # the credential. 5.1's ProcessStartInfo has no StandardInputEncoding, so for the
+  # start only, the console's input encoding is UTF-8 without a BOM. .NET Core drops
+  # the preamble itself.
+  $restore = $null
+  if ($null -ne $Stdin) {
+    $enc = Get-ConsoleInputEncoding
+    if ($enc.GetPreamble().Length -gt 0) {
+      try {
+        Set-ConsoleInputEncoding -Encoding (New-Object System.Text.UTF8Encoding $false)
+      } catch {
+        throw "The credential could not be handed to the tracebloc WSL distro without a byte-order mark in front of it: this console's input encoding could not be changed ($($_.Exception.Message)). Run this installer again in a new PowerShell window."
+      }
+      $restore = $enc
+    }
+  }
+  try {
+    $p = [System.Diagnostics.Process]::Start($psi)
+  } finally {
+    if ($null -ne $restore) { Set-ConsoleInputEncoding -Encoding $restore }
+  }
+  try {
+    if ($null -ne $Stdin) {
+      # A child that exits before it has read its stdin (a refusal, a crash) has
+      # closed the pipe, so the write fails as a broken pipe. Its exit code is
+      # what says why, so that failure is not thrown here; the stream is closed
+      # whatever happened.
+      try {
+        $p.StandardInput.BaseStream.Write($Stdin, 0, $Stdin.Length)
+        $p.StandardInput.BaseStream.Flush()
+      } catch [System.IO.IOException] {
+        $null = $_
+      } finally {
+        try { $p.StandardInput.Close() } catch [System.IO.IOException] { $null = $_ }
+      }
+    }
+    $p.WaitForExit()
+    return $p.ExitCode
+  } finally {
+    $p.Dispose()
+  }
+}
+
+# A new folder at PATH that only the current user can open: inheritance cut, one
+# full-control rule for this user. Off Windows (the test suite), a plain folder.
+function New-PrivateDirectory {
+  param([string]$Path)
+  New-Item -ItemType Directory -Path $Path -Force | Out-Null
+  if ($PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows) {
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+  }
+}
+
+# A typed value with the terminal's residue taken out: arrow keys, bracketed-paste
+# markers and control characters, which would otherwise become part of a permanent
+# client name. install-k8s.ps1's ConvertTo-SanitizedInput, COPIED UNCHANGED (its
+# comment names the bash and Go twins); install-wsl.Tests.ps1 holds it byte-for-byte
+# equal, the set derived from what Get-ClientName calls.
+function ConvertTo-SanitizedInput {
+  param([string]$Value)
+  if (-not $Value) { return "" }
+  $esc = [char]27
+  $s = $Value -replace "$esc(\[[0-9;]*|O)[A-Za-z~]", ""
+  $s = $s.Replace("[200~", "").Replace("[201~", "")
+  # The floor. The strip above knows CSI, SS3 and the paste markers; it cannot
+  # know the escape family nobody has reported yet -- and that is exactly how SS3
+  # got here, one rule hand-copied into three languages with only CSI ever
+  # tested. So if an ESC SURVIVED the strip, this value carries a shape we do not
+  # recognise and its printable bytes are not trustworthy content. Require one
+  # alphanumeric that did not come from an escape final byte, probing with ESC +
+  # intermediates + AT MOST TWO final-class bytes. Two, not one and not
+  # unbounded: one leaves the 'D' of an unrecognised SS3-shaped pair behind and
+  # the floor stops firing on the very shape this is about, while unbounded
+  # swallows a whole ASCII name (ESC N C h e l l o) yet spares a non-Latin one,
+  # making keep-vs-reject depend on the script the name is written in (Bugbot,
+  # #736). An escape final is one byte, an intro plus a final is two, and every
+  # keyboard-input escape family fits in that. The probe is a yes/no only -- it is
+  # never returned. Nothing but residue => return empty, which callers already
+  # treat as "no answer" (re-prompt, or auto-name).
+  if ($s.Contains($esc)) {
+    $probe = $s -replace "$esc[^A-Za-z0-9~]*[A-Za-z~]{1,2}", ""
+    if ($probe -notmatch '[\p{L}\p{Nd}]') { return "" }
+  }
+  return (($s.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join "")
+}
+
+# The name the client is registered under: TRACEBLOC_CLIENT_NAME, else asked for
+# here, else a refusal that names the variable. Either one is sanitized first; an
+# answer that was only residue counts as no answer.
+function Get-ClientName {
+  $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
+  if ($name) { return $name }
+  if (-not (Test-BootstrapCanPrompt)) {
+    throw "A name for this machine is needed to register it, and nobody at this console can be asked. Set TRACEBLOC_CLIENT_NAME, then run this installer again."
+  }
+  for ($i = 0; $i -lt 3; $i++) {
+    $name = (ConvertTo-SanitizedInput -Value "$(Read-Host '  Name this machine (as it will show in tracebloc)')").Trim()
+    if ($name) { return $name }
+  }
+  throw "No name was given for this machine, so it was not registered. Run this installer again, or set TRACEBLOC_CLIENT_NAME."
+}
+
+# The account steps on the host CLI: sign in (the device flow), then mint the
+# client for the cluster the host kubeconfig now makes current. Returns the bytes
+# `client create --credential-file` wrote. The file's folder is deleted before
+# this returns, whatever happened. CLI is the tracebloc CLI's path.
+function Get-HostClientCredential {
+  param([string]$Cli, [string]$Name)
+  $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
+  New-PrivateDirectory -Path $dir
+  try {
+    & $Cli login
+    if ($LASTEXITCODE -ne 0) {
+      throw "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
+    }
+    $file = Join-Path $dir 'client-credential.env'
+    & $Cli client create --yes --name $Name --credential-file $file
+    if ($LASTEXITCODE -ne 0) {
+      throw "The tracebloc CLI could not register this machine (client create exited $LASTEXITCODE). Its own message is above."
+    }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -eq 0) {
+      throw "The tracebloc CLI reported this machine registered but wrote no credential, so the client cannot be installed. Run this installer again."
+    }
+    return ,[System.IO.File]::ReadAllBytes($file)
+  } finally {
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+# The core, run twice in the distro, with the account steps between. CORE is the
+# verified -CoreDir. Returns the exit code of the run that ended it: the cluster
+# run's when it failed, else the client run's.
+function Invoke-WslCore {
+  param([string]$CoreDir)
+  $cli = Get-Command tracebloc -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $cli) {
+    throw "The tracebloc CLI is not installed on this computer, and it is what registers this machine. Install it, open a new PowerShell window, and run this installer again."
+  }
+  $core = ConvertTo-DistroPath -Path $CoreDir
+  $kubeconfig = ConvertTo-DistroPath -Path (Get-HostKubeconfigTarget)
+  $logHost = Join-Path $env:USERPROFILE '.tracebloc'
+  if (-not (Test-Path -LiteralPath $logHost)) { New-Item -ItemType Directory -Path $logHost -Force | Out-Null }
+  $logDir = ConvertTo-DistroPath -Path $logHost
+
+  Info "Setting up the cluster in the tracebloc WSL distro..."
+  $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseCluster -Core $core -Kubeconfig $kubeconfig -LogDir $logDir)
+  if ($rc -ne 0) { return $rc }
+
+  Info "Registering this machine with tracebloc..."
+  $credential = Get-HostClientCredential -Cli $cli.Source -Name (Get-ClientName)
+  try {
+    Info "Installing tracebloc in the tracebloc WSL distro..."
+    return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin) -Stdin $credential)
+  } finally {
+    [Array]::Clear($credential, 0, $credential.Length)
+  }
+}
 
 # =============================================================================
 #  The distro path, as far as it is built. Returns the exit code.
 # =============================================================================
+
+# LocalSystem's SID. WSL refuses that account for anything that touches a distro
+# ("Running WSL as local system is not supported", WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED:
+# S-W row 2 on Windows Server 2025, WSL 3.0.3), and the distro, its logon task and
+# its credential are the signed-in user's, so a deployment tool's SYSTEM run could
+# set up nothing that user could use. The check reads the account, not WSL:
+# `wsl --version` still answers as SYSTEM, so WSL would read as ready. A
+# Windows-only Pester case holds it to .NET's own WellKnownSidType.LocalSystemSid.
+$LocalSystemSid = 'S-1-5-18'
+
+# The SID of the account running this bootstrap, or $null where Windows cannot
+# say (off Windows, the test suite).
+function Get-BootstrapUserSid {
+  try { return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { return $null }
+}
+
 function Invoke-WslInstall {
   param([string]$CoreDir)
+  if ((Get-BootstrapUserSid) -eq $LocalSystemSid) {
+    throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
+  }
   Confirm-CoreDir -CoreDir $CoreDir
   # A restart stops with 2, install-k8s.ps1's declared "restart, then re-run"
   # code, which install.ps1 passes through and the e2e harness reads.

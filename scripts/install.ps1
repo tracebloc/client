@@ -392,6 +392,22 @@ function Find-ManifestDigest {
   return $null
 }
 
+# The bash core's scripts in a manifest: every scripts/*.sh key, in the manifest's
+# order. The distro path (TRACEBLOC_SUBSTRATE=k3s) fetches and checks exactly
+# these, so the signed manifest is their list and nothing restates it. Byte-
+# identical in install-wsl.ps1, which checks the same set in the tree it is given.
+function Get-CoreScriptKeys {
+  param([string]$ManifestPath)
+  $keys = @()
+  foreach ($line in Get-Content -LiteralPath $ManifestPath) {
+    $parts = @($line -split '\s+' | Where-Object { $_ -ne '' })
+    if ($parts.Count -ge 2 -and $parts[-1] -cmatch '^scripts/[A-Za-z0-9._/-]+\.sh$' -and $parts[-1] -notmatch '\.\.') {
+      $keys += $parts[-1]
+    }
+  }
+  return $keys
+}
+
 # Resolve a usable cosign into a path. Prefer one already on PATH; else fetch the
 # pinned release binary for this OS/arch from the cosign GitHub release and verify
 # it against its published checksums before use (a cosign we can't vouch for is no
@@ -691,7 +707,8 @@ function Invoke-Bootstrap {
     Info "Downloading tracebloc client installer (ref: $ref)..."
 
     # ── Fetch the sub-scripts (release assets on the customer path) ──
-    foreach ($f in $Files) {
+    $fetch = {
+      param([string]$f)
       $dest = Join-Path $tmpDir ($f -replace '^scripts/', '')
       # CREATE THE PARENT FIRST. `$Files` gained its first `scripts/lib/` entry
       # when telemetry.ps1 was split out, and Invoke-WebRequest -OutFile does not create
@@ -707,6 +724,7 @@ function Invoke-Bootstrap {
       $src = Get-SubscriptUrl -File $f -RepoRaw $repoRaw -RepoRel $repoRel -AllowUnverified $allowUnverified
       Get-WithRetry -Url $src -Dest $dest
     }
+    foreach ($f in $Files) { & $fetch $f }
 
     # ── Fetch + authenticate the manifest, then check every sub-script ──
     $manifest = Join-Path $tmpDir "manifest.sha256"
@@ -723,7 +741,16 @@ function Invoke-Bootstrap {
 
     if ($manifest) {
       Confirm-ManifestSignature -Manifest $manifest -RepoRel $repoRel -TmpDir $tmpDir -AllowUnverified $allowUnverified
-      Confirm-ScriptIntegrity -Manifest $manifest -TmpDir $tmpDir -Files $Files
+      # The distro path also runs the bash core inside WSL: the authenticated
+      # manifest's own list of its scripts, fetched now and checked with the rest.
+      # With no manifest there is no list, and install-wsl.ps1 refuses the tree.
+      $verify = @($Files)
+      if ($env:TRACEBLOC_SUBSTRATE -ceq $WslSubstrate) {
+        $core = @(Get-CoreScriptKeys -ManifestPath $manifest)
+        foreach ($f in $core) { & $fetch $f }
+        $verify += $core
+      }
+      Confirm-ScriptIntegrity -Manifest $manifest -TmpDir $tmpDir -Files $verify
     }
 
     # ── Run the verified main installer ──

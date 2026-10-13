@@ -240,6 +240,15 @@ provision_client() {
   # tracebloc CLI was installed in step b (Install what tracebloc needs); this
   # step signs in and mints the machine credential using it.
 
+  # The Windows installer's client run (tracebloc's WSL distro): main() read the
+  # credential from stdin. The host hands over an id and a password either way, from
+  # a client it registered on Windows or from a pair the operator supplied there, so
+  # the line claims neither.
+  if [[ -n "${TB_STDIN_CRED_FILE:-}" ]]; then
+    info "Using the credential the Windows installer handed over."
+    _provision_take_credential "$TB_STDIN_CRED_FILE"
+    return 0
+  fi
   if _provisioning_preset; then
     info "Using the credentials you supplied — skipping browser sign-in."
     return 0
@@ -497,6 +506,111 @@ provision_client() {
   rm -f "$_create_out"
   [[ -f "$cred_file" ]] || error "client create did not write the credential file ($cred_file)."
 
+  _provision_take_credential "$cred_file" "$_reuse_ns" "$_reconnected"
+}
+
+# provision_read_stdin_credential -- the Windows installer's client run hands this
+# core the credential its host CLI's `client create --credential-file` wrote, on
+# stdin (TRACEBLOC_CREDENTIAL_STDIN=1): never on the command line, which Windows
+# lists, and never across drvfs (client-dev#1810 section 5). main() calls this first
+# thing, so the bootstrap's write is always read. Kept only in the distro's client
+# run (refuse_wsl_run's rule): read to EOF into a 0600 file in a fresh 0700
+# directory (tb_scratch_dir, reaped on every exit) on the distro's own disk, named
+# in _PROVISION_CRED_FILE so install_cleanup deletes it on any exit, and handed to
+# step d in TB_STDIN_CRED_FILE. Anywhere else stdin is never read: by hand in a
+# terminal a read would wait for a Ctrl-D nobody knows to type, and under
+# `curl | bash` stdin is the rest of the bootstrap script. refuse_wsl_run refuses
+# TRACEBLOC_CREDENTIAL_STDIN there by name. Refuses nothing itself: the substrate
+# line comes first, so what it found wrong (a terminal on stdin, a TMPDIR on a
+# Windows drive or one it cannot place, an empty stdin) goes in
+# TB_STDIN_CRED_REFUSAL for refuse_wsl_run to raise after it. Prints nothing.
+provision_read_stdin_credential() {
+  local tmp="${TMPDIR:-/tmp}" dir="" file rc=0
+  TB_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
+  if ! tb_in_wsl_distro || [[ "${TRACEBLOC_WSL_PHASE:-}" != "client" ]]; then
+    return 0
+  fi
+  if _provision_stdin_is_terminal; then
+    TB_STDIN_CRED_REFUSAL="TRACEBLOC_CREDENTIAL_STDIN=1, but stdin is a terminal: no credential was handed to this run. Re-run the installer from Windows."
+    return 0
+  fi
+  _probe_windows_drive "$tmp" || rc=$?
+  case "$rc" in
+    1) ;;
+    0) TB_STDIN_CRED_REFUSAL="TMPDIR=${tmp} is on a Windows drive (drvfs), and the credential handed to this run is only ever written to the distro's own disk. Unset TMPDIR in the distro, then re-run the installer from Windows." ;;
+    *) TB_STDIN_CRED_REFUSAL="This run cannot read which filesystem holds TMPDIR=${tmp}, so it cannot tell whether the credential handed to it would land on a Windows drive (drvfs). Check that /proc/self/mounts is readable in the distro, then re-run the installer from Windows." ;;
+  esac
+  if [[ -n "$TB_STDIN_CRED_REFUSAL" ]] || ! tb_scratch_dir dir tracebloc-credential; then
+    [[ -n "$TB_STDIN_CRED_REFUSAL" ]] || TB_STDIN_CRED_REFUSAL="This run couldn't make a private directory under ${tmp} for the credential handed to it. Check that ${tmp} is writable in the distro, then re-run the installer from Windows."
+    # Drained, never kept: stdin is the Windows installer's pipe here (not a
+    # terminal, checked above), so its write ends and the refusal is what it reads.
+    cat >/dev/null 2>&1 || true
+    return 0
+  fi
+  file="${dir}/client-credential.env"
+  _PROVISION_CRED_FILE="$file"
+  if ! ( umask 077; cat >"$file" ); then
+    TB_STDIN_CRED_REFUSAL="This run couldn't read the credential handed to it on stdin. Re-run the installer from Windows."
+    return 0
+  fi
+  if [[ ! -s "$file" ]]; then
+    TB_STDIN_CRED_REFUSAL="TRACEBLOC_CREDENTIAL_STDIN=1, but stdin was empty: no credential was handed to this run. Re-run the installer from Windows."
+    return 0
+  fi
+  TB_STDIN_CRED_FILE="$file"
+}
+
+# _provision_stdin_is_terminal -- stdin is a terminal, not the Windows installer's
+# pipe. A function so a case can be a terminal without one.
+_provision_stdin_is_terminal() { [[ -t 0 ]]; }
+
+# The keys a credential file carries: what `tracebloc client create
+# --credential-file` writes (cli-dev writeClientCredential: the id, the password and
+# both namespace spellings on a mint; the id, the namespaces and
+# TRACEBLOC_CLIENT_ADOPTED=1 on an adopt), and the id and password alone the Windows
+# installer hands over. _provision_read_credential sets these and no other name.
+TB_CRED_KEYS="TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TRACEBLOC_NAMESPACE TB_NAMESPACE TRACEBLOC_CLIENT_ADOPTED"
+
+# _provision_read_credential FILE -- FILE's credential, read as data, never run as
+# shell: a password holding `$`, a quote or a backtick is taken as it is, and a line
+# that is not a credential sets nothing. KEY=value lines, split at the first `=`, the
+# value verbatim but for one trailing CR (a file saved on Windows); blank lines and
+# `#` lines are skipped. Refused: a line with no `=`, a key outside TB_CRED_KEYS, a
+# key given twice, no TRACEBLOC_CLIENT_ID, or an id with neither a password nor
+# TRACEBLOC_CLIENT_ADOPTED=1. A refusal returns 1 with the reason in
+# _PROVISION_CRED_WHY, which names lines and keys and never a value.
+_provision_read_credential() {
+  local line key k ok n=0 seen=" "
+  _PROVISION_CRED_WHY=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" == "#"* ]] && continue
+    if [[ "$line" != *=* ]]; then _PROVISION_CRED_WHY="line ${n} is not KEY=value"; return 1; fi
+    key="${line%%=*}"; ok=0
+    for k in $TB_CRED_KEYS; do [[ "$key" == "$k" ]] && ok=1; done
+    if [[ "$ok" -ne 1 ]]; then _PROVISION_CRED_WHY="line ${n} names a key a credential does not carry"; return 1; fi
+    case "$seen" in *" ${key} "*) _PROVISION_CRED_WHY="${key} is given twice"; return 1 ;; esac
+    seen="${seen}${key} "
+    printf -v "$key" '%s' "${line#*=}"
+  done <"$1"
+  [[ -n "${TRACEBLOC_CLIENT_ID:-}" ]] || { _PROVISION_CRED_WHY="it names no TRACEBLOC_CLIENT_ID"; return 1; }
+  if [[ "${TRACEBLOC_CLIENT_ADOPTED:-}" != 1 && -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]; then
+    _PROVISION_CRED_WHY="it names a client id with no TRACEBLOC_CLIENT_PASSWORD"; return 1
+  fi
+  return 0
+}
+
+# _provision_take_credential FILE [REUSE_NS] [RECONNECTED] -- the one tail every
+# credential goes through: the file `client create --credential-file` wrote, on this
+# machine (provision_client) or on the Windows host and handed over on stdin
+# (provision_read_stdin_credential). Reads FILE (_provision_read_credential), deletes
+# it, and hands the client to the Helm step: the adopt branch, a mint, or, for an id
+# and a password with no namespace, a preset. REUSE_NS is the namespace the
+# pre-create check found installed here (it was announced then); RECONNECTED is 1
+# when the CLI reissued the existing client's credential.
+_provision_take_credential() {
+  local cred_file="$1" _reuse_ns="${2:-}" _reconnected="${3:-0}"
   # The credential file is the sole source of truth for what was provisioned.
   # Clear any pre-existing values from the environment first: the mint case does
   # NOT write TRACEBLOC_CLIENT_ADOPTED, so a stale ADOPTED=1 left in the env would
@@ -506,10 +620,18 @@ provision_client() {
   # spelling of the same name, so a value the operator set before the mint
   # would otherwise outrank the minted slug for any alias-first reader.
   unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
-  # shellcheck disable=SC1090
-  source "$cred_file"
+  local read_rc=0
+  _provision_read_credential "$cred_file" || read_rc=1
   rm -f "$cred_file"
   unset _PROVISION_CRED_FILE
+  if [[ "$read_rc" -ne 0 ]]; then
+    unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
+    if [[ -n "${TB_STDIN_CRED_FILE:-}" && "$cred_file" == "$TB_STDIN_CRED_FILE" ]]; then
+      TB_EXIT_REFUSED=1
+      error "The credential the Windows installer handed over isn't one this installer reads (${_PROVISION_CRED_WHY}), so this machine was not registered. Re-run the installer from Windows."
+    fi
+    error "The credential file 'tracebloc client create' wrote isn't one this installer reads (${_PROVISION_CRED_WHY}). Update the tracebloc CLI (curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh), then re-run the installer."
+  fi
   # The CLI writes TB_NAMESPACE today; read the canonical first so a CLI that
   # writes TRACEBLOC_NAMESPACE is honoured without another installer change.
   if [[ -n "${TRACEBLOC_NAMESPACE:-}" ]]; then TB_NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
@@ -536,6 +658,13 @@ provision_client() {
   # namespace MUST be the created client's slug (Q2: it equals the heartbeat-
   # reported namespace), so the minted value wins over any TB_NAMESPACE default.
   export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
+  # An id and a password with no namespace (what the Windows installer hands over) is
+  # a preset, as credentials supplied in the environment are (_provisioning_preset):
+  # install_client_helm picks the namespace, so there is no slug to announce.
+  if [[ -z "${TB_NAMESPACE:-}" ]]; then
+    log "Credential handed to the install (not shown); the Helm step picks the namespace."
+    return 0
+  fi
   tb_export_namespace
   # The registered identity is the minted slug (= TB_NAMESPACE = the dashboard
   # name), e.g. "lukas-01" — not the raw typed name (which may be de-duplicated).

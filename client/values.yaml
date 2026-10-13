@@ -2748,11 +2748,13 @@ perDatasetPvcs: false
 # ============================================================
 # Durable pause/resume volume (client-runtime#882)
 # ============================================================
-# OFF BY DEFAULT, PENDING A PRODUCT DECISION (backend#5266): keeping a paused
-# cycle's resume payload (model weights + optimizer state) on a volume that
-# outlives the training pod changes the RFC-0003 §6.4 model-IP bound, and how
-# long an abandoned pause may keep it is not decided either. Off, the render is
-# byte for byte what it was before this block existed.
+# Keeping a paused cycle's resume payload (model weights + optimizer state) on a
+# volume that outlives the training pod is an exception to the RFC-0003 §6.4
+# model-IP bound. backend#5266 (LukasWodka, 2026-10-13) allowed it with a 7-day
+# retention: jobs-manager deletes a pause neither resumed nor stopped within 7
+# days, and a resume after that restarts the cycle. Whether an install gets it
+# is per environment, from trainingResumeEnabledByEnv below; off, the render is byte
+# for byte what it was before this block existed.
 #
 # On, the chart:
 # - creates the PVC `training-resume-pvc` (or uses `existingClaim`), with the
@@ -2764,17 +2766,34 @@ perDatasetPvcs: false
 # - mounts the same claim into jobs-manager at /data/resume, where it
 #   pre-creates each experiment's directory and removes it on a stop;
 # - grants jobs-manager `patch` on pods, to write the tracebloc.io/stop-kind
-#   annotation the training pod reads (templates/rbac.yaml).
+#   annotation the training pod reads (templates/rbac.yaml);
+# - sets TRACEBLOC_TRAINING_RESUME_ENABLED / TRAINING_RESUME_ENABLED to "1" on
+#   jobs-manager, which forwards it to every training pod: the engine only
+#   resumes with it on (backend#2617). An operator's own env.TRAINING_RESUME_ENABLED
+#   (either name) wins over this.
 # Set it here, not as env.TRACEBLOC_TRAINING_RESUME_PVC: rendering refuses the
 # env key, because on its own it arms the runtime without the mount or the RBAC.
-# The engine only resumes when TRAINING_RESUME_ENABLED is also on (backend#2617).
+#
+# `enabled` is LEFT NULL ON PURPOSE: null means "this environment's default"
+# (trainingResumeEnabledByEnv). A literal true or false is a per-edge override that
+# always wins, so a customer opts an edge out with `trainingResume.enabled: false`.
 trainingResume:
-  enabled: false
+  enabled:
   # -- Use a claim you created yourself instead of the chart's. It must be
   #    mountable by jobs-manager and every training pod at once.
   existingClaim: ""
   # -- Size of the chart-created claim.
   storage: 10Gi
+
+# What an install of each environment gets when trainingResume.enabled is unset
+# (backend#5266, staged): true for dev and stg, false for prod. Prod follows in
+# a later release, once the e2e check that a resume keeps the finished epochs is
+# green on staging. Like the other *ByEnv maps, this records what a NEW install
+# or upgrade of that environment renders, not where every edge already is.
+trainingResumeEnabledByEnv:
+  dev: true
+  stg: true
+  prod: false
 
 # ============================================================
 # Stop-kind signal for pause (client-runtime#882)
@@ -2786,8 +2805,8 @@ trainingResume:
 # 0 on a pause and the pod reads `Completed` (tracebloc-engine#1588). Any other
 # stop still exits 143.
 #
-# It holds no model weights, so it is ON by default and does not wait on the
-# model-IP decision that gates trainingResume (backend#5266). On, the chart sets
+# It holds no model weights, so it is ON by default and does not depend on
+# trainingResume, which is set per environment (backend#5266). On, the chart sets
 # TRACEBLOC_STOP_KIND_SIGNAL=1 on jobs-manager and grants it `patch` on pods
 # (templates/rbac.yaml). trainingResume.enabled always implies it. Set it here,
 # not as env.TRACEBLOC_STOP_KIND_SIGNAL: rendering refuses the env key, because
@@ -3280,9 +3299,10 @@ mysqlDatadirExists:
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge.
 selfRotateMysqlRoot:
 
-# Off for dev, stg and prod until the rollout flips it, one environment at a time.
+# True for dev, false for stg and prod: the rollout flips one environment at a
+# time, dev first, and the weeks between flips are the soak.
 selfRotateMysqlRootByEnv:
-  dev: false
+  dev: true
   stg: false
   prod: false
 

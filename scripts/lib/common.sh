@@ -1527,6 +1527,14 @@ retry() {
 }
 
 # ── Log file — captures all stdout/stderr alongside the terminal ─────────────
+# The install log's file name, declared once. <stamp> is `date +%Y%m%d-%H%M%S`.
+# In tracebloc's WSL distro both of the Windows installer's runs log into one
+# directory (TRACEBLOC_LOG_DIR), so the name carries the run: <phase> is one of
+# TB_WSL_PHASES below (client-dev#1810 section 5). e2e picks a run's log by it,
+# and install-wsl.ps1's Pester case holds its phase names to TB_WSL_PHASES: change
+# the names here, nowhere else. Every reader globs install-*.log.
+TB_INSTALL_LOG_NAME='install-<stamp>.log'
+TB_INSTALL_LOG_NAME_WSL='install-<stamp>-<phase>.log'
 # Choose the log-file path: under HOST_DATA_DIR when it's creatable AND writable,
 # else a temp file — so setup_log_file never dies on a bare `mkdir -p`/`tee` (#432).
 # This matters for prepare-host, which logs BEFORE the data-dir guard runs: on an NFS
@@ -1535,9 +1543,22 @@ retry() {
 # early_data_dir_guard still refuses a network DATA dir before this runs.) Pure-ish
 # (prints the path; no exec redirect) so it's unit-testable.
 _choose_log_file() {
-  local candidate=""
-  if mkdir -p "$HOST_DATA_DIR" 2>/dev/null; then
-    candidate="${HOST_DATA_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
+  local candidate="" dir="${HOST_DATA_DIR:-}" phase="" name
+  # TRACEBLOC_LOG_DIR: where the Windows installer wants the core's log when it runs
+  # it in tracebloc's WSL distro -- %USERPROFILE%\.tracebloc, as the distro sees it
+  # (client-dev#1810 section 5) -- so the user finds it on Windows, beside the
+  # host's own files. Unset everywhere else, where the data dir holds the log.
+  if [[ -n "${TRACEBLOC_LOG_DIR:-}" ]]; then dir="$TRACEBLOC_LOG_DIR"; fi
+  # Both of the Windows installer's runs log there, so the name says which run wrote
+  # it (TB_INSTALL_LOG_NAME_WSL). Outside the distro there is no phase, and the name
+  # is TB_INSTALL_LOG_NAME.
+  phase="$(tb_wsl_phase)" || phase=""
+  name="$TB_INSTALL_LOG_NAME"
+  [[ -z "$phase" ]] || name="$TB_INSTALL_LOG_NAME_WSL"
+  name="${name//<stamp>/$(date +%Y%m%d-%H%M%S)}"
+  name="${name//<phase>/$phase}"
+  if mkdir -p "$dir" 2>/dev/null; then
+    candidate="${dir}/${name}"
     : >"$candidate" 2>/dev/null || candidate=""   # confirm it's actually writable
   fi
   # Trailing X's (no suffix after): BSD mktemp (macOS) requires the X's at the END
@@ -2311,6 +2332,70 @@ refuse_unresolved_substrate() {
   [[ -n "${TB_SUBSTRATE_REFUSAL:-}" ]] || return 0
   TB_EXIT_REFUSED=1
   error "$TB_SUBSTRATE_REFUSAL"
+}
+
+# tb_in_wsl_distro -- this run is inside tracebloc's WSL distro: Linux, and probe.sh's
+# _probe_wsl_ours (the WSL kernel, and WSL_DISTRO_NAME is TB_WSL_DISTRO). The one
+# predicate the distro's paths read: the run contract below, step d's stdin
+# credential (provision.sh) and native k3s's steps (k3s.sh _native_k3s_on_wsl).
+# Without probe.sh (a stale bootstrap) nothing is told apart, so nothing is ours.
+tb_in_wsl_distro() {
+  [[ "${OS:-}" == "Linux" ]] && declare -F _probe_wsl_ours >/dev/null 2>&1 && _probe_wsl_ours
+}
+
+# ── The Windows installer's two runs (client-dev#1810 section 5's contract) ──────
+# In tracebloc's WSL distro this core runs twice, and only as the Windows installer
+# runs it: `wsl -d tracebloc -u root -- env TRACEBLOC_SUBSTRATE=k3s
+# TRACEBLOC_WSL_PHASE=<phase> … bash install-k8s.sh`. The sign-in and `client create`
+# are the host CLI's (RFC-0175 D2), and create needs the cluster, so:
+#   cluster  steps a, b (no CLI), c, then exit 0: the host signs in and creates;
+#   client   the credential on stdin (provision_read_stdin_credential), then steps
+#            a, b (no CLI), c (finds the cluster), d as that credential, e and f.
+# The phase never selects anything: the substrate is named on the line, and the
+# phase and the distro's name are refusals (refuse_wsl_run).
+TB_WSL_PHASES="cluster client"
+
+# refuse_wsl_run -- the run in tracebloc's WSL distro is the Windows installer's,
+# and only its. Refused by name, after the substrate line (main()): in the distro, a
+# substrate other than k3s, a phase outside TB_WSL_PHASES, and a client run with no
+# credential on stdin (step d would sign in, with no CLI here); anywhere else, a
+# phase; a stdin credential outside the distro's `client` phase; and what
+# provision_read_stdin_credential found wrong with the credential it read
+# (TB_STDIN_CRED_REFUSAL). Read-only.
+refuse_wsl_run() {
+  local ours=0 p ok=0 have="none" why=""
+  if tb_in_wsl_distro; then ours=1; fi
+  if [[ "$ours" -eq 1 ]]; then
+    for p in $TB_WSL_PHASES; do
+      if [[ "${TRACEBLOC_WSL_PHASE:-}" == "$p" ]]; then ok=1; fi
+    done
+    [[ -z "${TRACEBLOC_WSL_PHASE:-}" ]] || have="TRACEBLOC_WSL_PHASE='${TRACEBLOC_WSL_PHASE}'"
+    if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
+      why="In tracebloc's WSL distro the installer sets up native k3s only, and this run resolved '${TRACEBLOC_SUBSTRATE_RESOLVED:-}'. Install from Windows with install.ps1, which runs it here."
+    elif [[ "$ok" -ne 1 ]]; then
+      why="In tracebloc's WSL distro the installer runs as one of the Windows installer's two runs (TRACEBLOC_WSL_PHASE=${TB_WSL_PHASES// / or }), and this run has ${have}. Install from Windows with install.ps1, which runs both."
+    elif [[ "${TRACEBLOC_WSL_PHASE}" == "client" && "${TRACEBLOC_CREDENTIAL_STDIN:-}" != 1 ]]; then
+      why="In tracebloc's WSL distro the client run takes the credential the Windows installer hands over on stdin (TRACEBLOC_CREDENTIAL_STDIN=1), and this run was handed none. Install from Windows with install.ps1, which hands it over."
+    fi
+  elif [[ -n "${TRACEBLOC_WSL_PHASE:-}" ]]; then
+    why="TRACEBLOC_WSL_PHASE='${TRACEBLOC_WSL_PHASE}' belongs to the Windows installer's runs in tracebloc's WSL distro, and this is not that distro. Unset it, then re-run."
+  fi
+  if [[ -z "$why" && "${TRACEBLOC_CREDENTIAL_STDIN:-}" == 1 ]] && [[ "$ours" -ne 1 || "${TRACEBLOC_WSL_PHASE:-}" != "client" ]]; then
+    why="TRACEBLOC_CREDENTIAL_STDIN=1 belongs to the Windows installer's client run in tracebloc's WSL distro, and this run is not that one. Unset it, then re-run."
+  fi
+  if [[ -z "$why" && "${TRACEBLOC_CREDENTIAL_STDIN:-}" == 1 ]] && ! declare -F provision_read_stdin_credential >/dev/null 2>&1; then
+    why="This installer build can't take a credential on stdin (provision.sh is missing: stale bootstrap). Re-run the installer from Windows."
+  fi
+  [[ -n "$why" ]] || why="${TB_STDIN_CRED_REFUSAL:-}"
+  [[ -n "$why" ]] || return 0
+  TB_EXIT_REFUSED=1
+  error "$why"
+}
+
+# tb_wsl_phase -- this run's phase in tracebloc's WSL distro, or nothing elsewhere.
+# Read after refuse_wsl_run, so a phase it prints is one of TB_WSL_PHASES.
+tb_wsl_phase() {
+  if tb_in_wsl_distro; then printf '%s' "${TRACEBLOC_WSL_PHASE:-}"; fi
 }
 
 # ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────
