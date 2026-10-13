@@ -2,7 +2,8 @@
 # =============================================================================
 #  install-k8s.sh  —  One-command Kubernetes + GPU installer  (macOS & Linux)
 #
-#  Engine  : k3d  (k3s inside Docker — lightweight, prod-topology capable)
+#  Engine  : native k3s on a new Linux machine; k3d (k3s inside Docker —
+#            lightweight, prod-topology capable) everywhere else
 #  GPUs    : NVIDIA (Linux)  ✓     AMD (Linux) ✓     macOS passthrough ✗
 #
 #  Usage (macOS / Linux):
@@ -17,11 +18,18 @@
 #  spelling -- the name without TRACEBLOC_ (CLUSTER_NAME), or TB_ in its place
 #  (TB_STORAGE_MODE) -- still works until 2026-12-31; a non-empty TRACEBLOC_
 #  one wins:
-#    TRACEBLOC_SUBSTRATE=k3d     default: k3d  (the Kubernetes runtime to set up: k3d,
-#                                or k3s for native k3s, Linux only; a re-run keeps the
-#                                runtime the install recorded; the installer prints
-#                                "tracebloc-installer substrate=<name>" first, and
-#                                refuses a runtime it doesn't support)
+#    TRACEBLOC_SUBSTRATE=k3d     default: k3s on a new Linux machine, k3d otherwise
+#                                (the Kubernetes runtime to set up: k3d, or k3s for
+#                                native k3s, Linux only. A new Linux machine, outside
+#                                WSL, with no k3d, no k3d cluster in Docker and no
+#                                setting native k3s refuses (TRACEBLOC_AGENTS,
+#                                TRACEBLOC_SERVERS other than 1, a K8S_VERSION it has
+#                                no digest for), gets k3s; any other gets
+#                                k3d, and on an otherwise new Linux machine the line
+#                                after the substrate line names what kept k3d. A re-run
+#                                keeps the runtime the install recorded; the installer
+#                                prints "tracebloc-installer substrate=<name>" first,
+#                                and refuses a runtime it doesn't support)
 #    TRACEBLOC_CLUSTER_NAME=myapp  default: tracebloc
 #    TRACEBLOC_NAMESPACE=myns    default: tracebloc  (k8s namespace + local label;
 #                                not prompted — the client is identified by its credentials)
@@ -172,9 +180,10 @@ main() {
   # which substrate a refusal belongs to. Only then is an unsupported request
   # refused, by name. --help and --diagnose above install nothing and refuse
   # nothing, so they print no line. A re-run without TRACEBLOC_SUBSTRATE keeps
-  # the substrate its install recorded (tb_substrate_resolve, read-only), and a
-  # resolution that cannot tell, or that would put k3d beside native k3s, is
-  # refused by name after the line.
+  # the substrate its install recorded (tb_substrate_resolve, read-only); a new
+  # Linux machine gets native k3s, and one that keeps k3d although it is new says
+  # why on the next line. A resolution that cannot tell, or that would put k3d
+  # beside native k3s, is refused by name after the line.
   tb_substrate_resolve
   print_substrate_token
   refuse_unsupported_substrate

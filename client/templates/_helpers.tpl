@@ -2179,11 +2179,11 @@ true
   includes bakedRootRotationOn). Every template asks tracebloc.selfRotateMysqlRoot.
 
   WHY. An existing datadir keeps the root password it was initialised with, and
-  on an edge that predates rotation that is the leaked image literal. The manual
-  fix (docs/migration-tools/rotate-mysql-root.md) needs cluster access, which we
-  do not have on customer edges, and jobs-manager cannot do it either: on such
-  an edge it has no root credential at all (backend#5272). mysqld can, through
-  init_file, which runs at startup without authentication.
+  on an edge that predates rotation that is the image's default root password.
+  The manual fix (docs/migration-tools/rotate-mysql-root.md) needs cluster
+  access, which we do not have on customer edges, and jobs-manager cannot do it
+  either: on such an edge it has no root credential at all (backend#5272).
+  mysqld can, through init_file, which runs at startup without authentication.
 
   Off for dev, stg and prod until the rollout flips it, one environment at a
   time.

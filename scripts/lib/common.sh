@@ -656,6 +656,23 @@ _docker_answers() {
   _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>"${1:-/dev/null}"
 }
 
+# tb_k3d_cluster_names [ERRFILE] -- the k3d cluster of every container Docker lists
+# with the label k3d puts on each node it creates (app=k3d), stopped ones too, one
+# per line, so a stopped k3d cluster is listed. A container with no cluster label (a
+# k3d registry) gives an empty line: it names no cluster. Bounded as
+# _docker_answers is, and returns _bounded's status: 0 is a listing (no line is no
+# cluster), 124 is the deadline (Docker did not answer), anything else is Docker's
+# own failure, whose stderr goes to ERRFILE when given, for a caller that quotes it
+# (client-dev#1748). The one reader of that label: reinstall detection
+# (_reinstall_detect) and the fresh rule (_tb_substrate_fresh) both call it.
+tb_k3d_cluster_names() {
+  local out rc=0
+  out="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter label=app=k3d --format '{{.Label "k3d.cluster"}}' 2>"${1:-/dev/null}")" || rc=$?
+  [[ "$rc" -eq 0 ]] || out=""   # what a read printed before it failed is no answer (client-dev#1731)
+  [[ -z "$out" ]] || printf '%s\n' "$out"
+  return "$rc"
+}
+
 # ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
 # Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
 # both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
@@ -1527,6 +1544,7 @@ setup_log_file() {
   fi
   log "Substrate: ${TRACEBLOC_SUBSTRATE_RESOLVED}, from ${TB_SUBSTRATE_SOURCE:-the default}."
   if [[ -n "${TB_SUBSTRATE_NOTE:-}" ]]; then log "$TB_SUBSTRATE_NOTE"; fi
+  if [[ -n "${TB_SUBSTRATE_KEPT:-}" ]]; then log "$TB_SUBSTRATE_KEPT"; fi
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
@@ -2190,6 +2208,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #  install-contract.bats holds each one to the schema:
 #    TB_SUBSTRATES                  properties.substrate.enum, space-separated
 #    TB_SUBSTRATE_DEFAULT           x-tracebloc-substrate.default
+#    TB_SUBSTRATE_FRESH_LINUX       x-tracebloc-substrate.fresh-default.linux
 #    TB_SUBSTRATE_TOKEN_PREFIX      x-tracebloc-substrate.token-prefix
 #    TB_SUBSTRATE_TOKEN_UNSUPPORTED x-tracebloc-substrate.token-unsupported
 #    TB_INSTALL_RECORD_VERSION      properties.schema_version.const
@@ -2202,6 +2221,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_REINSTALL_CONSENT_VAR       x-tracebloc-reinstall.consent-variable
 TB_SUBSTRATES="k3d k3s"
 TB_SUBSTRATE_DEFAULT="k3d"
+TB_SUBSTRATE_FRESH_LINUX="k3s"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
@@ -2228,6 +2248,9 @@ TRACEBLOC_SUBSTRATE_RESOLVED="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
 TB_SUBSTRATE_SOURCE="${TRACEBLOC_SUBSTRATE:+TRACEBLOC_SUBSTRATE}"
 TB_SUBSTRATE_NOTE=""
 TB_SUBSTRATE_REFUSAL=""
+# Why a fresh Linux machine keeps the default (_tb_substrate_fresh): the line
+# print_substrate_token prints right after the substrate line.
+TB_SUBSTRATE_KEPT=""
 # Set by a refusal just before it exits: install_cleanup then prints no failure
 # footer, because a re-run with nothing changed is refused again.
 TB_EXIT_REFUSED=""
@@ -2257,13 +2280,14 @@ tb_substrate_token() {
 print_substrate_token() {
   tb_substrate_token
   TB_SUBSTRATE_TOKEN_PRINTED=1
+  if [[ -n "${TB_SUBSTRATE_KEPT:-}" ]]; then info "$TB_SUBSTRATE_KEPT"; fi
 }
 
 refuse_unsupported_substrate() {
   tb_substrate_supported && return 0
   TB_EXIT_REFUSED=1
   if [[ "${TB_SUBSTRATE_SOURCE:-TRACEBLOC_SUBSTRATE}" == "TRACEBLOC_SUBSTRATE" ]]; then
-    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use ${TB_SUBSTRATE_DEFAULT}."
+    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime (${TB_SUBSTRATE_FRESH_LINUX} on a new Linux machine, ${TB_SUBSTRATE_DEFAULT} otherwise)."
   fi
   error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TRACEBLOC_SUBSTRATE_RESOLVED}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
 }
@@ -2286,7 +2310,8 @@ refuse_unresolved_substrate() {
 #      cannot read it by design, so its absence from view is not "cannot tell";
 #   4. on Linux, a tracebloc native k3s this user can see without privileges
 #      (_native_k3s_live_probe), which catches one whose record is out of reach;
-#   5. the default.
+#   5. on a fresh Linux machine outside WSL, the fresh default (native k3s,
+#      _tb_substrate_fresh); on every other machine, the default.
 # A record that exists but cannot be read or parsed is "cannot tell", never
 # absent: the finding goes in TB_SUBSTRATE_REFUSAL, which main() refuses by name
 # after the substrate line. So does TRACEBLOC_SUBSTRATE=k3d where a tracebloc
@@ -2295,7 +2320,7 @@ refuse_unresolved_substrate() {
 # so the line prints it. Prints nothing and writes nothing.
 tb_substrate_resolve() {
   local rec sub rc=0 dst
-  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""
+  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""; TB_SUBSTRATE_KEPT=""
   if [[ -n "${TRACEBLOC_SUBSTRATE:-}" ]]; then
     TRACEBLOC_SUBSTRATE_RESOLVED="$TRACEBLOC_SUBSTRATE"; TB_SUBSTRATE_SOURCE="TRACEBLOC_SUBSTRATE"
     rc=1
@@ -2332,11 +2357,68 @@ tb_substrate_resolve() {
   fi
   rc=0; _tb_substrate_k3s_live || rc=$?
   case "$rc" in
-    1) ;;
+    1) _tb_substrate_fresh ;;
     0) TRACEBLOC_SUBSTRATE_RESOLVED="k3s"; TB_SUBSTRATE_SOURCE="the tracebloc native k3s set up on this machine (systemctl: k3s)" ;;
     *) TB_SUBSTRATE_REFUSAL="tracebloc's native k3s files are on this machine, but systemctl did not answer, so this run cannot tell whether that k3s is set up to run. Check 'systemctl status k3s', or set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run." ;;
   esac
   return 0
+}
+
+# _tb_substrate_fresh -- step 5: the fresh default (TB_SUBSTRATE_FRESH_LINUX,
+# native k3s) on a fresh Linux machine, the default on every other. Called only
+# when steps 2 to 4 found no record and no tracebloc k3s: that is the record half
+# of "fresh". The machine half, each read from the producer that already answers it:
+#   - Linux, outside WSL (_probe_wsl): the k3s path refuses WSL;
+#   - no k3d on PATH (`has k3d`, assess.sh's own fresh rule);
+#   - no Docker, or a Docker that answers (_docker_answers) and lists no k3d
+#     cluster's container, stopped ones included (tb_k3d_cluster_names).
+# A Docker that does not answer is not fresh: the default stays k3d, today's path,
+# so the flip never turns an install that works today into a refusal nobody asked
+# for. A fresh machine whose run native k3s would refuse keeps the default too,
+# where that run works today. The refusal is asked, never restated:
+# _native_k3s_refuse_host (k3s.sh), which refuse_k3s_beside_live_k3d asks as well
+# before a k3d offboard (client-dev#1805) and which reads nothing step a sets. Its
+# host half (Linux, outside WSL) holds here already, so what it refuses is a
+# setting: k3d's node counts (AGENTS, SERVERS) or a K8S_VERSION native k3s has no
+# digest for. Its error() is caught in a subshell, never raised, so nothing is
+# recorded and the run goes on with the default. hostpath and a dataset dir are not
+# refused since client-dev#1782, so they get native k3s. Each kept run, and a Docker
+# that cannot tell, says why in TB_SUBSTRATE_KEPT. A GPU is not one of them: each GPU
+# this installer sets up, it sets up on native k3s too (client-dev#1546). Prints
+# nothing.
+_tb_substrate_fresh() {
+  local rc names why kept="Setting up ${TB_SUBSTRATE_DEFAULT}, not native ${TB_SUBSTRATE_FRESH_LINUX}, the default for a new Linux machine:"
+  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
+  if ! declare -F _probe_wsl >/dev/null 2>&1; then
+    TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether it runs inside WSL, so it keeps ${TB_SUBSTRATE_DEFAULT}."
+    return 0
+  fi
+  _probe_wsl && return 0
+  has k3d && return 0
+  if has docker; then
+    if ! _docker_answers; then
+      TB_SUBSTRATE_KEPT="${kept} Docker is installed here but did not answer, so this run cannot tell whether a k3d cluster is already on this machine."
+      return 0
+    fi
+    rc=0; names="$(tb_k3d_cluster_names)" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      TB_SUBSTRATE_KEPT="${kept} Docker answered but did not list its containers, so this run cannot tell whether a k3d cluster is already on this machine."
+      return 0
+    fi
+    if [[ -n "$names" ]]; then
+      TB_SUBSTRATE_KEPT="${kept} Docker lists the containers of a k3d cluster on this machine."
+      return 0
+    fi
+  fi
+  if ! declare -F _native_k3s_refuse_host >/dev/null 2>&1; then
+    TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether native ${TB_SUBSTRATE_FRESH_LINUX} would accept this run's settings, so it keeps ${TB_SUBSTRATE_DEFAULT}."
+    return 0
+  fi
+  if ! why="$(error() { printf '%s' "$*"; exit 1; }; _native_k3s_refuse_host)"; then
+    TB_SUBSTRATE_KEPT="${kept} native ${TB_SUBSTRATE_FRESH_LINUX} would refuse this run. ${why:-Its refusal gave no reason.}"
+    return 0
+  fi
+  TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_FRESH_LINUX"; TB_SUBSTRATE_SOURCE="the default for a new Linux machine"
 }
 
 # _tb_substrate_k3s_live -- _native_k3s_live_probe's answer: 0 when a tracebloc

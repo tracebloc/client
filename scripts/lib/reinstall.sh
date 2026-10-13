@@ -47,9 +47,10 @@
 #      one completed would overrule a definite answer with "cannot tell"
 #      (client-dev#1719).
 #   5. with docker: _docker_answers, then the k3d-labelled containers, stopped ones
-#      included, merged into what k3d listed. Docker not answering, or refusing this
-#      user, is cannot tell only when k3d gave no answer of its own; after a k3d
-#      listing that answered it is an info line, and the listing decides.
+#      included (tb_k3d_cluster_names), merged into what k3d listed. Docker not
+#      answering, or refusing this user, is cannot tell only when k3d gave no answer
+#      of its own; after a k3d listing that answered it is an info line, and the
+#      listing decides.
 # One exception (1.1g), for a user adopting a host an administrator prepared for them
 # who cannot reach Docker at all (_reinstall_adopt_blind). k3d clusters are the
 # machine's Docker containers, prepare-host looked for them as the administrator
@@ -124,14 +125,13 @@ _reinstall_detect() {
     if [[ "$rc" -ne 0 ]]; then
       what="Docker ('docker info')"
     else
-      ps="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter label=app=k3d --format '{{.Label "k3d.cluster"}}' 2>"$errf")" || rc=$?
+      ps="$(tb_k3d_cluster_names "$errf")" || rc=$?
       what="Docker's container list ('docker ps')"
     fi
     how="$(_reinstall_read_how "$rc" "$errf")"
     [[ "$errf" == /dev/null ]] || rm -f "$errf"
     if [[ "$rc" -ne 0 ]] && (( listed )); then
       info "${what} ${how}; k3d's own cluster listing did, and it decides."
-      ps=""   # what a failed read printed before it failed is no answer either (client-dev#1731)
     elif [[ "$rc" -eq 124 ]]; then
       _reinstall_cannot_tell "$what" \
         "Start Docker, or run as a user Docker answers, then re-run."
