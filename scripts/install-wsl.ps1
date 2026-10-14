@@ -198,10 +198,12 @@ function ConvertFrom-WslVersionText {
 
 # Runs one wsl.exe command, bounded, with WSL_UTF8=1, and reports what happened
 # without judging it. The only function here that starts wsl.exe to read it.
-# -FilePath is a seam for the test suite.
+# Output is what it wrote to stdout; ErrorOutput, kept apart, what it wrote to
+# stderr, where WSL's service errors (ERROR_SHARING_VIOLATION) can go. Both are
+# read as UTF-8, as WSL_UTF8=1 asks of both. -FilePath is a seam for the test suite.
 function Invoke-WslProbe {
   param([string]$FilePath = 'wsl.exe', [string[]]$ArgumentList = @('--version'), [int]$TimeoutSec = $WslProbeTimeoutSec)
-  $r = [pscustomobject]@{ Started = $false; TimedOut = $false; ExitCode = $null; Output = ''; StartError = ''; NativeErrorCode = $null }
+  $r = [pscustomobject]@{ Started = $false; TimedOut = $false; ExitCode = $null; Output = ''; ErrorOutput = ''; StartError = ''; NativeErrorCode = $null }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $FilePath
   $psi.Arguments = ($ArgumentList -join ' ')
@@ -210,6 +212,7 @@ function Invoke-WslProbe {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
   $psi.EnvironmentVariables['WSL_UTF8'] = '1'
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = $psi
@@ -226,7 +229,7 @@ function Invoke-WslProbe {
   }
   $r.Started = $true
   $out = $p.StandardOutput.ReadToEndAsync()
-  $null = $p.StandardError.ReadToEndAsync()
+  $err = $p.StandardError.ReadToEndAsync()
   if (-not $p.WaitForExit($TimeoutSec * 1000)) {
     $r.TimedOut = $true
     try { $p.Kill() } catch { $r.StartError = "could not stop it: $($_.Exception.Message)" }
@@ -235,6 +238,7 @@ function Invoke-WslProbe {
   $p.WaitForExit()
   $r.ExitCode = $p.ExitCode
   $r.Output = [string]$out.Result
+  $r.ErrorOutput = [string]$err.Result
   return $r
 }
 
@@ -683,6 +687,251 @@ function Confirm-WslDistroImage {
     if (Test-Path -LiteralPath $Path) { $fate = "it could not be deleted: delete $Path yourself" }
     throw "$why, so it was not imported and $fate. Something between this machine and ghcr.io changed the download; re-run on a network that does not rewrite downloads."
   }
+}
+
+# THE DISTRO'S DISK (S-W row 11, backend#5416). An imported distro's VHDX gets
+# WSL's default virtual size, about 1 TiB, and the node's capacity is that, not
+# what the host has. On S-W's machine the node reported 1,055,762,868 KiB while C:
+# had 110 GB free, so kubelet's eviction (at 5 % of capacity free) could never
+# fire before C: filled. The VHDX also grew by the 5 GiB written and did not
+# shrink after the delete. So, right after `wsl --import` and BEFORE the distro
+# first starts, Set-WslDistroDisk:
+#   1. makes the VHDX sparse, so that blocks the distro frees go back to the host;
+#   2. caps its virtual size at Get-WslDistroDiskCap's answer, so that the node's
+#      capacity is what the host can give it, and eviction fires first.
+# Both come before the first start: once the VHD is attached, --set-sparse fails
+# with ERROR_SHARING_VIOLATION until `wsl --shutdown`, which would stop every
+# distro the user has (row 11). Measured on S-W's STOCK ubuntu-noble-wsl 20240423
+# image; the VHDX is WSL's, not the image's, so ours is the same.
+# NOT MEASURED YET: `--resize` itself (row 11 never ran it), and a sparse VHDX
+# giving space back. 3.3's distro cell runs both.
+# THE ORDER: the import step calls Set-WslDistroDisk between `wsl --import` and the
+# logon task's first run (S-W row 5), because the task starts the distro and
+# --set-sparse is refused from then on. Set-WslDistroDisk holds that itself: a
+# distro `wsl --list --running` names is refused by name before any --manage step,
+# and a sparse step WSL refuses for a disk still attached (ERROR_SHARING_VIOLATION,
+# after a start and a --terminate) is refused too, never retried: only
+# `wsl --shutdown` frees it, and that stops every distro the user has. On either
+# refusal the import step unregisters the distro it just imported, so a re-run
+# imports it afresh instead of taking the re-run path over a disk never capped.
+# A RE-RUN over a distro that is already there calls Update-WslDistroDisk instead:
+# it re-derives the cap and only GROWS the disk to it. The distro's own growth
+# takes the host's free space, so a re-run often derives a smaller cap, and
+# --resize is never asked to shrink a disk below the size it has. A re-run never
+# fails on the disk: a size it cannot read, a smaller cap, or a growth wsl.exe
+# refuses (the VHD stays attached while the distro runs, row 11) each leave the
+# cap the import set, and say so.
+# NOT MEASURED YET either: whether WSL's "GB" in --resize is 1024^3 bytes, as
+# PowerShell's 1GB is (a re-run compares the two).
+# NOTHING CALLS THESE YET: they follow the import, TODO(S-W row 3) above.
+
+# The free space the cap leaves on the host's drive, and the smallest cap worth
+# installing on, in GB: preflight.sh's PF_WARN_DISK_GB and PF_MIN_DISK_GB, the
+# floors the core already holds a node's disk to. install-wsl.Tests.ps1 reads both
+# defaults from preflight.sh and holds these to them.
+$WslDiskReserveGb = 20
+$WslDiskMinGb = 10
+
+# The drive that holds PATH (its root, C:\ on Windows), or PATH itself when that
+# cannot be told. What the refusals name.
+function Get-WslDiskDrive {
+  param([string]$Path)
+  try {
+    return [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path))
+  } catch {
+    return $Path
+  }
+}
+
+# The bytes free to this user on the drive that holds PATH, or $null when that
+# cannot be read. The tests' seam.
+function Get-WslDiskFreeSpace {
+  param([string]$Path)
+  try {
+    return [long]([System.IO.DriveInfo]::new((Get-WslDiskDrive -Path $Path)).AvailableFreeSpace)
+  } catch {
+    return $null
+  }
+}
+
+# FREE bytes as a cap in whole GB: rounded down, less the reserve. The one sum
+# both the import's cap and a re-run's growth make.
+function ConvertTo-WslDiskCapGb {
+  param([long]$Free, [int]$ReserveGb = $WslDiskReserveGb)
+  $freeGb = [long][math]::Floor($Free / 1GB)
+  $cap = $freeGb - $ReserveGb
+  return $cap
+}
+
+# The distro VHDX's cap in whole GB: what is free on the drive that holds PATH,
+# rounded down, less the reserve. Throws, by name, when the free space cannot be
+# read, or when what is left is under the smallest cap worth installing on. The
+# refusal is preflight.sh's disk refusal, in ASCII, for that drive and this floor
+# (the reserve plus the smallest cap); install-wsl.Tests.ps1 holds it to those words.
+function Get-WslDistroDiskCap {
+  param(
+    [string]$Path,
+    [int]$ReserveGb = $WslDiskReserveGb,
+    [int]$MinGb = $WslDiskMinGb
+  )
+  $drive = Get-WslDiskDrive -Path $Path
+  $free = Get-WslDiskFreeSpace -Path $Path
+  if ($null -eq $free) {
+    throw "Disk: could not read how much space is free on $drive, so the WSL distro's disk cannot be sized. Check that the drive is there and readable, then re-run."
+  }
+  $cap = ConvertTo-WslDiskCapGb -Free $free -ReserveGb $ReserveGb
+  if ($cap -lt $MinGb) {
+    throw "Disk: only $($cap + $ReserveGb) GB free on $drive - need >= $($ReserveGb + $MinGb) GB ($ReserveGb GB left to Windows, and at least $MinGb GB for tracebloc's WSL distro). Free up space or attach a larger disk, then re-run."
+  }
+  return $cap
+}
+
+# Whether `wsl --list --running` names DISTRO: $true only when a line of its answer
+# is exactly the name. Anything else, a list that cannot be read included, is
+# $false here: Set-WslDistroDisk's sparse step is then the check that decides, as
+# WSL refuses it for a disk that is attached.
+function Test-WslDistroRunning {
+  param([string]$Distro = $WslDistroName, [string]$FilePath = 'wsl.exe')
+  $l = Invoke-WslProbe -FilePath $FilePath -ArgumentList @('--list', '--running', '--quiet')
+  if (-not $l.Started -or $l.TimedOut) { return $false }
+  foreach ($line in ($l.Output -replace "`0", '') -split "`r?`n") {
+    if ($line.Trim() -ceq $Distro) { return $true }
+  }
+  return $false
+}
+
+# Make DISTRO's VHDX sparse, then cap its virtual size at CAPGB, through wsl.exe.
+# Runs right after `wsl --import`, before the distro first starts (THE ORDER,
+# above): a distro that already runs is refused by name before any step. A step
+# that does not run cleanly throws, by name, with what wsl.exe said, and the cap
+# never runs after a failed sparse step: an uncapped distro is the 1 TiB one row
+# 11 measured, so nothing goes on without both.
+function Set-WslDistroDisk {
+  param(
+    [long]$CapGb,
+    [string]$Distro = $WslDistroName,
+    [string]$FilePath = 'wsl.exe'
+  )
+  if ($CapGb -le 0) {
+    throw "The WSL distro's disk cap ($CapGb GB) is not a positive size, so the disk was not set. Tell tracebloc support."
+  }
+  if (Test-WslDistroRunning -Distro $Distro -FilePath $FilePath) {
+    throw "The WSL distro $Distro is already running, so its disk can no longer be made sparse and capped: that has to happen after its import and before its first start. Nothing was changed, and nothing is retried. Re-run the install; if it says this again, tell tracebloc support."
+  }
+  $steps = @(
+    @{ What = 'made sparse'; Arguments = @('--manage', $Distro, '--set-sparse', 'true') },
+    @{ What = "capped at $CapGb GB"; Arguments = @('--manage', $Distro, '--resize', "$($CapGb)GB") }
+  )
+  foreach ($s in $steps) {
+    $cmd = "wsl $($s.Arguments -join ' ')"
+    $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList $s.Arguments
+    if (-not $r.Started) {
+      throw "$cmd did not start ($($r.StartError)), so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
+    }
+    if ($r.TimedOut) {
+      throw "$cmd did not finish within $WslProbeTimeoutSec s, so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
+    }
+    if ($r.ExitCode -ne 0) {
+      $said = ("$($r.Output) $($r.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim()
+      $order = ''
+      if ($said -match 'ERROR_SHARING_VIOLATION') { $order = " Its disk is attached: the distro has started since its import, and only a first start may follow the disk steps." }
+      throw "$cmd failed (exit $($r.ExitCode)): $said The WSL distro's disk was not $($s.What), and an uncapped distro can fill this drive.$order Re-run; if it says this again, tell tracebloc support."
+    }
+  }
+  Ok "WSL distro disk: sparse, and capped at $CapGb GB"
+}
+
+# The virtual size in bytes of the VHDX at PATH, read from the file's own metadata,
+# or $null when it cannot be read: no file, not a VHDX, or one WSL holds open.
+# Never a guess. The VHDX format: the file identifier at 0, the region table at
+# 192 KiB names the metadata region, and the metadata table there names the
+# Virtual Disk Size item, a UINT64.
+function Get-WslVhdxVirtualSize {
+  param([string]$Path)
+  $metadataRegion = [guid]'8b7ca206-4790-4b9a-b8fe-575f050f886e'
+  $virtualDiskSize = [guid]'2fa54224-cd1b-4876-b211-5dbed83bf4b8'
+  $fs = $null
+  try {
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $r = [System.IO.BinaryReader]::new($fs)
+    $ascii = [System.Text.Encoding]::ASCII
+    if ($ascii.GetString($r.ReadBytes(8)) -ne 'vhdxfile') { return $null }
+    $fs.Position = 192KB
+    if ($ascii.GetString($r.ReadBytes(4)) -ne 'regi') { return $null }
+    [void]$r.ReadUInt32()
+    $regions = $r.ReadUInt32()
+    [void]$r.ReadUInt32()
+    if ($regions -gt 2047) { return $null }
+    $at = $null
+    for ($i = 0; $i -lt $regions; $i++) {
+      $id = [guid]::new($r.ReadBytes(16))
+      $offset = $r.ReadUInt64()
+      [void]$r.ReadBytes(8)
+      if ($id -eq $metadataRegion) { $at = [long]$offset }
+    }
+    if ($null -eq $at) { return $null }
+    $fs.Position = $at
+    if ($ascii.GetString($r.ReadBytes(8)) -ne 'metadata') { return $null }
+    [void]$r.ReadUInt16()
+    $items = $r.ReadUInt16()
+    [void]$r.ReadBytes(20)
+    for ($i = 0; $i -lt $items; $i++) {
+      $id = [guid]::new($r.ReadBytes(16))
+      $offset = $r.ReadUInt32()
+      [void]$r.ReadBytes(12)
+      if ($id -eq $virtualDiskSize) {
+        $fs.Position = $at + $offset
+        $size = $r.ReadUInt64()
+        if ($size -gt 0) { return [long]$size }
+        return $null
+      }
+    }
+    return $null
+  } catch {
+    return $null
+  } finally {
+    if ($fs) { $fs.Dispose() }
+  }
+}
+
+# A re-run over a distro that is already there: re-derive the cap from the host's
+# free space and only GROW the disk to it (see THE DISTRO'S DISK above). PATH is
+# the import directory, VHDX the disk WSL made there. Never throws: what it cannot
+# do leaves the disk at the cap it has, and says so.
+function Update-WslDistroDisk {
+  param(
+    [string]$Path,
+    [string]$Vhdx = [System.IO.Path]::Combine($Path, 'ext4.vhdx'),
+    [int]$ReserveGb = $WslDiskReserveGb,
+    [string]$Distro = $WslDistroName,
+    [string]$FilePath = 'wsl.exe'
+  )
+  $size = Get-WslVhdxVirtualSize -Path $Vhdx
+  if ($null -eq $size) {
+    Warn "Could not read the WSL distro's disk size from $Vhdx, so its cap is left as it is."
+    return
+  }
+  $nowGb = [long][math]::Floor($size / 1GB)
+  $hostFree = Get-WslDiskFreeSpace -Path $Path
+  if ($null -eq $hostFree) {
+    Warn "Disk: could not read how much space is free on $(Get-WslDiskDrive -Path $Path), so the WSL distro's disk stays capped at $nowGb GB."
+    return
+  }
+  $want = ConvertTo-WslDiskCapGb -Free $hostFree -ReserveGb $ReserveGb
+  if ($want -le $nowGb) {
+    Ok "WSL distro disk: kept at $nowGb GB (the host's free space now gives $want GB, and a cap is never shrunk)"
+    return
+  }
+  $grow = @('--manage', $Distro, '--resize', "$($want)GB")
+  $g = Invoke-WslProbe -FilePath $FilePath -ArgumentList $grow
+  if ($g.Started -and -not $g.TimedOut -and $g.ExitCode -eq 0) {
+    Ok "WSL distro disk: grown from $nowGb GB to $want GB"
+    return
+  }
+  $why = "exit $($g.ExitCode): $(("$($g.Output) $($g.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim())"
+  if (-not $g.Started) { $why = "did not start: $($g.StartError)" }
+  elseif ($g.TimedOut) { $why = "did not finish within $WslProbeTimeoutSec s" }
+  Warn "wsl $($grow -join ' ') did not grow the WSL distro's disk ($why), so it stays capped at $nowGb GB."
 }
 
 # Fetch the WSL distro's root filesystem from ghcr.io into DEST by its pinned

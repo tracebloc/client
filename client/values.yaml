@@ -3299,11 +3299,11 @@ mysqlDatadirExists:
 # keyed on the resolved CLIENT_ENV. Set this to force one answer on an edge.
 selfRotateMysqlRoot:
 
-# True for dev, false for stg and prod: the rollout flips one environment at a
-# time, dev first, and the weeks between flips are the soak.
+# True for dev and stg, false for prod: the rollout flips one environment at a
+# time, prod last, and the weeks between flips are the soak.
 selfRotateMysqlRootByEnv:
   dev: true
-  stg: false
+  stg: true
   prod: false
 
 # The claim the MySQL Deployment mounts as its datadir. Leave empty (the default)

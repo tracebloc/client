@@ -6951,6 +6951,13 @@ $script:TbCpFootprintCpuMilli = 650
 $script:TbCpTransientMemBytes = 402653184
 $script:TbCpTransientCpuMilli = 700
 # ── end generated footprint ─────────────────────────────────────────────────
+# When the training envelope reserves that transient (backend#5025 O-108): only
+# on a node with at least this much allocatable CPU. Below it the envelope is
+# today's and upgrades wait while a run trains (reserving 700 m there refuses a
+# 2-core machine and takes a core off a 4-core one). Hand-typed, a product
+# threshold. Mirrors bash _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI;
+# install-k8s.Tests.ps1 pins that the two agree.
+$script:TbCpTransientReserveMinCpuMilli = 8000
 # ── k3s's own addons, as a FLOOR (client-dev#1693, #1700) ──────────────────
 #
 # What k3s's bundled addons request on the k3d node this installer creates:
@@ -7345,6 +7352,10 @@ function Get-TbFootprintRefusal {
     return @{ Verdict = 'refused'
               Lines   = @('the chart footprint constants ($script:TbCpFootprint*) are missing or not numeric -- this installer cannot verify any envelope') }
   }
+  if ("$($script:TbCpTransientMemBytes)" -notmatch '^\d+$' -or "$($script:TbCpTransientCpuMilli)" -notmatch '^\d+$' -or "$($script:TbCpTransientReserveMinCpuMilli)" -notmatch '^\d+$') {
+    return @{ Verdict = 'refused'
+              Lines   = @('the hourly-job constants ($script:TbCpTransient*) are missing or not numeric -- this installer cannot verify any envelope') }
+  }
   return $null
 }
 
@@ -7426,12 +7437,19 @@ function Get-TbFitVerdict {
   # Resolve-TbTrainingFit.
   $out = @{ Verdict = ''; Lines = @(); Size = $Size; Undersized = $false }
   $fpMemB = [long]$script:TbCpFootprintMemBytes; $fpCpuM = [long]$script:TbCpFootprintCpuMilli
-  $needMemB = $fpMemB + $sysMemB
-  $needCpuM = $fpCpuM + $sysCpuM
   $mib = [long]1MB; $gib = [long]1GB
+  # The hourly CronJobs' transient, reserved only on a node large enough
+  # ($script:TbCpTransientReserveMinCpuMilli, backend#5025 O-108). Bash twin: _fit_verdict.
+  $trMemB = [long]0; $trCpuM = [long]0; $trPart = ''
+  if ($allocCpuM -ge [long]$script:TbCpTransientReserveMinCpuMilli) {
+    $trMemB = [long]$script:TbCpTransientMemBytes; $trCpuM = [long]$script:TbCpTransientCpuMilli
+    $trPart = " + hourly jobs (auto-upgrade, image refresh) $([math]::Floor($trMemB / $mib)) MiB / $trCpuM m"
+  }
+  $needMemB = $fpMemB + $trMemB + $sysMemB
+  $needCpuM = $fpCpuM + $trCpuM + $sysCpuM
   $lines = @()
   $lines += "${AllocLabel}: $([math]::Floor($allocMemB / $mib)) MiB / $allocCpuM m"
-  $lines += "control plane (chart) $([math]::Floor($fpMemB / $mib)) MiB / $fpCpuM m + system pods $([math]::Floor($sysMemB / $mib)) MiB / $sysCpuM m = $([math]::Floor($needMemB / $mib)) MiB / $needCpuM m ($sysHow)"
+  $lines += "control plane (chart) $([math]::Floor($fpMemB / $mib)) MiB / $fpCpuM m$trPart + system pods $([math]::Floor($sysMemB / $mib)) MiB / $sysCpuM m = $([math]::Floor($needMemB / $mib)) MiB / $needCpuM m ($sysHow)"
   $lines += "envelope $Size = $([math]::Floor($envMemB / $mib)) MiB / $envCpuM m"
 
   $memOver = $envMemB + $needMemB - $allocMemB

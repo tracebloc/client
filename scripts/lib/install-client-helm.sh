@@ -272,6 +272,20 @@ _TB_CP_TRANSIENT_MEM_BYTES=402653184
 _TB_CP_TRANSIENT_CPU_MILLI=700
 # ── end generated ───────────────────────────────────────────────────────────
 
+# ── when the training envelope reserves that transient (backend#5025 O-108) ──
+#
+# A training run lasts hours, so an hourly CronJob that has to wait for it stays
+# Pending the whole run: on an 8.4 GiB / 10-CPU machine the auto-upgrade failed
+# at its deadline behind one. _fit_verdict therefore reserves _TB_CP_TRANSIENT_*
+# beside the chart's steady state -- but only on a node whose allocatable CPU is
+# at least this much. Below it the envelope is today's and upgrades wait while a
+# run trains: reserving 700 m there refuses a 2-core machine outright (1900 m
+# allocatable leaves 350 m, under one core) and takes a core off every 4-core
+# one. Hand-typed, not generated: a product threshold, not a chart fact. The
+# PowerShell twin carries it as $script:TbCpTransientReserveMinCpuMilli;
+# install-k8s.Tests.ps1 pins that the two agree.
+_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
+
 # ── k3s's own addons, as a FLOOR (client-dev#1693, #1700) ──────────────────
 #
 # What k3s's bundled addons request on the node this installer sets up, native
@@ -931,6 +945,11 @@ _fit_footprint_refused() {
     _TB_FIT_LINES="the chart footprint constants (_TB_CP_FOOTPRINT_*) are missing or not numeric -- this installer cannot verify any envelope"
     return 0
   fi
+  if [[ ! "${_TB_CP_TRANSIENT_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_CP_TRANSIENT_CPU_MILLI:-}" =~ ^[0-9]+$ || ! "${_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
+    _TB_FIT_VERDICT="refused"
+    _TB_FIT_LINES="the hourly-job constants (_TB_CP_TRANSIENT_*) are missing or not numeric -- this installer cannot verify any envelope"
+    return 0
+  fi
   return 1
 }
 
@@ -1010,19 +1029,28 @@ _fit_training_envelope() {
 # Args: ALLOC_LABEL ALLOC_MEM_B ALLOC_CPU_M SYS_MEM_B SYS_CPU_M SYS_HOW SIZE
 #       ENV_MEM_B ENV_CPU_M OURS PROV
 # Reads the embedded _TB_CP_FOOTPRINT_* (the caller has already refused a broken
-# embed) and the contract floor. Sets _TB_FIT_VERDICT / _TB_FIT_LINES and, on
+# embed) and the contract floor. On a node with at least
+# _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI allocatable it also reserves the hourly
+# CronJobs' _TB_CP_TRANSIENT_* (backend#5025 O-108); below that, nothing changes. Sets _TB_FIT_VERDICT / _TB_FIT_LINES and, on
 # `reduced`, _TB_TRAINING_SIZE (and _TB_TRAINING_UNDERSIZED) -- in the CALLER's
 # scope, so a caller that must not leave a size behind shadows them with locals.
 _fit_verdict() {
   local alloc_label="$1" alloc_mem_b="$2" alloc_cpu_m="$3" sys_mem_b="$4" sys_cpu_m="$5" sys_how="$6"
   local size="$7" env_mem_b="$8" env_cpu_m="$9" ours="${10}" prov="${11}"
   local fp_mem_b="$_TB_CP_FOOTPRINT_MEM_BYTES" fp_cpu_m="$_TB_CP_FOOTPRINT_CPU_MILLI"
-  local need_mem_b=$(( fp_mem_b + sys_mem_b ))
-  local need_cpu_m=$(( fp_cpu_m + sys_cpu_m ))
   local mib=$(( 1024 * 1024 )) gib=$(( 1024 * 1024 * 1024 ))
+  # The hourly CronJobs' transient, reserved only on a node large enough
+  # (_TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI, backend#5025 O-108).
+  local tr_mem_b=0 tr_cpu_m=0 tr_part=""
+  if (( alloc_cpu_m >= _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI )); then
+    tr_mem_b="$_TB_CP_TRANSIENT_MEM_BYTES"; tr_cpu_m="$_TB_CP_TRANSIENT_CPU_MILLI"
+    tr_part=" + hourly jobs (auto-upgrade, image refresh) $(( tr_mem_b / mib )) MiB / ${tr_cpu_m} m"
+  fi
+  local need_mem_b=$(( fp_mem_b + tr_mem_b + sys_mem_b ))
+  local need_cpu_m=$(( fp_cpu_m + tr_cpu_m + sys_cpu_m ))
 
   _TB_FIT_LINES="${alloc_label}: $(( alloc_mem_b / mib )) MiB / ${alloc_cpu_m} m"$'\n'
-  _TB_FIT_LINES+="control plane (chart) $(( fp_mem_b / mib )) MiB / ${fp_cpu_m} m + system pods $(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m = $(( need_mem_b / mib )) MiB / ${need_cpu_m} m (${sys_how})"$'\n'
+  _TB_FIT_LINES+="control plane (chart) $(( fp_mem_b / mib )) MiB / ${fp_cpu_m} m${tr_part} + system pods $(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m = $(( need_mem_b / mib )) MiB / ${need_cpu_m} m (${sys_how})"$'\n'
   _TB_FIT_LINES+="envelope ${size} = $(( env_mem_b / mib )) MiB / ${env_cpu_m} m"$'\n'
 
   local mem_over=$(( env_mem_b + need_mem_b - alloc_mem_b ))

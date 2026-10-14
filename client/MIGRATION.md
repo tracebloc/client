@@ -2,6 +2,24 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.212 — `selfRotateMysqlRoot` is on for `stg`
+
+**What changed.** `selfRotateMysqlRootByEnv.stg` is now `true`; `dev` stays
+`true` and `prod` stays `false`. On a **stg** edge, MySQL now sets its root
+password from `MYSQL_ROOT_PASSWORD` in `mysql-credentials` at each start (see
+1.9.205 below for how).
+
+**What you have to do: nothing,** on any environment. On a stg edge:
+
+- The MySQL pod restarts once during the upgrade.
+- An edge whose MySQL datadir predates root-password rotation gets a generated
+  root password in `mysql-credentials`, and the jobs-manager logs in as root with
+  it. Anything that still logs in to MySQL as root with the old password stops
+  working: read the password from `mysql-credentials`' `MYSQL_ROOT_PASSWORD`.
+- An edge that is already rotated keeps its root password.
+
+**To keep a stg edge as it was**, set `selfRotateMysqlRoot: false`.
+
 ## Upgrading to 1.9.210 — `selfRotateMysqlRoot` is on for `dev`
 
 **What changed.** `selfRotateMysqlRootByEnv.dev` is now `true`; `stg` and `prod`
