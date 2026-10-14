@@ -2398,6 +2398,26 @@ tb_wsl_phase() {
   if tb_in_wsl_distro; then printf '%s' "${TRACEBLOC_WSL_PHASE:-}"; fi
 }
 
+# tb_wsl_handover_write -- the cluster run's verdict, handed to the Windows installer
+# (3.2 part 2c, client-dev#1810). The host names a file on the cluster run's line,
+# TRACEBLOC_WSL_HANDOVER, in a folder only this user can open and the host deletes
+# after the install. It reads the file only when the cluster run exits 0, and refuses
+# to go on when the file or its line is missing. So main() writes it last, just before
+# that exit 0: a file there means this run reached its end. Exactly one line, which
+# replaces whatever the file held: INSTALL_STATE_REASON=<word>, the reason the
+# stop-and-check gate set (assess.sh), as it set it -- a tag such as
+# credential-rejected, ns:<namespace> for a healthy client, or empty when the gate did
+# not assess (--force, or a stale bootstrap without assess.sh). On credential-rejected
+# the host runs `client create --reissue` and puts TB_CREDENTIAL_REISSUED=1 on the
+# client run's line. Only the cluster run writes it, and only to a file the host
+# named. A write that fails is an error, so the run never exits 0 without the line.
+tb_wsl_handover_write() {
+  [[ "$(tb_wsl_phase 2>/dev/null)" == "cluster" && -n "${TRACEBLOC_WSL_HANDOVER:-}" ]] || return 0
+  { printf 'INSTALL_STATE_REASON=%s\n' "${INSTALL_STATE_REASON:-}" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
+    || error "Couldn't hand what this run found to the Windows installer: ${TRACEBLOC_WSL_HANDOVER} could not be written. Re-run the installer from Windows."
+  log "handover: INSTALL_STATE_REASON=${INSTALL_STATE_REASON:-} written to ${TRACEBLOC_WSL_HANDOVER}"
+}
+
 # ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────
 # Apple silicon with macOS 26 or later (D6, decided 2026-09-29). macOS 26 is the last
 # release for Intel Macs, and every M1 or later Mac runs it. This is the floor's one

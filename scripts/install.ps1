@@ -68,6 +68,12 @@ $Files = @(
 # variable's name, to it.
 $WslSubstrate = 'k3s'
 
+# The distro path's Windows floor: Windows 11, whose first build is 22000 (RFC-0175
+# D7; Windows 10 was dropped from the distro path, client-dev#1810). The Docker path
+# keeps Windows 10 until it is retired. The floor is the build, not the name: from
+# build 22000 on, ProductName still reads "Windows 10".
+$WslMinWindowsBuild = 22000
+
 # Keep in lockstep with install.sh COSIGN_VERSION and cli release.yml's
 # cosign-installer pin.
 $CosignVersion = "v2.4.1"
@@ -652,11 +658,39 @@ function Confirm-ScriptIntegrity {
   Ok "all installer scripts verified against the signed manifest"
 }
 
+# This machine's Windows build and name, from one registry key, or $null where
+# they cannot be read (off Windows, the test suite). Below build 22000 the key's
+# ProductName is the machine's own ("Windows 10 Pro", "Windows Server 2022
+# Datacenter"), so a refusal can name it.
+function Get-WindowsBuildInfo {
+  try {
+    $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    return [pscustomobject]@{ Build = [int]$cv.CurrentBuildNumber; Name = [string]$cv.ProductName }
+  } catch { return $null }
+}
+
+# Assert-WslWindowsBuild -- the distro path refuses Windows older than Windows 11 by
+# name. A build it cannot read is refused too, saying what it could not read: one
+# contract with the Mac floor, whose verdict refuses a macOS version it cannot read.
+function Assert-WslWindowsBuild {
+  $os = Get-WindowsBuildInfo
+  if ($null -eq $os) {
+    throw "This installer could not read this machine's Windows build (CurrentBuildNumber under HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion), so it cannot tell whether this is Windows 11. The tracebloc WSL install needs Windows 11 (build $WslMinWindowsBuild or later). Unset TRACEBLOC_SUBSTRATE to install with the current Windows path."
+  }
+  if ($os.Build -lt $WslMinWindowsBuild) {
+    $name = if ($os.Name) { $os.Name } else { 'Windows' }
+    throw "This machine runs $name (build $($os.Build)). The tracebloc WSL install needs Windows 11 (build $WslMinWindowsBuild or later). Update to Windows 11, or unset TRACEBLOC_SUBSTRATE to install with the current Windows path, which still supports this version of Windows."
+  }
+}
+
 # =============================================================================
 #  Orchestration.
 # =============================================================================
 function Invoke-Bootstrap {
   param([object[]]$ChildArgs)
+
+  # The distro path's Windows floor, before anything is fetched or written.
+  if ($env:TRACEBLOC_SUBSTRATE -ceq $WslSubstrate) { Assert-WslWindowsBuild }
 
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
   # Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH first, the

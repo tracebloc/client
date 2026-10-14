@@ -877,11 +877,41 @@ _native_k3s_api_answers() {
   fi
 }
 
-# _native_k3s_node_ready CTX NAME -- the Ready condition's status of node NAME on
-# context CTX (True, False or Unknown), or nothing when the API does not say.
+# _native_k3s_node_ready CTX NAME -- node NAME's Ready condition on context CTX, as
+# STATUS|REASON|MESSAGE (STATUS True, False or Unknown), or nothing when the API does
+# not say.
 _native_k3s_node_ready() {
   _native_k3s_kubectl_on "$1" get node "$2" --request-timeout=5s \
-    -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true
+    -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}|{.status.conditions[?(@.type=="Ready")].reason}|{.status.conditions[?(@.type=="Ready")].message}' \
+    2>/dev/null || true
+}
+
+# _native_k3s_ready_said LAST -- the Ready condition a refused node-Ready wait read last
+# (LAST: STATUS|REASON|MESSAGE, or nothing), as a sentence for the refusal
+# (client-dev#1935). With it, a slow Ready, a node that never goes Ready and a k3s that
+# keeps exiting no longer read the same. The macOS node's refusal says it too.
+_native_k3s_ready_said() {
+  local st="${1%%|*}" rest
+  rest="${1#"$st"}"; rest="${rest#|}"; rest="${rest%.}"; [[ "$rest" != "|" ]] || rest=""
+  if [[ -n "$st" ]]; then
+    printf 'Its last Ready condition read %s%s.' "$st" "${rest:+: ${rest}}"
+  else
+    printf 'The API never gave its Ready condition.'
+  fi
+}
+
+# _native_k3s_ready_why LAST -- why a node-Ready wait on this host's k3s was refused:
+# the last Ready condition it read (_native_k3s_ready_said), and how many times systemd
+# has restarted k3s (NRestarts), which tells a k3s that keeps exiting from a slow one.
+_native_k3s_ready_why() {
+  local n
+  _native_k3s_ready_said "$1"
+  n="$(_bounded 10 systemctl show k3s -p NRestarts --value 2>/dev/null)" || n=""
+  if [[ "$n" =~ ^[0-9]+$ ]]; then
+    printf ' systemd has restarted k3s %s time(s) (NRestarts).' "$n"
+  else
+    printf " systemd did not say how many times it restarted k3s ('systemctl show k3s -p NRestarts' answered '%s')." "$n"
+  fi
 }
 
 # _native_k3s_wait_for_node_ready NAME -- the install is done only when node NAME is
@@ -890,14 +920,17 @@ _native_k3s_node_ready() {
 # v1 without fail-cgroupv1=false both read success while the kubelet exits every
 # ~14 s, and the API answers in between (S-R2, tracebloc/backend#5072).
 _native_k3s_wait_for_node_ready() {
-  local name="$1" budget ctx
+  local name="$1" budget ctx ready last=""
   # --print: nothing ran, so there is nothing to wait for or read back.
   if tb_root_planning; then return 0; fi
   budget="$(_api_wait_budget_s)"; ctx="$(_native_k3s_context)"
   log "Waiting for node '${name}' to be Ready..."
-  until [[ "$(_native_k3s_node_ready "$ctx" "$name")" == True ]]; do
+  until ready="$(_native_k3s_node_ready "$ctx" "$name")"; [[ "${ready%%|*}" == True ]]; do
+    # The last read that said something, for the refusal: an API that stops answering
+    # near the deadline does not erase what the node said before.
+    [[ -z "${ready%%|*}" ]] || last="$ready"
     _native_k3s_budget_left "$budget" \
-      || error "Node '${name}' did not become Ready within ${budget}s. It's safe to re-run this installer; on a slow machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. 'sudo journalctl -u k3s' says why the kubelet is not up."
+      || error "Node '${name}' did not become Ready within ${budget}s. $(_native_k3s_ready_why "$last") It's safe to re-run this installer; on a slow machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. 'sudo journalctl -u k3s' says why the kubelet is not up."
     sleep 2
     TB_K3S_WAITED_S=$(( TB_K3S_WAITED_S + 2 ))
   done
@@ -926,6 +959,15 @@ _native_k3s_wait_for_api() {
 
 # ── Re-run resolution's probe (1.1f) ───────────────────────────────────────────
 
+# _native_k3s_files_here -- tracebloc's k3s files are on this host, read with no
+# privileges: tracebloc's kubelet drop-in (0644; on the host only the native path
+# writes it, so a k3s without it is not tracebloc's) and k3s's uninstall script,
+# which upstream's install.sh writes beside the unit. The re-run probe below and the
+# stop-and-check gate (assess.sh) both ask it.
+_native_k3s_files_here() {
+  [[ -f "$TB_KUBELET_CONFIG_K3S_PATH" && -f "$TB_K3S_UNINSTALL_PATH" ]]
+}
+
 # _native_k3s_live_probe -- whether a tracebloc native k3s is set up on this
 # machine, read with no privileges, for common.sh's tb_substrate_resolve. The
 # marker in config.yaml is out of reach (root's, 0600), so it reads what any user
@@ -937,7 +979,7 @@ _native_k3s_wait_for_api() {
 # files are here but systemctl did not answer (cannot tell). Linux only.
 _native_k3s_live_probe() {
   [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 1
-  [[ -f "$TB_KUBELET_CONFIG_K3S_PATH" && -f "$TB_K3S_UNINSTALL_PATH" ]] || return 1
+  _native_k3s_files_here || return 1
   local rc=0
   _bounded "${TB_PROBE_TIMEOUT:-5}" systemctl is-active --quiet k3s 2>/dev/null || rc=$?
   [[ "$rc" -eq 0 ]] && return 0
@@ -1553,6 +1595,22 @@ _native_k3s_wait_for_kubeconfig() {
   done
 }
 
+# _native_k3s_run_state -- k3s's state in systemd's own word (`systemctl is-active
+# k3s`, which needs no root), printed, and what it means here: 0 running, 1 stopped
+# (a state _native_k3s_ensure_running starts), 2 no state this run can read. One
+# reading for the create path, which starts what it calls stopped, and for the
+# stop-and-check gate (assess.sh), which says it will.
+_native_k3s_run_state() {
+  local state
+  state="$(_bounded 10 systemctl is-active k3s 2>/dev/null)" || true
+  printf '%s' "$state"
+  case "$state" in
+    active|reloading|refreshing) return 0 ;;
+    inactive|failed|activating|deactivating|maintenance) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # _native_k3s_ensure_running -- start k3s when it is not running, after step 3.
 # Upstream's script starts the unit only when its own hashes changed
 # (service_enable_and_start: "No change detected so skipping service start"), and
@@ -1560,14 +1618,14 @@ _native_k3s_wait_for_kubeconfig() {
 # on an unchanged re-run a stopped k3s would stay down, and the waits would spend
 # their whole budget on it.
 # A running k3s is left alone: INSTALL_K3S_FORCE_RESTART would restart it on every
-# re-run. The state is systemd's own word (`systemctl is-active`, which needs no
-# root); one it cannot give is "cannot tell", refused, never read as running.
+# re-run. The state is systemd's own word (_native_k3s_run_state); one it cannot
+# give is "cannot tell", refused, never read as running.
 _native_k3s_ensure_running() {
-  local state
-  state="$(_bounded 10 systemctl is-active k3s 2>/dev/null)" || true
-  case "$state" in
-    active|reloading|refreshing) return 0 ;;
-    inactive|failed|activating|deactivating|maintenance) ;;
+  local state rc=0
+  state="$(_native_k3s_run_state)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) ;;
     *) error "native k3s: this run cannot tell whether k3s is running ('systemctl is-active k3s' answered '${state:-nothing}'), so it neither starts k3s nor waits on it. Check that 'systemctl status k3s' answers, then re-run; it's safe to re-run this installer." ;;
   esac
   # --print ran no install.sh, and on a new k3s that is what starts it: here only a k3s

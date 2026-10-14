@@ -532,6 +532,16 @@ _mac_ct_start_system() {
 #  the data is kept). A container or a volume of the node's name that run-args does
 #  not vouch for is refused, never adopted (D5): nothing shows this installer made it.
 #
+#  The join token is pinned on the host, outside the volume (client-dev#1976): k3s
+#  encrypts its datastore's bootstrap data with it, and without one it reads the
+#  server/token it rewrites, unsynced, on every start. A VM killed seconds after a
+#  start can tear that file, and k3s then refuses its own data on every start after
+#  ("bootstrap data already found and encrypted with different token"). The token is
+#  written once to _mac_ct_node_dir/token (0600) and reaches the node as an argument;
+#  the entrypoint writes it to TB_MAC_CT_NODE_TOKEN_FILE before every start, and the
+#  config names that file (`token-file`). A node made before the pin keeps the token
+#  it already has (_mac_ct_node_token), never a fresh one.
+#
 #  "Ready" is a Ready condition whose heartbeat is newer than the start this run
 #  made: for about 40 s after a restart the stored status is the old one (S-M).
 #
@@ -546,13 +556,21 @@ TB_MAC_CT_NODE_IFACE="eth0"
 TB_MAC_CT_NODE_VOLUME_SIZE="64g"
 # What the node needs Rosetta for is an amd64 image; this file is there once it is installed.
 TB_MAC_CT_ROSETTA_RUNTIME="/Library/Apple/usr/libexec/oah/libRosettaRuntime"
-# The node's entrypoint. $1 is config.yaml, $2 the kubelet drop-in, $3 the node IP. An
+# Where the entrypoint puts the join token inside the node, and the file the config's
+# `token-file` names: on the container's own disk, rewritten from the argument on every
+# start, so a copy a killed VM tore never reaches k3s.
+TB_MAC_CT_NODE_TOKEN_FILE="/etc/rancher/k3s/tracebloc-token"
+# The node's entrypoint. $1 is config.yaml, $2 the kubelet drop-in, $3 the node IP, $4
+# the join token. A token that is not one (empty, or not hex as _mac_ct_node_token
+# makes and reads them) stops the node before k3s starts: k3s would make a new one. An
 # address it cannot add, and that lo does not already carry, stops the node: k3s would
 # advertise an address nothing answers on.
 TB_MAC_CT_NODE_ENTRY='set -e
 mkdir -p /etc/rancher/k3s
 printf "%s\n" "$1" > /etc/rancher/k3s/config.yaml
 printf "%s\n" "$2" > /etc/rancher/k3s/tracebloc-kubelet.yaml
+case "$4" in ""|*[!0-9a-f]*) echo "tracebloc: the node was started without its join token" >&2; exit 1 ;; esac
+(umask 077; printf "%s\n" "$4" > /etc/rancher/k3s/tracebloc-token)
 ip addr add "$3/32" dev lo 2>/dev/null || case "$(ip -4 addr show dev lo)" in *"inet $3/32"*) ;; *) exit 1 ;; esac
 exec /bin/k3s server'
 
@@ -636,13 +654,14 @@ _mac_ct_node_cidrs() {
 
 # _mac_ct_node_config NAME CIDRS -- the node's config.yaml: _native_k3s_render_config's
 # (node-local storage on the volume, cgroup v2, the kubeconfig root's only), then the
-# Mac's own keys.
+# Mac's own keys, the join token's file among them (client-dev#1976).
 _mac_ct_node_config() {
   _native_k3s_render_config node-local "$1" "$2" "" v2 "" || return 1
   printf 'node-ip: "%s"\n' "$TB_MAC_CT_NODE_IP"
   printf 'advertise-address: "%s"\n' "$TB_MAC_CT_NODE_IP"
   printf 'tls-san: ["127.0.0.1"]\n'
   printf 'flannel-iface: "%s"\n' "$TB_MAC_CT_NODE_IFACE"
+  printf 'token-file: "%s"\n' "$TB_MAC_CT_NODE_TOKEN_FILE"
 }
 
 # _mac_ct_node_size -- "<cpus> <memory>" for the node.
@@ -677,19 +696,21 @@ _mac_ct_node_size() {
   printf '%s %sg' "$cpus" "$(_macos_vm_mem_gb "$phys")"
 }
 
-# _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE -- the `container run` argv, into
-# TB_MAC_CT_NODE_ARGV (an array: the config holds newlines and quotes). --rosetta is in
-# it when TRACEBLOC_MAC_CT_ROSETTA (the TEST SEAM), else TB_MAC_CT_ROSETTA_RUNTIME, exists.
+# _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE TOKEN -- the `container run` argv,
+# into TB_MAC_CT_NODE_ARGV (an array: the config holds newlines and quotes). --rosetta is
+# in it when TRACEBLOC_MAC_CT_ROSETTA (the TEST SEAM), else TB_MAC_CT_ROSETTA_RUNTIME,
+# exists. TOKEN is the join token, the entrypoint's last argument: it makes the argv a
+# secret, so run-args is kept 0600.
 TB_MAC_CT_NODE_ARGV=()
 _mac_ct_node_argv() {
-  local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }"
+  local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }" token="$6"
   TB_MAC_CT_NODE_ARGV=(run -d --name "$name"
     --cap-add ALL --read-only-path NONE --masked-path NONE)
   [[ ! -e "${TRACEBLOC_MAC_CT_ROSETTA:-$TB_MAC_CT_ROSETTA_RUNTIME}" ]] || TB_MAC_CT_NODE_ARGV+=(--rosetta)
   TB_MAC_CT_NODE_ARGV+=(--cpus "$cpus" --memory "$mem"
     -v "${name}:/var/lib/rancher/k3s" --tmpfs /run --tmpfs /var/run
     -p 127.0.0.1:6443:6443
-    --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY" sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP")
+    --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY" sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$token")
 }
 
 # _mac_ct_node_running CT NAME -- 0 when `container list` (running containers only)
@@ -725,16 +746,38 @@ _mac_ct_volume_exists() {
 # _mac_ct_node_ready_since CT NAME NODE SINCE -- 0 when node NODE's Ready condition is
 # True with a heartbeat at or after SINCE (UTC, %Y-%m-%dT%H:%M:%SZ), asked inside the
 # node. Both times are that format, so their digits compare as numbers. The heartbeat
-# it read is left in TB_MAC_CT_NODE_HB, for the log.
+# it read is left in TB_MAC_CT_NODE_HB, for the log, and the condition, as
+# STATUS|REASON|MESSAGE, in TB_MAC_CT_NODE_READY, for the refusal (client-dev#1935).
+# The message comes last, because it may hold spaces.
 TB_MAC_CT_NODE_HB=""
+TB_MAC_CT_NODE_READY=""
 _mac_ct_node_ready_since() {
-  local out hb st
+  local out hb st rest why=""
   out="$(_bounded 15 "$1" exec "$2" kubectl get node "$3" --request-timeout=5s \
-    -o 'jsonpath={.status.conditions[?(@.type=="Ready")].lastHeartbeatTime} {.status.conditions[?(@.type=="Ready")].status}' \
+    -o 'jsonpath={.status.conditions[?(@.type=="Ready")].lastHeartbeatTime} {.status.conditions[?(@.type=="Ready")].status} {.status.conditions[?(@.type=="Ready")].reason}|{.status.conditions[?(@.type=="Ready")].message}' \
     </dev/null 2>/dev/null)" || return 1
-  hb="${out%% *}"; st="${out##* }"; TB_MAC_CT_NODE_HB="$hb"
+  hb="${out%% *}"; rest="${out#* }"; st="${rest%% *}"; TB_MAC_CT_NODE_HB="$hb"
+  [[ "$rest" != *" "* ]] || why="${rest#* }"
+  [[ -z "$st" ]] || TB_MAC_CT_NODE_READY="${st}${why:+|${why}}"
   [[ "$st" == True && "$hb" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
   (( 10#${hb//[^0-9]/} >= 10#${4//[^0-9]/} ))
+}
+
+# _mac_ct_ready_why CT NAME SINCE -- why the macOS node's Ready wait was refused: the
+# last Ready condition it read (k3s.sh _native_k3s_ready_said) with its heartbeat, and
+# whether the node container still runs. Where Linux counts k3s's restarts, the Mac
+# cannot: k3s is the container's PID 1 and Apple's runtime has no restart policy, so a
+# k3s that exited is a node container that stopped.
+_mac_ct_ready_why() {
+  local rc=0
+  _native_k3s_ready_said "$TB_MAC_CT_NODE_READY"
+  [[ -z "$TB_MAC_CT_NODE_READY" ]] || printf ' Its heartbeat was %s, and the wait needs one at or after %s.' "${TB_MAC_CT_NODE_HB:-none}" "$3"
+  _mac_ct_node_running "$1" "$2" || rc=$?
+  case "$rc" in
+    0) printf ' The node container is running.' ;;
+    1) printf ' The node container has stopped, so k3s exited.' ;;
+    *) printf " Whether the node container still runs could not be read ('%s list' did not answer)." "$1" ;;
+  esac
 }
 
 # _mac_ct_wait_node_ready CT NAME NODE SINCE -- wait on the API budget the Linux waits
@@ -742,14 +785,75 @@ _mac_ct_node_ready_since() {
 _mac_ct_wait_node_ready() {
   local budget
   budget="$(_api_wait_budget_s)"
+  TB_MAC_CT_NODE_READY=""
   log "Waiting for node '${3}' to be Ready..."
   until _mac_ct_node_ready_since "$@"; do
     _native_k3s_budget_left "$budget" \
-      || error "Node '${3}' did not become Ready within ${budget}s. It's safe to re-run this installer; on a slow machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. \"${1}\" logs ${2} says why k3s is not up."
+      || error "Node '${3}' did not become Ready within ${budget}s. $(_mac_ct_ready_why "$1" "$2" "$4") It's safe to re-run this installer; on a slow machine, extend the wait with TRACEBLOC_API_WAIT_S=<seconds>. \"${1}\" logs ${2} says why k3s is not up."
     sleep 2
     TB_K3S_WAITED_S=$(( TB_K3S_WAITED_S + 2 ))
   done
   log "Node '${3}' is Ready (heartbeat ${TB_MAC_CT_NODE_HB}, asked for one at or after ${4})."
+}
+
+# The join token as _mac_ct_node_token makes and reads it: 16 random bytes in hex, the
+# shape k3s's own util.Random(16) gives the token it makes when none is passed.
+TB_MAC_CT_NODE_TOKEN_RE='^[0-9a-f]{32}$'
+
+# _mac_ct_node_token CT NAME DIR STATE -- the node's join token, into
+# TB_MAC_CT_NODE_TOKEN, pinned in DIR/token (0600) before the argv that carries it is
+# kept (client-dev#1976). STATE is what _mac_ct_ensure_node found of NAME: fresh (no
+# container and no volume), container, or volume (a volume without its container).
+#   - DIR/token there: it is the token, whatever STATE says. A re-run never makes
+#     another: one that cannot be read, or is not a token, is refused by name and left
+#     as it is.
+#   - none, on a fresh node: 16 new random bytes, written once.
+#   - none, on a node this installer made before it pinned the token: the token the
+#     node already has, read from it while it runs (a stopped one is started for it).
+#     k3s keeps it twice, as the user "server" in server/cred/passwd and after
+#     "::server:" in server/token, and the two must say the same.
+#   Anything else is refused by name, never answered with a new token: a node whose
+#   data was encrypted with another token never starts again. A node that cannot hand
+#   its token over (one k3s already refuses to start is this case) can only be
+#   reinstalled, and the refusal says how.
+TB_MAC_CT_NODE_TOKEN=""
+_mac_ct_node_token() {
+  local ct="$1" name="$2" dir="$3" state="$4" file="${3}/token" t="" passwd="" tok="" p="" rc
+  local how="run \"tracebloc delete\" (it removes the node and its data), then install again"
+  TB_MAC_CT_NODE_TOKEN=""
+  if [[ -e "$file" ]]; then
+    t="$(cat "$file")" \
+      || error "Apple container: ${file} cannot be read, so this run cannot tell the node's join token, and it never makes a new one. Make the file readable, then re-run."
+    [[ "$t" =~ $TB_MAC_CT_NODE_TOKEN_RE ]] \
+      || error "Apple container: ${file} does not hold a join token this installer wrote, and this run never replaces it. Remove it (rm \"${file}\") and re-run with the node running: the run then reads the token back from the node."
+    TB_MAC_CT_NODE_TOKEN="$t"
+    return 0
+  fi
+  case "$state" in
+    fresh)
+      t="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')" || t=""
+      [[ "$t" =~ $TB_MAC_CT_NODE_TOKEN_RE ]] || error "Apple container: /dev/urandom gave no join token for the node." ;;
+    container)
+      rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
+      case "$rc" in
+        0) ;;
+        1) _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true ;;
+        *) error "Apple container: the container system did not list its containers, so this run cannot tell whether the node ${name} runs to read its join token." ;;
+      esac
+      passwd="$(_bounded 30 "$ct" exec "$name" cat /var/lib/rancher/k3s/server/cred/passwd </dev/null 2>/dev/null)" || passwd=""
+      tok="$(_bounded 30 "$ct" exec "$name" cat /var/lib/rancher/k3s/server/token </dev/null 2>/dev/null)" || tok=""
+      p="$(awk -F, '$2 == "server" { print $1; exit }' <<<"$passwd")"
+      if [[ "$tok" == *::server:* ]]; then t="${tok##*::server:}"; fi
+      [[ -n "$p" && -n "$t" ]] \
+        || error "Apple container: the node ${name} was made before this installer pinned its join token, and the token could not be read from it (k3s's server/cred/passwd and server/token, inside the node). This run never gives it a new one: k3s would then refuse the node's own data. Start the node (\"${ct}\" start ${name}) and re-run. If it does not stay up, k3s is refusing its own data, and the node cannot be recovered without a reinstall: ${how}."
+      [[ "$p" == "$t" && "$t" =~ $TB_MAC_CT_NODE_TOKEN_RE ]] \
+        || error "Apple container: the node ${name} holds two different join tokens (k3s's server/cred/passwd and server/token), so this run cannot tell which one its data is encrypted with, and pins neither. \"${ct}\" logs ${name} says whether k3s starts. If it does not stay up, k3s is refusing its own data, and the node cannot be recovered without a reinstall: ${how}." ;;
+    *)
+      error "Apple container: a volume named ${name} is there without its node, and no join token is pinned for it (${file}), so this run cannot tell the token its data is encrypted with, and it never makes a new one for it. It cannot be recovered without a reinstall: ${how}." ;;
+  esac
+  (umask 077; printf '%s\n' "$t" > "${file}.tmp") && mv "${file}.tmp" "$file" \
+    || { rm -f "${file}.tmp"; error "Apple container: could not write ${file}."; }
+  TB_MAC_CT_NODE_TOKEN="$t"
 }
 
 # _mac_ct_ensure_node -- the node on the running system (part 2), Ready, recorded, and
@@ -758,7 +862,7 @@ _mac_ct_wait_node_ready() {
 # volume, and refuses a container or a volume of its name that nothing shows this
 # installer made.
 _mac_ct_ensure_node() {
-  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol=""
+  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state
   _native_k3s_check_version
   TB_K3S_ON_MAC=1
   root="$(_mac_ct_install_root)" && dir="$(_mac_ct_node_dir)" \
@@ -774,20 +878,39 @@ _mac_ct_ensure_node() {
   cfg="$(_mac_ct_node_config "$node" "$cidrs")" || error "Apple container: could not render the node's k3s config (above)."
   # The node is k3s whatever this run resolved: never k3d's Docker Desktop reservation.
   kubelet="$(TRACEBLOC_SUBSTRATE_RESOLVED=k3s _render_kubelet_config)" || error "Apple container: could not render the node's kubelet drop-in."
-  _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size"
-  want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
   if [[ -e "${dir}/run-args" ]]; then
     have="$(cat "${dir}/run-args")" || error "Apple container: ${dir}/run-args cannot be read, so this run cannot tell how the node was created."
   fi
   # The config is frozen before the node first reads it, as on Linux.
   printf '%s\n' "$cfg" > "${cfgfile}.tmp" && mv "${cfgfile}.tmp" "$cfgfile" \
     || { rm -f "${cfgfile}.tmp"; error "Apple container: could not write ${cfgfile}."; }
+  # What is there of the node, settled before its token is read from it: a container
+  # or a volume nothing shows this installer made is refused before anything runs in it.
   rc=0; _mac_ct_node_exists "$ct" "$name" || rc=$?
   [[ "$rc" != 2 ]] \
     || error "Apple container: the container system did not answer whether a container named ${name} exists, so this run cannot tell. It's safe to re-run this installer."
   if [[ "$rc" == 0 ]]; then
     [[ -n "$have" ]] \
       || error "Apple container: a container named ${name} already exists, and nothing shows this installer created it (${dir}/run-args is missing). This installer does not delete it: remove it yourself (\"${ct}\" delete --force ${name}), then re-run."
+    state=container
+  else
+    rc=0; _mac_ct_volume_exists "$ct" "$name" || rc=$?
+    [[ "$rc" != 2 ]] \
+      || error "Apple container: the container system did not answer whether a volume named ${name} exists, so this run cannot tell. It's safe to re-run this installer."
+    if [[ "$rc" == 0 ]]; then
+      [[ -n "$have" ]] \
+        || error "Apple container: a volume named ${name} already exists, and nothing shows this installer created it, so a new node would silently take over its data. This installer does not delete it: remove it yourself (\"${ct}\" volume delete ${name}), then re-run."
+      state=volume
+    else
+      mkvol=1; state=fresh
+    fi
+  fi
+  # The token goes first, before run-args: whatever a run cut off half-way leaves, a
+  # re-run must start with the token the node's data is encrypted with.
+  _mac_ct_node_token "$ct" "$name" "$dir" "$state"
+  _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN"
+  want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
+  if [[ "$state" == container ]]; then
     if [[ "$have" != "$want" ]]; then
       log "Apple container: the node's settings changed since it was created, so it is recreated on its volume ${name}; its data is kept."
       # A stop that fails is not the end: a node that is already stopped may refuse it,
@@ -805,15 +928,6 @@ _mac_ct_ensure_node() {
       esac
     fi
   else
-    rc=0; _mac_ct_volume_exists "$ct" "$name" || rc=$?
-    [[ "$rc" != 2 ]] \
-      || error "Apple container: the container system did not answer whether a volume named ${name} exists, so this run cannot tell. It's safe to re-run this installer."
-    if [[ "$rc" == 0 ]]; then
-      [[ -n "$have" ]] \
-        || error "Apple container: a volume named ${name} already exists, and nothing shows this installer created it, so a new node would silently take over its data. This installer does not delete it: remove it yourself (\"${ct}\" volume delete ${name}), then re-run."
-    else
-      mkvol=1
-    fi
     start=run
   fi
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -826,7 +940,8 @@ _mac_ct_ensure_node() {
         || error "Couldn't pull the k3s node image ${image}. Check that this machine can reach registry-1.docker.io, then re-run."
       # run-args goes first, before the volume and the container: whatever a run cut off
       # half-way leaves, a re-run must recognise as this installer's.
-      printf '%s\n' "$want" > "${dir}/run-args.tmp" && mv "${dir}/run-args.tmp" "${dir}/run-args" \
+      # 0600: the argv carries the join token.
+      (umask 077; printf '%s\n' "$want" > "${dir}/run-args.tmp") && mv "${dir}/run-args.tmp" "${dir}/run-args" \
         || { rm -f "${dir}/run-args.tmp"; error "Apple container: could not write ${dir}/run-args."; }
       [[ -z "$mkvol" ]] || _bounded 60 "$ct" volume create --opt "size=${TB_MAC_CT_NODE_VOLUME_SIZE}" "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
         || error "Apple container: could not create the node's volume ${name}."

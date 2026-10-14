@@ -10,9 +10,9 @@
 #
 #  NON-MUTATING, with exactly ONE narrow exception named below. It must never
 #  start the cluster, run helm, mint a credential, or write anything. Every
-#  probe is read-only (`k3d cluster list`, `helm list`/`get values`,
-#  `kubectl get`) and BOUNDED (short timeouts) so it can't hang, and it is
-#  NEVER fatal.
+#  probe is read-only (`k3d cluster list`, `systemctl is-active k3s`,
+#  `helm list`/`get values`, `kubectl get`) and BOUNDED (short timeouts) so it
+#  can't hang, and it is NEVER fatal.
 #
 #  THE EXCEPTION — one unprivileged, idempotent runtime nudge (#741). On macOS,
 #  `runtime-down` may `open -a Docker` and wait up to 60s for the daemon. It is
@@ -43,7 +43,8 @@
 #  Sets INSTALL_STATE (+ INSTALL_STATE_REASON, a short machine-readable tag of
 #  what is off):
 #    fresh    — no cluster, or a cluster with no tracebloc release.
-#    healthy  — all four signals above true. The ONLY short-circuit.
+#    healthy  — all four signals above true. The ONLY short-circuit, and on
+#               k3d only: a healthy native k3s goes on (assess_existing_install).
 #    degraded — a partial state (cluster stopped, workload not Ready, CLI
 #               missing, or any other partial state).
 #               A down container runtime is degraded/runtime-down: nothing below
@@ -486,6 +487,15 @@ _assess_classify() {
     return 0
   fi
 
+  _assess_classify_release
+}
+
+# _assess_classify_release — the reads both substrates share once their cluster
+# runs: the tracebloc release, a wedged helm op, the credential, the workloads, the
+# CLI and the GPU request, through helm and kubectl on the current context (native
+# k3s names it, _assess_classify_k3s). Sets INSTALL_STATE (+ INSTALL_STATE_REASON),
+# from fresh/cluster-no-release to healthy.
+_assess_classify_release() {
   # Cluster is running (live API). Is a tracebloc release installed on it? Reuse
   # the shared jq-free probe (sets INSTALLED_CLIENT_NS) so this can never disagree
   # with the Helm-step / #303 ownership guards on "what runs here". A running
@@ -529,9 +539,16 @@ _assess_classify() {
     return 0
   fi
 
+  # The CLI reasons only where the run installs the CLI. In a WSL run the CLI is the
+  # Windows host's and step b installs none (install-k8s.sh asks the same
+  # tb_wsl_phase), so cli-missing, cli-outdated and cli-behind-latest cannot occur
+  # in tracebloc's distro: the Windows installer keeps its own CLI current.
+  local cli_here=1
+  [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] || cli_here=0
+
   # Env is up and Ready, but the CLI is missing => degraded (the normal flow
   # reinstalls the CLI).
-  if ! _assess_cli_present; then
+  if [[ "$cli_here" == 1 ]] && ! _assess_cli_present; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-missing"
     return 0
   fi
@@ -539,7 +556,7 @@ _assess_classify() {
   # Present, but too old to keep itself current (client#707). Without this the
   # healthy fast-path pins a user to whatever CLI they first installed, forever
   # and silently — the ONE thing on the machine that no auto-upgrade reaches.
-  if _assess_cli_outdated; then
+  if [[ "$cli_here" == 1 ]] && _assess_cli_outdated; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-outdated"
     return 0
   fi
@@ -560,13 +577,80 @@ _assess_classify() {
   # Ordered AFTER the floor check so a below-floor CLI stays cli-outdated (a
   # mandatory full reinstall), and inert on ordinary runs because
   # _assess_cli_behind_latest gates itself on TB_UPGRADE_CLI.
-  if _assess_cli_behind_latest; then
+  if [[ "$cli_here" == 1 ]] && _assess_cli_behind_latest; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-behind-latest"
     return 0
   fi
 
   INSTALL_STATE="healthy"; INSTALL_STATE_REASON="ns:${ns}"
   return 0
+}
+
+# _assess_classify_k3s — _assess_classify on native k3s (client-dev#1926), on Linux
+# and in tracebloc's WSL distro: the same INSTALL_STATE / INSTALL_STATE_REASON
+# vocabulary, so main()'s handling of each applies unchanged (the degraded copy,
+# provision.sh's --reissue on credential-rejected, the CLI-only upgrade), while a
+# healthy k3s goes on to the normal flow instead of the hand-off
+# (assess_existing_install). k3s's own service stands where Docker and the k3d
+# listing stand:
+#   tracebloc's k3s files are not here     fresh/no-cluster (a k3s someone else set
+#                                          up among them: the create path refuses it)
+#   systemd says k3s is stopped            degraded/cluster-stopped (the create
+#                                          path's _native_k3s_ensure_running starts it)
+#   systemd gives no state, or the API     degraded/cluster-indeterminate
+#   does not answer on the k3s context
+# Below that the release reads are k3d's own (_assess_classify_release). In the
+# distro the cluster run reads the same, but for the CLI: the CLI reasons cannot
+# occur there (_assess_classify_release), and the client run is not assessed at all
+# (assess_existing_install).
+#
+# runtime-down cannot occur here: k3s runs its own containerd inside the k3s service,
+# so there is no runtime apart from the cluster, and a runtime that is down is a k3s
+# that is stopped: cluster-stopped. Nothing here asks Docker.
+#
+# BY NAME, as _native_k3s_release_storage's early read is: before the create path the
+# user's current context can be any cluster they work with, and a release read there
+# is that cluster's (its credential judged rejected rotates this machine's). The
+# release reads are k3d's,
+# which ask the current context, so the context is named the way kubeconfig allows:
+# the first KUBECONFIG file that sets current-context wins it, and the user's
+# kubeconfig after it supplies the cluster and the credential. That file holds one
+# context name and nothing secret, and is removed once the reads are done. KUBECONFIG
+# and HELM_KUBECONTEXT are set for the reads alone (bash restores a variable assigned
+# on a function call when the function returns), so step c's merge still finds the
+# user's own. With KUBECONFIG unset, k3s's kubectl reads root's k3s.yaml, never the
+# user's kubeconfig, so the merge's target is named then (_native_k3s_kubeconfig_target).
+_assess_classify_k3s() {
+  INSTALL_STATE="fresh"; INSTALL_STATE_REASON="no-cluster"
+  _native_k3s_files_here || return 0
+  local state rc=0 ctx pin
+  state="$(_native_k3s_run_state)" || rc=$?
+  case "$rc" in
+    0) : ;;
+    1) INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-stopped"; return 0 ;;
+    *) log "assess: native k3s: 'systemctl is-active k3s' answered '${state:-nothing}', so its state is not read."
+       INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0 ;;
+  esac
+  ctx="$(_native_k3s_context)"
+  pin="$(mktemp "${TMPDIR:-/tmp}/tracebloc-assess-ctx-XXXXXX" 2>/dev/null)" || pin=""
+  if [[ -z "$pin" ]] || ! printf 'apiVersion: v1\nkind: Config\ncurrent-context: %s\n' "$ctx" >"$pin"; then
+    [[ -z "$pin" ]] || rm -f "$pin"
+    log "assess: native k3s: no temporary file to name context ${ctx} in, so its release is not read."
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0
+  fi
+  KUBECONFIG="${pin}:${KUBECONFIG:-$(_native_k3s_kubeconfig_target)}" HELM_KUBECONTEXT="$ctx" _assess_k3s_on_context "$ctx"
+  rm -f "$pin"
+}
+
+# _assess_k3s_on_context CTX — the API on context CTX (cluster.sh's _api_answers,
+# bounded per request), then the release reads. Called with KUBECONFIG naming CTX
+# current, by _assess_classify_k3s.
+_assess_k3s_on_context() {
+  if ! _api_answers "$1"; then
+    log "assess: native k3s: the API did not answer on context $1 (or the kubeconfig has no such context), so its release is not read."
+    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0
+  fi
+  _assess_classify_release
 }
 
 # _assess_handoff — hand a healthy machine to the tracebloc home screen, then
@@ -682,23 +766,36 @@ assess_existing_install() {
     return 0
   fi
 
-  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): one log line, and no classification. Every
-  # read below asks Docker or k3d, so on k3s they would call a machine with a
-  # tracebloc k3s on it fresh. The k3s presence checks (a tracebloc k3s, a
-  # foreign one, a live k3d) belong to the k3s create path, where they refuse;
-  # this gate returns to the normal flow.
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    log "assess: native k3s -- the stop-and-check assessment does not read k3s; continuing to the install."
+  # The Windows installer's client run in tracebloc's WSL distro: the cluster run
+  # before it assessed this machine, and this run installs the credential the
+  # Windows installer handed it. Read again, the gate would repeat the cluster run's
+  # verdict and its copy in the middle of that install.
+  if [[ "$(tb_wsl_phase 2>/dev/null)" == "client" ]]; then
+    log "assess: the WSL client run -- the cluster run assessed this machine; continuing to the install."
     return 0
   fi
 
-  _assess_classify
+  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) is read from the host
+  # (_assess_classify_k3s): _assess_classify asks Docker and k3d, and on k3s would
+  # call a machine with a tracebloc k3s on it fresh. The k3s presence checks (a
+  # tracebloc k3s, a foreign one, a live k3d) stay the k3s create path's, where they
+  # refuse. On macOS, native k3s is the node in Apple's VM (mac-container.sh), with
+  # no systemd or k3s files on the Mac to read: one log line, and the normal flow.
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    if [[ "${OS:-$(uname -s 2>/dev/null)}" != "Linux" ]]; then
+      log "assess: native k3s on ${OS:-$(uname -s 2>/dev/null)} runs in Apple's VM, which the stop-and-check assessment does not read; continuing to the install."
+      return 0
+    fi
+    _assess_classify_k3s
+  else
+    _assess_classify
+  fi
   log "assess: INSTALL_STATE=${INSTALL_STATE} reason=${INSTALL_STATE_REASON:-}"
 
   # backend#2253: an explicit `tracebloc upgrade` on a box that is healthy on
   # every axis EXCEPT that its CLI is behind latest. Do NOT hand off (that no-op
   # is the bug) and do NOT run the degraded ceremony below — RETURN so main()
-  # updates just the CLI. Kept out of the case switch on purpose: this file stays
+  # updates just the CLI (on k3d; on native k3s main() runs the full install). Kept out of the case switch on purpose: this file stays
   # a read-only classifier, and the CLI-install mutation lives in main() (next to
   # create_cluster / install_client_helm), not behind assess.sh's non-mutating
   # contract.
@@ -708,6 +805,16 @@ assess_existing_install() {
 
   case "$INSTALL_STATE" in
     healthy)
+      # NATIVE K3S DOES NOT HAND OFF. RFC-0175 D4 and D11: every installer re-run on
+      # k3s moves the node forward (the binary upgraded in place, its files rewritten
+      # and k3s restarted when they changed), and that is step c's work, which a
+      # hand-off would skip on exactly the machines it serves. The four checks below
+      # are k3d's (they read its node containers). So a healthy k3s goes on to the
+      # normal flow, as fresh/cluster-no-release does: no copy, one log line.
+      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+        log "assess: native k3s is healthy; continuing, so step c moves the node forward."
+        return 0
+      fi
       echo ""
       # A healthy cluster can still be running a DRIFTED k3s (born unpinned, on an
       # older installer, or with K8S_VERSION=latest) — the #547 STEADY STATE. This
@@ -741,7 +848,16 @@ assess_existing_install() {
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
         cli-outdated)       info "Your tracebloc CLI is out of date — updating it." ;;
         pending-wedge)      info "A previous update was interrupted — recovering it and finishing setup." ;;
-        credential-rejected) info "tracebloc no longer accepts this machine's credential, so it shows offline — issuing it a new one and reconnecting." ;;
+        # The repair is provision.sh's `client create --reissue`, which the WSL cluster
+        # run never reaches: it ends at step c, and the client run, a new process, takes
+        # the credential the Windows installer hands it. So that run says what it found
+        # and promises no repair it does not run.
+        credential-rejected)
+          if [[ "$(tb_wsl_phase 2>/dev/null)" == "cluster" ]]; then
+                            info "tracebloc no longer accepts this machine's credential, so it shows offline. This run sets up the cluster; the Windows installer registers this machine after it."
+          else
+                            info "tracebloc no longer accepts this machine's credential, so it shows offline — issuing it a new one and reconnecting."
+          fi ;;
         gpu-unsupported)    info "Your secure environment asks for a GPU tracebloc's training images can't use — switching it to CPU mode." ;;
         # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (Bugbot Medium, client#984).
         # _assess_classify degrades to this when the k3d listing does not answer, and
@@ -770,8 +886,14 @@ assess_existing_install() {
         # path — a small over-claim, but exactly the kind this whole change
         # removes. What both paths share is the only thing this line now claims:
         # a k3d listing did not answer, and nothing is being concluded from it.
+        # On native k3s the read that did not answer is systemd's or the k3s API's
+        # (_assess_classify_k3s), never a k3d listing.
         cluster-indeterminate)
-                            info "Couldn't read the k3d cluster listing on this machine — it either didn't complete or k3d couldn't answer it. Continuing without drawing a conclusion from a read that didn't answer; setup reads the listing again before it acts." ;;
+          if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+                            info "Couldn't read this machine's k3s — systemd or the k3s API didn't answer. Continuing without drawing a conclusion from a read that didn't answer; setup reads it again before it acts."
+          else
+                            info "Couldn't read the k3d cluster listing on this machine — it either didn't complete or k3d couldn't answer it. Continuing without drawing a conclusion from a read that didn't answer; setup reads the listing again before it acts."
+          fi ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
       echo ""

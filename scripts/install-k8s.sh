@@ -364,7 +364,12 @@ main() {
   # this branch and falls through to the normal flow below. Guarded like the other
   # cross-file steps: a stale bootstrap without install-cli.sh falls through and
   # the full (idempotent) flow updates the CLI anyway.
+  # NOT on native k3s: every installer re-run there moves the node forward (RFC-0175
+  # D4/D11: the binary upgraded in place, its files rewritten and k3s restarted when
+  # they changed), which the CLI-only exit would skip. So `tracebloc upgrade` on k3s
+  # always runs the full install, and step b updates the CLI on the way.
   if [[ "${INSTALL_STATE:-}" == "degraded" && "${INSTALL_STATE_REASON:-}" == "cli-behind-latest" ]] \
+     && [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]] \
      && declare -F upgrade_cli_only >/dev/null 2>&1; then
     upgrade_cli_only     # updates just the CLI and exits 0
   fi
@@ -434,6 +439,9 @@ main() {
     if declare -F telemetry_run_handed_on >/dev/null 2>&1; then
       telemetry_run_handed_on
     fi
+    # What the stop-and-check gate found, for the host's account steps (common.sh):
+    # written last, so a file there means this run reached its exit 0.
+    tb_wsl_handover_write
     success "The cluster is ready. The Windows installer registers this machine next."
     _tb_done=1
     exit 0
