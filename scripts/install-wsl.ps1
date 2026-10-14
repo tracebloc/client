@@ -453,7 +453,7 @@ function Confirm-WslReady {
 #  (backend#5416) that decides it:
 #    TODO(S-W row 3): `wsl --import tracebloc "$env:LOCALAPPDATA\tracebloc\wsl"
 #      <rootfs> --version 2` as the daily user, unelevated, after Confirm-WslDistroImage.
-#    TODO(S-W row 5): the per-user logon task that keeps the distro running.
+#    The per-user logon task that keeps the distro running is section 3's.
 #    TODO(S-W rows 9 and 10): the proxy and the host's CA roots inside the distro.
 #      The host-side fetch below honours HTTPS_PROXY like every bootstrap download.
 #    TODO(S-W row 13): the GPU device the distro advertises.
@@ -972,8 +972,98 @@ function Get-WslDistroImage {
 }
 
 # =============================================================================
-#  3. The logon task. TODO(S-W row 5): the task that keeps the distro running.
+#  3. The logon task: what keeps the distro running.
+#
+#  WSL stops a distro seconds after its last wsl.exe exits, and k3s with it (S-W
+#  row 5a). A task of the daily user's own, at their logon, holds one wsl.exe open
+#  in the distro for the session: `sleep infinity`, started by a launcher that
+#  shows no window. It is S-W row 5b's block (backend#5416's kit), the launcher
+#  that row chose, registered unelevated at the Task Scheduler root as
+#  tracebloc-keepalive, which the install record names \tracebloc-keepalive.
+#
+#  It waits only for the distro to run. k3s Ready is the core's own wait, in its
+#  cluster run: a distro restart has measured 191 s to Ready (backend#5471), so no
+#  wait here may stand in for that one.
+#
+#  PROVISIONAL until rows 6-8 (idle, sleep, restart) hold on both S-W machines,
+#  Windows 11 and Server 2025. NOTHING CALLS THIS YET: it follows the import
+#  (section 2, S-W row 3).
+#    TODO(part 4): the install record's logon-task artefact, once cli-dev's
+#      `delete` knows the kind.
+#    TODO(part 5): the task's removal.
 # =============================================================================
+
+$KeepaliveTaskName = 'tracebloc-keepalive'
+$KeepaliveTaskId = "\$KeepaliveTaskName"
+$KeepaliveStartTimeoutSec = 60
+
+# THE LAUNCHER, named here and nowhere else: a program under %WINDIR% and its
+# arguments, put in front of wsl.exe. conhost --headless runs it with no console
+# window (S-W row 5b, backend#5471, Windows 11); wsl.exe started directly showed
+# one. @() starts wsl.exe directly.
+$KeepaliveLauncher = @('System32\conhost.exe', '--headless')
+
+# What the logon task runs: the launcher, then wsl.exe holding the distro open.
+function Get-KeepaliveAction {
+  $wsl = "$env:WINDIR\System32\wsl.exe"
+  $hold = "-d $WslDistroName --exec /bin/sleep infinity"
+  if (@($KeepaliveLauncher).Count -eq 0) { return [pscustomobject]@{ Execute = $wsl; Argument = $hold } }
+  return [pscustomobject]@{ Execute = "$env:WINDIR\$($KeepaliveLauncher[0])"; Argument = "$($KeepaliveLauncher[1]) $wsl $hold" }
+}
+
+# The account the task runs as, as Windows names it: a seam, since the test
+# suite's .NET has no Windows identity.
+function Get-BootstrapIdentityName { return [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+
+# The task's state and last result, for a refusal.
+function Get-KeepaliveTaskState {
+  $t = Get-ScheduledTask -TaskName $KeepaliveTaskName -ErrorAction SilentlyContinue
+  if (-not $t) { return 'not registered' }
+  $i = $t | Get-ScheduledTaskInfo
+  return ('{0}, last result 0x{1:X8}' -f $t.State, [int64]$i.LastTaskResult)
+}
+
+# Registers the logon task for the user running this bootstrap, unelevated, and
+# starts it now, so the distro runs before the core does. Re-registering replaces
+# it. Refuses when the task cannot be registered or started, or when the distro
+# has not started from it within TIMEOUTSEC.
+function Register-KeepaliveTask {
+  param([int]$TimeoutSec = $KeepaliveStartTimeoutSec)
+  $act = Get-KeepaliveAction
+  $a = New-ScheduledTaskAction -Execute $act.Execute -Argument $act.Argument
+  $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -Hidden
+  try {
+    # The issue's form first, then the account as Windows names it (the kit's order).
+    # A trigger only stores the name: Register-ScheduledTask resolves it, so a name
+    # the scheduler refuses throws there, and the next one is tried. The last one's
+    # refusal is the one named.
+    $users = @("$env:USERDOMAIN\$env:USERNAME", (Get-BootstrapIdentityName))
+    for ($i = 0; $i -lt $users.Count; $i++) {
+      $t = New-ScheduledTaskTrigger -AtLogOn -User $users[$i]
+      try {
+        Register-ScheduledTask -TaskName $KeepaliveTaskName -Action $a -Trigger $t -Settings $s -Force -ErrorAction Stop | Out-Null
+        break
+      } catch {
+        if ($i -eq $users.Count - 1) { throw }
+      }
+    }
+    Start-ScheduledTask -TaskName $KeepaliveTaskName -ErrorAction Stop
+  } catch {
+    throw "The logon task that keeps the tracebloc WSL distro running could not be set up for this user ($($_.Exception.Message)). Run this installer again."
+  }
+  # Two clocks, as the core's waits keep them: the seconds slept, so a stubbed
+  # sleep still ends it, and the wall clock, since each probe takes time too.
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $slept = 0
+  while (-not (Test-WslDistroRunning)) {
+    if ($slept -ge $TimeoutSec -or (Get-Date) -ge $deadline) {
+      throw "The tracebloc WSL distro did not start from its logon task within $TimeoutSec seconds (the task: $(Get-KeepaliveTaskState)). Run this installer again."
+    }
+    Start-Sleep -Seconds 1
+    $slept++
+  }
+  Ok "The tracebloc WSL distro runs, and starts again at each sign-in."
+}
 
 # =============================================================================
 #  4. The host GPU check.

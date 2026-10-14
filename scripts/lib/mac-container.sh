@@ -542,6 +542,14 @@ _mac_ct_start_system() {
 #  config names that file (`token-file`). A node made before the pin keeps the token
 #  it already has (_mac_ct_node_token), never a fresh one.
 #
+#  The volume is made with an ext4 journal (client-dev#1983). Apple container makes a
+#  volume without one unless `--opt journal=` asks for it, and a VM killed while the
+#  node writes is a power loss to that filesystem: without a journal it came back
+#  corrupt ("structure needs cleaning", directories containerd's metadata still names
+#  gone), and containerd then refused to start on every start after. A volume an
+#  earlier installer made without a journal cannot be given one in place: the run says
+#  so, and how to get one, and goes on.
+#
 #  "Ready" is a Ready condition whose heartbeat is newer than the start this run
 #  made: for about 40 s after a restart the stored status is the old one (S-M).
 #
@@ -554,6 +562,11 @@ TB_MAC_CT_NODE_IP="192.0.2.10"
 TB_MAC_CT_NODE_IFACE="eth0"
 # The volume's size: a sparse ext4 image, so it takes only what is written.
 TB_MAC_CT_NODE_VOLUME_SIZE="64g"
+# The volume's ext4 journal mode (`--opt journal=`): metadata journalled, data written
+# before the metadata that names it, as Linux mounts ext4 by default (client-dev#1983).
+TB_MAC_CT_NODE_VOLUME_JOURNAL="ordered"
+# What a node that cannot be repaired in place needs, said by every refusal that ends there.
+TB_MAC_CT_NODE_REINSTALL='run "tracebloc delete" (it removes the node and its data), then install again'
 # What the node needs Rosetta for is an amd64 image; this file is there once it is installed.
 TB_MAC_CT_ROSETTA_RUNTIME="/Library/Apple/usr/libexec/oah/libRosettaRuntime"
 # Where the entrypoint puts the join token inside the node, and the file the config's
@@ -743,6 +756,16 @@ _mac_ct_volume_exists() {
   awk -v n="$2" 'NR > 1 && $1 == n { found = 1 } END { exit !found }' <<<"$out"
 }
 
+# _mac_ct_volume_journaled CT NAME -- 0 when volume NAME was made with an ext4 journal:
+# its options, as `volume inspect` prints them, name one; 1 when they name none; 2 when
+# this run cannot tell (the inspect failed, or printed no options at all).
+_mac_ct_volume_journaled() {
+  local out
+  out="$(_bounded 30 "$1" volume inspect "$2" </dev/null 2>/dev/null)" || return 2
+  grep -q '"options"' <<<"$out" || return 2
+  grep -Eq '"journal"[[:space:]]*:[[:space:]]*"[a-z]' <<<"$out"
+}
+
 # _mac_ct_node_ready_since CT NAME NODE SINCE -- 0 when node NODE's Ready condition is
 # True with a heartbeat at or after SINCE (UTC, %Y-%m-%dT%H:%M:%SZ), asked inside the
 # node. Both times are that format, so their digits compare as numbers. The heartbeat
@@ -819,7 +842,7 @@ TB_MAC_CT_NODE_TOKEN_RE='^[0-9a-f]{32}$'
 TB_MAC_CT_NODE_TOKEN=""
 _mac_ct_node_token() {
   local ct="$1" name="$2" dir="$3" state="$4" file="${3}/token" t="" passwd="" tok="" p="" rc
-  local how="run \"tracebloc delete\" (it removes the node and its data), then install again"
+  local how="$TB_MAC_CT_NODE_REINSTALL"
   TB_MAC_CT_NODE_TOKEN=""
   if [[ -e "$file" ]]; then
     t="$(cat "$file")" \
@@ -905,6 +928,16 @@ _mac_ct_ensure_node() {
       mkvol=1; state=fresh
     fi
   fi
+  # A volume an earlier installer made without a journal is kept: it cannot gain one in
+  # place, and the node on it runs. The run says what it risks and how to get one.
+  if [[ "$state" != fresh ]]; then
+    rc=0; _mac_ct_volume_journaled "$ct" "$name" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) warn "Apple container: the node's volume ${name} was made without an ext4 journal, by an earlier installer. A crash or power loss while the node runs can corrupt it, and the node then never starts again. It cannot be given one in place (the node's image carries no e2fsprogs). To get a volume with a journal, ${TB_MAC_CT_NODE_REINSTALL}." ;;
+      *) warn "Apple container: this run cannot tell whether the node's volume ${name} has an ext4 journal (\"${ct}\" volume inspect ${name} did not say). Without one, a crash or power loss while the node runs can corrupt it." ;;
+    esac
+  fi
   # The token goes first, before run-args: whatever a run cut off half-way leaves, a
   # re-run must start with the token the node's data is encrypted with.
   _mac_ct_node_token "$ct" "$name" "$dir" "$state"
@@ -943,7 +976,7 @@ _mac_ct_ensure_node() {
       # 0600: the argv carries the join token.
       (umask 077; printf '%s\n' "$want" > "${dir}/run-args.tmp") && mv "${dir}/run-args.tmp" "${dir}/run-args" \
         || { rm -f "${dir}/run-args.tmp"; error "Apple container: could not write ${dir}/run-args."; }
-      [[ -z "$mkvol" ]] || _bounded 60 "$ct" volume create --opt "size=${TB_MAC_CT_NODE_VOLUME_SIZE}" "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+      [[ -z "$mkvol" ]] || _bounded 60 "$ct" volume create --opt "size=${TB_MAC_CT_NODE_VOLUME_SIZE}" --opt "journal=${TB_MAC_CT_NODE_VOLUME_JOURNAL}" "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
         || error "Apple container: could not create the node's volume ${name}."
       # set-u-safe: _mac_ct_node_argv seeds it with the run verb
       _bounded 300 "$ct" "${TB_MAC_CT_NODE_ARGV[@]}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \

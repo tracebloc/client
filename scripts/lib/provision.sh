@@ -235,6 +235,68 @@ _show_create_notices() {
   '
 }
 
+# ── a client ID with no password, on a terminal (backend#5025 O-13, client-dev#1504) ──
+#
+# The clients page's + creates a client and shows its ID and password once; its
+# install command carries the ID (`curl … | TRACEBLOC_CLIENT_ID=<id> bash`) and
+# never the password, which would land in shell history. Before this, an ID with
+# no password was no preset at all: the installer signed in in the browser and
+# registered a SECOND client, and the + client stayed Offline for good. Now the
+# installer asks for that client's password here, without echoing it, and the
+# preset path below installs that client: no device sign-in, no second client.
+#
+# Gated on a controlling terminal (_prompt_tty: /dev/tty readable and writable),
+# NOT on `[[ -t 0 ]]`: under `curl … | bash` stdin is the piped installer, never
+# the terminal, so a stdin check would never ask. With no terminal nothing
+# changes (the ID alone is no preset, as before). The password and values-file
+# presets, and the Windows installer's handed-over credential, never reach it.
+# _provisioning_preset is deliberately left as it is: this only fills in the
+# password it reads.
+_provision_wants_preset_password() {
+  [[ -z "${TRACEBLOC_VALUES_FILE:-}" && -z "${TB_STDIN_CRED_FILE:-}" ]] || return 1
+  [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]
+}
+
+# Asks for the password (read -s from TRACEBLOC_TTY, up to 3 tries), checks it
+# with verify_credentials when that is loaded, and sets TRACEBLOC_CLIENT_PASSWORD
+# in this shell -- not exported, so no child process inherits it. A rejected
+# password is asked again; an inactive account, three failures, or a terminal
+# that gives no input (EOF) stop with the remedy. Never prints the password.
+_provision_prompt_preset_password() {
+  local _pw="" _try _rc _status
+  info "Installing the client with ID ${TRACEBLOC_CLIENT_ID}."
+  hint "Enter the client password shown when it was created (typing is hidden)."
+  for _try in 1 2 3; do
+    _pw=""
+    printf '  Client password: ' >/dev/tty 2>/dev/null || true
+    _rc=0; IFS= read -r -s _pw <"$TRACEBLOC_TTY" || _rc=1
+    printf '\n' >/dev/tty 2>/dev/null || true
+    # The same cleaning the typed-credential path applies (_sanitize_credential),
+    # without trimming: a password is taken as it is.
+    _pw="$(_strip_paste_garbage "$_pw")"
+    if [[ -z "$_pw" ]]; then
+      [[ "$_rc" -ne 0 ]] && break    # EOF / no interactive input -- asking again won't help
+      warn "The client password cannot be empty."
+      continue
+    fi
+    _status="unverified"
+    if declare -F verify_credentials >/dev/null 2>&1; then
+      _status="$(verify_credentials "$TRACEBLOC_CLIENT_ID" "$_pw")"
+    fi
+    case "$_status" in
+      valid|unverified)
+        TRACEBLOC_CLIENT_PASSWORD="$_pw"
+        return 0 ;;
+      inactive)
+        error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
+      *)
+        warn "That password was rejected for client ID ${TRACEBLOC_CLIENT_ID}." ;;
+    esac
+    _pw=""
+  done
+  error "No valid password for client ID ${TRACEBLOC_CLIENT_ID}. Copy it from the page where the client was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
+}
+
 provision_client() {
   # No step header here — main() prints "d) Registering this machine". The
   # tracebloc CLI was installed in step b (Install what tracebloc needs); this
@@ -248,6 +310,12 @@ provision_client() {
     info "Using the credential the Windows installer handed over."
     _provision_take_credential "$TB_STDIN_CRED_FILE"
     return 0
+  fi
+  # A client ID with no password, on a terminal: ask for it (backend#5025 O-13).
+  # _prompt_tty only checks the node's mode; _login_tty_ok really opens it, so a
+  # headless run (node present, no controlling terminal) keeps the browser sign-in.
+  if _provision_wants_preset_password && _prompt_tty && _login_tty_ok; then
+    _provision_prompt_preset_password
   fi
   if _provisioning_preset; then
     info "Using the credentials you supplied — skipping browser sign-in."

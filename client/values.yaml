@@ -2921,17 +2921,18 @@ narrowEdgeuserByEnv:
 # (tracebloc.assertDropEdgeuserIsSafe) and jobs-manager refuses it again at startup.
 #
 # Flipped per environment (dev first) only after narrowing has soaked on that
-# fleet. TRUE for dev (backend#5427): narrowEdgeuser has been baked-on across dev
-# for weeks, so edgeuser is already USAGE-only and unused there — DROP is the clean
-# finish. stg and prod stay OFF until dev has soaked dropped and the Part C
-# telemetry confirms the fleet is edgeuser-free. UNSET override => the effective
+# fleet. TRUE for dev and stg (backend#5427): narrowEdgeuser has been baked-on
+# across both for weeks, so edgeuser is already USAGE-only and unused there — DROP
+# is the clean finish. Dev was verified retired live (telemetry edgeuser_present
+# false, Part C) before stg flipped. prod stays OFF until stg has soaked dropped
+# and the telemetry confirms stg is edgeuser-free. UNSET override => the effective
 # value comes from dropEdgeuserByEnv, keyed on the resolved CLIENT_ENV. Mirrors
 # narrowEdgeuser.
 dropEdgeuser:
 
 dropEdgeuserByEnv:
   dev: true
-  stg: false
+  stg: true
   prod: false
 
 # Optional operator pin for the tb_credmgr account password (mirrors

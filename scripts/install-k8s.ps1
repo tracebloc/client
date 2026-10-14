@@ -7834,6 +7834,47 @@ function Get-ProvisioningPreset {
   return [bool]($env:TRACEBLOC_CLIENT_ID -and $env:TRACEBLOC_CLIENT_PASSWORD)
 }
 
+# -- a client ID with no password, at a console (backend#5025 O-13, client-dev#1504)
+# The clients page's + shows the new client's ID and password once, and its
+# install command carries the ID only (the password would land in the shell's
+# history). Before this, an ID with no password was no preset: the installer
+# signed in in the browser and registered a SECOND client, and the + client
+# stayed Offline. Now Invoke-ProvisionClient asks for that client's password
+# (Read-Host -AsSecureString, nothing echoed) and installs it as a preset: no
+# browser sign-in, no second client. Only when Test-CanPrompt says someone can
+# answer; otherwise nothing changes. Get-ProvisioningPreset is left as it is: the
+# typed password is kept in $script:TB_PRESET_PASSWORD, never in $env:, so no
+# child process inherits it. Bash twin: provision.sh _provision_prompt_preset_password.
+function Test-TbWantsPresetPassword {
+  return [bool]($env:TRACEBLOC_CLIENT_ID -and -not $env:TRACEBLOC_CLIENT_PASSWORD)
+}
+
+# Asks up to 3 times, checks each answer with Test-Credentials, and returns the
+# password; a rejected one is asked again. An inactive account, three failures or
+# a console that gives no answer end in Err with the remedy. Never prints it.
+function Read-TbPresetPassword {
+  $id = "$env:TRACEBLOC_CLIENT_ID"
+  Info "Installing the client with ID $id."
+  Hint "Enter the client password shown when it was created (typing is hidden)."
+  for ($try = 1; $try -le 3; $try++) {
+    $sec = $null
+    if (Test-CanPrompt) { try { $sec = Read-Host "  Client password" -AsSecureString } catch { $sec = $null } }
+    if ($null -eq $sec) { break }   # no answer at all -- asking again won't help
+    # NetworkCredential reads the SecureString on every platform (PtrToStringAuto
+    # reads a BSTR as UTF-8 off Windows and keeps only its first character).
+    $pw = [System.Net.NetworkCredential]::new("", $sec).Password
+    # Same cleaning as the bash twin (_strip_paste_garbage): paste markers and control
+    # characters out, nothing trimmed -- a password is taken as it is.
+    $pw = ConvertTo-SanitizedInput -Value $pw
+    if (-not $pw) { Warn "The client password cannot be empty."; continue }
+    $status = Test-Credentials -ClientId $id -ClientPassword $pw
+    if ($status -eq "valid" -or $status -eq "unverified") { return $pw }
+    if ($status -eq "inactive") { Err "This tracebloc account is not active yet. Check your email for the activation link, then re-run." }
+    Warn "That password was rejected for client ID $id."
+  }
+  Err "No valid password for client ID $id. Copy it from the page where the client was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
+}
+
 # Native-probe wrapper so Pester can mock per-invocation (a mocked FUNCTION
 # doesn't set $LASTEXITCODE, so the callers below never shell out directly).
 function Invoke-TraceblocProbe {
@@ -8119,6 +8160,140 @@ function Get-ClientIdFromSecret {
   try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)).Trim() } catch { return "" }
 }
 
+# The machine credential the client's pods authenticate with, from the release's
+# Secret (canonical key first, the legacy one as fallback), or "" when it can't be
+# read. The same bounded, one-Secret read as Get-ClientIdFromSecret, with the
+# same row rule; only the columns differ. Bash peer: _client_password_from_secret.
+function Get-ClientPasswordSecretQuery {
+  param([string]$Release, [string]$Namespace, [int]$TimeoutSec = 5)
+  return @("get", "secret", "-n", $Namespace, "-l", "app.kubernetes.io/instance=$Release",
+           "-o", "custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_PASSWORD:.data.TRACEBLOC_CLIENT_PASSWORD,CLIENT_PASSWORD:.data.CLIENT_PASSWORD",
+           "--no-headers", "--request-timeout=${TimeoutSec}s")
+}
+
+function Get-ClientPasswordFromSecret {
+  param([string]$Release, [string]$Namespace)
+  if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return "" }
+  $q = Get-ClientPasswordSecretQuery -Release $Release -Namespace $Namespace -TimeoutSec 5
+  $rows = (& kubectl @q 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { return "" }
+  $b64 = Select-ClientIdFromSecretRows -Rows $rows
+  if (-not $b64) { return "" }
+  try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) } catch { return "" }
+}
+
+# PURE: the stage (dev|stg|prod) a release was installed for, from its values
+# JSON: env.TRACEBLOC_ENV, else env.CLIENT_ENV, else prod, reduced the way the
+# chart's tracebloc.clientEnv reduces it. $null when the JSON can't be parsed.
+# Bash peer: _assess_release_client_env.
+function Select-ReleaseClientEnv {
+  param([string]$ValuesJson)
+  $vals = $null
+  try { $vals = $ValuesJson | ConvertFrom-Json -ErrorAction Stop } catch { return $null }
+  $raw = ""
+  if ($null -ne $vals -and $null -ne $vals.env) {
+    if ($vals.env.TRACEBLOC_ENV) { $raw = "$($vals.env.TRACEBLOC_ENV)".Trim() }
+    elseif ($vals.env.CLIENT_ENV) { $raw = "$($vals.env.CLIENT_ENV)".Trim() }
+  }
+  if (-not $raw) { $raw = "prod" }
+  $stage = Get-TraceblocClientEnv -Value $raw
+  if (-not $stage) { $stage = "prod" }
+  return $stage
+}
+
+# True only when tracebloc DEFINITELY refuses the machine credential in this
+# release's Secret (Test-Credentials: invalid or inactive). Read-only; any read
+# that doesn't answer is "not rejected". Bash peer: _assess_credential_rejected.
+#
+# `unverified` (unreachable, throttled, a TLS failure) is deliberately NOT a
+# rejection: a credential is never rotated on a guess.
+#
+# Test-Credentials asks the backend of THIS run's stage, and a `--reissue` would
+# mint against that same stage. So only a release installed for that stage is
+# judged: a dev or staging client re-checked from a shell without its env would
+# read `invalid` on prod and have a working credential rotated. helm has no
+# request timeout, so the values read sits behind the bounded API probe, as in
+# Get-InstalledClientInfo.
+function Test-CredentialRejected {
+  param([string]$Release, [string]$Namespace)
+  if (-not $Release -or -not $Namespace) { return $false }
+  if (-not (Test-ApiReachable)) { return $false }
+  $valsJson = (helm get values $Release -n $Namespace -o json 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { return $false }
+  $relEnv = Select-ReleaseClientEnv -ValuesJson $valsJson
+  if (-not $relEnv) { return $false }
+  $runEnv = Get-TraceblocClientEnv
+  if (-not $runEnv) { $runEnv = "prod" }
+  if ($relEnv -ne $runEnv) {
+    Log "credential check: $Namespace is a $relEnv client but this run targets $runEnv; not checking its credential."
+    return $false
+  }
+  $id = Get-ClientIdFromSecret -Release $Release -Namespace $Namespace
+  $pw = Get-ClientPasswordFromSecret -Release $Release -Namespace $Namespace
+  if (-not $id -or -not $pw) { return $false }
+  $verdict = Test-Credentials -ClientId $id -ClientPassword $pw
+  Log "credential check: stored credential for ${Namespace}: $verdict"
+  return ($verdict -eq "invalid" -or $verdict -eq "inactive")
+}
+
+# PURE: true when the release Secret held a password before this run's helm call
+# ($Previous) and holds a different one after it ($Now), i.e. pods already running
+# were started on a credential that is gone. The reissue flag covers only the
+# credential-rejected repair; a preset (the ID-only prompt, the env pair) written
+# over a running release changes it just the same (client-dev#2018), so the
+# restart keys on the observed change, not on the route. An empty $Previous is a
+# first install; an empty $Now with a $Previous is "cannot tell", and that
+# restarts. Bash peer: _credential_changed_under_pods.
+function Test-CredentialChangedUnderPods {
+  param([string]$Previous, [string]$Now)
+  return ([bool]$Previous -and ($Previous -cne $Now))
+}
+
+# Roll the workloads that authenticate with the machine credential: the release's
+# Deployments except MySQL (`mysql-client`, which never uses it) and its
+# node-agent DaemonSets (they read the mirrored Secret). The DaemonSets are found
+# by the release's instance label across ALL namespaces, never by a namespace
+# named here. Bounded and best-effort, but never silent: a listing that fails or
+# finds no Deployment counts as a failed restart, because "nothing to roll" is the
+# state that leaves every pod on the old credential. Returns $false when any
+# restart failed: the Secret already holds the new, valid credential, so no later
+# run finds it rejected and nothing would roll these pods again. The caller makes
+# that fatal; the hint is the fix. Bash peer: _restart_credential_consumers.
+function Restart-CredentialConsumers {
+  param([string]$Release)
+  $failed = $false
+  $listed = (& kubectl get deployment -n $Release -l "app.kubernetes.io/instance=$Release" `
+               -o "jsonpath={.items[*].metadata.name}" --request-timeout=15s 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { $failed = $true }
+  $names = @("$listed".Trim() -split '\s+' | Where-Object { $_ })
+  if ($names.Count -eq 0) { $failed = $true }
+  foreach ($d in $names) {
+    if ($d -eq "mysql-client") { continue }
+    $out = (& kubectl rollout restart "deployment/$d" -n $Release --request-timeout=15s 2>&1) | Out-String
+    Log $out
+    if ($LASTEXITCODE -ne 0) { $failed = $true }
+  }
+  $rows = (& kubectl get daemonset -A -l "app.kubernetes.io/instance=$Release" `
+             -o "custom-columns=NS:.metadata.namespace,NAME:.metadata.name" `
+             --no-headers --request-timeout=15s 2>$null) | Out-String
+  if ($LASTEXITCODE -ne 0) { $failed = $true }
+  foreach ($line in ("$rows" -split "`r?`n")) {
+    $f = @($line.Trim() -split '\s+')
+    if ($f.Count -lt 2 -or -not $f[0] -or -not $f[1]) { continue }
+    $out = (& kubectl rollout restart "daemonset/$($f[1])" -n $f[0] --request-timeout=15s 2>&1) | Out-String
+    Log $out
+    if ($LASTEXITCODE -ne 0) { $failed = $true }
+  }
+  if ($failed) {
+    Warn "Couldn't restart every tracebloc service onto the new credential, so this machine stays offline until they restart. Re-running the installer won't redo it. Run:"
+    Hint "  kubectl rollout restart deployment -n $Release -l app.kubernetes.io/instance=$Release"
+    Hint "  kubectl get daemonset -A -l app.kubernetes.io/instance=$Release   # then: kubectl rollout restart daemonset/<name> -n <namespace>"
+    return $false
+  }
+  Log "restarted the services that authenticate, onto the new credential"
+  return $true
+}
+
 # Enumerate what client (if any) is already installed on this cluster — the
 # shared source for the provisioning pre-flight AND the Helm-step guard, so the
 # two can never drift. Values are read with `-o json`, not YAML: helm
@@ -8267,6 +8442,18 @@ function Read-ClientName {
 function Invoke-ProvisionClient {
   Step 5 $script:INSTALL_STEPS.Count "Registering this machine" "d"
   $script:TB_PROV_MODE = "fallback"
+  # Set when this run asks for a new credential for the client already running
+  # here (backend#5365); Install-ClientHelm then restarts the services on it.
+  $script:TB_CREDENTIAL_REISSUED = $false
+  $script:TB_PRESET_PASSWORD = $null
+
+  # A client ID with no password, at a console: ask for it (backend#5025 O-13).
+  if ((Test-TbWantsPresetPassword) -and (Test-CanPrompt)) {
+    $script:TB_PRESET_PASSWORD = Read-TbPresetPassword
+    Info "Using the credentials you supplied - skipping browser sign-in."
+    $script:TB_PROV_MODE = "preset"
+    return
+  }
 
   if (Get-ProvisioningPreset) {
     Info "Using the credentials you supplied - skipping browser sign-in."
@@ -8345,6 +8532,26 @@ function Invoke-ProvisionClient {
     }
   }
 
+  # The credential-rejected repair (backend#5365; bash: provision.sh). The client
+  # runs here, so a plain create adopts it and keeps the credential tracebloc
+  # refuses -- the machine would stay offline while the run reports success. Ask
+  # the CLI for a new one, and stop BEFORE the create when it can't issue one
+  # (client-dev#1846).
+  $reissue = $false
+  if ($reuseNs -and $inst.Ns -eq $reuseNs) {
+    $release = if ($inst.Name) { $inst.Name } else { $inst.Ns }
+    if (Test-CredentialRejected -Release $release -Namespace $inst.Ns) {
+      Warn "tracebloc no longer accepts this machine's credential."
+      $createHelp = ""
+      try { $createHelp = ($null | & tracebloc client create --help 2>$null | Out-String) } catch { $createHelp = "" }
+      if ($createHelp -notmatch '--reissue') {
+        Err "This tracebloc CLI can't issue a new credential to a running client yet - update it and re-run the installer."
+      }
+      Info "Issuing this machine a new credential."
+      $reissue = $true
+    }
+  }
+
   # Name this machine. `client create` would prompt itself, but its output is
   # captured to the log below (the credential must never reach the terminal) —
   # so collect the name here. Precedence: TRACEBLOC_CLIENT_NAME (unattended) >
@@ -8395,6 +8602,10 @@ function Invoke-ProvisionClient {
   $createOut = Join-Path ([System.IO.Path]::GetTempPath()) "tb-client-create-$(Get-Random).log"
   $createArgs = @("client", "create", "--yes", "--name", $clientName, "--credential-file", $credFile)
   if ($clientLocation) { $createArgs += @("--location", $clientLocation) }
+  if ($reissue) {
+    $createArgs += "--reissue"
+    $script:TB_CREDENTIAL_REISSUED = $true
+  }
   # try/finally: PowerShell runs `finally` on Ctrl-C, terminating errors, AND
   # `exit` (Err), so the secret can never linger in the window between mint and
   # parse — the ps1 analogue of bash's _PROVISION_CRED_FILE + install_cleanup
@@ -8597,7 +8808,8 @@ function Install-ClientHelm {
       # non-interactively (the same api-token-auth call jobs-manager makes) —
       # a wrong credential fails here, not as a crash-looping pod later.
       $TB_CLIENT_ID = $env:TRACEBLOC_CLIENT_ID
-      $TB_CLIENT_PASSWORD = $env:TRACEBLOC_CLIENT_PASSWORD
+      # The password typed for an ID given alone (Read-TbPresetPassword), else the env pair's.
+      $TB_CLIENT_PASSWORD = if ($script:TB_PRESET_PASSWORD) { $script:TB_PRESET_PASSWORD } else { $env:TRACEBLOC_CLIENT_PASSWORD }
       Info "Verifying the supplied credentials with tracebloc..."
       $credStatus = Test-Credentials -ClientId $TB_CLIENT_ID -ClientPassword $TB_CLIENT_PASSWORD
       if ($credStatus -eq "valid") { Ok "Credentials verified." }
@@ -9031,6 +9243,7 @@ $envBlock
   $null = Wait-MetricsApiService
 
   Write-Host ""
+  $prevPassword = ""
   if ($adoptedReuse) {
     # Surgical reconcile of the LIVE release: preserve the deployed configuration +
     # secret; only clientId is healed (#397 r2). Prefer --reset-then-reuse-values
@@ -9082,6 +9295,9 @@ $envBlock
   } else {
     Log "Installing $TB_NAMESPACE from $chartRef in namespace '$TB_NAMESPACE'..."
     Ensure-ReleaseDirs $TB_NAMESPACE
+    # The password the running pods started on, read before helm overwrites it, so
+    # the restart below can see a credential that changed under them (client-dev#2018).
+    $prevPassword = Get-ClientPasswordFromSecret -Release $TB_NAMESPACE -Namespace $TB_NAMESPACE
     # client-dev#1633: why the GPU was left off as unsupported rides --set-string, not the
     # values here-string: the sentence is free text, and ConvertTo-HelmSetValue is the one
     # quoting rule both paths share. Always all three keys (the reason, the name and the code,
@@ -9102,6 +9318,20 @@ $envBlock
   # Point kubeconfig's current context at the client namespace so kubectl + the
   # tracebloc CLI default to it (no -n / --namespace needed). Best-effort.
   kubectl config set-context --current --namespace $TB_NAMESPACE 2>$null | Out-Null
+
+  # A credential issued to a client already running here (the credential-rejected
+  # repair, backend#5365), or any other new password written over a running
+  # release's (a preset, client-dev#2018), is in the Secret now, but the pods read
+  # it from their environment at start and the chart doesn't roll them on a Secret
+  # change. Restart the ones that authenticate so they use it (bash:
+  # install-client-helm.sh). The reconcile path above reuses the release's values,
+  # so it writes no password and $prevPassword stays empty there.
+  if ($script:TB_CREDENTIAL_REISSUED -or ($prevPassword -and (Test-CredentialChangedUnderPods -Previous $prevPassword `
+        -Now (Get-ClientPasswordFromSecret -Release $TB_NAMESPACE -Namespace $TB_NAMESPACE)))) {
+    if (-not (Restart-CredentialConsumers -Release $TB_NAMESPACE)) {
+      Err "This machine's new credential is in place, but its services are still on the old one."
+    }
+  }
 
   Ok "Connected to tracebloc"
   Log "Values file: $valuesFile"

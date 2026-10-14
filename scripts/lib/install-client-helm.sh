@@ -1454,6 +1454,20 @@ _restart_credential_consumers() {
   return 0
 }
 
+# _credential_changed_under_pods PREV NOW — 0 when the release Secret held a
+# password before this run's helm call (PREV) and holds a different one after it
+# (NOW), i.e. pods already running were started on a credential that is gone.
+# The reissue flag covers only the credential-rejected repair; a preset (the
+# ID-only prompt, the env pair) or any other route that writes a new password into
+# a running release's Secret changes it just the same (client-dev#2018), so the
+# restart keys on the observed change, not on the route. An empty PREV is a first
+# install: no pod holds an old credential. An empty NOW (the read after helm
+# failed) with a PREV is "cannot tell", and that restarts: a needless roll is
+# cheap, pods left on a dead credential are offline.
+_credential_changed_under_pods() {
+  [[ -n "${1:-}" && "${1:-}" != "${2:-}" ]]
+}
+
 # detect_installed_client — report the tracebloc client already installed on this
 # cluster, if any, via the globals INSTALLED_CLIENT_ID / INSTALLED_CLIENT_NS
 # (both empty when none is found). Enumerate client-chart releases across ALL
@@ -3679,6 +3693,10 @@ EOF
   # same --set-string route, so it rides this array into the one helm call.
   _host_os_set_args
   _gpu_args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
+  # The password the running pods started on, read before helm overwrites it, so
+  # the restart below can see a credential that changed under them (client-dev#2018).
+  local _prev_password
+  _prev_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")"
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
@@ -3706,10 +3724,13 @@ EOF
   kubectl config set-context --current --namespace "$TB_NAMESPACE" >/dev/null 2>&1 || true
 
   # A credential issued to a client that is already running here (the
-  # credential-rejected repair, backend#5365) is in the Secret now, but the pods
-  # read it from their environment at start and the chart doesn't roll them on a
-  # Secret change. Restart the ones that authenticate so they use it.
-  if [[ "${TB_CREDENTIAL_REISSUED:-0}" == 1 ]]; then
+  # credential-rejected repair, backend#5365), or any other new password written
+  # over a running release's (a preset, client-dev#2018), is in the Secret now,
+  # but the pods read it from their environment at start and the chart doesn't
+  # roll them on a Secret change. Restart the ones that authenticate so they use it.
+  if [[ "${TB_CREDENTIAL_REISSUED:-0}" == 1 ]] \
+     || _credential_changed_under_pods "$_prev_password" \
+          "$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")"; then
     _restart_credential_consumers "$TB_NAMESPACE" \
       || error "This machine's new credential is in place, but its services are still on the old one."
   fi
