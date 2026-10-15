@@ -2906,6 +2906,28 @@ so it has no legacy spelling (settings naming, backend#3846).
 {{- end }}
 
 {{/*
+tracebloc.machineFactsEnv -- what the installer read off the host machine, for the
+dashboard: env.TRACEBLOC_MACHINE_KIND (laptop / desktop / server / cloud),
+env.TRACEBLOC_CLOUD_PROVIDER (aws / azure / gcp) and env.TRACEBLOC_HOST_CPU_NAME (the
+host's CPU model, set on macOS, where the node's /proc/cpuinfo names none). BOTH
+installers set all three with --set-string, empty when they cannot tell; the
+resource monitor sends them on every heartbeat. Each renders only when non-empty,
+so an unknown fact is an UNSET variable, never an empty one: the platform keeps
+what it had for a missing key and would clear it for an empty one. Canonical names
+only: the variables are new, so they have no legacy spelling.
+*/}}
+{{- define "tracebloc.machineFactsEnv" -}}
+{{- $env := default dict .Values.env }}
+{{- range $key := list "TRACEBLOC_MACHINE_KIND" "TRACEBLOC_CLOUD_PROVIDER" "TRACEBLOC_HOST_CPU_NAME" }}
+{{- $value := (get $env $key) | default "" | toString }}
+{{- if $value }}
+- name: {{ $key }}
+  value: {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
 jobs-manager containers, dual-emitted where the name has a TRACEBLOC_ canonical
 (settings naming, backend#3846; legacy remove_by 2026-12-31).

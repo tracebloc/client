@@ -155,8 +155,41 @@ $WslEnableMaxRestarts = 1
 # TODO(S-W row 2): the exit code `wsl --install --no-distribution` returns when it
 # needs a restart. 3010 and 1641 are Windows' "succeeded, restart needed /
 # restarting" codes (install-k8s.ps1's INSTALLER_REBOOT_OK_CODES has them too),
-# not a measurement of wsl.exe. Any other non-zero code is a failure.
-$WslEnableOkCodes = @(0, 3010, 1641)
+# not a measurement of wsl.exe. Any other non-zero code is a failure. A restart
+# code is never probed into "ready": Windows has said it must restart first.
+$WslEnableRestartCodes = @(3010, 1641)
+$WslEnableOkCodes = @(0) + $WslEnableRestartCodes
+
+# The Windows feature WSL 2 runs on. `wsl --version` answers without it: on a fresh
+# Windows Server 2025 host (3.3's EC2 cell) the IT step enabled it pending a
+# restart, and `wsl --version` already answered 3.0.3. So WSL is ready only on an
+# enabled platform.
+$WslPlatformFeature = 'VirtualMachinePlatform'
+# DISM's feature states, as Get-WindowsOptionalFeature names them, and what each
+# means here: a restart pending either way is "pending", never ready; a feature
+# partly installed is not enabled, so the IT step finishes it; one superseded by a
+# newer package says nothing about the platform, so cannot tell. A state not
+# listed is cannot tell too. A Windows-only Pester case holds the keys to exactly
+# the names DISM's FeatureState declares.
+$WslPlatformStates = @{
+  'Enabled'                    = 'enabled'
+  'EnablePending'              = 'pending'
+  'DisablePending'             = 'pending'
+  'Disabled'                   = 'disabled'
+  'DisabledWithPayloadRemoved' = 'disabled'
+  'PartiallyInstalled'         = 'disabled'
+  'Superseded'                 = 'cannot-tell'
+}
+# Which signal shows the IT step's restart, measured on Windows Server 2025 (S-W
+# row 2): after DISM enables the platform with /norestart (exit 3010), DISM already
+# reads Enabled and WMI's install state 1 (1 enabled, 2 disabled, 3 absent;
+# anything else, cannot tell), while the restart is still owed. Only Windows' own
+# pending-restart flag shows it, set then and cleared by the restart, and a
+# standard user can read it. So the flag is read first, elevated or not. It is
+# machine-wide: a restart any servicing owes reads as pending too.
+# The flag: this key under HKLM, there while a restart is pending.
+$WslRestartPendingKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+$WslPlatformWmiStates = @{ 1 = 'enabled'; 2 = 'disabled'; 3 = 'disabled' }
 
 $WslProbeTimeoutSec  = 30
 $WslEnableTimeoutSec = 1200
@@ -286,6 +319,70 @@ function Get-WslState {
   return [pscustomobject]@{ State = 'cannot-tell'; Version = $null; Why = $why }
 }
 
+# The Virtual Machine Platform's state: enabled, pending (a restart first),
+# disabled, or cannot-tell, with the reason in words. Windows' pending-restart flag
+# first, elevated or not, since DISM reads Enabled while the restart is owed; then
+# DISM; then, for an unelevated run, which DISM refuses, WMI.
+function Get-WslPlatformState {
+  try {
+    $pending = Test-WslRestartPending
+  } catch {
+    return [pscustomobject]@{ State = 'cannot-tell'; Why = "Windows' pending-restart flag could not be read ($($_.Exception.Message))" }
+  }
+  if ($pending) {
+    return [pscustomobject]@{ State = 'pending'; Why = 'Windows has a restart pending' }
+  }
+  try {
+    $s = "$((Get-WindowsOptionalFeature -Online -FeatureName $WslPlatformFeature -ErrorAction Stop).State)"
+    if (@($WslPlatformStates.Keys) -ccontains $s) {
+      return [pscustomobject]@{ State = $WslPlatformStates[$s]; Why = "the Virtual Machine Platform is $s" }
+    }
+    return [pscustomobject]@{ State = 'cannot-tell'; Why = "the Virtual Machine Platform reads '$s', which this installer does not know" }
+  } catch {
+    $dism = $_.Exception.Message
+  }
+  try {
+    $f = Get-CimInstance -ClassName Win32_OptionalFeature -Filter "Name='$WslPlatformFeature'" -ErrorAction Stop
+  } catch {
+    return [pscustomobject]@{ State = 'cannot-tell'; Why = "the Virtual Machine Platform's state could not be read ($($_.Exception.Message))" }
+  }
+  $n = if ($f) { $f.InstallState } else { $null }
+  $k = $n -as [int]
+  if ($null -ne $k -and $WslPlatformWmiStates.ContainsKey($k)) {
+    $st = $WslPlatformWmiStates[$k]
+    return [pscustomobject]@{ State = $st; Why = "the Virtual Machine Platform is $st" }
+  }
+  return [pscustomobject]@{ State = 'cannot-tell'; Why = "the Virtual Machine Platform's state could not be read (DISM: $dism; WMI install state '$n')" }
+}
+
+# Whether Windows has a restart pending: its flag key is there. Test-Path answers
+# false for a key this account cannot open, which would read a pending restart as
+# none, so the key is opened instead: no key is $false, and a key this account
+# cannot open throws ("Requested registry access is not allowed.", measured in CI
+# on Windows PowerShell 5.1 and pwsh 7.6.6), which the caller reads as cannot
+# tell. -Hive (a property of [Microsoft.Win32.Registry]) and -Key are a seam for
+# the test suite.
+function Test-WslRestartPending {
+  param([string]$Hive = 'LocalMachine', [string]$Key = $WslRestartPendingKey)
+  $k = [Microsoft.Win32.Registry]::$Hive.OpenSubKey($Key)
+  if ($null -eq $k) { return $false }
+  $k.Dispose()
+  return $true
+}
+
+# Get-WslState, and under a WSL at the floor the platform it runs on: ready only on
+# an enabled platform. A restart the platform waits for is pending; a platform
+# turned off, or one this cannot read, is cannot-tell, which the IT step enables.
+function Get-WslReadiness {
+  param([string]$MinVersion = $WslMinVersion)
+  $w = Get-WslState -MinVersion $MinVersion
+  if ($w.State -ne 'ready') { return $w }
+  $p = Get-WslPlatformState
+  if ($p.State -eq 'enabled') { return $w }
+  $st = if ($p.State -eq 'pending') { 'pending' } else { 'cannot-tell' }
+  return [pscustomobject]@{ State = $st; Version = $w.Version; Why = $p.Why }
+}
+
 # The process token is elevated (an administrator who ran PowerShell as
 # Administrator). The same test as install-k8s.ps1's admin gate.
 function Test-BootstrapElevated {
@@ -320,19 +417,20 @@ function Get-HostBootUnixTime {
 
 # TODO(S-W row 2): the resume marker. A JSON note in the user's own
 # %LOCALAPPDATA%\tracebloc, written when turning WSL on wants a restart: when it
-# was written (epoch seconds) and how many restarts the step has taken. A run that
-# finds WSL ready deletes it. Row 2 says whether a RunOnce entry should also re-run
-# the installer after the restart, as install-k8s.ps1 does; one would not carry
-# TRACEBLOC_SUBSTRATE, so it waits for part 5's default.
+# was written (epoch seconds), how many restarts the step has taken, and whether
+# the IT step has run yet (a restart for Windows' own pending flag can come
+# first). A run that finds WSL ready deletes it. Row 2 says whether a RunOnce
+# entry should also re-run the installer after the restart, as install-k8s.ps1
+# does; one would not carry TRACEBLOC_SUBSTRATE, so it waits for part 5's default.
 function Get-WslResumeMarkerPath {
   return (Join-Path $env:LOCALAPPDATA 'tracebloc\wsl-resume.json')
 }
 
 function Write-WslResumeMarker {
-  param([string]$Path, [int]$Restarts)
+  param([string]$Path, [int]$Restarts, [bool]$EnableRan)
   $dir = Split-Path -Parent $Path
   if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-  $note = [ordered]@{ step = 'wsl-enable'; written = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); restarts = $Restarts }
+  $note = [ordered]@{ step = 'wsl-enable'; written = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); restarts = $Restarts; enableRan = $EnableRan }
   [System.IO.File]::WriteAllText($Path, ($note | ConvertTo-Json -Compress))
 }
 
@@ -347,7 +445,8 @@ function Read-WslResumeMarker {
     $written = [long]$n.written
     $restarts = [int]$n.restarts
     if ($written -le 0 -or $restarts -lt 0) { throw 'out of range' }
-    return [pscustomobject]@{ Written = $written; Restarts = $restarts }
+    if ($n.enableRan -isnot [bool]) { throw 'no enableRan' }
+    return [pscustomobject]@{ Written = $written; Restarts = $restarts; EnableRan = $n.enableRan }
   } catch {
     Warn "Ignoring an unreadable resume note ($Path) and starting this step over."
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
@@ -382,7 +481,7 @@ function Confirm-WslReady {
   $itLead = 'Ask your IT team to run this once in an administrator PowerShell, then restart Windows if it asks:'
   $restartWords = 'Restart Windows, then run the same install command again: it continues from here.'
 
-  $w = Get-WslState -MinVersion $MinVersion
+  $w = Get-WslReadiness -MinVersion $MinVersion
   if ($w.State -eq 'ready') {
     Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
     Ok "WSL $($w.Version) is ready ($MinVersion or newer)."
@@ -397,6 +496,7 @@ function Confirm-WslReady {
 
   # A second run: did the restart the last run asked for happen?
   $restarts = 0
+  $enableRan = $false
   $marker = Read-WslResumeMarker -Path $MarkerPath
   if ($marker) {
     $boot = Get-HostBootUnixTime
@@ -407,10 +507,25 @@ function Confirm-WslReady {
       return 'restart'
     }
     $restarts = $marker.Restarts + 1
-    if ($restarts -ge $MaxRestarts) {
+    $enableRan = $marker.EnableRan
+    # A restart taken only for Windows' pending flag, before the IT step ever ran,
+    # spends none of the limit once the flag is gone: the IT step runs now, with
+    # the limit whole for its own restart. One still pending after it counts, so
+    # a flag that never clears still ends.
+    if (-not $enableRan -and $w.State -ne 'pending') {
+      $restarts = 0
+    } elseif ($restarts -ge $MaxRestarts) {
       Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
       throw "WSL is still not ready after $restarts restart(s): $($w.Why). $itLead $cmd"
     }
+  }
+
+  # WSL answers, but the platform under it waits for a restart: nothing to run, and
+  # not ready until Windows has restarted. Stopped here, before anything is imported.
+  if ($w.State -eq 'pending') {
+    Write-WslResumeMarker -Path $MarkerPath -Restarts $restarts -EnableRan $enableRan
+    Warn "Windows needs a restart to finish turning on WSL. $restartWords"
+    return 'restart'
   }
 
   $elevated = Test-BootstrapElevated
@@ -431,13 +546,15 @@ function Confirm-WslReady {
     throw "Turning on WSL failed: $cmd exited $($r.ExitCode). $itLead $cmd"
   }
 
-  $w = Get-WslState -MinVersion $MinVersion
-  if ($w.State -eq 'ready') {
-    Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
-    Ok "WSL $($w.Version) is ready ($MinVersion or newer)."
-    return 'ready'
+  if ($WslEnableRestartCodes -notcontains $r.ExitCode) {
+    $w = Get-WslReadiness -MinVersion $MinVersion
+    if ($w.State -eq 'ready') {
+      Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+      Ok "WSL $($w.Version) is ready ($MinVersion or newer)."
+      return 'ready'
+    }
   }
-  Write-WslResumeMarker -Path $MarkerPath -Restarts $restarts
+  Write-WslResumeMarker -Path $MarkerPath -Restarts $restarts -EnableRan $true
   Warn "Windows needs a restart to finish turning on WSL. $restartWords"
   return 'restart'
 }
@@ -711,6 +828,13 @@ function Confirm-WslDistroImage {
 # image; the VHDX is WSL's, not the image's, so ours is the same.
 # NOT MEASURED YET: `--resize` itself (row 11 never ran it), and a sparse VHDX
 # giving space back. 3.3's distro cell runs both.
+# SPARSE IS BEST EFFORT, AND ONLY FOR ONE REFUSAL (client-dev#1810, S-W's run of
+# record, 13 Oct, row 11): WSL 2.7.11 refused --set-sparse by policy ("Sparse VHD
+# support is currently disabled due to potential data corruption", exit -1,
+# Wsl/Service/E_INVALIDARG). For those words alone the install says so and goes on
+# to the cap: the cap is what keeps the node off a full drive; sparse only gives
+# freed space back. --allow-unsafe, which those words offer, is never passed. Every
+# other sparse failure still stops the install, and the cap stays mandatory.
 # THE ORDER: the import step calls Set-WslDistroDisk between `wsl --import` and the
 # logon task's first run (S-W row 5), because the task starts the distro and
 # --set-sparse is refused from then on. Set-WslDistroDisk holds that itself: a
@@ -737,6 +861,12 @@ function Confirm-WslDistroImage {
 # defaults from preflight.sh and holds these to them.
 $WslDiskReserveGb = 20
 $WslDiskMinGb = 10
+
+# WSL's refusal of --set-sparse by policy, as wsl.exe 2.7.11 printed it on the
+# managed laptop (S-W's log, row 11), its four lines joined by one space as
+# Set-WslDistroDisk joins what wsl.exe said. Only these exact words make the
+# sparse step best effort.
+$WslSparsePolicyRefusal = 'Sparse VHD support is currently disabled due to potential data corruption. To force a distribution to use a sparse VHD, please run: wsl.exe --manage <DistributionName> --set-sparse true --allow-unsafe Error code: Wsl/Service/E_INVALIDARG'
 
 # The drive that holds PATH (its root, C:\ on Windows), or PATH itself when that
 # cannot be told. What the refusals name.
@@ -811,7 +941,8 @@ function Test-WslDistroRunning {
 # above): a distro that already runs is refused by name before any step. A step
 # that does not run cleanly throws, by name, with what wsl.exe said, and the cap
 # never runs after a failed sparse step: an uncapped distro is the 1 TiB one row
-# 11 measured, so nothing goes on without both.
+# 11 measured. The one exception is WSL's policy refusal of sparse disks
+# ($WslSparsePolicyRefusal): that is said, and the cap still runs.
 function Set-WslDistroDisk {
   param(
     [long]$CapGb,
@@ -825,9 +956,10 @@ function Set-WslDistroDisk {
     throw "The WSL distro $Distro is already running, so its disk can no longer be made sparse and capped: that has to happen after its import and before its first start. Nothing was changed, and nothing is retried. Re-run the install; if it says this again, tell tracebloc support."
   }
   $steps = @(
-    @{ What = 'made sparse'; Arguments = @('--manage', $Distro, '--set-sparse', 'true') },
-    @{ What = "capped at $CapGb GB"; Arguments = @('--manage', $Distro, '--resize', "$($CapGb)GB") }
+    @{ What = 'made sparse'; Sparse = $true; Arguments = @('--manage', $Distro, '--set-sparse', 'true') },
+    @{ What = "capped at $CapGb GB"; Sparse = $false; Arguments = @('--manage', $Distro, '--resize', "$($CapGb)GB") }
   )
+  $sparse = $true
   foreach ($s in $steps) {
     $cmd = "wsl $($s.Arguments -join ' ')"
     $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList $s.Arguments -TimeoutSec $WslDiskTimeoutSec
@@ -839,12 +971,18 @@ function Set-WslDistroDisk {
     }
     if ($r.ExitCode -ne 0) {
       $said = ("$($r.Output) $($r.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim()
+      if ($s.Sparse -and $said.Contains($WslSparsePolicyRefusal)) {
+        # Its words are not echoed: they offer --allow-unsafe, which nothing here runs.
+        Warn "WSL has turned sparse disks off on this computer ($cmd exited $($r.ExitCode)), so the tracebloc WSL distro's disk will not give the space it frees back to Windows. Its size is still capped."
+        $sparse = $false
+        continue
+      }
       $order = ''
       if ($said -match 'ERROR_SHARING_VIOLATION') { $order = " Its disk is attached: the distro has started since its import, and only a first start may follow the disk steps." }
       throw "$cmd failed (exit $($r.ExitCode)): $said The WSL distro's disk was not $($s.What), and an uncapped distro can fill this drive.$order Re-run; if it says this again, tell tracebloc support."
     }
   }
-  Ok "WSL distro disk: sparse, and capped at $CapGb GB"
+  if ($sparse) { Ok "WSL distro disk: sparse, and capped at $CapGb GB" } else { Ok "WSL distro disk: capped at $CapGb GB" }
 }
 
 # The virtual size in bytes of the VHDX at PATH, read from the file's own metadata,
@@ -1563,29 +1701,40 @@ function Invoke-BoundedProcess {
 #  The caller contract is client-dev#1810's (issue comment 6141263609), and part 2
 #  builds the core's side to it. RFC-0175 D2 puts the account steps on the HOST
 #  CLI, and `client create` is keyed on the cluster's kube-system UID, so:
+#    0. the host CLI, installed for this user by its own installer;
 #    1. the core's cluster run: checks, step b without the CLI, the cluster, and
 #       its kubeconfig merged into the host's kubeconfig;
-#    2. the account steps here: `tracebloc login`, then `tracebloc client create
+#    2. the account steps here, provision.sh's on the host CLI: `tracebloc login`;
+#       `client create --plan`, which reads the client running in the cluster and
+#       the account, so a client of another account is refused before anything is
+#       minted and one of this account is reused by its name; then `client create
 #       --credential-file` into a folder only this user can read;
 #    3. the core's client run: the credential's bytes on its stdin, then Helm.
+#  With TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD both set (provision.sh's
+#  preset, for unattended installs), step 2 is skipped and that pair is the client
+#  run's stdin. Nothing then needs the CLI, so a failed CLI install only warns.
 #  The credential is never on wsl.exe's command line, which other processes can
 #  read, and never in a line this script prints.
 #
 #  NOTHING CALLS THESE YET: they wait on the import and the logon task (sections 2
-#  and 3, S-W rows 3 and 5) and on part 2's phases in the core.
-#    TODO(part 1, 5b): the host CLI's own install, per user (install-k8s.ps1's
-#      Install-TraceblocCli publishes machine-wide, which needs an administrator).
-#    TODO(part 1, 5b): provision.sh's reuse of an installed client (`client create
-#      --plan`), its check that the account owns it, and the credential-rejected
-#      `--reissue` repair. The core's one-client guard at the Helm step and its
-#      adopt branch hold until then.
+#  and 3, S-W rows 3 and 5) and on part 2's phases in the core, which also reads
+#  the preset pair from stdin.
+#  The cluster run hands the account steps what its stop-and-check gate found
+#  (2c): this script names a file on that run's line, TRACEBLOC_WSL_HANDOVER, in a
+#  folder only this user can open and deletes after the install, and reads it only
+#  when the run exits 0. A file or line that is missing stops the install: the run
+#  did not reach its end. On credential-rejected the account steps ask `client
+#  create` for a new credential (--reissue, provision.sh's repair) and the client
+#  run's line says so (TRACEBLOC_CREDENTIAL_REISSUED=1). A preset pair is never
+#  reissued: provision.sh's preset path returns before its repair.
 #    TODO(S-W): measure that /dev/tty answers in the distro while stdin is a pipe.
+#    TODO(part 5): the refusal for another account's client names no removal
+#      command yet: how the distro path removes a client is part 5's.
 # =============================================================================
 
 # The distro the core runs in, the substrate named on its command line (a Pester
-# test holds it to install.ps1's $WslSubstrate), and the core's two runs.
-# TODO(part 2b): once lib/common.sh declares TB_WSL_PHASES ("cluster client"), a
-# Pester case holds the two phases below to its two words.
+# test holds it to install.ps1's $WslSubstrate), and the core's two runs (a Pester
+# case holds the two phases to lib/common.sh's TB_WSL_PHASES).
 $WslDistroName = 'tracebloc'
 $CoreSubstrate = 'k3s'
 $CorePhaseCluster = 'cluster'
@@ -1598,6 +1747,19 @@ $CorePhaseClient = 'client'
 # holds this list to), so an opt-out set on Windows still opts out. Each goes on
 # the line only when it is set, with the value as it was set.
 $CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+
+# The tracebloc CLI's own Windows installer, as install-k8s.ps1 names it.
+$TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
+
+# The cluster run's handover (2c): the variable that names the file, the file's
+# name in its folder, the one line the core writes (lib/common.sh's
+# tb_wsl_handover_write), the reason that asks for a new credential, and the flag
+# the client run gets then (provision.sh's). Pester holds each to the core's.
+$CoreHandoverVar = 'TRACEBLOC_WSL_HANDOVER'
+$CoreHandoverFile = 'handover.env'
+$CoreHandoverKey = 'INSTALL_STATE_REASON'
+$CredentialRejectedReason = 'credential-rejected'
+$CredentialReissuedVar = 'TRACEBLOC_CREDENTIAL_REISSUED'
 
 # One Windows command-line argument, quoted so that CommandLineToArgvW, and the
 # .NET runtime on any OS, reads back exactly VALUE. wsl.exe --exec hands the
@@ -1655,15 +1817,19 @@ function ConvertTo-DistroPath {
 
 # wsl.exe's words for one run of the core. Every path is the distro's own. The
 # host GPU check's verdict and its three platform values go on every run's line
-# (section 4), empty when this host judged no NVIDIA GPU.
-# -CredentialStdin tells the core to read the credential from its stdin first.
+# (section 4), empty when this host judged no NVIDIA GPU. -Handover names the
+# cluster run's handover file. -CredentialStdin tells the core to read the
+# credential from its stdin first, and -CredentialReissued that the account steps
+# asked for a new one.
 function New-CoreRunArguments {
   param(
     [string]$Phase,
     [string]$Core,
     [string]$Kubeconfig,
     [string]$LogDir,
-    [switch]$CredentialStdin
+    [string]$Handover,
+    [switch]$CredentialStdin,
+    [switch]$CredentialReissued
   )
   $a = @('-d', $WslDistroName, '-u', 'root', '--exec', 'env',
     "TRACEBLOC_SUBSTRATE=$CoreSubstrate",
@@ -1678,7 +1844,9 @@ function New-CoreRunArguments {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($value) { $a += "$name=$value" }
   }
+  if ($Handover) { $a += "$CoreHandoverVar=$Handover" }
   if ($CredentialStdin) { $a += 'TRACEBLOC_CREDENTIAL_STDIN=1' }
+  if ($CredentialReissued) { $a += "$CredentialReissuedVar=1" }
   $a += @('bash', "$Core/install-k8s.sh")
   return $a
 }
@@ -1766,6 +1934,171 @@ function New-PrivateDirectory {
   }
 }
 
+# The CLI installer's launch: install-k8s.ps1's Start-TraceblocCliInstaller and the
+# functions it calls, COPIED UNCHANGED (backend#4405: four ways to start the child,
+# each refusal logged with its cause). install-wsl.Tests.ps1 holds them, and every
+# top-level variable they or Install-HostCli read, byte-for-byte equal to
+# install-k8s.ps1's, the set derived from install-k8s.ps1, until part 5 deletes the
+# PowerShell core.
+function Format-CliLaunchError($err) {
+  $ex = $err.Exception
+  $types = @()
+  while ($ex) {
+    $types += "$($ex.GetType().FullName) (0x$('{0:X8}' -f $ex.HResult))"
+    if ($ex -is [System.ComponentModel.Win32Exception]) {
+      return "$err [Win32 error $($ex.NativeErrorCode); $($types -join ' <- ')]"
+    }
+    $ex = $ex.InnerException
+  }
+  return "$err [no Win32 code surfaced; $($types -join ' <- ')]"
+}
+
+function Get-CliRedirectProbe([string]$Path) {
+  $dir = Split-Path -Parent $Path
+  try {
+    $probe = Join-Path $dir "tracebloc-probe-$(Get-Random).tmp"
+    [System.IO.File]::WriteAllText($probe, "")
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    $w = "writable"
+  } catch { $w = "NOT writable ($($_.Exception.Message))" }
+  "redirect dir $dir is $w; TEMP=$env:TEMP; user=$([Environment]::UserName)"
+}
+
+function Get-CliLaunchContext {
+  $session = $(try { [System.Diagnostics.Process]::GetCurrentProcess().SessionId } catch { "unknown" })
+  $elevated = $(try {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+      [Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { "unknown" })
+  "launch context: session=$session; interactive=$([Environment]::UserInteractive); elevated=$elevated; ps=$($PSVersionTable.PSVersion)"
+}
+
+function Start-CliInstallerDirect([string[]]$ArgumentList) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "powershell.exe"
+  $psi.Arguments = $ArgumentList -join ' '
+  $psi.UseShellExecute = $false
+  [System.Diagnostics.Process]::Start($psi)
+}
+
+function Start-TraceblocCliInstaller {
+  param([string[]]$ArgumentList, [string]$OutFile, [string]$ErrFile, [int]$RetryDelaySec = 5)
+  $plans = @(
+    @{ Mode = "redirect"; Label = "1/4 (redirected)" },
+    @{ Mode = "redirect"; Label = "2/4 (redirected, after ${RetryDelaySec}s)" },
+    @{ Mode = "plain";    Label = "3/4 (no redirection)" },
+    @{ Mode = "direct";   Label = "4/4 (Process.Start, no redirection)" }
+  )
+  $last = $null
+  for ($i = 0; $i -lt $plans.Count; $i++) {
+    $plan = $plans[$i]
+    if ($i -gt 0 -and $RetryDelaySec -gt 0) { Start-Sleep -Seconds $RetryDelaySec }
+    try {
+      if ($plan.Mode -eq "redirect") {
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $ArgumentList -NoNewWindow -PassThru `
+          -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile -ErrorAction Stop
+      } elseif ($plan.Mode -eq "plain") {
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $ArgumentList -NoNewWindow -PassThru -ErrorAction Stop
+      } else {
+        $p = Start-CliInstallerDirect -ArgumentList $ArgumentList
+        if (-not $p) { throw "Process.Start returned no process" }
+      }
+      if ($i -gt 0) { Log "tracebloc CLI installer launched on attempt $($plan.Label)." }
+      return $p
+    } catch {
+      $last = $_
+      Log "tracebloc CLI installer launch $($plan.Label) refused: $(Format-CliLaunchError $_)"
+      if ($i -eq 0) { Log "  $(Get-CliLaunchContext)" }
+      if ($plan.Mode -eq "redirect") { Log "  $(Get-CliRedirectProbe $OutFile)" }
+    }
+  }
+  throw $last
+}
+
+# Where tracebloc.exe is for this user: where the CLI's own installer puts it (the
+# cli repo's scripts/install.ps1: TRACEBLOC_INSTALL_PREFIX, else the legacy
+# INSTALL_PREFIX, else %LOCALAPPDATA%\Programs\tracebloc), else the first one on
+# this process's PATH, else $null. The bootstrap calls it by this path: the User
+# PATH entry that installer adds reaches only windows opened after it. PREFIXONLY
+# skips PATH: that installer cannot change this process's PATH, so a hit there is
+# never the CLI it just installed (client-dev#2088).
+function Find-HostCli {
+  param([switch]$PrefixOnly)
+  $prefix = $env:TRACEBLOC_INSTALL_PREFIX
+  if (-not $prefix) { $prefix = $env:INSTALL_PREFIX }
+  if (-not $prefix -and $env:LOCALAPPDATA) { $prefix = Join-Path $env:LOCALAPPDATA 'Programs\tracebloc' }
+  if ($prefix) {
+    $exe = Join-Path $prefix 'tracebloc.exe'
+    if (Test-Path -LiteralPath $exe -PathType Leaf) { return $exe }
+  }
+  if ($PrefixOnly) { return $null }
+  $cmd = Get-Command tracebloc -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($cmd) { return $cmd.Source }
+  return $null
+}
+
+# Installs the tracebloc CLI for the user running this bootstrap: the CLI's own
+# installer in a child Windows PowerShell (its `exit` closes nothing here), started
+# as install-k8s.ps1 starts it and given the same 10 minutes. Not install-k8s.ps1's
+# Install-TraceblocCli, which also copies the exe into the machine-wide tools
+# folder: that needs an administrator, and the distro path runs as the daily user.
+# The installer's exit code is the verdict. Returns the CLI's path. A failed
+# install keeps a CLI that was already here, with a warning; with none, it refuses,
+# because the CLI is what registers this machine. OPTIONAL is for an install that
+# registers nothing (the preset pair): there, no CLI is a warning and $null.
+function Install-HostCli {
+  param([int]$TimeoutSec = 600, [switch]$Optional)
+  Info "Installing the tracebloc CLI for this user..."
+  $out = Join-Path ([System.IO.Path]::GetTempPath()) ("tracebloc-cli-install-" + [guid]::NewGuid().ToString('N') + ".log")
+  $err = "$out.err"
+  $why = $null
+  try {
+    $p = Start-TraceblocCliInstaller -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm '$TRACEBLOC_CLI_INSTALL_URL' | iex") -OutFile $out -ErrFile $err
+    $null = $p.Handle
+    if ($p.WaitForExit($TimeoutSec * 1000)) {
+      # Only the overload with no deadline waits for the redirected streams, and
+      # until they drain ExitCode can read $null (install-k8s.ps1, backend#2849).
+      try { $p.WaitForExit() } catch { }
+      if ($p.ExitCode -ne 0) { $why = "its installer exited $(Format-ExitCode $p.ExitCode)" }
+    } else {
+      try { $p.Kill() } catch { }
+      try { $null = $p.WaitForExit(30000) } catch { }
+      $why = "its installer did not finish within $TimeoutSec seconds, so it was stopped"
+    }
+  } catch {
+    $why = "its installer could not be started ($($_.Exception.Message))"
+  }
+  if ($why) {
+    # The installer's own last words, from whichever stream has some.
+    foreach ($f in @($err, $out)) {
+      $tail = @(Get-Content -LiteralPath $f -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() } | Select-Object -Last 5)
+      if ($tail.Count) { foreach ($l in $tail) { Hint "$l".Trim() }; break }
+    }
+  }
+  Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue
+  # A clean exit is proven only by the exe where that installer puts it: a
+  # tracebloc on this process's PATH predates it, and is kept below only as the
+  # CLI already here, with a warning (client-dev#2088).
+  if (-not $why) {
+    $cli = Find-HostCli -PrefixOnly
+    if ($cli) {
+      Ok "tracebloc CLI installed for this user."
+      return $cli
+    }
+    $why = "its installer finished, but tracebloc.exe is not where it installs"
+  }
+  $cli = Find-HostCli
+  if ($cli) {
+    Warn "The tracebloc CLI could not be updated: $why. Using the one already here: $cli"
+    return $cli
+  }
+  if ($Optional) {
+    Warn "The tracebloc CLI could not be installed: $why. The credentials you supplied don't need it. To use tracebloc from this machine, install it later in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex"
+    return $null
+  }
+  throw "The tracebloc CLI could not be installed: $why. It is what registers this machine. Install it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+}
+
 # A typed value with the terminal's residue taken out: arrow keys, bracketed-paste
 # markers and control characters, which would otherwise become part of a permanent
 # client name. install-k8s.ps1's ConvertTo-SanitizedInput, COPIED UNCHANGED (its
@@ -1815,12 +2148,124 @@ function Get-ClientName {
   throw "No name was given for this machine, so it was not registered. Run this installer again, or set TRACEBLOC_CLIENT_NAME."
 }
 
-# The account steps on the host CLI: sign in (the device flow), then mint the
-# client for the cluster the host kubeconfig now makes current. Returns the bytes
-# `client create --credential-file` wrote. The file's folder is deleted before
-# this returns, whatever happened. CLI is the tracebloc CLI's path.
+# How long one probe of the host CLI may take. `client create --plan` reads the
+# account over HTTPS and the cluster through the host kubeconfig, and either can
+# wedge. No other host-CLI call here has a bound to share.
+$HostCliProbeTimeoutSec = 60
+
+# What the CLI wrote to stderr, as one line to say: its lines joined, without
+# colour codes or control characters.
+function Format-HostCliStderr {
+  param([string]$Text)
+  $said = (@($Text -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ' ') -replace "$([char]27)\[[0-9;?]*[ -/]*[@-~]", ''
+  return (($said.ToCharArray() | Where-Object { [int]$_ -ge 32 -and [int]$_ -ne 127 }) -join '')
+}
+
+# One answer from the host CLI, bounded, captured, with its stdin closed: a probe
+# never reads input (install-k8s.ps1, client-dev#1784). Returns its exit code, its
+# stdout lines, ErrorText (what it wrote to stderr, kept apart: the reason a probe
+# failed, and this script keeps no log to put it in) and TimedOut (it did not
+# answer within TimeoutSec, so it was stopped, with what it had said by then). A
+# CLI that could not be started, or was stopped, has no exit code. Not
+# Invoke-BoundedProcess, which is install-k8s.ps1's and leaves stdin attached
+# when there is nothing to write.
+function Invoke-HostCliProbe {
+  param([string]$Cli, [string[]]$ArgumentList, [int]$TimeoutSec = $HostCliProbeTimeoutSec)
+  $r = [pscustomobject]@{ ExitCode = $null; Lines = @(); ErrorText = ''; TimedOut = $false; TimeoutSec = $TimeoutSec }
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $Cli
+  $psi.Arguments = (($ArgumentList | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return $r }
+  # The readers start before stdin is closed, in Invoke-BoundedProcess's order.
+  $out = $p.StandardOutput.ReadToEndAsync()
+  $err = $p.StandardError.ReadToEndAsync()
+  try { $p.StandardInput.Close() } catch { }
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+    try { $p.Kill() } catch { }
+    $r.TimedOut = $true
+    # Its stderr closes with it, so the read ends; bounded all the same.
+    try { if ($err.Wait(5000)) { $r.ErrorText = Format-HostCliStderr ([string]$err.Result) } } catch { }
+    return $r
+  }
+  # Only the overload with no deadline waits for the redirected streams.
+  $p.WaitForExit()
+  $r.ExitCode = $p.ExitCode
+  $text = ([string]$out.Result) -replace '\r?\n\z', ''
+  if ($text) { $r.Lines = @($text -split '\r?\n') }
+  $r.ErrorText = Format-HostCliStderr ([string]$err.Result)
+  return $r
+}
+
+# What `client create` would do here (`--plan`, which changes nothing): the CLI's
+# own reads of the account and of the client running in the cluster the host
+# kubeconfig makes current. Action is adopt, reconnect, mint, refuse (a client of
+# another account runs here) or unknown, with the Namespace and Name. It is asked
+# with the --credential-file the create gets, so it answers as the create will; an
+# answer that can't be read is unknown, and Why says what the CLI did instead.
+# Bash parity: provision.sh's _create_plan, which logs the CLI's stderr; here it
+# is said.
+function Get-HostCreatePlan {
+  param([string]$Cli, [string]$CredentialFile)
+  $probe = Invoke-HostCliProbe -Cli $Cli -ArgumentList @('client', 'create', '--plan', '--credential-file', $CredentialFile)
+  $said = ''
+  if ($probe.ErrorText) { $said = ": $($probe.ErrorText)" }
+  $unknown = [pscustomobject]@{ Action = 'unknown'; Namespace = ''; Name = ''; Why = '' }
+  if ($probe.TimedOut) {
+    $unknown.Why = "timed out after $($probe.TimeoutSec) s, so it was stopped$said"
+    return $unknown
+  }
+  if ($null -eq $probe.ExitCode) {
+    $unknown.Why = 'could not be run'
+    return $unknown
+  }
+  if ($probe.ExitCode -ne 0) {
+    $unknown.Why = "exited $(Format-ExitCode $probe.ExitCode)$said"
+    return $unknown
+  }
+  $f = @()
+  if ($probe.Lines.Count -gt 0) { $f = @($probe.Lines[0].Split("`t")) }
+  if ($f.Count -lt 4) {
+    $unknown.Why = "gave no answer this installer can read$said"
+    return $unknown
+  }
+  $name = ($f[3..($f.Count - 1)] -join "`t")
+  if (-not $name) { $name = $f[2] }
+  return [pscustomobject]@{ Action = $f[0]; Namespace = $f[2]; Name = $name; Why = '' }
+}
+
+# What the cluster run handed over: the reason on its one line, which may be empty
+# (the gate did not assess). PATH is the file as Windows names it. A file that is
+# not there, or that holds anything but that one line, stops the install.
+function Read-CoreHandover {
+  param([string]$Path)
+  $lines = @()
+  if (Test-Path -LiteralPath $Path -PathType Leaf) { $lines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue) }
+  $prefix = "$CoreHandoverKey="
+  if ($lines.Count -ne 1 -or -not ([string]$lines[0]).StartsWith($prefix, [StringComparison]::Ordinal)) {
+    throw "The cluster setup in the tracebloc WSL distro ended without saying what it found, so this machine was not registered. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  }
+  return ([string]$lines[0]).Substring($prefix.Length)
+}
+
+# The account steps on the host CLI, provision.sh's: sign in (the device flow), ask
+# `client create --plan` what it would do, then mint into a folder only this user
+# can read. Another account's client running here, or an answer that can't tell,
+# is refused before anything is minted (the one-client-per-machine pre-flight). A
+# client of this account is reused by its name, with no prompt. -Reissue (the
+# cluster run found the credential rejected) asks the create for a new credential,
+# and stops before it when this CLI cannot issue one: without --reissue it would
+# hand back the credential tracebloc refuses. Returns the bytes `client create
+# --credential-file` wrote. The folder is deleted before this returns, whatever
+# happened. CLI is the tracebloc CLI's path.
 function Get-HostClientCredential {
-  param([string]$Cli, [string]$Name)
+  param([string]$Cli, [switch]$Reissue)
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
   New-PrivateDirectory -Path $dir
   try {
@@ -1828,8 +2273,62 @@ function Get-HostClientCredential {
     if ($LASTEXITCODE -ne 0) {
       throw "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
     }
+    $h = Invoke-HostCliProbe -Cli $Cli -ArgumentList @('client', 'create', '--help')
+    if ($h.TimedOut) {
+      $said = ''
+      if ($h.ErrorText) { $said = " (it said: $($h.ErrorText.TrimEnd('.')))" }
+      throw "The tracebloc CLI timed out after $($h.TimeoutSec) s when asked for its options$said, so this machine was not registered. Run this installer again; if it keeps failing, share this output with tracebloc support."
+    }
+    $help = $h.Lines -join "`n"
+    if ($help -notmatch '--plan') {
+      throw "This tracebloc CLI is too old to register this machine from the installer. Update it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+    }
+
     $file = Join-Path $dir 'client-credential.env'
-    & $Cli client create --yes --name $Name --credential-file $file
+    $plan = Get-HostCreatePlan -Cli $Cli -CredentialFile $file
+    if ($plan.Action -eq 'refuse') {
+      Write-Host ""
+      Warn "This machine already runs a tracebloc client that isn't in the account you just signed in as."
+      Hint "tracebloc runs one client per machine. Registering this machine now would make a"
+      Hint "second client and strand it (it could never install here). Pick one:"
+      Hint "  - Repair / update it     -> sign in as the account that owns it, then run this installer again"
+      Hint "  - Switch to this account -> remove the current client from this machine first"
+      Hint "  - Run both               -> install on a separate machine"
+      Write-Host ""
+      throw "Refusing to register a second client on this machine. See the options above."
+    }
+    if ($plan.Action -notin @('adopt', 'reconnect', 'mint')) {
+      Write-Host ""
+      Warn "Couldn't determine whether a tracebloc client is already installed here."
+      if ($plan.Why) { Hint "tracebloc client create --plan $($plan.Why.TrimEnd('.'))." }
+      Hint "tracebloc runs one client per machine. Registering a new client now could strand"
+      Hint "a second one if an existing client just couldn't be seen - usually the cluster in"
+      Hint "the tracebloc WSL distro, or tracebloc itself, is briefly unreachable."
+      Write-Host ""
+      throw "Refusing to register this machine without verifying what's already on it. Run this installer again."
+    }
+    $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_NAME").Trim()
+    if ($plan.Action -ne 'mint' -and $plan.Namespace) {
+      if ($plan.Action -eq 'adopt') {
+        Info "Found your secure environment '$($plan.Name)' - it's already registered for this machine."
+      } else {
+        Info "Found your secure environment '$($plan.Name)' - reconnecting it to this machine's new cluster."
+      }
+      # The name only satisfies the required --name: a reuse keeps the registered one.
+      if (-not $name) { $name = $plan.Namespace }
+    }
+    if (-not $name) { $name = Get-ClientName }
+
+    $create = @('client', 'create', '--yes', '--name', $name, '--credential-file', $file)
+    if ($Reissue) {
+      if ($help -notmatch '--reissue') {
+        throw "This tracebloc CLI can't issue a new credential to a running client yet. Update it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+      }
+      $create += '--reissue'
+    }
+    $location = "$env:TRACEBLOC_CLIENT_LOCATION".Trim()
+    if ($location) { $create += @('--location', $location) }
+    & $Cli @create
     if ($LASTEXITCODE -ne 0) {
       throw "The tracebloc CLI could not register this machine (client create exited $LASTEXITCODE). Its own message is above."
     }
@@ -1842,34 +2341,73 @@ function Get-HostClientCredential {
   }
 }
 
-# The core, run twice in the distro, with the account steps between. CORE is the
-# verified -CoreDir. Returns the exit code of the run that ended it: the cluster
-# run's when it failed, else the client run's.
+# The credentials the operator supplied (provision.sh's preset: TRACEBLOC_CLIENT_ID
+# and TRACEBLOC_CLIENT_PASSWORD, both set), as the bytes the client run reads on its
+# stdin: one KEY=value line each, LF-ended, UTF-8 with no BOM, values as given.
+# $null when neither is set. Half a pair is refused, as is a value with a line
+# break, which would end its line early; neither refusal repeats the value.
+function Get-HostPresetCredential {
+  $pair = [ordered]@{ TRACEBLOC_CLIENT_ID = "$env:TRACEBLOC_CLIENT_ID"; TRACEBLOC_CLIENT_PASSWORD = "$env:TRACEBLOC_CLIENT_PASSWORD" }
+  $set = @($pair.Keys | Where-Object { $pair[$_] })
+  if ($set.Count -eq 0) { return $null }
+  if ($set.Count -eq 1) {
+    $unset = @($pair.Keys | Where-Object { -not $pair[$_] })[0]
+    throw "$($set[0]) is set but $unset is not. Set both to install with your client's credentials, or neither to sign in in the browser."
+  }
+  $text = ''
+  foreach ($k in $pair.Keys) {
+    if ($pair[$k] -match "[`r`n]") { throw "$k has a line break in it, so it can't be your client's credential. Set it again without one." }
+    $text += "$k=$($pair[$k])`n"
+  }
+  return ,[System.Text.Encoding]::UTF8.GetBytes($text)
+}
+
+# The CLI installed, then the core run twice in the distro with the account steps
+# between, or the operator's preset pair in their place. CORE is the verified
+# -CoreDir. Returns the exit code of the run that ended it: the cluster run's when
+# it failed, else the client run's. The credential's bytes are wiped whatever
+# happened.
 function Invoke-WslCore {
   param([string]$CoreDir)
-  $cli = Get-Command tracebloc -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $cli) {
-    throw "The tracebloc CLI is not installed on this computer, and it is what registers this machine. Install it, open a new PowerShell window, and run this installer again."
-  }
-  $core = ConvertTo-DistroPath -Path $CoreDir
-  $kubeconfig = ConvertTo-DistroPath -Path (Get-HostKubeconfigTarget)
-  $logHost = Join-Path $env:USERPROFILE '.tracebloc'
-  if (-not (Test-Path -LiteralPath $logHost)) { New-Item -ItemType Directory -Path $logHost -Force | Out-Null }
-  $logDir = ConvertTo-DistroPath -Path $logHost
-  # The host GPU check (section 4), before the first run: both runs carry its answer.
-  Find-Gpu
-
-  Info "Setting up the cluster in the tracebloc WSL distro..."
-  $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseCluster -Core $core -Kubeconfig $kubeconfig -LogDir $logDir)
-  if ($rc -ne 0) { return $rc }
-
-  Info "Registering this machine with tracebloc..."
-  $credential = Get-HostClientCredential -Cli $cli.Source -Name (Get-ClientName)
+  $credential = Get-HostPresetCredential
   try {
-    Info "Installing tracebloc in the tracebloc WSL distro..."
-    return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin) -Stdin $credential)
+    $cli = Install-HostCli -Optional:($null -ne $credential)
+    $core = ConvertTo-DistroPath -Path $CoreDir
+    $kubeconfig = ConvertTo-DistroPath -Path (Get-HostKubeconfigTarget)
+    $logHost = Join-Path $env:USERPROFILE '.tracebloc'
+    if (-not (Test-Path -LiteralPath $logHost)) { New-Item -ItemType Directory -Path $logHost -Force | Out-Null }
+    $logDir = ConvertTo-DistroPath -Path $logHost
+    # The host GPU check (section 4), before the first run: both runs carry its answer.
+    Find-Gpu
+
+    # The cluster run's handover, in a folder only this user can open, deleted after
+    # the install whatever happened.
+    $handDir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('handover-' + [guid]::NewGuid().ToString('N'))
+    New-PrivateDirectory -Path $handDir
+    try {
+      $handover = (ConvertTo-DistroPath -Path $handDir) + '/' + $CoreHandoverFile
+      Info "Setting up the cluster in the tracebloc WSL distro..."
+      $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseCluster -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -Handover $handover)
+      if ($rc -ne 0) { return $rc }
+      $reason = Read-CoreHandover -Path (Join-Path $handDir $CoreHandoverFile)
+
+      if ($null -ne $credential) {
+        # As provision.sh's preset path, which returns before its credential-rejected
+        # repair: a supplied pair is never reissued.
+        $reissue = $false
+        Info "Using the credentials you supplied - skipping browser sign-in."
+      } else {
+        $reissue = $reason -ceq $CredentialRejectedReason
+        Info "Registering this machine with tracebloc..."
+        $credential = Get-HostClientCredential -Cli $cli -Reissue:$reissue
+      }
+      Info "Installing tracebloc in the tracebloc WSL distro..."
+      return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin -CredentialReissued:$reissue) -Stdin $credential)
+    } finally {
+      Remove-Item -LiteralPath $handDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
   } finally {
-    [Array]::Clear($credential, 0, $credential.Length)
+    if ($null -ne $credential) { [Array]::Clear($credential, 0, $credential.Length) }
   }
 }
 
@@ -1994,6 +2532,467 @@ function Save-HostInstallRecord {
 }
 
 # =============================================================================
+#  7. The reinstall path (RFC-0175 D10, W20): a Windows machine on Docker Desktop
+#     and k3d moves to the tracebloc WSL distro only through the offboard, and the
+#     distro is never set up beside a live k3d. client-dev#1810 part 6, the Windows
+#     twin of lib/reinstall.sh (client-dev#1470).
+#
+#  A k3d machine is reinstalled, not migrated: this detects it read-only, says what
+#  the move means, and refuses unless the user consents. The consented offboard is
+#  behind the release switch, $K3dReinstall: the schema's x-tracebloc-reinstall
+#  block, which lib/common.sh stamps as TB_K3D_REINSTALL and which ships at
+#  `offboard`. Under `refuse` the consent variable is never read and no console is
+#  asked, so nothing in the environment can reach an offboard.
+#
+#  The words are reinstall.sh's. install-wsl.Tests.ps1 holds every string here to
+#  one of reinstall.sh's (and of the k3d.sh and common.sh reads it mirrors), where
+#  the one difference is that reinstall.sh says native k3s and this says
+#  $ReinstallTarget. It also renders every outcome in 1.4's copy catalog
+#  (testdata/golden/02-reinstall.golden) and compares it line by line. A string
+#  only Windows says carries `# Windows only:` and why, on its line.
+#
+#  Invoke-WslInstall calls Assert-NoLiveK3d once the tree is verified and before WSL
+#  is touched, so nothing is turned on, written or started before it answers.
+#  NOTHING CALLS Invoke-K3dOffboard YET: it runs after the distro image is fetched
+#  and verified (section 2) and right before the import, TODO(S-W row 3), so a run
+#  that could not import never offboards a working client.
+#  What reinstall.sh does that this does not, and why:
+#    - it reads the install record for the cluster's name. The Docker path never
+#      wrote one, so the cluster looked for is install-k8s.ps1's own name;
+#    - the adopt-blind exception: no administrator prepares this host for another
+#      user;
+#    - the leftover-data guard (TB_LEFTOVER_ACTION): the distro keeps its data in
+#      its own disk, never in the Docker path's TRACEBLOC_HOST_DATA_DIR.
+#    TODO(part 1, 5b): install the host CLI first, per user, as reinstall.sh's
+#      install_tracebloc_cli does. Until then the offboard uses the CLI the Docker
+#      path installed, or stops by name.
+# =============================================================================
+
+# The release switch and the consent's variable, as lib/common.sh stamps them from
+# the schema (TB_K3D_REINSTALL, TB_REINSTALL_CONSENT_VAR). A Pester case holds both
+# to the schema.
+$K3dReinstall = 'offboard'
+$ReinstallConsentVar = 'TRACEBLOC_REINSTALL_CONSENT'
+
+# What this path moves a k3d machine to, where reinstall.sh's words say native k3s.
+$ReinstallTarget = 'the tracebloc WSL distro'  # Windows only: the one difference from reinstall.sh's words
+$ReinstallTargetStart = 'The tracebloc WSL distro'  # Windows only: the same, starting a sentence
+
+# The cluster-name rule, lib/common.sh's _valid_cluster_name (a Pester case holds it
+# so), which install-k8s.ps1's validation also applies.
+$ClusterNameRule = '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$'
+
+# Each deadline's default, by the name the core reads it under: a Pester case holds
+# each to every `${NAME:-default}` in lib/. Each is settable as its TRACEBLOC_
+# spelling, as common.sh's naming rule gives it (TB_ replaced by TRACEBLOC_).
+$ReinstallTimeouts = [ordered]@{
+  TB_K3D_LIST_TIMEOUT     = '15'
+  TB_DOCKER_PROBE_TIMEOUT = '10'
+  TB_CLI_PROBE_TIMEOUT    = '30s'
+  TB_OFFBOARD_TIMEOUT     = '15m'
+}
+
+# The deadline NAME as this run reads it: its TRACEBLOC_ spelling, else the TB_ one,
+# else the default above. The text as given, for the words that name it.
+function Get-ReinstallTimeout {
+  param([string]$Name)
+  foreach ($n in @(($Name -creplace '^TB_', 'TRACEBLOC_'), $Name)) {
+    $v = [Environment]::GetEnvironmentVariable($n)
+    if ($v) { return $v }
+  }
+  return $ReinstallTimeouts[$Name]
+}
+
+# The longest wait a .NET WaitForExit takes, in seconds: what 0 (no deadline, as
+# timeout(1) reads it) becomes.
+$NoDeadlineSec = [int][Math]::Floor([int]::MaxValue / 1000)
+
+# NAME's deadline in seconds, read as timeout(1) reads it: a whole number, then s,
+# m, h or d, or nothing for seconds. A value it cannot read is refused by name.
+function Get-ReinstallTimeoutSeconds {
+  param([string]$Name)
+  $text = Get-ReinstallTimeout -Name $Name
+  if ($text -cmatch '^([0-9]{1,9})([smhd]?)$') {
+    $mult = switch -CaseSensitive ($Matches[2]) { 'm' { 60 } 'h' { 3600 } 'd' { 86400 } default { 1 } }
+    $sec = [long]$Matches[1] * $mult
+    if ($sec -eq 0 -or $sec -gt $NoDeadlineSec) { return $NoDeadlineSec }
+    return [int]$sec
+  }
+  throw "$($Name -creplace '^TB_', 'TRACEBLOC_') is not a deadline this installer can read (got '$text'). Set it to a whole number of seconds, or one ending in s, m, h or d."  # Windows only: timeout(1) reads it on the core's side
+}
+
+# The program NAME on PATH, or $null: bash's `has`, the one way this section asks,
+# so a test can stand in for it.
+function Get-HostCommand {
+  param([string]$Name)
+  $c = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($c) { return $c.Source }
+  return $null
+}
+
+# The last non-empty line of TEXT, as reinstall.sh's awk 'NF { l = $0 } END { print l }'.
+function Get-LastLine {
+  param([string]$Text)
+  $lines = @(($Text -split "`r?`n") | Where-Object { $_.Trim() })
+  if ($lines.Count) { return $lines[-1].Trim() }
+  return ''
+}
+
+# The cluster the Docker path creates: install-k8s.ps1's own $CLUSTER_NAME, the same
+# expression (a Pester case holds it so).
+function Get-K3dClusterName {
+  $name = if ($env:TRACEBLOC_CLUSTER_NAME) { $env:TRACEBLOC_CLUSTER_NAME } elseif ($env:CLUSTER_NAME) { $env:CLUSTER_NAME } else { "tracebloc" }
+  return $name
+}
+
+# Every k3d cluster on this machine, as lib/k3d.sh's _k3d_live_clusters reads it:
+# Code 0 and the Names; 1 when k3d lists none; 2 when the listing did not answer
+# within TB_K3D_LIST_TIMEOUT; 3 when it failed fast, with k3d's last line in
+# Message. A fast failure of --no-headers is retried once without it (an older
+# k3d); a timeout is not, since a wedged engine would cost a second deadline.
+function Get-K3dLiveClusters {
+  param([string]$K3d)
+  $t = Get-ReinstallTimeoutSeconds -Name 'TB_K3D_LIST_TIMEOUT'
+  $r = Invoke-BoundedProcess -FileName $K3d -Arguments @('cluster', 'list', '--no-headers') -TimeoutSec $t -StdoutOnly
+  $lines = @()
+  if ($r.Code -ne 0 -and $r.Code -ne 124) {
+    $r = Invoke-BoundedProcess -FileName $K3d -Arguments @('cluster', 'list') -TimeoutSec $t -StdoutOnly
+    # The header-ful table's first row is its column header, not a cluster.
+    if ($r.Code -eq 0) {
+      $lines = @($r.Output -split "`r?`n")
+      if ($lines.Count -and (@($lines[0] -split '\s+' | Where-Object { $_ })[0]) -ceq 'NAME') { $lines = @($lines | Select-Object -Skip 1) }
+    }
+  } elseif ($r.Code -eq 0) {
+    $lines = @($r.Output -split "`r?`n")
+  }
+  if ($r.Code -eq 124) { return [pscustomobject]@{ Code = 2; Names = @(); Message = '' } }
+  if ($r.Code -ne 0) {
+    $msg = Get-LastLine -Text $r.Output
+    if (-not $msg) { $msg = "k3d cluster list exited $($r.Code) with no message" }
+    return [pscustomobject]@{ Code = 3; Names = @(); Message = $msg }
+  }
+  $names = @($lines | ForEach-Object { @($_ -split '\s+' | Where-Object { $_ })[0] } | Where-Object { $_ })
+  if (-not $names.Count) { return [pscustomobject]@{ Code = 1; Names = @(); Message = '' } }
+  return [pscustomobject]@{ Code = 0; Names = $names; Message = '' }
+}
+
+# What Docker says, as _reinstall_detect reads it: `docker info` first
+# (_docker_answers), then the k3d cluster of every container with k3d's node label,
+# stopped ones too (tb_k3d_cluster_names), each within TB_DOCKER_PROBE_TIMEOUT.
+# What names the read that decided; Code is 0, 124 (the deadline) or Docker's own
+# failure, whose words are in Output.
+function Get-DockerK3dNames {
+  param([string]$Docker)
+  $t = Get-ReinstallTimeoutSeconds -Name 'TB_DOCKER_PROBE_TIMEOUT'
+  $r = Invoke-BoundedProcess -FileName $Docker -Arguments @('info') -TimeoutSec $t
+  if ($r.Code -ne 0) { return [pscustomobject]@{ What = "Docker ('docker info')"; Code = $r.Code; Output = $r.Output; Names = @() } }
+  $r = Invoke-BoundedProcess -FileName $Docker -Arguments @('ps', '-a', '--filter', 'label=app=k3d', '--format', '{{.Label "k3d.cluster"}}') -TimeoutSec $t -StdoutOnly
+  # What a read printed before it failed is no answer. A container with no cluster
+  # label (a k3d registry) gives an empty line: it names no cluster.
+  $names = @()
+  if ($r.Code -eq 0) { $names = @(($r.Output -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+  return [pscustomobject]@{ What = "Docker's container list ('docker ps')"; Code = $r.Code; Output = $r.Output; Names = $names }
+}
+
+# How a bounded read that ended with CODE went, as reinstall.sh's
+# _reinstall_read_how says it: answered, did not answer (the deadline), or failed,
+# quoting the last line it wrote.
+function Get-ReinstallReadHow {
+  param([int]$Code, [string]$Output)
+  if ($Code -eq 0) { return 'answered' }
+  if ($Code -eq 124) { return 'did not answer' }
+  $msg = Get-LastLine -Text $Output
+  if (-not $msg) { $msg = "exited $Code with no message" }
+  return "failed ($msg)"
+}
+
+# What k3d this machine holds, read-only, as reinstall.sh's _reinstall_detect reads
+# it. Found is none | tracebloc | other | cannot-tell; Cluster is tracebloc's k3d
+# cluster when one was found; Others every other one; and for cannot-tell, Probe
+# (what could not answer), How and Remedy.
+#   1. With neither k3d nor docker on PATH no k3d cluster can run here: none, with
+#      nothing read.
+#   2. The cluster to look for, held to the name rule first, and refused in the
+#      Docker path's own words when it breaks it.
+#   3. k3d's listing, first. One that answered is the answer: no later read that
+#      failed overrules it.
+#   4. Docker: what it lists by k3d's label is merged into what k3d listed. Docker
+#      not answering is cannot tell only when k3d gave no answer of its own.
+function Get-ReinstallState {
+  $s = [pscustomobject]@{ Found = 'none'; Cluster = ''; Others = @(); Probe = ''; How = ''; Remedy = '' }
+  $k3d = Get-HostCommand -Name 'k3d'
+  $docker = Get-HostCommand -Name 'docker'
+  if (-not $k3d -and -not $docker) { return $s }
+  $name = Get-K3dClusterName
+  if ($name -cnotmatch $ClusterNameRule) {
+    throw "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '$name')"
+  }
+  $tracebloc = $false
+  $listed = $false
+  $others = New-Object System.Collections.Generic.List[string]
+  $seen = @()
+  if ($k3d) {
+    $l = Get-K3dLiveClusters -K3d $k3d
+    if ($l.Code -eq 3) {
+      return (Set-ReinstallCannotTell -State $s -Probe "the k3d cluster listing ('k3d cluster list')" -Remedy "Fix what k3d reports (start Docker if it is not running), then re-run." -How "failed ($($l.Message))")
+    }
+    if ($l.Code -eq 2) {
+      return (Set-ReinstallCannotTell -State $s -Probe "the k3d cluster listing ('k3d cluster list')" -Remedy "Start Docker so k3d can answer, then re-run.")
+    }
+    $listed = $true
+    $seen += @($l.Names)
+  }
+  if ($docker) {
+    $d = Get-DockerK3dNames -Docker $docker
+    if ($d.Code -ne 0) {
+      $how = Get-ReinstallReadHow -Code $d.Code -Output $d.Output
+      if ($listed) {
+        Info "$($d.What) $how; k3d's own cluster listing did, and it decides."
+      } elseif ($d.Code -eq 124) {
+        return (Set-ReinstallCannotTell -State $s -Probe $d.What -Remedy "Start Docker, or run as a user Docker answers, then re-run.")
+      } else {
+        return (Set-ReinstallCannotTell -State $s -Probe $d.What -Remedy "Fix what Docker reports (start Docker if it is not running, or run as a user Docker answers), then re-run." -How $how)
+      }
+    }
+    $seen += @($d.Names)
+  }
+  foreach ($n in $seen) {
+    if ($n -ceq $name) { $tracebloc = $true }
+    elseif (-not $others.Contains($n)) { $others.Add($n) }
+  }
+  if ($others.Count) { $s.Found = 'other' } elseif ($tracebloc) { $s.Found = 'tracebloc' }
+  if ($tracebloc) { $s.Cluster = $name }
+  $s.Others = @($others)
+  return $s
+}
+
+function Set-ReinstallCannotTell {
+  param([object]$State, [string]$Probe, [string]$Remedy, [string]$How = 'did not answer')
+  $State.Found = 'cannot-tell'; $State.Probe = $Probe; $State.Remedy = $Remedy; $State.How = $How
+  return $State
+}
+
+# The consent this run carries: the variable the schema names, and ONLY under
+# `offboard`. Under `refuse` it is never read.
+function Get-ReinstallConsent {
+  if ($K3dReinstall -cne 'offboard') { return '' }
+  return [string][Environment]::GetEnvironmentVariable($ReinstallConsentVar)
+}
+
+# Whether this run can consent, and ONLY under `offboard`: the consent variable is
+# set (passed to the CLI as --confirm-name), or someone at this console can answer
+# the CLI's own typed-name prompt.
+function Test-ReinstallConsented {
+  if (Get-ReinstallConsent) { return $true }
+  return ($K3dReinstall -ceq 'offboard' -and (Test-BootstrapCanPrompt))
+}
+
+# refuse | offboard | proceed, from what was found and the consent. proceed only
+# where no k3d cluster can be here; offboard only for tracebloc's own k3d when this
+# run can consent. Whether the consent names the right secure environment is the
+# CLI's check (--confirm-name, or its prompt).
+function Get-ReinstallDecision {
+  param([string]$Found)
+  switch -CaseSensitive ($Found) {
+    'none' { return 'proceed' }
+    'tracebloc' { if (Test-ReinstallConsented) { return 'offboard' } return 'refuse' }
+  }
+  return 'refuse'
+}
+
+# What moving this machine means (D10), before a refusal and before an offboard
+# alike.
+function Write-ReinstallExplanation {
+  param([string]$Cluster)
+  Warn "This machine runs tracebloc on k3d (cluster '$Cluster')."
+  Hint "Moving it to $ReinstallTarget is a reinstall: this machine's secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
+  Hint "To keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run."
+}
+
+# Never the distro beside a live k3d. Returns Decision (proceed, or a consented
+# offboard) and the Cluster it found; otherwise refuses by name, with what the move
+# means (D10).
+function Assert-NoLiveK3d {
+  $s = Get-ReinstallState
+  $decision = Get-ReinstallDecision -Found $s.Found
+  if ($decision -cne 'refuse') { return [pscustomobject]@{ Decision = $decision; Cluster = $s.Cluster } }
+  if ($s.Found -ceq 'cannot-tell') {
+    throw "This run cannot tell whether a k3d cluster is live on this machine: $($s.Probe) $($s.How), and $ReinstallTarget is never set up beside a live k3d. $($s.Remedy)"
+  }
+  if ($s.Found -ceq 'other') {
+    $others = $s.Others -join ' '
+    Warn "A k3d cluster that is not tracebloc's is on this machine: $others."
+    Hint "This installer never removes it. To keep tracebloc on k3d, unset TRACEBLOC_SUBSTRATE and re-run."
+    throw "$ReinstallTargetStart is never set up beside a live k3d."
+  }
+  Write-ReinstallExplanation -Cluster $s.Cluster
+  if ($K3dReinstall -ceq 'offboard') {
+    Hint "To move it, re-run on a terminal and type the secure environment's name when asked, or re-run with $ReinstallConsentVar=<the secure environment's name>."
+    throw "$ReinstallTargetStart is never set up beside a live k3d, and no consent was given, so nothing was changed."
+  }
+  throw "$ReinstallTargetStart is never set up beside a live k3d, and this installer cannot move a k3d machine to $ReinstallTarget yet."
+}
+
+# 0 when k3d cluster CLUSTER is on this machine, 1 when it is not, 2 when that
+# cannot be told: k3d's listing when k3d is here, else Docker's, read as
+# Get-ReinstallState reads them.
+function Get-ReinstallPresence {
+  param([string]$Cluster)
+  $k3d = Get-HostCommand -Name 'k3d'
+  if ($k3d) {
+    $l = Get-K3dLiveClusters -K3d $k3d
+    if ($l.Code -eq 0) { if (@($l.Names) -ccontains $Cluster) { return 0 } return 1 }
+    if ($l.Code -eq 1) { return 1 } else { return 2 }
+  }
+  $docker = Get-HostCommand -Name 'docker'
+  if (-not $docker) { return 1 }
+  $d = Get-DockerK3dNames -Docker $docker
+  if ($d.Code -ne 0) { return 2 }
+  if (@($d.Names) -ccontains $Cluster) { return 0 }
+  return 1
+}
+
+# The offboard did not finish: say what is left, read again, and install nothing.
+function Stop-Reinstall {
+  param([string]$Cluster, [string]$Why)
+  switch (Get-ReinstallPresence -Cluster $Cluster) {
+    0 { Hint "k3d cluster '$Cluster' is still on this machine." }
+    1 { Hint "k3d cluster '$Cluster' is gone." }
+    default { Hint "Whether k3d cluster '$Cluster' is still on this machine cannot be told." }
+  }
+  throw "$Why Nothing was installed."
+}
+
+# The one way this section runs the tracebloc CLI for the offboard (reinstall.sh's
+# _tb_cli), on this console, so its own summary is the user's to read. TIMEOUTSEC 0
+# runs it with this console's stdin and no deadline, for its typed-name prompt (a
+# person is there to stop it). Otherwise its stdin is closed, as </dev/null closes
+# it, and it is stopped at the deadline, with every process it started: 124, which
+# never confirms the cluster is gone. -Quiet reads its output and drops it, as
+# >/dev/null 2>&1 drops it (the probe). Returns the exit code.
+function Invoke-OffboardCli {
+  param([string]$Cli, [string[]]$Arguments, [int]$TimeoutSec, [switch]$Quiet)
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $Cli
+  $psi.Arguments = (($Arguments | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardInput = ($TimeoutSec -gt 0)
+  $psi.RedirectStandardOutput = [bool]$Quiet
+  $psi.RedirectStandardError = [bool]$Quiet
+  # A redirected stdin is wrapped, on Windows PowerShell 5.1's .NET Framework, in a
+  # writer on the console's input encoding, whose preamble (a BOM on code page 65001)
+  # reaches the pipe when it is closed. The CLI is to see end of input and nothing
+  # else, so for the start only that encoding is UTF-8 without a BOM, as Invoke-CoreRun does.
+  $restore = $null
+  if ($psi.RedirectStandardInput) {
+    $enc = Get-ConsoleInputEncoding
+    if ($enc.GetPreamble().Length -gt 0) {
+      try { Set-ConsoleInputEncoding -Encoding (New-Object System.Text.UTF8Encoding $false) } catch { return 127 }
+      $restore = $enc
+    }
+  }
+  try { $proc = [System.Diagnostics.Process]::Start($psi) } catch { return 127 } finally {
+    if ($null -ne $restore) { Set-ConsoleInputEncoding -Encoding $restore }
+  }
+  # Drained as it is written, so a CLI that writes more than a pipe holds still ends.
+  if ($Quiet) { $null = $proc.StandardOutput.ReadToEndAsync(); $null = $proc.StandardError.ReadToEndAsync() }
+  if ($TimeoutSec -le 0) { $proc.WaitForExit(); return $proc.ExitCode }
+  try { $proc.StandardInput.Close() } catch { }
+  if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    Stop-ProcessTree -Process $proc
+    return 124
+  }
+  # The untimed wait after the timed one is what fills ExitCode in for every caller.
+  $proc.WaitForExit()
+  return $proc.ExitCode
+}
+
+# Ends PROCESS and every process it started: `tracebloc delete` runs k3d and docker,
+# and a delete still running past its deadline would race the presence read and a
+# re-run. .NET's Kill(true) ends the tree; Windows PowerShell 5.1's .NET Framework has
+# only Kill(), which ends PROCESS alone, so there taskkill /T ends the tree.
+function Stop-ProcessTree {
+  param([System.Diagnostics.Process]$Process)
+  $ended = $false
+  if (Test-ProcessTreeKill) { try { Invoke-TreeKill -Process $Process; $ended = $true } catch { } }
+  # Where Kill(true) is absent, or threw (a child it could not end), taskkill /T tries the tree.
+  if (-not $ended) { Invoke-Taskkill -Arguments @('/T', '/F', '/PID', "$($Process.Id)") }
+  try { $null = $Process.WaitForExit(10000) } catch { }
+}
+
+# Process.Kill(entireProcessTree) on PROCESS, where this .NET has it: a seam.
+function Invoke-TreeKill { param([System.Diagnostics.Process]$Process) $Process.Kill($true) }
+
+# Whether this .NET's Process.Kill takes entireProcessTree (.NET Core 3.0 on): a seam.
+function Test-ProcessTreeKill { return [bool]([System.Diagnostics.Process].GetMethod('Kill', [type[]]@([bool]))) }
+
+# taskkill under %WINDIR% with ARGUMENTS, its output dropped: a seam.
+function Invoke-Taskkill {
+  param([string[]]$Arguments)
+  try { $null = & "$env:WINDIR\System32\taskkill.exe" @Arguments 2>&1 } catch { }
+}
+
+# The consented offboard (D10), as reinstall.sh's reinstall_offboard_k3d runs it:
+# `tracebloc delete --for-reinstall` revokes the old client and removes its k3d, and
+# only then is the distro set up. It does nothing unless Assert-NoLiveK3d decided
+# offboard and the release switch reads offboard.
+#
+# The consent is the variable, passed as --confirm-name, or else the CLI's own
+# typed-name prompt on this console. --yes and --force are never passed: a running
+# training blocks the offboard, and the CLI's refusal is what the user reads. The
+# CLI's exit code and k3d's own answer decide together: 0 and 10 (revoked, local
+# teardown incomplete) go on only when the cluster is definitely gone, because the
+# CLI also exits 0, with nothing removed, when its prompt is declined. The probe and
+# the headless offboard each have a deadline (TRACEBLOC_CLI_PROBE_TIMEOUT,
+# TRACEBLOC_OFFBOARD_TIMEOUT).
+function Invoke-K3dOffboard {
+  param([string]$Decision, [string]$Cluster)
+  if ($Decision -cne 'offboard' -or $K3dReinstall -cne 'offboard') { return }
+  $name = $Cluster
+  $consent = Get-ReinstallConsent
+  Write-ReinstallExplanation -Cluster $name
+  Info "Offboarding it first: tracebloc revokes this secure environment, then its k3d cluster '$name' and its data are removed."
+  $cli = Get-HostCommand -Name 'tracebloc'
+  if ($null -eq $cli) {
+    throw "The tracebloc CLI is not on this computer, and it is what offboards the old secure environment, so nothing was changed and k3d cluster '$name' still runs. Install it, open a new PowerShell window, and run this installer again."  # Windows only: the bootstrap does not install the host CLI yet (part 1, 5b)
+  }
+  $probeAfter = Get-ReinstallTimeout -Name 'TB_CLI_PROBE_TIMEOUT'
+  $probe = Invoke-OffboardCli -Cli $cli -Arguments @('delete', '--for-reinstall', '--help') -TimeoutSec (Get-ReinstallTimeoutSeconds -Name 'TB_CLI_PROBE_TIMEOUT') -Quiet
+  if ($probe -eq 124) {
+    throw "The tracebloc CLI on this machine did not answer within $probeAfter when asked whether it can offboard, so nothing was changed and k3d cluster '$name' still runs. Check it with 'tracebloc --help' and re-run."
+  }
+  if ($probe -ne 0) {
+    throw "The tracebloc CLI on this machine cannot offboard a secure environment for a reinstall, so nothing was changed and k3d cluster '$name' still runs. Update it with 'tracebloc upgrade' and re-run, or unset TRACEBLOC_SUBSTRATE to keep today's environment."
+  }
+  # The context the old client runs in: k3d's own name for the cluster, as the CLI
+  # names it when the machine has no install record.
+  $ctx = "k3d-$name"
+  $offboardAfter = Get-ReinstallTimeout -Name 'TB_OFFBOARD_TIMEOUT'
+  if ($consent) {
+    $rc = Invoke-OffboardCli -Cli $cli -Arguments @('delete', '--for-reinstall', '--context', $ctx, '--confirm-name', $consent) -TimeoutSec (Get-ReinstallTimeoutSeconds -Name 'TB_OFFBOARD_TIMEOUT')
+  } else {
+    $rc = Invoke-OffboardCli -Cli $cli -Arguments @('delete', '--for-reinstall', '--context', $ctx) -TimeoutSec 0
+  }
+  switch ($rc) {
+    0 {
+      if ((Get-ReinstallPresence -Cluster $name) -ne 1) {
+        Stop-Reinstall -Cluster $name -Why "The offboard did not finish: 'tracebloc delete' exited 0, but its k3d cluster is not gone, and $ReinstallTarget is never set up beside a live k3d. A confirmation that was declined, left blank or cancelled ends this way. Re-run and type the secure environment's name to move this machine, or unset TRACEBLOC_SUBSTRATE to keep today's environment."
+      }
+    }
+    10 {
+      if ((Get-ReinstallPresence -Cluster $name) -ne 1) {
+        Stop-Reinstall -Cluster $name -Why "'tracebloc delete' revoked the old secure environment, but $ReinstallTarget is never set up beside a live k3d. Check it with 'k3d cluster list', remove it with 'k3d cluster delete $name', then re-run."
+      }
+      Warn "The old secure environment is revoked and its k3d cluster is gone, but the CLI could not remove everything it left on this machine."
+    }
+    124 { Stop-Reinstall -Cluster $name -Why "The offboard did not finish within $offboardAfter ('tracebloc delete' was stopped), so how much of the secure environment it removed cannot be told. Re-run to finish it, with a longer TRACEBLOC_OFFBOARD_TIMEOUT if it needs more time." }
+    1 { Stop-Reinstall -Cluster $name -Why "The offboard did not run ('tracebloc delete' exited 1), so the secure environment is untouched; the CLI's message above says why." }
+    default { Stop-Reinstall -Cluster $name -Why "The offboard stopped ('tracebloc delete' exited $rc); the CLI's message above says what it removed." }
+  }
+  Ok "Offboarded the old secure environment and removed k3d cluster '$name'."
+}
+
+# =============================================================================
 #  The distro path, as far as it is built. Returns the exit code.
 # =============================================================================
 
@@ -2018,6 +3017,10 @@ function Invoke-WslInstall {
     throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
   Confirm-CoreDir -CoreDir $CoreDir
+  # Never the distro beside a live k3d (section 7): a refusal, or a consented
+  # offboard decided, before WSL is touched. The offboard itself runs right before
+  # the import (Invoke-K3dOffboard, TODO(S-W row 3)).
+  $script:Reinstall = Assert-NoLiveK3d
   # A restart stops with 2, install-k8s.ps1's declared "restart, then re-run"
   # code, which install.ps1 passes through and the e2e harness reads.
   if ((Confirm-WslReady) -eq 'restart') {

@@ -1951,7 +1951,10 @@ _gpu_unsupported_set_args() {
 # canonical name only: the variable is new, so it has no legacy spelling (RFC-0076).
 # ALWAYS passed, empty when the host cannot be read, so a reconciled release never
 # keeps another machine's answer. Into _TB_HOST_OS_ARGS (an array, bash-3.2 safe).
+# Inside WSL2 the label is the Windows host's, and the host is asked once for it
+# and the machine facts alike (_prime_windows_host_identity).
 _host_os_set_args() {
+  _prime_windows_host_identity
   _TB_HOST_OS_ARGS=(
     --set-string "env.TRACEBLOC_HOST_OS=$(_helm_set_string_escape "$(_host_os_label)")"
   )
@@ -2101,7 +2104,8 @@ _chassis_from_smbios() {
 }
 
 # _windows_host_identity — inside WSL2, ask the WINDOWS HOST what it is, over
-# interop. Prints one line, `Manufacturer|Model|ChassisTypes(csv)|PCSystemType`,
+# interop. Prints one line,
+# `Manufacturer|Model|ChassisTypes(csv)|PCSystemType|SMBIOSAssetTag|OSCaption`,
 # or returns 1 when it cannot: interop off (no powershell.exe), no `timeout` to
 # bound the call with, a hang, or a failure. The distro itself cannot answer:
 # its DMI is Hyper-V's (`Microsoft Corporation` / `Virtual Machine`) and
@@ -2122,38 +2126,124 @@ _windows_host_identity() {
   command -v timeout >/dev/null 2>&1 || return 1
   # shellcheck disable=SC2016  # the $ belong to PowerShell, not to this shell
   out="$(timeout --kill-after="${TB_WSL_INTEROP_KILL_AFTER:-5}" "${TB_WSL_INTEROP_TIMEOUT:-20}" "$ps" -NoProfile -NonInteractive -Command \
-    '$c = Get-CimInstance Win32_ComputerSystem; $e = Get-CimInstance Win32_SystemEnclosure; "{0}|{1}|{2}|{3}" -f $c.Manufacturer, $c.Model, (@($e.ChassisTypes) -join ","), $c.PCSystemType' \
+    '$c = Get-CimInstance Win32_ComputerSystem; $e = @(Get-CimInstance Win32_SystemEnclosure); $o = Get-CimInstance Win32_OperatingSystem; "{0}|{1}|{2}|{3}|{4}|{5}" -f $c.Manufacturer, $c.Model, (@($e.ChassisTypes) -join ","), $c.PCSystemType, $e[0].SMBIOSAssetTag, $o.Caption' \
     2>/dev/null)" || return 1
   out="${out//$'\r'/}"
   [[ "$out" == *"|"*"|"*"|"* ]] || return 1
   printf '%s' "$out"
 }
 
-# _chassis_from_windows_identity "Manufacturer|Model|ChassisTypes|PCSystemType" —
-# the SAME ladder as Get-DeviceType in install-k8s.ps1, so the bash installer in
-# WSL2 and the PowerShell installer on the same laptop give the same answer:
-# hypervisor signature first (a Windows host that is itself a VM is a server),
-# then the enclosure numbers, then PCSystemType (1/2/3 desk, 4/5 server).
+# _windows_host_identity_once — _windows_host_identity, asked at most once per
+# shell. Several facts are read from the one answer (the chassis, the cloud, the
+# OS), and each interop call starts a Windows PowerShell. The answer is kept in
+# globals, so it is shared only by what runs AFTER a call in THIS shell: a
+# verdict computed in `$( )` keeps its own copy. _prime_windows_host_identity
+# makes that one call in the caller's shell first. Returns 1 when it cannot tell.
+_TB_WIN_HOST_IDENT=""
+_TB_WIN_HOST_IDENT_READ=""
+_windows_host_identity_once() {
+  if [[ -z "${_TB_WIN_HOST_IDENT_READ:-}" ]]; then
+    _TB_WIN_HOST_IDENT="$(_windows_host_identity)" || _TB_WIN_HOST_IDENT=""
+    _TB_WIN_HOST_IDENT_READ=1
+  fi
+  [[ -n "${_TB_WIN_HOST_IDENT:-}" ]] || return 1
+  printf '%s' "$_TB_WIN_HOST_IDENT"
+}
+
+# _prime_windows_host_identity — inside WSL2 only, read the Windows host's
+# identity once in THIS shell, so the verdicts computed after it share it.
+# Outside WSL2 (or without probe.sh, which a stale bootstrap may not have
+# fetched) it does nothing.
+_prime_windows_host_identity() {
+  if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
+    _windows_host_identity_once >/dev/null || true
+  fi
+  return 0
+}
+
+# _chassis_from_windows_identity "Manufacturer|Model|ChassisTypes|PCSystemType[|...]"
+# — the SAME ladder as Get-ChassisFromIdentity in install-k8s.ps1, so the bash
+# installer in WSL2 and the PowerShell installer on the same laptop give the same
+# answer: hypervisor signature first (a Windows host that is itself a VM is
+# `vm`), then the enclosure numbers, then PCSystemType (2 Mobile is a laptop,
+# 1/3 desk, 4/5 server). Fields after the fourth are ignored.
 _chassis_from_windows_identity() {
-  local maker model types pcs chassis=""
-  IFS='|' read -r maker model types pcs <<<"${1:-}"
+  local maker model types pcs _rest chassis=""
+  IFS='|' read -r maker model types pcs _rest <<<"${1:-}"
   if _is_vm_signature "$maker $model"; then printf 'vm'; return 0; fi
   # shellcheck disable=SC2086  # word-split the comma list into numbers on purpose
   chassis="$(_chassis_from_smbios ${types//,/ })"
   if [[ -z "$chassis" ]]; then
     case "${pcs//[[:space:]]/}" in
-      1|2|3) chassis="desktop" ;;
-      4|5)   chassis="server" ;;
+      2)   chassis="laptop" ;;
+      1|3) chassis="desktop" ;;
+      4|5) chassis="server" ;;
     esac
   fi
   printf '%s' "$chassis"
   return 0
 }
 
+# _windows_identity_field "IDENTITY" N — field N (1-based) of a
+# _windows_host_identity line, or nothing. The OS caption is the LAST field, so
+# it keeps any `|` of its own.
+_windows_identity_field() {
+  local f1 f2 f3 f4 f5 f6
+  IFS='|' read -r f1 f2 f3 f4 f5 f6 <<<"${1:-}"
+  case "${2:-}" in
+    1) printf '%s' "$f1" ;; 2) printf '%s' "$f2" ;; 3) printf '%s' "$f3" ;;
+    4) printf '%s' "$f4" ;; 5) printf '%s' "$f5" ;; 6) printf '%s' "$f6" ;;
+  esac
+  return 0
+}
+
+# _linux_chassis — this Linux host's chassis word, BEFORE any verdict collapses it:
+# hostnamectl's own (laptop / desktop / convertible / tablet / handset / server /
+# vm / container / ...), else `vm` for a hypervisor's DMI signature, else the
+# SMBIOS enclosure number's class (laptop / desktop / server), else nothing.
+# Outside WSL2 only: inside it neither source describes the machine (see
+# _detect_device_type). The one ladder _detect_device_type and
+# _detect_machine_kind both read, so the two cannot disagree about a host.
+_linux_chassis() {
+  # TRACEBLOC_DMI_DIR is a test seam only; real installs read the kernel's DMI table.
+  local dmi="${TRACEBLOC_DMI_DIR:-/sys/class/dmi/id}" chassis=""
+  # `hostnamectl` prints "  Chassis: laptop 💻" (the icon is newer systemd);
+  # the first word is the verdict. `hostnamectl chassis` alone needs v249+.
+  # LC_ALL=C on hostnamectl ITSELF: systemd translates the label
+  # ("Gehäuse:", "Châssis:"), and a VM whose label went unmatched fell
+  # through to DMI type 1 (Other) and was reported as "" instead of server.
+  # LC_ALL=C on sed/awk too, so the icon's bytes cannot make them bail
+  # (BSD sed: "illegal byte sequence").
+  # This runs under the caller's errexit+pipefail, so a missing or failing
+  # hostnamectl (no systemd, no D-Bus in a container) must fall through to
+  # the DMI read, not abort the install; awk's NR==1 reads to EOF, so no
+  # reader closes the pipe early.
+  if command -v hostnamectl >/dev/null 2>&1; then
+    chassis="$( { LC_ALL=C hostnamectl 2>/dev/null || true; } | LC_ALL=C sed -n 's/^[[:space:]]*Chassis:[[:space:]]*//p' | LC_ALL=C awk 'NR == 1 { print $1 }')" || chassis=""
+  fi
+  # No verdict from hostnamectl (absent, no systemd bus, or no Chassis line):
+  # read DMI. The hypervisor signature comes FIRST -- hostnamectl reports
+  # `vm` for a guest from systemd-detect-virt, and without it the enclosure
+  # number is the firmware's claim, which for Hyper-V is 3 (Desktop).
+  if [[ -z "$chassis" ]]; then
+    if _is_vm_signature "$(_dmi_value "$dmi" sys_vendor) $(_dmi_value "$dmi" product_name)"; then chassis="vm"; fi
+  fi
+  if [[ -z "$chassis" && -r "$dmi/chassis_type" ]]; then
+    chassis="$(_chassis_from_smbios "$(tr -d '[:space:]' < "$dmi/chassis_type" 2>/dev/null || true)")"
+  fi
+  printf '%s' "$chassis"
+  return 0
+}
+
+# _dmi_value DIR NAME — the DMI field NAME under DIR (one line, trailing newline
+# dropped), or nothing when it is absent or unreadable. Never fails.
+_dmi_value() {
+  [[ -r "$1/$2" ]] || return 0
+  cat "$1/$2" 2>/dev/null || true
+}
+
 _detect_device_type() {
   local gpu_val="${1:-}" override="${TRACEBLOC_DEVICE_TYPE:-}" chassis=""
-  # TRACEBLOC_DMI_DIR is a test seam only; real installs read the kernel's DMI table.
-  local dmi="${TRACEBLOC_DMI_DIR:-/sys/class/dmi/id}"
   if [[ -n "$override" ]]; then
     local wanted
     wanted="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
@@ -2175,7 +2265,7 @@ _detect_device_type() {
       # branch is skipped, the same rule cluster.sh applies (#1179).
       if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
         local ident=""
-        if ident="$(_windows_host_identity)"; then
+        if ident="$(_windows_host_identity_once)"; then
           chassis="$(_chassis_from_windows_identity "$ident")"
         fi
         case "$chassis" in
@@ -2185,33 +2275,7 @@ _detect_device_type() {
         esac
         return 0
       fi
-      # `hostnamectl` prints "  Chassis: laptop 💻" (the icon is newer systemd);
-      # the first word is the verdict. `hostnamectl chassis` alone needs v249+.
-      # LC_ALL=C on hostnamectl ITSELF: systemd translates the label
-      # ("Gehäuse:", "Châssis:"), and a VM whose label went unmatched fell
-      # through to DMI type 1 (Other) and was reported as "" instead of server.
-      # LC_ALL=C on sed/awk too, so the icon's bytes cannot make them bail
-      # (BSD sed: "illegal byte sequence").
-      # This runs under the caller's errexit+pipefail, so a missing or failing
-      # hostnamectl (no systemd, no D-Bus in a container) must fall through to
-      # the DMI read, not abort the install; awk's NR==1 reads to EOF, so no
-      # reader closes the pipe early.
-      if command -v hostnamectl >/dev/null 2>&1; then
-        chassis="$( { LC_ALL=C hostnamectl 2>/dev/null || true; } | LC_ALL=C sed -n 's/^[[:space:]]*Chassis:[[:space:]]*//p' | LC_ALL=C awk 'NR == 1 { print $1 }')" || chassis=""
-      fi
-      # No verdict from hostnamectl (absent, no systemd bus, or no Chassis line):
-      # read DMI. The hypervisor signature comes FIRST -- hostnamectl reports
-      # `vm` for a guest from systemd-detect-virt, and without it the enclosure
-      # number is the firmware's claim, which for Hyper-V is 3 (Desktop).
-      if [[ -z "$chassis" ]]; then
-        local vendor="" product=""
-        [[ -r "$dmi/sys_vendor" ]] && vendor="$(cat "$dmi/sys_vendor" 2>/dev/null || true)"
-        [[ -r "$dmi/product_name" ]] && product="$(cat "$dmi/product_name" 2>/dev/null || true)"
-        if _is_vm_signature "$vendor $product"; then chassis="vm"; fi
-      fi
-      if [[ -z "$chassis" && -r "$dmi/chassis_type" ]]; then
-        chassis="$(_chassis_from_smbios "$(tr -d '[:space:]' < "$dmi/chassis_type" 2>/dev/null || true)")"
-      fi
+      chassis="$(_linux_chassis)"
       ;;
   esac
   case "$chassis" in
@@ -2220,6 +2284,149 @@ _detect_device_type() {
     *) printf '' ;;   # container / embedded / unknown: say nothing
   esac
   return 0
+}
+
+# ── Machine facts for the dashboard ───────────────────────────────────────────
+# What the installer reads off the host and the resource monitor cannot: a pod
+# sees neither the chassis, nor the cloud's firmware strings, nor (in a k3d node
+# on a Mac) the host's CPU name. Each is passed to the chart as one env var on the
+# resource monitor (_machine_facts_set_args), which sends it on every heartbeat.
+# A fact that cannot be read is EMPTY, and the chart then leaves the variable
+# unset: the platform keeps what it had rather than store a guess. Each verdict
+# is a word of the platform's closed vocabulary, or nothing.
+#   TRACEBLOC_MACHINE_KIND    laptop | desktop | server | cloud
+#   TRACEBLOC_CLOUD_PROVIDER  aws | azure | gcp
+#   TRACEBLOC_HOST_CPU_NAME   macOS only ("Apple M3 Pro"); on Linux the node's
+#                             own /proc/cpuinfo names the CPU.
+# DEVICE_TYPE is not one of them and is unchanged: jobs-manager validates it
+# against its own four words, so laptop and desktop still collapse there.
+#
+# Azure's virtual machines carry this fixed SMBIOS asset tag (Microsoft documents
+# it as the way to tell an Azure VM from any other Hyper-V guest), which a plain
+# Hyper-V guest does not. TWIN of `$script:AzureAssetTag` in install-k8s.ps1;
+# install-client-helm.bats pins the two identical.
+_TB_AZURE_ASSET_TAG="7783-7084-3265-9085-8269-3286-77"
+
+# _cloud_from_identity VENDOR PRODUCT ASSET_TAG — aws | gcp | azure | "" from the
+# firmware's strings, read on the host with no network call (no metadata
+# service): "Amazon EC2" (the vendor on every Nitro instance) is aws, "Google
+# Compute Engine" (the product) is gcp, and a Microsoft vendor WITH Azure's asset
+# tag is azure. Matched case-insensitively. TWIN of Get-CloudFromIdentity.
+_cloud_from_identity() {
+  local hay maker tag
+  hay="$(printf '%s %s' "${1:-}" "${2:-}" | tr '[:upper:]' '[:lower:]')"
+  maker="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  tag="$(printf '%s' "${3:-}" | tr -d '[:space:]')"
+  case "$hay" in
+    *"amazon ec2"*)            printf 'aws'; return 0 ;;
+    *"google compute engine"*) printf 'gcp'; return 0 ;;
+  esac
+  if [[ "$maker" == *microsoft* && "$tag" == "$_TB_AZURE_ASSET_TAG" ]]; then printf 'azure'; fi
+  return 0
+}
+
+# _machine_kind_from_chassis CHASSIS CLOUD — laptop | desktop | server | cloud |
+# "" from a chassis word (hostnamectl's, or _chassis_from_smbios /
+# _chassis_from_windows_identity's) and the detected cloud. A known cloud is
+# `cloud` whatever its chassis says: the cloud strings name only a cloud's own
+# machines, a bare-metal instance included. Any other VM is a server. TWIN of
+# Get-MachineKindFrom.
+_machine_kind_from_chassis() {
+  if [[ -n "${2:-}" ]]; then printf 'cloud'; return 0; fi
+  case "${1:-}" in
+    laptop|convertible|tablet|handset) printf 'laptop' ;;
+    desktop)   printf 'desktop' ;;
+    server|vm) printf 'server' ;;
+  esac
+  return 0
+}
+
+# _detect_cloud_provider — aws | azure | gcp | "" for this host. Linux reads the
+# DMI table; inside WSL2 the distro's DMI is Hyper-V's on every host, so the
+# Windows host's own strings decide, and interop that cannot answer says
+# nothing. macOS says nothing.
+_detect_cloud_provider() {
+  local dmi="${TRACEBLOC_DMI_DIR:-/sys/class/dmi/id}" ident=""
+  [[ "$(uname -s 2>/dev/null)" == Linux ]] || return 0
+  if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
+    if ident="$(_windows_host_identity_once)"; then
+      _cloud_from_identity "$(_windows_identity_field "$ident" 1)" "$(_windows_identity_field "$ident" 2)" \
+        "$(_windows_identity_field "$ident" 5)"
+    fi
+    return 0
+  fi
+  _cloud_from_identity "$(_dmi_value "$dmi" sys_vendor)" "$(_dmi_value "$dmi" product_name)" \
+    "$(_dmi_value "$dmi" chassis_asset_tag)"
+  return 0
+}
+
+# _detect_machine_kind — laptop | desktop | server | cloud | "" for this host:
+# the probes _detect_device_type reads, before it collapses laptop and desktop.
+#   macOS   laptop when `pmset -g batt` lists an internal battery, else desktop;
+#           nothing when pmset cannot answer.
+#   WSL2    the Windows host's chassis (_chassis_from_windows_identity); nothing
+#           when interop cannot answer.
+#   Linux   _linux_chassis.
+# A known cloud (_detect_cloud_provider) is `cloud` on every path.
+_detect_machine_kind() {
+  local chassis="" cloud="" batt="" ident=""
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      batt="$(pmset -g batt 2>/dev/null)" || return 0
+      case "$batt" in
+        *InternalBattery*) printf 'laptop' ;;
+        *)                 printf 'desktop' ;;
+      esac
+      return 0
+      ;;
+    Linux)
+      cloud="$(_detect_cloud_provider)"
+      if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
+        if ident="$(_windows_host_identity_once)"; then
+          chassis="$(_chassis_from_windows_identity "$ident")"
+        fi
+      else
+        chassis="$(_linux_chassis)"
+      fi
+      _machine_kind_from_chassis "$chassis" "$cloud"
+      ;;
+  esac
+  return 0
+}
+
+# _detect_host_cpu_name — the host CPU's model name where the node cannot read it:
+# macOS only, from `sysctl -n machdep.cpu.brand_string` ("Apple M3 Pro"), whose
+# k3d node's /proc/cpuinfo names no model on Apple silicon. Trimmed; nothing on
+# any other OS, when sysctl cannot answer, or when the name is longer than the
+# 200 characters the platform stores (a longer one is dropped, never cut).
+_detect_host_cpu_name() {
+  local name=""
+  [[ "$(uname -s 2>/dev/null)" == Darwin ]] || return 0
+  name="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)" || return 0
+  name="$(printf '%s' "$name" | LC_ALL=C tr -d '\r\n' | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  [[ "${#name}" -le 200 ]] || return 0
+  printf '%s' "$name"
+}
+
+# _machine_facts_set_args -- the three machine facts above as --set-string pairs:
+# env.TRACEBLOC_MACHINE_KIND, env.TRACEBLOC_CLOUD_PROVIDER and
+# env.TRACEBLOC_HOST_CPU_NAME. Canonical names only: the variables are new, so
+# they have no legacy spelling. ALWAYS all three keys, EMPTY when unknown, so a
+# reconciled release never keeps another run's answer; the chart renders a key
+# only when it is non-empty. Inside WSL2 the Windows host is asked once for all
+# of them. Into _TB_MACHINE_FACTS_ARGS (an array, bash-3.2 safe, six words).
+_machine_facts_set_args() {
+  local kind cloud cpu
+  _prime_windows_host_identity
+  kind="$(_detect_machine_kind)"
+  cloud="$(_detect_cloud_provider)"
+  cpu="$(_detect_host_cpu_name)"
+  log "Machine facts for the dashboard: kind=${kind:-unknown} cloud=${cloud:-none} cpu=${cpu:-not read}"
+  _TB_MACHINE_FACTS_ARGS=(
+    --set-string "env.TRACEBLOC_MACHINE_KIND=$(_helm_set_string_escape "$kind")"
+    --set-string "env.TRACEBLOC_CLOUD_PROVIDER=$(_helm_set_string_escape "$cloud")"
+    --set-string "env.TRACEBLOC_HOST_CPU_NAME=$(_helm_set_string_escape "$cpu")"
+  )
 }
 
 # _reconcile_adopted_client — RFC-0001 §7.2 adopt path. provision_client (Step 3)
@@ -2308,6 +2515,9 @@ _reconcile_adopted_client() {
   # would keep whatever an earlier run, or no run, wrote.
   _host_os_set_args
   _args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
+  # The machine facts ride it too, for the same reason.
+  _machine_facts_set_args
+  _args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
   # The local API (backend#5208) rides the same reconcile, for the same reason:
   # a release from before localApi existed reuses the chart default, off, while
   # create_cluster's _ensure_local_api_port has just mapped 127.0.0.1 to its
@@ -3712,6 +3922,9 @@ EOF
   # same --set-string route, so it rides this array into the one helm call.
   _host_os_set_args
   _gpu_args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
+  # The machine facts (kind, cloud, CPU name), the same way.
+  _machine_facts_set_args
+  _gpu_args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
   # The password the running pods started on, read before helm overwrites it, so
   # the restart below can see a credential that changed under them (client-dev#2018).
   # A read that CANNOT TELL (rc 2) is not a first install: when the Secret holds a

@@ -2001,9 +2001,27 @@ TB_GPU_NVIDIA_NAMES=""
 # it); its path and the macOS version take the overrides the setup steps already
 # honour (TRACEBLOC_OS_RELEASE_FILE, TRACEBLOC_MACOS_VER). The Windows twin is
 # Get-HostOsLabel in install-k8s.ps1.
+#
+# Inside WSL2 the machine is the Windows host, not the distro: the label is the
+# one Get-HostOsLabel gives ("Windows 11"), from the OS caption the host reports
+# over interop (_windows_host_identity_once, install-client-helm.sh). When interop
+# cannot answer, or the caption is not one it can read, the distro's label stands.
+# Without probe.sh or install-client-helm.sh loaded the distro's label stands too.
 _os_release_value() {  # $1 = key, $2 = file: the value, unquoted, or nothing
   sed -n "/^$1=/{s/^$1=//;p;q;}" "$2" 2>/dev/null \
     | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+# _windows_os_label CAPTION -- "Windows 11", "Windows Server 2022" from a Windows
+# OS caption ("Microsoft Windows 11 Pro"), without the vendor and the edition;
+# nothing for a caption it cannot read. The SAME pattern as Get-HostOsLabel in
+# install-k8s.ps1, case-insensitive as PowerShell's -match is. Pure.
+_windows_os_label() {
+  local re='Windows[[:space:]]+(Server[[:space:]]+[0-9]{4}([[:space:]]+R2)?|[0-9]+)' had_nocase=0 out=""
+  shopt -q nocasematch && had_nocase=1
+  shopt -s nocasematch
+  if [[ "${1:-}" =~ $re ]]; then out="Windows ${BASH_REMATCH[1]}"; fi
+  [[ "$had_nocase" == 1 ]] || shopt -u nocasematch
+  printf '%s' "$out"
 }
 _host_os_label() {
   local os name ver major
@@ -2018,6 +2036,15 @@ _host_os_label() {
       else printf 'macOS %s' "$major"; fi
       ;;
     Linux)
+      if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl \
+         && declare -F _windows_host_identity_once >/dev/null 2>&1; then
+        local ident="" caption="" label=""
+        if ident="$(_windows_host_identity_once)"; then
+          IFS='|' read -r _ _ _ _ _ caption <<<"$ident"
+          label="$(_windows_os_label "$caption")"
+          if [[ -n "$label" ]]; then printf '%s' "$label"; return 0; fi
+        fi
+      fi
       local f="${TRACEBLOC_OS_RELEASE_FILE:-/etc/os-release}"
       [[ -r "$f" ]] || return 0
       name="$(_os_release_value NAME "$f")"

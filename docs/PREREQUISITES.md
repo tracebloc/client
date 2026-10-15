@@ -48,17 +48,17 @@ This sets up k3s and adds you to the `tracebloc` group. Log out and back in, the
 
 Your use cases and models stay on tracebloc. To confirm, the installer asks you to type the secure environment's name, or reads it from `TRACEBLOC_REINSTALL_CONSENT=<name>`.
 
-**Hosts.** The installer checks each of these before it starts. The first five are always needed. The rest are needed only until k3s or Helm is installed.
+**Hosts.** Before a run changes anything, the installer checks each host that run needs. The last column says which runs need it.
 
-| Host | Why |
-|---|---|
-| `registry-1.docker.io`, `auth.docker.io` | Docker Hub |
-| `ghcr.io` | the tracebloc images |
-| `api.tracebloc.io` | the tracebloc API |
-| `tracebloc.github.io` | the tracebloc Helm charts |
-| `github.com`, `release-assets.githubusercontent.com`, `raw.githubusercontent.com` | the k3s release and its install script |
-| `rpm.rancher.io` | k3s's SELinux policy, on an SELinux-enforcing RHEL, Fedora or SUSE machine |
-| `get.helm.sh` | Helm |
+| Host | Why | Needed |
+|---|---|---|
+| `registry-1.docker.io`, `auth.docker.io` | Docker Hub | every run |
+| `ghcr.io` | the tracebloc images | every run |
+| `api.tracebloc.io` | the tracebloc API | every run |
+| `tracebloc.github.io` | the tracebloc Helm charts | every run |
+| `rpm.rancher.io` | k3s's SELinux policy, on an SELinux-enforcing RHEL, Fedora or SUSE machine | every run |
+| `github.com`, `release-assets.githubusercontent.com` | the k3s release | until k3s is installed, and on a run that upgrades it |
+| `get.helm.sh` | Helm | until Helm is installed |
 <!-- prerequisites:linux:end -->
 
 Once it is installed, the secure environment also reaches the hosts in [INSTALL.md § Network requirements](INSTALL.md#network-requirements-egress-allowlist).

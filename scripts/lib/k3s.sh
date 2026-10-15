@@ -12,8 +12,9 @@
 #  What is here:
 #    - the pins: the release tag DERIVED from K8S_VERSION, and the three digests
 #      common.sh stamps from facts.env (TB_K3S_BIN_SHA256_* / TB_K3S_INSTALL_SH_SHA256);
-#    - the verified downloads of the binary and of upstream's install.sh at the tag,
-#      and the scrubbed run of that script (INSTALL_K3S_SKIP_DOWNLOAD=binary);
+#    - the verified download of the binary, the verified copy of upstream's
+#      install.sh at the tag that ships with the installer (scripts/vendor/), and the
+#      scrubbed run of that script (INSTALL_K3S_SKIP_DOWNLOAD=binary);
 #    - /etc/rancher/k3s/config.yaml, rendered pure and written as root with an
 #      explicit mode, beside the kubelet drop-in and registries.yaml that cluster.sh
 #      renders for both substrates;
@@ -48,6 +49,10 @@ TB_K3S_KUBECONFIG_PATH="${TB_K3S_ETC_DIR}/k3s.yaml"
 # re-reads registries.yaml on every start -- the same reason the kubelet drop-in
 # is not under /tmp (cluster.sh).
 TB_K3S_CA_PATH="${TB_K3S_ETC_DIR}/tracebloc-ca.pem"
+# The join token's pinned file, which config.yaml's `token-file` names
+# (_native_k3s_pin_token, client-dev#1976): root's, 0600, written once. The path the
+# macOS node uses inside its container too (TB_MAC_CT_NODE_TOKEN_FILE).
+TB_K3S_TOKEN_PATH="${TB_K3S_ETC_DIR}/tracebloc-token"
 # Where the binary goes. upstream's install.sh looks for it in the same place
 # (BIN_DIR=/usr/local/bin) when it is told to skip the download.
 # shellcheck disable=SC2034  # the DEST 1.1e's install flow passes to _native_k3s_fetch_binary
@@ -261,7 +266,8 @@ _native_k3s_release_url() {
 # _native_k3s_install_script_url [K8S_VERSION] -- upstream's install.sh AT THE TAG.
 # The release does not attach install.sh (measured on v1.36.3+k3s1), and get.k3s.io
 # serves the tip of master, which moves under any pin -- so the tagged blob, from
-# raw.githubusercontent.com.
+# raw.githubusercontent.com. Only the pin's tools read it (check-facts.sh,
+# bump-k3s-pin.sh): the installer runs the copy it ships (client-dev#1994).
 _native_k3s_install_script_url() {
   local tag
   tag="$(_native_k3s_release_tag "${1:-}")" || return 1
@@ -296,20 +302,40 @@ _native_k3s_fetch_binary() {
   rm -rf "$tmpdir"
 }
 
-# _native_k3s_fetch_install_script DEST -- download upstream's install.sh at the
-# release tag to DEST (a file the caller owns), verified against the pinned digest.
-_native_k3s_fetch_install_script() {
-  local dest="$1" want="${TB_K3S_INSTALL_SH_SHA256:-}" url
+# _native_k3s_install_script_body FILE -- the upstream bytes of the vendored
+# install.sh: line 1 and everything below its END PROVENANCE line, the bytes its
+# PROVENANCE sha256 and TB_K3S_INSTALL_SH_SHA256 are of. k3s.bats stages the real
+# vendored file through it and holds the result to the pin.
+_native_k3s_install_script_body() {
+  sed '2,/^# END PROVENANCE$/d' "$1"
+}
+
+# _native_k3s_vendored_install_script -- the path of upstream's install.sh at the
+# tag, as the installer ships it: scripts/vendor/k3s-install.sh beside scripts/lib/,
+# which both bootstraps fetch and verify with the rest (gen-manifest.sh FILES). Read
+# off this file's own location, so the checkout and a bootstrap's temp tree agree.
+_native_k3s_vendored_install_script() {
+  local dir
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../vendor" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/k3s-install.sh' "$dir"
+}
+
+# _native_k3s_stage_install_script DEST -- copy upstream's install.sh at the release
+# tag out of the installer's own files to DEST (a file the caller owns), verified
+# against the pinned digest. Nothing is downloaded, so no run of the installer
+# needs raw.githubusercontent.com (client-dev#1994). Every run still runs the
+# script: it rewrites k3s.service.env, native k3s's proxy home.
+_native_k3s_stage_install_script() {
+  local dest="$1" want="${TB_K3S_INSTALL_SH_SHA256:-}" src
   [[ -n "$want" ]] || error "native k3s: no pinned digest for k3s's install.sh is stamped in common.sh -- run scripts/check-facts.sh --write."
-  url="$(_native_k3s_install_script_url)" || error "native k3s: cannot derive the k3s release from K8S_VERSION=${K8S_VERSION:-<empty>}."
-  # --print downloads nothing; the run verifies the script before running it.
+  # --print copies nothing; the run verifies the script before running it.
   if tb_root_planning; then return 0; fi
-  retry 3 5 curl_secure -fsSL "$url" -o "$dest" \
-    || error "Couldn't download k3s's install script from ${url}. Check that this machine can reach raw.githubusercontent.com, then re-run."
-  # 37 KB at v1.36.3+k3s1; an error page or a truncated stream is far shorter.
-  _assert_download_size "$dest" 10000 "k3s install.sh"
+  src="$(_native_k3s_vendored_install_script)" && [[ -r "$src" ]] \
+    || error "This installer build doesn't include k3s's install script (scripts/vendor/k3s-install.sh: stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+  _native_k3s_install_script_body "$src" >"$dest" \
+    || error "native k3s: couldn't copy k3s's install script from ${src}."
   _verify_sha256 "$want" "$dest" \
-    || { rm -f "$dest"; error "k3s's install script downloaded from ${url} does not match its pinned sha256 (${want}), so it was not run. Something between this machine and GitHub changed the file. Re-run on a network that does not rewrite downloads."; }
+    || { rm -f "$dest"; error "k3s's install script in this installer (${src}) does not match its pinned sha256 (${want}), so it was not run. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"; }
 }
 
 # _native_k3s_run_install_script SCRIPT -- run upstream's install.sh as root over the
@@ -392,9 +418,15 @@ _native_k3s_group_name_ok() {
 #   KGROUP        optional: the daily user's private group
 #                 (_native_k3s_kubeconfig_group). Given, k3s writes k3s.yaml 0640 to
 #                 that group (RFC-0175 D3, `write-kubeconfig-group`); empty, 0600.
-# It never emits `server:` or `token:` -- this node is a server, alone.
+#   TOKEN_FILE    optional: the join token's pinned file (TB_K3S_TOKEN_PATH, from
+#                 _native_k3s_write_config). Given, it is `token-file`, so k3s takes
+#                 its token from that file and never from the server/token it
+#                 rewrites on every start (client-dev#1976). The macOS node names its
+#                 own (_mac_ct_node_config) and passes none.
+# It never emits `server:` or `token:` -- this node is a server, alone, and its token
+# is a file's, never a value in this file, which the daily user's group may read.
 _native_k3s_render_config() {
-  local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" kgroup="${6:-}" cluster_cidr service_cidr kubelet_args
+  local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" kgroup="${6:-}" tokfile="${7:-}" cluster_cidr service_cidr kubelet_args
   case "$mode" in
     node-local|hostpath) ;;
     *) echo "native k3s: '${mode}' is not a storage mode (node-local or hostpath)." >&2; return 1 ;;
@@ -414,6 +446,10 @@ _native_k3s_render_config() {
     *) echo "native k3s: '${cgroup}' is not a cgroup version (v1 or v2)." >&2; return 1 ;;
   esac
   _native_k3s_group_name_ok "$kgroup" || { echo "native k3s: '${kgroup}' is not a group name k3s's kubeconfig can be granted to." >&2; return 1; }
+  case "$tokfile" in
+    ""|/*) ;;
+    *) echo "native k3s: the join token's file '${tokfile}' is not an absolute path." >&2; return 1 ;;
+  esac
   printf '%s\n' "$TB_K3S_CONFIG_MARKER"
   printf '# node-name and the two CIDRs are read back from here and never change.\n'
   printf 'disable: [traefik, servicelb]\n'
@@ -431,6 +467,9 @@ _native_k3s_render_config() {
   printf 'kubelet-arg: [%s]\n' "$kubelet_args"
   if [[ -n "$storage" ]]; then
     printf 'default-local-storage-path: "%s"\n' "$storage"
+  fi
+  if [[ -n "$tokfile" ]]; then
+    printf 'token-file: "%s"\n' "$tokfile"
   fi
 }
 
@@ -546,13 +585,92 @@ _native_k3s_cgroup_v1_notice() {
   fi
 }
 
+# ── The join token (client-dev#1976) ──────────────────────────────────────────
+#
+# k3s encrypts its datastore's bootstrap data with the server's join token. Given
+# none, it reads <data-dir>/server/token, which it rewrites on every start
+# (truncated, written again, never synced). A host that loses power, or a WSL distro
+# whose disk is cut off, seconds after a start can find that file torn, and k3s then
+# refuses its own data on every start after: "bootstrap data already found and
+# encrypted with different token". The window is small where a filesystem writes a
+# file's data before the metadata naming it (ext4 data=ordered or data=journal with
+# barriers, xfs, btrfs), and nothing closes it under data=writeback, nobarrier, or
+# mount options that cannot be read. So the token is pinned on every native host:
+# written once to TB_K3S_TOKEN_PATH, and named by config.yaml's `token-file`, a file
+# k3s reads and never writes. The macOS node pins its own (_mac_ct_node_token).
+
+# The join token as this installer makes it, and as k3s makes its own when it is
+# given none (util.Random(16)): 16 random bytes in hex.
+TB_K3S_TOKEN_RE='^[0-9a-f]{32}$'
+# What a k3s that cannot be repaired in place needs, said by every refusal that ends there.
+TB_K3S_REINSTALL='run "tracebloc delete" (it removes k3s and its data), then install again'
+
+# _native_k3s_pin_token -- the join token in TB_K3S_TOKEN_PATH (root, 0600) before
+# config.yaml names it; the caller made its directory. As root, through tb_root.
+#   - The file is there: it is the token. A run never makes another: one that cannot
+#     be read, or is not a token, is refused by name and left as it is.
+#   - It is not, and k3s has no data (no server/cred/passwd, no server/token under
+#     TB_K3S_DATA_PATH): 16 new random bytes.
+#   - It is not, on a k3s this installer set up before it pinned the token: the token
+#     that k3s already has. k3s keeps it twice, as the user "server" in
+#     server/cred/passwd and after "::server:" in server/token, and the two must
+#     say the same.
+#   Anything else is refused by name, never answered with a new token: data
+#   encrypted with another token never starts again.
+# The token goes to a scratch name beside the file, is synced, renamed over it, and
+# the directory is synced: whatever the filesystem orders, a host that loses power
+# finds no file or the whole one, never a torn one. A sudo that did not run is
+# "cannot tell", never an absent file.
+# Under --print the reads run as this user, who can see the file but not read it, and
+# cannot see k3s's data: a file that is there is kept (the run writes nothing), and
+# otherwise the writes are listed, the same ones a carried token makes.
+_native_k3s_pin_token() {
+  local file="$TB_K3S_TOKEN_PATH" srv="${TB_K3S_DATA_PATH}/server" t="" passwd="" tok="" p="" tmp
+  local how="$TB_K3S_REINSTALL"
+  if tb_root test -e "$file"; then
+    tb_root_planning && return 0
+    t="$(tb_root cat "$file")" \
+      || error "native k3s: ${file} cannot be read, so this run cannot tell k3s's join token, and it never makes a new one. Check that sudo can read it ('sudo cat ${file}'), then re-run."
+    [[ "$t" =~ $TB_K3S_TOKEN_RE ]] \
+      || error "native k3s: ${file} does not hold a join token this installer wrote, and this run never replaces it. Remove it ('sudo rm ${file}') and re-run: the run then reads the token back from k3s's data."
+    return 0
+  fi
+  tb_root test -d / \
+    || error "native k3s: sudo did not run, so this run cannot tell whether ${file} exists. Re-run the installer; it asks for the password once, at the start."
+  if tb_root test -e "${srv}/cred/passwd" || tb_root test -e "${srv}/token"; then
+    passwd="$(tb_root cat "${srv}/cred/passwd")" || passwd=""
+    tok="$(tb_root cat "${srv}/token")" || tok=""
+    p="$(awk -F, '$2 == "server" { print $1; exit }' <<<"$passwd")"
+    if [[ "$tok" == *::server:* ]]; then t="${tok##*::server:}"; fi
+    [[ -n "$p" && -n "$t" ]] \
+      || error "native k3s: this k3s was set up before the installer pinned its join token, and the token could not be read from its data (${srv}/cred/passwd and ${srv}/token). This run never gives it a new one: k3s would then refuse its own data. Check that sudo can read both, then re-run. If k3s does not stay up ('sudo journalctl -u k3s'), it is refusing its own data, and it cannot be recovered without a reinstall: ${how}."
+    [[ "$p" == "$t" && "$t" =~ $TB_K3S_TOKEN_RE ]] \
+      || error "native k3s: this k3s holds two different join tokens, or one that is not a token (${srv}/cred/passwd and ${srv}/token), so this run cannot tell which one its data is encrypted with, and pins neither. If k3s does not stay up ('sudo journalctl -u k3s'), it is refusing its own data, and it cannot be recovered without a reinstall: ${how}."
+  else
+    t="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')" || t=""
+    [[ "$t" =~ $TB_K3S_TOKEN_RE ]] || error "native k3s: /dev/urandom gave no join token for k3s."
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/tracebloc-k3s-XXXXXX")" || error "native k3s: could not create a temporary file for k3s's join token."
+  if ! { printf '%s\n' "$t" > "$tmp" \
+         && tb_root install -m 0600 "$tmp" "${file}.tmp" \
+         && tb_root sync "${file}.tmp" \
+         && tb_root mv -f "${file}.tmp" "$file" \
+         && tb_root sync "${file%/*}"; }; then
+    rm -f "$tmp"
+    error "native k3s: could not write k3s's join token to ${file} and sync it. Check that sudo can write under ${file%/*}, then re-run."
+  fi
+  rm -f "$tmp"
+}
+
 # _native_k3s_write_config MODE NODE_NAME CIDR_PAIR STORAGE_PATH CGROUP [CA_FILE]
 #   -- write everything k3s reads at start, as root, with an explicit mode on every
 #   path: /etc/rancher and /etc/rancher/k3s 0755; config.yaml 0600 (it names the
 #   node and the ranges, and k3s keeps its own secrets beside it), or 0640 to the
 #   daily user's private group, which then reads k3s.yaml too (D3); the kubelet
 #   drop-in 0644 (the e2e readback reads it unprivileged); and, when CA_FILE is
-#   given, the CA 0644 and registries.yaml 0600.
+#   given, the CA 0644 and registries.yaml 0600. The join token is pinned first
+#   (_native_k3s_pin_token, 0600), so config.yaml never names a file that is not
+#   there.
 #
 # The group is the prepared group on a prepared host (1.1g), and otherwise granted
 # only when it is private (_native_k3s_kubeconfig_grant). config.yaml holds no
@@ -563,11 +681,12 @@ _native_k3s_write_config() {
   local mode="$1" name="$2" cidrs="$3" storage="$4" cgroup="$5" ca="${6:-}" cfg kubelet ca_body kgroup
   kgroup="$(_native_k3s_kubeconfig_grant)" \
     || error "native k3s: ${TB_K3S_CONFIG_PATH} exists but could not be read, so this run cannot tell which group it grants k3s's kubeconfig to. Check it with 'sudo cat ${TB_K3S_CONFIG_PATH}', then re-run."
-  cfg="$(_native_k3s_render_config "$mode" "$name" "$cidrs" "$storage" "$cgroup" "$kgroup")" || return 1
+  cfg="$(_native_k3s_render_config "$mode" "$name" "$cidrs" "$storage" "$cgroup" "$kgroup" "$TB_K3S_TOKEN_PATH")" || return 1
   [[ "$cgroup" != v1 ]] || _native_k3s_cgroup_v1_notice
   kubelet="$(_render_kubelet_config)" || return 1
   tb_root install -d -m 0755 /etc/rancher || return 1
   tb_root install -d -m 0755 "$TB_K3S_ETC_DIR" || return 1
+  _native_k3s_pin_token
   if [[ -n "$kgroup" ]]; then
     _native_k3s_install_file 0640 "$TB_K3S_CONFIG_PATH" "$cfg" "$kgroup" || return 1
   else
@@ -1577,6 +1696,17 @@ _native_k3s_installed_version() {
   case "$line" in "k3s version "*) line="${line#k3s version }"; printf '%s' "${line%% *}" ;; esac
 }
 
+# _native_k3s_binary_due -- 0 when this run downloads the k3s binary: none at
+# TB_K3S_BIN_PATH, or one that is not the pinned release (the run after a pin bump).
+# Step c downloads on it, and preflight probes the download hosts on it, so the two
+# cannot disagree (client-dev#1994). A pin that cannot be derived counts as due:
+# preflight then probes, and step c refuses it by name.
+_native_k3s_binary_due() {
+  local want
+  want="$(_native_k3s_release_tag 2>/dev/null)" || return 0
+  [[ "$(_native_k3s_installed_version)" != "$want" ]]
+}
+
 # _native_k3s_wait_for_kubeconfig -- wait for k3s to write its kubeconfig, starting
 # the count of the ONE budget it shares with the API wait (TB_K3S_WAITED_S). The merge
 # reads the file, and the API wait asks the merged context by name.
@@ -1641,9 +1771,11 @@ _native_k3s_ensure_running() {
 # exist, recorded with tb_record_write the moment it does, so a run that fails at
 # step N leaves a record of steps 1 to N-1:
 #   1. the firewall rule, before k3s first starts, so the API never listens unfenced;
-#   2. config.yaml, the kubelet drop-in and (with a corporate CA) the CA and
-#      registries.yaml, each with its explicit mode;
-#   3. the verified binary and upstream's install.sh at the tag, run scrubbed, then
+#   2. the join token's pin (client-dev#1976), then config.yaml naming it, the
+#      kubelet drop-in and (with a corporate CA) the CA and registries.yaml, each
+#      with its explicit mode;
+#   3. the verified binary and upstream's install.sh at the tag (the copy the
+#      installer ships, verified), run scrubbed, then
 #      k3s running: started when it is not (_native_k3s_ensure_running);
 #   4. the merged kubeconfig, recorded BEFORE the API wait so a failed wait leaves
 #      the context for delete, then the API (asked on that context by name, on one
@@ -1716,6 +1848,7 @@ _native_k3s_create_cluster() {
   TB_K3S_FILES_CHANGED=""
   _native_k3s_write_config "${TB_STORAGE_MODE:-node-local}" "$name" "$cidrs" "$storage" "$cgroup" "$ca" \
     || error "native k3s: couldn't write k3s's configuration under ${TB_K3S_ETC_DIR}. Check that sudo can write there, then re-run."
+  tb_record_write file k3s-token "$TB_K3S_TOKEN_PATH"
   tb_record_write file k3s-config "$TB_K3S_CONFIG_PATH"
   tb_record_write file kubelet-config "$TB_KUBELET_CONFIG_K3S_PATH"
   if [[ -n "$ca" ]]; then
@@ -1726,13 +1859,13 @@ _native_k3s_create_cluster() {
   # 3. The binary and the install script.
   want="$(_native_k3s_release_tag)" || error "native k3s: cannot derive the k3s release from K8S_VERSION=${K8S_VERSION:-<empty>}."
   have="$(_native_k3s_installed_version)"
-  if [[ "$have" != "$want" ]]; then
+  if _native_k3s_binary_due; then
     log "native k3s: installing k3s ${want}${have:+ over ${have}}."
     _native_k3s_fetch_binary "$ARCH_DL" "$TB_K3S_BIN_PATH"
     replaced=1
   fi
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-sh-XXXXXX")" || error "native k3s: could not create a temporary directory for k3s's install script."
-  _native_k3s_fetch_install_script "${tmp}/install.sh"
+  _native_k3s_stage_install_script "${tmp}/install.sh"
   _native_k3s_run_install_script "${tmp}/install.sh" \
     || { rm -rf "$tmp"; error "k3s's install script failed. 'sudo journalctl -u k3s' says why; it's safe to re-run this installer."; }
   rm -rf "$tmp"

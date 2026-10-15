@@ -477,6 +477,57 @@ function Test-VmSignature {
   foreach ($sig in $script:VmSignatures) { if ($Text -like "*$sig*") { return $true } }
   return $false
 }
+# SMBIOS System Enclosure type numbers (DSP0134 7.4.1), by class: TWIN of
+# _chassis_from_smbios in install-client-helm.sh. Desk-class and portable numbers
+# are both a workstation to Get-DeviceType; Get-MachineFacts tells them apart.
+# Any portable number wins over a desk one, and either over a server one.
+$script:SmbiosDeskChassis     = @(3, 4, 5, 6, 7, 13, 15, 16, 24, 35, 36)
+$script:SmbiosPortableChassis = @(8, 9, 10, 11, 12, 14, 30, 31, 32)
+$script:SmbiosServerChassis   = @(17, 23, 25, 28, 29)
+
+# Get-HostIdentity -- this machine's firmware identity, read once per call:
+# Win32_ComputerSystem's Manufacturer, Model and PCSystemType, and
+# Win32_SystemEnclosure's ChassisTypes and SMBIOSAssetTag. A class that cannot be
+# read leaves its fields empty, never throws.
+function Get-HostIdentity {
+  $id = [pscustomobject]@{ Manufacturer = ""; Model = ""; ChassisTypes = @(); PCSystemType = 0; AssetTag = "" }
+  try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    if ($cs) {
+      $id.Manufacturer = "$($cs.Manufacturer)"
+      $id.Model = "$($cs.Model)"
+      $id.PCSystemType = [int]$cs.PCSystemType
+    }
+  } catch {}
+  try {
+    $enclosure = @(Get-CimInstance Win32_SystemEnclosure -ErrorAction Stop)
+    $id.ChassisTypes = @($enclosure.ChassisTypes | ForEach-Object { [int]$_ })
+    $id.AssetTag = "$(@($enclosure.SMBIOSAssetTag) | Select-Object -First 1)"
+  } catch {}
+  return $id
+}
+
+# Get-ChassisFromIdentity -- vm | laptop | desktop | server | "" from a firmware
+# identity, BEFORE any verdict collapses it. TWIN of _chassis_from_windows_identity
+# in install-client-helm.sh, which reads the same Windows classes over WSL2 interop:
+# the hypervisor signature first (a virtual machine is a vm whatever its firmware
+# says: Hyper-V/Azure guests report enclosure 3 (Desktop), VMware 1 (Other) with
+# PCSystemType 1 -- read alone, both came out as workstations),
+# then the enclosure numbers, then PCSystemType (2 Mobile a laptop, 1 Desktop /
+# 3 Workstation a desktop, 4/5 a server; 6/7/8 nothing). Pure.
+function Get-ChassisFromIdentity {
+  param([string]$Manufacturer = "", [string]$Model = "", [int[]]$ChassisTypes = @(), [int]$PCSystemType = 0)
+  if (Test-VmSignature "$Manufacturer $Model") { return "vm" }
+  $types = @($ChassisTypes)
+  if ($types | Where-Object { $_ -in $script:SmbiosPortableChassis }) { return "laptop" }
+  if ($types | Where-Object { $_ -in $script:SmbiosDeskChassis })     { return "desktop" }
+  if ($types | Where-Object { $_ -in $script:SmbiosServerChassis })   { return "server" }
+  if ($PCSystemType -eq 2) { return "laptop" }
+  if ($PCSystemType -in 1, 3) { return "desktop" }
+  if ($PCSystemType -in 4, 5) { return "server" }
+  return ""
+}
+
 function Get-DeviceType {
   param([string]$GpuVal = "")
   $override = "$env:TRACEBLOC_DEVICE_TYPE"
@@ -485,31 +536,59 @@ function Get-DeviceType {
     if ($wanted -in @('workstation', 'gpu_server', 'server', 'cluster')) { return $wanted }
     Warn "TRACEBLOC_DEVICE_TYPE=`"$override`" is not one of workstation|gpu_server|server|cluster -- ignoring it and reading the chassis instead."
   }
-  $desk = @(3, 4, 5, 6, 7, 13, 15, 16, 24, 35, 36) + @(8, 9, 10, 11, 12, 14, 30, 31, 32)
-  $serverClass = @(17, 23, 25, 28, 29)
-  $chassis = ""
-  # One read of Win32_ComputerSystem serves both the VM check and the fallback.
-  $cs = $null
-  try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch {}
-  if ($cs -and (Test-VmSignature "$($cs.Manufacturer) $($cs.Model)")) { $chassis = "server" }
-  if (-not $chassis) {
-    try {
-      $types = @((Get-CimInstance Win32_SystemEnclosure -ErrorAction Stop).ChassisTypes | ForEach-Object { [int]$_ })
-      if ($types | Where-Object { $_ -in $desk })        { $chassis = "desktop" }
-      elseif ($types | Where-Object { $_ -in $serverClass }) { $chassis = "server" }
-    } catch {}
-  }
-  if (-not $chassis -and $cs) {
-    switch ([int]$cs.PCSystemType) {
-      { $_ -in 1, 2, 3 } { $chassis = "desktop" }
-      { $_ -in 4, 5 }    { $chassis = "server" }
-    }
-  }
-  switch ($chassis) {
-    "desktop" { return "workstation" }
-    "server"  { if ($GpuVal) { return "gpu_server" } else { return "server" } }
-    default   { return "" }
-  }
+  $id = Get-HostIdentity
+  $chassis = Get-ChassisFromIdentity -Manufacturer $id.Manufacturer -Model $id.Model -ChassisTypes $id.ChassisTypes -PCSystemType $id.PCSystemType
+  if ($chassis -in "laptop", "desktop") { return "workstation" }
+  if ($chassis -in "server", "vm") { if ($GpuVal) { return "gpu_server" } else { return "server" } }
+  return ""
+}
+
+# Machine facts for the dashboard (bash twin: _machine_facts_set_args in
+# install-client-helm.sh). What the installer reads off the host and the resource
+# monitor cannot: each is passed to the chart as one env var, EMPTY when it cannot
+# be read, and the chart then leaves the variable unset. Each is a word of the
+# platform's closed vocabulary, or nothing:
+#   TRACEBLOC_MACHINE_KIND    laptop | desktop | server | cloud
+#   TRACEBLOC_CLOUD_PROVIDER  aws | azure | gcp
+#   TRACEBLOC_HOST_CPU_NAME   macOS only; always empty here.
+# DEVICE_TYPE is unchanged: laptop and desktop still collapse to workstation there.
+#
+# Azure's virtual machines carry this fixed SMBIOS asset tag, which a plain
+# Hyper-V guest does not. TWIN of _TB_AZURE_ASSET_TAG in install-client-helm.sh;
+# install-client-helm.bats pins the two identical, so keep it on ONE line.
+$script:AzureAssetTag = '7783-7084-3265-9085-8269-3286-77'
+
+# Get-CloudFromIdentity -- aws | gcp | azure | "" from the firmware's strings, with
+# no network call: "Amazon EC2" is aws, "Google Compute Engine" is gcp, and a
+# Microsoft manufacturer WITH Azure's asset tag is azure. Case-insensitive. TWIN
+# of _cloud_from_identity. Pure.
+function Get-CloudFromIdentity {
+  param([string]$Manufacturer = "", [string]$Model = "", [string]$AssetTag = "")
+  $hay = "$Manufacturer $Model"
+  if ($hay -like '*amazon ec2*') { return "aws" }
+  if ($hay -like '*google compute engine*') { return "gcp" }
+  if ($Manufacturer -like '*microsoft*' -and (($AssetTag -replace '\s', '') -eq $script:AzureAssetTag)) { return "azure" }
+  return ""
+}
+
+# Get-MachineKindFrom -- laptop | desktop | server | cloud | "" from a chassis word
+# (Get-ChassisFromIdentity's) and the detected cloud. A known cloud is `cloud`
+# whatever its chassis says; any other VM is a server. TWIN of
+# _machine_kind_from_chassis. Pure.
+function Get-MachineKindFrom {
+  param([string]$Chassis = "", [string]$Cloud = "")
+  if ($Cloud) { return "cloud" }
+  if ($Chassis -in "laptop", "desktop") { return $Chassis }
+  if ($Chassis -in "server", "vm") { return "server" }
+  return ""
+}
+
+# Get-MachineFacts -- this machine's kind and cloud, from ONE identity read.
+function Get-MachineFacts {
+  $id = Get-HostIdentity
+  $chassis = Get-ChassisFromIdentity -Manufacturer $id.Manufacturer -Model $id.Model -ChassisTypes $id.ChassisTypes -PCSystemType $id.PCSystemType
+  $cloud = Get-CloudFromIdentity -Manufacturer $id.Manufacturer -Model $id.Model -AssetTag $id.AssetTag
+  return [pscustomobject]@{ MachineKind = (Get-MachineKindFrom -Chassis $chassis -Cloud $cloud); CloudProvider = $cloud }
 }
 
 # The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
@@ -9039,6 +9118,12 @@ function Install-ClientHelm {
     Err "Can't reconcile the existing client without its password."
   }
 
+  # The machine facts (bash twin: _machine_facts_set_args), decided once here, before
+  # the adopted/fresh split, so both paths pass the same values. "" when unreadable --
+  # the chart then leaves the variable unset.
+  $machineFacts = Get-MachineFacts
+  Log "Machine facts for the dashboard: kind=$(if ($machineFacts.MachineKind) { $machineFacts.MachineKind } else { 'unknown' }) cloud=$(if ($machineFacts.CloudProvider) { $machineFacts.CloudProvider } else { 'none' })"
+
   # #616: decide the GPU chart values for THIS run BEFORE the adopted/fresh split, so BOTH paths
   # reconcile GPU the same way. Request a GPU for training jobs ONLY when the GPU was actually
   # wired into the cluster ($K3D_GPU_FLAG). Requesting nvidia.com/gpu while the node advertises 0
@@ -9308,6 +9393,9 @@ $envBlock
       --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" `
       --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" `
       --set-string "env.TRACEBLOC_HOST_OS=$(ConvertTo-HelmSetValue (Get-HostOsLabel))" `
+      --set-string "env.TRACEBLOC_MACHINE_KIND=$(ConvertTo-HelmSetValue $machineFacts.MachineKind)" `
+      --set-string "env.TRACEBLOC_CLOUD_PROVIDER=$(ConvertTo-HelmSetValue $machineFacts.CloudProvider)" `
+      --set-string "env.TRACEBLOC_HOST_CPU_NAME=" `
       @localApiArgs 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
@@ -9344,7 +9432,10 @@ $envBlock
       --set-string "env.GPU_UNSUPPORTED_REASON=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_REASON)" `
       --set-string "env.GPU_UNSUPPORTED_NAME=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_NAME)" `
       --set-string "env.GPU_UNSUPPORTED_CODE=$(ConvertTo-HelmSetValue $GPU_UNSUPPORTED_CODE)" `
-      --set-string "env.TRACEBLOC_HOST_OS=$(ConvertTo-HelmSetValue (Get-HostOsLabel))" 2>&1) | Out-String
+      --set-string "env.TRACEBLOC_HOST_OS=$(ConvertTo-HelmSetValue (Get-HostOsLabel))" `
+      --set-string "env.TRACEBLOC_MACHINE_KIND=$(ConvertTo-HelmSetValue $machineFacts.MachineKind)" `
+      --set-string "env.TRACEBLOC_CLOUD_PROVIDER=$(ConvertTo-HelmSetValue $machineFacts.CloudProvider)" `
+      --set-string "env.TRACEBLOC_HOST_CPU_NAME=" 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client installation failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
   }

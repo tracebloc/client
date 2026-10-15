@@ -1547,23 +1547,29 @@ _pf_connectivity() {
     tool_hosts="github.com / release-assets.githubusercontent.com / dl.k8s.io / get.helm.sh"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     # NATIVE k3s fetches no k3d, no kubectl (k3s carries its own) and no Docker, so
-    # none of their hosts is probed. What a first install fetches (k3s.sh; measured
-    # on v1.36.3+k3s1 under 1.1b): the binary from github.com, whose release
-    # download redirects to release-assets.githubusercontent.com, and install.sh at
-    # the tag from raw.githubusercontent.com. Keyed on k3s being absent, as k3d's
-    # hosts are keyed on k3d.
-    if ! has k3s; then
+    # none of their hosts is probed. Its hosts are keyed on what THIS run fetches,
+    # never on k3s merely being there, so a re-run that needs a host is checked for
+    # it before anything changes (client-dev#1994):
+    #   - the binary, from github.com, whose release download redirects to
+    #     release-assets.githubusercontent.com (measured on v1.36.3+k3s1 under 1.1b):
+    #     on the predicate step c downloads on, a k3s that is absent or not the pin;
+    #   - nothing from raw.githubusercontent.com: k3s's install.sh ships with the
+    #     installer (scripts/vendor/);
+    #   - rpm.rancher.io on EVERY run of an SELinux rpm host: install.sh runs on every
+    #     pass and installs or refreshes k3s-selinux from there each time, and with
+    #     the host blocked a re-run fails at its `dnf install` (measured on Rocky 9).
+    #     Its api.github.com version lookup is not probed: install.sh only warns
+    #     when it fails (measured too).
+    if _native_k3s_binary_due; then
       criticals+=("k3s download (github.com)|https://github.com/" \
-                  "k3s assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/" \
-                  "k3s install script (raw.githubusercontent.com)|https://raw.githubusercontent.com/")
-      # install.sh installs the k3s-selinux policy from rpm.rancher.io, and on an
-      # SELinux-enforcing host a missing policy is fatal to it.
-      if _pf_k3s_selinux_rpm_host; then
-        criticals+=("k3s SELinux policy (rpm.rancher.io)|https://rpm.rancher.io/")
-      fi
+                  "k3s assets (release-assets.githubusercontent.com)|https://release-assets.githubusercontent.com/")
+    fi
+    # On an SELinux-enforcing host a missing policy is fatal to install.sh.
+    if _pf_k3s_selinux_rpm_host; then
+      criticals+=("k3s SELinux policy (rpm.rancher.io)|https://rpm.rancher.io/")
     fi
     if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
-    tool_hosts="github.com / release-assets.githubusercontent.com / raw.githubusercontent.com / get.helm.sh / rpm.rancher.io"
+    tool_hosts="github.com / release-assets.githubusercontent.com / get.helm.sh / rpm.rancher.io"
     nodes_trust="k3s is"
   elif [[ "$OS" == "Linux" ]]; then
     if ! has k3d;     then criticals+=("k3d download (github.com)|https://github.com/" \

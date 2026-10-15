@@ -283,6 +283,9 @@ spec:
             {{- /* The host's OS (client-runtime#914), sent on every heartbeat as
                  `os`. Renders nothing unless an installer set it. */ -}}
             {{- include "tracebloc.hostOsEnv" . | nindent 12 }}
+            {{- /* The machine's kind, cloud and CPU name, read by the installer
+                 on the host. Each renders nothing unless an installer set it. */ -}}
+            {{- include "tracebloc.machineFactsEnv" . | nindent 12 }}
           resources:
             requests:
               cpu: 50m

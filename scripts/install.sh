@@ -450,6 +450,9 @@ mkdir -p "$TMPDIR/lib"
 # The sub-scripts to fetch. This list is the integrity surface — every entry
 # must have a digest in manifest.sha256 (the manifest is generated from exactly
 # this set at release time; see scripts/gen-manifest.sh). Keep it in sync.
+# scripts/vendor/k3s-install.sh is not a lib: it is upstream k3s's install.sh at
+# the pinned tag, which native k3s runs from here instead of downloading it on
+# every run (client-dev#1994).
 FILES=(
   "scripts/install-k8s.sh"
   "scripts/lib/common.sh"
@@ -474,6 +477,7 @@ FILES=(
   "scripts/lib/probe.sh"
   "scripts/lib/summary.sh"
   "scripts/lib/diagnose.sh"
+  "scripts/vendor/k3s-install.sh"
 )
 
 # ONE backoff schedule for every release download — the sub-scripts below and
@@ -577,6 +581,7 @@ if [[ "$_tb_anim" == 1 ]]; then printf '  %s⠋%s Fetching the installer…' "$_
 else printf '  · Fetching the installer…\n'; fi
 for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
   dest="$TMPDIR/${f#scripts/}"
+  mkdir -p "${dest%/*}"
   download_with_retry "$(subscript_url "$f")" "$dest"
 done
 if [[ "$_tb_anim" == 1 ]]; then printf '\r\033[K'; fi
