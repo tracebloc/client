@@ -1032,7 +1032,7 @@ _pf_k3s_credit_on() {
 }
 
 # _pf_k3d_offboard_volumes -- on a consented move off k3d, one "KB MOUNT" line per
-# volume of tracebloc's k3d cluster (TB_REINSTALL_CLUSTER), which
+# volume of tracebloc's k3d cluster (TRACEBLOC_REINSTALL_CLUSTER), which
 # reinstall_offboard_k3d removes: its size and the mount point of its filesystem.
 # 1 and nothing when this run does not offboard. 2 and nothing when the estimate
 # cannot be read: Docker does not answer, no container carries the cluster's label,
@@ -1042,8 +1042,8 @@ _pf_k3s_credit_on() {
 # removed but not counted, so the estimate errs low, which can only refuse more.
 # Each volume is measured as root: Docker's data root is root's.
 _pf_k3d_offboard_volumes() {
-  local name="${TB_REINSTALL_CLUSTER:-}" ids vols v mp kb m t="${TB_DOCKER_PROBE_TIMEOUT:-10}" out=""
-  [[ "${TB_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 1
+  local name="${TRACEBLOC_REINSTALL_CLUSTER:-}" ids vols v mp kb m t="${TB_DOCKER_PROBE_TIMEOUT:-10}" out=""
+  [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 1
   [[ -n "$name" ]] || return 2
   _native_k3s_root_ready || return 2
   ids="$(_bounded "$t" docker ps -aq --filter "label=k3d.cluster=${name}" 2>/dev/null)" || return 2
@@ -1096,11 +1096,11 @@ _pf_disk_grade() {
     what="${what}, counting the ${rq} ${ru} of images this k3s already holds, which the re-run reuses"
   fi
   if [[ "$freed" == 0 ]]; then
-    what="${what}; the move off k3d frees nothing on this disk (cluster '${TB_REINSTALL_CLUSTER:-}' keeps its volumes on another)"
+    what="${what}; the move off k3d frees nothing on this disk (cluster '${TRACEBLOC_REINSTALL_CLUSTER:-}' keeps its volumes on another)"
   elif [[ "$freed" =~ ^[0-9]+$ ]]; then
     free_kb=$(( free_kb + freed ))
     ru=GB; rq=$(( freed / 1024 / 1024 )); [[ "$rq" -gt 0 ]] || { rq=$(( freed / 1024 )); ru=MB; }
-    what="${what}, counting the ${rq} ${ru} the move off k3d frees on this disk (cluster '${TB_REINSTALL_CLUSTER:-}' and its volumes)"
+    what="${what}, counting the ${rq} ${ru} the move off k3d frees on this disk (cluster '${TRACEBLOC_REINSTALL_CLUSTER:-}' and its volumes)"
   elif [[ "$freed" == "unknown" ]]; then
     what="${what}, not counting what the move off k3d frees, which could not be measured"
   fi

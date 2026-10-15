@@ -187,10 +187,10 @@ main() {
   # else, so the write that sent it is always read. It refuses nothing here: what it
   # found wrong, and a build without provision.sh, is refused by name after the
   # substrate line (refuse_wsl_run).
-  # Both are set by that read alone, never inherited: a stale TB_STDIN_CRED_FILE would
+  # Both are set by that read alone, never inherited: a stale TRACEBLOC_STDIN_CRED_FILE would
   # hand step d a credential this run never read, and a stale refusal would refuse a run
   # that was never handed one.
-  TB_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
+  TRACEBLOC_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
   if [[ "${TRACEBLOC_CREDENTIAL_STDIN:-}" == 1 ]] && declare -F provision_read_stdin_credential >/dev/null 2>&1; then
     provision_read_stdin_credential
   fi
@@ -217,7 +217,7 @@ main() {
   # request without the check refuses by name; a k3d request runs as before. Only
   # that check decides an offboard: a decision inherited from the environment is
   # cleared first.
-  TB_REINSTALL_DECISION=""
+  TRACEBLOC_REINSTALL_DECISION=""
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     declare -F refuse_k3s_beside_live_k3d >/dev/null 2>&1 \
       || error "This installer build can't check for a live k3d cluster (stale bootstrap), and native k3s is never set up beside one. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
@@ -266,7 +266,7 @@ main() {
     # prepare-host never offboards a k3d cluster: the offboard runs only in the
     # install's own step a, which this path exits before. An offboard decision
     # reaching here would start native k3s beside the live k3d (D10), so refuse.
-    if [[ "${TB_REINSTALL_DECISION:-}" == "offboard" ]]; then
+    if [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" ]]; then
       error "prepare-host never replaces a live k3d cluster, and native k3s is never set up beside one. Run the installer as the user to offboard k3d first, then re-run prepare-host."
     fi
     if declare -F run_prepare_host >/dev/null 2>&1; then
@@ -351,7 +351,7 @@ main() {
   # the full flow. A consented k3d-to-native-k3s reinstall bypasses it as --force
   # does: on a healthy k3d machine the gate would hand off and exit 0, and the
   # offboard below would never run.
-  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 && "${TB_REINSTALL_DECISION:-}" != "offboard" ]] \
+  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 && "${TRACEBLOC_REINSTALL_DECISION:-}" != "offboard" ]] \
      && declare -F assess_existing_install >/dev/null 2>&1; then
     assess_existing_install
   fi
@@ -398,7 +398,7 @@ main() {
   # A consented k3d-to-native-k3s reinstall offboards the old client here (D10):
   # after every refusal step a makes, and before step b installs anything. The
   # decision exists only where reinstall.sh does (refuse_k3s_beside_live_k3d).
-  if [[ "${TB_REINSTALL_DECISION:-}" == "offboard" ]]; then
+  if [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" ]]; then
     reinstall_offboard_k3d
   fi
   echo ""; echo ""

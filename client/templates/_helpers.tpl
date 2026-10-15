@@ -2194,8 +2194,8 @@ true
   either: on such an edge it has no root credential at all (backend#5272).
   mysqld can, through init_file, which runs at startup without authentication.
 
-  True for dev and stg, false for prod: the rollout flips one environment at a
-  time, prod last.
+  True for dev, stg and prod: the rollout flipped one environment at a time,
+  prod last.
 */}}
 {{- define "tracebloc.selfRotateMysqlRootGate" -}}
 {{- $override := (default dict .Values).selfRotateMysqlRoot -}}

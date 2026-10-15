@@ -12,11 +12,16 @@
 # front of PATH: that entry is the installer's, not the user's, so it is dropped from
 # the capture. The cost is one conservative "open a new terminal" for a user whose
 # own PATH starts with ~/.local/bin and who pairs a stale bootstrap with these libs.
-if [[ -z "${TB_LAUNCH_PATH:-}" ]]; then
-  TB_LAUNCH_PATH="${PATH:-}"
-  TB_LAUNCH_PATH="${TB_LAUNCH_PATH#"${HOME}/.local/bin:"}"
+# A bootstrap from before backend#3846 hands the capture over as TB_LAUNCH_PATH
+# alone: read it as the fallback, and export both names, one value (remove_by
+# 2026-12-31).
+TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-}}"
+if [[ -z "$TRACEBLOC_LAUNCH_PATH" ]]; then
+  TRACEBLOC_LAUNCH_PATH="${PATH:-}"
+  TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH#"${HOME}/.local/bin:"}"
 fi
-export TB_LAUNCH_PATH
+export TRACEBLOC_LAUNCH_PATH
+export TB_LAUNCH_PATH="$TRACEBLOC_LAUNCH_PATH"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 # In a bats run only, the suite's sudo fence goes back in front of the directories
 # just prepended. Behind them, a case that dropped its own sudo stub would run the
@@ -49,7 +54,7 @@ tb_tuning_aliases=(
   TB_K3D_EDIT_TIMEOUT TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT
   TB_K3S_CRI_TIMEOUT TB_K3S_INSTALL_SH_TIMEOUT
   TB_KUBECONFIG_MERGE_TIMEOUT TB_KUBECTL_PROBE_TIMEOUT TB_METRICS_WAIT_S
-  TB_NODE_CHECK_EVERY_S TB_OFFBOARD_TIMEOUT TB_PLAIN TB_PROBE_TIMEOUT TB_PROBE_VERIFY
+  TB_NODE_CHECK_EVERY_S TB_OFFBOARD_TIMEOUT TB_PLAIN TB_PM_KILL_GRACE TB_PROBE_TIMEOUT TB_PROBE_VERIFY
   TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
   TB_WSL_INTEROP_KILL_AFTER TB_WSL_INTEROP_TIMEOUT
   COLIMA_CPU COLIMA_DISK GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
@@ -1042,6 +1047,88 @@ _tb_progress_end() {
   tput cnorm 2>/dev/null || true
 }
 
+# _tb_proc_tree PID — PID and every descendant, one per line, parents first.
+# Captured BEFORE any signal: once a wrapper dies its children reparent to init
+# and `pgrep -P` can no longer see them (Bugbot #442 r2).
+_tb_proc_tree() {
+  local _todo="$1" _next _p
+  while [[ -n "$_todo" ]]; do
+    _next=""
+    for _p in $_todo; do
+      echo "$_p"
+      _next="$_next $(pgrep -P "$_p" 2>/dev/null || true)"
+    done
+    # shellcheck disable=SC2086  # word-splitting the pid list is the point
+    _todo="$(printf '%s\n' $_next)"
+  done
+}
+
+# _tb_proc_alive PID COMM — true while PID is a live (non-zombie) process still
+# named COMM. `ps`, not `kill -0`: kill -0 on a root-owned `dnf` from a non-root
+# installer fails with EPERM and would read a running process as gone. The
+# name check means a pid the kernel reused is never taken for, or killed as,
+# the process we captured.
+_tb_proc_alive() {
+  local _st="" _c=""
+  read -r _st _c < <(ps -o stat= -o comm= -p "$1" 2>/dev/null || true) || true
+  _c="${_c##*/}"; _c="${_c// /}"   # as _tb_spin_reap captured it: macOS prints a path, maybe with spaces
+  [[ -n "$_st" && "$_st" != Z* && "$_c" == "$2" ]]
+}
+
+# _tb_spin_reap PID [GRACE_S] — spin's deadline path. TERM to PID and every
+# descendant, wait up to GRACE_S whole seconds for all of them to exit, then
+# KILL only those still alive under the same name. Empty GRACE_S is the
+# historical 0.5 s, right for k3d, curl and docker probes. A package manager
+# is not one of those: rpm and dpkg defer TERM until the transaction is
+# written, and a KILL 0.5 s later lands mid-transaction (client-dev#2063).
+# Through sudo, sudo relays the TERM and only the reap of the WHOLE tree keeps
+# its child from being orphaned holding the lock. Sets _TB_SPIN_SURVIVORS to
+# "pid:name …" for whatever is still alive after the KILL (a root-owned
+# process a non-root installer may not KILL), so the caller can name it.
+_TB_SPIN_SURVIVORS=""
+_tb_spin_reap() {
+  local _pid="$1" _grace="${2:-}" _tree _p _c _pairs="" _pair _live _ticks=0 _t0=$SECONDS
+  _TB_SPIN_SURVIVORS=""
+  # A typo'd TB_PM_KILL_GRACE must not fall back to 0.5 s for a package
+  # manager, nor abort the deadline path in $(( )): anything but digits is 60.
+  if [[ -n "$_grace" ]]; then
+    [[ "$_grace" =~ ^[0-9]+$ ]] && _grace=$(( 10#$_grace )) || _grace=60
+  fi
+  _tree="$(_tb_proc_tree "$_pid")"
+  for _p in $_tree; do
+    _c="$(ps -o comm= -p "$_p" 2>/dev/null || true)"
+    _c="${_c##*/}"; _c="${_c// /}"
+    [[ -n "$_c" ]] && _pairs="$_pairs $_p:$_c"
+  done
+  for _p in $_tree; do
+    kill -TERM "$_p" 2>/dev/null || true
+  done
+  if [[ -z "$_grace" ]]; then
+    sleep 0.5
+  else
+    # Ticks AND the wall clock, as spin's own deadline: a slow host stretches
+    # every sleep, and the grace must not stretch with it (client-dev#1514).
+    while (( _ticks * 2 < _grace * 10 && SECONDS - _t0 <= _grace )); do
+      _live=0
+      for _pair in $_pairs; do
+        _tb_proc_alive "${_pair%%:*}" "${_pair#*:}" && { _live=1; break; }
+      done
+      (( _live )) || break
+      sleep 0.2
+      _ticks=$(( _ticks + 1 ))
+    done
+  fi
+  for _pair in $_pairs; do
+    _tb_proc_alive "${_pair%%:*}" "${_pair#*:}" && { kill -9 "${_pair%%:*}" 2>/dev/null || true; }
+  done
+  sleep 0.1
+  for _pair in $_pairs; do
+    [[ "${_pair%%:*}" == "$_pid" ]] && continue   # our own child: wait reaps it
+    _tb_proc_alive "${_pair%%:*}" "${_pair#*:}" && _TB_SPIN_SURVIVORS="${_TB_SPIN_SURVIVORS:+$_TB_SPIN_SURVIVORS }$_pair"
+  done
+  return 0
+}
+
 # ── Spinner — hides noisy command output behind an animated status line ──────
 #  Usage:  spin <pid> "Installing foo…" [deadline_seconds]
 #  Animates only through the progress-line gate above: with colour off it prints
@@ -1050,39 +1137,26 @@ _tb_progress_end() {
 #  before calling spin. spin waits for the PID to exit and returns its exit code.
 #  With the optional third argument, a still-running PID is killed once the
 #  deadline passes and spin returns 124 (GNU timeout's convention) — the
-#  backstop for commands that can wedge indefinitely (#426).
+#  backstop for commands that can wedge indefinitely (#426). The optional
+#  fourth is the TERM-to-KILL grace in whole seconds (_tb_spin_reap below);
+#  empty keeps the 0.5 s every non-package-manager caller has always had.
 spin() {
-  local pid="$1" msg="$2" deadline_s="${3:-}"
+  local pid="$1" msg="$2" deadline_s="${3:-}" grace_s="${4:-}"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   local ticks=0                           # one tick ≈ 0.12s
   local _spin_t0=$SECONDS                 # the deadline's wall clock: ticks alone stretch on a slow host (client-dev#1514)
-  local _spin_kids="" _spin_k=""          # deadline path: captured child PIDs
 
   _tb_progress_start "$msg"               # hide cursor, or the one static line
   while kill -0 "$pid" 2>/dev/null; do
     if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 || SECONDS - _spin_t0 > deadline_s )); then
-      # Children FIRST: the pid is often a wrapper subshell (k3d.sh's
-      # `( k3d … ) &`) — signalling only the wrapper orphans the real worker,
-      # which keeps running (k3d keeps creating the cluster) after the install
-      # has already failed, racing any retry (Bugbot #442). Capture the child
-      # PIDs BEFORE any signal: once the wrapper dies they reparent to init
-      # and pkill -P can't see them (Bugbot #442 r2), so the KILL sweep must
-      # address them by captured PID. Harmless when bash exec-optimized the
-      # wrapper away — then $pid IS the worker and there are no children.
-      # Every line below is failure-proofed (`|| true`): pkill returns 1 when
-      # there are no children, kill/wait fail on already-reaped PIDs, and wait
-      # reports the kill signal — under `set -e` any of those would abort the
-      # deadline path before `return 124`, so the caller would never see the
-      # timeout (no warn/hint, no partial-cluster cleanup) (Bugbot #442 r3).
-      _spin_kids="$(pgrep -P "$pid" 2>/dev/null || true)"
-      pkill -TERM -P "$pid" 2>/dev/null || true
-      kill "$pid" 2>/dev/null || true
-      sleep 0.5
-      for _spin_k in $_spin_kids; do
-        kill -9 "$_spin_k" 2>/dev/null || true
-      done
-      kill -9 "$pid" 2>/dev/null || true
+      # The whole tree, not just the pid: it is often a wrapper subshell
+      # (k3d.sh's `( k3d … ) &`, or spin_cmd_bounded's `tb_root dnf …`), and
+      # signalling only the wrapper orphans the real worker (Bugbot #442).
+      # Every line is failure-proofed (`|| true`): under `set -e` a bare
+      # failure would abort the deadline path before `return 124`, and the
+      # caller would never see the timeout (Bugbot #442 r3).
+      _tb_spin_reap "$pid" "$grace_s" || true
       wait "$pid" 2>/dev/null || true
       _tb_progress_end
       return 124
@@ -1122,17 +1196,26 @@ spin_cmd() {
 #  talking to a wedged kube-apiserver). Same quiet-log capture + failure tail
 #  as spin_cmd; returns the command's real exit code, or 124 when the deadline
 #  killed it (with a timeout note so the user knows it was us, not the tool).
+#  `--grace N` first: N whole seconds between TERM and KILL instead of 0.5 —
+#  for a package manager, which must be let finish its transaction
+#  (client-dev#2063; callers pass "${TB_PM_KILL_GRACE:-60}"). Whatever is still
+#  running after it is named, so the user knows a lock may still be held.
 spin_cmd_bounded() {
+  local grace=""
+  if [[ "${1:-}" == "--grace" ]]; then grace="${2:-}"; shift 2; fi
   local secs="$1" msg="$2"; shift 2
   local logfile; _tb_spin_logfile; logfile="$_TB_SPIN_LOG"
   "$@" >> "$logfile" 2>&1 &
   local pid=$!
-  local rc=0
-  spin "$pid" "$msg" "$secs" || rc=$?
+  local rc=0 _sv
+  spin "$pid" "$msg" "$secs" "$grace" || rc=$?
   if (( rc == 124 )); then
     echo -e "  ${RED}${BOLD}✖ ${msg} — timed out after ${secs}s${RESET}" >&2
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
+    for _sv in ${_TB_SPIN_SURVIVORS:-}; do
+      echo -e "  ${YELLOW}⚠ ${_sv#*:} (PID ${_sv%%:*}) is still running and may hold the package manager's lock — wait for it to exit (ps -p ${_sv%%:*}) before running the installer again.${RESET}" >&2
+    done
     return 124
   elif (( rc != 0 )); then
     echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
@@ -1694,24 +1777,26 @@ TB_K3S_IMAGE_ARM64_DIGEST="sha256:4ceb591dd1e592b98b7c51ff3bdb7143914e1bee0677e7
 # Apple's `container` runtime for the macOS node (RFC-0175 D6): the release, the
 # package's digest and the Team ID that signs it (facts.env APPLE_CONTAINER_*, stamped
 # by check-facts.sh --write). Stamped here, not in mac-container.sh, for the reason the
-# k3s pins above are. No TRACEBLOC_* override: a different runtime has no digest here.
+# k3s pins above are. Not overridable from the environment: a different runtime has
+# no digest here. TRACEBLOC_-named since backend#3846 (TB_ is a banned prefix), and
+# assigned outright, so an exported TRACEBLOC_APPLE_* never reaches a reader.
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_APPLE_CONTAINER_VERSION="1.4.1"
+TRACEBLOC_APPLE_CONTAINER_VERSION="1.4.1"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_APPLE_CONTAINER_PKG_SHA256="c0d2716afefbb194c93fae662e9cae7cc186bcbcf746816608ec673dd648a6a4"
+TRACEBLOC_APPLE_CONTAINER_PKG_SHA256="c0d2716afefbb194c93fae662e9cae7cc186bcbcf746816608ec673dd648a6a4"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
+TRACEBLOC_APPLE_CONTAINER_TEAM_ID="UPBK2H6LZM"
 # The VM's init image and our kernel, each a repository and a digest (facts.env
 # APPLE_VMINIT_IMAGE / _DIGEST and MAC_KERNEL_IMAGE / _SHA256, the same stamping):
 # mac-container.sh starts the runtime on them.
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_APPLE_VMINIT_IMAGE="ghcr.io/tracebloc/apple-container-vminit"
+TRACEBLOC_APPLE_VMINIT_IMAGE="ghcr.io/tracebloc/apple-container-vminit"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_APPLE_VMINIT_DIGEST="sha256:aa6ab59d0938f7fadb54ac27e80959bdd2f1dafa8050011086d5f8ab1350fd6c"
+TRACEBLOC_APPLE_VMINIT_DIGEST="sha256:aa6ab59d0938f7fadb54ac27e80959bdd2f1dafa8050011086d5f8ab1350fd6c"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_MAC_KERNEL_IMAGE="ghcr.io/tracebloc/apple-container-kernel"
+TRACEBLOC_MAC_KERNEL_IMAGE="ghcr.io/tracebloc/apple-container-kernel"
 # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-TB_MAC_KERNEL_SHA256="fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
+TRACEBLOC_MAC_KERNEL_SHA256="fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR /
 # NVIDIA_DRIVER_HARD_FLOOR_LINUX, stamped by check-facts.sh --write). Below the
 # compute-capability floor or the hard driver floor (the CUDA 12 minimum) detect-gpu.sh
@@ -2408,7 +2493,7 @@ tb_wsl_phase() {
 # stop-and-check gate set (assess.sh), as it set it -- a tag such as
 # credential-rejected, ns:<namespace> for a healthy client, or empty when the gate did
 # not assess (--force, or a stale bootstrap without assess.sh). On credential-rejected
-# the host runs `client create --reissue` and puts TB_CREDENTIAL_REISSUED=1 on the
+# the host runs `client create --reissue` and puts TRACEBLOC_CREDENTIAL_REISSUED=1 on the
 # client run's line. Only the cluster run writes it, and only to a file the host
 # named. A write that fails is an error, so the run never exits 0 without the line.
 tb_wsl_handover_write() {
@@ -2669,15 +2754,15 @@ TB_RECORD_REFRESH_ONLY=""
 # the administrator named, never to the administrator who runs it. TB_RECORD_FOR_USER
 # is that user's login name (the record's `user`, and the root copy's <user>),
 # TB_RECORD_FOR_HOME their home from passwd, where their own copy goes, and
-# TB_RECORD_HOME the private directory this process builds the record in. Set only by
+# TRACEBLOC_RECORD_HOME the private directory this process builds the record in. Set only by
 # tb_record_for_user, and assigned here like TRACEBLOC_RECORD_ARMED, so the environment can
 # never point a record at another user.
 TB_RECORD_FOR_USER=""
 TB_RECORD_FOR_HOME=""
-TB_RECORD_HOME=""
+TRACEBLOC_RECORD_HOME=""
 # The user copy: x-tracebloc-record.user-path, its leading ~ as $HOME (in prepared
 # mode, as the directory the record is built in).
-tb_record_path() { printf '%s%s' "${TB_RECORD_HOME:-${HOME:-}}" "${TB_RECORD_USER_PATH#\~}"; }
+tb_record_path() { printf '%s%s' "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" "${TB_RECORD_USER_PATH#\~}"; }
 
 # The login name the record is written for: the named user in prepared mode, else
 # the user this process runs as.
@@ -2697,7 +2782,7 @@ tb_record_for_user() {
   [[ -n "$u" && "$h" == /* ]] || return 1
   tb_scratch_dir scratch tracebloc-record || return 1
   mkdir -p "${scratch}/.tracebloc" || return 1
-  TB_RECORD_FOR_USER="$u"; TB_RECORD_FOR_HOME="$h"; TB_RECORD_HOME="$scratch"
+  TB_RECORD_FOR_USER="$u"; TB_RECORD_FOR_HOME="$h"; TRACEBLOC_RECORD_HOME="$scratch"
   _tb_record_as_user "$u" cat "${h}${TB_RECORD_USER_PATH#\~}" > "$(tb_record_path)" 2>/dev/null \
     || rm -f "$(tb_record_path)"
   return 0
@@ -2767,7 +2852,7 @@ _tb_record_field() {
 tb_record_write() {
   # The record's home is tb_record_path's: in prepared mode the scratch directory,
   # so a prepare-host run with HOME unset (systemd, cloud-init, env -i) still records.
-  _tb_record_armed && [[ -n "${TB_RECORD_HOME:-${HOME:-}}" ]] || return 0
+  _tb_record_armed && [[ -n "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" ]] || return 0
   local rec dir now prior="" arts="" root_copy prepared_for
   rec="$(tb_record_path)"; dir="${rec%/*}"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

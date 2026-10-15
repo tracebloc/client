@@ -77,8 +77,12 @@ the signature check. **Release assets are per-tag and immutable**, so they are t
 correct transport. Only the maintainer/`TRACEBLOC_ALLOW_UNVERIFIED=1` path reads
 the tree, from `TRACEBLOC_SOURCE_REPO` (default `tracebloc/client`; point it at a
 public fork whose branch you pushed — `tracebloc/client-dev` is private, so its raw
-URLs need a token). Either way every fetched byte is verified against the signed
-manifest, so the transport is not a trust boundary. (The manifest + signature were
+URLs need a token). On the customer path every fetched byte is verified against
+the signed manifest, so the transport is not a trust boundary. The dev path is
+unverified by name: the tree carries no manifest (it is generated where it is
+used, backend#2868), so a per-commit bundle (`installer-per-sha.yml`) serves an
+unsigned one generated from its commit, and a bare branch tree serves none and the
+bootstrap says it skipped the digest check. (The manifest + signature were
 always release assets because signing happens in CI *after* the tag is cut — same
 reason the CLI serves `SHA256SUMS` as a release asset.)
 
@@ -101,7 +105,7 @@ job (runs on `release: published`, same trigger as the chart publish) that:
 
 1. Checks out the **released tag** (`github.event.release.tag_name`).
 2. Installs cosign (`sigstore/cosign-installer`, pinned `v2.4.1`).
-3. Runs `scripts/gen-manifest.sh` to (re)generate `manifest.sha256` from the
+3. Runs `scripts/gen-manifest.sh` to generate `manifest.sha256` from the
    exact `FILES` the bootstrap fetches — the script cross-checks the two `FILES`
    lists and fails on drift, so a sub-script can never ship unlisted.
 4. `cosign sign-blob` → `manifest.sha256.sig` + `manifest.sha256.cert` (keyless;
@@ -112,11 +116,19 @@ job (runs on `release: published`, same trigger as the chart publish) that:
 6. Attaches `install.sh`, `manifest.sha256`, `manifest.sha256.sig`,
    `manifest.sha256.cert` to the release.
 
+**The signed release asset is the integrity root, and nothing else is.** The
+manifest is generated where it is used and never committed (backend#2868): step 3
+is the only source of what step 4 signs. A committed copy was never what a
+release signed, and it changed on about a third of `develop` merges, so a
+branch that touched `scripts/` kept conflicting on it.
+
 `gen-manifest.sh --check` runs in the **`Source-of-truth drift`** job
-(`drift-checks.yaml`, via `make drift`) and fails any PR that changes a
-sub-script without regenerating the committed manifest, so the in-repo manifest
-never drifts from the scripts it covers. That job is a **required status check**
-on `develop` and on `main` — which is the whole reason the check lives there.
+(`drift-checks.yaml`, via `make drift`) and fails any PR where the bootstraps'
+lists and the manifest's declaration disagree, where a covered file is missing,
+where this job or `installer-per-sha.yml` would sign or ship a manifest it did
+not generate first, or that commits a copy. That job is a **required status
+check** on `develop` and on `main` — which is the whole reason the check lives
+there.
 
 > Until 2026-08-19 this paragraph named `installer-tests.yaml`, and the claim it
 > made was false. That workflow's `Static analysis` job is a required check on no

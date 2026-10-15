@@ -207,60 +207,57 @@ function Resolve-InstallRef {
 #  Fetch + integrity helpers.
 # =============================================================================
 
-# Download with retry. Honors $env:HTTPS_PROXY for the corporate-proxy segment
-# (#172/#722). Unlike curl in install.sh it does not currently apply $NO_PROXY
-# exclusions or a custom CA bundle — HTTPS_PROXY covers the common case.
-function Get-WithRetry {
+# ONE backoff schedule for every release download -- the sub-scripts
+# Get-WithRetry fetches and the optional trust assets Get-Optional gets -- so the
+# two can't drift apart (parity with install.sh's DL_DELAYS). Each entry is the
+# wait before the next attempt: $DlDelays.Count + 1 attempts over ~75 s. It used
+# to be three attempts 5 s apart, ~10 s in all, and a GitHub 500 on a release
+# asset one minute after the release was published outlasted that and failed a
+# fresh install (client-dev#2053). Only a failure a wait can cure is retried: no
+# answer (a timeout, a reset, DNS), 408, 429, or a 5xx; any other 4xx is the
+# server's answer and returns at once. Invoke-WebRequest throws on a status alone
+# only at 400 and above, so a thrown error that carries a lower status failed in
+# transport (the body cut after 200, a redirect whose target never answered) and
+# is retried too -- parity with install.sh's _dl_retriable.
+$script:DlDelays = @(5, 10, 20, 40)
+
+function Test-DownloadRetriable {
+  param([int]$Code)
+  return ($Code -lt 400 -or $Code -eq 408 -or $Code -eq 429 -or ($Code -ge 500 -and $Code -le 599))
+}
+
+# Fetch $Url to $Dest on the schedule above; $true = fetched, $false = not. Never
+# throws. Leaves the last outcome in $script:FetchStatus (the HTTP code, or 'none'
+# for no answer), $script:FetchTries, $script:FetchWaited (seconds slept),
+# $script:FetchUrl and $script:FetchError, so a refusal can name them.
+# Honors $env:HTTPS_PROXY for the corporate-proxy segment (#172/#722). Unlike curl
+# in install.sh it does not currently apply $NO_PROXY exclusions or a custom CA
+# bundle -- HTTPS_PROXY covers the common case.
+$script:FetchStatus = ''
+$script:FetchTries = 0
+$script:FetchWaited = 0
+$script:FetchUrl = ''
+$script:FetchError = ''
+function Invoke-DownloadOnSchedule {
   param(
     [string]$Url,
-    [string]$Dest,
-    [int]$MaxAttempts = 3,
-    [int]$DelaySeconds = 5
+    [string]$Dest
   )
   # PS 5.1's progress overlay throttles Invoke-WebRequest massively (its render
   # loop dominates the transfer) and its "Writing request stream" banner reads
-  # like a hang (#468). Function-local assignment — the preference reverts
+  # like a hang (#468). Function-local assignment -- the preference reverts
   # automatically when this function returns.
   $ProgressPreference = 'SilentlyContinue'
   $proxyArgs = @{}
   if ($env:HTTPS_PROXY) { $proxyArgs['Proxy'] = $env:HTTPS_PROXY }
-  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-    try {
-      Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop @proxyArgs
-      return
-    } catch {
-      if ($attempt -ge $MaxAttempts) {
-        throw "Failed to download $Url after $MaxAttempts attempts: $_"
-      }
-      Warn "Download failed (attempt $attempt/$MaxAttempts). Retrying in ${DelaySeconds}s..."
-      Start-Sleep -Seconds $DelaySeconds
-    }
-  }
-}
-
-# Try a download and never throw — used for optional assets (manifest
-# fall-through, sig/cert/bundle, the cosign checksums) where the caller decides
-# fail-closed vs. opt-out. A 404 is an answer (a release cut before signing, or
-# before the offline bundle, has no such asset), so it returns at once. Anything
-# else — a timeout, a reset, a 5xx — is a blip and gets the same attempts
-# Get-WithRetry gives every sub-script. These fetches used to be single-shot, so
-# one dropped connection on the manifest refused the whole install as "couldn't
-# fetch the integrity checksums" (backend#3020; parity with install.sh's
-# fetch_optional). $script:FetchStatus keeps the last outcome — the HTTP code, or
-# 'none' for no answer — so a refusal can say which of the two it was.
-$script:FetchStatus = ''
-function Get-Optional {
-  param(
-    [string]$Url,
-    [string]$Dest,
-    [int]$MaxAttempts = 3,
-    [int]$DelaySeconds = 5
-  )
-  # Same PS 5.1 progress-throttle fix as Get-WithRetry (#468); local scope only.
-  $ProgressPreference = 'SilentlyContinue'
-  $proxyArgs = @{}
-  if ($env:HTTPS_PROXY) { $proxyArgs['Proxy'] = $env:HTTPS_PROXY }
-  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+  $max = $script:DlDelays.Count + 1
+  $script:FetchUrl = $Url
+  $script:FetchStatus = ''
+  $script:FetchTries = 0
+  $script:FetchWaited = 0
+  $script:FetchError = ''
+  while ($true) {
+    $script:FetchTries++
     try {
       Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop @proxyArgs
       $script:FetchStatus = '200'
@@ -268,17 +265,45 @@ function Get-Optional {
     } catch {
       # PS 5.1 (WebException) and 7 (HttpResponseException) both carry the
       # response's StatusCode; a network error carries no response at all.
+      $script:FetchError = "$_"
       $code = 0
       try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = 0 }
       if ($code -gt 0) { $script:FetchStatus = "$code" } else { $script:FetchStatus = 'none' }
-      if ($code -eq 404) { return $false }
-      if ($attempt -lt $MaxAttempts) {
-        Warn "Download failed (attempt $attempt/$MaxAttempts). Retrying in ${DelaySeconds}s..."
-        Start-Sleep -Seconds $DelaySeconds
-      }
+      if (-not (Test-DownloadRetriable -Code $code)) { return $false }
+      if ($script:FetchTries -ge $max) { return $false }
+      $delay = $script:DlDelays[$script:FetchTries - 1]
+      Warn "Download failed (attempt $($script:FetchTries)/$max, status $($script:FetchStatus)). Retrying in ${delay}s..."
+      Start-Sleep -Seconds $delay
+      $script:FetchWaited += $delay
     }
   }
-  return $false
+}
+
+# A sub-script the installer can't run without: fetched on the schedule, or a
+# throw naming the URL, the last status and how long it waited.
+function Get-WithRetry {
+  param(
+    [string]$Url,
+    [string]$Dest
+  )
+  if (Invoke-DownloadOnSchedule -Url $Url -Dest $Dest) { return }
+  throw "Failed to download $Url (last status: $($script:FetchStatus)) after $($script:FetchTries) attempt(s) over $($script:FetchWaited)s: $($script:FetchError)"
+}
+
+# Try a download and never throw -- used for optional assets (manifest
+# fall-through, sig/cert/bundle, the cosign checksums) where the caller decides
+# fail-closed vs. opt-out. A 404 is an answer (a release cut before signing, or
+# before the offline bundle, has no such asset), so it returns at once. A
+# timeout, a reset, a 5xx is a blip and gets the same schedule Get-WithRetry
+# gives every sub-script. These fetches used to be single-shot, so one dropped
+# connection on the manifest refused the whole install as "couldn't fetch the
+# integrity checksums" (backend#3020; parity with install.sh's fetch_optional).
+function Get-Optional {
+  param(
+    [string]$Url,
+    [string]$Dest
+  )
+  return (Invoke-DownloadOnSchedule -Url $Url -Dest $Dest)
 }
 
 # The cause sentence of a refusal over an optional asset Get-Optional couldn't
@@ -287,7 +312,7 @@ function Get-Optional {
 function Get-FetchRefusalCause {
   param([string]$IfMissing)
   if ($script:FetchStatus -eq '404') { return $IfMissing }
-  return "The download failed 3 times (last status: $($script:FetchStatus)) -- check your network or proxy and re-run."
+  return "Downloading $($script:FetchUrl) failed after $($script:FetchTries) attempt(s) over $($script:FetchWaited)s (last status: $($script:FetchStatus)) -- check your network or proxy and re-run."
 }
 
 # Where to fetch one sub-script from. Customer path -> the RELEASE ASSET

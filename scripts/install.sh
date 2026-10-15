@@ -205,7 +205,11 @@ _tb_check_healthy() {
 # step reads it to say "run it now" when the CLI's directory was already on it,
 # and "open a new terminal" only when it was not (install-cli.sh,
 # _cli_on_launch_path). Kept when already set, so a nested run keeps the first.
-export TB_LAUNCH_PATH="${TB_LAUNCH_PATH:-${PATH:-}}"
+# TRACEBLOC_LAUNCH_PATH is the name (backend#3846: TB_ is a banned prefix); the
+# legacy TB_LAUNCH_PATH is read as the fallback and set beside it, one value, so
+# core libs older than this bootstrap still find it (remove_by 2026-12-31).
+export TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-${PATH:-}}}"
+export TB_LAUNCH_PATH="$TRACEBLOC_LAUNCH_PATH"
 
 # The CLI installer drops the binary in ~/.local/bin when /usr/local/bin isn't
 # writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
@@ -472,48 +476,85 @@ FILES=(
   "scripts/lib/diagnose.sh"
 )
 
-download_with_retry() {
-  local url="$1" dest="$2"
-  local attempt max_attempts=3 delay=5
-  for attempt in 1 2 3; do
+# ONE backoff schedule for every release download — the sub-scripts below and
+# the optional trust assets fetch_optional gets — so the two can't drift apart.
+# Each entry is the wait before the next attempt, so ${#DL_DELAYS[@]}+1 attempts
+# over ~75 s. It used to be three attempts 5 s apart in each function, ~10 s in
+# all, and a GitHub 500 on k3d.sh one minute after a release was published
+# outlasted that and failed a fresh install at "1. Downloading"
+# (client-dev#2053). Only a failure that a wait can cure is retried: no answer
+# (000 — DNS, a refused connect), 408, 429, or a 5xx. A 4xx other than 408 and
+# 429 is the server's answer and returns at once.
+#
+# The status is read only after curl has FAILED, and curl -f fails on a status
+# alone only at 400 and above (exit 22). So a failed curl that reports a lower
+# status failed in transport, and that is retried too: the body cut after
+# "200 OK" (56 reset, 18 short, 28 timeout), or a redirect whose target never
+# answered (302, then 7; every release asset redirects to GitHub's CDN). Measured
+# with curl 8.7.1 on 14 Oct 2026: v1.9.214-rc.1 gave up on all four at once.
+DL_DELAYS=(5 10 20 40)
+
+_dl_retriable() {
+  case "$1" in
+    ""|000|408|429|5[0-9][0-9]) return 0 ;;
+    [123][0-9][0-9]) return 0 ;;   # below 400 the transfer failed, not the server
+    *) return 1 ;;
+  esac
+}
+
+# Fetch $1 to $2 on the schedule above: 0 = fetched, 1 = not fetched. Leaves the
+# last outcome in FETCH_STATUS (the HTTP code, 000 for no answer), FETCH_TRIES and
+# FETCH_WAITED (seconds slept), and FETCH_URL, so a refusal can name all four.
+FETCH_STATUS=""; FETCH_TRIES=0; FETCH_WAITED=0; FETCH_URL=""
+# A third argument "quiet" keeps curl's own error line off the terminal: the
+# optional fetches say what failed through their refusal, and a 404 on an asset an
+# older release never had is not worth a line. A required download leaves it
+# visible -- the x509 / proxy line is what tells a corporate-proxy CA problem from
+# a GitHub outage.
+_dl_fetch() {
+  local url="$1" dest="$2" quiet="${3:-}" max=$(( ${#DL_DELAYS[@]} + 1 )) delay
+  FETCH_URL="$url"; FETCH_STATUS=""; FETCH_TRIES=0; FETCH_WAITED=0
+  while :; do
+    FETCH_TRIES=$((FETCH_TRIES + 1))
     # --tlsv1.2 floor; honor any proxy / custom-CA env the corporate-proxy
     # segment relies on (#172/#722) — curl picks up HTTPS_PROXY/NO_PROXY/
     # CURL_CA_BUNDLE from the environment automatically. --connect-timeout/--max-time
     # (added to every fetch in this file) turn a stalled endpoint into a retriable
     # failure instead of hanging the "1. Downloading" phase forever.
-    if curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 "$url" -o "$dest"; then return 0; fi
-    if [[ $attempt -ge $max_attempts ]]; then
-      echo "[ERROR] Failed to download $url after $max_attempts attempts."
-      exit 1
+    if [[ -n "$quiet" ]]; then
+      FETCH_STATUS="$(curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 -w '%{http_code}' "$url" -o "$dest" 2>/dev/null)" && return 0
+    else
+      FETCH_STATUS="$(curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 -w '%{http_code}' "$url" -o "$dest")" && return 0
     fi
-    echo "[WARN]  Download failed (attempt $attempt/$max_attempts). Retrying in ${delay}s..."
+    _dl_retriable "$FETCH_STATUS" || return 1
+    [[ $FETCH_TRIES -lt $max ]] || return 1
+    delay="${DL_DELAYS[$((FETCH_TRIES - 1))]}"
+    echo "[WARN]  Download failed (attempt $FETCH_TRIES/$max, status ${FETCH_STATUS:-000}). Retrying in ${delay}s..." >&2
     sleep "$delay"
+    FETCH_WAITED=$((FETCH_WAITED + delay))
   done
+}
+
+# A sub-script the installer can't run without: fetched on the schedule, or the
+# bootstrap exits naming the URL, the last status and how long it waited.
+download_with_retry() {
+  _dl_fetch "$1" "$2" && return 0
+  echo "[ERROR] Failed to download $1 (last status: ${FETCH_STATUS:-000}) after $FETCH_TRIES attempt(s) over ${FETCH_WAITED}s."
+  exit 1
 }
 
 # Fetch one OPTIONAL asset — the manifest, its sig/cert/bundle, the cosign
 # bootstrap — without exiting: 0 = fetched, 1 = not fetched, and the caller
 # decides between falling through and failing closed. A 404 is an answer (a
 # release cut before signing, or before the offline bundle, has no such asset),
-# so it returns at once. Anything else — a timeout, a reset, a 5xx — is a blip
-# and gets the same three attempts download_with_retry gives every sub-script.
-# These fetches used to be single-shot, so one dropped connection on the manifest
-# refused the whole install as "couldn't fetch the integrity checksums" on a
-# release whose assets had been published for hours (backend#3020). FETCH_STATUS
-# keeps the last outcome — the HTTP code, or 000 for no answer — so a refusal
-# can say which of the two it was.
-FETCH_STATUS=""
+# so it returns at once. A timeout, a reset (before or after the status line), a
+# 5xx is a blip and gets the same schedule download_with_retry gives every
+# sub-script. These fetches used to be
+# single-shot, so one dropped connection on the manifest refused the whole
+# install as "couldn't fetch the integrity checksums" on a release whose assets
+# had been published for hours (backend#3020).
 fetch_optional() {
-  local url="$1" dest="$2" attempt max_attempts=3 delay=5
-  for attempt in 1 2 3; do
-    FETCH_STATUS="$(curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 -w '%{http_code}' "$url" -o "$dest" 2>/dev/null)" && return 0
-    [[ "$FETCH_STATUS" == "404" ]] && return 1
-    if [[ $attempt -lt $max_attempts ]]; then
-      echo "[WARN]  Download failed (attempt $attempt/$max_attempts). Retrying in ${delay}s..." >&2
-      sleep "$delay"
-    fi
-  done
-  return 1
+  _dl_fetch "$1" "$2" quiet
 }
 
 # The cause line of a refusal over an optional asset fetch_optional couldn't get.
@@ -523,8 +564,8 @@ _fetch_refusal_cause() {
   if [[ "$FETCH_STATUS" == "404" ]]; then
     echo "        $1" >&2
   else
-    echo "        The download failed 3 times (last status: ${FETCH_STATUS:-none}) — check" >&2
-    echo "        your network or proxy and re-run." >&2
+    echo "        Downloading ${FETCH_URL:-the asset} failed after $FETCH_TRIES attempt(s) over ${FETCH_WAITED}s" >&2
+    echo "        (last status: ${FETCH_STATUS:-none}) — check your network or proxy and re-run." >&2
   fi
 }
 
@@ -641,9 +682,10 @@ verify_against_manifest() {
 
 download_manifest() {
   local dest="$1"
-  # Authoritative source: the signed release asset. Fall back to the in-repo
-  # copy in the tag tree only under the unverified dev opt-in (a branch checkout
-  # has no release assets).
+  # Authoritative source: the signed release asset. Fall back to a copy in the
+  # source tree only under the unverified dev opt-in (a branch checkout has no
+  # release assets). A per-commit bundle serves one generated from its commit;
+  # a git tree has none since backend#2868, and the caller then skips the check.
   if fetch_optional "$REPO_REL/manifest.sha256" "$dest"; then
     return 0
   fi

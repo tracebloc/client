@@ -1399,20 +1399,37 @@ _client_id_from_secret() {
 
 # _client_password_from_secret REL NS — the machine credential the client's pods
 # authenticate with, from the release's Secret (canonical key first, the legacy
-# one as fallback), or "" when it can't be read. Same bounded, one-Secret read as
-# _client_id_from_secret; the value never reaches argv (verify_credentials feeds
-# it to curl on stdin).
+# one as fallback). Same bounded, one-Secret read as _client_id_from_secret; the
+# value never reaches argv (verify_credentials feeds it to curl on stdin).
+# CONTRACT: echoes the password and returns 0; echoes nothing and returns 0 when
+# the release has no Secret carrying a password (a first install); echoes
+# nothing and returns 2 when it CANNOT TELL -- no kubectl, a failed or timed-out
+# read, two Secrets carrying one, a value that does not decode. The two empties
+# are different facts: the restart after helm reads "absent" as "no pod holds an
+# old credential" and "cannot tell" as "maybe one does" (client-dev#2044).
+# Callers in `$( )` under `set -e` must handle the 2 (`|| …`).
 _client_password_from_secret() {
-  local rel="$1" ns="$2" rows b64 out=""
-  has kubectl || return 0
+  local rel="$1" ns="$2" rows b64 out="" name canon legacy n=0
+  has kubectl || return 2
   rows="$(kubectl get secret -n "$ns" -l "app.kubernetes.io/instance=${rel}" \
             -o 'custom-columns=NAME:.metadata.name,TRACEBLOC_CLIENT_PASSWORD:.data.TRACEBLOC_CLIENT_PASSWORD,CLIENT_PASSWORD:.data.CLIENT_PASSWORD' \
-            --no-headers --request-timeout=5s 2>/dev/null)" || return 0
+            --no-headers --request-timeout=5s 2>/dev/null)" || return 2
   b64="$(_client_id_from_secret_rows "$rows")"
-  [[ -n "$b64" ]] || return 0
+  if [[ -z "$b64" ]]; then
+    # No row carrying a password is "absent"; more than one is "cannot tell".
+    while read -r name canon legacy _; do
+      [[ -n "$name" ]] || continue
+      [[ -n "$canon" && "$canon" != "<none>" ]] || canon="$legacy"
+      [[ -n "$canon" && "$canon" != "<none>" ]] || continue
+      n=$((n + 1))
+    done <<<"$rows"
+    (( n == 0 )) && return 0
+    return 2
+  fi
   out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
     || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
     || out=""
+  [[ -n "$out" ]] || return 2
   printf '%s' "$out"
   return 0
 }
@@ -1461,9 +1478,11 @@ _restart_credential_consumers() {
 # ID-only prompt, the env pair) or any other route that writes a new password into
 # a running release's Secret changes it just the same (client-dev#2018), so the
 # restart keys on the observed change, not on the route. An empty PREV is a first
-# install: no pod holds an old credential. An empty NOW (the read after helm
-# failed) with a PREV is "cannot tell", and that restarts: a needless roll is
-# cheap, pods left on a dead credential are offline.
+# install: no pod holds an old credential -- so the caller must never hand an
+# UNREADABLE previous read in as PREV; it restarts on that itself
+# (client-dev#2044). An empty NOW (the read after helm failed) with a PREV is
+# "cannot tell", and that restarts: a needless roll is cheap, pods left on a dead
+# credential are offline.
 _credential_changed_under_pods() {
   [[ -n "${1:-}" && "${1:-}" != "${2:-}" ]]
 }
@@ -2306,8 +2325,8 @@ _reconcile_adopted_client() {
     # singleNode nor hostPath.enabled=true, so without it the chart's guard would
     # refuse the upgrade.
     _args+=(--set "localApi.enabled=true"
-            --set "localApi.nodePort=$TB_LOCAL_API_NODE_PORT"
-            --set "localApi.hostPort=$TB_LOCAL_API_HOST_PORT"
+            --set "localApi.nodePort=$TRACEBLOC_LOCAL_API_NODE_PORT"
+            --set "localApi.hostPort=$TRACEBLOC_LOCAL_API_HOST_PORT"
             --set "localApi.singleMachine=true")
   else
     _args+=(--set "localApi.enabled=false")
@@ -3092,8 +3111,8 @@ _adopt_orphaned_gpu_device_plugin() {
 _local_api_values_block() {
   [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]] || return 0
   printf '\n# The local API the dashboard reaches on this machine: on, because k3d maps\n'
-  printf '# 127.0.0.1:%s to its NodePort (create_cluster, _ensure_local_api_port).\n' "$TB_LOCAL_API_HOST_PORT"
-  printf 'localApi:\n  enabled: true\n  nodePort: %s\n  hostPort: %s\n  singleMachine: true\n' "$TB_LOCAL_API_NODE_PORT" "$TB_LOCAL_API_HOST_PORT"
+  printf '# 127.0.0.1:%s to its NodePort (create_cluster, _ensure_local_api_port).\n' "$TRACEBLOC_LOCAL_API_HOST_PORT"
+  printf 'localApi:\n  enabled: true\n  nodePort: %s\n  hostPort: %s\n  singleMachine: true\n' "$TRACEBLOC_LOCAL_API_NODE_PORT" "$TRACEBLOC_LOCAL_API_HOST_PORT"
 }
 
 install_client_helm() {
@@ -3695,8 +3714,12 @@ EOF
   _gpu_args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
   # The password the running pods started on, read before helm overwrites it, so
   # the restart below can see a credential that changed under them (client-dev#2018).
-  local _prev_password
-  _prev_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")"
+  # A read that CANNOT TELL (rc 2) is not a first install: when the Secret holds a
+  # password after helm, the pods may have started on a different one, so that
+  # restarts below (client-dev#2044).
+  local _prev_password _prev_unreadable=0
+  _prev_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" \
+    || _prev_unreadable=1
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
@@ -3728,9 +3751,13 @@ EOF
   # over a running release's (a preset, client-dev#2018), is in the Secret now,
   # but the pods read it from their environment at start and the chart doesn't
   # roll them on a Secret change. Restart the ones that authenticate so they use it.
-  if [[ "${TB_CREDENTIAL_REISSUED:-0}" == 1 ]] \
-     || _credential_changed_under_pods "$_prev_password" \
-          "$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")"; then
+  # An unreadable read before helm with one that reads after it is "cannot tell",
+  # and restarts; unreadable on both sides is a cluster nothing here can roll.
+  local _now_password
+  _now_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" || _now_password=""
+  if [[ "${TRACEBLOC_CREDENTIAL_REISSUED:-0}" == 1 ]] \
+     || [[ "$_prev_unreadable" == 1 && -n "$_now_password" ]] \
+     || _credential_changed_under_pods "$_prev_password" "$_now_password"; then
     _restart_credential_consumers "$TB_NAMESPACE" \
       || error "This machine's new credential is in place, but its services are still on the old one."
   fi

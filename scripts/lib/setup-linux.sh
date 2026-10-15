@@ -85,8 +85,27 @@ _ensure_kernel_modules() {
     # The netfilter modules live in kernel-modules-extra, NOT the base
     # kernel-modules package. Install unversioned so dnf pulls the extra set
     # (and a matching newer kernel, if the repo has moved on) for the current repo.
-    spin_cmd "Installing kernel modules for Docker/k3s…" \
-      tb_root dnf install -y -q kernel-modules-extra || true
+    #
+    # BOUNDED: dnf's own mirror timeouts do not stop a slow-trickling mirror, and
+    # on rockylinux:9 this install sat behind the spinner for 11 minutes until the
+    # CI step bound killed it with nothing in the log but the label
+    # (client-dev#2037). A healthy install takes well under a minute. The modules
+    # are best-effort here (a later Docker start diagnoses what is still missing),
+    # so a stall warns and carries on rather than failing the run.
+    #
+    # The grace (client-dev#2063): at the deadline dnf gets TERM and up to
+    # TB_PM_KILL_GRACE seconds to finish its rpm transaction before any KILL —
+    # 0.5 s left a package half-written, or dnf orphaned behind sudo holding the
+    # lock. If it is STILL running after that, the Docker install below would
+    # queue on the same lock with no word of why, so stop and say so instead.
+    local _km_rc=0
+    spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 300 "Installing kernel modules for Docker/k3s…" \
+      tb_root dnf install -y -q kernel-modules-extra || _km_rc=$?
+    if (( _km_rc == 124 )) && [[ -n "${_TB_SPIN_SURVIVORS:-}" ]]; then
+      error "kernel-modules-extra did not install within 5 minutes, and dnf is still running and holding the package lock. Wait for it to finish (or check 'dnf history'), then re-run $([[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && echo prepare-host || echo the installer)."
+    elif (( _km_rc == 124 )); then
+      warn "kernel-modules-extra did not install within 5 minutes — the package mirror stalled. Continuing; if Docker later fails to start over a missing 'addrtype'/netfilter module, install kernel-modules-extra and re-run."
+    fi
     missing=""
     for m in $mods; do tb_root modprobe "$m" 2>/dev/null || missing=1; done
   fi
@@ -215,22 +234,34 @@ install_docker_engine() {
   # real daily user, never root.
   local _grant_user="${USER:-$(id -un 2>/dev/null)}"
   if ! has docker; then
+    # EVERY branch is bounded, not only get.docker.com's: a package manager's
+    # mirror fetch carries no overall deadline either, so a stall hung behind
+    # "Installing Docker…" until something else killed the process (client-dev#2037).
+    # A healthy install takes 1-3 minutes; 10 is network trouble, not a slow link.
+    # spin_cmd_bounded returns 124 ONLY on the deadline, so a fast real failure keeps
+    # its own error instead of being mislabelled as a stall (Bugbot). _dk_src names
+    # where the branch downloads from, for the stall message.
+    local _dk_rc=0 _dk_src=""
     if [[ -f "$os_release" ]] && grep -qi 'amzn\|amazon' "$os_release"; then
-      if has dnf; then spin_cmd "Installing Docker…" tb_root dnf install -y docker
-      else              spin_cmd "Installing Docker…" tb_root yum install -y docker; fi
+      _dk_src="the Amazon Linux repos"
+      if has dnf; then spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing Docker…" tb_root dnf install -y docker || _dk_rc=$?
+      else              spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing Docker…" tb_root yum install -y docker || _dk_rc=$?; fi
     elif has pacman; then
-      spin_cmd "Installing Docker…" tb_root pacman -S --noconfirm docker
+      _dk_src="the Arch mirrors"
+      spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing Docker…" tb_root pacman -S --noconfirm docker || _dk_rc=$?
     elif has zypper; then
-      spin_cmd "Installing Docker…" tb_root zypper install -y docker
+      _dk_src="the openSUSE repos"
+      spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing Docker…" tb_root zypper install -y docker || _dk_rc=$?
     elif [[ -f "$os_release" ]] && grep -qiE '^ID="?(almalinux|rocky|ol|oracle)"?' "$os_release"; then
       # get.docker.com rejects RHEL rebuilds (almalinux/rocky/ol) with
       # "Unsupported distribution". Install docker-ce from Docker's official
       # CentOS repo instead — it is RHEL-compatible and works on these distros.
-      spin_cmd "Installing Docker…" bash -c '
+      _dk_src="download.docker.com (the docker-ce repo)"
+      spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing Docker…" bash -c '
         set -e
         tb_root dnf -y -q install dnf-plugins-core
         tb_root dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        tb_root dnf -y -q install docker-ce docker-ce-cli containerd.io'
+        tb_root dnf -y -q install docker-ce docker-ce-cli containerd.io' || _dk_rc=$?
     else
       local docker_script
       docker_script="$(mktemp "${TMPDIR:-/tmp}/tracebloc-docker-XXXXXX")"
@@ -240,28 +271,26 @@ install_docker_engine() {
       # Same needrestart guard as setup_pm: get.docker.com runs `apt-get install`
       # internally, so under spin_cmd it can hit the same hidden prompt and hang.
       #
-      # And BOUND it: the script's internal apt/download.docker.com fetches carry
-      # no timeout of their own, so a stalled connection hung here silently behind
-      # the spinner until something else killed the process — in CI that was the
-      # 20-minute job timeout, three times in one day, with nothing in the log but
-      # "Installing Docker…" (backend, 2026-08-04). A healthy install takes 1-3
-      # minutes; 10 is network trouble, not a slow link. spin_cmd_bounded returns
-      # 124 ONLY on the deadline, so a fast real apt/script failure keeps its own
-      # error instead of being mislabelled as a stall (Bugbot).
-      local _dk_rc=0
-      spin_cmd_bounded 600 "Installing Docker…" tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
+      # And BOUND it (see the top of this block): the script's internal
+      # apt/download.docker.com fetches carry no timeout of their own — in CI that
+      # was the 20-minute job timeout, three times in one day, with nothing in the
+      # log but "Installing Docker…" (backend, 2026-08-04).
+      _dk_src="get.docker.com/download.docker.com"
+      spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing Docker…" tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash "$docker_script" || _dk_rc=$?
       rm -f "$docker_script"
-      # Re-run advice by mode, matching the daemon-check errors below: telling a
-      # prepare-host ADMIN to "re-run the installer" points them at a full
-      # provision as themselves — the exact outcome prepare-host exists to
-      # prevent (Bugbot).
-      local _rerun="the installer"
-      [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && _rerun="prepare-host"
-      if (( _dk_rc == 124 )); then
-        error "Docker install did not finish within 10 minutes — the download from get.docker.com/download.docker.com stalled. Check your network/proxy and re-run ${_rerun}; it resumes safely."
-      elif (( _dk_rc != 0 )); then
-        error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run ${_rerun}."
-      fi
+    fi
+    # Re-run advice by mode, matching the daemon-check errors below: telling a
+    # prepare-host ADMIN to "re-run the installer" points them at a full
+    # provision as themselves — the exact outcome prepare-host exists to
+    # prevent (Bugbot).
+    local _rerun="the installer"
+    [[ -n "${TB_PREPARE_HOST_MODE:-}" ]] && _rerun="prepare-host"
+    if (( _dk_rc == 124 )) && [[ -n "${_TB_SPIN_SURVIVORS:-}" ]]; then
+      error "Docker install did not finish within 10 minutes — the download from ${_dk_src} stalled, and the package manager is still running and holding its lock. Wait for it to finish, check your network/proxy, then re-run ${_rerun}."
+    elif (( _dk_rc == 124 )); then
+      error "Docker install did not finish within 10 minutes — the download from ${_dk_src} stalled. Check your network/proxy and re-run ${_rerun}; it resumes safely."
+    elif (( _dk_rc != 0 )); then
+      error "Docker install failed (the log tail above has the reason). Fix the reported problem and re-run ${_rerun}."
     fi
     # Enable for boot only (no --now): starting is handled below, where a start
     # failure is diagnosed instead of aborting the whole script under `set -e`.

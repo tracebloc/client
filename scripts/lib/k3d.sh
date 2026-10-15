@@ -383,7 +383,7 @@ _write_k3d_registries_config() {
 
 # ── The local dashboard port ─────────────────────────────────────────────────
 # The tracebloc dashboard, open in a browser on this machine, asks the client
-# whether the two are on one machine, on 127.0.0.1:TB_LOCAL_API_HOST_PORT. The
+# whether the two are on one machine, on 127.0.0.1:TRACEBLOC_LOCAL_API_HOST_PORT. The
 # k3d load balancer forwards that host port to the chart's NodePort
 # (localApi.nodePort); the chart turns the listener on only when this installer
 # says the mapping exists (TB_LOCAL_API_MAPPED=1, read by install-client-helm.sh).
@@ -402,10 +402,11 @@ _TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
 # two and install-k8s.Tests.ps1 holds them to the schema (client-dev#1688).
 _TB_LOCAL_API_NODE_PORT_MIN="30000"
 _TB_LOCAL_API_NODE_PORT_MAX="32767"
-# Overridable, for a host whose 47910 is spoken for, under the TRACEBLOC_ names
-# only: TB_LOCAL_API_* are this installer's internal state, never env inputs.
-TB_LOCAL_API_HOST_PORT="${TRACEBLOC_LOCAL_API_HOST_PORT:-$_TB_LOCAL_API_HOST_PORT_DEFAULT}"
-TB_LOCAL_API_NODE_PORT="${TRACEBLOC_LOCAL_API_NODE_PORT:-$_TB_LOCAL_API_NODE_PORT_DEFAULT}"
+# Overridable, for a host whose 47910 is spoken for, and resolved IN PLACE: the
+# TRACEBLOC_ name is both the env input and the value every reader below reads
+# (backend#3846 folded the TB_-prefixed internal copies into it; TB_ is banned).
+TRACEBLOC_LOCAL_API_HOST_PORT="${TRACEBLOC_LOCAL_API_HOST_PORT:-$_TB_LOCAL_API_HOST_PORT_DEFAULT}"
+TRACEBLOC_LOCAL_API_NODE_PORT="${TRACEBLOC_LOCAL_API_NODE_PORT:-$_TB_LOCAL_API_NODE_PORT_DEFAULT}"
 TB_LOCAL_API_MAPPED=0
 # Set by _local_api_create_args when THIS run's `k3d cluster create` carries the
 # mapping; cleared when that create turns out to have adopted an existing cluster.
@@ -415,7 +416,7 @@ TB_LOCAL_API_CREATE_MAPPED=0
 TB_LOCAL_API_UNKNOWN=0
 
 _local_api_port_spec() {
-  printf '127.0.0.1:%s:%s@loadbalancer' "$TB_LOCAL_API_HOST_PORT" "$TB_LOCAL_API_NODE_PORT"
+  printf '127.0.0.1:%s:%s@loadbalancer' "$TRACEBLOC_LOCAL_API_HOST_PORT" "$TRACEBLOC_LOCAL_API_NODE_PORT"
 }
 
 _local_api_wanted() {
@@ -426,10 +427,10 @@ _local_api_wanted() {
 }
 
 # Whether the cluster's load balancer already publishes the NodePort on
-# 127.0.0.1:TB_LOCAL_API_HOST_PORT. Any other answer, an unreadable one
+# 127.0.0.1:TRACEBLOC_LOCAL_API_HOST_PORT. Any other answer, an unreadable one
 # included, is "not mapped".
 # THREE answers, because "could not read" is not "not published": 0 = the load
-# balancer publishes 127.0.0.1:TB_LOCAL_API_HOST_PORT; 1 = docker answered and it
+# balancer publishes 127.0.0.1:TRACEBLOC_LOCAL_API_HOST_PORT; 1 = docker answered and it
 # does not (including docker's own "No public port" refusal); 2 = docker did not
 # answer (a timeout, a daemon error) -- cannot tell. A read right after a create
 # can be slow, so a timeout is retried; CR is stripped because Docker Desktop on
@@ -438,10 +439,10 @@ _local_api_port_mapped() {
   local out rc attempt
   for attempt in 1 2 3; do
     rc=0
-    out="$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker port "k3d-${CLUSTER_NAME}-serverlb" "${TB_LOCAL_API_NODE_PORT}/tcp" 2>&1)" || rc=$?
+    out="$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker port "k3d-${CLUSTER_NAME}-serverlb" "${TRACEBLOC_LOCAL_API_NODE_PORT}/tcp" 2>&1)" || rc=$?
     out="$(printf '%s\n' "$out" | tr -d '\r')"
     if [[ "$rc" -eq 0 ]]; then
-      grep -qx "127.0.0.1:${TB_LOCAL_API_HOST_PORT}" <<<"$out" && return 0
+      grep -qx "127.0.0.1:${TRACEBLOC_LOCAL_API_HOST_PORT}" <<<"$out" && return 0
       return 1
     fi
     if grep -qi "no public port" <<<"$out"; then
@@ -467,7 +468,7 @@ _local_api_backoff() {
 # Test-LocalApiHostPortBusy waits 1000 ms) reads as "not busy", as it does there.
 _local_api_host_port_busy() {
   _bounded 1 "${BASH:-bash}" -c \
-    'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TB_LOCAL_API_HOST_PORT}" 2>/dev/null
+    'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TRACEBLOC_LOCAL_API_HOST_PORT}" 2>/dev/null
 }
 
 # Whether both ports are ones the install can take (digits only): the host port
@@ -477,7 +478,7 @@ _local_api_host_port_busy() {
 # turn the feature off, never reach `k3d cluster create` and fail the install
 # (client-dev#1665).
 _local_api_port_valid() {
-  local p="$TB_LOCAL_API_HOST_PORT" n="$TB_LOCAL_API_NODE_PORT"
+  local p="$TRACEBLOC_LOCAL_API_HOST_PORT" n="$TRACEBLOC_LOCAL_API_NODE_PORT"
   [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
   (( 10#$p >= 1 && 10#$p <= 65535 )) || return 1
   [[ "$n" =~ ^[0-9]{1,5}$ ]] || return 1
@@ -486,7 +487,7 @@ _local_api_port_valid() {
 }
 
 _local_api_invalid_warn() {
-  warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TB_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TB_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set the host port to a number from 1 to 65535 and the node port to one from ${_TB_LOCAL_API_NODE_PORT_MIN} to ${_TB_LOCAL_API_NODE_PORT_MAX}, then re-run the installer to turn it on."
+  warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TRACEBLOC_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TRACEBLOC_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set the host port to a number from 1 to 65535 and the node port to one from ${_TB_LOCAL_API_NODE_PORT_MIN} to ${_TB_LOCAL_API_NODE_PORT_MAX}, then re-run the installer to turn it on."
 }
 
 # The new-cluster half: the mapping goes into `k3d cluster create` itself when
@@ -520,7 +521,7 @@ _local_api_create_bind_failed() {
   # Two steps, not a pipe: under pipefail a `grep -q` that stops early can
   # SIGPIPE the first grep and turn a match into a failure.
   local lines
-  lines="$(grep -E ":${TB_LOCAL_API_HOST_PORT}([^0-9]|$)" "$out" 2>/dev/null)" || return 1
+  lines="$(grep -E ":${TRACEBLOC_LOCAL_API_HOST_PORT}([^0-9]|$)" "$out" 2>/dev/null)" || return 1
   grep -Eqi "bind|already allocated|not available|already in use|access permissions" <<<"$lines"
 }
 
@@ -577,10 +578,10 @@ _ensure_local_api_port() {
     return 0
   fi
   if _local_api_host_port_busy; then
-    warn "Port ${TB_LOCAL_API_HOST_PORT} on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+    warn "Port ${TRACEBLOC_LOCAL_API_HOST_PORT} on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
     return 0
   fi
-  log "Adding the local dashboard port 127.0.0.1:${TB_LOCAL_API_HOST_PORT} to '$CLUSTER_NAME' (its k3d load balancer restarts once)."
+  log "Adding the local dashboard port 127.0.0.1:${TRACEBLOC_LOCAL_API_HOST_PORT} to '$CLUSTER_NAME' (its k3d load balancer restarts once)."
   local rc=0
   _bounded "${TB_K3D_EDIT_TIMEOUT:-300}" k3d cluster edit "$CLUSTER_NAME" --port-add "$(_local_api_port_spec)" >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
   local after=0
@@ -2117,7 +2118,7 @@ _create_new_cluster() {
   # k3d rolled its half-made cluster back (a rollback that failed is excluded),
   # and _ensure_local_api_port tries the port again, fail-soft, afterwards.
   if [[ $create_rc -ne 0 && $create_rc -ne 124 ]] && _local_api_create_bind_failed "$create_out"; then
-    warn "Couldn't reserve the local dashboard port 127.0.0.1:${TB_LOCAL_API_HOST_PORT} while creating your secure environment (k3d exit code ${create_rc}), so it is being created without it. Everything else works; the install log has k3d's answer."
+    warn "Couldn't reserve the local dashboard port 127.0.0.1:${TRACEBLOC_LOCAL_API_HOST_PORT} while creating your secure environment (k3d exit code ${create_rc}), so it is being created without it. Everything else works; the install log has k3d's answer."
     { echo "k3d cluster create (with the local dashboard port) exited $create_rc:"; cat "$create_out"; } >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     _local_api_drop_create_args
     : >"$create_out"

@@ -10,8 +10,9 @@
 #    - on the customer path, ONLY the temp dir install.ps1 has just verified
 #      against the signed manifest (the sub-scripts plus manifest.sha256, laid
 #      out as under scripts/);
-#    - for e2e, a commit's own scripts/ directory, with that commit's
-#      manifest.sha256, which CI holds current.
+#    - for e2e, a commit's own scripts/ directory, with a manifest.sha256
+#      generated from that commit by scripts/gen-manifest.sh (it is never
+#      committed, backend#2868).
 #  Either way, every file this script uses from the tree is checked again against
 #  the tree's manifest.sha256, and a tree that fails is refused by name. Nothing
 #  here or in install.ps1 skips that check. The signature over the manifest is
@@ -165,6 +166,11 @@ $WslEnableTimeoutSec = 1200
 # measured worst case: the VM measured 10 s, and the first start right after the
 # import is unmeasured.
 $WslDistroStartTimeoutSec = 300
+# `wsl --manage --set-sparse` and `--resize` rewrite the distro's VHDX, and that
+# work grows with the disk, so it is not bounded by the 30 s a `wsl --version`
+# gets either: on a probe budget a slow disk timed out while wsl.exe kept going.
+# 600 s is a bound, not a measured worst case (client-dev#2036).
+$WslDiskTimeoutSec = 600
 
 # "2.5" or "2.5.10.0" as a four-part [version], so 2.5.0 and 2.5.0.0 compare equal
 # ([version] ranks a missing part below 0). $null for anything else.
@@ -824,12 +830,12 @@ function Set-WslDistroDisk {
   )
   foreach ($s in $steps) {
     $cmd = "wsl $($s.Arguments -join ' ')"
-    $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList $s.Arguments
+    $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList $s.Arguments -TimeoutSec $WslDiskTimeoutSec
     if (-not $r.Started) {
       throw "$cmd did not start ($($r.StartError)), so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
     }
     if ($r.TimedOut) {
-      throw "$cmd did not finish within $WslProbeTimeoutSec s, so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
+      throw "$cmd did not finish within $WslDiskTimeoutSec s, so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
     }
     if ($r.ExitCode -ne 0) {
       $said = ("$($r.Output) $($r.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim()
@@ -923,14 +929,14 @@ function Update-WslDistroDisk {
     return
   }
   $grow = @('--manage', $Distro, '--resize', "$($want)GB")
-  $g = Invoke-WslProbe -FilePath $FilePath -ArgumentList $grow
+  $g = Invoke-WslProbe -FilePath $FilePath -ArgumentList $grow -TimeoutSec $WslDiskTimeoutSec
   if ($g.Started -and -not $g.TimedOut -and $g.ExitCode -eq 0) {
     Ok "WSL distro disk: grown from $nowGb GB to $want GB"
     return
   }
   $why = "exit $($g.ExitCode): $(("$($g.Output) $($g.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim())"
   if (-not $g.Started) { $why = "did not start: $($g.StartError)" }
-  elseif ($g.TimedOut) { $why = "did not finish within $WslProbeTimeoutSec s" }
+  elseif ($g.TimedOut) { $why = "did not finish within $WslDiskTimeoutSec s" }
   Warn "wsl $($grow -join ' ') did not grow the WSL distro's disk ($why), so it stays capped at $nowGb GB."
 }
 
@@ -1068,25 +1074,41 @@ function Register-KeepaliveTask {
 # =============================================================================
 #  4. The host GPU check.
 #
-#  On the distro path the core runs inside WSL, but nvidia-smi.exe and the driver
-#  live on the Windows host, so the driver and compute-capability verdict stays
-#  here (RFC-0175 D2, W21). These are install-k8s.ps1's Confirm-NvidiaDriver and
-#  Get-NvidiaFloorVerdict with everything they call, COPIED UNCHANGED: install-k8s.ps1
-#  runs as a separate process and its Find-Gpu still calls its own copies, so the
+#  On the distro path the core runs inside WSL, but nvidia-smi.exe, the driver and
+#  the GPUs Windows lists live on the Windows host, so the GPU check stays here
+#  (RFC-0175 D2, W21). These are install-k8s.ps1's Find-Gpu, Confirm-NvidiaDriver
+#  and Get-NvidiaFloorVerdict with everything they call, COPIED UNCHANGED:
+#  install-k8s.ps1 runs as a separate process and calls its own copies, so the
 #  originals stay until part 5 deletes the PowerShell core. Until then
 #  install-wsl.Tests.ps1 holds every copied function, and every top-level variable
 #  they read, byte-for-byte equal to install-k8s.ps1's (the set is derived from
-#  install-k8s.ps1, never listed). Ok and Warn are this file's own output helpers,
-#  which print the same lines without the log.
+#  install-k8s.ps1, never listed). Info, Ok and Warn are this file's own output
+#  helpers, which print the same lines without the log.
 #
-#  NOTHING CALLS THESE YET: the distro path stays behind the switch until 3.3 is
-#  green on it.
-#  The floors: check-facts.sh stamps install-k8s.ps1's from facts.env, and the
-#  parity test holds these to those, so after `check-facts.sh --write` copy the
-#  stamped lines here too (part 5 points check-facts at this file instead).
+#  Invoke-WslCore calls Find-Gpu before the core's first run, so both runs carry its
+#  answer. The distro path itself stays behind the switch until 3.3 is green on it.
+#  The floors: check-facts.sh stamps them from facts.env, here as in
+#  install-k8s.ps1, and the parity test holds the two copies equal.
+#  The words (W17, W21): below the floor it warns and keeps the GPU; below the hard
+#  floor or compute capability 7.5 it runs CPU-only. Every line those branches say
+#  is the core's own (detect-gpu.sh's _nvidia_gpu_floor_gate), a Pester case holds
+#  them so, with the dash written " -- " in these ASCII files.
 #    TODO(S-W row 14): the driver floor stays 570.65 until row 14 measures it.
-#    TODO(part 3): hand the verdict ($NVIDIA_DRIVER_OK, $GPU_SKIP_REASON and the
-#      GPU_UNSUPPORTED_* values) to the core in the distro.
+#  The handover: inside the distro nvidia-smi answers for this Windows driver, whose
+#  number the Linux floors must never judge. So Confirm-NvidiaDriver records its
+#  verdict ($GPU_FLOOR_VERDICT), and both core runs carry it and the GPU_UNSUPPORTED_*
+#  values on their line (New-CoreRunArguments). The core takes them as given
+#  (detect-gpu.sh, _nvidia_gpu_wsl_verdict), and reads an empty or unknown verdict as
+#  cannot tell: CPU-only. The words a verdict can be are declared once, as
+#  detect-gpu.sh's _NVIDIA_GPU_FLOOR_VERDICTS, and a Pester case holds
+#  Get-NvidiaFloorVerdict's returns to them.
+#  Find-Gpu's own reports, a GPU that is not NVIDIA (not_nvidia) and an NVIDIA GPU on
+#  arm64 (arch_unsupported), go on the same line as GPU_UNSUPPORTED_*, with no
+#  verdict. In the distro, where WSL shows no PCI device, the core takes them from
+#  there (detect-gpu.sh, _gpu_wsl_host_report).
+#    TODO(S-W row 13): the device half, the capacity patch or the plugin's WSL
+#      mode, is the core's (detect-gpu.sh, part 3), and takes only that verdict
+#      from here: the host never advertises a GPU itself.
 # =============================================================================
 
 # The verdict's state, as Confirm-NvidiaDriver leaves it.
@@ -1095,6 +1117,7 @@ $GPU_SKIP_REASON  = ""
 $GPU_UNSUPPORTED_REASON = ""
 $GPU_UNSUPPORTED_NAME   = ""
 $GPU_UNSUPPORTED_CODE   = ""
+$GPU_FLOOR_VERDICT      = ""
 $NVIDIA_GPU_NAMES       = ""
 $NVIDIA_DRIVER_VERSION = ""
 
@@ -1105,6 +1128,16 @@ $NVIDIA_DRIVER_FLOOR = "570.65"
 $NVIDIA_COMPUTE_CAP_FLOOR = "7.5"
 $NVIDIA_DRIVER_HARD_FLOOR = "528.33"
 $NVIDIA_PRE_TURING_NAME_RE = ' (GT|GTS) [0-9]{3,4}[A-Z]* | GTX [4-9][0-9]{2}[A-Z]* | GTX 10[0-9]{2}[A-Z]* | GTX TITAN | TITAN (X|XP|V|Z|BLACK) | MX[1-3][0-9]{2} | GEFORCE [6-9][0-9]{2}(M|MX|A) | QUADRO (K|M|G?P|GV)[0-9]+[A-Z]* | NVS [0-9]{3} | (TESLA|GRID) [KMPV][0-9]+[A-Z]* | (K80|K40M?|K20X?M?|M60|M40|M10|P100|P40|P6|P4|V100S?) '
+
+# The vendor Find-Gpu found: none, nvidia, amd, or nvidia_unsupported and
+# amd_unsupported for a GPU it leaves off.
+$GPU_VENDOR       = "none"
+# The vendors whose GPU counts as "a GPU, but not NVIDIA", matched against the NORMALISED name
+# (ConvertTo-GpuNormalisedName). An allowlist, so a virtual or BMC display adapter (Hyper-V,
+# VMware SVGA, ASPEED, Matrox, Parsec, Citrix) still reads as "no GPU". Intel counts, the
+# integrated GPU included. detect-gpu.sh carries the SAME strings (detect-gpu.bats holds them equal).
+$GPU_NOT_NVIDIA_VENDOR_RE   = ' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|INTEL|APPLE) '
+$GPU_NOT_NVIDIA_DISCRETE_RE = ' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|APPLE) '
 
 # The log line (no-op here: this script keeps no log file) and the dim hint line.
 function Log($m)           { if ($script:LOG_FILE) { Add-Content -Path $script:LOG_FILE -Value "[$(Get-Date -Format 'HH:mm:ss')] $m" -Encoding UTF8 -ErrorAction SilentlyContinue } }
@@ -1237,6 +1270,8 @@ function Confirm-NvidiaDriver {
     $verdict = Get-NvidiaFloorVerdict -DriverOutput ([string]$dr.Output) -CapOutput $capOut -DriverFloor $NVIDIA_DRIVER_FLOOR -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR -HardFloor $NVIDIA_DRIVER_HARD_FLOOR -NameOutput $nameOut
     $script:GPU_UNSUPPORTED_REASON = ""; $script:GPU_UNSUPPORTED_NAME = ""
     $script:GPU_UNSUPPORTED_CODE = ""
+    # The bash twin's TB_GPU_FLOOR_VERDICT. install-wsl.ps1 hands it to the core in WSL.
+    $script:GPU_FLOOR_VERDICT = $verdict
     $script:NVIDIA_GPU_NAMES = $nameOut
     Log "GPU floor: $verdict (driver $driverVer, floor $NVIDIA_DRIVER_FLOOR, hard floor $NVIDIA_DRIVER_HARD_FLOOR; compute capability $capVer, floor $NVIDIA_COMPUTE_CAP_FLOOR)"
     if ($verdict -eq "ok" -or $verdict -eq "below-driver") {
@@ -1246,11 +1281,11 @@ function Confirm-NvidiaDriver {
         # probes it, and a driver too old for the image fails there, with a reason.
         # A driver too old to answer compute_cap: the card itself could not be checked either.
         if ($capVer -eq "unknown") {
-          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability -- continuing with the GPU, but it may not work until the driver is updated."
+          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability -- continuing with the GPU, but it may not work until the driver is upgraded."
         } else {
-          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training -- continuing with the GPU; if GPU training fails on this machine, update the driver."
+          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training -- continuing with the GPU; if GPU training fails on this machine, upgrade the driver."
         }
-        Hint "To update: https://www.nvidia.com/Download/index.aspx, reboot, then re-run the installer."
+        Hint "To upgrade: install NVIDIA driver $NVIDIA_DRIVER_FLOOR or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
       }
       $script:NVIDIA_DRIVER_OK = $true
       Ok "NVIDIA GPU ready (driver $driverVer)"
@@ -1296,6 +1331,107 @@ function Confirm-NvidiaDriver {
     }
   } catch {
     Warn "Could not verify NVIDIA driver: $_"
+  }
+}
+
+# Find-Gpu and the helpers it calls, copied unchanged: the GPUs Windows lists, an
+# NVIDIA one first, then Confirm-NvidiaDriver; a GPU that is not NVIDIA, or an NVIDIA
+# GPU on arm64, is reported (not_nvidia, arch_unsupported) and goes on the core
+# runs' line with the rest (New-CoreRunArguments).
+
+# ConvertTo-GpuNormalisedName -- twin of detect-gpu.sh's _nvidia_name_normalised: upper case,
+# every run of characters that are not a letter or digit one space, one space either side.
+function ConvertTo-GpuNormalisedName([string]$Name) {
+  $n = ([string]$Name).ToUpperInvariant() -replace '[^A-Z0-9]+', ' '
+  return " $($n.Trim()) "
+}
+
+# Get-GpuNotNvidiaName -- pure twin of detect-gpu.sh's _gpu_not_nvidia_name (backend#5296):
+# $Names are GPU names (Win32_VideoController.Name). Returns the GPU to report as not_nvidia
+# when there is a GPU of a $GPU_NOT_NVIDIA_VENDOR_RE vendor and NO NVIDIA one; "" otherwise.
+# Any NVIDIA GPU wins: NVIDIA plus an iGPU is an NVIDIA machine. A discrete AMD card is named
+# before an Intel iGPU.
+function Get-GpuNotNvidiaName {
+  param([string[]]$Names)
+  $first = ""; $discrete = ""
+  foreach ($raw in @($Names)) {
+    $n = ([string]$raw).Trim()
+    if (-not $n) { continue }
+    $norm = ConvertTo-GpuNormalisedName $n
+    if ($norm -clike '* NVIDIA *') { return "" }
+    if ($norm -cnotmatch $GPU_NOT_NVIDIA_VENDOR_RE) { continue }
+    if (-not $first) { $first = $n }
+    if (-not $discrete -and $norm -cmatch $GPU_NOT_NVIDIA_DISCRETE_RE) { $discrete = $n }
+  }
+  if ($discrete) { return $discrete }
+  return $first
+}
+
+# Set-GpuNotNvidia -- the machine has a GPU and it is not NVIDIA: tell the platform (not_nvidia).
+# The sentence is detect-gpu.sh's _gpu_not_nvidia_report's, byte for byte.
+function Set-GpuNotNvidia([string]$Name) {
+  $script:GPU_UNSUPPORTED_CODE = "not_nvidia"
+  $script:GPU_UNSUPPORTED_REASON = "This machine's GPU is not an NVIDIA GPU, and tracebloc's GPU training images need one (NVIDIA Turing or later), so this machine runs on CPU."
+  $script:GPU_UNSUPPORTED_NAME = $Name
+}
+
+# Test-GpuArchSupported -- $true unless Windows runs on arm64: the GPU training images are
+# linux/amd64 only (client-dev#1698). Reads the environment, never Err: an unknown value is
+# not arm64. PROCESSOR_ARCHITEW6432 is the machine's own answer in an x64-emulated shell.
+function Test-GpuArchSupported {
+  return -not ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64")
+}
+
+# Set-GpuArchUnsupported -- an NVIDIA GPU on a machine that is not x86_64: leave it off
+# (nvidia_unsupported, so no driver check and no GPU wiring) and tell the platform
+# (arch_unsupported). The sentence is detect-gpu.sh's _gpu_arch_unsupported_report's.
+function Set-GpuArchUnsupported([string]$Name) {
+  $script:GPU_VENDOR = "nvidia_unsupported"; $script:NVIDIA_DRIVER_OK = $false
+  $script:GPU_UNSUPPORTED_CODE = "arch_unsupported"
+  $script:GPU_UNSUPPORTED_REASON = "This machine is arm64, and tracebloc's GPU training images are built for x86_64 machines only, so this machine runs on CPU."
+  $script:GPU_UNSUPPORTED_NAME = $Name
+  Warn "tracebloc's GPU training images are built for x86_64 machines only, and this machine is arm64 -- the NVIDIA GPU is not set up, and this machine will run in CPU mode."
+  Hint "Everything else works on CPU. GPU training needs an x86_64 machine with an NVIDIA GPU."
+}
+
+function Find-Gpu {
+  Log "GPU detection starting"
+  $script:GPU_UNSUPPORTED_REASON = ""; $script:GPU_UNSUPPORTED_NAME = ""; $script:GPU_UNSUPPORTED_CODE = ""
+
+  try {
+    $gpus = @(Get-CimInstance Win32_VideoController |
+            Where-Object { $_.Name -notmatch "Microsoft|Basic|VirtualBox" })
+    # NVIDIA first, wherever WMI lists it: an NVIDIA card beside an Intel iGPU or an AMD card
+    # is an NVIDIA machine (backend#5296), never judged by whichever adapter came first.
+    $nv = @($gpus | Where-Object { $_.Name -match "NVIDIA" })
+    $amd = @($gpus | Where-Object { $_.Name -match "AMD|Radeon" })
+    if ($nv.Count -gt 0) {
+      $script:GPU_VENDOR = "nvidia"; Ok "NVIDIA GPU detected: $($nv[0].Name)"
+    } elseif ($amd.Count -gt 0) {
+      $script:GPU_VENDOR = "amd"; Ok "AMD GPU detected: $($amd[0].Name)"
+    }
+    # A GPU that is not NVIDIA (AMD, or Intel -- the integrated one included) is a GPU this
+    # machine cannot train on: named to the platform as not_nvidia, not "no GPU".
+    $notNvidia = Get-GpuNotNvidiaName -Names @($gpus | ForEach-Object { [string]$_.Name })
+    if ($notNvidia) { Set-GpuNotNvidia $notNvidia }
+    if ($script:GPU_VENDOR -eq "none") {
+      if ($notNvidia) { Info "This machine's GPU ($notNvidia) is not an NVIDIA GPU. Your environment will run in CPU mode." }
+      else { Info "No GPU detected. Your environment will run in CPU mode." }
+    }
+  } catch {
+    Info "No GPU detected. Your environment will run in CPU mode."
+    Log "GPU detection failed: $_"
+  }
+
+  if ($script:GPU_VENDOR -eq "nvidia" -and -not (Test-GpuArchSupported)) { Set-GpuArchUnsupported $nv[0].Name }
+  if ($script:GPU_VENDOR -eq "nvidia") { Confirm-NvidiaDriver }
+
+  # No ROCm training image exists, on any platform (client-dev#1697): CPU mode, never
+  # "use Linux for AMD".
+  if ($script:GPU_VENDOR -eq "amd") {
+    Warn "tracebloc's GPU training images need an NVIDIA GPU, so the AMD GPU is not set up -- this machine will run in CPU mode."
+    Hint "Everything else works on CPU. GPU training needs an NVIDIA GPU (Turing or later) on an x86_64 machine."
+    $script:GPU_VENDOR = "amd_unsupported"
   }
 }
 
@@ -1517,7 +1653,9 @@ function ConvertTo-DistroPath {
   return $out.Trim()
 }
 
-# wsl.exe's words for one run of the core. Every value is the distro's own path.
+# wsl.exe's words for one run of the core. Every path is the distro's own. The
+# host GPU check's verdict and its three platform values go on every run's line
+# (section 4), empty when this host judged no NVIDIA GPU.
 # -CredentialStdin tells the core to read the credential from its stdin first.
 function New-CoreRunArguments {
   param(
@@ -1531,7 +1669,11 @@ function New-CoreRunArguments {
     "TRACEBLOC_SUBSTRATE=$CoreSubstrate",
     "TRACEBLOC_WSL_PHASE=$Phase",
     "KUBECONFIG=$Kubeconfig",
-    "TRACEBLOC_LOG_DIR=$LogDir")
+    "TRACEBLOC_LOG_DIR=$LogDir",
+    "TRACEBLOC_WSL_GPU_VERDICT=$script:GPU_FLOOR_VERDICT",
+    "TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE=$script:GPU_UNSUPPORTED_CODE",
+    "TRACEBLOC_WSL_GPU_UNSUPPORTED_NAME=$script:GPU_UNSUPPORTED_NAME",
+    "TRACEBLOC_WSL_GPU_UNSUPPORTED_REASON=$script:GPU_UNSUPPORTED_REASON")
   foreach ($name in $CorePassThroughVars) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($value) { $a += "$name=$value" }
@@ -1714,6 +1856,8 @@ function Invoke-WslCore {
   $logHost = Join-Path $env:USERPROFILE '.tracebloc'
   if (-not (Test-Path -LiteralPath $logHost)) { New-Item -ItemType Directory -Path $logHost -Force | Out-Null }
   $logDir = ConvertTo-DistroPath -Path $logHost
+  # The host GPU check (section 4), before the first run: both runs carry its answer.
+  Find-Gpu
 
   Info "Setting up the cluster in the tracebloc WSL distro..."
   $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseCluster -Core $core -Kubeconfig $kubeconfig -LogDir $logDir)
@@ -1726,6 +1870,126 @@ function Invoke-WslCore {
     return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin) -Stdin $credential)
   } finally {
     [Array]::Clear($credential, 0, $credential.Length)
+  }
+}
+
+# =============================================================================
+#  6. The install record: what `tracebloc delete` removes on Windows.
+#
+#  `tracebloc delete` on Windows reads the daily user's record, the schema's
+#  x-tracebloc-record.user-path under %USERPROFILE%. The core keeps its own record
+#  inside the distro, as root and with the distro's paths, and `wsl --unregister`
+#  deletes it with everything it names. So the host record carries the core's
+#  top-level fields, read back from the core's own record and never restated here,
+#  and the artefacts the Windows path creates on the host, in the order it creates
+#  them (RFC-0175 D12; the kinds and their ids are install-record.schema.json's):
+#    wsl-distro    tracebloc, path its import folder, %LOCALAPPDATA%\tracebloc\wsl
+#    logon-task    \tracebloc-keepalive, no path
+#    kube-context  the context the core merged into the host kubeconfig, path that
+#                  file as Windows names it
+#  A re-run keeps an artefact the record already names, with its created_at, as
+#  the core's writer does. Best-effort, like the core's: a record that cannot be
+#  read or written is said, never fatal.
+#
+#  NOTHING CALLS THIS YET: it follows the import (section 2, S-W row 3) and the
+#  client run (section 5).
+# =============================================================================
+
+# The record's place, as the schema's x-tracebloc-record.user-path names it: under
+# %USERPROFILE% on the host, under root's home in the distro, where the core runs.
+# Pester holds both to the schema.
+$HostRecordRelPath = '.tracebloc\install-record.json'
+$CoreRecordPath = '/root/.tracebloc/install-record.json'
+# The top-level fields the host record takes from the core's. The rest are the
+# host's own (user, updated_at, artefacts) or have no meaning on the host.
+$CoreRecordFields = @('schema_version', 'substrate', 'cluster_name', 'kube_context', 'data_dir', 'namespace', 'installer_version')
+
+# The folder the distro is imported into, which holds its virtual disk.
+function Get-WslImportDir {
+  return (Join-Path $env:LOCALAPPDATA 'tracebloc\wsl')
+}
+
+function Get-HostRecordPath {
+  return (Join-Path $env:USERPROFILE $HostRecordRelPath)
+}
+
+function Get-RecordTimestamp {
+  return [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+# The core's record, read from the distro, or $null when it cannot be read. cat is
+# named by its path: WSL did not find /usr/sbin's update-ca-certificates by name
+# for `wsl -u root --exec` (S-W row 9), though the command's own PATH holds
+# /usr/sbin (S-W's home row). So no program there is looked up by name.
+$DistroCat = '/usr/bin/cat'
+function Read-CoreInstallRecord {
+  $r = Invoke-WslProbe -ArgumentList @('-d', $WslDistroName, '-u', 'root', '--exec', $DistroCat, $CoreRecordPath) -TimeoutSec $WslDistroStartTimeoutSec
+  if (-not $r.Started -or $r.TimedOut -or $r.ExitCode -ne 0 -or -not $r.Output) { return $null }
+  try { return ($r.Output | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+# The record already on the host, or $null when there is none or it cannot be read.
+function Read-HostInstallRecord {
+  $path = Get-HostRecordPath
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  try { return (Get-Content -Raw -LiteralPath $path -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+# The host record: CORE's top-level fields, this user, and the host's artefacts.
+# PRIOR's artefacts come first and are kept as they are; one already there (the
+# same kind, id and path) is not added again. KUBECONFIG is the host file the core
+# merged its context into.
+function New-HostInstallRecord {
+  param([object]$Core, [object]$Prior, [string]$Kubeconfig, [string]$Now)
+  $arts = New-Object System.Collections.ArrayList
+  if ($Prior -and $Prior.artefacts) { foreach ($a in @($Prior.artefacts | ForEach-Object { $_ })) { [void]$arts.Add($a) } }
+  $want = @(
+    [ordered]@{ kind = 'wsl-distro'; id = $WslDistroName; path = (Get-WslImportDir) }
+    [ordered]@{ kind = 'logon-task'; id = $KeepaliveTaskId; path = $null }
+  )
+  if ($Core.kube_context) { $want += [ordered]@{ kind = 'kube-context'; id = [string]$Core.kube_context; path = $Kubeconfig } }
+  foreach ($w in $want) {
+    $have = @($arts | Where-Object { $_.kind -ceq $w.kind -and $_.id -ceq $w.id -and $_.path -ceq $w.path })
+    if ($have.Count -eq 0) { $w.created_at = $Now; [void]$arts.Add([pscustomobject]$w) }
+  }
+  $rec = [ordered]@{}
+  foreach ($f in $CoreRecordFields) {
+    $rec[$f] = $Core.$f
+    if ($f -eq 'substrate') { $rec['user'] = $env:USERNAME }
+  }
+  $rec['updated_at'] = $Now
+  $rec['artefacts'] = @($arts)
+  return $rec
+}
+
+# Writes RECORD to the host record path: UTF-8 with no BOM, through a temporary
+# file in the same folder, so a reader never sees half a record.
+function Write-HostInstallRecord {
+  param([System.Collections.IDictionary]$Record)
+  $path = Get-HostRecordPath
+  $dir = Split-Path -Parent $path
+  if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  $tmp = Join-Path $dir ('.install-record.' + [guid]::NewGuid().ToString('N'))
+  try {
+    [IO.File]::WriteAllText($tmp, ($Record | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $path -Force -ErrorAction Stop
+  } finally {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+# Records this install on the host, after the client run. Never fatal.
+function Save-HostInstallRecord {
+  param([string]$Kubeconfig)
+  $core = Read-CoreInstallRecord
+  if (-not $core) {
+    Warn "The tracebloc WSL distro's install record could not be read, so this install was not recorded on Windows. tracebloc delete will not find it; share this output with tracebloc support."
+    return
+  }
+  try {
+    Write-HostInstallRecord -Record (New-HostInstallRecord -Core $core -Prior (Read-HostInstallRecord) -Kubeconfig $Kubeconfig -Now (Get-RecordTimestamp))
+  } catch {
+    Warn "This install could not be recorded in $(Get-HostRecordPath) ($($_.Exception.Message)). tracebloc delete will not find it; share this output with tracebloc support."
   }
 }
 

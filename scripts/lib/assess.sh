@@ -363,7 +363,7 @@ _assess_credential_rejected() {
     return 1
   fi
   id="$(_client_id_from_secret "$rel" "$ns")"
-  pw="$(_client_password_from_secret "$rel" "$ns")"
+  pw="$(_client_password_from_secret "$rel" "$ns")" || pw=""   # rc 2 = cannot tell: not judged
   [[ -n "$id" && -n "$pw" ]] || return 1
   verdict="$(verify_credentials "$id" "$pw")"
   log "assess: stored credential for ${ns}: ${verdict}"

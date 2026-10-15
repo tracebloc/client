@@ -253,7 +253,7 @@ _show_create_notices() {
 # _provisioning_preset is deliberately left as it is: this only fills in the
 # password it reads.
 _provision_wants_preset_password() {
-  [[ -z "${TRACEBLOC_VALUES_FILE:-}" && -z "${TB_STDIN_CRED_FILE:-}" ]] || return 1
+  [[ -z "${TRACEBLOC_VALUES_FILE:-}" && -z "${TRACEBLOC_STDIN_CRED_FILE:-}" ]] || return 1
   [[ -n "${TRACEBLOC_CLIENT_ID:-}" && -z "${TRACEBLOC_CLIENT_PASSWORD:-}" ]]
 }
 
@@ -306,9 +306,9 @@ provision_client() {
   # credential from stdin. The host hands over an id and a password either way, from
   # a client it registered on Windows or from a pair the operator supplied there, so
   # the line claims neither.
-  if [[ -n "${TB_STDIN_CRED_FILE:-}" ]]; then
+  if [[ -n "${TRACEBLOC_STDIN_CRED_FILE:-}" ]]; then
     info "Using the credential the Windows installer handed over."
-    _provision_take_credential "$TB_STDIN_CRED_FILE"
+    _provision_take_credential "$TRACEBLOC_STDIN_CRED_FILE"
     return 0
   fi
   # A client ID with no password, on a terminal: ask for it (backend#5025 O-13).
@@ -539,7 +539,7 @@ provision_client() {
     if [[ "$_create_help" == *--reissue* ]]; then
       _create_args+=(--reissue)
       # shellcheck disable=SC2034  # consumed cross-file by install-client-helm.sh
-      TB_CREDENTIAL_REISSUED=1
+      TRACEBLOC_CREDENTIAL_REISSUED=1
     else
       # Stop before the create (client-dev#1846): without --reissue it adopts the
       # running client and hands back the credential tracebloc refuses, and the run
@@ -585,7 +585,7 @@ provision_client() {
 # run (refuse_wsl_run's rule): read to EOF into a 0600 file in a fresh 0700
 # directory (tb_scratch_dir, reaped on every exit) on the distro's own disk, named
 # in _PROVISION_CRED_FILE so install_cleanup deletes it on any exit, and handed to
-# step d in TB_STDIN_CRED_FILE. Anywhere else stdin is never read: by hand in a
+# step d in TRACEBLOC_STDIN_CRED_FILE. Anywhere else stdin is never read: by hand in a
 # terminal a read would wait for a Ctrl-D nobody knows to type, and under
 # `curl | bash` stdin is the rest of the bootstrap script. refuse_wsl_run refuses
 # TRACEBLOC_CREDENTIAL_STDIN there by name. Refuses nothing itself: the substrate
@@ -594,7 +594,7 @@ provision_client() {
 # TB_STDIN_CRED_REFUSAL for refuse_wsl_run to raise after it. Prints nothing.
 provision_read_stdin_credential() {
   local tmp="${TMPDIR:-/tmp}" dir="" file rc=0
-  TB_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
+  TRACEBLOC_STDIN_CRED_FILE=""; TB_STDIN_CRED_REFUSAL=""
   if ! tb_in_wsl_distro || [[ "${TRACEBLOC_WSL_PHASE:-}" != "client" ]]; then
     return 0
   fi
@@ -625,7 +625,7 @@ provision_read_stdin_credential() {
     TB_STDIN_CRED_REFUSAL="TRACEBLOC_CREDENTIAL_STDIN=1, but stdin was empty: no credential was handed to this run. Re-run the installer from Windows."
     return 0
   fi
-  TB_STDIN_CRED_FILE="$file"
+  TRACEBLOC_STDIN_CRED_FILE="$file"
 }
 
 # _provision_stdin_is_terminal -- stdin is a terminal, not the Windows installer's
@@ -694,7 +694,7 @@ _provision_take_credential() {
   unset _PROVISION_CRED_FILE
   if [[ "$read_rc" -ne 0 ]]; then
     unset TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD TB_NAMESPACE TRACEBLOC_NAMESPACE TRACEBLOC_CLIENT_ADOPTED
-    if [[ -n "${TB_STDIN_CRED_FILE:-}" && "$cred_file" == "$TB_STDIN_CRED_FILE" ]]; then
+    if [[ -n "${TRACEBLOC_STDIN_CRED_FILE:-}" && "$cred_file" == "$TRACEBLOC_STDIN_CRED_FILE" ]]; then
       TB_EXIT_REFUSED=1
       error "The credential the Windows installer handed over isn't one this installer reads (${_PROVISION_CRED_WHY}), so this machine was not registered. Re-run the installer from Windows."
     fi

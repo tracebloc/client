@@ -29,7 +29,7 @@ TRACEBLOC_CLI_FALLBACK_BIN="${HOME}/.local/bin"
 # The absolute path of the CLI this run installed, as its installer reported it; empty
 # until install_tracebloc_cli records one. Set here, not inherited: a path from the
 # environment must not stand in for a binary this run did not install.
-TB_CLI_BIN=""
+TRACEBLOC_CLI_BIN=""
 
 # _cli_at_system_dir PATH → true if the CLI lives in a SYSTEM location that's
 # unconditionally on the user's shell PATH (so the summary CTA may say "run it
@@ -44,21 +44,21 @@ _cli_at_system_dir() {
 }
 
 # _cli_on_launch_path BIN -> 0 when BIN's directory was on the PATH of the shell
-# that started the install (TB_LAUNCH_PATH, captured by install.sh / common.sh
+# that started the install (TRACEBLOC_LAUNCH_PATH, captured by install.sh / common.sh
 # before either prepends anything). That shell is the one the user types the next
 # command into, so a CLI in ~/.local/bin is usable there right away when the user's
 # PATH already had ~/.local/bin -- the common case on a re-install. Without this,
 # such a user was told "open a new terminal" while their shell already found the
-# CLI (backend#5025 O-103). Conservative: an unset or empty TB_LAUNCH_PATH, or a BIN
+# CLI (backend#5025 O-103). Conservative: an unset or empty TRACEBLOC_LAUNCH_PATH, or a BIN
 # that is not an absolute path, is "no". A bootstrap older than common.sh has already
 # prepended ~/.local/bin by the time common.sh captures the PATH, so common.sh drops
 # that leading entry from the capture instead of trusting it.
 _cli_on_launch_path() {
   local bin="${1:-}" dir
   case "$bin" in /*) ;; *) return 1 ;; esac
-  [[ -n "${TB_LAUNCH_PATH:-}" ]] || return 1
+  [[ -n "${TRACEBLOC_LAUNCH_PATH:-}" ]] || return 1
   dir="${bin%/*}"
-  case ":${TB_LAUNCH_PATH}:" in *":${dir}:"* | *":${dir}/:"*) return 0 ;; esac
+  case ":${TRACEBLOC_LAUNCH_PATH}:" in *":${dir}:"* | *":${dir}/:"*) return 0 ;; esac
   return 1
 }
 
@@ -268,7 +268,7 @@ install_tracebloc_cli() {
   # clean "vX → vY" update instead of an already-present / re-running / installing
   # pileup. Cosmetic — a failing `tracebloc version` just yields "" (guarded).
   TB_CLI_OLD_VER=""
-  TB_CLI_BIN=""
+  TRACEBLOC_CLI_BIN=""
   if has tracebloc; then
     TB_CLI_OLD_VER="$(_cli_version_short)"
   fi
@@ -332,7 +332,7 @@ install_tracebloc_cli() {
       # The macOS node's login item runs this binary by its absolute path (launchd has
       # no PATH): mac-container.sh's _mac_ct_create_cluster reads it.
       # shellcheck disable=SC2034  # consumed cross-file by mac-container.sh
-      TB_CLI_BIN="$_cli_path"
+      TRACEBLOC_CLI_BIN="$_cli_path"
     else
       log "The CLI installer reported no install path; no tracebloc binary recorded."
     fi

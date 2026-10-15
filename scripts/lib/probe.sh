@@ -349,7 +349,7 @@ render_host_audit() {
 
   if [[ "${INSTALL_TIER_REASON:-}" == "mac-node" ]]; then
     # The macOS node brings its own runtime: whether Docker answers is beside the point.
-    _audit_row "Container runtime" "Apple container ${TB_APPLE_CONTAINER_VERSION:-} (set up for you)" note
+    _audit_row "Container runtime" "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION:-} (set up for you)" note
   elif [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
     # BOUNDED (client#984): `docker version` reports the SERVER version, so it
     # talks to the daemon and blocks on a wedged one exactly like `docker info`.

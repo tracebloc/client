@@ -22,7 +22,7 @@
 # answer from a producer that already exists, and nothing here prompts, writes or
 # starts anything. Sets:
 #   TB_REINSTALL_FOUND   none | tracebloc | other | cannot-tell
-#   TB_REINSTALL_CLUSTER tracebloc's k3d cluster, when one was found
+#   TRACEBLOC_REINSTALL_CLUSTER tracebloc's k3d cluster, when one was found
 #   TB_REINSTALL_OTHERS  every other k3d cluster found, space-separated
 #   TB_REINSTALL_PROBE   for cannot-tell: what could not answer
 #   TB_REINSTALL_HOW     ...how it failed: "did not answer", or what it said
@@ -59,7 +59,7 @@
 # info line instead of cannot tell. A listed cluster, a listing that did not answer,
 # and anything Docker does answer are read as everywhere.
 _reinstall_detect() {
-  TB_REINSTALL_FOUND="none"; TB_REINSTALL_CLUSTER=""; TB_REINSTALL_OTHERS=""
+  TB_REINSTALL_FOUND="none"; TRACEBLOC_REINSTALL_CLUSTER=""; TB_REINSTALL_OTHERS=""
   TB_REINSTALL_PROBE=""; TB_REINSTALL_HOW=""; TB_REINSTALL_REMEDY=""; _TB_REINSTALL_BLIND_SAID=""
   local name="" rec_rc=0 has_k3d=0 has_docker=0 rc list n ps what how errf tracebloc=0 blind=0 listed=0
   has k3d && has_k3d=1
@@ -150,7 +150,7 @@ _reinstall_detect() {
   if [[ -n "$TB_REINSTALL_OTHERS" ]]; then TB_REINSTALL_FOUND="other"
   elif (( tracebloc )); then TB_REINSTALL_FOUND="tracebloc"
   fi
-  (( tracebloc )) && TB_REINSTALL_CLUSTER="$name"
+  (( tracebloc )) && TRACEBLOC_REINSTALL_CLUSTER="$name"
   return 0
 }
 
@@ -266,7 +266,7 @@ _reinstall_decision() {
 # _reinstall_explain -- what moving this machine means (D10), before a refusal
 # and before an offboard alike.
 _reinstall_explain() {
-  warn "This machine runs tracebloc on k3d (cluster '${TB_REINSTALL_CLUSTER}')."
+  warn "This machine runs tracebloc on k3d (cluster '${TRACEBLOC_REINSTALL_CLUSTER}')."
   hint "Moving it to native k3s is a reinstall: this machine's secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
   hint "To keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run."
 }
@@ -275,10 +275,10 @@ _reinstall_explain() {
 
 # refuse_k3s_beside_live_k3d -- on a native k3s request, never k3s beside a live
 # k3d. Returns 0 when this run may go on (no k3d here, or a consented offboard,
-# which TB_REINSTALL_DECISION carries to main()); otherwise refuses by name, with
+# which TRACEBLOC_REINSTALL_DECISION carries to main()); otherwise refuses by name, with
 # what the move means (D10). Does nothing on any other substrate.
 refuse_k3s_beside_live_k3d() {
-  TB_REINSTALL_DECISION="proceed"
+  TRACEBLOC_REINSTALL_DECISION="proceed"
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
   # A request native k3s refuses is refused FIRST, before detection decides
   # anything: an offboard for it removes the k3d client at step a, and step c then
@@ -294,8 +294,8 @@ refuse_k3s_beside_live_k3d() {
   _native_k3s_refuse_host
   TB_EXIT_REFUSED=""
   _reinstall_detect
-  TB_REINSTALL_DECISION="$(_reinstall_decision)"
-  case "$TB_REINSTALL_DECISION" in
+  TRACEBLOC_REINSTALL_DECISION="$(_reinstall_decision)"
+  case "$TRACEBLOC_REINSTALL_DECISION" in
     proceed|offboard) return 0 ;;
   esac
   # Every path below ends in error: a refusal, like the substrate refusals above it
@@ -345,13 +345,13 @@ _reinstall_kube_context() {
     ctx="${ctx#\"}"; ctx="${ctx%\"}"
     [[ "$ctx" != "null" ]] || ctx=""
   fi
-  printf '%s' "${ctx:-k3d-${TB_REINSTALL_CLUSTER}}"
+  printf '%s' "${ctx:-k3d-${TRACEBLOC_REINSTALL_CLUSTER}}"
 }
 
 # _reinstall_stop WHY -- the offboard did not finish: say what is left, read
 # again from _cluster_presence, and install nothing.
 _reinstall_stop() {
-  local p=0 name="${TB_REINSTALL_CLUSTER}"
+  local p=0 name="${TRACEBLOC_REINSTALL_CLUSTER}"
   _reinstall_presence "$name" >/dev/null 2>&1 || p=$?
   case "$p" in
     0) hint "k3d cluster '${name}' is still on this machine." ;;
@@ -381,8 +381,8 @@ _reinstall_stop() {
 # install for ever. 124 is that deadline: it never confirms the cluster is gone,
 # so it stops like a declined prompt, and nothing is removed on a timeout.
 reinstall_offboard_k3d() {
-  [[ "${TB_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 0
-  local name="${TB_REINSTALL_CLUSTER}" consent ctx rc=0 p=0 probe=0 armed="${TRACEBLOC_RECORD_ARMED:-}" armed_old="${TB_RECORD_ARMED:-}"
+  [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 0
+  local name="${TRACEBLOC_REINSTALL_CLUSTER}" consent ctx rc=0 p=0 probe=0 armed="${TRACEBLOC_RECORD_ARMED:-}" armed_old="${TB_RECORD_ARMED:-}"
   consent="$(_reinstall_consent)"
   _reinstall_explain
   info "Offboarding it first: tracebloc revokes this secure environment, then its k3d cluster '${name}' and its data are removed."

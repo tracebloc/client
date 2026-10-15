@@ -76,6 +76,13 @@ _nvidia_pre_turing_name() {
   return 1
 }
 
+# _NVIDIA_GPU_FLOOR_VERDICTS -- every verdict there is: the words _nvidia_gpu_floor_verdict
+# prints, the words install-wsl.ps1's copy of the Windows verdict returns, and so the only
+# words the Windows installer hands to the core in WSL (_nvidia_gpu_wsl_verdict). Declared
+# once, here: gpu-floor.bats holds this function's echoes to it, and install-wsl.Tests.ps1
+# the Windows verdict's returns.
+_NVIDIA_GPU_FLOOR_VERDICTS=(ok below-driver below-hard-floor below-compute unreadable)
+
 # _nvidia_gpu_floor_verdict DRIVERS CAPS DRIVER_FLOOR CAP_FLOOR HARD_FLOOR [NAMES] -- pure:
 # prints ok, below-driver, below-hard-floor, below-compute or unreadable. DRIVERS, CAPS
 # and NAMES are nvidia-smi's driver_version, compute_cap and name answers, one line per
@@ -211,6 +218,45 @@ _nvidia_gpu_floor_gate() {
   esac
 }
 
+# _nvidia_gpu_wsl_verdict NAMES -- the floor gate in tracebloc's WSL distro (3.2 part 3,
+# client-dev#1810). There nvidia-smi answers for the WINDOWS driver, whose number the
+# Linux floors must never judge. The Windows installer judged it against the Windows
+# floors (install-wsl.ps1, Confirm-NvidiaDriver), said what it means, and hands the
+# verdict to both of the core's runs on their line: TRACEBLOC_WSL_GPU_VERDICT, one of
+# _NVIDIA_GPU_FLOOR_VERDICTS, and TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE / _NAME / _REASON,
+# which below-compute and below-hard-floor carry to the platform as the gate's own do.
+# This takes them as given and repeats nothing the host said. A verdict that is empty or
+# not one of those words is cannot tell: unreadable, so the GPU steps install and wire
+# nothing and the install runs CPU-only, said, never a silent GPU.
+_nvidia_gpu_wsl_verdict() {
+  local given="${TRACEBLOC_WSL_GPU_VERDICT:-}" v known=0
+  TB_GPU_UNSUPPORTED_CODE=""; TB_GPU_UNSUPPORTED_NAME=""; TB_GPU_UNSUPPORTED_REASON=""
+  TB_GPU_NVIDIA_NAMES="${1:-}"
+  for v in ${_NVIDIA_GPU_FLOOR_VERDICTS[@]+"${_NVIDIA_GPU_FLOOR_VERDICTS[@]}"}; do
+    if [[ "$given" == "$v" ]]; then known=1; fi
+  done
+  if (( ! known )); then
+    TB_GPU_FLOOR_VERDICT=unreadable
+    log "GPU floor: unreadable (the Windows installer handed over '${given}')"
+    if [[ -z "$given" ]]; then
+      warn "The Windows installer did not say whether this machine's NVIDIA driver is new enough for GPU training, so this machine will run in CPU mode to be safe."
+    else
+      warn "The Windows installer's check of this machine's NVIDIA driver answered '${given}', which this installer does not know, so this machine will run in CPU mode to be safe."
+    fi
+    hint "Re-run the installer from Windows. If this comes back, share this output with tracebloc support."
+    return 0
+  fi
+  TB_GPU_FLOOR_VERDICT="$given"
+  log "GPU floor: ${given} (the Windows installer's verdict, against the Windows floors)"
+  case "$given" in
+    below-compute|below-hard-floor)
+      TB_GPU_UNSUPPORTED_CODE="${TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE:-}"
+      TB_GPU_UNSUPPORTED_NAME="${TRACEBLOC_WSL_GPU_UNSUPPORTED_NAME:-}"
+      TB_GPU_UNSUPPORTED_REASON="${TRACEBLOC_WSL_GPU_UNSUPPORTED_REASON:-}"
+      ;;
+  esac
+}
+
 # ── The GPU that is not NVIDIA, and the NVIDIA GPU no container can see (backend#5296) ──
 # TB_GPU_UNSUPPORTED_CODE is one of a CLOSED vocabulary the backend stores beside the
 # sentence and the dashboard switches on: compute_too_old and driver_too_old (the floor
@@ -310,6 +356,43 @@ _gpu_arch_unsupported_report() {
   hint "Everything else works on CPU. GPU training needs an x86_64 machine with an NVIDIA GPU."
 }
 
+# _gpu_wsl_host_report -- tracebloc's WSL distro, past the nvidia-smi path. WSL shows a
+# distro no PCI device and no NVIDIA kernel module, so lspci and /proc/driver/nvidia
+# cannot see this machine's GPUs; the Windows installer's Find-Gpu did, and has said
+# what it found. Its reports reach this run on its line (install-wsl.ps1,
+# New-CoreRunArguments): not_nvidia and arch_unsupported as
+# TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE, with the card as _NAME, and set here by this
+# file's own reports, the same sentences, without saying them again. A verdict on the
+# line is an NVIDIA GPU the host judged, taken as _nvidia_gpu_wsl_verdict takes it; one
+# the host let through (ok, below-driver) whose driver does not answer in here, and a
+# code this installer does not know, run CPU-only, said.
+_gpu_wsl_host_report() {
+  local code="${TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE:-}"
+  log "GPU detection in the WSL distro, no nvidia-smi: the Windows installer reported '${code}', verdict '${TRACEBLOC_WSL_GPU_VERDICT:-}'"
+  case "$code" in
+    not_nvidia)
+      _gpu_not_nvidia_report "${TRACEBLOC_WSL_GPU_UNSUPPORTED_NAME:-}"
+      return 0
+      ;;
+    arch_unsupported)
+      _gpu_arch_unsupported_report "${TRACEBLOC_WSL_GPU_UNSUPPORTED_NAME:-}" >/dev/null
+      return 0
+      ;;
+  esac
+  if [[ -n "${TRACEBLOC_WSL_GPU_VERDICT:-}" ]]; then
+    _nvidia_gpu_wsl_verdict ""
+    case "$TB_GPU_FLOOR_VERDICT" in
+      ok|below-driver)
+        warn "The Windows installer found an NVIDIA GPU, but its driver does not answer inside the tracebloc WSL distro, so this machine will run in CPU mode."
+        hint "Re-run the installer from Windows. If this comes back, share this output with tracebloc support."
+        ;;
+    esac
+  elif [[ -n "$code" ]]; then
+    warn "The Windows installer's GPU check answered '${code}', which this installer does not know, so this machine will run in CPU mode to be safe."
+    hint "Re-run the installer from Windows; if this comes back, share this output with tracebloc support."
+  fi
+}
+
 # _gpu_container_blind RUNTIME -- the container runtime's own GPU probe has just said it
 # cannot give a container this machine's NVIDIA GPU: k3d's `docker run --gpus all` of the
 # GPU node image (k3d.sh), or k3s's containerd not registering the NVIDIA runtime
@@ -392,6 +475,12 @@ detect_gpu() {
       _gpu_arch_unsupported_report "${_gpu_name%"${_gpu_name##*[![:space:]]}"}"
       return
     fi
+    # In tracebloc's WSL distro the Windows installer's verdict decides, never the
+    # Linux floors (_nvidia_gpu_wsl_verdict).
+    if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+      _nvidia_gpu_wsl_verdict "$_gpu_name"
+      return
+    fi
     _nvidia_gpu_floor_gate "$_gpu_drv" "$_gpu_cap" "$_gpu_name"
     return
   fi
@@ -399,6 +488,11 @@ detect_gpu() {
   # Past the nvidia-smi path, which the floor gate clears and judges: what follows
   # reports a GPU that is not NVIDIA, or nothing.
   TB_GPU_UNSUPPORTED_REASON=""; TB_GPU_UNSUPPORTED_NAME=""; TB_GPU_UNSUPPORTED_CODE=""
+  # In tracebloc's WSL distro the GPUs are the Windows host's (_gpu_wsl_host_report).
+  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+    _gpu_wsl_host_report
+    return
+  fi
   if has lspci; then
     # Capture ONCE, then match the captured value. `lspci | grep -qi` lets grep
     # close the pipe on its first hit; lspci takes SIGPIPE and pipefail makes the

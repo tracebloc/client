@@ -73,7 +73,7 @@ _mac_ct_home() {
 # _mac_ct_install_root [VERSION] -- where VERSION (default: the pin) is unpacked: one
 # folder per version, so a pin bump unpacks beside the old runtime instead of over it.
 _mac_ct_install_root() {
-  local v="${1:-${TB_APPLE_CONTAINER_VERSION:-}}" home
+  local v="${1:-${TRACEBLOC_APPLE_CONTAINER_VERSION:-}}" home
   _mac_ct_version_ok "$v" || { echo "Apple container: '${v}' is not a release version (like 1.4.1)." >&2; return 1; }
   home="$(_mac_ct_home)" || return 1
   printf '%s/%s' "$home" "$v"
@@ -82,12 +82,12 @@ _mac_ct_install_root() {
 # _mac_ct_pkg_name [VERSION] / _mac_ct_pkg_url [VERSION] -- the signed package's asset
 # name and its release URL, derived from the version, never pinned beside it.
 _mac_ct_pkg_name() {
-  local v="${1:-${TB_APPLE_CONTAINER_VERSION:-}}"
+  local v="${1:-${TRACEBLOC_APPLE_CONTAINER_VERSION:-}}"
   _mac_ct_version_ok "$v" || { echo "Apple container: '${v}' is not a release version (like 1.4.1)." >&2; return 1; }
   printf 'container-%s-installer-signed.pkg' "$v"
 }
 _mac_ct_pkg_url() {
-  local v="${1:-${TB_APPLE_CONTAINER_VERSION:-}}" name
+  local v="${1:-${TRACEBLOC_APPLE_CONTAINER_VERSION:-}}" name
   name="$(_mac_ct_pkg_name "$v")" || return 1
   printf 'https://github.com/apple/container/releases/download/%s/%s' "$v" "$name"
 }
@@ -97,10 +97,10 @@ _mac_ct_pkg_url() {
 # and the install stops by name. Same bounds as k3s.sh's binary download: a stall
 # floor, not a hard deadline, on a ~118 MB file.
 _mac_ct_fetch_pkg() {
-  local dir="$1" want="${TB_APPLE_CONTAINER_PKG_SHA256:-}" url name
+  local dir="$1" want="${TRACEBLOC_APPLE_CONTAINER_PKG_SHA256:-}" url name
   [[ -n "$want" ]] || { rm -rf "$dir"; error "Apple container: no pinned sha256 for the package is stamped in common.sh -- run scripts/check-facts.sh --write."; }
   url="$(_mac_ct_pkg_url)" && name="$(_mac_ct_pkg_name)" \
-    || { rm -rf "$dir"; error "Apple container: cannot derive the package from TB_APPLE_CONTAINER_VERSION='${TB_APPLE_CONTAINER_VERSION:-}'."; }
+    || { rm -rf "$dir"; error "Apple container: cannot derive the package from TRACEBLOC_APPLE_CONTAINER_VERSION='${TRACEBLOC_APPLE_CONTAINER_VERSION:-}'."; }
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "$url" -o "${dir}/${name}" \
     || { rm -rf "$dir"; error "Couldn't download Apple's container package from ${url}. Check that this machine can reach github.com and release-assets.githubusercontent.com, then re-run."; }
@@ -117,7 +117,7 @@ _mac_ct_fetch_pkg() {
 #   1. Developer ID Installer: Apple Inc. - Containerization (UPBK2H6LZM)
 # A pkgutil that does not answer is "cannot tell", never a pass.
 _mac_ct_check_pkg() {
-  local pkg="$1" team="${TB_APPLE_CONTAINER_TEAM_ID:-}" out rc=0 leaf
+  local pkg="$1" team="${TRACEBLOC_APPLE_CONTAINER_TEAM_ID:-}" out rc=0 leaf
   [[ -n "$team" ]] || { echo "Apple container: no pinned Team ID is stamped in common.sh -- run scripts/check-facts.sh --write."; return 1; }
   out="$(_bounded 60 pkgutil --check-signature "$pkg" 2>&1)" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
@@ -145,7 +145,7 @@ _mac_ct_check_pkg() {
 # ships beside the programs are not codesign's to judge, and a program Apple adds in a
 # later release is checked without a list here to update.
 _mac_ct_check_binaries() {
-  local root="$1" team="${TB_APPLE_CONTAINER_TEAM_ID:-}" list f kind got out rc n=0 cli=""
+  local root="$1" team="${TRACEBLOC_APPLE_CONTAINER_TEAM_ID:-}" list f kind got out rc n=0 cli=""
   [[ -n "$team" ]] || { echo "no pinned Team ID is stamped in common.sh to check it against (run scripts/check-facts.sh --write)"; return 1; }
   command -v file >/dev/null 2>&1 \
     || { echo "file(1) is not on this Mac, so this run cannot tell which of its files are programs"; return 1; }
@@ -193,7 +193,7 @@ _mac_ct_check_binaries() {
 
 # _mac_ct_marker_body -- what a verified unpack of the pin records about its package.
 _mac_ct_marker_body() {
-  printf 'version=%s\npkg_sha256=%s\n' "${TB_APPLE_CONTAINER_VERSION:-}" "${TB_APPLE_CONTAINER_PKG_SHA256:-}"
+  printf 'version=%s\npkg_sha256=%s\n' "${TRACEBLOC_APPLE_CONTAINER_VERSION:-}" "${TRACEBLOC_APPLE_CONTAINER_PKG_SHA256:-}"
 }
 
 # _mac_ct_check_marker ROOT -- ROOT carries this installer's marker for the pinned
@@ -207,7 +207,7 @@ _mac_ct_check_marker() {
   have="$(cat "${root}/${TB_MAC_CT_MARKER}" 2>/dev/null)" \
     || { echo "its ${TB_MAC_CT_MARKER} marker cannot be read, so this run cannot tell which package it came from"; return 1; }
   if [[ "$have" != "$(_mac_ct_marker_body)" ]]; then
-    echo "its ${TB_MAC_CT_MARKER} marker names another package than the pinned one (${TB_APPLE_CONTAINER_VERSION:-}, sha256 ${TB_APPLE_CONTAINER_PKG_SHA256:-})"
+    echo "its ${TB_MAC_CT_MARKER} marker names another package than the pinned one (${TRACEBLOC_APPLE_CONTAINER_VERSION:-}, sha256 ${TRACEBLOC_APPLE_CONTAINER_PKG_SHA256:-})"
     return 1
   fi
 }
@@ -253,8 +253,8 @@ _mac_ct_ensure_runtime() {
   dest="$(_mac_ct_install_root)" || error "Apple container: cannot tell where to unpack the runtime (above)."
   if [[ -e "$dest" ]]; then
     if why="$(_mac_ct_check_marker "$dest")" && why="$(_mac_ct_check_binaries "$dest")"; then
-      log "Apple container ${TB_APPLE_CONTAINER_VERSION}: reusing the checked runtime in ${dest}."
-      tb_record_write apple-container "$TB_APPLE_CONTAINER_VERSION" "${dest%/*}"
+      log "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION}: reusing the checked runtime in ${dest}."
+      tb_record_write apple-container "$TRACEBLOC_APPLE_CONTAINER_VERSION" "${dest%/*}"
       return 0
     fi
     error "Apple container: ${dest} is already there, but ${why}. This installer does not delete it: move that folder out of the way yourself, then re-run."
@@ -267,8 +267,8 @@ _mac_ct_ensure_runtime() {
   fi
   _mac_ct_unpack "$pkg" "$dest" "$tmp"
   rm -rf "$tmp"
-  tb_record_write apple-container "$TB_APPLE_CONTAINER_VERSION" "${dest%/*}"
-  log "Apple container ${TB_APPLE_CONTAINER_VERSION}: unpacked and checked in ${dest}."
+  tb_record_write apple-container "$TRACEBLOC_APPLE_CONTAINER_VERSION" "${dest%/*}"
+  log "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION}: unpacked and checked in ${dest}."
 }
 
 # =============================================================================
@@ -307,7 +307,7 @@ _mac_ct_kernel_dir() { local home; home="$(_mac_ct_home)" || return 1; printf '%
 # digest, joined by '@'. A repository with a tag or digest of its own, or a digest that
 # is not sha256, is refused: the digest alone must decide what boots.
 _mac_ct_vminit_ref() {
-  local image="${TB_APPLE_VMINIT_IMAGE:-}" digest="${TB_APPLE_VMINIT_DIGEST:-}"
+  local image="${TRACEBLOC_APPLE_VMINIT_IMAGE:-}" digest="${TRACEBLOC_APPLE_VMINIT_DIGEST:-}"
   if [[ ! "$image" =~ ^[a-z0-9.-]+(/[a-z0-9._-]+)+$ ]]; then
     echo "Apple container: the stamped init image repository is '${image}', not a bare registry path like ghcr.io/org/vminit (run scripts/check-facts.sh --write)."
     return 1
@@ -325,12 +325,12 @@ _mac_ct_vminit_ref() {
 _mac_ct_check_pins() {
   local ref
   ref="$(_mac_ct_vminit_ref)" || { echo "$ref"; return 1; }
-  if [[ ! "${TB_MAC_KERNEL_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "Apple container: the stamped kernel sha256 is '${TB_MAC_KERNEL_SHA256:-}', not 64 hex digits (run scripts/check-facts.sh --write)."
+  if [[ ! "${TRACEBLOC_MAC_KERNEL_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Apple container: the stamped kernel sha256 is '${TRACEBLOC_MAC_KERNEL_SHA256:-}', not 64 hex digits (run scripts/check-facts.sh --write)."
     return 1
   fi
-  if [[ ! "${TB_MAC_KERNEL_IMAGE:-}" =~ ^ghcr\.io(/[a-z0-9._-]+)+$ ]]; then
-    echo "Apple container: the stamped kernel repository is '${TB_MAC_KERNEL_IMAGE:-}', not a ghcr.io path (run scripts/check-facts.sh --write)."
+  if [[ ! "${TRACEBLOC_MAC_KERNEL_IMAGE:-}" =~ ^ghcr\.io(/[a-z0-9._-]+)+$ ]]; then
+    echo "Apple container: the stamped kernel repository is '${TRACEBLOC_MAC_KERNEL_IMAGE:-}', not a ghcr.io path (run scripts/check-facts.sh --write)."
     return 1
   fi
 }
@@ -377,7 +377,7 @@ _mac_ct_registry_token() {
 # does not is refused and left alone (nothing proves what changed it). Otherwise the
 # kernel is pulled from ghcr.io by the pin, checked, and renamed into place.
 _mac_ct_ensure_kernel() {
-  local want="${TB_MAC_KERNEL_SHA256:-}" image="${TB_MAC_KERNEL_IMAGE:-}" dir file repo token tmp why
+  local want="${TRACEBLOC_MAC_KERNEL_SHA256:-}" image="${TRACEBLOC_MAC_KERNEL_IMAGE:-}" dir file repo token tmp why
   TB_MAC_CT_KERNEL_FILE=""
   why="$(_mac_ct_check_pins)" || error "$why"
   dir="$(_mac_ct_kernel_dir)" || error "Apple container: cannot tell where to keep the kernel (above)."
@@ -477,7 +477,7 @@ _mac_ct_start_system() {
     out="$(_bounded 60 "${root}/bin/container" system property list </dev/null 2>&1)" \
       || error "Apple container: the container system did not list its settings, so this run cannot tell which init image it boots. Nothing was stopped; re-run when it answers."
     if [[ "$out" == *"\"${ref}\""* ]]; then
-      log "Apple container ${TB_APPLE_CONTAINER_VERSION}: the system is already running on the pinned init image."
+      log "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION}: the system is already running on the pinned init image."
     else
       state="ours ${root} (another init image)"
     fi
@@ -504,7 +504,7 @@ _mac_ct_start_system() {
     || error "Apple container: the container system did not list its settings, so this run cannot tell which init image it boots."
   [[ "$out" == *"\"${ref}\""* ]] \
     || error "Apple container: the running container system does not boot the pinned init image ${ref}."
-  log "Apple container ${TB_APPLE_CONTAINER_VERSION}: running on kernel sha256:${TB_MAC_KERNEL_SHA256} and init image ${ref}."
+  log "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION}: running on kernel sha256:${TRACEBLOC_MAC_KERNEL_SHA256} and init image ${ref}."
 }
 
 # =============================================================================
@@ -1055,7 +1055,7 @@ _mac_ct_agent_home() {
   printf '%s\n' "$home"
 }
 
-TB_MAC_CT_AGENT_HELP_S=30
+TRACEBLOC_MAC_CT_AGENT_HELP_S=30
 # _mac_ct_agent_bin_check BIN -- prints nothing and returns 0 when the login item can
 # run BIN: an absolute path to an executable file that knows `node ensure`. Otherwise
 # prints why and returns 1. `--help` runs nothing: an older tracebloc fails it, because
@@ -1069,9 +1069,9 @@ _mac_ct_agent_bin_check() {
   [[ -f "$bin" && -x "$bin" ]] \
     || { echo "Apple container: ${bin} is not an executable file, so the login item would have nothing to run."; return 1; }
   rc=0
-  out="$(TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TB_MAC_CT_AGENT_HELP_S" "$bin" node ensure --help </dev/null 2>/dev/null)" || rc=$?
+  out="$(TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TRACEBLOC_MAC_CT_AGENT_HELP_S" "$bin" node ensure --help </dev/null 2>/dev/null)" || rc=$?
   if [[ "$rc" -eq 124 ]]; then
-    echo "Apple container: \`${bin} node ensure --help\` did not finish within ${TB_MAC_CT_AGENT_HELP_S} s, so this run cannot tell whether the CLI knows the command the login item runs. It's safe to re-run this installer."
+    echo "Apple container: \`${bin} node ensure --help\` did not finish within ${TRACEBLOC_MAC_CT_AGENT_HELP_S} s, so this run cannot tell whether the CLI knows the command the login item runs. It's safe to re-run this installer."
     return 1
   fi
   [[ "$rc" -eq 0 && "$out" == *"node ensure"* ]] \
@@ -1080,17 +1080,17 @@ _mac_ct_agent_bin_check() {
 
 # _mac_ct_agent_trial BIN HOME -- prints nothing and returns 0 when BIN's `node ensure`,
 # run once as the login item runs it (HOME the record's home, telemetry off), succeeds
-# within TB_MAC_CT_AGENT_TRIAL_S; its output goes to the install log. Otherwise prints
+# within TRACEBLOC_MAC_CT_AGENT_TRIAL_S; its output goes to the install log. Otherwise prints
 # why and returns 1. Step c calls it just after the node is Ready, so `node ensure` only
 # probes; a run past the bound cannot tell, and fails closed.
-TB_MAC_CT_AGENT_TRIAL_S=120
+TRACEBLOC_MAC_CT_AGENT_TRIAL_S=120
 _mac_ct_agent_trial() {
   local bin="$1" home="$2" out rc=0 ver="" first _w _rest nl=$'\n'
-  out="$(HOME="$home" TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TB_MAC_CT_AGENT_TRIAL_S" "$bin" node ensure </dev/null 2>&1)" || rc=$?
+  out="$(HOME="$home" TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TRACEBLOC_MAC_CT_AGENT_TRIAL_S" "$bin" node ensure </dev/null 2>&1)" || rc=$?
   printf '%s\n' "$out" >>"${LOG_FILE:-/dev/null}"
   [[ "$rc" -ne 0 ]] || return 0
   if [[ "$rc" -eq 124 ]]; then
-    echo "Apple container: \`${bin} node ensure\`, the command the login item runs, did not finish within ${TB_MAC_CT_AGENT_TRIAL_S} s, so this run cannot tell whether the login item would bring the node back. It's safe to re-run this installer."
+    echo "Apple container: \`${bin} node ensure\`, the command the login item runs, did not finish within ${TRACEBLOC_MAC_CT_AGENT_TRIAL_S} s, so this run cannot tell whether the login item would bring the node back. It's safe to re-run this installer."
     return 1
   fi
   if [[ "$out" == *"newer than this tracebloc reads"* ]]; then
@@ -1234,7 +1234,7 @@ _mac_ct_install_macos() {
 # of this installer's keeps its volume and its data, and a container or volume nothing
 # shows this installer made is refused (_mac_ct_ensure_node): that is this path's
 # leftover guard (D5).
-# The login item runs the CLI step b installed (TB_CLI_BIN, install-cli.sh). Without it
+# The login item runs the CLI step b installed (TRACEBLOC_CLI_BIN, install-cli.sh). Without it
 # the node would not come back after a restart, so a run without it stops before the
 # node is touched.
 _mac_ct_create_cluster() {
@@ -1245,7 +1245,7 @@ _mac_ct_create_cluster() {
   if [[ ! -e "${dir}/run-args" ]] && declare -F _precreate_fit_gate >/dev/null 2>&1; then
     _precreate_fit_gate
   fi
-  [[ -n "${TB_CLI_BIN:-}" ]] \
+  [[ -n "${TRACEBLOC_CLI_BIN:-}" ]] \
     || error "The macOS node's login item runs the tracebloc CLI, and step b did not install it (above). Without the login item the node would not come back after a restart. Install the tracebloc CLI, then re-run this installer."
   _mac_ct_ensure_node
   _mac_ct_merge_kubeconfig
@@ -1253,7 +1253,7 @@ _mac_ct_create_cluster() {
   # own probe of 127.0.0.1:6443 bypasses every proxy itself (client-dev#1914).
   _export_host_no_proxy
   _mac_ct_local_network_gate
-  _mac_ct_ensure_agent "$TB_CLI_BIN"
+  _mac_ct_ensure_agent "$TRACEBLOC_CLI_BIN"
 }
 
 # ── The Local Network prompt (backend#5407, option a) ──────────────────────────

@@ -2415,6 +2415,8 @@ function Confirm-NvidiaDriver {
     $verdict = Get-NvidiaFloorVerdict -DriverOutput ([string]$dr.Output) -CapOutput $capOut -DriverFloor $NVIDIA_DRIVER_FLOOR -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR -HardFloor $NVIDIA_DRIVER_HARD_FLOOR -NameOutput $nameOut
     $script:GPU_UNSUPPORTED_REASON = ""; $script:GPU_UNSUPPORTED_NAME = ""
     $script:GPU_UNSUPPORTED_CODE = ""
+    # The bash twin's TB_GPU_FLOOR_VERDICT. install-wsl.ps1 hands it to the core in WSL.
+    $script:GPU_FLOOR_VERDICT = $verdict
     $script:NVIDIA_GPU_NAMES = $nameOut
     Log "GPU floor: $verdict (driver $driverVer, floor $NVIDIA_DRIVER_FLOOR, hard floor $NVIDIA_DRIVER_HARD_FLOOR; compute capability $capVer, floor $NVIDIA_COMPUTE_CAP_FLOOR)"
     if ($verdict -eq "ok" -or $verdict -eq "below-driver") {
@@ -2424,11 +2426,11 @@ function Confirm-NvidiaDriver {
         # probes it, and a driver too old for the image fails there, with a reason.
         # A driver too old to answer compute_cap: the card itself could not be checked either.
         if ($capVer -eq "unknown") {
-          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability -- continuing with the GPU, but it may not work until the driver is updated."
+          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability -- continuing with the GPU, but it may not work until the driver is upgraded."
         } else {
-          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training -- continuing with the GPU; if GPU training fails on this machine, update the driver."
+          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training -- continuing with the GPU; if GPU training fails on this machine, upgrade the driver."
         }
-        Hint "To update: https://www.nvidia.com/Download/index.aspx, reboot, then re-run the installer."
+        Hint "To upgrade: install NVIDIA driver $NVIDIA_DRIVER_FLOOR or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
       }
       $script:NVIDIA_DRIVER_OK = $true
       Ok "NVIDIA GPU ready (driver $driverVer)"
@@ -8161,9 +8163,16 @@ function Get-ClientIdFromSecret {
 }
 
 # The machine credential the client's pods authenticate with, from the release's
-# Secret (canonical key first, the legacy one as fallback), or "" when it can't be
-# read. The same bounded, one-Secret read as Get-ClientIdFromSecret, with the
-# same row rule; only the columns differ. Bash peer: _client_password_from_secret.
+# Secret (canonical key first, the legacy one as fallback), or "". The same
+# bounded, one-Secret read as Get-ClientIdFromSecret, with the same row rule; only
+# the columns differ. Bash peer: _client_password_from_secret.
+# The two "" are different facts (client-dev#2044): the release has no Secret
+# carrying a password (a first install), or the read CANNOT TELL -- no kubectl, a
+# failed or timed-out read, two Secrets carrying one, a value that does not
+# decode. Each call leaves $script:TB_PASSWORD_UNREADABLE $true for the second,
+# so the restart after helm can tell "no pod holds an old credential" from
+# "maybe one does". (The bash peer says it with exit 2; a function's value here
+# is its output, so the flag carries it.)
 function Get-ClientPasswordSecretQuery {
   param([string]$Release, [string]$Namespace, [int]$TimeoutSec = 5)
   return @("get", "secret", "-n", $Namespace, "-l", "app.kubernetes.io/instance=$Release",
@@ -8173,13 +8182,27 @@ function Get-ClientPasswordSecretQuery {
 
 function Get-ClientPasswordFromSecret {
   param([string]$Release, [string]$Namespace)
+  $script:TB_PASSWORD_UNREADABLE = $true
   if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return "" }
   $q = Get-ClientPasswordSecretQuery -Release $Release -Namespace $Namespace -TimeoutSec 5
   $rows = (& kubectl @q 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) { return "" }
   $b64 = Select-ClientIdFromSecretRows -Rows $rows
-  if (-not $b64) { return "" }
-  try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) } catch { return "" }
+  if (-not $b64) {
+    # No row carrying a password is "absent"; more than one is "cannot tell".
+    $carrying = @(foreach ($line in ("$rows" -split "`r?`n")) {
+      $f = @($line.Trim() -split '\s+')
+      $v = if ($f.Count -ge 2 -and $f[1] -and $f[1] -ne '<none>') { $f[1] } elseif ($f.Count -ge 3) { $f[2] } else { "" }
+      if ($f[0] -and $v -and $v -ne '<none>') { $v }
+    })
+    if ($carrying.Count -eq 0) { $script:TB_PASSWORD_UNREADABLE = $false }
+    return ""
+  }
+  $pw = ""
+  try { $pw = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) } catch { return "" }
+  if (-not $pw) { return "" }
+  $script:TB_PASSWORD_UNREADABLE = $false
+  return $pw
 }
 
 # PURE: the stage (dev|stg|prod) a release was installed for, from its values
@@ -8242,8 +8265,10 @@ function Test-CredentialRejected {
 # credential-rejected repair; a preset (the ID-only prompt, the env pair) written
 # over a running release changes it just the same (client-dev#2018), so the
 # restart keys on the observed change, not on the route. An empty $Previous is a
-# first install; an empty $Now with a $Previous is "cannot tell", and that
-# restarts. Bash peer: _credential_changed_under_pods.
+# first install -- so the caller never hands an UNREADABLE previous read in as
+# one; it restarts on that itself (client-dev#2044). An empty $Now with a
+# $Previous is "cannot tell", and that restarts. Bash peer:
+# _credential_changed_under_pods.
 function Test-CredentialChangedUnderPods {
   param([string]$Previous, [string]$Now)
   return ([bool]$Previous -and ($Previous -cne $Now))
@@ -8259,17 +8284,22 @@ function Test-CredentialChangedUnderPods {
 # restart failed: the Secret already holds the new, valid credential, so no later
 # run finds it rejected and nothing would roll these pods again. The caller makes
 # that fatal; the hint is the fix. Bash peer: _restart_credential_consumers.
+# -Release is the Helm release (the instance label), -Namespace where it runs: an
+# adopted release can be named unlike its namespace, and selecting by one for the
+# other matches nothing (client-dev#2019). -Namespace defaults to -Release, the
+# shape bash's `helm upgrade --install "$TB_NAMESPACE"` always installs.
 function Restart-CredentialConsumers {
-  param([string]$Release)
+  param([string]$Release, [string]$Namespace)
+  if (-not $Namespace) { $Namespace = $Release }
   $failed = $false
-  $listed = (& kubectl get deployment -n $Release -l "app.kubernetes.io/instance=$Release" `
+  $listed = (& kubectl get deployment -n $Namespace -l "app.kubernetes.io/instance=$Release" `
                -o "jsonpath={.items[*].metadata.name}" --request-timeout=15s 2>$null) | Out-String
   if ($LASTEXITCODE -ne 0) { $failed = $true }
   $names = @("$listed".Trim() -split '\s+' | Where-Object { $_ })
   if ($names.Count -eq 0) { $failed = $true }
   foreach ($d in $names) {
     if ($d -eq "mysql-client") { continue }
-    $out = (& kubectl rollout restart "deployment/$d" -n $Release --request-timeout=15s 2>&1) | Out-String
+    $out = (& kubectl rollout restart "deployment/$d" -n $Namespace --request-timeout=15s 2>&1) | Out-String
     Log $out
     if ($LASTEXITCODE -ne 0) { $failed = $true }
   }
@@ -8286,7 +8316,7 @@ function Restart-CredentialConsumers {
   }
   if ($failed) {
     Warn "Couldn't restart every tracebloc service onto the new credential, so this machine stays offline until they restart. Re-running the installer won't redo it. Run:"
-    Hint "  kubectl rollout restart deployment -n $Release -l app.kubernetes.io/instance=$Release"
+    Hint "  kubectl rollout restart deployment -n $Namespace -l app.kubernetes.io/instance=$Release"
     Hint "  kubectl get daemonset -A -l app.kubernetes.io/instance=$Release   # then: kubectl rollout restart daemonset/<name> -n <namespace>"
     return $false
   }
@@ -9244,6 +9274,7 @@ $envBlock
 
   Write-Host ""
   $prevPassword = ""
+  $prevUnreadable = $false
   if ($adoptedReuse) {
     # Surgical reconcile of the LIVE release: preserve the deployed configuration +
     # secret; only clientId is healed (#397 r2). Prefer --reset-then-reuse-values
@@ -9297,7 +9328,10 @@ $envBlock
     Ensure-ReleaseDirs $TB_NAMESPACE
     # The password the running pods started on, read before helm overwrites it, so
     # the restart below can see a credential that changed under them (client-dev#2018).
+    # A read that CANNOT TELL is not a first install (client-dev#2044): see the restart below.
+    $script:TB_PASSWORD_UNREADABLE = $false
     $prevPassword = Get-ClientPasswordFromSecret -Release $TB_NAMESPACE -Namespace $TB_NAMESPACE
+    $prevUnreadable = [bool]$script:TB_PASSWORD_UNREADABLE
     # client-dev#1633: why the GPU was left off as unsupported rides --set-string, not the
     # values here-string: the sentence is free text, and ConvertTo-HelmSetValue is the one
     # quoting rule both paths share. Always all three keys (the reason, the name and the code,
@@ -9325,10 +9359,20 @@ $envBlock
   # it from their environment at start and the chart doesn't roll them on a Secret
   # change. Restart the ones that authenticate so they use it (bash:
   # install-client-helm.sh). The reconcile path above reuses the release's values,
-  # so it writes no password and $prevPassword stays empty there.
-  if ($script:TB_CREDENTIAL_REISSUED -or ($prevPassword -and (Test-CredentialChangedUnderPods -Previous $prevPassword `
-        -Now (Get-ClientPasswordFromSecret -Release $TB_NAMESPACE -Namespace $TB_NAMESPACE)))) {
-    if (-not (Restart-CredentialConsumers -Release $TB_NAMESPACE)) {
+  # so it writes no password and $prevPassword stays empty there. $pvRelease is the
+  # release this run installed or reconciled: an adopted one keeps its own name,
+  # which need not be its namespace's (client-dev#2019). A read before helm that
+  # could not tell, with one after it that reads a password, is "cannot tell" and
+  # restarts too (client-dev#2044); unreadable on both sides is a cluster nothing
+  # here can roll.
+  $credentialChanged = $false
+  if (-not $script:TB_CREDENTIAL_REISSUED -and ($prevPassword -or $prevUnreadable)) {
+    $nowPassword = Get-ClientPasswordFromSecret -Release $TB_NAMESPACE -Namespace $TB_NAMESPACE
+    $credentialChanged = ($prevUnreadable -and [bool]$nowPassword) -or
+      (Test-CredentialChangedUnderPods -Previous $prevPassword -Now $nowPassword)
+  }
+  if ($script:TB_CREDENTIAL_REISSUED -or $credentialChanged) {
+    if (-not (Restart-CredentialConsumers -Release $pvRelease -Namespace $TB_NAMESPACE)) {
       Err "This machine's new credential is in place, but its services are still on the old one."
     }
   }

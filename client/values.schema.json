@@ -740,7 +740,7 @@
     },
     "selfRotateMysqlRootByEnv": {
       "type": "object",
-      "description": "Per-environment default for selfRotateMysqlRoot (backend#5427), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). True for dev and stg, false for prod: the rollout flips one environment at a time, prod last.",
+      "description": "Per-environment default for selfRotateMysqlRoot (backend#5427), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — aliases normalized first). True for dev, stg and prod: the rollout flipped one environment at a time, prod last. Set selfRotateMysqlRoot=false to hold one edge back.",
       "additionalProperties": {
         "type": "boolean"
       }
