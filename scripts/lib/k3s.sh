@@ -876,6 +876,27 @@ _native_k3s_rename_kubeconfig() {
   printf '%s\n' "$out"
 }
 
+# _native_k3s_wsl_server_localhost -- stdin a renamed k3s.yaml, stdout the same with
+# its server's host `localhost` in place of k3s's `127.0.0.1`. Inside tracebloc's WSL
+# distro the merge writes the Windows user's own kubeconfig (the Windows installer
+# hands the core that file as KUBECONFIG, client-dev#1810 part 1), and Windows reaches
+# the API through WSL's localhost forwarding. Spike S-W measured that forwarding on
+# `::1` only on a Windows 11 laptop (WSL 2.7.11): `127.0.0.1:6443` was refused from
+# Windows while the API answered (RFC-0175 D7; tracebloc/rfcs#240, rows 6 and 7). On
+# Server 2025 (WSL 3.0.3) `127.0.0.1` answered. `localhost`, which a client tries on
+# both loopbacks, serves both hosts. k3s puts `localhost` in its serving certificate
+# beside 127.0.0.1 and ::1, and inside the distro `localhost` is the distro's own
+# loopback, so the core's own reads through this file keep working. Returns 1 unless
+# the file held exactly one `server:` line and that line now names localhost: a file of
+# another shape is not one this can vouch for.
+_native_k3s_wsl_server_localhost() {
+  local out
+  out="$(sed -e 's#^\(    server: https://\)127\.0\.0\.1:\([0-9][0-9]*\)$#\1localhost:\2#')" || return 1
+  [[ "$(printf '%s\n' "$out" | grep -c '^ *server:')" == 1 ]] || return 1
+  grep -Eq '^    server: https://localhost:[0-9]+$' <<<"$out" || return 1
+  printf '%s\n' "$out"
+}
+
 # _native_k3s_context -- the kubeconfig context native k3s is merged as:
 # k3s-<CLUSTER_NAME> (decided 2026-10-01; it mirrors k3d's k3d-<name>). The cluster
 # and the user entries carry the same name. One definition, read by the merge, the
@@ -932,6 +953,15 @@ _native_k3s_merge_kubeconfig() {
   fi
   _native_k3s_rename_kubeconfig "$ctx" < "${td}/k3s.yaml" > "${td}/renamed.yaml" \
     || { rm -rf "$td"; error "native k3s: ${src:-$TB_K3S_KUBECONFIG_PATH} is not the shape k3s writes (one cluster, user and context, all named 'default'), so it was not merged into ${target}."; }
+  # In tracebloc's WSL distro the target is the Windows user's kubeconfig, and
+  # Windows reaches the API as localhost (_native_k3s_wsl_server_localhost). Linux
+  # and the Mac keep k3s's 127.0.0.1.
+  if _native_k3s_on_wsl; then
+    _native_k3s_wsl_server_localhost < "${td}/renamed.yaml" > "${td}/hosted.yaml" \
+      || { rm -rf "$td"; error "native k3s: ${src:-$TB_K3S_KUBECONFIG_PATH} does not name the API as k3s writes it (one server, https://127.0.0.1:<port>), so it was not merged into ${target}: Windows reaches the API as localhost, and this file cannot be told to."; }
+    mv -f "${td}/hosted.yaml" "${td}/renamed.yaml" \
+      || { rm -rf "$td"; error "native k3s: couldn't stage the kubeconfig for Windows in ${td}."; }
+  fi
   mkdir -p "$(dirname "$target")" \
     || { rm -rf "$td"; error "native k3s: couldn't create $(dirname "$target")."; }
   # set-u-safe: kc is seeded with the kubectl in both branches

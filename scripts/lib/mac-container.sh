@@ -684,12 +684,19 @@ _mac_ct_node_config() {
 #           runtime holds the node. Lukas decided this on 2026-10-11
 #           (tracebloc/backend#4827), departing from RFC-0175's proposal, a quarter of
 #           the RAM between 4 and 16 GB.
-#   CPUs:   the Mac's cores less one, at least 1. The VM adds a vCPU of its own
-#           (RFC-0175's measurement), so the node advertises the Mac's cores.
+#   CPUs:   the Mac's cores less the VM's own (TB_MAC_CT_VM_OWN_CPUS), at least 1, so
+#           the node advertises the Mac's cores.
 # The VM never returns memory (no balloon), so this is what the Mac gives up while the
 # node runs.
+#
+# TB_MAC_CT_VM_OWN_CPUS: the vCPUs Apple's VM adds to the --cpus it is given, as the node
+# advertises them. RFC-0175 measured one on the spike Mac, and the e2e EC2 Mac again on
+# 2026-10-14 (--cpus 2 advertised 3, --cpus 9 advertised 10). The one declaration: the
+# node's size keeps that many of the Mac's cores back, and preflight's CPU reader
+# (_pf_runtime_ncpu) adds them again, so the fit gate budgets what the node advertises.
+TB_MAC_CT_VM_OWN_CPUS=1
 _mac_ct_node_size() {
-  local spare=1 phys ncpu cpus re='^[1-9][0-9]*$'
+  local spare="$TB_MAC_CT_VM_OWN_CPUS" phys ncpu cpus re='^[1-9][0-9]*$'
   if ! declare -F _macos_vm_mem_gb _pf_host_mem_gb >/dev/null 2>&1; then
     echo "Apple container: the installer's macOS VM sizing (preflight.sh) is not loaded, so this run cannot size the node."
     return 1

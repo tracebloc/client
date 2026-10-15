@@ -559,6 +559,41 @@ function Confirm-WslReady {
   return 'restart'
 }
 
+# WSL's networking mode, read from the user's own .wslconfig (client-dev#1810, S-W's
+# run of record, row 10; rfcs#241 decision 2): the distro runs on WSL's default NAT
+# only. networkingMode is a global [wsl2] key, so a user's mirrored setting reaches
+# our distro too, and on the laptop (WSL 2.7.11) a mirrored distro's node never came
+# up: containerd's pull timed out and autoProxy gave k3s no proxy. NAT pulled on both
+# hosts. So any value but nat is refused by name before anything is written; a
+# missing key, or no file, is WSL's default, NAT. The file is never edited: the key
+# changes every distro the user has. A file that cannot be read is cannot tell, and
+# is refused with the reason. Section and key names are read case-insensitively, as
+# the value is; a key outside [wsl2] is not this one. A header with a trailing # or ;
+# comment still names its section: read as no header, it would let the key under it
+# through.
+function Assert-WslNetworkingNat {
+  param([string]$Path = (Join-Path $env:USERPROFILE '.wslconfig'))
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  try {
+    $text = [System.IO.File]::ReadAllText($Path)
+  } catch {
+    throw "The installer could not read your WSL settings file $Path ($($_.Exception.Message)), so it cannot tell whether WSL uses NAT networking, which the tracebloc WSL distro needs. Make sure your account can read the file, then run the install again. The installer does not change it."
+  }
+  $section = ''
+  foreach ($raw in ($text -split "`r?`n")) {
+    $line = $raw.Trim()
+    if (-not $line -or $line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+    if ($line -match '^\[([^\]]*)\]\s*([#;].*)?$') { $section = $Matches[1].Trim(); continue }
+    $eq = $line.IndexOf('=')
+    if ($section -ine 'wsl2' -or $eq -lt 0) { continue }
+    if ($line.Substring(0, $eq).Trim() -ine 'networkingMode') { continue }
+    $value = $line.Substring($eq + 1).Trim().Trim('"')
+    if ($value -ine 'nat') {
+      throw "Your WSL settings file $Path sets networkingMode=$value in its [wsl2] section. The tracebloc WSL distro needs WSL's NAT networking: with $value its cluster cannot download what it needs or start. This setting applies to all your WSL distros, so the installer does not change it. Set networkingMode=nat there, or remove the line, then run wsl --shutdown (it stops every running WSL distro) and run the install again."
+    }
+  }
+}
+
 # =============================================================================
 #  2. The distro image: the WSL distro's root filesystem.
 #
@@ -569,10 +604,9 @@ function Confirm-WslReady {
 #  a truncated or padded download, then the sha256. A refused file is deleted at
 #  once, so no later step can import it by mistake.
 #
-#  NOTHING CALLS THESE YET. The pins are stamped from facts.env as WSL_ROOTFS_*
-#  when 3.1 publishes its first image (check-facts.sh refuses an empty pin, so the
-#  keys land with their values), and the distro path stays behind the switch until
-#  3.3 is green on it. Still to come, each waiting on the row of spike S-W
+#  NOTHING CALLS THESE YET. The pins are facts.env's WSL_ROOTFS_*, stamped below,
+#  and Get-WslDistroImage takes them unless told otherwise. The distro path stays
+#  behind the switch until 3.3 is green on it. Still to come, each waiting on the row of spike S-W
 #  (backend#5416) that decides it:
 #    TODO(S-W row 3): `wsl --import tracebloc "$env:LOCALAPPDATA\tracebloc\wsl"
 #      <rootfs> --version 2` as the daily user, unelevated, after Confirm-WslDistroImage.
@@ -582,6 +616,18 @@ function Confirm-WslReady {
 #    TODO(S-W row 13): the GPU device the distro advertises.
 #    TODO(part 5, after 3.3 is green): the PowerShell core's removal.
 # =============================================================================
+
+# The rootfs this release pins: facts.env's WSL_ROOTFS_*, stamped here by
+# check-facts.sh (--write stamps them, --check holds them to facts.env). The sha256
+# and the length are the one layer an install fetches and Confirm-WslDistroImage
+# holds the file to; the digest is the manifest that lists that layer, the one cosign
+# signed; the version is that manifest's tag. scripts/wsl-rootfs-pin.sh bump moves
+# them, through facts.env, never here by hand.
+$WSL_ROOTFS_IMAGE = "ghcr.io/tracebloc/wsl-distro"
+$WSL_ROOTFS_SHA256 = "d064df6c5a12fc51e7403a3373b699b96ea79a6dc1edd5f6afeae0b020e91484"
+$WSL_ROOTFS_BYTES = "126331555"
+$WSL_ROOTFS_DIGEST = "sha256:1dc346742be2f798e99130c2bd85ef57a466e03b8561a3a204c38533c4d0826a"
+$WSL_ROOTFS_VERSION = "ubuntu-24.04.5-20261001-v1.36.5-k3s1"
 
 # The repository an image on ghcr.io names, or $null. Only ghcr.io: the anonymous
 # token below is ghcr.io's. No tag or digest on the name (the digest is pinned on
@@ -1080,14 +1126,17 @@ function Update-WslDistroDisk {
 
 # Fetch the WSL distro's root filesystem from ghcr.io into DEST by its pinned
 # layer digest, and confirm it. Returns DEST, or throws a refusal that names what
-# was wrong. The pins are checked for shape first: a pin this cannot use is a
-# broken release, refused before anything is downloaded. A download that failed
-# part way leaves no file behind, so it is refused as missing, not as tampered.
+# was wrong. The pins are the release's stamped WSL_ROOTFS_* unless passed. They
+# are checked for shape first: a pin this cannot use is a broken release, refused
+# before anything is downloaded. A download that failed part way leaves no file
+# behind, so it is refused as missing, not as tampered.
 function Get-WslDistroImage {
   param(
-    [string]$Image,
-    [string]$Sha256,
-    [long]$Bytes,
+    [string]$Image = $WSL_ROOTFS_IMAGE,
+    [string]$Sha256 = $WSL_ROOTFS_SHA256,
+    [long]$Bytes = $WSL_ROOTFS_BYTES,
+    [string]$Version = $WSL_ROOTFS_VERSION,
+    [string]$Digest = $WSL_ROOTFS_DIGEST,
     [string]$Dest
   )
   $repo = ConvertTo-GhcrRepo -Image $Image
@@ -1107,11 +1156,11 @@ function Get-WslDistroImage {
   if (-not $token) {
     throw "ghcr.io gave no pull token for $Image ($($script:GhcrTokenFailure)). Check that this machine can reach ghcr.io, then re-run."
   }
-  Info "Downloading the WSL distro image ($([math]::Round($Bytes / 1MB)) MB) from $Image..."
+  Info "Downloading the WSL distro image $Version ($([math]::Round($Bytes / 1MB)) MB) from $Image..."
   $fetched = Receive-WslDistroImage -Url "https://ghcr.io/v2/$repo/blobs/sha256:$Sha256" -Token $token -Dest $Dest -MaxBytes $Bytes
   if (-not $fetched) { Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue }
   Confirm-WslDistroImage -Path $Dest -Sha256 $Sha256 -Bytes $Bytes
-  Ok "WSL distro image verified against its pinned length and sha256"
+  Ok "WSL distro image $Version verified against its pinned length and sha256 (the layer of $Image@$Digest)"
   return $Dest
 }
 
@@ -3017,6 +3066,8 @@ function Invoke-WslInstall {
     throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
   Confirm-CoreDir -CoreDir $CoreDir
+  # NAT only: a user's mirrored .wslconfig is refused before anything is written.
+  Assert-WslNetworkingNat
   # Never the distro beside a live k3d (section 7): a refusal, or a consented
   # offboard decided, before WSL is touched. The offboard itself runs right before
   # the import (Invoke-K3dOffboard, TODO(S-W row 3)).

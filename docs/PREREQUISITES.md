@@ -15,7 +15,7 @@ On a new Linux machine the installer sets up **native k3s**: Kubernetes runs on 
 |---|---|
 | Processor | 64-bit: `amd64` or `arm64` |
 | Administrator rights | Once, as `sudo` or root, because k3s runs as root. Or an administrator prepares the machine for you once, and you install with no `sudo` (see below). |
-| Memory | At least 5 GB: the installer stops below that. 11 GB fits the smallest training run as installed, and 16 GB is recommended. An 8 GB machine trains too, once `tracebloc resources set max` has sized training to what is free beside the platform (tracebloc CLI 0.10.93 or later). |
+| Memory | At least 6.7 GB: the installer stops below that, because a smaller machine cannot fit one training run beside the platform. 11 GB fits the smallest training run as installed, and 16 GB is recommended. An 8 GB machine trains too, once `tracebloc resources set max` has sized training to what is free beside the platform (tracebloc CLI 0.10.93 or later). |
 | Disk | At least 10 GB free, and 20 GB recommended. This applies both where k3s keeps its data (`/var/lib/rancher/k3s`) and where your data is kept (`/var/lib/rancher/k3s/storage`, or the directory you set with `TRACEBLOC_HOST_DATA_DIR`). The installer stops below 10 GB. |
 | CPU | 2 cores, 4 recommended |
 | Network | Outbound HTTPS (port 443) to the hosts below |
