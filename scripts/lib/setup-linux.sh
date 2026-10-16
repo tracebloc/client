@@ -27,10 +27,13 @@ setup_pm() {
   # `tb_root env` because sudo resets the environment by default.
   #
   # apt also waits *indefinitely* on the dpkg lock while apt-daily / unattended-
-  # upgrades hold it on a freshly-booted host (#210); -o DPkg::Lock::Timeout=600
+  # upgrades hold it on a freshly-booted host (#210); -o DPkg::Lock::Timeout
   # bounds that wait so the install fails with a clear error rather than hanging
-  # silently behind the spinner.
-  if   has apt-get; then PM_UPDATE="tb_root apt-get update -qq -o DPkg::Lock::Timeout=600"; PM_INSTALL="tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+  # silently behind the spinner. The waits (240 s update, 540 s install) sit just
+  # under the spin_cmd_bounded deadlines (300 s / 600 s) the callers wrap them in
+  # (client-dev#2048): a held lock then ends as apt's own lock error, handled as
+  # a failed install, and never as the deadline's "mirror stalled".
+  if   has apt-get; then PM_UPDATE="tb_root apt-get update -qq -o DPkg::Lock::Timeout=240"; PM_INSTALL="tb_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -q -o DPkg::Lock::Timeout=540 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
   elif has dnf;     then PM_UPDATE="tb_root dnf makecache -q";             PM_INSTALL="tb_root dnf install -y -q"
   elif has yum;     then PM_UPDATE="tb_root yum makecache -q";             PM_INSTALL="tb_root yum install -y -q"
   elif has zypper;  then PM_UPDATE="tb_root zypper refresh";               PM_INSTALL="tb_root zypper install -y"
@@ -444,6 +447,55 @@ install_docker_engine() {
   log "Docker daemon running."
 }
 
+# ── Bounded package-manager calls (client-dev#2048) ──────────────────────────
+# A package mirror that accepts the connection and then stops sending hangs
+# apt/dnf/zypper with no timeout of their own, and behind spin_cmd that was a
+# spinner with no message until something else killed the install — the class
+# install_docker_engine's get.docker.com run was bounded for. A healthy index
+# refresh takes seconds to a minute or two and a package a few minutes, so 5 and
+# 10 minutes are a stalled mirror, not a slow link. spin_cmd_bounded returns 124
+# ONLY on the deadline, so a fast real failure keeps its own handling.
+#
+# _pm_update_bounded — refresh the package index, best-effort: a stale index
+# usually still installs from cache, and a package that genuinely can't be found
+# surfaces on the install that follows. Never fails.
+_pm_update_bounded() {
+  local _rc=0
+  # shellcheck disable=SC2086  # PM_UPDATE is a command line that must word-split
+  spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 300 "Updating package index…" $PM_UPDATE || _rc=$?
+  if (( _rc == 124 )); then
+    _pm_survivor_stop "the package index refresh"
+    warn "The package index refresh did not finish within 5 minutes — the package mirror stalled. Continuing; installs will use the cached index."
+  elif (( _rc != 0 )); then
+    warn "Package index refresh failed — continuing; installs will use the cached index."
+  fi
+  return 0
+}
+
+# _pm_survivor_stop <what> — after a deadline kill (rc 124), stop when the package
+# manager is STILL running: it holds the package lock, so every later install would
+# queue behind it with no word of why. Returns 0 when nothing survived, so a plain
+# stall keeps its own best-effort handling. Same rule as the kernel-module and
+# Docker installs above.
+_pm_survivor_stop() {
+  [[ -n "${_TB_SPIN_SURVIVORS:-}" ]] || return 0
+  local _rerun="the installer"
+  [[ -n "${TB_PREPARE_HOST_MODE:-}${TB_PREPARE_HOST_RUN:-}" ]] && _rerun="prepare-host"
+  error "$1 did not finish within its deadline, and the package manager is still running and holding the package lock. Wait for it to finish, check your network/proxy, then re-run ${_rerun}."
+}
+
+# _pm_install_stalled <what> — the fatal message for an install the deadline
+# killed. Re-run advice by mode, as install_docker_engine words it.
+_pm_install_stalled() {
+  local _rerun="the installer"
+  # TB_PREPARE_HOST_MODE is only set around install_docker_engine and the cgroup
+  # drop-in; TB_PREPARE_HOST_RUN is set for the whole of run_prepare_host, which
+  # install_system_deps and the native-k3s prereqs run under.
+  [[ -n "${TB_PREPARE_HOST_MODE:-}${TB_PREPARE_HOST_RUN:-}" ]] && _rerun="prepare-host"
+  _pm_survivor_stop "Installing $1"
+  error "Installing $1 did not finish within 10 minutes — the package mirror stalled. Check your network/proxy and re-run ${_rerun}; it resumes safely."
+}
+
 # ── System dependencies ─────────────────────────────────────────────────────
 install_system_deps() {
   # conntrack is deliberately NOT here any more (removed 2026-09-09). It was
@@ -468,13 +520,20 @@ install_system_deps() {
     # (|| log) — so a flaky mirror refresh was MORE fatal than a failed install,
     # which is backwards. A stale index usually still installs from cache; if a
     # package genuinely can't be found, the guarded install below surfaces it.
-    spin_cmd "Updating package index…" $PM_UPDATE || \
-      warn "Package index refresh failed — continuing; installs will use the cached index."
+    # Both bounded (client-dev#2048): see _pm_update_bounded / _pm_install_stalled.
+    _pm_update_bounded
+    local _pkg_rc
     for pkg in "${MISSING_PKGS[@]}"; do  # set-u-safe: inside the non-empty check
       # ${pkg}, braced: bash 3.2 in a UTF-8 locale reads the first byte of "…"
       # into an unbraced name and, under set -u, aborts "pkg\xE2: unbound variable".
-      spin_cmd "Installing ${pkg}…" $PM_INSTALL "$pkg" || \
+      _pkg_rc=0
+      # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
+      spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing ${pkg}…" $PM_INSTALL "$pkg" || _pkg_rc=$?
+      if (( _pkg_rc == 124 )); then
+        _pm_install_stalled "${pkg}"
+      elif (( _pkg_rc != 0 )); then
         log "Could not install $pkg — may already be satisfied by an alternative package."
+      fi
     done
     log "Dependencies installed: ${MISSING_PKGS[*]}"  # set-u-safe: inside the non-empty check
   fi
@@ -713,13 +772,18 @@ _ensure_unpack_tools() {
   apt_wait_for_lock
   # Mirror install_system_deps: refresh the index best-effort (a brand-new
   # minimal image has no package lists at all), gate on the install itself.
-  spin_cmd "Updating package index…" $PM_UPDATE || \
-    warn "Package index refresh failed — continuing; installs will use the cached index."
+  _pm_update_bounded
   # ONE combined install (not per-package): a single sudo consumer right after
-  # the priming, minimizing the window in which the ticket could lapse.
-  # set-u-safe: the empty-missing check above returns first
-  spin_cmd "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || \
+  # the priming, minimizing the window in which the ticket could lapse. Bounded
+  # like the refresh (client-dev#2048).
+  local _unpack_rc=0
+  # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
+  spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing ${missing[*]}…" $PM_INSTALL "${missing[@]}" || _unpack_rc=$?  # set-u-safe: the empty-missing check above returns first
+  if (( _unpack_rc == 124 )); then
+    _pm_install_stalled "${missing[*]}"  # set-u-safe: the empty-missing check above returns first
+  elif (( _unpack_rc != 0 )); then
     error "Couldn't install ${missing[*]} (needed to unpack Helm). Install with your package manager, then re-run this installer."  # set-u-safe: the empty-missing check above returns first
+  fi
   # Kill only the keepalive WE started — never a preflight_sudo one that the
   # rest of the full flow still relies on (Bugbot r3).
   if [ -n "$_unpack_keepalive" ]; then
@@ -1226,7 +1290,10 @@ _ensure_uidmap_helpers() {
   # die deep inside dockerd-rootless-setuptool.sh — this restores the guard the removed
   # install_rootless_docker precondition gave (Bugbot/Asad, client#458).
   if ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; then
-    _install_uidmap_pkg
+    # Tolerate the install's non-zero (124 on a stall, client-dev#2048): the
+    # re-check below is the verdict. Bare, a `set -e` caller would exit here before
+    # it — today's callers sit in `||` lists, which only masks that (client-dev#2129).
+    _install_uidmap_pkg || :
     # --print installed nothing, so it plans as if the install gave both helpers.
     if ! tb_root_planning && { ! _idmap_helper_ok newuidmap || ! _idmap_helper_ok newgidmap; }; then
       # Return non-zero (don't error/exit): the sudo-path caller turns this into a
@@ -1319,11 +1386,17 @@ _install_uidmap_pkg() {
   # operation, so an empty/stale apt/dnf/pacman list can't locate uidmap/shadow and
   # the install hard-stops (Bugbot #458). Best-effort — matches the repo pattern; a
   # genuine not-found still surfaces on the guarded install below.
-  # shellcheck disable=SC2086  # PM_UPDATE is a command line that must word-split
-  spin_cmd "Updating package index…" $PM_UPDATE \
-    || warn "Package index refresh failed — continuing; the install will use the cached index."
+  _pm_update_bounded
+  # Bounded (client-dev#2048). Best-effort on a stall: the caller re-checks the
+  # helpers and says what is missing, so this warns and hands the 124 back.
+  local _uid_rc=0
   # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
-  spin_cmd "Installing uidmap helpers…" $PM_INSTALL "$pkg"
+  spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing uidmap helpers…" $PM_INSTALL "$pkg" || _uid_rc=$?
+  if (( _uid_rc == 124 )); then
+    _pm_survivor_stop "Installing ${pkg}"
+    warn "Installing ${pkg} did not finish within 10 minutes — the package mirror stalled. Continuing without it; check your network/proxy."
+  fi
+  return "$_uid_rc"
 }
 
 install_linux() {
@@ -1659,6 +1732,7 @@ run_prepare_host() {
     _prepare_host_print
     return $?
   fi
+  TB_PREPARE_HOST_RUN=1   # for _pm_install_stalled: a stall here is re-run as prepare-host, never the full installer
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
 
   # Native k3s (RFC-0175 D3, 1.1g): k3s itself, set up FOR the named user, who

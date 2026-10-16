@@ -535,17 +535,30 @@ function Test-CosignRuns {
   return ($LASTEXITCODE -eq 0)
 }
 
+# -TufRoot: cosign keeps the TUF root it verifies with under $env:TUF_ROOT, else
+# under ~/.sigstore/root (v2.4.1 and v3 alike, measured), and nothing removed that
+# folder: every install left ~/.sigstore behind (client-dev#1615). TUF_ROOT is set
+# for this one call to a folder inside the run's TmpDir, which goes with it, and put
+# back as it was in `finally` -- this script may run in the user's own session
+# (irm | iex), where a process variable would outlive it. Their own TUF_ROOT is held
+# only to be restored; it never names the cache, and their ~/.sigstore is never
+# written. A ~/.sigstore an earlier install left stays: it cannot be told from one
+# the user's own cosign made.
 function Invoke-CosignVerifyBlob {
-  param([Parameter(Mandatory)][string]$Cosign, [Parameter(Mandatory)][string[]]$VerifyArgs)
+  param([Parameter(Mandatory)][string]$Cosign, [Parameter(Mandatory)][string[]]$VerifyArgs,
+        [Parameter(Mandatory)][string]$TufRoot)
   $global:LASTEXITCODE = 255
   $prevEAP = $ErrorActionPreference
+  $prevTuf = [Environment]::GetEnvironmentVariable('TUF_ROOT', 'Process')
   try {
     $ErrorActionPreference = 'Continue'
+    [Environment]::SetEnvironmentVariable('TUF_ROOT', $TufRoot, 'Process')
     & $Cosign @VerifyArgs 2>&1 | Out-Null
   } catch {
     return $false
   } finally {
     $ErrorActionPreference = $prevEAP
+    [Environment]::SetEnvironmentVariable('TUF_ROOT', $prevTuf, 'Process')
   }
   return ($LASTEXITCODE -eq 0)
 }
@@ -622,9 +635,10 @@ function Confirm-ManifestSignature {
   # existed 404 here and fall through to the online .sig/.cert path; so does a bundle
   # that doesn't verify — the online path does the SAME full keyless check, just
   # needing live Rekor, so this is a fallback, never a downgrade.
+  $tufRoot = Join-Path $TmpDir "sigstore-root"
   $bundle = Join-Path $TmpDir "manifest.sha256.bundle"
   if (Get-Optional "$RepoRel/manifest.sha256.bundle" $bundle) {
-    if (Invoke-CosignVerifyBlob $cosign @(
+    if (Invoke-CosignVerifyBlob -TufRoot $tufRoot $cosign @(
           'verify-blob',
           '--bundle', $bundle,
           '--certificate-identity-regexp', $idRe,
@@ -647,7 +661,7 @@ function Confirm-ManifestSignature {
     throw ("Couldn't fetch the installer's signature for this release -- can't confirm the download is authentic. " + (Get-FetchRefusalCause "This release doesn't publish one. Pin a release tag that ships it."))
   }
 
-  if (Invoke-CosignVerifyBlob $cosign @(
+  if (Invoke-CosignVerifyBlob -TufRoot $tufRoot $cosign @(
         'verify-blob',
         '--certificate-identity-regexp', $idRe,
         '--certificate-oidc-issuer', $issuer,

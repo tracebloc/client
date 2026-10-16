@@ -28,8 +28,9 @@
 #       (install-k8s.ps1's declared "restart, then re-run" code)
 #
 #  The path stays behind TRACEBLOC_SUBSTRATE=k3s until 3.3's cell is green on it
-#  (D14 item 9). Its steps land in the numbered sections below, one PR each
-#  (client-dev#1810 part 1).
+#  (D14 item 9). Its steps are the numbered sections below, and Invoke-WslInstall,
+#  at the end, runs them in order (client-dev#1810 part 1): WSL ready, the import
+#  and its disk, the logon task, the host's CA roots, the core, the record.
 # =============================================================================
 #Requires -Version 5.1
 param([string]$CoreDir)
@@ -239,7 +240,11 @@ function ConvertFrom-WslVersionText {
 # without judging it. The only function here that starts wsl.exe to read it.
 # Output is what it wrote to stdout; ErrorOutput, kept apart, what it wrote to
 # stderr, where WSL's service errors (ERROR_SHARING_VIOLATION) can go. Both are
-# read as UTF-8, as WSL_UTF8=1 asks of both. -FilePath is a seam for the test suite.
+# read as UTF-8, as WSL_UTF8=1 asks of both, and both come back with their NULs
+# stripped: an old wsl.exe ignores WSL_UTF8 and writes UTF-16LE, which reads as a
+# NUL between every letter, and a reader that matches the raw text (k3s's state,
+# the trust bundle's certificates) then misses. Stripped here, once, so no reader
+# has to remember to (client-dev#2128). -FilePath is a seam for the test suite.
 function Invoke-WslProbe {
   param([string]$FilePath = 'wsl.exe', [string[]]$ArgumentList = @('--version'), [int]$TimeoutSec = $WslProbeTimeoutSec)
   $r = [pscustomobject]@{ Started = $false; TimedOut = $false; ExitCode = $null; Output = ''; ErrorOutput = ''; StartError = ''; NativeErrorCode = $null }
@@ -276,8 +281,8 @@ function Invoke-WslProbe {
   }
   $p.WaitForExit()
   $r.ExitCode = $p.ExitCode
-  $r.Output = [string]$out.Result
-  $r.ErrorOutput = [string]$err.Result
+  $r.Output = ([string]$out.Result) -replace "`0", ''
+  $r.ErrorOutput = ([string]$err.Result) -replace "`0", ''
   return $r
 }
 
@@ -604,15 +609,17 @@ function Assert-WslNetworkingNat {
 #  a truncated or padded download, then the sha256. A refused file is deleted at
 #  once, so no later step can import it by mistake.
 #
-#  NOTHING CALLS THESE YET. The pins are facts.env's WSL_ROOTFS_*, stamped below,
-#  and Get-WslDistroImage takes them unless told otherwise. The distro path stays
-#  behind the switch until 3.3 is green on it. Still to come, each waiting on the row of spike S-W
-#  (backend#5416) that decides it:
-#    TODO(S-W row 3): `wsl --import tracebloc "$env:LOCALAPPDATA\tracebloc\wsl"
-#      <rootfs> --version 2` as the daily user, unelevated, after Confirm-WslDistroImage.
+#  Import-WslDistro, at the end of this section, is the import step Invoke-WslInstall
+#  runs: the rootfs fetched and confirmed, then `wsl --import tracebloc
+#  "$env:LOCALAPPDATA\tracebloc\wsl" <rootfs> --version 2` as the daily user,
+#  unelevated (S-W row 3: 8.4 s, no consent.exe), then the disk. The pins are
+#  facts.env's WSL_ROOTFS_*, stamped below, and Get-WslDistroImage takes them unless
+#  told otherwise. The distro path stays behind the switch until 3.3 is green on it.
+#  Still to come, each waiting on the row of spike S-W (backend#5416) that decides it:
 #    The per-user logon task that keeps the distro running is section 3's.
-#    TODO(S-W rows 9 and 10): the proxy and the host's CA roots inside the distro.
-#      The host-side fetch below honours HTTPS_PROXY like every bootstrap download.
+#    The proxy inside the distro (row 10) crosses on the core's runs (section 5);
+#      the host-side fetch below honours HTTPS_PROXY like every bootstrap
+#      download. The host's CA roots (row 9) are Add-WslHostRootTrust's, below.
 #    TODO(S-W row 13): the GPU device the distro advertises.
 #    TODO(part 5, after 3.3 is green): the PowerShell core's removal.
 # =============================================================================
@@ -899,7 +906,7 @@ function Confirm-WslDistroImage {
 # cap the import set, and say so.
 # NOT MEASURED YET either: whether WSL's "GB" in --resize is 1024^3 bytes, as
 # PowerShell's 1GB is (a re-run compares the two).
-# NOTHING CALLS THESE YET: they follow the import, TODO(S-W row 3) above.
+# Import-WslDistro calls them, right after the import (below).
 
 # The free space the cap leaves on the host's drive, and the smallest cap worth
 # installing on, in GB: preflight.sh's PF_WARN_DISK_GB and PF_MIN_DISK_GB, the
@@ -1164,6 +1171,261 @@ function Get-WslDistroImage {
   return $Dest
 }
 
+# `wsl --import` as S-W row 3 measured it, as the daily user, unelevated: 8.4 s on
+# the managed laptop, with no consent.exe. 600 s is a bound, not a measured worst
+# case.
+$WslImportTimeoutSec = 600
+
+# Whether `wsl --list --quiet` names DISTRO, read as Test-WslDistroRunning reads its
+# list: State 'registered' or 'absent', or 'unread' when wsl.exe did not start or did
+# not answer in time, with Why. Unread is never taken for absent: the import step
+# stops on it, as a disk in the import folder may then be the live distro's, and
+# nothing may be fetched or offboarded on a guess. The exit code is not the answer:
+# what wsl.exe exits with on a machine with no distro at all is not measured, and the
+# list it printed is what it said.
+function Get-WslDistroRegistration {
+  param([string]$Distro = $WslDistroName, [string]$FilePath = 'wsl.exe')
+  $listed = Invoke-WslProbe -FilePath $FilePath -ArgumentList @('--list', '--quiet')
+  if (-not $listed.Started) { return [pscustomobject]@{ State = 'unread'; Why = "did not start ($($listed.StartError))" } }
+  if ($listed.TimedOut) { return [pscustomobject]@{ State = 'unread'; Why = "did not answer within $WslProbeTimeoutSec s" } }
+  foreach ($name in ($listed.Output -replace "`0", '') -split "`r?`n") {
+    if ($name.Trim() -ceq $Distro) { return [pscustomobject]@{ State = 'registered'; Why = '' } }
+  }
+  return [pscustomobject]@{ State = 'absent'; Why = '' }
+}
+
+# Unregisters DISTRO after its disk step stopped the install, so that a re-run
+# imports it afresh instead of taking the re-run path over a disk never capped
+# (THE ORDER, above). Never throws: the disk step's refusal is what stops the
+# install, and this only says whether the distro is gone.
+function Remove-WslDistro {
+  param([string]$Distro = $WslDistroName, [string]$FilePath = 'wsl.exe')
+  $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList @('--unregister', $Distro) -TimeoutSec $WslDiskTimeoutSec
+  if ($r.Started -and -not $r.TimedOut -and $r.ExitCode -eq 0) {
+    Info "Removed the WSL distro $Distro this run had just imported, so the next run imports it afresh."
+    return
+  }
+  $why = "exit $($r.ExitCode): $(("$($r.Output) $($r.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim())"
+  if (-not $r.Started) { $why = "did not start: $($r.StartError)" }
+  elseif ($r.TimedOut) { $why = "did not finish within $WslDiskTimeoutSec s" }
+  Warn "wsl --unregister $Distro did not remove the WSL distro this run had just imported ($why). Remove it with 'wsl --unregister $Distro' before running the install again, or the next run keeps its uncapped disk."
+}
+
+# The import step: the distro imported, with its disk set before anything starts
+# it (THE ORDER, above), or the one already here. On a fresh machine:
+#   1. the cap is read first, so a drive that is too full is refused before
+#      anything is fetched, and a disk WSL left in the import folder with no distro
+#      using it is refused before anything is imported over it;
+#   2. the rootfs is fetched and confirmed (Get-WslDistroImage) into a file of its
+#      own in the user's temp folder, deleted again whatever happens;
+#   3. a consented k3d offboard (section 7) runs only now, after the download, so a
+#      failed download leaves that machine as it was;
+#   4. `wsl --import` into the import folder, as the daily user, unelevated;
+#   5. Set-WslDistroDisk. When it stops the install, the distro just imported is
+#      unregistered.
+# A RE-RUN over a distro that is already registered imports nothing: the offboard,
+# then Update-WslDistroDisk. A list that cannot be read stops it first, before the
+# disk check and before anything is fetched or offboarded. Returns 'imported' or
+# 'present'.
+function Import-WslDistro {
+  param([object]$Reinstall, [string]$FilePath = 'wsl.exe')
+  $dir = Get-WslImportDir
+  $reg = Get-WslDistroRegistration -FilePath $FilePath
+  if ($reg.State -ceq 'unread') {
+    throw "wsl --list $($reg.Why), so whether the tracebloc WSL distro is already on this machine cannot be told. Nothing was downloaded, imported or removed. Run the install again; if it says this again, tell tracebloc support."
+  }
+  if ($reg.State -ceq 'registered') {
+    Invoke-K3dOffboard -Decision $Reinstall.Decision -Cluster $Reinstall.Cluster
+    Info "The tracebloc WSL distro is already on this machine: it is kept, and nothing is imported."
+    Update-WslDistroDisk -Path $dir -FilePath $FilePath
+    return 'present'
+  }
+  $vhdx = Join-Path $dir 'ext4.vhdx'
+  if (Test-Path -LiteralPath $vhdx) {
+    throw "A WSL disk is already at $vhdx, but no WSL distro named $WslDistroName uses it, so nothing was imported over it. If nothing of yours is in that folder, delete the folder, then run the install again."
+  }
+  $cap = Get-WslDistroDiskCap -Path $dir
+  $rootfs = Join-Path ([System.IO.Path]::GetTempPath()) ('tracebloc-wsl-rootfs-' + [guid]::NewGuid().ToString('N') + '.tar.gz')
+  try {
+    $null = Get-WslDistroImage -Dest $rootfs
+    Invoke-K3dOffboard -Decision $Reinstall.Decision -Cluster $Reinstall.Cluster
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    Info "Importing the tracebloc WSL distro into $dir..."
+    $import = @('--import', $WslDistroName, (ConvertTo-WindowsArgument $dir), (ConvertTo-WindowsArgument $rootfs), '--version', '2')
+    $cmd = "wsl --import $WslDistroName"
+    $imp = Invoke-WslProbe -FilePath $FilePath -ArgumentList $import -TimeoutSec $WslImportTimeoutSec
+    if (-not $imp.Started) {
+      throw "$cmd did not start ($($imp.StartError)), so the tracebloc WSL distro was not imported. Run the install again; if it says this again, tell tracebloc support."
+    }
+    if ($imp.TimedOut) {
+      throw "$cmd did not finish within $WslImportTimeoutSec s, so whether the tracebloc WSL distro was imported cannot be told. If 'wsl --list' names $WslDistroName, remove it with 'wsl --unregister $WslDistroName', then run the install again."
+    }
+    if ($imp.ExitCode -ne 0) {
+      $wslSaid = ("$($imp.Output) $($imp.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim()
+      throw "$cmd failed (exit $($imp.ExitCode)): $wslSaid The tracebloc WSL distro was not imported. Run the install again; if it says this again, tell tracebloc support."
+    }
+  } finally {
+    Remove-Item -LiteralPath $rootfs -Force -ErrorAction SilentlyContinue
+  }
+  Ok "Imported the tracebloc WSL distro into $dir"
+  try {
+    Set-WslDistroDisk -CapGb $cap -FilePath $FilePath
+  } catch {
+    Remove-WslDistro -FilePath $FilePath
+    throw
+  }
+  return 'imported'
+}
+
+# THE HOST'S CA ROOTS IN THE DISTRO (S-W row 9, client-dev#1810 part 1, "Proxy and
+# CA"). Behind a proxy that inspects TLS, every TLS client in the distro (curl, and
+# containerd's image pulls) has to trust the CA that IT put in the host's root
+# store, and Ubuntu's own roots do not hold it. Add-WslHostRootTrust hands the
+# host's roots in and proves they arrived, in this order:
+#   1. the host's trusted roots, LocalMachine's and the user's, as one PEM file;
+#   2. copied to $DistroRootsFile by `wsl --exec /usr/bin/cp`, the file's path a
+#      plain argument. The first form, a quoted `sh -c` block through `wsl --`,
+#      fails under Windows PowerShell 5.1, because the login shell takes its $0
+#      (S-W row 9, on both machines);
+#   3. the bundle rebuilt by /usr/sbin/update-ca-certificates, named by its path:
+#      `wsl --exec` did not find it by name on S-W's laptop. A copy without the
+#      rebuild leaves the bundle curl and containerd read without the roots, and
+#      both then fail late, on an unknown issuer, naming nothing of ours. So a
+#      rebuild that fails is refused by name;
+#   4. the bundle, $DistroCaBundle, read back and held to every root handed in,
+#      before k3s restarts;
+#   5. k3s restarted when it is running or starting, because containerd reads the
+#      roots once, when it starts: a k3s still activating has already read the old
+#      bundle. The state is `systemctl is-active k3s`'s answer, never its exit
+#      code, which is non-zero for activating too. A k3s that is not running reads
+#      them when it next starts (a unit not installed yet answers inactive). Any
+#      other answer, none included (systemd out of reach), is a refusal, never
+#      read as stopped.
+# No registries.yaml: with the bundle rebuilt, containerd pulled with none (S-W's
+# Azure run). The laptop run that needed one never rebuilt the bundle.
+# Invoke-WslInstall runs it right after the logon task's first start, with the
+# distro running, and before the core's first run, where k3s first needs egress.
+# The proxy (row 10) is part 1's other half.
+$DistroRootsFile = '/usr/local/share/ca-certificates/tracebloc-windows-roots.crt'
+$DistroCaBundle = '/etc/ssl/certs/ca-certificates.crt'
+$DistroCp = '/usr/bin/cp'
+$DistroUpdateCaCertificates = '/usr/sbin/update-ca-certificates'
+$DistroSystemctl = '/usr/bin/systemctl'
+# `systemctl restart k3s` returns once k3s says it has started. 300 s is a bound,
+# not a measurement.
+$WslK3sRestartTimeoutSec = 300
+# `systemctl is-active`'s answers (systemd's unit active states): the ones that
+# restart k3s, and the ones that leave it to read the roots when it next starts.
+$K3sStatesRestart = @('active', 'activating', 'reloading', 'refreshing')
+$K3sStatesStopped = @('inactive', 'failed', 'deactivating', 'maintenance')
+
+# The host's trusted root certificates, LocalMachine's and the user's, each once
+# (by thumbprint), in thumbprint order. A seam for the test suite: off Windows
+# there is no Cert: drive, and the answer is none.
+function Get-HostRootCertificate {
+  $seen = @{}
+  foreach ($store in @('Cert:\LocalMachine\Root', 'Cert:\CurrentUser\Root')) {
+    foreach ($c in @(Get-ChildItem -Path $store -ErrorAction SilentlyContinue)) {
+      if ($c.RawData -and -not $seen.ContainsKey($c.Thumbprint)) { $seen[$c.Thumbprint] = $c }
+    }
+  }
+  return @($seen.Values | Sort-Object Thumbprint)
+}
+
+# CERTIFICATE's DER bytes as base64 on one line: the key the bundle check compares.
+function ConvertTo-CertificateBody {
+  param([object]$Certificate)
+  return [Convert]::ToBase64String([byte[]]$Certificate.RawData)
+}
+
+# The certificates as one PEM text: base64, 64 characters a line, LF line ends.
+function ConvertTo-PemText {
+  param([object[]]$Certificate)
+  $sb = New-Object System.Text.StringBuilder
+  foreach ($c in $Certificate) {
+    $b64 = ConvertTo-CertificateBody -Certificate $c
+    [void]$sb.Append("-----BEGIN CERTIFICATE-----`n")
+    for ($i = 0; $i -lt $b64.Length; $i += 64) {
+      [void]$sb.Append($b64.Substring($i, [Math]::Min(64, $b64.Length - $i))).Append("`n")
+    }
+    [void]$sb.Append("-----END CERTIFICATE-----`n")
+  }
+  return $sb.ToString()
+}
+
+# Every certificate a PEM TEXT holds, as a set of one-line base64 bodies.
+function Get-PemCertificateBody {
+  param([AllowNull()][string]$Text)
+  $bodies = @{}
+  if (-not $Text) { return $bodies }
+  foreach ($m in [regex]::Matches($Text, '-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\s]+?)-----END CERTIFICATE-----')) {
+    $bodies[($m.Groups[1].Value -replace '\s', '')] = $true
+  }
+  return $bodies
+}
+
+# What went wrong with one Invoke-WslProbe run, in words, for a refusal.
+function Format-WslProbeFailure {
+  param([object]$Probe, [int]$TimeoutSec)
+  if (-not $Probe.Started) { return "it did not start: $($Probe.StartError)" }
+  if ($Probe.TimedOut) { return "it did not finish within $TimeoutSec s" }
+  $said = ("$($Probe.ErrorOutput) $($Probe.Output)" -replace "`0", '' -replace '\s+', ' ').Trim()
+  if ($said) { return "exit $($Probe.ExitCode): $said" }
+  return "exit $($Probe.ExitCode)"
+}
+
+# Hand the host's trusted roots to DISTRO and prove its trust bundle holds them, then
+# restart k3s if it runs. Throws a refusal that names the step; never ends quietly
+# with roots the bundle does not hold.
+function Add-WslHostRootTrust {
+  param([string]$Distro = $WslDistroName)
+  $roots = @(Get-HostRootCertificate)
+  if ($roots.Count -eq 0) {
+    Warn "Could not read this computer's trusted root certificates, so the tracebloc WSL distro trusts only its own. Behind a proxy that inspects TLS, its downloads will fail on an unknown certificate issuer: share this output with tracebloc support."
+    return
+  }
+  $asRoot = @('-d', $Distro, '-u', 'root', '--exec')
+  $pem = Join-Path ([IO.Path]::GetTempPath()) ('tracebloc-host-roots-' + [guid]::NewGuid().ToString('N') + '.pem')
+  [IO.File]::WriteAllText($pem, (ConvertTo-PemText -Certificate $roots), (New-Object System.Text.ASCIIEncoding))
+  try {
+    $from = ConvertTo-DistroPath -Path $pem
+    $copy = Invoke-WslProbe -ArgumentList ($asRoot + @($DistroCp, (ConvertTo-WindowsArgument $from), $DistroRootsFile)) -TimeoutSec $WslDistroStartTimeoutSec
+    if (-not $copy.Started -or $copy.TimedOut -or $copy.ExitCode -ne 0) {
+      throw "This computer's trusted root certificates could not be copied into the tracebloc WSL distro ($(Format-WslProbeFailure $copy $WslDistroStartTimeoutSec)), so TLS inside it would fail behind a proxy that inspects TLS. Run this installer again; if it keeps failing, share this output with tracebloc support."
+    }
+    $rebuild = Invoke-WslProbe -ArgumentList ($asRoot + @($DistroUpdateCaCertificates)) -TimeoutSec $WslDistroStartTimeoutSec
+    if (-not $rebuild.Started -or $rebuild.TimedOut -or $rebuild.ExitCode -ne 0) {
+      throw "This computer's trusted root certificates were copied into the tracebloc WSL distro, but $DistroUpdateCaCertificates did not add them to its trust bundle ($(Format-WslProbeFailure $rebuild $WslDistroStartTimeoutSec)), so TLS inside the distro would fail on an unknown certificate issuer. Run this installer again; if it keeps failing, share this output with tracebloc support."
+    }
+    $read = Invoke-WslProbe -ArgumentList ($asRoot + @($DistroCat, $DistroCaBundle)) -TimeoutSec $WslDistroStartTimeoutSec
+    if (-not $read.Started -or $read.TimedOut -or $read.ExitCode -ne 0) {
+      throw "The tracebloc WSL distro's trust bundle ($DistroCaBundle) could not be read back ($(Format-WslProbeFailure $read $WslDistroStartTimeoutSec)), so whether it holds this computer's trusted root certificates cannot be told. Run this installer again; if it keeps failing, share this output with tracebloc support."
+    }
+    $held = Get-PemCertificateBody -Text $read.Output
+    $missing = @($roots | Where-Object { -not $held.ContainsKey((ConvertTo-CertificateBody -Certificate $_)) })
+    if ($missing.Count -gt 0) {
+      throw "The tracebloc WSL distro's trust bundle ($DistroCaBundle) holds $($roots.Count - $missing.Count) of this computer's $($roots.Count) trusted root certificates after $DistroUpdateCaCertificates, so TLS inside the distro would fail on an unknown certificate issuer. Run this installer again; if it keeps failing, share this output with tracebloc support."
+    }
+  } finally {
+    Remove-Item -LiteralPath $pem -Force -ErrorAction SilentlyContinue
+  }
+  Ok "The tracebloc WSL distro trusts this computer's $($roots.Count) root certificates"
+  $running = Invoke-WslProbe -ArgumentList ($asRoot + @($DistroSystemctl, 'is-active', 'k3s')) -TimeoutSec $WslDistroStartTimeoutSec
+  $state = ''
+  if ($running.Started -and -not $running.TimedOut -and $running.Output) {
+    $state = "$(@($running.Output -split "`r?`n" | Where-Object { $_.Trim() })[0])".Trim()
+  }
+  if ($K3sStatesStopped -contains $state) { return }
+  if ($K3sStatesRestart -notcontains $state) {
+    throw "Whether k3s runs in the tracebloc WSL distro could not be told ($(Format-WslProbeFailure $running $WslDistroStartTimeoutSec)), so it was not restarted to read the new certificates. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  }
+  $restart = Invoke-WslProbe -ArgumentList ($asRoot + @($DistroSystemctl, 'restart', 'k3s')) -TimeoutSec $WslK3sRestartTimeoutSec
+  if (-not $restart.Started -or $restart.TimedOut -or $restart.ExitCode -ne 0) {
+    throw "k3s in the tracebloc WSL distro did not restart ($(Format-WslProbeFailure $restart $WslK3sRestartTimeoutSec)), so its image pulls may not trust this computer's root certificates yet. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  }
+  Ok "Restarted k3s, so its image pulls trust them too"
+}
+
 # =============================================================================
 #  3. The logon task: what keeps the distro running.
 #
@@ -1179,8 +1441,8 @@ function Get-WslDistroImage {
 #  wait here may stand in for that one.
 #
 #  PROVISIONAL until rows 6-8 (idle, sleep, restart) hold on both S-W machines,
-#  Windows 11 and Server 2025. NOTHING CALLS THIS YET: it follows the import
-#  (section 2, S-W row 3).
+#  Windows 11 and Server 2025. Invoke-WslInstall runs it right after the import
+#  (section 2): its start is the distro's first.
 #    TODO(part 4): the install record's logon-task artefact, once cli-dev's
 #      `delete` knows the kind.
 #    TODO(part 5): the task's removal.
@@ -1235,6 +1497,9 @@ function Register-KeepaliveTask {
       $t = New-ScheduledTaskTrigger -AtLogOn -User $users[$i]
       try {
         Register-ScheduledTask -TaskName $KeepaliveTaskName -Action $a -Trigger $t -Settings $s -Force -ErrorAction Stop | Out-Null
+        # From here the task is on this machine, whatever its start or the wait
+        # below says: a stop names it in what is left (Write-WslInstallLeft).
+        $script:KeepaliveRegistered = $true
         break
       } catch {
         if ($i -eq $users.Count - 1) { throw }
@@ -1765,9 +2030,8 @@ function Invoke-BoundedProcess {
 #  The credential is never on wsl.exe's command line, which other processes can
 #  read, and never in a line this script prints.
 #
-#  NOTHING CALLS THESE YET: they wait on the import and the logon task (sections 2
-#  and 3, S-W rows 3 and 5) and on part 2's phases in the core, which also reads
-#  the preset pair from stdin.
+#  Invoke-WslInstall runs Invoke-WslCore once the import and the logon task (sections
+#  2 and 3) have the distro running.
 #  The cluster run hands the account steps what its stop-and-check gate found
 #  (2c): this script names a file on that run's line, TRACEBLOC_WSL_HANDOVER, in a
 #  folder only this user can open and deletes after the install, and reads it only
@@ -1790,12 +2054,102 @@ $CorePhaseCluster = 'cluster'
 $CorePhaseClient = 'client'
 
 # What the core reads from this process's environment, carried onto its line,
-# because no Windows variable crosses into the distro: the release the bootstrap
-# resolved (lib/common.sh's TB_VERSION reads it), and every telemetry opt-out the
-# core honours (lib/telemetry.sh's TB_TELEMETRY_OPT_OUT_VARS, which a Pester test
-# holds this list to), so an opt-out set on Windows still opts out. Each goes on
-# the line only when it is set, with the value as it was set.
-$CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+# because no Windows variable crosses into the distro:
+#   - the release the bootstrap resolved (lib/common.sh's TB_VERSION reads it);
+#   - the stage, both names lib/common.sh's tb_client_env reads (canonical first,
+#     then the legacy one), so the core installs against the backend the host CLI
+#     signs in to: the CLI reads the same two on Windows. Without them the core
+#     falls back to prod while the CLI mints the credential on stg (client-dev#1810);
+#   - every telemetry opt-out the core honours (lib/telemetry.sh's
+#     TB_TELEMETRY_OPT_OUT_VARS), so an opt-out set on Windows still opts out.
+# Pester tests hold the stage names and the opt-outs to those declarations. Each
+# goes on the line only when it is set, with the value as it was set: the core
+# reduces the stage's spelling itself.
+$CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_ENV', 'CLIENT_ENV', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+
+# THE HOST'S PROXY IN THE DISTRO (S-W row 10, client-dev#1810 part 1, "Proxy and
+# CA"; RFC-0175 D7: NAT, with the proxy on k3s's unit). Both runs get every name
+# lib/cluster.sh's _node_proxy_env hands a cluster node, and the NO_PROXY pair its
+# _augment_no_proxy reads. Pester holds both lists to cluster.sh. Nothing is
+# written here, because the core already owns the write:
+#   - the cluster run hands these to k3s's install.sh, which writes them into
+#     k3s.service.env, native k3s's proxy home, on every run. A file written from
+#     this side would be rewritten from the core's environment. S-W's run pulled
+#     with the proxy in that file, on NAT;
+#   - the NO_PROXY there is the core's: the host's, unioned with cluster.sh's
+#     TB_NO_PROXY_DEFAULTS (loopback, the RFC1918 ranges, the cluster's DNS
+#     suffixes). k3s.bats holds both pod and service range pairs inside it, and
+#     cluster.bats holds loopback;
+#   - the client run hands them to the chart's proxy settings.
+# They cross by WSLENV, never on the line. A proxy's URL can hold a password, and
+# the line is wsl.exe's command line, which other processes can read. WSLENV names
+# the variables wsl.exe copies from its own environment into the Linux process it
+# starts (/u: from Windows to Linux only), so the values are in no argument and in
+# no printed line. A wsl session reads no /etc/environment, so this is the only way
+# in. Each name the core reads is listed when Windows finds it set, and Windows
+# finds a name in any case. WSLENV's names are case-sensitive (Microsoft's WSL
+# docs), so a variable crosses at least under the name it was set by, and the core
+# reads both cases (cluster.sh), as on a Linux host. The same reader as the
+# bootstrap's own downloads, which honour HTTPS_PROXY: a proxy set only in
+# Windows' Internet settings is not read here either.
+$CoreProxyVars = @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')
+$CoreNoProxyVars = @('NO_PROXY', 'no_proxy')
+$CoreWslEnvVars = $CoreProxyVars + $CoreNoProxyVars
+
+# The WSLENV a core run starts with: the user's own entries first, as set, then
+# NAME/u for each of $CoreWslEnvVars that is set and not listed already (a name
+# the user lists keeps the user's flag). Names only: never a value.
+function Get-CoreWslEnv {
+  param([AllowNull()][string]$Existing = $env:WSLENV)
+  $entries = [System.Collections.Generic.List[string]]::new()
+  $listed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+  foreach ($e in @("$Existing" -split ':' | Where-Object { $_ })) {
+    $entries.Add($e)
+    [void]$listed.Add(($e -split '/')[0])
+  }
+  foreach ($name in $CoreWslEnvVars) {
+    if ($listed.Contains($name) -or -not [Environment]::GetEnvironmentVariable($name)) { continue }
+    $entries.Add("$name/u")
+    [void]$listed.Add($name)
+  }
+  return ($entries -join ':')
+}
+
+# Why VALUE, one proxy variable's value, is not a proxy the cluster can use, or
+# $null when it is. The rule is Go's proxy reader, which containerd and k3s read
+# these variables with: a URL with a scheme and a host, or else host[:port] with
+# http:// assumed. The schemes Go's transport dials are http, https, socks5 and
+# socks5h. A value with a space in it is never one.
+$ProxySchemes = @('http', 'https', 'socks5', 'socks5h')
+function Get-ProxyValueProblem {
+  param([string]$Value)
+  # Never trimmed: the line carries the value as set, and Go reads a padded one as
+  # no proxy address.
+  $v = $Value
+  if ($v -match '\s') { return 'it has a space in it' }
+  $text = $v
+  if ($v -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://') { $text = "http://$v" }
+  $uri = $null
+  if (-not [Uri]::TryCreate($text, [UriKind]::Absolute, [ref]$uri)) { return 'it is neither a URL nor a host[:port]' }
+  if (-not $uri.Host) { return 'it names no host' }
+  if ($ProxySchemes -notcontains $uri.Scheme) { return "its scheme, $($uri.Scheme), is not $(($ProxySchemes[0..($ProxySchemes.Count - 2)]) -join ', ') or $($ProxySchemes[-1])" }
+  return $null
+}
+
+# Refuses, by the variable's name, a host proxy the cluster could not use, before
+# anything is written: k3s and containerd would otherwise fail their first pull
+# late, naming nothing of ours. The value is never repeated, since a proxy's URL
+# can hold a password. No proxy set, or a NO_PROXY alone, is nothing to check.
+function Assert-HostProxy {
+  foreach ($name in $CoreProxyVars) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if (-not $value) { continue }
+    $problem = Get-ProxyValueProblem -Value $value
+    if ($problem) {
+      throw "$name is set, but the tracebloc cluster cannot use it as a proxy: $problem. Set $name to your proxy's address, like http://proxy.example.com:3128, or remove it, then run the install again."
+    }
+  }
+}
 
 # The tracebloc CLI's own Windows installer, as install-k8s.ps1 names it.
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
@@ -1922,6 +2276,9 @@ function Invoke-CoreRun {
   $psi.FileName = $FilePath
   $psi.Arguments = (@($ArgumentList | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' ')
   $psi.UseShellExecute = $false
+  # The host's proxy crosses by WSLENV, in the child's environment only (section 5).
+  $wslenv = Get-CoreWslEnv
+  if ($wslenv) { $psi.EnvironmentVariables['WSLENV'] = $wslenv }
   $psi.RedirectStandardInput = ($null -ne $Stdin)
   # .NET Framework's Process.Start (Windows PowerShell 5.1) wraps a redirected stdin
   # in a writer on the console's input encoding and flushes it at once, which puts
@@ -2478,8 +2835,9 @@ function Invoke-WslCore {
 #  the core's writer does. Best-effort, like the core's: a record that cannot be
 #  read or written is said, never fatal.
 #
-#  NOTHING CALLS THIS YET: it follows the import (section 2, S-W row 3) and the
-#  client run (section 5).
+#  Invoke-WslInstall saves it after the client run (section 5), and after a stop
+#  past the logon task too, once the core's own record can be read, so that
+#  tracebloc delete finds what a failed install left.
 # =============================================================================
 
 # The record's place, as the schema's x-tracebloc-record.user-path names it: under
@@ -2565,18 +2923,23 @@ function Write-HostInstallRecord {
   }
 }
 
-# Records this install on the host, after the client run. Never fatal.
+# Records this install on the host, after the client run, or after a stop past the
+# import. Never fatal; returns whether the record was written. -IfAny is a stop's:
+# a core that has not written its own record yet leaves nothing to record, and that
+# is not said, as the stop names what it left.
 function Save-HostInstallRecord {
-  param([string]$Kubeconfig)
+  param([string]$Kubeconfig, [switch]$IfAny)
   $core = Read-CoreInstallRecord
   if (-not $core) {
-    Warn "The tracebloc WSL distro's install record could not be read, so this install was not recorded on Windows. tracebloc delete will not find it; share this output with tracebloc support."
-    return
+    if (-not $IfAny) { Warn "The tracebloc WSL distro's install record could not be read, so this install was not recorded on Windows. tracebloc delete will not find it; share this output with tracebloc support." }
+    return $false
   }
   try {
     Write-HostInstallRecord -Record (New-HostInstallRecord -Core $core -Prior (Read-HostInstallRecord) -Kubeconfig $Kubeconfig -Now (Get-RecordTimestamp))
+    return $true
   } catch {
     Warn "This install could not be recorded in $(Get-HostRecordPath) ($($_.Exception.Message)). tracebloc delete will not find it; share this output with tracebloc support."
+    return $false
   }
 }
 
@@ -2602,9 +2965,9 @@ function Save-HostInstallRecord {
 #
 #  Invoke-WslInstall calls Assert-NoLiveK3d once the tree is verified and before WSL
 #  is touched, so nothing is turned on, written or started before it answers.
-#  NOTHING CALLS Invoke-K3dOffboard YET: it runs after the distro image is fetched
-#  and verified (section 2) and right before the import, TODO(S-W row 3), so a run
-#  that could not import never offboards a working client.
+#  Import-WslDistro (section 2) calls Invoke-K3dOffboard once the distro image is
+#  fetched and verified, right before the import, so a run whose download fails
+#  never offboards a working client.
 #  What reinstall.sh does that this does not, and why:
 #    - it reads the install record for the cluster's name. The Docker path never
 #      wrote one, so the cluster looked for is install-k8s.ps1's own name;
@@ -3042,7 +3405,7 @@ function Invoke-K3dOffboard {
 }
 
 # =============================================================================
-#  The distro path, as far as it is built. Returns the exit code.
+#  The distro path, end to end. Returns the exit code.
 # =============================================================================
 
 # LocalSystem's SID. WSL refuses that account for anything that touches a distro
@@ -3060,17 +3423,40 @@ function Get-BootstrapUserSid {
   try { return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { return $null }
 }
 
+# What a stop past the import leaves on this machine, and how it goes: a re-run
+# reuses it, and once the core has written its own record, the host record names it
+# for tracebloc delete. Before that, the stop prints the removal by hand, as the
+# user can run it unelevated, naming only what this run created: the distro
+# Import-WslDistro imports and, once Register-ScheduledTask has registered it, the
+# task Register-KeepaliveTask sets up at the Task Scheduler root, even when its
+# start or the distro's first start then fails. Pester cases hold both commands to
+# what those producers did.
+function Write-WslInstallLeft {
+  param([switch]$Task, [switch]$Recorded)
+  $what = "the tracebloc WSL distro (in $(Get-WslImportDir))"
+  $how = "wsl --unregister $WslDistroName"
+  if ($Task) {
+    $what += " and its logon task $KeepaliveTaskId"
+    $how += ", then Unregister-ScheduledTask -TaskName $KeepaliveTaskName -Confirm:`$false"
+  }
+  if ($Recorded) { $how = 'tracebloc delete' }
+  Hint "Left on this machine: $what. Run this installer again to finish (it reuses them), or remove them with: $how"
+}
+
 function Invoke-WslInstall {
   param([string]$CoreDir)
   if ((Get-BootstrapUserSid) -eq $LocalSystemSid) {
     throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
   Confirm-CoreDir -CoreDir $CoreDir
+  # The host's proxy, which both core runs carry (section 5): a value the cluster
+  # could not use is refused before anything is written.
+  Assert-HostProxy
   # NAT only: a user's mirrored .wslconfig is refused before anything is written.
   Assert-WslNetworkingNat
   # Never the distro beside a live k3d (section 7): a refusal, or a consented
-  # offboard decided, before WSL is touched. The offboard itself runs right before
-  # the import (Invoke-K3dOffboard, TODO(S-W row 3)).
+  # offboard decided, before WSL is touched. The offboard itself runs inside the
+  # import step, right before the import.
   $script:Reinstall = Assert-NoLiveK3d
   # A restart stops with 2, install-k8s.ps1's declared "restart, then re-run"
   # code, which install.ps1 passes through and the e2e harness reads.
@@ -3078,7 +3464,37 @@ function Invoke-WslInstall {
     Info "If you set TRACEBLOC_SUBSTRATE=k3s in this window only, set it again after the restart."
     return 2
   }
-  throw "WSL is ready, but the rest of the TRACEBLOC_SUBSTRATE=k3s path is not available on Windows yet. Unset TRACEBLOC_SUBSTRATE to install with the current Windows path."
+  # The distro (section 2): imported, with its disk set before anything starts it,
+  # or the one already here on a re-run.
+  $null = Import-WslDistro -Reinstall $script:Reinstall
+  # From here the distro is on this machine, so a stop says what it left.
+  $step = 'task'
+  # Register-KeepaliveTask sets this once the task is registered, before it starts
+  # it and waits, so a refusal there still names the task it left.
+  $script:KeepaliveRegistered = $false
+  try {
+    # Its first start, and every sign-in's (section 3).
+    Register-KeepaliveTask
+    $step = 'core'
+    # The host's CA roots, before the core's first download (S-W row 9).
+    Add-WslHostRootTrust
+    # The core, run twice, with the account steps between (section 5).
+    $rc = Invoke-WslCore -CoreDir $CoreDir
+  } catch {
+    $recorded = $false
+    if ($step -eq 'core') { $recorded = Save-HostInstallRecord -Kubeconfig (Get-HostKubeconfigTarget) -IfAny }
+    Write-WslInstallLeft -Task:($step -eq 'core' -or $script:KeepaliveRegistered) -Recorded:$recorded
+    throw
+  }
+  # The record (section 6), whether the core finished or not: it is what
+  # tracebloc delete removes.
+  $recorded = Save-HostInstallRecord -Kubeconfig (Get-HostKubeconfigTarget) -IfAny:($rc -ne 0)
+  if ($rc -ne 0) {
+    Write-WslInstallLeft -Task -Recorded:$recorded
+    # The core has said why. 1, never its own code: 2 is the restart code.
+    return 1
+  }
+  return 0
 }
 
 # =============================================================================

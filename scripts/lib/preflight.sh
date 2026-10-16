@@ -403,10 +403,44 @@ _pf_display_gb_from_mib() {
 }
 
 _pf_host_too_small_for_floor() {
-  local host_gb="${1:-}"
+  local host_gb="${1:-}" run_floor_mib
   [[ "$host_gb" =~ ^[0-9]+$ ]] || return 1
   (( host_gb > 0 )) || return 1
+  # Linux with the run floor resolved (client-dev#2113): the host is held to the run
+  # floor with no OS reserve, as _pf_memory holds it, so the machine is too small
+  # exactly when it cannot hold the remedy the budget lines quote -- and a remedy
+  # this predicate lets through is always one the machine can give.
+  if run_floor_mib="$(_pf_runtime_run_floor_mib)"; then
+    (( host_gb < $(_pf_runtime_run_target_gb "$run_floor_mib") ))
+    return
+  fi
   (( host_gb - PF_OS_RESERVE_GB < PF_MIN_MEM_GB ))
+}
+
+# The run floor (MiB) a Linux DOCKER BUDGET is graded against, or nothing (exit 1)
+# off Linux or when _pf_linux_run_floor_mib does not resolve (the escape hatch).
+# _pf_memory grades the HOST against it; on Linux the daemon's budget can still sit
+# below the host (Docker Desktop for Linux, a VM or cgroup limit), and a budget
+# between the typed floor and this one installed fine and then never scheduled a
+# run (client-dev#2113). Both runtime graders read it here, so they agree.
+_pf_runtime_run_floor_mib() {
+  [[ "$OS" == "Linux" ]] || return 1
+  _pf_linux_run_floor_mib
+}
+
+# The ONE remedy size for a budget under that floor, in whole GB (the unit a limit
+# takes): the clamped rung budget, raised to the run floor when the clamp sits under
+# it -- a remedy below the floor just named is no remedy. The floor is graded on the
+# guest's MemTotal with no grace, and a VM or Docker Desktop guest reports up to
+# PF_VM_MEM_GRACE_MIB under its configured size, so the size quoted is the floor
+# PLUS that grace: a VM set to exactly the quoted figure clears the floor, rather
+# than failing the same check again (Bugbot on client-dev#2115). Arg: the run
+# floor in MiB.
+_pf_runtime_run_target_gb() {
+  local floor_gb warn_eff
+  floor_gb=$(( (${1:-0} + PF_VM_MEM_GRACE_MIB + 1023) / 1024 ))
+  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
+  if (( warn_eff > floor_gb )); then printf '%s' "$warn_eff"; else printf '%s' "$floor_gb"; fi
 }
 
 # What a Docker budget below the smallest training rung's budget COSTS, worded
@@ -443,7 +477,14 @@ _pf_runtime_mem_status() {
   rt_gb="$(_pf_display_gb_from_mib "$rt_mib")"
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
-  if (( rt_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
+  # Linux: the derived run floor, no grace (as in _pf_memory -- the kubelet sizes
+  # allocatable from this MemTotal), so this line and the recheck's hard-fail agree.
+  local run_floor_mib=""
+  run_floor_mib="$(_pf_runtime_run_floor_mib)" || run_floor_mib=""
+  if [[ -n "$run_floor_mib" ]] && (( rt_mib < run_floor_mib )); then
+    warn "${what}: $(_pf_tenths_gb "$rt_mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule."
+    target_gb="$(_pf_runtime_run_target_gb "$run_floor_mib")"
+  elif (( rt_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
     warn "${what}: ${rt_gb} GB — below the ${PF_MIN_MEM_GB} GB the client needs; it will OOM."
     # Sub-floor is the ONE condition where _pf_recheck_runtime_mem also hard-fails
     # (the latch suppresses a duplicate warning, never the hard-fail), so this
@@ -508,7 +549,11 @@ _pf_runtime_mem_status() {
   if [[ -z "$target_gb" ]]; then
     :   # the clamped warn above carries its own advice; no concrete target exists to print
   elif _pf_host_too_small_for_floor "$host_gb"; then
-    hint "This machine has ${host_gb} GB of RAM total; the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB. Free up memory or use a larger machine."
+    if [[ -n "$run_floor_mib" ]]; then
+      hint "This machine has ${host_gb} GB of RAM total, less than the $(_pf_runtime_run_target_gb "$run_floor_mib") GB Docker budget one training run needs beside the tracebloc platform. Use a larger machine."
+    else
+      hint "This machine has ${host_gb} GB of RAM total; the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB. Free up memory or use a larger machine."
+    fi
   elif [[ "$OS" == "Darwin" ]]; then
     hint "Give Docker ${target_gb} GB: Docker Desktop → Settings → Resources → Memory (colima: colima stop && colima start --memory ${target_gb})."
   else
@@ -862,7 +907,12 @@ _pf_recheck_runtime_mem() {
   # existed in _pf_memory too and the replace took the first match).
   gb="$(_pf_display_gb_from_mib "$mib")"
   warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
-  if [[ "$mib" -lt $(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )) ]]; then
+  # Linux: the budget is graded against the derived run floor, not the typed one
+  # (client-dev#2113) -- the same floor _pf_memory holds the host to.
+  local floor_mib run_floor_mib=""
+  floor_mib=$(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB ))
+  if run_floor_mib="$(_pf_runtime_run_floor_mib)"; then floor_mib="$run_floor_mib"; else run_floor_mib=""; fi
+  if [[ "$mib" -lt "$floor_mib" ]]; then
     # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
     # Tolerance is PF_VM_MEM_GRACE_MIB (not 64): the guest MemTotal is a few hundred MiB
     # under the configured size, so a VM set to exactly the documented floor still
@@ -881,7 +931,13 @@ _pf_recheck_runtime_mem() {
     if _pf_host_too_small_for_floor "$phys_gb"; then
       local host_noun="machine"
       [[ "$OS" == "Darwin" ]] && host_noun="Mac"
-      error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+      if [[ -n "$run_floor_mib" ]]; then
+        error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: one training run needs a $(_pf_runtime_run_target_gb "$run_floor_mib") GB Docker budget beside the tracebloc platform, more than this ${host_noun} has. Use a larger machine."
+      else
+        error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${PF_MIN_MEM_GB} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( PF_MIN_MEM_GB + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+      fi
+    elif [[ -n "$run_floor_mib" ]]; then
+      error "Docker has only $(_pf_tenths_gb "$mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule. Raise the VM/cgroup limit (or free memory) to ≥ $(_pf_runtime_run_target_gb "$run_floor_mib") GB, then re-run."
     elif [[ "$OS" == "Linux" ]]; then
       error "Docker has only ${gb} GB — below the ${PF_MIN_MEM_GB} GB the tracebloc client needs; it will OOM. Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     else

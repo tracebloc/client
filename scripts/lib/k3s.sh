@@ -1475,9 +1475,21 @@ TB_K3S_NODE_PASSWORD_PATH="/etc/rancher/node/password"
 # kernel-modules-extra (_ensure_kernel_modules is the Docker path's).
 _native_k3s_ensure_firewall_tool() {
   case "$(_native_k3s_fw_pick)" in nft|iptables) return 0 ;; esac
+  # Bounded (client-dev#2048): a stalled package mirror hung here behind the
+  # spinner with no message. Best-effort either way -- the firewall step still
+  # refuses a host it cannot fence -- but a stall is named as one.
+  local _nft_rc=0
   # shellcheck disable=SC2086  # PM_INSTALL is a command line that must word-split
-  spin_cmd "Installing nftables…" $PM_INSTALL nftables || \
+  spin_cmd_bounded --grace "${TB_PM_KILL_GRACE:-60}" 600 "Installing nftables…" $PM_INSTALL nftables || _nft_rc=$?
+  if (( _nft_rc == 124 )) && [[ -n "${_TB_SPIN_SURVIVORS:-}" ]]; then
+    # The package manager outlived its kill: it still holds the lock, so the
+    # firewall step and every later install would queue behind it unannounced.
+    error "Installing nftables did not finish within 10 minutes, and the package manager is still running and holding the package lock. Wait for it to finish, check your network/proxy, then re-run prepare-host or the installer."
+  elif (( _nft_rc == 124 )); then
+    warn "Installing nftables did not finish within 10 minutes — the package mirror stalled; the firewall step names what is missing."
+  elif (( _nft_rc != 0 )); then
     log "Could not install nftables; the firewall step names what is missing."
+  fi
   # --print installed nothing: the rule it plans is for the nftables it plans.
   # shellcheck disable=SC2034  # consumed cross-file by k3s-firewall.sh (_native_k3s_fw_pick)
   if tb_root_planning; then TRACEBLOC_K3S_FW_PLANNED=nft; fi

@@ -740,7 +740,7 @@ verify_manifest_signature() {
   # so does any bundle that doesn't verify — the online path does the SAME full
   # keyless check, just needing live Rekor, so this is a fallback, never a downgrade.
   if fetch_optional "$REPO_REL/manifest.sha256.bundle" "$bundle"; then
-    if "$COSIGN_BIN" verify-blob \
+    if _cosign verify-blob \
           --bundle "$bundle" \
           --certificate-identity-regexp "$id_re" \
           --certificate-oidc-issuer "$issuer" \
@@ -763,7 +763,7 @@ verify_manifest_signature() {
     exit 1
   fi
 
-  if "$COSIGN_BIN" verify-blob \
+  if _cosign verify-blob \
         --certificate-identity-regexp "$id_re" \
         --certificate-oidc-issuer "$issuer" \
         --certificate "$cert" \
@@ -777,6 +777,16 @@ verify_manifest_signature() {
     exit 1
   fi
 }
+
+# _cosign ARG... -- $COSIGN_BIN with sigstore's TUF cache inside this run's $TMPDIR.
+# cosign keeps the TUF root it verifies with under $TUF_ROOT, else under
+# $HOME/.sigstore/root (v2.4.1, the pin below, and v3 alike, measured), and nothing
+# removed that folder: every install left ~/.sigstore behind (client-dev#1615, live
+# check 23). TUF_ROOT is set for this one process only, never exported, so the
+# user's own ~/.sigstore and their own TUF_ROOT are neither read nor written, and the
+# cache goes with $TMPDIR on exit. A ~/.sigstore an earlier install left stays: it
+# cannot be told from one the user's own cosign made.
+_cosign() { TUF_ROOT="$TMPDIR/sigstore-root" "$COSIGN_BIN" "$@"; }
 
 # Resolve a usable cosign into $COSIGN_BIN. Prefer one already on PATH; else
 # fetch the pinned release binary for this OS/arch from the cosign GitHub

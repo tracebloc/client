@@ -105,6 +105,24 @@
           "type": "string",
           "description": "Optional GPU limits for spawned jobs, and THE GATE for the pair. GPU_LIMITS and GPU_REQUESTS are ONE number (client#995): set this alone and the chart renders GPU_REQUESTS with the same value, because Kubernetes requires an extended resource's request to equal its limit. An explicit empty ('') declares a CPU-only cluster (backend#2216); absent, nothing is rendered and the runtime's legacy default ('nvidia.com/gpu=1') applies. Set both to different values and the chart writes them as given; the runtime warns once and the API server rejects that pod. No schema default: Helm injects none, and the chart emits nothing when this is absent. Bounds SCHEDULING, not visibility. Kubernetes uses this to decide how many GPU pods fit on a node -- one at a time at the default -- so concurrent jobs do not contend. It does NOT restrict which devices a container can see when the GPU arrives via CDI: that injection happens outside the Kubernetes resource limit, so on a CDI node (Docker Desktop / WSL2, see GPU_VISIBLE_DEVICES) a pod sees every GPU on the machine regardless of this value. On a device-plugin node the plugin does pin concrete GPU UUIDs, so there the limit is also an isolation boundary -- same key, two meanings, which is why this says so (backend#2657). Setting this to 'nvidia.com/gpu=1' on a multi-GPU CDI box does not cap a job at one device."
         },
+        "INFERENCE_RESOURCE_REQUESTS": {
+          "type": "string",
+          "pattern": "^((cpu|memory|ephemeral-storage)=[^,=\\s]+(,(cpu|memory|ephemeral-storage)=[^,=\\s]+)*)?$",
+          "description": "Optional cpu/memory/ephemeral-storage requests for INFERENCE pods, written like RESOURCE_REQUESTS (client-runtime#946). Absent: inference pods get the training envelope. Rendered as TRACEBLOC_INFERENCE_RESOURCE_REQUESTS. Memory floor: an inference pod loads the whole model, so too little memory OOM-kills it and the run gets no score."
+        },
+        "INFERENCE_RESOURCE_LIMITS": {
+          "type": "string",
+          "pattern": "^((cpu|memory|ephemeral-storage)=[^,=\\s]+(,(cpu|memory|ephemeral-storage)=[^,=\\s]+)*)?$",
+          "description": "Optional cpu/memory/ephemeral-storage limits for INFERENCE pods, written like RESOURCE_LIMITS (client-runtime#946). One side alone is mirrored to the other by the runtime. Absent: inference pods get the training envelope. Rendered as TRACEBLOC_INFERENCE_RESOURCE_LIMITS."
+        },
+        "INFERENCE_GPU_REQUESTS": {
+          "type": "string",
+          "description": "Optional GPU requests for INFERENCE pods (client-runtime#946). Like GPU_REQUESTS: renders only when INFERENCE_GPU_LIMITS is set, and follows it when absent."
+        },
+        "INFERENCE_GPU_LIMITS": {
+          "type": "string",
+          "description": "Optional GPU limits for INFERENCE pods, and THE GATE for the inference GPU pair (client-runtime#946). Absent: inference follows the training GPU decision. An explicit empty ('') runs inference pods on CPU while training keeps its GPU. 'nvidia.com/gpu=N' replaces the training count for inference; inference uses one device, so N above 1 leaves the rest idle."
+        },
         "RUNTIME_CLASS_NAME": {
           "type": "string"
         },

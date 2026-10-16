@@ -2858,6 +2858,45 @@ naming, backend#3846; legacy remove_by 2026-12-31). The values keys stay
 {{- end }}
 
 {{/*
+tracebloc.inferenceResourceEnv -- the size of an INFERENCE pod (client-runtime#946,
+RFC-0243 D12), rendered ONCE for both containers like `tracebloc.gpuEnv`.
+
+  * `env.INFERENCE_RESOURCE_REQUESTS` / `env.INFERENCE_RESOURCE_LIMITS`
+      -> TRACEBLOC_INFERENCE_RESOURCE_REQUESTS / _LIMITS, each only when its key
+         is set ("cpu=2,memory=8Gi", like RESOURCE_*). The runtime mirrors a lone
+         side. Absent: inference pods get the training envelope.
+  * `env.INFERENCE_GPU_LIMITS` is THE GATE for the GPU pair, as GPU_LIMITS is:
+      absent                  -> neither var; inference follows training's GPU.
+      ""                      -> both empty: inference pods run on CPU while
+                                 training keeps its GPU.
+      "nvidia.com/gpu=N"      -> both set; INFERENCE_GPU_REQUESTS takes the
+                                 operator's value when given, else this one
+                                 (Kubernetes needs request == limit).
+
+Canonical TRACEBLOC_ names only: these are new settings (RFC-0076 S6). The keys
+are excluded from the generic env passthrough, which drops an empty value -- the
+"" that means CPU-only inference.
+*/}}
+{{- define "tracebloc.inferenceResourceEnv" -}}
+{{- if hasKey .Values.env "INFERENCE_RESOURCE_REQUESTS" }}
+- name: TRACEBLOC_INFERENCE_RESOURCE_REQUESTS
+  value: {{ .Values.env.INFERENCE_RESOURCE_REQUESTS | default "" | quote }}
+{{- end }}
+{{- if hasKey .Values.env "INFERENCE_RESOURCE_LIMITS" }}
+- name: TRACEBLOC_INFERENCE_RESOURCE_LIMITS
+  value: {{ .Values.env.INFERENCE_RESOURCE_LIMITS | default "" | quote }}
+{{- end }}
+{{- if hasKey .Values.env "INFERENCE_GPU_LIMITS" }}
+{{- $req := ternary .Values.env.INFERENCE_GPU_REQUESTS .Values.env.INFERENCE_GPU_LIMITS (hasKey .Values.env "INFERENCE_GPU_REQUESTS") | default "" }}
+{{- $lim := .Values.env.INFERENCE_GPU_LIMITS | default "" }}
+- name: TRACEBLOC_INFERENCE_GPU_REQUESTS
+  value: {{ $req | quote }}
+- name: TRACEBLOC_INFERENCE_GPU_LIMITS
+  value: {{ $lim | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 tracebloc.gpuUnsupportedEnv -- why the installer left the GPU off as UNSUPPORTED
 (client-dev#1633): env.GPU_UNSUPPORTED_REASON (one human sentence) and
 env.GPU_UNSUPPORTED_NAME (the card, e.g. "NVIDIA GeForce GT 710"), which BOTH
