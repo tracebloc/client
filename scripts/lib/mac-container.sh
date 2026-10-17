@@ -1386,7 +1386,16 @@ _mac_ct_agent_trial() {
   return 1
 }
 
-# _mac_ct_agent_plist BIN HOME -- the login item's plist, by setup-macos.sh's writer.
+# _mac_ct_agent_log -- the file the login item logs to: in the runtime's log folder, so
+# the runtime's removal (apple-container, whose path is the runtime's home) removes it too.
+_mac_ct_agent_log() { local logs; logs="$(_mac_ct_log_root)" || return 1; printf '%s/tracebloc-node.log' "$logs"; }
+
+# TB_MAC_CT_AGENT_OLD_LOG -- where the login item logged before it logged into the
+# runtime's folder, under its home. Nothing removed it, so a rewrite of the plist removes
+# that one file (client-dev#1615).
+TB_MAC_CT_AGENT_OLD_LOG="Library/Logs/tracebloc-node.log"
+
+# _mac_ct_agent_plist BIN HOME LOG -- the login item's plist, by setup-macos.sh's writer.
 _mac_ct_agent_plist() {
   local extra
   extra="  <key>StartInterval</key><integer>${TB_MAC_CT_AGENT_INTERVAL}</integer>
@@ -1397,7 +1406,7 @@ _mac_ct_agent_plist() {
     <key>HOME</key><string>${2}</string>
     <key>TRACEBLOC_SKIP_TELEMETRY</key><string>1</string>
   </dict>"
-  _emit_launch_plist "$TB_MAC_CT_AGENT_LABEL" "$extra" "${2}/Library/Logs/tracebloc-node.log" "$1" node ensure
+  _emit_launch_plist "$TB_MAC_CT_AGENT_LABEL" "$extra" "$3" "$1" node ensure
 }
 
 # _mac_ct_agent_loaded -- 0 when this user's GUI domain has the login item, 1 when it
@@ -1416,22 +1425,23 @@ _mac_ct_agent_loaded() {
 # `node ensure`: written, recorded as a launch-agent and loaded into this login session.
 # A loaded agent whose plist is already these bytes is left as it is.
 _mac_ct_ensure_agent() {
-  local bin="$1" why home dir plist want have="" loaded=0
+  local bin="$1" why home dir plist agent_log old_log want have="" loaded=0
   if [[ -n "${TRACEBLOC_SKIP_AUTOSTART:-}" || -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
     warn "Login item skipped (TRACEBLOC_SKIP_AUTOSTART/TRACEBLOC_NO_AUTOSTART set): after a reboot, or when its VM stops, the node stays down until you run \`tracebloc node ensure\`."
     return 0
   fi
   why="$(_mac_ct_agent_bin_check "$bin")" || error "$why"
   home="$(_mac_ct_agent_home)" || error "$home"
+  agent_log="$(_mac_ct_agent_log)" || error "Apple container: cannot tell where the login item logs (above)."
   # A plist string holds these only escaped, and the writer prints values as they are.
-  case "${bin}${home}" in
-    *[\&\<\>]*) error "Apple container: '${bin}' or '${home}' holds &, < or >, which the login item's plist cannot hold as it is." ;;
+  case "${bin}${home}${agent_log}" in
+    *[\&\<\>]*) error "Apple container: '${bin}', '${home}' or '${agent_log}' holds &, < or >, which the login item's plist cannot hold as it is." ;;
   esac
   # Run as launchd will, before anything is written or loaded.
   why="$(_mac_ct_agent_trial "$bin" "$home")" || error "$why"
   dir="${TRACEBLOC_LAUNCHAGENTS_DIR:-${home}/Library/LaunchAgents}"
   plist="${dir}/${TB_MAC_CT_AGENT_LABEL}.plist"
-  want="$(_mac_ct_agent_plist "$bin" "$home")"
+  want="$(_mac_ct_agent_plist "$bin" "$home" "$agent_log")"
   if [[ -e "$plist" ]]; then
     have="$(cat "$plist")" || error "Apple container: ${plist} cannot be read, so this run cannot tell what the login item runs."
   fi
@@ -1447,9 +1457,16 @@ _mac_ct_ensure_agent() {
     _bounded 30 launchctl bootout "gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
       || error "Apple container: could not unload the login item ${TB_MAC_CT_AGENT_LABEL} to rewrite it. Run launchctl bootout gui/$(id -u)/${TB_MAC_CT_AGENT_LABEL}, then re-run."
   fi
-  mkdir -p "$dir" "${home}/Library/Logs" || error "Apple container: could not create ${dir}."
+  # launchd fails the job (EX_CONFIG) when its log's folder is missing.
+  mkdir -p "$dir" "${agent_log%/*}" || error "Apple container: could not create ${dir} or ${agent_log%/*}."
   printf '%s\n' "$want" > "${plist}.tmp" && mv "${plist}.tmp" "$plist" \
     || { rm -f "${plist}.tmp"; error "Apple container: could not write ${plist}."; }
+  # The log an earlier plist named, which nothing else removes: that one file, by its
+  # exact path, and nothing beside it.
+  old_log="${home}/${TB_MAC_CT_AGENT_OLD_LOG}"
+  if [[ -f "$old_log" ]]; then
+    rm -f "$old_log" || warn "Apple container: could not remove the login item's old log ${old_log}; remove it yourself."
+  fi
   # Recorded before it loads: a run cut off here leaves an artefact delete knows.
   tb_record_write launch-agent "$TB_MAC_CT_AGENT_LABEL" "$plist"
   _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \

@@ -2,6 +2,49 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.10.0 — MySQL 8.4 is the default engine
+
+**What changed.** The chart's default MySQL image is now MySQL 8.4, a
+multi-architecture image (amd64 and arm64) pinned by digest. Until this release
+the default was the MySQL 5.7-lineage image, which runs on amd64 only, and 8.4
+was an option for new installs. The installer now gives every new install 8.4,
+on every architecture.
+
+MySQL 8.4 cannot open a MySQL 5.7 data directory. The chart's MySQL format
+guard checks this before the database starts, so a mismatch stops the upgrade
+instead of touching your data.
+
+**What you have to do.**
+- **A new install, or a client that already runs MySQL 8.4: nothing.** A client
+  on 8.4 carries `images.mysqlClient.tag: "8.4"` in its values and keeps it.
+- **A client that still runs MySQL 5.7** (check with
+  `kubectl -n <namespace> get deploy mysql-client -o jsonpath='{.spec.template.spec.containers[0].image}'`:
+  an image ending in `@sha256:f546e47f…` or `:prod` is 5.7) keeps 5.7 only if
+  its values say so. Without that, its upgrade to this version renders 8.4 over
+  the 5.7 data, the format guard refuses, and the upgrade fails:
+  - the hourly auto-upgrade rolls back to your current version and tries again
+    on the next run, and each attempt restarts MySQL;
+  - a manual `helm upgrade` without `--atomic` leaves MySQL stopped until you run
+    `helm rollback <release> -n <namespace>`.
+
+  Pin 5.7 explicitly to stay on it:
+
+  ```bash
+  helm upgrade <release> tracebloc/client -n <namespace> \
+    --reset-then-reuse-values \
+    --set images.mysqlClient.tag=prod \
+    --set images.mysqlClient.digest=sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354
+  ```
+
+  Re-running the installer on a 5.7 client writes this pin for you. To move a
+  5.7 client to 8.4, contact support@tracebloc.io: the migration runs on your
+  client, and your data never leaves it.
+
+**Going back.** `--version 1.9.218` restores the 5.7 default. A client on 8.4
+whose values do not name the 8.4 image must add `--set images.mysqlClient.tag=8.4
+--set images.mysqlClient.digest=""` before it goes back, or the older chart
+would start 5.7 over its 8.4 data.
+
 ## The ingestor chart 0.2.2 — the post-install hook sets the `TRACEBLOC_` names only
 
 **What changed.** The `ingestor` chart's post-install hook used to set its two

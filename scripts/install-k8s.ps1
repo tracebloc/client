@@ -7033,9 +7033,9 @@ function Get-ImageMirrorYaml {
 # scripts/gen-envelope-embed.sh --check verifies the constants in CI.
 #
 # Regenerate with: scripts/gen-envelope-embed.sh
-$script:TbEnvelopeContractVersion  = 6
-$script:TbEnvelopeOverheadCpuMilli = 650
-$script:TbEnvelopeOverheadMemBytes = 2214592512
+$script:TbEnvelopeContractVersion  = 7
+$script:TbEnvelopeOverheadCpuMilli = 850
+$script:TbEnvelopeOverheadMemBytes = 2483027968
 $script:TbEnvelopeFloorCpuMilli    = 1000
 $script:TbEnvelopeFloorMemBytes    = 2147483648
 # ── end generated ───────────────────────────────────────────────────────────
@@ -7105,7 +7105,7 @@ $script:TbLadderRungMemGib = 4
 # scheduling (contract `floor`) -- one run fits beside the platform, and below it
 # none ever can (client-dev#2105). Mirrors bash _TB_WINDOWS_MIN_MEM_BYTES;
 # Get-PfVmFloorMib reads it.
-$script:TbWindowsMinMemBytes = 8153726976
+$script:TbWindowsMinMemBytes = 8422162432
 # ── end generated VM budget ───────────────────────────────────────────────────
 
 # Set by Get-TrainingResources when the machine is readable but below the

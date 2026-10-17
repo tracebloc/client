@@ -50,11 +50,11 @@ _TB_VM_MIN_MEM_BYTES=10850664448
 # The Linux HARD floor: Linux kubelet carve-out + the platform's own pods (contract
 # `overhead`) + the least a training run is worth scheduling (contract `floor`)
 # (backend#5601). Below it no run can ever schedule on this host.
-_TB_LINUX_MIN_MEM_BYTES=7180648448
+_TB_LINUX_MIN_MEM_BYTES=7449083904
 # The same floor over the macOS and the Windows carve-out, graded on the VM beneath
 # the node (client-dev#2105). Below it no run can ever schedule in that VM.
-_TB_DARWIN_MIN_MEM_BYTES=7046430720
-_TB_WINDOWS_MIN_MEM_BYTES=8153726976
+_TB_DARWIN_MIN_MEM_BYTES=7314866176
+_TB_WINDOWS_MIN_MEM_BYTES=8422162432
 # ── end generated VM budget ───────────────────────────────────────────────────
 # The warn tier is DERIVED from that constant: below it the smallest training
 # run (XS, 4 GiB) cannot schedule beside the platform, so "comfortable to run" is
@@ -749,8 +749,8 @@ _pf_mysql_engine_decision() {
   # Dev mode (TRACEBLOC_VALUES_FILE): install_client_helm deploys the caller's file
   # AS-IS and resolves the engine straight from it (_devmode_engine_decision), NOT
   # via the auto rule below. Preflight MUST ask that same question, or the auto
-  # rule's "8.4 fresh" green-lights a fresh arm64 host whose silent values file
-  # actually leaves the amd64-only 5.7 default in place — and the refusal then lands
+  # rule's "8.4 fresh" green-lights a fresh arm64 host whose values file actually
+  # pins the amd64-only 5.7 image — and the refusal then lands
   # only at step e, after the cluster is already provisioned (backend#2854). The
   # engine rule and this helper live in the same lib, so the guard above proves both
   # are loaded.
@@ -864,18 +864,17 @@ _pf_arch() {
       hint "To keep 5.7, enable amd64 emulation and re-run:"
       hint "  $(_pf_binfmt_remedy)" ;;
     values-file)
-      # Dev mode (caller-supplied values file) that did not pin the multi-arch 8.4
-      # engine, so the amd64-only 5.7 chart default is what would render. Two fixes:
-      # pin 8.4 in the file (fresh data only), or enable emulation.
-      _pf_fail_line "The supplied values file leaves the amd64-only MySQL 5.7 engine in place (it doesn't pin 8.4), and that image can't run on ${ARCH}."
-      hint "Pin the native multi-arch 8.4 engine in your values file (images.mysqlClient.tag: \"8.4\" + digest: \"\") — fresh data directories only."
+      # Dev mode (caller-supplied values file) whose images.mysqlClient block
+      # renders the amd64-only 5.7 image, or an image this check cannot name.
+      # Two fixes: take the native 8.4 engine (fresh data only), or enable emulation.
+      _pf_fail_line "The supplied values file pins the amd64-only MySQL 5.7 engine (or an image this check can't name), and that image can't run on ${ARCH}."
+      hint "Use the native multi-arch 8.4 engine: drop images.mysqlClient from your values file to take the chart default, or pin images.mysqlClient.tag: \"8.4\" + digest: \"\" — fresh data directories only."
       hint "Or enable amd64 emulation and re-run:"
       hint "  $(_pf_binfmt_remedy)" ;;
     *)
-      # Includes `amd64` (unreachable — this host is not amd64) and
-      # `no-engine-rule` (the fail-closed answer when the lib holding the rule
-      # isn't loaded). Generic, and still emulation-shaped: without the rule
-      # there is no 8.4 opt-in to reach.
+      # Includes `no-engine-rule` (the fail-closed answer when the lib holding
+      # the rule isn't loaded). Generic, and still emulation-shaped: without the
+      # rule there is no 8.4 opt-in to reach.
       _pf_fail_line "Architecture: ${ARCH} — this install needs the amd64-only MySQL 5.7 image and can't run here."
       hint "Fix: enable amd64 emulation and re-run:"
       hint "  $(_pf_binfmt_remedy)" ;;

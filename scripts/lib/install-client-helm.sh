@@ -235,9 +235,9 @@ _existing_training_resources() {
 #
 # Regenerate after an upstream contract change:
 #   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=6
-_TB_ENVELOPE_OVERHEAD_CPU_MILLI=650
-_TB_ENVELOPE_OVERHEAD_MEM_BYTES=2214592512
+_TB_ENVELOPE_CONTRACT_VERSION=7
+_TB_ENVELOPE_OVERHEAD_CPU_MILLI=850
+_TB_ENVELOPE_OVERHEAD_MEM_BYTES=2483027968
 _TB_ENVELOPE_FLOOR_CPU_MILLI=1000
 _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
 # ── end generated ───────────────────────────────────────────────────────────
@@ -2667,6 +2667,15 @@ _reconcile_adopted_client() {
   # would keep whatever an earlier run, or no run, wrote.
   _host_os_set_args
   _args+=("${_TB_HOST_OS_ARGS[@]}")  # set-u-safe: _host_os_set_args always assigns two words
+  # A release that runs 5.7 keeps 5.7 (RFC-0150's exit, backend#4366): the chart
+  # now defaults to 8.4, and --reuse-values / --reset-then-reuse-values keep only
+  # what the release STORED, which for a 5.7 release is usually no image key at
+  # all. Without this pin the reconcile would render 8.4 over its 5.7 datadir,
+  # mysql-format-guard would refuse, and --atomic would roll the reconcile back.
+  if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" != "8.4" ]]; then
+    _args+=(--set "images.mysqlClient.tag=${TB_MYSQL_57_PIN_TAG}"
+            --set "images.mysqlClient.digest=${TB_MYSQL_57_PIN_DIGEST}")
+  fi
   # The machine facts ride it too, for the same reason.
   _machine_facts_set_args
   _args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
@@ -2885,12 +2894,19 @@ _download_services_progress() {
 }
 
 # ── MySQL engine channel (backend#723, decision A2 2026-08-05) ─────────────
-# The chart's frozen 5.7 digest pin stays the default for every existing
-# install; FRESH installs may opt into the multi-arch 8.4 engine. `auto`
-# picks 8.4 only on a fresh arm64 install — the one cohort 5.7 actually hurts
-# (amd64-only image under emulation). Anything that smells like existing
-# state stays 5.7: an existing release, real mysql datadir content on the
-# host (legacy or per-release layout), or nothing at all to suggest 8.4.
+# The chart's default is the multi-arch 8.4 engine since RFC-0150's exit
+# (backend#4366); the frozen 5.7-lineage image is no longer a default anywhere,
+# only an explicit pin (TB_MYSQL_57_PIN_* below) that this installer writes for
+# an install it resolves to 5.7. `auto` picks 8.4 on every fresh install,
+# whatever the arch (RFC-0150 P22): it used to pick 8.4 only on arm64 and keep
+# fresh amd64 hosts on 5.7, so every new x86 install joined the 5.7 -> 8.4
+# migration backlog the day it came up. Anything that smells like existing
+# state stays 5.7: an existing release, or real mysql datadir content on the
+# host (legacy or per-release layout). EVERY resolution is written down as an
+# explicit image pin -- 8.4 as `tag "8.4"` + `digest ""`, 5.7 as
+# TB_MYSQL_57_PIN_* -- so what runs never depends on which engine a chart
+# version defaults to: a 5.7 install that relied on the default would be moved
+# onto 8.4 by the first chart that changed it, and 8.4 refuses a 5.7 datadir.
 # A previous opt-in stays sticky across re-runs (the values file is
 # regenerated every run, so it is re-derived from the old file first). The
 # chart's mysql-format-guard init container backstops whatever this
@@ -2898,12 +2914,26 @@ _download_services_progress() {
 # never opens a datadir with the wrong engine.
 #   TB_MYSQL_ENGINE=auto|5.7|8.4    explicit value always wins (default auto)
 # Reads (bash dynamic scope, set by install_client_helm before the call):
-# values_file, existing_id, HOST_DATA_DIR, TB_NAMESPACE, ARCH.
+# values_file, existing_id, HOST_DATA_DIR, TB_NAMESPACE. Not ARCH: the arch
+# decides whether a 5.7 verdict can RUN here (_assert_engine_runs_on_this_arch),
+# never which engine a fresh host gets.
 # Sets: TB_MYSQL_ENGINE_RESOLVED.
 #
 # Two of those inputs are `local`s of install_client_helm, which has NOT run at
 # preflight time — so the helpers below derive them, and preflight's arch gate
 # (backend#2047) calls the same helpers rather than restating the paths.
+# The explicit pin for an install that stays on MySQL 5.7: the frozen
+# 5.7-lineage `:prod` image the chart defaulted to until RFC-0150's exit. The
+# chart's tracebloc.mysqlEngineMajor maps exactly this digest to "5.7", which
+# keeps mysql-format-guard armed for these datadirs; install-client-helm.bats
+# holds both values against the chart's own literal, so they cannot drift apart.
+TB_MYSQL_57_PIN_TAG="prod"
+TB_MYSQL_57_PIN_DIGEST="sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
+# The chart's DEFAULT images.mysqlClient.digest (the 8.4 manifest index), for the
+# one reader that has to know what an absent digest renders: a dev-mode values
+# file (_values_mysql_engine). Held to client/values.yaml by the same bats case.
+TB_MYSQL_84_DEFAULT_DIGEST="sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d"
+
 # Content test for a host mysql datadir, FAIL-CLOSED on unlistable dirs
 # (mirrors _leftover_data_dirs, and the same Bugbot ownership case): a
 # uid-999/root-owned dir the host user can't read/enter cannot be proven
@@ -3199,8 +3229,7 @@ _hostpath_paths_block() {
 #   8.4 sticky             this machine already opted into 8.4
 #   5.7 existing-release   a live Helm release (helm list), data format unknown
 #   5.7 existing-datadir   real mysql datadir content on this host (non-empty)
-#   5.7 amd64              fresh install on amd64 — keep the pinned 5.7 image
-#   8.4 fresh              fresh install on non-amd64 — native multi-arch engine
+#   8.4 fresh              fresh install, on every arch — native multi-arch engine
 _mysql_engine_decision() {
   local requested="${TB_MYSQL_ENGINE:-auto}"
   case "$requested" in
@@ -3244,33 +3273,98 @@ _mysql_engine_decision() {
     echo "5.7 existing-release"
     return 0
   fi
-  case "${ARCH:-$(uname -m)}" in
-    x86_64|amd64) echo "5.7 amd64" ;;
-    *)            echo "8.4 fresh" ;;
-  esac
+  # Fresh: nothing here is 5.7-format, so the multi-arch 8.4 engine, on every
+  # arch. A fresh amd64 host used to answer "5.7 amd64" and keep the chart's 5.7
+  # pin, which made each new x86 install a later 5.7 -> 8.4 migration
+  # (RFC-0150 P22, backend#4366).
+  echo "8.4 fresh"
 }
 
 # Dev-mode (TRACEBLOC_VALUES_FILE) engine resolution — DELIBERATELY not the auto
 # rule above. When the caller supplies a values file, install_client_helm deploys
 # it as-is (only this run's GPU decision rides on top, client-dev#1764) and never
-# generates the mysqlClient override the normal path writes, so
-# the engine that RUNS is simply what the file declares: 8.4 iff it affirmatively
-# pins 8.4 (_values_pin_mysql_84), else the chart default, which is the amd64-only
-# 5.7 image. _mysql_engine_decision answers "8.4 fresh" for a fresh arm64 host
-# PRECISELY because the normal path would generate that 8.4 override — one dev-mode
-# never writes. Consulting the auto rule for a dev-mode install is what let
-# backend#2854 pass preflight (auto -> 8.4 fresh, native, no gate) and then refuse
-# after the cluster was already up (dev-mode -> 5.7). This helper is the ONE reader
-# both the step-e install path and preflight's early arch gate share, so the two
-# cannot drift. Fail-closed: a missing/unreadable file reads as 5.7 (refuse rather
-# than false-pass). Echoes "<engine> values-file".
+# generates the mysqlClient pin the normal path writes, so the engine that RUNS is
+# what the file's images.mysqlClient block renders over THIS chart's defaults
+# (_values_mysql_engine) — since RFC-0150's exit that is the multi-arch 8.4 engine
+# unless the file pins the 5.7-lineage image. _mysql_engine_decision answers for
+# the normal path, whose pin dev-mode never writes; consulting it for a dev-mode
+# install is what let backend#2854 pass preflight and then refuse after the
+# cluster was already up. This helper is the ONE reader both the step-e install
+# path and preflight's early arch gate share, so the two cannot drift.
+# Fail-closed: a missing/unreadable file, or an engine the reader cannot name (a
+# custom digest), reads as 5.7 — the answer that keeps the arch gate armed,
+# refusing rather than false-passing. Echoes "<engine> values-file".
 _devmode_engine_decision() {
-  local vf="${TRACEBLOC_VALUES_FILE:-}"
-  if [[ -n "$vf" && -f "$vf" ]] && _values_pin_mysql_84 < "$vf"; then
+  local vf="${TRACEBLOC_VALUES_FILE:-}" engine=""
+  if [[ -n "$vf" && -f "$vf" && -r "$vf" ]]; then
+    engine="$(_values_mysql_engine < "$vf")"
+  fi
+  if [[ "$engine" == "8.4" ]]; then
     echo "8.4 values-file"
   else
     echo "5.7 values-file"
   fi
+}
+
+# _values_mysql_engine -- the MySQL engine a values file (on STDIN) runs on THIS
+# chart: its images.mysqlClient block laid over the chart's defaults, then
+# tracebloc.mysqlEngineMajor's own rule. Prints 5.7, 8.4, 8.0 or unknown.
+#   digest absent   -> the chart default, TB_MYSQL_84_DEFAULT_DIGEST -> 8.4
+#   digest = that   -> 8.4;  digest = TB_MYSQL_57_PIN_DIGEST -> 5.7
+#   other digest    -> unknown (a custom pin; the guard stands down)
+#   digest ""       -> the tag (absent = the chart default "8.4"):
+#                      ""/prod/5.7* -> 5.7, 8.4* -> 8.4, 8.0* -> 8.0, else unknown
+#   `mysqlClient: null` / `images: null` -> the template fallbacks, tag prod -> 5.7
+# It RESTATES the chart's helper, so install-client-helm.bats renders the chart on
+# every input shape above and holds this reader to the guard's own answer.
+# Unlike _values_pin_mysql_84 an ABSENT key here means the default of the chart
+# being installed: right for a dev-mode file, which is deployed against this
+# chart, and wrong for a values file a 5.7 release stored under an older one
+# (there an absent digest was the 5.7 pin) -- so the sticky and release reads
+# keep _values_pin_mysql_84. Reads to EOF and decides in END (no SIGPIPE on a
+# producer, backend#1778).
+_values_mysql_engine() {
+  awk -v d57="$TB_MYSQL_57_PIN_DIGEST" -v d84="$TB_MYSQL_84_DEFAULT_DIGEST" -v sq="'" '
+    function val(line,   v) {
+      v = line
+      sub(/^[[:space:]]*[A-Za-z]+:[[:space:]]*/, "", v)
+      sub(/[[:space:]]+#.*$/, "", v)
+      gsub(/"/, "", v)
+      gsub(sq, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      return v
+    }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*(images|mysqlClient):[[:space:]]*(null|~)[[:space:]]*$/ { nil = 1; next }
+    { match($0, /^[[:space:]]*/); indent = RLENGTH }
+    !inblk {
+      if ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/) { inblk = 1; base = indent; tag = ""; sawtag = 0; digest = ""; sawdigest = 0 }
+      next
+    }
+    {
+      if (indent <= base) {
+        inblk = ($0 ~ /^[[:space:]]*mysqlClient:[[:space:]]*$/)
+        if (inblk) { base = indent; tag = ""; sawtag = 0; digest = ""; sawdigest = 0 }
+        next
+      }
+      if ($0 ~ /^[[:space:]]*tag:/)         { tag = val($0); sawtag = 1 }
+      else if ($0 ~ /^[[:space:]]*digest:/) { digest = val($0); sawdigest = 1 }
+    }
+    END {
+      if (nil) { print "5.7"; exit 0 }
+      if (!sawdigest) digest = d84
+      if (!sawtag) tag = "8.4"
+      if (digest == d84)       e = "8.4"
+      else if (digest == d57)  e = "5.7"
+      else if (digest != "")   e = "unknown"
+      else if (tag == "" || tag == "prod" || tag ~ /^5\.7/) e = "5.7"
+      else if (tag ~ /^8\.4/) e = "8.4"
+      else if (tag ~ /^8\.0/) e = "8.0"
+      else e = "unknown"
+      print e
+    }
+  '
 }
 
 # The logging wrapper around the rule above: sets TB_MYSQL_ENGINE_RESOLVED and
@@ -3341,9 +3435,9 @@ _assert_engine_runs_on_this_arch() {
   esac
   # LINUX ONLY past here. Name the actual cause. `explicit`, `existing-release`,
   # `existing-datadir` and the dev-mode `values-file` (its own `*)` arm below) can
-  # reach here (`sticky`/`fresh` resolve to 8.4, `amd64` was returned above), but
-  # the reason is matched rather than assumed: a future reason must not inherit a
-  # claim about this host's data that may be false.
+  # reach here (`sticky` and `fresh` resolve to 8.4), but the reason is matched
+  # rather than assumed: a future reason must not inherit a claim about this
+  # host's data that may be false.
   case "${TB_MYSQL_ENGINE_REASON:-}" in
     explicit)
       warn "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it cannot run on ${ARCH}."
@@ -3507,7 +3601,7 @@ install_client_helm() {
     # backend#2146: gate the arch on the dev-mode path too, BEFORE helm deploys.
     # We install the caller's file as-is, so the engine that will run is whatever
     # the file declares — read THAT (do NOT re-resolve: a fresh resolution could
-    # pick 8.4 while the file leaves the amd64-only 5.7 default in place) and ask
+    # pick 8.4 while the file pins the amd64-only 5.7 image) and ask
     # the same question the normal path asks below. The SAME helper backs
     # preflight's early arch gate, so the two can't drift and refuse at different
     # steps (backend#2854).
@@ -3947,17 +4041,29 @@ $(_local_api_values_block)
 $(if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" == "8.4" ]]; then
 cat <<'MYSQL84'
 
-# MySQL engine opt-in (backend#723, decision A2): this install runs the
-# multi-arch 8.4 engine natively — fresh datadirs only; the chart's
-# mysql-format-guard init container refuses a mismatched datadir. Explicit
-# tag + empty digest: the chart's 5.7 reproducibility pin stays for installs
-# on the default engine. Sticky across installer re-runs; override with
-# TB_MYSQL_ENGINE=5.7|8.4.
+# MySQL engine: the multi-arch 8.4 engine (backend#723 A2; the chart default
+# since RFC-0150's exit). Stated explicitly rather than left to the chart
+# default, so the sticky read finds it on every re-run and no later chart
+# default can move this datadir. Explicit tag + empty digest: the shape the
+# RFC-0150 migration also writes. Override with TB_MYSQL_ENGINE=5.7|8.4.
 images:
   mysqlClient:
     tag: "8.4"
     digest: ""
 MYSQL84
+else
+cat <<MYSQL57
+
+# MySQL engine: this install stays on the 5.7 engine (an existing release or
+# datadir, or TB_MYSQL_ENGINE=5.7), pinned to the frozen 5.7-lineage image.
+# EXPLICIT since RFC-0150's exit made 8.4 the chart default: left to the default,
+# the next upgrade would render 8.4 over this 5.7 datadir, which 8.4 refuses to
+# open. Move it to 8.4 with the RFC-0150 migration, never by editing this pin.
+images:
+  mysqlClient:
+    tag: "${TB_MYSQL_57_PIN_TAG}"
+    digest: "${TB_MYSQL_57_PIN_DIGEST}"
+MYSQL57
 fi)
 ${gpu_block:+$gpu_block
 }pvc:

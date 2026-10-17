@@ -2494,25 +2494,32 @@ Usage inside a container's env: list:
 tracebloc.mysqlEngineMajor — the MySQL engine major the chart is about to run,
 for the mysql-format-guard init container (backend#723). Resolution mirrors
 tracebloc.image's digest-wins precedence:
-  digest set   -> the known 5.7-lineage pin maps to "5.7"; any other digest is
-                  "unknown" (custom pin — the guard stands down).
+  digest set   -> the two known pins: the chart's default 8.4 index digest maps
+                  to "8.4", the frozen 5.7-lineage `:prod` digest (the pin the
+                  installer writes for an edge that stays on 5.7) to "5.7";
+                  any other digest is "unknown" (custom pin — the guard stands
+                  down).
   digest empty -> derive from the tag: ""/prod/5.7* -> 5.7, 8.4* -> 8.4,
                   8.0* -> 8.0, anything else -> unknown.
-The sha256 literal below MUST equal the images.mysqlClient.digest default in
-values.yaml — mysql_test.yaml pins the default render to "5.7", so re-pinning
-the digest without updating this helper fails CI instead of silently
-disarming the guard.
+The first sha256 literal below MUST equal the images.mysqlClient.digest default
+in values.yaml — mysql_test.yaml pins the default render to "8.4", so
+re-pinning the digest without updating this helper fails CI instead of silently
+disarming the guard (RFC-0150 P29). The second is the 5.7 pin, which no longer
+renders by default but still arms the guard for the edges that carry it.
 Nil-guarded at both levels (backend#4372), as tracebloc.honouredPin is: an
 operator's explicit `images.mysqlClient: null` or `images: null`, or a
-`--reuse-values` replay from before the block existed, reads as the defaults
-(tag `prod` -> "5.7") instead of failing the render on a nil pointer.
+`--reuse-values` replay from before the block existed, reads as the template
+fallbacks (tag `prod` -> "5.7", the image the nil block also renders) instead of
+failing the render on a nil pointer.
 */}}
 {{- define "tracebloc.mysqlEngineMajor" -}}
 {{- $img := default dict (index (default dict .Values.images) "mysqlClient") -}}
 {{- $digest := $img.digest | default "" -}}
 {{- $tag := $img.tag | default "prod" -}}
 {{- if $digest -}}
-{{- if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
+{{- if eq $digest "sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d" -}}
+8.4
+{{- else if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
 5.7
 {{- else -}}
 unknown

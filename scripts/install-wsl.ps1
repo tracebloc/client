@@ -1579,8 +1579,14 @@ function Add-WslHostRootTrust {
 #  tracebloc-keepalive, which the install record names \tracebloc-keepalive.
 #
 #  It waits only for the distro to run. k3s Ready is the core's own wait, in its
-#  cluster run: a distro restart has measured 191 s to Ready (backend#5471), so no
-#  wait here may stand in for that one.
+#  cluster run, on the core's one TB_API_WAIT_S budget (180 s), so no wait here
+#  may stand in for that one. That budget covers a distro start
+#  (client-dev#1935): our distro was Ready within 30-40 s of a host reboot in
+#  five e2e runs, and S-W's stock image 22 s after `wsl --terminate` (its `ready`
+#  row). The 191 s once cited here was one row-4 reading on that stock image, a
+#  re-run with k3s already installed (backend#5471); S-W draws no timing from
+#  row 4. Our distro carries no cloud-init and no snapd, which the stock image
+#  runs at every start; wsl-distro.sh test refuses a build that does.
 #
 #  PROVISIONAL until rows 6-8 (idle, sleep, restart) hold on both S-W machines,
 #  Windows 11 and Server 2025. Invoke-WslInstall runs it right after the import
