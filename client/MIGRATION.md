@@ -2,6 +2,40 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.9.217 — credential Secret keys are written under their `TRACEBLOC_` names only
+
+**What changed.** The chart writes every credential key in `<release>-secrets`,
+its node-agents copy and `mysql-credentials` under its `TRACEBLOC_` name only.
+Since 1.9.180 it wrote each one under both names; since 1.9.196 every pod has read
+the `TRACEBLOC_` key. The legacy keys are no longer written, and the upgrade
+removes them from the live Secrets:
+
+| No longer written | Written (unchanged value) |
+|---|---|
+| `CLIENT_ID`, `CLIENT_PASSWORD` | `TRACEBLOC_CLIENT_ID`, `TRACEBLOC_CLIENT_PASSWORD` |
+| `POD_TOKEN_SIGNING_SECRET` | `TRACEBLOC_POD_TOKEN_SIGNING_SECRET` |
+| `TB_CREDMGR_PASSWORD`, `TB_META_PASSWORD`, `TB_INGEST_PASSWORD` | `TRACEBLOC_CREDMGR_PASSWORD`, `TRACEBLOC_META_PASSWORD`, `TRACEBLOC_INGEST_PASSWORD` |
+
+`MYSQL_ROOT_PASSWORD` and `DB_BOOTSTRAP_PASSWORD` keep their names. The
+environment variables inside the pods are not affected by this release.
+
+**What you have to do.**
+- **Upgrade the tracebloc CLI to 0.10.63 or later.** An older CLI looks for the
+  client id only under `CLIENT_ID`; the platform asks it to upgrade.
+- **Scripts of your own that read the Secret** (`kubectl get secret ... -o
+  jsonpath='{.data.CLIENT_ID}'`, or a manifest of yours with a `secretKeyRef`
+  onto one of these keys) must read the `TRACEBLOC_` key.
+- **Rotating a credential by hand:** set the `TRACEBLOC_` key (`docs/SECURITY.md`
+  §6.1). A legacy key set beside it is ignored.
+
+An upgrade from any older chart keeps working: when the live Secret has only the
+legacy keys (written before 1.9.180), the chart reads the values from them and
+writes them under the `TRACEBLOC_` names. **Going back:** `helm rollback` restores
+the older revision's Secret as it was. `helm upgrade --version` to a chart from
+1.9.180 on works too, because those charts read the `TRACEBLOC_` keys. A chart
+older than 1.9.180 reads only the legacy keys, so do not downgrade to one from
+this release.
+
 ## Upgrading to 1.9.214 — `selfRotateMysqlRoot` is on for `prod`
 
 **What changed.** `selfRotateMysqlRootByEnv.prod` is now `true`, so the setting

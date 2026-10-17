@@ -225,8 +225,8 @@ spec:
             {{- /* Canonical TRACEBLOC_ names beside the legacy NAMESPACE /
                  CLIENT_ID / CLIENT_PASSWORD (remove_by 2026-12-31), same
                  value. Both credential env names read the CANONICAL key of the
-                 node-agents mirror (the FLIP, backend#4959), which secrets.yaml
-                 writes beside the legacy key. */}}
+                 node-agents mirror (the FLIP, backend#4959), the only key
+                 secrets.yaml writes there since backend#4959 step a. */}}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: MONITOR_INTERVAL

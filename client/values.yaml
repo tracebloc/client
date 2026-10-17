@@ -2121,16 +2121,14 @@ podDisruptionBudget:
 #      CLIENT_PASSWORD), else
 #   3. a hard failure naming both options.
 #
-# THE SECRET CARRIES EACH CREDENTIAL UNDER TWO KEYS. The chart writes CLIENT_ID
-# and TRACEBLOC_CLIENT_ID (and CLIENT_PASSWORD / TRACEBLOC_CLIENT_PASSWORD) with
-# the same value. The TRACEBLOC_ names are the canonical ones and the pods read
-# them; the CLIENT_* keys stay for older readers. A Secret that has only the
-# CLIENT_* keys (one written before the chart added the canonical keys, or
-# pre-created that way) still works: the chart resolves from it and writes both
-# names on the same render that starts the pods. When you create or rotate the
-# Secret by hand, set BOTH names to the same value, as the commands below do --
-# a rotation of the CLIENT_* keys alone is overwritten from TRACEBLOC_* on the
-# next upgrade, because the chart preserves the key the pods read.
+# THE SECRET CARRIES EACH CREDENTIAL UNDER ITS TRACEBLOC_ KEY. The chart writes
+# TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD, and the pods read them; it no
+# longer writes the legacy CLIENT_ID / CLIENT_PASSWORD keys, and an upgrade removes
+# them. A Secret that has only the CLIENT_* keys (one written before the chart
+# added the canonical keys, or pre-created that way) still works: the chart
+# resolves from it and writes the TRACEBLOC_ names on the same render that starts
+# the pods. When you create or rotate the Secret by hand, set the TRACEBLOC_ keys,
+# as the commands below do -- a CLIENT_* key beside a TRACEBLOC_* one is ignored.
 #
 # WHY YOU WOULD BOTHER: anything passed as a value is stored by Helm in the
 # release's user-supplied values IN CLEARTEXT, in every retained revision (10 by
@@ -2159,8 +2157,7 @@ podDisruptionBudget:
 # them in the same breath:
 #
 #   kubectl -n <ns> create secret generic <release>-secrets \
-#     --from-literal=TRACEBLOC_CLIENT_ID=... --from-literal=TRACEBLOC_CLIENT_PASSWORD=... \
-#     --from-literal=CLIENT_ID=... --from-literal=CLIENT_PASSWORD=...
+#     --from-literal=TRACEBLOC_CLIENT_ID=... --from-literal=TRACEBLOC_CLIENT_PASSWORD=...
 #   kubectl -n <ns> label secret <release>-secrets \
 #     app.kubernetes.io/managed-by=Helm
 #   kubectl -n <ns> annotate secret <release>-secrets \
@@ -2935,19 +2932,20 @@ narrowEdgeuserByEnv:
 # (tracebloc.assertDropEdgeuserIsSafe) and jobs-manager refuses it again at startup.
 #
 # Flipped per environment (dev first) only after narrowing has soaked on that
-# fleet. TRUE for dev and stg (backend#5427): narrowEdgeuser has been baked-on
-# across both for weeks, so edgeuser is already USAGE-only and unused there — DROP
-# is the clean finish. Dev was verified retired live (telemetry edgeuser_present
-# false, Part C) before stg flipped. prod stays OFF until stg has soaked dropped
-# and the telemetry confirms stg is edgeuser-free. UNSET override => the effective
+# fleet. TRUE for every environment — dev, stg, prod (backend#5427):
+# narrowEdgeuser has been baked-on across all three for weeks, so edgeuser is
+# already USAGE-only and unused there — DROP is the clean finish. dev and stg were
+# verified retired live (telemetry edgeuser_present false, Part C) before prod, the
+# final flip. On prod DROP is a no-op on the 8.4 template edge (no edgeuser) and the
+# retirement step on any remaining 5.7 prod edge. UNSET override => the effective
 # value comes from dropEdgeuserByEnv, keyed on the resolved CLIENT_ENV. Mirrors
-# narrowEdgeuser.
+# narrowEdgeuser (and selfRotateMysqlRoot, whose prod flip landed in #2065).
 dropEdgeuser:
 
 dropEdgeuserByEnv:
   dev: true
   stg: true
-  prod: false
+  prod: true
 
 # Optional operator pin for the tb_credmgr account password (mirrors
 # podTokenSigningSecret's 3-tier resolution). Leave "" to generate-and-persist

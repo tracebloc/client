@@ -1802,12 +1802,16 @@ function Test-ToolsPresent {
   return $true
 }
 
-# The CLI floor the installer actively repairs (client#707). 0.10.0 is the release
-# where the CLI gained its own update nudge: at or above it a user can keep
-# themselves current, below it NOTHING on the machine can tell them they are
-# behind. A floor, not a "must be latest" — so this needs no network call and
-# never needs raising.
-$script:TB_CLI_MIN_VERSION = "0.10.0"
+# The CLI floor the installer actively repairs (client#707): 0.10.63, the
+# platform's own CLI floor (backend#4959). It was 0.10.0, the release where the
+# CLI gained its own update nudge. It moved with the chart release that stops
+# writing the legacy credential Secret keys: a CLI below 0.10.63 reads the client
+# id only from CLIENT_ID, so it cannot find the client this chart installs, and
+# the platform refuses it (426). The installer drives the CLI to provision the
+# client, so it repairs it to that floor first. Same value as scripts/lib/assess.sh;
+# raise both only with the platform's floor. A floor, not a "must be latest" — so
+# this needs no network call.
+$script:TB_CLI_MIN_VERSION = "0.10.63"
 
 # Is the tracebloc CLI present AND new enough to maintain itself?
 #

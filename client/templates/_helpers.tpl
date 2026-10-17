@@ -430,8 +430,9 @@ mysql-root-rotated
 
 {{/*
   Name of the Secret that holds the local MySQL passwords (client-dev#1702):
-  MYSQL_ROOT_PASSWORD, DB_BOOTSTRAP_PASSWORD and TB_CREDMGR / TB_META /
-  TB_INGEST_PASSWORD with their TRACEBLOC_ twins. Rendered by secrets.yaml with
+  MYSQL_ROOT_PASSWORD, DB_BOOTSTRAP_PASSWORD and TRACEBLOC_CREDMGR / _META /
+  _INGEST_PASSWORD (the legacy TB_ keys are no longer written, backend#4959
+  step a). Rendered by secrets.yaml with
   helm.sh/resource-policy: keep, so it survives `helm uninstall` beside the
   `mysql-pvc` datadir those passwords open.
 

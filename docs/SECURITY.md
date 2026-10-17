@@ -387,8 +387,6 @@ If `clientId` / `clientPassword` are leaked after install (published to a dashbo
 
 ```bash
 kubectl -n <ns> create secret generic <release>-secrets \
-  --from-literal=CLIENT_ID=<new-id> \
-  --from-literal=CLIENT_PASSWORD=<new-password> \
   --from-literal=TRACEBLOC_CLIENT_ID=<new-id> \
   --from-literal=TRACEBLOC_CLIENT_PASSWORD=<new-password> \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -396,7 +394,7 @@ kubectl -n <ns> create secret generic <release>-secrets \
 kubectl -n <ns> rollout restart deployment/<release>-jobs-manager
 ```
 
-The Secret carries each credential under two keys with the same value: the canonical `TRACEBLOC_CLIENT_ID` / `TRACEBLOC_CLIENT_PASSWORD`, which the pods read, and the legacy `CLIENT_ID` / `CLIENT_PASSWORD`, kept for older readers until they are retired. Set both. `kubectl apply` merges, so a rotation that sets only the `CLIENT_*` keys changes nothing the pods see -- and the next `helm upgrade` writes the `TRACEBLOC_*` value back over them, because the chart preserves the key the pods read. A rotation that sets only the `TRACEBLOC_*` keys reaches the pods after the restart and is copied into `CLIENT_*` by the next `helm upgrade`. The installers read the `TRACEBLOC_*` key first too, to identify the installed client.
+The Secret carries each credential under its `TRACEBLOC_CLIENT_ID` / `TRACEBLOC_CLIENT_PASSWORD` key, which the pods read; the chart no longer writes the legacy `CLIENT_ID` / `CLIENT_PASSWORD` keys, and an upgrade removes them. Set the `TRACEBLOC_*` keys. A rotation that sets only `CLIENT_*` keys changes nothing the pods see, and the chart ignores them while the `TRACEBLOC_*` keys exist. The installers and the tracebloc CLI (0.10.63 and later) read the `TRACEBLOC_*` key to identify the installed client.
 
 Rotating replaces the credential; it does **not** remove the copies already stored in the release's retained revisions. If this install passes `clientId`/`clientPassword` as values, see §6.7 for how to stop it doing that.
 
@@ -506,7 +504,7 @@ kubectl -n <ns> get secret <release>-secrets \
   -o jsonpath='{.data.TRACEBLOC_CLIENT_ID}' | base64 -d
 ```
 
-(`TRACEBLOC_CLIENT_ID` is the key the pods read, and the one the chart resolves first. A Secret last written by a chart older than the one that added it has only the legacy `CLIENT_ID`; read that key instead if the command above prints nothing -- the next `helm upgrade` writes both.)
+(`TRACEBLOC_CLIENT_ID` is the key the pods read, and the one the chart resolves first. A Secret last written by a chart older than the one that added it has only the legacy `CLIENT_ID`; read that key instead if the command above prints nothing -- the next `helm upgrade` moves the value to `TRACEBLOC_CLIENT_ID`.)
 
 Empty output means tier 2 has nothing to resolve from, and dropping the values would make the next upgrade **fail** rather than degrade. Create them first, using the labelled/annotated form in `values.yaml` so Helm adopts the Secret instead of colliding with it.
 

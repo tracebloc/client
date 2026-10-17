@@ -239,16 +239,23 @@ _assess_cli_present() {
 # _assess_cli_outdated — is the installed CLI below the floor the installer will
 # actively repair? (client#707)
 #
-# The floor is 0.10.0 because that is the release where the CLI gained its own
-# update nudge. At or above it a user can keep themselves current; below it
-# NOTHING on the machine can tell them they are behind — the cluster auto-
-# upgrades hourly around a host binary that never moves. A field machine sat on
-# v0.5.1 for five weeks that way.
+# The floor is 0.10.63, the platform's own CLI floor (backend#4959). It was
+# 0.10.0, the release where the CLI gained its own update nudge: at or above it
+# a user can keep themselves current; below it NOTHING on the machine can tell
+# them they are behind — the cluster auto-upgrades hourly around a host binary
+# that never moves. A field machine sat on v0.5.1 for five weeks that way.
+#
+# It moved to 0.10.63 with the chart release that stops writing the legacy
+# credential Secret keys: a CLI below 0.10.63 reads the client id only from
+# CLIENT_ID, so it can no longer find the client this chart installs, and the
+# platform refuses it (426 upgrade_required). This installer drives the CLI to
+# provision the client, so it has to repair it to that floor BEFORE it does.
+# Raise it again only with the platform's floor (release-train releases/floors.yml).
 #
 # It is a FLOOR, not a "must be latest": the installer repairs users up to the
-# point where the CLI maintains itself, and then stops caring. That keeps this
-# free (no network call on every run) and means the constant never needs raising.
-: "${TB_CLI_MIN_VERSION:=0.10.0}"
+# point where the CLI works with this chart and maintains itself, and then stops
+# caring. That keeps this free (no network call on every run).
+: "${TB_CLI_MIN_VERSION:=0.10.63}"
 
 _assess_cli_outdated() {
   local bin ver
@@ -268,8 +275,8 @@ _assess_cli_outdated() {
 
 # _assess_cli_behind_latest — for an EXPLICIT `tracebloc upgrade` only, is the
 # installed CLI behind the LATEST release (as opposed to below the mandatory-
-# reinstall floor)? This is the gap backend#2253 closed: the floor above stops at
-# 0.10.0, but the CLI's own update nudge fires against latest, so a CLI at e.g.
+# reinstall floor)? This is the gap backend#2253 closed: the floor above stopped
+# at 0.10.0 then, but the CLI's own update nudge fires against latest, so a CLI at e.g.
 # 0.10.5 with latest 0.10.8 was nagged on every command while `tracebloc upgrade`
 # — which re-runs this installer — found the machine "healthy" and changed
 # nothing. The nag named a command that could not carry it out.

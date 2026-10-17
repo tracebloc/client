@@ -1327,10 +1327,10 @@ _extract_yaml_value() {
 # _client_id_from_secret_rows ROWS — the base64 client id out of
 # `NAME TRACEBLOC_CLIENT_ID CLIENT_ID` rows (the custom-columns read below), or
 # nothing. PURE, so the guard and the tests can drive it without a cluster.
-# CANONICAL KEY FIRST: the chart writes the id under both keys, same value
-# (settings naming, the Secret-key expand); a Secret written by an older chart
-# has only CLIENT_ID, so the legacy column is the fallback when the canonical
-# prints `<none>`. Exactly ONE row may carry an id: none is a release whose
+# CANONICAL KEY FIRST: the chart writes the id under TRACEBLOC_CLIENT_ID (both
+# keys from 1.9.180, the canonical only since backend#4959 step a); a Secret
+# written by an older chart has only CLIENT_ID, so the legacy column is the
+# fallback when the canonical prints `<none>`. Exactly ONE row may carry an id: none is a release whose
 # Secret is not there, and two cannot be told apart, so either is "couldn't read
 # it" -- never a guess. A Secret without either key (the registry pull Secret)
 # prints `<none>` and is not a candidate.

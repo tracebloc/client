@@ -682,7 +682,7 @@
     },
     "dropEdgeuserByEnv": {
       "type": "object",
-      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for dev and stg (backend#5427): narrowEdgeuser has been baked-on across both for weeks, so edgeuser is already USAGE-only and unused and DROP is the clean finish; dev was verified retired live (Part C telemetry) before stg flipped. prod stays FALSE until stg has soaked dropped and the telemetry confirms stg is edgeuser-free. The baked default declines on any edge whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
+      "description": "Per-environment default for dropEdgeuser, keyed on the RESOLVED CLIENT_ENV (documented aliases normalize first). TRUE for every environment — dev, stg, prod (backend#5427): narrowEdgeuser has been baked-on across all three for weeks, so edgeuser is already USAGE-only and unused and DROP is the clean finish; dev and stg were verified retired live (Part C telemetry) before prod, the final flip. The baked default declines on any edge whose posture is incomplete, and — because drop is gated on narrow — an explicit flip where narrowEdgeuser (or any of its predecessors) is off fails the render; see dropEdgeuser.",
       "additionalProperties": {
         "type": "boolean"
       }

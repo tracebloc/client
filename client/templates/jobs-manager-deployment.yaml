@@ -539,8 +539,8 @@ spec:
              TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
              the legacy spellings (remove_by 2026-12-31). Both env names read
              the CANONICAL Secret key (the FLIP, backend#4959): secrets.yaml
-             writes it on every render, beside the legacy key it still writes
-             for older readers. */}}
+             writes it on every render, and since backend#4959 step a it is
+             the only key it writes. */}}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
@@ -1291,8 +1291,8 @@ spec:
              TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
              the legacy spellings (remove_by 2026-12-31). Both env names read
              the CANONICAL Secret key (the FLIP, backend#4959): secrets.yaml
-             writes it on every render, beside the legacy key it still writes
-             for older readers. */}}
+             writes it on every render, and since backend#4959 step a it is
+             the only key it writes. */}}
         - name: CLIENT_ID
           valueFrom:
             secretKeyRef:
