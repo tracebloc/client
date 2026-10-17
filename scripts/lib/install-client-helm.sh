@@ -2612,18 +2612,29 @@ _reconcile_adopted_client() {
   _ensure_helm_runnable
 
   # backend#2146: the arch gate belongs on the adopt path too, BEFORE the engine is
-  # deployed. Reconcile reuses the release's stored values (--reuse-values), so the
-  # engine that will run is whatever the release already pins — read THAT (never a
-  # fresh resolution, which could pick 8.4 on an arm64 host while Helm keeps the
-  # release's amd64-only 5.7) and ask the same question the normal install path
-  # asks. Without it, an arm64 host with no amd64 emulation adopting a 5.7 release
-  # reported success and then CrashLooped: preflight had classified the machine as
-  # fresh-8.4, so its early gate waved it through. existing-release is the accurate
-  # reason (a live Helm release, not host files — see _assert_engine_runs_on_this_arch).
-  if _release_pins_mysql_84 "$_rel" "$_ns"; then
+  # deployed. Reconcile keeps the release's engine — read THAT (never a fresh
+  # resolution, which could pick 8.4 for a release whose data is 5.7) and ask the
+  # same question the normal install path asks. Without it, an arm64 host with no
+  # amd64 emulation adopting a 5.7 release reported success and then CrashLooped:
+  # preflight had classified the machine as fresh-8.4, so its early gate waved it
+  # through. existing-release is the accurate reason (a live Helm release, not host
+  # files — see _assert_engine_runs_on_this_arch).
+  #
+  # What the release RUNS (_release_mysql_engine); when that cannot be read, an
+  # 8.x-format host datadir (_host_mysql_datadir_format) or its stored values'
+  # explicit 8.4 opt-in (_release_pins_mysql_84); else 5.7, the data-safety
+  # default (RFC-0150's exit, backend#4366). A release running an image that names
+  # neither engine (a custom pin) keeps its own values: no 5.7 pin below, and 5.7
+  # for the arch gate, which cannot prove it runs natively.
+  local _live _fmt _pin57=0
+  _live="$(_release_mysql_engine "$_ns")"
+  _fmt="$(_host_mysql_datadir_format)"
+  if [[ "$_live" == "8.4" ]] \
+     || { [[ -z "$_live" ]] && { [[ "$_fmt" == "8.x" ]] || _release_pins_mysql_84 "$_rel" "$_ns"; }; }; then
     TB_MYSQL_ENGINE_RESOLVED="8.4"
   else
     TB_MYSQL_ENGINE_RESOLVED="5.7"
+    [[ "$_live" == "unknown" ]] || _pin57=1
   fi
   TB_MYSQL_ENGINE_REASON="existing-release"
   _assert_engine_runs_on_this_arch
@@ -2672,7 +2683,8 @@ _reconcile_adopted_client() {
   # what the release STORED, which for a 5.7 release is usually no image key at
   # all. Without this pin the reconcile would render 8.4 over its 5.7 datadir,
   # mysql-format-guard would refuse, and --atomic would roll the reconcile back.
-  if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" != "8.4" ]]; then
+  # A custom pin (_live unknown) is left to its own stored values.
+  if [[ "$_pin57" == 1 ]]; then
     _args+=(--set "images.mysqlClient.tag=${TB_MYSQL_57_PIN_TAG}"
             --set "images.mysqlClient.digest=${TB_MYSQL_57_PIN_DIGEST}")
   fi
@@ -2934,17 +2946,90 @@ TB_MYSQL_57_PIN_DIGEST="sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287
 # file (_values_mysql_engine). Held to client/values.yaml by the same bats case.
 TB_MYSQL_84_DEFAULT_DIGEST="sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d"
 
-# Content test for a host mysql datadir, FAIL-CLOSED on unlistable dirs
-# (mirrors _leftover_data_dirs, and the same Bugbot ownership case): a
-# uid-999/root-owned dir the host user can't read/enter cannot be proven
-# empty — treat it as content, so `auto` keeps 5.7 rather than opting a
-# reused datadir into 8.4 that the format guard would then refuse to boot.
-# Symlinks are never trusted as data (same stance as the leftover guard).
-_mysql_dir_has_content() {
+# The engine a mysql-client image reference runs: 5.7, 8.4, 8.0 or unknown. The
+# same classification tracebloc.mysqlEngineMajor makes of the values that
+# rendered it, applied to the rendered reference: a digest names its engine only
+# when it is one of the two pins above (anything else is unknown); a bare tag
+# reads prod/5.7* as 5.7, 8.4* as 8.4 and 8.0* as 8.0. A reference with no tag at
+# all runs `latest`, which names no engine.
+_mysql_image_engine() {
+  local ref="$1" digest="" last tag=""
+  case "$ref" in
+    *@sha256:*) digest="sha256:${ref##*@sha256:}"; ref="${ref%%@*}" ;;
+  esac
+  if [[ -n "$digest" ]]; then
+    case "$digest" in
+      "$TB_MYSQL_84_DEFAULT_DIGEST") echo 8.4 ;;
+      "$TB_MYSQL_57_PIN_DIGEST")     echo 5.7 ;;
+      *)                             echo unknown ;;
+    esac
+    return 0
+  fi
+  last="${ref##*/}"
+  case "$last" in *:*) tag="${last##*:}" ;; esac
+  case "$tag" in
+    prod|5.7*) echo 5.7 ;;
+    8.4*)      echo 8.4 ;;
+    8.0*)      echo 8.0 ;;
+    *)         echo unknown ;;
+  esac
+}
+
+# The engine the release in namespace <ns> RUNS, read from the image of its live
+# mysql Deployment (the chart names it mysql-client). Echoes
+#   5.7 | 8.4  the image names that engine
+#   unknown    the image was read and names neither (a custom pin, the 8.0
+#              transit hop)
+#   (nothing)  it could not be read: no namespace, no Deployment, an API that
+#              did not answer
+# What RUNS, not what the release's values say: since chart 1.10.0 a release that
+# carries no image keys runs whatever its chart version defaults to, 5.7 before
+# 1.10.0 and 8.4 from it, so the values alone cannot tell (RFC-0150's exit).
+# Bounded (--request-timeout), and never logs: _mysql_engine_decision calls it.
+_release_mysql_engine() {
+  local ns="$1" img eng
+  [[ -n "$ns" ]] || return 0
+  img="$(kubectl get deployment mysql-client -n "$ns" --request-timeout=10s \
+    -o 'jsonpath={.spec.template.spec.containers[?(@.name=="mysql-client")].image}' 2>/dev/null)" || return 0
+  [[ -n "$img" ]] || return 0
+  eng="$(_mysql_image_engine "$img")"
+  case "$eng" in 5.7|8.4) echo "$eng" ;; *) echo unknown ;; esac
+  return 0
+}
+
+# The format of a host mysql datadir, by the marker the chart's format guard
+# reads: `mysql.ibd` (the 8.0+ data dictionary) present = an 8.x datadir, which
+# 8.4 opens; real content without it = 5.7-format, which only 5.7 opens. Echoes
+#   (nothing)  absent, a symlink (never trusted as data, the leftover guard's
+#              stance), or empty: the dirs _ensure_tracebloc_dirs creates
+#   8.x        mysql.ibd is there
+#   5.7        content, and no mysql.ibd
+#   unknown    the host user cannot list it (a uid-999/root-owned dir): it
+#              cannot be proven empty or read, so it counts as content whose
+#              format is unknown. FAIL CLOSED (mirrors _leftover_data_dirs and
+#              the same Bugbot ownership case), never an 8.4 opt-in by default.
+_mysql_datadir_format() {
   local d="$1"
-  [[ -d "$d" && ! -L "$d" ]] || return 1   # absent -> no content
-  [[ -r "$d" && -x "$d" ]] || return 0     # unlistable -> fail closed
-  [[ -n "$(ls -A "$d" 2>/dev/null)" ]]
+  [[ -d "$d" && ! -L "$d" ]] || return 0
+  [[ -r "$d" && -x "$d" ]] || { echo unknown; return 0; }
+  [[ -n "$(ls -A "$d" 2>/dev/null)" ]] || return 0
+  if [[ -e "$d/mysql.ibd" ]]; then echo 8.x; else echo 5.7; fi
+}
+
+# The format of this install's host datadirs, both layouts (legacy
+# HOST_DATA_DIR/mysql and per-release HOST_DATA_DIR/<namespace>/mysql) in one
+# word, the most conservative first: unknown, then 5.7, then 8.x; nothing when
+# neither holds data. 5.7 beats 8.x because any 5.7 data here may be what the
+# release mounts, and only 5.7 opens it.
+_host_mysql_datadir_format() {
+  local legacy perrel
+  legacy="$(_mysql_datadir_format "${HOST_DATA_DIR:-/nonexistent}/mysql")"
+  perrel="$(_mysql_datadir_format "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql")"
+  case " $legacy $perrel " in
+    *" unknown "*) echo unknown ;;
+    *" 5.7 "*)     echo 5.7 ;;
+    *" 8.x "*)     echo 8.x ;;
+  esac
 }
 
 # The generated values file install_client_helm reads (for the sticky 8.4
@@ -3226,9 +3311,13 @@ _hostpath_paths_block() {
 # carries the verdict:
 #   5.7|8.4 explicit      an explicit TB_MYSQL_ENGINE=<value>
 #   invalid <value>        TB_MYSQL_ENGINE is not auto|5.7|8.4
-#   8.4 sticky             this machine already opted into 8.4
-#   5.7 existing-release   a live Helm release (helm list), data format unknown
-#   5.7 existing-datadir   real mysql datadir content on this host (non-empty)
+#   8.4 sticky             this machine already opted into 8.4 (its values.yaml)
+#   8.4 existing-release   this machine's live release runs 8.4
+#   8.4 existing-datadir   this host's mysql datadir is 8.x-format (mysql.ibd)
+#   5.7 existing-datadir   this host holds mysql data that is 5.7-format, or that
+#                          cannot be read (fail closed)
+#   5.7 existing-release   this machine's live release runs 5.7, or runs an engine
+#                          that cannot be read, and no host datadir says more
 #   8.4 fresh              fresh install, on every arch — native multi-arch engine
 _mysql_engine_decision() {
   local requested="${TB_MYSQL_ENGINE:-auto}"
@@ -3244,34 +3333,49 @@ _mysql_engine_decision() {
   if [[ -f "${values_file:-}" ]] && _values_pin_mysql_84 < "${values_file}"; then
     echo "8.4 sticky"; return 0
   fi
-  # Never auto-flip existing state: a found release or real datadir content
-  # means a 5.7-format datadir may exist, and 8.4 refuses to open it. Two
-  # DISTINCT triggers, ordered MOST-SPECIFIC FIRST because their remedy differs:
+  # Existing state keeps the engine it RUNS (RFC-0150's exit, backend#4366):
+  # since chart 1.10.0 the chart's default is 8.4, so a 5.7 client must be pinned
+  # to 5.7 explicitly and an 8.4 client must not be. Read from the state itself,
+  # most authoritative first:
   #
-  #   datadir content — a non-empty mysql data directory on this host (the probe
-  #     tests for content, NOT format). Checked first: when files exist the reason
-  #     is 'existing-datadir' whether or not a release is also present, because
-  #     there IS data here and a clean start means clearing the data dir (a
-  #     release-only "uninstall" remedy would leave those files to re-pin 5.7 on
-  #     the next run). An UNLISTABLE dir counts as content (fail closed; see the
-  #     helper).
+  #   the live release: the image of its mysql Deployment
+  #     (_release_mysql_engine). It is what runs on the release's datadir, and the
+  #     format guard admitted that pairing at its last start. Its values cannot
+  #     say: a release with no image keys runs its chart version's default.
   #
-  #   existing_id — a live Helm release from detect_installed_client (helm list
-  #     -A + clientId) with NO host datadir files, e.g. TB_STORAGE_MODE=node-local
-  #     where both probes are empty. Reason 'existing-release': 5.7 stays the safe
-  #     default, but the gate must not claim host 5.7 data — and "uninstall the
-  #     release" is a COMPLETE fresh-start remedy here precisely because no files
-  #     remain to re-trigger the gate.
+  #   the host datadir: its format marker (_host_mysql_datadir_format), for a
+  #     host with data and no readable release (a reinstall over kept data, an
+  #     API that would not answer). 8.x-format opens on 8.4; 5.7-format only on
+  #     5.7; an UNLISTABLE dir counts as content of unknown format and keeps 5.7
+  #     (fail closed; see the helper).
+  #
+  # Reason 'existing-datadir' whenever there IS 5.7 (or unreadable) data on this
+  # host, release or not: a clean start then means clearing the data dir, and a
+  # release-only "uninstall" remedy would leave those files to re-pin 5.7 on the
+  # next run (Bugbot, client#752). 'existing-release' for a release with no host
+  # datadir files (TB_STORAGE_MODE=node-local, where both probes are empty): 5.7
+  # when it runs 5.7 or cannot be read, because 8.4 cannot open a 5.7-format
+  # datadir and an existing one is never flipped automatically; "uninstall the
+  # release" is then a COMPLETE fresh-start remedy, as no files remain to
+  # re-trigger the gate.
   #
   # The empty dirs _ensure_tracebloc_dirs just created don't count — only files.
-  if _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/mysql" \
-    || _mysql_dir_has_content "${HOST_DATA_DIR:-/nonexistent}/${TB_NAMESPACE:-}/mysql"; then
-    echo "5.7 existing-datadir"
-    return 0
+  local fmt live=""
+  fmt="$(_host_mysql_datadir_format)"
+  if [[ -n "${existing_id:-}" ]]; then
+    live="$(_release_mysql_engine "${existing_ns:-${TB_NAMESPACE:-}}")"
+  fi
+  if [[ "$live" == "8.4" ]]; then
+    echo "8.4 existing-release"; return 0
+  fi
+  if [[ "$live" != "5.7" && "$fmt" == "8.x" ]]; then
+    echo "8.4 existing-datadir"; return 0
+  fi
+  if [[ -n "$fmt" ]]; then
+    echo "5.7 existing-datadir"; return 0
   fi
   if [[ -n "${existing_id:-}" ]]; then
-    echo "5.7 existing-release"
-    return 0
+    echo "5.7 existing-release"; return 0
   fi
   # Fresh: nothing here is 5.7-format, so the multi-arch 8.4 engine, on every
   # arch. A fresh amd64 host used to answer "5.7 amd64" and keep the chart's 5.7
@@ -3382,10 +3486,14 @@ _resolve_mysql_engine() {
   # WHY, not just what: the arch gate below needs to name the real cause, and
   # "existing datadir" vs "you asked for 5.7" are different fixes.
   TB_MYSQL_ENGINE_REASON="$reason"
-  case "$reason" in
-    explicit) log "MySQL engine: ${engine} (explicit TB_MYSQL_ENGINE)" ;;
-    sticky)   log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)" ;;
-    fresh)    log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine)" ;;
+  case "${engine} ${reason}" in
+    *" explicit")           log "MySQL engine: ${engine} (explicit TB_MYSQL_ENGINE)" ;;
+    "8.4 sticky")           log "MySQL engine: 8.4 (kept from this machine's existing values.yaml)" ;;
+    "8.4 fresh")            log "MySQL engine: 8.4 (fresh install on ${ARCH:-$(uname -m)} — native multi-arch engine)" ;;
+    "8.4 existing-release") log "MySQL engine: 8.4 (this machine's tracebloc release runs it)" ;;
+    "8.4 existing-datadir") log "MySQL engine: 8.4 (this host's MySQL data is 8.x-format)" ;;
+    "5.7 existing-release") log "MySQL engine: 5.7, pinned explicitly (this machine's tracebloc release runs 5.7, or its engine could not be read; the chart's default, 8.4, cannot open 5.7 data)" ;;
+    "5.7 existing-datadir") log "MySQL engine: 5.7, pinned explicitly (this host holds MySQL data that is 5.7-format or could not be read; the chart's default, 8.4, cannot open 5.7 data)" ;;
   esac
 }
 

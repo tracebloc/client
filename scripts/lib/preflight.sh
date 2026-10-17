@@ -740,8 +740,8 @@ _pf_backend_host() {
 #
 # Fails CLOSED: if the engine rule isn't loaded we report 5.7, i.e. "no native
 # path", and the refusal below stands. That is the honest answer rather than a
-# guess — the 8.4 opt-in lives in the very lib that is missing, so a host without
-# it cannot get the native engine either.
+# guess — without the rule nothing here can tell whether this host holds 5.7
+# data, and the chart's 8.4 default cannot open that.
 _pf_mysql_engine_decision() {
   if ! declare -F _mysql_engine_decision >/dev/null 2>&1; then
     echo "5.7 no-engine-rule"; return 0
@@ -750,8 +750,9 @@ _pf_mysql_engine_decision() {
   # AS-IS and resolves the engine straight from it (_devmode_engine_decision), NOT
   # via the auto rule below. Preflight MUST ask that same question, or the auto
   # rule's "8.4 fresh" green-lights a fresh arm64 host whose values file actually
-  # pins the amd64-only 5.7 image — and the refusal then lands
-  # only at step e, after the cluster is already provisioned (backend#2854). The
+  # pins the amd64-only 5.7 image — and the refusal then lands only at step e,
+  # after the cluster is already provisioned (backend#2854; until chart 1.10.0 a
+  # file SILENT on the engine did the same, the chart's default being 5.7). The
   # engine rule and this helper live in the same lib, so the guard above proves both
   # are loaded.
   if [[ -n "${TRACEBLOC_VALUES_FILE:-}" ]]; then
@@ -808,6 +809,20 @@ _pf_arch() {
     warn "Architecture: ${ARCH} — proceeding (TRACEBLOC_ALLOW_ARM64 set); if this install keeps the amd64-only MySQL 5.7 engine it may crash without emulation."
     return 0
   fi
+  # Ask the engine FIRST. Since chart 1.10.0 the default engine is the multi-arch
+  # 8.4 (RFC-0150's exit), so emulation — Rosetta on a Mac, binfmt on Linux —
+  # matters only to a client kept on 5.7 by its existing data or an explicit
+  # request. Every branch below is about that 5.7 case; an 8.4 host needs none
+  # of them, and naming Rosetta or binfmt to it would send it after a setting it
+  # does not need (backend#2047's lesson, for the emulation that IS available).
+  local _decision _engine _reason
+  _decision="$(_pf_mysql_engine_decision)"
+  _engine="${_decision%% *}"; _reason="${_decision#* }"
+  if [[ "$_engine" == "8.4" ]]; then
+    _pf_note "Architecture: ${ARCH} — running natively on the multi-arch MySQL 8.4 engine (no amd64 emulation needed)."
+    return 0
+  fi
+
   if _pf_on_mac_node; then
     # The macOS node runs amd64 images under Rosetta, which the node gets when this Mac
     # has it installed (mac-container.sh, --rosetta); there is no Docker setting to name.
@@ -825,17 +840,8 @@ _pf_arch() {
     _pf_note "Architecture: ${ARCH} — amd64 emulation (QEMU binfmt) available; client images run emulated (slower)."
     return 0
   fi
-  # No emulation. Before refusing, ask the engine rule whether emulation is even
-  # needed here: on a fresh install this host gets the multi-arch 8.4 engine and
-  # runs NATIVELY, which is why the old unconditional refusal was sending people
-  # to provision amd64 VMs they didn't need (backend#2047).
-  local _decision _engine _reason
-  _decision="$(_pf_mysql_engine_decision)"
-  _engine="${_decision%% *}"; _reason="${_decision#* }"
-  if [[ "$_engine" == "8.4" ]]; then
-    _pf_note "Architecture: ${ARCH} — running natively on the multi-arch MySQL 8.4 engine (no amd64 emulation needed)."
-    return 0
-  fi
+  # No emulation, and the engine asked above is not 8.4: this host would run the
+  # amd64-only 5.7 image, which it can't.
   PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
   # An unusable TB_MYSQL_ENGINE arrives as engine="invalid", reason=<the value> —
   # so it is checked on the ENGINE field, not inside the reason case below.

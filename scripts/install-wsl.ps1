@@ -631,10 +631,10 @@ function Assert-WslNetworkingNat {
 # signed; the version is that manifest's tag. scripts/wsl-rootfs-pin.sh bump moves
 # them, through facts.env, never here by hand.
 $WSL_ROOTFS_IMAGE = "ghcr.io/tracebloc/wsl-distro"
-$WSL_ROOTFS_SHA256 = "d064df6c5a12fc51e7403a3373b699b96ea79a6dc1edd5f6afeae0b020e91484"
-$WSL_ROOTFS_BYTES = "126331555"
-$WSL_ROOTFS_DIGEST = "sha256:1dc346742be2f798e99130c2bd85ef57a466e03b8561a3a204c38533c4d0826a"
-$WSL_ROOTFS_VERSION = "ubuntu-24.04.5-20261001-v1.36.5-k3s1"
+$WSL_ROOTFS_SHA256 = "0846a8bcb469c64c2821db614d4440508d6561b178371801c10d3b2ee3eb1f8d"
+$WSL_ROOTFS_BYTES = "126330208"
+$WSL_ROOTFS_DIGEST = "sha256:92bc181882bfb6492282ab9135f4ecbf959f7a89d0cd0332c14b166ba8588728"
+$WSL_ROOTFS_VERSION = "ubuntu-24.04.5-20261017-v1.36.5-k3s1"
 
 # The repository an image on ghcr.io names, or $null. Only ghcr.io: the anonymous
 # token below is ghcr.io's. No tag or digest on the name (the digest is pinned on

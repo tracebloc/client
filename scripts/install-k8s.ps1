@@ -8992,6 +8992,207 @@ function Protect-TraceblocValuesFile {
   }
 }
 
+# -- MySQL engine: a client on 5.7 data stays on 5.7 (RFC-0150's exit) --
+# From chart 1.10.0 the chart's default engine is MySQL 8.4, which cannot open a
+# 5.7-format datadir: the chart's mysql-format-guard refuses that pairing before
+# mysqld starts, and touches no data. So an EXISTING client still on 5.7 is pinned
+# to 5.7 explicitly, on both paths -- the values file, and the adopted reconcile,
+# which resets to the new chart's defaults. A fresh install, or a client already
+# on 8.4, writes the explicit 8.4 block, as the bash twin does, so no later chart
+# default can move its datadir. Peer of the bash twin's _mysql_engine_decision,
+# its values heredoc and the adopt arm of its reconcile
+# (scripts/lib/install-client-helm.sh); the pins below are that file's
+# constants, which install-k8s.Tests.ps1 holds equal. No TB_MYSQL_ENGINE override
+# and no arch gate on this side: this installer never had either.
+$TB_MYSQL_84_DEFAULT_DIGEST = "sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d"  # = TB_MYSQL_84_DEFAULT_DIGEST = the chart's images.mysqlClient.digest
+$TB_MYSQL_57_PIN_DIGEST     = "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"  # = TB_MYSQL_57_PIN_DIGEST
+$TB_MYSQL_57_PIN_TAG        = "prod"  # = TB_MYSQL_57_PIN_TAG
+
+# The engine a mysql-client image reference runs: 5.7, 8.4, 8.0 or unknown. A
+# digest names its engine only when it is one of the pins above; a bare tag reads
+# prod/5.7* as 5.7, 8.4* as 8.4, 8.0* as 8.0. Peer of _mysql_image_engine, and of
+# the classification the chart's tracebloc.mysqlEngineMajor makes.
+function Get-TbMysqlImageEngine {
+  param([string]$Ref)
+  $at = $Ref.IndexOf("@sha256:")
+  if ($at -ge 0) {
+    $digest = $Ref.Substring($at + 1)
+    if ($digest -ceq $TB_MYSQL_84_DEFAULT_DIGEST) { return "8.4" }
+    if ($digest -ceq $TB_MYSQL_57_PIN_DIGEST) { return "5.7" }
+    return "unknown"
+  }
+  $last = $Ref.Substring($Ref.LastIndexOf('/') + 1)
+  $colon = $last.LastIndexOf(':')
+  $tag = if ($colon -ge 0) { $last.Substring($colon + 1) } else { "" }
+  if ($tag -ceq "prod" -or $tag.StartsWith("5.7", [StringComparison]::Ordinal)) { return "5.7" }
+  if ($tag.StartsWith("8.4", [StringComparison]::Ordinal)) { return "8.4" }
+  if ($tag.StartsWith("8.0", [StringComparison]::Ordinal)) { return "8.0" }
+  return "unknown"
+}
+
+# The engine the release in $Namespace RUNS, read from its live mysql-client
+# Deployment: 5.7 | 8.4 | unknown (an image that names neither) | "" (could not be
+# read). What runs, not what its values say: a release with no image keys runs
+# its chart version's default, 5.7 before 1.10.0 and 8.4 from it. custom-columns,
+# not jsonpath, for the reason Get-ClientWorkloadQuery gives. Peer of
+# _release_mysql_engine. Bounded by --request-timeout.
+function Get-TbReleaseMysqlEngine {
+  param([string]$Namespace)
+  if (-not $Namespace) { return "" }
+  # kubectl's stdout lines as they come, joined: never through Out-String, which
+  # formats at the host's width, and a 5.7 pin's repository@sha256 ref is over
+  # 100 characters (more behind a mirror). A ref split there would read as
+  # "unknown", and the reconcile would pin nothing over 5.7 data.
+  $lines = @(kubectl get deployment mysql-client -n $Namespace --request-timeout=10s `
+            -o "custom-columns=NAMES:.spec.template.spec.containers[*].name,IMAGES:.spec.template.spec.containers[*].image" `
+            --no-headers 2>$null)
+  if ($LASTEXITCODE -ne 0) { return "" }
+  $row = (($lines | ForEach-Object { "$_" }) -join " ").Trim()
+  if (-not $row) { return "" }
+  $f = @($row -split '\s+')
+  if ($f.Count -lt 2) { return "" }
+  $names = @($f[0] -split ','); $images = @($f[1] -split ',')
+  $i = [array]::IndexOf($names, "mysql-client")
+  if ($i -lt 0 -or $i -ge $images.Count -or -not $images[$i]) { return "" }
+  $e = Get-TbMysqlImageEngine $images[$i]
+  if ($e -eq "5.7" -or $e -eq "8.4") { return $e }
+  return "unknown"
+}
+
+# The format of a host mysql datadir, by the marker the format guard reads:
+# "" (absent, a reparse point, or empty), "8.x" (mysql.ibd, which 8.4 opens),
+# "5.7" (content without it), "unknown" (cannot be listed: fail closed, as
+# Get-LeftoverDataDirs does). Peer of _mysql_datadir_format.
+function Get-TbMysqlDatadirFormat {
+  param([string]$Dir)
+  if (-not $Dir -or -not (Test-Path -LiteralPath $Dir -PathType Container)) { return "" }
+  $item = Get-Item -LiteralPath $Dir -Force -ErrorAction SilentlyContinue
+  if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return "" }
+  # The whole listing, never `| Select-Object -First 1` inside the try: stopping
+  # the enumerator early can surface in the catch on Windows PowerShell 5.1, and
+  # this catch reads as "cannot list" (5.7) for a full 8.x datadir.
+  try {
+    $entries = @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop)
+  } catch { return "unknown" }
+  if ($entries.Count -eq 0) { return "" }
+  if (Test-Path -LiteralPath (Join-Path $Dir "mysql.ibd")) { return "8.x" }
+  return "5.7"
+}
+
+# This install's host datadirs, both layouts (HOST_DATA_DIR\mysql and
+# HOST_DATA_DIR\<release>\mysql), in one word, the most conservative first:
+# unknown, then 5.7, then 8.x. Peer of _host_mysql_datadir_format.
+function Get-TbHostMysqlDatadirFormat {
+  param([string]$Release)
+  $fmts = @(Get-TbMysqlDatadirFormat (Join-Path $HOST_DATA_DIR "mysql"))
+  if ($Release) { $fmts += Get-TbMysqlDatadirFormat (Join-Path (Join-Path $HOST_DATA_DIR $Release) "mysql") }
+  foreach ($w in @("unknown", "5.7", "8.x")) { if ($fmts -contains $w) { return $w } }
+  return ""
+}
+
+# Whether this machine's values file carries the 8.4 block this installer writes
+# (Get-TbMysqlPinValuesBlock "8.4"): tag 8.4 AND an explicit empty digest. Any
+# other shape is not provably 8.4 and reads as no (fail closed). Peer of the
+# bash twin's sticky read, _values_pin_mysql_84.
+function Test-TbValuesFilePinsMysql84 {
+  param([string]$Path)
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if (-not $text) { return $false }
+  return ($text -match '(?m)^images:\r?\n  mysqlClient:\r?\n    tag: "8\.4"\r?\n    digest: ""\r?$')
+}
+
+# Whether a release's STORED values pin 8.4 (helm get values, user-supplied only):
+# tag exactly 8.4 AND a digest key that is present and empty. A digest that is
+# set, or absent, renders that digest or the chart's default, so it is not
+# provably 8.4 (fail closed). Peer of the bash twin's _release_pins_mysql_84.
+# helm has no request timeout, so the read sits behind the bounded API probe, as
+# in Test-CredentialRejected.
+function Test-TbReleasePinsMysql84 {
+  param([string]$Release, [string]$Namespace)
+  if (-not $Release -or -not $Namespace) { return $false }
+  if (-not (Test-ApiReachable)) { return $false }
+  # helm's stdout lines as they come, never through Out-String, for the reason
+  # Get-TbReleaseMysqlEngine gives.
+  $lines = @(helm get values $Release -n $Namespace -o json 2>$null)
+  if ($LASTEXITCODE -ne 0) { return $false }
+  $valsJson = (($lines | ForEach-Object { "$_" }) -join "`n").Trim()
+  if (-not $valsJson) { return $false }
+  try { $vals = $valsJson | ConvertFrom-Json } catch { return $false }
+  $m = $null
+  if ($vals -and $vals.images) { $m = $vals.images.mysqlClient }
+  if (-not $m) { return $false }
+  $names = @($m.PSObject.Properties | ForEach-Object { $_.Name })
+  if ($names -notcontains "tag" -or $names -notcontains "digest") { return $false }
+  return ("$($m.tag)" -ceq "8.4" -and "$($m.digest)" -ceq "")
+}
+
+# The engine an install keeps, as "<engine> <reason>": this machine's values file
+# when it holds the 8.4 block (sticky), then what the existing release RUNS, then
+# the host datadir's format, else 8.4 for a fresh install. 5.7 when an existing
+# release's engine cannot be read and nothing above says more, because 8.4 cannot
+# open 5.7 data and an existing client is never flipped automatically. Same rule,
+# same reasons, as the bash twin's _mysql_engine_decision.
+function Resolve-TbMysqlEngine {
+  param([string]$ExistingId, [string]$Namespace, [string]$Release, [string]$ValuesFile)
+  # Sticky first, as the bash twin: a machine whose values file holds the 8.4
+  # block stays on 8.4 even when the live read cannot answer.
+  if (Test-TbValuesFilePinsMysql84 -Path $ValuesFile) { return "8.4 sticky" }
+  $fmt = Get-TbHostMysqlDatadirFormat -Release $Release
+  $live = ""
+  if ($ExistingId) { $live = Get-TbReleaseMysqlEngine -Namespace $Namespace }
+  if ($live -eq "8.4") { return "8.4 existing-release" }
+  if ($live -ne "5.7" -and $fmt -eq "8.x") { return "8.4 existing-datadir" }
+  if ($fmt) { return "5.7 existing-datadir" }
+  if ($ExistingId) { return "5.7 existing-release" }
+  return "8.4 fresh"
+}
+
+# The values block that states the engine, the same two keys the bash twin
+# writes: for 5.7 the frozen 5.7-lineage pin (on a mirror, where the digest does
+# not render, the tag is the same 5.7 image); for 8.4 the explicit tag with an
+# empty digest, the shape the RFC-0150 migration also writes.
+function Get-TbMysqlPinValuesBlock {
+  param([string]$Engine)
+  if ($Engine -eq "5.7") {
+    return @"
+
+# MySQL engine 5.7, pinned explicitly: this client's data is 5.7-format, and
+# the chart's default engine is 8.4, which cannot open it. Move it to 8.4 with
+# the tracebloc-run migration, never by editing this pin.
+images:
+  mysqlClient:
+    tag: "$TB_MYSQL_57_PIN_TAG"
+    digest: "$TB_MYSQL_57_PIN_DIGEST"
+"@
+  }
+  return @"
+
+# MySQL engine: the multi-arch 8.4 engine, the chart's default since 1.10.0.
+# Stated explicitly so no later chart default can move this datadir.
+images:
+  mysqlClient:
+    tag: "8.4"
+    digest: ""
+"@
+}
+
+# The same pin as --set-string args, for the adopted reconcile: 5.7 when the
+# release runs 5.7, or its engine cannot be read and neither an 8.x datadir nor
+# the release's stored 8.4 opt-in is here; none when it runs 8.4 or an image
+# naming neither (a custom pin keeps its values).
+# The caller wraps this in @(), so an empty answer splats as nothing.
+function Get-TbMysqlReconcilePin {
+  param([string]$Namespace, [string]$Release)
+  $live = Get-TbReleaseMysqlEngine -Namespace $Namespace
+  if ($live -eq "8.4" -or $live -eq "unknown") { return @() }
+  if (-not $live -and (Get-TbHostMysqlDatadirFormat -Release $Release) -eq "8.x") { return @() }
+  if (-not $live -and (Test-TbReleasePinsMysql84 -Release $Release -Namespace $Namespace)) { return @() }
+  Log "MySQL engine: 5.7, pinned explicitly on the reconcile (the release runs 5.7, or its engine could not be read)"
+  return @("--set-string", "images.mysqlClient.tag=$TB_MYSQL_57_PIN_TAG",
+           "--set-string", "images.mysqlClient.digest=$TB_MYSQL_57_PIN_DIGEST")
+}
+
 function Install-ClientHelm {
   # -- Step 5/5: Install tracebloc client --
   Step 6 $script:INSTALL_STEPS.Count "Installing tracebloc client" "e"
@@ -9304,6 +9505,12 @@ function Install-ClientHelm {
     Log "Mirror credentials provided -- minting an imagePullSecret for the mirror."
   }
 
+  # The MySQL engine this client keeps (RFC-0150's exit), written explicitly
+  # either way. See Resolve-TbMysqlEngine.
+  $mysqlDecision = Resolve-TbMysqlEngine -ExistingId $existingId -Namespace $existingNs -Release $TB_NAMESPACE -ValuesFile $valuesFile
+  $mysqlEngine = ($mysqlDecision -split ' ')[0]
+  Log "MySQL engine: $mysqlDecision"
+
   # ($gpuVal / $runtimeClass were decided before the adopted/fresh split above.)
   Log "Writing values to $valuesFile"
   $envBlock = "env:`n"
@@ -9399,7 +9606,7 @@ pvc:
 pvcAccessMode: ReadWriteOnce
 
 clusterScope: true
-$imageMirrorBlock$(Get-LocalApiValuesBlock)
+$imageMirrorBlock$(Get-LocalApiValuesBlock)$(Get-TbMysqlPinValuesBlock $mysqlEngine)
 clientId: "$TB_CLIENT_ID"
 clientPassword: '$passwordEscaped'
 
@@ -9503,6 +9710,9 @@ $envBlock
     # The local API is forced the same way (backend#5208): New-K3dCluster's
     # Update-LocalApiPort has mapped the port on this run, or found it gone.
     $localApiArgs = @(Get-LocalApiReconcileArgs)
+    # The engine the release RUNS, pinned to 5.7 when that is what it runs: the
+    # reset above takes the chart's defaults, whose engine is 8.4 (RFC-0150's exit).
+    $mysqlArgs = @(Get-TbMysqlReconcilePin -Namespace $existingNs -Release $existingName)
     Log "Reconciling release '$existingName' in namespace '$existingNs' (adopted; $reuseFlag; healing clientId + GPU request + local API)..."
     Ensure-ReleaseDirs $existingName
     $helmOutput = (helm upgrade $existingName $chartRef `
@@ -9521,7 +9731,8 @@ $envBlock
       --set-string "env.TRACEBLOC_MACHINE_KIND=$(ConvertTo-HelmSetValue $machineFacts.MachineKind)" `
       --set-string "env.TRACEBLOC_CLOUD_PROVIDER=$(ConvertTo-HelmSetValue $machineFacts.CloudProvider)" `
       --set-string "env.TRACEBLOC_HOST_CPU_NAME=" `
-      @localApiArgs 2>&1) | Out-String
+      @localApiArgs `
+      @mysqlArgs 2>&1) | Out-String
     Log "Helm Output: $helmOutput"
     if ($LASTEXITCODE -ne 0) { Err "Client reconcile failed (helm exited $(Format-ExitCode $LASTEXITCODE))." $helmOutput }
     # Keep the LOCAL record in step for future default-reuse prompts: heal only
@@ -10400,7 +10611,8 @@ function Test-Preflight {
   $recCpu     = if ($v = Get-TbEnvAlias 'PF_REC_CPU')      { [int]$v }      else { 4 }
   $hardFail   = 0
 
-  # Architecture — the tracebloc client images (e.g. mysql-client) are amd64-only.
+  # Architecture -- a client kept on the MySQL 5.7 engine runs an amd64-only
+  # mysql-client image (the chart's 8.4 default is multi-arch).
   $arch = Get-WindowsArch
   if ($arch -eq "amd64") {
     Ok "Architecture: amd64"
