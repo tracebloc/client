@@ -2915,7 +2915,7 @@ _download_services_progress() {
 # migration backlog the day it came up. Anything that smells like existing
 # state stays 5.7: an existing release, or real mysql datadir content on the
 # host (legacy or per-release layout). EVERY resolution is written down as an
-# explicit image pin -- 8.4 as `tag "8.4"` + `digest ""`, 5.7 as
+# explicit image pin -- 8.4 as `tag "8.4"` + TB_MYSQL_84_DEFAULT_DIGEST, 5.7 as
 # TB_MYSQL_57_PIN_* -- so what runs never depends on which engine a chart
 # version defaults to: a 5.7 install that relied on the default would be moved
 # onto 8.4 by the first chart that changed it, and 8.4 refuses a 5.7 datadir.
@@ -2941,9 +2941,11 @@ _download_services_progress() {
 # holds both values against the chart's own literal, so they cannot drift apart.
 TB_MYSQL_57_PIN_TAG="prod"
 TB_MYSQL_57_PIN_DIGEST="sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
-# The chart's DEFAULT images.mysqlClient.digest (the 8.4 manifest index), for the
-# one reader that has to know what an absent digest renders: a dev-mode values
-# file (_values_mysql_engine). Held to client/values.yaml by the same bats case.
+# The chart's DEFAULT images.mysqlClient.digest (the 8.4 manifest index): the
+# digest the installer's 8.4 block pins (client-dev#2243), the one digest the
+# sticky read (_values_pin_mysql_84) knows is 8.4, and what an absent digest
+# renders for the dev-mode reader (_values_mysql_engine). Held to
+# client/values.yaml by the same bats case.
 TB_MYSQL_84_DEFAULT_DIGEST="sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d"
 
 # The engine a mysql-client image reference runs: 5.7, 8.4, 8.0 or unknown. The
@@ -3064,13 +3066,16 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # (tag: 8.4 — the #200 quote-stripping lesson).
 #
 # DIGEST WINS OVER TAG (Bugbot, client#833). tracebloc.image renders
-# repository@<digest> when a digest is set and ignores the tag entirely, and the
-# default pin is the amd64-only 5.7 image. So `tag: "8.4"` with a NON-empty digest
-# actually runs whatever that (opaque sha256) digest is — which we cannot decode —
-# not 8.4. Report 8.4 ONLY when tag is 8.4 AND the digest is AFFIRMATIVELY empty:
-# the documented opt-in is exactly `tag: "8.4"` + `digest: ""`, which is how our own
-# heredoc writes it. A set digest is treated as "not provably 8.4" so the 5.7 arch
-# gate runs — fail closed, refuse rather than CrashLoop.
+# repository@<digest> when a digest is set and ignores the tag entirely. So
+# `tag: "8.4"` with a NON-empty digest actually runs whatever that (opaque sha256)
+# digest is — which we cannot decode — not 8.4. Report 8.4 ONLY when tag is 8.4
+# AND the digest is one that provably runs 8.4: TB_MYSQL_84_DEFAULT_DIGEST, the
+# chart's own 8.4 pin and what our heredoc writes (client-dev#2243), or
+# AFFIRMATIVELY empty, the documented opt-in (`tag: "8.4"` + `digest: ""`) and
+# what the heredoc wrote before it pinned — so a client installed then stays 8.4
+# sticky and its re-run writes the pinned block. Any other set digest is treated
+# as "not provably 8.4" so the 5.7 arch gate runs — fail closed, refuse rather
+# than CrashLoop.
 #
 # AN ABSENT DIGEST IS NOT AN EMPTY ONE (Bugbot High, backend#2638 / client#838).
 # This reader is fed PARTIAL views: `_release_pins_mysql_84` reads `helm get values`
@@ -3084,18 +3089,18 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # (We deliberately do NOT switch the caller to `helm get values --all`: coalescing
 # can re-default an operator's explicit `digest: ""` back to the chart's 5.7 pin,
 # which would false-REFUSE a genuine 8.4 reconcile. Reading only supplied values and
-# demanding an explicit empty digest is the fail-closed direction that costs nothing
-# real — our heredoc always writes the explicit `digest: ""`.)
+# demanding an explicit known digest is the fail-closed direction that costs nothing
+# real — our heredoc always writes the digest key explicitly.)
 #
 # Reads to EOF and decides in END — it never exits on first match, so a producer
 # piping in (helm get values) is never SIGPIPE'd (backend#1778; the trap an early
 # `exit`/`grep -q` would spring).
 _values_pin_mysql_84() {
-  awk '
-    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty. sawdigest guards the
-    # "absent digest is not an empty one" rule (backend#2638): a digest we never saw
-    # on STDIN may still be a non-empty chart default that wins over the tag.
-    function flush() { if (inblk && tag == "8.4" && sawdigest && digest == "") found = 1 }
+  awk -v d84="$TB_MYSQL_84_DEFAULT_DIGEST" '
+    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty or the 8.4 pin.
+    # sawdigest guards the "absent digest is not an empty one" rule (backend#2638):
+    # a digest we never saw on STDIN may still be a non-empty default that wins.
+    function flush() { if (inblk && tag == "8.4" && sawdigest && (digest == "" || digest == d84)) found = 1 }
     /^[[:space:]]*#/ { next }                      # comment line — drops the decoy
     /^[[:space:]]*$/ { next }                      # blank line
     { match($0, /^[[:space:]]*/); indent = RLENGTH }
@@ -4147,17 +4152,18 @@ _hostpath_paths_block
 fi)
 $(_local_api_values_block)
 $(if [[ "${TB_MYSQL_ENGINE_RESOLVED:-5.7}" == "8.4" ]]; then
-cat <<'MYSQL84'
+cat <<MYSQL84
 
 # MySQL engine: the multi-arch 8.4 engine (backend#723 A2; the chart default
 # since RFC-0150's exit). Stated explicitly rather than left to the chart
 # default, so the sticky read finds it on every re-run and no later chart
-# default can move this datadir. Explicit tag + empty digest: the shape the
-# RFC-0150 migration also writes. Override with TB_MYSQL_ENGINE=5.7|8.4.
+# default can move this datadir. Pinned by the chart's own 8.4 digest, so it
+# renders the same image the chart default does, never the moving 8.4 tag.
+# Override with TB_MYSQL_ENGINE=5.7|8.4.
 images:
   mysqlClient:
     tag: "8.4"
-    digest: ""
+    digest: "${TB_MYSQL_84_DEFAULT_DIGEST}"
 MYSQL84
 else
 cat <<MYSQL57

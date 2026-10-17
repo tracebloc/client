@@ -1260,7 +1260,7 @@ _native_k3s_gpu_marker() { printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.t
 # to get the GPU: fix REASON and re-run. Native k3s needs no recreate, unlike k3d.
 # `blind` marks a REASON that is k3s's container runtime itself saying it has no GPU
 # for a container (no NVIDIA runtime, no CDI spec, the runtime never registered), told
-# to the platform as docker_cannot_see_gpu (backend#5296); a read that could not tell
+# to the platform as runtime_cannot_see_gpu (backend#5296); a read that could not tell
 # passes no flag.
 _native_k3s_gpu_cpu() {
   TRACEBLOC_GPU_WIRED=0

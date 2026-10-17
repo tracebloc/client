@@ -2942,7 +2942,7 @@ the NVIDIA GPU (backend#5296). The resource monitor sends them on every heartbea
 gpu_unsupported_reason / gpu_unsupported_name (client-runtime#879), so the web
 app can say why the client runs on CPU (backend#5256). env.GPU_UNSUPPORTED_CODE
 is the machine-readable kind beside the sentence (compute_too_old /
-driver_too_old / not_nvidia / docker_cannot_see_gpu), sent as
+driver_too_old / not_nvidia / runtime_cannot_see_gpu), sent as
 gpu_unsupported_code (backend#5296). The names are a cross-repo contract: do
 not rename one side alone.
 

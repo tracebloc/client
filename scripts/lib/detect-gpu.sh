@@ -260,9 +260,12 @@ _nvidia_gpu_wsl_verdict() {
 # ── The GPU that is not NVIDIA, and the NVIDIA GPU no container can see (backend#5296) ──
 # TB_GPU_UNSUPPORTED_CODE is one of a CLOSED vocabulary the backend stores beside the
 # sentence and the dashboard switches on: compute_too_old and driver_too_old (the floor
-# gate above), not_nvidia, docker_cannot_see_gpu and arch_unsupported (below).
+# gate above), not_nvidia, runtime_cannot_see_gpu and arch_unsupported (below).
 # install-k8s.ps1 sets the same five, with the same sentences. A code the backend does
 # not know yet is stored blank and the sentence still shows (backend#5296).
+# runtime_cannot_see_gpu is the runtime-neutral name backend#5892 gave the container-blind
+# code. The backend and cli-dev's doctor still read the old name, for clients installed
+# before it, but nothing here writes it: detect-gpu.bats fails on any file naming it.
 
 # _GPU_NOT_NVIDIA_VENDOR_RE -- the vendors whose GPU counts as "a GPU, but not NVIDIA",
 # matched against the NORMALISED name (_nvidia_name_normalised). An allowlist, on
@@ -397,7 +400,7 @@ _gpu_wsl_host_report() {
 # cannot give a container this machine's NVIDIA GPU: k3d's `docker run --gpus all` of the
 # GPU node image (k3d.sh), or k3s's containerd not registering the NVIDIA runtime
 # (k3s.sh). RUNTIME names it in the sentence ("Docker", "k3s"). Reports
-# docker_cannot_see_gpu ONLY for a GPU the floor gate let through (ok or below-driver,
+# runtime_cannot_see_gpu ONLY for a GPU the floor gate let through (ok or below-driver,
 # with a driver that answered nvidia-smi): a card or driver already reported unsupported
 # keeps that reason, and a GPU this run could not read is "cannot tell", never blind.
 _gpu_container_blind() {
@@ -406,7 +409,7 @@ _gpu_container_blind() {
   [[ -z "${TB_GPU_UNSUPPORTED_CODE:-}" ]] || return 0
   local name="${TB_GPU_NVIDIA_NAMES:-}"
   name="${name%%$'\n'*}"; name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
-  TB_GPU_UNSUPPORTED_CODE="docker_cannot_see_gpu"
+  TB_GPU_UNSUPPORTED_CODE="runtime_cannot_see_gpu"
   TB_GPU_UNSUPPORTED_REASON="${1} can't see this machine's NVIDIA GPU, so this machine runs on CPU until containers can use the GPU."
   TB_GPU_UNSUPPORTED_NAME="$name"
 }

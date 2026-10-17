@@ -1971,7 +1971,7 @@ _create_new_cluster() {
     # Its stderr is kept apart (never matched for "k3s": the image's own name says
     # k3s): when the run fails in Docker's own words for "no GPU for this container"
     # (_GPU_CONTAINER_BLIND_RE), the pull worked and Docker cannot see the GPU, which
-    # the platform is told as docker_cannot_see_gpu (backend#5296).
+    # the platform is told as runtime_cannot_see_gpu (backend#5296).
     if (( _gpu_ok )); then
       local _ver_out _ver_err="" _ver_errf
       _ver_errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-gpu-run-XXXXXX" 2>/dev/null || echo /dev/null)"

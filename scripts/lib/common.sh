@@ -1997,10 +1997,10 @@ TB_GPU_FLOOR_VERDICT=""
 TB_GPU_UNSUPPORTED_REASON=""
 TB_GPU_UNSUPPORTED_NAME=""
 # The kind beside the sentence (backend#5296): compute_too_old | driver_too_old |
-# not_nvidia | docker_cannot_see_gpu | arch_unsupported, or empty. Passed as
+# not_nvidia | runtime_cannot_see_gpu | arch_unsupported, or empty. Passed as
 # env.GPU_UNSUPPORTED_CODE.
 TB_GPU_UNSUPPORTED_CODE=""
-# nvidia-smi's name answer, one line per GPU, for a docker_cannot_see_gpu report.
+# nvidia-smi's name answer, one line per GPU, for a runtime_cannot_see_gpu report.
 TB_GPU_NVIDIA_NAMES=""
 
 # _host_os_label -- this host's operating system as the dashboard shows it
