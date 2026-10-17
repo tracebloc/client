@@ -872,38 +872,58 @@ function Confirm-WslDistroImage {
 # fire before C: filled. The VHDX also grew by the 5 GiB written and did not
 # shrink after the delete. So, right after `wsl --import` and BEFORE the distro
 # first starts, Set-WslDistroDisk:
-#   1. makes the VHDX sparse, so that blocks the distro frees go back to the host;
-#   2. caps its virtual size at Get-WslDistroDiskCap's answer, so that the node's
-#      capacity is what the host can give it, and eviction fires first.
-# Both come before the first start: once the VHD is attached, --set-sparse fails
-# with ERROR_SHARING_VIOLATION until `wsl --shutdown`, which would stop every
-# distro the user has (row 11). Measured on S-W's STOCK ubuntu-noble-wsl 20240423
-# image; the VHDX is WSL's, not the image's, so ours is the same.
-# NOT MEASURED YET: `--resize` itself (row 11 never ran it), and a sparse VHDX
-# giving space back. 3.3's distro cell runs both.
-# SPARSE IS BEST EFFORT, AND ONLY FOR ONE REFUSAL (client-dev#1810, S-W's run of
-# record, 13 Oct, row 11): WSL 2.7.11 refused --set-sparse by policy ("Sparse VHD
-# support is currently disabled due to potential data corruption", exit -1,
-# Wsl/Service/E_INVALIDARG). For those words alone the install says so and goes on
-# to the cap: the cap is what keeps the node off a full drive; sparse only gives
-# freed space back. --allow-unsafe, which those words offer, is never passed. Every
-# other sparse failure still stops the install, and the cap stays mandatory.
+#   1. caps its virtual size at Get-WslDistroDiskCap's answer, so that the node's
+#      capacity is what the host can give it, and eviction fires first;
+#   2. makes the VHDX sparse, so that blocks the distro frees go back to the host.
+# Both come before the first start: once the VHD is attached, WSL refuses them
+# ($WslDiskHeldCodes, below), and only `wsl --shutdown` frees it (row 11: not a
+# --terminate). Measured on S-W's STOCK ubuntu-noble-wsl 20240423 image; the VHDX
+# is WSL's, not the image's, so ours is the same.
+# THE CAP COMES FIRST: WSL CANNOT RESIZE A SPARSE DISK. On WSL 3.0.3 (3.3's distro
+# leg on Windows Server 2025, 16 Oct) `--resize` after `--set-sparse true` was
+# refused: "Virtual hard disk files must be uncompressed and unencrypted and must
+# not be sparse", exit -1, Wsl/Service/ERROR_VIRTUAL_DISK_LIMITATION. So the cap
+# runs first and sparse after it. A disk that is sparse already (a WSL that makes
+# every new disk sparse) is made not sparse once, the cap runs again, and the
+# sparse step makes it sparse after.
+# NOT MEASURED YET: a sparse VHDX giving space back. 3.3's distro cell runs it.
+# SPARSE IS BEST EFFORT; THE CAP IS NOT. Sparse only gives freed space back to
+# Windows, and a correct install does not need it; the cap is what keeps the node
+# off a full drive. So a sparse step that does not run cleanly is said and the
+# install goes on to the cap (the coordinator's ruling, 15 Oct, on 3.3's distro
+# leg); a cap that does not stops the install. WSL's refusal by policy (S-W's run
+# of record, 13 Oct, row 11: WSL 2.7.11, "Sparse VHD support is currently disabled
+# due to potential data corruption", exit -1, Wsl/Service/E_INVALIDARG) is said in
+# its own words, with no command to run: the only one would be --allow-unsafe,
+# which is never passed. Every other sparse failure is said with the commands that
+# make the disk sparse by hand later.
+# THE DISK STAYS ATTACHED AFTER THE IMPORT on WSL 3.0.3 (3.3's distro leg on
+# Windows Server 2025): straight after `wsl --import`, with no start between them
+# and nothing in `wsl --list --running`, `--set-sparse` was refused with
+# ERROR_SHARING_VIOLATION (15 Oct) and `--resize` with WSL_E_DISTRO_NOT_STOPPED
+# (16 Oct), both saying "the VHD is currently in use". So a disk step WSL refuses
+# with either code ($WslDiskHeldCodes) frees the disk once, with `wsl --shutdown`,
+# and runs that step again, but only when
+# `wsl --list --running` was read and names no distro at all: the shutdown then
+# stops nothing of the user's (Clear-WslHeldDisk). A distro that runs, a list that
+# cannot be read, or a shutdown that does not run cleanly frees nothing, and says
+# why. At most one shutdown and one second try per Set-WslDistroDisk.
 # THE ORDER: the import step calls Set-WslDistroDisk between `wsl --import` and the
 # logon task's first run (S-W row 5), because the task starts the distro and
 # --set-sparse is refused from then on. Set-WslDistroDisk holds that itself: a
-# distro `wsl --list --running` names is refused by name before any --manage step,
-# and a sparse step WSL refuses for a disk still attached (ERROR_SHARING_VIOLATION,
-# after a start and a --terminate) is refused too, never retried: only
-# `wsl --shutdown` frees it, and that stops every distro the user has. On either
-# refusal the import step unregisters the distro it just imported, so a re-run
-# imports it afresh instead of taking the re-run path over a disk never capped.
+# distro `wsl --list --running` names is refused by name before any --manage step.
+# When the cap stops the install, the import step unregisters the distro it just
+# imported, so a re-run imports it afresh instead of taking the re-run path over a
+# disk never capped.
 # A RE-RUN over a distro that is already there calls Update-WslDistroDisk instead:
 # it re-derives the cap and only GROWS the disk to it. The distro's own growth
 # takes the host's free space, so a re-run often derives a smaller cap, and
 # --resize is never asked to shrink a disk below the size it has. A re-run never
 # fails on the disk: a size it cannot read, a smaller cap, or a growth wsl.exe
-# refuses (the VHD stays attached while the distro runs, row 11) each leave the
-# cap the import set, and say so.
+# refuses (the VHD stays attached while the distro runs, row 11, and the import
+# made it sparse) each leave the cap the import set, and say so. A growth refused
+# for a sparse disk also says the commands that grow it by hand: they stop every
+# WSL distro, which a re-run never does by itself.
 # NOT MEASURED YET either: whether WSL's "GB" in --resize is 1024^3 bytes, as
 # PowerShell's 1GB is (a re-run compares the two).
 # Import-WslDistro calls them, right after the import (below).
@@ -989,13 +1009,85 @@ function Test-WslDistroRunning {
   return $false
 }
 
-# Make DISTRO's VHDX sparse, then cap its virtual size at CAPGB, through wsl.exe.
-# Runs right after `wsl --import`, before the distro first starts (THE ORDER,
-# above): a distro that already runs is refused by name before any step. A step
-# that does not run cleanly throws, by name, with what wsl.exe said, and the cap
-# never runs after a failed sparse step: an uncapped distro is the 1 TiB one row
-# 11 measured. The one exception is WSL's policy refusal of sparse disks
-# ($WslSparsePolicyRefusal): that is said, and the cap still runs.
+# A distro's name as WSL allows one (wsl --import refuses any other): letters,
+# digits, '.', '_' and '-'. A line of `wsl --list` with a space in it is wsl.exe's
+# own words, never a distro.
+$WslDistroNamePattern = '^[A-Za-z0-9._-]+$'
+
+# WSL's words when `wsl --list --running` finds nothing running. Only an empty
+# answer with exit 0, or these words (with at most WSL's "Error code:" line after
+# them), say that nothing runs; anything else cannot tell.
+$WslNoneRunning = 'There are no running distributions.'
+
+# How long a disk WSL still holds is waited for when what runs cannot be read, and
+# how often the step is tried meanwhile. WSL stops its VM once no distro has run
+# for vmIdleTimeout (60 s by default), which frees every disk. A bound, not a
+# measured worst case.
+$WslDiskReleaseWaitSec = 120
+$WslDiskReleasePollSec = 10
+
+# The codes wsl.exe gives a disk step it refuses because WSL still holds the disk
+# (THE DISK STAYS ATTACHED AFTER THE IMPORT, above): --set-sparse's and --resize's.
+# The codes, not the words: WSL translates its words, never its codes.
+$WslDiskHeldCodes = @('ERROR_SHARING_VIOLATION', 'WSL_E_DISTRO_NOT_STOPPED')
+
+# Whether SAID, what wsl.exe said refusing a disk step, says WSL still holds the
+# disk: one of $WslDiskHeldCodes is in it.
+function Test-WslDiskHeld {
+  param([string]$Said)
+  foreach ($code in $WslDiskHeldCodes) {
+    if ($Said.IndexOf($code, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  }
+  return $false
+}
+
+# What to do about the distro's disk when WSL still holds it after the import
+# (Test-WslDiskHeld; THE DISK STAYS ATTACHED AFTER THE IMPORT, above), from
+# `wsl --list --running`:
+#   - it names a distro: nothing; only `wsl --shutdown` would free the disk, and that
+#     would stop it. Running names them;
+#   - it says, beyond doubt, that nothing runs: `wsl --shutdown`, which then stops
+#     nothing of the user's. Why is '' once it ran cleanly;
+#   - it cannot tell: Wait, and nothing is shut down, as a shutdown that cannot tell
+#     might stop a distro of the user's.
+# Why says what was not done, and why.
+function Clear-WslHeldDisk {
+  param([string]$FilePath = 'wsl.exe')
+  $not = 'so WSL was not shut down to free it'
+  $l = Invoke-WslProbe -FilePath $FilePath -ArgumentList @('--list', '--running', '--quiet')
+  if (-not $l.Started) { return [pscustomobject]@{ Why = "which WSL distros run could not be read (wsl --list --running did not start: $($l.StartError)), $not"; Running = @(); Wait = $true } }
+  if ($l.TimedOut) { return [pscustomobject]@{ Why = "which WSL distros run could not be read (wsl --list --running did not answer within $WslProbeTimeoutSec s), $not"; Running = @(); Wait = $true } }
+  $text = ("$($l.Output)`n$($l.ErrorOutput)" -replace ([string][char]0xFEFF), '')
+  $lines = @(($text -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  $running = @($lines | Where-Object { $_ -cmatch $WslDistroNamePattern })
+  if ($running.Count) { return [pscustomobject]@{ Why = "only 'wsl --shutdown' frees it, which would stop the WSL distros running now ($($running -join ', ')), $not"; Running = $running; Wait = $false } }
+  # Ordinal: a culture's compare ignores a BOM or a NUL, and so would read words
+  # that are not WSL's as WSL's.
+  $isNone = { param($x) [string]::Equals($x, $WslNoneRunning, [System.StringComparison]::Ordinal) }
+  $none = @($lines | Where-Object { & $isNone $_ }).Count -and -not @($lines | Where-Object { -not (& $isNone $_) -and -not $_.StartsWith('Error code: ', [System.StringComparison]::Ordinal) }).Count
+  if (-not $none -and -not ($l.ExitCode -eq 0 -and -not $lines.Count)) {
+    $said = ' and said nothing'
+    if ($lines.Count) { $said = ": $($lines -join ' ')" }
+    return [pscustomobject]@{ Why = "which WSL distros run could not be read (wsl --list --running exited $($l.ExitCode)$said), $not"; Running = @(); Wait = $true }
+  }
+  Info "WSL still holds the tracebloc WSL distro's disk after its import, and no WSL distro is running: shutting WSL down to free it (wsl --shutdown)."
+  $s = Invoke-WslProbe -FilePath $FilePath -ArgumentList @('--shutdown') -TimeoutSec $WslDiskTimeoutSec
+  $why = ''
+  if (-not $s.Started) { $why = "'wsl --shutdown', run to free it, did not start ($($s.StartError))" }
+  elseif ($s.TimedOut) { $why = "'wsl --shutdown', run to free it, did not finish within $WslDiskTimeoutSec s" }
+  elseif ($s.ExitCode -ne 0) { $why = "'wsl --shutdown', run to free it, failed (exit $($s.ExitCode): $(("$($s.Output) $($s.ErrorOutput)" -replace '\s+', ' ').Trim()))" }
+  return [pscustomobject]@{ Why = $why; Running = @(); Wait = $false }
+}
+
+# Cap DISTRO's VHDX's virtual size at CAPGB, then make it sparse, through wsl.exe
+# (THE CAP COMES FIRST, above). Runs right after `wsl --import`, before the distro
+# first starts (THE ORDER, above): a distro that already runs is refused by name
+# before any step. A disk WSL still holds is freed once, and the step it refused
+# runs again (Clear-WslHeldDisk). A disk WSL will not resize because it is sparse
+# is made not sparse once, and the cap runs again. A cap that does not run cleanly
+# throws, by name, with what wsl.exe said: an uncapped distro is the 1 TiB one row
+# 11 measured. A sparse step that does not run cleanly is said, with what wsl.exe
+# said, and the install goes on.
 function Set-WslDistroDisk {
   param(
     [long]$CapGb,
@@ -1008,32 +1100,79 @@ function Set-WslDistroDisk {
   if (Test-WslDistroRunning -Distro $Distro -FilePath $FilePath) {
     throw "The WSL distro $Distro is already running, so its disk can no longer be made sparse and capped: that has to happen after its import and before its first start. Nothing was changed, and nothing is retried. Re-run the install; if it says this again, tell tracebloc support."
   }
-  $steps = @(
-    @{ What = 'made sparse'; Sparse = $true; Arguments = @('--manage', $Distro, '--set-sparse', 'true') },
-    @{ What = "capped at $CapGb GB"; Sparse = $false; Arguments = @('--manage', $Distro, '--resize', "$($CapGb)GB") }
-  )
+  $cap = @{ What = "capped at $CapGb GB"; Sparse = $false; Cap = $true; Arguments = @('--manage', $Distro, '--resize', "$($CapGb)GB") }
+  $steps = [System.Collections.Generic.List[object]]::new()
+  $steps.Add($cap)
+  $steps.Add(@{ What = 'made sparse'; Sparse = $true; Cap = $false; Arguments = @('--manage', $Distro, '--set-sparse', 'true') })
   $sparse = $true
-  foreach ($s in $steps) {
+  # How often a disk WSL will not resize because it is sparse was made not sparse:
+  # once at most.
+  $unsparsed = 0
+  # Clear-WslHeldDisk's answer: $null until a step finds the disk held, so it is
+  # asked once at most. When it can only wait, the tries left are shared by both
+  # steps, so the whole disk step waits $WslDiskReleaseWaitSec s at most.
+  $held = $null
+  $tries = 0
+  for ($i = 0; $i -lt $steps.Count; $i++) {
+    $s = $steps[$i]
     $cmd = "wsl $($s.Arguments -join ' ')"
-    $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList $s.Arguments -TimeoutSec $WslDiskTimeoutSec
+    while ($true) {
+      $said = ''
+      $r = Invoke-WslProbe -FilePath $FilePath -ArgumentList $s.Arguments -TimeoutSec $WslDiskTimeoutSec
+      if (-not $r.Started -or $r.TimedOut -or $r.ExitCode -eq 0) { break }
+      $said = ("$($r.Output) $($r.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim()
+      if (-not (Test-WslDiskHeld -Said $said)) { break }
+      if ($null -eq $held) {
+        $held = Clear-WslHeldDisk -FilePath $FilePath
+        if (-not $held.Why) { continue }
+        if ($held.Wait) {
+          $tries = [int][math]::Floor($WslDiskReleaseWaitSec / $WslDiskReleasePollSec)
+          Info "WSL still holds the tracebloc WSL distro's disk after its import: waiting up to $WslDiskReleaseWaitSec s for WSL to free it."
+        }
+      }
+      if ($tries -le 0) { break }
+      $tries--
+      Start-Sleep -Seconds $WslDiskReleasePollSec
+    }
+    if ($r.Started -and -not $r.TimedOut -and $r.ExitCode -eq 0) { continue }
+    if ($s.Cap -and $said -match 'ERROR_VIRTUAL_DISK_LIMITATION' -and $unsparsed -lt 1) {
+      $unsparsed++
+      Info "The tracebloc WSL distro's disk is sparse already, and WSL cannot resize a sparse disk: making it not sparse to cap it, then sparse again (wsl --manage $Distro --set-sparse false)."
+      $steps.Insert($i + 1, @{ What = "made not sparse, so it was not capped at $CapGb GB (WSL cannot resize a sparse disk)"; Sparse = $false; Cap = $false; Arguments = @('--manage', $Distro, '--set-sparse', 'false') })
+      $steps.Insert($i + 2, $cap)
+      continue
+    }
+    $attached = ''
+    if (Test-WslDiskHeld -Said $said) {
+      $attached = " Its disk is still attached in WSL, even after 'wsl --shutdown'."
+      if ($held.Wait) { $attached = " Its disk is still attached in WSL after waiting $WslDiskReleaseWaitSec s for WSL to free it, and $($held.Why)." }
+      elseif ($held.Why) { $attached = " Its disk is still attached in WSL, and $($held.Why)." }
+    }
+    if ($s.Sparse) {
+      $sparse = $false
+      if ($said.Contains($WslSparsePolicyRefusal)) {
+        # Its words are not echoed: they offer --allow-unsafe, which nothing here runs.
+        Warn "WSL has turned sparse disks off on this computer ($cmd exited $($r.ExitCode)), so the tracebloc WSL distro's disk will not give the space it frees back to Windows. Its size is still capped."
+        continue
+      }
+      $how = "failed (exit $($r.ExitCode)): $said"
+      if (-not $r.Started) { $how = "did not start ($($r.StartError))" }
+      elseif ($r.TimedOut) { $how = "did not finish within $WslDiskTimeoutSec s" }
+      Warn "The tracebloc WSL distro's disk could not be made sparse ($cmd $how).$attached The install goes on, and the disk is still capped, but the space the distro frees will not go back to Windows."
+      Hint "To make it sparse later: run 'wsl --shutdown' (it stops every WSL distro), then '$cmd', then 'Start-ScheduledTask -TaskName $KeepaliveTaskName' to start tracebloc again."
+      continue
+    }
     if (-not $r.Started) {
       throw "$cmd did not start ($($r.StartError)), so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
     }
     if ($r.TimedOut) {
       throw "$cmd did not finish within $WslDiskTimeoutSec s, so the WSL distro's disk was not $($s.What). Re-run; if it says this again, tell tracebloc support."
     }
-    if ($r.ExitCode -ne 0) {
-      $said = ("$($r.Output) $($r.ErrorOutput)" -replace "`0", '' -replace '\s+', ' ').Trim()
-      if ($s.Sparse -and $said.Contains($WslSparsePolicyRefusal)) {
-        # Its words are not echoed: they offer --allow-unsafe, which nothing here runs.
-        Warn "WSL has turned sparse disks off on this computer ($cmd exited $($r.ExitCode)), so the tracebloc WSL distro's disk will not give the space it frees back to Windows. Its size is still capped."
-        $sparse = $false
-        continue
-      }
-      $order = ''
-      if ($said -match 'ERROR_SHARING_VIOLATION') { $order = " Its disk is attached: the distro has started since its import, and only a first start may follow the disk steps." }
-      throw "$cmd failed (exit $($r.ExitCode)): $said The WSL distro's disk was not $($s.What), and an uncapped distro can fill this drive.$order Re-run; if it says this again, tell tracebloc support."
-    }
+    $limited = ''
+    if ($s.Cap -and $unsparsed -and $said -match 'ERROR_VIRTUAL_DISK_LIMITATION') { $limited = " WSL refused it after 'wsl --manage $Distro --set-sparse false' too: a disk that is compressed or encrypted cannot be resized either." }
+    $next = 'Re-run; if it says this again, tell tracebloc support.'
+    if ((Test-WslDiskHeld -Said $said) -and $held.Running.Count) { $next = "Stop them, or run 'wsl --shutdown', which stops every WSL distro, then run the install again." }
+    throw "$cmd failed (exit $($r.ExitCode)): $said The WSL distro's disk was not $($s.What), and an uncapped distro can fill this drive.$attached$limited $next"
   }
   if ($sparse) { Ok "WSL distro disk: sparse, and capped at $CapGb GB" } else { Ok "WSL distro disk: capped at $CapGb GB" }
 }
@@ -1129,6 +1268,9 @@ function Update-WslDistroDisk {
   if (-not $g.Started) { $why = "did not start: $($g.StartError)" }
   elseif ($g.TimedOut) { $why = "did not finish within $WslDiskTimeoutSec s" }
   Warn "wsl $($grow -join ' ') did not grow the WSL distro's disk ($why), so it stays capped at $nowGb GB."
+  if ($why -match 'ERROR_VIRTUAL_DISK_LIMITATION') {
+    Hint "WSL cannot resize a sparse disk. To grow it by hand: run 'wsl --shutdown' (it stops every WSL distro), then 'wsl --manage $Distro --set-sparse false', 'wsl $($grow -join ' ')' and 'wsl --manage $Distro --set-sparse true', then 'Start-ScheduledTask -TaskName $KeepaliveTaskName' to start tracebloc again."
+  }
 }
 
 # Fetch the WSL distro's root filesystem from ghcr.io into DEST by its pinned
@@ -2039,7 +2181,12 @@ function Invoke-BoundedProcess {
 #  did not reach its end. On credential-rejected the account steps ask `client
 #  create` for a new credential (--reissue, provision.sh's repair) and the client
 #  run's line says so (TRACEBLOC_CREDENTIAL_REISSUED=1). A preset pair is never
-#  reissued: provision.sh's preset path returns before its repair.
+#  reissued: provision.sh's preset path returns before its repair. It also hands
+#  over the context kubectl pointed at before it, which the client run's line
+#  carries (TRACEBLOC_WSL_PREV_KUBE_CONTEXT): that run merges the kubeconfig again,
+#  after the cluster run made its own context current, and its summary says how to
+#  switch back (backend#5025 O-19). And where this machine runs, which the account
+#  steps put in `client create`'s environment, as provision.sh does (backend#5797).
 #    TODO(S-W): measure that /dev/tty answers in the distro while stdin is a pipe.
 #    TODO(part 5): the refusal for another account's client names no removal
 #      command yet: how the distro path removes a client is part 5's.
@@ -2066,6 +2213,45 @@ $CorePhaseClient = 'client'
 # goes on the line only when it is set, with the value as it was set: the core
 # reduces the stage's spelling itself.
 $CorePassThroughVars = @('TRACEBLOC_INSTALL_REF', 'TRACEBLOC_ENV', 'CLIENT_ENV', 'TRACEBLOC_SKIP_TELEMETRY', 'TRACEBLOC_NO_TELEMETRY', 'DO_NOT_TRACK')
+
+# THE INSTALL'S OWN SETTINGS. install-k8s.sh's header and the core's --help name
+# the settings a user sets for the install, and lib/common.sh resolves each
+# canonical name into its legacy one (a non-empty canonical wins). The core reads
+# them in the distro, so the ones that mean the same there go on its line too, by
+# both names, as set, and the core resolves them itself:
+#   - the secure-environment name, the namespace and Helm release the client goes
+#     in (without it the client lands in 'tracebloc' whatever was set);
+#   - what each training run may use;
+#   - a forced reinstall;
+#   - the leftover-data guard's answer, and skipping that guard.
+# Each other one is in $CoreSettingsReadOnHost or $CoreSettingsNotUsed. A Pester
+# case holds every name the header, the --help and common.sh's resolution lines
+# name to one of the three.
+$CoreSettingVars = @('TRACEBLOC_NAMESPACE', 'TB_NAMESPACE', 'TRACEBLOC_TRAINING_RESOURCES', 'TRACEBLOC_FORCE_REINSTALL', 'TB_FORCE_REINSTALL', 'TRACEBLOC_LEFTOVER_ACTION', 'TB_LEFTOVER_ACTION', 'TRACEBLOC_SKIP_LEFTOVER_GUARD')
+$CorePassThroughVars += $CoreSettingVars
+
+# The settings the bootstrap reads on Windows itself, and does not carry:
+#   - TRACEBLOC_SUBSTRATE: k3s is what runs this distro path (install.ps1);
+#   - TRACEBLOC_CLUSTER_NAME: the Docker path's k3d cluster, which the move to the
+#     distro removes (Get-K3dClusterName). The distro runs one cluster, tracebloc.
+$CoreSettingsReadOnHost = @('TRACEBLOC_SUBSTRATE', 'TRACEBLOC_CLUSTER_NAME')
+
+# The settings the distro path does not use, and why: one that is set is said
+# (Write-CoreSettingsNotUsed), never dropped without a word. Only the
+# TRACEBLOC_ names: the legacy ones are generic (CLUSTER_NAME, SERVERS) and can be
+# set for other tools.
+$CoreSettingsNotUsed = [ordered]@{
+  TRACEBLOC_SERVERS           = 'the tracebloc WSL distro runs one node'
+  TRACEBLOC_AGENTS            = 'the tracebloc WSL distro runs one node'
+  TRACEBLOC_K8S_VERSION       = "the tracebloc WSL distro's image carries its Kubernetes version"
+  TRACEBLOC_K3D_VERSION       = 'the tracebloc WSL distro does not use k3d'
+  TRACEBLOC_HELM_VERSION      = 'the tracebloc WSL distro uses the Helm version the installer pins'
+  TRACEBLOC_STORAGE_MODE      = 'the tracebloc WSL distro keeps datasets inside its node'
+  TRACEBLOC_HOST_DATA_DIR     = "tracebloc keeps its data on the tracebloc WSL distro's own disk"
+  TRACEBLOC_HOST_DATASET_DIR  = 'a separate dataset folder is not supported on Windows yet'
+  TRACEBLOC_ALLOW_NETWORK_FS  = "tracebloc keeps its data on the tracebloc WSL distro's own disk"
+  TRACEBLOC_SKIP_REBOOT_PROMPT = 'nothing installs a GPU driver in the tracebloc WSL distro, so there is no reboot to skip'
+}
 
 # THE HOST'S PROXY IN THE DISTRO (S-W row 10, client-dev#1810 part 1, "Proxy and
 # CA"; RFC-0175 D7: NAT, with the proxy on k3s's unit). Both runs get every name
@@ -2155,12 +2341,20 @@ function Assert-HostProxy {
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
 
 # The cluster run's handover (2c): the variable that names the file, the file's
-# name in its folder, the one line the core writes (lib/common.sh's
+# name in its folder, the five lines the core writes (lib/common.sh's
 # tb_wsl_handover_write), the reason that asks for a new credential, and the flag
-# the client run gets then (provision.sh's). Pester holds each to the core's.
+# the client run gets then (provision.sh's). The second line is the context kubectl
+# pointed at before the cluster run, which the client run gets by the variable
+# k3s.sh's kubeconfig merge reads (backend#5025 O-19). The last three are where this
+# machine runs (provision.sh's _registration_machine_facts), by the names
+# provision.sh puts in its own `client create`'s environment, which the host's create
+# gets the same way (backend#5797). Pester holds each to the core's.
 $CoreHandoverVar = 'TRACEBLOC_WSL_HANDOVER'
 $CoreHandoverFile = 'handover.env'
 $CoreHandoverKey = 'INSTALL_STATE_REASON'
+$CoreHandoverPrevContextKey = 'TB_PREV_KUBE_CONTEXT'
+$CorePrevContextVar = 'TRACEBLOC_WSL_PREV_KUBE_CONTEXT'
+$CoreHandoverFactKeys = @('TRACEBLOC_MACHINE_KIND', 'TRACEBLOC_CLOUD_PROVIDER', 'TRACEBLOC_HOST_OS')
 $CredentialRejectedReason = 'credential-rejected'
 $CredentialReissuedVar = 'TRACEBLOC_CREDENTIAL_REISSUED'
 
@@ -2232,7 +2426,8 @@ function New-CoreRunArguments {
     [string]$LogDir,
     [string]$Handover,
     [switch]$CredentialStdin,
-    [switch]$CredentialReissued
+    [switch]$CredentialReissued,
+    [string]$PrevKubeContext
   )
   $a = @('-d', $WslDistroName, '-u', 'root', '--exec', 'env',
     "TRACEBLOC_SUBSTRATE=$CoreSubstrate",
@@ -2250,8 +2445,19 @@ function New-CoreRunArguments {
   if ($Handover) { $a += "$CoreHandoverVar=$Handover" }
   if ($CredentialStdin) { $a += 'TRACEBLOC_CREDENTIAL_STDIN=1' }
   if ($CredentialReissued) { $a += "$CredentialReissuedVar=1" }
+  if ($PrevKubeContext) { $a += "$CorePrevContextVar=$PrevKubeContext" }
   $a += @('bash', "$Core/install-k8s.sh")
   return $a
+}
+
+# Says each setting in $CoreSettingsNotUsed that is set, and why the distro path
+# does not use it. Once, before the core's first run.
+function Write-CoreSettingsNotUsed {
+  foreach ($name in $CoreSettingsNotUsed.Keys) {
+    if ([Environment]::GetEnvironmentVariable($name)) {
+      Warn "$name is set, but the install in the tracebloc WSL distro does not use it: $($CoreSettingsNotUsed[$name])."
+    }
+  }
 }
 
 # The console's input encoding, read and set: seams for Invoke-CoreRun, since the
@@ -2646,18 +2852,41 @@ function Get-HostCreatePlan {
   return [pscustomobject]@{ Action = $f[0]; Namespace = $f[2]; Name = $name; Why = '' }
 }
 
-# What the cluster run handed over: the reason on its one line, which may be empty
-# (the gate did not assess). PATH is the file as Windows names it. A file that is
-# not there, or that holds anything but that one line, stops the install.
+# What the cluster run handed over, on its five lines: Reason, which may be empty
+# (the gate did not assess); PrevContext, the context kubectl pointed at before that
+# run, empty when it pointed at no other one; and Facts, where this machine runs, by
+# the names the CLI reads, each empty when the core could not read it. PATH is the
+# file as Windows names it. A file that is not there, or that holds anything but
+# those five lines in that order, stops the install.
 function Read-CoreHandover {
   param([string]$Path)
   $lines = @()
   if (Test-Path -LiteralPath $Path -PathType Leaf) { $lines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue) }
-  $prefix = "$CoreHandoverKey="
-  if ($lines.Count -ne 1 -or -not ([string]$lines[0]).StartsWith($prefix, [StringComparison]::Ordinal)) {
+  $keys = @($CoreHandoverKey, $CoreHandoverPrevContextKey) + $CoreHandoverFactKeys
+  $ok = $lines.Count -eq $keys.Count
+  for ($i = 0; $ok -and $i -lt $keys.Count; $i++) { $ok = ([string]$lines[$i]).StartsWith("$($keys[$i])=", [StringComparison]::Ordinal) }
+  if (-not $ok) {
     throw "The cluster setup in the tracebloc WSL distro ended without saying what it found, so this machine was not registered. Run this installer again; if it keeps failing, share this output with tracebloc support."
   }
-  return ([string]$lines[0]).Substring($prefix.Length)
+  $values = @(for ($i = 0; $i -lt $keys.Count; $i++) { ([string]$lines[$i]).Substring($keys[$i].Length + 1) })
+  $facts = [ordered]@{}
+  for ($i = 0; $i -lt $CoreHandoverFactKeys.Count; $i++) { $facts[$CoreHandoverFactKeys[$i]] = $values[2 + $i] }
+  return [pscustomobject]@{ Reason = $values[0]; PrevContext = $values[1]; Facts = $facts }
+}
+
+# Set-ProcessEnv -- set the process variable $Name to $Value, or UNSET it when $Value
+# is $null. Never $null through [Environment]::SetEnvironmentVariable: on .NET 9 and
+# later (pwsh 7.5+) its string parameter takes $null as "", so the variable stays,
+# empty. An empty string is set as given, so a restore puts back exactly what it
+# found. $Value is untyped on purpose: a [string] parameter would turn $null into ""
+# before this could see it.
+function Set-ProcessEnv {
+  param([Parameter(Mandatory)][string]$Name, $Value)
+  if ($null -eq $Value) {
+    Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+  } else {
+    [Environment]::SetEnvironmentVariable($Name, [string]$Value, 'Process')
+  }
 }
 
 # The account steps on the host CLI, provision.sh's: sign in (the device flow), ask
@@ -2671,7 +2900,7 @@ function Read-CoreHandover {
 # --credential-file` wrote. The folder is deleted before this returns, whatever
 # happened. CLI is the tracebloc CLI's path.
 function Get-HostClientCredential {
-  param([string]$Cli, [switch]$Reissue)
+  param([string]$Cli, [switch]$Reissue, [System.Collections.IDictionary]$Facts)
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
   New-PrivateDirectory -Path $dir
   try {
@@ -2734,7 +2963,21 @@ function Get-HostClientCredential {
     }
     $location = "$env:TRACEBLOC_CLIENT_LOCATION".Trim()
     if ($location) { $create += @('--location', $location) }
-    & $Cli @create
+    # Where this machine runs, as the cluster run read it (FACTS), in the CLI's
+    # environment for the create only, as provision.sh hands it to its own; a CLI that
+    # predates the names ignores them. A fact the core could not read is left unset,
+    # so the CLI does not send it. Put back as found, whatever the create did.
+    $savedFacts = [ordered]@{}
+    foreach ($k in $CoreHandoverFactKeys) {
+      $savedFacts[$k] = [Environment]::GetEnvironmentVariable($k)
+      $v = $null; if ($Facts -and $Facts[$k]) { $v = [string]$Facts[$k] }
+      Set-ProcessEnv -Name $k -Value $v
+    }
+    try {
+      & $Cli @create
+    } finally {
+      foreach ($k in @($savedFacts.Keys)) { Set-ProcessEnv -Name $k -Value $savedFacts[$k] }
+    }
     if ($LASTEXITCODE -ne 0) {
       throw "The tracebloc CLI could not register this machine (client create exited $LASTEXITCODE). Its own message is above."
     }
@@ -2785,6 +3028,7 @@ function Invoke-WslCore {
     $logDir = ConvertTo-DistroPath -Path $logHost
     # The host GPU check (section 4), before the first run: both runs carry its answer.
     Find-Gpu
+    Write-CoreSettingsNotUsed
 
     # The cluster run's handover, in a folder only this user can open, deleted after
     # the install whatever happened.
@@ -2795,7 +3039,7 @@ function Invoke-WslCore {
       Info "Setting up the cluster in the tracebloc WSL distro..."
       $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseCluster -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -Handover $handover)
       if ($rc -ne 0) { return $rc }
-      $reason = Read-CoreHandover -Path (Join-Path $handDir $CoreHandoverFile)
+      $handed = Read-CoreHandover -Path (Join-Path $handDir $CoreHandoverFile)
 
       if ($null -ne $credential) {
         # As provision.sh's preset path, which returns before its credential-rejected
@@ -2803,12 +3047,12 @@ function Invoke-WslCore {
         $reissue = $false
         Info "Using the credentials you supplied - skipping browser sign-in."
       } else {
-        $reissue = $reason -ceq $CredentialRejectedReason
+        $reissue = $handed.Reason -ceq $CredentialRejectedReason
         Info "Registering this machine with tracebloc..."
-        $credential = Get-HostClientCredential -Cli $cli -Reissue:$reissue
+        $credential = Get-HostClientCredential -Cli $cli -Reissue:$reissue -Facts $handed.Facts
       }
       Info "Installing tracebloc in the tracebloc WSL distro..."
-      return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin -CredentialReissued:$reissue) -Stdin $credential)
+      return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin -CredentialReissued:$reissue -PrevKubeContext $handed.PrevContext) -Stdin $credential)
     } finally {
       Remove-Item -LiteralPath $handDir -Recurse -Force -ErrorAction SilentlyContinue
     }

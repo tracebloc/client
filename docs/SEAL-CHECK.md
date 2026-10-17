@@ -332,8 +332,9 @@ it is ignored — the workload renders the channel tag, `image-refresh` re-pins
 from the live registry, and `helm install/upgrade` prints a NOTES warning
 naming the image and both registries. A pin with `digest` set and
 `digestRegistry` empty is read as resolved on `docker.io` (the only registry
-these images were pulled from before the key existed), so it is honoured under
-`images.traceblocRegistry: docker.io` and ignored at the `ghcr.io` default.
+these images were pulled from before the key existed). The chart refuses
+`images.traceblocRegistry: docker.io` from 1.9.218, so such a pin is ignored
+wherever the chart renders.
 
 That legacy shape is exactly what earlier versions of this note recommended for
 staging/prod, and it is how a digest pin outlived its registry: pins resolved on

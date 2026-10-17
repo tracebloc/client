@@ -1,3 +1,5 @@
+{{- /* Refuse a Docker Hub registry before anything is patched (backend#4959): its frozen control plane reads only the legacy env names this chart no longer sets. */ -}}
+{{- include "tracebloc.assertRegistryIsNotDockerHub" . -}}
 {{- /* #229/#238: when HTTP_PROXY_HOST is set, tracebloc.proxyEnv owns these keys — it emits HTTP(S)_PROXY and a merged, cluster-safe NO_PROXY. Exclude them from the generic .Values.env passthrough below so a user-set NO_PROXY (or proxy var) is not re-emitted UNMERGED after proxyEnv — Kubernetes keeps the LAST duplicate env, which would drop the cluster-internal NO_PROXY entries and route in-cluster traffic through the proxy. When HTTP_PROXY_HOST is UNSET, proxyEnv renders nothing, so the exclusion list stays empty and the passthrough still emits a directly-set env.HTTP_PROXY / NO_PROXY — the pre-1.6.0 way to configure a corporate proxy. Dropping those unconditionally was an upgrade regression (#238): gate the exclusion on proxyEnv being active. */ -}}
 {{- $proxyKeys := list -}}
 {{- if .Values.env.HTTP_PROXY_HOST -}}
@@ -517,40 +519,24 @@ spec:
         */}}
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
-        {{- /* Each of the three under its canonical TRACEBLOC_ name too, from the
-             same expression (backend#3846; legacy remove_by 2026-12-31). */}}
-        - name: TELEMETRY_TOKEN_SECRET_NAMESPACE
-          value: {{ .Values.nodeAgents.namespace.name | quote }}
+        {{- /* Each of the three under its canonical TRACEBLOC_ name only
+             (backend#3846; the legacy names stopped rendering in the CONTRACT
+             step, backend#4959). */}}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
-        - name: TELEMETRY_TOKEN_SECRET_NAME
+        - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAME
           # Release-scoped, resolved through the one helper the reader and RBAC also
           # use, so the WRITER cannot end up naming a different Secret than they read
           # (backend#2625). jobs-manager writes THIS name; the daemonset's pre-flight
           # additionally tolerates the legacy fixed name until every edge has one.
           value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
-        - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAME
-          value: {{ include "tracebloc.telemetryTokenSecretName" . | quote }}
-        - name: TELEMETRY_TOKEN_SECRET_KEY
-          value: {{ $tokEnv.key | default "token" | quote }}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
-        {{- /* The client identity under both names: TRACEBLOC_CLIENT_ID /
-             TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
-             the legacy spellings (remove_by 2026-12-31). Both env names read
-             the CANONICAL Secret key (the FLIP, backend#4959): secrets.yaml
-             writes it on every render, and since backend#4959 step a it is
-             the only key it writes. */}}
-        - name: CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_CLIENT_ID
-        - name: CLIENT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_CLIENT_PASSWORD
+        {{- /* The client identity under its canonical names, TRACEBLOC_CLIENT_ID /
+             TRACEBLOC_CLIENT_PASSWORD; the legacy CLIENT_ID / CLIENT_PASSWORD env
+             names stopped rendering in the CONTRACT step (backend#4959 step b).
+             Both read the CANONICAL Secret key, the only key secrets.yaml writes
+             since backend#4959 step a. */}}
         - name: TRACEBLOC_CLIENT_ID
           valueFrom:
             secretKeyRef:
@@ -565,33 +551,21 @@ spec:
         # REQUESTS_PROXY_TOKEN. Same Secret key the requests-proxy reads to
         # verify. When present, spin_job mints stateless signed tokens (no
         # pod_tokens table). Never injected into training pods.
-        {{- /* Settings naming: every name below is emitted twice, the canonical
-             TRACEBLOC_<name> (a leading TB_ replaced) beside the legacy spelling,
-             with the identical value or secretKeyRef, so a jobs-manager reading
-             either one resolves the same identity. Every secretKeyRef names the
-             CANONICAL Secret key (the FLIP, backend#4959); secrets.yaml writes
-             it, and still writes the legacy key beside it. The legacy env names
-             stay until remove_by 2026-12-31. */}}
-        - name: POD_TOKEN_SIGNING_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
+        {{- /* Settings naming: every name below is emitted under its canonical
+             TRACEBLOC_<name> (a leading TB_ replaced) only; the legacy spellings
+             stopped rendering in the CONTRACT step (backend#4959 step b), every
+             jobs-manager this chart runs reading the canonical first. Every
+             secretKeyRef names the CANONICAL Secret key, the only one
+             secrets.yaml writes. */}}
         - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
               key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
-        - name: POD_TOKEN_TTL_SECONDS
-          value: {{ .Values.podTokenTtlSeconds | default 604800 | quote }}
         - name: TRACEBLOC_POD_TOKEN_TTL_SECONDS
           value: {{ .Values.podTokenTtlSeconds | default 604800 | quote }}
-        - name: CLIENT_PVC
-          value: {{ include "tracebloc.clientDataPvc" . | quote }}
         - name: TRACEBLOC_CLIENT_PVC
           value: {{ include "tracebloc.clientDataPvc" . | quote }}
-        - name: CLIENT_LOGS_PVC
-          value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         {{- if (include "tracebloc.trainingResumeEnabled" .) }}
@@ -603,12 +577,11 @@ spec:
         {{- if not (or (hasKey $opEnv "TRAINING_RESUME_ENABLED") (hasKey $opEnv "TRACEBLOC_TRAINING_RESUME_ENABLED")) }}
         # backend#5266: a volume the engine ignores keeps nothing, so the same
         # switch arms the engine's resume. jobs-manager forwards it to every
-        # training pod (client-runtime operator_training_switches). Both names,
-        # as the env passthrough writes them (RFC-0076); an operator's own
-        # env.TRAINING_RESUME_ENABLED wins and is rendered by the passthrough.
+        # training pod (client-runtime operator_training_switches). The canonical
+        # name only, as the env passthrough writes it (RFC-0076 CONTRACT step,
+        # backend#4959); an operator's own env.TRAINING_RESUME_ENABLED wins and
+        # is rendered by the passthrough.
         - name: TRACEBLOC_TRAINING_RESUME_ENABLED
-          value: "1"
-        - name: TRAINING_RESUME_ENABLED
           value: "1"
         {{- end }}
         {{- end }}
@@ -633,8 +606,6 @@ spec:
         # jobs-manager into every ingestion Job it spawns — the ingestor
         # then writes one immutable ds_<uuid4 hex> table per run. Rendered
         # only when enabled so default installs stay byte-identical.
-        - name: PER_INGESTION_TABLES
-          value: "1"
         - name: TRACEBLOC_PER_INGESTION_TABLES
           value: "1"
         {{- end }}
@@ -646,8 +617,6 @@ spec:
         # clusters only — elastic clusters log a warning and fall back to
         # subPath). Needs the flag-gated PV/PVC grants in rbac.yaml. Rendered
         # only when enabled so default installs stay byte-identical.
-        - name: PER_DATASET_PVCS
-          value: "1"
         - name: TRACEBLOC_PER_DATASET_PVCS
           value: "1"
         {{- end }}
@@ -659,8 +628,6 @@ spec:
         # (10-edgeuser-bridge-grants.sql re-grants it at init and cannot branch on
         # a runtime flag). jobs-manager refuses this unless the whole posture is
         # retired; the render refuses it too, above. It REVOKEs, never DROPs.
-        - name: NARROW_EDGEUSER
-          value: "1"
         - name: TRACEBLOC_NARROW_EDGEUSER
           value: "1"
         {{- end }}
@@ -674,8 +641,6 @@ spec:
         # refuses it unless the posture is retired; the render refuses it too, above.
         # DROP USER IF EXISTS, so a fresh datadir (no edgeuser since backend#947) and
         # an already-dropped edge are both clean no-ops.
-        - name: DROP_EDGEUSER
-          value: "1"
         - name: TRACEBLOC_DROP_EDGEUSER
           value: "1"
         {{- end }}
@@ -687,19 +652,10 @@ spec:
         # edgeuser. TB_CREDMGR_* is the dedicated minting identity (provisioned
         # by jobs-manager on startup from this generated Secret). Rendered only
         # when enabled so default installs stay byte-identical.
-        - name: PER_EXPERIMENT_DB_CREDS
-          value: "1"
         - name: TRACEBLOC_PER_EXPERIMENT_DB_CREDS
           value: "1"
-        - name: TB_CREDMGR_USER
-          value: "tb_credmgr"
         - name: TRACEBLOC_CREDMGR_USER
           value: "tb_credmgr"
-        - name: TB_CREDMGR_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
-              key: TRACEBLOC_CREDMGR_PASSWORD
         - name: TRACEBLOC_CREDMGR_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -713,33 +669,17 @@ spec:
         # DB) at startup from these generated Secrets. Additive — nothing
         # consumes the accounts until S2 — so this is rendered only when enabled
         # and a default install stays byte-identical.
-        - name: SERVICE_DB_ACCOUNTS
-          value: "1"
         - name: TRACEBLOC_SERVICE_DB_ACCOUNTS
           value: "1"
-        - name: TB_META_USER
-          value: "tb_meta"
         - name: TRACEBLOC_META_USER
           value: "tb_meta"
-        - name: TB_META_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
-              key: TRACEBLOC_META_PASSWORD
         - name: TRACEBLOC_META_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
               key: TRACEBLOC_META_PASSWORD
-        - name: TB_INGEST_USER
-          value: "tb_ingest"
         - name: TRACEBLOC_INGEST_USER
           value: "tb_ingest"
-        - name: TB_INGEST_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
-              key: TRACEBLOC_INGEST_PASSWORD
         - name: TRACEBLOC_INGEST_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -798,7 +738,7 @@ spec:
         # Repository + tag are overridable for private mirrors. Every read is
         # nil-guarded so `--reuse-values` from a release that predates the
         # `images.ingestor` key still renders.
-        - name: INGESTOR_IMAGE_REPOSITORY
+        - name: TRACEBLOC_INGESTOR_IMAGE_REPOSITORY
           # Precedence (#585): an explicit images.ingestor.repository always wins
           # (someone who names a full repo means it). Otherwise, when a private
           # mirror is set via global.imageRegistry, the still-default repository is
@@ -811,14 +751,8 @@ spec:
           {{- $ingMirror := dig "imageRegistry" "" (.Values.global | default dict) }}
           {{- if and $ingMirror (eq $ingRepo "ghcr.io/tracebloc/ingestor") }}{{ $ingRepo = printf "%s/tracebloc/ingestor" $ingMirror }}{{ end }}
           value: {{ $ingRepo | quote }}
-        - name: TRACEBLOC_INGESTOR_IMAGE_REPOSITORY
-          value: {{ $ingRepo | quote }}
-        - name: INGESTOR_IMAGE_TAG
-          value: {{ include "tracebloc.ingestorTag" . | quote }}
         - name: TRACEBLOC_INGESTOR_IMAGE_TAG
           value: {{ include "tracebloc.ingestorTag" . | quote }}
-        - name: INGESTOR_IMAGE_DIGEST
-          value: {{ include "tracebloc.ingestorDigest" . | quote }}
         - name: TRACEBLOC_INGESTOR_IMAGE_DIGEST
           value: {{ include "tracebloc.ingestorDigest" . | quote }}
         {{- /* What the pinned ingestor image says about itself
@@ -837,8 +771,6 @@ spec:
         - name: TRACEBLOC_INGESTOR_CAPABILITIES
           value: {{ $ingCaps | quote }}
         {{- end }}
-        - name: REQUESTS_PROXY_URL
-          value: "http://requests-proxy-service:8888"
         - name: TRACEBLOC_REQUESTS_PROXY_URL
           value: "http://requests-proxy-service:8888"
         {{- if and (default dict .Values.egressProxy).enabled (default dict .Values.egressProxy).routeWorkloads }}
@@ -846,8 +778,6 @@ spec:
         # HTTPS_PROXY=<gateway> into training pods (and suppresses raw HTTP_PROXY_HOST).
         # routeWorkloads defaults true (RFC-0003 D6), so this renders by default;
         # set egressProxy.routeWorkloads=false to opt a fleet out of gateway routing.
-        - name: EGRESS_PROXY_URL
-          value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         - name: TRACEBLOC_EGRESS_PROXY_URL
           value: "http://egress-proxy-service:{{ (default dict .Values.egressProxy).port | default 3128 }}"
         {{- end }}
@@ -859,12 +789,8 @@ spec:
         # set, else the Service FQDN, which jobs-manager resolves to its ClusterIP
         # (a pod's nameserver must be an IP). Unset = the pods keep the cluster
         # DNS -- which the training NetworkPolicy no longer lets them reach.
-        - name: RESTRICTED_DNS_NAMESERVER
-          value: {{ .clusterIP | default (printf "restricted-dns-service.%s.svc.%s" $.Release.Namespace (trimSuffix "." (.clusterDomain | default "cluster.local"))) | quote }}
         - name: TRACEBLOC_RESTRICTED_DNS_NAMESERVER
           value: {{ .clusterIP | default (printf "restricted-dns-service.%s.svc.%s" $.Release.Namespace (trimSuffix "." (.clusterDomain | default "cluster.local"))) | quote }}
-        - name: RESTRICTED_DNS_CLUSTER_DOMAIN
-          value: {{ trimSuffix "." (.clusterDomain | default "cluster.local") | quote }}
         - name: TRACEBLOC_RESTRICTED_DNS_CLUSTER_DOMAIN
           value: {{ trimSuffix "." (.clusterDomain | default "cluster.local") | quote }}
         {{- end }}
@@ -875,7 +801,7 @@ spec:
         # point at different registries: a private mirror set via
         # global.imageRegistry (#585) wins, so an air-gapped/mirrored install
         # pulls job images from the same registry as the chart's own images;
-        # else images.traceblocRegistry (the per-edge rollback knob); else the
+        # else images.traceblocRegistry (the tracebloc-only knob); else the
         # chart default, ghcr.io since the GHCR migration. Docker Hub is a
         # frozen archive: it serves the tags it last received and none of the
         # digests resolved on ghcr.io since, which is why the training digest
@@ -883,8 +809,6 @@ spec:
         # helper is nil-guarded for pre-this-key --reset-then-reuse-values
         # upgrades.
         # Trailing slash: the runtime concatenates <host><repo>:<tag> verbatim.
-        - name: JOB_IMAGE_HOST
-          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         - name: TRACEBLOC_JOB_IMAGE_HOST
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- if include "tracebloc.useImagePullSecrets" . }}
@@ -906,15 +830,11 @@ spec:
         #
         # Skew-safe both ways: a client-runtime older than backend#2119 ignores
         # this var, and a newer one treats its absence as "public".
-        - name: IMAGE_PULL_SECRET_NAME
-          value: {{ include "tracebloc.registrySecretName" . | quote }}
         - name: TRACEBLOC_IMAGE_PULL_SECRET_NAME
           value: {{ include "tracebloc.registrySecretName" . | quote }}
         {{- end }}
         {{- $clientEnv := include "tracebloc.clientEnv" . }}
         - name: TRACEBLOC_ENV
-          value: {{ $clientEnv | quote }}
-        - name: CLIENT_ENV
           value: {{ $clientEnv | quote }}
         {{- /* Digest-pinned training images (RFC-1246 P2; backend#3156 for
              RFC-0067 D8). Read by jobs_manager.load_training_image_digests /
@@ -933,8 +853,8 @@ spec:
              tracebloc.trainingPins holds: a map exists, the runtime will pin
              here, and the map was resolved on the registry this edge pulls
              training images from (images.training.digestRegistry ==
-             JOB_IMAGE_HOST's registry). On a customer mirror, on
-             images.traceblocRegistry=docker.io, with pinned=false, or on a
+             JOB_IMAGE_HOST's registry). On a customer mirror, on another
+             images.traceblocRegistry, with pinned=false, or on a
              dev/stg edge in auto mode, neither renders and the edge floats
              exactly as it does with an empty map -- a digest resolved on one
              registry is not a reference another registry can serve.
@@ -950,8 +870,6 @@ spec:
         {{- end }}
         {{- $trainingPins := include "tracebloc.trainingPins" . }}
         {{- if $trainingPins }}
-        - name: TRAINING_IMAGE_DIGESTS
-          value: {{ $training.digests | toJson | quote }}
         - name: TRACEBLOC_TRAINING_IMAGE_DIGESTS
           value: {{ $training.digests | toJson | quote }}
         {{- end }}
@@ -960,14 +878,10 @@ spec:
              absent value is a non-empty sentinel that would emit the var and
              turn a no-op upgrade into a pod roll (Bugbot, client#976). */}}
         {{- if and (hasKey $training "pinned") (ne (toString $training.pinned) "") }}
-        - name: TRAINING_IMAGE_PINNED
-          value: {{ $training.pinned | toString | quote }}
         - name: TRACEBLOC_TRAINING_IMAGE_PINNED
           value: {{ $training.pinned | toString | quote }}
         {{- end }}
         {{- if and $trainingPins $training.capabilities }}
-        - name: TRAINING_ENGINE_CAPABILITIES
-          value: {{ $training.capabilities | quote }}
         - name: TRACEBLOC_TRAINING_ENGINE_CAPABILITIES
           value: {{ $training.capabilities | quote }}
         {{- end }}
@@ -977,8 +891,6 @@ spec:
         # and set-but-empty as "no node-agents namespace", so leaving it
         # populated would list a namespace that isn't rendered — a 403 every
         # heartbeat for a workload the operator turned off.
-        - name: NODE_AGENTS_NAMESPACE
-          value: {{ if (include "tracebloc.resourceMonitorEnabled" .) }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         - name: TRACEBLOC_NODE_AGENTS_NAMESPACE
           value: {{ if (include "tracebloc.resourceMonitorEnabled" .) }}{{ dig "namespace" "name" "" (.Values.nodeAgents | default dict) | quote }}{{ else }}""{{ end }}
         # backend#664 (Utilization Ladder L0): with NEITHER env.RESOURCE_REQUESTS
@@ -1044,14 +956,10 @@ spec:
         # a runtime carrying #388.
         {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
         {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
-        - name: RESOURCE_REQUESTS
-          value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
         - name: TRACEBLOC_RESOURCE_REQUESTS
           value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
         {{- end }}
         {{- if hasKey .Values.env "RESOURCE_LIMITS" }}
-        - name: RESOURCE_LIMITS
-          value: {{ .Values.env.RESOURCE_LIMITS | quote }}
         - name: TRACEBLOC_RESOURCE_LIMITS
           value: {{ .Values.env.RESOURCE_LIMITS | quote }}
         {{- end }}
@@ -1065,8 +973,6 @@ spec:
         # deliberate `tracebloc resources set` are indistinguishable once the
         # value differs from the old cpu=2,memory=8Gi literal, so guessing would
         # risk overruling a human. Consumers MUST treat `unknown` as `user`.
-        - name: RESOURCE_PROVENANCE
-          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         - name: TRACEBLOC_RESOURCE_PROVENANCE
           value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
@@ -1116,8 +1022,6 @@ spec:
         # env.INFERENCE_RESOURCE_* / env.INFERENCE_GPU_*. Absent, nothing is
         # rendered and inference pods keep the training size above.
         {{- include "tracebloc.inferenceResourceEnv" . | nindent 8 }}
-        - name: RUNTIME_CLASS_NAME
-          value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         - name: TRACEBLOC_RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
@@ -1130,8 +1034,6 @@ spec:
         # quoted string (schema: env.additionalProperties is string); the
         # runtime parses true/false. hostPath is nil-guarded so a pre-this-key
         # --reset-then-reuse-values upgrade can't crash templating.
-        - name: SINGLE_NODE
-          value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         # backend#4346: the node this pod runs on, reported as the heartbeat's
@@ -1186,25 +1088,15 @@ spec:
              (DB_BOOTSTRAP_PASSWORD and the TB_META / TB_INGEST / TB_CREDMGR
              pairs), and those moved there. The env name is client-runtime's
              contract and stays. */}}
-        - name: RELEASE_NAME
-          value: {{ .Release.Name | quote }}
         - name: TRACEBLOC_RELEASE_NAME
           value: {{ .Release.Name | quote }}
-        - name: RELEASE_SECRET_NAME
-          value: {{ include "tracebloc.mysqlCredentialsSecret" . | quote }}
         - name: TRACEBLOC_RELEASE_SECRET_NAME
           value: {{ include "tracebloc.mysqlCredentialsSecret" . | quote }}
-        - name: MYSQL_MIGRATION_JOB_IMAGE
-          value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         - name: TRACEBLOC_MYSQL_MIGRATION_JOB_IMAGE
           value: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         {{- if .Values.autoUpgrade.enabled }}
-        - name: MYSQL_MIGRATION_SERVICE_ACCOUNT
-          value: {{ include "tracebloc.autoUpgradeName" . | quote }}
         - name: TRACEBLOC_MYSQL_MIGRATION_SERVICE_ACCOUNT
           value: {{ include "tracebloc.autoUpgradeName" . | quote }}
-        - name: MYSQL_MIGRATION_HELM_IMAGE
-          value: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) | quote }}
         - name: TRACEBLOC_MYSQL_MIGRATION_HELM_IMAGE
           value: {{ include "tracebloc.thirdPartyImage" (dict "site" "autoUpgrade.image" "root" $) | quote }}
         {{- end }}
@@ -1287,22 +1179,11 @@ spec:
           mountPath: "/data/logs"
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
-        {{- /* The client identity under both names: TRACEBLOC_CLIENT_ID /
-             TRACEBLOC_CLIENT_PASSWORD are canonical, CLIENT_ID / CLIENT_PASSWORD
-             the legacy spellings (remove_by 2026-12-31). Both env names read
-             the CANONICAL Secret key (the FLIP, backend#4959): secrets.yaml
-             writes it on every render, and since backend#4959 step a it is
-             the only key it writes. */}}
-        - name: CLIENT_ID
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_CLIENT_ID
-        - name: CLIENT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "tracebloc.secretName" . }}
-              key: TRACEBLOC_CLIENT_PASSWORD
+        {{- /* The client identity under its canonical names, TRACEBLOC_CLIENT_ID /
+             TRACEBLOC_CLIENT_PASSWORD; the legacy CLIENT_ID / CLIENT_PASSWORD env
+             names stopped rendering in the CONTRACT step (backend#4959 step b).
+             Both read the CANONICAL Secret key, the only key secrets.yaml writes
+             since backend#4959 step a. */}}
         - name: TRACEBLOC_CLIENT_ID
           valueFrom:
             secretKeyRef:
@@ -1313,21 +1194,15 @@ spec:
             secretKeyRef:
               name: {{ include "tracebloc.secretName" . }}
               key: TRACEBLOC_CLIENT_PASSWORD
-        - name: CLIENT_LOGS_PVC
-          value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         - name: TRACEBLOC_CLIENT_LOGS_PVC
           value: {{ include "tracebloc.clientLogsPvc" . | quote }}
         # See the api container's JOB_IMAGE_HOST note (#585): rendered from
         # tracebloc.tbRegistry, so a global.imageRegistry mirror wins, then
         # images.traceblocRegistry, then the chart default (ghcr.io).
-        - name: JOB_IMAGE_HOST
-          value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         - name: TRACEBLOC_JOB_IMAGE_HOST
           value: {{ printf "%s/" (include "tracebloc.tbRegistry" .) | quote }}
         {{- $clientEnv := include "tracebloc.clientEnv" . }}
         - name: TRACEBLOC_ENV
-          value: {{ $clientEnv | quote }}
-        - name: CLIENT_ENV
           value: {{ $clientEnv | quote }}
         # See the api container's RESOURCE_REQUESTS note (backend#664,
         # backend#2418): both omitted when neither is set (jobs-manager derives
@@ -1339,14 +1214,10 @@ spec:
         # writes, always rendered verbatim -- see the api container's note.)
         {{- if or (hasKey .Values.env "RESOURCE_REQUESTS") (hasKey .Values.env "RESOURCE_LIMITS") }}
         {{- if hasKey .Values.env "RESOURCE_REQUESTS" }}
-        - name: RESOURCE_REQUESTS
-          value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
         - name: TRACEBLOC_RESOURCE_REQUESTS
           value: {{ .Values.env.RESOURCE_REQUESTS | quote }}
         {{- end }}
         {{- if hasKey .Values.env "RESOURCE_LIMITS" }}
-        - name: RESOURCE_LIMITS
-          value: {{ .Values.env.RESOURCE_LIMITS | quote }}
         - name: TRACEBLOC_RESOURCE_LIMITS
           value: {{ .Values.env.RESOURCE_LIMITS | quote }}
         {{- end }}
@@ -1360,8 +1231,6 @@ spec:
         # deliberate `tracebloc resources set` are indistinguishable once the
         # value differs from the old cpu=2,memory=8Gi literal, so guessing would
         # risk overruling a human. Consumers MUST treat `unknown` as `user`.
-        - name: RESOURCE_PROVENANCE
-          value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         - name: TRACEBLOC_RESOURCE_PROVENANCE
           value: {{ if hasKey .Values.env "RESOURCE_PROVENANCE" }}{{ .Values.env.RESOURCE_PROVENANCE | quote }}{{ else }}"unknown"{{ end }}
         {{- end }}
@@ -1375,16 +1244,12 @@ spec:
         # client-runtime#946: same helper as the api container -- a GPU->CPU
         # respin of an inference pod is sized the same way.
         {{- include "tracebloc.inferenceResourceEnv" . | nindent 8 }}
-        - name: RUNTIME_CLASS_NAME
-          value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         - name: TRACEBLOC_RUNTIME_CLASS_NAME
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # Kept in sync with the api container (client-runtime#92). pods-monitor
         # does not consume SINGLE_NODE, but injecting it here keeps both env
         # blocks + their range-exclusion lists symmetric, matching how
         # GPU_REQUESTS et al. are already handled.
-        - name: SINGLE_NODE
-          value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         {{- range $key, $value := .Values.env }}

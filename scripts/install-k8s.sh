@@ -484,6 +484,12 @@ main() {
   # with the control plane's (slim client B.13). It does not wait for the pull.
   _prepull_training_parent
   print_summary
+  # A connected, interactive install opens the dashboard with a one-time link
+  # that marks the browser as on this machine (install-client-helm.sh). It never
+  # fails the install; guarded for a stale bootstrap without it.
+  if declare -F open_dashboard_link >/dev/null 2>&1; then
+    open_dashboard_link || true
+  fi
 
   # Exit code reflects reality: connected/starting are OK; failures are non-zero
   # so re-runs and automation can tell the difference.

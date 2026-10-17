@@ -284,12 +284,15 @@ gpu:
   devicePlugin:
     # Master gate. The Linux installer sets this true on the native-GPU path, in
     # lockstep with the GPU request it writes for training jobs (env.GPU_REQUESTS
-    # / env.GPU_LIMITS). Left false for CPU-only installs and for the Windows
-    # WSL2/CDI path (which advertises the GPU itself via a node-status patch and
-    # must NOT run the NVML plugin). Default false: nothing renders.
+    # / env.GPU_LIMITS). Left false for CPU-only installs and, until the Windows
+    # port (client-dev#1810 part 3), for the Windows WSL2/CDI path, which still
+    # advertises the GPU itself via a node-status patch. Default false: nothing
+    # renders.
     enabled: false
     # Which vendor plugin to render when enabled: "nvidia" or "amd".
     # Rendering with enabled: true and an unset/other vendor is a template error.
+    # So is enabled: true with openshift.scc.enabled (backend#5812): no chart SCC
+    # admits the plugin's DaemonSet, so use the vendor's GPU Operator there.
     vendor: ""
     # Namespace for the DaemonSet. kube-system by default — the kubelet only
     # discovers a device plugin that mounts its own device-plugins socket dir,
@@ -300,11 +303,16 @@ gpu:
     # (#585 mirror / air-gap) re-homes them exactly like every other chart image
     # — the mirror must host the same repository path. Set a digest to pin.
     nvidia:
-      # Pinned to the version the installer used to apply (NVIDIA k8s-device-plugin).
+      # NVIDIA k8s-device-plugin v0.20.1, pinned by digest (the multi-arch index:
+      # linux/amd64 and linux/arm64). It was v0.14.5, the version the installer
+      # used to apply. v0.19.1 and later find WSL by themselves (their default
+      # `auto` discovery reads /dev/dxg) and advertise one shared device, `all`:
+      # RFC-0175 D8's Windows device (W26), measured on v0.20.1 by spike S-W. The
+      # same plugin, under the same `nvidia` RuntimeClass, is Linux's device.
       registry: nvcr.io
       repository: nvidia/k8s-device-plugin
-      tag: v0.14.5
-      digest: ""
+      tag: v0.20.1
+      digest: "sha256:27c1b2553a690ca3d29889dcd61df97525d46f58272c0be8dc63c2b18f120075"
       # `<repository>:<tag>` the digest above was resolved for. Empty = the chart
       # default identity for the chart's own pin, your image for your own digest.
       digestFor: ""
@@ -329,8 +337,8 @@ gpu:
       # this to "nvidia" whenever the GPU is wired: on k3d the RuntimeClass baked into
       # the k3s-cuda node image, on native k3s the one k3s creates for the host's
       # NVIDIA toolkit. Empty = plugin runs under the default runtime
-      # (the correct choice for CPU clusters and the Windows/WSL2 path, which does
-      # not run this plugin at all).
+      # (the correct choice for CPU clusters and for the Windows/WSL2 path, which
+      # does not run this plugin until the Windows port, client-dev#1810 part 3).
       runtimeClassName: ""
     amd:
       # ROCm k8s device plugin (docker.io/rocm/k8s-device-plugin).
@@ -1224,10 +1232,15 @@ images:
   # the GHCR migration, and it is the chart default. Docker Hub is a FROZEN
   # archive since then: nothing is published there any more, so it serves the
   # tags it last received -- older images, never the digests resolved on
-  # ghcr.io since. "docker.io" remains a valid value and is the per-edge
-  # rollback (`--set images.traceblocRegistry=docker.io`; user-supplied, so it
-  # survives the fleet auto-upgrade until cleared), a rollback to those older
-  # tags. Digest pins are NOT registry-agnostic: a digest names bytes on the
+  # ghcr.io since. From 1.9.218 the chart REFUSES docker.io here (or in
+  # global.imageRegistry; any case, any port, any host under docker.io) and the
+  # message names the fix: those older tags are control-plane builds that read
+  # only the legacy environment names, which the chart no longer sets, so a
+  # jobs-manager pulled from there would sign in with an empty client id. It is
+  # no longer a rollback; to go back a release, `helm rollback` or
+  # `helm upgrade --version` to the older chart (MIGRATION.md, 1.9.218). The
+  # refusal fails the fleet's atomic auto-upgrade, so a client that still sets
+  # docker.io stays on the chart it runs until the value is cleared. Digest pins are NOT registry-agnostic: a digest names bytes on the
   # registry it was resolved on, and nothing guarantees another registry ever
   # held them -- so every pin carries the registry it was resolved on and is
   # rendered only when that equals the registry this knob resolves to: the
@@ -1274,8 +1287,9 @@ images:
   # LEGACY RULE: `digest` set with `digestRegistry` empty is a pin written
   # before the key existed. Every such pin was resolved on docker.io -- the only
   # registry these images were pulled from until then -- so it is read as
-  # `digestRegistry: docker.io`: honoured with `traceblocRegistry: docker.io`
-  # (the rollback), ignored at the ghcr.io default. That is exactly the pin
+  # `digestRegistry: docker.io`, and the chart refuses `traceblocRegistry:
+  # docker.io` from 1.9.218, so such a pin is ignored wherever the chart
+  # renders. That is exactly the pin
   # that outlived its registry when the default moved: rendered onto ghcr.io,
   # which never had the digest, it could not pull, and two days of
   # auto-upgrades timed out and rolled back against it. Now it floats instead.
@@ -1402,7 +1416,8 @@ images:
   # advanced on every engine prod promotion or prod freezes on these bytes --
   # that is the release train's promotion step, which re-runs the same resolver.
   # dev and staging edges (auto) render none of it and keep floating; so do
-  # pinned=false, a mirror and the docker.io rollback (see digestRegistry above).
+  # pinned=false, a mirror and another registry of the operator's (see
+  # digestRegistry above).
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
@@ -1839,9 +1854,8 @@ images:
     #
     # The digest is unchanged by the move: `crane copy` writes the same bytes
     # under the same digest, so this is a one-word change, not a re-pin.
-    # Rollback is `images.traceblocRegistry: docker.io`, which ignores this pin
-    # (declared ghcr.io) and renders `docker.io/tracebloc/mysql-client:prod` --
-    # the same frozen image, from the retained Hub namespace.
+    # Docker Hub's retained namespace holds the same frozen image, but the chart
+    # refuses `images.traceblocRegistry: docker.io` from 1.9.218 (see that key).
     digestRegistry: "ghcr.io"
     # mysql-client is only published under the "prod" tag — it has no dev/
     # staging variants, so we decouple it from env.CLIENT_ENV. Override only

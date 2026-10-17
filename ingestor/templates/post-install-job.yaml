@@ -60,13 +60,11 @@ spec:
             # `curl: Could not resolve host` at the hook. Customers
             # whose ingestor release sits in a different namespace from
             # the tracebloc release set `jobsManager.endpoint`
-            # explicitly to override.
-            - name: JOBS_MANAGER_ENDPOINT
-              value: {{ .Values.jobsManager.endpoint | default (printf "http://jobs-manager.%s.svc.cluster.local:8080" .Release.Namespace) | quote }}
+            # explicitly to override. Under the canonical TRACEBLOC_ names
+            # only (settings naming CONTRACT step, backend#4959); the script
+            # below reads them first.
             - name: TRACEBLOC_JOBS_MANAGER_ENDPOINT
               value: {{ .Values.jobsManager.endpoint | default (printf "http://jobs-manager.%s.svc.cluster.local:8080" .Release.Namespace) | quote }}
-            - name: SUBMIT_PATH
-              value: {{ .Values.jobsManager.submitPath | quote }}
             - name: TRACEBLOC_SUBMIT_PATH
               value: {{ .Values.jobsManager.submitPath | quote }}
           command: ["/bin/sh", "-c"]
@@ -100,7 +98,7 @@ spec:
               fi
 
               # Settings naming: the hook sets each of these under its canonical
-              # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+              # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
               # canonical first; a blank or absent canonical leaves the legacy value --
               # and any default or `set -u` refusal below -- exactly as before.
               if [ -n "${TRACEBLOC_JOBS_MANAGER_ENDPOINT:-}" ]; then JOBS_MANAGER_ENDPOINT="$TRACEBLOC_JOBS_MANAGER_ENDPOINT"; fi

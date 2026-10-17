@@ -76,8 +76,6 @@ spec:
             {{- include "tracebloc.proxyEnv" . | nindent 12 }}
             - name: TRACEBLOC_ENV
               value: {{ $env | quote }}
-            - name: CLIENT_ENV
-              value: {{ $env | quote }}
           command:
             - sh
             - -c

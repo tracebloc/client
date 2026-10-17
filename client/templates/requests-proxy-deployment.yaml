@@ -149,14 +149,10 @@ spec:
             - name: MYSQL_HOST
               value: "mysql-client"
             {{- /* Settings naming: the queue names follow the service-bus family,
-                 TRACEBLOC_SB_<QUEUE>_QUEUE_NAME, beside the legacy spelling
-                 (remove_by 2026-12-31), same value. */}}
-            - name: EXPERIMENTS_QUEUE_NAME
-              value: "experiments"
+                 TRACEBLOC_SB_<QUEUE>_QUEUE_NAME. The legacy <QUEUE>_QUEUE_NAME
+                 stopped rendering in the CONTRACT step (backend#4959). */}}
             - name: TRACEBLOC_SB_EXPERIMENTS_QUEUE_NAME
               value: "experiments"
-            - name: FLOPS_QUEUE_NAME
-              value: "flops"
             - name: TRACEBLOC_SB_FLOPS_QUEUE_NAME
               value: "flops"
             # client-runtime#79: shared HMAC secret used to VERIFY the per-pod
@@ -164,16 +160,10 @@ spec:
             # jobs-manager uses to mint it. When present, the proxy skips the
             # pod_tokens table entirely.
             {{- /* Settings naming: each identity name is emitted as the canonical
-                 TRACEBLOC_<name> (a leading TB_ replaced) beside the legacy one, with
-                 the identical secretKeyRef or value. Every secretKeyRef names the
-                 CANONICAL Secret key (the FLIP, backend#4959), which secrets.yaml
-                 writes beside the legacy key. Legacy env names stay until
-                 remove_by 2026-12-31. */}}
-            - name: POD_TOKEN_SIGNING_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
-                  key: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
+                 TRACEBLOC_<name> (a leading TB_ replaced) only: the legacy env
+                 names stopped rendering in the CONTRACT step (backend#4959).
+                 Every secretKeyRef names the CANONICAL Secret key, the only one
+                 secrets.yaml writes. */}}
             - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
@@ -187,19 +177,10 @@ spec:
             # tb_meta at its startup; the proxy's bootstrap retries until it
             # lands. Rendered only when enabled, so a default install stays
             # byte-identical (mirrors the jobs-manager block).
-            - name: SERVICE_DB_ACCOUNTS
-              value: "1"
             - name: TRACEBLOC_SERVICE_DB_ACCOUNTS
               value: "1"
-            - name: TB_META_USER
-              value: "tb_meta"
             - name: TRACEBLOC_META_USER
               value: "tb_meta"
-            - name: TB_META_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "tracebloc.mysqlCredentialsSecret" . }}
-                  key: TRACEBLOC_META_PASSWORD
             - name: TRACEBLOC_META_PASSWORD
               valueFrom:
                 secretKeyRef:

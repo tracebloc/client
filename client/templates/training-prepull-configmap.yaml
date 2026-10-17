@@ -22,8 +22,8 @@
   WHEN IT RENDERS. Only where tracebloc.trainingParentPin holds: the digest map
   itself renders (tracebloc.trainingPins: a map exists, the runtime will pin
   here, and the map was resolved on the registry this edge pulls training images
-  from) AND the GPU entry is set. A floating edge (dev/staging in auto, pinned=false, a mirror, the
-  docker.io rollback) runs whatever its tag points at, so a parent read off the
+  from) AND the GPU entry is set. A floating edge (dev/staging in auto, pinned=false, a mirror, another
+  registry of the operator's) runs whatever its tag points at, so a parent read off the
   pinned set says nothing about it, and the ConfigMap is absent. GPU only: the
   installer prepulls on GPU-wired hosts, and the CPU families' parents are not in
   scope.

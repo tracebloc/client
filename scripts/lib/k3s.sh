@@ -764,14 +764,59 @@ _native_k3s_node_name() {
 
 # ── Pod and service ranges ────────────────────────────────────────────────────
 
-# _native_k3s_host_routes -- the host's IPv4 routes, as `ip -4 route show` prints
-# them. TRACEBLOC_K3S_ROUTES_STUB is the TEST SEAM: a file whose lines replace the command.
+# _native_k3s_host_routes -- the host's IPv4 routes, one per line in the shape
+# `ip -4 route show` prints them: "<dest>/<len> dev <iface>", or "default dev <iface>".
+# Read from the kernel's own table, /proc/net/route (the main table, the one
+# `ip -4 route show` lists), so the install needs no iproute2: tracebloc's WSL distro
+# is Canonical's ubuntu-base and ships none, and 3.3's distro leg stopped here on
+# `ip: command not found` (16 Oct, e2e run 38852163664). Returns 1 when the table
+# cannot be read, its header is not the kernel's, or a line is not a route: never a
+# partial answer. TEST SEAMS: TRACEBLOC_K3S_ROUTES_STUB, a file whose lines replace
+# the whole answer; TRACEBLOC_K3S_PROC_ROUTE, the table's path.
 _native_k3s_host_routes() {
   if [[ -n "${TRACEBLOC_K3S_ROUTES_STUB:-}" ]]; then
     cat "$TRACEBLOC_K3S_ROUTES_STUB"
     return
   fi
-  ip -4 route show
+  local table="${TRACEBLOC_K3S_PROC_ROUTE:-/proc/net/route}" text header line iface dest gw flags refcnt use metric mask rest addr len
+  text="$(cat "$table" 2>/dev/null)" || return 1
+  header="${text%%$'\n'*}"
+  read -r iface dest gw flags refcnt use metric mask rest <<<"$header"
+  [[ "$iface" == Iface && "$dest" == Destination && "$mask" == Mask ]] || return 1
+  while IFS= read -r line; do
+    [[ "$line" == "$header" || -z "${line//[[:space:]]/}" ]] && continue
+    read -r iface dest gw flags refcnt use metric mask rest <<<"$line"
+    addr="$(_native_k3s_hex_ipv4 "$dest")" || return 1
+    len="$(_native_k3s_hex_prefix_len "$mask")" || return 1
+    if [[ "$addr" == 0.0.0.0 && "$len" == 0 ]]; then
+      printf 'default dev %s\n' "$iface"
+    else
+      printf '%s/%s dev %s\n' "$addr" "$len" "$iface"
+    fi
+  done <<<"$text"
+}
+
+# _native_k3s_hex_ipv4 HEX -- an address as /proc/net/route writes it (eight hex
+# digits, the bytes in the host's little-endian order) as a dotted quad.
+_native_k3s_hex_ipv4() {
+  local h="$1"
+  [[ "$h" =~ ^[0-9A-Fa-f]{8}$ ]] || return 1
+  printf '%d.%d.%d.%d\n' "$((16#${h:6:2}))" "$((16#${h:4:2}))" "$((16#${h:2:2}))" "$((16#${h:0:2}))"
+}
+
+# _native_k3s_hex_prefix_len HEX -- a netmask as /proc/net/route writes it, as a
+# prefix length. Returns 1 for a mask whose bits are not contiguous: no route can
+# carry one, so it is a table this cannot read.
+_native_k3s_hex_prefix_len() {
+  local h="$1" n len=0
+  [[ "$h" =~ ^[0-9A-Fa-f]{8}$ ]] || return 1
+  n=$(( (16#${h:6:2} << 24) | (16#${h:4:2} << 16) | (16#${h:2:2} << 8) | 16#${h:0:2} ))
+  while (( n & 0x80000000 )); do
+    len=$((len + 1))
+    n=$(( (n << 1) & 0xFFFFFFFF ))
+  done
+  (( n == 0 )) || return 1
+  printf '%s\n' "$len"
 }
 
 # _native_k3s_cidr_overlap A B -- true when the IPv4 ranges A and B share an address.
@@ -805,7 +850,7 @@ _native_k3s_pick_cidrs() {
     printf '%s %s\n' "$have_c" "$have_s"
     return 0
   fi
-  routes="$(_native_k3s_host_routes)" || error "native k3s: couldn't read this machine's routes (ip -4 route show), so it cannot tell which pod and service ranges are free. Install iproute2, then re-run."
+  routes="$(_native_k3s_host_routes)" || error "native k3s: couldn't read this machine's routes (/proc/net/route), so it cannot tell which pod and service ranges are free. Check that /proc is mounted and readable, then re-run."
   for pair in "${TRACEBLOC_K3S_CIDR_PAIRS[@]}"; do  # set-u-safe: TRACEBLOC_K3S_CIDR_PAIRS is a file-scope constant
     hits=""
     while IFS= read -r line; do
@@ -939,7 +984,15 @@ _native_k3s_merge_kubeconfig() {
   # names the user's kubeconfig: with KUBECONFIG unset, k3s's kubectl reads
   # /etc/rancher/k3s/k3s.yaml (context `default`) and never ~/.kube/config.
   TB_PREV_KUBE_CONTEXT=""
-  prev_ctx="$(_bounded 10 env KUBECONFIG="${KUBECONFIG:-$target}" "${kc[@]}" config current-context 2>/dev/null)" || prev_ctx=""  # set-u-safe: kc is seeded with the kubectl in both branches
+  if [[ "$(tb_wsl_phase 2>/dev/null)" == "client" ]]; then
+    # The Windows installer's client run in tracebloc's WSL distro merges after the
+    # cluster run made this context current, so kubectl's answer here would be this
+    # one. What it pointed at before is the cluster run's reading, which the host
+    # hands this run (tb_wsl_handover_write; backend#5025 O-19).
+    prev_ctx="${TRACEBLOC_WSL_PREV_KUBE_CONTEXT:-}"
+  else
+    prev_ctx="$(_bounded 10 env KUBECONFIG="${KUBECONFIG:-$target}" "${kc[@]}" config current-context 2>/dev/null)" || prev_ctx=""  # set-u-safe: kc is seeded with the kubectl in both branches
+  fi
   prev_ctx="${prev_ctx//[$'\r\n']/}"
   td="$(mktemp -d "${TMPDIR:-/tmp}/tracebloc-k3s-kc-XXXXXX")" || error "native k3s: could not create a temporary directory for the kubeconfig merge."
   # Read as root (adopted: through the prepared group), written as the user: the
@@ -1629,6 +1682,8 @@ _native_k3s_refuse_windows_drive() {
   for name in TB_K3S_DATA_PATH HOST_DATA_DIR HOST_DATASET_DIR; do
     path="${!name:-}"
     [[ -n "$path" ]] || continue
+    # Before validate_config: the data dir is read as it will read it, under $HOME.
+    [[ "$name" != HOST_DATA_DIR ]] || path="$(_tb_home_path "$path")"
     case "$name" in
       TB_K3S_DATA_PATH) what="k3s's data directory ${path}" ;;
       HOST_DATA_DIR)    what="The data directory ${path} (TRACEBLOC_HOST_DATA_DIR, --data-dir)" ;;

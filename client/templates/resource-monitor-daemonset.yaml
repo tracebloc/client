@@ -220,17 +220,13 @@ spec:
             # The monitor queries workloads in the release namespace, not its
             # own node-agents namespace — use the release namespace literal
             # rather than the Downward API pod namespace.
-            - name: NAMESPACE
-              value: {{ .Release.Namespace | quote }}
-            {{- /* Canonical TRACEBLOC_ names beside the legacy NAMESPACE /
-                 CLIENT_ID / CLIENT_PASSWORD (remove_by 2026-12-31), same
-                 value. Both credential env names read the CANONICAL key of the
-                 node-agents mirror (the FLIP, backend#4959), the only key
+            {{- /* Canonical TRACEBLOC_ names only: the legacy NAMESPACE /
+                 CLIENT_ID / CLIENT_PASSWORD stopped rendering in the CONTRACT
+                 step (backend#4959 step b). The credential env names read the
+                 CANONICAL key of the node-agents mirror, the only key
                  secrets.yaml writes there since backend#4959 step a. */}}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
-            - name: MONITOR_INTERVAL
-              value: "30"
             - name: TRACEBLOC_MONITOR_INTERVAL
               value: "30"
             {{- if $datasetPath }}
@@ -238,26 +234,12 @@ spec:
             # contract: the collector adds this path to the set it measures, so
             # the var without the mount stats nothing and drops every node's
             # storage reading. Never set one without the other.
-            - name: HOST_DATASET_PATH
-              value: /host/dataset
             - name: TRACEBLOC_HOST_DATASET_PATH
               value: /host/dataset
             {{- end }}
             {{- $clientEnv := include "tracebloc.clientEnv" . }}
             - name: TRACEBLOC_ENV
               value: {{ $clientEnv | quote }}
-            - name: CLIENT_ENV
-              value: {{ $clientEnv | quote }}
-            - name: CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
-                  key: TRACEBLOC_CLIENT_ID
-            - name: CLIENT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "tracebloc.secretName" . }}
-                  key: TRACEBLOC_CLIENT_PASSWORD
             - name: TRACEBLOC_CLIENT_ID
               valueFrom:
                 secretKeyRef:

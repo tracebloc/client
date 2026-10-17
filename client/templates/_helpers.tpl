@@ -927,9 +927,9 @@ gpu.devicePlugin.amd:
 gpu.devicePlugin.nvidia:
   registry: nvcr.io
   repository: nvidia/k8s-device-plugin
-  tag: "v0.14.5"
-  digest: ""
-  digestFor: ""
+  tag: "v0.20.1"
+  digest: "sha256:27c1b2553a690ca3d29889dcd61df97525d46f58272c0be8dc63c2b18f120075"
+  digestFor: "nvidia/k8s-device-plugin:v0.20.1"
 telemetryCollector.image:
   registry: ghcr.io
   repository: tracebloc/otelcol-tracebloc
@@ -1126,17 +1126,14 @@ about where those images live:
                                     tracebloc-published images -- control plane
                                     and training-image host TOGETHER -- leaving
                                     busybox, squid, alpine/*, the device plugins
-                                    and the ingestor where they are. Also the
-                                    per-edge rollback: set it to the previous
-                                    registry.
+                                    and the ingestor where they are.
   3. "ghcr.io"                   — the chart default since the GHCR migration.
-                                    Docker Hub is a frozen archive since then:
-                                    "docker.io" is still the documented
-                                    rollback, to the tags it last received,
-                                    and serves none of the digests resolved
-                                    on ghcr.io since (every pin is honoured
-                                    only on its own registry --
-                                    tracebloc.pinRegistryHonoured).
+                                    Docker Hub is a frozen archive since then,
+                                    and from 1.9.218 the chart refuses it
+                                    (tracebloc.assertRegistryIsNotDockerHub):
+                                    its control plane reads only the legacy
+                                    environment names the chart no longer
+                                    sets.
 
 ROUTED THROUGH HERE SINCE D1 STEP 6 (backend#3397): `tracebloc/mysql-client`.
 It used to be excluded because it was "published only to Docker Hub", and step 6
@@ -1144,9 +1141,8 @@ ends that -- the image is copied to ghcr.io at the same digests and
 `build-mysql-client.yml` publishes there. Leaving it out would give the chart two
 answers to "where do the tracebloc-published images live", which is the split
 this helper exists to close. It is still FROZEN and digest-pinned; what changed
-is the host, not the bytes, and `images.traceblocRegistry: docker.io` rolls it
-back with everything else (the Hub namespace is retained, frozen, never deleted
--- RFC-BACKEND-2610 step 7).
+is the host, not the bytes (the Hub namespace is retained, frozen, never deleted
+-- RFC-BACKEND-2610 step 7, though the chart refuses Docker Hub from 1.9.218).
 
 NOT routed through here, on purpose: the third-party images (each has its own
 `registry` key), and the ingestor, which is named by full repository
@@ -1180,6 +1176,41 @@ or a registry the script has no token arm for). Call with the ROOT context.
 {{- define "tracebloc.imageRefreshResolvable" -}}
 {{- if has (include "tracebloc.tbRegistry" .) (splitList " " (include "tracebloc.imageRefreshResolvableRegistries" .)) -}}
 true
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.assertRegistryIsNotDockerHub -- refuse the render when the tracebloc
+images would be pulled from Docker Hub (backend#4959, client-dev#2159's FR hold).
+
+Docker Hub is a frozen archive since 2026-09-19. Its tracebloc/* tags are
+control-plane builds from client-runtime 1538927 or older, which read only the
+legacy environment names (CLIENT_ID, CLIENT_PASSWORD, TB_META_*, ...). From
+1.9.218 the chart sets only the TRACEBLOC_ names, so such a jobs-manager would
+sign in with an empty client id. A refused render fails the fleet's atomic
+auto-upgrade, so a client that still points at Docker Hub stays on the chart it
+runs instead of upgrading into a broken one.
+
+It reads tracebloc.tbRegistry's own answer, so it holds for every input that
+helper reads (global.imageRegistry, images.traceblocRegistry, the default) and
+cannot drift from it. Docker Hub is matched as a DOMAIN, not a list of names:
+the value's host (before any path), lower-cased and without a port, is
+docker.io or a host under it (index.docker.io, registry-1.docker.io). A path
+does not exempt it: Docker Hub has no nested repositories, so docker.io/<x>
+cannot hold tracebloc/jobs-manager either. The message names the key that set
+the value.
+
+Call with the ROOT context.
+*/}}
+{{- define "tracebloc.assertRegistryIsNotDockerHub" -}}
+{{- $reg := include "tracebloc.tbRegistry" . -}}
+{{- $host := regexReplaceAll ":[0-9]+$" (lower (first (splitList "/" $reg))) "" -}}
+{{- if or (eq $host "docker.io") (hasSuffix ".docker.io" $host) -}}
+{{-   $key := "images.traceblocRegistry" -}}
+{{-   if dig "imageRegistry" "" (.Values.global | default dict) -}}
+{{-     $key = "global.imageRegistry" -}}
+{{-   end -}}
+{{-   fail (printf "%s is %q, which is Docker Hub. Docker Hub has been a frozen archive since 2026-09-19: its tracebloc control-plane images are older builds that read only the legacy environment names (CLIENT_ID, CLIENT_PASSWORD), and charts from 1.9.218 set only the TRACEBLOC_ names, so jobs-manager would sign in with an empty client id. Clear the value so the client pulls from ghcr.io, the registry of record: helm upgrade %s tracebloc/client -n %s --reset-then-reuse-values --set %s= (see MIGRATION.md, 1.9.218)." $key $reg .Release.Name .Release.Namespace $key) -}}
 {{- end -}}
 {{- end -}}
 
@@ -1445,10 +1476,10 @@ floats exactly as an edge with an empty map does. All three must hold:
 
 Rule 3 is the one that keeps an edge pulling. The runtime prefixes JOB_IMAGE_HOST
 to `tracebloc/client-<task>-<arch>@<digest>`, so a map resolved on ghcr.io and
-rendered on an edge that pulls from a customer mirror or from docker.io (the
-documented per-edge rollback) asks that registry for bytes it may never have
-held -- and Docker Hub, frozen since the move to ghcr.io, holds none of the
-current engine's. Every training spawn would fail to pull. On any registry but
+rendered on an edge that pulls from a customer mirror or another registry of
+the operator's asks that registry for bytes it may never have held. Every
+training spawn would fail to pull. (Docker Hub, frozen since the move to
+ghcr.io, is refused outright: tracebloc.assertRegistryIsNotDockerHub.) On any registry but
 the declared one the map is therefore not rendered and the edge floats. A mirror
 that does hold the exact digests opts in by declaring itself:
 `--set images.training.digestRegistry=<the mirror, spelled as global.imageRegistry>`.
@@ -1475,8 +1506,8 @@ renders at all, and the digest its Job pulls.
 It holds exactly where tracebloc.trainingPins holds and the GPU entry is set.
 The parent was read off the PINNED images, so it says something only where those
 images run: on a floating edge (dev/staging in auto, pinned=false), on a mirror
-that has not declared itself, or under the docker.io rollback it is empty, and
-nothing is prepulled. GPU only: the CPU families' parents are not in scope.
+that has not declared itself, or on another registry of the operator's it is
+empty, and nothing is prepulled. GPU only: the CPU families' parents are not in scope.
 
 The pin rule for the parent, beside tracebloc.honouredPin: a template hands
 tracebloc.image this, never the values digest
@@ -2838,21 +2869,18 @@ lives in one place (Saqlain, client#996). Three situations, not two (backend#221
                                           limit). Two different explicit values are
                                           written as given; the runtime warns once.
 
-Each var renders under its canonical TRACEBLOC_ name too (TRACEBLOC_GPU_REQUESTS /
-TRACEBLOC_GPU_LIMITS), from the same value and behind the same gate (settings
-naming, backend#3846; legacy remove_by 2026-12-31). The values keys stay
-`env.GPU_REQUESTS` / `env.GPU_LIMITS` -- they are the chart's input API.
+Each var renders under its canonical TRACEBLOC_ name only (TRACEBLOC_GPU_REQUESTS /
+TRACEBLOC_GPU_LIMITS): the legacy GPU_REQUESTS / GPU_LIMITS env names stopped
+rendering in the settings-naming CONTRACT step (backend#4959), every reader
+taking the canonical first. The values keys stay `env.GPU_REQUESTS` /
+`env.GPU_LIMITS` -- they are the chart's input API.
 */}}
 {{- define "tracebloc.gpuEnv" -}}
 {{- if hasKey .Values.env "GPU_LIMITS" }}
 {{- $req := ternary .Values.env.GPU_REQUESTS .Values.env.GPU_LIMITS (hasKey .Values.env "GPU_REQUESTS") | default "" }}
 {{- $lim := .Values.env.GPU_LIMITS | default "" }}
-- name: GPU_REQUESTS
-  value: {{ $req | quote }}
 - name: TRACEBLOC_GPU_REQUESTS
   value: {{ $req | quote }}
-- name: GPU_LIMITS
-  value: {{ $lim | quote }}
 - name: TRACEBLOC_GPU_LIMITS
   value: {{ $lim | quote }}
 {{- end }}
@@ -2911,17 +2939,16 @@ driver_too_old / not_nvidia / docker_cannot_see_gpu), sent as
 gpu_unsupported_code (backend#5296). The names are a cross-repo contract: do
 not rename one side alone.
 
-Each renders only when non-empty, under its legacy name and its TRACEBLOC_
-canonical, same value (settings naming, backend#3846); either spelling of the
-values key works, the canonical first (the passthrough's alias-first rule).
+Each renders only when non-empty, under its TRACEBLOC_ canonical only (settings
+naming CONTRACT step, backend#4959: the legacy env name no longer renders); either
+spelling of the values key works, the canonical first (the passthrough's
+alias-first rule).
 */}}
 {{- define "tracebloc.gpuUnsupportedEnv" -}}
 {{- $env := default dict .Values.env -}}
 {{- range $key := list "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" "GPU_UNSUPPORTED_CODE" }}
 {{- $value := (get $env (printf "TRACEBLOC_%s" $key)) | default (get $env $key) | default "" | toString }}
 {{- if $value }}
-- name: {{ $key }}
-  value: {{ $value | quote }}
 - name: TRACEBLOC_{{ $key }}
   value: {{ $value | quote }}
 {{- end }}
@@ -2969,29 +2996,34 @@ only: the variables are new, so they have no legacy spelling.
 
 {{/*
 tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
-jobs-manager containers, dual-emitted where the name has a TRACEBLOC_ canonical
-(settings naming, backend#3846; legacy remove_by 2026-12-31).
+jobs-manager containers, rendered under its TRACEBLOC_ canonical where the name
+has one (settings naming CONTRACT step, backend#4959).
 Usage: {{ include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) }}
 The caller keeps its own exclusion list; this renders only what passed it.
 
-WHY THE PASSTHROUGH HAS TO DUAL-EMIT. The chart renders a legacy name and its
-canonical side by side, and client-runtime reads the canonical FIRST. A
-passthrough copy renders after the chart's and wins (Kubernetes keeps the last
-duplicate), so an `env.JOB_IMAGE_HOST` override that re-rendered only the
-legacy name would leave the canonical at the chart's value -- and an alias-first
-reader would silently ignore the operator. For every name listed below the
-passthrough therefore renders BOTH spellings with the one value, and either
-spelling of the values key has the same effect:
+WHY THE PASSTHROUGH RENDERS THE CANONICAL. The chart renders the canonical, and
+client-runtime reads the canonical FIRST. A passthrough copy renders after the
+chart's and wins (Kubernetes keeps the last duplicate), so an
+`env.JOB_IMAGE_HOST` override that rendered only the legacy name would leave the
+canonical at the chart's value -- and an alias-first reader would silently
+ignore the operator. For every name listed below the passthrough therefore
+renders the CANONICAL with the value, and either spelling of the values key has
+the same effect:
 
-  * `env.X` alone                  -> X and TRACEBLOC_X, both = env.X.
-  * `env.TRACEBLOC_X` alone        -> the same pair, both = env.TRACEBLOC_X.
+  * `env.X` alone                  -> TRACEBLOC_X = env.X.
+  * `env.TRACEBLOC_X` alone        -> TRACEBLOC_X = env.TRACEBLOC_X.
   * both set, canonical non-empty  -> the canonical wins (the alias-first rule);
                                       env.X renders nothing, so no duplicate.
   * both set, canonical empty      -> the range already skips the empty one, so
-                                      env.X renders the pair (blank canonical =
-                                      legacy, as every reader treats it).
+                                      env.X renders TRACEBLOC_X (blank canonical
+                                      = legacy, as every reader treats it).
 
-The list is every legacy name either container dual-emits that the other's (or
+The legacy env name is NOT rendered (it was, beside the canonical, until the
+CONTRACT step), except for the names in `$keepLegacy`, which a pinned reader
+still takes by the legacy name alone: NODE_NAME, read as `k8s.node.name` by
+the tracebloc-telemetry package client-runtime pins. Those still render both.
+
+The list is every legacy name either container used to dual-emit that the other's (or
 its own) passthrough does not exclude, plus the operator knobs the chart never
 renders itself and only passes through (the GPU / SHM line and the lines after
 it: every such knob client-runtime's jobs-manager or pods-monitor reads
@@ -3004,9 +3036,9 @@ installer-set GPU_UNSUPPORTED_REASON / GPU_UNSUPPORTED_NAME / GPU_UNSUPPORTED_CO
 TRACEBLOC_X. A name excluded from a container's passthrough never reaches this
 helper there, so listing it is inert in that container. The values keys the
 chart READS (`env.GPU_LIMITS`, `env.RESOURCE_*`, ...) are its input API and are
-not listed: the chart renders both names from them and excludes both from the
-passthrough. scripts/tests/chart-env-passthrough-alias.bats derives the pairs
-from the render and fails on one missing here.
+not listed: the chart renders the canonical from them and excludes both
+spellings from the passthrough. scripts/tests/chart-env-passthrough-alias.bats
+derives the pairs from the render and fails on one missing here.
 */}}
 {{- define "tracebloc.envPassthroughEntry" -}}
 {{- $aliased := list
@@ -3030,6 +3062,7 @@ from the render and fails on one missing here.
       "HOST_UID" "HOST_GID" "DATASET_SCOPED_MOUNTS" "LOGS_SCOPED_MOUNTS" "TELEMETRY_COLLECTOR_NAMESPACE"
       "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" "GPU_UNSUPPORTED_CODE"
 -}}
+{{- $keepLegacy := list "NODE_NAME" -}}
 {{- $key := .key -}}
 {{- $legacy := "" -}}
 {{- if has $key $aliased -}}
@@ -3044,8 +3077,10 @@ from the render and fails on one missing here.
 {{- else -}}
 {{-   $canon := printf "TRACEBLOC_%s" (trimPrefix "TB_" $legacy) -}}
 {{-   if or (eq $key $canon) (not (get .env $canon)) }}
+{{-     if has $legacy $keepLegacy }}
 - name: {{ $legacy }}
   value: {{ .value | quote }}
+{{-     end }}
 - name: {{ $canon }}
   value: {{ .value | quote }}
 {{-   end }}

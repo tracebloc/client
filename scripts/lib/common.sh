@@ -1875,6 +1875,23 @@ _tb_system_path() {
   return 1
 }
 
+# _tb_home_path DIR -- DIR as validate_config reads a data dir: a leading ~ or ~/ is
+# $HOME (users type --data-dir=~/foo and the shell does not expand ~ inside a quoted
+# value), and a relative path is under $HOME. Empty stays empty. ONE rule: the
+# refusals that run before validate_config (_mac_ct_hostpath_dirs,
+# _native_k3s_refuse_windows_drive) read HOST_DATA_DIR through it too, so they judge
+# the folder the install will use (client-dev#2183).
+_tb_home_path() {
+  local dir="${1:-}"
+  [[ -n "$dir" ]] || return 0
+  case "$dir" in
+    "~")   dir="$HOME" ;;
+    "~/"*) dir="$HOME/${dir#\~/}" ;;
+  esac
+  [[ "$dir" == /* ]] || dir="$HOME/$dir"
+  printf '%s' "$dir"
+}
+
 validate_config() {
   [[ -n "${HOME:-}" ]]  || error "\$HOME is not set — cannot determine user home directory"
   [[ -n "${USER:-}" ]]  || USER="$(whoami)" || error "Cannot determine current user"
@@ -1896,14 +1913,9 @@ validate_config() {
   # Fail closed on an empty value (e.g. --data-dir= with no path) — otherwise the
   # $HOME-relative rewrite below resolves "" to a surprise dir like $HOME/$USER.
   [[ -n "$dir" ]] || error "HOST_DATA_DIR must not be empty (got '')."
-  # Expand a leading ~ / ~/ : users type --data-dir=~/foo and the shell does not
-  # expand ~ inside a quoted value, so it would otherwise be read as the literal
-  # "$HOME/~/foo" and fail parent resolution. Only the leading ~ is expanded.
-  case "$dir" in
-    "~")   dir="$HOME" ;;
-    "~/"*) dir="$HOME/${dir#\~/}" ;;
-  esac
-  [[ "$dir" != /* ]] && dir="$HOME/$dir"
+  # Expand a leading ~ / ~/ and a $HOME-relative path (_tb_home_path): otherwise
+  # --data-dir=~/foo is read as the literal "$HOME/~/foo" and fails parent resolution.
+  dir="$(_tb_home_path "$dir")"
   # Resolve via parent directory — the target itself may not exist yet on first run
   local parent
   parent="$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd)" || true
@@ -2515,19 +2527,35 @@ tb_wsl_phase() {
 # TRACEBLOC_WSL_HANDOVER, in a folder only this user can open and the host deletes
 # after the install. It reads the file only when the cluster run exits 0, and refuses
 # to go on when the file or its line is missing. So main() writes it last, just before
-# that exit 0: a file there means this run reached its end. Exactly one line, which
-# replaces whatever the file held: INSTALL_STATE_REASON=<word>, the reason the
-# stop-and-check gate set (assess.sh), as it set it -- a tag such as
-# credential-rejected, ns:<namespace> for a healthy client, or empty when the gate did
-# not assess (--force, or a stale bootstrap without assess.sh). On credential-rejected
-# the host runs `client create --reissue` and puts TRACEBLOC_CREDENTIAL_REISSUED=1 on the
-# client run's line. Only the cluster run writes it, and only to a file the host
-# named. A write that fails is an error, so the run never exits 0 without the line.
+# that exit 0: a file there means this run reached its end. Exactly five lines, which
+# replace whatever the file held:
+#   INSTALL_STATE_REASON=<word>, the reason the stop-and-check gate set (assess.sh), as
+#   it set it -- a tag such as credential-rejected, ns:<namespace> for a healthy
+#   client, or empty when the gate did not assess (--force, or a stale bootstrap
+#   without assess.sh). On credential-rejected the host runs `client create --reissue`
+#   and puts TRACEBLOC_CREDENTIAL_REISSUED=1 on the client run's line;
+#   TB_PREV_KUBE_CONTEXT=<context>, the context kubectl pointed at before this run's
+#   kubeconfig merge made its own current (k3s.sh), or empty when it pointed at no
+#   other one. The client run merges again after this one, so only this run can tell;
+#   the host puts it on the client run's line (TRACEBLOC_WSL_PREV_KUBE_CONTEXT), and
+#   that run's summary says how to switch back (backend#5025 O-19);
+#   TRACEBLOC_MACHINE_KIND=, TRACEBLOC_CLOUD_PROVIDER= and TRACEBLOC_HOST_OS=, where
+#   this machine runs (provision.sh's _registration_machine_facts, the facts the
+#   chart's heartbeat gets in this distro), each empty when it cannot be read. The
+#   host runs `client create`, so it puts them in that call's environment, as
+#   provision.sh does for its own create, and the registration says where the
+#   machine runs before its first heartbeat (backend#5797).
+# Only the cluster run writes it, and only to a file the host named. A write that
+# fails is an error, so the run never exits 0 without the lines.
 tb_wsl_handover_write() {
   [[ "$(tb_wsl_phase 2>/dev/null)" == "cluster" && -n "${TRACEBLOC_WSL_HANDOVER:-}" ]] || return 0
-  { printf 'INSTALL_STATE_REASON=%s\n' "${INSTALL_STATE_REASON:-}" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
+  _TB_REG_MACHINE_KIND=""; _TB_REG_CLOUD_PROVIDER=""; _TB_REG_HOST_OS=""
+  if declare -F _registration_machine_facts >/dev/null 2>&1; then _registration_machine_facts; fi
+  { printf 'INSTALL_STATE_REASON=%s\nTB_PREV_KUBE_CONTEXT=%s\nTRACEBLOC_MACHINE_KIND=%s\nTRACEBLOC_CLOUD_PROVIDER=%s\nTRACEBLOC_HOST_OS=%s\n' \
+      "${INSTALL_STATE_REASON:-}" "${TB_PREV_KUBE_CONTEXT:-}" \
+      "${_TB_REG_MACHINE_KIND//[$'\r\n']/}" "${_TB_REG_CLOUD_PROVIDER//[$'\r\n']/}" "${_TB_REG_HOST_OS//[$'\r\n']/}" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
     || error "Couldn't hand what this run found to the Windows installer: ${TRACEBLOC_WSL_HANDOVER} could not be written. Re-run the installer from Windows."
-  log "handover: INSTALL_STATE_REASON=${INSTALL_STATE_REASON:-} written to ${TRACEBLOC_WSL_HANDOVER}"
+  log "handover: INSTALL_STATE_REASON=${INSTALL_STATE_REASON:-} TB_PREV_KUBE_CONTEXT=${TB_PREV_KUBE_CONTEXT:-} TRACEBLOC_MACHINE_KIND=${_TB_REG_MACHINE_KIND} TRACEBLOC_CLOUD_PROVIDER=${_TB_REG_CLOUD_PROVIDER} TRACEBLOC_HOST_OS=${_TB_REG_HOST_OS} written to ${TRACEBLOC_WSL_HANDOVER}"
 }
 
 # ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────

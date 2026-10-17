@@ -468,13 +468,14 @@ print_summary() {
       # Data location depends on the storage model: hostpath binds /tracebloc on
       # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
       # k3s local-path, so there is no host /tracebloc to point the user at.
-      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
-        # The macOS node: the volumes are inside the node, on its own volume.
-        echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the macOS node's volume (k3s local-path)${RESET}"
-      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
+      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
         # Native k3s, hostpath (client-dev#1782): the PVs name the host directory itself.
+        # The macOS node mounts that folder at its own path, so the same line holds there.
         kdata="$(_hostpath_root)"
         echo -e "  ${DIM}Logs ${logdisp}  ·  Data ${kdata}/${ns} (hostPath)${RESET}"
+      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
+        # The macOS node: the volumes are inside the node, on its own volume.
+        echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the macOS node's volume (k3s local-path)${RESET}"
       elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s: the volumes are on this host, in local-path's storage path.
         # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
@@ -514,12 +515,11 @@ print_summary() {
       echo -e "  Your network intercepts HTTPS (break-and-inspect), so the in-cluster image"
       echo -e "  pulls fail certificate validation (x509). Point the installer at your"
       if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
-        # The macOS node takes no corporate CA yet (_mac_ct_refuse_host refuses one), so
-        # the remedy is k3d, which does: release this machine first, as below.
-        echo -e "  corporate CA bundle on k3d: the macOS node can't trust one yet. Release this"
-        echo -e "  machine's secure environment first, then re-run on k3d with the CA:"
-        echo -e "    ${TB_CMD}tracebloc delete --keep-data${RESET}   ${DIM}(releases it; keeps your local data)${RESET}"
-        echo -e "    ${TB_CMD}TRACEBLOC_SUBSTRATE=k3d TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
+        # The macOS node takes the CA's roots by path (_mac_ct_node_ca), and new roots
+        # recreate it on its volume, so a re-run with the CA is the whole remedy:
+        # nothing is released and nothing is deleted.
+        echo -e "  corporate CA bundle so the macOS node trusts it. Re-running with the CA"
+        echo -e "  recreates the node with it, and keeps the node's data:"
       elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s reads the CA from /etc/rancher/k3s/registries.yaml each time
         # the k3s service starts, so a re-run that writes it is the whole remedy:
@@ -535,9 +535,7 @@ print_summary() {
         echo -e "    ${TB_CMD}tracebloc delete --keep-data${RESET}   ${DIM}(releases it; keeps your local data)${RESET}"
         echo -e "    ${TB_CMD}k3d cluster delete ${CLUSTER_NAME:-tracebloc}${RESET}"
       fi
-      if [[ ! ( "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ) ]]; then
-        echo -e "    ${TB_CMD}TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
-      fi
+      echo -e "    ${TB_CMD}TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
       echo -e "  ${DIM}(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure.${RESET}"
       echo -e "  Inspect:  ${TB_CMD}kubectl get events -n ${ns} | grep -i x509${RESET}"
       echo -e "  ${DIM}Re-running this installer is safe.${RESET}"
@@ -598,10 +596,10 @@ _log_advanced_info() {
   local kdata
   log ""
   log "=== Advanced Info (for debugging) ==="
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
-    log "Volumes: in the macOS node's volume $(_mac_ct_node_name 2>/dev/null) (k3s local-path, inside Apple's VM)"
-  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
     log "Volumes: $(_hostpath_root) (hostPath, on this host)"
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
+    log "Volumes: in the macOS node's volume $(_mac_ct_node_name 2>/dev/null) (k3s local-path, inside Apple's VM)"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     kdata="$(_native_k3s_storage_path)" || kdata=""
     log "Volumes: ${kdata:-path not readable without root} (k3s local-path, on this host)"

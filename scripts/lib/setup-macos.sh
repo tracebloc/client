@@ -289,7 +289,9 @@ _offer_colima_memory_raise() {
 
   # Only when it is actually short — for one of TWO reasons, graded in MiB with
   # the grace exactly as _pf_runtime_mem_status grades them:
-  #   floor  below PF_MIN_MEM_GB: the client itself OOMs (the original #2221 case)
+  #   floor  below the macOS VM floor (_pf_vm_floor_mib darwin: the derived run
+  #          floor, client-dev#2105; PF_MIN_MEM_GB when set): no training run fits
+  #          beside the platform (the original #2221 case was the client OOMing)
   #   rung   at or above the floor but below the smallest training rung's budget
   #          (PF_WARN_MEM_GB, derived from the generated VM constant; clamped to
   #          this host the way the preflight clamps it): the client runs, and
@@ -299,7 +301,7 @@ _offer_colima_memory_raise() {
   #          settings store in _offer_desktop_memory_raise below.
   local rung_eff short_reason
   rung_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
-  if (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
+  if (( current_mib < $(_pf_vm_floor_mib darwin) )); then
     short_reason="floor"
   elif [[ "$rung_eff" =~ ^[0-9]+$ ]] && (( current_mib < rung_eff * 1024 - PF_VM_MEM_GRACE_MIB )); then
     short_reason="rung"
@@ -324,11 +326,11 @@ _offer_colima_memory_raise() {
   # Floor reason only: a VM that is above the floor has nothing to be told about
   # the floor, whatever the derived target says — the rung path below explains
   # its own non-offers in its own words.
-  if [[ "$short_reason" == "floor" ]] && (( target_gb < PF_MIN_MEM_GB )); then
+  if [[ "$short_reason" == "floor" ]] && (( target_gb < $(_pf_vm_floor_gb darwin) )); then
     if [[ -n "${COLIMA_MEMORY:-}" ]]; then
-      hint "COLIMA_MEMORY is set to ${COLIMA_MEMORY} GB, below the ${PF_MIN_MEM_GB} GB tracebloc needs to train. Raise or unset it."
+      hint "COLIMA_MEMORY is set to ${COLIMA_MEMORY} GB, below the $(_pf_vm_floor_gb darwin) GB tracebloc needs to train. Raise or unset it."
     else
-      hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+      hint "This Mac cannot spare $(_pf_vm_floor_gb darwin) GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
     fi
     return 0
   fi
@@ -360,7 +362,7 @@ _offer_colima_memory_raise() {
   if [[ "$short_reason" == "rung" ]]; then
     warn "Docker's Colima VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; $(_pf_below_rung_words)."
   else
-    warn "Docker's Colima VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
+    warn "Docker's Colima VM has ${current_gb} GB — below the $(_pf_vm_floor_gb darwin) GB tracebloc needs to train."
   fi
 
   if [[ "${TRACEBLOC_ASSUME_YES:-}" != "1" ]]; then
@@ -869,7 +871,7 @@ _offer_desktop_memory_raise() {
   target_gb="$(_macos_vm_mem_gb)"
   [[ "$target_gb" =~ ^[0-9]+$ && "$target_gb" -gt 0 ]] || return 0
   rung_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
-  if (( current_mib < PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB )); then
+  if (( current_mib < $(_pf_vm_floor_mib darwin) )); then
     short_reason="floor"
   elif [[ "$rung_eff" =~ ^[0-9]+$ ]] && (( current_mib < rung_eff * 1024 - PF_VM_MEM_GRACE_MIB )); then
     short_reason="rung"
@@ -878,8 +880,8 @@ _offer_desktop_memory_raise() {
   fi
   # The two honest non-offers, in the Colima path's words: a Mac that cannot reach
   # the floor, and a rung raise the host cannot honour.
-  if [[ "$short_reason" == "floor" ]] && (( target_gb < PF_MIN_MEM_GB )); then
-    hint "This Mac cannot spare ${PF_MIN_MEM_GB} GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
+  if [[ "$short_reason" == "floor" ]] && (( target_gb < $(_pf_vm_floor_gb darwin) )); then
+    hint "This Mac cannot spare $(_pf_vm_floor_gb darwin) GB for Docker (the most it can give is ${target_gb} GB), so raising the VM would not fix it. Training needs a larger machine."
     return 0
   fi
   if [[ "$short_reason" == "rung" ]] && (( target_gb < PF_WARN_MEM_GB )); then
@@ -904,7 +906,7 @@ _offer_desktop_memory_raise() {
   if [[ "$short_reason" == "rung" ]]; then
     warn "Docker Desktop's VM has ${current_gb} GB — enough to run the client, but the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted; $(_pf_below_rung_words)."
   else
-    warn "Docker Desktop's VM has ${current_gb} GB — below the ${PF_MIN_MEM_GB} GB tracebloc needs to train."
+    warn "Docker Desktop's VM has ${current_gb} GB — below the $(_pf_vm_floor_gb darwin) GB tracebloc needs to train."
   fi
 
   # CONSENT, exactly as the Colima raise takes it: no TTY -> the instruction; a

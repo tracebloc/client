@@ -2,7 +2,76 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
-## Upgrading to 1.9.217 — credential Secret keys are written under their `TRACEBLOC_` names only
+## The ingestor chart 0.2.2 — the post-install hook sets the `TRACEBLOC_` names only
+
+**What changed.** The `ingestor` chart's post-install hook used to set its two
+settings twice, as `TRACEBLOC_JOBS_MANAGER_ENDPOINT` / `JOBS_MANAGER_ENDPOINT` and
+`TRACEBLOC_SUBMIT_PATH` / `SUBMIT_PATH`. From 0.2.2 it sets only the `TRACEBLOC_`
+names. The hook's own script reads them first, so an ingestion submitted with
+0.2.2 behaves exactly as before.
+
+**What you have to do: nothing.** Your values (`jobsManager.endpoint`,
+`jobsManager.submitPath`) keep their names. **Going back:** an older ingestor
+chart version sets both names and reads either, so `--version 0.2.1` still works.
+
+## Upgrading to 1.9.218 — the pods carry the `TRACEBLOC_` environment variable names only
+
+**What changed.** Until this release the chart set each renamed tracebloc
+environment variable on its workloads twice: under its `TRACEBLOC_` name and under the older
+name it replaced (for example `TRACEBLOC_CLIENT_ID` and `CLIENT_ID`,
+`TRACEBLOC_ENV` and `CLIENT_ENV`, `TRACEBLOC_META_USER` and `TB_META_USER`), with
+one value. Every tracebloc component that runs against this chart reads the
+`TRACEBLOC_` name first, so from this release the chart sets only the
+`TRACEBLOC_` name on jobs-manager, the requests proxy, the resource monitor, the
+auto-upgrade and image-refresh CronJobs, the storage and egress checks and the
+MySQL format guard. The same goes for the operator settings you pass through
+`env:`: `env.EMIT_TOPOLOGY` (or `env.TRACEBLOC_EMIT_TOPOLOGY`) now reaches the pod
+as `TRACEBLOC_EMIT_TOPOLOGY` only.
+
+Unchanged:
+- **Your values.** The `env.*` keys you set (`env.RESOURCE_REQUESTS`,
+  `env.GPU_LIMITS`, `env.CLIENT_ENV`, ...) keep their names and their meaning.
+- **The protected names** `MYSQL_*`, `DB_BOOTSTRAP_*`, `DB_USER` and
+  `DB_PASSWORD`, which have no `TRACEBLOC_` spelling.
+- **Three older names the chart still sets beside their `TRACEBLOC_` name**,
+  because a component still reads them under the old name: `CHART_NAME` and
+  `REPO_URL` on the auto-upgrade CronJob, and `NODE_NAME` on jobs-manager and the
+  resource monitor.
+
+**What you have to do.**
+- **Nothing**, unless you read the pods' environment yourself.
+- **Scripts of your own that read a tracebloc pod's environment** (`kubectl exec
+  ... env`, `kubectl set env --list`, or a `jsonpath` on `env`) must read the
+  `TRACEBLOC_` name. The tracebloc CLI from 0.10.63 does.
+- **A control-plane image you pinned yourself** (`images.jobsManager.digest`,
+  `images.podsMonitor.digest`, `images.resourceMonitor.digest`) must be a build
+  that reads the `TRACEBLOC_` names; an older build loses those settings. Clear
+  the pin to run the images this chart version names.
+- **A client that pulls the tracebloc images from Docker Hub**
+  (`images.traceblocRegistry=docker.io`, or `global.imageRegistry=docker.io`)
+  must clear that value. Docker Hub has been a frozen archive since 2026-09-19:
+  its control-plane images are older builds that read only the legacy names, so
+  a jobs-manager pulled from there would sign in with an empty client id. The
+  chart refuses that render and names the fix. A refused render fails the fleet
+  auto-upgrade, so such a client stays on 1.9.217 until the value is cleared:
+
+  ```bash
+  helm upgrade <release> tracebloc/client -n <namespace> \
+    --reset-then-reuse-values --set images.traceblocRegistry=
+  ```
+
+  The same holds for any host under `docker.io` (`index.docker.io`,
+  `registry-1.docker.io`), in any case, with any port or path.
+- **A mirror (`global.imageRegistry`)** must serve control-plane images built
+  on or after 2026-09-28, the first that read the `TRACEBLOC_` names. The chart
+  cannot see how old a mirror's copies are, so refresh them before upgrading.
+
+**Going back.** `helm rollback` restores the older revision's workloads as they
+were, both names included. `helm upgrade --version` to an older chart works
+too: every chart before this one set both names. Pointing the tracebloc images
+at Docker Hub is not a way back any more (above).
+
+## Upgrading to 1.9.218 — credential Secret keys are written under their `TRACEBLOC_` names only
 
 **What changed.** The chart writes every credential key in `<release>-secrets`,
 its node-agents copy and `mysql-credentials` under its `TRACEBLOC_` name only.
@@ -16,8 +85,8 @@ removes them from the live Secrets:
 | `POD_TOKEN_SIGNING_SECRET` | `TRACEBLOC_POD_TOKEN_SIGNING_SECRET` |
 | `TB_CREDMGR_PASSWORD`, `TB_META_PASSWORD`, `TB_INGEST_PASSWORD` | `TRACEBLOC_CREDMGR_PASSWORD`, `TRACEBLOC_META_PASSWORD`, `TRACEBLOC_INGEST_PASSWORD` |
 
-`MYSQL_ROOT_PASSWORD` and `DB_BOOTSTRAP_PASSWORD` keep their names. The
-environment variables inside the pods are not affected by this release.
+`MYSQL_ROOT_PASSWORD` and `DB_BOOTSTRAP_PASSWORD` keep their names. For the
+environment variables inside the pods, see the section above.
 
 **What you have to do.**
 - **Upgrade the tracebloc CLI to 0.10.63 or later.** An older CLI looks for the
@@ -955,14 +1024,13 @@ pull from, not which bytes run.
   that project) only ever applies to installs from before the chart carried the
   key.
 
-**Rollback (per edge):** the same knob as 1.9.113 — it moves the control plane
-AND the training-image host back to Docker Hub together, and, being
-user-supplied, it persists across the fleet auto-upgrade until you clear it:
-
-```bash
-helm upgrade <release> tracebloc/client -n <namespace> \
-  --reset-then-reuse-values --set images.traceblocRegistry=docker.io
-```
+**Rollback (per edge): retired in 1.9.218.** This section used to offer
+`--set images.traceblocRegistry=docker.io`, which moved the control plane and
+the training-image host back to Docker Hub together. From 1.9.218 the chart
+refuses Docker Hub, because its frozen control plane reads only the legacy
+environment names the chart no longer sets (see *Upgrading to 1.9.218 — the
+pods carry the `TRACEBLOC_` environment variable names only*). To go back a
+release, use `helm rollback`.
 
 Confirm which host the training pods will pull from:
 
@@ -1008,13 +1076,12 @@ bytes run.
 - **Mirrors.** Edges with `global.imageRegistry` set are unaffected: the mirror
   re-homes every image and always wins.
 
-**Rollback (per edge):** point the knob back at Docker Hub. It is user-supplied,
-so it persists across the fleet auto-upgrade until you clear it:
-
-```bash
-helm upgrade <release> tracebloc/client -n <namespace> \
-  --reset-then-reuse-values --set images.traceblocRegistry=docker.io
-```
+**Rollback (per edge): retired in 1.9.218.** This section used to offer
+`--set images.traceblocRegistry=docker.io`. From 1.9.218 the chart refuses
+Docker Hub, because its frozen control plane reads only the legacy environment
+names the chart no longer sets (see *Upgrading to 1.9.218 — the pods carry the
+`TRACEBLOC_` environment variable names only*). To go back a release, use
+`helm rollback`.
 
 Confirm which registry an edge pulls from:
 

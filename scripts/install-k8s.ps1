@@ -591,6 +591,35 @@ function Get-MachineFacts {
   return [pscustomobject]@{ MachineKind = (Get-MachineKindFrom -Chassis $chassis -Cloud $cloud); CloudProvider = $cloud }
 }
 
+# Get-RegistrationMachineFacts -- the same facts, and the host's OS, for `tracebloc
+# client create` to send when it registers this machine, so the dashboard can say
+# where it runs before its first heartbeat (bash twin: _registration_machine_facts
+# in provision.sh). Keyed by the env var names the CLI reads, the names the chart
+# gets too. A fact that cannot be read is EMPTY, and Invoke-ProvisionClient then
+# leaves its variable unset, so the CLI does not send it. Never throws: a fact is
+# not worth a registration.
+function Get-RegistrationMachineFacts {
+  $kind = ""; $cloud = ""; $os = ""
+  try { $f = Get-MachineFacts; $kind = [string]$f.MachineKind; $cloud = [string]$f.CloudProvider } catch { $kind = ""; $cloud = "" }
+  try { $os = [string](Get-HostOsLabel) } catch { $os = "" }
+  return [ordered]@{ TRACEBLOC_MACHINE_KIND = $kind; TRACEBLOC_CLOUD_PROVIDER = $cloud; TRACEBLOC_HOST_OS = $os }
+}
+
+# Set-ProcessEnv -- set the process variable $Name to $Value, or UNSET it when $Value
+# is $null. Never $null through [Environment]::SetEnvironmentVariable: on .NET 9 and
+# later (pwsh 7.5+) its string parameter takes $null as "", so the variable stays,
+# empty (the TUF_ROOT restore in install.ps1 says the same). An empty string is set
+# as given, so a restore puts back exactly what it found. $Value is untyped on
+# purpose: a [string] parameter would turn $null into "" before this could see it.
+function Set-ProcessEnv {
+  param([Parameter(Mandatory)][string]$Name, $Value)
+  if ($null -eq $Value) {
+    Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+  } else {
+    [Environment]::SetEnvironmentVariable($Name, [string]$Value, 'Process')
+  }
+}
+
 # The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
 # Utilization Ladder L0.2). Twin of `_training_limits` in
 # scripts/lib/install-client-helm.sh -- the two are pinned to agree by
@@ -4426,7 +4455,7 @@ function Set-ClusterAutostart {
 # machine is too small rather than persist one known to OOM. Pure (#418).
 function Get-WslConfigMemoryGb {
   param([int]$HostGb, [int]$MinGb = 0)
-  if ($MinGb -le 0) { $MinGb = Get-PfMinMemGb }
+  if ($MinGb -le 0) { $MinGb = Get-PfVmFloorGb }
   # No ReserveGb param on purpose: the reserve is single-sourced, so no caller can
   # reintroduce the drift this function existed to demonstrate.
   if (($HostGb - (Get-PfOsReserveGb)) -lt $MinGb) { return 0 }
@@ -4603,7 +4632,7 @@ function Set-DailyUserProvisioning {
         # bake that in for every later run on the daily account. Leave memory unset
         # (WSL2's own default then applies) and say so plainly -- same honest framing
         # as the preflight's host-too-small line.
-        $minGb   = Get-PfMinMemGb
+        $minGb   = Get-PfVmFloorGb
         $reserve = Get-PfOsReserveGb
         Warn ("This machine has $hostGb GB RAM - too little for tracebloc: the client needs a $minGb GB WSL2 budget " +
               "and Windows needs ~$reserve GB, so about $($minGb + $reserve) GB physical is the practical minimum.")
@@ -7071,6 +7100,12 @@ $script:TbVmMinMemBytes = 10850664448
 # a second hand-written 4 beside a budget that moves on its own.
 # Show-MemoryStatus reads it; no threshold is derived from it.
 $script:TbLadderRungMemGib = 4
+# The HARD floor on the VM's MemTotal: the Windows kubelet carve-out + the
+# platform's own pods (contract `overhead`) + the least a training run is worth
+# scheduling (contract `floor`) -- one run fits beside the platform, and below it
+# none ever can (client-dev#2105). Mirrors bash _TB_WINDOWS_MIN_MEM_BYTES;
+# Get-PfVmFloorMib reads it.
+$script:TbWindowsMinMemBytes = 8153726976
 # ── end generated VM budget ───────────────────────────────────────────────────
 
 # Set by Get-TrainingResources when the machine is readable but below the
@@ -7901,6 +7936,82 @@ function Test-Credentials {
   }
 }
 
+# -- Open the dashboard as "this machine" (the install link) --------------------
+# Peer of open_dashboard_link in lib/install-client-helm.sh. At the end of a
+# connected install at a console, mint a one-time dashboard link with the machine
+# credential (api-token-auth/, then POST local-session/link/) and open it with
+# Start-Process. The link marks the browser as on this machine; it works once,
+# for five minutes, for a signed-in user who may reach this client.
+#
+# THE LINK IS A BEARER CAPABILITY: it is never written to the install log or to
+# telemetry. Printed only when there is nothing to open it with.
+# IT NEVER FAILS THE INSTALL: any failure, a backend without the endpoint (404)
+# included, is "no link", silently; the summary already showed the dashboard URL.
+
+# PURE: the one URL shape that is opened or printed (https, a host, a path, the
+# ticket in the fragment as url-safe base64). Bash peer: _dashboard_link_url_ok.
+function Test-DashboardLinkUrl {
+  param([string]$Url)
+  return [bool]("$Url" -cmatch '^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9/_-]*#local-session-link=[A-Za-z0-9_-]{32,128}$')
+}
+
+# The install link's URL, or "" on any failure. Bash peer: _dashboard_link_mint.
+# No redirect is followed: a 3xx would carry the password and the token to the
+# address it names. The backend answers both posts directly.
+function Get-DashboardLink {
+  param([string]$ClientId, [string]$ClientPassword)
+  if (-not $ClientId -or -not $ClientPassword) { return "" }
+  $backend = Get-BackendUrl
+  try {
+    $login = Invoke-WebRequest -Uri "${backend}api-token-auth/" -Method Post `
+      -Body @{ username = $ClientId; password = $ClientPassword } `
+      -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+    $auth = $login.Content | ConvertFrom-Json
+    if (-not $auth.token) { return "" }
+    $scheme = if ("$($auth.token_scheme)" -in @("Token", "Bearer")) { "$($auth.token_scheme)" } else { "Token" }
+    $resp = Invoke-WebRequest -Uri "${backend}local-session/link/" -Method Post `
+      -Headers @{ Authorization = "$scheme $($auth.token)"; Accept = "application/json" } `
+      -MaximumRedirection 0 -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+    $url = "$(($resp.Content | ConvertFrom-Json).url)"
+    if (Test-DashboardLinkUrl -Url $url) { return $url }
+  } catch {
+    # 404 from a backend without the endpoint, a rejected credential, no network:
+    # all "no link". The exception text can carry the request, so it is not logged.
+  }
+  return ""
+}
+
+# The whole step, after Print-Summary. Bash peer: open_dashboard_link.
+function Open-DashboardLink {
+  try {
+    if (-not (Test-InstallConnected)) { return }
+    if (-not (Test-CanPrompt)) { return }
+    $ns = $script:TB_NAMESPACE
+    $id = Get-ClientIdFromSecret -Release $ns -Namespace $ns
+    $pw = Get-ClientPasswordFromSecret -Release $ns -Namespace $ns
+    # The release's Secret is what the client's pods authenticate with, on every
+    # path; the preset pair is the fallback when it cannot be read.
+    if (-not $id -or -not $pw) { $id = $env:TRACEBLOC_CLIENT_ID; $pw = $env:TRACEBLOC_CLIENT_PASSWORD }
+    $url = Get-DashboardLink -ClientId $id -ClientPassword $pw
+    $pw = $null
+    if (-not $url) { Log "Dashboard link: not available; the summary's dashboard URL stands."; return }
+    try {
+      Start-Process -FilePath $url -ErrorAction Stop
+      Log "Dashboard link: opened in the browser."
+      Write-Host "  Opened your dashboard in your browser. It shows this machine as the one you're on."
+    } catch {
+      Log "Dashboard link: no browser to open it in; printed to the console only."
+      Write-Host ""
+      Write-Host "  Open this link in a browser on this machine to see it on your dashboard"
+      Write-Host "  as the machine you are on. It works once, for 5 minutes:"
+      Write-Host "    $url"
+      Write-Host ""
+    }
+  } catch {
+    Log "Dashboard link: skipped."
+  }
+}
+
 # =============================================================================
 #  PROVISIONING (#388 — parity with scripts/lib/provision.sh)
 # =============================================================================
@@ -8723,6 +8834,15 @@ function Invoke-ProvisionClient {
   # `exit` (Err), so the secret can never linger in the window between mint and
   # parse — the ps1 analogue of bash's _PROVISION_CRED_FILE + install_cleanup
   # (Bugbot #397 r2).
+  # Where this machine runs, in the CLI's environment for the create only (a CLI
+  # that predates them ignores them); put back as found in the finally below.
+  $regFacts = Get-RegistrationMachineFacts
+  $savedFactEnv = @{}
+  foreach ($k in @($regFacts.Keys)) {
+    $savedFactEnv[$k] = [Environment]::GetEnvironmentVariable($k)
+    $v = $null; if ($regFacts[$k]) { $v = $regFacts[$k] }
+    Set-ProcessEnv -Name $k -Value $v
+  }
   $cred = $null
   try {
     & tracebloc @createArgs *> $createOut
@@ -8737,6 +8857,7 @@ function Invoke-ProvisionClient {
     if (-not (Test-Path $credFile)) { Err "client create did not write the credential file ($credFile)." }
     $cred = Read-TraceblocCredentialFile -Path $credFile
   } finally {
+    foreach ($k in @($savedFactEnv.Keys)) { Set-ProcessEnv -Name $k -Value $savedFactEnv[$k] }
     Remove-Item $credFile -Force -ErrorAction SilentlyContinue
     Remove-Item $createOut -Force -ErrorAction SilentlyContinue
   }
@@ -9930,7 +10051,10 @@ function Get-PfOsReserveGb { if ($script:PfOsReserveGb -gt 0) { return [int]$scr
 # Settings naming (backend#3846): every PF_* threshold is read as TRACEBLOC_PF_*
 # first, then the legacy PF_* (remove_by 2026-12-31), through Get-TbEnvAlias --
 # the bash twin's rule (preflight.sh).
-function Get-PfMinMemGb    { if ($v = Get-TbEnvAlias 'PF_MIN_MEM_GB')  { return [int]$v }  else { return 5 } }
+# The typed setting alone, or nothing: its one read site, so the floor can tell a
+# typed PF_MIN_MEM_GB (the escape hatch) from the default (client-dev#2105).
+function Get-PfMinMemGbSetting { return (Get-TbEnvAlias 'PF_MIN_MEM_GB') }
+function Get-PfMinMemGb    { if ($v = Get-PfMinMemGbSetting)  { return [int]$v }  else { return 5 } }
 # DERIVED, not typed (backend#2460): the smallest training rung's VM budget, ceiling'd
 # to whole GB, from the generated $script:TbVmMinMemBytes. Mirrors bash _pf_vm_min_gb;
 # the 8 is the pre-derivation fallback and unreachable while `make drift` is green.
@@ -9942,6 +10066,23 @@ function Get-PfRecMemGb    { if ($v = Get-TbEnvAlias 'PF_REC_MEM_GB')  { return 
 # exactly the documented floor must still pass -- otherwise the effective floor is a
 # GB higher than we tell people (bash PF_VM_MEM_GRACE_MIB, #513 reviewer).
 function Get-PfVmMemGraceMib { if ($v = Get-TbEnvAlias 'PF_VM_MEM_GRACE_MIB') { return [int]$v } else { return 512 } }
+# THE FLOOR EVERY MEMORY GATE GRADES Docker's VM AGAINST, in MiB (client-dev#2105):
+# the derived run floor -- one training run beside the platform, from the generated
+# $script:TbWindowsMinMemBytes. An explicit PF_MIN_MEM_GB, or an unpopulated embed,
+# keeps the typed floor less the grace, as before. Mirrors bash _pf_vm_floor_mib on
+# the windows family.
+function Test-PfVmFloorDerived { return (-not (Get-PfMinMemGbSetting)) -and ([long]$script:TbWindowsMinMemBytes -gt 0) }
+function Get-PfVmFloorMib {
+  if (-not (Test-PfVmFloorDerived)) { return ((Get-PfMinMemGb) * 1024) - (Get-PfVmMemGraceMib) }
+  return [int][math]::Ceiling([long]$script:TbWindowsMinMemBytes / 1MB)
+}
+# The same floor as the whole-GB size to CONFIGURE: ceil((floor + grace) / 1024), so
+# a VM set to it clears the floor; the typed floor maps back to PF_MIN_MEM_GB.
+function Get-PfVmFloorGb { return [int][math]::Floor(((Get-PfVmFloorMib) + (Get-PfVmMemGraceMib) + 1023) / 1024) }
+function Get-PfVmFloorWords {
+  if (Test-PfVmFloorDerived) { return "below the $(Get-PfVmFloorGb) GB one training run needs beside the tracebloc platform" }
+  return "below the $(Get-PfMinMemGb) GB the client needs; it will OOM"
+}
 
 # Cap a desired Docker-memory recommendation at what the host can actually give
 # (physical RAM minus the OS reserve), so we never advise more than the machine
@@ -9957,7 +10098,7 @@ function Get-PfVmMemGraceMib { if ($v = Get-TbEnvAlias 'PF_VM_MEM_GRACE_MIB') { 
 # _pf_clamp_mem_gb exactly (preflight.sh, #428/#513) so the two installers give
 # the same advice on the same hardware.
 function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
-  $minMemGb = Get-PfMinMemGb
+  $minMemGb = Get-PfVmFloorGb
   $cap = $HostGb - (Get-PfOsReserveGb)
   if ($cap -lt $minMemGb) { $cap = $minMemGb }
   if ($DesiredGb -lt $cap) { return $DesiredGb }
@@ -9972,8 +10113,10 @@ function Get-PfMemRecommendation([int]$DesiredGb, [int]$HostGb) {
 # labelled as Docker's share. Warn-only. Shared by Step-1 preflight and the
 # post-Docker re-check so their wording never diverges.
 function Show-MemoryStatus {
-  param($HostGb, $BudgetGb)   # either may be $null
-  $minMemGb   = Get-PfMinMemGb
+  param($HostGb, $BudgetGb, $BudgetMib)   # any may be $null; BudgetMib grades the floor exactly
+  # The VM floor, not the typed client minimum (client-dev#2105): one training run
+  # must fit beside the platform, or the install is refused.
+  $minMemGb   = Get-PfVmFloorGb
   $warnMemGb  = Get-PfWarnMemGb
   $recMemGb   = Get-PfRecMemGb
   $reserveGb  = Get-PfOsReserveGb
@@ -10009,8 +10152,11 @@ function Show-MemoryStatus {
   $hostTooSmall = ($null -ne $HostGb) -and (($HostGb - $reserveGb) -lt $minMemGb)
   $budgetIsBottleneck = ($null -ne $BudgetGb) -and ($null -eq $HostGb -or $BudgetGb -lt $HostGb) -and (-not $hostTooSmall)
 
-  if ($effective -lt $minMemGb) {
-    Warn "Memory: $label$budgetNote - below the $minMemGb GB the client needs; it will OOM."
+  # Graded in MiB when the caller read it, so this line and Test-PreflightRuntimeMem's
+  # gate share one boundary (Get-PfVmFloorMib) and a refused VM never prints as fine.
+  $belowFloor = if ($null -ne $BudgetMib) { $BudgetMib -lt (Get-PfVmFloorMib) } else { $effective -lt $minMemGb }
+  if ($belowFloor) {
+    Warn "Memory: $label$budgetNote - $(Get-PfVmFloorWords)."
     if ($budgetIsBottleneck) {
       Hint "Give Docker at least $minMemGb GB (up to $recRun GB): WSL2 backend - [wsl2] memory=${recRun}GB in %UserProfile%\.wslconfig + 'wsl --shutdown'; Hyper-V - Docker Desktop -> Settings -> Resources -> Advanced."
     } elseif ($hostTooSmall) {
@@ -10044,8 +10190,12 @@ function Show-MemoryStatus {
     # printing a number: no branch may emit a concrete memory= value for a host
     # that cannot reach the floor while keeping the OS reserve.
     if ($hostTooSmall) {
-      Warn "Memory: $label$budgetNote - enough to run the client, but too little to train locally: $rungNeed."
-      Hint "This machine has $label of RAM total and the OS needs ~$reserveGb GB, so it cannot give Docker a training-sized budget. Run the client here and train on a larger machine."
+      # NOT "enough to run the client" (client-dev#2124, Bugbot): this arm is reached
+      # only above the bare floor yet short of floor + OS reserve, so the machine can
+      # neither give Docker the run floor nor keep the OS its reserve -- the same
+      # verdict as the bash twin's practical-minimum branch in _pf_memory.
+      Warn "Memory: $label$budgetNote - the client needs a $minMemGb GB Docker budget and the OS needs ~$reserveGb GB, so this machine is below the practical minimum of about $($minMemGb + $reserveGb) GB, and too little to train locally: $rungNeed."
+      Hint "This machine has $label of RAM total, so it cannot give Docker a run-sized budget and leave the OS its reserve. Free up memory or use a larger machine."
     } elseif ($recTrain -lt $warnMemGb) {
       # NO "N GB recommended to train" BELOW THE NEED (Bugbot on client#1085, round 2):
       # graded on host RAM this branch fires only when the host is below the warn
@@ -10289,7 +10439,11 @@ function Test-Preflight {
   # preflight, else host RAM — so a throttled budget is never green-OK'd (reviewer).
   # At preflight Docker is usually down, so this grades host; Test-PreflightRuntimeMem
   # re-runs the same assessment once Docker is up and its budget is known.
-  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb (Get-PfRuntimeMemGb)
+  # -BudgetMib so Step 1 grades the floor in the SAME unit and boundary as
+  # Test-PreflightRuntimeMem: the whole-GB figure floors a VM sitting at exactly the
+  # floor to one GB under it, and it would warn "below the floor" here and then be
+  # accepted at the gate (client-dev#2124, Bugbot). $null when Docker is down.
+  Show-MemoryStatus -HostGb (Get-PfMemGb) -BudgetGb (Get-PfRuntimeMemGb) -BudgetMib (Get-PfRuntimeMemMib)
 
   $disk = Get-PfFreeGb
   if      ($null -eq $disk)        { Warn "Disk: couldn't determine free space (skipping)." }
@@ -10498,13 +10652,14 @@ function Test-PreflightRuntimeMem {
   # Re-run the SAME assessment now that Docker's budget is known, so both floors
   # (min "will OOM" + warn "training may OOM") apply to the budget and the wording
   # matches Step-1 (#417 reviewer). Host RAM stays the reported label.
-  Show-MemoryStatus -HostGb $hostGb -BudgetGb $budget
+  Show-MemoryStatus -HostGb $hostGb -BudgetGb $budget -BudgetMib $mib
 
-  $minGb = Get-PfMinMemGb
-  # Grace band, not a bare `-lt $minGb`: see Get-PfRuntimeMemMib. A VM at exactly the
-  # documented floor passes; a genuinely sub-floor one (e.g. 4 GB) does not. Same
-  # $grace as the grade above, so this boundary and that one are the same boundary.
-  if ($mib -ge (($minGb * 1024) - $grace)) { return }
+  $minGb = Get-PfVmFloorGb
+  # The derived VM floor (client-dev#2105): one training run beside the platform.
+  # Show-MemoryStatus grades the same $mib against the same Get-PfVmFloorMib, so
+  # this boundary and that one are the same boundary. With PF_MIN_MEM_GB set it is
+  # the typed floor less the grace, as before.
+  if ($mib -ge (Get-PfVmFloorMib)) { return }
 
   $reserveGb = Get-PfOsReserveGb
   Write-Host ""
@@ -10518,7 +10673,7 @@ function Test-PreflightRuntimeMem {
     # Achievable target: clamped to this host when we know its size, else the raw
     # run target (no ceiling is known, so don't cap at the throttled budget, #483).
     $target = if ($null -ne $hostGb) { Get-PfMemRecommendation -DesiredGb (Get-PfWarnMemGb) -HostGb $hostGb } else { Get-PfWarnMemGb }
-    Write-PfFail "Docker's VM has only $budget GB - below the $minGb GB the tracebloc client needs; it will OOM-crashloop."
+    Write-PfFail "Docker's VM has only $budget GB - $(Get-PfVmFloorWords)."
     Hint "Raise it to >= $target GB, then re-run: WSL2 backend - set [wsl2] memory=${target}GB in %UserProfile%\.wslconfig and run 'wsl --shutdown'; Hyper-V backend - Docker Desktop -> Settings -> Resources -> Advanced."
   }
   Err "Not enough memory for the tracebloc client. (Override at your own risk with `$env:TRACEBLOC_SKIP_PREFLIGHT=1.)"
@@ -11404,6 +11559,9 @@ if (Test-InstallConnected) { Set-InstallComplete } else { Clear-InstallCompleted
 
 Print-Summary
 $script:OutcomeReported = $true   # Print-Summary reported the outcome (guards the finally)
+# A connected install at a console opens the dashboard with a one-time link that
+# marks the browser as on this machine. Never fails the install.
+Open-DashboardLink
 
 Log "Install finished."
 

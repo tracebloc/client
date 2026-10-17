@@ -122,8 +122,6 @@ spec:
             # at the writable emptyDir mounted at /home/kubectl.
             - name: HOME
               value: "/home/kubectl"
-            - name: NAMESPACE
-              value: {{ .Release.Namespace | quote }}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             {{- /* The Helm RELEASE NAME. Its canonical is TRACEBLOC_RELEASE_NAME, the
@@ -131,43 +129,27 @@ spec:
                  TRACEBLOC_RELEASE, which is the PLATFORM release version the
                  backend serves on /version/ (backend#3850). The script's legacy
                  name stays RELEASE (remove_by 2026-12-31). */}}
-            - name: RELEASE
-              value: {{ .Release.Name | quote }}
             - name: TRACEBLOC_RELEASE_NAME
               value: {{ .Release.Name | quote }}
-            - name: EXPECTED_STORAGE_CLASS
-              value: {{ include "tracebloc.storageClassName" . | quote }}
             - name: TRACEBLOC_EXPECTED_STORAGE_CLASS
               value: {{ include "tracebloc.storageClassName" . | quote }}
             {{- /* mysql-pvc stays listed even when mysqlClaimName moves the datadir
             to another claim: it is still a release PVC. The datadir claim is
             added next to it, so the claim that actually holds MySQL's data is
             checked too. */}}
-            - name: EXPECTED_PVCS
-              value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}{{ if ne (include "tracebloc.mysqlDataClaim" .) (include "tracebloc.mysqlPvc" .) }} {{ include "tracebloc.mysqlDataClaim" . }}{{ end }}"
             - name: TRACEBLOC_EXPECTED_PVCS
               value: "{{ include "tracebloc.clientDataPvc" . }} {{ include "tracebloc.clientLogsPvc" . }} {{ include "tracebloc.mysqlPvc" . }}{{ if ne (include "tracebloc.mysqlDataClaim" .) (include "tracebloc.mysqlPvc" .) }} {{ include "tracebloc.mysqlDataClaim" . }}{{ end }}"
             # The chart's own (legacy bare-metal) hostPath PV names — in
             # dynamic mode, a claim bound to one of these is a leftover-PV
             # capture, detectable by name alone (no PV read RBAC needed).
-            - name: CHART_HOSTPATH_PVS
-              value: "{{ include "tracebloc.clientDataPvName" . }} {{ include "tracebloc.clientLogsPvName" . }} {{ include "tracebloc.mysqlPvName" . }}"
             - name: TRACEBLOC_CHART_HOSTPATH_PVS
               value: "{{ include "tracebloc.clientDataPvName" . }} {{ include "tracebloc.clientLogsPvName" . }} {{ include "tracebloc.mysqlPvName" . }}"
-            - name: HOSTPATH_MODE
-              value: {{ ternary "true" "false" (not (empty $hostPathMode)) | quote }}
             - name: TRACEBLOC_HOSTPATH_MODE
               value: {{ ternary "true" "false" (not (empty $hostPathMode)) | quote }}
-            - name: PV_SCAN
-              value: {{ ternary "true" "false" $pvScan | quote }}
             - name: TRACEBLOC_PV_SCAN
               value: {{ ternary "true" "false" $pvScan | quote }}
-            - name: TIMEOUT_SECONDS
-              value: {{ $timeout | quote }}
             - name: TRACEBLOC_TIMEOUT_SECONDS
               value: {{ $timeout | quote }}
-            - name: NODE_LOCAL_PREFIXES
-              value: {{ join " " $nodeLocalPrefixes | quote }}
             - name: TRACEBLOC_NODE_LOCAL_PREFIXES
               value: {{ join " " $nodeLocalPrefixes | quote }}
           command:
@@ -182,7 +164,7 @@ spec:
               KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
               fail=0
               # Settings naming: the Job sets each of these under its canonical
-              # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+              # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
               # canonical first; a blank or absent canonical leaves the legacy value --
               # and any default or `set -u` refusal below -- exactly as before.
               if [ -n "${TRACEBLOC_EXPECTED_STORAGE_CLASS:-}" ]; then EXPECTED_STORAGE_CLASS="$TRACEBLOC_EXPECTED_STORAGE_CLASS"; fi

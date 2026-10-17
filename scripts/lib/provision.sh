@@ -47,6 +47,24 @@ _create_plan() {
   return 0
 }
 
+# _registration_machine_facts — where this machine runs, for `tracebloc client
+# create` to send when it registers the client, so the dashboard can say so before
+# the first heartbeat. The same detection the chart's heartbeat env gets
+# (_detect_machine_kind / _detect_cloud_provider in install-client-helm.sh,
+# _host_os_label in common.sh), into _TB_REG_MACHINE_KIND / _TB_REG_CLOUD_PROVIDER
+# / _TB_REG_HOST_OS. Each is EMPTY when it cannot be read or its detector is not
+# loaded, and the CLI then leaves it out of the registration. Always exits 0: a fact
+# is not worth a registration. TWIN of Get-RegistrationMachineFacts (install-k8s.ps1).
+_registration_machine_facts() {
+  _TB_REG_MACHINE_KIND=""; _TB_REG_CLOUD_PROVIDER=""; _TB_REG_HOST_OS=""
+  if declare -F _prime_windows_host_identity >/dev/null 2>&1; then _prime_windows_host_identity || true; fi
+  if declare -F _detect_machine_kind >/dev/null 2>&1; then _TB_REG_MACHINE_KIND="$(_detect_machine_kind 2>/dev/null)" || _TB_REG_MACHINE_KIND=""; fi
+  if declare -F _detect_cloud_provider >/dev/null 2>&1; then _TB_REG_CLOUD_PROVIDER="$(_detect_cloud_provider 2>/dev/null)" || _TB_REG_CLOUD_PROVIDER=""; fi
+  if declare -F _host_os_label >/dev/null 2>&1; then _TB_REG_HOST_OS="$(_host_os_label 2>/dev/null)" || _TB_REG_HOST_OS=""; fi
+  log "Machine facts for the registration: kind=${_TB_REG_MACHINE_KIND:-unknown} cloud=${_TB_REG_CLOUD_PROVIDER:-none} os=${_TB_REG_HOST_OS:-not read}"
+  return 0
+}
+
 # _cli_supports_provisioning: does the installed CLI ship the browser-auth mint
 # commands (`tracebloc login` + `tracebloc client create`)? install_tracebloc_cli
 # pulls the latest RELEASE, which can lag this installer until the cli#104 release
@@ -558,7 +576,12 @@ provision_client() {
   # own and just wrote the 0600 credential into) rather than a predictable
   # world-writable /tmp path — that path is a symlink-clobber target under sudo.
   local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${HOST_DATA_DIR}/.client-create.$$.out"
-  if ! ( umask 077; tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then  # set-u-safe: seeded with the client create verb
+  # Where this machine runs, handed to the create in its environment so the
+  # registration carries it (a CLI that predates the variables ignores them).
+  _registration_machine_facts
+  if ! ( umask 077
+         TRACEBLOC_MACHINE_KIND="$_TB_REG_MACHINE_KIND" TRACEBLOC_CLOUD_PROVIDER="$_TB_REG_CLOUD_PROVIDER" \
+           TRACEBLOC_HOST_OS="$_TB_REG_HOST_OS" tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then  # set-u-safe: seeded with the client create verb
     cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
     _report_create_failure "$_create_out" "$client_location" "$client_location_source"
@@ -679,6 +702,9 @@ _provision_read_credential() {
 # when the CLI reissued the existing client's credential.
 _provision_take_credential() {
   local cred_file="$1" _reuse_ns="${2:-}" _reconnected="${3:-0}"
+  # The secure-environment name set for this install (common.sh resolved
+  # TRACEBLOC_NAMESPACE into TB_NAMESPACE), kept for a preset, which names none.
+  local _set_ns="${TB_NAMESPACE:-}"
   # The credential file is the sole source of truth for what was provisioned.
   # Clear any pre-existing values from the environment first: the mint case does
   # NOT write TRACEBLOC_CLIENT_ADOPTED, so a stale ADOPTED=1 left in the env would
@@ -728,8 +754,15 @@ _provision_take_credential() {
   export TRACEBLOC_CLIENT_ID TRACEBLOC_CLIENT_PASSWORD
   # An id and a password with no namespace (what the Windows installer hands over) is
   # a preset, as credentials supplied in the environment are (_provisioning_preset):
-  # install_client_helm picks the namespace, so there is no slug to announce.
+  # install_client_helm picks the namespace, so there is no slug to announce. As for
+  # that preset, it picks the name set for this install, else tracebloc: the clear
+  # above was for a minted slug to win, and a preset has none. Without this, a name
+  # set on Windows, which reaches the client run on its line, was dropped here.
   if [[ -z "${TB_NAMESPACE:-}" ]]; then
+    if [[ -n "$_set_ns" ]]; then
+      TB_NAMESPACE="$_set_ns"
+      tb_export_namespace
+    fi
     log "Credential handed to the install (not shown); the Helm step picks the namespace."
     return 0
   fi

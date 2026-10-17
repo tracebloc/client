@@ -558,7 +558,13 @@ function Invoke-CosignVerifyBlob {
     return $false
   } finally {
     $ErrorActionPreference = $prevEAP
-    [Environment]::SetEnvironmentVariable('TUF_ROOT', $prevTuf, 'Process')
+    # Unset stays unset: on .NET 9 and later (pwsh 7.5+), setting a variable to
+    # $null keeps it, empty, so the restore would leave TUF_ROOT="" in the session.
+    if ($null -eq $prevTuf) {
+      Remove-Item Env:TUF_ROOT -ErrorAction SilentlyContinue
+    } else {
+      [Environment]::SetEnvironmentVariable('TUF_ROOT', $prevTuf, 'Process')
+    }
   }
   return ($LASTEXITCODE -eq 0)
 }

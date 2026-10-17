@@ -550,8 +550,37 @@ _mac_ct_start_system() {
 #  earlier installer made without a journal cannot be given one in place: the run says
 #  so, and how to get one, and goes on.
 #
+#  A corporate CA (TRACEBLOC_CA_BUNDLE, else CURL_CA_BUNDLE) reaches the node by path,
+#  as the host's roots reach the WSL distro (client-dev#2116). Its certificates are
+#  copied to _mac_ct_node_dir/ca, a folder the node mounts read-only: Apple container
+#  mounts folders, not files. On every start, before k3s, the entrypoint rebuilds the
+#  trust bundle containerd's image pulls read from the image's own copy and those
+#  roots. The roots' checksum is in the argv, so new roots recreate the node (the argv
+#  rule above) and k3s reads them as it starts; the same roots restart nothing. Once
+#  the node is Ready this Mac reads the bundle back and holds it to every root it
+#  handed in. No registries.yaml: with the bundle rebuilt, the WSL distro's containerd
+#  pulled with none.
+#
 #  "Ready" is a Ready condition whose heartbeat is newer than the start this run
 #  made: for about 40 s after a restart the stored status is the old one (S-M).
+#
+#  Behind a proxy the node runs with this Mac's proxy environment, as k3d's nodes and
+#  native k3s's service do (cluster.sh's _node_proxy_env), with the node IP added to
+#  NO_PROXY: k3s reaches its own API there, and no default range covers it. The values
+#  cross in a file, never on the line: a proxy's URL can hold a password, and the argv
+#  is `container run`'s command line. The file (<node dir>/proxy.env, 0600, as the join
+#  token's) is handed to the runtime as `--env-file`, so the argv names only its path.
+#  A changed proxy recreates the node (its data kept), and k3s and its containerd read
+#  it as they start; a run without one recreates it without, and removes the file. No
+#  value is logged.
+#  hostPath storage and a dataset folder (TRACEBLOC_STORAGE_MODE=hostpath,
+#  TRACEBLOC_HOST_DATASET_DIR) are folders on this Mac, each mounted into the node at its
+#  own path (_mac_ct_node_mounts). The chart's hostPath PVs then name the same folder on
+#  both sides, as on native k3s, where the node is the host (client-dev#1782): the
+#  values (_hostpath_paths_block), the folders the installer prepares
+#  (_ensure_release_dirs) and the summary read them unchanged. The folders are frozen
+#  with the node, as its name and ranges are: an installed release's PVs name them, and
+#  hostPath volumes cannot move.
 #
 #  Step c reaches it through _mac_ct_create_cluster (part 6).
 # =============================================================================
@@ -573,17 +602,45 @@ TB_MAC_CT_ROSETTA_RUNTIME="/Library/Apple/usr/libexec/oah/libRosettaRuntime"
 # `token-file` names: on the container's own disk, rewritten from the argument on every
 # start, so a copy a killed VM tore never reaches k3s.
 TB_MAC_CT_NODE_TOKEN_FILE="/etc/rancher/k3s/tracebloc-token"
+# Where the node finds the corporate CA's roots: _mac_ct_node_dir/ca, mounted read-only
+# here, holding TB_MAC_CT_NODE_CA_ROOTS.
+TB_MAC_CT_NODE_CA_DIR="/etc/tracebloc/ca"
+TB_MAC_CT_NODE_CA_ROOTS="roots.pem"
+# The trust bundle the node's containerd reads (the first of Go's system paths on
+# Linux), which the entrypoint rebuilds, and the image's own copy of it, kept beside it
+# once, so a restart rebuilds from that rather than adding the roots twice.
+TB_MAC_CT_NODE_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+TB_MAC_CT_NODE_CA_BUNDLE_IMAGE="${TB_MAC_CT_NODE_CA_BUNDLE}.tracebloc-image"
+# `awk "$TB_MAC_CT_CA_HELD_AWK" ROOTS BUNDLE` prints "HELD N": how many of the N PEM
+# certificates in ROOTS the PEM file BUNDLE holds, compared by their base64 bodies, as
+# the WSL distro's check compares them. It exits 1 when one is missing, or when ROOTS
+# holds none. One program, for the CA (_mac_ct_ca_bundle, against /dev/null: N is how
+# many it holds) and for the node's bundle read back (_mac_ct_node_ca_held).
+TB_MAC_CT_CA_HELD_AWK='/-----BEGIN CERTIFICATE-----/ { body = ""; inside = 1; next }
+/-----END CERTIFICATE-----/ { if (inside && body != "") { if (FILENAME == ARGV[1]) want[body] = 1; else held[body] = 1 }; inside = 0; next }
+inside { gsub(/[ \t\r]/, ""); body = body $0 }
+END { n = 0; m = 0; for (b in want) { n++; if (b in held) m++ }; print m, n; exit (n == 0 || m < n) }'
 # The node's entrypoint. $1 is config.yaml, $2 the kubelet drop-in, $3 the node IP, $4
-# the join token. A token that is not one (empty, or not hex as _mac_ct_node_token
-# makes and reads them) stops the node before k3s starts: k3s would make a new one. An
-# address it cannot add, and that lo does not already carry, stops the node: k3s would
+# the corporate CA roots' checksum (empty: no CA), $5 the join token. A token that is
+# not one (empty, or not hex as _mac_ct_node_token makes and reads them) stops the node
+# before k3s starts: k3s would make a new one. With a checksum, TB_MAC_CT_NODE_CA_BUNDLE
+# is rebuilt from the image's copy and the roots handed in; roots that were not handed
+# in stop the node, since its image pulls would fail on an unknown issuer. An address
+# it cannot add, and that lo does not already carry, stops the node: k3s would
 # advertise an address nothing answers on.
 TB_MAC_CT_NODE_ENTRY='set -e
 mkdir -p /etc/rancher/k3s
 printf "%s\n" "$1" > /etc/rancher/k3s/config.yaml
 printf "%s\n" "$2" > /etc/rancher/k3s/tracebloc-kubelet.yaml
-case "$4" in ""|*[!0-9a-f]*) echo "tracebloc: the node was started without its join token" >&2; exit 1 ;; esac
-(umask 077; printf "%s\n" "$4" > /etc/rancher/k3s/tracebloc-token)
+case "$5" in ""|*[!0-9a-f]*) echo "tracebloc: the node was started without its join token" >&2; exit 1 ;; esac
+(umask 077; printf "%s\n" "$5" > /etc/rancher/k3s/tracebloc-token)
+if [ -n "$4" ]; then
+  b='"$TB_MAC_CT_NODE_CA_BUNDLE"' i='"$TB_MAC_CT_NODE_CA_BUNDLE_IMAGE"' r='"$TB_MAC_CT_NODE_CA_DIR/$TB_MAC_CT_NODE_CA_ROOTS"'
+  [ -r "$r" ] || { echo "tracebloc: the corporate CA roots were not handed to the node ($r)" >&2; exit 1; }
+  [ -e "$i" ] || cp "$b" "$i"
+  cat "$i" "$r" > "$b.tracebloc-new"
+  mv "$b.tracebloc-new" "$b"
+fi
 ip addr add "$3/32" dev lo 2>/dev/null || case "$(ip -4 addr show dev lo)" in *"inet $3/32"*) ;; *) exit 1 ;; esac
 exec /bin/k3s server'
 
@@ -597,10 +654,12 @@ exec /bin/k3s server'
 #     later, which the runtime needs (RFC-0175 D6). Its words are the floor's own
 #     (tb_mac_floor_reason); this path adds the way back to k3d, which serves those Macs
 #     until 2.1's flip. 2.4 (client-dev#1623) refuses them on every path at the flip.
-#   - No corporate CA: the node's image pulls do not take one yet, so a network that
-#     inspects TLS would fail them after the node is up.
-#   - No hostPath storage and no dataset folder: the node is a VM, so either would be
-#     inside it, not on this Mac. (Linux serves both: there the node is the host.)
+#   - A corporate CA the node cannot take (_mac_ct_ca_bundle): set but unreadable, or
+#     holding no PEM certificate. One it can take is handed in by _mac_ct_ensure_node.
+#   - hostPath storage and a dataset folder the node cannot mount
+#     (_mac_ct_hostpath_dirs): a path that is not absolute, holds a ':' (which
+#     `container run -v` splits on) or a line break, or lies in a system tree the node's
+#     own files are in (_tb_system_path). One it can mount is served (_mac_ct_node_mounts).
 #   - k3d's node counts, refused as on Linux (_native_k3s_refuse_k3d_nodes), and the
 #     pinned k3s version (_native_k3s_check_version).
 _mac_ct_refuse_host() {
@@ -612,16 +671,91 @@ _mac_ct_refuse_host() {
     '' | ok) ;;
     *) error "$(tb_mac_floor_reason "$verdict") Set TRACEBLOC_SUBSTRATE=k3d to install on k3d." ;;
   esac
-  local ca="" carc=0
-  if declare -F _resolve_ca_bundle >/dev/null 2>&1; then ca="$(_resolve_ca_bundle)" || carc=$?; fi
-  [[ -z "$ca" && "$carc" -eq 0 ]] \
-    || error "A corporate CA (TRACEBLOC_CA_BUNDLE or CURL_CA_BUNDLE) is not available on the macOS node yet: the node's image pulls would not trust it. Unset it, or set TRACEBLOC_SUBSTRATE=k3d to install on k3d with it."
-  [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]] \
-    || error "TRACEBLOC_STORAGE_MODE=hostpath is not available on the macOS node yet: the node is a VM, so its hostPath volumes would be inside the VM, not on this Mac. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE), or set TRACEBLOC_SUBSTRATE=k3d to keep hostpath on k3d."
-  [[ -z "${HOST_DATASET_DIR:-}" ]] \
-    || error "HOST_DATASET_DIR is not available on the macOS node yet: a folder on this Mac is not mounted into the node's VM. Unset TRACEBLOC_HOST_DATASET_DIR (and the older HOST_DATASET_DIR), or set TRACEBLOC_SUBSTRATE=k3d to keep the mount on k3d."
+  local why
+  if declare -F _resolve_ca_bundle >/dev/null 2>&1; then why="$(_mac_ct_ca_bundle)" || error "$why"; fi
+  local dirs
+  dirs="$(_mac_ct_hostpath_dirs)" || error "$dirs"
   _native_k3s_refuse_k3d_nodes
   _native_k3s_check_version
+}
+
+# _mac_ct_hostpath_dirs -- the folders this run's hostPath storage asks the node to
+# mount, one a line: the hostPath root (_hostpath_root, HOST_DATA_DIR read as
+# validate_config reads it, unless a release's own is kept) and the dataset folder (an
+# installed release's, else HOST_DATASET_DIR) when there is one. Nothing under
+# node-local. Prints why, and fails, for a folder the node cannot mount at its own
+# path: one that is not absolute, holds a ':' (`container run -v` splits on it) or a
+# line break, or lies in a system tree (_tb_system_path), where it would cover the
+# node's own files.
+_mac_ct_hostpath_dirs() {
+  [[ "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]] || return 0
+  local root ds d nl=$'\n'
+  root="$(_hostpath_root)"
+  # The refusal runs before validate_config: read this run's root as it will
+  # (_tb_home_path), so ~/data or a $HOME-relative one is not refused as relative.
+  [[ "${TB_HOSTPATH_KEPT:-}" == 1 ]] || root="$(_tb_home_path "$root")"
+  ds="${HOST_DATASET_DIR:-}"
+  [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
+  for d in "$root" "$ds"; do
+    [[ -n "$d" ]] || continue
+    if [[ "$d" != /* || "$d" == *:* || "$d" == *"$nl"* ]] || _tb_system_path "$d"; then
+      echo "'${d}' is a hostPath folder the macOS node cannot mount at its own path: it must be an absolute path with no ':', outside the system folders (/etc, /usr, /var and the like). Point TRACEBLOC_HOST_DATA_DIR or TRACEBLOC_HOST_DATASET_DIR at another folder, then re-run."
+      return 1
+    fi
+    printf '%s\n' "$d"
+  done
+}
+
+# _mac_ct_node_mounts DIR -- the hostPath folders the node mounts, one a line, frozen in
+# DIR/hostpath. A node with none frozen takes this run's (_mac_ct_hostpath_dirs), and
+# keeps them: every run after mounts the same folders, whatever it asks for, since an
+# installed release's PVs name them, and a run that asks for others is told they are
+# not used. Each folder is made if it is missing (as _ensure_release_dirs makes them
+# on Linux): the runtime mounts only a folder that is there. Nothing when the node has
+# none frozen and this run is node-local. Prints why, and fails, when a folder cannot
+# be mounted, made, read back from DIR/hostpath, or frozen.
+_mac_ct_node_mounts() {
+  local file="${1}/hostpath" want got d off=""
+  want="$(_mac_ct_hostpath_dirs)" || { printf '%s' "$want"; return 1; }
+  if [[ -e "$file" ]]; then
+    got="$(cat "$file")" || { echo "Apple container: ${file} cannot be read, so this run cannot tell which hostPath folders the node mounts."; return 1; }
+    while IFS= read -r d; do
+      [[ -z "$d" ]] || grep -qxF -- "$d" <<<"$got" || off="${off:+${off}, }${d}"
+    done <<<"$want"
+    if [[ -n "$off" ]]; then
+      warn "The macOS node mounts the hostPath folders it was made with (${got//$'\n'/, }), and this run asked for ${off}, which it does not mount: hostPath volumes can't move. To use another folder, remove tracebloc from this Mac, then install again with it." >&2
+    fi
+  else
+    got="$want"
+    [[ -n "$got" ]] || return 0
+    printf '%s\n' "$got" > "${file}.tmp" && mv "${file}.tmp" "$file" \
+      || { rm -f "${file}.tmp"; echo "Apple container: could not write ${file}."; return 1; }
+  fi
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    mkdir -p "$d" || { echo "Apple container: the hostPath folder ${d} is not there and could not be made, so the node cannot mount it. Make it (or mount the volume it is on), then re-run."; return 1; }
+  done <<<"$got"
+  printf '%s' "$got"
+}
+
+# _mac_ct_hostpath_mounted -- under hostpath, the folders the release's PVs will name
+# (_mac_ct_hostpath_dirs, after _native_k3s_release_storage has read the release) are
+# among the node's frozen mounts (_mac_ct_node_dir/hostpath), or the run stops by name
+# before the values are written: a PV naming a folder the node does not mount would put
+# its data inside the VM, not on this Mac. A frozen file that cannot be read is cannot
+# tell, and stops it too.
+_mac_ct_hostpath_mounted() {
+  [[ "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]] || return 0
+  local want got dir d
+  want="$(_mac_ct_hostpath_dirs)" || error "$want"
+  dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's files are (above)."
+  got="$(cat "${dir}/hostpath" 2>/dev/null)" \
+    || error "Apple container: ${dir}/hostpath cannot be read, so this run cannot tell which hostPath folders the node mounts. It's safe to re-run this installer."
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    grep -qxF -- "$d" <<<"$got" \
+      || error "The tracebloc release's hostPath volumes are in ${d}, and the macOS node does not mount it (it mounts ${got//$'\n'/, }): its data would land inside the node's VM, not on this Mac. hostPath volumes can't move: re-run with the folders the node mounts, or remove tracebloc from this Mac, then install again."
+  done <<<"$want"
 }
 
 # _mac_ct_node_name -- the node container's name, and its volume's: the kube context's
@@ -716,21 +850,59 @@ _mac_ct_node_size() {
   printf '%s %sg' "$cpus" "$(_macos_vm_mem_gb "$phys")"
 }
 
-# _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE TOKEN -- the `container run` argv,
-# into TB_MAC_CT_NODE_ARGV (an array: the config holds newlines and quotes). --rosetta is
-# in it when TRACEBLOC_MAC_CT_ROSETTA (the TEST SEAM), else TB_MAC_CT_ROSETTA_RUNTIME,
-# exists. TOKEN is the join token, the entrypoint's last argument: it makes the argv a
-# secret, so run-args is kept 0600.
+# _mac_ct_node_proxy_env -- the proxy environment the node runs with, one NAME=VALUE a
+# line, into stdout: cluster.sh's _node_proxy_env, the one definition k3d's nodes and
+# native k3s take, with TB_MAC_CT_NODE_IP added to this Mac's NO_PROXY (or no_proxy).
+# Nothing when this Mac sets no HTTP(S) proxy. Prints why, and fails, when cluster.sh,
+# which holds it, is not loaded: a node run without the proxy would pull direct and
+# fail late, naming nothing of ours. A proxy value with a line break in it is refused by
+# the variable's name, never its value: it would end its line in the env file early.
+_mac_ct_node_proxy_env() {
+  if ! declare -F _node_proxy_env >/dev/null 2>&1; then
+    echo "Apple container: the installer's proxy reader (cluster.sh) is not loaded, so this run cannot tell whether the node needs a proxy."
+    return 1
+  fi
+  local np="${NO_PROXY:-${no_proxy:-}}" var
+  for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    if [[ "${!var:-}" == *$'\n'* ]]; then
+      echo "${var} is set, but its value has a line break in it, so the macOS node cannot take it as a proxy. Set ${var} to your proxy's address, like http://proxy.example.com:3128, or remove it, then re-run."
+      return 1
+    fi
+  done
+  ( NO_PROXY="${np:+${np},}${TB_MAC_CT_NODE_IP}"; _node_proxy_env )
+}
+
+# _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE TOKEN [CADIR CASUM] -- the `container
+# run` argv, into TB_MAC_CT_NODE_ARGV (an array: the config holds newlines and quotes).
+# --rosetta is in it when TRACEBLOC_MAC_CT_ROSETTA (the TEST SEAM), else
+# TB_MAC_CT_ROSETTA_RUNTIME, exists, a `-v FOLDER:FOLDER` for each line of
+# TB_MAC_CT_NODE_MOUNTS (the hostPath folders, _mac_ct_node_mounts's, which
+# _mac_ct_ensure_node sets), and `--env-file` naming TB_MAC_CT_NODE_PROXY_FILE when it
+# is set (the proxy's file, which _mac_ct_ensure_node sets: a path, never a value).
+# TOKEN is the join token, the entrypoint's last argument: it makes the argv a secret,
+# so run-args is kept 0600. CASUM is the corporate CA roots' checksum
+# (_mac_ct_node_ca): with one, CADIR, the folder on this Mac that holds them, is mounted
+# read-only at TB_MAC_CT_NODE_CA_DIR, and the checksum reaches the entrypoint, so that
+# new roots make a new argv.
 TB_MAC_CT_NODE_ARGV=()
+TB_MAC_CT_NODE_MOUNTS=""
+TB_MAC_CT_NODE_PROXY=""
+TB_MAC_CT_NODE_PROXY_FILE=""
 _mac_ct_node_argv() {
-  local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }" token="$6"
+  local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }" token="$6" cadir="${7:-}" casum="${8:-}" d
   TB_MAC_CT_NODE_ARGV=(run -d --name "$name"
     --cap-add ALL --read-only-path NONE --masked-path NONE)
   [[ ! -e "${TRACEBLOC_MAC_CT_ROSETTA:-$TB_MAC_CT_ROSETTA_RUNTIME}" ]] || TB_MAC_CT_NODE_ARGV+=(--rosetta)
   TB_MAC_CT_NODE_ARGV+=(--cpus "$cpus" --memory "$mem"
-    -v "${name}:/var/lib/rancher/k3s" --tmpfs /run --tmpfs /var/run
-    -p 127.0.0.1:6443:6443
-    --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY" sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$token")
+    -v "${name}:/var/lib/rancher/k3s" --tmpfs /run --tmpfs /var/run)
+  [[ -z "$casum" ]] || TB_MAC_CT_NODE_ARGV+=(-v "${cadir}:${TB_MAC_CT_NODE_CA_DIR}:ro")
+  while IFS= read -r d; do
+    [[ -z "$d" ]] || TB_MAC_CT_NODE_ARGV+=(-v "${d}:${d}")
+  done <<<"$TB_MAC_CT_NODE_MOUNTS"
+  [[ -z "$TB_MAC_CT_NODE_PROXY_FILE" ]] || TB_MAC_CT_NODE_ARGV+=(--env-file "$TB_MAC_CT_NODE_PROXY_FILE")
+  TB_MAC_CT_NODE_ARGV+=(-p 127.0.0.1:6443:6443
+    --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY"
+    sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$casum" "$token")
 }
 
 # _mac_ct_node_running CT NAME -- 0 when `container list` (running containers only)
@@ -886,13 +1058,89 @@ _mac_ct_node_token() {
   TB_MAC_CT_NODE_TOKEN="$t"
 }
 
+# _mac_ct_ca_bundle -- the corporate CA the node takes: _resolve_ca_bundle's file
+# (TRACEBLOC_CA_BUNDLE, else CURL_CA_BUNDLE), printed when it holds a PEM certificate,
+# nothing when none is set. Prints why, and fails, when the bundle is set but cannot be
+# read, when it holds no PEM certificate (a DER file, say: the node would start with
+# none of it), and when cluster.sh, which reads it, is not loaded (cannot tell).
+_mac_ct_ca_bundle() {
+  local ca="" rc=0 said=""
+  if ! declare -F _resolve_ca_bundle >/dev/null 2>&1; then
+    echo "Apple container: the installer's CA reader (cluster.sh) is not loaded, so this run cannot tell whether a corporate CA is set."
+    return 1
+  fi
+  ca="$(_resolve_ca_bundle)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "${ca} is set but its CA bundle file can't be read — fix its path/permissions and re-run."
+    return 1
+  fi
+  [[ -n "$ca" ]] || return 0
+  said="$(awk "$TB_MAC_CT_CA_HELD_AWK" "$ca" /dev/null)" || true
+  if [[ ! "${said#* }" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${ca}, the corporate CA bundle (TRACEBLOC_CA_BUNDLE or CURL_CA_BUNDLE), holds no PEM certificate (-----BEGIN CERTIFICATE-----), so the macOS node could not trust it. Point it at the bundle in PEM form, then re-run."
+    return 1
+  fi
+  printf '%s' "$ca"
+}
+
+# _mac_ct_node_ca CADIR -- hand the corporate CA to the node: _mac_ct_ca_bundle's file
+# copied to CADIR/TB_MAC_CT_NODE_CA_ROOTS (0644; rewritten only when it changed), and
+# its checksum printed for the argv (`cksum`'s CRC and size). Prints nothing when no CA
+# is set: an earlier copy stays until the node runs without it (_mac_ct_ensure_node).
+# Prints why, and fails, when the CA cannot be taken, when CADIR has a ':' in it, which
+# `container run -v` splits on, and when the copy cannot be written.
+_mac_ct_node_ca() {
+  local cadir="$1" ca roots sum
+  ca="$(_mac_ct_ca_bundle)" || { printf '%s' "$ca"; return 1; }
+  [[ -n "$ca" ]] || return 0
+  if [[ "$cadir" == *:* ]]; then
+    echo "Apple container: ${cadir} has a ':' in it, and the node's mounts cannot take one, so the corporate CA cannot be handed to the node. Set TRACEBLOC_CA_BUNDLE only on a Mac whose home folder path has no ':'."
+    return 1
+  fi
+  roots="${cadir}/${TB_MAC_CT_NODE_CA_ROOTS}"
+  if ! cmp -s "$ca" "$roots"; then
+    { mkdir -p "$cadir" && cp "$ca" "${roots}.tmp" && chmod 0644 "${roots}.tmp" && mv "${roots}.tmp" "$roots"; } || {
+      rm -f "${roots}.tmp"
+      echo "Apple container: could not copy the corporate CA (${ca}) to ${roots}, where the node reads it."
+      return 1
+    }
+  fi
+  sum="$(cksum < "$roots")" || sum=""
+  if [[ ! "$sum" =~ ^[0-9]+[[:space:]]+[0-9]+$ ]]; then
+    echo "Apple container: cksum gave no checksum for ${roots}, so this run cannot tell whether the node holds these roots."
+    return 1
+  fi
+  printf '%s-%s' "${sum%%[[:space:]]*}" "${sum##*[[:space:]]}"
+}
+
+# _mac_ct_node_ca_held CT NAME DIR -- the node's trust bundle, read back, holds every
+# corporate CA root handed in (DIR/ca/TB_MAC_CT_NODE_CA_ROOTS), or the run stops,
+# saying how many it holds. A bundle that cannot be read back is cannot tell, and stops
+# it too: it is never read as held.
+_mac_ct_node_ca_held() {
+  local ct="$1" name="$2" roots="${3}/ca/${TB_MAC_CT_NODE_CA_ROOTS}" bundle="${3}/node-ca-bundle.tmp" said="" rc=0
+  local re='^[0-9]+ [0-9]+$' cannot="could not be read back, so whether it holds the corporate CA's roots cannot be told. It's safe to re-run this installer."
+  if ! _bounded 30 "$ct" exec "$name" cat "$TB_MAC_CT_NODE_CA_BUNDLE" </dev/null >"$bundle" 2>/dev/null || [[ ! -s "$bundle" ]]; then
+    rm -f "$bundle"
+    error "Apple container: the node's trust bundle (${TB_MAC_CT_NODE_CA_BUNDLE} in ${name}) ${cannot}"
+  fi
+  said="$(awk "$TB_MAC_CT_CA_HELD_AWK" "$roots" "$bundle")" || rc=$?
+  rm -f "$bundle"
+  [[ "$said" =~ $re ]] \
+    || error "Apple container: the corporate CA's roots (${roots}) or the node's trust bundle ${cannot}"
+  [[ "$rc" -eq 0 ]] \
+    || error "Apple container: the node's trust bundle (${TB_MAC_CT_NODE_CA_BUNDLE} in ${name}) holds ${said% *} of the ${said#* } corporate CA root(s) in ${roots}, so its image pulls would fail on an unknown certificate issuer. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  log "Apple container: the node trusts the corporate CA's ${said#* } root(s)."
+}
+
 # _mac_ct_ensure_node -- the node on the running system (part 2), Ready, recorded, and
 # its kubeconfig copied to _mac_ct_node_dir/k3s.yaml. Reuses a running node created with
 # this argv, starts a stopped one, recreates one created with another argv on its
 # volume, and refuses a container or a volume of its name that nothing shows this
 # installer made.
 _mac_ct_ensure_node() {
-  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state
+  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum
+  local penv pold="" pchanged=""
   _native_k3s_check_version
   TB_K3S_ON_MAC=1
   root="$(_mac_ct_install_root)" && dir="$(_mac_ct_node_dir)" \
@@ -948,10 +1196,23 @@ _mac_ct_ensure_node() {
   # The token goes first, before run-args: whatever a run cut off half-way leaves, a
   # re-run must start with the token the node's data is encrypted with.
   _mac_ct_node_token "$ct" "$name" "$dir" "$state"
-  _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN"
+  casum="$(_mac_ct_node_ca "${dir}/ca")" || error "$casum"
+  TB_MAC_CT_NODE_MOUNTS="$(_mac_ct_node_mounts "$dir")" || error "$TB_MAC_CT_NODE_MOUNTS"
+  # The proxy: its values in a 0600 file the argv names, never in the argv. The file the
+  # node was made with says whether they changed; one that cannot be read is cannot tell.
+  TB_MAC_CT_NODE_PROXY="$(_mac_ct_node_proxy_env)" || error "$TB_MAC_CT_NODE_PROXY"
+  penv="${dir}/proxy.env"; TB_MAC_CT_NODE_PROXY_FILE=""
+  if [[ -n "$TB_MAC_CT_NODE_PROXY" ]]; then
+    TB_MAC_CT_NODE_PROXY_FILE="$penv"
+    if [[ -e "$penv" ]]; then
+      pold="$(cat "$penv")" || error "Apple container: ${penv} cannot be read, so this run cannot tell which proxy the node runs with. It's safe to re-run this installer."
+    fi
+    [[ "$pold" == "$TB_MAC_CT_NODE_PROXY" ]] || pchanged=1
+  fi
+  _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN" "${dir}/ca" "$casum"
   want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
   if [[ "$state" == container ]]; then
-    if [[ "$have" != "$want" ]]; then
+    if [[ "$have" != "$want" || -n "$pchanged" ]]; then
       log "Apple container: the node's settings changed since it was created, so it is recreated on its volume ${name}; its data is kept."
       # A stop that fails is not the end: a node that is already stopped may refuse it,
       # and the delete below is what says whether the node is gone.
@@ -970,6 +1231,9 @@ _mac_ct_ensure_node() {
   else
     start=run
   fi
+  # A run without a proxy keeps no proxy file: this node's argv names none (one made
+  # with it was removed above, to be made again without).
+  [[ -n "$TB_MAC_CT_NODE_PROXY" ]] || rm -f "$penv"
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   case "$start" in
     run)
@@ -980,7 +1244,11 @@ _mac_ct_ensure_node() {
         || error "Couldn't pull the k3s node image ${image}. Check that this machine can reach registry-1.docker.io, then re-run."
       # run-args goes first, before the volume and the container: whatever a run cut off
       # half-way leaves, a re-run must recognise as this installer's.
-      # 0600: the argv carries the join token.
+      # 0600: the argv carries the join token, and the proxy's file can carry a password.
+      if [[ -n "$TB_MAC_CT_NODE_PROXY" ]]; then
+        (umask 077; printf '%s\n' "$TB_MAC_CT_NODE_PROXY" > "${penv}.tmp") && mv "${penv}.tmp" "$penv" \
+          || { rm -f "${penv}.tmp"; error "Apple container: could not write ${penv}."; }
+      fi
       (umask 077; printf '%s\n' "$want" > "${dir}/run-args.tmp") && mv "${dir}/run-args.tmp" "${dir}/run-args" \
         || { rm -f "${dir}/run-args.tmp"; error "Apple container: could not write ${dir}/run-args."; }
       [[ -z "$mkvol" ]] || _bounded 60 "$ct" volume create --opt "size=${TB_MAC_CT_NODE_VOLUME_SIZE}" --opt "journal=${TB_MAC_CT_NODE_VOLUME_JOURNAL}" "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
@@ -1001,6 +1269,12 @@ _mac_ct_ensure_node() {
   # otherwise inherit the first wait's elapsed time and time out at once.
   TB_K3S_WAITED_S=0; TB_K3S_WAIT_T0="$(date +%s)"
   _mac_ct_wait_node_ready "$ct" "$name" "$node" "${since:-0000-00-00T00:00:00Z}"
+  # Roots a run without a CA leaves behind go once the node runs without them.
+  if [[ -n "$casum" ]]; then
+    _mac_ct_node_ca_held "$ct" "$name" "$dir"
+  else
+    rm -f "${dir}/ca/${TB_MAC_CT_NODE_CA_ROOTS}"
+  fi
   (umask 077; _bounded 30 "$ct" exec "$name" cat /etc/rancher/k3s/k3s.yaml </dev/null > "${dir}/k3s.yaml.tmp") \
     && [[ -s "${dir}/k3s.yaml.tmp" ]] && mv "${dir}/k3s.yaml.tmp" "${dir}/k3s.yaml" \
     || { rm -f "${dir}/k3s.yaml.tmp"; error "Apple container: could not copy the node's kubeconfig out of ${name}. It's safe to re-run this installer."; }

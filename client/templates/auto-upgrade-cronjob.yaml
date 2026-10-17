@@ -19,7 +19,7 @@ data:
     set -eu
 
     # Settings naming: the chart sets each identity var under its canonical
-    # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
     # canonical first; a blank or absent canonical leaves the legacy value --
     # and `set -u`'s refusal of an unset one -- exactly as before.
     if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE_NAME="$TRACEBLOC_RELEASE_NAME"; fi
@@ -37,7 +37,8 @@ data:
     log() { printf '[auto-upgrade] %s\n' "$*"; }
 
     # Settings naming: the CronJob sets each of these under its canonical
-    # TRACEBLOC_ name AND the legacy one (remove_by 2026-12-31). Read the
+    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one,
+    # except CHART_NAME / REPO_URL, which a reader still needs. Read the
     # canonical first; a blank or absent canonical leaves the legacy value --
     # and any default or `set -u` refusal below -- exactly as before.
     # The chart source (REPO_URL / REPO_NAME / CHART_NAME) takes the spelling the
@@ -812,28 +813,20 @@ spec:
               command: ["/bin/sh", "/scripts/auto-upgrade.sh"]
               env:
               {{- include "tracebloc.proxyEnv" . | nindent 16 }}
-                - name: RELEASE_NAME
-                  value: {{ .Release.Name | quote }}
                 - name: TRACEBLOC_RELEASE_NAME
                   value: {{ .Release.Name | quote }}
-                - name: RELEASE_NAMESPACE
-                  value: {{ .Release.Namespace | quote }}
                 - name: TRACEBLOC_RELEASE_NAMESPACE
                   value: {{ .Release.Namespace | quote }}
                 - name: REPO_URL
                   value: {{ .Values.autoUpgrade.repoUrl | quote }}
                 - name: TRACEBLOC_HELM_REPO_URL
                   value: {{ .Values.autoUpgrade.repoUrl | quote }}
-                - name: REPO_NAME
-                  value: {{ .Values.autoUpgrade.repoName | quote }}
                 - name: TRACEBLOC_HELM_REPO_NAME
                   value: {{ .Values.autoUpgrade.repoName | quote }}
                 - name: CHART_NAME
                   value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: TRACEBLOC_CHART_NAME
                   value: {{ .Values.autoUpgrade.chartName | quote }}
-                - name: UPGRADE_TIMEOUT
-                  value: {{ .Values.autoUpgrade.timeout | quote }}
                 - name: TRACEBLOC_UPGRADE_TIMEOUT
                   value: {{ .Values.autoUpgrade.timeout | quote }}
                 # #2877: the wedge-vs-in-flight age threshold, in whole seconds.
@@ -841,24 +834,16 @@ spec:
                 # convert the human duration here. `| default "45m"` preserves the
                 # reset-then-reuse-values nil-guard when an older values.yaml
                 # predates the key (same pattern as activeDeadlineSeconds).
-                - name: WEDGE_MIN_AGE_SECONDS
-                  value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
                 - name: TRACEBLOC_WEDGE_MIN_AGE_SECONDS
                   value: {{ include "tracebloc.durationSeconds" (.Values.autoUpgrade.pendingWedgeMinAge | default "45m") | quote }}
                 # backend#3550: the names the same-version reconcile reads the
                 # stored manifest and the dry-run render by. Rendered from the SAME
                 # helpers the status template and the Collector DaemonSet use, so
                 # the reader and the writers cannot disagree about a spelling.
-                - name: TELEMETRY_STATUS_NAME
-                  value: {{ include "tracebloc.telemetryStatusName" . | quote }}
                 - name: TRACEBLOC_TELEMETRY_STATUS_NAME
                   value: {{ include "tracebloc.telemetryStatusName" . | quote }}
-                - name: TELEMETRY_STATUS_ANNOTATION
-                  value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
                 - name: TRACEBLOC_TELEMETRY_STATUS_ANNOTATION
                   value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
-                - name: TELEMETRY_COLLECTOR_NAME
-                  value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
                 - name: TRACEBLOC_TELEMETRY_COLLECTOR_NAME
                   value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
               securityContext:

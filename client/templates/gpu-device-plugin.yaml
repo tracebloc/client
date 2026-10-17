@@ -24,12 +24,16 @@ NOTE: deliberately NO `helm.sh/resource-policy: keep` here — the whole point o
 uninstall (contrast the PVCs in docs/MIGRATIONS.md, which are kept on purpose).
 
 Windows: the installer's WSL2/CDI path advertises nvidia.com/gpu itself via a
-node-status patch and must NOT run the NVML device plugin (it would register 0
-GPUs and pin the resource at 0 — see docker/k3s-cuda/nvidia-runtimeclass.yaml),
-so that path leaves this disabled. The Windows non-WSL2 fallback still applies
-the plugin imperatively because it must verify the node advertises a GPU before
-it writes the GPU request — an ordering this Helm-managed resource can't satisfy
-in a single install. See the issue thread.
+node-status patch and leaves this disabled. v0.14.5's NVML plugin registered 0
+GPUs there and pinned the resource at 0 (see
+docker/k3s-cuda/nvidia-runtimeclass.yaml). From v0.19.1 the plugin finds WSL by
+itself (`/dev/dxg`, its default `auto` discovery) and advertises one shared
+device, `all`: RFC-0175 D8's Windows device (W26), measured on v0.20.1 by spike
+S-W with runtimeClassName nvidia. Turning it on there is the Windows port
+(client-dev#1810 part 3), not this chart's default. The Windows non-WSL2
+fallback still applies the plugin imperatively because it must verify the node
+advertises a GPU before it writes the GPU request — an ordering this
+Helm-managed resource can't satisfy in a single install. See the issue thread.
 */ -}}
 {{- /*
 Nil-safe access via the chart's `default dict` pattern (mirrors resource-monitor
@@ -48,6 +52,21 @@ the nil, so no evaluation order matters.
 {{- if not (or (eq $vendor "nvidia") (eq $vendor "amd")) }}
 {{- fail (printf "gpu.devicePlugin.enabled is true but gpu.devicePlugin.vendor is %q; set it to \"nvidia\" or \"amd\"" $vendor) }}
 {{- end }}
+{{- /*
+OpenShift: refused, not rendered (backend#5812). Both DaemonSets below run as
+their namespace's `default` ServiceAccount and mount hostPaths (AMD also runs
+privileged), and no SCC this chart renders lists that ServiceAccount, so under
+OpenShift's default `restricted-v2` their pods are refused at admission and a
+`helm upgrade --atomic --wait` times out and rolls back. Granting `default` an
+SCC is a permission decision this chart does not make, so it refuses the
+combination here, where the reason can be read, instead of an
+admission failure nobody sees. On OpenShift the vendor's GPU Operator provides
+the plugin. Nil-safe for --reuse-values, like $gpu / $dp above.
+*/ -}}
+{{- $scc := ((.Values.openshift | default dict).scc | default dict) }}
+{{- if $scc.enabled }}
+{{- fail (printf "gpu.devicePlugin.enabled is true with openshift.scc.enabled: the chart's %s device-plugin DaemonSet mounts hostPaths under its namespace's default ServiceAccount, which no chart SCC admits. On OpenShift, install the plugin with the %s GPU Operator and set gpu.devicePlugin.enabled=false" $vendor (ternary "NVIDIA" "AMD" (eq $vendor "nvidia"))) }}
+{{- end }}
 {{- $ns := $dp.namespace | default "kube-system" }}
 {{- /* global.imageRegistry (#585 mirror / air-gap) re-homes the plugin image
      exactly like every other chart image -- tracebloc.thirdPartyImage applies
@@ -57,12 +76,12 @@ the nil, so no evaluation order matters.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  # Name/namespace match the upstream NVIDIA manifest (v0.14.5) the installer
-  # used to apply, so an installer re-run adopts an existing DaemonSet in place
-  # rather than orphaning it. The name comes from a shared helper because
-  # auto-upgrade-rbac.yaml restricts the auto-upgrade SA's write verbs in this
-  # namespace to exactly this resourceName (backend#1992) — one declaration, so
-  # the two cannot drift into a 403.
+  # Name/namespace match the upstream NVIDIA manifest (v0.14.5, the one the
+  # installer used to apply; v0.20.1's keeps both), so an installer re-run adopts
+  # an existing DaemonSet in place rather than orphaning it. The name comes from a
+  # shared helper because auto-upgrade-rbac.yaml restricts the auto-upgrade SA's
+  # write verbs in this namespace to exactly this resourceName (backend#1992) —
+  # one declaration, so the two cannot drift into a 403.
   name: {{ include "tracebloc.gpuDevicePluginName" $vendor }}
   namespace: {{ $ns }}
   labels:
