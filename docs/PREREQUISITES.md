@@ -4,7 +4,7 @@ What a machine needs before `bash <(curl -fsSL https://tracebloc.io/i.sh)` (macO
 
 This page is the one place these prerequisites are written down. The [README](../README.md) and [INSTALL.md](INSTALL.md) link here rather than repeat them, and the product docs at [docs.tracebloc.io](https://docs.tracebloc.io) carry a copy that is checked against this page. Every figure, path and host below is read back from the installer's own code by a test, so the page cannot quietly disagree with what the installer enforces.
 
-A Mac with Apple's container runtime has its own section, [macOS](#macos). A Mac on k3d, and Windows, are covered by the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) until their own runtime changes. At that point they move here too.
+A Mac with Apple's container runtime has its own section, [macOS](#macos), and Windows has its own, [Windows](#windows). A Mac on k3d is covered by the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) until its own runtime changes. At that point it moves here too.
 
 ## Linux
 
@@ -104,3 +104,57 @@ The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc 
 <!-- prerequisites:macos:end -->
 
 Once it is installed, the secure environment also reaches the hosts in [INSTALL.md § Network requirements](INSTALL.md#network-requirements-egress-allowlist).
+
+## Windows
+
+<!-- prerequisites:windows:start -->
+On Windows, the installer sets up **k3s in tracebloc's own WSL distro**. This is native k3s, as on Linux, inside a WSL 2 distro named `tracebloc` that belongs to the signed-in user, with no Docker Desktop and no k3d. It is the one runtime the installer sets up on Windows: any other `TRACEBLOC_SUBSTRATE` stops it before it changes anything.
+
+| | What the machine needs |
+|---|---|
+| Windows | Windows 11 (build 22000 or later). The installer stops on an older Windows. |
+| Processor | 64-bit `amd64` (x64): tracebloc's distro image is built for it |
+| WSL | 2.5 or later. If it is missing or older, an administrator turns it on once (see below). |
+| Administrator rights | Once, for that step. Everything after it runs as the signed-in user, and the installer refuses to run as the SYSTEM account. |
+| Memory | At least 9 GB in WSL's VM: the installer warns below that, because a smaller VM cannot fit one training run beside the tracebloc platform. 11 GB in the VM fits the smallest training run, and 16 GB is recommended. WSL gives its VM half of the machine's memory by default; `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`, WSL's own setting, changes that. |
+| Disk | At least 30 GB free on the drive that holds the distro. The distro's disk is capped at what is free there, less 20 GB that is left to Windows. The installer stops if that leaves less than 10 GB for the distro. |
+| CPU | 2 cores, 4 recommended |
+| Network | Outbound HTTPS (port 443) to the hosts below |
+
+**The one administrator step.** When WSL 2.5 or later is missing, the installer stops and says: "Ask your IT team to run this once in an administrator PowerShell, then restart Windows if it asks:"
+
+```powershell
+wsl --install --no-distribution
+```
+
+If you are an administrator yourself, Windows asks you once to allow it, and that command is the only thing the installer runs elevated. Where `wsl --install` cannot run, for example from a deployment tool running as SYSTEM, IT can instead turn on the Windows features `Microsoft-Windows-Subsystem-Linux` and `VirtualMachinePlatform`, install WSL's own package, and restart. If Windows asks for a restart, the installer says: "Restart Windows, then run the same install command again: it continues from here."
+
+**What the installer puts on the machine:**
+
+- the `tracebloc` WSL distro in `%LOCALAPPDATA%\tracebloc\wsl`, the signed-in user's own folder, imported from tracebloc's image on `ghcr.io`, a download of about 126 MB: Ubuntu 24.04.5 with `ca-certificates`, `curl`, `dbus`, `nftables`, `systemd` and `systemd-sysv`, and k3s;
+- inside the distro, what native k3s puts on a Linux machine, as the Linux section above lists it;
+- the `tracebloc` CLI, for the signed-in user only, in `%LOCALAPPDATA%\Programs\tracebloc` unless `TRACEBLOC_INSTALL_PREFIX` names another folder;
+- the install record `%USERPROFILE%\.tracebloc\install-record.json`, where `tracebloc delete` finds what to remove;
+- the logon task `tracebloc-keepalive`, the signed-in user's own, set up without administrator rights. At each sign-in it starts the distro, with no window, and keeps it running.
+
+The installer installs no Docker Desktop, no winget packages and no k3d. `tracebloc delete` removes the logon task, then the distro, with everything inside it.
+
+**After a restart.** The secure environment runs while you are signed in. After Windows restarts, it starts again when you sign in.
+
+**A machine that runs tracebloc on k3d.** The installer never sets up the distro beside a live k3d cluster. Moving the machine is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc. The installer offboards the old environment only after you type its name when asked, or set `TRACEBLOC_REINSTALL_CONSENT` to it. A k3d cluster that is not tracebloc's stops the installer, which never removes it.
+
+**A proxy.** Set `HTTPS_PROXY`, and `HTTP_PROXY` and `NO_PROXY` if your network needs them, in Windows' environment before the install. The installer stops before it sets up the distro if a proxy variable holds a value the cluster could not use. Windows' own downloads use `HTTPS_PROXY`. The installer hands these variables into the distro, and k3s gets them there.
+
+**A proxy that inspects TLS.** Its root certificate needs no extra step. The installer copies this computer's trusted root certificates, the machine's and the signed-in user's, into the distro before its first download there. It stops if the distro's trust bundle does not hold every one, and restarts k3s if it already runs, so k3s reads them too.
+
+**Hosts.** Windows downloads the installer and the tracebloc CLI from `github.com`, whose release files come from `release-assets.githubusercontent.com`, and the distro's image from `ghcr.io`. Inside the distro, the installer checks each of these before it starts. The first four rows are always needed. The distro's image carries k3s, so the k3s release is needed only on a run that upgrades it. Helm is needed until Helm is installed.
+
+| Host | Why |
+|---|---|
+| `registry-1.docker.io`, `auth.docker.io` | Docker Hub |
+| `ghcr.io` | the tracebloc images |
+| `api.tracebloc.io` | the tracebloc API |
+| `tracebloc.github.io` | the tracebloc Helm charts |
+| `github.com`, `release-assets.githubusercontent.com` | the k3s release |
+| `get.helm.sh` | Helm |
+<!-- prerequisites:windows:end -->

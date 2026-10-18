@@ -2959,7 +2959,7 @@ tb_record_write() {
   # The record's home is tb_record_path's: in prepared mode the scratch directory,
   # so a prepare-host run with HOME unset (systemd, cloud-init, env -i) still records.
   _tb_record_armed && [[ -n "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" ]] || return 0
-  local rec dir now prior="" arts="" root_copy prepared_for
+  local rec dir now prior="" arts="" root_copy prepared_for k3s_data_fs=""
   rec="$(tb_record_path)"; dir="${rec%/*}"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$dir" 2>/dev/null || { log "Install record: couldn't create ${dir}; not recorded."; return 0; }
@@ -3018,12 +3018,22 @@ tb_record_write() {
   # previous write's value; any other record has none, so the key is left out.
   if [[ -n "${TB_RECORD_FOR_USER:-}" ]]; then prepared_for="$(_tb_json "$TB_RECORD_FOR_USER")"
   else prepared_for="$(_tb_record_prior prepared_for "$prior")"; fi
-  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for")" || return 0
+  # k3s_data_fs (client-dev#1976): the filesystem under native k3s's data directory,
+  # read afresh on every write of a native k3s install on Linux, the WSL distro
+  # included, by k3s.sh's reader. A CLI-only refresh never saw the install, so it
+  # keeps the previous value, like the other install facts. A Mac or a k3d install
+  # writes none: the Mac's node runs tracebloc's pinned VM image.
+  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]]; then
+    k3s_data_fs="$(_tb_record_prior k3s_data_fs "$prior")"
+  elif [[ "${OS:-}" == Linux && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == k3s ]] && declare -F _native_k3s_data_fs >/dev/null 2>&1; then
+    k3s_data_fs="$(_native_k3s_data_fs)"
+  fi
+  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs")" || return 0
   _TB_RECORD_ROOT_WRITTEN=""
   _tb_record_root_copy "$rec"
   if [[ -n "$_TB_RECORD_ROOT_WRITTEN" && "$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")" != "$root_copy" ]]; then
     root_copy="$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")"
-    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for")" || return 0
+    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs")" || return 0
     _tb_record_root_copy "$rec"
   fi
   _tb_record_user_copy "$rec"
@@ -3032,7 +3042,7 @@ tb_record_write() {
 
 # The record's text: SUBSTRATE ($1) and ROOT_COPY ($5) as JSON literals, the
 # previous write's text ($2), its artefact lines ($3) and the time ($4). PREPARED_FOR
-# ($6), a JSON literal, is written only when there is one.
+# ($6) and K3S_DATA_FS ($7), JSON literals, are written only when there is one.
 _tb_record_render() {
   local out line n i
   out="{
@@ -3046,6 +3056,7 @@ _tb_record_render() {
   \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$2"),
   \"root_copy\": $5,"
   if [[ -n "${6:-}" ]]; then out+=$'\n  "prepared_for": '"$6"','; fi
+  if [[ -n "${7:-}" ]]; then out+=$'\n  "k3s_data_fs": '"$7"','; fi
   out+="
   \"updated_at\": \"$4\","
   if [[ -z "$3" ]]; then
