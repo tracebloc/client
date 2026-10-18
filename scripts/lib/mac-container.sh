@@ -110,26 +110,46 @@ _mac_ct_fetch_pkg() {
     || { rm -rf "$dir"; error "Apple's container package downloaded from ${url} does not match its pinned sha256 (${want}), so it was not unpacked. Something between this machine and GitHub changed the file; do not install it by hand. Re-run on a network that does not rewrite downloads."; }
 }
 
+# _mac_ct_notary_pause -- the 5 s between pkgutil's two reads in _mac_ct_check_pkg. Its
+# own function so a test counts the pause without stubbing `sleep`, which the
+# deadline primitives under _bounded also tick with.
+_mac_ct_notary_pause() { sleep 5; }
+
 # _mac_ct_check_pkg PKG -- pkgutil's verdict on PKG (check 2). The lines are the ones
 # pkgutil prints on macOS 26 for Apple's package (spike S-M, RFC-0175 section 12.6):
 #   Status: signed by a developer certificate issued by Apple for distribution
 #   Notarization: trusted by the Apple notary service
 #   1. Developer ID Installer: Apple Inc. - Containerization (UPBK2H6LZM)
 # A pkgutil that does not answer is "cannot tell", never a pass.
+#
+# THE NOTARIZATION LINE IS A LIVE ANSWER. pkgutil prints it only when Apple's notary
+# service vouches for the package, and without a ticket stapled to it that is a lookup
+# over the network: one that does not answer prints the signature without the line,
+# exactly like a package that was never notarised (the pin gate's verify read the same
+# pinned package with the line, and 30 minutes later without it). So a read that is
+# signed for distribution but lacks the line is read once more, 5 s later, and if the
+# line is still absent this says it cannot tell. It never passes: an unread
+# notarisation is not a notarised package.
 _mac_ct_check_pkg() {
   local pkg="$1" team="${TRACEBLOC_APPLE_CONTAINER_TEAM_ID:-}" out rc=0 leaf
+  local status_line='Status: signed by a developer certificate issued by Apple for distribution'
+  local notary_line='Notarization: trusted by the Apple notary service'
   [[ -n "$team" ]] || { echo "Apple container: no pinned Team ID is stamped in common.sh -- run scripts/check-facts.sh --write."; return 1; }
   out="$(_bounded 60 pkgutil --check-signature "$pkg" 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 ]] && grep -qF "$status_line" <<<"$out" && ! grep -qF "$notary_line" <<<"$out"; then
+    _mac_ct_notary_pause
+    rc=0; out="$(_bounded 60 pkgutil --check-signature "$pkg" 2>&1)" || rc=$?
+  fi
   if [[ "$rc" -ne 0 ]]; then
     echo "Apple container: pkgutil could not check the package's signature (exit ${rc}), so this run cannot tell who signed it, and it was not unpacked."
     return 1
   fi
-  if ! grep -qF 'Status: signed by a developer certificate issued by Apple for distribution' <<<"$out"; then
+  if ! grep -qF "$status_line" <<<"$out"; then
     echo "Apple container: pkgutil does not say the package is signed for distribution, so it was not unpacked."
     return 1
   fi
-  if ! grep -qF 'Notarization: trusted by the Apple notary service' <<<"$out"; then
-    echo "Apple container: pkgutil does not say Apple's notary service trusts the package, so it was not unpacked."
+  if ! grep -qF "$notary_line" <<<"$out"; then
+    echo "Apple container: pkgutil did not report the package as notarised on two reads 5 s apart. It reports that only when Apple's notary service answers for the package, so this run cannot tell whether the package is notarised, and it was not unpacked. Check that this Mac can reach Apple, then run this again."
     return 1
   fi
   leaf="$(awk '/^ *1\. /{ sub(/^ *1\. /, ""); print; exit }' <<<"$out")"
