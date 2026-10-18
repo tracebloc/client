@@ -273,8 +273,9 @@ telemetry_run_handed_on() { _TB_TELEMETRY_RUN_STARTED=""; return 0; }
 # naming-canon.yml remove_by (2026-12-31) — do not drop it before then. Because
 # both are read, an opt-out a user already set cannot lapse across the rename, so
 # no reader-side migration window is needed. DO_NOT_TRACK is externally mandated
-# and is never renamed. The PowerShell twin (telemetry.ps1) carries the same set;
-# telemetry-vocabulary-agreement.sh fails if the two lists, or the --help text,
+# and is never renamed. install-wsl.ps1 passes each of them into its WSL distro,
+# and install-wsl.Tests.ps1 holds its list to this one;
+# telemetry-vocabulary-agreement.sh fails if this list and the --help text
 # disagree.
 TB_TELEMETRY_OPT_OUT_VARS="TRACEBLOC_SKIP_TELEMETRY TRACEBLOC_NO_TELEMETRY DO_NOT_TRACK"
 telemetry_enabled() {

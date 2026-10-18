@@ -6,7 +6,7 @@
 
 A **scheduled** workflow can stop producing a `success` without anyone noticing:
 
-- **Silent cancel.** `Windows e2e (self-hosted)` ran nightly for 22 days and every run was `cancelled` — GitHub's 24h queue-timeout, because no matching runner ever picked it up. `cancelled` is not a red check and fires no alert, so a job that had **never once succeeded** read as "covered nightly" for three weeks (backend#2627).
+- **Silent cancel.** `Windows e2e (self-hosted)`, since retired, ran nightly for 22 days and every run was `cancelled` — GitHub's 24h queue-timeout, because no matching runner ever picked it up. `cancelled` is not a red check and fires no alert, so a job that had **never once succeeded** read as "covered nightly" for three weeks (backend#2627).
 - **Ignored red.** This repo's own `digest-drift.yml` failed on schedule ~13 days running with nobody acting on it — the same disease with a red check instead of a cancel (compare backend#2386, where red runs masked an 18-day EC2 leak).
 
 Both are: *a scheduled job stopped going green and no signal was loud enough to act on.*
@@ -54,4 +54,4 @@ Or run the workflow with **Run workflow → dry-run = true**. The classification
 
 ## Porting to another repo
 
-The org class sweep (backend#2627, measured 2026-08-27) found `windows-e2e.yaml` is currently the **only** self-hosted-targeting workflow in the org — this exists so the *next* rotting scheduled job can't be silent. To cover another repo, copy the workflow + both scripts and keep `ALERT_REPO` (and the App token's `repositories:`) pointing at the private catch-all. Nothing is client-specific.
+The org class sweep (backend#2627, measured 2026-08-27) found the Windows e2e workflow, since retired, was then the **only** self-hosted-targeting workflow in the org — this exists so the *next* rotting scheduled job can't be silent. To cover another repo, copy the workflow + both scripts and keep `ALERT_REPO` (and the App token's `repositories:`) pointing at the private catch-all. Nothing is client-specific.

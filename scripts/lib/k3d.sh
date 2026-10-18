@@ -41,8 +41,8 @@
 # cluster that may still be running; and assess's gate would label the machine
 # `fresh` and offer a first-time install over it. That is client#682's
 # misclassification, which the header above was written about, and it is the same
-# question LukasWodka blocked the PowerShell twin (#973) on: what does the main
-# install path DO when the deadline fires?
+# question LukasWodka blocked the retired PowerShell core's version (#973) on: what does
+# the main install path DO when the deadline fires?
 #
 # So the primitive is TRI-STATE, with the contract _k3d_cluster_running
 # (gpu-nvidia.sh) already established in this codebase for the same reason —
@@ -61,7 +61,7 @@
 #     older k3d that does not know --no-headers — and never when it TIMED OUT
 #     (124): the same wedged daemon cannot answer a retry, it can only eat another
 #     deadline. A timeout ends the chain with a log line naming itself, which is
-#     the finding support needs (the Windows twin keeps the same line).
+#     the finding support needs.
 # Worst case: 2 bounded reads with jq present, 1 without. Before: unbounded.
 #
 # macOS: these probes go through `_bounded`, which has held its deadline on a stock
@@ -266,12 +266,11 @@ _verify_nodes_see_host_data() {
   # ONE QUERY PER ROLE, letting docker AND the two label filters, rather than one
   # query with `--format '{{.Names}} {{.Label "k3d.role"}}'` and an awk split. Bash
   # could use the quoted format safely — it passes an array and never re-joins —
-  # but the PowerShell twin CANNOT: its $psi.Arguments joins the args and quotes any
-  # whitespace-bearing value without escaping inner quotes, so that format arrives
-  # with its quotes consumed and docker's Go template fails to parse, throwing a
-  # FALSE REFUSAL on every Windows hostpath install (#817). Keeping both halves on
-  # the shape the constrained one requires is what makes them diffable by eye; a
-  # divergence here would be a twin gap nobody notices until Windows breaks.
+  # but the retired PowerShell core could not: its $psi.Arguments joined the args
+  # and quoted any whitespace-bearing value without escaping inner quotes, so that
+  # format arrived with its quotes consumed and docker's Go template failed to
+  # parse, throwing a FALSE REFUSAL on every Windows hostpath install (#817). The
+  # shape it required stays: no argument carries a space or a quote.
   #
   # Bonus: no role parsing, and the load balancer is excluded by construction —
   # its role is `loadbalancer`, which is simply never queried.
@@ -392,14 +391,13 @@ _write_k3d_registries_config() {
 # Fail-soft everywhere: a port already in use, or a k3d that will not add it,
 # turns the feature off with a warning and never stops the install.
 # TRACEBLOC_LOCAL_API=off opts out.
-# The defaults are the chart's localApi.hostPort / localApi.nodePort, and
-# install-k8s.ps1 carries the same two; install-k8s.Tests.ps1 holds all three
-# to one value.
+# The defaults are the chart's localApi.hostPort / localApi.nodePort;
+# local-api-port.bats holds them to values.yaml.
 _TB_LOCAL_API_HOST_PORT_DEFAULT="47910"
 _TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
 # The NodePort range the chart's values.schema.json allows for localApi.nodePort
-# (Kubernetes' default service-node-port-range). install-k8s.ps1 carries the same
-# two and install-k8s.Tests.ps1 holds them to the schema (client-dev#1688).
+# (Kubernetes' default service-node-port-range); local-api-port.bats holds them to
+# the schema (client-dev#1688).
 _TB_LOCAL_API_NODE_PORT_MIN="30000"
 _TB_LOCAL_API_NODE_PORT_MAX="32767"
 # Overridable, for a host whose 47910 is spoken for, and resolved IN PLACE: the
@@ -464,8 +462,7 @@ _local_api_backoff() {
 # connect that succeeds means busy; bash's /dev/tcp works in 3.2 as well.
 # Bounded (client-dev#1664): /dev/tcp has no connect timeout of its own, so a
 # listener whose backlog is full -- a SYN nobody answers -- held the install for
-# the kernel's whole SYN-retry window. The deadline (1 s, as the Windows twin's
-# Test-LocalApiHostPortBusy waits 1000 ms) reads as "not busy", as it does there.
+# the kernel's whole SYN-retry window. The deadline (1 s) reads as "not busy".
 _local_api_host_port_busy() {
   _bounded 1 "${BASH:-bash}" -c \
     'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TRACEBLOC_LOCAL_API_HOST_PORT}" 2>/dev/null
@@ -788,9 +785,8 @@ ensure_cluster_autostart() {
   # install whose docker.service was never enabled on boot — the cluster would
   # not come back after a reboot, with no warning. A failed/timed-out read means
   # "we couldn't enumerate nodes", so skip the loop (k3d already sets
-  # --restart unless-stopped at create time, so the policy still holds — the same
-  # rationale the Windows twin Set-ClusterAutostart states) and fall through to
-  # the boot-enable step.
+  # --restart unless-stopped at create time, so the policy still holds) and fall
+  # through to the boot-enable step.
   nodes=$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter "name=k3d-${CLUSTER_NAME}-" --format '{{.Names}}' 2>/dev/null) || _nodes_rc=$?
   if [[ "$_nodes_rc" -ne 0 ]]; then
     nodes=""
@@ -1019,8 +1015,8 @@ _handle_existing_cluster() {
     # Bounded start (Bugbot): `k3d cluster start` waits for the server with no
     # deadline by default, so behind the log redirect a wedged Docker would hang a
     # headless install forever instead of reaching the curated error below. --wait
-    # --timeout bounds it (parity with the Windows installer's 5-minute start
-    # deadline) so a stuck start fails cleanly into that message.
+    # --timeout bounds it (5 minutes, the start deadline the retired PowerShell
+    # core used too) so a stuck start fails cleanly into that message.
     #
     # THE DOCKER ATTRIBUTION HERE IS DELIBERATE, and stays after `:944`'s was
     # dropped (LukasWodka, client#984 round 7, raised so the choice is visible
@@ -1148,7 +1144,7 @@ _check_existing_cluster_k8s_version() {
       # <k3s>-cuda-<cuda-base>, so extract the k3s part and drift-check it too —
       # else a GPU cluster silently escapes this check and keeps a stale k3s across
       # a pin bump. An override tag lacking the -cuda- marker isn't parseable, so
-      # don't guess. Mirrors the Windows twin's Test-K3sVersionDrift.
+      # don't guess.
       local _cudatag="${image##*k3s-cuda:}"
       _cudatag="${_cudatag%%@*}"
       case "$_cudatag" in
@@ -1454,9 +1450,8 @@ _check_existing_cluster_storage_mode() {
 # nvidia.com/gpu even after the host Docker runtime is set and the device plugin
 # is deployed. docker/k3s-cuda rebuilds the SAME pinned k3s on a CUDA base with the
 # NVIDIA Container Toolkit + the `nvidia` RuntimeClass baked in, published to
-# ghcr.io/tracebloc/k3s-cuda by .github/workflows/build-k3s-cuda.yaml. This is the
-# Linux twin of the resolution the Windows installer already does
-# (install-k8s.ps1's $K3S_CUDA_IMAGE): a full override wins, else derive the tag —
+# ghcr.io/tracebloc/k3s-cuda by .github/workflows/build-k3s-cuda.yaml. The
+# resolution: a full override wins, else derive the tag —
 # which encodes BOTH the k3s pin and the CUDA base so a K8S_VERSION bump can never
 # reuse a stale image (check-facts.sh enforces the sync) — re-homed onto a private
 # mirror when one is configured (#585) or ghcr.io otherwise.
@@ -1468,7 +1463,7 @@ _gpu_node_image() {
   # BARE host prefix: strip a pasted scheme AND any trailing slash(es), so a mirror
   # given as https://mirror.corp/ yields <host>/repo, not <host>//repo — the double
   # slash makes the host pre-pull (docker pull) fail and drops a credentialed GPU
-  # install to CPU (Bugbot). Matches the Windows twin's `-replace '/+$',''`.
+  # install to CPU (Bugbot).
   local mirror="${TRACEBLOC_IMAGE_REGISTRY:-}"
   if [[ -n "$mirror" ]]; then
     local host="${mirror#*://}"
@@ -1499,7 +1494,6 @@ _gpu_node_image() {
 # path segment as a REGISTRY only when it has a '.'/':' or is 'localhost'; otherwise
 # the ref is a Docker Hub repo (owner/name) and login must target docker.io, not the
 # owner segment — else creds for a private image go to the wrong endpoint (client#835).
-# Mirrors the Windows twin's Get-RegistryHost.
 _registry_host_for() {
   local first="${1%%/*}"
   case "$first" in
@@ -1514,8 +1508,7 @@ _registry_host_for() {
 # so also accept an EXACT match against the image this run is configured to use.
 # A stock rancher/k3s image — or an unreadable/empty one — is not GPU-capable and
 # must fail safe to CPU rather than strand jobs Pending. Pure (string in, status
-# out) so it is unit-testable without a live cluster. Mirrors the Windows twin's
-# Test-NodeImageGpuCapable.
+# out) so it is unit-testable without a live cluster.
 #
 # NO fail-open on empty (the promise above): an empty/unreadable image returns 1 at
 # the `-n` guard, before the exact-match tail — and even if it didn't, _gpu_node_image
@@ -1567,8 +1560,7 @@ _check_existing_cluster_gpu() {
 # isn't known on this path, so ask the LIVE cluster instead: does it request an
 # NVIDIA GPU (the k3s-cuda node image is NVIDIA-only; AMD runs on stock rancher/k3s)
 # its node can't schedule? Warn with the recreate remedy (non-fatal; the client is up).
-# Mirrors the Windows twin's Test-HealthyClusterGpuConsistent. Self-contained + jq-
-# free so it needs no other lib. Bounded (macOS-safe via the cluster-info gate
+# Self-contained + jq-free so it needs no other lib. Bounded (macOS-safe via the cluster-info gate
 # below); silent no-op when it can't tell (no helm/kubectl, API unreachable, or
 # nothing requests a GPU).
 _check_healthy_cluster_gpu_consistent() {
@@ -1621,9 +1613,9 @@ _check_healthy_cluster_gpu_consistent() {
   # No GPU advertised — but the REMEDY depends on WHY (Bugbot). A stock (pre-#835)
   # node image is fixed at create time, so recreate IS the fix. A GPU-CAPABLE node
   # advertising 0 is a device-plugin/CDI problem — recreate would NOT help — so don't
-  # give recreate advice there; leave it to the plugin rollout (mirrors the Windows
-  # twin, which checks the node image). Only warn recreate when the image is CONFIRMED
-  # stock; stay quiet when it's capable OR unreadable (don't guess).
+  # give recreate advice there; leave it to the plugin rollout. Only warn recreate
+  # when the image is CONFIRMED stock; stay quiet when it's capable OR unreadable
+  # (don't guess).
   local image
   image="$(_bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect "k3d-${CLUSTER_NAME}-server-0" --format '{{.Config.Image}}' 2>/dev/null)" || image=""
   if [[ -z "$image" ]] || _node_image_gpu_capable "$image"; then
@@ -1723,7 +1715,7 @@ _generate_node_cdi_specs() {
 # each reports the WHOLE machine as its capacity and the scheduler counts the
 # machine once per node (backend#2221). The format checks run first, so a
 # non-integer is named as one; the refusal compares strings, so no value can
-# overflow it. install-k8s.ps1's Confirm-Config is the twin.
+# overflow it.
 #
 # ONE NODE BY DEFAULT ON HOSTPATH TOO (tracebloc/client-dev#1418). The default
 # used to be one server plus one agent: two nodes, so the machine's CPU and memory
@@ -1792,9 +1784,8 @@ _create_new_cluster() {
   # have noticed. Nobody watching pod restarts would ever see this one.)
   #
   # Note the flag and the RACE are two different problems, both about this same
-  # APIService. #553/#757 added a bounded wait to each installer
-  # (_wait_for_metrics_apiservice here, Wait-MetricsApiService on Windows, budget
-  # stamped in scripts/spec/facts.env as METRICS_WAIT_TIMEOUT) because k3s applies
+  # APIService. #553/#757 added a bounded wait (_wait_for_metrics_apiservice,
+  # budget stamped in scripts/spec/facts.env as METRICS_WAIT_TIMEOUT) because k3s applies
   # its bundled metrics-server slightly AFTER the API server reports ready, so a
   # fast host could render the chart inside that window. That wait falls through
   # non-fatally, by design — so disabling the component here is not something it
@@ -1802,8 +1793,8 @@ _create_new_cluster() {
   # the chart's `fail`.
   #
   # Guarded by scripts/tests/cluster.bats (the exact disable set per storage
-  # mode) and scripts/tests/k3s-components-agreement.sh (both installers agree,
-  # and the chart coupling above still exists).
+  # mode) and scripts/tests/k3s-components-agreement.sh (k3d.sh and the native
+  # render agree, and the chart coupling above still exists).
   K3D_ARGS=(
     cluster create "$CLUSTER_NAME"
     --servers "$SERVERS"
@@ -1892,8 +1883,8 @@ _create_new_cluster() {
 
   # Bounded create (#426): --wait alone has no deadline, so a stalled image
   # pull (rate-limited registry, TLS-intercepting proxy) hangs the create
-  # forever. k3d's own --timeout aborts it with a real error instead; the env
-  # knob matches the Windows installer's TB_CREATE_TIMEOUT_MIN.
+  # forever. k3d's own --timeout aborts it with a real error instead;
+  # TB_CREATE_TIMEOUT_MIN (minutes) sets it.
   local _create_timeout_min
   _create_timeout_min="$(tb_minutes_or "${TB_CREATE_TIMEOUT_MIN:-}" 15)"
   K3D_ARGS+=(--wait --timeout "${_create_timeout_min}m")
@@ -1912,8 +1903,7 @@ _create_new_cluster() {
   # is pulled by the host daemon, not the kubelet, so a chart imagePullSecret can't
   # help), pre-pull, then verify the image actually runs k3s; on any failure drop the
   # GPU request (CPU fallback) with an actionable reason instead of aborting. k3d
-  # reuses the cached image, so it is not wasted work. Mirrors the Windows twin's
-  # Connect-GpuRegistry + Confirm-GpuImagePullable + Test-GpuImageRunsK3s. Skipped
+  # reuses the cached image, so it is not wasted work. Skipped
   # for 'latest' (handled below) and the unit harness (empty K8S_VERSION);
   # TRACEBLOC_SKIP_GPU_IMAGE_PREPULL bypasses it (TB_SKIP_GPU_IMAGE_PREPULL
   # until remove_by 2026-12-31; both are read).
@@ -1922,8 +1912,8 @@ _create_new_cluster() {
     local _prepull_image _prepull_min _gpu_ok=1 _gpu_fail_reason="" _pull_log="" _got_digest=""
     _prepull_image="$(_gpu_node_image)"
     _prepull_min="$(tb_minutes_or "${TB_GPU_PULL_TIMEOUT_MIN:-}" 15)"
-    # Authenticate the host daemon to the image's registry first (mirrors
-    # Connect-GpuRegistry): --password-stdin so the secret never lands in argv/ps.
+    # Authenticate the host daemon to the image's registry first: --password-stdin
+    # so the secret never lands in argv/ps.
     # Best-effort — a public image needs no login, and a failed login still tries an
     # unauthenticated pull before the CPU fallback below.
     if [[ -n "${TRACEBLOC_REGISTRY_USERNAME:-}" && -n "${TRACEBLOC_REGISTRY_PASSWORD:-}" ]]; then
@@ -1962,7 +1952,7 @@ _create_new_cluster() {
       fi
     fi
     [[ -n "$_pull_log" && "$_pull_log" != /dev/null ]] && rm -f "$_pull_log"
-    # Verify the pulled image actually runs k3s (mirrors Test-GpuImageRunsK3s): a
+    # Verify the pulled image actually runs k3s: a
     # mis-tagged/broken override or mirror copy passes the pull but then hard-fails
     # cluster-create. Run WITH --gpus so it exercises the exact create path (our image
     # bakes NVIDIA_DISABLE_REQUIRE, so it passes on any driver). Capture-then-match,
@@ -2027,7 +2017,7 @@ _create_new_cluster() {
   # image (client#835): same pinned k3s, plus the NVIDIA runtime + `nvidia`
   # RuntimeClass, because GPU capability is baked into the node at create time and
   # can't be bolted onto a running cluster. Gated on _gpu_wired so a CPU install is
-  # byte-for-byte unchanged. Mirrors the Windows twin (install-k8s.ps1).
+  # byte-for-byte unchanged.
   if [[ "$K8S_VERSION" == "latest" ]]; then
     warn "K8S_VERSION=latest runs an UNVALIDATED k3s (k3d's bundled default), not the tested pin."
     hint "The chart is validated against a specific k3s release; 'latest' is unsupported and has stranded installs (#547)."
@@ -2178,7 +2168,7 @@ _create_new_cluster() {
       # with no timeout hint (Bugbot #442). And killing k3d mid-create skips
       # its rollback: delete the partial cluster so a re-run doesn't adopt a
       # half-created environment via the "already exists" branch above
-      # (parity with the Windows fix on #439).
+      # (the retired PowerShell core's fix on #439 did the same).
       warn "Creating the environment timed out after $(( _create_timeout_min + 5 )) minutes."
       hint "Check that Docker is healthy and this machine can pull images, then re-run. (TB_CREATE_TIMEOUT_MIN raises the k3d bound.)"
       ( k3d cluster delete "$CLUSTER_NAME" >>"${LOG_FILE:-/dev/null}" 2>&1 ) &
@@ -2393,7 +2383,7 @@ _k3s_log_facts() {
 # written, `_bounded` ran the bare command on a stock Mac, which has no
 # timeout/gtimeout; since client-dev#1357 both hold the deadline there, and the
 # file stays for the PIPESTATUS reason below. This is the one read whose time
-# grows with the log. The PowerShell twin already cuts it at the same deadline.
+# grows with the log.
 #
 # No pipeline also means no PIPESTATUS (Bugbot on client-dev#1380, "Failed log
 # read marked dead"). install-k8s.sh runs with `set -E` and an ERR trap, and on
@@ -2428,8 +2418,8 @@ _k3s_running_in() {
 
 # _k3d_nodes ROLE — this cluster's containers of one k3d role, one per line.
 # By k3d's LABELS, one query per role, never by name — the reasoning is
-# _verify_nodes_see_host_data's (an exact cluster match, and a format the
-# PowerShell twin can pass unchanged). `-a`: a node that is restarting counts.
+# _verify_nodes_see_host_data's (an exact cluster match, and a format with no
+# space or quote in any argument). `-a`: a node that is restarting counts.
 _k3d_nodes() {
   _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a \
     --filter "label=k3d.cluster=${CLUSTER_NAME}" \
@@ -2440,7 +2430,7 @@ _k3d_nodes() {
 # _k3d_node_addr NODE — "running|network|address|pinned" for NODE on the network
 # k3d's own label names (derived, not "k3d-$CLUSTER_NAME"). address and pinned are
 # empty when there is none. Raw-string (backtick) template keys, so no argument
-# carries a double quote — the constraint of the PowerShell twin.
+# carries a double quote — the constraint the retired PowerShell core set.
 _k3d_node_addr() {
   _bounded "${TB_DOCKER_INSPECT_TIMEOUT:-10}" docker inspect -f \
     '{{$n := index .Config.Labels `k3d.cluster.network`}}{{.State.Running}}|{{$n}}|{{with index .NetworkSettings.Networks $n}}{{.IPAddress}}|{{with .IPAMConfig}}{{.IPv4Address}}{{end}}{{end}}' \

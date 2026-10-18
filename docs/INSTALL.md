@@ -5,11 +5,10 @@ This guide covers installing the **tracebloc** unified Helm chart (AKS, EKS, bar
 > **Don't have a Kubernetes cluster yet?** The standalone installer provisions a cluster, installs GPU drivers, deploys a full tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) — in a single command:
 >
 > - **macOS / Linux:** `bash <(curl -fsSL https://tracebloc.io/i.sh)`
-> - **Windows (PowerShell):** `irm https://tracebloc.io/i.ps1 | iex`
-> - **Windows (Command Prompt):** `powershell -ExecutionPolicy Bypass -Command "irm https://tracebloc.io/i.ps1 | iex"`
-> - **Windows via WSL2 (recommended — avoids Docker Desktop licensing):** Docker Desktop's commercial licence is a blocker for large hospital systems. Inside a **WSL2** Linux distro the environment *is* Linux, so tracebloc installs **rootless**, with no Docker Desktop licence. One-time Windows admin step (the Windows equivalent of the Linux "prepare-host"): in an elevated PowerShell run `wsl --install`, reboot, then **inside** your WSL2 distro run the **macOS / Linux** command above. The installer detects WSL2 and prefers rootless — it reuses Docker Desktop's WSL integration only if it's already present.
+> - **Windows 11 (PowerShell):** `irm https://tracebloc.io/i.ps1 | iex`
+> - **Windows 11 (Command Prompt):** `powershell -ExecutionPolicy Bypass -Command "irm https://tracebloc.io/i.ps1 | iex"`
 >
-> **On Windows the installer needs Administrator rights.** Open an elevated shell first — press **Win+X → Terminal (Admin)** (or search "PowerShell" in Start and press **Ctrl+Shift+Enter**), accept the User Account Control prompt, then paste the command. If you run it un-elevated, the installer now **offers to relaunch itself as Administrator** (one UAC prompt) rather than failing. The Command-Prompt form above also works from `cmd.exe`, so a paste into the wrong shell still runs instead of erroring. (The **WSL2** route above avoids the Docker Desktop licence and runs rootless — no Windows Administrator needed beyond the one-time `wsl --install`.)
+> **On Windows, run it as yourself.** It sets tracebloc up in its own WSL2 Linux distro under your account, so there is no Docker Desktop and no Docker Desktop licence. It needs Windows 11 and WSL 2.5 or newer. Turning WSL on needs administrator rights once: if your account is an administrator, Windows asks you to allow it; otherwise the installer prints the one command for your IT team to run in an administrator PowerShell, `wsl --install --no-distribution`, and stops. When Windows asks for a restart, restart and run the same command again: it continues from there. A deployment tool (Intune, Configuration Manager) must run it in the user's context, not as SYSTEM. The Command-Prompt form also works from `cmd.exe`, so a paste into the wrong shell still runs.
 >
 > See the [README's Quick install section](../README.md#quick-install) for what it does. Continue here if you're deploying into an existing cluster.
 
@@ -111,12 +110,7 @@ export TRACEBLOC_REGISTRY_USERNAME=<user>
 export TRACEBLOC_REGISTRY_PASSWORD=<token>
 ```
 
-```powershell
-# Windows (install-k8s.ps1) — same knobs:
-$env:TRACEBLOC_IMAGE_REGISTRY    = "mirror.corp.example"
-$env:TRACEBLOC_REGISTRY_USERNAME = "<user>"
-$env:TRACEBLOC_REGISTRY_PASSWORD = "<token>"
-```
+On Windows, `install.ps1` runs this same installer inside its WSL2 distro, and these three variables are not carried into the distro yet: set on Windows, they do not reach the install. Until they are, install against a mirror from a macOS or Linux machine.
 
 **With plain Helm** (no installer), set the same value directly:
 
@@ -469,22 +463,11 @@ The chart **does not transport data into the cluster** — it points at data alr
 
 ### Staging on a local (hostpath) install
 
-On a **hostpath** laptop install (`hostPath.enabled: true`) `/data/shared/` is just a folder on your machine — the dataset dir is `HOST_DATA_DIR\data\<dataset>` on Windows, `$HOST_DATA_DIR/data/<dataset>` on macOS/Linux — so you stage a dataset by copying it there directly (no `kubectl cp` needed). This is the default on Windows (`install-k8s.ps1`), and on macOS/Linux when you opt in with `TB_STORAGE_MODE=hostpath`. On a Mac, k3s runs in a lightweight VM, and that VM mounts the folder (and `HOST_DATASET_DIR`, when set) at the same path, so the path is the same inside and outside. The VM keeps the folders it was first made with: to move them, remove tracebloc from the Mac, then install again.
+On a **hostpath** laptop install (`hostPath.enabled: true`) `/data/shared/` is just a folder on your machine — the dataset dir is `$HOST_DATA_DIR/data/<dataset>` — so you stage a dataset by copying it there directly (no `kubectl cp` needed). It is opt-in, on macOS/Linux, with `TB_STORAGE_MODE=hostpath`. On a Mac, k3s runs in a lightweight VM, and that VM mounts the folder (and `HOST_DATASET_DIR`, when set) at the same path, so the path is the same inside and outside. The VM keeps the folders it was first made with: to move them, remove tracebloc from the Mac, then install again. On Windows, `install.ps1` runs the macOS/Linux installer inside its WSL2 distro, and that installer picks the storage mode there: node-local, below, with the data on the distro's own disk.
 
 Since the RFC-0003 D15 flip (client#456), the macOS/Linux (k3s) installer defaults to **node-local** storage instead: datasets live inside the k3d node on k3s `local-path` with no host `/data/shared/` folder, and are wiped by `cluster delete`. There, stage data with the `kubectl cp` pattern from the ingestor README rather than by copying into a host dir. On **native k3s** (the default on a new Linux machine) the node is this machine itself, so node-local volumes are directories k3s manages under the storage path in [PREREQUISITES.md § Linux](PREREQUISITES.md#linux); stage with `kubectl cp` there too, never by copying into them.
 
 Use **idempotent** commands so re-running the step (for example after the installer got re-run) never errors on an already-staged dataset:
-
-**Windows (PowerShell)** — `New-Item -Force` doesn't fail when the folder already exists, and `robocopy` merges into an existing target instead of throwing `already exists`:
-
-```powershell
-$dst = "$env:USERPROFILE\.tracebloc\data\shapes-demo"    # HOST_DATA_DIR\data\<dataset>
-New-Item -ItemType Directory -Force -Path $dst | Out-Null
-robocopy "$env:USERPROFILE\Downloads\sample_dataset\shapes-demo" $dst /E
-# robocopy exit codes 0-7 are success (>=8 is a real error); safe to re-run.
-```
-
-> Plain `mkdir` and `Copy-Item -Recurse` are **not** idempotent — a second run throws `An item with the specified name … already exists` even though the earlier copy succeeded. That error is harmless (the data is already staged), but the commands above avoid it.
 
 **macOS / Linux** — `mkdir -p` and `cp -R` (or `rsync -a`) are already idempotent:
 

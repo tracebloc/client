@@ -18,10 +18,10 @@ _ensure_tracebloc_dirs() {
 }
 
 # Modes the two SHARED hostPath dirs must end up with. Named constants because the
-# same pair is spelled out in two other places — the Windows installer's
-# $TB_SHARED_DIR_MODE/$TB_LOGS_DIR_MODE (scripts/install-k8s.ps1) and the chart's
-# init-writable-data (client/templates/jobs-manager-deployment.yaml) — and the three
-# have to be diffable by eye rather than drifting (#667, #673).
+# same pair is spelled out in the chart's init-writable-data
+# (client/templates/jobs-manager-deployment.yaml) too, and the two have to be
+# diffable by eye rather than drifting (#667, #673); hostpath-prep.bats holds them
+# equal.
 #
 # Both get setgid (2) so new entries inherit the group. They differ in the sticky bit,
 # deliberately:
@@ -34,9 +34,9 @@ _ensure_tracebloc_dirs() {
 TB_SHARED_DIR_MODE="2777"
 TB_LOGS_DIR_MODE="3777"
 
-# Echo the path:mode pairs this release needs, one per line — the same shape the Windows
-# installer's Get-ReleaseDirsSpec and the chart's init-writable-data use, so the parity
-# test can diff all three without re-deriving the layout (#673).
+# Echo the path:mode pairs this release needs, one per line — the same shape the chart's
+# init-writable-data uses, so hostpath-prep.bats can diff the two without re-deriving the
+# layout (#673).
 #
 # backend#743: the dataset dir goes under HOST_DATASET_DIR (network mount) when set, else
 # stays local. logs (and mysql, below) always stay on the local HOST_DATA_DIR.
@@ -67,8 +67,8 @@ _ensure_release_dirs() {
   local base root; root="$(_hostpath_root)"; base="${root:-$HOST_DATA_DIR}/$release"
   # mysql is deliberately left on the flat recursive 777 this function has always used:
   # it has ONE writer (uid 999) and its own init container in the chart, and its datadir
-  # permissions are the database's business — the same reason it is out of scope for the
-  # Windows prep and for init-writable-data (#654, #673).
+  # permissions are the database's business — the same reason it is out of scope for
+  # init-writable-data (#654, #673).
   mkdir -p "$base/mysql"
   chmod -R 777 "$base/mysql" 2>/dev/null || true
   local entry dir mode
@@ -160,8 +160,7 @@ _resolve_ca_bundle() {
     val="${!var:-}"; [[ -z "$val" ]] && continue
     # Require a readable regular FILE, not just -r: a directory of PEMs is readable
     # but would bind-mount over the single-file node path and containerd can't read
-    # it as a ca_file — the silent "looks applied but still x509" case. Mirrors the
-    # PS Resolve-CaBundle -PathType Leaf check (reviewer).
+    # it as a ca_file — the silent "looks applied but still x509" case (reviewer).
     if [[ ! -r "$val" || ! -f "$val" ]]; then echo "$var"; return 2; fi
     case "$val" in /*) : ;; *) val="$(cd "$(dirname "$val")" 2>/dev/null && pwd)/$(basename "$val")" ;; esac
     echo "$val"; return 0
@@ -274,9 +273,9 @@ wire_ca_trust() {
 #   age  2m  the kubelet never GCs an image a running container uses; this only
 #            protects a just-pulled, not-yet-used image from being reclaimed
 #            under the same burst that pulled it
-# The guard asserts the INVARIANTS (all three set, both twins agree, low < high,
-# never looser than stock) rather than these exact integers, so retuning them is
-# a values change and not a guard change.
+# The guard asserts the INVARIANTS (all three set, low < high, never looser than
+# stock) rather than these exact integers, so retuning them is a values change and
+# not a guard change.
 TB_KUBELET_IMAGE_GC_HIGH_PERCENT=75
 TB_KUBELET_IMAGE_GC_LOW_PERCENT=60
 TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
@@ -297,7 +296,7 @@ TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
 # create_cluster(), samples the kubelet's own /stats/summary idle and under a
 # training-shaped load (the real 2 GB task image pulled and run), and writes a
 # record to scripts/spec/node-reservation/. scripts/gen-node-reservation-embed.sh
-# turns the records into the block between the markers, in BOTH twins, and its
+# turns the records into the block between the markers, and its
 # `--check` runs in `make drift` (the required Source-of-truth drift job). What
 # it reserves is everything on the node that is NOT a pod -- the node's working
 # set minus the `pods` system container, which on k3s is ~5x what the kubelet's
@@ -488,7 +487,7 @@ _kubelet_reservation_warn_unmeasured() {
     hint "Re-run the installer from a fresh bootstrap so probe.sh is fetched; the reservation is then written for the platform detected."
   else
     warn "No measured node reservation exists for platform '${platform}' ($(uname -s)) yet, so this node's allocatable will equal its capacity -- the training envelope is sized against a number that includes the kubelet and container runtime."
-    hint "Measure one with scripts/tests/measure-node-reservation.sh (tracebloc/client) and both installers pick it up."
+    hint "Measure one with scripts/tests/measure-node-reservation.sh (tracebloc/client) and the installer picks it up."
   fi
   return 0
 }

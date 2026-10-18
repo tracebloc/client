@@ -1,10 +1,10 @@
 # =============================================================================
 #  install-wsl.ps1 -- the Windows distro path (RFC-0175 D2, D7; client-dev#1810)
 #
-#  install.ps1 runs this as a child process (powershell.exe -File) when
-#  TRACEBLOC_SUBSTRATE=k3s, where it would otherwise run install-k8s.ps1. It is
-#  in install.ps1's $Files and in the signed manifest, so on the customer path it
-#  runs only after install.ps1 has verified it.
+#  install.ps1 runs this as a child process (powershell.exe -File): it is the one
+#  Windows install path since the PowerShell core was retired (client-dev#1810
+#  part 5). It is in install.ps1's $Files and in the signed manifest, so on the
+#  customer path it runs only after install.ps1 has verified it.
 #
 #  -CoreDir is the one tree it may use:
 #    - on the customer path, ONLY the temp dir install.ps1 has just verified
@@ -25,12 +25,11 @@
 #    0  done
 #    1  a named refusal or a failure, already explained on screen
 #    2  a restart is needed first, then the same install command again
-#       (install-k8s.ps1's declared "restart, then re-run" code)
+#       (the declared "restart, then re-run" code, which the e2e harness reads)
 #
-#  The path stays behind TRACEBLOC_SUBSTRATE=k3s until 3.3's cell is green on it
-#  (D14 item 9). Its steps are the numbered sections below, and Invoke-WslInstall,
-#  at the end, runs them in order (client-dev#1810 part 1): WSL ready, the import
-#  and its disk, the logon task, the host's CA roots, the core, the record.
+#  Its steps are the numbered sections below, and Invoke-WslInstall, at the end,
+#  runs them in order (client-dev#1810 part 1): WSL ready, the import and its disk,
+#  the logon task, the host's CA roots, the core, the record.
 # =============================================================================
 #Requires -Version 5.1
 param([string]$CoreDir)
@@ -155,8 +154,7 @@ $WslUpdateArgs = $WslInstallArgs
 $WslEnableMaxRestarts = 1
 # TODO(S-W row 2): the exit code `wsl --install --no-distribution` returns when it
 # needs a restart. 3010 and 1641 are Windows' "succeeded, restart needed /
-# restarting" codes (install-k8s.ps1's INSTALLER_REBOOT_OK_CODES has them too),
-# not a measurement of wsl.exe. Any other non-zero code is a failure. A restart
+# restarting" codes, not a measurement of wsl.exe. Any other non-zero code is a failure. A restart
 # code is never probed into "ready": Windows has said it must restart first.
 $WslEnableRestartCodes = @(3010, 1641)
 $WslEnableOkCodes = @(0) + $WslEnableRestartCodes
@@ -389,7 +387,7 @@ function Get-WslReadiness {
 }
 
 # The process token is elevated (an administrator who ran PowerShell as
-# Administrator). The same test as install-k8s.ps1's admin gate.
+# Administrator).
 function Test-BootstrapElevated {
   try {
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -425,8 +423,7 @@ function Get-HostBootUnixTime {
 # was written (epoch seconds), how many restarts the step has taken, and whether
 # the IT step has run yet (a restart for Windows' own pending flag can come
 # first). A run that finds WSL ready deletes it. Row 2 says whether a RunOnce
-# entry should also re-run the installer after the restart, as install-k8s.ps1
-# does; one would not carry TRACEBLOC_SUBSTRATE, so it waits for part 5's default.
+# entry should also re-run the installer after the restart.
 function Get-WslResumeMarkerPath {
   return (Join-Path $env:LOCALAPPDATA 'tracebloc\wsl-resume.json')
 }
@@ -614,14 +611,14 @@ function Assert-WslNetworkingNat {
 #  "$env:LOCALAPPDATA\tracebloc\wsl" <rootfs> --version 2` as the daily user,
 #  unelevated (S-W row 3: 8.4 s, no consent.exe), then the disk. The pins are
 #  facts.env's WSL_ROOTFS_*, stamped below, and Get-WslDistroImage takes them unless
-#  told otherwise. The distro path stays behind the switch until 3.3 is green on it.
+#  told otherwise.
 #  Still to come, each waiting on the row of spike S-W (backend#5416) that decides it:
 #    The per-user logon task that keeps the distro running is section 3's.
 #    The proxy inside the distro (row 10) crosses on the core's runs (section 5);
 #      the host-side fetch below honours HTTPS_PROXY like every bootstrap
 #      download. The host's CA roots (row 9) are Add-WslHostRootTrust's, below.
-#    TODO(S-W row 13): the GPU device the distro advertises.
-#    TODO(part 5, after 3.3 is green): the PowerShell core's removal.
+#    The GPU the distro advertises (S-W row 13): section 4b says which GPU WSL can
+#      give it, and the core wires it (k3s.sh, _native_k3s_gpu_wsl_prepare).
 # =============================================================================
 
 # The rootfs this release pins: facts.env's WSL_ROOTFS_*, stamped here by
@@ -1592,8 +1589,7 @@ function Add-WslHostRootTrust {
 #  Windows 11 and Server 2025. Invoke-WslInstall runs it right after the import
 #  (section 2): its start is the distro's first.
 #    TODO(part 4): the install record's logon-task artefact, once cli-dev's
-#      `delete` knows the kind.
-#    TODO(part 5): the task's removal.
+#      `delete` knows the kind, and with it the task's removal.
 # =============================================================================
 
 $KeepaliveTaskName = 'tracebloc-keepalive'
@@ -1676,19 +1672,14 @@ function Register-KeepaliveTask {
 #
 #  On the distro path the core runs inside WSL, but nvidia-smi.exe, the driver and
 #  the GPUs Windows lists live on the Windows host, so the GPU check stays here
-#  (RFC-0175 D2, W21). These are install-k8s.ps1's Find-Gpu, Confirm-NvidiaDriver
-#  and Get-NvidiaFloorVerdict with everything they call, COPIED UNCHANGED:
-#  install-k8s.ps1 runs as a separate process and calls its own copies, so the
-#  originals stay until part 5 deletes the PowerShell core. Until then
-#  install-wsl.Tests.ps1 holds every copied function, and every top-level variable
-#  they read, byte-for-byte equal to install-k8s.ps1's (the set is derived from
-#  install-k8s.ps1, never listed). Info, Ok and Warn are this file's own output
-#  helpers, which print the same lines without the log.
+#  (RFC-0175 D2, W21). Find-Gpu, Confirm-NvidiaDriver and Get-NvidiaFloorVerdict,
+#  with everything they call, came over unchanged from the PowerShell core that
+#  part 5 retired, and their behaviour is held by install-wsl-host.Tests.ps1. Info,
+#  Ok and Warn are this file's own output helpers, which print the same lines
+#  without the log.
 #
 #  Invoke-WslCore calls Find-Gpu before the core's first run, so both runs carry its
-#  answer. The distro path itself stays behind the switch until 3.3 is green on it.
-#  The floors: check-facts.sh stamps them from facts.env, here as in
-#  install-k8s.ps1, and the parity test holds the two copies equal.
+#  answer. The floors: check-facts.sh stamps them from facts.env.
 #  The words (W17, W21): below the floor it warns and keeps the GPU; below the hard
 #  floor or compute capability 7.5 it runs CPU-only. Every line those branches say
 #  is the core's own (detect-gpu.sh's _nvidia_gpu_floor_gate), a Pester case holds
@@ -1706,9 +1697,10 @@ function Register-KeepaliveTask {
 #  arm64 (arch_unsupported), go on the same line as GPU_UNSUPPORTED_*, with no
 #  verdict. In the distro, where WSL shows no PCI device, the core takes them from
 #  there (detect-gpu.sh, _gpu_wsl_host_report).
-#    TODO(S-W row 13): the device half, the capacity patch or the plugin's WSL
-#      mode, is the core's (detect-gpu.sh, part 3), and takes only that verdict
-#      from here: the host never advertises a GPU itself.
+#  The device half (S-W row 13) is the core's, and takes only that verdict and
+#  section 4b's report from here: the host never advertises a GPU itself. In the
+#  distro the chart's device plugin, v0.20.1 under the nvidia RuntimeClass, finds
+#  WSL by /dev/dxg and advertises one shared device, all (W26, measured by S-W).
 # =============================================================================
 
 # The verdict's state, as Confirm-NvidiaDriver leaves it.
@@ -2035,8 +2027,97 @@ function Find-Gpu {
   }
 }
 
-# Run a child process with a hard timeout, its arguments quoted for Win32
-# (install-k8s.ps1's comments above its copies give the rules).
+# =============================================================================
+#  4b. The GPU WSL can give the distro (S-W row 13, client-dev#1810).
+#
+#  Find-Gpu and Confirm-NvidiaDriver judge the card and its driver against the
+#  floors, as on every platform. WSL adds two rules of its own, NVIDIA's CUDA on WSL
+#  guide's: it hands a distro a GPU (/dev/dxg) only in the WDDM driver model, never
+#  in TCC, and Tesla parts are left out whatever their mode. e2e-test-agent's Windows
+#  GPU box holds its runner to the same two (harness/windows_gpu_box.py, unfit).
+#  Confirm-NvidiaWslGpu reads each NVIDIA GPU's name and driver model and, only for a
+#  GPU the floors let through (ok, below-driver):
+#    - every GPU fit: nothing changes;
+#    - some fit, some not: the GPU stays, and the ones WSL leaves out are named;
+#    - none fit: the GPU is left out, said, and the platform told
+#      (wsl_cannot_see_gpu), as Find-Gpu's own reports are: GPU_VENDOR is
+#      nvidia_unsupported and no verdict goes on the core runs' line, so the core
+#      takes the host's report (detect-gpu.sh, _gpu_wsl_cannot_see_report);
+#    - the driver model cannot be read: cannot tell here, so the GPU stays and the
+#      core's own check in the distro decides (nvidia-smi answers there, or the
+#      core runs CPU-only, said).
+#  The device half is the core's, in the distro: the spec tracebloc-cdi writes at
+#  each start, k3s's NVIDIA runtime, and the chart's device plugin (k3s.sh,
+#  _native_k3s_gpu_wsl_prepare).
+# =============================================================================
+
+# The one driver model WSL's GPU path supports, and the family it leaves out by name.
+$NVIDIA_WSL_DRIVER_MODEL = 'WDDM'
+$NVIDIA_WSL_EXCLUDED_FAMILY = 'Tesla'
+
+# Get-NvidiaWslFit -- pure: OUTPUT is nvidia-smi's `--query-gpu=name,driver_model.current
+# --format=csv,noheader` answer, one GPU per line. Returns Fit (the names WSL can give
+# the distro), Unfit (one @{ Name; Why } per card it cannot) and Read (the lines it
+# could parse). Why is a sentence's subject clause, said and told as it is.
+function Get-NvidiaWslFit {
+  param([string]$Output)
+  $fit = @(); $unfit = @(); $read = 0
+  foreach ($line in @([string]$Output -split "\r?\n")) {
+    $cells = @($line -split ',' | ForEach-Object { $_.Trim() })
+    if ($cells.Count -ne 2 -or -not $cells[0]) { continue }
+    $read++
+    $name = $cells[0]; $model = $cells[1]
+    if ($name -cmatch "(^| )$NVIDIA_WSL_EXCLUDED_FAMILY( |$)") {
+      $unfit += @{ Name = $name; Why = "it is a $NVIDIA_WSL_EXCLUDED_FAMILY part, which CUDA on WSL does not support" }
+    } elseif ($model -cne $NVIDIA_WSL_DRIVER_MODEL) {
+      $shown = if ($model) { $model } else { 'unreported' }
+      $unfit += @{ Name = $name; Why = "it runs in the $shown driver model, and WSL gives a distro a GPU only in $NVIDIA_WSL_DRIVER_MODEL" }
+    } else {
+      $fit += $name
+    }
+  }
+  return @{ Fit = $fit; Unfit = $unfit; Read = $read }
+}
+
+# Confirm-NvidiaWslGpu -- the rules above, after Find-Gpu (Invoke-WslCore).
+function Confirm-NvidiaWslGpu {
+  if ($script:GPU_VENDOR -ne 'nvidia' -or @('ok', 'below-driver') -cnotcontains $script:GPU_FLOOR_VERDICT) { return }
+  $cmd = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
+  $nvSmi = if ($cmd) { $cmd.Source } else { $null }
+  if (-not $nvSmi) {
+    $found = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'nvidia-smi.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $nvSmi = if ($found) { $found.FullName } else { $null }
+  }
+  $r = if ($nvSmi) { Invoke-BoundedProcess -FileName $nvSmi -Arguments @('--query-gpu=name,driver_model.current', '--format=csv,noheader') -TimeoutSec 15 -StdoutOnly } else { $null }
+  $fit = if ($r -and $r.Code -eq 0) { Get-NvidiaWslFit -Output ([string]$r.Output) } else { $null }
+  if (-not $fit -or $fit.Read -eq 0) {
+    $how = if (-not $nvSmi) { 'nvidia-smi.exe was not found' } elseif ($r.Code -ne 0) { "nvidia-smi exited $(Format-ExitCode $r.Code)" } else { 'nvidia-smi named no GPU' }
+    Log "WSL GPU check: the driver model could not be read ($how); the distro's own check decides"
+    Warn "Couldn't read this NVIDIA GPU's driver model ($how), so it is not known whether WSL can give the tracebloc WSL distro the GPU -- the distro checks for itself, and runs in CPU mode if it cannot see it."
+    return
+  }
+  Log "WSL GPU check: fit '$($fit.Fit -join ', ')'; left out: $(@($fit.Unfit | ForEach-Object { "$($_.Name) ($($_.Why))" }) -join '; ')"
+  if (@($fit.Fit).Count -gt 0) {
+    foreach ($u in @($fit.Unfit)) { Warn "WSL leaves this NVIDIA GPU out of the tracebloc WSL distro ($($u.Name)): $($u.Why). Training uses the others." }
+    return
+  }
+  $first = @($fit.Unfit)[0]
+  $script:GPU_VENDOR = 'nvidia_unsupported'; $script:NVIDIA_DRIVER_OK = $false
+  $script:GPU_FLOOR_VERDICT = ''
+  $script:GPU_UNSUPPORTED_CODE = "wsl_cannot_see_gpu"
+  $script:GPU_UNSUPPORTED_NAME = $first.Name
+  $script:GPU_UNSUPPORTED_REASON = "This NVIDIA GPU cannot be used for training on Windows: $($first.Why). So this machine runs on CPU."
+  $script:GPU_SKIP_REASON = "WSL cannot give the tracebloc WSL distro this NVIDIA GPU ($($first.Name)): $($first.Why) -- running CPU-only"
+  Warn "WSL cannot give the tracebloc WSL distro this NVIDIA GPU ($($first.Name)): $($first.Why) -- this machine will run in CPU mode."
+  Hint "GPU training on Windows needs a GeForce or an RTX (Quadro) card in the $NVIDIA_WSL_DRIVER_MODEL driver model. Everything else works on CPU."
+}
+
+# Run a child process with a hard timeout, its arguments quoted for Win32.
+# ConvertTo-Win32Arg quotes ONE argument so CommandLineToArgvW recovers it as a
+# single token: one with no whitespace and no `"` goes as it is; otherwise it is
+# wrapped in `"`, a `"` inside becomes `\"`, a run of N `\` before a `"` becomes
+# 2N+1, a run of N `\` at the end becomes 2N, and any other `\` stays; the empty
+# string becomes `""`. Callers pass raw arguments and never pre-quote (backend#2455).
 function ConvertTo-Win32Arg {
   param([Parameter(Mandatory)][AllowEmptyString()][string]$Arg)
   if ($Arg -ne "" -and $Arg -notmatch '[\s"]') { return $Arg }
@@ -2194,8 +2275,9 @@ function Invoke-BoundedProcess {
 #  switch back (backend#5025 O-19). And where this machine runs, which the account
 #  steps put in `client create`'s environment, as provision.sh does (backend#5797).
 #    TODO(S-W): measure that /dev/tty answers in the distro while stdin is a pipe.
-#    TODO(part 5): the refusal for another account's client names no removal
-#      command yet: how the distro path removes a client is part 5's.
+#    TODO(part 4): the refusal for another account's client names no removal
+#      command yet: `tracebloc delete` removes the distro path's client once
+#      cli-dev's `delete` knows the record's kinds.
 # =============================================================================
 
 # The distro the core runs in, the substrate named on its command line (a Pester
@@ -2343,7 +2425,7 @@ function Assert-HostProxy {
   }
 }
 
-# The tracebloc CLI's own Windows installer, as install-k8s.ps1 names it.
+# The tracebloc CLI's own Windows installer.
 $TRACEBLOC_CLI_INSTALL_URL = "https://github.com/tracebloc/cli/releases/latest/download/install.ps1"
 
 # The cluster run's handover (2c): the variable that names the file, the file's
@@ -2552,12 +2634,10 @@ function New-PrivateDirectory {
   }
 }
 
-# The CLI installer's launch: install-k8s.ps1's Start-TraceblocCliInstaller and the
-# functions it calls, COPIED UNCHANGED (backend#4405: four ways to start the child,
-# each refusal logged with its cause). install-wsl.Tests.ps1 holds them, and every
-# top-level variable they or Install-HostCli read, byte-for-byte equal to
-# install-k8s.ps1's, the set derived from install-k8s.ps1, until part 5 deletes the
-# PowerShell core.
+# The CLI installer's launch: Start-TraceblocCliInstaller and the functions it
+# calls, which came over unchanged from the retired PowerShell core (backend#4405:
+# four ways to start the child, each refusal logged with its cause).
+# install-wsl-host.Tests.ps1 holds their behaviour.
 function Format-CliLaunchError($err) {
   $ex = $err.Exception
   $types = @()
@@ -2657,9 +2737,9 @@ function Find-HostCli {
 
 # Installs the tracebloc CLI for the user running this bootstrap: the CLI's own
 # installer in a child Windows PowerShell (its `exit` closes nothing here), started
-# as install-k8s.ps1 starts it and given the same 10 minutes. Not install-k8s.ps1's
-# Install-TraceblocCli, which also copies the exe into the machine-wide tools
-# folder: that needs an administrator, and the distro path runs as the daily user.
+# by Start-TraceblocCliInstaller and given 10 minutes. For this user only: the
+# retired PowerShell core also copied the exe into the machine-wide tools folder,
+# which needs an administrator, and the distro path runs as the daily user.
 # The installer's exit code is the verdict. Returns the CLI's path. A failed
 # install keeps a CLI that was already here, with a warning; with none, it refuses,
 # because the CLI is what registers this machine. OPTIONAL is for an install that
@@ -2675,7 +2755,7 @@ function Install-HostCli {
     $null = $p.Handle
     if ($p.WaitForExit($TimeoutSec * 1000)) {
       # Only the overload with no deadline waits for the redirected streams, and
-      # until they drain ExitCode can read $null (install-k8s.ps1, backend#2849).
+      # until they drain ExitCode can read $null (backend#2849).
       try { $p.WaitForExit() } catch { }
       if ($p.ExitCode -ne 0) { $why = "its installer exited $(Format-ExitCode $p.ExitCode)" }
     } else {
@@ -2719,9 +2799,9 @@ function Install-HostCli {
 
 # A typed value with the terminal's residue taken out: arrow keys, bracketed-paste
 # markers and control characters, which would otherwise become part of a permanent
-# client name. install-k8s.ps1's ConvertTo-SanitizedInput, COPIED UNCHANGED (its
-# comment names the bash and Go twins); install-wsl.Tests.ps1 holds it byte-for-byte
-# equal, the set derived from what Get-ClientName calls.
+# client name. The twin of common.sh's _strip_paste_garbage and the CLI's
+# sanitize.go: change the three together. It came over unchanged from the retired
+# PowerShell core; install-wsl-host.Tests.ps1 holds its cases.
 function ConvertTo-SanitizedInput {
   param([string]$Value)
   if (-not $Value) { return "" }
@@ -2780,13 +2860,13 @@ function Format-HostCliStderr {
 }
 
 # One answer from the host CLI, bounded, captured, with its stdin closed: a probe
-# never reads input (install-k8s.ps1, client-dev#1784). Returns its exit code, its
+# never reads input (client-dev#1784). Returns its exit code, its
 # stdout lines, ErrorText (what it wrote to stderr, kept apart: the reason a probe
 # failed, and this script keeps no log to put it in) and TimedOut (it did not
 # answer within TimeoutSec, so it was stopped, with what it had said by then). A
 # CLI that could not be started, or was stopped, has no exit code. Not
-# Invoke-BoundedProcess, which is install-k8s.ps1's and leaves stdin attached
-# when there is nothing to write.
+# Invoke-BoundedProcess, which leaves stdin attached when there is nothing to
+# write.
 function Invoke-HostCliProbe {
   param([string]$Cli, [string[]]$ArgumentList, [int]$TimeoutSec = $HostCliProbeTimeoutSec)
   $r = [pscustomobject]@{ ExitCode = $null; Lines = @(); ErrorText = ''; TimedOut = $false; TimeoutSec = $TimeoutSec }
@@ -3032,8 +3112,10 @@ function Invoke-WslCore {
     $logHost = Join-Path $env:USERPROFILE '.tracebloc'
     if (-not (Test-Path -LiteralPath $logHost)) { New-Item -ItemType Directory -Path $logHost -Force | Out-Null }
     $logDir = ConvertTo-DistroPath -Path $logHost
-    # The host GPU check (section 4), before the first run: both runs carry its answer.
+    # The host GPU check (section 4), before the first run: both runs carry its answer,
+    # with WSL's own rules for the GPU it can give the distro (section 4b).
     Find-Gpu
+    Confirm-NvidiaWslGpu
     Write-CoreSettingsNotUsed
 
     # The cluster run's handover, in a folder only this user can open, deleted after
@@ -3208,10 +3290,13 @@ function Save-HostInstallRecord {
 #
 #  The words are reinstall.sh's. install-wsl.Tests.ps1 holds every string here to
 #  one of reinstall.sh's (and of the k3d.sh and common.sh reads it mirrors), where
-#  the one difference is that reinstall.sh says native k3s and this says
-#  $ReinstallTarget. It also renders every outcome in 1.4's copy catalog
-#  (testdata/golden/02-reinstall.golden) and compares it line by line. A string
-#  only Windows says carries `# Windows only:` and why, on its line.
+#  the differences are two: reinstall.sh says native k3s where this says
+#  $ReinstallTarget, and this never says to unset TRACEBLOC_SUBSTRATE to keep
+#  today's environment, because on Windows no other runtime is left to keep
+#  (client-dev#1810 part 5). It also renders every outcome in 1.4's copy catalog
+#  (testdata/golden/02-reinstall.golden) and compares it line by line, with those
+#  differences applied. A string only Windows says carries `# Windows only:` and
+#  why, on its line.
 #
 #  Invoke-WslInstall calls Assert-NoLiveK3d once the tree is verified and before WSL
 #  is touched, so nothing is turned on, written or started before it answers.
@@ -3220,7 +3305,7 @@ function Save-HostInstallRecord {
 #  never offboards a working client.
 #  What reinstall.sh does that this does not, and why:
 #    - it reads the install record for the cluster's name. The Docker path never
-#      wrote one, so the cluster looked for is install-k8s.ps1's own name;
+#      wrote one, so the cluster looked for is the name the Docker path created;
 #    - the adopt-blind exception: no administrator prepares this host for another
 #      user;
 #    - the leftover-data guard (TB_LEFTOVER_ACTION): the distro keeps its data in
@@ -3241,7 +3326,7 @@ $ReinstallTarget = 'the tracebloc WSL distro'  # Windows only: the one differenc
 $ReinstallTargetStart = 'The tracebloc WSL distro'  # Windows only: the same, starting a sentence
 
 # The cluster-name rule, lib/common.sh's _valid_cluster_name (a Pester case holds it
-# so), which install-k8s.ps1's validation also applies.
+# so).
 $ClusterNameRule = '^[a-zA-Z][a-zA-Z0-9._-]{0,62}$'
 
 # Each deadline's default, by the name the core reads it under: a Pester case holds
@@ -3300,8 +3385,9 @@ function Get-LastLine {
   return ''
 }
 
-# The cluster the Docker path creates: install-k8s.ps1's own $CLUSTER_NAME, the same
-# expression (a Pester case holds it so).
+# The cluster the retired Docker path created: TRACEBLOC_CLUSTER_NAME, then
+# CLUSTER_NAME, then tracebloc, as lib/common.sh reads it (a Pester case holds it
+# so).
 function Get-K3dClusterName {
   $name = if ($env:TRACEBLOC_CLUSTER_NAME) { $env:TRACEBLOC_CLUSTER_NAME } elseif ($env:CLUSTER_NAME) { $env:CLUSTER_NAME } else { "tracebloc" }
   return $name
@@ -3463,12 +3549,12 @@ function Get-ReinstallDecision {
 }
 
 # What moving this machine means (D10), before a refusal and before an offboard
-# alike.
+# alike. Windows has no runtime left to keep, so reinstall.sh's third line, "To
+# keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run.", is not said.
 function Write-ReinstallExplanation {
   param([string]$Cluster)
   Warn "This machine runs tracebloc on k3d (cluster '$Cluster')."
   Hint "Moving it to $ReinstallTarget is a reinstall: this machine's secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
-  Hint "To keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run."
 }
 
 # Never the distro beside a live k3d. Returns Decision (proceed, or a consented
@@ -3484,7 +3570,7 @@ function Assert-NoLiveK3d {
   if ($s.Found -ceq 'other') {
     $others = $s.Others -join ' '
     Warn "A k3d cluster that is not tracebloc's is on this machine: $others."
-    Hint "This installer never removes it. To keep tracebloc on k3d, unset TRACEBLOC_SUBSTRATE and re-run."
+    Hint "This installer never removes it."  # Windows only: no runtime is left to keep on k3d, so reinstall.sh's second sentence is cut
     throw "$ReinstallTargetStart is never set up beside a live k3d."
   }
   Write-ReinstallExplanation -Cluster $s.Cluster
@@ -3624,7 +3710,7 @@ function Invoke-K3dOffboard {
     throw "The tracebloc CLI on this machine did not answer within $probeAfter when asked whether it can offboard, so nothing was changed and k3d cluster '$name' still runs. Check it with 'tracebloc --help' and re-run."
   }
   if ($probe -ne 0) {
-    throw "The tracebloc CLI on this machine cannot offboard a secure environment for a reinstall, so nothing was changed and k3d cluster '$name' still runs. Update it with 'tracebloc upgrade' and re-run, or unset TRACEBLOC_SUBSTRATE to keep today's environment."
+    throw "The tracebloc CLI on this machine cannot offboard a secure environment for a reinstall, so nothing was changed and k3d cluster '$name' still runs. Update it with 'tracebloc upgrade' and re-run."  # Windows only: no runtime is left to keep, so reinstall.sh's "or unset TRACEBLOC_SUBSTRATE" is cut
   }
   # The context the old client runs in: k3d's own name for the cluster, as the CLI
   # names it when the machine has no install record.
@@ -3638,7 +3724,7 @@ function Invoke-K3dOffboard {
   switch ($rc) {
     0 {
       if ((Get-ReinstallPresence -Cluster $name) -ne 1) {
-        Stop-Reinstall -Cluster $name -Why "The offboard did not finish: 'tracebloc delete' exited 0, but its k3d cluster is not gone, and $ReinstallTarget is never set up beside a live k3d. A confirmation that was declined, left blank or cancelled ends this way. Re-run and type the secure environment's name to move this machine, or unset TRACEBLOC_SUBSTRATE to keep today's environment."
+        Stop-Reinstall -Cluster $name -Why "The offboard did not finish: 'tracebloc delete' exited 0, but its k3d cluster is not gone, and $ReinstallTarget is never set up beside a live k3d. A confirmation that was declined, left blank or cancelled ends this way. Re-run and type the secure environment's name to move this machine."  # Windows only: no runtime is left to keep, so reinstall.sh's "or unset TRACEBLOC_SUBSTRATE" is cut
       }
     }
     10 {
@@ -3708,10 +3794,9 @@ function Invoke-WslInstall {
   # offboard decided, before WSL is touched. The offboard itself runs inside the
   # import step, right before the import.
   $script:Reinstall = Assert-NoLiveK3d
-  # A restart stops with 2, install-k8s.ps1's declared "restart, then re-run"
-  # code, which install.ps1 passes through and the e2e harness reads.
+  # A restart stops with 2, the declared "restart, then re-run" code, which
+  # install.ps1 passes through and the e2e harness reads.
   if ((Confirm-WslReady) -eq 'restart') {
-    Info "If you set TRACEBLOC_SUBSTRATE=k3s in this window only, set it again after the restart."
     return 2
   }
   # The distro (section 2): imported, with its disk set before anything starts it,

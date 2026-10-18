@@ -50,8 +50,8 @@ _tb_lowest_version() {
 # Matched against the NORMALISED name (_nvidia_name_normalised): upper case, every run
 # of other characters one space, one space either side, so each alternative is
 # anchored on whole words. POSIX ERE, no \b (bash 3.2 on macOS has none).
-# install-k8s.ps1 carries the SAME string as $NVIDIA_PRE_TURING_NAME_RE; gpu-floor.bats
-# holds the two equal, and both suites walk fixtures/gpu-floor/names.tsv.
+# install-wsl.ps1 carries the SAME string as $NVIDIA_PRE_TURING_NAME_RE; gpu-floor.bats
+# holds the two equal and walks fixtures/gpu-floor/names.tsv.
 _NVIDIA_PRE_TURING_NAME_RE=' (GT|GTS) [0-9]{3,4}[A-Z]* | GTX [4-9][0-9]{2}[A-Z]* | GTX 10[0-9]{2}[A-Z]* | GTX TITAN | TITAN (X|XP|V|Z|BLACK) | MX[1-3][0-9]{2} | GEFORCE [6-9][0-9]{2}(M|MX|A) | QUADRO (K|M|G?P|GV)[0-9]+[A-Z]* | NVS [0-9]{3} | (TESLA|GRID) [KMPV][0-9]+[A-Z]* | (K80|K40M?|K20X?M?|M60|M40|M10|P100|P40|P6|P4|V100S?) '
 
 # _nvidia_name_normalised NAME -- NAME upper-cased, every run of characters that are
@@ -261,8 +261,11 @@ _nvidia_gpu_wsl_verdict() {
 # TB_GPU_UNSUPPORTED_CODE is one of a CLOSED vocabulary the backend stores beside the
 # sentence and the dashboard switches on: compute_too_old and driver_too_old (the floor
 # gate above), not_nvidia, runtime_cannot_see_gpu and arch_unsupported (below).
-# install-k8s.ps1 sets the same five, with the same sentences. A code the backend does
-# not know yet is stored blank and the sentence still shows (backend#5296).
+# install-wsl.ps1 sets four of them on the Windows host (all but runtime_cannot_see_gpu);
+# detect-gpu.bats holds its not_nvidia and arch_unsupported sentences to these.
+# wsl_cannot_see_gpu is the Windows installer's alone (install-wsl.ps1,
+# Confirm-NvidiaWslGpu), taken below as it reports it. A code the backend does not
+# know yet is stored blank and the sentence still shows (backend#5296).
 # runtime_cannot_see_gpu is the runtime-neutral name backend#5892 gave the container-blind
 # code. The backend and cli-dev's doctor still read the old name, for clients installed
 # before it, but nothing here writes it: detect-gpu.bats fails on any file naming it.
@@ -273,8 +276,8 @@ _nvidia_gpu_wsl_verdict() {
 # QXL, Cirrus, Hyper-V, bochs) is a display adapter, not a GPU, and must keep reading
 # as "no GPU". Intel counts, the integrated GPU included: a machine whose ONLY GPU is
 # an Intel iGPU has a GPU, and "only NVIDIA GPUs are supported" is the true answer.
-# install-k8s.ps1 carries the SAME string as $GPU_NOT_NVIDIA_VENDOR_RE (detect-gpu.bats
-# holds the two equal).
+# install-wsl.ps1 carries the SAME strings as $GPU_NOT_NVIDIA_VENDOR_RE and
+# $GPU_NOT_NVIDIA_DISCRETE_RE (detect-gpu.bats holds each pair equal).
 _GPU_NOT_NVIDIA_VENDOR_RE=' (AMD|ATI|RADEON|ADVANCED MICRO DEVICES|INTEL|APPLE) '
 # _GPU_NOT_NVIDIA_DISCRETE_RE -- of those, the ones named first when a machine has
 # several: a discrete AMD card or the Apple GPU over an Intel iGPU.
@@ -329,15 +332,15 @@ _gpu_not_nvidia_report() {
 # the compute floor: nothing is installed or requested for them (no ROCm, no NVIDIA
 # driver or container toolkit, no device plugin, no GPU_REQUESTS), the install runs
 # CPU-only, it says why, and the platform is told. detect_gpu gives the vendor the
-# _unsupported suffix (amd_unsupported, nvidia_unsupported; install-k8s.ps1 has always
-# called a Windows AMD GPU amd_unsupported), so every GPU step, which keys on exactly
+# _unsupported suffix (amd_unsupported, nvidia_unsupported; install-wsl.ps1 calls a
+# Windows AMD GPU amd_unsupported too), so every GPU step, which keys on exactly
 # nvidia or amd, passes over it.
 
 # _gpu_arch_supported -- 0 when this machine can run the GPU training images (x86_64).
 _gpu_arch_supported() { [[ "${ARCH:-}" == x86_64 || "${ARCH:-}" == amd64 ]]; }
 
 # _gpu_arch_label -- this machine's architecture as the reason names it: arm64 for
-# uname's aarch64 too, so the sentence is the same as install-k8s.ps1's.
+# uname's aarch64 too, so the sentence is the same as install-wsl.ps1's.
 _gpu_arch_label() {
   case "${ARCH:-}" in
     aarch64|arm64) printf 'arm64' ;;
@@ -359,13 +362,59 @@ _gpu_arch_unsupported_report() {
   hint "Everything else works on CPU. GPU training needs an x86_64 machine with an NVIDIA GPU."
 }
 
+# TB_WSL_GPU_LIB_DIR -- where WSL mounts the Windows driver's user-space half in a
+# distro: nvidia-smi, libcuda and libdxcore (NVIDIA's CUDA on WSL guide).
+TB_WSL_GPU_LIB_DIR="/usr/lib/wsl/lib"
+
+# _gpu_wsl_lib_on_path -- tracebloc's WSL distro (S-W row 13): the core's runs start
+# from `wsl --exec env ... bash`, and nothing in the distro puts TB_WSL_GPU_LIB_DIR on
+# PATH, so the Windows driver's nvidia-smi could go unseen and a GPU the host judged
+# would read as "does not answer". Appended once, after the distro's own directories,
+# when nvidia-smi is there. Nothing else changes: the GPU itself reaches k3s's pods
+# through the spec tracebloc-cdi writes (k3s.sh, _native_k3s_gpu_wsl_prepare).
+_gpu_wsl_lib_on_path() {
+  [[ -x "${TB_WSL_GPU_LIB_DIR}/nvidia-smi" ]] || return 0
+  case ":${PATH:-}:" in *":${TB_WSL_GPU_LIB_DIR}:"*) return 0 ;; esac
+  PATH="${PATH:+${PATH}:}${TB_WSL_GPU_LIB_DIR}"
+  export PATH
+  log "GPU detection in the WSL distro: ${TB_WSL_GPU_LIB_DIR} put on PATH for the Windows driver's nvidia-smi"
+}
+
+# _gpu_smi ARGS... -- nvidia-smi, bounded in tracebloc's WSL distro. There it is the
+# Windows driver's (_gpu_wsl_lib_on_path), reached over WSL's GPU bridge, and a
+# wedged bridge would hang the install with no further output. TB_WSL_INTEROP_TIMEOUT
+# bounds it, as it bounds the distro's other calls into Windows
+# (install-client-helm.sh). Outside the distro it is nvidia-smi, as before.
+_gpu_smi() {
+  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+    _bounded "${TB_WSL_INTEROP_TIMEOUT:-20}" nvidia-smi "$@"
+  else
+    nvidia-smi "$@"
+  fi
+}
+
+# _gpu_wsl_cannot_see_report -- the Windows installer's wsl_cannot_see_gpu
+# (install-wsl.ps1, Confirm-NvidiaWslGpu, S-W row 13): an NVIDIA GPU that WSL cannot
+# give this distro, in the TCC driver model or a Tesla part. Taken as Find-Gpu's other
+# reports are: the GPU is left out (nvidia_unsupported, no driver step and no wiring),
+# and the platform is told the host's code, card and sentence. The host said it on
+# Windows, so this logs and says nothing again.
+_gpu_wsl_cannot_see_report() {
+  GPU_VENDOR="nvidia_unsupported"; NVIDIA_DRIVER_OK=false; TB_GPU_FLOOR_VERDICT=""
+  TB_GPU_UNSUPPORTED_CODE="wsl_cannot_see_gpu"
+  TB_GPU_UNSUPPORTED_NAME="${TRACEBLOC_WSL_GPU_UNSUPPORTED_NAME:-}"
+  TB_GPU_UNSUPPORTED_REASON="${TRACEBLOC_WSL_GPU_UNSUPPORTED_REASON:-}"
+  log "GPU: the Windows installer left out '${TB_GPU_UNSUPPORTED_NAME}': WSL cannot give this distro that GPU (wsl_cannot_see_gpu)"
+}
+
 # _gpu_wsl_host_report -- tracebloc's WSL distro, past the nvidia-smi path. WSL shows a
 # distro no PCI device and no NVIDIA kernel module, so lspci and /proc/driver/nvidia
 # cannot see this machine's GPUs; the Windows installer's Find-Gpu did, and has said
 # what it found. Its reports reach this run on its line (install-wsl.ps1,
 # New-CoreRunArguments): not_nvidia and arch_unsupported as
 # TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE, with the card as _NAME, and set here by this
-# file's own reports, the same sentences, without saying them again. A verdict on the
+# file's own reports, the same sentences, without saying them again; wsl_cannot_see_gpu
+# with the host's own sentence as _REASON (_gpu_wsl_cannot_see_report). A verdict on the
 # line is an NVIDIA GPU the host judged, taken as _nvidia_gpu_wsl_verdict takes it; one
 # the host let through (ok, below-driver) whose driver does not answer in here, and a
 # code this installer does not know, run CPU-only, said.
@@ -379,6 +428,10 @@ _gpu_wsl_host_report() {
       ;;
     arch_unsupported)
       _gpu_arch_unsupported_report "${TRACEBLOC_WSL_GPU_UNSUPPORTED_NAME:-}" >/dev/null
+      return 0
+      ;;
+    wsl_cannot_see_gpu)
+      _gpu_wsl_cannot_see_report
       return 0
       ;;
   esac
@@ -418,7 +471,7 @@ _gpu_container_blind() {
 # container a GPU", as `docker run --gpus all` prints them: no NVIDIA runtime at all
 # (Docker Desktop without GPU support), the toolkit's CLI failing, NVML refused (WSL2
 # passthrough off). A pull or network failure prints none of them, so it is never read
-# as a blind runtime. install-k8s.ps1 carries the SAME string as $GPU_CONTAINER_BLIND_RE.
+# as a blind runtime.
 _GPU_CONTAINER_BLIND_RE='could not select device driver|nvidia-container-cli|Failed to initialize NVML|no adapters were found|capabilities: \[\[gpu\]\]'
 
 # A function so bats can model the /proc path (same idiom as common.sh's
@@ -451,7 +504,20 @@ detect_gpu() {
     return
   fi
 
-  if has nvidia-smi && nvidia-smi &>/dev/null 2>&1; then
+  # In tracebloc's WSL distro the Windows driver's nvidia-smi is WSL's (_gpu_wsl_lib_on_path).
+  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+    _gpu_wsl_lib_on_path
+  fi
+  if has nvidia-smi && _gpu_smi &>/dev/null 2>&1; then
+    # In tracebloc's WSL distro a GPU the Windows installer left out because WSL
+    # cannot give it to the distro stays out (_gpu_wsl_cannot_see_report): before
+    # any line says it was detected, and without asking nvidia-smi anything more.
+    if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+      if [[ "${TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE:-}" == wsl_cannot_see_gpu ]]; then
+        _gpu_wsl_cannot_see_report
+        return
+      fi
+    fi
     GPU_VENDOR="nvidia"
     NVIDIA_DRIVER_OK=true
     # Capture-then-slice, not `nvidia-smi … | head -1` (backend#1778). These run
@@ -468,9 +534,9 @@ detect_gpu() {
     # compute_cap is its own query: a driver too old to know it fails that query
     # alone, and the floor gate still reads its driver version.
     local _gpu_name _gpu_drv _gpu_cap
-    _gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)" || _gpu_name=""
-    _gpu_drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)" || _gpu_drv=""
-    _gpu_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null)" || _gpu_cap=""
+    _gpu_name="$(_gpu_smi --query-gpu=name --format=csv,noheader 2>/dev/null)" || _gpu_name=""
+    _gpu_drv="$(_gpu_smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)" || _gpu_drv=""
+    _gpu_cap="$(_gpu_smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null)" || _gpu_cap=""
     success "NVIDIA GPU detected: ${_gpu_name%%$'\n'*}"
     log "Driver: ${_gpu_drv%%$'\n'*}"
     if ! _gpu_arch_supported; then

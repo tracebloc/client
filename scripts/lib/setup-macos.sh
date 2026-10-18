@@ -1683,10 +1683,17 @@ _install_macos_autostart() {
 # The macOS amd64-emulation refusal — the Rosetta remedy. Shared by the early gate
 # (assert_amd64_emulation) and the late _assert_engine_runs_on_this_arch backstop, so
 # a refusal from either gives the same macOS-correct fix, never the Linux binfmt one.
+# On the macOS node (TRACEBLOC_SUBSTRATE_RESOLVED=k3s, install_macos's own switch)
+# there is no Docker or colima to name: the remedy is Rosetta itself (client-dev#1954).
 _macos_amd64_refusal() {
-  warn "amd64 emulation isn't working on this Apple Silicon Mac, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
-  hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
-  hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    warn "This Apple silicon Mac doesn't have Rosetta, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
+    hint "  Install Rosetta (softwareupdate --install-rosetta), then re-run: the macOS node runs amd64 images under it."
+  else
+    warn "amd64 emulation isn't working on this Apple Silicon Mac, and this install resolved to the amd64-only MySQL 5.7 engine — it would crash-loop, not fail here."
+    hint "  Docker Desktop: Settings → General → enable \"Use Rosetta for x86_64/amd64 emulation\", then restart Docker and re-run."
+    hint "  Colima: recreate the VM with VZ + Rosetta →  colima delete && colima start --vm-type vz --vz-rosetta"
+  fi
   hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway — the images may crash.)"
   error "amd64 emulation unavailable — fix the above and re-run (this install needs the amd64-only MySQL 5.7 engine; a fresh install would use the native 8.4 engine instead)."
 }
@@ -1696,7 +1703,17 @@ _macos_amd64_refusal() {
 # returns 124 on the deadline -> false, same as a real emulation failure. Shared by
 # the EARLY gate (assert_amd64_emulation) and the LATE _assert_engine_runs_on_this_arch
 # backstop (client#756), so "can this arm64 Mac run amd64?" has one answer in one place.
+# On the macOS node there is no Docker to smoke-test (client-dev#1954's live leg: the
+# smoke ran `docker` on a Mac without it and gave the Docker remedy). The node runs
+# amd64 images exactly when it was created with --rosetta, which _mac_ct_node_argv adds
+# when _mac_ct_rosetta_present holds, and a run whose argv differs from the node's
+# recreates it (mac-container.sh, part 3). So it asks that one function, not a copy of
+# it. A build without mac-container.sh cannot tell, and fails closed.
 _macos_amd64_emulation_ok() {
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    declare -F _mac_ct_rosetta_present >/dev/null 2>&1 && _mac_ct_rosetta_present
+    return
+  fi
   local _img="${TB_AMD64_SMOKE_IMAGE:-busybox:1.36}"
   spin_cmd_bounded "${TB_AMD64_SMOKE_TIMEOUT:-120}" "Verifying amd64 emulation…" \
     docker run --rm --platform linux/amd64 "$_img" true

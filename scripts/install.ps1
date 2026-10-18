@@ -49,28 +49,21 @@ $DefaultRef = "__TRACEBLOC_RELEASE_REF__"
 # hashes exactly this set (its WINDOWS_FILES array) and its --check mode fails CI
 # if this array and that one drift. Keep them in lockstep.
 $Files = @(
-  "scripts/install-k8s.ps1"
-  # The outcome emitter. A separate file rather than 500 more
-  # lines inside install-k8s.ps1, for the same reason the bash side keeps
-  # lib/telemetry.sh separate: it is the one part of the installer with its own
-  # unit suite (scripts/tests/telemetry.Tests.ps1), and it is verified against
-  # the signed manifest exactly like every other fetched script.
-  "scripts/lib/telemetry.ps1"
-  # The distro path (RFC-0175 D2, D7), run instead of install-k8s.ps1 under
-  # TRACEBLOC_SUBSTRATE=k3s. Fetched and verified on every run like the rest, so
-  # the tree it is handed always holds a verified copy of it.
+  # The distro path (RFC-0175 D2, D7), the one Windows install path since the
+  # PowerShell core was retired (client-dev#1810 part 5). Its other input is the
+  # bash core, whose scripts the signed manifest lists (Get-CoreScriptKeys).
   "scripts/install-wsl.ps1"
 )
 
-# The TRACEBLOC_SUBSTRATE value that runs install-wsl.ps1 instead of
-# install-k8s.ps1. The vocabulary is the install-record schema's
+# The one runtime Windows sets up: k3s in the tracebloc WSL distro. An unset
+# TRACEBLOC_SUBSTRATE takes it, and so does this value; any other is refused by
+# name (Assert-WindowsSubstrate). The vocabulary is the install-record schema's
 # (properties.substrate.enum); a Pester test holds this value, and the
 # variable's name, to it.
 $WslSubstrate = 'k3s'
 
-# The distro path's Windows floor: Windows 11, whose first build is 22000 (RFC-0175
-# D7; Windows 10 was dropped from the distro path, client-dev#1810). The Docker path
-# keeps Windows 10 until it is retired. The floor is the build, not the name: from
+# The Windows floor: Windows 11, whose first build is 22000 (RFC-0175 D7; Windows
+# 10 was dropped, client-dev#1810). The floor is the build, not the name: from
 # build 22000 on, ProductName still reads "Windows 10".
 $WslMinWindowsBuild = 22000
 
@@ -95,7 +88,7 @@ $SignerRepos = 'client|client-dev'
 $SignerIdRe  = "^https://github\.com/tracebloc/($SignerRepos)/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*"
 
 # =============================================================================
-#  Logging helpers — match install-k8s.ps1 / install.sh UX.
+#  Logging helpers — match install-wsl.ps1 / install.sh UX.
 # =============================================================================
 function Info($m) { Write-Host "  " -NoNewline; Write-Host ([char]0x00B7) -ForegroundColor DarkGray -NoNewline; Write-Host " $m" -ForegroundColor DarkGray }
 function Ok($m)   { Write-Host "  " -NoNewline; Write-Host ([char]0x2714) -ForegroundColor Green    -NoNewline; Write-Host " $m" }
@@ -340,8 +333,8 @@ function Get-SubscriptUrl {
 }
 
 # Print a dim heartbeat dot every $TickSeconds while $Job runs — a quiet window
-# on a multi-minute step reads as a hang and gets killed (#468; same honest-
-# progress philosophy as the Docker wait in install-k8s.ps1, #449). Returns
+# on a multi-minute step reads as a hang and gets killed (#468; the same honest-
+# progress philosophy as #449). Returns
 # $true once the job has left the Running state on its own; $false if it is
 # still running after $TimeoutSeconds (the job is stopped, caller owns Remove-Job).
 function Wait-JobWithTicks {
@@ -424,8 +417,8 @@ function Find-ManifestDigest {
 }
 
 # The bash core's scripts in a manifest: every scripts/*.sh key, in the manifest's
-# order. The distro path (TRACEBLOC_SUBSTRATE=k3s) fetches and checks exactly
-# these, so the signed manifest is their list and nothing restates it. Byte-
+# order. The bootstrap fetches and checks exactly these for the distro path, so
+# the signed manifest is their list and nothing restates it. Byte-
 # identical in install-wsl.ps1, which checks the same set in the tree it is given.
 function Get-CoreScriptKeys {
   param([string]$ManifestPath)
@@ -714,17 +707,29 @@ function Get-WindowsBuildInfo {
   } catch { return $null }
 }
 
-# Assert-WslWindowsBuild -- the distro path refuses Windows older than Windows 11 by
+# Assert-WslWindowsBuild -- the install refuses Windows older than Windows 11 by
 # name. A build it cannot read is refused too, saying what it could not read: one
 # contract with the Mac floor, whose verdict refuses a macOS version it cannot read.
 function Assert-WslWindowsBuild {
   $os = Get-WindowsBuildInfo
   if ($null -eq $os) {
-    throw "This installer could not read this machine's Windows build (CurrentBuildNumber under HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion), so it cannot tell whether this is Windows 11. The tracebloc WSL install needs Windows 11 (build $WslMinWindowsBuild or later). Unset TRACEBLOC_SUBSTRATE to install with the current Windows path."
+    throw "This installer could not read this machine's Windows build (CurrentBuildNumber under HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion), so it cannot tell whether this is Windows 11. The tracebloc install needs Windows 11 (build $WslMinWindowsBuild or later)."
   }
   if ($os.Build -lt $WslMinWindowsBuild) {
     $name = if ($os.Name) { $os.Name } else { 'Windows' }
-    throw "This machine runs $name (build $($os.Build)). The tracebloc WSL install needs Windows 11 (build $WslMinWindowsBuild or later). Update to Windows 11, or unset TRACEBLOC_SUBSTRATE to install with the current Windows path, which still supports this version of Windows."
+    throw "This machine runs $name (build $($os.Build)). The tracebloc install needs Windows 11 (build $WslMinWindowsBuild or later). Update to Windows 11, then run the install again."
+  }
+}
+
+# Assert-WindowsSubstrate -- Windows sets up one runtime, $WslSubstrate in the
+# tracebloc WSL distro. Any other TRACEBLOC_SUBSTRATE is refused by name, as the
+# shell installer refuses a runtime it cannot set up: never read as the distro, so
+# a run that asked for k3d does not get the distro instead. Blank means unset, as
+# for every TRACEBLOC_* setting.
+function Assert-WindowsSubstrate {
+  $asked = [string]$env:TRACEBLOC_SUBSTRATE
+  if ($asked -and $asked -cne $WslSubstrate) {
+    throw "TRACEBLOC_SUBSTRATE='$asked' is not a runtime this installer can set up on Windows (it supports: $WslSubstrate, in the tracebloc WSL distro). Nothing was changed. Unset it, then run the install again."
   }
 }
 
@@ -732,10 +737,17 @@ function Assert-WslWindowsBuild {
 #  Orchestration.
 # =============================================================================
 function Invoke-Bootstrap {
-  param([object[]]$ChildArgs)
+  param([object[]]$BootstrapArgs)
 
-  # The distro path's Windows floor, before anything is fetched or written.
-  if ($env:TRACEBLOC_SUBSTRATE -ceq $WslSubstrate) { Assert-WslWindowsBuild }
+  # The bootstrap takes no arguments, and install-wsl.ps1 takes only the tree. One
+  # it was given is refused before anything is fetched, so a -Help never installs.
+  if ($BootstrapArgs -and $BootstrapArgs.Count -gt 0) {
+    throw "This installer takes no arguments, and it was given: $($BootstrapArgs -join ' '). Nothing was changed. Run it again without them."
+  }
+  # The runtime asked for, and the Windows floor, before anything is fetched or
+  # written.
+  Assert-WindowsSubstrate
+  Assert-WslWindowsBuild
 
   $allowUnverified = ($env:TRACEBLOC_ALLOW_UNVERIFIED -eq "1")
   # Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH first, the
@@ -789,8 +801,8 @@ function Invoke-Bootstrap {
     $fetch = {
       param([string]$f)
       $dest = Join-Path $tmpDir ($f -replace '^scripts/', '')
-      # CREATE THE PARENT FIRST. `$Files` gained its first `scripts/lib/` entry
-      # when telemetry.ps1 was split out, and Invoke-WebRequest -OutFile does not create
+      # CREATE THE PARENT FIRST. The bash core's keys include `scripts/lib/`
+      # entries, and Invoke-WebRequest -OutFile does not create
       # directories: without this the very first fetch of a lib file throws
       # DirectoryNotFound and the Windows bootstrap dies before it verifies
       # anything. install.sh has always done the equivalent `mkdir -p`. This
@@ -824,44 +836,29 @@ function Invoke-Bootstrap {
       # manifest's own list of its scripts, fetched now and checked with the rest.
       # With no manifest there is no list, and install-wsl.ps1 refuses the tree.
       $verify = @($Files)
-      if ($env:TRACEBLOC_SUBSTRATE -ceq $WslSubstrate) {
-        $core = @(Get-CoreScriptKeys -ManifestPath $manifest)
-        foreach ($f in $core) { & $fetch $f }
-        $verify += $core
-      }
+      $core = @(Get-CoreScriptKeys -ManifestPath $manifest)
+      foreach ($f in $core) { & $fetch $f }
+      $verify += $core
       Confirm-ScriptIntegrity -Manifest $manifest -TmpDir $tmpDir -Files $verify
     }
 
     # ── Run the verified main installer ──
     # Hand the resolved ref down, exactly as install.sh:247 exports
-    # TRACEBLOC_INSTALL_REF. install-k8s.ps1 runs as a CHILD process, so an
-    # environment variable set here is inherited. Without it `service.version` on
+    # TRACEBLOC_INSTALL_REF. install-wsl.ps1 runs as a CHILD process, so an
+    # environment variable set here is inherited, and it hands the value to the
+    # core in the distro. Without it `service.version` on
     # every Windows telemetry record was permanently "0.0.0-unknown" — the field
     # that says WHICH installer failed, on the platform this feature was added for.
     # (Found by the derived ScriptVar test, not by review.)
     $env:TRACEBLOC_INSTALL_REF = $ref
 
-    # TRACEBLOC_SUBSTRATE=k3s runs the distro path instead (RFC-0175 D2, D7;
-    # client-dev#1810), behind the switch until 3.3's cell is green on it. Its one
-    # input is the tree verified just above: install-wsl.ps1 checks it again and
-    # refuses any other, and there is no way to hand it an unverified one. Its exit
-    # code goes through unchanged, as install-k8s.ps1's does: 2 is the declared
-    # "restart, then re-run" handoff.
-    if ($env:TRACEBLOC_SUBSTRATE -ceq $WslSubstrate) {
-      $wsl = Join-Path $tmpDir "install-wsl.ps1"
-      Info "Running tracebloc WSL setup..."
-      & powershell.exe -ExecutionPolicy Bypass -File $wsl -CoreDir $tmpDir
-      Complete-Bootstrap -Code $LASTEXITCODE
-      return
-    }
-
-    $k8s = Join-Path $tmpDir "install-k8s.ps1"
-    Info "Running tracebloc environment setup..."
-    if ($ChildArgs -and $ChildArgs.Count -gt 0) {
-      & powershell.exe -ExecutionPolicy Bypass -File $k8s @ChildArgs
-    } else {
-      & powershell.exe -ExecutionPolicy Bypass -File $k8s
-    }
+    # The distro path (RFC-0175 D2, D7; client-dev#1810). Its one input is the tree
+    # verified just above: install-wsl.ps1 checks it again and refuses any other,
+    # and there is no way to hand it an unverified one. Its exit code goes through
+    # unchanged: 2 is the declared "restart, then re-run" handoff.
+    $wsl = Join-Path $tmpDir "install-wsl.ps1"
+    Info "Running tracebloc WSL setup..."
+    & powershell.exe -ExecutionPolicy Bypass -File $wsl -CoreDir $tmpDir
     Complete-Bootstrap -Code $LASTEXITCODE
   } finally {
     Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -872,8 +869,8 @@ function Invoke-Bootstrap {
 #  EXITING WITHOUT TAKING THE USER'S WINDOW WITH IT (#577, client#917)
 # =============================================================================
 # #577 made the installer always show a clean "what happened" instead of
-# vanishing -- and it fixed that in install-k8s.ps1, which runs as a CHILD
-# process where `exit` is harmless. THIS file is the other half, and it was
+# vanishing -- and it fixed that in the installer's CHILD process, where
+# `exit` is harmless. THIS file is the other half, and it was
 # missed: the documented entry point is `irm ... | iex`, so this script runs
 # INSIDE the user's own console. A top-level `exit` there ends THEIR session --
 # the window closes and takes the outcome with it.
@@ -884,12 +881,12 @@ function Invoke-Bootstrap {
 # just closed the PowerShell".
 #
 # The exit CODE must still propagate untouched -- the e2e harness reads it to
-# tell install-k8s.ps1's declared `exit 2` reboot handoff from a real failure --
+# tell install-wsl.ps1's declared `exit 2` restart handoff from a real failure --
 # so this does not swap `exit` for `return`, which would silently turn every
 # code into 0 for `powershell.exe -Command` callers. It holds the window open
 # just long enough to be read, then exits exactly as before.
 #
-# Can we prompt? Same predicate install-k8s.ps1 uses, deliberately: false under
+# Can we prompt? Same predicate install-wsl.ps1 uses, deliberately: false under
 # CI, a service, or piped/redirected stdin -- every context where a hold would
 # be a hang and where no human is losing a window anyway. Note this predicate is
 # a best-effort filter, NOT a guarantee: an interactive Windows desktop session
@@ -914,10 +911,10 @@ function Complete-Bootstrap {
       Write-Host "  This window closes when you press a key (or in ${HoldSec}s)." -ForegroundColor DarkGray
       $deadline = (Get-Date).AddSeconds($HoldSec)
       # DRAIN FIRST. KeyAvailable reports whatever is sitting in the console input
-      # buffer, not a press since the hold began -- and install-k8s.ps1 just ran as a
-      # child on THIS console with 11 Read-Host sites. Any key the user tapped during
+      # buffer, not a press since the hold began -- and install-wsl.ps1 just ran as a
+      # child on THIS console, with its own prompts. Any key the user tapped during
       # a 15-40 minute install (an extra Enter at a prompt, the trailing newline of
-      # `irm ... | iex`, a keystroke at the Docker spinner) is still queued, would make
+      # `irm ... | iex`, a keystroke at a spinner) is still queued, would make
       # the `while` false on its FIRST evaluation, and would close the window over the
       # summary -- reproducing the exact #577 failure this function exists to stop,
       # under a line that just promised to wait.
@@ -952,7 +949,7 @@ if (-not $env:TRACEBLOC_PESTER) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
   try {
-    Invoke-Bootstrap -ChildArgs $args
+    Invoke-Bootstrap -BootstrapArgs $args
   } catch {
     # Clean, branded failure — never a raw stack (#577). "$_" stringifies to the
     # exception MESSAGE (curated at the throw sites, #576), not the source/stack.

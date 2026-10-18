@@ -2,8 +2,9 @@
 # =============================================================================
 #  install-k8s.sh  —  One-command Kubernetes + GPU installer  (macOS & Linux)
 #
-#  Engine  : native k3s on a new Linux machine; k3d (k3s inside Docker —
-#            lightweight, prod-topology capable) everywhere else
+#  Engine  : native k3s on a new Linux machine; k3s in Apple's container
+#            runtime on a new Mac; k3d (k3s inside Docker — lightweight,
+#            prod-topology capable) everywhere else
 #  GPUs    : NVIDIA (Linux)  ✓     AMD (Linux) ✓     macOS passthrough ✗
 #
 #  Usage (macOS / Linux):
@@ -18,7 +19,7 @@
 #  spelling -- the name without TRACEBLOC_ (CLUSTER_NAME), or TB_ in its place
 #  (TB_STORAGE_MODE) -- still works until 2026-12-31; a non-empty TRACEBLOC_
 #  one wins:
-#    TRACEBLOC_SUBSTRATE=k3d     default: k3s on a new Linux machine, k3d otherwise
+#    TRACEBLOC_SUBSTRATE=k3d     default: k3s on a new Linux machine or a new Mac, k3d otherwise
 #                                (the Kubernetes runtime to set up: k3d, or k3s for
 #                                native k3s, on Linux or on a Mac with Apple silicon
 #                                and macOS 26 or later, where k3s runs in Apple's VM.
@@ -27,7 +28,11 @@
 #                                (TRACEBLOC_AGENTS, TRACEBLOC_SERVERS other than 1, a
 #                                K8S_VERSION it has no digest for), gets k3s; any other
 #                                gets k3d, and on an otherwise new Linux machine the line
-#                                after the substrate line names what kept k3d. A re-run
+#                                after the substrate line names what kept k3d. A new Mac
+#                                (no record, no k3d, no k3d cluster in Docker, Apple
+#                                silicon at or above the macOS floor, TB_MACOS_FLOOR_MAJOR,
+#                                and no setting the macOS node refuses) gets k3s too, in
+#                                Apple's VM, and says what kept k3d otherwise. A re-run
 #                                keeps the runtime the install recorded; the installer
 #                                prints "tracebloc-installer substrate=<name>" first,
 #                                and refuses a runtime it doesn't support)
@@ -50,7 +55,7 @@
 #                                ~/.tracebloc on the host (survive cluster delete;
 #                                required for a TRACEBLOC_HOST_DATASET_DIR network mount).
 #    TRACEBLOC_HOST_DATASET_DIR=/data01/tracebloc  optional separate dataset dir (hostpath)
-#                                Linux/k3s path only — install-k8s.ps1 is hostpath-only.
+#                                Linux/k3s path only.
 #    TRACEBLOC_ENV=dev           optional, canonical name (RFC-0076); if neither this nor the
 #                                legacy CLIENT_ENV is set, no stage var is added to values
 #    CLIENT_ENV=dev              legacy alias for TRACEBLOC_ENV, remove_by 2026-12-31
@@ -200,10 +205,13 @@ main() {
   # which substrate a refusal belongs to. Only then is an unsupported request
   # refused, by name. --help and --diagnose above install nothing and refuse
   # nothing, so they print no line. A re-run without TRACEBLOC_SUBSTRATE keeps
-  # the substrate its install recorded (tb_substrate_resolve, read-only); a new
+  # the substrate its install recorded (tb_substrate_resolve, read-only); a new Mac
+  # gets k3s on Apple container, and a new
   # Linux machine gets native k3s, and one that keeps k3d although it is new says
   # why on the next line. A resolution that cannot tell, or that would put k3d
-  # beside native k3s, is refused by name after the line.
+  # beside native k3s, is refused by name after the line. So is a new install on a
+  # Mac below the floor (RFC-0175 D6: Apple silicon, macOS 26 or later), before
+  # setup_log_file writes anything; prepare-host below is refused there too.
   tb_substrate_resolve
   print_substrate_token
   refuse_unsupported_substrate
@@ -223,6 +231,7 @@ main() {
       || error "This installer build can't check for a live k3d cluster (stale bootstrap), and native k3s is never set up beside one. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
     refuse_k3s_beside_live_k3d
   fi
+  refuse_unsupported_mac
 
   # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
   # installs the privileged prerequisites so a researcher can then install

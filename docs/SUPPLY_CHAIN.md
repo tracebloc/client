@@ -253,7 +253,7 @@ curl -fsSL "$BASE/provision.sh" \
 
 On Windows the same `cosign verify-blob` invocation works verbatim (cosign ships
 a Windows binary); compare a sub-script's digest with
-`Get-FileHash -Algorithm SHA256 install-k8s.ps1` against its line in
+`Get-FileHash -Algorithm SHA256 install-wsl.ps1` against its line in
 `manifest.sha256`.
 
 **Hardened / air-gapped sites:** install cosign from your OS package manager (or
@@ -273,11 +273,14 @@ the R8 Windows leg, PR #299):
    pins a different release tag; the legacy `$env:BRANCH` escape and any
    non-`vX.Y.Z` ref require `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'` and warn
    loudly.
-2. **Signed manifest.** Its integrity surface (`$Files`, currently
-   `scripts/install-k8s.ps1`) is hashed into the **same** `manifest.sha256`:
-   the `WINDOWS_FILES` array in `gen-manifest.sh` mirrors `$Files`, and the CI
-   `--check` gate fails any PR where the two drift — exactly like the bash
-   `FILES` list. One manifest, one cosign signature, both entrypoints.
+2. **Signed manifest.** Its integrity surface is `$Files`, currently
+   `scripts/install-wsl.ps1` (the distro path), plus the bash core that path
+   runs inside its WSL2 distro: every `scripts/*.sh` key the manifest lists,
+   which `install.ps1` fetches and verifies with the rest. All of it is hashed
+   into the **same** `manifest.sha256`: the `WINDOWS_FILES` array in
+   `gen-manifest.sh` mirrors `$Files`, and the CI `--check` gate fails any PR
+   where the two drift — exactly like the bash `FILES` list. One manifest, one
+   cosign signature, both entrypoints.
 3. **Fail-closed cosign.** The manifest signature is required on the default
    path. If cosign is absent, the bootstrap fetches the pinned `$CosignVersion`
    release binary and verifies it against cosign's published checksums; if it

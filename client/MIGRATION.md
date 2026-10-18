@@ -1135,8 +1135,9 @@ kubectl get deploy -n <namespace> <release>-jobs-manager \
 
 ## Upgrading to 1.9.105 — `env.GPU_LIMITS` alone now renders an equal `GPU_REQUESTS` (client#995)
 
-Nothing to do if your values set both keys, or neither — that is every edge the
-installers provisioned, since both installers write the pair with one value.
+Nothing to do if your values set both keys, or neither — that is every
+installer-provisioned edge: the installer writes the pair with one value, and so
+did the retired PowerShell installer.
 
 If your values file set **only `env.GPU_LIMITS`** (say `nvidia.com/gpu=2`), the
 chart used to fill the absent `GPU_REQUESTS` with a literal `nvidia.com/gpu=1`,

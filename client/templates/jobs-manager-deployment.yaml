@@ -217,12 +217,13 @@ spec:
       # got, instead of a bare "OK" that could be read as "the whole mode landed" — and when a call
       # failed on a dir that was ALREADY other-writable it says "other-writable regardless", never
       # "mode applied anyway", which would credit this container for something it did not do.
-      # Kept deliberately diffable by eye against the installer's Get-ReleaseDirsPrepCommand
-      # (scripts/install-k8s.ps1), which prepares the same dirs with the same path:mode spec and the
-      # same `ls -ldn` verification; the chart additionally names which call failed. One intentional
-      # divergence: the chart does NOT send chown/chmod stderr to /dev/null, so the real errno
-      # (Operation not permitted vs Read-only file system) lands in `kubectl logs` beside the
-      # verdict; the installer suppresses it because its output is a user-facing progress line.
+      # The installer's host-side counterpart is scripts/lib/cluster.sh's _ensure_release_dirs,
+      # which prepares the same dirs from the same path:mode spec (_release_dirs_spec), best-effort
+      # (a mount that cannot represent POSIX modes must not abort the install), with chmod's stderr
+      # sent to /dev/null.
+      # The chart does NOT send chown/chmod stderr to /dev/null, so the real errno (Operation not
+      # permitted vs Read-only file system) lands in `kubectl logs` beside the verdict, and it
+      # additionally names which call failed.
       - name: init-writable-data
         image: {{ include "tracebloc.thirdPartyImage" (dict "site" "images.busybox" "root" $) | quote }}
         securityContext:

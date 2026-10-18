@@ -126,11 +126,10 @@ tb_client_env() {
 # The DASHBOARD for this environment — where a human goes to create a client,
 # read their credentials, or see whether it came online (backend#2849).
 #
-# THE BASH TWIN OF Get-TraceblocDashboardUrl. The PowerShell side was fixed
-# first; Bugbot caught that this half still hardcoded production at ten sites
-# while `_backend_url` was correctly env-aware — so a `CLIENT_ENV=dev` install on
-# Linux or macOS still sent the operator to ai.tracebloc.io for credentials
-# `dev-api` then rejects. Same defect, other half of the contract.
+# Bugbot caught that this still hardcoded production at ten sites while
+# `_backend_url` was correctly env-aware — so a `CLIENT_ENV=dev` install on Linux
+# or macOS still sent the operator to ai.tracebloc.io for credentials `dev-api`
+# then rejects. (The retired PowerShell core had been fixed first.)
 #
 # IT LIVES HERE, NOT IN install-client-helm.sh, and that placement is the whole
 # point (@LukasWodka on client#946). It was defined in install-client-helm.sh and
@@ -141,7 +140,7 @@ tb_client_env() {
 # being fixed, because a wrong link a reader can recover from and a missing one
 # they cannot. common.sh is sourced first by install-k8s.sh AND by the bats
 # load_lib, and it already holds `tb_client_env` — which this calls — so both
-# twins get it by construction rather than by accident.
+# get it by construction rather than by accident.
 #
 # The hosts are the backend's OWN per-environment settings, not a guess:
 # DEVICE_VERIFICATION_URI / RESET_PASSWORD_URL in
@@ -620,11 +619,9 @@ _bounded_capture() {
 # TB_PROBE_TIMEOUT's 5s — the tightest bound in the tree on the slowest call, and
 # half the budget of the daemon probe that gates it (LukasWodka, client#984).
 #
-# 15s matches the PowerShell twin's identical read (install-k8s.ps1's
-# Get-ClusterListJson job deadline), so the two installers agree on how long this
-# question is allowed to take. It also narrows the window the tri-state has to
-# resolve: a busy-but-healthy engine that answers in 6s is now PRESENT/ABSENT
-# rather than UNKNOWN.
+# 15s is the deadline the retired PowerShell core gave the same read. It also
+# narrows the window the tri-state has to resolve: a busy-but-healthy engine
+# that answers in 6s is now PRESENT/ABSENT rather than UNKNOWN.
 : "${TB_K3D_LIST_TIMEOUT:=15}"
 
 # _bounded_root SECONDS CMD… — like _bounded, but for a command that runs as root.
@@ -785,7 +782,7 @@ tb_minutes_or() {
 # UTF-8 bytes (0x80+) preserved so international characters survive. Lives here
 # (shared) so BOTH the credential path (install-client-helm.sh) and the client-
 # name prompt (provision.sh) sanitize identically (customer-reported 2026-07-20).
-# Mirrored by cli/internal/cli/sanitize.go and install-k8s.ps1's
+# Mirrored by cli/internal/cli/sanitize.go and install-wsl.ps1's
 # ConvertTo-SanitizedInput — change all three together.
 _strip_paste_garbage() {
   local s="$1"
@@ -899,11 +896,10 @@ _chart_version() {
 #     selector is immutable, so the chart cannot rename these without replacing
 #     the Deployment, and they never carry the release name.
 #
-# ONE TABLE PER LANGUAGE, HELD TOGETHER BY A GUARD: $script:ClientWorkloadRoles
-# in scripts/install-k8s.ps1 is the PowerShell twin, and
-# scripts/tests/client-workloads-read-not-built.sh holds the two identical AND
-# holds each right-hand side to exactly one Deployment in the rendered chart,
-# with and without an override. Keep this on ONE line of role=app words.
+# ONE TABLE, HELD TO THE CHART BY A GUARD:
+# scripts/tests/client-workloads-read-not-built.sh holds each right-hand side to
+# exactly one Deployment in the rendered chart, with and without an override.
+# Keep this on ONE line of role=app words.
 _TB_CLIENT_WORKLOAD_ROLES="mysql-client=mysql-client jobs-manager=manager requests-proxy=requests-proxy"
 
 # _client_workloads_from_rows ROWS — the pure half: pick each role's Deployment
@@ -932,9 +928,9 @@ _client_workloads_from_rows() {
 # jobs-manager, requests-proxy). RELEASE defaults to NS: the installer names the
 # release after the namespace (scripts/tests/release-name-equals-namespace.sh).
 # ONE bounded read (TIMEOUT, default 10s); a failed or unanswered read returns 1,
-# the same as a missing role. custom-columns rather than jsonpath so the same
-# argument vector works from PowerShell, where an embedded `"` in a native
-# argument is mangled on Windows PowerShell 5.1.
+# the same as a missing role. custom-columns rather than jsonpath: the retired
+# PowerShell core ran the same argument vector, and Windows PowerShell 5.1
+# mangles an embedded `"` in a native argument.
 _client_workloads() {
   local ns="${1:-${TB_NAMESPACE:-default}}" timeout="${2:-10s}" rel="${3:-}" rows
   [[ -n "$rel" ]] || rel="$ns"
@@ -973,10 +969,8 @@ _client_workload_name() {
 #     scripts/tests/collector-class-a-agreement.sh also records), so it is the
 #     stable handle the object name is not.
 #
-# TWIN of $script:ResourceMonitorContainer in scripts/install-k8s.ps1;
-# scripts/tests/client-workloads-read-not-built.sh holds the two identical and
-# holds the helper below to the DaemonSet the chart renders, with and without an
-# override.
+# scripts/tests/client-workloads-read-not-built.sh holds the helper below to the
+# DaemonSet the chart renders, with and without an override.
 _TB_RESOURCE_MONITOR_CONTAINER="tracebloc-resource-monitor"
 
 # _resource_monitor_from_rows ROWS NS — the pure half: out of
@@ -1004,7 +998,7 @@ _resource_monitor_from_rows() {
 # _resource_monitor_daemonset NS [TIMEOUT] [RELEASE] — `NAMESPACE NAME` of the
 # resource-monitor DaemonSet of the client in namespace NS, or rc 1. RELEASE
 # defaults to NS, as in _client_workloads. ONE bounded read (TIMEOUT, default
-# 10s); custom-columns for the same PowerShell-quoting reason.
+# 10s); custom-columns, as in _client_workloads.
 _resource_monitor_daemonset() {
   local ns="${1:-${TB_NAMESPACE:-default}}" timeout="${2:-10s}" rel="${3:-}" rows
   [[ -n "$rel" ]] || rel="$ns"
@@ -1712,9 +1706,8 @@ if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLO
 #                          k3d node — they die with `cluster delete`, are not a
 #                          browsable host folder, and need no chmod 777. This is
 #                          the RFC-0003 goal for the local install. The flip
-#                          applies to the Linux/k3s (bash core) install path;
-#                          install-k8s.ps1 stays hostpath-only (no Windows
-#                          node-local path yet — see the D15 scope note on #456).
+#                          applies to the bash core, which Windows runs too,
+#                          inside tracebloc's WSL distro.
 #   hostpath   (opt-out) : the older model — datasets live in ~/.tracebloc on the
 #                          host, bind-mounted into the cluster; survive cluster
 #                          delete; world-writable dirs. Select with
@@ -1736,8 +1729,8 @@ K8S_VERSION="${K8S_VERSION:-v1.36.5-k3s1}"
 # docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
 # base, and its published tag encodes both (…/k3s-cuda:<K8S_VERSION>-cuda-<this>),
 # so k3d.sh::_gpu_node_image can derive the pull ref deterministically.
-# TRACEBLOC_CUDA_BASE_TAG overrides it (mirrors the Windows twin's $CUDA_BASE_TAG).
-# check-facts.sh keeps this in lockstep with facts.env's CUDA_TAG and the four
+# TRACEBLOC_CUDA_BASE_TAG overrides it.
+# check-facts.sh keeps this in lockstep with facts.env's CUDA_TAG and the three
 # other consumers, so a bump can't derive a GPU image tag that was never built.
 # shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
 TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
@@ -1990,14 +1983,16 @@ TB_GPU_FLOOR_VERDICT=""
 # below-compute and below-hard-floor, by detect_gpu for a GPU that is not NVIDIA or an
 # NVIDIA GPU on a machine that is not x86_64 (client-dev#1698), and
 # by the container runtime's GPU probe for an NVIDIA GPU no container can see
-# (backend#5296) -- ONLY those -- and passed to the chart as
+# (backend#5296), and in tracebloc's WSL distro by the Windows installer's report of an
+# NVIDIA GPU WSL cannot give it (wsl_cannot_see_gpu) -- ONLY those -- and passed to the chart as
 # env.GPU_UNSUPPORTED_REASON / env.GPU_UNSUPPORTED_NAME (install-client-helm.sh).
 # Empty otherwise: an unreadable host or a failed GPU step is not "unsupported".
 # Assigned, never defaulted from the environment.
 TB_GPU_UNSUPPORTED_REASON=""
 TB_GPU_UNSUPPORTED_NAME=""
 # The kind beside the sentence (backend#5296): compute_too_old | driver_too_old |
-# not_nvidia | runtime_cannot_see_gpu | arch_unsupported, or empty. Passed as
+# not_nvidia | runtime_cannot_see_gpu | arch_unsupported, or, in tracebloc's WSL
+# distro, the Windows installer's wsl_cannot_see_gpu; or empty. Passed as
 # env.GPU_UNSUPPORTED_CODE.
 TB_GPU_UNSUPPORTED_CODE=""
 # nvidia-smi's name answer, one line per GPU, for a runtime_cannot_see_gpu report.
@@ -2011,12 +2006,11 @@ TB_GPU_NVIDIA_NAMES=""
 # whose /etc/os-release is the image's, and a k3d node's osImage is k3s's.
 # os-release is READ, never sourced (it is the host's file, and sourcing it would run
 # it); its path and the macOS version take the overrides the setup steps already
-# honour (TRACEBLOC_OS_RELEASE_FILE, TRACEBLOC_MACOS_VER). The Windows twin is
-# Get-HostOsLabel in install-k8s.ps1.
+# honour (TRACEBLOC_OS_RELEASE_FILE, TRACEBLOC_MACOS_VER).
 #
 # Inside WSL2 the machine is the Windows host, not the distro: the label is the
-# one Get-HostOsLabel gives ("Windows 11"), from the OS caption the host reports
-# over interop (_windows_host_identity_once, install-client-helm.sh). When interop
+# host's ("Windows 11"), from the OS caption the host reports over interop
+# (_windows_host_identity_once, install-client-helm.sh). When interop
 # cannot answer, or the caption is not one it can read, the distro's label stands.
 # Without probe.sh or install-client-helm.sh loaded the distro's label stands too.
 _os_release_value() {  # $1 = key, $2 = file: the value, unquoted, or nothing
@@ -2025,8 +2019,7 @@ _os_release_value() {  # $1 = key, $2 = file: the value, unquoted, or nothing
 }
 # _windows_os_label CAPTION -- "Windows 11", "Windows Server 2022" from a Windows
 # OS caption ("Microsoft Windows 11 Pro"), without the vendor and the edition;
-# nothing for a caption it cannot read. The SAME pattern as Get-HostOsLabel in
-# install-k8s.ps1, case-insensitive as PowerShell's -match is. Pure.
+# nothing for a caption it cannot read. Case-insensitive. Pure.
 _windows_os_label() {
   local re='Windows[[:space:]]+(Server[[:space:]]+[0-9]{4}([[:space:]]+R2)?|[0-9]+)' had_nocase=0 out=""
   shopt -q nocasematch && had_nocase=1
@@ -2081,10 +2074,9 @@ PM_UPDATE=""
 # existing cluster turns out to be a CPU-only node. On native k3s it becomes 1 only
 # in step c, once k3s's own containerd has registered the NVIDIA runtime (k3s.sh
 # _native_k3s_gpu_wire, slim client 1.1i). So this is the one honest
-# gate for "should we request a GPU for jobs" — the same role the Windows twin's
-# `$K3D_GPU_FLAG -ne ""` plays. Requesting nvidia.com/gpu on a node that
-# advertises 0 GPUs strands every job Pending (client#835), so the GPU chart
-# values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
+# gate for "should we request a GPU for jobs". Requesting nvidia.com/gpu on a
+# node that advertises 0 GPUs strands every job Pending (client#835), so the GPU
+# chart values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
 # Wired means exactly GPU_VENDOR=nvidia and TRACEBLOC_GPU_WIRED=1; any other value of
 # either is "not wired". set -u safe: a unit test that sources only a single lib
 # may not have TRACEBLOC_GPU_WIRED, so it defaults here.
@@ -2127,8 +2119,7 @@ _gpu_runtime_class() {
 #  kills the installer with NO output at all: the user got a generic "did not
 #  complete", and the install log — which is the WHOLE session tee'd — recorded
 #  nothing about why. A single ERR trap records where it died so both the log
-#  and the closer can name it. This is the bash counterpart of install-k8s.ps1's
-#  Show-FatalError (#577).
+#  and the closer can name it (#577).
 #
 #  install-k8s.sh arms this with `set -E` (errtrace) so the trap is inherited by
 #  functions and subshells — without it an ERR trap fires only at top level, and
@@ -2318,7 +2309,7 @@ install_cleanup() {
     # through `exit 130`/`exit 143` so this trap still shreds the transient
     # credential — but funnelling those into "did not complete" told users their
     # own Ctrl-C was an installer failure, and made an interrupted run
-    # indistinguishable from a real one in the log. Mirrors Show-Interrupted (#577).
+    # indistinguishable from a real one in the log.
     echo ""
     warn "Installation was interrupted before it finished."
     [[ -n "${LOG_FILE:-}" ]] && hint "Log: $LOG_FILE"
@@ -2333,7 +2324,7 @@ install_cleanup() {
       warn "Installation did not complete."
       # Name the failing site on screen too. The command text stays in the log
       # only: it is unexpanded, but it is still installer internals, and the
-      # PowerShell side deliberately shows a reason without a stack trace (#577).
+      # user is shown a reason, never a stack trace (#577).
       if [[ -n "${TB_ERR_CODE:-}" ]]; then
         hint "Stopped at ${TRACEBLOC_ERR_LOC} (exit ${TB_ERR_CODE})."
       fi
@@ -2367,6 +2358,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_SUBSTRATES                  properties.substrate.enum, space-separated
 #    TB_SUBSTRATE_DEFAULT           x-tracebloc-substrate.default
 #    TB_SUBSTRATE_FRESH_LINUX       x-tracebloc-substrate.fresh-default.linux
+#    TB_SUBSTRATE_FRESH_MACOS       x-tracebloc-substrate.fresh-default.macos
 #    TB_SUBSTRATE_TOKEN_PREFIX      x-tracebloc-substrate.token-prefix
 #    TB_SUBSTRATE_TOKEN_UNSUPPORTED x-tracebloc-substrate.token-unsupported
 #    TB_INSTALL_RECORD_VERSION      properties.schema_version.const
@@ -2380,6 +2372,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 TB_SUBSTRATES="k3d k3s"
 TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_FRESH_LINUX="k3s"
+TB_SUBSTRATE_FRESH_MACOS="k3s"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
@@ -2406,7 +2399,7 @@ TRACEBLOC_SUBSTRATE_RESOLVED="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
 TB_SUBSTRATE_SOURCE="${TRACEBLOC_SUBSTRATE:+TRACEBLOC_SUBSTRATE}"
 TB_SUBSTRATE_NOTE=""
 TB_SUBSTRATE_REFUSAL=""
-# Why a fresh Linux machine keeps the default (_tb_substrate_fresh): the line
+# Why a fresh Linux machine or Mac keeps the default (_tb_substrate_fresh): the line
 # print_substrate_token prints right after the substrate line.
 TB_SUBSTRATE_KEPT=""
 # Set by a refusal just before it exits: install_cleanup then prints no failure
@@ -2445,7 +2438,7 @@ refuse_unsupported_substrate() {
   tb_substrate_supported && return 0
   TB_EXIT_REFUSED=1
   if [[ "${TB_SUBSTRATE_SOURCE:-TRACEBLOC_SUBSTRATE}" == "TRACEBLOC_SUBSTRATE" ]]; then
-    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime (${TB_SUBSTRATE_FRESH_LINUX} on a new Linux machine, ${TB_SUBSTRATE_DEFAULT} otherwise)."
+    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime (${TB_SUBSTRATE_FRESH_LINUX} on a new Linux machine, ${TB_SUBSTRATE_FRESH_MACOS} on a new Mac, ${TB_SUBSTRATE_DEFAULT} otherwise)."
   fi
   error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TRACEBLOC_SUBSTRATE_RESOLVED}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
 }
@@ -2561,9 +2554,10 @@ tb_wsl_handover_write() {
 # ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────
 # Apple silicon with macOS 26 or later (D6, decided 2026-09-29). macOS 26 is the last
 # release for Intel Macs, and every M1 or later Mac runs it. This is the floor's one
-# declaration, and its words: the macOS node refuses a Mac below it
-# (_mac_ct_refuse_host, behind TRACEBLOC_SUBSTRATE), and 2.4's refusal on every path
-# (client-dev#1623, with 2.1's flip) reuses both (tracebloc/cli-dev#1056, decision F).
+# declaration, and its words. A Mac below it is stopped by name on every path, before
+# anything is written (refuse_unsupported_mac; D10, decision F, tracebloc/cli-dev#1056),
+# whether or not it already runs tracebloc: one that does keeps the version it runs,
+# unsupported, and is not switched off.
 TB_MACOS_FLOOR_MAJOR=26
 
 # _tb_macos_version -- this Mac's macOS version, `sw_vers -productVersion`.
@@ -2614,6 +2608,29 @@ tb_mac_floor_reason() {
   esac
 }
 
+# refuse_unsupported_mac -- a Mac below the floor, stopped by name, on every path.
+# main() calls it right after the substrate refusals, so the substrate line has
+# printed, and before setup_log_file, so nothing is written yet: no CLI install, no
+# repair, no log. The macOS node's refusals (_mac_ct_refuse_host) call it too. One
+# message serves a new Mac and an installed one, so nothing probes for an install.
+# `tracebloc upgrade` (TRACEBLOC_UPGRADE_CLI, or TB_UPGRADE_CLI from a CLI older than
+# its dual emit) reads any other exit as a failed upgrade and sends the user to the
+# installer again (cli-dev#1056, check 2), so on that path the same stop exits 0.
+refuse_unsupported_mac() {
+  local verdict why
+  verdict="$(tb_mac_floor_verdict)"
+  case "$verdict" in ''|ok) return 0 ;; esac
+  why="$(tb_mac_floor_reason "$verdict")"
+  why+=" A tracebloc already installed here keeps the version it has, without updates. Nothing was changed on this Mac."
+  if [[ "${TRACEBLOC_UPGRADE_CLI:-${TB_UPGRADE_CLI:-0}}" == 1 ]]; then
+    warn "$why"
+    _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
+    exit 0
+  fi
+  TB_EXIT_REFUSED=1
+  error "$why"
+}
+
 # ── Re-run resolution (1.1f) ─────────────────────────────────────────────────
 # tb_substrate_resolve -- the substrate this run sets up. A machine installed on
 # one runtime stays on it without the variable, so the order is:
@@ -2624,8 +2641,11 @@ tb_mac_floor_reason() {
 #      cannot read it by design, so its absence from view is not "cannot tell";
 #   4. on Linux, a tracebloc native k3s this user can see without privileges
 #      (_native_k3s_live_probe), which catches one whose record is out of reach;
-#   5. on a fresh Linux machine outside WSL, the fresh default (native k3s,
-#      _tb_substrate_fresh); on every other machine, the default.
+#   5. on a fresh Linux machine outside WSL, or a fresh Mac, that OS's fresh default
+#      (native k3s; k3s on Apple container, client-dev#1943: _tb_substrate_fresh);
+#      on every other machine, the default. A Mac has no root copy and no live
+#      probe: its record is the daily user's, and a k3d Mac without one is told by
+#      its k3d and its Docker, as on Linux.
 # A record that exists but cannot be read or parsed is "cannot tell", never
 # absent: the finding goes in TB_SUBSTRATE_REFUSAL, which main() refuses by name
 # after the substrate line. So does TRACEBLOC_SUBSTRATE=k3d where a tracebloc
@@ -2656,7 +2676,11 @@ tb_substrate_resolve() {
     fi
     return 0
   fi
-  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
+  case "${OS:-$(uname -s 2>/dev/null)}" in
+    Linux) ;;
+    Darwin) _tb_substrate_fresh; return 0 ;;
+    *) return 0 ;;
+  esac
   if dst="$(_tb_record_root_copy_path)" && _tb_record_root_access; then
     if _tb_record_root_run test -e "$dst"; then
       if sub="$(_tb_record_root_run cat "$dst" 2>/dev/null | _tb_record_substrate_in)"; then
@@ -2678,27 +2702,38 @@ tb_substrate_resolve() {
   return 0
 }
 
-# _tb_substrate_fresh -- step 5: the fresh default (TB_SUBSTRATE_FRESH_LINUX,
-# native k3s) on a fresh Linux machine, the default on every other. Called only
-# when steps 2 to 4 found no record and no tracebloc k3s: that is the record half
-# of "fresh". The machine half, each read from the producer that already answers it:
-#   - Linux, outside WSL (_probe_wsl): the k3s path refuses every WSL distro but
+# _tb_substrate_fresh -- step 5: the fresh default for this OS on a fresh machine,
+# the default on every other: TB_SUBSTRATE_FRESH_LINUX (native k3s) on Linux,
+# TB_SUBSTRATE_FRESH_MACOS (k3s on Apple container, client-dev#1943) on a Mac.
+# Called only when the steps before it found no record (and, on Linux, no
+# tracebloc k3s): that is the record half of "fresh". The machine half, each read
+# from the producer that already answers it:
+#   - on Linux, outside WSL (_probe_wsl): the k3s path refuses every WSL distro but
 #     tracebloc's own, and there the Windows installer names the substrate on the
 #     line it runs this core with (client-dev#1810), so this rule never guesses it;
 #   - no k3d on PATH (`has k3d`, assess.sh's own fresh rule);
 #   - no Docker, or a Docker that answers (_docker_answers) and lists no k3d
-#     cluster's container, stopped ones included (tb_k3d_cluster_names).
-# A Docker that does not answer is not fresh: the default stays k3d, today's path,
+#     cluster's container, stopped ones included (tb_k3d_cluster_names); on a Mac,
+#     also a Docker that does not answer 'docker info' (client-dev#1954's ruling).
+# On Linux a Docker that does not answer is not fresh: the default stays k3d, today's path,
 # so the flip never turns an install that works today into a refusal nobody asked
 # for. A fresh machine whose run native k3s would refuse keeps the default too,
 # where that run works today. The refusal is asked, never restated:
 # _native_k3s_refuse_host (k3s.sh), which refuse_k3s_beside_live_k3d asks as well
-# before a k3d offboard (client-dev#1805) and which reads nothing step a sets. Its
-# host half (Linux, outside WSL) holds here already, so what it refuses is a
+# before a k3d offboard (client-dev#1805) and which reads nothing step a sets. On
+# Linux its host half (outside WSL) holds here already, so what it refuses is a
 # setting: k3d's node counts (AGENTS, SERVERS) or a K8S_VERSION native k3s has no
-# digest for. Its error() is caught in a subshell, never raised, so nothing is
-# recorded and the run goes on with the default. hostpath and a dataset dir are not
-# refused since client-dev#1782, so they get native k3s. Each kept run, and a Docker
+# digest for; hostpath and a dataset dir are not refused since client-dev#1782, so
+# they get native k3s. On a Mac it is the macOS node's own (_mac_ct_refuse_host): a
+# corporate CA it cannot take, a hostPath or dataset folder it cannot mount at its own
+# path (it mounts the others since client-dev#2170), and the same node counts and
+# version, so each of those keeps k3d on a Mac. The macOS floor comes before all of this, the
+# first thing read on a Mac (client-dev#1943 box 4): a Mac below it (tb_mac_floor_verdict:
+# an Intel Mac, an older macOS, or a version this run cannot read) is never put to the
+# default. It keeps k3d with no kept line naming a runtime, and nothing of the default,
+# not even Docker, is read; main() refuses it by name right after the substrate line
+# (refuse_unsupported_mac, client-dev#1623). Its error() is caught in a subshell, never raised, so
+# nothing is recorded and the run goes on with the default. Each kept run, and a Docker
 # that cannot tell, says why in TB_SUBSTRATE_KEPT. A Docker read that hit the
 # deadline (124) did not answer; one that failed on its own is quoted in Docker's
 # words (_tb_docker_why), so a refused socket is not reported as a silent daemon
@@ -2706,13 +2741,23 @@ tb_substrate_resolve() {
 # this installer sets up, it sets up on native k3s too (client-dev#1546). Prints
 # nothing.
 _tb_substrate_fresh() {
-  local rc names why what errf kept="Setting up ${TB_SUBSTRATE_DEFAULT}, not native ${TB_SUBSTRATE_FRESH_LINUX}, the default for a new Linux machine:"
-  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
-  if ! declare -F _probe_wsl >/dev/null 2>&1; then
-    TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether it runs inside WSL, so it keeps ${TB_SUBSTRATE_DEFAULT}."
-    return 0
+  local rc names why what errf os fresh runtime machine kept
+  os="${OS:-$(uname -s 2>/dev/null)}"
+  case "$os" in
+    Linux) fresh="$TB_SUBSTRATE_FRESH_LINUX"; runtime="native ${fresh}"; machine="a new Linux machine" ;;
+    Darwin)
+      [[ "$(tb_mac_floor_verdict)" == ok ]] || return 0
+      fresh="$TB_SUBSTRATE_FRESH_MACOS"; runtime="${fresh} on Apple container"; machine="a new Mac" ;;
+    *) return 0 ;;
+  esac
+  kept="Setting up ${TB_SUBSTRATE_DEFAULT}, not ${runtime}, the default for ${machine}:"
+  if [[ "$os" == Linux ]]; then
+    if ! declare -F _probe_wsl >/dev/null 2>&1; then
+      TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether it runs inside WSL, so it keeps ${TB_SUBSTRATE_DEFAULT}."
+      return 0
+    fi
+    _probe_wsl && return 0
   fi
-  _probe_wsl && return 0
   has k3d && return 0
   if has docker; then
     errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-docker-read-XXXXXX" 2>/dev/null)" || errf=/dev/null
@@ -2720,6 +2765,12 @@ _tb_substrate_fresh() {
     if [[ "$rc" -eq 0 ]]; then what="ps"; names="$(tb_k3d_cluster_names "$errf")" || rc=$?; fi
     why=""; [[ "$rc" -eq 0 || "$rc" -eq 124 ]] || why="$(_tb_docker_why "$rc" "$errf")"
     [[ "$errf" == /dev/null ]] || rm -f "$errf"
+    # A Mac whose Docker is installed but does not answer 'docker info' (stopped,
+    # or silent) is a new Mac: no k3d is on PATH (`has k3d` above), and every k3d
+    # install leaves its k3d there. Docker Desktop installed and left stopped is
+    # common on a Mac (coordinator ruling on client-dev#1954, 15 Oct 2026). A
+    # Docker that answers but cannot list its containers still cannot tell.
+    [[ "$os" != Darwin || "$what" != info ]] || rc=0
     case "${what}:${rc}" in
       *:0) ;;
       info:124) TB_SUBSTRATE_KEPT="${kept} Docker is installed here but did not answer, so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
@@ -2733,14 +2784,14 @@ _tb_substrate_fresh() {
     fi
   fi
   if ! declare -F _native_k3s_refuse_host >/dev/null 2>&1; then
-    TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether native ${TB_SUBSTRATE_FRESH_LINUX} would accept this run's settings, so it keeps ${TB_SUBSTRATE_DEFAULT}."
+    TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether ${runtime} would accept this run's settings, so it keeps ${TB_SUBSTRATE_DEFAULT}."
     return 0
   fi
   if ! why="$(error() { printf '%s' "$*"; exit 1; }; _native_k3s_refuse_host)"; then
-    TB_SUBSTRATE_KEPT="${kept} native ${TB_SUBSTRATE_FRESH_LINUX} would refuse this run. ${why:-Its refusal gave no reason.}"
+    TB_SUBSTRATE_KEPT="${kept} ${runtime} would refuse this run. ${why:-Its refusal gave no reason.}"
     return 0
   fi
-  TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_FRESH_LINUX"; TB_SUBSTRATE_SOURCE="the default for a new Linux machine"
+  TRACEBLOC_SUBSTRATE_RESOLVED="$fresh"; TB_SUBSTRATE_SOURCE="the default for ${machine}"
 }
 
 # _tb_substrate_k3s_live -- _native_k3s_live_probe's answer: 0 when a tracebloc

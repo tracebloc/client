@@ -598,6 +598,11 @@ TB_MAC_CT_NODE_VOLUME_JOURNAL="ordered"
 TB_MAC_CT_NODE_REINSTALL='run "tracebloc delete" (it removes the node and its data), then install again'
 # What the node needs Rosetta for is an amd64 image; this file is there once it is installed.
 TB_MAC_CT_ROSETTA_RUNTIME="/Library/Apple/usr/libexec/oah/libRosettaRuntime"
+# _mac_ct_rosetta_present -- 0 when this Mac has Rosetta: TRACEBLOC_MAC_CT_ROSETTA (the
+# TEST SEAM), else TB_MAC_CT_ROSETTA_RUNTIME, exists. The one answer to it: the node gets
+# --rosetta exactly then (_mac_ct_node_argv), and the MySQL 5.7 gate asks the same
+# (setup-macos.sh, _macos_amd64_emulation_ok).
+_mac_ct_rosetta_present() { [[ -e "${TRACEBLOC_MAC_CT_ROSETTA:-$TB_MAC_CT_ROSETTA_RUNTIME}" ]]; }
 # Where the entrypoint puts the join token inside the node, and the file the config's
 # `token-file` names: on the container's own disk, rewritten from the argument on every
 # start, so a copy a killed VM tore never reaches k3s.
@@ -649,11 +654,11 @@ exec /bin/k3s server'
 # where native k3s runs, calls it for a Mac (2.1 part 6), so it runs where Linux's
 # refusals run, including before a k3d offboard (reinstall.sh): it stays read-only and
 # reads nothing step a sets. The darwin_k3s measurement (2.1 part 5b) calls it too.
-#   - The macOS floor, common.sh's one declaration (tb_mac_floor_verdict): Apple silicon,
-#     since Apple's container runtime is arm64-only, with macOS TB_MACOS_FLOOR_MAJOR or
-#     later, which the runtime needs (RFC-0175 D6). Its words are the floor's own
-#     (tb_mac_floor_reason); this path adds the way back to k3d, which serves those Macs
-#     until 2.1's flip. 2.4 (client-dev#1623) refuses them on every path at the flip.
+#   - The macOS floor (refuse_unsupported_mac, common.sh, on its one declaration
+#     tb_mac_floor_verdict): Apple silicon, since Apple's container runtime is
+#     arm64-only, with macOS TB_MACOS_FLOOR_MAJOR or later, which the runtime needs
+#     (RFC-0175 D6). main() refuses those Macs on every path first (2.4,
+#     client-dev#1623), with no way back to k3d; this is the same refusal.
 #   - A corporate CA the node cannot take (_mac_ct_ca_bundle): set but unreadable, or
 #     holding no PEM certificate. One it can take is handed in by _mac_ct_ensure_node.
 #   - hostPath storage and a dataset folder the node cannot mount
@@ -665,12 +670,7 @@ exec /bin/k3s server'
 _mac_ct_refuse_host() {
   [[ "${OS:-}" == "Darwin" ]] \
     || error "The macOS node runs on a Mac only, and this machine runs ${OS:-an unknown OS}."
-  local verdict
-  verdict="$(tb_mac_floor_verdict)"
-  case "$verdict" in
-    '' | ok) ;;
-    *) error "$(tb_mac_floor_reason "$verdict") Set TRACEBLOC_SUBSTRATE=k3d to install on k3d." ;;
-  esac
+  refuse_unsupported_mac
   local why
   if declare -F _resolve_ca_bundle >/dev/null 2>&1; then why="$(_mac_ct_ca_bundle)" || error "$why"; fi
   local dirs
@@ -874,16 +874,15 @@ _mac_ct_node_proxy_env() {
 
 # _mac_ct_node_argv NAME IMAGE CONFIG KUBELET SIZE TOKEN [CADIR CASUM] -- the `container
 # run` argv, into TB_MAC_CT_NODE_ARGV (an array: the config holds newlines and quotes).
-# --rosetta is in it when TRACEBLOC_MAC_CT_ROSETTA (the TEST SEAM), else
-# TB_MAC_CT_ROSETTA_RUNTIME, exists, a `-v FOLDER:FOLDER` for each line of
-# TB_MAC_CT_NODE_MOUNTS (the hostPath folders, _mac_ct_node_mounts's, which
-# _mac_ct_ensure_node sets), and `--env-file` naming TB_MAC_CT_NODE_PROXY_FILE when it
-# is set (the proxy's file, which _mac_ct_ensure_node sets: a path, never a value).
-# TOKEN is the join token, the entrypoint's last argument: it makes the argv a secret,
-# so run-args is kept 0600. CASUM is the corporate CA roots' checksum
-# (_mac_ct_node_ca): with one, CADIR, the folder on this Mac that holds them, is mounted
-# read-only at TB_MAC_CT_NODE_CA_DIR, and the checksum reaches the entrypoint, so that
-# new roots make a new argv.
+# --rosetta is in it when this Mac has Rosetta (_mac_ct_rosetta_present), a
+# `-v FOLDER:FOLDER` for each line of TB_MAC_CT_NODE_MOUNTS (the hostPath folders,
+# _mac_ct_node_mounts's, which _mac_ct_ensure_node sets), and `--env-file` naming
+# TB_MAC_CT_NODE_PROXY_FILE when it is set (the proxy's file, which _mac_ct_ensure_node
+# sets: a path, never a value). TOKEN is the join token, the entrypoint's last argument:
+# it makes the argv a secret, so run-args is kept 0600. CASUM is the corporate CA roots'
+# checksum (_mac_ct_node_ca): with one, CADIR, the folder on this Mac that holds them, is
+# mounted read-only at TB_MAC_CT_NODE_CA_DIR, and the checksum reaches the entrypoint, so
+# that new roots make a new argv.
 TB_MAC_CT_NODE_ARGV=()
 TB_MAC_CT_NODE_MOUNTS=""
 TB_MAC_CT_NODE_PROXY=""
@@ -892,7 +891,7 @@ _mac_ct_node_argv() {
   local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }" token="$6" cadir="${7:-}" casum="${8:-}" d
   TB_MAC_CT_NODE_ARGV=(run -d --name "$name"
     --cap-add ALL --read-only-path NONE --masked-path NONE)
-  [[ ! -e "${TRACEBLOC_MAC_CT_ROSETTA:-$TB_MAC_CT_ROSETTA_RUNTIME}" ]] || TB_MAC_CT_NODE_ARGV+=(--rosetta)
+  ! _mac_ct_rosetta_present || TB_MAC_CT_NODE_ARGV+=(--rosetta)
   TB_MAC_CT_NODE_ARGV+=(--cpus "$cpus" --memory "$mem"
     -v "${name}:/var/lib/rancher/k3s" --tmpfs /run --tmpfs /var/run)
   [[ -z "$casum" ]] || TB_MAC_CT_NODE_ARGV+=(-v "${cadir}:${TB_MAC_CT_NODE_CA_DIR}:ro")

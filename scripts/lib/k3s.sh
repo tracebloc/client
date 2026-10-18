@@ -662,6 +662,78 @@ _native_k3s_pin_token() {
   rm -f "$tmp"
 }
 
+# ── The filesystem under k3s's data (client-dev#1976) ─────────────────────────
+#
+# The pin above closes the torn token on every native host, whatever the filesystem
+# does. Whether that host's filesystem would have kept the window small is still
+# worth knowing: tracebloc's test cells measure their own hosts, never a customer's.
+# So the install record has a field for it, k3s_data_fs
+# (scripts/spec/install-record.schema.json), read the way those cells read it:
+# findmnt on k3s's data path, and /proc/fs/jbd2 for whether a journal runs on its
+# device. NOTHING WRITES IT YET: the CLI's reader refuses a field its own copy of the
+# schema does not declare, so it learns the field first (client-dev#1976 step 2).
+#
+# Where /sys and /proc are, assigned here and never read from the environment, so a
+# test can point the reads at a tree of its own.
+_NATIVE_K3S_FS_ROOT=""
+
+# _native_k3s_fs_journal TYPE OPTIONS JOURNAL -- whether the filesystem writes a
+# file's data before the metadata naming it, one word of the schema's journal enum:
+#   orders-data     xfs, btrfs; ext4 with a journal, data=ordered or data=journal,
+#                   barriers on;
+#   does-not-order  ext4 mounted data=writeback, nobarrier or barrier=0, or with no
+#                   journal;
+#   cannot-tell     any other filesystem (or none read), an ext4 whose journal could
+#                   not be read, or whose options name no data= mode. Never a guess.
+# OPTIONS is the mount's comma-separated options; JOURNAL is yes, no or unknown.
+_native_k3s_fs_journal() {
+  local type="$1" opts=",${2},"
+  case "$type" in
+    xfs | btrfs) echo orders-data; return 0 ;;
+    ext4) ;;
+    *) echo cannot-tell; return 0 ;;
+  esac
+  case "$opts" in
+    *,data=writeback,* | *,nobarrier,* | *,barrier=0,*) echo does-not-order; return 0 ;;
+  esac
+  case "$3" in
+    no) echo does-not-order; return 0 ;;
+    yes) ;;
+    *) echo cannot-tell; return 0 ;;
+  esac
+  case "$opts" in
+    *,data=ordered,* | *,data=journal,*) echo orders-data ;;
+    *) echo cannot-tell ;;
+  esac
+}
+
+# _native_k3s_data_fs [PATH] -- k3s_data_fs for PATH (TB_K3S_DATA_PATH), one line of
+# JSON: {"type": ..., "options": ..., "journal": ...}. type and options are what
+# findmnt said for the mount holding PATH, null when it said nothing; the journal is
+# read for ext4 only, from jbd2's entry for the mount's device. A read that fails is
+# null and cannot-tell, never absent.
+_native_k3s_data_fs() {
+  local path="${1:-$TB_K3S_DATA_PATH}" out type="" opts="" majmin="" dev="" journal=unknown jbd2
+  if has findmnt; then
+    # Capture, then the first line: findmnt prints a line per mount stacked over the
+    # target, and a pipe into head would SIGPIPE it under pipefail (_pf_fstype).
+    out="$(findmnt -nro FSTYPE,OPTIONS,MAJ:MIN --target "$path" 2>/dev/null || true)"
+    read -r type opts majmin <<<"${out%%$'\n'*}" || true
+  fi
+  if [[ "$type" == ext4 && -n "$majmin" ]]; then
+    jbd2="${_NATIVE_K3S_FS_ROOT}/proc/fs/jbd2"
+    dev="$(readlink "${_NATIVE_K3S_FS_ROOT}/sys/dev/block/${majmin}" 2>/dev/null || true)"
+    dev="${dev##*/}"
+    if [[ -n "$dev" && -d "$jbd2" && -r "$jbd2" && -x "$jbd2" ]]; then
+      journal=no
+      if compgen -G "${jbd2}/${dev}-*" >/dev/null; then journal=yes; fi
+    fi
+  fi
+  # _tb_json writes an empty value as null.
+  printf '{"type": %s, "options": %s, "journal": "%s"}' \
+    "$(_tb_json "$type")" "$(_tb_json "$opts")" "$(_native_k3s_fs_journal "$type" "$opts" "$journal")"
+}
+
 # _native_k3s_write_config MODE NODE_NAME CIDR_PAIR STORAGE_PATH CGROUP [CA_FILE]
 #   -- write everything k3s reads at start, as root, with an explicit mode on every
 #   path: /etc/rancher and /etc/rancher/k3s 0755; config.yaml 0600 (it names the
@@ -1340,12 +1412,87 @@ _native_k3s_gpu_cdi_spec() {
   return 1
 }
 
+# ── The GPU in tracebloc's WSL distro (S-W row 13, client-dev#1810) ──────────────
+# The device WSL gives a distro for the Windows host's GPUs (NVIDIA's CUDA on WSL guide).
+TB_WSL_DXG_PATH="/dev/dxg"
+# The unit the distro's image runs at each start, before k3s, to write the WSL spec at
+# TB_K3S_GPU_CDI_PATH: `nvidia-ctk cdi generate --mode=wsl`, then libdxcore into its
+# mounts (wsl-distro.sh, gpu_files).
+TB_K3S_GPU_WSL_CDI_UNIT="tracebloc-cdi.service"
+# The bound on restarting it, in seconds: above the unit's own TimeoutStartSec, so
+# systemd, not this bound, ends a start that hangs (wsl-distro.bats holds the two).
+TB_K3S_GPU_WSL_CDI_BOUND=150
+# What a whole WSL spec names: the GPU, /dev/dxg and libdxcore. The same three
+# tracebloc-cdi holds its own spec to before it keeps it (wsl-distro.bats reads them out
+# of wsl-distro.sh and holds this list to them). Without libdxcore, libcuda loads but
+# never reaches /dev/dxg, and CUDA blames the driver: the PowerShell core's live box
+# saw exactly that from a spec that existed.
+TB_K3S_GPU_WSL_SPEC_NEEDLES=(nvidia.com/gpu /dev/dxg libdxcore.so)
+
+# _native_k3s_gpu_wsl_spec_lacks -- what the spec at TB_K3S_GPU_CDI_PATH lacks of
+# TB_K3S_GPU_WSL_SPEC_NEEDLES, space-separated, or "a spec" when there is no non-empty
+# one. Empty output: it is whole.
+_native_k3s_gpu_wsl_spec_lacks() {
+  local n lacks=""
+  if ! sudo test -s "$TB_K3S_GPU_CDI_PATH"; then printf 'a spec'; return 0; fi
+  for n in "${TB_K3S_GPU_WSL_SPEC_NEEDLES[@]}"; do  # set-u-safe: TB_K3S_GPU_WSL_SPEC_NEEDLES is a literal list
+    sudo grep -qF -- "$n" "$TB_K3S_GPU_CDI_PATH" 2>/dev/null || lacks="${lacks:+${lacks} }${n}"
+  done
+  printf '%s' "$lacks"
+}
+
+# _native_k3s_gpu_wsl_prepare -- step b's NVIDIA half in tracebloc's WSL distro. The
+# distro's image carries what this run could not install there: NVIDIA's container
+# toolkit, pinned and set to CDI mode, and tracebloc-cdi (wsl-distro.sh). So nothing is
+# installed and nothing generated here (a plain `nvidia-ctk cdi generate` knows nothing
+# of WSL). It checks the outcome, and each miss is CPU mode, said by name:
+#   - TB_WSL_DXG_PATH, the device the GPU reaches the distro by;
+#   - an nvidia-ctk that answers, and its version floor (a warning, as on Linux);
+#   - a whole spec. One that is not is asked for again, once, by restarting
+#     TB_K3S_GPU_WSL_CDI_UNIT, then read again. It is the image's, never recorded.
+# Past it the path is Linux's: k3s registers the NVIDIA runtime from the toolkit (step
+# c's gate), and the chart's device plugin, under that runtime, finds WSL by /dev/dxg
+# and advertises one shared device, `all` (W26, measured on v0.20.1 by spike S-W).
+_native_k3s_gpu_wsl_prepare() {
+  local lacks state
+  if ! sudo test -e "$TB_WSL_DXG_PATH"; then
+    _native_k3s_gpu_cpu "WSL gives the tracebloc WSL distro no GPU device (${TB_WSL_DXG_PATH} is not there), so no container here can use the GPU" blind
+    return 1
+  fi
+  if ! { has nvidia-ctk && _bounded "${TB_PROBE_TIMEOUT:-5}" nvidia-ctk --version >/dev/null 2>&1; }; then
+    _native_k3s_gpu_cpu "the tracebloc WSL distro has no NVIDIA Container Toolkit that answers ('nvidia-ctk --version'), and this installer installs none there: its image carries it" blind
+    return 1
+  fi
+  _native_k3s_gpu_toolkit_floor
+  lacks="$(_native_k3s_gpu_wsl_spec_lacks)"
+  if [[ -n "$lacks" ]]; then
+    log "WSL GPU spec ${TB_K3S_GPU_CDI_PATH} lacks: ${lacks}; restarting ${TB_K3S_GPU_WSL_CDI_UNIT} once."
+    _bounded_root "$TB_K3S_GPU_WSL_CDI_BOUND" systemctl restart "$TB_K3S_GPU_WSL_CDI_UNIT" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+    lacks="$(_native_k3s_gpu_wsl_spec_lacks)"
+  fi
+  if [[ -n "$lacks" ]]; then
+    state="$(_bounded_root "${TB_PROBE_TIMEOUT:-5}" systemctl is-active "$TB_K3S_GPU_WSL_CDI_UNIT" 2>/dev/null)" || true
+    state="${state%%$'\n'*}"
+    _native_k3s_gpu_cpu "the tracebloc WSL distro's GPU spec, ${TB_K3S_GPU_CDI_PATH}, lacks ${lacks}, and ${TB_K3S_GPU_WSL_CDI_UNIT}, which writes it, did not fix that (it is ${state:-in a state systemctl did not say}; 'systemctl status ${TB_K3S_GPU_WSL_CDI_UNIT%.service}' says why)" blind
+    return 1
+  fi
+  log "WSL GPU spec ${TB_K3S_GPU_CDI_PATH} names the GPU, /dev/dxg and libdxcore; using it as it is."
+  return 0
+}
+
 # _native_k3s_gpu_prepare -- step b's NVIDIA half on native k3s: the toolkit package
 # (gpu-nvidia.sh's package half, as on k3d), its version floor, and a CDI spec. It
 # touches no Docker and no host containerd, and leaves TRACEBLOC_GPU_WIRED at 0: step c's
 # gate sets it. TB_K3S_GPU_PREPARED=1 tells that gate the toolkit and a spec are here.
+# In tracebloc's WSL distro the image's toolkit and spec, checked
+# (_native_k3s_gpu_wsl_prepare).
 _native_k3s_gpu_prepare() {
   TB_K3S_GPU_PREPARED=""
+  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+    _native_k3s_gpu_wsl_prepare || return 0
+    TB_K3S_GPU_PREPARED=1
+    return 0
+  fi
   _nvidia_container_toolkit_package
   _native_k3s_gpu_toolkit_floor
   _native_k3s_gpu_cdi_spec || return 0
@@ -1500,6 +1647,10 @@ _native_k3s_gpu_verify() {
     return 0
   fi
   warn "k3s runs the NVIDIA runtime, but the node advertises no GPU (allocatable nvidia.com/gpu = 0), so GPU training jobs will wait."
+  if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
+    hint "In the tracebloc WSL distro the device plugin finds the GPU through ${TB_WSL_DXG_PATH}: 'kubectl -n ${ns} logs daemonset/nvidia-device-plugin-daemonset' says what it found. Then re-run the installer from Windows."
+    return 0
+  fi
   hint "If 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"' shows Xid 140 or 'RmInitAdapter failed', the GPUs failed when they re-initialised: turn persistence mode on from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), reboot, then re-run this installer. Drivers 550 and newer did not need it."
 }
 

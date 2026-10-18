@@ -406,8 +406,8 @@ _assess_classify() {
   # probe (client#682). The cluster probe used to be a BOOLEAN whose three reads
   # all swallowed stderr and returned 1, so a down daemon was indistinguishable
   # from an empty machine — and a laptop that merely needs Docker started was told
-  # it had nothing installed and offered a full first-time install. install-k8s.ps1
-  # has carried the tri-state version of this contract since #557; bash finally
+  # it had nothing installed and offered a full first-time install. The retired
+  # PowerShell core carried the tri-state version of this contract from #557; bash
   # does too (_cluster_presence, client#984).
   #
   # THIS ORDERING IS NOT ENOUGH ON ITS OWN, and it is worth being precise about

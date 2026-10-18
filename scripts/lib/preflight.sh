@@ -491,8 +491,9 @@ _pf_host_too_small_for_floor() {
   # (the .wslconfig default is half the Windows host), never the host's: reserve
   # arithmetic on it called a VM sitting exactly on the floor too small and
   # answered "use a larger machine" where the remedy is raising the VM
-  # (client-dev#2124, Bugbot). The Windows host is install-k8s.ps1's to grade;
-  # from here it cannot be told, which is "not too small".
+  # (client-dev#2124, Bugbot). The Windows host cannot be told from inside the
+  # VM, which is "not too small"; the retired PowerShell core graded it, and the
+  # distro path has no host-side grade yet (client-dev#1810).
   [[ "$(_pf_run_floor_family 2>/dev/null)" == windows ]] && return 1
   # Native Linux with the run floor resolved (client-dev#2113): the host is held to
   # the run floor in MiB with no OS reserve and no grace -- the very comparison
@@ -564,7 +565,8 @@ _pf_spare_rung_words() {
 
 # "CAN SPARE" UNDER WSL2 IS THE VM ITSELF (client-dev#2158, Bugbot on client-dev#2157).
 # MemTotal there is the WSL2 VM, not the Windows host: the host's OS reserve lives
-# outside it, and the host is install-k8s.ps1's to grade (_pf_host_too_small_for_floor).
+# outside it, and _pf_host_too_small_for_floor does not grade the Windows host (the
+# retired PowerShell core did; the distro path has no host-side grade yet).
 # Elsewhere it is host RAM less the OS reserve. Never the floor-lifted clamp
 # (client-dev#2124). Args: the clamped figure, the host/VM GB.
 _pf_spare_gb() {
@@ -590,8 +592,8 @@ _pf_runtime_mem_status() {
   # so plain rt_mib/1024 showed a VM set to exactly the documented floor as one
   # GB BELOW it — graded correctly by the grace-aware thresholds below, but
   # displayed as if sub-floor, which reads as a contradiction. Adding the same
-  # grace before the division recovers the configured figure. Mirrors the
-  # PowerShell peer's (mib + grace) / 1024 (Bugbot #445 r3).
+  # grace before the division, (mib + grace) / 1024, recovers the configured
+  # figure (Bugbot #445 r3).
   rt_gb="$(_pf_display_gb_from_mib "$rt_mib")"
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
@@ -624,11 +626,11 @@ _pf_runtime_mem_status() {
     # (Bugbot on client#1085). `warn_eff` is PF_WARN_MEM_GB clamped to host RAM minus
     # the OS reserve, so on an 8 GB host it reads 6 — and printing it as "the
     # smallest run needs 6 GB" told that host the 4 GiB rung fits in a budget it
-    # already had, while the rung still would not schedule. The PowerShell twin
-    # interpolates the unclamped figure for the same sentence; so does this now.
+    # already had, while the rung still would not schedule. The sentence now
+    # interpolates the unclamped figure.
     # AND NO "Give Docker N GB" REMEDY WHEN THE CLAMP BIT (Bugbot, round 3): a
     # target the same line has just called too small to hold a training run is
-    # not a remedy, and Show-MemoryStatus prints none on this case either. The
+    # not a remedy, so none is printed on this case. The
     # warn's own last sentence is the whole of the advice; the latch below still
     # sets, so the recheck does not say it twice.
     if (( warn_eff < PF_WARN_MEM_GB )); then
@@ -670,8 +672,7 @@ _pf_runtime_mem_status() {
   # small for tracebloc no matter how Docker is configured, so a "give Docker N GB"
   # remedy is a dead end that asks for more than the machine has (Bugbot #445 r2 —
   # a 4 GB Mac was told "colima start --memory 5"). Say so plainly instead; the
-  # recheck's own host-too-small branch then stops the install honestly. Mirrors
-  # the PowerShell installer's host-too-small branch (#444).
+  # recheck's own host-too-small branch then stops the install honestly (#444).
   host_gb="$(_pf_host_mem_gb)"
   [[ "$what" == "Docker's memory budget" ]] || target_gb=""
   if [[ -z "$target_gb" ]]; then
@@ -991,7 +992,7 @@ _pf_memory() {
     warn "Memory: ${gb} GB (${label}) — the client needs a ${floor_gb} GB ${budget} and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
   elif [[ "$mib" -lt "$warn_mib" ]]; then
     # The DERIVED budget, not its clamp (Bugbot on client#1085) — the same rule as
-    # _pf_runtime_mem_status and the PowerShell twin's Show-MemoryStatus. AND NO
+    # _pf_runtime_mem_status. AND NO
     # "N GB recommended to train" BELOW THE NEED (Bugbot, round 2): for host RAM
     # this branch fires only when gb < PF_WARN_MEM_GB, so the clamped
     # recommendation (gb − reserve) is ALWAYS below the budget the sentence has
@@ -1069,7 +1070,7 @@ _pf_recheck_runtime_mem() {
     # passes here rather than hard-failing on the guest shortfall (#513 reviewer).
     # If the HOST is too small to ever give the VM the floor (physical − reserve <
     # floor), no resize helps — say so plainly instead of a remedy that repeats an
-    # unachievable size (#428 Bugbot; mirrors the PowerShell host-too-small branch).
+    # unachievable size (#428 Bugbot).
     local phys_gb; phys_gb="$(_pf_host_mem_gb)"
     # Through the SHARED predicate, and on every OS. Two divergences lived here
     # (Bugbot #445 r7, High): the arithmetic was inlined rather than calling
@@ -1623,15 +1624,15 @@ _pf_env_proxy_raw() {
   return 0
 }
 
-# Percent-decode a URL-encoded string (proxy userinfo). Mirrors PowerShell's
-# [Uri]::UnescapeDataString so an encoded credential (e.g. a "%40" in a password)
-# authenticates identically on both platforms (Bugbot). Percent-only: userinfo does
-# not use '+'-for-space, so '+' is left literal.
+# Percent-decode a URL-encoded string (proxy userinfo), as .NET's
+# [Uri]::UnescapeDataString does, so an encoded credential (e.g. a "%40" in a
+# password) authenticates as the user wrote it (Bugbot). Percent-only: userinfo
+# does not use '+'-for-space, so '+' is left literal.
 _pf_urldecode() {
   local s="${1:-}"
   # Escape literal backslashes first so printf '%b' expands ONLY the percent-escapes
   # we turn into \xHH below -- otherwise a '\' (or a '\n'/'\t') in the password is
-  # taken as an escape, diverging from the PS peer's percent-only UnescapeDataString
+  # taken as an escape, diverging from .NET's percent-only UnescapeDataString
   # (Bugbot, client#589).
   s="${s//\\/\\\\}"
   printf '%b' "${s//%/\\x}"
@@ -1671,7 +1672,7 @@ _pf_detect_tls_inspection() {
   # stripped), and an authenticated proxy additionally needs -proxy_user/-proxy_pass
   # (openssl >= 3.0) or it 407s and issuer capture fails → a false 'unknown' on the
   # exact TLS-inspecting networks this exists to detect (Bugbot). Credentials go to
-  # openssl only, URL-decoded (parity with the PS peer) and NEVER printed/logged.
+  # openssl only, URL-decoded (_pf_urldecode) and NEVER printed/logged.
   raw="$(_pf_env_proxy_raw)"
   if [[ -n "$raw" ]]; then
     args+=(-proxy "$(_pf_proxy_hostport "$raw")")
@@ -1778,15 +1779,15 @@ _pf_connectivity() {
   # UNAMBIGUOUS: the installer always fetches kubectl/k3d/helm from exactly these
   # hosts. Release assets 302 to objects.githubusercontent.com and _pf_probe_url
   # does not follow redirects, so github.com passing proves nothing about the asset
-  # host — probe it explicitly. Lockstep with install-k8s.ps1 (drift: check-drift.sh).
+  # host — probe it explicitly. check-drift.sh holds the probe list to these hosts.
   #
   # The Docker-ENGINE install host is deliberately NOT hard: it's path/distro/
   # environment-dependent (Debian→get.docker.com, RHEL clones→download.docker.com,
   # Amazon/Arch/SUSE→distro repos, macOS GUI→desktop.docker.com, headless→Colima via
   # brew/ghcr.io). preflight can't cheaply know which, so hard-probing a fixed host
   # would abort supported paths that never touch it (Bugbot). It goes in `soft`
-  # (warn-only) below. On Windows Docker Desktop is the sole path, so install-k8s.ps1
-  # keeps desktop.docker.com hard there.
+  # (warn-only) below. Windows runs this core inside tracebloc's WSL distro, on
+  # native k3s, so it fetches no Docker engine at all.
   local soft=() tool_hosts="dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com" nodes_trust="The k3d nodes are"
   if _pf_on_mac_node; then
     # The macOS node (2.1 part 6) fetches no Docker, k3d or Homebrew. Apple's runtime

@@ -2964,8 +2964,8 @@ alias-first rule).
 
 {{/*
 tracebloc.hostOsEnv -- the host machine's operating system (client-runtime#914):
-env.TRACEBLOC_HOST_OS, e.g. "Ubuntu 22.04" or "Windows 11", which BOTH installers
-set with --set-string (empty when they cannot tell). The resource monitor sends it
+env.TRACEBLOC_HOST_OS, e.g. "Ubuntu 22.04" or "Windows 11", which the installer
+sets with --set-string (empty when it cannot tell). The resource monitor sends it
 on every heartbeat as `os`, and the web app shows it beside the machine's name.
 Only the installer can answer: the monitor's own /etc/os-release is its image's.
 Renders only when non-empty, and under the canonical name only: the variable is new,

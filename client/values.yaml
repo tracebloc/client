@@ -77,7 +77,7 @@ env: {
   #
   # Effective ONLY when RESOURCE_REQUESTS *and* RESOURCE_LIMITS are both unset:
   # an explicit envelope always wins, and this key is then inert (jobs-manager
-  # never reaches the derive branch). Note that BOTH installers write
+  # never reaches the derive branch). Note that the installer writes
   # RESOURCE_* unconditionally, so on an installer-provisioned edge you must
   # clear both keys as well as setting this one.
   #
@@ -123,9 +123,9 @@ env: {
   # Optional: CDI device selector threaded into GPU training pods as
   # NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set this ONLY where the NVIDIA k8s
   # device plugin can't run and the GPU is injected via CDI instead — notably Docker
-  # Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED (tracebloc/client#616); the
-  # Windows installer sets it automatically on that path. Leave EMPTY on a normal
-  # device-plugin (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets
+  # Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED (tracebloc/client#616); no
+  # installer sets it today (the retired PowerShell installer did). Leave EMPTY on a
+  # normal device-plugin (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets
   # concrete GPU UUIDs, so forcing a CDI selector would break device resolution.
   # GPU_VISIBLE_DEVICES: "nvidia.com/gpu=all"
   # Optional: single-node (fixed, non-elastic) cluster flag — gates
@@ -904,13 +904,13 @@ restrictedDns:
 # `app.kubernetes.io/instance`, Helm's `meta.helm.sh/release-name` bookkeeping,
 # and the RELEASE_NAME env auto-upgrade rolls back with (backend#2620).
 #
-# THE INSTALLERS FOLLOW IT. The shell and PowerShell installers do not rebuild
-# the client's workload names from the namespace: they list the release's
-# Deployments by `app.kubernetes.io/instance` and tell them apart by each
-# Deployment's selector (`scripts/lib/common.sh` `_client_workloads`,
-# `scripts/install-k8s.ps1` `Get-ClientWorkloads`). So the readiness wait, the
-# re-run health check and the support bundle read the overridden names, and a
-# re-run over a healthy overridden release no-ops as it does for any other.
+# THE INSTALLER FOLLOWS IT. The installer does not rebuild the client's
+# workload names from the namespace: it lists the release's Deployments by
+# `app.kubernetes.io/instance` and tells them apart by each Deployment's
+# selector (`scripts/lib/common.sh` `_client_workloads`). So the readiness
+# wait, the re-run health check and the support bundle read the overridden
+# names, and a re-run over a healthy overridden release no-ops as it does for
+# any other.
 #
 # IT DOES NOT MOVE DATA. Release-scoped on-disk PATHS -- the dataset directory,
 # the hostPath PV's `path`, the Collector's queue -- keep the RELEASE name,
@@ -1421,56 +1421,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "b02d10288ffbd0d91db07600a3a5dee158ecb48f"
+    engineCommit: "b675c2c7583ce8849a86198ca6275473e8d7ac9a"
     digests:
       causal_language_modeling:
-        cpu: "sha256:7642041e0033c65c6877df70946f27f7f72881d7b340747defdd8498d66dee8c"
-        gpu: "sha256:9040c2dcdc9ff357d8162bce516f80be769ca9e6b02a7a033a38de369a8c1c80"
+        cpu: "sha256:980690bc256c43c873608289455a5e882573e9e504455d611f39989785174aca"
+        gpu: "sha256:b0892be40cfaafd85a1b6870edfb09e3492a86338b2ee9e9dda641de010d8623"
       embeddings:
-        cpu: "sha256:5e053a55c5e9802918e7d2a1a4c4ddb7df8de29196457bd2ffd617cb57a7edf6"
-        gpu: "sha256:f25df15ac8f2be5d54587240a72ad607ab4d41cd49e800ec3a9d0988e75166fd"
+        cpu: "sha256:b3f0b70d92ae0e7b0c1a435090862e4259552772807e164f4a82dcd0ec3f2cf4"
+        gpu: "sha256:ef7e76830ff2756b5e0018e45f2968f9420cd69b5a7ef0701f7d6a94a217d29e"
       image_classification:
-        cpu: "sha256:4f69eeaec5be0ddfc91d6faaf23a3ea8c92ab276d36a6f092e51780bcccd06df"
-        gpu: "sha256:8eb19923aae17bbf41ed4e0f29f7b711bf38aa6c09c0eebd267caf1f5ce1da27"
+        cpu: "sha256:54b43dc115b056db0f58393855b1454c45a669b75c1287c3514142341c6a922a"
+        gpu: "sha256:9f64d835f29495c8a60743f54d89118a2df8648fb94c93ade2690a396cd48eed"
       keypoint_detection:
-        cpu: "sha256:3892cd20a3e60973fb45c4bc3ce728b0f95c2e07ad2408249bb81118eef64af6"
-        gpu: "sha256:bf5abb88dd40df4361be0ba795e80c44273be30e7ba4e8ab681b093eda485b9e"
+        cpu: "sha256:7b65b267392d67cf52b1d019fe619eaef5e7c62ab253cf9d42dace3166aa3009"
+        gpu: "sha256:9a3f942670e3af0ef27178dbab6f53c7765f4c7162e65b9503df94983aa11392"
       masked_language_modeling:
-        cpu: "sha256:f9086306315df2554180424e4c287662e8748ca1474e63dabf0a4a4f06b1d4bf"
-        gpu: "sha256:0809368ff73bbd002e010505bb13d58b075bde8add6040e03c869aceeb4bbe90"
+        cpu: "sha256:29070a6af7086a99786ee293fb62e702d5b39a2ce8622944ee43b7b69e515334"
+        gpu: "sha256:24c906b0b2351090d965362a99b3dc4039367d6cc5f02d1b694e5ed40ba24223"
       object_detection:
-        cpu: "sha256:54335b783d3a681006e9cf6225036b358121a52811d9fd1520fcc3f80b9298d8"
-        gpu: "sha256:1e8f7d60a85d37bf745662a86f071b7ecc43eee10a3c19da4623339d5c13cf9f"
+        cpu: "sha256:8bcbfb75b3784f4e93f7517fc2c67fb643cf6687d0fc886c3d7b062906bc4bbc"
+        gpu: "sha256:0d28d31fffad7926dc3df0f972de9db7ff0c1d263c764851a2f42fbb8ceb31be"
       semantic_segmentation:
-        cpu: "sha256:e01341a7b7320fbdc314d20e72a9ba20d8da3ff6513deca5273eb6dc9add0b3e"
-        gpu: "sha256:19e3855c5919a342d1cd55892c57b825da0fc44ffd983080b1c976963542d24b"
+        cpu: "sha256:035c013c7f294254139e12b49a28a77a318a03700894cba17a2e683e77f19159"
+        gpu: "sha256:c6d06770423fdc955773c2a93a041f079b0df56b7611016fdf3382727610c07e"
       sentence_pair_classification:
-        cpu: "sha256:4e983384d500b4e168ce08c220daf5480a4c82312d3b1b3b63ff63a257340613"
-        gpu: "sha256:78126ebc16d74b719c8748952d7f53fd24b63ce817c1514acbbaf0b300421e6e"
+        cpu: "sha256:c60f64c8c2338d14a482e8db99cf9489b794d06a98ed9141eb0c33e8a52570b4"
+        gpu: "sha256:535a483ff443a2ebd46f9d20add9e87decb686da8810cd133c58012f8af5e179"
       seq2seq:
-        cpu: "sha256:4268d361df2b7fcf611634b20845a198d095761107b326481c72ee03c17ea64f"
-        gpu: "sha256:786f1f2426a6e22f8728811830965abee8e61dab25df02036082d327eb49a9e2"
+        cpu: "sha256:99e175698dfbdd47512f3dea7efaae2aad16e700e3b06ce01980731bb2ca9d49"
+        gpu: "sha256:ef6f063fd4b7816878af985cb909e7b49c805a1027155036f4de8283bc5a9190"
       tabular_classification:
-        cpu: "sha256:13d99e1d47e08b38d4e46e5c60f8b205e3336518507af9a31a024bebd45cd179"
-        gpu: "sha256:36e002f018034bf2d411dd40c9f67c6294bf4e73eeb2a593293644b868f21024"
+        cpu: "sha256:b014ce3f60dc6ed919112999de8b4130fbade2b37f1d83dbda6ff32890c3d5c4"
+        gpu: "sha256:a01786bdb0a714bf7d51cc92bbc2599af0cb16b21486a3c0a9cbb8feb017d54c"
       tabular_regression:
-        cpu: "sha256:ebd361ef9e15017cbf73888e84aba1b8e90876b115d071a5cda27284a05fb80d"
-        gpu: "sha256:a2637a8295a5bcb575230553df6c541344357ebe3ce2f97a3f2e3c3aabecc7e6"
+        cpu: "sha256:e8de60e6f3ffd7043c0982fc62218757f4d70e8157bc5f50daca3240fc859aae"
+        gpu: "sha256:0f4b50e4349b2b8f3abc2692f5d9e6e900ecc3254a01ca169720e0509d875595"
       text_classification:
-        cpu: "sha256:b546b8198835fe43afa3201ec737ddcb756436e2fb4c265e918c97324262d134"
-        gpu: "sha256:68b9bd79dfdb188f84a5dbf35e8fc1082f130855f1e1e6cf8b44043694a88686"
+        cpu: "sha256:8be99dab4d8221d8e0364068f7849ddb63ccdb7fa47dbd0ab344dbf2b4fdbeb2"
+        gpu: "sha256:ce800b79b7ef8edb02f212a69b3b05bb675971731e0b5bfd19d7936623449fce"
       time_series_classification:
-        cpu: "sha256:43ed93f65aa6fdf734f17c50316a9faff24417c4499809008ab12441a947e227"
-        gpu: "sha256:fc1ec867605871ff13e9d80f03ed4c8325e85755b22fb60b96331ec794f51fd9"
+        cpu: "sha256:7e382129eaf98a756f1204d1ede06eb64e3fddd455b2116b602e8f272b55c71d"
+        gpu: "sha256:e4a600082a22e7cc0a4a06039065ea8e16b71eafdb391bc342d838f4383f53d9"
       time_series_forecasting:
-        cpu: "sha256:19e98949c67bbbc5c9978975bbed7bec9ac30b23434c5beec4fbddacaaf889e2"
-        gpu: "sha256:47d8c2c806ecaf42db1c7eca2f476c5fb88cd2699242d0adbb88aff8504f7993"
+        cpu: "sha256:be0c512c366fbd7953a469453f6d95e8f5c2fa3f0bf7c311f17896a5421dc49c"
+        gpu: "sha256:ac2f683e628143ecd078db9e2df54de82847d45a125b70e89595e34f420ca240"
       time_to_event_prediction:
-        cpu: "sha256:f7e4f10a91a08499f9b489dc5c606612f022da0bf7ba35b74bd03a89fb370e81"
-        gpu: "sha256:bb3af99897ca7fcdd4bef11aacdd7d4c9d5b69e9f5dc8ace9ba26401dc391440"
+        cpu: "sha256:851c24d83f436a3833b0b2d97513ba0daf08b792aa867942dd4440ece4113bde"
+        gpu: "sha256:17315e8d986b97592b7422b707681d9786408615c144004317622729e78e2319"
       token_classification:
-        cpu: "sha256:e30a20ec4405e23aa59578377cf28b611e59b4ddb98ab86f15986a18d95739a4"
-        gpu: "sha256:bc730dae33a344169c250bb96bbe6ce23bc5a3dc0c0d215556a58772b26fe344"
+        cpu: "sha256:93a88cfe5d51b4cfc63da4b23eb27de7dc352d5235b56448aa1f66c3f39e35e7"
+        gpu: "sha256:6bd113dbce36788daaebf6ab780dff9c08cdcd8344451d7d9158350dec2fa610"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:

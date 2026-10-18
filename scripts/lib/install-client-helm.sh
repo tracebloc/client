@@ -105,10 +105,10 @@ _cpu_to_milli() {
 # plain bytes); empty on junk. The decimal arms were added for the same reason as
 # the fractional-cores arm above: the chart and kubelet speak `Mi`, but a system
 # pod may say `250M`, and an unreadable quantity must be a refusal, not a zero.
-# The Pi/P arms exist because the PowerShell twin had them and this did not
-# (Saqlain, client#994): both readers replay
-# scripts/tests/fixtures/quantity_vectors.json, so the grammars are held
-# together by a test, not by a comment claiming they match.
+# The Pi/P arms exist because the retired PowerShell core had them and this did
+# not (Saqlain, client#994): this reader replays
+# scripts/tests/fixtures/quantity_vectors.json, so the grammar is held by a
+# test, not by a comment claiming it.
 _mem_to_bytes() {
   local v="$1" n
   case "$v" in
@@ -215,7 +215,7 @@ _existing_training_resources() {
 # ── envelope contract (GENERATED — do not hand-edit) ─────────────────────────
 #
 # backend#2220 / RFC-BACKEND-664 §P0. These four numbers used to be typed out
-# here, again in install-k8s.ps1, and a third time in cli's set.go, with a
+# here, again in the PowerShell core, and a third time in cli's set.go, with a
 # fourth policy in client-runtime's node_sizing.py. Four copies, none derived
 # from the others.
 #
@@ -223,8 +223,7 @@ _existing_training_resources() {
 # arithmetic lives in node_sizing.envelope_from_allocatable. bash cannot parse
 # JSON (jq is not a guaranteed prerequisite — see the helm-namespace note
 # below) and the bootstrap is signed and must not fetch anything unsigned, so
-# the constants are EMBEDDED here, exactly as the GPU node-image build inputs
-# are embedded into install-k8s.ps1 (#616/#633).
+# the constants are EMBEDDED here.
 #
 # What keeps an embed honest is the drift guard, not the comment:
 #   * scripts/tests/install-client-helm.bats replays the contract's golden
@@ -281,9 +280,7 @@ _TB_CP_TRANSIENT_CPU_MILLI=700
 # at least this much. Below it the envelope is today's and upgrades wait while a
 # run trains: reserving 700 m there refuses a 2-core machine outright (1900 m
 # allocatable leaves 350 m, under one core) and takes a core off every 4-core
-# one. Hand-typed, not generated: a product threshold, not a chart fact. The
-# PowerShell twin carries it as $script:TbCpTransientReserveMinCpuMilli;
-# install-k8s.Tests.ps1 pins that the two agree.
+# one. Hand-typed, not generated: a product threshold, not a chart fact.
 _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
 
 # ── k3s's own addons, as a FLOOR (client-dev#1693, #1700) ──────────────────
@@ -308,9 +305,7 @@ _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
 #
 # Both substrates. k3d runs the same addons, the same fit and the same timing,
 # and bites when rounding to whole GiB leaves under 140 MiB to spare
-# (client-dev#1700). The PowerShell twin (k3d only) carries the same two
-# constants as $script:TbK3sAddon* and applies them in Resolve-TbTrainingFit;
-# install-k8s.Tests.ps1 pins that they equal these.
+# (client-dev#1700).
 _TB_K3S_ADDON_MEM_BYTES=146800640
 _TB_K3S_ADDON_CPU_MILLI=200
 
@@ -348,14 +343,13 @@ _TRAINING_DEFAULT_HISTORIC="cpu=2,memory=8Gi"
 # Three whitespace-separated fields per node: allocatable cpu, allocatable
 # memory, and `.spec.unschedulable`. Kubernetes declares Unschedulable with
 # `omitempty`, so a normal node emits nothing for the third field and the line
-# carries a trailing space; only a CORDONED node emits the literal `true`. Both
-# readers therefore test for `true` rather than for emptiness.
+# carries a trailing space; only a CORDONED node emits the literal `true`. The
+# reader therefore tests for `true` rather than for emptiness.
 #
 # Extended from two fields to three under backend#2237: the contract's
 # skipped_nodes has always said `spec.unschedulable (cordoned)` is skipped, but
 # neither installer ASKED the API for the field, so neither could honour it.
-# install-k8s.ps1's Get-TrainingResources carries the PowerShell copy of this
-# string — the two are pinned to agree by the shared cluster-state fixture,
+# The cluster states it is read on are pinned by the shared fixture,
 # scripts/tests/fixtures/installer_parity.json.
 _TB_NODE_JSONPATH='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.allocatable.memory}{" "}{.spec.unschedulable}{"\n"}{end}'
 
@@ -479,19 +473,19 @@ _training_limits() {
   for pair in $size; do
     # TRIM FIRST. `case " cpu=7 " in cpu=*)` does NOT match, so an operator who
     # wrote `TRACEBLOC_TRAINING_RESOURCES="cpu=7, memory=29Gi"` would keep the
-    # cpu limit -- silently, and in the dangerous direction. The PowerShell twin
-    # trims via `.Trim()`, so skipping it here is also a twin DIVERGENCE: the
-    # same shared contract, two different control flows, which is the exact bug
-    # class backend#2220 found five of. jobs-manager's own parser strips too, so
-    # trimmed output is what it would have read anyway.
+    # cpu limit -- silently, and in the dangerous direction. The retired
+    # PowerShell core trimmed via `.Trim()`, so skipping it here was also a twin
+    # DIVERGENCE: the same shared contract, two different control flows, which is
+    # the exact bug class backend#2220 found five of. jobs-manager's own parser
+    # strips too, so trimmed output is what it would have read anyway.
     pair="${pair#"${pair%%[![:space:]]*}"}"
     pair="${pair%"${pair##*[![:space:]]}"}"
     [[ -n "$pair" ]] || continue
     # CASE-INSENSITIVE, via character classes rather than `${pair,,}` — this
     # bootstrap has to run under macOS's bash 3.2, which has no case conversion.
     #
-    # A twin DIVERGENCE otherwise (review on client#820): PowerShell's
-    # `-like 'cpu=*'` is case-insensitive, so `CPU=7,memory=29Gi` dropped the
+    # It was a twin DIVERGENCE (review on client#820): the PowerShell core's
+    # `-like 'cpu=*'` was case-insensitive, so `CPU=7,memory=29Gi` dropped the
     # cpu limit on Windows and kept it on Linux/macOS. Same class as the
     # whitespace-trim divergence, and every parity fixture row is lowercase, so
     # nothing pinned it.
@@ -566,9 +560,9 @@ _machine_training_ceiling() {
   # too small when we never managed to measure it is a fabrication, and the
   # caller used to do exactly that by re-probing `kubectl get nodes -o name`:
   # any listable node, including one whose allocatable would not parse or which
-  # is not Ready yet, tripped the hard warning. The PowerShell twin only flagged
+  # is not Ready yet, tripped the hard warning. The PowerShell core only flagged
   # it after a PARSED node, so the two disagreed on the same cluster -- the
-  # divergence class client#766 exists to remove (Bugbot on #768).
+  # divergence class client#766 existed to remove (Bugbot on #768).
   printf '|unschedulable'
   return 0
 }
@@ -801,7 +795,7 @@ _pod_effective_requests() {
 #
 # PER NODE, then the MAX across nodes. A training pod takes everything from ONE
 # node and this reader does not know which node the anchor is by name (the node
-# contract is pinned to three fields by the ps1 twin, backend#2237). On the
+# contract is pinned to three fields, backend#2237). On the
 # single-node edge this ticket is about the two are the same number; on a
 # multi-node cluster the max is conservative -- it can only make the envelope
 # smaller than strictly necessary, never larger than what schedules.
@@ -1361,9 +1355,10 @@ _client_id_from_secret_rows() {
 # (the label the chart's `tracebloc.labels` puts on it, which by the chart's own
 # table never follows the override), and the one carrying the id is the one --
 # under TRACEBLOC_CLIENT_ID, else CLIENT_ID (see _client_id_from_secret_rows).
-# Same shape as _client_workloads (backend#2888); custom-columns rather than a
-# jsonpath for the same PowerShell-quoting reason. PowerShell peer:
-# Get-ClientIdFromSecret. Guard: scripts/tests/client-secret-read-not-built.sh.
+# Same shape as _client_workloads (backend#2888), custom-columns rather than a
+# jsonpath like it (chosen while the retired PowerShell core had to quote the
+# same read). Guard:
+# scripts/tests/client-secret-read-not-built.sh.
 # CONTRACT: echoes the id or nothing, and ALWAYS returns 0. Callers assign it
 # inside `$( )`; a non-zero rc there would abort the installer under `set -e`
 # (the same trap _extract_yaml_value documents above), and "couldn't read it" is
@@ -1377,8 +1372,8 @@ _client_id_from_secret() {
   # clientId is dropped from release values — which this chart recommends — every
   # scanned release reaches here, so an unbounded read against a wedged API would
   # hang a headless install or assess with no further output. kubectl's default
-  # is no timeout at all; 5s matches the other existence probes in this repo
-  # (install-k8s.ps1's namespace/daemonset/allocatable reads). A timeout exits
+  # is no timeout at all; 5s matches the other existence probes in this repo.
+  # A timeout exits
   # non-zero and is handled by the same `|| return 0` as any other unreadable
   # Secret: "couldn't read it" is a state the caller already knows how to treat,
   # and the caller's fail-closed path turns it into an unidentifiable client
@@ -1388,8 +1383,8 @@ _client_id_from_secret() {
             --no-headers --request-timeout=5s 2>/dev/null)" || return 0
   b64="$(_client_id_from_secret_rows "$rows")"
   [[ -n "$b64" ]] || return 0
-  # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling. Same
-  # both-spellings idiom as scripts/tests/gpu-embed-drift.bats.
+  # -d is GNU/coreutils and modern macOS; -D is the older BSD spelling, so both
+  # are tried in turn.
   out="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" \
     || out="$(printf '%s' "$b64" | base64 -D 2>/dev/null)" \
     || out=""
@@ -1559,8 +1554,7 @@ detect_installed_client() {
     fi
   done < <(printf '%s\n' "$_list" | awk '/[[:space:]]client-[0-9]/ { print $1, $2 }')
   # A client release existed but we couldn't read its clientId, and no OTHER
-  # release gave a definitive id -> unknown (parity with the PowerShell guard's
-  # $unreadableNs fail-closed path).
+  # release gave a definitive id -> unknown (fail closed).
   [[ -z "$INSTALLED_CLIENT_ID" && "$_unreadable" == 1 ]] && INSTALLED_CLIENT_UNKNOWN=1
   rm -f "$_gvf"
   return 0
@@ -2120,8 +2114,8 @@ _host_os_set_args() {
 # guard / CDI setup set TRACEBLOC_GPU_WIRED=0) still requesting a GPU and stranding jobs
 # Pending, or a wired GPU host with every key empty and no device plugin, so the node
 # advertises 0 GPUs (backend#2033, client#835). The values are the SAME the fresh write
-# chooses (_gpu_request_value, _gpu_runtime_class, _detect_device_type), mirroring the
-# Windows twin's adopt-path --set-string:
+# chooses (_gpu_request_value, _gpu_runtime_class, _detect_device_type), each as
+# --set-string:
 #   env.GPU_REQUESTS, env.GPU_LIMITS, env.RUNTIME_CLASS_NAME: --set-string, so helm does
 #     not type-infer the value's '='/'/' or read dots as key navigation; empty
 #     deliberately clears a stale request (client-runtime#80: "" means "no GPU here");
@@ -2220,8 +2214,6 @@ _gpu_request_value() {
 # (Bugbot on #1248). Every entry names a hypervisor or a cloud's virtual
 # platform, never a hardware maker -- `Microsoft Corporation` alone is also a
 # Surface laptop, so Hyper-V is matched by its model, `Virtual Machine`.
-# TWIN of `$script:VmSignatures` in install-k8s.ps1; install-client-helm.bats
-# pins the two lists identical.
 _TB_VM_SIGNATURES=("virtual machine" "vmware" "virtualbox" "innotek" "qemu" "kvm" "xen" "bochs" "parallels" "amazon ec2" "google compute engine" "openstack" "digitalocean")
 
 # _is_vm_signature "VENDOR PRODUCT" — 0 when the pair names a hypervisor.
@@ -2237,8 +2229,8 @@ _is_vm_signature() {
 
 # _chassis_from_smbios N... — desktop | laptop | server | "" for SMBIOS System
 # Enclosure type numbers (DSP0134 §7.4.1). Any desk or portable number wins over
-# a server one, the same precedence Get-DeviceType applies to Windows'
-# ChassisTypes array; one list for both callers below so they cannot drift.
+# a server one, for Windows' ChassisTypes array as for Linux's one number;
+# one list for both callers below so they cannot drift.
 _chassis_from_smbios() {
   local n desk="" lap="" srv=""
   for n in "$@"; do
@@ -2314,11 +2306,10 @@ _prime_windows_host_identity() {
 }
 
 # _chassis_from_windows_identity "Manufacturer|Model|ChassisTypes|PCSystemType[|...]"
-# — the SAME ladder as Get-ChassisFromIdentity in install-k8s.ps1, so the bash
-# installer in WSL2 and the PowerShell installer on the same laptop give the same
-# answer: hypervisor signature first (a Windows host that is itself a VM is
-# `vm`), then the enclosure numbers, then PCSystemType (2 Mobile is a laptop,
-# 1/3 desk, 4/5 server). Fields after the fourth are ignored.
+# — the Windows host's own ladder, read from inside WSL2: hypervisor signature
+# first (a Windows host that is itself a VM is `vm`), then the enclosure numbers,
+# then PCSystemType (2 Mobile is a laptop, 1/3 desk, 4/5 server). Fields after
+# the fourth are ignored.
 _chassis_from_windows_identity() {
   local maker model types pcs _rest chassis=""
   IFS='|' read -r maker model types pcs _rest <<<"${1:-}"
@@ -2455,15 +2446,14 @@ _detect_device_type() {
 #
 # Azure's virtual machines carry this fixed SMBIOS asset tag (Microsoft documents
 # it as the way to tell an Azure VM from any other Hyper-V guest), which a plain
-# Hyper-V guest does not. TWIN of `$script:AzureAssetTag` in install-k8s.ps1;
-# install-client-helm.bats pins the two identical.
+# Hyper-V guest does not.
 _TB_AZURE_ASSET_TAG="7783-7084-3265-9085-8269-3286-77"
 
 # _cloud_from_identity VENDOR PRODUCT ASSET_TAG — aws | gcp | azure | "" from the
 # firmware's strings, read on the host with no network call (no metadata
 # service): "Amazon EC2" (the vendor on every Nitro instance) is aws, "Google
 # Compute Engine" (the product) is gcp, and a Microsoft vendor WITH Azure's asset
-# tag is azure. Matched case-insensitively. TWIN of Get-CloudFromIdentity.
+# tag is azure. Matched case-insensitively.
 _cloud_from_identity() {
   local hay maker tag
   hay="$(printf '%s %s' "${1:-}" "${2:-}" | tr '[:upper:]' '[:lower:]')"
@@ -2481,8 +2471,7 @@ _cloud_from_identity() {
 # "" from a chassis word (hostnamectl's, or _chassis_from_smbios /
 # _chassis_from_windows_identity's) and the detected cloud. A known cloud is
 # `cloud` whatever its chassis says: the cloud strings name only a cloud's own
-# machines, a bare-metal instance included. Any other VM is a server. TWIN of
-# Get-MachineKindFrom.
+# machines, a bare-metal instance included. Any other VM is a server.
 _machine_kind_from_chassis() {
   if [[ -n "${2:-}" ]]; then printf 'cloud'; return 0; fi
   case "${1:-}" in
@@ -2805,13 +2794,13 @@ _pull_failure_detail() {
   bad="$(printf '%s\n' "$pods" | grep -iE 'ImagePullBackOff|ErrImagePull|InvalidImageName' || true)"
   [[ -n "$bad" ]] || return 1
   events="$(kubectl get events -n "$ns" --request-timeout="$kube_timeout" 2>/dev/null || true)"
-  # Scope to the PULL-failure events only (like summary.sh::_diagnose_not_ready and the
-  # PowerShell path) — never a bare x509/TLS match: kubectl prints one event per line,
+  # Scope to the PULL-failure events only (like summary.sh::_diagnose_not_ready) —
+  # never a bare x509/TLS match: kubectl prints one event per line,
   # so an x509 on a pull-failure line is already captured here, while an UNRELATED x509
   # event elsewhere in the ns must not, via tail, displace the real reason (#425 Bugbot).
   pull_fail="$(printf '%s\n' "$events" | grep -iE 'failed to pull|ErrImagePull' | tail -n 3 || true)"
-  # Cap the failing-pod lines (like the PowerShell path's Select-Object -First 3) so a
-  # cluster with many stuck pods doesn't print a wall of indented lines (reviewer).
+  # Cap the failing-pod lines at three so a cluster with many stuck pods doesn't
+  # print a wall of indented lines (reviewer).
   # Herestring, NOT `printf … | head -n 3`: under `set -o pipefail` head closes the
   # pipe after its 3rd line, so a namespace with enough stuck pods to push `$bad`
   # past the ~64KB pipe buffer makes printf take SIGPIPE → the pipeline exits 141 →
@@ -3675,8 +3664,8 @@ _adopt_orphaned_gpu_device_plugin() {
 # The `localApi` block of the generated values: present only when k3d.sh's
 # _ensure_local_api_port recorded the mapping (TB_LOCAL_API_MAPPED=1, with the
 # two ports it mapped), because the chart opens the NodePort only when it
-# exists. Peer of install-k8s.ps1's Get-LocalApiValuesBlock. An existing
-# release gets the same decision as --set args in _reconcile_adopted_client.
+# exists. An existing release gets the same decision as --set args in
+# _reconcile_adopted_client.
 _local_api_values_block() {
   [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]] || return 0
   printf '\n# The local API the dashboard reaches on this machine: on, because k3d maps\n'
@@ -3941,8 +3930,7 @@ install_client_helm() {
   # native k3s created by k3s itself) so the node's containerd invokes the NVIDIA
   # runtime; AMD needs no RuntimeClass. A request this fixed single-node
   # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
-  # a Pending GPU pod to CPU rather than strand it (client-runtime#92). Mirrors the
-  # Windows twin.
+  # a Pending GPU pod to CPU rather than strand it (client-runtime#92).
   local gpu_val runtime_class="" device_type=""
   gpu_val="$(_gpu_request_value)"
   if _gpu_wired; then runtime_class="$(_gpu_runtime_class)"; fi
@@ -4201,8 +4189,9 @@ EOF
   # (telemetry.bats, "the spool is 0600 under the umask the installer can actually
   # be holding"); this file, which holds a credential, had none.
   #
-  # POSIX `ls -ldn`, NEVER GNU-only `stat -c` -- BSD rejects `-c` silently, which
-  # is the bug hostpath-prep.bats:181 stands as a regression guard for.
+  # POSIX `ls -ldn`, NEVER GNU-only `stat -c` -- BSD rejects `-c` silently.
+  # install-client-helm.bats' "the values.yaml mode is read with POSIX ls -ldn,
+  # never GNU-only stat -c" holds this block to it.
   #
   # WARN RATHER THAN error, deliberately. chmod genuinely cannot apply on a
   # HOST_DATA_DIR living on a filesystem without POSIX modes (exFAT, some

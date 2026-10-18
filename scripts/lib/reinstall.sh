@@ -130,6 +130,14 @@ _reinstall_detect() {
     fi
     how="$(_reinstall_read_how "$rc" "$errf")"
     [[ "$errf" == /dev/null ]] || rm -f "$errf"
+    # A new Mac's default (common.sh _tb_substrate_fresh, client-dev#1954's ruling)
+    # resolved k3s with no k3d on PATH beside a Docker that did not answer 'docker
+    # info': no cluster to find, so that unanswered read is not "cannot tell", or the
+    # default would refuse itself. Only that source: a k3s requested by name keeps it.
+    if [[ "$what" == "Docker ('docker info')" && "$rc" -ne 0 ]] && (( ! has_k3d )) \
+        && [[ "${TB_SUBSTRATE_SOURCE:-}" == "the default for a new Mac" ]]; then
+      rc=0; ps=""
+    fi
     if [[ "$rc" -ne 0 ]] && (( listed )); then
       info "${what} ${how}; k3d's own cluster listing did, and it decides."
     elif [[ "$rc" -eq 124 ]]; then

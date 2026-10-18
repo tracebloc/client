@@ -303,7 +303,7 @@ spec:
         # missing dataset mount would hand the meter a fresh empty directory on
         # the ROOT disk and read it as the dataset volume -- a wrong number
         # reported confidently, which is the defect backend#3916 is about. Fail
-        # visibly instead. Both installers bind the volume with k3d's `@all`, so
+        # visibly instead. The installer binds the volume with k3d's `@all`, so
         # the path is on every node in the flow that sets this.
         - name: host-dataset
           hostPath:

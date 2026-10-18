@@ -54,7 +54,8 @@ _create_plan() {
 # _host_os_label in common.sh), into _TB_REG_MACHINE_KIND / _TB_REG_CLOUD_PROVIDER
 # / _TB_REG_HOST_OS. Each is EMPTY when it cannot be read or its detector is not
 # loaded, and the CLI then leaves it out of the registration. Always exits 0: a fact
-# is not worth a registration. TWIN of Get-RegistrationMachineFacts (install-k8s.ps1).
+# is not worth a registration. On Windows the distro's cluster run reads them here
+# and hands them to the host's create (tb_wsl_handover_write in common.sh).
 _registration_machine_facts() {
   _TB_REG_MACHINE_KIND=""; _TB_REG_CLOUD_PROVIDER=""; _TB_REG_HOST_OS=""
   if declare -F _prime_windows_host_identity >/dev/null 2>&1; then _prime_windows_host_identity || true; fi

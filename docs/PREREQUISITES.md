@@ -4,7 +4,7 @@ What a machine needs before `bash <(curl -fsSL https://tracebloc.io/i.sh)` (macO
 
 This page is the one place these prerequisites are written down. The [README](../README.md) and [INSTALL.md](INSTALL.md) link here rather than repeat them, and the product docs at [docs.tracebloc.io](https://docs.tracebloc.io) carry a copy that is checked against this page. Every figure, path and host below is read back from the installer's own code by a test, so the page cannot quietly disagree with what the installer enforces.
 
-macOS and Windows are covered by the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) until their own runtime changes. At that point they move here too.
+A Mac with Apple's container runtime has its own section, [macOS](#macos). A Mac on k3d, and Windows, are covered by the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) until their own runtime changes. At that point they move here too.
 
 ## Linux
 
@@ -60,5 +60,47 @@ Your use cases and models stay on tracebloc. To confirm, the installer asks you 
 | `github.com`, `release-assets.githubusercontent.com` | the k3s release | until k3s is installed, and on a run that upgrades it |
 | `get.helm.sh` | Helm | until Helm is installed |
 <!-- prerequisites:linux:end -->
+
+Once it is installed, the secure environment also reaches the hosts in [INSTALL.md § Network requirements](INSTALL.md#network-requirements-egress-allowlist).
+
+## macOS
+
+<!-- prerequisites:macos:start -->
+On a new Mac with Apple silicon and macOS 26 or later, the installer sets up **k3s in Apple's `container` runtime**. Kubernetes runs in a small Linux VM that Apple's runtime starts from your own user folder, with no Docker, no k3d and no administrator rights. A new Mac is one with no tracebloc install, no k3d, and no k3d cluster in Docker; a Docker that is installed but not running counts as none, since every k3d install leaves k3d itself behind. Every other Mac keeps k3d, which the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) covers, and the installer says why in one line. To keep k3d on a new Mac, set `TRACEBLOC_SUBSTRATE=k3d`.
+
+| | What the Mac needs |
+|---|---|
+| Processor | Apple silicon (M1 or later). The installer stops on an Intel Mac. |
+| macOS | 26 or later. The installer stops on an older version. |
+| Administrator rights | None. |
+| Memory | 16 GB recommended. The node is a VM that holds part of the Mac's memory while it runs: 6 GB of an 8 GB Mac, 11 GB of a 16 GB Mac, 12 GB of a 24 GB Mac, and 16 GB of a Mac with 32 GB or more. 11 GB fits the smallest training run. On a smaller Mac, the installer stops before it creates the node if a training run would not fit beside the platform. |
+| Disk | At least 10 GB free, and 20 GB recommended, on the disk that holds `~/Library/Application Support/tracebloc/container`, where the node's images and its volume are kept. The installer stops below 10 GB. The volume grows as data is written, up to 64 GB. |
+| CPU | 2 cores, 4 recommended. The node gets all but one of them. |
+| Network | Outbound HTTPS (port 443) to the hosts below |
+
+**What the installer puts on the Mac:**
+
+- Apple's `container` runtime, from its signed package, in `~/Library/Application Support/tracebloc/container`;
+- the Linux kernel the node boots (`ghcr.io/tracebloc/apple-container-kernel`) and the k3s node image (`rancher/k3s`, by digest);
+- a login item, `io.tracebloc.node`, that keeps the node running and brings it back when you log in again;
+- kubectl and Helm in `~/.local/bin`;
+- the tracebloc CLI.
+
+The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc delete` removes the node, its login item and the runtime.
+
+**The one prompt.** When the node first starts, macOS asks whether `container-runtime-linux` may find devices on your local network. It is part of Apple's runtime, and it makes the cluster's API reachable from this Mac only. Click Allow. The installer waits up to 2 minutes for your answer. Without it, the installer stops and says where to allow it: System Settings › Privacy & Security › Local Network.
+
+**Hosts.** The installer checks each of these before it starts. The first five rows are always needed. The rest are needed only until Apple's runtime or Helm is installed.
+
+| Host | Why |
+|---|---|
+| `registry-1.docker.io`, `auth.docker.io` | Docker Hub: the k3s node image |
+| `ghcr.io` | the tracebloc images and the node's kernel |
+| `api.tracebloc.io` | the tracebloc API |
+| `tracebloc.github.io` | the tracebloc Helm charts |
+| `dl.k8s.io` | kubectl |
+| `github.com`, `release-assets.githubusercontent.com` | Apple's `container` runtime, its signed package |
+| `get.helm.sh` | Helm |
+<!-- prerequisites:macos:end -->
 
 Once it is installed, the secure environment also reaches the hosts in [INSTALL.md § Network requirements](INSTALL.md#network-requirements-egress-allowlist).
