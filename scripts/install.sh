@@ -42,7 +42,8 @@
 #  with TRACEBLOC_SOURCE_URL (https, or http to 127.0.0.1 / localhost / [::1]):
 #    TRACEBLOC_SOURCE_URL=http://127.0.0.1:8765 TRACEBLOC_ALLOW_UNVERIFIED=1 bash install.sh
 #
-#  Windows (PowerShell as Administrator):
+#  Windows (PowerShell, as the signed-in user; an administrator is needed only
+#  once per machine, to enable WSL, and the installer names that one step):
 #    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
 # =============================================================================
 set -euo pipefail

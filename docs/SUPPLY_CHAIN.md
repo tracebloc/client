@@ -287,7 +287,8 @@ the R8 Windows leg, PR #299):
    can be neither found nor bootstrapped, the install **fails closed** — the
    only way past is the explicit `TRACEBLOC_ALLOW_UNVERIFIED` opt-in.
 
-Canonical Windows entrypoint (PowerShell as Administrator):
+Canonical Windows entrypoint (PowerShell, as the signed-in user; an administrator is
+needed only once per machine, to enable WSL, and the installer names that one step):
 
 ```powershell
 irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex

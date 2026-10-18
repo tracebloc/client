@@ -72,7 +72,7 @@ A single command provisions a Kubernetes cluster, auto-detects and installs GPU 
 bash <(curl -fsSL https://tracebloc.io/i.sh)
 ```
 
-**Windows 11** *(PowerShell, as yourself: it sets tracebloc up in its own WSL2 distro, with no Docker Desktop)*
+**Windows 11** *(PowerShell, as yourself: it sets tracebloc up in its own WSL2 distro, with no Docker Desktop. What it needs, including the one step for IT: [docs/PREREQUISITES.md § Windows](docs/PREREQUISITES.md#windows))*
 
 ```powershell
 irm https://tracebloc.io/i.ps1 | iex

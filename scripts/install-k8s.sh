@@ -12,7 +12,8 @@
 #    -- OR --
 #    chmod +x install-k8s.sh && ./install-k8s.sh
 #
-#  Windows (PowerShell as Administrator):
+#  Windows (PowerShell, as the signed-in user; an administrator is needed only
+#  once per machine, to enable WSL, and the installer names that one step):
 #    irm https://tracebloc.io/i.ps1 | iex
 #
 #  Environment variable overrides (optional). Each TRACEBLOC_ name's older

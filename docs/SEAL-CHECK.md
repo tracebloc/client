@@ -126,6 +126,14 @@ Three sub-checks, reported line-by-line in the Job log:
    PVs are that install's declared storage model, and the model is chosen in
    values, visible to review.
 
+A PVC read that fails is reported, never guessed. A claim the API answers
+`NotFound` is `MISSING`. Any other failed read, such as `Forbidden`, an
+unreachable API or a timeout, is `UNREADABLE`, and the `FAIL` line carries
+kubectl's own error (cut to 160 characters). Before client-dev#2284 every
+failed read printed as `MISSING` / class `'<none>'`, so a claim that existed
+and was mounted looked absent. Either way the check fails: a claim that
+cannot be read is unverified, and unverified is reported unsealed.
+
 Two deliberate nuances, both grounded in RFC-0003:
 
 - **Node-local provisioner paths are tolerated, with a note.** On k3s/k3d

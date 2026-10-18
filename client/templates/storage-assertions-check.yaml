@@ -162,6 +162,13 @@ spec:
               if [ -n "${TRACEBLOC_NAMESPACE:-}" ]; then NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
               if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE="$TRACEBLOC_RELEASE_NAME"; fi
               KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
+              # A failed read KEEPS kubectl's stderr (client-dev#2284). It was sent to
+              # /dev/null, so a Forbidden or an unreachable API printed as "MISSING" /
+              # '<none>' and the log could not say why. _err prints it on one line, cut
+              # short enough to survive a consumer's line cut, and empties the file so
+              # no later read reports an earlier read's error. /tmp is the writable emptyDir.
+              KC_ERR="${TMPDIR:-/tmp}/storage-assertions.kc.err"
+              _err() { e=$(tr '\n' ' ' 2>/dev/null < "$KC_ERR"); : > "$KC_ERR"; printf '%.160s' "${e:-kubectl printed no error}"; }
               fail=0
               # Settings naming: the Job sets each of these under its canonical
               # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
@@ -182,11 +189,21 @@ spec:
               # be pulling images. FAIL only if still unbound at the deadline.
               deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
               pending=""
+              read_err=""
               while :; do
                 pending=""
+                read_err=""
                 for pvc in $EXPECTED_PVCS; do
-                  phase=$($KC get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null) || phase=""
-                  [ -n "$phase" ] || phase="MISSING"
+                  # MISSING only for a claim the API says is NotFound; any other
+                  # failed read is UNREADABLE, and its error goes on the FAIL line.
+                  if phase=$($KC get pvc "$pvc" -o jsonpath='{.status.phase}' 2>"$KC_ERR"); then
+                    [ -n "$phase" ] || phase="UNKNOWN"
+                  elif grep -q '(NotFound)' "$KC_ERR" 2>/dev/null; then
+                    phase="MISSING"
+                  else
+                    phase="UNREADABLE"
+                    read_err=$(_err)
+                  fi
                   [ "$phase" = "Bound" ] || pending="$pending $pvc=$phase"
                 done
                 [ -z "$pending" ] && break
@@ -197,13 +214,17 @@ spec:
               if [ -z "$pending" ]; then
                 echo "OK  pvc-bound: all release PVCs are Bound ($EXPECTED_PVCS)"
               else
-                echo "FAIL  pvc-bound: not all release PVCs reached Bound within ${TIMEOUT_SECONDS}s:$pending"
+                echo "FAIL  pvc-bound: not all release PVCs reached Bound within ${TIMEOUT_SECONDS}s:$pending${read_err:+ — kubectl could not read them: $read_err}"
                 fail=1
               fi
 
               # ── pvc-storageclass: every release PVC is on the expected class ──
               for pvc in $EXPECTED_PVCS; do
-                sc=$($KC get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>/dev/null) || sc=""
+                if ! sc=$($KC get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>"$KC_ERR"); then
+                  echo "FAIL  pvc-storageclass: could not read PVC $pvc ($(_err)) — its class is UNVERIFIED, and unverified is reported unsealed."
+                  fail=1
+                  continue
+                fi
                 if [ "$sc" = "$EXPECTED_STORAGE_CLASS" ]; then
                   echo "OK  pvc-storageclass: $pvc is on '$sc'"
                 else
@@ -217,7 +238,11 @@ spec:
                 echo "SKIP  pv-hostpath: hostPath.enabled=true — hostPath PVs are this install's declared storage model; nothing to assert."
               else
                 for pvc in $EXPECTED_PVCS; do
-                  vol=$($KC get pvc "$pvc" -o jsonpath='{.spec.volumeName}' 2>/dev/null) || vol=""
+                  if ! vol=$($KC get pvc "$pvc" -o jsonpath='{.spec.volumeName}' 2>"$KC_ERR"); then
+                    echo "FAIL  pv-hostpath: could not read PVC $pvc ($(_err)) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
+                    fail=1
+                    continue
+                  fi
                   if [ -z "$vol" ]; then
                     echo "FAIL  pv-hostpath: PVC $pvc has no bound PersistentVolume to inspect"
                     fail=1
@@ -235,8 +260,8 @@ spec:
                     fi
                   done
                   if [ "$PV_SCAN" = "true" ]; then
-                    if ! hp=$(kubectl --request-timeout=10s get pv "$vol" -o jsonpath='{.spec.hostPath.path}' 2>/dev/null); then
-                      echo "FAIL  pv-hostpath: could not read PV '$vol' (RBAC or API error) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
+                    if ! hp=$(kubectl --request-timeout=10s get pv "$vol" -o jsonpath='{.spec.hostPath.path}' 2>"$KC_ERR"); then
+                      echo "FAIL  pv-hostpath: could not read PV '$vol' ($(_err)) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
                       fail=1
                       continue
                     fi

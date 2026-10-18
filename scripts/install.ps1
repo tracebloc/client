@@ -14,7 +14,8 @@
 #       degrading to a checksum fetched over the same channel an on-path attacker
 #       controls.
 #
-#  Usage (PowerShell as Administrator):
+#  Usage (PowerShell, as the signed-in user; an administrator is needed only once
+#  per machine, to enable WSL, and the installer names that one step):
 #    irm https://github.com/tracebloc/client/releases/latest/download/install.ps1 | iex
 #  (Only the release asset is stamped with its pinned tag. The raw.githubusercontent
 #   .../main/scripts/... copy is this file unstamped, so it refuses to run -- never
