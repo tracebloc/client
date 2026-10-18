@@ -1524,6 +1524,38 @@ Call with the ROOT context: {{ include "tracebloc.trainingParentPin" . }}
 {{- end -}}
 
 {{/*
+tracebloc.appleGpuBundle — the digest of the macOS engine bundle the pinned
+engine release names (images.training.macosBundle.digest, the sha256 of the
+bundle's .tar.gz), when the chart names it to the Mac's Apple GPU runner;
+empty otherwise. ONE decision for both sites: whether
+templates/apple-gpu-bundle-configmap.yaml renders, and whether jobs-manager
+gets TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST.
+
+It holds exactly where tracebloc.trainingPins holds and the bundle is set.
+RFC-0185 D2's version agreement sends a GPU job to the Mac only when the bundle
+the runner holds is the one "its engine release names", and only a pinned edge
+runs a named release. A floating edge (dev/staging in auto, pinned=false, a
+mirror that has not declared itself, another registry of the operator's) runs
+whatever its tag points at, so a bundle read off the pinned set says nothing
+about it: nothing renders, and its GPU jobs run on the CPU. A dev or staging
+Mac that should use the Apple GPU sets images.training.pinned=true, and runs the
+pinned images and their bundle together.
+
+The two sites are one decision, never two: a runner told to fetch a bundle
+jobs-manager does not expect would hold it for nothing, and a jobs-manager
+expecting a bundle no runner was told about would never dispatch.
+
+Call with the ROOT context: {{ include "tracebloc.appleGpuBundle" . }}
+*/}}
+{{- define "tracebloc.appleGpuBundle" -}}
+{{- $training := default dict (default dict .Values.images).training -}}
+{{- $bundle := default dict $training.macosBundle -}}
+{{- if and $bundle.digest (include "tracebloc.trainingPins" .) -}}
+{{- $bundle.digest -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 tracebloc.pinIgnored — "1" when this image HAS a values digest pin that
 tracebloc.pinFor did NOT honour (resolved on a registry this release does not
 pull from), else "". The image-refresh CronJob reads it per image: an ignored

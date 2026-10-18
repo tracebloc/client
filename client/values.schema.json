@@ -1397,7 +1397,7 @@
         "training": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. `engineCommit` is the tracebloc-engine source commit every pinned image was built from, read off their org.opencontainers.image.revision label by the same resolver; it is a record for whoever reads the values file (the release train's changelog), not rendered. The chart refuses `capabilities`, `parents` or `engineCommit` with an empty `digests`.",
+          "description": "Digest-pinned training images (RFC-1246 P2; backend#3156 for RFC-0067 D8). `digests` is task -> {cpu, gpu} -> canonical sha256 digest, rendered onto jobs-manager as TRAINING_IMAGE_DIGESTS (toJson); `pinned` gates it (\"\" = auto: prod only; true/false override), rendered as TRAINING_IMAGE_PINNED; `capabilities` is the engine's own io.tracebloc.engine.capabilities label read off the PINNED images by the resolver that writes the digests -- never hand-typed -- rendered as TRAINING_ENGINE_CAPABILITIES; `digestRegistry` is the registry the map was resolved on, and the map and capabilities render only when it equals the registry the edge pulls training images from. `parents` is the shared torch parent the pinned images of an arch build FROM, read off their io.tracebloc.engine.torch-parent label by the same resolver; it renders the installer's prepull manifest (ConfigMap <release>-training-prepull) only where the map renders. `engineCommit` is the tracebloc-engine source commit every pinned image was built from, read off their org.opencontainers.image.revision label by the same resolver; it is a record for whoever reads the values file (the release train's changelog), not rendered. `macosBundle` is the macOS engine bundle of the same pinned release, for a Mac's Apple GPU runner; it renders ConfigMap tracebloc-apple-gpu-bundle and jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST only where the map renders. The chart refuses `capabilities`, `parents`, `engineCommit` or `macosBundle` with an empty `digests`.",
           "properties": {
             "pinned": {
               "enum": [
@@ -1435,6 +1435,27 @@
               "type": "string",
               "pattern": "^[0-9a-f]{40}$",
               "description": "The full 40-hex tracebloc-engine commit the pinned images were built from, DERIVED from every pinned image's org.opencontainers.image.revision label (tracebloc-engine scripts/oci_labels.py) by scripts/resolve-training-digests.sh, which reads THIS pattern before writing and refuses when the images disagree or carry no label. Never hand-typed; refused by the template when `digests` is empty."
+            },
+            "macosBundle": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "digest",
+                "location"
+              ],
+              "description": "The macOS engine bundle the pinned engine release names, for the Apple GPU runner on a Mac (RFC-0185 D2, D6; tracebloc-engine#1701). Two values bound by one signed OCI manifest: `digest` is the sha256 of the bundle's .tar.gz (the manifest's one layer), and `location` is the manifest by digest. Rendered ONLY where the digest map renders (tracebloc.trainingPins): a floating edge runs whatever its tag points at, so a bundle read off the pinned set says nothing about it. Where it renders, the chart writes ConfigMap tracebloc-apple-gpu-bundle (keys `digest`, `location`), which the runner reads and fetches, and jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST, which it compares with the runner node's tracebloc.io/bundle-digest annotation before it sends a GPU job there. Absent: neither renders, and every job runs on the CPU. Refused by the template when `digests` is empty.",
+              "properties": {
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}$",
+                  "description": "sha256:<64 lowercase hex> of the bundle .tar.gz: the layer digest of the manifest `location` names."
+                },
+                "location": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*\\.[a-z]+(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$",
+                  "description": "<registry>/<repository>@sha256:<64 hex>, the bundle's OCI manifest by digest, with its host (the Mac fetches it directly, not through the cluster's registry): ghcr.io/tracebloc/engine-macos-arm64@sha256:..."
+                }
+              }
             },
             "capabilities": {
               "type": "string",

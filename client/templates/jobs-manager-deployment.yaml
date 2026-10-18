@@ -886,6 +886,16 @@ spec:
         - name: TRACEBLOC_TRAINING_ENGINE_CAPABILITIES
           value: {{ $training.capabilities | quote }}
         {{- end }}
+        {{- /* The macOS engine bundle this pinned release names (RFC-0185 D2):
+             jobs-manager sends a GPU job to the Mac's Apple GPU node only while
+             the node's tracebloc.io/bundle-digest annotation equals this value.
+             One decision with ConfigMap tracebloc-apple-gpu-bundle, which tells
+             the runner to fetch it (tracebloc.appleGpuBundle). Omitted when
+             unset, like the map: no Apple GPU dispatch, and no pod roll. */}}
+        {{- with include "tracebloc.appleGpuBundle" . }}
+        - name: TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST
+          value: {{ . | quote }}
+        {{- end }}
         # Where the resource-monitor DaemonSet lives, for the heartbeat version
         # inventory. EMPTY when resourceMonitor is off, and that empty value is
         # load-bearing: the runtime reads unset as "use the built-in default"

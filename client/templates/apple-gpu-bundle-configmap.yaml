@@ -1,0 +1,47 @@
+{{- /*
+  The macOS engine bundle the Apple GPU runner on a Mac is to hold (RFC-0185 D2,
+  D6, §8 Q16; tracebloc-engine#1701 publishes it, cli-dev#1305 reads it).
+
+  WHY THE CLUSTER TELLS THE RUNNER. The chart upgrades itself hourly; the runner
+  ships in the CLI and moves only when the user upgrades it. jobs-manager sends a
+  GPU job to the runner's node only while the node's bundle digest is the one
+  this engine release names, so a runner holding an older bundle would never see
+  a job naming the newer one. It reads the wanted bundle here instead, fetches it
+  by `location`, verifies it, and publishes its digest on its node; GPU jobs run
+  on the CPU meanwhile.
+
+  TWO KEYS, bound by one signed OCI manifest:
+    digest    sha256:<64 hex> of the bundle's .tar.gz, the manifest's one layer.
+              The same value jobs-manager gets as TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST
+              (jobs-manager-deployment.yaml), and the value the runner publishes
+              in its node's tracebloc.io/bundle-digest annotation.
+    location  <registry>/<repository>@sha256:<64 hex>, the manifest itself. The
+              runner fetches it, checks its cosign signature, and refuses it
+              unless its one layer's digest is `digest`.
+
+  THE NAME IS FIXED, not tracebloc.fullname: it is the runner's contract
+  constant (cli-dev internal/runner BundleConfigMap), read in the release's
+  namespace by a reader outside this chart that cannot know the release name.
+
+  WHEN IT RENDERS. Only where tracebloc.appleGpuBundle holds: the digest map
+  renders (tracebloc.trainingPins) AND the bundle is set. The same helper gates
+  jobs-manager's env, so the two never disagree.
+*/ -}}
+{{- $training := default dict (default dict .Values.images).training }}
+{{- if and $training.macosBundle (not $training.digests) }}
+{{- fail "images.training.macosBundle names the macOS bundle of the PINNED engine release and cannot be set while images.training.digests is empty -- there is no pinned release it could belong to. Unset it, or pin the training images it was published with." }}
+{{- end }}
+{{- $bundle := default dict $training.macosBundle }}
+{{- if include "tracebloc.appleGpuBundle" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tracebloc-apple-gpu-bundle
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-bundle
+data:
+  digest: {{ include "tracebloc.appleGpuBundle" . | quote }}
+  location: {{ $bundle.location | quote }}
+{{- end }}
