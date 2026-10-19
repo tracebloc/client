@@ -87,7 +87,7 @@ spec:
             readOnlyRootFilesystem: true
           resources:
             requests:
-              cpu: {{ $req.cpu | default "10m" | quote }}
+              cpu: {{ $req.cpu | default "0" | quote }}
               memory: {{ $req.memory | default "32Mi" | quote }}
             limits:
               cpu: {{ $lim.cpu | default "200m" | quote }}

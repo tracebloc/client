@@ -424,7 +424,7 @@ print_summary() {
   local cver; cver="$(_chart_version "$ns")"
   # Footer log path: HOST_DATA_DIR with $HOME collapsed to ~ (e.g. ~/.tracebloc).
   local logdisp="${HOST_DATA_DIR:-$HOME/.tracebloc}"
-  local kdata
+  local kdata jdata
   if [[ -n "${HOME:-}" && "$logdisp" == "$HOME"* ]]; then logdisp="~${logdisp#"$HOME"}"; fi
 
   echo ""
@@ -443,7 +443,7 @@ print_summary() {
       # "What's next" is a heading (cyan) — the primary call to action, not dim.
       echo -e "  ${TB_HEADING}What's next${RESET}"
       echo -e "    1. Ingest your data       ${TB_CMD}tracebloc data ingest${RESET}"
-      echo -e "    2. Create a use case      ${TB_LINK}$(_dashboard_url my-use-cases)${RESET}"
+      echo -e "    2. Create a use case      ${TB_LINK}$(_dashboard_url 'my-use-cases-v2?create=1')${RESET}"
       echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
       echo ""
       if _cli_runnable_now; then
@@ -474,8 +474,15 @@ print_summary() {
         kdata="$(_hostpath_root)"
         echo -e "  ${DIM}Logs ${logdisp}  ·  Data ${kdata}/${ns} (hostPath)${RESET}"
       elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
-        # The macOS node: the volumes are inside the node, on its own volume.
-        echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the macOS node's volume (k3s local-path)${RESET}"
+        # The macOS node: job data in the job-data folder on this Mac when the release
+        # keeps one (client-dev#2320), the rest inside the node, on its own volume.
+        jdata=""
+        if declare -F _mac_ct_job_data_dir >/dev/null; then jdata="$(_mac_ct_job_data_dir)"; fi
+        if [[ -n "$jdata" ]]; then
+          echo -e "  ${DIM}Logs ${logdisp}  ·  Job data ${jdata}/${ns} (on this Mac, private to you)${RESET}"
+        else
+          echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the macOS node's volume (k3s local-path)${RESET}"
+        fi
       elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s: the volumes are on this host, in local-path's storage path.
         # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
@@ -506,7 +513,7 @@ print_summary() {
       echo -e "  ${TB_ERR}✖ Couldn't connect — your Client ID or password was rejected.${RESET}" >&2
       echo ""
       echo -e "  The environment installed, but tracebloc refused those credentials."
-      echo -e "    1. Re-check them at ${TB_LINK}$(_dashboard_url)${RESET}"
+      echo -e "    1. Check them against the credential file \`tracebloc client create\` wrote"
       echo -e "    2. Re-run this installer ${DIM}(safe to re-run)${RESET}"
       ;;
     image_pull_ca)
@@ -593,12 +600,15 @@ _gpu_test_cmd() {
 }
 
 _log_advanced_info() {
-  local kdata
+  local kdata jdata
   log ""
   log "=== Advanced Info (for debugging) ==="
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
     log "Volumes: $(_hostpath_root) (hostPath, on this host)"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
+    jdata=""
+    if declare -F _mac_ct_job_data_dir >/dev/null; then jdata="$(_mac_ct_job_data_dir)"; fi
+    [[ -z "$jdata" ]] || log "Job data: ${jdata} (dataset, logs and resume; on this Mac, mode 0700, mounted into the node at the same path)"
     log "Volumes: in the macOS node's volume $(_mac_ct_node_name 2>/dev/null) (k3s local-path, inside Apple's VM)"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     kdata="$(_native_k3s_storage_path)" || kdata=""

@@ -1,0 +1,204 @@
+{{- /*
+  The Apple GPU runner's cluster identity. The runner is a login item on the
+  Mac, outside the cluster's VM, started by the tracebloc CLI. It registers one
+  virtual node, apple-gpu, takes the GPU jobs jobs-manager schedules to it, runs
+  each in a sandbox on the Mac and writes its status back. It reaches the
+  cluster only through the API the macOS node publishes on the Mac's loopback,
+  with a token for the ServiceAccount below.
+
+  NOTHING RENDERS unless tracebloc.appleGpuRunner holds (appleGpuRunner.enabled,
+  false by default), and the same helper keeps the node-agent DaemonSets on
+  Linux nodes, so with it off the chart renders byte for byte as before.
+
+  EVERY RULE IS A CALL THE RUNNER MAKES; any other call fails. Pinned by name
+  wherever the name is fixed; three cannot be:
+    nodes create                  a create carries no name to pin
+    pods/portforward create       a job's forwards reach whichever pod backs
+                                  MySQL, requests-proxy and the egress proxy
+    persistentvolumes get         a job's volume names a PV made per dataset
+
+  NO SECRETS. A GPU job's MySQL user comes by secretKeyRef from a Secret whose
+  name is made per job (tb-dbcreds-exp<id>c<cycle>-<hash>, see rbac.yaml), and
+  no rule here can pin that. jobs-manager grants the runner that one Secret per
+  job instead, with a Role and RoleBinding the Job owns (RFC-0185 §8 Q5, option
+  1; rbac.yaml gives jobs-manager the right under tracebloc.runnerDbCredsGrant),
+  so this grants no access to Secrets at all.
+
+  ITS OWN TOKEN. The installer mints the runner a bound token for one year, and
+  the runner renews it at half-life (RFC-0185 Call 2, option (a)): a
+  TokenRequest for this ServiceAccount, pinned by name, and for no other.
+
+  NAMES. The ServiceAccount's is fixed (tracebloc.appleGpuRunnerAccount). The
+  objects outside the release's namespace carry the release's name
+  (tracebloc.appleGpuRunnerRbacName). The node and lease name apple-gpu is the
+  runner's own constant, and tracebloc-apple-gpu-bundle is the ConfigMap
+  apple-gpu-bundle-configmap.yaml renders.
+*/ -}}
+{{- if include "tracebloc.appleGpuRunner" . }}
+{{- if eq .Values.clusterScope false }}
+{{- fail "appleGpuRunner.enabled requires clusterScope: the runner registers its own node, and nodes are cluster-scoped, so a namespaced Role cannot grant it. Set clusterScope: true (the default) or leave appleGpuRunner.enabled false." }}
+{{- end }}
+{{- $account := include "tracebloc.appleGpuRunnerAccount" . }}
+{{- $name := include "tracebloc.appleGpuRunnerRbacName" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $account }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+# No pod runs as this account: its token is minted for the runner on the Mac.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+rules:
+  # Register the node once; create carries no name to pin.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["create"]
+  # Read the node back and keep its labels, taint and capacity current.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    resourceNames: ["apple-gpu"]
+    verbs: ["get", "patch"]
+  # Its conditions, addresses and allocatable.
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    resourceNames: ["apple-gpu"]
+    verbs: ["patch"]
+  # A job's volume, resolved to its folder on the Mac: the PV a claim is bound
+  # to is made per dataset, so there is no name to pin.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ $name }}
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $account }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+rules:
+  # The jobs on its node: a watch field-selected by spec.nodeName, and a pod
+  # deleted in the cluster is ended on the Mac. `list` also finds the pod that
+  # backs a forward's Service.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Running, Succeeded, Failed, and a job sent back to the CPU.
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["update"]
+  # A job's three forwards, to MySQL, requests-proxy and the egress proxy:
+  # their pods change when a pod is replaced, so there is no name to pin.
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  # The Services those forwards follow.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  # The engine bundle the runner is to hold (apple-gpu-bundle-configmap.yaml).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["tracebloc-apple-gpu-bundle"]
+    verbs: ["get"]
+  # A job's volume claims, resolved to their folders on the Mac.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+  # A job's events.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Its own token, renewed at half-life: a TokenRequest for this account only.
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: [{{ $account | quote }}]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $account }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $account }}
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: kube-node-lease
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+rules:
+  # The node's heartbeat: its lease is created once, then renewed by name. The
+  # helper is also auto-upgrade's grant here (auto-upgrade-rbac.yaml).
+  {{- include "tracebloc.appleGpuRunnerLeaseRules" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: kube-node-lease
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: apple-gpu-runner
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $name }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

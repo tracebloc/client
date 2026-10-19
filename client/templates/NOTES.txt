@@ -17,6 +17,9 @@
 {{- if (default dict .Values.hostPath).enabled }}
   {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}hostPath (bare-metal){{ "\033[0m" }}
   {{ "\033[1;34m" }}Host dirs:{{ "\033[0m" }}        {{ "\033[0;33m" }}{{ include "tracebloc.hostPathRoot" . }}/data, {{ include "tracebloc.hostPathRoot" . }}/logs, {{ include "tracebloc.hostPathRoot" . }}/mysql (on the node){{ "\033[0m" }}
+{{- else if include "tracebloc.jobDataPath" . }}
+  {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}job data on this Mac, the database in the node ({{ include "tracebloc.storageClassName" . }}){{ "\033[0m" }}
+  {{ "\033[1;34m" }}Job data:{{ "\033[0m" }}         {{ "\033[0;33m" }}{{ include "tracebloc.jobDataPath" . }}/{{ .Release.Name }}/{data,logs,resume} (private to you){{ "\033[0m" }}
 {{- else }}
   {{ "\033[1;34m" }}Storage:{{ "\033[0m" }}          {{ "\033[0;33m" }}dynamic PVC ({{ include "tracebloc.storageClassName" . }}){{ "\033[0m" }}
 {{- end }}

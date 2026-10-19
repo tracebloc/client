@@ -300,6 +300,17 @@
         }
       }
     },
+    "appleGpuRunner": {
+      "type": "object",
+      "description": "Not in use yet; leave enabled false. It is for a runner a later tracebloc release starts.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
     "storageClass": {
       "type": "object",
       "required": [
@@ -371,6 +382,16 @@
           ],
           "pattern": "^/",
           "description": "Base host path for the DATASET (shared-images) PV ONLY. Unset (or null), it is hostPath.root, so datasets stay local alongside mysql/logs; the installer sets it (/tracebloc-data on k3d, the mount itself on native k3s) when a customer network (NFS) dataset mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works; backend#743). mysql + logs PV paths always stay on hostPath.root. The chart appends /<release>/data. Any value other than hostPath.root ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
+        }
+      }
+    },
+    "jobData": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(/.*)?$",
+          "description": "The macOS node's job-data folder (RFC-0185, client-dev#2320): a folder on the Mac, the user's own at mode 0700, which the node mounts at its own path. Set, the dataset, logs and resume claims are PVs on <path>/<release>/{data,logs,resume}, while MySQL's claim stays on the storage class. Empty: off. The installer sets it; it cannot be combined with hostPath.enabled. Must be absolute when set."
         }
       }
     },

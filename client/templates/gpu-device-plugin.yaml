@@ -23,17 +23,20 @@ NOTE: deliberately NO `helm.sh/resource-policy: keep` here — the whole point o
 #564 is that this object shares the release lifecycle and IS removed on
 uninstall (contrast the PVCs in docs/MIGRATIONS.md, which are kept on purpose).
 
-Windows: the installer's WSL2/CDI path advertises nvidia.com/gpu itself via a
-node-status patch and leaves this disabled. v0.14.5's NVML plugin registered 0
-GPUs there and pinned the resource at 0 (see
-docker/k3s-cuda/nvidia-runtimeclass.yaml). From v0.19.1 the plugin finds WSL by
-itself (`/dev/dxg`, its default `auto` discovery) and advertises one shared
-device, `all`: RFC-0175 D8's Windows device (W26), measured on v0.20.1 by spike
-S-W with runtimeClassName nvidia. Turning it on there is the Windows port
-(client-dev#1810 part 3), not this chart's default. The Windows non-WSL2
-fallback still applies the plugin imperatively because it must verify the node
-advertises a GPU before it writes the GPU request — an ordering this
-Helm-managed resource can't satisfy in a single install. See the issue thread.
+Windows: tracebloc's WSL distro runs this plugin as Linux does. The core inside
+the distro is Linux's, so it enables the plugin with runtimeClassName nvidia
+when the GPU is wired (client-dev#1810 part 3). From v0.19.1 the plugin finds
+WSL by itself (`/dev/dxg`, its default `auto` discovery) and advertises one
+shared device, `all`: RFC-0175 D8's Windows device (W26), measured on v0.20.1 by
+spike S-W. v0.14.5's NVML plugin registered 0 GPUs there and pinned the resource
+at 0 (see docker/k3s-cuda/nvidia-runtimeclass.yaml).
+
+The PowerShell core (scripts/install-k8s.ps1) leaves this disabled until
+client-dev#2133 retires it. Its WSL2/CDI path advertises nvidia.com/gpu itself
+via a node-status patch. Its non-WSL2 fallback applies the plugin imperatively,
+because it must verify the node advertises a GPU before it writes the GPU
+request — an ordering this Helm-managed resource can't satisfy in a single
+install. See the issue thread.
 */ -}}
 {{- /*
 Nil-safe access via the chart's `default dict` pattern (mirrors resource-monitor
@@ -109,8 +112,10 @@ spec:
       # enumerate GPUs — otherwise the pod runs under the default runtime, sees no
       # device, and registers 0. The Linux installer sets this to "nvidia" only when
       # the GPU is wired. On k3d the RuntimeClass is baked into the k3s-cuda node
-      # image; on native k3s, k3s creates it when it finds the host's NVIDIA toolkit.
-      # Left unset on Windows/WSL2 (that path doesn't run this plugin) and CPU.
+      # image; on native k3s, k3s creates it when it finds the host's NVIDIA toolkit,
+      # inside tracebloc's WSL distro too (client-dev#1810 part 3). Left unset on
+      # CPU, and by the PowerShell core, whose path doesn't run this plugin, until
+      # client-dev#2133 retires it.
       runtimeClassName: {{ . | quote }}
       {{- end }}
       # NOT NEEDED, and no ServiceAccount is named — so without this the pod

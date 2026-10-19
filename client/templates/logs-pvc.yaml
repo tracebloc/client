@@ -1,6 +1,7 @@
 {{- $name := include "tracebloc.clientLogsPvc" . -}}
 {{- $storage := include "tracebloc.clientLogsStorage" . -}}
-{{- if (default dict .Values.hostPath).enabled }}
+{{- $hostPath := include "tracebloc.claimHostPath" (dict "root" . "claim" "logs") }}
+{{- if $hostPath }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -8,7 +9,7 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  storageClassName: {{ include "tracebloc.claimStorageClass" (dict "root" . "claim" "logs") }}
   capacity:
     storage: {{ $storage }}
   accessModes:
@@ -17,7 +18,7 @@ spec:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: {{ include "tracebloc.hostPathRoot" . }}/{{ .Release.Name }}/logs
+    path: {{ $hostPath }}
     type: DirectoryOrCreate
 ---
 {{- end }}
@@ -31,9 +32,9 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  storageClassName: {{ include "tracebloc.claimStorageClass" (dict "root" . "claim" "logs") }}
   accessModes:
-    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .Values.hostPath).enabled | default false)) }}
+    - {{ include "tracebloc.claimAccessMode" (dict "root" . "claim" "logs") }}
   resources:
     requests:
       storage: {{ $storage }}

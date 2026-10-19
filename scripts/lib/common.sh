@@ -149,9 +149,13 @@ tb_client_env() {
 # the same unknown->prod fallback as `_backend_url`, so the two can never
 # disagree about which environment an install belongs to.
 #
-#   $1 = path under the dashboard (default "clients"; pass "" for the bare host)
+#   $1 = path under the dashboard (default "secure-environment"; pass "" for the bare host)
+#
+# The default is My Secure Environment, the page that shows this client and
+# whether it is connected. It was "clients" until the Clients page retired
+# (frontend-app#2277): /clients now only redirects there.
 _dashboard_url() {
-  local path="${1-clients}" base
+  local path="${1-secure-environment}" base
   # Bare call, no explicit fallback: tb_client_env's own ambient-env path
   # already reads TRACEBLOC_ENV alias-first, and an unset/unrecognised result
   # lands in the *) branch below the same way an explicit "prod" would --
@@ -164,6 +168,19 @@ _dashboard_url() {
   esac
   if [[ -n "$path" ]]; then printf '%s/%s' "$base" "$path"; else printf '%s' "$base"; fi
 }
+
+# _credential_file_cmd / _credential_file_load_cmd — where a secure environment's
+# Client ID and password come from, for every line that tells someone. The
+# Clients page that showed them is retired (frontend-app#2277), and My Secure
+# Environment shows neither. An interactive install needs no pair at all:
+# provision_client signs in through the browser. An unattended one creates the
+# pair on a machine signed in to tracebloc, which writes it to tb.env, then loads
+# that file in the shell it installs from (docs: environment-setup/setup-guide).
+# Here, not in install-client-helm.sh, for the reason `_dashboard_url` is: the
+# summary's bad_creds outcome prints it too, and summary.sh sources neither
+# sibling. common.bats holds every bash lib to spelling the commands only here.
+_credential_file_cmd()      { printf '%s' 'tracebloc client create --no-cluster --yes --credential-file tb.env'; }
+_credential_file_load_cmd() { printf '%s' 'set -a; . ./tb.env; set +a'; }
 
 # curl_secure — the one way this installer fetches anything.
 #
@@ -1792,13 +1809,14 @@ TRACEBLOC_MAC_KERNEL_IMAGE="ghcr.io/tracebloc/apple-container-kernel"
 TRACEBLOC_MAC_KERNEL_SHA256="fb2cfb79eb1ae19447a85d75682d7fa5cfec97e24beb2609a492b806e8072c8d"
 # The NVIDIA GPU floors (facts.env NVIDIA_DRIVER_FLOOR_LINUX / NVIDIA_COMPUTE_CAP_FLOOR /
 # NVIDIA_DRIVER_HARD_FLOOR_LINUX, stamped by check-facts.sh --write). Below the
-# compute-capability floor or the hard driver floor (the CUDA 12 minimum) detect-gpu.sh
-# leaves the GPU unwired and the install runs CPU-only; below the driver floor it
-# warns and wires the GPU anyway. Policy, so no TRACEBLOC_* override.
-# shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh and gpu-nvidia.sh
-TB_NVIDIA_DRIVER_FLOOR="550"
+# compute-capability floor or the hard driver floor (the CUDA 13 minimum) detect-gpu.sh
+# leaves the GPU unwired and the install runs CPU-only. The driver floor is the driver
+# the installer installs and asks for, never below the hard floor. Policy, so no
+# TRACEBLOC_* override.
+# shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh, gpu-nvidia.sh and gpu-plugins.sh
+TB_NVIDIA_DRIVER_FLOOR="580"
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
-TB_NVIDIA_DRIVER_HARD_FLOOR="525.60.13"
+TB_NVIDIA_DRIVER_HARD_FLOOR="580"
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
 TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
 # Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
@@ -1974,9 +1992,8 @@ amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
 # step keys on exactly nvidia or amd, so an _unsupported vendor sets nothing up.
 GPU_VENDOR="none"
 NVIDIA_DRIVER_OK=false
-# detect-gpu.sh's floor verdict for a present NVIDIA driver: ok | below-driver |
-# below-hard-floor | below-compute | unreadable. Empty = not judged (no NVIDIA driver
-# on the host yet).
+# detect-gpu.sh's floor verdict for a present NVIDIA driver: ok | below-hard-floor |
+# below-compute | unreadable. Empty = not judged (no NVIDIA driver on the host yet).
 TB_GPU_FLOOR_VERDICT=""
 # Why the GPU was left off as UNSUPPORTED, for the platform (client-dev#1633): one
 # human sentence and the card's name, set by detect-gpu.sh's floor gate on
@@ -2085,14 +2102,12 @@ _gpu_wired() {
 }
 
 # True when detect_gpu's floor verdict skips the GPU: below-compute (the card is too
-# old for the images), below-hard-floor (the driver is older than the CUDA 12 minimum,
-# so the images cannot initialise CUDA, client-dev#1632) or unreadable (cannot tell).
-# The GPU steps then install no
-# toolkit and never set TRACEBLOC_GPU_WIRED, so the install runs CPU-only; detect_gpu has
-# already printed why and the remedy. below-driver does NOT skip: detect_gpu warned,
-# and the GPU is wired (Lukas, 2026-09-30, client-dev#1355: the floor is advice until
-# spike S-G measures it). Not judged (no driver yet, the driver-install path) is not
-# a skip either.
+# old for the images), below-hard-floor (the driver is older than the CUDA 13 minimum
+# tracebloc's GPU images need, client-dev#1632) or unreadable (cannot tell). The GPU
+# steps then install no toolkit and never set TRACEBLOC_GPU_WIRED, so the install runs
+# CPU-only; detect_gpu has already printed why and the remedy. Every verdict that is
+# not ok skips: there is no warning band (2026-10-18). Not judged (no driver yet, the
+# driver-install path) is not a skip.
 _gpu_floor_skips() {
   case "${TB_GPU_FLOOR_VERDICT:-}" in
     below-compute|below-hard-floor|unreadable) return 0 ;;
@@ -2376,7 +2391,7 @@ TB_SUBSTRATE_FRESH_MACOS="k3s"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
-TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule wsl-distro logon-task kube-context group apple-container container-node"
+TB_ARTEFACT_KINDS="k3d-cluster binary launch-agent launch-daemon helm-release k3s-install file firewall-rule wsl-distro logon-task kube-context group apple-container container-node job-data engine-bundles"
 TB_ARTEFACT_FLAGS="created_by_prepare_host"
 # shellcheck disable=SC2088  # a template: tb_record_path substitutes the ~, never the shell
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
@@ -2834,10 +2849,10 @@ _tb_record_substrate_in() {
 #  as the install goes: tb_record_write KIND ID PATH [FLAG=true|false] records
 #  one artefact the moment it exists, and tb_record_write alone refreshes the
 #  other fields. FLAG is one boolean member the schema declares for an artefact
-#  (TB_ARTEFACT_FLAGS: created_by_prepare_host, on a group). The
-#  format is fixed (one artefact object per line) because the writer reads its
-#  own previous output back: an artefact an earlier run recorded is kept, and so
-#  is a field this run has not decided yet. No jq or python3 on this path.
+#  (TB_ARTEFACT_FLAGS: created_by_prepare_host, on a group). The writer reads its
+#  previous output back: an artefact an earlier run recorded is kept
+#  (_tb_record_artefacts, any layout), and so is a field this run has not decided
+#  yet (_tb_record_prior, the writer's layout). No jq or python3 on this path.
 #  Best-effort: a record that cannot be written is logged, never fatal.
 #  Written only once main() has armed it, after the refusals, when the run is
 #  committed to installing. Assigned here, never read from the environment: a
@@ -2955,6 +2970,96 @@ _tb_record_field() {
   printf '%s' "${p:-null}"
 }
 
+# _tb_record_artefacts -- the artefacts of the record text on stdin, one per line
+# in the writer's own form (_tb_record_render), so a record reformatted or with
+# its keys reordered (jq, an editor, json.dump(indent=2)) keeps every artefact
+# and the kind+id+path match still finds it. Fails when the text holds anything
+# it cannot read as a record of declared artefact members: the caller must not
+# rewrite what it could not read. No text, no artefacts.
+_tb_record_artefacts() {
+  LC_ALL=C awk -v flags="$TB_ARTEFACT_FLAGS" '
+    { text = text $0 "\n" }
+    function lex(s,   n, i, j, c) {
+      n = length(s); i = 1; nt = 0
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == " " || c == "\t" || c == "\r" || c == "\n") { i++; continue }
+        if (c == "\"") {
+          for (j = i + 1; j <= n; j++) {
+            c = substr(s, j, 1)
+            if (c == "\\") { j++; continue }
+            if (c == "\"" || c == "\n") break
+          }
+          if (j > n || c != "\"") return 0
+          tok[++nt] = substr(s, i, j - i + 1); i = j + 1; continue
+        }
+        if (index("{}[]:,", c)) { tok[++nt] = c; i++; continue }
+        for (j = i; j <= n && index("{}[]:,\" \t\r\n", substr(s, j, 1)) == 0; j++) ;
+        tok[++nt] = substr(s, i, j - i); i = j
+      }
+      return 1
+    }
+    function scalar(t) { return substr(t, 1, 1) == "\"" || t == "true" || t == "false" || t == "null" }
+    # value(p) -- the token after the value starting at p, or 0 when it is not one.
+    function value(p,   d) {
+      if (scalar(tok[p]) || tok[p] ~ /^-?[0-9]/) return p + 1
+      if (tok[p] != "{" && tok[p] != "[") return 0
+      for (d = 0; p <= nt; p++) {
+        if (tok[p] == "{" || tok[p] == "[") d++
+        else if (tok[p] == "}" || tok[p] == "]") { if (--d == 0) return p + 1 }
+      }
+      return 0
+    }
+    # artefact(p) -- one artefact object at p printed in the writer form; the token
+    # after it, or 0.
+    function artefact(p,   k, v, f, nf, i, line) {
+      if (tok[p++] != "{") return 0
+      split("", m)
+      while (tok[p] != "}") {
+        k = tok[p]; v = tok[p + 2]
+        if (k !~ /^"[a-z_]+"$/ || tok[p + 1] != ":" || !scalar(v) || (k in m)) return 0
+        m[k] = v; p += 3
+        if (tok[p] == ",") p++
+        else if (tok[p] != "}") return 0
+      }
+      if (!("\"kind\"" in m) || !("\"id\"" in m) || !("\"path\"" in m) || !("\"created_at\"" in m)) return 0
+      line = "{\"kind\": " m["\"kind\""] ", \"id\": " m["\"id\""] ", \"path\": " m["\"path\""] ", "
+      nf = split(flags, f, " ")
+      for (i = 1; i <= nf; i++) {
+        k = "\"" f[i] "\""
+        if (k in m) { line = line k ": " m[k] ", "; delete m[k] }
+      }
+      line = line "\"created_at\": " m["\"created_at\""] "}"
+      delete m["\"kind\""]; delete m["\"id\""]; delete m["\"path\""]; delete m["\"created_at\""]
+      for (k in m) return 0
+      out[++no] = line
+      return p + 1
+    }
+    END {
+      if (!lex(text)) exit 1
+      if (nt == 0) exit 0
+      if (tok[1] != "{") exit 1
+      p = 2
+      while (tok[p] != "}") {
+        if (substr(tok[p], 1, 1) != "\"" || tok[p + 1] != ":") exit 1
+        if (tok[p] == "\"artefacts\"") {
+          if (seen++ || tok[p + 2] != "[") exit 1
+          p += 3
+          while (tok[p] != "]") {
+            if (!(p = artefact(p))) exit 1
+            if (tok[p] == ",") p++
+            else if (tok[p] != "]") exit 1
+          }
+          p++
+        } else if (!(p = value(p + 2))) exit 1
+        if (tok[p] == ",") p++
+        else if (tok[p] != "}") exit 1
+      }
+      if (p != nt) exit 1
+      for (i = 1; i <= no; i++) print out[i]
+    }'
+}
+
 tb_record_write() {
   # The record's home is tb_record_path's: in prepared mode the scratch directory,
   # so a prepare-host run with HOME unset (systemd, cloud-init, env -i) still records.
@@ -2964,7 +3069,10 @@ tb_record_write() {
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$dir" 2>/dev/null || { log "Install record: couldn't create ${dir}; not recorded."; return 0; }
   if [[ -f "$rec" ]]; then prior="$(cat "$rec" 2>/dev/null || true)"; fi
-  arts="$(printf '%s\n' "$prior" | sed -n 's/^    \({"kind": .*}\),\{0,1\}$/\1/p')"
+  if ! arts="$(printf '%s\n' "$prior" | _tb_record_artefacts)"; then
+    log "Install record: couldn't read the artefacts in ${rec}; left as it is${1:+, ${1} ${2:-} not recorded}."
+    return 0
+  fi
   if [[ -n "${1:-}" ]]; then
     # A kind the schema does not declare would make the whole record invalid, so
     # it is refused by name and the record keeps what it had.

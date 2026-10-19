@@ -30,6 +30,12 @@ On a new Linux machine the installer sets up **native k3s**: Kubernetes runs on 
 
 kubectl comes with k3s. The installer installs no Docker and no k3d. k3s lives in `/usr/local/bin/k3s`, `/etc/rancher/k3s` and `/var/lib/rancher/k3s`, and runs as the `k3s` service. `tracebloc delete` removes them.
 
+**An NVIDIA GPU.** GPU training needs NVIDIA driver R580 or newer (CUDA 13). With an older driver the installer sets the machine up in CPU mode. To use the GPU, update the driver, reboot, and run the installer again. On Ubuntu, this command updates it:
+
+```bash
+sudo ubuntu-drivers install --gpgpu nvidia:580-server
+```
+
 **Without administrator rights.** An administrator runs this once, with your user name in place of `<user>`:
 
 ```bash
@@ -74,7 +80,7 @@ On a new Mac with Apple silicon and macOS 26 or later, the installer sets up **k
 | macOS | 26 or later. The installer stops on an older version. |
 | Administrator rights | None. |
 | Memory | 16 GB recommended. The node is a VM that holds part of the Mac's memory while it runs: 6 GB of an 8 GB Mac, 11 GB of a 16 GB Mac, 12 GB of a 24 GB Mac, and 16 GB of a Mac with 32 GB or more. 11 GB fits the smallest training run. On a smaller Mac, the installer stops before it creates the node if a training run would not fit beside the platform. |
-| Disk | At least 10 GB free, and 20 GB recommended, on the disk that holds `~/Library/Application Support/tracebloc/container`, where the node's images and its volume are kept. The installer stops below 10 GB. The volume grows as data is written, up to 64 GB. |
+| Disk | At least 10 GB free, and 20 GB recommended, on the disk that holds `~/Library/Application Support/tracebloc/container`, where the node's images and its volume are kept. The installer stops below 10 GB. The volume grows as data is written, up to 64 GB. The installer checks the disk that holds your job data too. |
 | CPU | 2 cores, 4 recommended. The node gets all but one of them. |
 | Network | Outbound HTTPS (port 443) to the hosts below |
 
@@ -83,10 +89,11 @@ On a new Mac with Apple silicon and macOS 26 or later, the installer sets up **k
 - Apple's `container` runtime, from its signed package, in `~/Library/Application Support/tracebloc/container`;
 - the Linux kernel the node boots (`ghcr.io/tracebloc/apple-container-kernel`) and the k3s node image (`rancher/k3s`, by digest);
 - a login item, `io.tracebloc.node`, that keeps the node running and brings it back when you log in again;
+- a folder for your job data, `~/.tracebloc/job-data`: the datasets, logs and resume points training uses. Only you can open it.
 - kubectl and Helm in `~/.local/bin`;
 - the tracebloc CLI.
 
-The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc delete` removes the node, its login item and the runtime.
+The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc delete` removes the node, its login item, the runtime and your job data.
 
 **The one prompt.** When the node first starts, macOS asks whether `container-runtime-linux` may find devices on your local network. It is part of Apple's runtime, and it makes the cluster's API reachable from this Mac only. Click Allow. The installer waits up to 2 minutes for your answer. Without it, the installer stops and says where to allow it: System Settings › Privacy & Security › Local Network.
 
@@ -146,6 +153,8 @@ The installer installs no Docker Desktop, no winget packages and no k3d. `traceb
 **A proxy.** Set `HTTPS_PROXY`, and `HTTP_PROXY` and `NO_PROXY` if your network needs them, in Windows' environment before the install. The installer stops before it sets up the distro if a proxy variable holds a value the cluster could not use. Windows' own downloads use `HTTPS_PROXY`. The installer hands these variables into the distro, and k3s gets them there.
 
 **A proxy that inspects TLS.** Its root certificate needs no extra step. The installer copies this computer's trusted root certificates, the machine's and the signed-in user's, into the distro before its first download there. It stops if the distro's trust bundle does not hold every one, and restarts k3s if it already runs, so k3s reads them too.
+
+**An NVIDIA GPU.** GPU training needs NVIDIA driver R580 or newer (CUDA 13), from NVIDIA's download page, https://www.nvidia.com/Download/index.aspx. With an older driver the installer sets the machine up in CPU mode. To use the GPU, update the driver, reboot, and run the installer again.
 
 **Hosts.** Windows downloads the installer and the tracebloc CLI from `github.com`, whose release files come from `release-assets.githubusercontent.com`, and the distro's image from `ghcr.io`. Inside the distro, the installer checks each of these before it starts. The first four rows are always needed. The distro's image carries k3s, so the k3s release is needed only on a run that upgrades it. Helm is needed until Helm is installed.
 

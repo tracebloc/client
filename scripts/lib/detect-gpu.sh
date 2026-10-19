@@ -81,10 +81,10 @@ _nvidia_pre_turing_name() {
 # words the Windows installer hands to the core in WSL (_nvidia_gpu_wsl_verdict). Declared
 # once, here: gpu-floor.bats holds this function's echoes to it, and install-wsl.Tests.ps1
 # the Windows verdict's returns.
-_NVIDIA_GPU_FLOOR_VERDICTS=(ok below-driver below-hard-floor below-compute unreadable)
+_NVIDIA_GPU_FLOOR_VERDICTS=(ok below-hard-floor below-compute unreadable)
 
 # _nvidia_gpu_floor_verdict DRIVERS CAPS DRIVER_FLOOR CAP_FLOOR HARD_FLOOR [NAMES] -- pure:
-# prints ok, below-driver, below-hard-floor, below-compute or unreadable. DRIVERS, CAPS
+# prints ok, below-hard-floor, below-compute or unreadable. DRIVERS, CAPS
 # and NAMES are nvidia-smi's driver_version, compute_cap and name answers, one line per
 # GPU, queried SEPARATELY. The lowest driver and compute capability across all GPUs is
 # what counts.
@@ -94,11 +94,13 @@ _NVIDIA_GPU_FLOOR_VERDICTS=(ok below-driver below-hard-floor below-compute unrea
 #   - A driver too old to know compute_cap (the query fails) is judged by the card's
 #     NAME: a known pre-Turing family is below-compute (client-dev#1631, a GT 710 on
 #     its last driver). A name this cannot classify is judged on the driver alone.
-#   - Below HARD_FLOOR (the CUDA 12 minimum) the images cannot initialise CUDA at all:
-#     below-hard-floor skips the GPU (client-dev#1632). Between it and DRIVER_FLOOR it
-#     is below-driver, which only warns.
-#   - A driver at or above the floor always answers compute_cap, so there a failed
-#     answer is unreadable.
+#   - Below HARD_FLOOR (the CUDA 13 minimum tracebloc's GPU images need) it is
+#     below-hard-floor, which skips the GPU (client-dev#1632). There is no warning
+#     band: every driver at or above HARD_FLOOR is judged on the card alone.
+#     DRIVER_FLOOR is not compared, only read: the gate names it as the update, so a
+#     floor that is not a version is unreadable, never a pass.
+#   - A driver at or above the hard floor always answers compute_cap, so there a
+#     failed answer is unreadable.
 _nvidia_gpu_floor_verdict() {
   local drv cap cap_ok=1
   if ! _tb_is_version "$3" || ! _tb_is_version "$4" || ! _tb_is_version "${5:-}"; then echo unreadable; return 0; fi
@@ -107,7 +109,6 @@ _nvidia_gpu_floor_verdict() {
   if (( cap_ok )) && ! _tb_version_ge "$cap" "$4"; then echo below-compute; return 0; fi
   if (( ! cap_ok )) && _nvidia_pre_turing_name "${6:-}" >/dev/null; then echo below-compute; return 0; fi
   if ! _tb_version_ge "$drv" "$5"; then echo below-hard-floor; return 0; fi
-  if ! _tb_version_ge "$drv" "$3"; then echo below-driver; return 0; fi
   if (( ! cap_ok )); then echo unreadable; return 0; fi
   echo ok
 }
@@ -136,11 +137,12 @@ _nvidia_unsupported_name() {
 
 # _nvidia_gpu_floor_gate DRIVERS CAPS [NAMES] -- judge the host against the stamped
 # floors, record the verdict in TB_GPU_FLOOR_VERDICT, and say what it means, once.
-#   below-driver                the floor, this driver and the upgrade; the GPU is
-#                               still wired
+#   ok                          nothing is said; the GPU is wired
 #   below-compute, below-hard-floor, unreadable
 #                               the GPU steps install and wire nothing
-#                               (_gpu_floor_skips), so the install runs CPU-only
+#                               (_gpu_floor_skips), so the install runs CPU-only;
+#                               below-hard-floor prints the update to the driver
+#                               floor and says to re-run the installer
 # below-compute and below-hard-floor also set TB_GPU_UNSUPPORTED_REASON / _NAME, which
 # the chart passes to the platform (client-dev#1633), and TB_GPU_UNSUPPORTED_CODE, the
 # machine-readable kind beside the sentence (compute_too_old / driver_too_old,
@@ -163,32 +165,15 @@ _nvidia_gpu_floor_gate() {
   fi
   case "$TB_GPU_FLOOR_VERDICT" in
     ok) ;;
-    below-driver)
-      # A driver too old to answer compute_cap: the GPU is kept (the decision on
-      # #1355), and the warning says the card itself could not be checked either.
-      if [[ "$cap" == unknown ]]; then
-        warn "NVIDIA driver ${drv} is older than ${floor}, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability — continuing with the GPU, but it may not work until the driver is upgraded."
-      else
-        warn "NVIDIA driver ${drv} is older than ${floor}, the driver tracebloc recommends for GPU training — continuing with the GPU; if GPU training fails on this machine, upgrade the driver."
-      fi
-      if [[ -n "$cmd" ]]; then
-        hint "To upgrade: ${cmd}, reboot, then re-run the installer."
-      else
-        hint "To upgrade: install NVIDIA driver ${floor} or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
-      fi
-      # The measured remedy for keeping an older driver (S-G, tracebloc/backend#4830):
-      # at 535 the GPUs failed to initialise and the node advertised 0, until
-      # persistence mode was on from boot. A driver too old to report compute_cap is
-      # older than anything S-G ran, so it gets the upgrade alone.
-      if [[ "$cap" != unknown ]]; then
-        hint "Or keep this driver: turn persistence mode on from boot (nvidia-persistenced, or 'sudo nvidia-smi -pm 1' before the cluster starts), reboot, then re-run the installer. Driver 535 needed it to bring the GPU up."
-      fi
-      ;;
     below-hard-floor)
-      # Below the CUDA 12 minimum the images' torch cannot initialise CUDA at all, so
-      # the GPU would be advertised and unusable (client-dev#1632).
-      warn "NVIDIA driver ${drv} is older than ${hard}, the oldest driver tracebloc's GPU images can use (CUDA 12) — this machine will run in CPU mode."
-      TB_GPU_UNSUPPORTED_REASON="The NVIDIA driver on this machine (${drv}) is older than ${hard}, the oldest driver tracebloc's GPU training images can use, so this machine runs on CPU until the driver is updated."
+      # Below the CUDA 13 minimum tracebloc's GPU images need (torch 2.14.1+cu130,
+      # tracebloc-engine#1712) the GPU would be advertised and unusable
+      # (client-dev#1632), so it is left off: there is no warning band (2026-10-18).
+      # The update is to the driver floor, and the GPU is set up only by a run on the
+      # new driver, so the hint says to re-run the installer. Word for word what
+      # install-wsl.ps1 says on Windows (install-wsl.Tests.ps1 holds it).
+      warn "NVIDIA driver ${drv} is older than ${hard}, the driver tracebloc's GPU training images need (CUDA 13) — this machine will run in CPU mode."
+      TB_GPU_UNSUPPORTED_REASON="The NVIDIA driver on this machine (${drv}) is older than ${hard}, the driver tracebloc's GPU training images need (CUDA 13), so this machine runs on CPU until the driver is updated to ${floor} or newer and the installer is run again."
       TB_GPU_UNSUPPORTED_CODE="driver_too_old"
       TB_GPU_UNSUPPORTED_NAME="$(_nvidia_unsupported_name "$names" "$2" "$cap_floor")"
       if [[ -n "$cmd" ]]; then
@@ -416,7 +401,7 @@ _gpu_wsl_cannot_see_report() {
 # file's own reports, the same sentences, without saying them again; wsl_cannot_see_gpu
 # with the host's own sentence as _REASON (_gpu_wsl_cannot_see_report). A verdict on the
 # line is an NVIDIA GPU the host judged, taken as _nvidia_gpu_wsl_verdict takes it; one
-# the host let through (ok, below-driver) whose driver does not answer in here, and a
+# the host let through (ok) whose driver does not answer in here, and a
 # code this installer does not know, run CPU-only, said.
 _gpu_wsl_host_report() {
   local code="${TRACEBLOC_WSL_GPU_UNSUPPORTED_CODE:-}"
@@ -438,7 +423,7 @@ _gpu_wsl_host_report() {
   if [[ -n "${TRACEBLOC_WSL_GPU_VERDICT:-}" ]]; then
     _nvidia_gpu_wsl_verdict ""
     case "$TB_GPU_FLOOR_VERDICT" in
-      ok|below-driver)
+      ok)
         warn "The Windows installer found an NVIDIA GPU, but its driver does not answer inside the tracebloc WSL distro, so this machine will run in CPU mode."
         hint "Re-run the installer from Windows. If this comes back, share this output with tracebloc support."
         ;;
@@ -453,12 +438,12 @@ _gpu_wsl_host_report() {
 # cannot give a container this machine's NVIDIA GPU: k3d's `docker run --gpus all` of the
 # GPU node image (k3d.sh), or k3s's containerd not registering the NVIDIA runtime
 # (k3s.sh). RUNTIME names it in the sentence ("Docker", "k3s"). Reports
-# runtime_cannot_see_gpu ONLY for a GPU the floor gate let through (ok or below-driver,
-# with a driver that answered nvidia-smi): a card or driver already reported unsupported
+# runtime_cannot_see_gpu ONLY for a GPU the floor gate let through (ok, with a driver
+# that answered nvidia-smi): a card or driver already reported unsupported
 # keeps that reason, and a GPU this run could not read is "cannot tell", never blind.
 _gpu_container_blind() {
   [[ "${GPU_VENDOR:-}" == nvidia && "${NVIDIA_DRIVER_OK:-false}" == true ]] || return 0
-  case "${TB_GPU_FLOOR_VERDICT:-}" in ok|below-driver) ;; *) return 0 ;; esac
+  case "${TB_GPU_FLOOR_VERDICT:-}" in ok) ;; *) return 0 ;; esac
   [[ -z "${TB_GPU_UNSUPPORTED_CODE:-}" ]] || return 0
   local name="${TB_GPU_NVIDIA_NAMES:-}"
   name="${name%%$'\n'*}"; name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"

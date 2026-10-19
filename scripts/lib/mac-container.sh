@@ -537,7 +537,8 @@ _mac_ct_start_system() {
 #    - all its state is one volume, named like the container, at /var/lib/rancher/k3s;
 #    - --cap-add ALL --read-only-path NONE --masked-path NONE, without which k3s stops
 #      at "open /proc/sys/kernel/panic: read-only file system";
-#    - the API published on 127.0.0.1:6443 only;
+#    - the API published on 127.0.0.1:6443 only, and a packet filter inside the node
+#      (TB_MAC_CT_NODE_WALL) that drops what other VMs on this Mac send it;
 #    - --rosetta when Rosetta is installed, while the chart's MySQL pin is amd64;
 #    - a fixed node IP: the container's address changes on every start, so the node
 #      advertises a loopback alias, TB_MAC_CT_NODE_IP, that the entrypoint adds.
@@ -601,6 +602,14 @@ _mac_ct_start_system() {
 #  (_ensure_release_dirs) and the summary read them unchanged. The folders are frozen
 #  with the node, as its name and ranges are: an installed release's PVs name them, and
 #  hostPath volumes cannot move.
+#  The job-data folder (client-dev#2320, RFC-0185) is the node-local install's one folder
+#  on this Mac: the dataset, logs and resume claims live in it (the chart's jobData.path),
+#  so a job the Apple-GPU runner starts on the Mac reads them at the paths a pod does;
+#  k3s and MySQL stay in the node. It is the user's own, at mode 0700, and mounted at its
+#  own path like the hostPath folders (_mac_ct_job_data_dir, _mac_ct_job_data_private).
+#  Measured on the e2e Mac (spike run 39148554631): the node's file sharing checks no
+#  mode, so pods of any uid write it without opening it, and what they write is the
+#  user's on this Mac. Nothing chmods inside it: a chmod in the node would reach the Mac.
 #
 #  Step c reaches it through _mac_ct_create_cluster (part 6).
 # =============================================================================
@@ -609,6 +618,20 @@ _mac_ct_start_system() {
 TB_MAC_CT_NODE_IP="192.0.2.10"
 # The interface flannel uses inside the node (the container's only one).
 TB_MAC_CT_NODE_IFACE="eth0"
+# The port the node's API listens on, published on this Mac's 127.0.0.1 only
+# (_mac_ct_node_argv), and the one port the node's packet filter lets this Mac reach.
+TB_MAC_CT_NODE_API_PORT="6443"
+# The node's packet filter (client-dev#2297, RFC-0185 D10 item 4): a chain in the mangle
+# table of both IP families, which PREROUTING sends everything arriving on
+# TB_MAC_CT_NODE_IFACE through, before kube-proxy's NodePort DNAT can see it. Every VM on
+# this Mac shares the node's network, and the node listens on every address (the
+# kubelet's 10250, the API, every NodePort), so without it any of them reaches the
+# cluster. The chain lets back what answers the node's own connections, and this Mac,
+# the network's gateway, to the API port over IPv4 (the runtime's 127.0.0.1 forward
+# arrives from it); it drops the rest. The entrypoint sets it before k3s starts, on
+# every start (the VM's kernel keeps no rule across one), and _mac_ct_node_walled reads
+# it back.
+TB_MAC_CT_NODE_WALL="TRACEBLOC-WALL"
 # The volume's size: a sparse ext4 image, so it takes only what is written.
 TB_MAC_CT_NODE_VOLUME_SIZE="64g"
 # The volume's ext4 journal mode (`--opt journal=`): metadata journalled, data written
@@ -652,7 +675,11 @@ END { n = 0; m = 0; for (b in want) { n++; if (b in held) m++ }; print m, n; exi
 # is rebuilt from the image's copy and the roots handed in; roots that were not handed
 # in stop the node, since its image pulls would fail on an unknown issuer. An address
 # it cannot add, and that lo does not already carry, stops the node: k3s would
-# advertise an address nothing answers on.
+# advertise an address nothing answers on. Then it sets the packet filter
+# (TB_MAC_CT_NODE_WALL), with this Mac's address read from the node's IPv4 default route
+# (the VM's address changes on every start, and its network may not be the default
+# one). A node with no such route within 30 s, or a rule it cannot set, stops before
+# k3s: a node it cannot wall is never one other VMs can reach.
 TB_MAC_CT_NODE_ENTRY='set -e
 mkdir -p /etc/rancher/k3s
 printf "%s\n" "$1" > /etc/rancher/k3s/config.yaml
@@ -667,6 +694,25 @@ if [ -n "$4" ]; then
   mv "$b.tracebloc-new" "$b"
 fi
 ip addr add "$3/32" dev lo 2>/dev/null || case "$(ip -4 addr show dev lo)" in *"inet $3/32"*) ;; *) exit 1 ;; esac
+w() { "$@" || { echo "tracebloc: the node could not set its packet filter ($*)" >&2; exit 1; }; }
+e='"$TB_MAC_CT_NODE_IFACE"' c='"$TB_MAC_CT_NODE_WALL"' g="" n=0
+while :; do
+  r="$(ip -4 route show default 2>/dev/null)" || r=""
+  case "$r" in "default via "*" dev $e"|"default via "*" dev $e "*) g="${r#default via }"; g="${g%% *}" ;; esac
+  case "$g" in ""|*[!0-9.]*) g="" ;; *) break ;; esac
+  n=$((n + 1))
+  [ "$n" -lt 30 ] || { echo "tracebloc: the node has no IPv4 default route on $e, so its packet filter cannot tell this Mac from other VMs" >&2; exit 1; }
+  sleep 1
+done
+for f in iptables ip6tables; do
+  w "$f" -t mangle -N "$c"
+  w "$f" -t mangle -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+done
+w iptables -t mangle -A "$c" -s "$g" -p tcp --dport '"$TB_MAC_CT_NODE_API_PORT"' -j RETURN
+for f in iptables ip6tables; do
+  w "$f" -t mangle -A "$c" -j DROP
+  w "$f" -t mangle -I PREROUTING -i "$e" -j "$c"
+done
 exec /bin/k3s server'
 
 # _mac_ct_refuse_host -- refuse, each by name, a host or a setting the macOS node does
@@ -699,23 +745,78 @@ _mac_ct_refuse_host() {
   _native_k3s_check_version
 }
 
-# _mac_ct_hostpath_dirs -- the folders this run's hostPath storage asks the node to
-# mount, one a line: the hostPath root (_hostpath_root, HOST_DATA_DIR read as
+# _mac_ct_job_data_dir -- the macOS node's job-data folder (client-dev#2320), or nothing
+# when this run keeps no job data on this Mac. Under node-local only (hostpath keeps its
+# own tree). An installed release decides, once _native_k3s_release_storage has read it:
+# one that names a folder (jobData.path) keeps that folder, and one that names none (a
+# v1.11 Mac's: its claims are in the node and cannot move) gets none. Before the release
+# is read, the node decides: one made without any frozen mounts (run-args and no
+# hostpath file, a v1.11 node-local Mac's) gets none, so an upgrade neither recreates it
+# nor makes a folder its claims never use. Otherwise it is <data dir>/job-data, the data
+# dir read as validate_config reads HOST_DATA_DIR (_tb_home_path).
+_mac_ct_job_data_dir() {
+  [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] || return 0
+  case "${TRACEBLOC_JOB_DATA_KEPT:-}" in
+    1) printf '%s' "${TRACEBLOC_JOB_DATA_KEPT_DIR:-}"; return 0 ;;
+    0) return 0 ;;
+  esac
+  local base dir
+  if dir="$(_mac_ct_node_dir 2>/dev/null)" && [[ -e "${dir}/run-args" && ! -e "${dir}/hostpath" ]]; then
+    return 0
+  fi
+  base="$(_tb_home_path "${HOST_DATA_DIR:-}")"
+  [[ -n "$base" ]] || return 0
+  printf '%s/job-data' "${base%/}"
+}
+
+# _mac_ct_job_data_private DIR -- DIR is a folder of this user's at mode 0700, or prints
+# why and fails. A missing one is made (its parents as mkdir -p makes them) at 0700, and
+# one at another mode is set to it: never world-writable (RFC-0003's reason for leaving
+# hostpath), and nothing in the node needs more (see Part 3). A symbolic link, or a
+# folder that is not this user's, is refused, never chmodded: it is not a folder this
+# installer made. The checks are find's -user and -perm, which BSD and GNU read alike.
+_mac_ct_job_data_private() {
+  local d="$1" uid
+  uid="$(id -u)" || { echo "Apple container: cannot tell this user's uid (id -u), so whether ${d} is theirs cannot be told."; return 1; }
+  if [[ -L "$d" ]]; then
+    echo "The job-data folder ${d} is a symbolic link. It must be a folder of your own, so that training data on this Mac stays private to you. Remove the link, or point TRACEBLOC_HOST_DATA_DIR at another folder, then re-run."
+    return 1
+  fi
+  if [[ ! -e "$d" ]]; then
+    { mkdir -p "${d%/*}" && mkdir -m 0700 "$d"; } \
+      || { echo "Apple container: the job-data folder ${d} could not be made, so the node cannot mount it."; return 1; }
+  fi
+  [[ -d "$d" ]] || { echo "The job-data folder ${d} is there and is not a folder. Move it aside, or point TRACEBLOC_HOST_DATA_DIR at another folder, then re-run."; return 1; }
+  [[ -n "$(find "$d" -prune -user "$uid" 2>/dev/null)" ]] \
+    || { echo "The job-data folder ${d} is not yours (uid ${uid}), so training data in it would not be private to you. Point TRACEBLOC_HOST_DATA_DIR at a folder of your own, then re-run."; return 1; }
+  chmod 0700 "$d" 2>/dev/null \
+    || { echo "Apple container: could not set the job-data folder ${d} to mode 0700 (yours only)."; return 1; }
+  [[ -n "$(find "$d" -prune -perm 700 2>/dev/null)" ]] \
+    || { echo "Apple container: the job-data folder ${d} is not at mode 0700 after chmod, so whether it is private to you cannot be told."; return 1; }
+}
+
+# _mac_ct_hostpath_dirs -- the folders this run's storage asks the node to mount, one a
+# line. hostpath: the hostPath root (_hostpath_root, HOST_DATA_DIR read as
 # validate_config reads it, unless a release's own is kept) and the dataset folder (an
-# installed release's, else HOST_DATASET_DIR) when there is one. Nothing under
-# node-local. Prints why, and fails, for a folder the node cannot mount at its own
-# path: one that is not absolute, holds a ':' (`container run -v` splits on it) or a
-# line break, or lies in a system tree (_tb_system_path), where it would cover the
-# node's own files.
+# installed release's, else HOST_DATASET_DIR) when there is one. node-local: the
+# job-data folder (_mac_ct_job_data_dir), when there is one. Prints why, and fails, for
+# a folder the node cannot mount at its own path: one that is not absolute, holds a ':'
+# (`container run -v` splits on it) or a line break, or lies in a system tree
+# (_tb_system_path), where it would cover the node's own files.
 _mac_ct_hostpath_dirs() {
-  [[ "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]] || return 0
   local root ds d nl=$'\n'
-  root="$(_hostpath_root)"
-  # The refusal runs before validate_config: read this run's root as it will
-  # (_tb_home_path), so ~/data or a $HOME-relative one is not refused as relative.
-  [[ "${TB_HOSTPATH_KEPT:-}" == 1 ]] || root="$(_tb_home_path "$root")"
-  ds="${HOST_DATASET_DIR:-}"
-  [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
+  if [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]]; then
+    # node-local: the job-data folder, when this run keeps one (client-dev#2320).
+    root="$(_mac_ct_job_data_dir)"; ds=""
+    [[ -n "$root" ]] || return 0
+  else
+    root="$(_hostpath_root)"
+    # The refusal runs before validate_config: read this run's root as it will
+    # (_tb_home_path), so ~/data or a $HOME-relative one is not refused as relative.
+    [[ "${TB_HOSTPATH_KEPT:-}" == 1 ]] || root="$(_tb_home_path "$root")"
+    ds="${HOST_DATASET_DIR:-}"
+    [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
+  fi
   for d in "$root" "$ds"; do
     [[ -n "$d" ]] || continue
     if [[ "$d" != /* || "$d" == *:* || "$d" == *"$nl"* ]] || _tb_system_path "$d"; then
@@ -735,12 +836,15 @@ _mac_ct_hostpath_dirs() {
 # none frozen and this run is node-local. Prints why, and fails, when a folder cannot
 # be mounted, made, read back from DIR/hostpath, or frozen.
 _mac_ct_node_mounts() {
-  local file="${1}/hostpath" want got d off=""
+  local file="${1}/hostpath" want got d off="" jd why
   want="$(_mac_ct_hostpath_dirs)" || { printf '%s' "$want"; return 1; }
+  jd="$(_mac_ct_job_data_dir)"
   if [[ -e "$file" ]]; then
     got="$(cat "$file")" || { echo "Apple container: ${file} cannot be read, so this run cannot tell which hostPath folders the node mounts."; return 1; }
+    # A job-data folder the node lacks is not named here: whether this release needs it
+    # is decided once the release is read, and _mac_ct_hostpath_mounted stops it then.
     while IFS= read -r d; do
-      [[ -z "$d" ]] || grep -qxF -- "$d" <<<"$got" || off="${off:+${off}, }${d}"
+      [[ -z "$d" || "$d" == "$jd" ]] || grep -qxF -- "$d" <<<"$got" || off="${off:+${off}, }${d}"
     done <<<"$want"
     if [[ -n "$off" ]]; then
       warn "The macOS node mounts the hostPath folders it was made with (${got//$'\n'/, }), and this run asked for ${off}, which it does not mount: hostPath volumes can't move. To use another folder, remove tracebloc from this Mac, then install again with it." >&2
@@ -753,29 +857,51 @@ _mac_ct_node_mounts() {
   fi
   while IFS= read -r d; do
     [[ -n "$d" ]] || continue
+    if [[ -n "$jd" && "$d" == "$jd" ]]; then
+      why="$(_mac_ct_job_data_private "$d")" || { printf '%s' "$why"; return 1; }
+      continue
+    fi
     mkdir -p "$d" || { echo "Apple container: the hostPath folder ${d} is not there and could not be made, so the node cannot mount it. Make it (or mount the volume it is on), then re-run."; return 1; }
   done <<<"$got"
   printf '%s' "$got"
 }
 
-# _mac_ct_hostpath_mounted -- under hostpath, the folders the release's PVs will name
-# (_mac_ct_hostpath_dirs, after _native_k3s_release_storage has read the release) are
-# among the node's frozen mounts (_mac_ct_node_dir/hostpath), or the run stops by name
-# before the values are written: a PV naming a folder the node does not mount would put
-# its data inside the VM, not on this Mac. A frozen file that cannot be read is cannot
-# tell, and stops it too.
+# _mac_ct_hostpath_mounted -- the folders the release's PVs will name (_mac_ct_hostpath_dirs,
+# after _native_k3s_release_storage has read the release: hostpath's, or the job-data
+# folder) are among the node's frozen mounts (_mac_ct_node_dir/hostpath), or the run stops
+# by name before the values are written: a PV naming a folder the node does not mount
+# would put its data inside the VM, not on this Mac. The job-data folder is held private
+# again first (_mac_ct_job_data_private). A frozen file that cannot be read is cannot
+# tell, and stops it too. Nothing to check when the release names no folder.
 _mac_ct_hostpath_mounted() {
-  [[ "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]] || return 0
-  local want got dir d
+  local want got dir d jd why
   want="$(_mac_ct_hostpath_dirs)" || error "$want"
+  [[ -n "$want" ]] || return 0
+  jd="$(_mac_ct_job_data_dir)"
+  if [[ -n "$jd" ]]; then why="$(_mac_ct_job_data_private "$jd")" || error "$why"; fi
   dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's files are (above)."
   got="$(cat "${dir}/hostpath" 2>/dev/null)" \
     || error "Apple container: ${dir}/hostpath cannot be read, so this run cannot tell which hostPath folders the node mounts. It's safe to re-run this installer."
   while IFS= read -r d; do
     [[ -n "$d" ]] || continue
+    [[ "$d" != "$jd" ]] || grep -qxF -- "$d" <<<"$got" \
+      || error "The tracebloc release's job data is in ${d}, and the macOS node does not mount it (it mounts ${got:-nothing}): its data would land inside the node's VM, not on this Mac. Remove tracebloc from this Mac, then install again."
     grep -qxF -- "$d" <<<"$got" \
       || error "The tracebloc release's hostPath volumes are in ${d}, and the macOS node does not mount it (it mounts ${got//$'\n'/, }): its data would land inside the node's VM, not on this Mac. hostPath volumes can't move: re-run with the folders the node mounts, or remove tracebloc from this Mac, then install again."
   done <<<"$want"
+}
+
+# _mac_ct_job_data_record -- records the job-data folder (install-record kind job-data,
+# client-dev#2320), id = the node that mounts it, once the release's storage is decided
+# and the node is known to mount the folder (_mac_ct_hostpath_mounted). Only a release
+# that keeps its job data there records one, so the entry is also the Apple-GPU runner's
+# marker that it does (tracebloc/cli-dev#1305). Nothing without one.
+_mac_ct_job_data_record() {
+  local jd name
+  jd="$(_mac_ct_job_data_dir)"
+  [[ -n "$jd" ]] || return 0
+  name="$(_mac_ct_node_name)" || error "$name"
+  tb_record_write job-data "$name" "$jd"
 }
 
 # _mac_ct_node_name -- the node container's name, and its volume's: the kube context's
@@ -919,7 +1045,7 @@ _mac_ct_node_argv() {
     [[ -z "$d" ]] || TB_MAC_CT_NODE_ARGV+=(-v "${d}:${d}")
   done <<<"$TB_MAC_CT_NODE_MOUNTS"
   [[ -z "$TB_MAC_CT_NODE_PROXY_FILE" ]] || TB_MAC_CT_NODE_ARGV+=(--env-file "$TB_MAC_CT_NODE_PROXY_FILE")
-  TB_MAC_CT_NODE_ARGV+=(-p 127.0.0.1:6443:6443
+  TB_MAC_CT_NODE_ARGV+=(-p "127.0.0.1:${TB_MAC_CT_NODE_API_PORT}:${TB_MAC_CT_NODE_API_PORT}"
     --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY"
     sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$casum" "$token")
 }
@@ -1152,11 +1278,33 @@ _mac_ct_node_ca_held() {
   log "Apple container: the node trusts the corporate CA's ${said#* } root(s)."
 }
 
-# _mac_ct_ensure_node -- the node on the running system (part 2), Ready, recorded, and
-# its kubeconfig copied to _mac_ct_node_dir/k3s.yaml. Reuses a running node created with
-# this argv, starts a stopped one, recreates one created with another argv on its
-# volume, and refuses a container or a volume of its name that nothing shows this
-# installer made.
+# _mac_ct_node_walled CT NAME -- the node's packet filter, read back from the mangle
+# table of both IP families: PREROUTING's first rule sends TB_MAC_CT_NODE_IFACE through
+# TB_MAC_CT_NODE_WALL, and that chain's last rule drops. Anything else stops the run,
+# saying which family is open; a table that cannot be read back is cannot tell, and
+# stops it too: it is never read as walled.
+_mac_ct_node_walled() {
+  local ct="$1" name="$2" f out said err
+  err="$(mktemp)" || error "Apple container: cannot make a scratch file to read the node's packet filter back."
+  local jump="-A PREROUTING -i ${TB_MAC_CT_NODE_IFACE} -j ${TB_MAC_CT_NODE_WALL}" drop="-A ${TB_MAC_CT_NODE_WALL} -j DROP"
+  for f in iptables ip6tables; do
+    out="$(_bounded 30 "$ct" exec "$name" "$f" -w 10 -t mangle -S </dev/null 2>"$err")" && [[ -n "$out" ]] \
+      || { said="$(head -c 300 "$err" 2>/dev/null | tr '\n' ' ')"; rm -f "$err"; error "Apple container: the node's packet filter (${f} in ${name}) could not be read back${said:+ (${said% })}, so whether other VMs on this Mac can reach the cluster cannot be told. It's safe to re-run this installer."; }
+    rm -f "$err"
+    awk -v jump="$jump" -v chain="-A ${TB_MAC_CT_NODE_WALL} " -v drop="$drop" '
+      /^-A PREROUTING / && first == "" { first = $0 }
+      index($0, chain) == 1 { last = $0 }
+      END { exit !(first == jump && last == drop) }' <<<"$out" \
+      || error "Apple container: the node's packet filter is not set (${f} in ${name}: PREROUTING's first rule is not \"${jump}\", or the chain does not end in \"${drop}\"), so other VMs on this Mac could reach the cluster. Run this installer again; if it keeps failing, share this output with tracebloc support."
+  done
+  log "Apple container: the node's packet filter holds: other VMs on this Mac cannot reach it, and this Mac reaches its API only."
+}
+
+# _mac_ct_ensure_node -- the node on the running system (part 2), Ready, its packet
+# filter read back (_mac_ct_node_walled), recorded, and its kubeconfig copied to
+# _mac_ct_node_dir/k3s.yaml. Reuses a running node created with this argv, starts a
+# stopped one, recreates one created with another argv on its volume, and refuses a
+# container or a volume of its name that nothing shows this installer made.
 _mac_ct_ensure_node() {
   local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum
   local penv pold="" pchanged=""
@@ -1294,6 +1442,7 @@ _mac_ct_ensure_node() {
   else
     rm -f "${dir}/ca/${TB_MAC_CT_NODE_CA_ROOTS}"
   fi
+  _mac_ct_node_walled "$ct" "$name"
   (umask 077; _bounded 30 "$ct" exec "$name" cat /etc/rancher/k3s/k3s.yaml </dev/null > "${dir}/k3s.yaml.tmp") \
     && [[ -s "${dir}/k3s.yaml.tmp" ]] && mv "${dir}/k3s.yaml.tmp" "${dir}/k3s.yaml" \
     || { rm -f "${dir}/k3s.yaml.tmp"; error "Apple container: could not copy the node's kubeconfig out of ${name}. It's safe to re-run this installer."; }
@@ -1491,6 +1640,214 @@ _mac_ct_ensure_agent() {
   _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
     || error "Apple container: launchd did not load the login item ${plist}, so the node would not come back after a reboot. It's safe to re-run this installer."
   log "Apple container: the login item ${TB_MAC_CT_AGENT_LABEL} is loaded and runs ${bin} node ensure every ${TB_MAC_CT_AGENT_INTERVAL} s."
+}
+
+# ── Part 4b: the runner's login item io.tracebloc.runner ────────────────────
+#  The Apple-GPU runner (cli-dev#1305, RFC-0185 D2) is the CLI's hidden `tracebloc
+#  runner`: a node of this Mac's own cluster that runs GPU jobs as sandboxed processes
+#  on the Mac. A second login item keeps it running, beside io.tracebloc.node. It needs
+#  the chart's ServiceAccount (apple-gpu-runner-rbac.yaml), so step e sets it up right
+#  after the chart, not step c.
+#    - DARK until the CLI carries the runner. The CLI step b installed is asked:
+#      `tracebloc runner --released` exits 0 only in a release whose runner is switched
+#      on. Any other answer, an older CLI's unknown flag included, is "not released":
+#      no login item, and the chart's appleGpuRunner stays off. So the CLI's one
+#      switch decides both, and an installer newer than its CLI adds nothing.
+#    - Its kubeconfig names the API on 127.0.0.1:6443, the one server the runner dials,
+#      with the node's CA, and reads the runner's token from a file beside it. The token
+#      is a bound ServiceAccount token for TB_MAC_CT_RUNNER_TOKEN_S, issued again by every
+#      run, so an upgrade renews it; the runner re-reads the file. Both files are 0600,
+#      in a 0700 folder in the node's, so the runtime's removal takes them.
+#    - KeepAlive: launchd starts the runner again when it ends, at most once every
+#      TB_MAC_CT_RUNNER_THROTTLE_S. LimitLoadToSessionType Aqua and the environment as
+#      io.tracebloc.node's.
+#    - Not part of a CPU install: a runner that cannot be set up is a warning, and GPU
+#      jobs then run on the CPU (D3). It's safe to re-run the installer.
+TB_MAC_CT_RUNNER_LABEL="io.tracebloc.runner"
+# The chart's ServiceAccount for the runner (tracebloc.appleGpuRunnerAccount).
+TB_MAC_CT_RUNNER_ACCOUNT="tracebloc-runner"
+TB_MAC_CT_RUNNER_TOKEN_S=31536000
+TB_MAC_CT_RUNNER_THROTTLE_S=30
+TRACEBLOC_MAC_CT_RUNNER_PROBE_S=30
+# This run's answer to "does the CLI carry the runner?", asked once (_mac_ct_runner_on).
+# Cleared where the lib is sourced, so a value in the environment decides nothing.
+TRACEBLOC_MAC_CT_RUNNER_ON=""
+
+# _mac_ct_runner_released BIN -- 0 when BIN, an absolute path to an executable, answers
+# `runner --released` with exit 0 within TRACEBLOC_MAC_CT_RUNNER_PROBE_S; 1 for any other
+# answer, a run past the bound included. Its output goes to the install log.
+_mac_ct_runner_released() {
+  local bin="$1" rc=0
+  case "$bin" in /*) ;; *) return 1 ;; esac
+  [[ -f "$bin" && -x "$bin" ]] || return 1
+  TRACEBLOC_SKIP_TELEMETRY=1 _bounded "$TRACEBLOC_MAC_CT_RUNNER_PROBE_S" "$bin" runner --released \
+    </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
+  [[ "$rc" -eq 0 ]]
+}
+
+# _mac_ct_runner_on -- 0 when this run sets up the runner: the macOS node (native k3s on a
+# Mac) and a CLI that carries it (TRACEBLOC_CLI_BIN, step b). Asked once a run; the chart's
+# value and the login item read the same answer.
+_mac_ct_runner_on() {
+  if [[ -z "$TRACEBLOC_MAC_CT_RUNNER_ON" ]]; then
+    TRACEBLOC_MAC_CT_RUNNER_ON=0
+    if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]] \
+      && _mac_ct_runner_released "${TRACEBLOC_CLI_BIN:-}"; then
+      TRACEBLOC_MAC_CT_RUNNER_ON=1
+    fi
+  fi
+  [[ "$TRACEBLOC_MAC_CT_RUNNER_ON" == 1 ]]
+}
+
+# _mac_ct_runner_off_why -- why _mac_ct_runner_on said no, from the same conditions it read
+# (the CLI is not asked again): the substrate, the CLI's path, or the CLI's answer.
+_mac_ct_runner_off_why() {
+  local bin="${TRACEBLOC_CLI_BIN:-}"
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
+    printf 'it runs only on the macOS node (native k3s), and this Mac runs %s' "${TRACEBLOC_SUBSTRATE_RESOLVED:-no substrate}"
+  elif [[ "$bin" != /* || ! -f "$bin" || ! -x "$bin" ]]; then
+    printf 'this run has no tracebloc CLI to ask (%s)' "${bin:-none}"
+  else
+    printf 'the tracebloc CLI at %s did not report it as part of its release' "$bin"
+  fi
+}
+
+_mac_ct_runner_dir() { local d; d="$(_mac_ct_node_dir)" || return 1; printf '%s/runner' "$d"; }
+_mac_ct_runner_log() { local logs; logs="$(_mac_ct_log_root)" || return 1; printf '%s/tracebloc-runner.log' "$logs"; }
+
+# _mac_ct_runner_kubeconfig_yaml CA_DATA TOKEN_FILE NAMESPACE -- the runner's kubeconfig.
+_mac_ct_runner_kubeconfig_yaml() {
+  printf '%s\n' 'apiVersion: v1' 'kind: Config' 'clusters:' '- name: tracebloc' '  cluster:' \
+    '    server: https://127.0.0.1:6443'
+  printf '    certificate-authority-data: %s\n' "$1"
+  printf '%s\n' 'users:' "- name: ${TB_MAC_CT_RUNNER_ACCOUNT}" '  user:'
+  printf '    tokenFile: %s\n' "$2"
+  printf '%s\n' 'contexts:' "- name: ${TB_MAC_CT_RUNNER_ACCOUNT}" '  context:' '    cluster: tracebloc' \
+    "    user: ${TB_MAC_CT_RUNNER_ACCOUNT}"
+  printf '    namespace: %s\n' "$3"
+  printf 'current-context: %s\n' "$TB_MAC_CT_RUNNER_ACCOUNT"
+}
+
+# _mac_ct_runner_kubeconfig NAMESPACE -- issues the runner's token and writes it and the
+# runner's kubeconfig, each 0600 in a 0700 folder; prints the kubeconfig's path. Exit 1,
+# printing why, when the node's CA cannot be read, kubectl issues no token, or a file
+# cannot be written. The token never reaches the log or the output.
+_mac_ct_runner_kubeconfig() {
+  local ns="$1" node dir ca tok rc=0 saved_umask
+  node="$(_mac_ct_node_dir)" || { echo "cannot tell where the node's files are"; return 1; }
+  dir="${node}/runner"
+  ca="$(sed -n 's/^ *certificate-authority-data: *//p' "${node}/k3s.yaml" 2>/dev/null)" || ca=""
+  ca="${ca%%$'\n'*}"
+  [[ "$ca" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "the node's kubeconfig ${node}/k3s.yaml holds no certificate-authority-data"; return 1; }
+  tok="$(_bounded 30 kubectl --kubeconfig "$(_native_k3s_kubeconfig_target)" --context "$(_native_k3s_context)" \
+    -n "$ns" create token "$TB_MAC_CT_RUNNER_ACCOUNT" --duration="${TB_MAC_CT_RUNNER_TOKEN_S}s" --request-timeout=20s \
+    </dev/null 2>>"${LOG_FILE:-/dev/null}")" || rc=$?
+  [[ "$rc" -eq 0 ]] || { echo "kubectl could not issue a token for the ServiceAccount ${ns}/${TB_MAC_CT_RUNNER_ACCOUNT} (exit ${rc})"; return 1; }
+  [[ "$tok" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] \
+    || { echo "kubectl's answer for the ServiceAccount ${ns}/${TB_MAC_CT_RUNNER_ACCOUNT} is not one token"; return 1; }
+  saved_umask="$(umask)"
+  umask 077
+  if ! { mkdir -p "$dir" && chmod 0700 "$dir"; }; then
+    umask "$saved_umask"; echo "could not create ${dir}"; return 1
+  fi
+  if ! { printf '%s' "$tok" > "${dir}/token.tmp" && chmod 0600 "${dir}/token.tmp" && mv "${dir}/token.tmp" "${dir}/token"; }; then
+    rm -f "${dir}/token.tmp"; umask "$saved_umask"; echo "could not write ${dir}/token"; return 1
+  fi
+  if ! { _mac_ct_runner_kubeconfig_yaml "$ca" "${dir}/token" "$ns" > "${dir}/kubeconfig.tmp" \
+         && chmod 0600 "${dir}/kubeconfig.tmp" && mv "${dir}/kubeconfig.tmp" "${dir}/kubeconfig"; }; then
+    rm -f "${dir}/kubeconfig.tmp"; umask "$saved_umask"; echo "could not write ${dir}/kubeconfig"; return 1
+  fi
+  umask "$saved_umask"
+  printf '%s/kubeconfig' "$dir"
+}
+
+# _mac_ct_runner_plist BIN HOME LOG KUBECONFIG NAMESPACE -- the runner's login item, by
+# setup-macos.sh's writer.
+_mac_ct_runner_plist() {
+  local extra
+  extra="  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>${TB_MAC_CT_RUNNER_THROTTLE_S}</integer>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Standard</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>${2}</string>
+    <key>TRACEBLOC_SKIP_TELEMETRY</key><string>1</string>
+  </dict>"
+  _emit_launch_plist "$TB_MAC_CT_RUNNER_LABEL" "$extra" "$3" "$1" runner --kubeconfig "$4" --namespace "$5"
+}
+
+# _mac_ct_runner_loaded -- 0 when this user's GUI domain has the runner's login item, 1
+# when it does not (launchctl's 113), 2 when launchctl cannot say.
+_mac_ct_runner_loaded() {
+  local rc=0
+  _bounded 30 launchctl print "gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}" </dev/null >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    113) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# _mac_ct_ensure_runner -- the runner's login item, when this run sets up the runner
+# (_mac_ct_runner_on): its kubeconfig and token written, its plist written, recorded as a
+# launch-agent and loaded into this login session. A loaded item whose plist is already
+# these bytes is left loaded; its token is still issued again. Anything that stops it is
+# a warning, never the install's failure: GPU jobs then run on the CPU.
+_mac_ct_ensure_runner() {
+  local ns="${TB_NAMESPACE:-}" bin="${TRACEBLOC_CLI_BIN:-}" home dir plist runner_log kcfg want have="" loaded=0 why
+  local cpu="GPU jobs run on the CPU. It's safe to re-run this installer."
+  if ! _mac_ct_runner_on; then
+    [[ "${OS:-}" != "Darwin" ]] || log "The Apple-GPU runner: $(_mac_ct_runner_off_why), so no runner login item."
+    return 0
+  fi
+  if [[ -n "${TRACEBLOC_SKIP_AUTOSTART:-}" || -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
+    warn "The Apple-GPU runner's login item skipped (TRACEBLOC_SKIP_AUTOSTART/TRACEBLOC_NO_AUTOSTART set): ${cpu}"
+    return 0
+  fi
+  [[ -n "$ns" ]] || { warn "The Apple-GPU runner: this run has no namespace for it. ${cpu}"; return 0; }
+  home="$(_mac_ct_agent_home)" || { warn "The Apple-GPU runner: ${home} ${cpu}"; return 0; }
+  runner_log="$(_mac_ct_runner_log)" || { warn "The Apple-GPU runner: cannot tell where its login item logs. ${cpu}"; return 0; }
+  kcfg="$(_mac_ct_runner_kubeconfig "$ns")" || { warn "The Apple-GPU runner: ${kcfg}. ${cpu}"; return 0; }
+  # A plist string holds these only escaped, and the writer prints values as they are.
+  case "${bin}${home}${runner_log}${kcfg}${ns}" in
+    *[\&\<\>]*) warn "The Apple-GPU runner: '${bin}', '${home}', '${runner_log}' or '${kcfg}' holds &, < or >, which its login item's plist cannot hold as it is. ${cpu}"; return 0 ;;
+  esac
+  dir="${TRACEBLOC_LAUNCHAGENTS_DIR:-${home}/Library/LaunchAgents}"
+  plist="${dir}/${TB_MAC_CT_RUNNER_LABEL}.plist"
+  want="$(_mac_ct_runner_plist "$bin" "$home" "$runner_log" "$kcfg" "$ns")"
+  if [[ -e "$plist" ]]; then
+    have="$(cat "$plist")" || { warn "The Apple-GPU runner: ${plist} cannot be read, so this run cannot tell what its login item runs. ${cpu}"; return 0; }
+  fi
+  _mac_ct_runner_loaded || loaded=$?
+  if [[ "$loaded" -eq 2 ]]; then
+    warn "The Apple-GPU runner: launchctl could not say whether ${TB_MAC_CT_RUNNER_LABEL} is loaded, so this run leaves it as it is. ${cpu}"
+    return 0
+  fi
+  if [[ "$loaded" -eq 0 && "$have" == "$want" ]]; then
+    tb_record_write launch-agent "$TB_MAC_CT_RUNNER_LABEL" "$plist"
+    log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded; its token was issued again."
+    return 0
+  fi
+  if [[ "$loaded" -eq 0 ]] && ! _bounded 30 launchctl bootout "gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1; then
+    warn "The Apple-GPU runner: could not unload ${TB_MAC_CT_RUNNER_LABEL} to rewrite it. Run launchctl bootout gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}, then re-run. Until then ${cpu}"
+    return 0
+  fi
+  # launchd fails the job (EX_CONFIG) when its log's folder is missing.
+  if ! mkdir -p "$dir" "${runner_log%/*}"; then
+    warn "The Apple-GPU runner: could not create ${dir} or ${runner_log%/*}. ${cpu}"; return 0
+  fi
+  if ! { printf '%s\n' "$want" > "${plist}.tmp" && mv "${plist}.tmp" "$plist"; }; then
+    rm -f "${plist}.tmp"; warn "The Apple-GPU runner: could not write ${plist}. ${cpu}"; return 0
+  fi
+  # Recorded before it loads: a run cut off here leaves an artefact delete knows.
+  tb_record_write launch-agent "$TB_MAC_CT_RUNNER_LABEL" "$plist"
+  why=0
+  _bounded 30 launchctl bootstrap "gui/$(id -u)" "$plist" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || why=$?
+  if [[ "$why" -ne 0 ]]; then
+    warn "The Apple-GPU runner: launchd did not load ${plist} (exit ${why}). ${cpu}"; return 0
+  fi
+  log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded and runs ${bin} runner."
 }
 
 # ── Part 6: reachable behind TRACEBLOC_SUBSTRATE=k3s on a Mac ───────────────

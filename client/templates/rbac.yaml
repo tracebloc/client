@@ -290,3 +290,48 @@ roleRef:
   name: {{ include "tracebloc.rbacNodeAgentsName" . }}
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
+
+{{- if include "tracebloc.runnerDbCredsGrant" . }}
+---
+{{/*
+  RFC-0185 §8 Q5, option 1 (client-runtime#1042). For each Mac GPU job,
+  jobs-manager creates a Role that may `get` that job's db-creds Secret by name,
+  and a RoleBinding of it to the runner's ServiceAccount (tracebloc-runner). It
+  creates both before the Job, patches ownerReferences onto them so they go with
+  the Job, and deletes them if the Job create fails.
+
+  A namespaced Role in the release namespace, never the ClusterRole: the grant
+  lives where the Jobs do, so jobs-manager cannot write RBAC anywhere else on a
+  clusterScope edge. No `escalate` or `bind`: Kubernetes lets a subject create
+  a Role, or bind one, only with permissions it already holds, and jobs-manager
+  already holds `get` on secrets (the configmaps/secrets rule above). So the
+  most this pair can hand out is what jobs-manager has in this namespace.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tracebloc.rbacRunnerGrantName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tracebloc.rbacRunnerGrantName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "tracebloc.rbacRunnerGrantName" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

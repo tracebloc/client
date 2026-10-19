@@ -234,11 +234,15 @@ _existing_training_resources() {
 #
 # Regenerate after an upstream contract change:
 #   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=7
-_TB_ENVELOPE_OVERHEAD_CPU_MILLI=850
-_TB_ENVELOPE_OVERHEAD_MEM_BYTES=2483027968
+_TB_ENVELOPE_CONTRACT_VERSION=9
+_TB_ENVELOPE_OVERHEAD_CPU_MILLI=650
+_TB_ENVELOPE_OVERHEAD_MEM_BYTES=2516582400
 _TB_ENVELOPE_FLOOR_CPU_MILLI=1000
 _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
+# The ingestion Job's requests, one component of the overhead above. The fit
+# verdict keeps them free beside the training run (_fit_verdict).
+_TB_ENVELOPE_INGESTION_CPU_MILLI=0
+_TB_ENVELOPE_INGESTION_MEM_BYTES=268435456
 # ── end generated ───────────────────────────────────────────────────────────
 
 # ── the chart's own control-plane footprint (GENERATED — do not hand-edit) ──
@@ -259,7 +263,7 @@ _TB_ENVELOPE_FLOOR_MEM_BYTES=2147483648
 # signed. What keeps it honest is `scripts/gen-footprint-embed.sh --check` in
 # `make drift` (the required Source-of-truth drift job): the value below must
 # equal a fresh render of the chart in the same tree, or CI reddens.
-_TB_CP_FOOTPRINT_MEM_BYTES=2214592512
+_TB_CP_FOOTPRINT_MEM_BYTES=2248146944
 _TB_CP_FOOTPRINT_CPU_MILLI=650
 # The TRANSIENT the chart's CronJobs may have resident on top of the steady state
 # (auto-upgrade + image-refresh, both Forbid, routinely co-resident), summed by
@@ -944,12 +948,18 @@ _fit_footprint_refused() {
     _TB_FIT_LINES="the hourly-job constants (_TB_CP_TRANSIENT_*) are missing or not numeric -- this installer cannot verify any envelope"
     return 0
   fi
+  if [[ ! "${_TB_ENVELOPE_INGESTION_MEM_BYTES:-}" =~ ^[0-9]+$ || ! "${_TB_ENVELOPE_INGESTION_CPU_MILLI:-}" =~ ^[0-9]+$ ]]; then
+    _TB_FIT_VERDICT="refused"
+    _TB_FIT_LINES="the ingestion Job constants (_TB_ENVELOPE_INGESTION_*) are missing or not numeric -- this installer cannot verify any envelope"
+    return 0
+  fi
   return 1
 }
 
 _fit_training_envelope() {
   _TB_FIT_VERDICT=""
   _TB_FIT_LINES=""
+  _TB_FIT_INGEST_WAITS=0
   local size="${_TB_TRAINING_SIZE:-}" prov="${_TB_TRAINING_PROVENANCE:-}"
   local ours=0
   [[ "$prov" == "installer" ]] && ours=1
@@ -1028,6 +1038,14 @@ _fit_training_envelope() {
 # CronJobs' _TB_CP_TRANSIENT_* (backend#5025 O-108); below that, nothing changes. Sets _TB_FIT_VERDICT / _TB_FIT_LINES and, on
 # `reduced`, _TB_TRAINING_SIZE (and _TB_TRAINING_UNDERSIZED) -- in the CALLER's
 # scope, so a caller that must not leave a size behind shadows them with locals.
+#
+# The ingestion Job (_TB_ENVELOPE_INGESTION_*) is a data upload, which can start
+# while a run trains. An installer-chosen run is sized to leave its requests
+# free, but never below the contract floor in a dimension where the run alone
+# would have reached it: a smaller run that never trains is worse than an upload
+# that waits. Where the Job does not fit beside the size written -- that, or a
+# human's pin -- _TB_FIT_INGEST_WAITS=1 so the caller says an upload waits for
+# training. Whether the run itself fits or is refused is decided without it.
 _fit_verdict() {
   local alloc_label="$1" alloc_mem_b="$2" alloc_cpu_m="$3" sys_mem_b="$4" sys_cpu_m="$5" sys_how="$6"
   local size="$7" env_mem_b="$8" env_cpu_m="$9" ours="${10}" prov="${11}"
@@ -1042,6 +1060,8 @@ _fit_verdict() {
   fi
   local need_mem_b=$(( fp_mem_b + tr_mem_b + sys_mem_b ))
   local need_cpu_m=$(( fp_cpu_m + tr_cpu_m + sys_cpu_m ))
+  local ing_mem_b="$_TB_ENVELOPE_INGESTION_MEM_BYTES" ing_cpu_m="$_TB_ENVELOPE_INGESTION_CPU_MILLI"
+  _TB_FIT_INGEST_WAITS=0
 
   _TB_FIT_LINES="${alloc_label}: $(( alloc_mem_b / mib )) MiB / ${alloc_cpu_m} m"$'\n'
   _TB_FIT_LINES+="control plane (chart) $(( fp_mem_b / mib )) MiB / ${fp_cpu_m} m${tr_part} + system pods $(( sys_mem_b / mib )) MiB / ${sys_cpu_m} m = $(( need_mem_b / mib )) MiB / ${need_cpu_m} m (${sys_how})"$'\n'
@@ -1063,20 +1083,33 @@ _fit_verdict() {
     _TB_FIT_LINES+="cpu: ${env_cpu_m} + ${need_cpu_m} = $(( env_cpu_m + need_cpu_m )) m > ${alloc_cpu_m} m (${cpu_over} m OVER)"$'\n'
   fi
 
-  if (( mem_fits && cpu_fits )); then
+  # Does the ingestion Job fit beside this envelope as well?
+  local ing_fits=0
+  (( env_mem_b + need_mem_b + ing_mem_b <= alloc_mem_b && env_cpu_m + need_cpu_m + ing_cpu_m <= alloc_cpu_m )) && ing_fits=1
+  local ing_part="ingestion Job (a data upload) $(( ing_mem_b / mib )) MiB / ${ing_cpu_m} m"
+
+  if (( mem_fits && cpu_fits && ing_fits )); then
     _TB_FIT_VERDICT="fits"
+    _TB_FIT_LINES+="${ing_part}: fits beside the run"
     return 0
   fi
 
   if (( ! ours )); then
+    if (( mem_fits && cpu_fits )); then
+      _TB_FIT_VERDICT="fits"
+      _TB_FIT_INGEST_WAITS=1
+      _TB_FIT_LINES+="${ing_part}: does not fit beside ${size}, which was chosen by a human (${prov}) and is written as-is"
+      return 0
+    fi
     _TB_FIT_VERDICT="pinned-over"
     _TB_FIT_LINES+="this size was chosen by a human (${prov}), so it is written as-is; training pods will stay Pending on this machine until it is lowered"
     return 0
   fi
 
-  # Ours, and it does not fit: the largest whole-core / whole-GiB envelope that
-  # does -- floored (a ceiling that rounds up is not a ceiling), and never
-  # larger than what was chosen in either dimension.
+  # Ours: the largest whole-core / whole-GiB envelope that fits -- floored (a
+  # ceiling that rounds up is not a ceiling), and never larger than what was
+  # chosen in either dimension -- first beside the platform alone, then with
+  # the ingestion Job's requests left free too.
   local fit_mem_b=$(( alloc_mem_b - need_mem_b )) fit_cpu_m=$(( alloc_cpu_m - need_cpu_m ))
   (( fit_mem_b < 0 )) && fit_mem_b=0
   (( fit_cpu_m < 0 )) && fit_cpu_m=0
@@ -1091,10 +1124,43 @@ _fit_verdict() {
     return 0
   fi
 
-  _TB_TRAINING_SIZE="cpu=${new_cores},memory=${new_gib}Gi"
+  local ing_fit_mem_b=$(( fit_mem_b - ing_mem_b )) ing_fit_cpu_m=$(( fit_cpu_m - ing_cpu_m ))
+  (( ing_fit_mem_b < 0 )) && ing_fit_mem_b=0
+  (( ing_fit_cpu_m < 0 )) && ing_fit_cpu_m=0
+  local ing_gib=$(( ing_fit_mem_b / gib )) ing_cores=$(( ing_fit_cpu_m / 1000 ))
+  (( ing_gib > new_gib )) && ing_gib=$new_gib
+  (( ing_cores > new_cores )) && ing_cores=$new_cores
+  # Never below the floor for the Job's sake: per dimension, the run keeps
+  # min(what fits alone, the floor) when leaving the Job free would cut deeper.
+  local floor_gib=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / gib )) floor_cores=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 ))
+  local keep_gib=$new_gib keep_cores=$new_cores
+  (( keep_gib > floor_gib )) && keep_gib=$floor_gib
+  (( keep_cores > floor_cores )) && keep_cores=$floor_cores
+  (( ing_gib > keep_gib )) && keep_gib=$ing_gib
+  (( ing_cores > keep_cores )) && keep_cores=$ing_cores
+  if (( keep_gib * gib + need_mem_b + ing_mem_b > alloc_mem_b || keep_cores * 1000 + need_cpu_m + ing_cpu_m > alloc_cpu_m )); then
+    _TB_FIT_INGEST_WAITS=1
+  fi
+
+  if (( mem_fits && cpu_fits && keep_gib == old_gib && keep_cores == old_cores )); then
+    # Already as small as the floor allows: the size stands, the upload waits.
+    _TB_FIT_VERDICT="fits"
+    _TB_FIT_LINES+="${ing_part}: does not fit beside ${size}, which is already the smallest run this machine is given"
+    return 0
+  fi
+
+  _TB_TRAINING_SIZE="cpu=${keep_cores},memory=${keep_gib}Gi"
   _TB_FIT_VERDICT="reduced"
   _TB_FIT_LINES+="reduced ${size} -> ${_TB_TRAINING_SIZE}: $(( alloc_mem_b / mib )) - $(( need_mem_b / mib )) = $(( fit_mem_b / mib )) MiB -> ${new_gib} GiB; ${alloc_cpu_m} - ${need_cpu_m} = ${fit_cpu_m} m -> ${new_cores} core(s)"
-  if (( new_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || new_gib * gib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
+  if (( keep_gib != new_gib || keep_cores != new_cores )); then
+    _TB_FIT_LINES+="; less the ${ing_part}: $(( ing_fit_mem_b / mib )) MiB -> ${keep_gib} GiB, ${ing_fit_cpu_m} m -> ${keep_cores} core(s) (never below the floor for it)"
+  fi
+  if (( _TB_FIT_INGEST_WAITS )); then
+    _TB_FIT_LINES+=$'\n'"${ing_part}: does not fit beside ${_TB_TRAINING_SIZE} without cutting the run below the floor"
+  else
+    _TB_FIT_LINES+=$'\n'"${ing_part}: fits beside the run"
+  fi
+  if (( keep_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || keep_gib * gib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
     _TB_TRAINING_UNDERSIZED=1
   fi
   return 0
@@ -1161,7 +1227,7 @@ _precreate_fit_estimate() {
   fi
 
   # Shadowed: the rule writes these in its caller's scope.
-  local _TB_FIT_VERDICT="" _TB_FIT_LINES="" _TB_TRAINING_SIZE="$_TRAINING_DEFAULT" _TB_TRAINING_UNDERSIZED=0
+  local _TB_FIT_VERDICT="" _TB_FIT_LINES="" _TB_TRAINING_SIZE="$_TRAINING_DEFAULT" _TB_TRAINING_UNDERSIZED=0 _TB_FIT_INGEST_WAITS=0
   if _fit_footprint_refused; then
     _TB_PRECREATE_VERDICT="refused"
     _TB_PRECREATE_LINES="$_TB_FIT_LINES"
@@ -2106,6 +2172,48 @@ _host_os_set_args() {
   )
 }
 
+# TB_MAC_NODE_PROFILE -- the macOS node's values profile (RFC-0185 D10 items 4 and 6,
+# client-dev#2297), one KEY=VALUE a word: the one declaration of it. The walls a Mac's
+# cluster keeps, whatever runs in it, CPU pods today and the Apple GPU runner's jobs later:
+#   restrictedDns.enabled=true  training and ingestion pods resolve the cluster's own names
+#                               only, through the chart's restricted resolver, and reach
+#                               the backend through the egress gateway, which resolves for
+#                               them (values.yaml `restrictedDns`): a pod cannot carry data
+#                               out in a DNS query's name (D10 item 6);
+#   localApi.enabled=false      the chart's one NodePort Service stays off (D10 item 4). It
+#                               was written for k3d's load balancer, which forwards a port
+#                               on 127.0.0.1 to it; the macOS node publishes nothing but
+#                               the API on 127.0.0.1:6443, so on a Mac it would only be a
+#                               port other local VMs could reach.
+TB_MAC_NODE_PROFILE=(restrictedDns.enabled=true localApi.enabled=false)
+
+# _mac_node_profile_set_args -- TB_MAC_NODE_PROFILE as --set pairs, and jobData.path when
+# the release keeps its job data on this Mac (_mac_ct_job_data_dir), into
+# _TB_MAC_PROFILE_ARGS, on the macOS node (native k3s on a Mac); empty anywhere else, which
+# keeps an operator's own choice of the same keys. Every helm call this installer makes
+# on the Mac passes them: the fresh install, dev mode and the adopt reconcile. --set
+# outranks --values whatever their order, so neither the values file the installer writes,
+# nor a caller's own (TRACEBLOC_VALUES_FILE), nor a release's stored values turns a wall
+# off, as with the GPU decision (_gpu_decision_set_args); --reset-then-reuse-values, the
+# reconcile's and the hourly auto-upgrade's, keeps them in the release.
+_mac_node_profile_set_args() {
+  _TB_MAC_PROFILE_ARGS=()
+  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]] || return 0
+  local kv
+  local jd
+  for kv in "${TB_MAC_NODE_PROFILE[@]}"; do  # set-u-safe: TB_MAC_NODE_PROFILE is declared non-empty above
+    _TB_MAC_PROFILE_ARGS+=(--set "$kv")
+  done
+  log "The macOS node's values profile: ${TB_MAC_NODE_PROFILE[*]}."  # set-u-safe: declared non-empty above
+  # The job-data folder (client-dev#2320), when the release keeps its job data on this
+  # Mac: the chart puts the dataset, logs and resume claims there. A string, so a path
+  # is never read as a number or a list (_helm_set_string_escape).
+  jd="$(_mac_ct_job_data_dir)"
+  [[ -n "$jd" ]] || return 0
+  _TB_MAC_PROFILE_ARGS+=(--set-string "jobData.path=$(_helm_set_string_escape "$jd")")
+  log "The macOS node's job data: ${jd}."
+}
+
 # _gpu_decision_set_args -- THIS run's GPU decision as helm args, for the two paths that
 # install over values the installer did not just write: the adopt reconcile (a release's
 # stored values, --reuse-values) and dev mode (the caller's TRACEBLOC_VALUES_FILE,
@@ -2150,6 +2258,19 @@ _gpu_decision_set_args() {
   else
     _TB_GPU_DECISION_ARGS+=(--set "gpu.devicePlugin.enabled=false")
   fi
+}
+
+# _mac_runner_set_args -- appleGpuRunner.enabled=true as a --set pair, into
+# _TB_MAC_RUNNER_ARGS, when this run sets up the Apple-GPU runner (_mac_ct_runner_on,
+# mac-container.sh): the chart then renders the runner's ServiceAccount and its rights
+# (cli-dev#1305). Empty otherwise, which keeps the release's stored value, as the macOS
+# node's profile does. Every helm call that passes the profile passes this after it.
+_mac_runner_set_args() {
+  _TB_MAC_RUNNER_ARGS=()
+  declare -F _mac_ct_runner_on >/dev/null 2>&1 || return 0
+  _mac_ct_runner_on || return 0
+  _TB_MAC_RUNNER_ARGS+=(--set "appleGpuRunner.enabled=true")
+  log "The Apple-GPU runner: on (this tracebloc CLI carries it)."
 }
 
 # _gpu_request_value — the GPU resource a spawned training pod should request,
@@ -2703,6 +2824,12 @@ _reconcile_adopted_client() {
   else
     _args+=(--set "localApi.enabled=false")
   fi
+  # The macOS node's values profile (client-dev#2297), last, so its words are the last
+  # --set of each key: the release's stored values may predate it.
+  _mac_node_profile_set_args
+  _args+=(${_TB_MAC_PROFILE_ARGS[@]+"${_TB_MAC_PROFILE_ARGS[@]}"})
+  _mac_runner_set_args
+  _args+=(${_TB_MAC_RUNNER_ARGS[@]+"${_TB_MAC_RUNNER_ARGS[@]}"})
 
   # node-local (RFC-0003 Option C) has no hostPath dirs to pre-create.
   [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]] && _ensure_release_dirs "$_ns"
@@ -2766,10 +2893,14 @@ _tty_available() { [[ -r "$TRACEBLOC_TTY" ]]; }
 # same failure class the TRACEBLOC_TTY change set out to remove. Mirrors provision.sh,
 # whose name read breaks on rc!=0 and falls through to the same guidance.
 _no_interactive_creds_die() {
-  error "No credentials supplied and no terminal to prompt on.
-  Set TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD (find them at
-  $(_dashboard_url)), then re-run — under \`curl … | bash\` the
-  prompt cannot read your input."
+  error "No credentials supplied and no terminal to prompt on (under \`curl … | bash\`
+  the prompt cannot read your input). In a terminal, with a current tracebloc CLI,
+  this installer signs you in through your browser and needs no Client ID or
+  password. For an unattended install, create the pair on a machine signed in to
+  tracebloc:
+    $(_credential_file_cmd)
+  then copy tb.env here, load it ($(_credential_file_load_cmd)), which sets
+  TRACEBLOC_CLIENT_ID and TRACEBLOC_CLIENT_PASSWORD, and re-run."
 }
 
 # _download_services_progress NS — render an honest N-of-M count bar as the
@@ -3142,11 +3273,12 @@ _release_pins_mysql_84() {
 }
 
 # _values_hostpath_storage -- the top-level hostPath block of `helm get values` on
-# STDIN, as three lines: enabled=<v>, root=<v>, datasetPath=<v> (absent is empty;
-# null and ~ are empty too). Values are unquoted the way helm serializes them:
+# STDIN, and the macOS node's jobData.path (client-dev#2320), as four lines:
+# enabled=<v>, root=<v>, datasetPath=<v>, jobDataPath=<v> (absent is empty; null and ~
+# are empty too). Values are unquoted the way helm serializes them:
 # plain, '...' with '' for a quote, or "..." without escapes. Anything else -- a
-# "..." holding a backslash, a block scalar, a root or datasetPath folded onto a
-# second line -- prints the single word `unreadable`: a path read half-right is
+# "..." holding a backslash, a block scalar, a root, datasetPath or jobData path folded
+# onto a second line -- prints the single word `unreadable`: a path read half-right is
 # worse than none. Reads to EOF (no early exit, so a producer is never SIGPIPE'd).
 _values_hostpath_storage() {
   awk -v sq="'" '
@@ -3166,22 +3298,23 @@ _values_hostpath_storage() {
     }
     /^[[:space:]]*$/ { next }
     { match($0, /^ */); ind = RLENGTH }
-    ind == 0 { inblk = ($0 ~ /^hostPath:[[:space:]]*$/); child = -1; last = ""; next }
-    !inblk { next }
+    ind == 0 { inblk = ($0 ~ /^hostPath:[[:space:]]*$/); injd = ($0 ~ /^jobData:[[:space:]]*$/); child = -1; last = ""; next }
+    !inblk && !injd { next }
     child < 0 { child = ind }
-    ind > child { if (last == "root" || last == "datasetPath") bad = 1; next }
+    ind > child { if (last == "root" || last == "datasetPath" || last == "jobData.path") bad = 1; next }
     {
       line = $0; sub(/^ */, "", line)
       key = line; sub(/:.*/, "", key)
       v = line; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
       last = key
+      if (injd) { if (key == "path") { last = "jobData.path"; jd = unq(v) }; next }
       if (key == "enabled") en = v
       else if (key == "root") root = unq(v)
       else if (key == "datasetPath") ds = unq(v)
     }
     END {
       if (bad) { print "unreadable"; exit 0 }
-      print "enabled=" en; print "root=" root; print "datasetPath=" ds
+      print "enabled=" en; print "root=" root; print "datasetPath=" ds; print "jobDataPath=" jd
     }
   '
 }
@@ -3219,7 +3352,7 @@ _values_hostpath_storage() {
 _native_k3s_release_storage() {
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
   [[ "${TB_RELEASE_STORAGE_READ:-}" != 1 ]] || return 0
-  local early="" ns="${TB_NAMESPACE:-}" out rc=0 vals line enabled="" root="" ds="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
+  local early="" ns="${TB_NAMESPACE:-}" out rc=0 vals line enabled="" root="" ds="" jd="" want="${TB_STORAGE_MODE:-node-local}" kc ctx rec
   if [[ "${1:-}" == early ]]; then early=1; ns="$(_client_default_namespace)"; fi
   [[ -n "$ns" ]] || return 0
   kc="$(_native_k3s_kubeconfig_target)"; ctx="$(_native_k3s_context)"
@@ -3252,12 +3385,17 @@ _native_k3s_release_storage() {
       enabled=*)     enabled="${line#enabled=}" ;;
       root=*)        root="${line#root=}" ;;
       datasetPath=*) ds="${line#datasetPath=}" ;;
+      jobDataPath=*) jd="${line#jobDataPath=}" ;;
     esac
   done <<<"$out"
 
   if [[ "$enabled" != true ]]; then
     [[ "$want" != hostpath ]] \
       || error "TRACEBLOC_STORAGE_MODE=hostpath, but this machine's tracebloc release '${ns}' keeps its data in k3s's local-path volumes (node-local), and an installed release can't change its storage in place. Unset TRACEBLOC_STORAGE_MODE (and the older TB_STORAGE_MODE) to keep node-local, or remove tracebloc from this machine and install again with hostpath."
+    # The macOS node's job-data folder (client-dev#2320): the release keeps the one its
+    # claims' PVs name, or keeps having none (a v1.11 Mac's release: its claims are in
+    # the node and cannot move). _mac_ct_job_data_dir reads the two.
+    if [[ -n "$jd" ]]; then TRACEBLOC_JOB_DATA_KEPT=1; TRACEBLOC_JOB_DATA_KEPT_DIR="$jd"; else TRACEBLOC_JOB_DATA_KEPT=0; fi
     return 0
   fi
   root="${root:-/tracebloc}"   # the chart's default, which is what rendered
@@ -3755,6 +3893,7 @@ install_client_helm() {
   # would put the data inside its VM (mac-container.sh, _mac_ct_hostpath_mounted).
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]]; then
     _mac_ct_hostpath_mounted
+    _mac_ct_job_data_record
   fi
 
   # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
@@ -3777,7 +3916,7 @@ install_client_helm() {
     info "Verifying credentials with tracebloc…"
     case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
       valid)      success "Credentials verified." ;;
-      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc — check it at $(_dashboard_url) and re-run." ;;
+      invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them against the credential file \`tracebloc client create\` wrote, or create a new pair ($(_credential_file_cmd)), load it ($(_credential_file_load_cmd)) and re-run." ;;
       inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
     esac
@@ -3798,8 +3937,10 @@ install_client_helm() {
   echo ""
   hint "Already have one? Enter its credentials below — or set"
   hint "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD to skip this prompt."
-  hint "Need one? Create it (free) at:"
-  echo -e "    ${BOLD}${WHITE}$(_dashboard_url)${RESET}"
+  hint "Need one? With a current tracebloc CLI, this installer signs you in through"
+  hint "your browser and needs no Client ID or password. For an unattended install,"
+  hint "create the pair (free) on a machine signed in to tracebloc; it writes tb.env:"
+  echo -e "    ${TB_CMD}$(_credential_file_cmd)${RESET}"
   echo ""
 
   # Collect + verify credentials. The entered Client ID / password are checked
@@ -3836,7 +3977,7 @@ install_client_helm() {
         break ;;
       invalid)
         warn "That Client ID / password was rejected by tracebloc — please re-enter."
-        hint "Find your credentials at $(_dashboard_url)" ;;
+        hint "They are in the credential file \`tracebloc client create\` wrote" ;;
       inactive)
         error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified)
@@ -3847,7 +3988,7 @@ install_client_helm() {
 
     _cred_attempt=$((_cred_attempt + 1))
     if [[ $_cred_attempt -ge $_cred_max ]]; then
-      error "Too many failed attempts. Double-check your credentials at $(_dashboard_url) and re-run."
+      error "Too many failed attempts. Check them against the credential file \`tracebloc client create\` wrote, or create a new pair ($(_credential_file_cmd)), and re-run."
     fi
     # Force an active re-entry on retry (don't silently reuse a rejected default).
     default_client_id=""; default_client_password=""
@@ -4044,6 +4185,12 @@ install_client_helm() {
   elif (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 1 )); then
     warn "This machine is too small to host a training run at all; keeping the default ${training_size}."
     hint "Training jobs will stay Pending until this edge has more memory — the client itself will still run, ingest and report."
+  fi
+  # The ingestion Job did not fit beside the size written (_fit_verdict): the run
+  # was kept at no less than the floor, so an upload queues behind it.
+  if (( ${_TB_FIT_INGEST_WAITS:-0} == 1 )); then
+    warn "A data upload started while a training run is using this machine waits until training ends."
+    hint "  An upload needs $(( _TB_ENVELOPE_INGESTION_MEM_BYTES / 1024 / 1024 )) MiB / ${_TB_ENVELOPE_INGESTION_CPU_MILLI} m free beside ${training_size}; upload between runs, or give this machine more CPU and memory."
   fi
 
   # CREATE IT EMPTY AND 0600 *BEFORE* THE CREDENTIAL GOES IN (backend#2571).
@@ -4291,6 +4438,12 @@ EOF
   # The machine facts (kind, cloud, CPU name), the same way.
   _machine_facts_set_args
   _gpu_args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
+  # The macOS node's values profile (client-dev#2297), on both branches: over the values
+  # file this run wrote, and over a caller's own in dev mode.
+  _mac_node_profile_set_args
+  _gpu_args+=(${_TB_MAC_PROFILE_ARGS[@]+"${_TB_MAC_PROFILE_ARGS[@]}"})
+  _mac_runner_set_args
+  _gpu_args+=(${_TB_MAC_RUNNER_ARGS[@]+"${_TB_MAC_RUNNER_ARGS[@]}"})
   # The password the running pods started on, read before helm overwrites it, so
   # the restart below can see a credential that changed under them (client-dev#2018).
   # A read that CANNOT TELL (rc 2) is not a first install: when the Secret holds a

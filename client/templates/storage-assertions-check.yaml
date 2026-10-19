@@ -30,6 +30,11 @@
                       In hostPath mode the sub-check reports SKIP — hostPath
                       PVs are the declared storage model there, and the model
                       itself is chosen in values, visible to review.
+                      On the macOS node (jobData.path, client-dev#2320) the
+                      dataset and logs claims are on the job-data folder: each
+                      must be bound to its own chart PV, with no class, on
+                      <jobData.path>/<release>/<claim>, and nothing else;
+                      MySQL's claim is checked as any dynamic claim is.
 
   Verdict philosophy (RFC-0003 §8.2): a guarantee that cannot be verified is
   reported UNSEALED (the Job fails loudly) — it is never silently claimed
@@ -60,6 +65,13 @@
 {{- $img := default dict $cfg.image }}
 {{- $pvScan := ne .Values.clusterScope false }}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled }}
+{{- /* The claims on the macOS node's job-data folder, one a line: the claim, its
+       chart PV and the PV's path, last since a path can hold a space. Derived
+       from the helpers the PV templates render with, never restated. */}}
+{{- $jobDataClaims := "" }}
+{{- if include "tracebloc.jobDataPath" . }}
+{{- $jobDataClaims = printf "%s %s %s\n%s %s %s" (include "tracebloc.clientDataPvc" .) (include "tracebloc.clientDataPvName" .) (include "tracebloc.claimHostPath" (dict "root" . "claim" "data")) (include "tracebloc.clientLogsPvc" .) (include "tracebloc.clientLogsPvName" .) (include "tracebloc.claimHostPath" (dict "root" . "claim" "logs")) }}
+{{- end }}
 {{- $nodeLocalPrefixes := dig "nodeLocalPathPrefixes" (list "/var/lib/rancher/" "/opt/local-path-provisioner/") $cfg }}
 apiVersion: batch/v1
 kind: Job
@@ -144,6 +156,8 @@ spec:
             # capture, detectable by name alone (no PV read RBAC needed).
             - name: TRACEBLOC_CHART_HOSTPATH_PVS
               value: "{{ include "tracebloc.clientDataPvName" . }} {{ include "tracebloc.clientLogsPvName" . }} {{ include "tracebloc.mysqlPvName" . }}"
+            - name: TRACEBLOC_JOB_DATA_CLAIMS
+              value: {{ $jobDataClaims | quote }}
             - name: TRACEBLOC_HOSTPATH_MODE
               value: {{ ternary "true" "false" (not (empty $hostPathMode)) | quote }}
             - name: TRACEBLOC_PV_SCAN
@@ -181,6 +195,10 @@ spec:
               if [ -n "${TRACEBLOC_PV_SCAN:-}" ]; then PV_SCAN="$TRACEBLOC_PV_SCAN"; fi
               if [ -n "${TRACEBLOC_TIMEOUT_SECONDS:-}" ]; then TIMEOUT_SECONDS="$TRACEBLOC_TIMEOUT_SECONDS"; fi
               if [ -n "${TRACEBLOC_NODE_LOCAL_PREFIXES:-}" ]; then NODE_LOCAL_PREFIXES="$TRACEBLOC_NODE_LOCAL_PREFIXES"; fi
+              JOB_DATA_CLAIMS="${TRACEBLOC_JOB_DATA_CLAIMS:-}"
+              # _jd CLAIM -- "<PV> <path>" when CLAIM is on the macOS node's job-data
+              # folder (JOB_DATA_CLAIMS), else nothing.
+              _jd() { printf '%s\n' "$JOB_DATA_CLAIMS" | while read -r c v p; do if [ "$c" = "$1" ]; then printf '%s %s\n' "$v" "$p"; break; fi; done; }
               echo "[storage-assertions] release=${RELEASE} ns=${NAMESPACE} expected-class=${EXPECTED_STORAGE_CLASS} hostPath-mode=${HOSTPATH_MODE} pv-scan=${PV_SCAN}"
 
               # ── pvc-bound: every release PVC exists and is Bound ──────────
@@ -225,10 +243,13 @@ spec:
                   fail=1
                   continue
                 fi
-                if [ "$sc" = "$EXPECTED_STORAGE_CLASS" ]; then
-                  echo "OK  pvc-storageclass: $pvc is on '$sc'"
+                # A claim on the job-data folder is bound to its PV statically, with no class.
+                want="$EXPECTED_STORAGE_CLASS"
+                [ -z "$(_jd "$pvc")" ] || want=""
+                if [ "$sc" = "$want" ]; then
+                  echo "OK  pvc-storageclass: $pvc is on '${sc:-<none>}'"
                 else
-                  echo "FAIL  pvc-storageclass: $pvc is on '${sc:-<none>}', expected '$EXPECTED_STORAGE_CLASS'"
+                  echo "FAIL  pvc-storageclass: $pvc is on '${sc:-<none>}', expected '${want:-<none>}'"
                   fail=1
                 fi
               done
@@ -246,6 +267,26 @@ spec:
                   if [ -z "$vol" ]; then
                     echo "FAIL  pv-hostpath: PVC $pvc has no bound PersistentVolume to inspect"
                     fail=1
+                    continue
+                  fi
+                  # The macOS node's job-data claims: their own chart PV, on the folder.
+                  jd=$(_jd "$pvc")
+                  if [ -n "$jd" ]; then
+                    jd_pv=${jd%% *}; jd_path=${jd#* }
+                    if [ "$vol" != "$jd_pv" ]; then
+                      echo "FAIL  pv-hostpath: PVC $pvc is bound to PV '$vol', not to its job-data PV '$jd_pv'."
+                      fail=1
+                    elif [ "$PV_SCAN" != "true" ]; then
+                      echo "WARNING  pv-hostpath: PARTIAL verification for $pvc (clusterScope=false grants no PV read). Verified only that the claim is bound to its job-data PV '$jd_pv' by name; the PV's path was NOT read. Set clusterScope=true for full verification."
+                    elif ! hp=$(kubectl --request-timeout=10s get pv "$vol" -o jsonpath='{.spec.hostPath.path}' 2>"$KC_ERR"); then
+                      echo "FAIL  pv-hostpath: could not read PV '$vol' ($(_err)) — its backing is UNVERIFIED, and unverified is reported unsealed, never sealed."
+                      fail=1
+                    elif [ "$hp" = "$jd_path" ]; then
+                      echo "OK  pv-hostpath: $pvc -> PV $vol is on the job-data folder at '$hp' (a folder on the Mac, mounted into the node at its own path)."
+                    else
+                      echo "FAIL  pv-hostpath: $pvc -> PV $vol uses hostPath '${hp:-<none>}', not the job-data folder's '$jd_path'."
+                      fail=1
+                    fi
                     continue
                   fi
                   # Leftover chart hostPath PVs carry a claimRef for our PVC

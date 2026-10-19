@@ -479,6 +479,9 @@ main() {
   step_header e "Installing tracebloc"
   install_client_helm
   tb_record_write   # the namespace is decided now
+  # The Apple-GPU runner's login item (cli-dev#1305), after the chart, which holds its
+  # ServiceAccount. The macOS node only, and only with a CLI that carries the runner.
+  if declare -F _mac_ct_ensure_runner >/dev/null 2>&1; then _mac_ct_ensure_runner; fi
   # Node-level GPU verification (informational): the chart-managed device plugin
   # (client#564) rolls out as part of the Helm release above, so confirm the node
   # now advertises the GPU here rather than before Helm. verify_gpu no-ops for a

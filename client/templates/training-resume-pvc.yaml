@@ -17,7 +17,8 @@
 {{- if and (include "tracebloc.trainingResumeEnabled" .) (not (default dict .Values.trainingResume).existingClaim) }}
 {{- $name := include "tracebloc.trainingResumePvc" . -}}
 {{- $storage := (default dict .Values.trainingResume).storage | default "10Gi" -}}
-{{- if (default dict .Values.hostPath).enabled }}
+{{- $hostPath := include "tracebloc.claimHostPath" (dict "root" . "claim" "resume") }}
+{{- if $hostPath }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -25,7 +26,7 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  storageClassName: {{ include "tracebloc.claimStorageClass" (dict "root" . "claim" "resume") }}
   capacity:
     storage: {{ $storage }}
   accessModes:
@@ -34,7 +35,7 @@ spec:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: {{ include "tracebloc.hostPathRoot" . }}/{{ .Release.Name }}/resume
+    path: {{ $hostPath }}
     type: DirectoryOrCreate
 ---
 {{- end }}
@@ -49,9 +50,9 @@ metadata:
   labels:
     {{- include "tracebloc.labels" . | nindent 4 }}
 spec:
-  storageClassName: {{ include "tracebloc.storageClassName" . }}
+  storageClassName: {{ include "tracebloc.claimStorageClass" (dict "root" . "claim" "resume") }}
   accessModes:
-    - {{ .Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .Values.hostPath).enabled | default false)) }}
+    - {{ include "tracebloc.claimAccessMode" (dict "root" . "claim" "resume") }}
   resources:
     requests:
       storage: {{ $storage }}

@@ -257,7 +257,12 @@ tracebloc.io/seal-check-name: {{ .name | quote }}
 */}}
 {{- define "tracebloc.resourceMonitorDatasetPath" -}}
 {{- $hp := default dict .Values.hostPath -}}
-{{- if $hp.enabled -}}
+{{- $jd := include "tracebloc.jobDataPath" . -}}
+{{- if $jd -}}
+{{- /* The macOS node (client-dev#2320): the job-data folder is on the Mac, a
+       filesystem apart from the node's own disk, where MySQL is. */ -}}
+{{- $jd -}}
+{{- else if $hp.enabled -}}
 {{- $root := include "tracebloc.hostPathRoot" . -}}
 {{- $ds := $hp.datasetPath | default $root -}}
 {{- if ne $ds $root -}}{{- $ds -}}{{- end -}}
@@ -352,6 +357,83 @@ client-pvc
 */}}
 {{- define "tracebloc.hostPathRoot" -}}
 {{- (default dict .Values.hostPath).root | default "/tracebloc" -}}
+{{- end -}}
+
+{{/*
+  The macOS node's job-data folder (jobData.path; RFC-0185, client-dev#2320), or
+  "". Nil-guarded (default dict) for `--reuse-values` upgrades predating the key.
+*/}}
+{{- define "tracebloc.jobDataPath" -}}
+{{- (default dict .Values.jobData).path | default "" -}}
+{{- end -}}
+
+{{/*
+  The hostPath a release claim's chart PV names, or "" when the claim has no
+  chart PV and is on the storage class. Called as
+  (dict "root" $ "claim" "data|logs|resume|mysql"); the claim's word is also its
+  folder's name.
+    hostPath.enabled  every claim: data on tracebloc.clientDataHostPath, the rest
+                      on <hostPath.root>/<release>/<claim> (bare metal, k3d,
+                      native k3s), as before.
+    jobData.path      data, logs and resume on <jobData.path>/<release>/<claim>
+                      (the macOS node); mysql stays on the storage class.
+  The two are refused together (tracebloc.jobDataRefusal).
+*/}}
+{{- define "tracebloc.claimHostPath" -}}
+{{- $r := .root -}}
+{{- $jd := include "tracebloc.jobDataPath" $r -}}
+{{- if (default dict $r.Values.hostPath).enabled -}}
+{{- if eq .claim "data" -}}
+{{- include "tracebloc.clientDataHostPath" $r -}}
+{{- else -}}
+{{- printf "%s/%s/%s" (include "tracebloc.hostPathRoot" $r) $r.Release.Name .claim -}}
+{{- end -}}
+{{- else if and $jd (ne .claim "mysql") -}}
+{{- printf "%s/%s/%s" $jd $r.Release.Name .claim -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  jobData.path and hostPath.enabled together are refused: one keeps MySQL in the
+  node, the other puts it on hostPath.root. Rendered by shared-images-pvc.yaml,
+  which every release renders, so the refusal has one place.
+*/}}
+{{- define "tracebloc.jobDataRefusal" -}}
+{{- if and (default dict .Values.hostPath).enabled (include "tracebloc.jobDataPath" .) -}}
+{{- fail "jobData.path and hostPath.enabled cannot both be set: jobData.path keeps the dataset, logs and resume claims in a folder on the Mac and MySQL's on the storage class, while hostPath.enabled puts every claim under hostPath.root. Set one of them." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  The storageClassName a release claim and its chart PV carry, called as
+  tracebloc.claimHostPath is. A claim on a jobData PV is bound to it statically,
+  so both carry the empty class (""): on the storage class, k3s's local-path
+  would provision the claim a volume inside the node instead. Every other claim
+  is on tracebloc.storageClassName, as before.
+*/}}
+{{- define "tracebloc.claimStorageClass" -}}
+{{- if and (include "tracebloc.jobDataPath" .root) (include "tracebloc.claimHostPath" .) -}}
+""
+{{- else -}}
+{{- include "tracebloc.storageClassName" .root -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  The access mode a release claim asks for, called as tracebloc.claimHostPath is.
+  A claim on a jobData PV asks for ReadWriteOnce, its PV's one mode, whatever
+  pvcAccessMode says: a claim that asks for a mode its PV does not offer never
+  binds, and the dataset, logs and resume claims would stay Pending (the installer
+  writes pvcAccessMode: ReadWriteOnce, but a dev-mode values file or a direct helm
+  install need not). Every other claim takes pvcAccessMode, or ReadWriteOnce on
+  hostPath and ReadWriteMany on a storage class, as before.
+*/}}
+{{- define "tracebloc.claimAccessMode" -}}
+{{- if and (include "tracebloc.claimHostPath" .) (include "tracebloc.jobDataPath" .root) -}}
+ReadWriteOnce
+{{- else -}}
+{{- .root.Values.pvcAccessMode | default (ternary "ReadWriteOnce" "ReadWriteMany" ((default dict .root.Values.hostPath).enabled | default false)) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "tracebloc.clientLogsPvc" -}}
@@ -580,6 +662,15 @@ nvidia-device-plugin-daemonset
 */}}
 {{- define "tracebloc.rbacNodeAgentsName" -}}
 {{ include "tracebloc.fullname" . }}-jobs-manager-node-agents
+{{- end }}
+
+{{/*
+  jobs-manager Role/RoleBinding pair that lets it grant the Apple GPU runner a
+  job's db-creds Secret (tracebloc.runnerDbCredsGrant). Distinct from
+  tracebloc.rbacName, which is the ClusterRole or the Role of the same namespace.
+*/}}
+{{- define "tracebloc.rbacRunnerGrantName" -}}
+{{ include "tracebloc.fullname" . }}-jobs-manager-runner-grant
 {{- end }}
 
 {{/*
@@ -1552,6 +1643,89 @@ Call with the ROOT context: {{ include "tracebloc.appleGpuBundle" . }}
 {{- $bundle := default dict $training.macosBundle -}}
 {{- if and $bundle.digest (include "tracebloc.trainingPins" .) -}}
 {{- $bundle.digest -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.appleGpuRunner — "true" when the chart renders the Apple GPU runner's
+cluster identity (templates/apple-gpu-runner-rbac.yaml) and keeps the
+node-agent DaemonSets on Linux nodes, off the runner's virtual node; empty
+otherwise. ONE decision for both: a runner with no identity registers no node,
+and a node the DaemonSets may land on would hold their pods Pending for ever.
+
+Off unless appleGpuRunner.enabled is true, and the chart default is false. Read
+defensively: a release upgraded with --reuse-values from a chart without the
+key has no appleGpuRunner map at all.
+
+Call with the ROOT context: {{ include "tracebloc.appleGpuRunner" . }}
+*/}}
+{{- define "tracebloc.appleGpuRunner" -}}
+{{- $r := default dict .Values.appleGpuRunner -}}
+{{- if eq (toString $r.enabled) "true" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+tracebloc.appleGpuRunnerAccount — the runner's ServiceAccount, a FIXED name
+like the bundle ConfigMap's: whatever writes the runner's kubeconfig on the Mac
+asks for its token by this name, in the release's namespace, without reading
+the release.
+*/}}
+{{- define "tracebloc.appleGpuRunnerAccount" -}}
+tracebloc-runner
+{{- end -}}
+
+{{/*
+tracebloc.appleGpuRunnerRbacName — the runner's cluster-scoped objects and its
+Role in kube-node-lease: outside the release's namespace, so they carry the
+release's name.
+*/}}
+{{- define "tracebloc.appleGpuRunnerRbacName" -}}
+{{ include "tracebloc.fullname" . }}-apple-gpu-runner
+{{- end -}}
+
+{{/*
+tracebloc.appleGpuRunnerLeaseRules — the rules of the runner's Role in
+kube-node-lease: the node's heartbeat, its lease created once, then renewed by
+name. ONE list for two Roles: the runner's own (apple-gpu-runner-rbac.yaml) and
+auto-upgrade's there (auto-upgrade-rbac.yaml), because RBAC lets auto-upgrade
+write the runner's Role only while it holds every rule in it.
+*/}}
+{{- define "tracebloc.appleGpuRunnerLeaseRules" -}}
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["apple-gpu"]
+  verbs: ["get", "update"]
+{{- end -}}
+
+{{/*
+tracebloc.runnerDbCredsGrant -- "true" when jobs-manager may hand a Mac GPU
+job's per-experiment db-creds Secret to the Apple GPU runner, else empty
+(RFC-0185 §8 Q5, option 1; client-runtime#1042).
+
+On a Mac the tracebloc runner, not a kubelet, resolves the pod's MYSQL_USER /
+MYSQL_PASSWORD secretKeyRefs, so it must read that one Secret. jobs-manager
+grants it per job: a Role that may `get` that one name and a RoleBinding to the
+runner's ServiceAccount, owned by the Job. To do that jobs-manager needs
+create/patch/delete on roles and rolebindings, which this gate renders.
+
+It holds only where a runner-bound job can carry such a Secret, all three of:
+  * tracebloc.appleGpuRunner -- the runner's identity renders (its ServiceAccount,
+    the grant's subject), so this is a Mac that can have a runner at all; a
+    pinned Linux edge with a bundle named never does;
+  * tracebloc.appleGpuBundle -- jobs-manager gets TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST
+    only here, and without it no GPU job goes to a runner (`no-bundle-named`);
+  * tracebloc.perExperimentDbCreds -- without it the pod carries no
+    per-experiment Secret, so there is nothing to grant.
+Anywhere else jobs-manager never makes the grant, so the chart gives no verb.
+
+Call with the ROOT context: {{ include "tracebloc.runnerDbCredsGrant" . }}
+*/}}
+{{- define "tracebloc.runnerDbCredsGrant" -}}
+{{- if and (include "tracebloc.appleGpuRunner" .) (include "tracebloc.appleGpuBundle" .) (include "tracebloc.perExperimentDbCreds" .) -}}
+true
 {{- end -}}
 {{- end -}}
 

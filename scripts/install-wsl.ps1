@@ -1680,11 +1680,14 @@ function Register-KeepaliveTask {
 #
 #  Invoke-WslCore calls Find-Gpu before the core's first run, so both runs carry its
 #  answer. The floors: check-facts.sh stamps them from facts.env.
-#  The words (W17, W21): below the floor it warns and keeps the GPU; below the hard
-#  floor or compute capability 7.5 it runs CPU-only. Every line those branches say
-#  is the core's own (detect-gpu.sh's _nvidia_gpu_floor_gate), a Pester case holds
-#  them so, with the dash written " -- " in these ASCII files.
-#    TODO(S-W row 14): the driver floor stays 570.65 until row 14 measures it.
+#  The words (W17, W21): below the hard floor (the CUDA 13 minimum) or compute
+#  capability 7.5 it runs CPU-only, and below the hard floor the hint names the
+#  driver to install and says to re-run the installer. There is no warning band
+#  (2026-10-18). Every line those branches say is the core's own (detect-gpu.sh's
+#  _nvidia_gpu_floor_gate), a Pester case holds them so, with the dash written " -- "
+#  in these ASCII files.
+#    S-W row 14 has not measured a Windows driver: the floor is NVIDIA's CUDA 13
+#    minimum, as on Linux.
 #  The handover: inside the distro nvidia-smi answers for this Windows driver, whose
 #  number the Linux floors must never judge. So Confirm-NvidiaDriver records its
 #  verdict ($GPU_FLOOR_VERDICT), and both core runs carry it and the GPU_UNSUPPORTED_*
@@ -1716,9 +1719,9 @@ $NVIDIA_DRIVER_VERSION = ""
 # The NVIDIA GPU floors (scripts/spec/facts.env NVIDIA_DRIVER_FLOOR_WINDOWS /
 # NVIDIA_COMPUTE_CAP_FLOOR / NVIDIA_DRIVER_HARD_FLOOR_WINDOWS), and the pre-Turing
 # families by name. Policy, so no TRACEBLOC_* override.
-$NVIDIA_DRIVER_FLOOR = "570.65"
+$NVIDIA_DRIVER_FLOOR = "580"
 $NVIDIA_COMPUTE_CAP_FLOOR = "7.5"
-$NVIDIA_DRIVER_HARD_FLOOR = "528.33"
+$NVIDIA_DRIVER_HARD_FLOOR = "580"
 $NVIDIA_PRE_TURING_NAME_RE = ' (GT|GTS) [0-9]{3,4}[A-Z]* | GTX [4-9][0-9]{2}[A-Z]* | GTX 10[0-9]{2}[A-Z]* | GTX TITAN | TITAN (X|XP|V|Z|BLACK) | MX[1-3][0-9]{2} | GEFORCE [6-9][0-9]{2}(M|MX|A) | QUADRO (K|M|G?P|GV)[0-9]+[A-Z]* | NVS [0-9]{3} | (TESLA|GRID) [KMPV][0-9]+[A-Z]* | (K80|K40M?|K20X?M?|M60|M40|M10|P100|P40|P6|P4|V100S?) '
 
 # The vendor Find-Gpu found: none, nvidia, amd, or nvidia_unsupported and
@@ -1785,7 +1788,6 @@ function Get-NvidiaFloorVerdict {
   if ($null -ne $cap -and $cap -lt $cf) { return "below-compute" }
   if ($null -eq $cap -and $null -ne (Get-NvidiaPreTuringName $NameOutput)) { return "below-compute" }
   if ($drv -lt $hf) { return "below-hard-floor" }
-  if ($drv -lt $df) { return "below-driver" }
   if ($null -eq $cap) { return "unreadable" }
   return "ok"
 }
@@ -1866,19 +1868,7 @@ function Confirm-NvidiaDriver {
     $script:GPU_FLOOR_VERDICT = $verdict
     $script:NVIDIA_GPU_NAMES = $nameOut
     Log "GPU floor: $verdict (driver $driverVer, floor $NVIDIA_DRIVER_FLOOR, hard floor $NVIDIA_DRIVER_HARD_FLOOR; compute capability $capVer, floor $NVIDIA_COMPUTE_CAP_FLOOR)"
-    if ($verdict -eq "ok" -or $verdict -eq "below-driver") {
-      if ($verdict -eq "below-driver") {
-        # A warning, not a skip (Lukas, 2026-09-30, client-dev#1355): the images admit
-        # older drivers on datacenter cards, so the GPU stays on. Confirm-DockerGpu still
-        # probes it, and a driver too old for the image fails there, with a reason.
-        # A driver too old to answer compute_cap: the card itself could not be checked either.
-        if ($capVer -eq "unknown") {
-          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training, and it cannot report this GPU's compute capability -- continuing with the GPU, but it may not work until the driver is upgraded."
-        } else {
-          Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_FLOOR, the driver tracebloc recommends for GPU training -- continuing with the GPU; if GPU training fails on this machine, upgrade the driver."
-        }
-        Hint "To upgrade: install NVIDIA driver $NVIDIA_DRIVER_FLOOR or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
-      }
+    if ($verdict -eq "ok") {
       $script:NVIDIA_DRIVER_OK = $true
       Ok "NVIDIA GPU ready (driver $driverVer)"
       # Expectation-setting only, never a gate (#387): entry-level cards pass
@@ -1908,11 +1898,13 @@ function Confirm-NvidiaDriver {
       $script:GPU_UNSUPPORTED_NAME = Get-NvidiaUnsupportedName -NameOutput $nameOut -CapOutput $capOut -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR
       Hint "GPU training needs a newer card (NVIDIA Turing or later). Everything else works on CPU."
     } elseif ($verdict -eq "below-hard-floor") {
-      # Below the CUDA 12 minimum the images' torch cannot initialise CUDA at all, so the
-      # GPU would be advertised and unusable (client-dev#1632).
-      $script:GPU_SKIP_REASON = "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the oldest driver tracebloc's GPU images can use (CUDA 12) -- running CPU-only"
-      Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the oldest driver tracebloc's GPU images can use (CUDA 12) -- this machine will run in CPU mode."
-      $script:GPU_UNSUPPORTED_REASON = "The NVIDIA driver on this machine ($driverVer) is older than $NVIDIA_DRIVER_HARD_FLOOR, the oldest driver tracebloc's GPU training images can use, so this machine runs on CPU until the driver is updated."
+      # Below the CUDA 13 minimum tracebloc's GPU images need (torch 2.14.1+cu130) the
+      # GPU would be advertised and unusable (client-dev#1632), so it is left off: there
+      # is no warning band (2026-10-18). The update is to the driver floor, and the GPU
+      # is set up only by a run on the new driver, so the hint says to re-run the installer.
+      $script:GPU_SKIP_REASON = "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the driver tracebloc's GPU training images need (CUDA 13) -- running CPU-only"
+      Warn "NVIDIA driver $driverVer is older than $NVIDIA_DRIVER_HARD_FLOOR, the driver tracebloc's GPU training images need (CUDA 13) -- this machine will run in CPU mode."
+      $script:GPU_UNSUPPORTED_REASON = "The NVIDIA driver on this machine ($driverVer) is older than $NVIDIA_DRIVER_HARD_FLOOR, the driver tracebloc's GPU training images need (CUDA 13), so this machine runs on CPU until the driver is updated to $NVIDIA_DRIVER_FLOOR or newer and the installer is run again."
       $script:GPU_UNSUPPORTED_CODE = "driver_too_old"
       $script:GPU_UNSUPPORTED_NAME = Get-NvidiaUnsupportedName -NameOutput $nameOut -CapOutput $capOut -CapFloor $NVIDIA_COMPUTE_CAP_FLOOR
       Hint "To use the GPU: install NVIDIA driver $NVIDIA_DRIVER_FLOOR or newer (https://www.nvidia.com/Download/index.aspx), reboot, then re-run the installer."
@@ -2036,7 +2028,7 @@ function Find-Gpu {
 #  in TCC, and Tesla parts are left out whatever their mode. e2e-test-agent's Windows
 #  GPU box holds its runner to the same two (harness/windows_gpu_box.py, unfit).
 #  Confirm-NvidiaWslGpu reads each NVIDIA GPU's name and driver model and, only for a
-#  GPU the floors let through (ok, below-driver):
+#  GPU the floors let through (ok):
 #    - every GPU fit: nothing changes;
 #    - some fit, some not: the GPU stays, and the ones WSL leaves out are named;
 #    - none fit: the GPU is left out, said, and the platform told
@@ -2081,7 +2073,7 @@ function Get-NvidiaWslFit {
 
 # Confirm-NvidiaWslGpu -- the rules above, after Find-Gpu (Invoke-WslCore).
 function Confirm-NvidiaWslGpu {
-  if ($script:GPU_VENDOR -ne 'nvidia' -or @('ok', 'below-driver') -cnotcontains $script:GPU_FLOOR_VERDICT) { return }
+  if ($script:GPU_VENDOR -ne 'nvidia' -or $script:GPU_FLOOR_VERDICT -cne 'ok') { return }
   $cmd = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
   $nvSmi = if ($cmd) { $cmd.Source } else { $null }
   if (-not $nvSmi) {
@@ -2259,8 +2251,10 @@ function Invoke-BoundedProcess {
 #  The credential is never on wsl.exe's command line, which other processes can
 #  read, and never in a line this script prints.
 #
-#  Invoke-WslInstall runs Invoke-WslCore once the import and the logon task (sections
-#  2 and 3) have the distro running.
+#  Invoke-WslInstall checks the preset pair before anything is written, so half a
+#  pair or a value with a line break stops it before the import (client-dev#2321).
+#  It runs Invoke-WslCore once the import and the logon task (sections 2 and 3) have
+#  the distro running.
 #  The cluster run hands the account steps what its stop-and-check gate found
 #  (2c): this script names a file on that run's line, TRACEBLOC_WSL_HANDOVER, in a
 #  folder only this user can open and deletes after the install, and reads it only
@@ -2985,12 +2979,18 @@ function Set-ProcessEnv {
 # hand back the credential tracebloc refuses. Returns the bytes `client create
 # --credential-file` wrote. The folder is deleted before this returns, whatever
 # happened. CLI is the tracebloc CLI's path.
+#
+# The login and the create are piped to Out-Host. What a command run here writes to
+# stdout is this function's output, and the caller keeps that as the credential: so
+# the login's URL and code never reached the screen (the user waited ten minutes for
+# a code they were not shown), and a CLI line would sit in front of the credential
+# bytes, which the client run's [byte[]] -Stdin cannot take (client-dev#1810).
 function Get-HostClientCredential {
   param([string]$Cli, [switch]$Reissue, [System.Collections.IDictionary]$Facts)
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
   New-PrivateDirectory -Path $dir
   try {
-    & $Cli login
+    & $Cli login | Out-Host
     if ($LASTEXITCODE -ne 0) {
       throw "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
     }
@@ -3060,7 +3060,7 @@ function Get-HostClientCredential {
       Set-ProcessEnv -Name $k -Value $v
     }
     try {
-      & $Cli @create
+      & $Cli @create | Out-Host
     } finally {
       foreach ($k in @($savedFacts.Keys)) { Set-ProcessEnv -Name $k -Value $savedFacts[$k] }
     }
@@ -3095,6 +3095,16 @@ function Get-HostPresetCredential {
     $text += "$k=$($pair[$k])`n"
   }
   return ,[System.Text.Encoding]::UTF8.GetBytes($text)
+}
+
+# The preset pair's refusals, before anything is written (client-dev#2321): the
+# clients page's Windows "+" command sets TRACEBLOC_CLIENT_ID alone, and a refusal
+# raised only in the core run came after the distro import and the keepalive task.
+# The environment does not change in between, so Invoke-WslCore reads the same pair
+# again; the bytes read here are wiped at once.
+function Assert-HostPresetCredential {
+  $credential = Get-HostPresetCredential
+  if ($null -ne $credential) { [Array]::Clear($credential, 0, $credential.Length) }
 }
 
 # The CLI installed, then the core run twice in the distro with the account steps
@@ -3785,6 +3795,9 @@ function Invoke-WslInstall {
     throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
   Confirm-CoreDir -CoreDir $CoreDir
+  # The operator's preset pair (section 5): half a pair, or a value with a line
+  # break, is refused before anything is written.
+  Assert-HostPresetCredential
   # The host's proxy, which both core runs carry (section 5): a value the cluster
   # could not use is refused before anything is written.
   Assert-HostProxy

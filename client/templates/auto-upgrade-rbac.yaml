@@ -397,4 +397,79 @@ roleRef:
   name: {{ $gpuRoleName }}
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
+{{- if include "tracebloc.appleGpuRunner" . }}
+{{- $runnerLease := include "tracebloc.appleGpuRunnerRbacName" . }}
+{{- $leaseRoleName := printf "%s-apple-gpu-runner" (include "tracebloc.autoUpgradeName" .) }}
+{{/*
+  cli-dev#1305: with the Apple GPU runner on, the chart renders the runner's
+  Role and RoleBinding in kube-node-lease (apple-gpu-runner-rbac.yaml), where
+  the runner's node keeps its heartbeat. Neither the release-namespace Role nor
+  the ClusterRole above reaches that namespace, and helm re-applies both objects
+  on every chart bump (their helm.sh/chart label changes). Without this grant,
+  every tick after the runner is switched on would 403 there, --atomic would roll
+  back, and the channel that would deliver a fix would be the one locked out.
+
+  NOT `*` on `*`, like the GPU block above and for a like reason: kube-node-lease
+  holds every node's heartbeat, and whoever may write any lease there can make a
+  node look alive or dead. The grant is what the chart renders there:
+    * the runner's lease rules, from the same helper as the runner's Role
+      (tracebloc.appleGpuRunnerLeaseRules). RBAC lets an actor write or bind a
+      Role only while it holds every rule in it, so this is what lets auto-upgrade
+      re-apply the runner's pair. `escalate`/`bind` would let it write any Role
+      there instead, and they are not granted.
+    * roles/rolebindings: create (no name can pin a create); get, update, patch
+      and delete only on the runner's pair and this pair, so it can reconcile
+      its own grant, as the GPU block does.
+
+  The installer switches the runner on and off, running helm with the node's
+  admin kubeconfig; a tick keeps the value it finds (--reset-then-reuse-values).
+  A tick that drops the value (a stuck release recovered with its values lost)
+  deletes this pair along with the runner's. helm skips an object it can no
+  longer read, so at worst a RoleBinding bound to a deleted Role stays behind,
+  and that grants nothing.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $leaseRoleName }}
+  namespace: kube-node-lease
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+rules:
+  # The runner's lease rules, so the runner's Role can be written.
+  {{- include "tracebloc.appleGpuRunnerLeaseRules" . | nindent 2 }}
+  # The runner's Role and RoleBinding, and this pair.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    resourceNames: [{{ $runnerLease | quote }}, {{ $leaseRoleName | quote }}]
+    verbs: ["get", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $leaseRoleName }}
+  namespace: kube-node-lease
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-upgrade
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tracebloc.autoUpgradeName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $leaseRoleName }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- end }}

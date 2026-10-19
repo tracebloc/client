@@ -12,7 +12,7 @@ The tracebloc platform lets external data scientists upload **Python code, model
 |---|---|---|
 | Identity | Training pods carry no Kubernetes API token | `automountServiceAccountToken: false` |
 | Runtime | Non-root, no privileges, no capabilities, seccomp-default | Pod + container `securityContext` |
-| Filesystem | Read-only root filesystem for the 3 new-architecture training images | `readOnlyRootFilesystem: true` + scoped `emptyDir` mounts |
+| Filesystem | Read-only root filesystem for every training image | `readOnlyRootFilesystem: true` + scoped `emptyDir` mounts |
 | Storage | Dataset volume mounted read-only | `readOnly: true` on the shared PVC mount |
 | Network | Default-deny ingress; egress only to cluster DNS, the in-cluster MySQL, the requests-proxy and the egress gateway, so external HTTPS goes only through the gateway's FQDN allowlist | Kubernetes `NetworkPolicy` + squid egress gateway |
 | Admission | Namespace-level Pod Security Admission tripwire | `pod-security.kubernetes.io/warn` + `audit` labels |
@@ -194,7 +194,7 @@ spec:
 
 **What this still allows:**
 
-- DNS lookups to the cluster DNS — **and the cluster DNS forwards any name it does not own to the internet**, so a pod can leak data by encoding it into query names (`<chunk>.attacker.example`), with no TCP connection at all. Closed by `restrictedDns.enabled` (default off; see [DNS exfiltration](#dns-exfiltration-restricteddns) below).
+- DNS lookups to the cluster DNS — **and the cluster DNS forwards any name it does not own to the internet**, so a pod can leak data by encoding it into query names (`<chunk>.attacker.example`), with no TCP connection at all. Closed by `restrictedDns.enabled` (default off; on for the macOS node, §5.5; see [DNS exfiltration](#dns-exfiltration-restricteddns) below).
 - In-cluster egress to MySQL (3306), the requests-proxy (8888), and the egress gateway (3128)
 - Outbound HTTPS/443 to the public internet — **dropped by default as of 1.9.96 (`networkPolicy.training.allowExternalHttps: false`, deny-by-default).** Training pods reach external services only through the in-cluster egress gateway; set `allowExternalHttps: true` to opt a fleet back out (see §8.2).
 
@@ -204,7 +204,7 @@ A NetworkPolicy cannot filter DNS by name, and the cluster DNS is the cluster op
 
 This works because, with `egressProxy.routeWorkloads` on, these pods never resolve an external name themselves: they send `CONNECT host:443` to the egress gateway, which resolves it. The chart refuses to render the switch with routing off and an empty allowlist.
 
-It is **off by default**. Before turning it on for an edge: the jobs-manager image must carry the `dnsConfig` support (an older one leaves pods on the cluster DNS, which the policy then blocks, so every run loses DNS); `clusterDomain` must be the cluster's real domain; and on a node-local DNS cache set `restrictedDns.upstream` to its IP. `networkPolicy.training.enforcementProbeHost` must stay an IP, since a training pod can no longer resolve an external host. What stays open: ingestion pods keep all TCP egress, so DNS-over-TCP straight to an outside resolver is not blocked for them (they run tracebloc's own image, not uploaded code). Like every rule here, the policy half holds only where the CNI enforces egress policy.
+It is **off by default**, except on the macOS node, where the installer turns it on (§5.5). Before turning it on for an edge: the jobs-manager image must carry the `dnsConfig` support (an older one leaves pods on the cluster DNS, which the policy then blocks, so every run loses DNS); `clusterDomain` must be the cluster's real domain; and on a node-local DNS cache set `restrictedDns.upstream` to its IP. `networkPolicy.training.enforcementProbeHost` must stay an IP, since a training pod can no longer resolve an external host. What stays open: ingestion pods keep all TCP egress, so DNS-over-TCP straight to an outside resolver is not blocked for them (they run tracebloc's own image, not uploaded code). Like every rule here, the policy half holds only where the CNI enforces egress policy.
 
 **Enforcement prerequisite:** every bullet above is a *request* to the CNI, not a guarantee. It holds only on a CNI that enforces **egress** NetworkPolicy — Calico, Cilium, OpenShift OVN-Kubernetes, Azure CNI created with a network policy, or the **EKS VPC CNI managed add-on with `enableNetworkPolicy=true`**. See [§5.1](#enforcing-cnis) for the full list and the EKS caveat, and §6.2 for how to verify it on a given cluster. On a non-enforcing CNI the policy object exists and blocks nothing.
 
@@ -232,12 +232,12 @@ securityContext:
 securityContext:
   allowPrivilegeEscalation: false
   capabilities: {drop: [ALL]}
-  readOnlyRootFilesystem: true    # new-architecture categories only (see below)
+  readOnlyRootFilesystem: true
 ```
 
-`readOnlyRootFilesystem: true` is applied only to training pods whose `category` is in the new-architecture allow-list (`tabular_classification`, `tabular_regression`, `text_classification`). Legacy categories write weight files inside the image filesystem and cannot yet accommodate a read-only rootfs; see §8.4.
+`readOnlyRootFilesystem: true` is applied to every training pod, whatever its task type: every training image writes its runtime files under `EXPERIMENT_SCRATCH_PATH` and its framework caches under `$HOME`, so the root filesystem is locked down uniformly (§8.4 records the earlier per-category rollout).
 
-When enabled, the training pod also gets three `emptyDir` mounts to host framework caches and experiment outputs:
+The training pod also gets three `emptyDir` mounts to host framework caches and experiment outputs:
 
 | Mount path | Why |
 |---|---|
@@ -374,6 +374,34 @@ The chart does **not** set `runAsUser` on training pods. Training images declare
 When `hostPath.enabled: true`, the PVCs backing `/data/shared`, `/data/logs`, and MySQL data are rooted at `/tracebloc/<release>/*` on the node filesystem. Training pods still mount those volumes through the PVC abstraction — the read-only enforcement applies. Operators should be aware that compromising the node directly (outside of tracebloc's threat model) gives filesystem-level access to the same data.
 
 **Network-mounted datasets (backend#743).** MySQL/InnoDB must stay on a local disk — file-locking and `O_DIRECT` over NFS are unsafe — so the installer preflight fails fast when `HOST_DATA_DIR` is on a network filesystem (override: `TRACEBLOC_ALLOW_NETWORK_FS=1`). Large datasets may instead live on a customer network (NFS) mount via `HOST_DATASET_DIR`: only the dataset PV base path (`hostPath.datasetPath`, mounted at `/data/shared`) is relocated there, while mysql + logs stay on the local `/tracebloc` tree. Under NFS `root_squash` a non-admin researcher has access only as their own uid and cannot grant the fixed uid `999` access, so the installer passes the host user's uid/gid to jobs-manager, which runs spawned **ingestion** pods as that uid — dataset writes then land as the user who owns the export, with no chown and no root mapping. Training pods still mount `/data/shared` read-only and keep their arbitrary-UID posture (§5.3); only the ingestion writer is pinned to the host uid.
+
+### 5.5 The macOS node (Apple `container`)
+
+On a Mac (Apple silicon, macOS 26 or later) the installer runs k3s as one Linux VM on Apple's `container` runtime, the macOS node. The training-pod defenses above apply inside it unchanged. What differs is the network around the node, and two values the installer sets for it.
+
+#### The cluster
+
+**Other VMs on the same Mac share the node's network.** Every VM the runtime starts sits on one virtual network (by default `192.168.64.0/24`, with this Mac as its gateway), and inside the node k3s listens on every address: the kubelet (`10250`), the API (`6443`) and every NodePort. Without a filter, any other VM on the Mac (a developer's container, another tool's VM) could reach all three. The node closes this itself:
+
+- **A packet filter inside the node.** The node's entrypoint sets it on every start, before k3s runs: a chain, `TRACEBLOC-WALL`, in the `mangle` table of both IP families, which every packet arriving on the node's interface passes before kube-proxy's NodePort rules can see it. The chain lets back replies to the node's own connections (image pulls, DNS, the egress gateway's traffic), lets this Mac reach the API port over IPv4, and drops everything else, IPv6 neighbour discovery included. The VM's address changes on every start, so the filter does not name it: it names this Mac by the gateway of the node's default route, read at each start. A node with no default route within 30 seconds, or a rule the kernel refuses, stops before k3s starts, so a node that cannot set its filter never serves.
+- **The API on this Mac's loopback only.** The runtime publishes the node's API on `127.0.0.1:6443`, and that forward is the one path the filter lets in. The kubelet and every NodePort are reachable from nowhere outside the node.
+- **Read back on every install.** After the node is Ready, the installer reads the filter back from both families and stops if PREROUTING's first rule is not the jump to the chain or the chain does not end in `DROP` ("the node's packet filter is not set"). A table it cannot read back stops the install too; it is never taken as walled. A node the login item starts again after a reboot or a crash sets the filter in the same entrypoint; the read-back runs on every install and re-run of the installer.
+- **Proven from a second VM.** The live suite (`scripts/tests/mac-container-live.sh`, check 27) runs a probe VM on the same Mac against a pod behind a NodePort. As the node is first started, after a restart and after a recreate on its volume, the kubelet, the NodePort and the API give that VM no answer over IPv4 or IPv6, while this Mac's API answers. With the filter's jump taken out of the live node, the same probe reaches the kubelet and the NodePort, so the timeouts are the filter's and not a probe that cannot reach the node.
+
+**No NodePort is exposed.** On k3d the chart publishes its local API on `localApi.nodePort` through k3d's load balancer. The macOS node has no such load balancer, and its values profile sets `localApi.enabled=false`, so no NodePort Service renders there.
+
+**Restricted DNS is on.** The macOS node's values profile also sets `restrictedDns.enabled=true` ([DNS exfiltration](#dns-exfiltration-restricteddns)). The installer passes the profile as the last `--set` of every Helm call it makes on the macOS node (a fresh install, a dev-mode install with a caller's own values file, and the reconcile of an existing release), so it outranks the values file and any stored value. Helm stores it with the release, so an upgrade that reuses the release's values keeps it. Every other platform keeps the chart's default, off.
+
+#### The job data
+
+**On this Mac, private to you.** A new macOS node keeps its release's datasets, logs and resume points in one folder on this Mac, `~/.tracebloc/job-data` (in the data folder, `TRACEBLOC_HOST_DATA_DIR`), and mounts it at the same path. The chart's static volumes put each in `<folder>/<release>/{data,logs,resume}`. MySQL and k3s stay on the node's own volume.
+
+- **Mode 0700, the user's own.** The installer makes the folder as the user at mode `0700` and sets it back to `0700` on every run. Apple's file sharing enforces no modes inside the VM, and files written in the node land on this Mac as the user, so the folder's mode is what keeps the Mac's other users out. It is never made world-writable.
+- **Never adopted.** A symbolic link, a file, or a folder another user owns at that path stops the install: the installer refuses it rather than change it, and says to point `TRACEBLOC_HOST_DATA_DIR` at a folder of the user's own.
+- **Mounted, or stopped.** Once the release is read, the installer checks that the node mounts the folder its volumes name, and stops if not, so job data never lands inside the VM by mistake.
+- **Removed with the install.** `tracebloc delete` removes the folder after the node and before Apple's runtime, as the user, unless `--keep-data` keeps it. It removes only a folder the installer could have made: an absolute path named `job-data`, a folder and not a link, the user's own.
+
+A Mac installed before this layout keeps its job data in the node's volume until it is reinstalled.
 
 ---
 
@@ -591,8 +619,7 @@ kubectl -n <ns> get job -l app=client -o json \
 
 kubectl -n <ns> get job -l app=client -o json \
   | jq '.items[].spec.template.spec.containers[0].securityContext'
-# expected: allowPrivilegeEscalation:false, capabilities.drop:["ALL"]
-# expected on new-arch: readOnlyRootFilesystem:true
+# expected: allowPrivilegeEscalation:false, capabilities.drop:["ALL"], readOnlyRootFilesystem:true
 ```
 
 ### 7.5 Shared data mount is read-only
@@ -723,14 +750,9 @@ Previously the tracebloc backend issued Django REST Framework `authtoken` creden
 
 **Still open — SEC-07 "Remember Me" retention (tracebloc/backend#5324).** Not covered by this acceptance. Worth stating precisely, because the original SEC-07 framing is out of date: there is no 365-day session. The backend mints one bounded 30-day token for every web login and has no "remember me" concept at all; the frontend still writes a **365-day expiry on the cookie** carrying it. So the checkbox promises a year of a credential the server kills at 30 days, and a dead token lingers in script-reachable storage long after it stops working. That is a correctness and storage-hygiene problem, not a live 365-day exposure — but it leans on the same storage hygiene this acceptance now depends on.
 
-### 8.4 Legacy training image architecture (G4 partial) — **legacy-migration team**
+### 8.4 Read-only root filesystem for every task type — **resolved**
 
-Six task types still run on the legacy `common/ping.py` architecture and write weight files inside the image at `/app/common/<experiment_id>/`. These categories cannot receive `readOnlyRootFilesystem: true` until they migrate to the `use_cases/` pattern (which honors `EXPERIMENT_SCRATCH_PATH`).
-
-- Affected: `image_classification`, `keypoint_detection`, `object_detection`, `semantic_segmentation`, `time_series_forecasting`, `time_to_event_prediction`
-- Already migrated: `tabular_classification`, `tabular_regression`, `text_classification`
-
-Adding a migrated category to `READONLY_ROOTFS_CATEGORIES` in the jobs-manager is the only code change needed to promote it once migrated. A separate engineering team owns the migration.
+Earlier versions of this document listed six task types (`image_classification`, `keypoint_detection`, `object_detection`, `semantic_segmentation`, `time_series_forecasting`, `time_to_event_prediction`) that still wrote weight files inside the image and so ran without `readOnlyRootFilesystem: true`. That is no longer the case: every training image now writes under `EXPERIMENT_SCRATCH_PATH`, and the jobs-manager applies the read-only root filesystem and its three `emptyDir` mounts to every training pod, with no per-category allow-list (§4.4). Verify it on a running edge with §7.4.
 
 ### 8.5 PSA `enforce: restricted` on bare-metal — **operator**
 
@@ -832,7 +854,7 @@ Cross-reference for reviewers and contributors.
 | `automountServiceAccountToken: false` | same |
 | Pod + container securityContext | same |
 | Shared volume `readOnly` | same |
-| `readOnlyRootFilesystem` + emptyDir mounts | same (gated by `READONLY_ROOTFS_CATEGORIES`) |
+| `readOnlyRootFilesystem` + emptyDir mounts | same (every task type) |
 | Training-pod NetworkPolicy | [`client:templates/network-policy-training.yaml`](../client/templates/network-policy-training.yaml) |
 | Namespace PSA labels | [`client:templates/namespace.yaml`](../client/templates/namespace.yaml) (opt-in) |
 | Experiment scratch-path env | `tracebloc-engine:core/utils/general.py` |
@@ -852,6 +874,7 @@ Cross-reference for reviewers and contributors.
 - **2026-09-08** — Recorded the egress seal as **sealed + enforcement-probe-verified** across all three tracebloc template fleets — dev (`tb-client-dev-templates`), staging + prod (`tracebloc-clients-prod`) — in §8.2, and corrected the §5.1 staging-fleet cluster attribution to match (client-runtime#199). The hold lifted because the HF runtime-fetch gate now ships `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE`/`HF_DATASETS_OFFLINE`, so an NLP template fails closed at the library layer. New/customer fleets still follow the §8.2 gated rollout. Fleet records in [SEAL-CHECK.md](SEAL-CHECK.md).
 - **2026-09-18** — Corrected §8.2, which still said the egress gateway allowlist permits App Insights although it no longer does (client-runtime#471 / backend#3078; `client/tests/egress_proxy_test.yaml` asserts the absence). Corrected the TL;DR network row, which still read as if direct external HTTPS were the default. Added `scripts/tests/egress-prose-agreement.sh`, which derives the egress defaults and the allowlist from `client/values.yaml` and reddens on any document that contradicts them, with `egress-prose-mutations.sh` proving it can fail.
 - **2026-10-06** — Recorded the **SEC-06 residual-risk acceptance** in §8.3: the web-session token stays in JS-readable storage; the `httpOnly`-cookie migration was assessed and declined on CSRF and frontend-rework cost against an already-bounded, revocable 30-day token (tracebloc/backend#971, backend#2257 closed unmerged). Names the compensating controls this now leans on — XSS in the web app is a session-compromise class of bug, revocation paths are load-bearing, and the 30-day TTL should not grow — plus the conditions that re-open the decision. SEC-07 "Remember Me" retention is explicitly *not* covered, and is now tracked standalone as tracebloc/backend#5324 — with the correction that it is a client-side cookie-expiry mismatch against the backend's single 30-day TTL, not the 365-day session the original finding described.
+- **2026-10-18** — Added §5.5, the macOS node: the packet filter that keeps other VMs on the Mac away from the node's kubelet, API and NodePorts, its read-back and its live proof from a second VM; no NodePort on the Mac; restricted DNS on by default there (client-dev#2297). Corrected the read-only root filesystem, which the jobs-manager now applies to every task type: the TL;DR, §4.4, §7.4, §8.4 and §10 still said new-architecture categories only.
 
 ---
 

@@ -41,10 +41,11 @@ install_nvidia_drivers() {
 
   # The floor's series (facts.env NVIDIA_DRIVER_FLOOR_LINUX). The package is the
   # newest the archive lists at or above it; when it lists none, the newest it
-  # does list -- a driver below the floor only warns and keeps the GPU
-  # (client-dev#1355), so naming a series the archive does not carry would turn
-  # that warning into an aborted install. Only an empty listing falls back to
-  # the floor's series by name. ubuntu-drivers is asked for the chosen series.
+  # does list, said: naming a series the archive does not carry would abort the
+  # install. A driver installed here below the hard floor is judged on the next
+  # run, which leaves the GPU off (_nvidia_gpu_floor_gate). Only an empty listing
+  # falls back to the floor's series by name. ubuntu-drivers is asked for the
+  # chosen series.
   # if/else, never `a && b || c`: a FAILED install of the package found must
   # fail here, not quietly fall through to another driver.
   local floor_series="${TB_NVIDIA_DRIVER_FLOOR%%.*}" search pkg series failed=""
@@ -67,7 +68,7 @@ install_nvidia_drivers() {
     if [[ -z "$pkg" ]]; then
       pkg="$(_nvidia_driver_pkg_pick 0 "$search")"
       if [[ -n "$pkg" ]]; then
-        warn "No NVIDIA driver ${floor_series} or newer is available from this machine's package sources — installing ${pkg}, older than the driver tracebloc recommends for GPU training; upgrade it when a newer one is available."
+        warn "No NVIDIA driver ${floor_series} or newer is available from this machine's package sources — installing ${pkg}, older than the driver tracebloc's GPU training images need (CUDA 13), so GPU training will not work on it: update it to ${floor_series} or newer when one is available, then re-run the installer."
       fi
     fi
     series="${pkg#nvidia-driver-}"; series="${series%%-*}"; series="${series:-$floor_series}"

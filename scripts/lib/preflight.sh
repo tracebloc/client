@@ -46,15 +46,15 @@ _PF_MIN_MEM_GB_RESOLVED="$PF_MIN_MEM_GB"
 # rung + kubelet reservation + k3s addons + control plane + CronJob transient, in
 # bytes (backend#2460, RFC-BACKEND-664 §L0.1/§P4). Kept honest by
 # `gen-vm-budget-embed.sh --check` in `make drift`.
-_TB_VM_MIN_MEM_BYTES=10850664448
+_TB_VM_MIN_MEM_BYTES=10884218880
 # The Linux HARD floor: Linux kubelet carve-out + the platform's own pods (contract
 # `overhead`) + the least a training run is worth scheduling (contract `floor`)
 # (backend#5601). Below it no run can ever schedule on this host.
-_TB_LINUX_MIN_MEM_BYTES=7449083904
+_TB_LINUX_MIN_MEM_BYTES=7482638336
 # The same floor over the macOS and the Windows carve-out, graded on the VM beneath
 # the node (client-dev#2105). Below it no run can ever schedule in that VM.
-_TB_DARWIN_MIN_MEM_BYTES=7314866176
-_TB_WINDOWS_MIN_MEM_BYTES=8422162432
+_TB_DARWIN_MIN_MEM_BYTES=7348420608
+_TB_WINDOWS_MIN_MEM_BYTES=8455716864
 # ── end generated VM budget ───────────────────────────────────────────────────
 # The warn tier is DERIVED from that constant: below it the smallest training
 # run (XS, 4 GiB) cannot schedule beside the platform, so "comfortable to run" is
@@ -1156,12 +1156,22 @@ _pf_mac_node_disk_at() {
 # Under hostpath the training data is not in the node's volume but in the hostPath
 # folder on this Mac, which the node mounts (_mac_ct_node_mounts): a second line grades
 # that folder's disk, as _pf_disk_k3s grades HOST_DATA_DIR for native k3s's hostpath.
+# Under node-local the job data is in the job-data folder (_mac_ct_job_data_dir) when the
+# install keeps one, and the second line grades that folder's disk.
 _pf_disk_mac_node() {
   local both tab=$'\t' root at
   both="$(_pf_mac_node_disk_at)" \
     || { warn "Disk: couldn't tell where Apple's container runtime will keep the node (skipping)."; return 0; }
   _pf_disk_grade "${both%%"$tab"*}" "the node's images and volume (${both#*"$tab"})"
-  [[ "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]] || return 0
+  # node-local: the job data is in the job-data folder on this Mac (client-dev#2320).
+  if [[ "${TB_STORAGE_MODE:-node-local}" != "hostpath" ]]; then
+    root=""
+    if declare -F _mac_ct_job_data_dir >/dev/null; then root="$(_mac_ct_job_data_dir)"; fi
+    [[ -n "$root" ]] || return 0
+    at="$(_pf_nearest_existing "$root")"; [[ -n "$at" ]] || at="/"
+    _pf_disk_grade "$at" "the job data (${root})"
+    return 0
+  fi
   root="$(_hostpath_root)"; root="${root:-${HOST_DATA_DIR:-}}"
   at="$(_pf_nearest_existing "$root")"; [[ -n "$at" ]] || at="/"
   _pf_disk_grade "$at" "the hostPath volumes (${root})"

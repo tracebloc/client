@@ -131,6 +131,13 @@ spec:
         runAsNonRoot: false
         seccompProfile:
           type: RuntimeDefault
+      {{- if include "tracebloc.appleGpuRunner" . }}
+      # Linux nodes only while the Apple GPU runner is on: its virtual node
+      # (kubernetes.io/os darwin) takes GPU jobs and nothing else, so the
+      # tolerations below would put a pod there that never starts.
+      nodeSelector:
+        kubernetes.io/os: linux
+      {{- end }}
       tolerations:
         - operator: "Exists"
       containers:
