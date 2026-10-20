@@ -920,11 +920,13 @@ spec:
         #     image used cpu=2,memory=8Gi, the value this template used to
         #     inject), assigned to requests AND limits -> a CPU job pod is
         #     GUARANTEED.
-        #   * a GPU job -> BESTEFFORT under EITHER setting. client-runtime's GPU
-        #     path resolves its envelope to nvidia.com/gpu and ephemeral-storage
-        #     only, and neither is QoS-relevant, so the container sets no
-        #     cpu/memory request or limit at all and the flag changes nothing
-        #     (backend#2871; `pod-qos-class.py` encodes the same carve-out).
+        #   * a GPU job -> the SAME class as a CPU job, on a runtime image with
+        #     client-runtime#1092 (client-runtime#1089): one-GPU pods now carry
+        #     the cpu/memory envelope by default, capped to the node's share
+        #     per GPU on a single node. Before #1092 the GPU path sized only
+        #     nvidia.com/gpu and ephemeral-storage, neither QoS-relevant, so
+        #     every GPU job pod was BESTEFFORT (backend#2871). Setting
+        #     env.GPU_POD_ENVELOPE=0 opts out and restores that BestEffort pod.
         #
         # NO VERBATIM CROSS-REPO QUOTE HERE, deliberately (Asad, review of
         # backend#2872). This block used to quote client-runtime's own comment

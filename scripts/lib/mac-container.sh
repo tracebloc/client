@@ -753,7 +753,9 @@ _mac_ct_refuse_host() {
 # is read, the node decides: one made without any frozen mounts (run-args and no
 # hostpath file, a v1.11 node-local Mac's) gets none, so an upgrade neither recreates it
 # nor makes a folder its claims never use. Otherwise it is <data dir>/job-data, the data
-# dir read as validate_config reads HOST_DATA_DIR (_tb_home_path).
+# dir read as validate_config reads HOST_DATA_DIR (_tb_home_path). A caller's values file
+# (TRACEBLOC_VALUES_FILE) that opens hostPath keeps job data in its own tree, so it gets
+# none: the chart refuses jobData.path beside hostPath.enabled (tracebloc.jobDataRefusal).
 _mac_ct_job_data_dir() {
   [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] || return 0
   case "${TRACEBLOC_JOB_DATA_KEPT:-}" in
@@ -761,6 +763,10 @@ _mac_ct_job_data_dir() {
     0) return 0 ;;
   esac
   local base dir
+  if [[ -r "${TRACEBLOC_VALUES_FILE:-}" ]] && declare -F _values_hostpath_storage >/dev/null \
+     && _values_hostpath_storage <"$TRACEBLOC_VALUES_FILE" | grep -x 'enabled=true' >/dev/null; then
+    return 0
+  fi
   if dir="$(_mac_ct_node_dir 2>/dev/null)" && [[ -e "${dir}/run-args" && ! -e "${dir}/hostpath" ]]; then
     return 0
   fi

@@ -106,7 +106,7 @@ spec:
              same reason — client#564 / Bugbot). */ -}}
         {{- include "tracebloc.selectorLabels" . | nindent 8 }}
     spec:
-      {{- with $nv.runtimeClassName }}
+      {{- with include "tracebloc.nvidiaPluginRuntimeClass" . }}
       # client#835: run the plugin under the `nvidia` RuntimeClass so its pod gets
       # the GPU (the node's containerd invokes the NVIDIA runtime) and NVML can
       # enumerate GPUs — otherwise the pod runs under the default runtime, sees no

@@ -610,6 +610,20 @@ nvidia-device-plugin-daemonset
 {{- end }}
 
 {{/*
+tracebloc.nvidiaPluginRuntimeClass — the RuntimeClass the chart's NVIDIA device plugin
+runs under: gpu.devicePlugin.nvidia.runtimeClassName while the plugin is enabled with
+vendor nvidia, else "". gpu-device-plugin.yaml and resource-monitor-daemonset.yaml both
+read it here, so the monitor can only ever get the plugin's class. Nil-safe for
+--reuse-values (no gpu map). Call with the ROOT context.
+*/}}
+{{- define "tracebloc.nvidiaPluginRuntimeClass" -}}
+{{- $dp := (.Values.gpu | default dict).devicePlugin | default dict -}}
+{{- if and $dp.enabled (eq ($dp.vendor | default "") "nvidia") -}}
+{{- ($dp.nvidia | default dict).runtimeClassName | default "" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Release-scoped name shared by the auto-upgrade CronJob, ServiceAccount,
   ClusterRoleBinding, and the ConfigMap holding the upgrade script. Kept
   in one helper so the four resources stay in lockstep — the CRB references

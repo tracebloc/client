@@ -2969,6 +2969,38 @@ function Set-ProcessEnv {
   }
 }
 
+# The console's output encoding, read and set: seams for Invoke-HostCliShown, as
+# Get-ConsoleInputEncoding and Set-ConsoleInputEncoding are for Invoke-CoreRun.
+function Get-ConsoleOutputEncoding { return [Console]::OutputEncoding }
+function Set-ConsoleOutputEncoding {
+  param([System.Text.Encoding]$Encoding)
+  [Console]::OutputEncoding = $Encoding
+}
+
+# Runs the host CLI with ARGUMENTLIST, its stdout piped to Out-Host so none of it is
+# this function's output. Windows PowerShell 5.1 decodes a native command's piped
+# stdout by [Console]::OutputEncoding (the OEM code page), but the CLI writes UTF-8:
+# for the call only that encoding is UTF-8 without a BOM, put back as found even when
+# the CLI throws. A console that refuses the change still runs the CLI.
+function Invoke-HostCliShown {
+  param([string]$Cli, [string[]]$ArgumentList)
+  $restore = $null
+  try {
+    $enc = Get-ConsoleOutputEncoding
+    Set-ConsoleOutputEncoding -Encoding (New-Object System.Text.UTF8Encoding $false)
+    $restore = $enc
+  } catch {
+    $null = $_
+  }
+  try {
+    & $Cli @ArgumentList | Out-Host
+  } finally {
+    if ($null -ne $restore) {
+      try { Set-ConsoleOutputEncoding -Encoding $restore } catch { $null = $_ }
+    }
+  }
+}
+
 # The account steps on the host CLI, provision.sh's: sign in (the device flow), ask
 # `client create --plan` what it would do, then mint into a folder only this user
 # can read. Another account's client running here, or an answer that can't tell,
@@ -2980,17 +3012,18 @@ function Set-ProcessEnv {
 # --credential-file` wrote. The folder is deleted before this returns, whatever
 # happened. CLI is the tracebloc CLI's path.
 #
-# The login and the create are piped to Out-Host. What a command run here writes to
-# stdout is this function's output, and the caller keeps that as the credential: so
-# the login's URL and code never reached the screen (the user waited ten minutes for
-# a code they were not shown), and a CLI line would sit in front of the credential
-# bytes, which the client run's [byte[]] -Stdin cannot take (client-dev#1810).
+# The login and the create are piped to Out-Host (Invoke-HostCliShown). What a
+# command run here writes to stdout is this function's output, and the caller keeps
+# that as the credential: so the login's URL and code never reached the screen (the
+# user waited ten minutes for a code they were not shown), and a CLI line would sit
+# in front of the credential bytes, which the client run's [byte[]] -Stdin cannot
+# take (client-dev#1810).
 function Get-HostClientCredential {
   param([string]$Cli, [switch]$Reissue, [System.Collections.IDictionary]$Facts)
   $dir = Join-Path (Join-Path $env:LOCALAPPDATA 'tracebloc') ('credential-' + [guid]::NewGuid().ToString('N'))
   New-PrivateDirectory -Path $dir
   try {
-    & $Cli login | Out-Host
+    Invoke-HostCliShown -Cli $Cli -ArgumentList @('login')
     if ($LASTEXITCODE -ne 0) {
       throw "Signing in with the tracebloc CLI did not finish (it exited $LASTEXITCODE), so this machine was not registered. Run this installer again to sign in."
     }
@@ -3060,7 +3093,7 @@ function Get-HostClientCredential {
       Set-ProcessEnv -Name $k -Value $v
     }
     try {
-      & $Cli @create | Out-Host
+      Invoke-HostCliShown -Cli $Cli -ArgumentList $create
     } finally {
       foreach ($k in @($savedFacts.Keys)) { Set-ProcessEnv -Name $k -Value $savedFacts[$k] }
     }

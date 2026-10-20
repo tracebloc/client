@@ -764,7 +764,7 @@ If the customer enables the policy on a CNI that doesn't enforce (default EKS, F
 
 ### 8.7 Kernel-level container escape — **out of scope today**
 
-`readOnlyRootFilesystem`, capability drop, and seccomp-default substantially reduce the exploitable attack surface for kernel CVEs, but a zero-day in the container runtime could still escape a training pod to the node. Defense-in-depth via user-namespace-based runtimes (gVisor, Kata Containers) is available: set `env.RUNTIME_CLASS_NAME` in your values to a RuntimeClass the customer has installed. Not enabled by default because RuntimeClass availability varies by cluster.
+`readOnlyRootFilesystem`, capability drop, and seccomp-default substantially reduce the exploitable attack surface for kernel CVEs, but a zero-day in the container runtime could still escape a training pod to the node. Defense-in-depth via user-namespace-based runtimes (gVisor, Kata Containers) is available: set `env.RUNTIME_CLASS_NAME` in your values to a RuntimeClass the customer has installed. Not enabled by default because RuntimeClass availability varies by cluster. The class applies to the pods tracebloc starts for training, not to the chart's own node agents: the resource-monitor DaemonSet, which reads each node's `/proc` and `/sys`, keeps the default runtime, or the NVIDIA device plugin's class on a GPU node.
 
 ### 8.8 DoS via resource exhaustion — **out of scope**
 
