@@ -151,15 +151,17 @@ data:
     # $1/$2 are the from/to chart versions the log names. Output still streams
     # (tee), so a Job killed mid-op keeps what helm printed. Returns 0 on
     # success; on failure prints the classification and EXITS (1 or 3).
+    # Its files are unique per call: a tick run beside another on one host must
+    # never read the other's output or exit code.
     atomic_upgrade() {
       _au_from="$1"; _au_to="$2"; shift 2
-      _au_out=/tmp/auto-upgrade-helm.out
-      _au_rcf=/tmp/auto-upgrade-helm.rc
-      rm -f "$_au_out" "$_au_rcf"
+      _au_out="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-helm-out.XXXXXX")"
+      _au_rcf="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-helm-rc.XXXXXX")"
       { "$@" 2>&1 && echo 0 >"$_au_rcf" || echo "$?" >"$_au_rcf"; } | tee "$_au_out"
       _au_rc="$(cat "$_au_rcf" 2>/dev/null || true)"
+      rm -f "$_au_rcf"
       case "$_au_rc" in ''|*[!0-9]*) _au_rc=1 ;; esac
-      [ "$_au_rc" -eq 0 ] && return 0
+      [ "$_au_rc" -eq 0 ] && { rm -f "$_au_out"; return 0; }
 
       _au_err="$(grep '^Error: ' "$_au_out" 2>/dev/null | tail -n 1 || true)"
       [ -n "$_au_err" ] || _au_err="$(tail -n 1 "$_au_out" 2>/dev/null || true)"
@@ -179,6 +181,7 @@ data:
           _au_orig="${_au_orig%": release $RELEASE_NAME failed: "*}" ;;
       esac
       _au_warn="$(grep 'msg="upgrade failed"' "$_au_out" 2>/dev/null | tail -n 1 || true)"
+      rm -f "$_au_out"
       case "$_au_warn" in
         *' error="'*) _au_orig="${_au_warn#* error=\"}"; _au_orig="${_au_orig%%\"*}" ;;
       esac
@@ -528,14 +531,16 @@ data:
           # like an empty history, or the refusal below names the wrong fact and
           # sends the operator to the history instead of the CronJob's access.
           # stderr goes to a file so a warning helm prints there on success can
-          # never land in the JSON body.
-          _hist_err=/tmp/auto-upgrade-history.err
+          # never land in the JSON body; unique per tick, as atomic_upgrade's are.
+          _hist_err="$(mktemp "${TMPDIR:-/tmp}/auto-upgrade-history-err.XXXXXX")"
           _hist_rc=0
           HISTORY_JSON="$(helm history "$RELEASE_NAME" -n "$RELEASE_NAMESPACE" -o json 2>"$_hist_err")" \
             || _hist_rc=$?
+          _hist_msg="$(tail -n 1 "$_hist_err" 2>/dev/null || true)"
+          rm -f "$_hist_err"
           if [ "$_hist_rc" -ne 0 ]; then
             log "ERROR: release '$RELEASE_NAME' is stuck in '$STATUS', but its history could not"
-            log "be read (helm history exited $_hist_rc: $(tail -n 1 "$_hist_err" 2>/dev/null))."
+            log "be read (helm history exited $_hist_rc: $_hist_msg)."
             log "This is a failed read, not an empty history. Refusing the rollback: without the"
             log "history there is no known-good revision to return to (backend#5273). Check that"
             log "this CronJob can read the release, then recover by hand:"

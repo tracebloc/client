@@ -3062,16 +3062,19 @@ _download_services_progress() {
 TB_MYSQL_57_PIN_TAG="prod"
 TB_MYSQL_57_PIN_DIGEST="sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354"
 # The chart's DEFAULT images.mysqlClient.digest (the 8.4 manifest index): the
-# digest the installer's 8.4 block pins (client-dev#2243), the one digest the
-# sticky read (_values_pin_mysql_84) knows is 8.4, and what an absent digest
-# renders for the dev-mode reader (_values_mysql_engine). Held to
+# digest the installer's 8.4 block pins (client-dev#2243) and what an absent
+# digest renders for the dev-mode reader (_values_mysql_engine). Held to
 # client/values.yaml by the same bats case.
-TB_MYSQL_84_DEFAULT_DIGEST="sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d"
+TB_MYSQL_84_DEFAULT_DIGEST="sha256:0050bd8f38d07bed86a4f5b5791314516efd47134c98ee75a8968471aa2ebc93"
+# The chart's previous 8.4 default (:8.4-bc3756a9). Earlier installers wrote it
+# into the values file, so clients carry it: every reader below still reads it as
+# 8.4, as tracebloc.mysqlEngineMajor does (held by install-client-helm.bats).
+TB_MYSQL_84_PRIOR_DIGEST="sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d"
 
 # The engine a mysql-client image reference runs: 5.7, 8.4, 8.0 or unknown. The
 # same classification tracebloc.mysqlEngineMajor makes of the values that
 # rendered it, applied to the rendered reference: a digest names its engine only
-# when it is one of the two pins above (anything else is unknown); a bare tag
+# when it is one of the pins above (anything else is unknown); a bare tag
 # reads prod/5.7* as 5.7, 8.4* as 8.4 and 8.0* as 8.0. A reference with no tag at
 # all runs `latest`, which names no engine.
 _mysql_image_engine() {
@@ -3081,7 +3084,7 @@ _mysql_image_engine() {
   esac
   if [[ -n "$digest" ]]; then
     case "$digest" in
-      "$TB_MYSQL_84_DEFAULT_DIGEST") echo 8.4 ;;
+      "$TB_MYSQL_84_DEFAULT_DIGEST"|"$TB_MYSQL_84_PRIOR_DIGEST") echo 8.4 ;;
       "$TB_MYSQL_57_PIN_DIGEST")     echo 5.7 ;;
       *)                             echo unknown ;;
     esac
@@ -3190,7 +3193,8 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # `tag: "8.4"` with a NON-empty digest actually runs whatever that (opaque sha256)
 # digest is — which we cannot decode — not 8.4. Report 8.4 ONLY when tag is 8.4
 # AND the digest is one that provably runs 8.4: TB_MYSQL_84_DEFAULT_DIGEST, the
-# chart's own 8.4 pin and what our heredoc writes (client-dev#2243), or
+# chart's own 8.4 pin and what our heredoc writes (client-dev#2243), the
+# previous default an earlier installer wrote (TB_MYSQL_84_PRIOR_DIGEST), or
 # AFFIRMATIVELY empty, the documented opt-in (`tag: "8.4"` + `digest: ""`) and
 # what the heredoc wrote before it pinned — so a client installed then stays 8.4
 # sticky and its re-run writes the pinned block. Any other set digest is treated
@@ -3216,11 +3220,11 @@ _client_default_namespace() { _sanitize_workspace_name "${TB_NAMESPACE:-traceblo
 # piping in (helm get values) is never SIGPIPE'd (backend#1778; the trap an early
 # `exit`/`grep -q` would spring).
 _values_pin_mysql_84() {
-  awk -v d84="$TB_MYSQL_84_DEFAULT_DIGEST" '
-    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty or the 8.4 pin.
+  awk -v d84="$TB_MYSQL_84_DEFAULT_DIGEST" -v d84p="$TB_MYSQL_84_PRIOR_DIGEST" '
+    # 8.4 iff tag is 8.4 AND the digest was SEEN and is empty or an 8.4 pin.
     # sawdigest guards the "absent digest is not an empty one" rule (backend#2638):
     # a digest we never saw on STDIN may still be a non-empty default that wins.
-    function flush() { if (inblk && tag == "8.4" && sawdigest && (digest == "" || digest == d84)) found = 1 }
+    function flush() { if (inblk && tag == "8.4" && sawdigest && (digest == "" || digest == d84 || digest == d84p)) found = 1 }
     /^[[:space:]]*#/ { next }                      # comment line — drops the decoy
     /^[[:space:]]*$/ { next }                      # blank line
     { match($0, /^[[:space:]]*/); indent = RLENGTH }
@@ -3546,7 +3550,8 @@ _devmode_engine_decision() {
 # chart: its images.mysqlClient block laid over the chart's defaults, then
 # tracebloc.mysqlEngineMajor's own rule. Prints 5.7, 8.4, 8.0 or unknown.
 #   digest absent   -> the chart default, TB_MYSQL_84_DEFAULT_DIGEST -> 8.4
-#   digest = that   -> 8.4;  digest = TB_MYSQL_57_PIN_DIGEST -> 5.7
+#   digest = that or TB_MYSQL_84_PRIOR_DIGEST -> 8.4
+#   digest = TB_MYSQL_57_PIN_DIGEST -> 5.7
 #   other digest    -> unknown (a custom pin; the guard stands down)
 #   digest ""       -> the tag (absent = the chart default "8.4"):
 #                      ""/prod/5.7* -> 5.7, 8.4* -> 8.4, 8.0* -> 8.0, else unknown
@@ -3560,7 +3565,7 @@ _devmode_engine_decision() {
 # keep _values_pin_mysql_84. Reads to EOF and decides in END (no SIGPIPE on a
 # producer, backend#1778).
 _values_mysql_engine() {
-  awk -v d57="$TB_MYSQL_57_PIN_DIGEST" -v d84="$TB_MYSQL_84_DEFAULT_DIGEST" -v sq="'" '
+  awk -v d57="$TB_MYSQL_57_PIN_DIGEST" -v d84="$TB_MYSQL_84_DEFAULT_DIGEST" -v d84p="$TB_MYSQL_84_PRIOR_DIGEST" -v sq="'" '
     function val(line,   v) {
       v = line
       sub(/^[[:space:]]*[A-Za-z]+:[[:space:]]*/, "", v)
@@ -3591,7 +3596,7 @@ _values_mysql_engine() {
       if (nil) { print "5.7"; exit 0 }
       if (!sawdigest) digest = d84
       if (!sawtag) tag = "8.4"
-      if (digest == d84)       e = "8.4"
+      if (digest == d84 || digest == d84p) e = "8.4"
       else if (digest == d57)  e = "5.7"
       else if (digest != "")   e = "unknown"
       else if (tag == "" || tag == "prod" || tag ~ /^5\.7/) e = "5.7"
