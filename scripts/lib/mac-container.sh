@@ -1715,6 +1715,40 @@ _mac_ct_runner_off_why() {
 _mac_ct_runner_dir() { local d; d="$(_mac_ct_node_dir)" || return 1; printf '%s/runner' "$d"; }
 _mac_ct_runner_log() { local logs; logs="$(_mac_ct_log_root)" || return 1; printf '%s/tracebloc-runner.log' "$logs"; }
 
+# The runner's engine bundle store (RFC-0185 D6, §8 Q16): the folder it keeps the verified
+# macOS engine bundles in, HOME/Library/Application Support/tracebloc/engine-bundles, the
+# daily user's own at mode 0700. It is the install record's engine-bundles entry, id the
+# runner's label. The runner reads the record once, when it starts, and keeps no bundle
+# where the record names no such folder of this user's own, so the folder is made and
+# recorded before its login item loads. tracebloc delete removes it.
+# _mac_ct_runner_bundles_dir HOME -- the folder's path under HOME.
+_mac_ct_runner_bundles_dir() { printf '%s/Library/Application Support/tracebloc/engine-bundles' "$1"; }
+
+# _mac_ct_runner_bundles_listed DIR -- 0 when the install record already lists DIR as the
+# runner's engine-bundles folder.
+_mac_ct_runner_bundles_listed() {
+  local rec
+  rec="$(tb_record_path)"
+  [[ -f "$rec" ]] || return 1
+  grep -qF "{\"kind\": \"engine-bundles\", \"id\": $(_tb_json "$TB_MAC_CT_RUNNER_LABEL"), \"path\": $(_tb_json "$1"), " "$rec"
+}
+
+# _mac_ct_runner_bundles DIR -- makes DIR, the runner's engine bundle store, 0700. Exit 1,
+# printing why, when DIR is there and is not a folder of this user's own (a symbolic link,
+# a file, another user's folder: the runner and delete refuse each), or cannot be made.
+_mac_ct_runner_bundles() {
+  local d="$1" saved_umask
+  if [[ -L "$d" ]] || { [[ -e "$d" ]] && ! [[ -d "$d" && -O "$d" ]]; }; then
+    echo "${d} is there and is not a folder of your own, so the runner has nowhere to keep the GPU engine"; return 1
+  fi
+  saved_umask="$(umask)"
+  umask 077
+  if ! { mkdir -p "$d" && chmod 0700 "$d"; }; then
+    umask "$saved_umask"; echo "could not create ${d}"; return 1
+  fi
+  umask "$saved_umask"
+}
+
 # _mac_ct_runner_kubeconfig_yaml CA_DATA TOKEN_FILE NAMESPACE -- the runner's kubeconfig.
 _mac_ct_runner_kubeconfig_yaml() {
   printf '%s\n' 'apiVersion: v1' 'kind: Config' 'clusters:' '- name: tracebloc' '  cluster:' \
@@ -1790,12 +1824,15 @@ _mac_ct_runner_loaded() {
 }
 
 # _mac_ct_ensure_runner -- the runner's login item, when this run sets up the runner
-# (_mac_ct_runner_on): its kubeconfig and token written, its plist written, recorded as a
-# launch-agent and loaded into this login session. A loaded item whose plist is already
-# these bytes is left loaded; its token is still issued again. Anything that stops it is
-# a warning, never the install's failure: GPU jobs then run on the CPU.
+# (_mac_ct_runner_on): its kubeconfig and token written, its engine bundle store made, its
+# plist written, recorded as a launch-agent and loaded into this login session. A loaded
+# item whose plist is already these bytes is left loaded, unless the record did not list
+# the bundle store before this run: the runner read the record when it started, so it is
+# unloaded, the store recorded, and the item loaded again to read it. Its token is issued again either way. Anything
+# that stops it is a warning, never the install's failure: GPU jobs then run on the CPU.
 _mac_ct_ensure_runner() {
   local ns="${TB_NAMESPACE:-}" bin="${TRACEBLOC_CLI_BIN:-}" home dir plist runner_log kcfg want have="" loaded=0 why
+  local bundles listed=0 bad
   local cpu="GPU jobs run on the CPU. It's safe to re-run this installer."
   if ! _mac_ct_runner_on; then
     [[ "${OS:-}" != "Darwin" ]] || log "The Apple-GPU runner: $(_mac_ct_runner_off_why), so no runner login item."
@@ -1813,6 +1850,9 @@ _mac_ct_ensure_runner() {
   case "${bin}${home}${runner_log}${kcfg}${ns}" in
     *[\&\<\>]*) warn "The Apple-GPU runner: '${bin}', '${home}', '${runner_log}' or '${kcfg}' holds &, < or >, which its login item's plist cannot hold as it is. ${cpu}"; return 0 ;;
   esac
+  bundles="$(_mac_ct_runner_bundles_dir "$home")"
+  if _mac_ct_runner_bundles_listed "$bundles"; then listed=1; fi
+  bad="$(_mac_ct_runner_bundles "$bundles")" || { warn "The Apple-GPU runner: ${bad}. ${cpu}"; return 0; }
   dir="${TRACEBLOC_LAUNCHAGENTS_DIR:-${home}/Library/LaunchAgents}"
   plist="${dir}/${TB_MAC_CT_RUNNER_LABEL}.plist"
   want="$(_mac_ct_runner_plist "$bin" "$home" "$runner_log" "$kcfg" "$ns")"
@@ -1824,7 +1864,7 @@ _mac_ct_ensure_runner() {
     warn "The Apple-GPU runner: launchctl could not say whether ${TB_MAC_CT_RUNNER_LABEL} is loaded, so this run leaves it as it is. ${cpu}"
     return 0
   fi
-  if [[ "$loaded" -eq 0 && "$have" == "$want" ]]; then
+  if [[ "$loaded" -eq 0 && "$have" == "$want" && "$listed" -eq 1 ]]; then
     tb_record_write launch-agent "$TB_MAC_CT_RUNNER_LABEL" "$plist"
     log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded; its token was issued again."
     return 0
@@ -1833,6 +1873,9 @@ _mac_ct_ensure_runner() {
     warn "The Apple-GPU runner: could not unload ${TB_MAC_CT_RUNNER_LABEL} to rewrite it. Run launchctl bootout gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}, then re-run. Until then ${cpu}"
     return 0
   fi
+  # Recorded once the old item is gone and before the new one loads: the runner reads the
+  # record when it starts, and a run that stopped above must not leave it listed.
+  tb_record_write engine-bundles "$TB_MAC_CT_RUNNER_LABEL" "$bundles"
   # launchd fails the job (EX_CONFIG) when its log's folder is missing.
   if ! mkdir -p "$dir" "${runner_log%/*}"; then
     warn "The Apple-GPU runner: could not create ${dir} or ${runner_log%/*}. ${cpu}"; return 0
