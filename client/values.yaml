@@ -2854,15 +2854,18 @@ trainingResume:
   # -- Size of the chart-created claim.
   storage: 10Gi
 
-# What an install of each environment gets when trainingResume.enabled is unset
-# (backend#5266, staged): true for dev and stg, false for prod. Prod follows in
-# a later release, once the e2e check that a resume keeps the finished epochs is
-# green on staging. Like the other *ByEnv maps, this records what a NEW install
-# or upgrade of that environment renders, not where every edge already is.
+# What an install of each environment gets when trainingResume.enabled is unset:
+# on for dev, stg and prod (backend#5266). The evidence for prod is staging e2e
+# run 39488505748: a PyTorch cycle paused at epoch 3 resumed at epoch 4, so a
+# resume keeps the finished epochs. The engine checkpoints only PyTorch models;
+# sklearn, lifelines and scikit-survival models still restart the cycle on
+# resume (TODO(tracebloc/tracebloc-engine#1826)). Like the other *ByEnv maps,
+# this records what a NEW install or upgrade of that environment renders, not
+# where every edge already is.
 trainingResumeEnabledByEnv:
   dev: true
   stg: true
-  prod: false
+  prod: true
 
 # ============================================================
 # Stop-kind signal for pause (client-runtime#882)

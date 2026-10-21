@@ -264,6 +264,8 @@ This prevents a malicious training pod from overwriting dataset files, planting 
 
 **Writable logs PVC.** `/data/logs` is writable because training code legitimately writes per-experiment log files there. Nothing else in the threat model relies on this volume being read-only.
 
+**Writable resume volume.** Durable pause/resume is on by default in every environment; `trainingResume.enabled: false` turns it off for one client. On, the chart creates the claim `training-resume-pvc` (or uses `trainingResume.existingClaim`), and each training pod mounts its own experiment's directory of that claim, writable, at `/data/resume/<experiment>`. A paused PyTorch training cycle keeps its model weights and optimizer state there, so they outlive the pod: the jobs-manager removes the directory when the experiment is stopped, and deletes a pause that is neither resumed nor stopped within 7 days. Models on other frameworks are not checkpointed and restart the cycle on resume.
+
 **Read-side isolation.** Training pods can read files under `/data/shared/<table_name>/` for the dataset they were assigned. Dataset sharing across experiments is by design — multiple experiments on the same dataset read from the same location for efficiency. The tracebloc backend controls which dataset a data scientist is authorized to see; the client-side enforcement is access (the experiment assignment itself), not on-disk separation.
 
 ### 4.6 Cross-tenant forgeability (G7)

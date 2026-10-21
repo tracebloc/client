@@ -854,7 +854,7 @@
     },
     "trainingResumeEnabledByEnv": {
       "type": "object",
-      "description": "Per-environment default for trainingResume.enabled (backend#5266, staged), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Ships true for dev and stg, false for prod; prod follows in a later release once resume-keeps-the-epochs is green on staging.",
+      "description": "Per-environment default for trainingResume.enabled (backend#5266), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod; documented aliases normalize first). Ships true for dev, stg and prod. Only PyTorch models keep their finished epochs on resume; models on other frameworks restart the cycle.",
       "additionalProperties": {
         "type": "boolean"
       }

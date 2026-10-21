@@ -450,10 +450,11 @@ client-logs-pvc
 
 {{/*
   Durable pause/resume volume (client-runtime#882). Allowed with a 7-day
-  retention by backend#5266 and staged per environment: `trainingResume.enabled`
-  true or false is the per-edge override and always wins; unset (null), the
-  value is trainingResumeEnabledByEnv's for this install's environment
-  (tracebloc.clientEnv). "true" or "" so callers can gate with `if (include ...)`.
+  retention by backend#5266 and set per environment (on for dev, stg and prod):
+  `trainingResume.enabled` true or false is the per-edge override and always
+  wins; unset (null), the value is trainingResumeEnabledByEnv's for this
+  install's environment (tracebloc.clientEnv). "true" or "" so callers can gate
+  with `if (include ...)`.
 */}}
 {{- define "tracebloc.trainingResumeEnabled" -}}
 {{- $override := (default dict .Values.trainingResume).enabled -}}
