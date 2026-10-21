@@ -537,8 +537,10 @@ _mac_ct_start_system() {
 #    - all its state is one volume, named like the container, at /var/lib/rancher/k3s;
 #    - --cap-add ALL --read-only-path NONE --masked-path NONE, without which k3s stops
 #      at "open /proc/sys/kernel/panic: read-only file system";
-#    - the API published on 127.0.0.1:6443 only, and a packet filter inside the node
-#      (TB_MAC_CT_NODE_WALL) that drops what other VMs on this Mac send it;
+#    - the API published on 127.0.0.1:6443 only, the local API (the dashboard's
+#      "is this machine" handshake, client-dev#2379) on 127.0.0.1 only, and a
+#      packet filter inside the node (TB_MAC_CT_NODE_WALL) that drops what other VMs on
+#      this Mac send it;
 #    - --rosetta when Rosetta is installed, while the chart's MySQL pin is amd64;
 #    - a fixed node IP: the container's address changes on every start, so the node
 #      advertises a loopback alias, TB_MAC_CT_NODE_IP, that the entrypoint adds.
@@ -619,7 +621,7 @@ TB_MAC_CT_NODE_IP="192.0.2.10"
 # The interface flannel uses inside the node (the container's only one).
 TB_MAC_CT_NODE_IFACE="eth0"
 # The port the node's API listens on, published on this Mac's 127.0.0.1 only
-# (_mac_ct_node_argv), and the one port the node's packet filter lets this Mac reach.
+# (_mac_ct_node_argv), and a port the node's packet filter lets this Mac reach.
 TB_MAC_CT_NODE_API_PORT="6443"
 # The node's packet filter (client-dev#2297, RFC-0185 D10 item 4): a chain in the mangle
 # table of both IP families, which PREROUTING sends everything arriving on
@@ -627,10 +629,13 @@ TB_MAC_CT_NODE_API_PORT="6443"
 # this Mac shares the node's network, and the node listens on every address (the
 # kubelet's 10250, the API, every NodePort), so without it any of them reaches the
 # cluster. The chain lets back what answers the node's own connections, and this Mac,
-# the network's gateway, to the API port over IPv4 (the runtime's 127.0.0.1 forward
-# arrives from it); it drops the rest. The entrypoint sets it before k3s starts, on
-# every start (the VM's kernel keeps no rule across one), and _mac_ct_node_walled reads
-# it back.
+# the network's gateway, to the API port and, when the node publishes it
+# (TRACEBLOC_MAC_CT_LOCAL_API), the local API's NodePort, over IPv4 (the runtime's 127.0.0.1
+# forwards arrive from it); it drops the rest. The local API's NodePort is the one
+# NodePort this Mac reaches (Lukas's decision of 2026-10-19 on client-dev#2379,
+# amending RFC-0185 D10 item 4); no other VM reaches it. The entrypoint sets the chain
+# before k3s starts, on every start (the VM's kernel keeps no rule across one), and
+# _mac_ct_node_walled reads it back.
 TB_MAC_CT_NODE_WALL="TRACEBLOC-WALL"
 # The volume's size: a sparse ext4 image, so it takes only what is written.
 TB_MAC_CT_NODE_VOLUME_SIZE="64g"
@@ -669,23 +674,26 @@ TB_MAC_CT_CA_HELD_AWK='/-----BEGIN CERTIFICATE-----/ { body = ""; inside = 1; ne
 inside { gsub(/[ \t\r]/, ""); body = body $0 }
 END { n = 0; m = 0; for (b in want) { n++; if (b in held) m++ }; print m, n; exit (n == 0 || m < n) }'
 # The node's entrypoint. $1 is config.yaml, $2 the kubelet drop-in, $3 the node IP, $4
-# the corporate CA roots' checksum (empty: no CA), $5 the join token. A token that is
-# not one (empty, or not hex as _mac_ct_node_token makes and reads them) stops the node
-# before k3s starts: k3s would make a new one. With a checksum, TB_MAC_CT_NODE_CA_BUNDLE
+# the corporate CA roots' checksum (empty: no CA), $5 the local API's NodePort (empty:
+# the node publishes no local API), $6 the join token. A token that is not one (empty,
+# or not hex as _mac_ct_node_token makes and reads them), or a NodePort that is not a
+# number, stops the node before k3s starts: k3s would make a new token. With a checksum, TB_MAC_CT_NODE_CA_BUNDLE
 # is rebuilt from the image's copy and the roots handed in; roots that were not handed
 # in stop the node, since its image pulls would fail on an unknown issuer. An address
 # it cannot add, and that lo does not already carry, stops the node: k3s would
 # advertise an address nothing answers on. Then it sets the packet filter
 # (TB_MAC_CT_NODE_WALL), with this Mac's address read from the node's IPv4 default route
 # (the VM's address changes on every start, and its network may not be the default
-# one). A node with no such route within 30 s, or a rule it cannot set, stops before
-# k3s: a node it cannot wall is never one other VMs can reach.
+# one): this Mac reaches the API port and, with $5, that NodePort. A node with no such
+# route within 30 s, or a rule it cannot set, stops before k3s: a node it cannot wall is
+# never one other VMs can reach.
 TB_MAC_CT_NODE_ENTRY='set -e
 mkdir -p /etc/rancher/k3s
 printf "%s\n" "$1" > /etc/rancher/k3s/config.yaml
 printf "%s\n" "$2" > /etc/rancher/k3s/tracebloc-kubelet.yaml
-case "$5" in ""|*[!0-9a-f]*) echo "tracebloc: the node was started without its join token" >&2; exit 1 ;; esac
-(umask 077; printf "%s\n" "$5" > /etc/rancher/k3s/tracebloc-token)
+case "$6" in ""|*[!0-9a-f]*) echo "tracebloc: the node was started without its join token" >&2; exit 1 ;; esac
+case "$5" in *[!0-9]*) echo "tracebloc: the node was started with a local API port that is not a number ($5)" >&2; exit 1 ;; esac
+(umask 077; printf "%s\n" "$6" > /etc/rancher/k3s/tracebloc-token)
 if [ -n "$4" ]; then
   b='"$TB_MAC_CT_NODE_CA_BUNDLE"' i='"$TB_MAC_CT_NODE_CA_BUNDLE_IMAGE"' r='"$TB_MAC_CT_NODE_CA_DIR/$TB_MAC_CT_NODE_CA_ROOTS"'
   [ -r "$r" ] || { echo "tracebloc: the corporate CA roots were not handed to the node ($r)" >&2; exit 1; }
@@ -709,6 +717,7 @@ for f in iptables ip6tables; do
   w "$f" -t mangle -A "$c" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 done
 w iptables -t mangle -A "$c" -s "$g" -p tcp --dport '"$TB_MAC_CT_NODE_API_PORT"' -j RETURN
+[ -z "$5" ] || w iptables -t mangle -A "$c" -s "$g" -p tcp --dport "$5" -j RETURN
 for f in iptables ip6tables; do
   w "$f" -t mangle -A "$c" -j DROP
   w "$f" -t mangle -I PREROUTING -i "$e" -j "$c"
@@ -1034,11 +1043,15 @@ _mac_ct_node_proxy_env() {
 # it makes the argv a secret, so run-args is kept 0600. CASUM is the corporate CA roots'
 # checksum (_mac_ct_node_ca): with one, CADIR, the folder on this Mac that holds them, is
 # mounted read-only at TB_MAC_CT_NODE_CA_DIR, and the checksum reaches the entrypoint, so
-# that new roots make a new argv.
+# that new roots make a new argv. With TRACEBLOC_MAC_CT_LOCAL_API set ("HOST NODE", which
+# _mac_ct_local_api decides), 127.0.0.1:HOST is published to the local API's NodePort
+# beside the API, and NODE reaches the entrypoint, whose packet filter lets this Mac
+# reach it; without, neither.
 TB_MAC_CT_NODE_ARGV=()
 TB_MAC_CT_NODE_MOUNTS=""
 TB_MAC_CT_NODE_PROXY=""
 TB_MAC_CT_NODE_PROXY_FILE=""
+TRACEBLOC_MAC_CT_LOCAL_API=""
 _mac_ct_node_argv() {
   local name="$1" image="$2" cfg="$3" kubelet="$4" cpus="${5%% *}" mem="${5#* }" token="$6" cadir="${7:-}" casum="${8:-}" d
   TB_MAC_CT_NODE_ARGV=(run -d --name "$name"
@@ -1051,9 +1064,37 @@ _mac_ct_node_argv() {
     [[ -z "$d" ]] || TB_MAC_CT_NODE_ARGV+=(-v "${d}:${d}")
   done <<<"$TB_MAC_CT_NODE_MOUNTS"
   [[ -z "$TB_MAC_CT_NODE_PROXY_FILE" ]] || TB_MAC_CT_NODE_ARGV+=(--env-file "$TB_MAC_CT_NODE_PROXY_FILE")
-  TB_MAC_CT_NODE_ARGV+=(-p "127.0.0.1:${TB_MAC_CT_NODE_API_PORT}:${TB_MAC_CT_NODE_API_PORT}"
-    --entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY"
-    sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$casum" "$token")
+  TB_MAC_CT_NODE_ARGV+=(-p "127.0.0.1:${TB_MAC_CT_NODE_API_PORT}:${TB_MAC_CT_NODE_API_PORT}")
+  local lport=""
+  if [[ -n "$TRACEBLOC_MAC_CT_LOCAL_API" ]]; then
+    lport="${TRACEBLOC_MAC_CT_LOCAL_API#* }"
+    TB_MAC_CT_NODE_ARGV+=(-p "127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}:${lport}")
+  fi
+  TB_MAC_CT_NODE_ARGV+=(--entrypoint /bin/sh "$image" -c "$TB_MAC_CT_NODE_ENTRY"
+    sh "$cfg" "$kubelet" "$TB_MAC_CT_NODE_IP" "$casum" "$lport" "$token")
+}
+
+# _mac_ct_local_api HAVE -- whether this run's node publishes the local API (backend#5208,
+# client-dev#2379): into TRACEBLOC_MAC_CT_LOCAL_API, "HOST NODE" (TRACEBLOC_LOCAL_API_HOST_PORT
+# and TRACEBLOC_LOCAL_API_NODE_PORT, k3d.sh's one declaration of them), or "" when it
+# does not. As on k3d, fail-soft: TRACEBLOC_LOCAL_API=off opts out (_local_api_wanted),
+# ports the chart would refuse turn it off with k3d's warning (_local_api_port_valid), and
+# so does a host port something else on this Mac already listens on
+# (_local_api_host_port_busy), or the API's own port. HAVE is the argv the node was
+# created with (run-args): a node that already publishes the host port, to whichever
+# NodePort, is what holds it, so it is never read as busy, and recreating that node
+# frees it first.
+_mac_ct_local_api() {
+  local have="${1:-}" hp="$TRACEBLOC_LOCAL_API_HOST_PORT"
+  TRACEBLOC_MAC_CT_LOCAL_API=""
+  _local_api_wanted || return 0
+  _local_api_port_valid || { _local_api_invalid_warn; return 0; }
+  if (( 10#$hp == 10#$TB_MAC_CT_NODE_API_PORT )) \
+      || { ! grep -qE "^127[.]0[.]0[.]1:${hp}:[0-9]+\$" <<<"$have" && _local_api_host_port_busy; }; then
+    _local_api_busy_warn
+    return 0
+  fi
+  TRACEBLOC_MAC_CT_LOCAL_API="${TRACEBLOC_LOCAL_API_HOST_PORT} ${TRACEBLOC_LOCAL_API_NODE_PORT}"
 }
 
 # _mac_ct_node_running CT NAME -- 0 when `container list` (running containers only)
@@ -1286,13 +1327,16 @@ _mac_ct_node_ca_held() {
 
 # _mac_ct_node_walled CT NAME -- the node's packet filter, read back from the mangle
 # table of both IP families: PREROUTING's first rule sends TB_MAC_CT_NODE_IFACE through
-# TB_MAC_CT_NODE_WALL, and that chain's last rule drops. Anything else stops the run,
-# saying which family is open; a table that cannot be read back is cannot tell, and
-# stops it too: it is never read as walled.
+# TB_MAC_CT_NODE_WALL, and that chain's last rule drops. With the local API published
+# (TRACEBLOC_MAC_CT_LOCAL_API), the IPv4 chain also lets one address, this Mac's, to its
+# NodePort: without that rule the dashboard's handshake never reaches the node. Anything
+# else stops the run, saying which family is open or which rule is missing; a table that
+# cannot be read back is cannot tell, and stops it too: it is never read as walled.
 _mac_ct_node_walled() {
-  local ct="$1" name="$2" f out said err
+  local ct="$1" name="$2" f out said err lport=""
   err="$(mktemp)" || error "Apple container: cannot make a scratch file to read the node's packet filter back."
   local jump="-A PREROUTING -i ${TB_MAC_CT_NODE_IFACE} -j ${TB_MAC_CT_NODE_WALL}" drop="-A ${TB_MAC_CT_NODE_WALL} -j DROP"
+  [[ -z "$TRACEBLOC_MAC_CT_LOCAL_API" ]] || lport="${TRACEBLOC_MAC_CT_LOCAL_API#* }"
   for f in iptables ip6tables; do
     out="$(_bounded 30 "$ct" exec "$name" "$f" -w 10 -t mangle -S </dev/null 2>"$err")" && [[ -n "$out" ]] \
       || { said="$(head -c 300 "$err" 2>/dev/null | tr '\n' ' ')"; rm -f "$err"; error "Apple container: the node's packet filter (${f} in ${name}) could not be read back${said:+ (${said% })}, so whether other VMs on this Mac can reach the cluster cannot be told. It's safe to re-run this installer."; }
@@ -1302,8 +1346,17 @@ _mac_ct_node_walled() {
       index($0, chain) == 1 { last = $0 }
       END { exit !(first == jump && last == drop) }' <<<"$out" \
       || error "Apple container: the node's packet filter is not set (${f} in ${name}: PREROUTING's first rule is not \"${jump}\", or the chain does not end in \"${drop}\"), so other VMs on this Mac could reach the cluster. Run this installer again; if it keeps failing, share this output with tracebloc support."
+    [[ "$f" == iptables && -n "$lport" ]] || continue
+    awk -v chain="-A ${TB_MAC_CT_NODE_WALL} " -v port="$lport" '
+      index($0, chain) == 1 && $3 == "-s" && $4 ~ /^[0-9.]+\/32$/ && $0 ~ (" --dport " port " -j RETURN$") { found = 1 }
+      END { exit !found }' <<<"$out" \
+      || error "Apple container: the node's packet filter does not let this Mac reach the local API (${f} in ${name}: no rule lets one address to port ${lport}), so the dashboard cannot tell it is on this machine. Run this installer again; if it keeps failing, share this output with tracebloc support."
   done
-  log "Apple container: the node's packet filter holds: other VMs on this Mac cannot reach it, and this Mac reaches its API only."
+  if [[ -n "$lport" ]]; then
+    log "Apple container: the node's packet filter holds: other VMs on this Mac cannot reach it, and this Mac reaches its API and the local API only."
+  else
+    log "Apple container: the node's packet filter holds: other VMs on this Mac cannot reach it, and this Mac reaches its API only."
+  fi
 }
 
 # _mac_ct_ensure_node -- the node on the running system (part 2), Ready, its packet
@@ -1312,7 +1365,7 @@ _mac_ct_node_walled() {
 # stopped one, recreates one created with another argv on its volume, and refuses a
 # container or a volume of its name that nothing shows this installer made.
 _mac_ct_ensure_node() {
-  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum
+  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum running="" lhp
   local penv pold="" pchanged=""
   _native_k3s_check_version
   TB_K3S_ON_MAC=1
@@ -1382,6 +1435,19 @@ _mac_ct_ensure_node() {
     fi
     [[ "$pold" == "$TB_MAC_CT_NODE_PROXY" ]] || pchanged=1
   fi
+  # The node holds the local API's host port only while it runs. One that is stopped, or a
+  # run cut off before its node started, holds nothing, so its run-args says nothing about
+  # who holds the port, and the port is probed as on a fresh node. This one read also
+  # decides below whether a kept node is started.
+  if [[ "$state" == container ]]; then
+    rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
+    case "$rc" in
+      0) running=1 ;;
+      1) ;;
+      *) error "Apple container: the container system did not list its containers, so this run cannot tell whether the node ${name} is running." ;;
+    esac
+  fi
+  _mac_ct_local_api "${running:+$have}"
   _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN" "${dir}/ca" "$casum"
   want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
   if [[ "$state" == container ]]; then
@@ -1394,12 +1460,7 @@ _mac_ct_ensure_node() {
         || error "Apple container: could not remove the node ${name} to recreate it. Its volume is untouched. Run \"${ct}\" delete --force ${name}, then re-run."
       start=run
     else
-      rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
-      case "$rc" in
-        0) ;;
-        1) start=start ;;
-        *) error "Apple container: the container system did not list its containers, so this run cannot tell whether the node ${name} is running." ;;
-      esac
+      [[ -n "$running" ]] || start=start
     fi
   else
     start=run
@@ -1427,7 +1488,30 @@ _mac_ct_ensure_node() {
       [[ -z "$mkvol" ]] || _bounded 60 "$ct" volume create --opt "size=${TB_MAC_CT_NODE_VOLUME_SIZE}" --opt "journal=${TB_MAC_CT_NODE_VOLUME_JOURNAL}" "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
         || error "Apple container: could not create the node's volume ${name}."
       # set-u-safe: _mac_ct_node_argv seeds it with the run verb
-      _bounded 300 "$ct" "${TB_MAC_CT_NODE_ARGV[@]}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
+      rc=0; _bounded 300 "$ct" "${TB_MAC_CT_NODE_ARGV[@]}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
+      # The local API is optional, as on k3d (client-dev#1665): the free-port probe is a
+      # snapshot, and the runtime's own bind can still lose the port. A run that carried it
+      # and failed is made once more without it, and run-args says so first, so a re-run
+      # probes the port afresh. The volume is kept; a node that fails again fails the run.
+      if [[ "$rc" -ne 0 && -n "$TRACEBLOC_MAC_CT_LOCAL_API" ]]; then
+        lhp="${TRACEBLOC_MAC_CT_LOCAL_API%% *}"
+        warn "The node did not start with the local dashboard port 127.0.0.1:${lhp} published (\"${ct}\" run exited ${rc}), so it is started again without it, and the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+        # A run that failed may leave a node, stopped or not: stop it, then remove it, and
+        # a node that is still there is no node to start again beside (the recreate above).
+        _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+        if ! _bounded 60 "$ct" delete "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1; then
+          rc=0; _mac_ct_node_exists "$ct" "$name" || rc=$?
+          [[ "$rc" -eq 1 ]] \
+            || error "Apple container: could not remove the node ${name} the failed start left, to start it again without the local dashboard port. Its volume is untouched. Run \"${ct}\" delete --force ${name}, then re-run."
+        fi
+        TRACEBLOC_MAC_CT_LOCAL_API=""
+        _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN" "${dir}/ca" "$casum"
+        want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
+        (umask 077; printf '%s\n' "$want" > "${dir}/run-args.tmp") && mv "${dir}/run-args.tmp" "${dir}/run-args" \
+          || { rm -f "${dir}/run-args.tmp"; error "Apple container: could not write ${dir}/run-args."; }
+        rc=0; _bounded 300 "$ct" "${TB_MAC_CT_NODE_ARGV[@]}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?  # set-u-safe: as above
+      fi
+      [[ "$rc" -eq 0 ]] \
         || error "Apple container: the node ${name} did not start. \"${ct}\" logs ${name} says why. It's safe to re-run this installer." ;;
     start)
       _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
@@ -1449,10 +1533,13 @@ _mac_ct_ensure_node() {
     rm -f "${dir}/ca/${TB_MAC_CT_NODE_CA_ROOTS}"
   fi
   _mac_ct_node_walled "$ct" "$name"
+  # The chart opens the local API only when the node publishes it and the wall lets this
+  # Mac to it, as on k3d once its load balancer maps the port (install-client-helm.sh).
+  [[ -z "$TRACEBLOC_MAC_CT_LOCAL_API" ]] || TB_LOCAL_API_MAPPED=1
   (umask 077; _bounded 30 "$ct" exec "$name" cat /etc/rancher/k3s/k3s.yaml </dev/null > "${dir}/k3s.yaml.tmp") \
     && [[ -s "${dir}/k3s.yaml.tmp" ]] && mv "${dir}/k3s.yaml.tmp" "${dir}/k3s.yaml" \
     || { rm -f "${dir}/k3s.yaml.tmp"; error "Apple container: could not copy the node's kubeconfig out of ${name}. It's safe to re-run this installer."; }
-  log "Apple container: node '${node}' is Ready in ${name}, its API on 127.0.0.1:6443."
+  log "Apple container: node '${node}' is Ready in ${name}, its API on 127.0.0.1:${TB_MAC_CT_NODE_API_PORT}${TRACEBLOC_MAC_CT_LOCAL_API:+, the local API on 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}}."
 }
 
 # _mac_ct_merge_kubeconfig -- the node's kubeconfig merged into the user's, as a
@@ -1992,6 +2079,10 @@ _mac_ct_create_cluster() {
 #  and what the helper is for, makes the call, and waits for the answer. A reset that
 #  outlasts the wait is the missing permission, refused by name with where to allow it.
 #  The node is Ready by then: the installer never reports it as a broken cluster.
+#  The same helper forwards the local API's 127.0.0.1 port (TRACEBLOC_MAC_CT_LOCAL_API,
+#  client-dev#2379), under the same grant: it is kept per bundle id, not per port. So
+#  the wait reads the API's port alone; nothing answers on the local API's until the
+#  chart has installed jobs-manager.
 
 TB_MAC_CT_LAN_HELPER="container-runtime-linux"
 TB_MAC_CT_LAN_SETTINGS="System Settings › Privacy & Security › Local Network"
@@ -2034,7 +2125,7 @@ _mac_ct_local_network_gate() {
   local dir kc body="" rc t0
   dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's kubeconfig is (above)."
   kc="${dir}/k3s.yaml"
-  info "macOS may now ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find devices on your local network. It is part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:6443. Click Allow. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for your answer."
+  info "macOS may now ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find devices on your local network. It is part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:${TB_MAC_CT_NODE_API_PORT}${TRACEBLOC_MAC_CT_LOCAL_API:+, and the local API the dashboard asks, on 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}}. Click Allow. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for your answer."
   t0=$SECONDS
   while :; do
     rc=0; body="$(_mac_ct_api_try "$kc")" || rc=$?

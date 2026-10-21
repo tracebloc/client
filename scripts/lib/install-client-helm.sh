@@ -2172,20 +2172,21 @@ _host_os_set_args() {
   )
 }
 
-# TB_MAC_NODE_PROFILE -- the macOS node's values profile (RFC-0185 D10 items 4 and 6,
+# TB_MAC_NODE_PROFILE -- the macOS node's values profile (RFC-0185 D10 item 6,
 # client-dev#2297), one KEY=VALUE a word: the one declaration of it. The walls a Mac's
 # cluster keeps, whatever runs in it, CPU pods today and the Apple GPU runner's jobs later:
 #   restrictedDns.enabled=true  training and ingestion pods resolve the cluster's own names
 #                               only, through the chart's restricted resolver, and reach
 #                               the backend through the egress gateway, which resolves for
 #                               them (values.yaml `restrictedDns`): a pod cannot carry data
-#                               out in a DNS query's name (D10 item 6);
-#   localApi.enabled=false      the chart's one NodePort Service stays off (D10 item 4). It
-#                               was written for k3d's load balancer, which forwards a port
-#                               on 127.0.0.1 to it; the macOS node publishes nothing but
-#                               the API on 127.0.0.1:6443, so on a Mac it would only be a
-#                               port other local VMs could reach.
-TB_MAC_NODE_PROFILE=(restrictedDns.enabled=true localApi.enabled=false)
+#                               out in a DNS query's name (D10 item 6).
+# The local API (the chart's one NodePort) is not a wall, so it is not here. It rides
+# TB_LOCAL_API_MAPPED as on k3d: on, with k3d's four --set pairs, when this run's node
+# publishes it on 127.0.0.1 and its packet filter lets this Mac alone to its NodePort
+# (mac-container.sh, _mac_ct_local_api; client-dev#2379, which amends D10 item 4 by
+# Lukas's decision of 2026-10-19); off when the user opted out or the port was refused.
+# The filter, not the chart, keeps every other VM on this Mac off every NodePort.
+TB_MAC_NODE_PROFILE=(restrictedDns.enabled=true)
 
 # _mac_node_profile_set_args -- TB_MAC_NODE_PROFILE as --set pairs, and jobData.path when
 # the release keeps its job data on this Mac (_mac_ct_job_data_dir), into
@@ -2803,7 +2804,8 @@ _reconcile_adopted_client() {
   _args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
   # The local API (backend#5208) rides the same reconcile, for the same reason:
   # a release from before localApi existed reuses the chart default, off, while
-  # create_cluster's _ensure_local_api_port has just mapped 127.0.0.1 to its
+  # create_cluster's _ensure_local_api_port (k3d), or the macOS node's publish
+  # (_mac_ct_ensure_node, client-dev#2379), has just mapped 127.0.0.1 to its
   # NodePort. Force THIS run's decision, the one _local_api_values_block writes on
   # a fresh install: on with the two ports k3d mapped, else off, so a mapping
   # that is gone (opted out, port busy, edit refused) can't leave a stale "on".
@@ -3805,14 +3807,14 @@ _adopt_orphaned_gpu_device_plugin() {
 }
 
 # The `localApi` block of the generated values: present only when k3d.sh's
-# _ensure_local_api_port recorded the mapping (TB_LOCAL_API_MAPPED=1, with the
-# two ports it mapped), because the chart opens the NodePort only when it
-# exists. An existing release gets the same decision as --set args in
+# _ensure_local_api_port, or the macOS node (_mac_ct_ensure_node), recorded the
+# mapping (TB_LOCAL_API_MAPPED=1, with the two ports it mapped), because the chart
+# opens the NodePort only when it exists. An existing release gets the same decision as --set args in
 # _reconcile_adopted_client.
 _local_api_values_block() {
   [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]] || return 0
-  printf '\n# The local API the dashboard reaches on this machine: on, because k3d maps\n'
-  printf '# 127.0.0.1:%s to its NodePort (create_cluster, _ensure_local_api_port).\n' "$TRACEBLOC_LOCAL_API_HOST_PORT"
+  printf '\n# The local API the dashboard reaches on this machine: on, because the cluster maps\n'
+  printf '# 127.0.0.1:%s to its NodePort (k3d: _ensure_local_api_port; the macOS node: _mac_ct_ensure_node).\n' "$TRACEBLOC_LOCAL_API_HOST_PORT"
   printf 'localApi:\n  enabled: true\n  nodePort: %s\n  hostPort: %s\n  singleMachine: true\n' "$TRACEBLOC_LOCAL_API_NODE_PORT" "$TRACEBLOC_LOCAL_API_HOST_PORT"
 }
 

@@ -483,6 +483,12 @@ _local_api_port_valid() {
   return 0
 }
 
+# _local_api_busy_warn -- the host port is taken: the one wording of it, for k3d's
+# load balancer and the macOS node's publish (mac-container.sh, _mac_ct_local_api).
+_local_api_busy_warn() {
+  warn "Port ${TRACEBLOC_LOCAL_API_HOST_PORT} on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+}
+
 _local_api_invalid_warn() {
   warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TRACEBLOC_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TRACEBLOC_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set the host port to a number from 1 to 65535 and the node port to one from ${_TB_LOCAL_API_NODE_PORT_MIN} to ${_TB_LOCAL_API_NODE_PORT_MAX}, then re-run the installer to turn it on."
 }
@@ -575,7 +581,7 @@ _ensure_local_api_port() {
     return 0
   fi
   if _local_api_host_port_busy; then
-    warn "Port ${TRACEBLOC_LOCAL_API_HOST_PORT} on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+    _local_api_busy_warn
     return 0
   fi
   log "Adding the local dashboard port 127.0.0.1:${TRACEBLOC_LOCAL_API_HOST_PORT} to '$CLUSTER_NAME' (its k3d load balancer restarts once)."
