@@ -1359,13 +1359,32 @@ _mac_ct_node_walled() {
   fi
 }
 
+# _mac_ct_node_drop_local_api CT NAME VERB RC -- the node's VERB (run or start) exited RC
+# with the local API published: say so, remove the node it left and clear
+# TRACEBLOC_MAC_CT_LOCAL_API, so the caller makes the node again without it on its volume.
+# The local API is optional, as on k3d (client-dev#1665): the free-port probe is a
+# snapshot, and the runtime's own bind can still lose the port.
+_mac_ct_node_drop_local_api() {
+  local ct="$1" name="$2" verb="$3" rc="$4" gone
+  warn "The node did not start with the local dashboard port 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *} published (\"${ct}\" ${verb} exited ${rc}), so it is started again without it, and the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+  # A failed start may leave a node, stopped or not: stop it, then remove it, and a node
+  # that is still there is no node to make again beside.
+  _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+  if ! _bounded 60 "$ct" delete "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1; then
+    gone=0; _mac_ct_node_exists "$ct" "$name" || gone=$?
+    [[ "$gone" -eq 1 ]] \
+      || error "Apple container: could not remove the node ${name} the failed start left, to start it again without the local dashboard port. Its volume is untouched. Run \"${ct}\" delete --force ${name}, then re-run."
+  fi
+  TRACEBLOC_MAC_CT_LOCAL_API=""
+}
+
 # _mac_ct_ensure_node -- the node on the running system (part 2), Ready, its packet
 # filter read back (_mac_ct_node_walled), recorded, and its kubeconfig copied to
 # _mac_ct_node_dir/k3s.yaml. Reuses a running node created with this argv, starts a
 # stopped one, recreates one created with another argv on its volume, and refuses a
 # container or a volume of its name that nothing shows this installer made.
 _mac_ct_ensure_node() {
-  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum running="" lhp
+  local root ct name dir image cfgfile cidrs node cfg kubelet size want have="" rc since start="" mkvol="" state casum running=""
   local penv pold="" pchanged=""
   _native_k3s_check_version
   TB_K3S_ON_MAC=1
@@ -1469,6 +1488,18 @@ _mac_ct_ensure_node() {
   # with it was removed above, to be made again without).
   [[ -n "$TB_MAC_CT_NODE_PROXY" ]] || rm -f "$penv"
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "$start" == start ]]; then
+    rc=0; _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
+    if [[ "$rc" -ne 0 && -n "$TRACEBLOC_MAC_CT_LOCAL_API" ]]; then
+      _mac_ct_node_drop_local_api "$ct" "$name" start "$rc"
+      _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN" "${dir}/ca" "$casum"
+      want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
+      start=run
+    else
+      [[ "$rc" -eq 0 ]] \
+        || error "Apple container: the node ${name} did not start. \"${ct}\" logs ${name} says why. It's safe to re-run this installer."
+    fi
+  fi
   case "$start" in
     run)
       # The image is needed only to create a node: reusing or starting one works with the
@@ -1489,22 +1520,11 @@ _mac_ct_ensure_node() {
         || error "Apple container: could not create the node's volume ${name}."
       # set-u-safe: _mac_ct_node_argv seeds it with the run verb
       rc=0; _bounded 300 "$ct" "${TB_MAC_CT_NODE_ARGV[@]}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
-      # The local API is optional, as on k3d (client-dev#1665): the free-port probe is a
-      # snapshot, and the runtime's own bind can still lose the port. A run that carried it
-      # and failed is made once more without it, and run-args says so first, so a re-run
-      # probes the port afresh. The volume is kept; a node that fails again fails the run.
+      # A run that carried the local API and failed is made once more without it
+      # (_mac_ct_node_drop_local_api), and run-args says so first, so a re-run probes the
+      # port afresh. A node that fails again fails the run.
       if [[ "$rc" -ne 0 && -n "$TRACEBLOC_MAC_CT_LOCAL_API" ]]; then
-        lhp="${TRACEBLOC_MAC_CT_LOCAL_API%% *}"
-        warn "The node did not start with the local dashboard port 127.0.0.1:${lhp} published (\"${ct}\" run exited ${rc}), so it is started again without it, and the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
-        # A run that failed may leave a node, stopped or not: stop it, then remove it, and
-        # a node that is still there is no node to start again beside (the recreate above).
-        _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
-        if ! _bounded 60 "$ct" delete "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1; then
-          rc=0; _mac_ct_node_exists "$ct" "$name" || rc=$?
-          [[ "$rc" -eq 1 ]] \
-            || error "Apple container: could not remove the node ${name} the failed start left, to start it again without the local dashboard port. Its volume is untouched. Run \"${ct}\" delete --force ${name}, then re-run."
-        fi
-        TRACEBLOC_MAC_CT_LOCAL_API=""
+        _mac_ct_node_drop_local_api "$ct" "$name" run "$rc"
         _mac_ct_node_argv "$name" "$image" "$cfg" "$kubelet" "$size" "$TB_MAC_CT_NODE_TOKEN" "${dir}/ca" "$casum"
         want="$(printf '%s\n' "${TB_MAC_CT_NODE_ARGV[@]}")"  # set-u-safe: _mac_ct_node_argv seeds it with the run verb
         (umask 077; printf '%s\n' "$want" > "${dir}/run-args.tmp") && mv "${dir}/run-args.tmp" "${dir}/run-args" \
@@ -1513,9 +1533,7 @@ _mac_ct_ensure_node() {
       fi
       [[ "$rc" -eq 0 ]] \
         || error "Apple container: the node ${name} did not start. \"${ct}\" logs ${name} says why. It's safe to re-run this installer." ;;
-    start)
-      _bounded 120 "$ct" start "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 \
-        || error "Apple container: the node ${name} did not start. \"${ct}\" logs ${name} says why. It's safe to re-run this installer." ;;
+    start) ;;
     *) since="" ;;
   esac
   tb_record_write container-node "$name" "$(_mac_ct_home)"

@@ -1448,56 +1448,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "02cb9b968d18aecad16571009425806c1f6ffdbc"
+    engineCommit: "5dde42cbb28b7558c0c9bc40baebd5d22e9ba571"
     digests:
       causal_language_modeling:
-        cpu: "sha256:c083de799008ff1c0f210ef1c8d2eee566d2c24c2258e57fde3d74a20acb6a49"
-        gpu: "sha256:20018a8d514531ff3667d919b983285bd5f6595bf2ec5fc1cd2906196aeccd0e"
+        cpu: "sha256:abc7403333b21b7dc8c95474c44c90227c0ed7a4a58e76dfdc5282ae51028c2b"
+        gpu: "sha256:6663e5fc7c260eaf7850355e8157a422a480c37b845d300ed32284e0f491d316"
       embeddings:
-        cpu: "sha256:b2974c878f85f28ed84e010a8e1a185d9475c29c635b609c09cf1c31088d59ef"
-        gpu: "sha256:e8b99da5e3d4ab876d17d97bb47866475115d8ecb3c864dad4ad03685d5ffed8"
+        cpu: "sha256:a2ec6d6228bea6a56dd110b31956d820ca93560782862d22698d5236976d2413"
+        gpu: "sha256:7e62478cd68025a7a213a596197b0af2ef7a71e20f4b71709de477e5063b4225"
       image_classification:
-        cpu: "sha256:278659b9cec432bb33a2901356135466e19c8334a4a0a1949ed00e6431f86715"
-        gpu: "sha256:330ee4255af3e61af32e281f939209124e93ee8c887674052843b1e2de3bd3cb"
+        cpu: "sha256:33e8ff18274ddbbbafd98df29c2c26ff8539aa17dc19039cbaa7be44afdf9872"
+        gpu: "sha256:8e7af7870d696655799bb4414975b685febd74490bc5e121521e1d82d94beeea"
       keypoint_detection:
-        cpu: "sha256:ae4e5213e2872f5e888ffc6238ba7c5f29ba9b6cafdd758dd321adb255faef87"
-        gpu: "sha256:8d11e81f411065e521330ffdef04f95a852afb0a0275e2017a13d43d2ba69fea"
+        cpu: "sha256:50db59fd885f8700a9a2f5a40bfaf1ee5360e2c40555c865b2e4e4b664ed2ba5"
+        gpu: "sha256:cafecdae3d94933108b772a959f1abc904f00134fab7bebba690fd84f6e95ce0"
       masked_language_modeling:
-        cpu: "sha256:322ae2a1266fb49438e3a40032f3a6e2bab2ceaf05f7f968619fb57a7e1c4290"
-        gpu: "sha256:87bbfc231a1f347815a22e6472f2604021f1d2fffa5e35f3929e43ce279cf259"
+        cpu: "sha256:f241c2141b2b983c3a7c1f3a0e0aa269b71476d70395bc0792a7b3dad96d41ce"
+        gpu: "sha256:8faee4ee2063f201f6c0757fc3318e81cb9f5e4030be27a53e9533db0cc76e98"
       object_detection:
-        cpu: "sha256:ab8fd4997fe1836533fdff99de58370362c2360d842ceac82ed361fa4f211ee4"
-        gpu: "sha256:7fa34ae29ca0871eec465936fa244e3e57d9c13efb792f34d6226a6cbd92550c"
+        cpu: "sha256:43063b04d7c4f3d685ea44f399477f87f1c863b02acfcd43b3a95ad3c55cafa1"
+        gpu: "sha256:c6befb8616db79654dd46298bdc863f4db8c361d734ea7adaad657f0cc5d58f6"
       semantic_segmentation:
-        cpu: "sha256:b8076a51d7fef50ce8b81cd0eac395899d508535a155acb995fb682141ffc0d5"
-        gpu: "sha256:3fd3a1ca069c0a047678569b374c4b7ae81b8c6db41217e361dea6c2226d6478"
+        cpu: "sha256:bc58295d69c1ba4af6c255fcda09e31d31c632dad6d409689bb3bc49e59ef7be"
+        gpu: "sha256:1855b471fc8ada9071786eb2abe282c3aa86cd035c1641a5bd6a6333769a3692"
       sentence_pair_classification:
-        cpu: "sha256:c0b81279d1ec8c461a25cc2a7acb8a857d82713580c3d8e244b6e1619ff87225"
-        gpu: "sha256:815c9f33c9b3f0720ee68d54613c9f8d0d3037be3fe1ddb2d916658600fd7b46"
+        cpu: "sha256:d4f470b89914da49f16bc6e6a728b611a06f8ff4e00a57f932bfb6da01c8a4f7"
+        gpu: "sha256:0b79556b902df5b467f0a4adcbb273df15172e4a149fa825850087a57efec663"
       seq2seq:
-        cpu: "sha256:cfe74bcb0d68b521ef678980ad41f28c93abfe525fa62e254b90211578005d15"
-        gpu: "sha256:1212a2b58d5fac19c10fd4d2f2ccc1980260125b0807644b6dc10213af787084"
+        cpu: "sha256:7c7eab20cd352068228e70a6970b8a16be903093e898c3c4fc4b723849ef3e7b"
+        gpu: "sha256:3dee769f0af9f76378aad303bfffdd797121093ba329562fec1020d158b56f3c"
       tabular_classification:
-        cpu: "sha256:6f39fa7b2409c32d74b54170e2797b823b0d95cdf4cf9e244c7adcb7d30b4206"
-        gpu: "sha256:22b387a880282a43fe7b6f0d6e34ce99b903f5154bb687ad57b15736b20c76af"
+        cpu: "sha256:d5f2532f683fb4c30a94dc4541370bf1ccb2f6982438c8db5b52b1887187e8ab"
+        gpu: "sha256:60b844838392649468ec49a377615c95148f9bb221445a8f669dac4da959d41f"
       tabular_regression:
-        cpu: "sha256:2b03ef2f449b8b718362abafe49bf84f3caf4b7849bae8f1eb102a78da75b689"
-        gpu: "sha256:a99de77829fcbdc0793b8cb1b0579b12df8d513aa255145cf5d3c43f3ed379f8"
+        cpu: "sha256:f1cab3b29f4eaed905b5a0d87b0b14924bc4c54b8369bcb3ef5001a8f65fbc62"
+        gpu: "sha256:7ea60833920abb311e90a1323f7314da05154ab28ba4c9fdecdb724a8c181b10"
       text_classification:
-        cpu: "sha256:5b29e112b45af819d06197b6361dd58b8ca3b80a5e26d5ad84b867294a865291"
-        gpu: "sha256:fdb9b78a9080df154c53dea75140694f3886ef06deedf7b77fd6bb5e5aece8a5"
+        cpu: "sha256:1562f1976f1b79b58ad42ecbb9360866345343d48ba696c0d2b8a5198a116842"
+        gpu: "sha256:cc1339be06e54cd1b305058c7e49aac9ff2808bc2edc96fed7480bc967e83f3f"
       time_series_classification:
-        cpu: "sha256:6dc33b68691ef880cc041a1781ba6c9bdfa6f5e66247caf10f99bbc30ac9d764"
-        gpu: "sha256:d0ee7e41fbf00d304f2bcfd53ce81a2fea044c160af99708aa6b7a5bd1f2b443"
+        cpu: "sha256:73d410cd79e74366170940a1093350c014b4c78ebde9473b67b793390b4b26f5"
+        gpu: "sha256:49bb96d12eda250fb3a21529d4648cb7df3343a0ca48f522caf845aab21bbf5c"
       time_series_forecasting:
-        cpu: "sha256:5357a1cc357066aed8648e411c617129a34268dded8d9d04e1322767fe3bf82f"
-        gpu: "sha256:bf4336b9c87a06efdafaa208ef1a1140a99febf70d61295df59fe5479e6b065f"
+        cpu: "sha256:92a7ef94259d734a8cba7b055a45816c2e29879d5ca38e0fd8c36816609c48c8"
+        gpu: "sha256:4383a65d2e0c56c408b64ce9244c4ad5fdedb841de1703563041fd6f147a93ce"
       time_to_event_prediction:
-        cpu: "sha256:5e3df141778214790cece4d1dec4a8191dc97c58d4d772065e813c0b55b2bd1f"
-        gpu: "sha256:ddcf65b4336c61856315d77c116f20b565b2d4778d45c6eb660f5529591c832b"
+        cpu: "sha256:a1b4f2ea56c58a445b258e8a93f9ecc0c3444bf7b7dc9eeecf1880252b29b752"
+        gpu: "sha256:48235ee57b5b393654cfa01646ab6bd7c1fba3df1c4e91f85c211c3c18a4fc81"
       token_classification:
-        cpu: "sha256:56bcaa5ba3698d07afe7119c139efb60c00cee58efdf2d1eb399ab188b4a31b5"
-        gpu: "sha256:83a0377741f359ecfcd91252bc6d1e847c8b51ecd417dcbc9eadb0f135eda0f1"
+        cpu: "sha256:e0913f32efed3497266ec457eaf7b7cc64ab5323b9aa89a3f962e38d513a93a8"
+        gpu: "sha256:11707bfdc293745492eb61ca89b5757241b0833ba3be147f4a486134f4341b7e"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:
@@ -1728,24 +1728,26 @@ images:
     # `prodDigest` for every prod edge (the pre-#5099 behaviour).
     #
     # Same rules as `prodDigest`: a canonical multi-arch index, resolved, never
-    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.80` prints it). No
+    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.82` prints it). No
     # Chart.yaml bump: the release train numbers the client chart (RFC-0255),
     # so the next release publishes it. CI's `ingestor-multiarch` job checks it.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.80** — VERIFIED
-    # against ghcr.io 2026-10-20 (linux/amd64 + linux/arm64 OCI image index;
-    # the same digest the v0.8.80 GitHub Release names; cosign keyless
-    # signature from data-ingestors' release-image.yml at refs/tags/v0.8.80,
-    # revision 6b0445f, on main). It is what the `0.8` float names, so the
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.82** — VERIFIED
+    # against ghcr.io 2026-10-21 (linux/amd64 + linux/arm64 OCI image index;
+    # the same digest the v0.8.82 GitHub Release names; cosign keyless
+    # signature from data-ingestors' release-image.yml at refs/tags/v0.8.82,
+    # revision 78c3d99, on main). It is what the `0.8` float names, so the
     # digest-drift watch reads this pin as current again (backend#5964).
-    # v0.8.80 descends from v0.8.75 (the count per class in the ingest
-    # summary, data-ingestors#944) and v0.8.72 (the emitter's "telemetry: not
-    # exporting …" line kept off the user's `tracebloc data ingest` output,
-    # data-ingestors#945). It adds: a failed run tells the backend it added no
-    # dataset; a hard-killed ingest's table lock clears within minutes while a
-    # live one never goes stale; and the backend's error bodies stay out of the
-    # ingest summary's exceptions and logs.
-    prodDigestServiceDb: "sha256:19dda4ec26098f10f9a4d3705a679a82495978ace8f1174b5f2ce540032ebde0"
+    # v0.8.82 descends from v0.8.80 (a failed run tells the backend it added
+    # no dataset; a hard-killed ingest's table lock clears within minutes) and
+    # v0.8.75 (the count per class in the ingest summary). It adds: a failed
+    # run's staged files are removed, so the same data can be ingested again;
+    # dataset tables are indexed on ingestor_id (an existing table gains the
+    # index online on its next ingest); a large JSON source is streamed
+    # through preflight instead of loaded whole; a mask name with dots in it is
+    # found; and a table over MySQL's column or row-size limit is refused up
+    # front in plain words.
+    prodDigestServiceDb: "sha256:98881d495ecf45b720956c54836dc466b19948e7b0472b1397fce6d1afc7cd84"
 
     # -- What each chart-pinned ingestor image says about itself, keyed by its
     # digest (tracebloc/cli-dev#971). When the digest `tracebloc.ingestorDigest`
@@ -1776,8 +1778,8 @@ images:
     pinnedImageLabels:
       "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873":
         version: "0.8.2"
-      "sha256:19dda4ec26098f10f9a4d3705a679a82495978ace8f1174b5f2ce540032ebde0":
-        version: "0.8.80"
+      "sha256:98881d495ecf45b720956c54836dc466b19948e7b0472b1397fce6d1afc7cd84":
+        version: "0.8.82"
         capabilities: "ingest:v1,layout:4,object_detection:manifestless,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means

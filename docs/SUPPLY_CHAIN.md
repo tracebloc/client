@@ -58,6 +58,8 @@ the pinned tag:
 |---|---|---|
 | `install.sh` | release job, `DEFAULT_REF` stamped to the tag | the entrypoint itself (pin) |
 | `install.ps1` | release job, `$DefaultRef` stamped to the tag | the Windows entrypoint (pin, §7) |
+| `install.sh.bundle` | `cosign sign-blob --bundle` over the **stamped** `install.sh` | the bootstrap itself, before it runs (§2a) |
+| `install.ps1.bundle` | `cosign sign-blob --bundle` over the **stamped** `install.ps1` | the Windows bootstrap itself, before it runs (§2a) |
 | `manifest.sha256` | `scripts/gen-manifest.sh` | every sub-script's bytes (both platforms) |
 | `manifest.sha256.sig` | `cosign sign-blob` (keyless) | authenticity of the manifest |
 | `manifest.sha256.cert` | `cosign sign-blob` (keyless) | the cert the sig verifies against |
@@ -86,6 +88,25 @@ bootstrap says it skipped the digest check. (The manifest + signature were
 always release assets because signing happens in CI *after* the tag is cut — same
 reason the CLI serves `SHA256SUMS` as a release asset.)
 
+### 2a. The bootstraps are signed too
+
+The manifest covers the sub-scripts, and the check that verifies it lives
+**inside** `install.sh` / `install.ps1`. Whoever could replace a bootstrap asset
+would skip that check entirely, so the bootstraps carry a signature of their own:
+`install.sh.bundle` and `install.ps1.bundle`, offline Sigstore bundles from the
+same keyless identity as the manifest. The release job signs each bootstrap
+**after** stamping its ref, so the bundle covers the exact bytes the release
+serves, then verifies both bundles `--offline` and checks that a copy with one
+extra byte fails. The one-line installers on tracebloc.io do not check the bundle
+yet; verify a bootstrap yourself with the recipe in §6. Once they do, they will
+download the bootstrap and its bundle from `releases/latest/download/`, run
+`cosign verify-blob --offline` with the identity in §6, and run the bootstrap only
+when it passes, so a release without the bundles will fail that check closed.
+
+`gen-manifest.sh --check` refuses a release workflow that attaches a bootstrap
+(any `.sh` / `.ps1` among the attach step's literal files) without
+`<bootstrap>.bundle`, signs it before its stamp, or never verifies the bundle.
+
 ## 3. Why cosign keyless (and not minisign / gpg)
 
 | Option | Key management | Why / why not |
@@ -113,8 +134,13 @@ job (runs on `release: published`, same trigger as the chart publish) that:
 5. Stamps `__TRACEBLOC_RELEASE_REF__` → the tag in a *copy* of `install.sh` and
    self-tests that the stamped installer parses and **fails closed** on a
    mutable ref.
-6. Attaches `install.sh`, `manifest.sha256`, `manifest.sha256.sig`,
-   `manifest.sha256.cert` to the release.
+6. Signs the **stamped** `install.sh` and `install.ps1` keyless
+   (`cosign sign-blob --bundle`), verifies each bundle `--offline`, and checks that
+   a tampered copy fails (§2a).
+7. Attaches `install.sh`, `install.ps1`, `install.sh.bundle`,
+   `install.ps1.bundle`, `manifest.sha256`, `manifest.sha256.sig`,
+   `manifest.sha256.cert`, `manifest.sha256.bundle` and the sub-scripts to the
+   release.
 
 **The signed release asset is the integrity root, and nothing else is.** The
 manifest is generated where it is used and never committed (backend#2868): step 3
@@ -250,6 +276,25 @@ cosign verify-blob \
 curl -fsSL "$BASE/provision.sh" \
   | sha256sum  # compare to the "scripts/lib/provision.sh" line in manifest.sha256
 ```
+
+Verify a bootstrap before you run it (the one-line installers will do exactly this
+once they check the bundle; they do not yet):
+
+```bash
+curl -fsSLO "$BASE/install.sh"
+curl -fsSLO "$BASE/install.sh.bundle"
+cosign verify-blob \
+  --bundle install.sh.bundle \
+  --certificate-identity-regexp \
+    '^https://github\.com/tracebloc/(client|client-dev)/\.github/workflows/release-helm-chart\.yaml@refs/tags/v.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --offline \
+  install.sh
+# → "Verified OK"; the same with install.ps1 / install.ps1.bundle on Windows
+```
+
+Releases cut before the bootstraps were signed carry no `install.sh.bundle` or
+`install.ps1.bundle`.
 
 On Windows the same `cosign verify-blob` invocation works verbatim (cosign ships
 a Windows binary); compare a sub-script's digest with
