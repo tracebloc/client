@@ -2438,6 +2438,9 @@ $CoreHandoverPrevContextKey = 'TB_PREV_KUBE_CONTEXT'
 $CorePrevContextVar = 'TRACEBLOC_WSL_PREV_KUBE_CONTEXT'
 $CoreHandoverFactKeys = @('TRACEBLOC_MACHINE_KIND', 'TRACEBLOC_CLOUD_PROVIDER', 'TRACEBLOC_HOST_OS')
 $CredentialRejectedReason = 'credential-rejected'
+# The machine name and provider `client create` sets, by the names provision.sh puts
+# in its own create's environment (backend#5255). Pester holds them to provision.sh's.
+$MachineLabelKeys = @('TRACEBLOC_MACHINE_NAME', 'TRACEBLOC_CLIENT_PROVIDER')
 $CredentialReissuedVar = 'TRACEBLOC_CREDENTIAL_REISSUED'
 
 # One Windows command-line argument, quoted so that CommandLineToArgvW, and the
@@ -2834,10 +2837,43 @@ function Get-ClientName {
     throw "A name for this machine is needed to register it, and nobody at this console can be asked. Set TRACEBLOC_CLIENT_NAME, then run this installer again."
   }
   for ($i = 0; $i -lt 3; $i++) {
-    $name = (ConvertTo-SanitizedInput -Value "$(Read-Host '  Name this machine (as it will show in tracebloc)')").Trim()
+    $name = (ConvertTo-SanitizedInput -Value "$(Read-Host '  Name your secure environment (shown on your tracebloc dashboard)')").Trim()
     if ($name) { return $name }
   }
   throw "No name was given for this machine, so it was not registered. Run this installer again, or set TRACEBLOC_CLIENT_NAME."
+}
+
+# This computer's name, the machine name a new client gets when none is given.
+function Get-HostComputerName { [Environment]::MachineName }
+
+# provision.sh's _machine_labels: TRACEBLOC_MACHINE_NAME / TRACEBLOC_CLIENT_PROVIDER,
+# else asked at this console, else this computer's name and no provider, keyed by
+# $MachineLabelKeys. Only a run whose plan ACTION is a mint asks or defaults: a reused
+# client keeps what `tracebloc machine set` stored and gets only what the caller set.
+function Get-MachineLabels {
+  param([string]$Action)
+  $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_MACHINE_NAME").Trim()
+  $provider = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_PROVIDER").Trim()
+  if ($Action -eq 'mint' -and -not ($name -and $provider)) {
+    $computer = (ConvertTo-SanitizedInput -Value "$(Get-HostComputerName)").Trim()
+    if (Test-BootstrapCanPrompt) {
+      Write-Host ""
+      Info "Name this machine and its provider (change them later with: tracebloc machine set)"
+      if (-not $name) {
+        $ask = '  Machine name'
+        if ($computer) { $ask += " [$computer]" }
+        $name = (ConvertTo-SanitizedInput -Value "$(Read-Host $ask)").Trim()
+      }
+      if (-not $provider) {
+        $provider = (ConvertTo-SanitizedInput -Value "$(Read-Host '  Provider, e.g. Azure or your lab (Enter to skip)')").Trim()
+      }
+    }
+    if (-not $name) { $name = $computer }
+  }
+  $labels = [ordered]@{}
+  $labels[$MachineLabelKeys[0]] = $name
+  $labels[$MachineLabelKeys[1]] = $provider
+  return $labels
 }
 
 # How long one probe of the host CLI may take. `client create --plan` reads the
@@ -3072,6 +3108,7 @@ function Get-HostClientCredential {
       if (-not $name) { $name = $plan.Namespace }
     }
     if (-not $name) { $name = Get-ClientName }
+    $labels = Get-MachineLabels -Action $plan.Action
 
     $create = @('client', 'create', '--yes', '--name', $name, '--credential-file', $file)
     if ($Reissue) {
@@ -3082,14 +3119,16 @@ function Get-HostClientCredential {
     }
     $location = "$env:TRACEBLOC_CLIENT_LOCATION".Trim()
     if ($location) { $create += @('--location', $location) }
-    # Where this machine runs, as the cluster run read it (FACTS), in the CLI's
-    # environment for the create only, as provision.sh hands it to its own; a CLI that
-    # predates the names ignores them. A fact the core could not read is left unset,
-    # so the CLI does not send it. Put back as found, whatever the create did.
+    # Where this machine runs, as the cluster run read it (FACTS), and what it is
+    # called (Get-MachineLabels), in the CLI's environment for the create only, as
+    # provision.sh hands them to its own; a CLI that predates the names ignores them.
+    # A blank value is left unset, so the CLI does not send it. Put back as found,
+    # whatever the create did.
     $savedFacts = [ordered]@{}
-    foreach ($k in $CoreHandoverFactKeys) {
+    foreach ($k in $CoreHandoverFactKeys + $MachineLabelKeys) {
       $savedFacts[$k] = [Environment]::GetEnvironmentVariable($k)
       $v = $null; if ($Facts -and $Facts[$k]) { $v = [string]$Facts[$k] }
+      if ($labels[$k]) { $v = [string]$labels[$k] }
       Set-ProcessEnv -Name $k -Value $v
     }
     try {

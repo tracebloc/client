@@ -611,6 +611,41 @@ nvidia-device-plugin-daemonset
 {{- end }}
 
 {{/*
+  The GPU device-plugin DaemonSet's updateStrategy, for BOTH vendors (backend#1969).
+
+  The plugin is OPTIONAL: a node without it trains on CPU. It must not gate the
+  auto-upgrade's `helm upgrade --atomic` (which waits, with `--wait=legacy` under
+  Helm 4). Helm's legacy readiness check for a DaemonSet (pkg/kube/ready.go
+  daemonSetReady, the same in Helm 3 and 4) is:
+
+    observedGeneration == generation
+    AND updatedNumberScheduled == desiredNumberScheduled
+    AND numberReady >= desiredNumberScheduled - maxUnavailable
+
+  With the Kubernetes default maxUnavailable of 1, on a cluster of N >= 2 GPU nodes
+  a plugin image that cannot be pulled (ImagePullBackOff) stalls the rollout after
+  the first node: updatedNumberScheduled stays 1 of N, the wait times out, and
+  `--atomic` rolls back the WHOLE client upgrade, every later chart version
+  included (security fixes too). maxUnavailable 100% makes the last term
+  `numberReady >= 0` and lets the controller replace every node's pod at once, so
+  updatedNumberScheduled reaches N as soon as the new pods are bound: the wait
+  passes whether or not the plugin's pods ever become Ready.
+
+  What it costs: during a plugin rollout every node restarts its plugin pod at
+  the same time (seconds without the node advertising its GPUs; running GPU pods
+  keep their devices). A plugin that never becomes Ready leaves the nodes
+  advertising no GPU, the CPU fallback the pre-chart imperative install had,
+  while the rest of the client upgrades. Still a RollingUpdate, so the plugin
+  rolls out with every release, and still a release resource, removed on
+  `helm uninstall`.
+*/}}
+{{- define "tracebloc.gpuDevicePluginUpdateStrategy" -}}
+type: RollingUpdate
+rollingUpdate:
+  maxUnavailable: "100%"
+{{- end }}
+
+{{/*
 tracebloc.nvidiaPluginRuntimeClass — the RuntimeClass the chart's NVIDIA device plugin
 runs under: gpu.devicePlugin.nvidia.runtimeClassName while the plugin is enabled with
 vendor nvidia, else "". gpu-device-plugin.yaml and resource-monitor-daemonset.yaml both

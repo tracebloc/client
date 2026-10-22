@@ -31,12 +31,9 @@ shared device, `all`: RFC-0175 D8's Windows device (W26), measured on v0.20.1 by
 spike S-W. v0.14.5's NVML plugin registered 0 GPUs there and pinned the resource
 at 0 (see docker/k3s-cuda/nvidia-runtimeclass.yaml).
 
-The PowerShell core (scripts/install-k8s.ps1) leaves this disabled until
-client-dev#2133 retires it. Its WSL2/CDI path advertises nvidia.com/gpu itself
-via a node-status patch. Its non-WSL2 fallback applies the plugin imperatively,
-because it must verify the node advertises a GPU before it writes the GPU
-request — an ordering this Helm-managed resource can't satisfy in a single
-install. See the issue thread.
+Client v1.10.2 and older ran a PowerShell core on Windows (install-k8s.ps1,
+retired in client-dev#2133) that left this disabled and advertised the GPU
+itself through a node-status patch.
 */ -}}
 {{- /*
 Nil-safe access via the chart's `default dict` pattern (mirrors resource-monitor
@@ -93,8 +90,9 @@ spec:
   selector:
     matchLabels:
       name: nvidia-device-plugin-ds
+  # Never gates the auto-upgrade's --atomic wait (backend#1969): see the helper.
   updateStrategy:
-    type: RollingUpdate
+    {{- include "tracebloc.gpuDevicePluginUpdateStrategy" . | nindent 4 }}
   template:
     metadata:
       labels:
@@ -202,6 +200,9 @@ spec:
   selector:
     matchLabels:
       name: amdgpu-dp-ds
+  # Never gates the auto-upgrade's --atomic wait (backend#1969): see the helper.
+  updateStrategy:
+    {{- include "tracebloc.gpuDevicePluginUpdateStrategy" . | nindent 4 }}
   template:
     metadata:
       labels:

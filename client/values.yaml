@@ -285,9 +285,9 @@ gpu:
     # Master gate. The Linux installer sets this true on the native-GPU path, in
     # lockstep with the GPU request it writes for training jobs (env.GPU_REQUESTS
     # / env.GPU_LIMITS), and so does the core inside tracebloc's WSL distro on
-    # Windows (client-dev#1810 part 3). Left false for CPU-only installs, and by
-    # the PowerShell core (scripts/install-k8s.ps1), which advertises the GPU
-    # itself via a node-status patch, until client-dev#2133 retires it. Default
+    # Windows (client-dev#1810 part 3). Left false for CPU-only installs, and on
+    # releases client v1.10.2 and older installed on Windows, whose PowerShell
+    # core (retired in client-dev#2133) advertised the GPU itself. Default
     # false: nothing renders.
     enabled: false
     # Which vendor plugin to render when enabled: "nvidia" or "amd".
@@ -1448,56 +1448,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "5dde42cbb28b7558c0c9bc40baebd5d22e9ba571"
+    engineCommit: "71eb13743601049dbd6d77c6577525f29593d18b"
     digests:
       causal_language_modeling:
-        cpu: "sha256:abc7403333b21b7dc8c95474c44c90227c0ed7a4a58e76dfdc5282ae51028c2b"
-        gpu: "sha256:6663e5fc7c260eaf7850355e8157a422a480c37b845d300ed32284e0f491d316"
+        cpu: "sha256:2958f81fdf6b51ceb6d627fc49efb6f942d842bafb7442d726fa96170afaf327"
+        gpu: "sha256:d302718461f1a41cad71b3594ca4bfced87d9c9a87254ce6f39aeb09bc0a8b3b"
       embeddings:
-        cpu: "sha256:a2ec6d6228bea6a56dd110b31956d820ca93560782862d22698d5236976d2413"
-        gpu: "sha256:7e62478cd68025a7a213a596197b0af2ef7a71e20f4b71709de477e5063b4225"
+        cpu: "sha256:71153d2b96048075275f286771310943435b980bc0aa145ecc33bf24a62b3482"
+        gpu: "sha256:f3f3947ed19963979f8d37d6caa4f2b1f7313a47b6b754aaa0630d8a74ce97b0"
       image_classification:
-        cpu: "sha256:33e8ff18274ddbbbafd98df29c2c26ff8539aa17dc19039cbaa7be44afdf9872"
-        gpu: "sha256:8e7af7870d696655799bb4414975b685febd74490bc5e121521e1d82d94beeea"
+        cpu: "sha256:b6a0dc038c07f135a60b72ade2f177195906eb342ef96333fa2f28f3e0aa40db"
+        gpu: "sha256:5727f5b614cc6772ba4fa3bfc7e86980622bae3405c875d594f34f84ade9c95c"
       keypoint_detection:
-        cpu: "sha256:50db59fd885f8700a9a2f5a40bfaf1ee5360e2c40555c865b2e4e4b664ed2ba5"
-        gpu: "sha256:cafecdae3d94933108b772a959f1abc904f00134fab7bebba690fd84f6e95ce0"
+        cpu: "sha256:6a2c13a64ad41596fbcb11409e2098cc7639454a587b8a3c2cb1e3507fcaf53c"
+        gpu: "sha256:4e9a81e434784cc5b6a45359dd0e1c87ac75b3fa3a9f5f058f3ac7fc6d234eb2"
       masked_language_modeling:
-        cpu: "sha256:f241c2141b2b983c3a7c1f3a0e0aa269b71476d70395bc0792a7b3dad96d41ce"
-        gpu: "sha256:8faee4ee2063f201f6c0757fc3318e81cb9f5e4030be27a53e9533db0cc76e98"
+        cpu: "sha256:be7dba2087b03bb005634a910c107792ca4f88f637aa7b7a1e8f9cc1627074d1"
+        gpu: "sha256:df6cccbb55fbca144f061f59fedcbf82bf31806417447cf5e7c25409e9f12d11"
       object_detection:
-        cpu: "sha256:43063b04d7c4f3d685ea44f399477f87f1c863b02acfcd43b3a95ad3c55cafa1"
-        gpu: "sha256:c6befb8616db79654dd46298bdc863f4db8c361d734ea7adaad657f0cc5d58f6"
+        cpu: "sha256:362c45efee344af27304cfbbd4e156f1a844a17ccce06f841b545d681a840840"
+        gpu: "sha256:ea10c5e856546da83681faef92448ca345ac0b5a4f8f56b28073d4357736b445"
       semantic_segmentation:
-        cpu: "sha256:bc58295d69c1ba4af6c255fcda09e31d31c632dad6d409689bb3bc49e59ef7be"
-        gpu: "sha256:1855b471fc8ada9071786eb2abe282c3aa86cd035c1641a5bd6a6333769a3692"
+        cpu: "sha256:2c059a7d63fb77b5dfcde2513851882963121865a6f0a94891c023b196dc6fee"
+        gpu: "sha256:a2f378ae935be213dddfbc33ee26932967c9b9f50b5f5b60d0e3018416aacfbd"
       sentence_pair_classification:
-        cpu: "sha256:d4f470b89914da49f16bc6e6a728b611a06f8ff4e00a57f932bfb6da01c8a4f7"
-        gpu: "sha256:0b79556b902df5b467f0a4adcbb273df15172e4a149fa825850087a57efec663"
+        cpu: "sha256:866b22851aba9bb5f56c7e18d52fef632d36ed0d8a44b6e7c1ea92fbb5667e17"
+        gpu: "sha256:731bb8e84ed7015aaaa87666206f2464f34c76fb29bb4b0891694eb1ad82be2c"
       seq2seq:
-        cpu: "sha256:7c7eab20cd352068228e70a6970b8a16be903093e898c3c4fc4b723849ef3e7b"
-        gpu: "sha256:3dee769f0af9f76378aad303bfffdd797121093ba329562fec1020d158b56f3c"
+        cpu: "sha256:35492aaf4b0303344acf8e2b6c0aece251d122942e07929f69c916d09ee59c87"
+        gpu: "sha256:0c11bd2aca38cf0ec2f06cbb52e453326c69f8532cb2c5699e546e28fda92845"
       tabular_classification:
-        cpu: "sha256:d5f2532f683fb4c30a94dc4541370bf1ccb2f6982438c8db5b52b1887187e8ab"
-        gpu: "sha256:60b844838392649468ec49a377615c95148f9bb221445a8f669dac4da959d41f"
+        cpu: "sha256:677c671214a367a9a3f4a37d0c1fd6d1b3eb2b1dba221a54685511096c8fe5e7"
+        gpu: "sha256:d1d9accf403ec57a1ce54a6ccac98717813230d1752dee63e378b58c47e84af5"
       tabular_regression:
-        cpu: "sha256:f1cab3b29f4eaed905b5a0d87b0b14924bc4c54b8369bcb3ef5001a8f65fbc62"
-        gpu: "sha256:7ea60833920abb311e90a1323f7314da05154ab28ba4c9fdecdb724a8c181b10"
+        cpu: "sha256:ed7844eb5dce4e2e98fa5c86829e3fde2d622176e7feb101dc61872e55dac804"
+        gpu: "sha256:1ffdfd2d9cb3ba067941191f9ac538657a42775ab4728506b01b5b724d30f825"
       text_classification:
-        cpu: "sha256:1562f1976f1b79b58ad42ecbb9360866345343d48ba696c0d2b8a5198a116842"
-        gpu: "sha256:cc1339be06e54cd1b305058c7e49aac9ff2808bc2edc96fed7480bc967e83f3f"
+        cpu: "sha256:314ab6b3d53fc31d849f808f66dca96218e34af711595547d203f298d50921fa"
+        gpu: "sha256:247bb09e512e5222d961091b49a3c9b50964811daec47889e9280f541b3853d6"
       time_series_classification:
-        cpu: "sha256:73d410cd79e74366170940a1093350c014b4c78ebde9473b67b793390b4b26f5"
-        gpu: "sha256:49bb96d12eda250fb3a21529d4648cb7df3343a0ca48f522caf845aab21bbf5c"
+        cpu: "sha256:05ddf3d235e881e711c9da44b93b4b45330af17943457dfcb322279f0fab7081"
+        gpu: "sha256:e52b59f6fbacd59ad60bebf97d9566e6442f5d484fb26149d9ee47bba003dccc"
       time_series_forecasting:
-        cpu: "sha256:92a7ef94259d734a8cba7b055a45816c2e29879d5ca38e0fd8c36816609c48c8"
-        gpu: "sha256:4383a65d2e0c56c408b64ce9244c4ad5fdedb841de1703563041fd6f147a93ce"
+        cpu: "sha256:2ac7371864ab5b591265c7f432e87c0b9ee17ea2704383ab6528f79512d4d76b"
+        gpu: "sha256:2436216d6a01b1c8027ecfd1dd0f22223f463a6133f19d809144291b437e5c34"
       time_to_event_prediction:
-        cpu: "sha256:a1b4f2ea56c58a445b258e8a93f9ecc0c3444bf7b7dc9eeecf1880252b29b752"
-        gpu: "sha256:48235ee57b5b393654cfa01646ab6bd7c1fba3df1c4e91f85c211c3c18a4fc81"
+        cpu: "sha256:058ff30ef17320433e2419f94220ee27df528b4b566b8f73eeb904d50c500557"
+        gpu: "sha256:288b5906122b78b90c5a5a58033c72b4e65f8191763b9cd05ce575059f474026"
       token_classification:
-        cpu: "sha256:e0913f32efed3497266ec457eaf7b7cc64ab5323b9aa89a3f962e38d513a93a8"
-        gpu: "sha256:11707bfdc293745492eb61ca89b5757241b0833ba3be147f4a486134f4341b7e"
+        cpu: "sha256:f4a666e8c4c85dff359d6b364ba8b20b11308270e0c4ade30eb18ca5731b0680"
+        gpu: "sha256:f852f40e7bc7bb34fdd18a67e1b6fc7609218e6a1d65dd148a281e6f346aa9aa"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:
@@ -1728,26 +1728,27 @@ images:
     # `prodDigest` for every prod edge (the pre-#5099 behaviour).
     #
     # Same rules as `prodDigest`: a canonical multi-arch index, resolved, never
-    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.82` prints it). No
+    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.83` prints it). No
     # Chart.yaml bump: the release train numbers the client chart (RFC-0255),
     # so the next release publishes it. CI's `ingestor-multiarch` job checks it.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.82** — VERIFIED
-    # against ghcr.io 2026-10-21 (linux/amd64 + linux/arm64 OCI image index;
-    # the same digest the v0.8.82 GitHub Release names; cosign keyless
-    # signature from data-ingestors' release-image.yml at refs/tags/v0.8.82,
-    # revision 78c3d99, on main). It is what the `0.8` float names, so the
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.83** — VERIFIED
+    # against ghcr.io 2026-10-22 (linux/amd64 + linux/arm64 OCI image index;
+    # the same digest the v0.8.83 GitHub Release names; cosign keyless
+    # signature from data-ingestors' release-image.yml at refs/tags/v0.8.83,
+    # revision b18e7d5, on main). It is what the `0.8` float names, so the
     # digest-drift watch reads this pin as current again (backend#5964).
-    # v0.8.82 descends from v0.8.80 (a failed run tells the backend it added
-    # no dataset; a hard-killed ingest's table lock clears within minutes) and
-    # v0.8.75 (the count per class in the ingest summary). It adds: a failed
-    # run's staged files are removed, so the same data can be ingested again;
-    # dataset tables are indexed on ingestor_id (an existing table gains the
-    # index online on its next ingest); a large JSON source is streamed
-    # through preflight instead of loaded whole; a mask name with dots in it is
-    # found; and a table over MySQL's column or row-size limit is refused up
-    # front in plain words.
-    prodDigestServiceDb: "sha256:98881d495ecf45b720956c54836dc466b19948e7b0472b1397fce6d1afc7cd84"
+    # v0.8.83 descends from v0.8.82 (a failed run's staged files are removed,
+    # so the same data can be ingested again; dataset tables are indexed on
+    # ingestor_id, an existing table gaining the index online on its next
+    # ingest; a large JSON source is streamed through preflight) and v0.8.80.
+    # It adds: a failed run prints one summary line per problem at the
+    # default log level, so it says why its records failed; the run keeps a
+    # bounded record of its failures instead of every failed row; preflight
+    # reads image headers and VOC annotations on the copy workers; and the
+    # optional ingestor_id index no longer aborts the ingest after a failed
+    # rollback.
+    prodDigestServiceDb: "sha256:f483f3838f20e1fea09ded0659e80c42defd1dbfe6645835d80120556e001c56"
 
     # -- What each chart-pinned ingestor image says about itself, keyed by its
     # digest (tracebloc/cli-dev#971). When the digest `tracebloc.ingestorDigest`
@@ -1778,8 +1779,8 @@ images:
     pinnedImageLabels:
       "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873":
         version: "0.8.2"
-      "sha256:98881d495ecf45b720956c54836dc466b19948e7b0472b1397fce6d1afc7cd84":
-        version: "0.8.82"
+      "sha256:f483f3838f20e1fea09ded0659e80c42defd1dbfe6645835d80120556e001c56":
+        version: "0.8.83"
         capabilities: "ingest:v1,layout:4,object_detection:manifestless,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means

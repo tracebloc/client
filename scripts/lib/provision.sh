@@ -66,6 +66,57 @@ _registration_machine_facts() {
   return 0
 }
 
+# _trim_label VALUE — VALUE without terminal escapes or surrounding white space.
+_trim_label() {
+  local v; v="$(_strip_paste_garbage "$1")"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+
+# _host_machine_name — this host's short name, the machine name's default.
+_host_machine_name() {
+  local raw; raw="$(hostname 2>/dev/null || uname -n 2>/dev/null || true)"
+  _trim_label "${raw%%.*}"
+}
+
+# _machine_labels REUSE_NS PLAN_ACTION — the machine name and provider `client
+# create` sets, into _TB_MACHINE_NAME / _TB_CLIENT_PROVIDER: TRACEBLOC_MACHINE_NAME /
+# TRACEBLOC_CLIENT_PROVIDER, else asked on a terminal, else the host's name and no
+# provider. Only a run that mints a client asks or defaults (PLAN_ACTION, else
+# `client create --plan`): a reused client keeps what `tracebloc machine set` stored,
+# and gets only what the caller set. The CLI sends a value only when it is given.
+_machine_labels() {
+  local reuse="$1" action="$2" host
+  _TB_MACHINE_NAME="$(_trim_label "${TRACEBLOC_MACHINE_NAME:-}")"
+  _TB_CLIENT_PROVIDER="$(_trim_label "${TRACEBLOC_CLIENT_PROVIDER:-}")"
+  [[ -n "$_TB_MACHINE_NAME" && -n "$_TB_CLIENT_PROVIDER" ]] && return 0
+  [[ -z "$reuse" ]] || return 0
+  [[ -n "$action" ]] || action="$(_create_plan | cut -s -f1)"
+  if [[ "$action" != mint ]]; then
+    log "Machine name and provider: only what was set (client create --plan: ${action:-no answer})"
+    return 0
+  fi
+  host="$(_host_machine_name)"
+  if _prompt_tty; then
+    # Plain `read`, like the client name's: see that prompt for why. EOF or an empty
+    # line takes the default; the name is never required.
+    printf '\n  Name this machine and its provider (change them later with: tracebloc machine set)\n' >/dev/tty 2>/dev/null || true
+    if [[ -z "$_TB_MACHINE_NAME" ]]; then
+      printf '  Machine name%s: ' "${host:+ [${host}]}" >/dev/tty 2>/dev/null || true
+      IFS= read -r _TB_MACHINE_NAME <"$TRACEBLOC_TTY" || true
+      _TB_MACHINE_NAME="$(_trim_label "$_TB_MACHINE_NAME")"
+    fi
+    if [[ -z "$_TB_CLIENT_PROVIDER" ]]; then
+      printf '  Provider, e.g. Azure or your lab (Enter to skip): ' >/dev/tty 2>/dev/null || true
+      IFS= read -r _TB_CLIENT_PROVIDER <"$TRACEBLOC_TTY" || true
+      _TB_CLIENT_PROVIDER="$(_trim_label "$_TB_CLIENT_PROVIDER")"
+    fi
+  fi
+  [[ -n "$_TB_MACHINE_NAME" ]] || _TB_MACHINE_NAME="$host"
+  log "Machine name: ${_TB_MACHINE_NAME:-none}; provider: ${_TB_CLIENT_PROVIDER:-none}"
+  return 0
+}
+
 # _cli_supports_provisioning: does the installed CLI ship the browser-auth mint
 # commands (`tracebloc login` + `tracebloc client create`)? install_tracebloc_cli
 # pulls the latest RELEASE, which can lag this installer until the cli#104 release
@@ -450,7 +501,7 @@ provision_client() {
   # between mint and the explicit removal below — the secret must never linger.
   _PROVISION_CRED_FILE="$cred_file"
   rm -f "$cred_file"
-  # Name this machine, then provision. `client create` would prompt for the name
+  # Name this client, then provision. `client create` would prompt for the name
   # itself, but we redirect its output to the log below (the credential must never
   # reach the terminal), so it can't — collect the name here and pass it explicitly.
   # Precedence: TRACEBLOC_CLIENT_NAME (unattended) > interactive prompt on /dev/tty
@@ -546,6 +597,7 @@ provision_client() {
   fi
 
   [[ -n "$client_name" ]] || error "A name for this client is required to provision it. Re-run in a terminal to be prompted, or set TRACEBLOC_CLIENT_NAME (and optionally TRACEBLOC_CLIENT_LOCATION) for an unattended install."
+  _machine_labels "$_reuse_ns" "${_plan_action:-}"
   # --name is required; pass --location only when we have one (the CLI defaults it
   # otherwise). Build as an array so values with spaces survive intact.
   local -a _create_args=(client create --yes --name "$client_name" --credential-file "$cred_file")
@@ -577,12 +629,13 @@ provision_client() {
   # own and just wrote the 0600 credential into) rather than a predictable
   # world-writable /tmp path — that path is a symlink-clobber target under sudo.
   local _create_out; _create_out="$(mktemp 2>/dev/null)" || _create_out="${HOST_DATA_DIR}/.client-create.$$.out"
-  # Where this machine runs, handed to the create in its environment so the
-  # registration carries it (a CLI that predates the variables ignores them).
+  # Where this machine runs and what it is called (_machine_labels above), handed to
+  # the create in its environment (a CLI that predates the variables ignores them).
   _registration_machine_facts
   if ! ( umask 077
          TRACEBLOC_MACHINE_KIND="$_TB_REG_MACHINE_KIND" TRACEBLOC_CLOUD_PROVIDER="$_TB_REG_CLOUD_PROVIDER" \
-           TRACEBLOC_HOST_OS="$_TB_REG_HOST_OS" tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then  # set-u-safe: seeded with the client create verb
+           TRACEBLOC_HOST_OS="$_TB_REG_HOST_OS" TRACEBLOC_MACHINE_NAME="$_TB_MACHINE_NAME" \
+           TRACEBLOC_CLIENT_PROVIDER="$_TB_CLIENT_PROVIDER" tracebloc "${_create_args[@]}" ) >"$_create_out" 2>&1; then  # set-u-safe: seeded with the client create verb
     cat "$_create_out" >>"${LOG_FILE:-/dev/null}" 2>/dev/null || true
     rm -f "$cred_file"   # remove any partial the failed create may have written
     _report_create_failure "$_create_out" "$client_location" "$client_location_source"

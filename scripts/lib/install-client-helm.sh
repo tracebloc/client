@@ -234,7 +234,7 @@ _existing_training_resources() {
 #
 # Regenerate after an upstream contract change:
 #   scripts/gen-envelope-embed.sh
-_TB_ENVELOPE_CONTRACT_VERSION=9
+_TB_ENVELOPE_CONTRACT_VERSION=10
 _TB_ENVELOPE_OVERHEAD_CPU_MILLI=650
 _TB_ENVELOPE_OVERHEAD_MEM_BYTES=2516582400
 _TB_ENVELOPE_FLOOR_CPU_MILLI=1000
@@ -303,12 +303,12 @@ _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
 # k3s the addons can still be Pending (no nodeName) or not yet created at that
 # moment, so the measurement came back 0 and the envelope was checked against
 # the chart alone. On a 2 vCPU / 7 GB machine that is 5250 MiB allocatable -
-# 2112 MiB chart = 3138 MiB -> 3 GiB, which "fits" with 66 MiB to spare; once
+# 2112 MiB chart = 3138 MiB, which "fits" with nothing to spare; once
 # the addons land, 2998 MiB is free and doctor says Not ready. The floor makes
 # the fit count what WILL be on the node, whatever has been scheduled so far.
 #
 # Both substrates. k3d runs the same addons, the same fit and the same timing,
-# and bites when rounding to whole GiB leaves under 140 MiB to spare
+# and bites wherever less than 140 MiB is left to spare
 # (client-dev#1700).
 _TB_K3S_ADDON_MEM_BYTES=146800640
 _TB_K3S_ADDON_CPU_MILLI=200
@@ -424,7 +424,7 @@ _anchor_largest_schedulable() {
   _TB_ANCHOR_MEM_BYTES=$best_mem
 }
 
-# Echo "cpu=N,memory=MGi" sized to the largest schedulable node, or nothing when
+# Echo "cpu=N,memory=MMi" sized to the largest schedulable node, or nothing when
 # the cluster is unreadable / the machine cannot give a run the contract floor.
 #
 # Node selection lives in _anchor_largest_schedulable; this function is the
@@ -442,7 +442,7 @@ _machine_training_resources() {
   # deliberately kept revertable — only the value it writes changed.
   { (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
     && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); } || return 0
-  printf 'cpu=%d,memory=%dGi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 / 1024 ))"
+  printf 'cpu=%d,memory=%dMi' "$(( run_cpu_m / 1000 ))" "$(( run_mem_b / 1024 / 1024 ))"
 }
 
 # The LIMITS half of a training envelope: memory only, never cpu (backend#2418,
@@ -540,20 +540,22 @@ _machine_training_ceiling() {
   (( run_cpu_m < 0 )) && run_cpu_m=0
   (( run_mem_b < 0 )) && run_mem_b=0
 
+  # Memory in floored MiB, the contract's writing unit (v10): whole GiB threw
+  # away up to 1023 MiB of the run's room (client-dev#2478).
   local cores=$(( run_cpu_m / 1000 ))
-  local gib=$(( run_mem_b / 1024 / 1024 / 1024 ))
+  local mib=$(( run_mem_b / 1024 / 1024 ))
 
   if (( run_cpu_m >= _TB_ENVELOPE_FLOOR_CPU_MILLI )) \
      && (( run_mem_b >= _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
-    printf 'cpu=%d,memory=%dGi|viable' "$cores" "$gib"
+    printf 'cpu=%d,memory=%dMi|viable' "$cores" "$mib"
     return 0
   fi
 
   # Below the contract floor. Report the honest remainder when it is a
   # REQUESTABLE shape -- at least one whole core and one whole GiB. Reachable
   # only on macOS/Windows, where the memory preflight warns instead of failing.
-  if (( cores >= 1 && gib >= 1 )); then
-    printf 'cpu=%d,memory=%dGi|undersized' "$cores" "$gib"
+  if (( cores >= 1 && mib >= 1024 )); then
+    printf 'cpu=%d,memory=%dMi|undersized' "$cores" "$mib"
     return 0
   fi
 
@@ -592,7 +594,7 @@ _existing_training_provenance() {
 # backend#2220 exists to delete.
 #
 # Sets, in the CALLER's scope (so a subshell cannot swallow them):
-#   _TB_TRAINING_SIZE       "cpu=N,memory=MGi"
+#   _TB_TRAINING_SIZE       "cpu=N,memory=MMi" (or the user's own)
 #   _TB_TRAINING_PROVENANCE installer | user | unknown
 #
 # Why provenance is needed at all: RESOURCE_* has no unset state once helm's
@@ -682,7 +684,7 @@ _resolve_training_size() {
   return 0
 }
 
-# The per-run training size for the generated values ("cpu=N,memory=MGi").
+# The per-run training size for the generated values ("cpu=N,memory=MMi").
 # Thin wrapper kept because it is the tested, readable entry point; the values
 # generation calls _resolve_training_size directly so it gets both answers from
 # a single pass of the cluster probes.
@@ -873,7 +875,7 @@ _measured_system_requests() {
 #   _TB_FIT_VERDICT   fits | reduced | refused | pinned-over | unverified
 #   _TB_FIT_LINES     the arithmetic, one fact per line, for the caller to print
 # and on `reduced` REWRITES _TB_TRAINING_SIZE to the largest whole-core /
-# whole-GiB envelope that fits (never larger than what was chosen). The
+# whole-MiB envelope that fits (never larger than what was chosen). The
 # reduction can land below the contract floor while still being a requestable
 # shape (>= 1 core, >= 1 GiB); that keeps the existing `undersized` semantics
 # (backend#2254) and sets _TB_TRAINING_UNDERSIZED so the caller warns.
@@ -1106,19 +1108,19 @@ _fit_verdict() {
     return 0
   fi
 
-  # Ours: the largest whole-core / whole-GiB envelope that fits -- floored (a
+  # Ours: the largest whole-core / whole-MiB envelope that fits -- floored (a
   # ceiling that rounds up is not a ceiling), and never larger than what was
   # chosen in either dimension -- first beside the platform alone, then with
   # the ingestion Job's requests left free too.
   local fit_mem_b=$(( alloc_mem_b - need_mem_b )) fit_cpu_m=$(( alloc_cpu_m - need_cpu_m ))
   (( fit_mem_b < 0 )) && fit_mem_b=0
   (( fit_cpu_m < 0 )) && fit_cpu_m=0
-  local new_gib=$(( fit_mem_b / gib )) new_cores=$(( fit_cpu_m / 1000 ))
-  local old_gib=$(( env_mem_b / gib )) old_cores=$(( env_cpu_m / 1000 ))
-  (( new_gib > old_gib )) && new_gib=$old_gib
+  local new_mib=$(( fit_mem_b / mib )) new_cores=$(( fit_cpu_m / 1000 ))
+  local old_mib=$(( env_mem_b / mib )) old_cores=$(( env_cpu_m / 1000 ))
+  (( new_mib > old_mib )) && new_mib=$old_mib
   (( new_cores > old_cores )) && new_cores=$old_cores
 
-  if (( new_cores < 1 || new_gib < 1 )); then
+  if (( new_cores < 1 || new_mib < gib / mib )); then
     _TB_FIT_VERDICT="refused"
     _TB_FIT_LINES+="what fits is $(( fit_mem_b / mib )) MiB / ${fit_cpu_m} m -- not even a 1-core / 1-GiB run; there is no honest envelope to write"
     return 0
@@ -1127,40 +1129,40 @@ _fit_verdict() {
   local ing_fit_mem_b=$(( fit_mem_b - ing_mem_b )) ing_fit_cpu_m=$(( fit_cpu_m - ing_cpu_m ))
   (( ing_fit_mem_b < 0 )) && ing_fit_mem_b=0
   (( ing_fit_cpu_m < 0 )) && ing_fit_cpu_m=0
-  local ing_gib=$(( ing_fit_mem_b / gib )) ing_cores=$(( ing_fit_cpu_m / 1000 ))
-  (( ing_gib > new_gib )) && ing_gib=$new_gib
+  local ing_mib=$(( ing_fit_mem_b / mib )) ing_cores=$(( ing_fit_cpu_m / 1000 ))
+  (( ing_mib > new_mib )) && ing_mib=$new_mib
   (( ing_cores > new_cores )) && ing_cores=$new_cores
   # Never below the floor for the Job's sake: per dimension, the run keeps
   # min(what fits alone, the floor) when leaving the Job free would cut deeper.
-  local floor_gib=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / gib )) floor_cores=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 ))
-  local keep_gib=$new_gib keep_cores=$new_cores
-  (( keep_gib > floor_gib )) && keep_gib=$floor_gib
+  local floor_mib=$(( _TB_ENVELOPE_FLOOR_MEM_BYTES / mib )) floor_cores=$(( _TB_ENVELOPE_FLOOR_CPU_MILLI / 1000 ))
+  local keep_mib=$new_mib keep_cores=$new_cores
+  (( keep_mib > floor_mib )) && keep_mib=$floor_mib
   (( keep_cores > floor_cores )) && keep_cores=$floor_cores
-  (( ing_gib > keep_gib )) && keep_gib=$ing_gib
+  (( ing_mib > keep_mib )) && keep_mib=$ing_mib
   (( ing_cores > keep_cores )) && keep_cores=$ing_cores
-  if (( keep_gib * gib + need_mem_b + ing_mem_b > alloc_mem_b || keep_cores * 1000 + need_cpu_m + ing_cpu_m > alloc_cpu_m )); then
+  if (( keep_mib * mib + need_mem_b + ing_mem_b > alloc_mem_b || keep_cores * 1000 + need_cpu_m + ing_cpu_m > alloc_cpu_m )); then
     _TB_FIT_INGEST_WAITS=1
   fi
 
-  if (( mem_fits && cpu_fits && keep_gib == old_gib && keep_cores == old_cores )); then
+  if (( mem_fits && cpu_fits && keep_mib == old_mib && keep_cores == old_cores )); then
     # Already as small as the floor allows: the size stands, the upload waits.
     _TB_FIT_VERDICT="fits"
     _TB_FIT_LINES+="${ing_part}: does not fit beside ${size}, which is already the smallest run this machine is given"
     return 0
   fi
 
-  _TB_TRAINING_SIZE="cpu=${keep_cores},memory=${keep_gib}Gi"
+  _TB_TRAINING_SIZE="cpu=${keep_cores},memory=${keep_mib}Mi"
   _TB_FIT_VERDICT="reduced"
-  _TB_FIT_LINES+="reduced ${size} -> ${_TB_TRAINING_SIZE}: $(( alloc_mem_b / mib )) - $(( need_mem_b / mib )) = $(( fit_mem_b / mib )) MiB -> ${new_gib} GiB; ${alloc_cpu_m} - ${need_cpu_m} = ${fit_cpu_m} m -> ${new_cores} core(s)"
-  if (( keep_gib != new_gib || keep_cores != new_cores )); then
-    _TB_FIT_LINES+="; less the ${ing_part}: $(( ing_fit_mem_b / mib )) MiB -> ${keep_gib} GiB, ${ing_fit_cpu_m} m -> ${keep_cores} core(s) (never below the floor for it)"
+  _TB_FIT_LINES+="reduced ${size} -> ${_TB_TRAINING_SIZE}: $(( alloc_mem_b / mib )) - $(( need_mem_b / mib )) = $(( fit_mem_b / mib )) MiB -> ${new_mib} MiB; ${alloc_cpu_m} - ${need_cpu_m} = ${fit_cpu_m} m -> ${new_cores} core(s)"
+  if (( keep_mib != new_mib || keep_cores != new_cores )); then
+    _TB_FIT_LINES+="; less the ${ing_part}: $(( ing_fit_mem_b / mib )) MiB -> ${keep_mib} MiB, ${ing_fit_cpu_m} m -> ${keep_cores} core(s) (never below the floor for it)"
   fi
   if (( _TB_FIT_INGEST_WAITS )); then
     _TB_FIT_LINES+=$'\n'"${ing_part}: does not fit beside ${_TB_TRAINING_SIZE} without cutting the run below the floor"
   else
     _TB_FIT_LINES+=$'\n'"${ing_part}: fits beside the run"
   fi
-  if (( keep_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || keep_gib * gib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
+  if (( keep_cores * 1000 < _TB_ENVELOPE_FLOOR_CPU_MILLI || keep_mib * mib < _TB_ENVELOPE_FLOOR_MEM_BYTES )); then
     _TB_TRAINING_UNDERSIZED=1
   fi
   return 0
