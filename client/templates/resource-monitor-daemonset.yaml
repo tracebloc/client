@@ -220,12 +220,9 @@ spec:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: "utility"
             {{- /* Settings naming: NODE_NAME, MONITOR_INTERVAL and HOST_DATASET_PATH
-                 are emitted under their legacy names and the canonical
-                 TRACEBLOC_<name>, same value (remove_by 2026-12-31). */}}
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
+                 render under their canonical TRACEBLOC_<name> only. The legacy
+                 NODE_NAME was the last to stop (backend#4959), once the prod
+                 control-plane pin read it canonical-first. */}}
             - name: TRACEBLOC_NODE_NAME
               valueFrom:
                 fieldRef:

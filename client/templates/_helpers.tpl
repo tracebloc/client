@@ -3284,9 +3284,10 @@ the same effect:
                                       = legacy, as every reader treats it).
 
 The legacy env name is NOT rendered (it was, beside the canonical, until the
-CONTRACT step), except for the names in `$keepLegacy`, which a pinned reader
-still takes by the legacy name alone: NODE_NAME, read as `k8s.node.name` by
-the tracebloc-telemetry package client-runtime pins. Those still render both.
+CONTRACT step). NODE_NAME was the last name kept beside its canonical, for the
+tracebloc-telemetry package client-runtime pins; it reads the canonical first
+from 0.1.1, which the prod control-plane pin carries since chart 1.12.10
+(backend#4959), so no name is kept.
 
 The list is every legacy name either container used to dual-emit that the other's (or
 its own) passthrough does not exclude, plus the operator knobs the chart never
@@ -3327,7 +3328,6 @@ derives the pairs from the render and fails on one missing here.
       "HOST_UID" "HOST_GID" "DATASET_SCOPED_MOUNTS" "LOGS_SCOPED_MOUNTS" "TELEMETRY_COLLECTOR_NAMESPACE"
       "GPU_UNSUPPORTED_REASON" "GPU_UNSUPPORTED_NAME" "GPU_UNSUPPORTED_CODE"
 -}}
-{{- $keepLegacy := list "NODE_NAME" -}}
 {{- $key := .key -}}
 {{- $legacy := "" -}}
 {{- if has $key $aliased -}}
@@ -3342,10 +3342,6 @@ derives the pairs from the render and fails on one missing here.
 {{- else -}}
 {{-   $canon := printf "TRACEBLOC_%s" (trimPrefix "TB_" $legacy) -}}
 {{-   if or (eq $key $canon) (not (get .env $canon)) }}
-{{-     if has $legacy $keepLegacy }}
-- name: {{ $legacy }}
-  value: {{ .value | quote }}
-{{-     end }}
 - name: {{ $canon }}
   value: {{ .value | quote }}
 {{-   end }}

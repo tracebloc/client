@@ -2,6 +2,48 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## Upgrading to 1.12.11 — the last older environment variable names are gone: `NODE_NAME`, `CHART_NAME`, `REPO_URL`
+
+**What changed.** 1.9.218 stopped setting the older environment variable names
+beside their `TRACEBLOC_` names, but kept three, because a component still read
+them under the old name alone. From 1.12.10 on, the control-plane images that
+prod edges run read the `TRACEBLOC_` name first, so this release stops setting
+all three:
+
+- **`NODE_NAME`** on jobs-manager and the resource monitor. They get the name of
+  the node they run on as `TRACEBLOC_NODE_NAME` only (the pod's `spec.nodeName`,
+  as before). The older name was kept for the telemetry library in the
+  control-plane images, which reports the node in each record.
+- **`CHART_NAME` and `REPO_URL`** on the auto-upgrade CronJob. It gets the chart
+  it upgrades to as `TRACEBLOC_CHART_NAME` and `TRACEBLOC_HELM_REPO_URL` only
+  (from `autoUpgrade.chartName` and `autoUpgrade.repoUrl`, as before). The older
+  names were kept for the MySQL migration run, which reads the chart source off
+  this CronJob.
+
+Nothing changes in your values. The node name reaches the heartbeat, the
+resource monitor and telemetry as before, and the auto-upgrade and the MySQL
+migration find the chart as before.
+
+**What you have to do.**
+- **Nothing**, unless you read the pods' environment yourself or run a
+  control-plane image that the chart does not name.
+- **Scripts of your own** that read `NODE_NAME` from a jobs-manager or resource
+  monitor pod, or `CHART_NAME` / `REPO_URL` from the auto-upgrade CronJob, must
+  read `TRACEBLOC_NODE_NAME`, `TRACEBLOC_CHART_NAME` and
+  `TRACEBLOC_HELM_REPO_URL`.
+- **A jobs-manager image you pinned yourself** (`images.jobsManager.digest`)
+  must be the build chart 1.12.10 names, or a later one. An older build still
+  runs, but its telemetry records can lose the node name, and its MySQL
+  migration can fail to find the chart. Clear the pin to run the images this
+  chart version names.
+- **A mirror (`global.imageRegistry`)** must serve the control-plane images
+  chart 1.12.10 names, or later ones, for the same reason. Refresh its copies
+  before upgrading.
+
+**Going back.** `helm rollback` restores the older revision's workloads with
+both names. `helm upgrade --version 1.12.10` works too, since every earlier
+chart sets both names.
+
 ## Upgrading to 1.10.0 — MySQL 8.4 is the default engine
 
 **What changed.** The chart's default MySQL image is now MySQL 8.4, a

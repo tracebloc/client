@@ -1050,18 +1050,17 @@ spec:
         - name: TRACEBLOC_SINGLE_NODE
           value: {{ if hasKey .Values.env "SINGLE_NODE" }}{{ .Values.env.SINGLE_NODE | quote }}{{ else }}{{ (default dict .Values.hostPath).enabled | default false | quote }}{{ end }}
         # backend#4346: the node this pod runs on, reported as the heartbeat's
-        # `hostname` for the dashboard's secure-environment switcher. Downward
-        # API, so no RBAC and no API call -- the same source the resource
-        # monitor DaemonSet already uses for NODE_NAME. On the installer's
-        # single-host cluster this IS the machine's name. Excluded from the
-        # passthrough range below so `env.NODE_NAME` cannot render it twice.
+        # `hostname` for the dashboard's secure-environment switcher, and as
+        # telemetry's `k8s.node.name`. Downward API, so no RBAC and no API call
+        # -- the same source the resource monitor DaemonSet uses. On the
+        # installer's single-host cluster this IS the machine's name. Excluded
+        # (both spellings) from the passthrough range below, so neither
+        # `env.NODE_NAME` nor `env.TRACEBLOC_NODE_NAME` can render it twice.
+        # The canonical name only: the legacy NODE_NAME stopped rendering once
+        # the prod control-plane pin read it canonical-first (backend#4959).
         # (`env.DEVICE_TYPE`, the installer's chassis verdict, needs no line of
         # its own: the range passes it through, and jobs-manager omits the key
         # when it is unset rather than guessing.)
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
         - name: TRACEBLOC_NODE_NAME
           valueFrom:
             fieldRef:

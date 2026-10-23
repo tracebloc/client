@@ -37,8 +37,9 @@ data:
     log() { printf '[auto-upgrade] %s\n' "$*"; }
 
     # Settings naming: the CronJob sets each of these under its canonical
-    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one,
-    # except CHART_NAME / REPO_URL, which a reader still needs. Read the
+    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one
+    # (CHART_NAME / REPO_URL were the last to stop, once the prod control-plane
+    # pin read them canonical-first). Read the
     # canonical first; a blank or absent canonical leaves the legacy value --
     # and any default or `set -u` refusal below -- exactly as before.
     # The chart source (REPO_URL / REPO_NAME / CHART_NAME) takes the spelling the
@@ -822,14 +823,10 @@ spec:
                   value: {{ .Release.Name | quote }}
                 - name: TRACEBLOC_RELEASE_NAMESPACE
                   value: {{ .Release.Namespace | quote }}
-                - name: REPO_URL
-                  value: {{ .Values.autoUpgrade.repoUrl | quote }}
                 - name: TRACEBLOC_HELM_REPO_URL
                   value: {{ .Values.autoUpgrade.repoUrl | quote }}
                 - name: TRACEBLOC_HELM_REPO_NAME
                   value: {{ .Values.autoUpgrade.repoName | quote }}
-                - name: CHART_NAME
-                  value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: TRACEBLOC_CHART_NAME
                   value: {{ .Values.autoUpgrade.chartName | quote }}
                 - name: TRACEBLOC_UPGRADE_TIMEOUT
