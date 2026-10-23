@@ -73,6 +73,9 @@
 #    TRACEBLOC_SKIP_EXAMPLE=1    don't set up your account's example use case after a
 #                                connected install (the CLI you signed in with sets it
 #                                up once per account)
+#    TRACEBLOC_EXAMPLE_TIMEOUT=15m  how long setting up the example use case may take
+#                                with no terminal attached (CI, automation); past it,
+#                                that step stops and the install still succeeds
 #    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
 #                                may use (sized to the machine, else the contract
 #                                floor cpu=1,memory=2Gi; sets requests==limits)
@@ -512,6 +515,7 @@ main() {
     open_dashboard_link || true
   fi
 
+  tb_wsl_client_state_write
   # Exit code reflects reality: connected/starting are OK; failures are non-zero
   # so re-runs and automation can tell the difference.
   case "${TRACEBLOC_CLIENT_STATE:-}" in

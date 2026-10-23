@@ -47,7 +47,7 @@ tb_tuning_aliases=(
   TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT TB_CLUSTER_START_TIMEOUT_MIN
   TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
   TB_DESKTOP_RESTART_WAIT TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
-  TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT TB_EXAMPLE_TIMEOUT
+  TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
   TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN
   TB_GPU_VERIFY_TIMEOUT
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
@@ -2564,6 +2564,19 @@ tb_wsl_handover_write() {
       "${_TB_REG_MACHINE_KIND//[$'\r\n']/}" "${_TB_REG_CLOUD_PROVIDER//[$'\r\n']/}" "${_TB_REG_HOST_OS//[$'\r\n']/}" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
     || error "Couldn't hand what this run found to the Windows installer: ${TRACEBLOC_WSL_HANDOVER} could not be written. Re-run the installer from Windows."
   log "handover: INSTALL_STATE_REASON=${INSTALL_STATE_REASON:-} TB_PREV_KUBE_CONTEXT=${TB_PREV_KUBE_CONTEXT:-} TRACEBLOC_MACHINE_KIND=${_TB_REG_MACHINE_KIND} TRACEBLOC_CLOUD_PROVIDER=${_TB_REG_CLOUD_PROVIDER} TRACEBLOC_HOST_OS=${_TB_REG_HOST_OS} written to ${TRACEBLOC_WSL_HANDOVER}"
+}
+
+# tb_wsl_client_state_write -- the client run's TRACEBLOC_CLIENT_STATE, handed to the
+# Windows installer, which runs the example use case only on `connected` (as
+# setup_example_use_case does). One line, to the file the host named on this run's line.
+# A failed write only warns: the host reads a missing file as not connected.
+tb_wsl_client_state_write() {
+  [[ "$(tb_wsl_phase 2>/dev/null)" == "client" && -n "${TRACEBLOC_WSL_HANDOVER:-}" ]] || return 0
+  local state="${TRACEBLOC_CLIENT_STATE:-}"
+  state="${state//[$'\r\n']/}"
+  { printf 'TRACEBLOC_CLIENT_STATE=%s\n' "$state" >"$TRACEBLOC_WSL_HANDOVER"; } 2>/dev/null \
+    || { warn "Couldn't hand the client's state to the Windows installer (${TRACEBLOC_WSL_HANDOVER}); it will not set up the example use case."; return 0; }
+  log "handover: TRACEBLOC_CLIENT_STATE=${state} written to ${TRACEBLOC_WSL_HANDOVER}"
 }
 
 # ── The macOS floor (RFC-0175 D6, D10) ───────────────────────────────────────

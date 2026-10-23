@@ -2018,6 +2018,58 @@ _last_deployed_helm_revision() {
   }'
 }
 
+# ── The host's helm lock (cli-dev#1545, RFC-0185) ────────────────────────────
+# On the macOS node the Apple-GPU runner's idle restart stops the node and holds
+# ~/.tracebloc/helm.lock until it is Ready again, and the tracebloc CLI's helm commands
+# take the same lock (cli-dev internal/helmlock). So each helm call here that changes the
+# release takes it too, around that call alone: a restart then waits for one helm call,
+# never for the rest of the installer, and never stops the node under one. The recovery
+# of an interrupted release holds it across the read it decides on and its act
+# (_tb_recover_locked), since the wait for the lock can change what that read says.
+#   - It is flock(2), exclusive. macOS's /usr/bin/lockf (FreeBSD's) takes the same lock;
+#     cli-dev's TestTheInstallersLockfIsTheSameLock holds that.
+#   - -k keeps the file. Without it lockf unlinks the file on exit, and a process that
+#     opened the old file could lock it while another locks a new one: both would hold it.
+#   - The kernel drops the lock when its holder exits, so a holder that died leaves it free.
+#   - Exit 75 (EX_TEMPFAIL) is lockf's: the wait ran out and helm never ran.
+#   - spin's deadline TERMs and KILLs the whole tree (_tb_spin_reap), lockf and the helm
+#     under it, so a timed-out call leaves no helm running without the lock.
+# Elsewhere (Linux, WSL, k3d on a Mac) no runner restarts a node, and the prefix is empty.
+_TB_HELM_LOCK=()
+_TB_HELM_LOCKF=/usr/bin/lockf
+
+# _tb_helm_lock -- set _TB_HELM_LOCK to the prefix the next release-changing helm call runs
+# under: `lockf -k -t WAIT LOCK` on the macOS node (native k3s on a Mac, as
+# _mac_node_profile_set_args reads it), empty anywhere else. WAIT is
+# TRACEBLOC_HELM_LOCK_WAIT_S whole seconds, 300 by default. LOCK sits beside the install
+# record's user copy, as cli-dev's helmlock.Path does. A lock this run cannot take (no
+# home, no folder, no lockf) stops the run: helm never runs without it on the Mac.
+_tb_helm_lock() {
+  local _rec _w
+  _TB_HELM_LOCK=()
+  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]] || return 0
+  [[ -n "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" ]] \
+    || error "HOME is not set, so this run cannot tell where the helm lock (~/.tracebloc/helm.lock) is. Re-run the installer from your own login."
+  _rec="$(tb_record_path)"
+  mkdir -p "${_rec%/*}" \
+    || error "Couldn't create ${_rec%/*}, which holds the helm lock the tracebloc runner shares with this installer. Check that you own it, then re-run."
+  [[ -x "$_TB_HELM_LOCKF" ]] \
+    || error "${_TB_HELM_LOCKF} is missing, so this installer cannot take the helm lock the tracebloc runner shares with it. It ships with macOS; check this Mac's system files, then re-run."
+  case "${TRACEBLOC_HELM_LOCK_WAIT_S:-}" in
+    ''|*[!0-9]*) _w=300 ;;
+    *) _w=$(( 10#$TRACEBLOC_HELM_LOCK_WAIT_S )) ;;
+  esac
+  _TB_HELM_LOCK=("$_TB_HELM_LOCKF" -k -t "$_w" "${_rec%/*}/helm.lock")
+}
+
+# _tb_helm_lock_timed_out RC -- stop the run by name when RC is lockf's "the wait ran out"
+# (75) under a lock prefix: something else held the lock, and helm did not run. Any other
+# RC returns, for the caller's own helm failure.
+_tb_helm_lock_timed_out() {
+  [[ "$1" -eq 75 && "${#_TB_HELM_LOCK[@]}" -eq 5 ]] || return 0
+  error "A tracebloc node restart or helm command on this Mac held ${_TB_HELM_LOCK[4]} for ${_TB_HELM_LOCK[3]} s, so this installer did not change the client. Re-run the installer once it has ended."
+}
+
 # _recover_pending_helm_release — auto-clear a wedged pending-* release before a
 # helm upgrade/install (#554). A helm process killed mid-operation (Ctrl-C, OOM,
 # host reboot, laptop sleep) leaves the release stuck in a transient state; every
@@ -2029,7 +2081,8 @@ _last_deployed_helm_revision() {
 #   $3 = mode: "full" (default) or "no-destroy" (see below)
 #
 # Reads the STATUS: line of `helm status` (jq-free on purpose — parsed the same
-# way the auto-upgrade cronjob does, whose alpine/helm image ships without jq):
+# way the auto-upgrade cronjob does, whose alpine/helm image ships without jq), and
+# again under the host's helm lock, where what to do is decided (_tb_recover_locked):
 #   deployed / failed / superseded / uninstalled / "" → healthy or absent; no-op
 #   pending-upgrade / pending-rollback → roll back to the last deployed revision,
 #                                        named from `helm history` (backend#5273);
@@ -2057,17 +2110,16 @@ _last_deployed_helm_revision() {
 # attempted and FAILED, or was refused under no-destroy — the caller must fail
 # closed rather than march into the same wedge.
 _recover_pending_helm_release() {
-  local _rel="$1" _ns="$2" _mode="${3:-full}" _status
+  local _rel="$1" _ns="$2" _mode="${3:-full}" _status _rc _verdict _script
   # Bound the status READ (#554 Bugbot): every helm/kubectl probe in this installer
   # must be bounded so a wedged/unreachable API can't hang a headless run — and
   # this read gates everything below, so bounding it bounds the whole recovery. A
   # timeout (or any error) yields an empty status → no-op → we hand off to the
   # bounded upgrade, which surfaces the API failure with its own deadline. The
-  # mutating ops below are NOT wrapped in a kill-based bound on purpose: SIGKILLing
-  # a helm rollback/uninstall midway would recreate the very pending-* wedge we are
-  # clearing. The history read before a rollback is bounded like this one; the
-  # rollback and the uninstall are bounded gracefully by helm's own --wait
-  # --timeout (and only run once this read has proven the API responsive).
+  # mutating ops (_tb_recover_locked) are NOT wrapped in a kill-based bound on
+  # purpose: SIGKILLing a helm rollback/uninstall midway would recreate the very
+  # pending-* wedge we are clearing. They are bounded gracefully by helm's own
+  # --wait --timeout (and only run once this read has proven the API responsive).
   # Capture the whole `helm status`, then parse it from a here-string — NEVER
   # through an early-exit awk pipeline. Under `set -o pipefail` awk's `exit`
   # SIGPIPEs helm (rc 141) as it writes the rest of the status body, and the
@@ -2078,60 +2130,141 @@ _recover_pending_helm_release() {
   _status_out="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>/dev/null)" || _status_out=""
   _status="$(awk '/^STATUS:/ {print $2; exit}' <<<"$_status_out")"
   case "$_status" in
-    pending-upgrade|pending-rollback)
-      warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
-      # Name the target (backend#5273): a revision-less `helm rollback` goes to
-      # current-1, which in a pending-rollback wedge (N deployed, N+1 failed,
-      # N+2 pending-rollback) is the FAILED upgrade, not the last working one.
-      # Read the history and return to the highest `deployed` revision; with
-      # none to return to, refuse rather than roll onto a broken revision.
-      local _history _target
-      _history="$(_bounded 30 helm history "$_rel" -n "$_ns" -o json 2>/dev/null)" || _history=""
-      _target="$(_last_deployed_helm_revision "$_history")"
-      if [[ -z "$_target" ]]; then
-        warn "The history of '$_rel' names no deployed revision to roll back to — refusing an automatic rollback."
-        hint "Inspect it and roll back by hand to a revision you trust:"
-        hint "  helm -n $_ns history $_rel"
-        hint "  helm -n $_ns rollback $_rel <revision> --wait"
-        return 1
-      fi
-      info "Rolling back '$_rel' to its last deployed revision ($_target) before continuing…"
-      # --wait --timeout: helm's own graceful bound, as on the uninstall below —
-      # the release is not healthy until its pods are, and the caller's upgrade
-      # must not start on top of a rollback that is still rolling out.
-      if ! helm rollback "$_rel" "$_target" -n "$_ns" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1; then
-        warn "Automatic rollback of '$_rel' to revision $_target failed."
-        return 1
-      fi
-      log "Recovered '$_rel' from $_status via helm rollback to revision $_target."
-      ;;
-    pending-install|uninstalling)
-      warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
-      if [[ "$_mode" == no-destroy ]]; then
-        # Clearing pending-install/uninstalling can only be done by uninstalling
-        # (a never-deployed revision can't be rolled back), which would drop this
-        # client's stored credential — refuse on the reconcile path (#554 Bugbot).
-        # rollback is NOT a remedy for these states, so print the credential-safe
-        # manual path instead.
-        warn "Clearing '$_rel' (status: $_status) needs an uninstall, which would drop this client's write-only stored credential — refusing to auto-recover it here."
-        hint "Recover by hand without losing the credential:"
-        hint "  helm -n $_ns get values $_rel   # save clientPassword first — it can't be re-fetched"
-        hint "  helm -n $_ns uninstall $_rel    # then re-run the installer"
-        return 1
-      fi
-      info "Clearing the half-finished release '$_rel' before continuing…"
-      if ! helm uninstall "$_rel" -n "$_ns" --wait --timeout 5m >> "${LOG_FILE:-/dev/null}" 2>&1; then
-        warn "Automatic cleanup of '$_rel' failed."
-        return 1
-      fi
-      log "Recovered '$_rel' from $_status via helm uninstall."
-      ;;
+    pending-upgrade|pending-rollback|pending-install|uninstalling) ;;
     ''|deployed|failed|superseded|uninstalled)
-      : # healthy or absent — nothing to recover
-      ;;
+      return 0 ;;  # healthy or absent — nothing to recover
     *)
       log "helm status of '$_rel' is '$_status'; no pending-state recovery needed."
+      return 0 ;;
+  esac
+  warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
+  info "Clearing it before continuing…"
+  # The read above only says whether to recover. What to do is decided under the
+  # host's helm lock (cli-dev#1545), by a read made there: the lock can wait up to
+  # 300 s for the runner's node restart or the CLI's helm command, which can finish
+  # this very release meanwhile, and a rollback or uninstall decided before that wait
+  # would undo a release that is healthy again. lockf runs a program, never a shell
+  # function, so on the macOS node the locked section is a bash of its own, handed
+  # _tb_recover_locked and what it calls; elsewhere there is no lock, and it runs here.
+  _tb_helm_lock
+  local _sec=("$_rel" "$_ns" "$_mode" "${LOG_FILE:-/dev/null}")
+  _rc=0
+  if [[ "${#_TB_HELM_LOCK[@]}" -gt 0 ]]; then
+    _script="$(declare -f has _bounded _tb_bounded_bg _tb_bounded_wait _last_deployed_helm_revision _tb_recover_locked)" \
+      || error "The installer is missing a function its helm lock's recovery runs. Re-download the installer, then re-run."
+    _verdict="$(${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} "$BASH" -c "${_script}"$'\n''_tb_recover_locked "$@"' tb-helm-recover "${_sec[@]}" 2>>"${LOG_FILE:-/dev/null}")" || _rc=$?  # set-u-safe: _sec holds the four words assigned above
+  else
+    _verdict="$(_tb_recover_locked "${_sec[@]}")" || _rc=$?  # set-u-safe: _sec holds the four words assigned above
+  fi
+  if [[ "$_rc" -ne 0 ]]; then
+    _tb_helm_lock_timed_out "$_rc"
+    warn "The recovery of '$_rel' ended with exit $_rc before it said what it did."
+    return 1
+  fi
+  local _v="" _vs="" _vt=""
+  read -r _v _vs _vt <<<"$_verdict" || true
+  case "$_v" in
+    clear)
+      info "'$_rel' is no longer interrupted (status: $_vs): it finished before this installer acted, so it is left as it is."
+      log "No recovery of '$_rel': it was $_status, and $_vs when read again under the helm lock."
       ;;
+    unreadable)
+      warn "This installer could not read '$_rel' again under the helm lock, so it cannot tell whether it is still interrupted, and left it as it is."
+      hint "Check it, then re-run:  helm -n $_ns status $_rel"
+      return 1
+      ;;
+    rolled-back)
+      info "Rolled '$_rel' back to its last deployed revision ($_vt)."
+      log "Recovered '$_rel' from $_vs via helm rollback to revision $_vt."
+      ;;
+    uninstalled)
+      info "Cleared the half-finished release '$_rel'."
+      log "Recovered '$_rel' from $_vs via helm uninstall."
+      ;;
+    no-target)
+      warn "The history of '$_rel' names no deployed revision to roll back to — refusing an automatic rollback."
+      hint "Inspect it and roll back by hand to a revision you trust:"
+      hint "  helm -n $_ns history $_rel"
+      hint "  helm -n $_ns rollback $_rel <revision> --wait"
+      return 1
+      ;;
+    refused)
+      # Clearing pending-install/uninstalling can only be done by uninstalling
+      # (a never-deployed revision can't be rolled back), which would drop this
+      # client's stored credential — refuse on the reconcile path (#554 Bugbot).
+      # rollback is NOT a remedy for these states, so print the credential-safe
+      # manual path instead.
+      warn "Clearing '$_rel' (status: $_vs) needs an uninstall, which would drop this client's write-only stored credential — refusing to auto-recover it here."
+      hint "Recover by hand without losing the credential:"
+      hint "  helm -n $_ns get values $_rel   # save clientPassword first — it can't be re-fetched"
+      hint "  helm -n $_ns uninstall $_rel    # then re-run the installer"
+      return 1
+      ;;
+    rollback-failed)
+      warn "Automatic rollback of '$_rel' to revision $_vt failed."
+      return 1
+      ;;
+    uninstall-failed)
+      warn "Automatic cleanup of '$_rel' failed."
+      return 1
+      ;;
+    *)
+      warn "The recovery of '$_rel' gave no answer this installer reads ('${_verdict}'), so it cannot tell whether the release changed."
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# _tb_recover_locked REL NS MODE LOG -- _recover_pending_helm_release's decision and its
+# act, as one piece that runs under the host's helm lock. It reads REL's status again
+# and acts on that read alone; helm's output goes to LOG. Prints one verdict line,
+# which the caller turns into messages:
+#   clear STATUS              not interrupted (any more), or absent (helm: not found):
+#                             nothing done
+#   unreadable                helm status gave no status and did not say not found
+#                             (a timeout, an API error): nothing done
+#   rolled-back STATUS REV    pending-upgrade/-rollback, rolled back to the last
+#                             deployed revision REV, named from `helm history`
+#                             (backend#5273)
+#   no-target STATUS          ... but the history names no deployed revision: refused
+#   rollback-failed STATUS REV
+#   uninstalled STATUS        pending-install (revision 1 never deployed: there is no
+#                             good revision, so the half-install goes; the chart's
+#                             resource-policy: keep leaves the PVCs, docs/MIGRATIONS)
+#                             or uninstalling (a killed `helm uninstall`, finished)
+#   refused STATUS            ... but MODE is no-destroy
+#   uninstall-failed STATUS
+# On the macOS node it runs in the bash lockf starts, so it uses only what
+# _recover_pending_helm_release hands that bash: no messages, no other globals.
+_tb_recover_locked() {
+  local out s hist target
+  # helm's own words are kept: a release helm cannot find is absent, but a read that
+  # timed out or met an API error says nothing about it, and a release the caller
+  # saw interrupted must not pass for finished on that (Bugbot, client-dev#2524).
+  out="$(_bounded 30 helm status "$1" -n "$2" 2>&1)" || :
+  s="$(awk '/^STATUS:/ {print $2; exit}' <<<"$out")"
+  if [ -z "$s" ]; then
+    case "$out" in
+      *"not found"*) echo "clear absent" ;;
+      *) echo "unreadable" ;;
+    esac
+    return 0
+  fi
+  case "$s" in
+    pending-upgrade|pending-rollback)
+      hist="$(_bounded 30 helm history "$1" -n "$2" -o json 2>/dev/null)" || hist=""
+      target="$(_last_deployed_helm_revision "$hist")"
+      if [ -z "$target" ]; then echo "no-target $s"
+      elif helm rollback "$1" "$target" -n "$2" --wait --timeout 5m >>"$4" 2>&1; then echo "rolled-back $s $target"
+      else echo "rollback-failed $s $target"; fi
+      ;;
+    pending-install|uninstalling)
+      if [ "$3" = no-destroy ]; then echo "refused $s"
+      elif helm uninstall "$1" -n "$2" --wait --timeout 5m >>"$4" 2>&1; then echo "uninstalled $s"
+      else echo "uninstall-failed $s"; fi
+      ;;
+    *) echo "clear $s" ;;
   esac
   return 0
 }
@@ -2857,8 +2990,11 @@ _reconcile_adopted_client() {
   local _helm_timeout_min
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
-  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" helm "${_args[@]}" || _helm_rc=$?  # set-u-safe: assigned the upgrade verb at its declaration
+  _tb_helm_lock
+  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" \
+    ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} helm "${_args[@]}" || _helm_rc=$?  # set-u-safe: assigned the upgrade verb at its declaration
   if [[ "$_helm_rc" -ne 0 ]]; then
+    _tb_helm_lock_timed_out "$_helm_rc"
     # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
     # leave the release pending-*. The next run auto-recovers
     # (_recover_pending_helm_release), but name the manual unwedge too — on exit
@@ -4461,7 +4597,11 @@ EOF
   local _prev_password _prev_unreadable=0
   _prev_password="$(_client_password_from_secret "$TB_NAMESPACE" "$TB_NAMESPACE")" \
     || _prev_unreadable=1
+  # The lock's prefix has a line of its own, so the call still starts its line, where
+  # release-name-equals-namespace.sh reads the release's name from.
+  _tb_helm_lock
   spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
+    ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \
     --create-namespace \
@@ -4469,6 +4609,7 @@ EOF
     --values "$values_file" \
     "${_gpu_args[@]}" || _helm_rc=$?  # set-u-safe: both branches above assign at least six words
   if [[ "$_helm_rc" -ne 0 ]]; then
+    _tb_helm_lock_timed_out "$_helm_rc"
     # A helm op killed partway (timeout=124, or an in-progress wedge=exit 1) can
     # leave the release pending-*. The next run auto-recovers
     # (_recover_pending_helm_release), but name the manual unwedge too — on exit

@@ -2319,7 +2319,9 @@ $CorePassThroughVars += $CoreSettingVars
 #     distro removes (Get-K3dClusterName). The distro runs one cluster, tracebloc.
 #   - TRACEBLOC_SKIP_EXAMPLE: the host CLI that signed in sets up the example use
 #     case (Get-ExampleOptOut); the distro's runs never do.
-$CoreSettingsReadOnHost = @('TRACEBLOC_SUBSTRATE', 'TRACEBLOC_CLUSTER_NAME', 'TRACEBLOC_SKIP_EXAMPLE')
+#   - TRACEBLOC_EXAMPLE_TIMEOUT: that same host-side setup is the one it bounds
+#     (Invoke-HostExample, through Get-ReinstallTimeout).
+$CoreSettingsReadOnHost = @('TRACEBLOC_SUBSTRATE', 'TRACEBLOC_CLUSTER_NAME', 'TRACEBLOC_SKIP_EXAMPLE', 'TRACEBLOC_EXAMPLE_TIMEOUT')
 
 # The settings the distro path does not use, and why: one that is set is said
 # (Write-CoreSettingsNotUsed), never dropped without a word. Only the
@@ -2441,6 +2443,12 @@ $CoreHandoverPrevContextKey = 'TB_PREV_KUBE_CONTEXT'
 $CorePrevContextVar = 'TRACEBLOC_WSL_PREV_KUBE_CONTEXT'
 $CoreHandoverFactKeys = @('TRACEBLOC_MACHINE_KIND', 'TRACEBLOC_CLOUD_PROVIDER', 'TRACEBLOC_HOST_OS')
 $CredentialRejectedReason = 'credential-rejected'
+# The client run's handover: its file, in the same folder, and the one line the core
+# writes (lib/common.sh's tb_wsl_client_state_write). Invoke-HostExample runs only on
+# the connected state. Pester holds each to the core's.
+$CoreClientHandoverFile = 'client.env'
+$CoreClientStateKey = 'TRACEBLOC_CLIENT_STATE'
+$ClientConnectedState = 'connected'
 # The machine name and provider `client create` sets, by the names provision.sh puts
 # in its own create's environment (backend#5255). Pester holds them to provision.sh's.
 $MachineLabelKeys = @('TRACEBLOC_MACHINE_NAME', 'TRACEBLOC_CLIENT_PROVIDER')
@@ -2503,7 +2511,7 @@ function ConvertTo-DistroPath {
 # wsl.exe's words for one run of the core. Every path is the distro's own. The
 # host GPU check's verdict and its three platform values go on every run's line
 # (section 4), empty when this host judged no NVIDIA GPU. -Handover names the
-# cluster run's handover file. -CredentialStdin tells the core to read the
+# run's handover file. -CredentialStdin tells the core to read the
 # credential from its stdin first, and -CredentialReissued that the account steps
 # asked for a new one.
 function New-CoreRunArguments {
@@ -2993,6 +3001,16 @@ function Read-CoreHandover {
   return [pscustomobject]@{ Reason = $values[0]; PrevContext = $values[1]; Facts = $facts }
 }
 
+# The client state the client run handed over, or '' when its file is not there or
+# holds anything but its one line. Never throws: '' only means the example is skipped.
+function Read-CoreClientState {
+  param([string]$Path)
+  $lines = @()
+  if (Test-Path -LiteralPath $Path -PathType Leaf) { $lines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue) }
+  if ($lines.Count -ne 1 -or -not ([string]$lines[0]).StartsWith("$CoreClientStateKey=", [StringComparison]::Ordinal)) { return '' }
+  return ([string]$lines[0]).Substring($CoreClientStateKey.Length + 1)
+}
+
 # Set-ProcessEnv -- set the process variable $Name to $Value, or UNSET it when $Value
 # is $null. Never $null through [Environment]::SetEnvironmentVariable: on .NET 9 and
 # later (pwsh 7.5+) its string parameter takes $null as "", so the variable stays,
@@ -3257,7 +3275,11 @@ function Invoke-WslCore {
         $script:HostSignedInCli = $cli
       }
       Info "Installing tracebloc in the tracebloc WSL distro..."
-      return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin -CredentialReissued:$reissue -PrevKubeContext $handed.PrevContext) -Stdin $credential)
+      $clientHandover = (ConvertTo-DistroPath -Path $handDir) + '/' + $CoreClientHandoverFile
+      $rc = Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -Handover $clientHandover -CredentialStdin -CredentialReissued:$reissue -PrevKubeContext $handed.PrevContext) -Stdin $credential
+      # The client run exits 0 still starting too: see Invoke-HostExample.
+      $script:HostClientState = Read-CoreClientState -Path (Join-Path $handDir $CoreClientHandoverFile)
+      return $rc
     } finally {
       Remove-Item -LiteralPath $handDir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -3278,12 +3300,17 @@ function Get-ExampleOptOut {
 }
 
 # After a connected install, `tracebloc data ingest --example` on CLI, the host CLI this
-# run signed in ($null: none did, and nothing runs). Never throws. The bash twin is
+# run signed in ($null: none did, and nothing runs). ClientState is what the client run
+# handed over; anything but connected runs nothing. Never throws. The bash twin is
 # lib/install-cli.sh's setup_example_use_case, which the distro's runs skip.
 function Invoke-HostExample {
-  param([string]$Cli)
+  param([string]$Cli, [string]$ClientState)
   if (-not $Cli) {
     Log 'Example use case: not set up, as this run did not sign the tracebloc CLI in.'
+    return
+  }
+  if ($ClientState -cne $ClientConnectedState) {
+    Log "Example use case: not set up, as the client is not connected yet (state '$ClientState')."
     return
   }
   $why = Get-ExampleOptOut
@@ -3307,7 +3334,7 @@ function Invoke-HostExample {
     Info "Setting up your example use case..."
     # With nobody at this console no Ctrl-C can come, so a run that does not end is
     # stopped: lib/install-cli.sh's setup_example_use_case.
-    if (-not (Test-BootstrapCanPrompt)) { $deadline = Get-ReinstallTimeoutSeconds -Name 'TB_EXAMPLE_TIMEOUT' }
+    if (-not (Test-BootstrapCanPrompt)) { $deadline = Get-ReinstallTimeoutSeconds -Name 'TRACEBLOC_EXAMPLE_TIMEOUT' }
     $rc = Invoke-HostCliNoInput -Cli $Cli -ArgumentList @('data', 'ingest', '--example') -TimeoutSec $deadline
   } catch {
     $err = $_.Exception.Message
@@ -3318,7 +3345,7 @@ function Invoke-HostExample {
     return
   }
   if ($rc -eq 124 -and $deadline -gt 0) {
-    Warn "Stopped setting up the example use case after $(Get-ReinstallTimeout -Name 'TB_EXAMPLE_TIMEOUT') with no terminal attached - your secure environment is set up fine."
+    Warn "Stopped setting up the example use case after $(Get-ReinstallTimeout -Name 'TRACEBLOC_EXAMPLE_TIMEOUT') with no terminal attached - your secure environment is set up fine."
     return
   }
   Warn "Couldn't set up the example use case - your secure environment is set up fine."
@@ -3518,7 +3545,7 @@ $ReinstallTimeouts = [ordered]@{
   TB_DOCKER_PROBE_TIMEOUT = '10'
   TB_CLI_PROBE_TIMEOUT    = '30s'
   TB_OFFBOARD_TIMEOUT     = '15m'
-  TB_EXAMPLE_TIMEOUT      = '15m'
+  TRACEBLOC_EXAMPLE_TIMEOUT = '15m'
 }
 
 # The deadline NAME as this run reads it: its TRACEBLOC_ spelling, else the TB_ one,
@@ -3992,8 +4019,10 @@ function Invoke-WslInstall {
   # Register-KeepaliveTask sets this once the task is registered, before it starts
   # it and waits, so a refusal there still names the task it left.
   $script:KeepaliveRegistered = $false
-  # Invoke-WslCore sets this once its account steps signed the host CLI in.
+  # Invoke-WslCore sets these once its account steps signed the host CLI in, and
+  # once the client run handed over the client's state.
   $script:HostSignedInCli = $null
+  $script:HostClientState = $null
   try {
     # Its first start, and every sign-in's (section 3).
     Register-KeepaliveTask
@@ -4018,7 +4047,7 @@ function Invoke-WslInstall {
   }
   # The client run exits 0 connected or still starting. Last, after the record: a
   # Ctrl-C stops this script, as anywhere in it, and then costs only the example.
-  Invoke-HostExample -Cli $script:HostSignedInCli
+  Invoke-HostExample -Cli $script:HostSignedInCli -ClientState $script:HostClientState
   return 0
 }
 

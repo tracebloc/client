@@ -521,7 +521,7 @@ setup_example_use_case() {
   if _example_attended; then
     "$cli" data ingest --example </dev/null || rc=$?
   else
-    deadline="${TB_EXAMPLE_TIMEOUT:-15m}"
+    deadline="${TRACEBLOC_EXAMPLE_TIMEOUT:-15m}"
     _bounded "$deadline" "$cli" data ingest --example </dev/null || rc=$?
   fi
   if [[ -n "$int_trap" ]]; then eval "$int_trap"; else trap - INT; fi
