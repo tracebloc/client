@@ -362,7 +362,7 @@ spec:
           # ingestor subchart's post-install hook hits this through the
           # jobs-manager Service. Cluster-internal only.
           - name: http
-            containerPort: 8080
+            containerPort: {{ include "tracebloc.ingestionHttpPort" . }}
             protocol: TCP
           {{- if (default dict .Values.localApi).enabled }}
           # The local API the dashboard reaches on 127.0.0.1 (values.yaml
@@ -371,7 +371,7 @@ spec:
             containerPort: {{ .Values.localApi.port | default 8091 }}
             protocol: TCP
           {{- end }}
-        {{- if not (default dict .Values.env).INGESTION_HTTP_DISABLED }}
+        {{- if include "tracebloc.ingestionHttpEnabled" . }}
         # backend#1779. jobs-manager had no probes at all, so the kubelet
         # reported the container Ready the moment it was *running* — and
         # `kubectl rollout status` printed "successfully rolled out" while the
@@ -389,7 +389,7 @@ spec:
         #   authz_mount   the ingestion-authz ConfigMap this pod mounts below
         #                 is readable. If it is NOT mounted, load_authz_policy
         #                 falls back to a deny-all empty policy and every
-        #                 caller gets 403 — forever, from a pod that binds 8080
+        #                 caller gets 403 — forever, from a pod that binds its port
         #                 and answers a TCP connect perfectly.
         #   schema        the vendored ingest schema validator is loaded.
         #   metadata_db   MySQL answers `SELECT 1`. Every submission does a
@@ -402,15 +402,13 @@ spec:
         # is this chart's fail-safe render for an operator who has not
         # configured ingestion yet, so a fresh edge is legitimately Ready.
         #
-        # Gated on INGESTION_HTTP_DISABLED because the runtime gates the server
-        # on it, with the same truthiness: `not os.getenv(...)` treats ANY
-        # non-empty value as "disabled", and a non-empty string is likewise
-        # truthy to Helm. Without this gate, an operator setting that env var
-        # would get a pod that never becomes Ready.
+        # Port and gate come from the helpers the runtime's own readers mirror
+        # (tracebloc.ingestionHttpPort / ingestionHttpEnabled): a probe of a port
+        # or a server that is not there leaves the pod NotReady forever.
         readinessProbe:
           httpGet:
             path: /healthz
-            port: 8080
+            port: {{ include "tracebloc.ingestionHttpPort" . }}
           # The probe that fixes the false-green: the jobs-manager Service must
           # not route POST /internal/submit-ingestion-run at a pod whose server
           # is not listening ("connection refused to that pod's 8080, x16
@@ -434,33 +432,24 @@ spec:
           # Both outcomes mark the pod NotReady; only one of them says why.
           timeoutSeconds: 5
           failureThreshold: 3
-        # READINESS ONLY — no livenessProbe AND no startupProbe, deliberately.
-        # backend#1779 asks for this to be a recorded decision, so here it is.
-        #
-        # Both of those probe types KILL the container when they fail: liveness
-        # on every failure threshold, and a startupProbe likewise ("if the
-        # startup probe fails, the kubelet kills the container"). jobs_manager.py
-        # catches a failed run_server_in_thread on purpose: "Startup failure
-        # here is fatal for the ingestion flow but must not take down the rest
-        # of jobs-manager — SB polling can still operate independently and
-        # training submissions keep working."
-        #
-        # So either probe would reverse that decision from the chart, and turn a
-        # degraded-but-useful pod into a CrashLoopBackOff that also stops the
-        # Service Bus polling and the training it was still doing. Readiness
-        # removes the pod from the Service, which is the part that needs to
-        # happen. Restarting a process that is still training models is not.
-        #
-        # Moving to /healthz STRENGTHENS that argument rather than weakening
-        # it. _healthz_report's own docstring says so: its metadata_db check
-        # makes the answer depend on MySQL, "safe for READINESS and wrong for
-        # LIVENESS or a startupProbe" — a MySQL blip on a liveness probe would
-        # not just deroute this pod, it would restart it, and take Service Bus
-        # polling and training submission down with it.
-        #
-        # (An earlier revision of client#699 did add a startupProbe with a 150s
-        # budget, which had exactly that bug — it was caught in review. Do not
-        # reintroduce one without also changing jobs_manager.py's decision.)
+        # Liveness on /livez only: it does no MySQL or Kubernetes I/O and 503s once
+        # the main loop stops stamping (TRACEBLOC_LIVEZ_MAX_AGE_SECONDS, in the app).
+        # /healthz reads MySQL, so liveness there restarts the pod on a MySQL blip.
+        # No startupProbe either: it kills on failure too.
+        # TODO(tracebloc/backend#6765): default on once no edge can run an image
+        # without /livez (it 404s there and the probe would restart-loop it).
+        {{- if and (dig "livenessProbe" "enabled" false (default dict .Values.jobsManager)) (include "tracebloc.ingestionHttpEnabled" .) }}
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: {{ include "tracebloc.ingestionHttpPort" . }}
+          # Nothing listens until auth, the MySQL wait (DB_READY_DEADLINE_S, 300 s)
+          # and the migration finish; a shorter delay kills a healthy cold start.
+          initialDelaySeconds: 600
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        {{- end }}
         {{- end }}
         volumeMounts:
           - name: shared-volume

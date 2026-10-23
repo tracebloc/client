@@ -29,7 +29,8 @@
 #
 #  Its steps are the numbered sections below, and Invoke-WslInstall, at the end,
 #  runs them in order (client-dev#1810 part 1): WSL ready, the import and its disk,
-#  the logon task, the host's CA roots, the core, the record.
+#  the logon task, the host's CA roots, the core, the record, then the account's
+#  example use case (Invoke-HostExample).
 # =============================================================================
 #Requires -Version 5.1
 param([string]$CoreDir)
@@ -2316,7 +2317,9 @@ $CorePassThroughVars += $CoreSettingVars
 #   - TRACEBLOC_SUBSTRATE: k3s is what runs this distro path (install.ps1);
 #   - TRACEBLOC_CLUSTER_NAME: the Docker path's k3d cluster, which the move to the
 #     distro removes (Get-K3dClusterName). The distro runs one cluster, tracebloc.
-$CoreSettingsReadOnHost = @('TRACEBLOC_SUBSTRATE', 'TRACEBLOC_CLUSTER_NAME')
+#   - TRACEBLOC_SKIP_EXAMPLE: the host CLI that signed in sets up the example use
+#     case (Get-ExampleOptOut); the distro's runs never do.
+$CoreSettingsReadOnHost = @('TRACEBLOC_SUBSTRATE', 'TRACEBLOC_CLUSTER_NAME', 'TRACEBLOC_SKIP_EXAMPLE')
 
 # The settings the distro path does not use, and why: one that is set is said
 # (Write-CoreSettingsNotUsed), never dropped without a word. Only the
@@ -3037,6 +3040,36 @@ function Invoke-HostCliShown {
   }
 }
 
+# Runs the host CLI with ARGUMENTLIST, its output straight to this console and its
+# stdin closed, as lib/install-cli.sh's </dev/null closes it: a CLI that asks for
+# input sees the end of it and never waits on this console. Past TIMEOUTSEC (0: no
+# deadline) it is stopped with every process it started, and that is 124. Returns its
+# exit code; a CLI that cannot be started throws. The preamble: see Invoke-OffboardCli.
+function Invoke-HostCliNoInput {
+  param([string]$Cli, [string[]]$ArgumentList, [int]$TimeoutSec = 0)
+  $start = New-Object System.Diagnostics.ProcessStartInfo
+  $start.FileName = $Cli
+  $start.Arguments = (($ArgumentList | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
+  $start.UseShellExecute = $false
+  $start.RedirectStandardInput = $true
+  $inEnc = $null
+  $was = Get-ConsoleInputEncoding
+  if ($was.GetPreamble().Length -gt 0) {
+    try { Set-ConsoleInputEncoding -Encoding (New-Object System.Text.UTF8Encoding $false); $inEnc = $was } catch { $null = $_ }
+  }
+  try { $run = [System.Diagnostics.Process]::Start($start) } finally {
+    if ($null -ne $inEnc) { Set-ConsoleInputEncoding -Encoding $inEnc }
+  }
+  try { $run.StandardInput.Close() } catch { $null = $_ }
+  if ($TimeoutSec -gt 0 -and -not $run.WaitForExit($TimeoutSec * 1000)) {
+    Stop-ProcessTree -Process $run
+    return 124
+  }
+  # The untimed wait is what fills ExitCode in, after a timed one too.
+  $run.WaitForExit()
+  return $run.ExitCode
+}
+
 # The account steps on the host CLI, provision.sh's: sign in (the device flow), ask
 # `client create --plan` what it would do, then mint into a folder only this user
 # can read. Another account's client running here, or an answer that can't tell,
@@ -3220,6 +3253,8 @@ function Invoke-WslCore {
         $reissue = $handed.Reason -ceq $CredentialRejectedReason
         Info "Registering this machine with tracebloc..."
         $credential = Get-HostClientCredential -Cli $cli -Reissue:$reissue -Facts $handed.Facts
+        # Signed in to the account that owns this client: see Invoke-HostExample.
+        $script:HostSignedInCli = $cli
       }
       Info "Installing tracebloc in the tracebloc WSL distro..."
       return (Invoke-CoreRun -ArgumentList (New-CoreRunArguments -Phase $CorePhaseClient -Core $core -Kubeconfig $kubeconfig -LogDir $logDir -CredentialStdin -CredentialReissued:$reissue -PrevKubeContext $handed.PrevContext) -Stdin $credential)
@@ -3228,6 +3263,70 @@ function Invoke-WslCore {
     }
   } finally {
     if ($null -ne $credential) { [Array]::Clear($credential, 0, $credential.Length) }
+  }
+}
+
+# The variable that switches the account's example use case off, or $null:
+# TRACEBLOC_SKIP_EXAMPLE, then TRACEBLOC_NO_EXAMPLE, set to anything but '', '0' or
+# 'false' once trimmed, in any case. The CLI's rule, as lib/install-cli.sh's _example_opt_out.
+function Get-ExampleOptOut {
+  $vars = [ordered]@{ TRACEBLOC_SKIP_EXAMPLE = $env:TRACEBLOC_SKIP_EXAMPLE; TRACEBLOC_NO_EXAMPLE = $env:TRACEBLOC_NO_EXAMPLE }
+  foreach ($name in $vars.Keys) {
+    if ("$($vars[$name])".Trim().ToLowerInvariant() -notin @('', '0', 'false')) { return $name }
+  }
+  return $null
+}
+
+# After a connected install, `tracebloc data ingest --example` on CLI, the host CLI this
+# run signed in ($null: none did, and nothing runs). Never throws. The bash twin is
+# lib/install-cli.sh's setup_example_use_case, which the distro's runs skip.
+function Invoke-HostExample {
+  param([string]$Cli)
+  if (-not $Cli) {
+    Log 'Example use case: not set up, as this run did not sign the tracebloc CLI in.'
+    return
+  }
+  $why = Get-ExampleOptOut
+  if ($why) {
+    Info "Skipping the example use case: $why is set."
+    return
+  }
+  $rc = $null
+  $err = ''
+  $deadline = 0
+  try {
+    # A CLI without --example refuses the flag even beside --help, and help changes nothing.
+    $probe = Invoke-HostCliProbe -Cli $Cli -ArgumentList @('data', 'ingest', '--example', '--help')
+    if ($probe.ExitCode -ne 0) {
+      $late = ''
+      if ($probe.TimedOut) { $late = ", no answer within $($probe.TimeoutSec) s" }
+      Log "Example use case: not set up, as 'tracebloc data ingest --example --help' exited $(Format-ExitCode $probe.ExitCode)$late."
+      return
+    }
+    Write-Host ""
+    Info "Setting up your example use case..."
+    # With nobody at this console no Ctrl-C can come, so a run that does not end is
+    # stopped: lib/install-cli.sh's setup_example_use_case.
+    if (-not (Test-BootstrapCanPrompt)) { $deadline = Get-ReinstallTimeoutSeconds -Name 'TB_EXAMPLE_TIMEOUT' }
+    $rc = Invoke-HostCliNoInput -Cli $Cli -ArgumentList @('data', 'ingest', '--example') -TimeoutSec $deadline
+  } catch {
+    $err = $_.Exception.Message
+  }
+  if ($rc -eq 0) { return }
+  if ($rc -eq 130) {
+    Info 'Stopped setting up the example use case.'
+    return
+  }
+  if ($rc -eq 124 -and $deadline -gt 0) {
+    Warn "Stopped setting up the example use case after $(Get-ReinstallTimeout -Name 'TB_EXAMPLE_TIMEOUT') with no terminal attached - your secure environment is set up fine."
+    return
+  }
+  Warn "Couldn't set up the example use case - your secure environment is set up fine."
+  # This script keeps no log, so the reason is shown.
+  if ($err) {
+    Hint "The tracebloc CLI could not be run: $err"
+  } else {
+    Hint "tracebloc data ingest --example exited $(Format-ExitCode $rc)."
   }
 }
 
@@ -3419,6 +3518,7 @@ $ReinstallTimeouts = [ordered]@{
   TB_DOCKER_PROBE_TIMEOUT = '10'
   TB_CLI_PROBE_TIMEOUT    = '30s'
   TB_OFFBOARD_TIMEOUT     = '15m'
+  TB_EXAMPLE_TIMEOUT      = '15m'
 }
 
 # The deadline NAME as this run reads it: its TRACEBLOC_ spelling, else the TB_ one,
@@ -3892,6 +3992,8 @@ function Invoke-WslInstall {
   # Register-KeepaliveTask sets this once the task is registered, before it starts
   # it and waits, so a refusal there still names the task it left.
   $script:KeepaliveRegistered = $false
+  # Invoke-WslCore sets this once its account steps signed the host CLI in.
+  $script:HostSignedInCli = $null
   try {
     # Its first start, and every sign-in's (section 3).
     Register-KeepaliveTask
@@ -3914,6 +4016,9 @@ function Invoke-WslInstall {
     # The core has said why. 1, never its own code: 2 is the restart code.
     return 1
   }
+  # The client run exits 0 connected or still starting. Last, after the record: a
+  # Ctrl-C stops this script, as anywhere in it, and then costs only the example.
+  Invoke-HostExample -Cli $script:HostSignedInCli
   return 0
 }
 

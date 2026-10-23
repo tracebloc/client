@@ -421,6 +421,8 @@ provision_client() {
   echo -e "  (on this or any device) and enter the code:"
   echo ""
   _device_sign_in
+  # shellcheck disable=SC2034  # consumed cross-file by install-cli.sh (setup_example_use_case)
+  TB_CLI_SIGNED_IN=1
 
   # Namespace of a client installed here that the signed-in account owns, when
   # the pre-flight below finds one: this run reconnects it rather than naming a

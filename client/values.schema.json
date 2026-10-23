@@ -807,6 +807,33 @@
       "default": 1,
       "description": "jobs-manager's replica count: 1 (the default) or 0. Set 0 as a user-supplied value to hold jobs-manager down across upgrades."
     },
+    "jobsManager": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "description": "jobs-manager container settings.",
+      "properties": {
+        "livenessProbe": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": false,
+              "description": "Render a livenessProbe on GET /livez. Off by default: an older jobs-manager image answers 404 there and would restart-loop. Never renders when env.INGESTION_HTTP_DISABLED or env.TRACEBLOC_INGESTION_HTTP_DISABLED is set."
+            }
+          }
+        }
+      }
+    },
     "perIngestionTables": {
       "type": "boolean",
       "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."

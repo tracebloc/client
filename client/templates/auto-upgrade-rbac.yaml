@@ -30,7 +30,8 @@ metadata:
 
     * a ClusterRole enumerating ONLY the cluster-scoped kinds this chart
       actually templates (Namespace, PersistentVolume, StorageClass,
-      PriorityClass, ClusterRole, ClusterRoleBinding, and the OpenShift
+      PriorityClass, ClusterRole, ClusterRoleBinding, the runner grant's
+      ValidatingAdmissionPolicy and binding, and the OpenShift
       SecurityContextConstraints). `escalate`/`bind` on the RBAC kinds are
       required: without them Kubernetes' privilege-escalation prevention would
       refuse to let this SA re-apply the chart's OTHER ClusterRoles/bindings
@@ -132,6 +133,16 @@ rules:
     resources: ["clusterroles", "clusterrolebindings"]
     verbs:
       ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+  # The runner grant's admission policy and binding (rbac.yaml). Unconditional,
+  # so the upgrade that turns the grant off can still delete them; every verb
+  # but `create`, which RBAC cannot pin, is pinned to their one name.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["create"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    resourceNames: [{{ include "tracebloc.rbacRunnerGrantName" . | quote }}]
+    verbs: ["get", "update", "patch", "delete"]
   # resource-monitor-daemonset.yaml pre-flights metrics-server during
   # `helm upgrade`, and after the cluster-admin cutover this scoped SA is what
   # runs it. BOTH reads below are load-bearing; missing either aborts every

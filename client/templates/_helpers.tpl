@@ -326,6 +326,24 @@ client-pvc
 {{- if kindIs "invalid" $r -}}1{{- else -}}{{- int $r -}}{{- end -}}
 {{- end }}
 
+{{/*
+  The port jobs-manager's ingestion server binds, resolved as the runtime's
+  _ingestion_http_port does: TRACEBLOC_ name first, then the legacy one, then 8080.
+*/}}
+{{- define "tracebloc.ingestionHttpPort" -}}
+{{- $env := default dict .Values.env -}}
+{{- $env.TRACEBLOC_INGESTION_HTTP_PORT | default $env.INGESTION_HTTP_PORT | default 8080 | int -}}
+{{- end -}}
+
+{{/*
+  "true" or "" for whether that server runs: any non-empty value of either
+  disable spelling turns it off, as in the runtime's _ingestion_http_enabled.
+*/}}
+{{- define "tracebloc.ingestionHttpEnabled" -}}
+{{- $env := default dict .Values.env -}}
+{{- if not (or $env.TRACEBLOC_INGESTION_HTTP_DISABLED $env.INGESTION_HTTP_DISABLED) -}}true{{- end -}}
+{{- end }}
+
 {{- define "tracebloc.clientDataStorage" -}}
 {{ .Values.pvc.data | default "50Gi" }}
 {{- end }}

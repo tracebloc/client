@@ -440,11 +440,16 @@ print_summary() {
       echo -e "  ${TB_HEADING}Your secure environment is live${RESET} 🟢"
       echo -e "    See it on your dashboard:  ${TB_LINK}$(_dashboard_url)${RESET}"
       echo ""
-      # "What's next" is a heading (cyan) — the primary call to action, not dim.
-      echo -e "  ${TB_HEADING}What's next${RESET}"
-      echo -e "    1. Ingest your data       ${TB_CMD}tracebloc data ingest${RESET}"
-      echo -e "    2. Create a use case      ${TB_LINK}$(_dashboard_url 'my-use-cases-v2?create=1')${RESET}"
-      echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
+      # The first-install steps are for a first install only (tb_upgrade_run).
+      if tb_upgrade_run; then
+        echo -e "  ${BOLD}Upgrade complete${RESET} — ${TB_DESC}your data and use cases are unchanged${RESET}"
+      else
+        # "What's next" is a heading (cyan) — the primary call to action, not dim.
+        echo -e "  ${TB_HEADING}What's next${RESET}"
+        echo -e "    1. Ingest your data       ${TB_CMD}tracebloc data ingest${RESET}"
+        echo -e "    2. Create a use case      ${TB_LINK}$(_dashboard_url 'my-use-cases-v2?create=1')${RESET}"
+        echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
+      fi
       echo ""
       if _cli_runnable_now; then
         echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"

@@ -294,18 +294,21 @@ roleRef:
 {{- if include "tracebloc.runnerDbCredsGrant" . }}
 ---
 {{/*
-  RFC-0185 §8 Q5, option 1 (client-runtime#1042). For each Mac GPU job,
-  jobs-manager creates a Role that may `get` that job's db-creds Secret by name,
-  and a RoleBinding of it to the runner's ServiceAccount (tracebloc-runner). It
-  creates both before the Job, patches ownerReferences onto them so they go with
-  the Job, and deletes them if the Job create fails.
+  RFC-0185 §8 Q5, option 1. For each Mac GPU job, jobs-manager creates a Role
+  that may `get` that job's db-creds Secret by name, and a RoleBinding of it to
+  the runner's ServiceAccount (tracebloc-runner). It creates both before the
+  Job, patches ownerReferences onto them so they go with the Job, and deletes
+  them if the Job create fails.
 
   A namespaced Role in the release namespace, never the ClusterRole: the grant
   lives where the Jobs do, so jobs-manager cannot write RBAC anywhere else on a
   clusterScope edge. No `escalate` or `bind`: Kubernetes lets a subject create
   a Role, or bind one, only with permissions it already holds, and jobs-manager
-  already holds `get` on secrets (the configmaps/secrets rule above). So the
-  most this pair can hand out is what jobs-manager has in this namespace.
+  already holds `get` on secrets (the configmaps/secrets rule above).
+
+  RBAC cannot pin `create` to a name, and the names are drawn per spawn, so the
+  verbs reach every Role and RoleBinding here. The ValidatingAdmissionPolicy
+  below narrows jobs-manager's writes to the grant's one shape.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -334,4 +337,96 @@ roleRef:
   kind: Role
   name: {{ include "tracebloc.rbacRunnerGrantName" . }}
   apiGroup: rbac.authorization.k8s.io
+---
+{{/*
+  jobs-manager's Role and RoleBinding writes, held to the grant client-runtime
+  makes (apple_gpu.runner_db_creds_role / runner_db_creds_binding): named
+  <job>-runner-db-creds-<8 hex> and labelled, the Role a `get` on one db-creds
+  Secret, the binding that Role to the runner alone; an update (the Job's
+  ownerReference) changes neither. Anyone else's writes are not matched.
+*/}}
+{{- $grantName := include "tracebloc.rbacRunnerGrantName" . }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $grantName }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["roles", "rolebindings"]
+  matchConditions:
+    - name: jobs-manager
+      expression: >-
+        request.userInfo.username == {{ printf "system:serviceaccount:%s:%s" .Release.Namespace (include "tracebloc.serviceAccountName" .) | squote }}
+  variables:
+    # The object as the request leaves it, or the one it deletes.
+    - name: after
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    # The object as it was before the request; a create has only `object`.
+    - name: before
+      expression: "request.operation == 'CREATE' ? object : oldObject"
+    - name: grantName
+      expression: "'^[a-z0-9]([-a-z0-9.]*[a-z0-9])?-runner-db-creds-[0-9a-f]{8}$'"
+    - name: label
+      expression: "'tracebloc.io/runner-db-creds'"
+  validations:
+    - expression: >-
+        variables.after.metadata.name.matches(variables.grantName) &&
+        variables.before.metadata.name.matches(variables.grantName)
+      reason: Forbidden
+      message: "jobs-manager may write only a Role or RoleBinding named <job>-runner-db-creds-<8 hex>"
+    - expression: >-
+        [variables.after, variables.before].all(o,
+        has(o.metadata.labels) && variables.label in o.metadata.labels &&
+        o.metadata.labels[variables.label] == 'true')
+      reason: Forbidden
+      message: "jobs-manager may write only a Role or RoleBinding labelled tracebloc.io/runner-db-creds=true"
+    - expression: >-
+        request.operation == 'DELETE' || request.resource.resource != 'roles' ||
+        (has(object.rules) && size(object.rules) == 1 &&
+        has(object.rules[0].apiGroups) && object.rules[0].apiGroups == [''] &&
+        has(object.rules[0].resources) && object.rules[0].resources == ['secrets'] &&
+        object.rules[0].verbs == ['get'] &&
+        !has(object.rules[0].nonResourceURLs) &&
+        has(object.rules[0].resourceNames) && size(object.rules[0].resourceNames) == 1 &&
+        object.rules[0].resourceNames[0].matches('^tb-dbcreds-[-a-z0-9.]+-[0-9a-f]{12}$'))
+      reason: Forbidden
+      message: "jobs-manager's Role may hold one rule only: get on one db-creds Secret (tb-dbcreds-...), by name"
+    - expression: >-
+        request.operation == 'DELETE' || request.resource.resource != 'rolebindings' ||
+        (object.roleRef.apiGroup == 'rbac.authorization.k8s.io' &&
+        object.roleRef.kind == 'Role' && object.roleRef.name == object.metadata.name &&
+        has(object.subjects) && size(object.subjects) == 1 &&
+        object.subjects[0].kind == 'ServiceAccount' &&
+        object.subjects[0].name == {{ include "tracebloc.appleGpuRunnerAccount" . | squote }} &&
+        has(object.subjects[0].namespace) && object.subjects[0].namespace == request.namespace)
+      reason: Forbidden
+      message: "jobs-manager's RoleBinding may bind only the Role of its own name, to ServiceAccount {{ include "tracebloc.appleGpuRunnerAccount" . }} in this namespace"
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (request.resource.resource == 'roles' ?
+        object.rules == oldObject.rules :
+        object.roleRef == oldObject.roleRef && object.subjects == oldObject.subjects)
+      reason: Forbidden
+      message: "jobs-manager may not change a grant's rules, subjects or roleRef"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $grantName }}
+  labels:
+    {{- include "tracebloc.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $grantName }}
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace }}
 {{- end }}

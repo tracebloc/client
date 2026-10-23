@@ -13,6 +13,9 @@
 #  Keeping that logic in the cli repo means this stays correct as the CLI's
 #  platform matrix / signing evolves.
 #
+#  After a connected install, setup_example_use_case has that CLI set up the
+#  account's example use case (`tracebloc data ingest --example`), also non-fatal.
+#
 #  NON-FATAL by design: this runs AFTER the client is already connected, so a
 #  CLI-install hiccup must warn and move on — it must never turn a successful
 #  "Connected to tracebloc" into a failed install. Every path returns 0, and
@@ -30,6 +33,11 @@ TRACEBLOC_CLI_FALLBACK_BIN="${HOME}/.local/bin"
 # until install_tracebloc_cli records one. Set here, not inherited: a path from the
 # environment must not stand in for a binary this run did not install.
 TRACEBLOC_CLI_BIN=""
+
+# 1 once this run's device sign-in signed the CLI in (provision_client), so the CLI's
+# account is the one that owns the client this run connects. Set here, not inherited:
+# only this run's sign-in vouches for that (setup_example_use_case reads it).
+TB_CLI_SIGNED_IN=""
 
 # _cli_at_system_dir PATH → true if the CLI lives in a SYSTEM location that's
 # unconditionally on the user's shell PATH (so the summary CTA may say "run it
@@ -158,9 +166,10 @@ _cli_version_short() {
 # next" (`tracebloc data ingest ./data`). A full install prints that summary; the
 # CLI-only `tracebloc upgrade` path (upgrade_cli_only, TRACEBLOC_CLI_UPGRADE_ONLY=1)
 # exits without one, so there the line would name a step that never comes
-# (client-dev#1642). upgrade_cli_only closes with its own upgrade line instead.
+# (client-dev#1642). upgrade_cli_only closes with its own upgrade line instead; an
+# upgrade that runs the full flow (native k3s) ends on the summary's. See tb_upgrade_run.
 _cli_first_install_next_step() {
-  [[ "${TRACEBLOC_CLI_UPGRADE_ONLY:-0}" == "1" ]] && return 0
+  tb_upgrade_run && return 0
   info "Then the 'tracebloc data ingest ./data' step below will work."
 }
 
@@ -436,4 +445,97 @@ upgrade_cli_only() {
   fi
   _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
   exit 0
+}
+
+# ── The account's example use case ──────────────────────────────────────────
+
+# _example_switch_on VALUE -- true unless VALUE, trimmed, is "", "0" or "false" in any
+# case: the CLI's own rule for its opt-out variables, so either side skips alike.
+_example_switch_on() {
+  local v="${1:-}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    '' | 0 | [Ff][Aa][Ll][Ss][Ee]) return 1 ;;
+  esac
+  return 0
+}
+
+# _example_opt_out -- the variable that switches the example use case off, or nothing.
+# TRACEBLOC_SKIP_EXAMPLE is its name; TRACEBLOC_NO_EXAMPLE skips it too, as in the CLI.
+_example_opt_out() {
+  if _example_switch_on "${TRACEBLOC_SKIP_EXAMPLE:-}"; then
+    printf 'TRACEBLOC_SKIP_EXAMPLE'
+  elif _example_switch_on "${TRACEBLOC_NO_EXAMPLE:-}"; then
+    printf 'TRACEBLOC_NO_EXAMPLE'
+  fi
+  return 0
+}
+
+# _example_attended -- a controlling terminal, so a Ctrl-C can reach the example's run:
+# /dev/tty opens, the test _login_tty_ok makes. Split out so tests can force either branch.
+_example_attended() { { : </dev/tty; } 2>/dev/null; }
+
+# setup_example_use_case -- after a connected install, `tracebloc data ingest --example`
+# sets up the account's example use case. The CLI asks tracebloc first, so a re-run
+# sets nothing up twice. It never fails the install: every path returns 0.
+setup_example_use_case() {
+  local cli="" why="" probe=0 rc=0 int_trap="" deadline=""
+  [[ "${TRACEBLOC_CLIENT_STATE:-}" == connected ]] || return 0
+  [[ "${TRACEBLOC_CLI_UPGRADE_ONLY:-0}" != 1 ]] || return 0
+  # In tracebloc's WSL distro the CLI is the Windows host's, and install-wsl.ps1 runs it.
+  [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] || return 0
+  why="$(_example_opt_out)"
+  if [[ -n "$why" ]]; then
+    info "Skipping the example use case: ${why} is set."
+    return 0
+  fi
+  # Only a CLI this run signed in is signed in to the account that owns this client;
+  # credentials supplied up front sign nothing in.
+  if [[ "${TB_CLI_SIGNED_IN:-}" != 1 ]]; then
+    log "Example use case: not set up, as this run did not sign the tracebloc CLI in."
+    return 0
+  fi
+  if [[ -n "${TRACEBLOC_CLI_BIN:-}" && -x "$TRACEBLOC_CLI_BIN" ]]; then
+    cli="$TRACEBLOC_CLI_BIN"
+  elif has tracebloc; then
+    cli=tracebloc
+  else
+    log "Example use case: not set up, as no tracebloc CLI runs here."
+    return 0
+  fi
+  # A CLI without --example refuses the flag even beside --help, and help changes nothing.
+  _bounded "${TB_CLI_PROBE_TIMEOUT:-30s}" "$cli" data ingest --example --help </dev/null >/dev/null 2>&1 || probe=$?
+  if [[ "$probe" -ne 0 ]]; then
+    log "Example use case: not set up, as '${cli} data ingest --example --help' exited ${probe} (124: no answer within ${TB_CLI_PROBE_TIMEOUT:-30s})."
+    return 0
+  fi
+  echo ""
+  info "Setting up your example use case…"
+  # Attended, in the foreground and unbounded: _bounded moves it out of the terminal's
+  # process group, where a Ctrl-C never reaches it. The CLI exits 130 on one; the
+  # installer's INT trap is a no-op meanwhile, since the install is connected and stays
+  # done. Unattended, no Ctrl-C can come, so a run that does not end is stopped.
+  int_trap="$(trap -p INT)"
+  trap ':' INT
+  if _example_attended; then
+    "$cli" data ingest --example </dev/null || rc=$?
+  else
+    deadline="${TB_EXAMPLE_TIMEOUT:-15m}"
+    _bounded "$deadline" "$cli" data ingest --example </dev/null || rc=$?
+  fi
+  if [[ -n "$int_trap" ]]; then eval "$int_trap"; else trap - INT; fi
+  case "$rc" in
+    0) ;;
+    130) info "Stopped setting up the example use case." ;;
+    *)
+      if [[ "$rc" -eq 124 && -n "$deadline" ]]; then
+        warn "Stopped setting up the example use case after ${deadline} with no terminal attached — your secure environment is set up fine."
+        return 0
+      fi
+      warn "Couldn't set up the example use case — your secure environment is set up fine."
+      log "tracebloc data ingest --example exited ${rc}."
+      ;;
+  esac
+  return 0
 }

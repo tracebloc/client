@@ -17,6 +17,7 @@ spec:
   ports:
     - name: http
       port: 8080
-      targetPort: 8080
+      # The container port by name, so it follows the port the server binds.
+      targetPort: http
       protocol: TCP
   type: ClusterIP

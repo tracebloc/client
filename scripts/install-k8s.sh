@@ -70,6 +70,9 @@
 #                                --data-dir=PATH) sidesteps the prompt.
 #    TRACEBLOC_SKIP_LEFTOVER_GUARD=1  bypass the leftover-data guard entirely
 #    TRACEBLOC_SKIP_REBOOT_PROMPT=1 (Linux) skip "Reboot now?" after NVIDIA driver install
+#    TRACEBLOC_SKIP_EXAMPLE=1    don't set up your account's example use case after a
+#                                connected install (the CLI you signed in with sets it
+#                                up once per account)
 #    TRACEBLOC_TRAINING_RESOURCES="cpu=4,memory=16Gi"  CPU/RAM each training run
 #                                may use (sized to the machine, else the contract
 #                                floor cpu=1,memory=2Gi; sets requests==limits)
@@ -493,6 +496,11 @@ main() {
   #     Wait for the client's workloads to actually come up, then the rich summary.
   step_header f "Connecting to the tracebloc network"
   wait_for_client_ready
+  # The account's example use case, by the CLI this run signed in (install-cli.sh).
+  # Guarded so a stale bootstrap without it proceeds as before.
+  if declare -F setup_example_use_case >/dev/null 2>&1; then
+    setup_example_use_case
+  fi
   # The GPU training base image, after readiness so its pull never shares the link
   # with the control plane's (slim client B.13). It does not wait for the pull.
   _prepull_training_parent

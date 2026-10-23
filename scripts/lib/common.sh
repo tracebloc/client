@@ -47,7 +47,7 @@ tb_tuning_aliases=(
   TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT TB_CLUSTER_START_TIMEOUT_MIN
   TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
   TB_DESKTOP_RESTART_WAIT TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
-  TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
+  TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT TB_EXAMPLE_TIMEOUT
   TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN
   TB_GPU_VERIFY_TIMEOUT
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
@@ -2623,6 +2623,13 @@ tb_mac_floor_reason() {
   esac
 }
 
+# tb_upgrade_run -- this run is a `tracebloc upgrade`, on any path: the CLI's flag
+# (TB_ spelling first, as install.sh and assess.sh read it) or upgrade_cli_only's.
+# The one rule for leaving out the first-install pointer at `tracebloc data ingest`.
+tb_upgrade_run() {
+  [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 || "${TRACEBLOC_CLI_UPGRADE_ONLY:-0}" == 1 ]]
+}
+
 # refuse_unsupported_mac -- a Mac below the floor, stopped by name, on every path.
 # main() calls it right after the substrate refusals, so the substrate line has
 # printed, and before setup_log_file, so nothing is written yet: no CLI install, no
@@ -3328,6 +3335,11 @@ the TRACEBLOC_ prefix -- TB_STORAGE_MODE for TRACEBLOC_STORAGE_MODE -- still wor
   TRACEBLOC_HOST_DATA_DIR  Persistent data directory  (default: ~/.tracebloc; legacy: HOST_DATA_DIR)
                  Must be on a LOCAL disk — NFS/CIFS/SMB is rejected (the database
                  corrupts on network storage). TRACEBLOC_ALLOW_NETWORK_FS=1 overrides.
+
+Example use case:
+  After a connected install, the tracebloc CLI you signed in with sets up your
+  account's example use case, once per account. Set TRACEBLOC_SKIP_EXAMPLE=1 to
+  skip it.
 
 Usage reporting:
   This installer records ONE outcome event per run so we can see failures without
