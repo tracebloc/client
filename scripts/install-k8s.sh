@@ -224,7 +224,8 @@ main() {
   refuse_unsupported_substrate
   refuse_unresolved_substrate
   # tracebloc's WSL distro runs only as the Windows installer runs it: native k3s,
-  # and one of its two runs (common.sh, client-dev#1810 section 5).
+  # and one of its two runs (common.sh, client-dev#1810 section 5). Any other WSL
+  # distro is refused, whatever the substrate (client-dev#1949).
   refuse_wsl_run
   # Native k3s is never set up beside a live k3d (D10): read-only detection, then a
   # refusal, before anything below installs, writes or starts. A bootstrap too old

@@ -46,7 +46,7 @@ _PF_MIN_MEM_GB_RESOLVED="$PF_MIN_MEM_GB"
 # rung + kubelet reservation + k3s addons + control plane + CronJob transient, in
 # bytes (backend#2460, RFC-BACKEND-664 §L0.1/§P4). Kept honest by
 # `gen-vm-budget-embed.sh --check` in `make drift`.
-_TB_VM_MIN_MEM_BYTES=10884218880
+_TB_VM_MIN_MEM_BYTES=9911140352
 # The Linux HARD floor: Linux kubelet carve-out + the platform's own pods (contract
 # `overhead`) + the least a training run is worth scheduling (contract `floor`)
 # (backend#5601). Below it no run can ever schedule on this host.
@@ -54,7 +54,7 @@ _TB_LINUX_MIN_MEM_BYTES=7482638336
 # The same floor over the macOS and the Windows carve-out, graded on the VM beneath
 # the node (client-dev#2105). Below it no run can ever schedule in that VM.
 _TB_DARWIN_MIN_MEM_BYTES=7348420608
-_TB_WINDOWS_MIN_MEM_BYTES=8455716864
+_TB_WINDOWS_MIN_MEM_BYTES=7046430720
 # ── end generated VM budget ───────────────────────────────────────────────────
 # The warn tier is DERIVED from that constant: below it the smallest training
 # run (XS, 4 GiB) cannot schedule beside the platform, so "comfortable to run" is

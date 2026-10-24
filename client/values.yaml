@@ -1448,56 +1448,56 @@ images:
   training:
     pinned: ""
     digestRegistry: "ghcr.io"
-    engineCommit: "deb2a944aade382a9da335df4d165094bf2adb34"
+    engineCommit: "040072a5f76498e63ed2eb46075fb89b4b3f8c44"
     digests:
       causal_language_modeling:
-        cpu: "sha256:4b40d84d47c9de70baf327672187730e9b998522bf9f63ed5df32b7c8fc0abe2"
-        gpu: "sha256:0688d618f608d60938bb8b2c1f7e91cd6abbd007246708a12396fde392cc288b"
+        cpu: "sha256:bfbcf9e5e10c538b8fea632e7d991366066e0d05de68e41de6b1e75e6b1fec17"
+        gpu: "sha256:1dd3b0d300836b1b27004d16a55ff8f52a75219492e043ba892d9168806526a2"
       embeddings:
-        cpu: "sha256:981e8035652eccb3b7d9b055d2c09b31f27c27419a130efe191315bbb38b1e6e"
-        gpu: "sha256:ec875245e85a729295c98574af184c1314d6de7a90a58f72aff18c2b3b6bec11"
+        cpu: "sha256:a9bf2ef181c6bb7981aef0d378af76aa20de40d38bca0dad2d96c469e31e1b90"
+        gpu: "sha256:412c9f68d395a47de745551432dc7a21f13eabe728d54f831f483db69949811b"
       image_classification:
-        cpu: "sha256:a187479fe17a276b6c2dab30f9bf9072d1cc9651fbaa00c7dad919bff090927c"
-        gpu: "sha256:e08a4430e72a519058dcc24ef78842b9c0ac24d7f68c38d2a432738d013541b6"
+        cpu: "sha256:c16e6ac0a977c0a3ff62e149d359d8ebfd289b6cf2ed67b85eba3dae76a706d8"
+        gpu: "sha256:fda0dc421decd4a8151adf28f3707dc938554386428e3463ce26da98ad0205a5"
       keypoint_detection:
-        cpu: "sha256:63e814c36269f893a64b5785ee82e2e542619c7a8e7703e3c43e562a5499d366"
-        gpu: "sha256:997ebe798c5db578f34408db5cfb13fc5a108be713397086f6d6a8f1305d8e71"
+        cpu: "sha256:b2971d68b9562469549fe988bd35187767503f878e4f74bea4ebe86117fd9c77"
+        gpu: "sha256:a96fbd881dbd222689361b3454a911cc2eb19cdab89dba44aa1639012072e1f5"
       masked_language_modeling:
-        cpu: "sha256:e333210251f2654670d70606aae46ca6360bc7d780628d74144d9439125723d8"
-        gpu: "sha256:ba2948d3440f8d4f3c23104d28cef42d832abe43355c9d7e782097326eeb85ba"
+        cpu: "sha256:43a49d9301bef9fb873c20a36b76fbcfef3960e94d6b10445bb2ef9d9358ac12"
+        gpu: "sha256:5ab9aee3170e43df8cf7db5f8143dcf39cc8f0d8ef00818671468fe751bcaf86"
       object_detection:
-        cpu: "sha256:b7362ac8d6409e2b0068731995e27f6e7025e33bb38bee2ffd83a86fdbeb80d5"
-        gpu: "sha256:51a350577056f4d013051bdbbee0aca77109f3abcd84e72616fb9ee2ffecdfb6"
+        cpu: "sha256:912fd4574ec99b1a4642c66773f845020d77aaba2aa948f28b7216630d764415"
+        gpu: "sha256:fd42e7dd46240396a275e57f1e67e0cb0e1219b700f416f04fc8e9bf3fa69559"
       semantic_segmentation:
-        cpu: "sha256:04a60018add51871fb65bb713bb9875b03627ef7b564d660a6d07a9c432ec14b"
-        gpu: "sha256:0e3cfa355e69aff3330c8cede1ba90b9d64cf47acf4877b6fe7f03c4ba4dfa4c"
+        cpu: "sha256:3cb15fcbdf7c1cf1358918d583c020d7cc716d76cf6727de2cbdb0bc2356b471"
+        gpu: "sha256:112fd9450dc4d3562925a14ae013928ad37e64ea44d3921c2ade5fe147a2fd66"
       sentence_pair_classification:
-        cpu: "sha256:da0440983b961289227498306b37e41e4d48ab8958328ed28ae6e022b01532ab"
-        gpu: "sha256:951d92cf1e80ca9664f1aa8a91fa321290e5bc2c304d81830f96451ca5a21c61"
+        cpu: "sha256:b34b6d123078d59ee96f4101ea7ef383abc2baf70bf3694deeec781ea633b053"
+        gpu: "sha256:15cd419ebadc0abb7f725c9f33933b633f0c37cc5726fc786a5e7bf2aec59cea"
       seq2seq:
-        cpu: "sha256:a5f5d4aed6e3d74330efef2a96a7a8bc1064a7d9be2686b73e10645db68294b1"
-        gpu: "sha256:cfa437d83c7176143f0242a5438152705c66a8330f22895ae4984e07f9515afb"
+        cpu: "sha256:05b3344f8f6f2a41a627f991cb12e0621bb8ddf733c632266e8c5acee6b8cda7"
+        gpu: "sha256:a87c223c87dd9689a7895b6e776457b3a0db89e382f3394eb47745722e0d8d51"
       tabular_classification:
-        cpu: "sha256:a0101263d4bd3d59703150fe46b8db9cc66c1fdb222a1d939e87669b4c98e4da"
-        gpu: "sha256:5d6f084804ec613cf0e73bf1582f10715a5221823a1ae6033a2fd13ec96a8f38"
+        cpu: "sha256:8a84df475398fad69e4bc2747873f6b713f8d7b7b8dd3b6054c01804cff4ee5a"
+        gpu: "sha256:e39135aac276bb222c65b4e0fa41f6bcefb5ea2196a02fd1c6e076b9ba6c2841"
       tabular_regression:
-        cpu: "sha256:4728409e22a50dbfad1e5af5a26f278f32d50cb05d4f2a71fd388631b48de01e"
-        gpu: "sha256:7646be12d0d474ff434a9889c04416850004068b3b89541732eed449087b70f9"
+        cpu: "sha256:ddd30ba688194ad4798df80675209fd21a197a750372d754722c9bb1eeed5f35"
+        gpu: "sha256:5233af8dfe296e25e6fcf44a65f6547ef79ae11e32b69873dcb6b3f6446cf8a1"
       text_classification:
-        cpu: "sha256:8069a647519f201ff5030b9cac09b678870f1f4ac3a1f307541c4af07be6f2b4"
-        gpu: "sha256:14e67693f8d7b01d891594e474dfa66794b5557e6e6088db57a5114f436d0204"
+        cpu: "sha256:62c7bd1492849f790bef370f636b5769366b3cd2223134adc4484940e410dcf1"
+        gpu: "sha256:ba6548147cc03fe8db20226ddeb74219d8939e4207c05c837c7192516e3bdfa8"
       time_series_classification:
-        cpu: "sha256:dbb2000c9bbb6a6314567fb1ad7a14161e38ddd9918fad34f2cc9bdc4c898685"
-        gpu: "sha256:043caa32db0bf53c210207b45103ae20246dd42072c38596f31eb1289336fa96"
+        cpu: "sha256:d2bbddc2b4ddab8bfb90b7fbbe3121ed9cbcb611801905be5ae6f30ee4846249"
+        gpu: "sha256:04f1f1cdbd6c3f9b8079788a9f62e48271f8df36d36de584b0c0ef80c097db75"
       time_series_forecasting:
-        cpu: "sha256:0ae4f7f5f171542bb9749eb7439a57cc903ddeb0e4321ff5448a32faaf390cfe"
-        gpu: "sha256:a073991fb757e4852f1408064829c5bd9a7c177983dd5a669eec91dc39d01219"
+        cpu: "sha256:be92f04b77c759f7ac20c0d862b74906e6ff1de41e6551898bc17b40f4989b56"
+        gpu: "sha256:733f3a6302a0575139727828f74ef777f16aeeaf981c572542d699e903f1b375"
       time_to_event_prediction:
-        cpu: "sha256:3ab20a5ee10cb3521784fc8639da2183fda8d393be1af3e9c50c68415bab1a26"
-        gpu: "sha256:a0c4830350aead9c249da76a7e499eea8cecdce11b07b38318bdb0316b6efb13"
+        cpu: "sha256:f08ddba531b22dbeeeffb441f1d55c30952dd344527b3352e7f4044f97c30efc"
+        gpu: "sha256:422eacfdecc5289c62428b5840ac9a4d056886e2d8470f70802068350032d6e0"
       token_classification:
-        cpu: "sha256:8d62ef61261f7db92daf148291ee0a26dc56455c2dec8b312109e3562bbeec6a"
-        gpu: "sha256:ee4f1dc249dfce5aa7b79b0468c2a62934b5bad4a17e7aca6822fa1425538b81"
+        cpu: "sha256:eb9a1a7f0ddeff12716c31381b2ac219e1394576f0879760f01293f17d367e2c"
+        gpu: "sha256:cf85b5a978d5455d5f5737a3b6230767e64fa241c128b2cf59bfe32f57a97241"
     capabilities: "ddp,loss-coupled:embeddings,loss-coupled:time_to_event_prediction,min-micro-batch:2,per_rank_split"
     parents:
       gpu:
@@ -2394,6 +2394,25 @@ autoUpgrade:
   # genuine wedge still recovers on the very next tick. That tick only rolls back;
   # the upgrade runs on the tick after it. Duration string (Ns/Nm/Nh).
   pendingWedgeMinAge: "45m"
+  # An upgrade replaces the jobs-manager pod, and a replaced jobs-manager starts
+  # the next training cycle late: on a run across several edges that cycle can be
+  # averaged without this edge. So while the edge trains, a tick that would
+  # upgrade (or re-render) DEFERS: it logs `DEFERRED: ...`, exits 0, and the next
+  # scheduled tick asks again. Training means a pod labelled
+  # tracebloc.io/workload=training (every training, inference and scoring pod
+  # jobs-manager runs) that is not finished, or that finished less than
+  # `finishedWithin` ago: between two cycles of a run no pod runs. Finished pods
+  # are visible only until their Job's TTL removes them (5 minutes by default).
+  # The deferral count is the CronJob's tracebloc.io/upgrade-training-deferrals
+  # annotation. After `maxDeferrals` deferrals in a row the tick upgrades anyway
+  # (`BACKSTOP: ...`), so an edge that is always busy is at most that many ticks
+  # behind (24 = a day at the hourly schedule). A tick that cannot tell whether
+  # the edge trains, or cannot record a deferral, upgrades as it would without
+  # this gate, and says so.
+  deferWhileTraining:
+    enabled: true
+    maxDeferrals: 24
+    finishedWithin: "10m"
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   successfulJobsHistoryLimit: 3
@@ -2707,6 +2726,17 @@ imageRefresh:
   # 8 ticks is ~2h at the default 15m schedule — longer than any legitimate
   # rollout, including a resource-monitor DaemonSet roll across every node.
   maxSkipTicks: 8
+  # Re-imaging jobs-manager or requests-proxy replaces its pod, so it waits while
+  # the edge trains, exactly as autoUpgrade.deferWhileTraining describes: the tick
+  # logs `DEFERRED: ...` and exits 0 without re-imaging anything, and goes ahead
+  # anyway after `maxDeferrals` deferrals in a row (96 = a day at the 15-minute
+  # schedule). The count is the jobs-manager Deployment's
+  # tracebloc.io/refresh-training-deferrals annotation. On, it adds `list` on pods
+  # in the release namespace to this CronJob's Role.
+  deferWhileTraining:
+    enabled: true
+    maxDeferrals: 96
+    finishedWithin: "10m"
   # CronJob spec knobs. Override per-cluster if needed.
   suspend: false
   # Lower history limits than autoUpgrade — this Job runs ~96x/day, the

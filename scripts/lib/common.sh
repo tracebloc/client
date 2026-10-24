@@ -2490,13 +2490,24 @@ TB_WSL_PHASES="cluster client"
 # refuse_wsl_run -- the run in tracebloc's WSL distro is the Windows installer's,
 # and only its. Refused by name, after the substrate line (main()): in the distro, a
 # substrate other than k3s, a phase outside TB_WSL_PHASES, and a client run with no
-# credential on stdin (step d would sign in, with no CLI here); anywhere else, a
+# credential on stdin (step d would sign in, with no CLI here); in any other WSL
+# distro, the run itself, whatever its substrate (RFC-0175 D10: a user's own
+# distro is no longer served, and native k3s serves tracebloc's distro only),
+# told apart by probe.sh's _probe_wsl_kernel and _probe_wsl_ours (a WSL kernel,
+# never WSL's environment names alone, which any Linux host can export), so a
+# process without probe.sh (a stale bootstrap) refuses nothing here; anywhere else, a
 # phase; a stdin credential outside the distro's `client` phase; and what
 # provision_read_stdin_credential found wrong with the credential it read
 # (TB_STDIN_CRED_REFUSAL). Read-only.
 refuse_wsl_run() {
-  local ours=0 p ok=0 have="none" why=""
-  if tb_in_wsl_distro; then ours=1; fi
+  local ours=0 wsl=0 p ok=0 have="none" why=""
+  if tb_in_wsl_distro; then
+    ours=1
+  elif [[ "${OS:-}" == "Linux" ]] && declare -F _probe_wsl_ours >/dev/null 2>&1 && _probe_wsl_kernel; then
+    # probe.sh is loaded and can tell tracebloc's distro from another (its
+    # _probe_wsl_ours), and this is a WSL kernel, but not that distro.
+    wsl=1
+  fi
   if [[ "$ours" -eq 1 ]]; then
     for p in $TB_WSL_PHASES; do
       if [[ "${TRACEBLOC_WSL_PHASE:-}" == "$p" ]]; then ok=1; fi
@@ -2509,6 +2520,12 @@ refuse_wsl_run() {
     elif [[ "${TRACEBLOC_WSL_PHASE}" == "client" && "${TRACEBLOC_CREDENTIAL_STDIN:-}" != 1 ]]; then
       why="In tracebloc's WSL distro the client run takes the credential the Windows installer hands over on stdin (TRACEBLOC_CREDENTIAL_STDIN=1), and this run was handed none. Install from Windows with install.ps1, which hands it over."
     fi
+  elif [[ "$wsl" -eq 1 ]]; then
+    why="Inside WSL the installer runs only in tracebloc's own distro, '${TB_WSL_DISTRO:-}', which install.ps1 sets up"
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+      why+=", and this is the distro '${WSL_DISTRO_NAME}'"
+    fi
+    why+=". Install from Windows with install.ps1."
   elif [[ -n "${TRACEBLOC_WSL_PHASE:-}" ]]; then
     why="TRACEBLOC_WSL_PHASE='${TRACEBLOC_WSL_PHASE}' belongs to the Windows installer's runs in tracebloc's WSL distro, and this is not that distro. Unset it, then re-run."
   fi

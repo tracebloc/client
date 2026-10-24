@@ -54,6 +54,10 @@ data:
     if [ -n "${TRACEBLOC_TELEMETRY_STATUS_NAME:-}" ]; then TELEMETRY_STATUS_NAME="$TRACEBLOC_TELEMETRY_STATUS_NAME"; fi
     if [ -n "${TRACEBLOC_TELEMETRY_STATUS_ANNOTATION:-}" ]; then TELEMETRY_STATUS_ANNOTATION="$TRACEBLOC_TELEMETRY_STATUS_ANNOTATION"; fi
     if [ -n "${TRACEBLOC_TELEMETRY_COLLECTOR_NAME:-}" ]; then TELEMETRY_COLLECTOR_NAME="$TRACEBLOC_TELEMETRY_COLLECTOR_NAME"; fi
+    if [ -n "${TRACEBLOC_AUTO_UPGRADE_NAME:-}" ]; then AUTO_UPGRADE_NAME="$TRACEBLOC_AUTO_UPGRADE_NAME"; fi
+    if [ -n "${TRACEBLOC_TRAINING_DEFER_ENABLED:-}" ]; then TRAINING_DEFER_ENABLED="$TRACEBLOC_TRAINING_DEFER_ENABLED"; fi
+    if [ -n "${TRACEBLOC_TRAINING_DEFER_MAX:-}" ]; then TRAINING_DEFER_MAX="$TRACEBLOC_TRAINING_DEFER_MAX"; fi
+    if [ -n "${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS:-}" ]; then TRAINING_FINISHED_WINDOW_SECONDS="$TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS"; fi
 
     # The wait mode, read once for both `helm upgrade --atomic` calls below.
     # Helm 4 `--rollback-on-failure` (alias `--atomic`) switches the default wait
@@ -81,7 +85,8 @@ data:
     # --- failed --atomic upgrade classification: begin (backend#2961) ----------
     # EXIT CODES of this script, the whole interface a Job's status carries:
     #   0  nothing to do, upgraded, or a skip the log names (pending-* in flight,
-    #      mid-uninstall, ahead of the index, "cannot tell" on the reconcile), or
+    #      mid-uninstall, ahead of the index, "cannot tell" on the reconcile, an
+    #      upgrade DEFERRED while the edge trains), or
     #      an abandoned wedge rolled back, with the upgrade deferred to the next
     #      tick (backend#5273: recovery and upgrade never share a tick)
     #   1  any other failure: the repo fetch, version resolution, a `helm upgrade`
@@ -420,6 +425,8 @@ data:
     # logged because "cannot tell" must never be silent; 1 stays quiet, as today.
     telemetry_reconcile_if_needed() {
       if _why="$(telemetry_reconcile_verdict)"; then
+        # The re-render is a `helm upgrade` too: it waits for training like one.
+        training_gate "the in-place re-render of $CURRENT" autoUpgrade.deferWhileTraining || return 0
         log "reconcile: $_why; re-rendering $CURRENT in place (same-version upgrade, values reused)"
         atomic_upgrade "$CURRENT" "$CURRENT" helm upgrade "$RELEASE_NAME" "${REPO_NAME}/${CHART_NAME}" \
           --namespace "$RELEASE_NAMESPACE" \
@@ -438,6 +445,58 @@ data:
       fi
     }
     # --- telemetry Collector same-version reconcile: end ------------------------
+
+    # The Kubernetes API for the training gate below. The image has no kubectl, so
+    # this is curl (in every alpine/helm tag the chart has pinned) with the mounted
+    # ServiceAccount. The token reaches curl on stdin (-K -), never its argv.
+    # TRACEBLOC_SA_DIR is set only by a test that runs this script outside a pod.
+    TRACEBLOC_SA_DIR="${TRACEBLOC_SA_DIR:-/var/run/secrets/kubernetes.io/serviceaccount}"
+    kube_api() {  # METHOD PATH [MERGE_PATCH_BODY]
+      command -v curl >/dev/null 2>&1 || { echo "this image has no curl" >&2; return 1; }
+      [ -n "${KUBERNETES_SERVICE_HOST:-}" ] || { echo "KUBERNETES_SERVICE_HOST is unset" >&2; return 1; }
+      _ka_tok="$(cat "$TRACEBLOC_SA_DIR/token" 2>/dev/null)" && [ -n "$_ka_tok" ] \
+        || { echo "cannot read the ServiceAccount token at $TRACEBLOC_SA_DIR/token" >&2; return 1; }
+      _ka_host="$KUBERNETES_SERVICE_HOST"
+      case "$_ka_host" in *:*) _ka_host="[$_ka_host]" ;; esac
+      _ka_url="https://${_ka_host}:${KUBERNETES_SERVICE_PORT:-443}$2"
+      if [ -n "${3:-}" ]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$_ka_tok" | curl -sS -f -K - --max-time 15 \
+          --noproxy "$KUBERNETES_SERVICE_HOST" --cacert "$TRACEBLOC_SA_DIR/ca.crt" -X "$1" \
+          -H "Content-Type: application/merge-patch+json" --data "$3" "$_ka_url"
+      else
+        printf 'header = "Authorization: Bearer %s"\n' "$_ka_tok" | curl -sS -f -K - --max-time 15 \
+          --noproxy "$KUBERNETES_SERVICE_HOST" --cacert "$TRACEBLOC_SA_DIR/ca.crt" -X "$1" "$_ka_url"
+      fi
+    }
+    kube_raw_get() { kube_api GET "$1"; }
+
+    # The deferral count lives on this CronJob, so it survives from tick to tick
+    # and goes with the release.
+    UPGRADE_DEFER_KEY="tracebloc.io/upgrade-training-deferrals"
+    upgrade_cronjob_path() {
+      [ -n "${AUTO_UPGRADE_NAME:-}" ] || { echo "AUTO_UPGRADE_NAME is unset" >&2; return 1; }
+      printf '/apis/batch/v1/namespaces/%s/cronjobs/%s' "$RELEASE_NAMESPACE" "$AUTO_UPGRADE_NAME"
+    }
+    gate_streak_read() {
+      _gs_path="$(upgrade_cronjob_path)" || return 1
+      _gs_body="$(kube_api GET "$_gs_path")" && [ -n "$_gs_body" ] || return 1
+      printf '%s' "$_gs_body" | tr -d '\n' | awk -v key="\"$UPGRADE_DEFER_KEY\":" '
+        $0 !~ /"kind":[ ]*"CronJob"/ { exit 1 }
+        {
+          i = index($0, key); if (i == 0) exit
+          s = substr($0, i + length(key))
+          if (match(s, /^[ ]*"[^"]*"/)) { v = substr(s, RSTART, RLENGTH); gsub(/[ "]/, "", v); print v }
+        }'
+    }
+    gate_streak_write() {
+      _gs_path="$(upgrade_cronjob_path)" || return 1
+      kube_api PATCH "$_gs_path" "{\"metadata\":{\"annotations\":{\"$UPGRADE_DEFER_KEY\":\"$1\"}}}" >/dev/null
+    }
+    gate_streak_clear() {
+      _gs_path="$(upgrade_cronjob_path)" || return 1
+      kube_api PATCH "$_gs_path" "{\"metadata\":{\"annotations\":{\"$UPGRADE_DEFER_KEY\":null}}}" >/dev/null
+    }
+    {{- include "tracebloc.trainingGateSh" . | nindent 4 }}
 
     log "release=$RELEASE_NAME namespace=$RELEASE_NAMESPACE repo=$REPO_URL"
 
@@ -659,6 +718,10 @@ data:
       exit 0
     fi
 
+    # An upgrade replaces the jobs-manager pod, so it waits while the edge trains
+    # (tracebloc.trainingGateSh); a deferred upgrade ends the tick with exit 0.
+    training_gate "the upgrade $CURRENT -> $LATEST" autoUpgrade.deferWhileTraining || exit 0
+
     log "upgrading $CURRENT -> $LATEST"
     # --reset-then-reuse-values (helm 3.14+ and 4) is critical here: --reuse-values
     # alone re-uses the LAST RELEASE'S COMPUTED VALUES, so any new keys added
@@ -743,8 +806,9 @@ spec:
       # again on the rollback, which uses the same wait (client-dev#1519,
       # measured: a 10m timeout under the old 900s cap was killed mid-rollback).
       # So take the MAX of the configured floor (default 900s) and 2 x the parsed
-      # timeout plus 300s headroom for the repo fetch, the 60s server dry-run and
-      # the `helm status` reads that classify a failed upgrade (backend#2961).
+      # timeout plus 300s headroom for the repo fetch, the 60s server dry-run, the
+      # training gate's API calls (15s each, at most four) and the `helm status`
+      # reads that classify a failed upgrade (backend#2961).
       # Only one `--atomic` runs per tick (the same-version reconcile runs only
       # when there is no newer chart), so 2 x timeout covers both sites. The
       # wedge recovery's rollback also waits up to `timeout`, but a tick that
@@ -848,6 +912,10 @@ spec:
                   value: {{ include "tracebloc.telemetryStateAnnotation" . | quote }}
                 - name: TRACEBLOC_TELEMETRY_COLLECTOR_NAME
                   value: {{ include "tracebloc.telemetryCollectorName" . | quote }}
+                # The CronJob the training gate records its deferral count on.
+                - name: TRACEBLOC_AUTO_UPGRADE_NAME
+                  value: {{ include "tracebloc.autoUpgradeName" . | quote }}
+                {{- include "tracebloc.trainingGateEnv" (dict "gate" .Values.autoUpgrade.deferWhileTraining "maxDefault" 24) | nindent 16 }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

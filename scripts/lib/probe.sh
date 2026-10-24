@@ -96,12 +96,12 @@ _probe_userns() {
 
 # _probe_wsl — are we running inside a WSL2 distro (Linux inside Windows)? #1179.
 # WSL sets WSL_DISTRO_NAME / WSL_INTEROP in the environment and stamps "microsoft"/
-# "WSL" into the kernel release. Read-only. Two consumers: the WSL-aware audit
-# note, and `_kubelet_reservation_platform` (lib/cluster.sh), which routes a Linux
-# kernel through this detector so a WSL2 host gets the `windows` node-reservation
-# record — the one place WSL DOES change a classification. Inside WSL2 the
-# environment is still Linux, so the Linux install TIERS apply unchanged; only the
-# reservation record differs. Every consumer must source this file — a process
+# "WSL" into the kernel release. Read-only. Its consumers include the audit note,
+# the run contract (refuse_wsl_run, lib/common.sh), which refuses a run in any WSL
+# distro but tracebloc's own, and `_kubelet_reservation_platform` (lib/cluster.sh),
+# which routes a Linux kernel through this detector so a WSL2 host never gets a
+# row measured on a Linux host. Inside WSL2 the environment is still Linux, so the
+# Linux install TIERS apply unchanged. Every consumer must source this file — a process
 # that lacks it makes the selector answer `unknown`, which the installer and the
 # e2e check both refuse. Paths overridable (TRACEBLOC_OSRELEASE_FILE /
 # TRACEBLOC_PROC_VERSION_FILE) so it's testable off a real WSL host.

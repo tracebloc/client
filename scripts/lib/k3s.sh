@@ -1787,7 +1787,7 @@ _native_k3s_refuse_host() {
     declare -F _probe_wsl_ours >/dev/null \
       || error "native k3s: this probe.sh cannot tell tracebloc's WSL distro from another (stale bootstrap). Re-run the installer from a fresh download."
     _probe_wsl_ours \
-      || error "Inside WSL, native k3s runs only in tracebloc's own distro, '${TB_WSL_DISTRO}', which the Windows installer sets up, and this is $(_native_k3s_wsl_which). Install from Windows with install.ps1, or set TRACEBLOC_SUBSTRATE=k3d to install on k3d here."
+      || error "Inside WSL, native k3s runs only in tracebloc's own distro, '${TB_WSL_DISTRO}', which the Windows installer sets up, and this is $(_native_k3s_wsl_which). $(_native_k3s_wsl_way_out)"
     _native_k3s_refuse_windows_drive
   fi
   # hostpath and HOST_DATASET_DIR are served (client-dev#1782): the node is the host,
@@ -1818,6 +1818,17 @@ _native_k3s_wsl_which() {
     printf "the distro '%s'" "$WSL_DISTRO_NAME"
   else
     printf "a shell whose WSL_DISTRO_NAME says '%s', on a kernel that is not WSL's" "$WSL_DISTRO_NAME"
+  fi
+}
+
+# _native_k3s_wsl_way_out -- that refusal's way out: install.ps1 on WSL's kernel. On
+# another, only WSL's names make this shell look like WSL (refuse_wsl_run, common.sh,
+# takes it for Linux), and unsetting them is a way out where install.ps1 cannot run.
+_native_k3s_wsl_way_out() {
+  if declare -F _probe_wsl_kernel >/dev/null 2>&1 && _probe_wsl_kernel; then
+    printf '%s' "Install from Windows with install.ps1."
+  else
+    printf '%s' "If this is not WSL, unset WSL_DISTRO_NAME and WSL_INTEROP, then re-run; inside WSL, install from Windows with install.ps1."
   fi
 }
 

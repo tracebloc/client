@@ -2032,8 +2032,9 @@ _last_deployed_helm_revision() {
 #     opened the old file could lock it while another locks a new one: both would hold it.
 #   - The kernel drops the lock when its holder exits, so a holder that died leaves it free.
 #   - Exit 75 (EX_TEMPFAIL) is lockf's: the wait ran out and helm never ran.
-#   - spin's deadline TERMs and KILLs the whole tree (_tb_spin_reap), lockf and the helm
-#     under it, so a timed-out call leaves no helm running without the lock.
+#   - spin's deadline (_tb_helm_deadline_s) is helm's budget plus the lock's wait, so the
+#     wait never takes helm's time and lockf's 75 comes first. At it spin TERMs and KILLs
+#     the whole tree (_tb_spin_reap), so a timed-out call leaves no helm without the lock.
 # Elsewhere (Linux, WSL, k3d on a Mac) no runner restarts a node, and the prefix is empty.
 _TB_HELM_LOCK=()
 _TB_HELM_LOCKF=/usr/bin/lockf
@@ -2070,6 +2071,14 @@ _tb_helm_lock_timed_out() {
   error "A tracebloc node restart or helm command on this Mac held ${_TB_HELM_LOCK[4]} for ${_TB_HELM_LOCK[3]} s, so this installer did not change the client. Re-run the installer once it has ended."
 }
 
+# _tb_helm_deadline_s MINUTES -- print spin's deadline, in seconds, for a helm call run
+# under _TB_HELM_LOCK: helm's MINUTES plus the lock's wait, or MINUTES alone with no lock.
+_tb_helm_deadline_s() {
+  local _w=0
+  [[ "${#_TB_HELM_LOCK[@]}" -eq 5 ]] && _w="${_TB_HELM_LOCK[3]}"
+  printf '%s' "$(( $1 * 60 + _w ))"
+}
+
 # _recover_pending_helm_release — auto-clear a wedged pending-* release before a
 # helm upgrade/install (#554). A helm process killed mid-operation (Ctrl-C, OOM,
 # host reboot, laptop sleep) leaves the release stuck in a transient state; every
@@ -2083,7 +2092,9 @@ _tb_helm_lock_timed_out() {
 # Reads the STATUS: line of `helm status` (jq-free on purpose — parsed the same
 # way the auto-upgrade cronjob does, whose alpine/helm image ships without jq), and
 # again under the host's helm lock, where what to do is decided (_tb_recover_locked):
-#   deployed / failed / superseded / uninstalled / "" → healthy or absent; no-op
+#   deployed / failed / superseded / uninstalled / not found → healthy or absent; no-op
+#   no status (a timeout, an API error) → no-op, except under the host's helm lock,
+#     where its holder may be what the read timed out on: there it is read again
 #   pending-upgrade / pending-rollback → roll back to the last deployed revision,
 #                                        named from `helm history` (backend#5273);
 #                                        none in the history → refuse (return 1)
@@ -2110,12 +2121,14 @@ _tb_helm_lock_timed_out() {
 # attempted and FAILED, or was refused under no-destroy — the caller must fail
 # closed rather than march into the same wedge.
 _recover_pending_helm_release() {
-  local _rel="$1" _ns="$2" _mode="${3:-full}" _status _rc _verdict _script
+  local _rel="$1" _ns="$2" _mode="${3:-full}" _status _rc _verdict _script _unread=""
   # Bound the status READ (#554 Bugbot): every helm/kubectl probe in this installer
   # must be bounded so a wedged/unreachable API can't hang a headless run — and
   # this read gates everything below, so bounding it bounds the whole recovery. A
   # timeout (or any error) yields an empty status → no-op → we hand off to the
-  # bounded upgrade, which surfaces the API failure with its own deadline. The
+  # bounded upgrade, which surfaces the API failure with its own deadline — unless
+  # the host's helm lock is in force, whose holder (the runner's node restart) can
+  # be what the read timed out on: then it is read again under the lock. The
   # mutating ops (_tb_recover_locked) are NOT wrapped in a kill-based bound on
   # purpose: SIGKILLing a helm rollback/uninstall midway would recreate the very
   # pending-* wedge we are clearing. They are bounded gracefully by helm's own
@@ -2127,18 +2140,28 @@ _recover_pending_helm_release() {
   # skipping recovery (#554 Bugbot; same SIGPIPE-under-pipefail lesson as
   # _extract_yaml_value). Here-string parsing can't signal anything.
   local _status_out
-  _status_out="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>/dev/null)" || _status_out=""
+  _status_out="$(_bounded 30 helm status "$_rel" -n "$_ns" 2>&1)" || :
   _status="$(awk '/^STATUS:/ {print $2; exit}' <<<"$_status_out")"
+  if [[ -z "$_status" && "$_status_out" != *"not found"* ]]; then
+    _tb_helm_lock
+    [[ "${#_TB_HELM_LOCK[@]}" -gt 0 ]] || return 0
+    _unread=1
+  fi
   case "$_status" in
     pending-upgrade|pending-rollback|pending-install|uninstalling) ;;
-    ''|deployed|failed|superseded|uninstalled)
-      return 0 ;;  # healthy or absent — nothing to recover
+    '') [[ -n "$_unread" ]] || return 0 ;;  # absent, or unread off the lock
+    deployed|failed|superseded|uninstalled)
+      return 0 ;;  # healthy — nothing to recover
     *)
       log "helm status of '$_rel' is '$_status'; no pending-state recovery needed."
       return 0 ;;
   esac
-  warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
-  info "Clearing it before continuing…"
+  if [[ -n "$_unread" ]]; then
+    log "helm status of '$_rel' gave no status outside the helm lock; reading it again under the lock."
+  else
+    warn "A previous helm operation on '$_rel' was interrupted (status: $_status)."
+    info "Clearing it before continuing…"
+  fi
   # The read above only says whether to recover. What to do is decided under the
   # host's helm lock (cli-dev#1545), by a read made there: the lock can wait up to
   # 300 s for the runner's node restart or the CLI's helm command, which can finish
@@ -2165,10 +2188,18 @@ _recover_pending_helm_release() {
   read -r _v _vs _vt <<<"$_verdict" || true
   case "$_v" in
     clear)
+      if [[ -n "$_unread" ]]; then
+        log "No recovery of '$_rel': it was $_vs when read again under the helm lock."
+        return 0
+      fi
       info "'$_rel' is no longer interrupted (status: $_vs): it finished before this installer acted, so it is left as it is."
       log "No recovery of '$_rel': it was $_status, and $_vs when read again under the helm lock."
       ;;
     unreadable)
+      if [[ -n "$_unread" ]]; then
+        log "helm status of '$_rel' gave no status under the helm lock either; leaving it to the bounded upgrade."
+        return 0
+      fi
       warn "This installer could not read '$_rel' again under the helm lock, so it cannot tell whether it is still interrupted, and left it as it is."
       hint "Check it, then re-run:  helm -n $_ns status $_rel"
       return 1
@@ -2407,6 +2438,29 @@ _mac_runner_set_args() {
   _mac_ct_runner_on || return 0
   _TB_MAC_RUNNER_ARGS+=(--set "appleGpuRunner.enabled=true")
   log "The Apple-GPU runner: on (this tracebloc CLI carries it)."
+  # The runner trains on this Mac's GPU only over the job-data folder the install record
+  # names (_mac_ct_job_data_record): cli-dev's runner refuses the GPU without it, and the
+  # training runs on the CPU. A run that keeps none says why (backend#5976), in the copy
+  # catalog's words (scripts/testdata/golden/03-mac-gpu-no-training-folder.golden).
+  local why
+  why="$(_mac_ct_job_data_none_why)" || return 0
+  warn "This machine keeps no folder for training data, so training here can't use this Mac's GPU and will run on the CPU: ${why}."
+  hint "To train on the GPU, run tracebloc delete, then install again with the default storage."
+}
+
+# _mac_node_storage_steps -- on the macOS node (native k3s on a Mac), before helm: the
+# folders the release's PVs will name must be ones the node mounts, or the PVs would put
+# the data inside its VM (mac-container.sh, _mac_ct_hostpath_mounted); then the job-data
+# folder, when this run keeps one (_mac_ct_job_data_dir), is recorded
+# (_mac_ct_job_data_record), the entry the Apple-GPU runner reads to train on the GPU.
+# Both install paths run it: the normal one once _native_k3s_release_storage has read the
+# release, and dev mode over the caller's file, which installs the folder too
+# (_mac_node_profile_set_args) and once recorded nothing (backend#5976). A no-op anywhere
+# else.
+_mac_node_storage_steps() {
+  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]] || return 0
+  _mac_ct_hostpath_mounted
+  _mac_ct_job_data_record
 }
 
 # _gpu_request_value — the GPU resource a spawned training pod should request,
@@ -2991,7 +3045,7 @@ _reconcile_adopted_client() {
   _helm_timeout_min="$(tb_minutes_or "${TB_HELM_TIMEOUT_MIN:-}" 10)"
   local _helm_rc=0
   _tb_helm_lock
-  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Reconciling the existing client…" \
+  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Reconciling the existing client…" \
     ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} helm "${_args[@]}" || _helm_rc=$?  # set-u-safe: assigned the upgrade verb at its declaration
   if [[ "$_helm_rc" -ne 0 ]]; then
     _tb_helm_lock_timed_out "$_helm_rc"
@@ -3994,6 +4048,10 @@ install_client_helm() {
     TB_MYSQL_ENGINE_RESOLVED="${_dm_decision%% *}"
     TB_MYSQL_ENGINE_REASON="${_dm_decision#* }"
     _assert_engine_runs_on_this_arch
+    # The macOS node's storage steps, as the normal path takes them below: dev mode
+    # installs the job-data folder too (_mac_node_profile_set_args), so it records it
+    # (backend#5976).
+    _mac_node_storage_steps
   else
 
   local use_existing=""
@@ -4034,12 +4092,7 @@ install_client_helm() {
   # Native k3s: an installed release keeps the storage it was made with, before the
   # reconcile and the values below read TB_STORAGE_MODE (client-dev#1782).
   _native_k3s_release_storage
-  # The macOS node: those hostPath folders must be ones the node mounts, or the PVs
-  # would put the data inside its VM (mac-container.sh, _mac_ct_hostpath_mounted).
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]]; then
-    _mac_ct_hostpath_mounted
-    _mac_ct_job_data_record
-  fi
+  _mac_node_storage_steps
 
   # RFC-0001 §7.2 — a re-run on an already-connected client must reconcile in place,
   # not re-provision. Step 3 marks that case with TRACEBLOC_CLIENT_ADOPTED=1 (+ the
@@ -4600,7 +4653,7 @@ EOF
   # The lock's prefix has a line of its own, so the call still starts its line, where
   # release-name-equals-namespace.sh reads the release's name from.
   _tb_helm_lock
-  spin_cmd_bounded "$(( _helm_timeout_min * 60 ))" "Installing the tracebloc client…" \
+  spin_cmd_bounded "$(_tb_helm_deadline_s "$_helm_timeout_min")" "Installing the tracebloc client…" \
     ${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} \
     helm upgrade --install "$TB_NAMESPACE" "$chart_ref" \
     --namespace "$TB_NAMESPACE" \

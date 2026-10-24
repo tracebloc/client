@@ -765,23 +765,53 @@ _mac_ct_refuse_host() {
 # dir read as validate_config reads HOST_DATA_DIR (_tb_home_path). A caller's values file
 # (TRACEBLOC_VALUES_FILE) that opens hostPath keeps job data in its own tree, so it gets
 # none: the chart refuses jobData.path beside hostPath.enabled (tracebloc.jobDataRefusal).
+# The rule is _mac_ct_job_data_decision's, which says why too: the runner's warning
+# (_mac_ct_job_data_none_why) reads the same branch this does.
 _mac_ct_job_data_dir() {
-  [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] || return 0
+  local d
+  d="$(_mac_ct_job_data_decision)"
+  [[ "$d" == "dir "* ]] || return 0
+  printf '%s' "${d#dir }"
+}
+
+# _mac_ct_job_data_decision -- _mac_ct_job_data_dir's rule (above), once: "dir FOLDER" when
+# this run keeps its job data in FOLDER on this Mac, or "none WHY" when it keeps none, WHY
+# a clause that names the branch that decided it, in the words of the copy catalog
+# (scripts/testdata/golden/03-mac-gpu-no-training-folder.golden).
+_mac_ct_job_data_decision() {
+  if [[ "${TB_STORAGE_MODE:-node-local}" != "node-local" ]]; then
+    printf 'none %s' "this secure environment keeps its data in hostPath volumes (storage mode ${TB_STORAGE_MODE})"
+    return 0
+  fi
   case "${TRACEBLOC_JOB_DATA_KEPT:-}" in
-    1) printf '%s' "${TRACEBLOC_JOB_DATA_KEPT_DIR:-}"; return 0 ;;
-    0) return 0 ;;
+    1) printf 'dir %s' "${TRACEBLOC_JOB_DATA_KEPT_DIR:-}"; return 0 ;;
+    0) printf 'none %s' "this secure environment was installed before version 1.12, which added the folder, and its storage can't move"; return 0 ;;
   esac
   local base dir
   if [[ -r "${TRACEBLOC_VALUES_FILE:-}" ]] && declare -F _values_hostpath_storage >/dev/null \
      && _values_hostpath_storage <"$TRACEBLOC_VALUES_FILE" | grep -x 'enabled=true' >/dev/null; then
+    printf 'none %s' "the values file ${TRACEBLOC_VALUES_FILE} (TRACEBLOC_VALUES_FILE) turns on hostPath (hostPath.enabled: true), and hostPath storage keeps no such folder"
     return 0
   fi
   if dir="$(_mac_ct_node_dir 2>/dev/null)" && [[ -e "${dir}/run-args" && ! -e "${dir}/hostpath" ]]; then
+    printf 'none %s' "the VM that runs tracebloc on this Mac was made before version 1.12, which added the folder, and its mounts can't change"
     return 0
   fi
   base="$(_tb_home_path "${HOST_DATA_DIR:-}")"
-  [[ -n "$base" ]] || return 0
-  printf '%s/job-data' "${base%/}"
+  if [[ -z "$base" ]]; then
+    printf 'none %s' "TRACEBLOC_HOST_DATA_DIR is empty, so there is nowhere to keep it"
+    return 0
+  fi
+  printf 'dir %s/job-data' "${base%/}"
+}
+
+# _mac_ct_job_data_none_why -- why this run keeps no job-data folder on this Mac, from
+# _mac_ct_job_data_decision; fails when it keeps one.
+_mac_ct_job_data_none_why() {
+  local d
+  d="$(_mac_ct_job_data_decision)"
+  [[ "$d" == "none "* ]] || return 1
+  printf '%s' "${d#none }"
 }
 
 # _mac_ct_job_data_private DIR -- DIR is a folder of this user's at mode 0700, or prints

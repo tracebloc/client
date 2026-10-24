@@ -1834,6 +1834,30 @@
           "pattern": "^[0-9]+(s|m|h)$",
           "description": "How long a release must sit in pending-upgrade/pending-rollback before the hourly recovery treats it as an abandoned wedge (rolls it back) rather than an in-flight upgrade (leaves it alone) — tracebloc/client#2877. Keep it above the longest hand-run upgrade and below the schedule gap. Default 45m."
         },
+        "deferWhileTraining": {
+          "type": "object",
+          "description": "Defer an upgrade while the edge trains: an upgrade replaces the jobs-manager pod, which starts the next training cycle late. See values.yaml.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "When false the job never checks for training and goes ahead as soon as it has something to do."
+            },
+            "maxDeferrals": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 24,
+              "description": "Deferrals in a row after which the job goes ahead although the edge is still training."
+            },
+            "finishedWithin": {
+              "type": "string",
+              "pattern": "^[0-9]+(s|m|h)$",
+              "default": "10m",
+              "description": "A training pod that finished less than this long ago still counts as training: a run between two cycles has no pod running."
+            }
+          },
+          "additionalProperties": false
+        },
         "suspend": {
           "type": "boolean",
           "default": false,
@@ -1963,6 +1987,30 @@
           "type": "integer",
           "minimum": 1,
           "description": "Consecutive failed rollout attempts (same target digest) after which the refresh backs off instead of re-imaging a flapping workload every tick (#563). The counter is shared across all reconciled workloads."
+        },
+        "deferWhileTraining": {
+          "type": "object",
+          "description": "Defer re-imaging jobs-manager or requests-proxy while the edge trains, as autoUpgrade.deferWhileTraining does. See values.yaml.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "When false the job never checks for training and goes ahead as soon as it has something to do."
+            },
+            "maxDeferrals": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 96,
+              "description": "Deferrals in a row after which the job goes ahead although the edge is still training."
+            },
+            "finishedWithin": {
+              "type": "string",
+              "pattern": "^[0-9]+(s|m|h)$",
+              "default": "10m",
+              "description": "A training pod that finished less than this long ago still counts as training: a run between two cycles has no pod running."
+            }
+          },
+          "additionalProperties": false
         },
         "suspend": {
           "type": "boolean",

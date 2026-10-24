@@ -210,6 +210,9 @@ data:
     if [ -n "${TRACEBLOC_PODS_MONITOR_PIN_IGNORED:-}" ]; then PODS_MONITOR_PIN_IGNORED="$TRACEBLOC_PODS_MONITOR_PIN_IGNORED"; fi
     if [ -n "${TRACEBLOC_RESOURCE_MONITOR_PIN_IGNORED:-}" ]; then RESOURCE_MONITOR_PIN_IGNORED="$TRACEBLOC_RESOURCE_MONITOR_PIN_IGNORED"; fi
     if [ -n "${TRACEBLOC_REQUESTS_PROXY_PINNED:-}" ]; then REQUESTS_PROXY_PINNED="$TRACEBLOC_REQUESTS_PROXY_PINNED"; fi
+    if [ -n "${TRACEBLOC_TRAINING_DEFER_ENABLED:-}" ]; then TRAINING_DEFER_ENABLED="$TRACEBLOC_TRAINING_DEFER_ENABLED"; fi
+    if [ -n "${TRACEBLOC_TRAINING_DEFER_MAX:-}" ]; then TRAINING_DEFER_MAX="$TRACEBLOC_TRAINING_DEFER_MAX"; fi
+    if [ -n "${TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS:-}" ]; then TRAINING_FINISHED_WINDOW_SECONDS="$TRACEBLOC_TRAINING_FINISHED_WINDOW_SECONDS"; fi
 
     # #563: guard a FLAPPING deployment. After this many consecutive FAILED
     # rollout attempts in a row, STOP re-restarting and flag the deployment for a
@@ -443,6 +446,21 @@ data:
       _json="$(kubectl get deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" -o json --request-timeout=15s)" || return 1
       printf '%s\n' "$_json" | jq -r --arg k "$_key" '.metadata.annotations[$k] // empty'
     }
+
+    # The training gate's primitives (tracebloc.trainingGateSh). Its deferral count
+    # is an annotation on the jobs-manager Deployment, beside the other counters.
+    kube_raw_get() { kubectl get --raw "$1" --request-timeout=15s; }
+    TRAINING_DEFER_KEY="tracebloc.io/refresh-training-deferrals"
+    gate_streak_read() { get_annotation "$TRAINING_DEFER_KEY"; }
+    gate_streak_write() {
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${TRAINING_DEFER_KEY}=$1" --overwrite --request-timeout=15s >/dev/null
+    }
+    gate_streak_clear() {
+      kubectl annotate deployment -n "$RELEASE_NAMESPACE" "$DEPLOYMENT_NAME" \
+        "${TRAINING_DEFER_KEY}-" --overwrite --request-timeout=15s >/dev/null
+    }
+    {{- include "tracebloc.trainingGateSh" . | nindent 4 }}
 
     # write_digest_records "<annotate args>" -- record a workload's
     # `last-refreshed-<image>-digest` (+ applied/first-observed) markers on the
@@ -1195,6 +1213,16 @@ data:
         exit 0
       fi
 
+      # Re-imaging jobs-manager or requests-proxy replaces its pod, so it waits
+      # while the edge trains (tracebloc.trainingGateSh). A deferral leaves every
+      # counter above as it was: nothing was attempted.
+      if [ -n "$jm_set_args" ] || [ -n "$rp_set_args" ]; then
+        if ! training_gate "re-imaging deployment/${DEPLOYMENT_NAME} and deployment/${REQUESTS_PROXY_DEPLOYMENT}" imageRefresh.deferWhileTraining; then
+          log "tick complete"
+          exit 0
+        fi
+      fi
+
       new_count=$(( attempt + 1 ))
       # Persist the incremented failure count BEFORE restarting so a failed
       # rollout (which exits the tick under set -e) still advances the counter
@@ -1492,6 +1520,7 @@ spec:
                 # which is also what the Deployment renders (tracebloc.effectivePin).
                 - name: TRACEBLOC_REQUESTS_PROXY_PINNED
                   value: {{ ternary "1" "0" (not (empty (include "tracebloc.pinFor" (dict "image" "requestsProxy" "root" $)))) | quote }}
+                {{- include "tracebloc.trainingGateEnv" (dict "gate" .Values.imageRefresh.deferWhileTraining "maxDefault" 96) | nindent 16 }}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

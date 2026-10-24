@@ -14,9 +14,12 @@ metadata:
   binding on purpose. This CronJob only touches Deployments in
   {{ .Release.Namespace }}: read the jobs-manager Deployment to compare the
   recorded refresh digest, and patch the jobs-manager + requests-proxy
-  Deployments for `kubectl set image` + annotation update. No pods, no other
-  resources, no cluster scope. A compromise of this Pod is bounded to
-  re-imaging and annotating those two Deployments.
+  Deployments for `kubectl set image` + annotation update. The one read
+  beyond them is `list` on pods, rendered while imageRefresh.deferWhileTraining
+  is on: the training gate (tracebloc.trainingGateSh) lists the training pods
+  before a re-image. No other resources, no cluster scope. A compromise of this
+  Pod is bounded to re-imaging and annotating those two Deployments, and to
+  reading the pods of this namespace.
 
   #569 added requests-proxy as a patch target. No rule change was needed: it
   is a Deployment in the SAME namespace, already covered below.
@@ -40,6 +43,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch", "watch"]
+  {{- if dig "deferWhileTraining" "enabled" true (.Values.imageRefresh | default dict) }}
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -472,7 +472,6 @@ function Resolve-Cosign {
   # "frozen" in exactly this window (#468).
   Info "cosign not found -- downloading pinned cosign $CosignVersion (~17 MB) to verify the manifest."
   Info "This is the bootstrap's one big download; a few minutes on a slow network is normal."
-  Info "Tip: 'winget install sigstore.cosign' makes re-runs skip this download."
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   if (-not (Get-OptionalWithTicks "$base/$asset" $bin))       { return $null }
   if (-not (Get-Optional "$base/cosign_checksums.txt" $sums)) { return $null }
@@ -612,12 +611,11 @@ function Confirm-ManifestSignature {
       Warn "Proceeding on checksum-only integrity. Not for production."
       return
     }
-    # Deliberately does NOT suggest `winget install sigstore.cosign` (Bugbot).
-    # We already HAVE a cosign here -- it will not start. Installing another copy
-    # of the same amd64 build, which is the only one winget and sigstore publish,
-    # reproduces the failure exactly. A remedy that cannot clear the error is
-    # worse than none: it costs the user a round trip and teaches them the
-    # message is noise.
+    # Deliberately suggests no second cosign (Bugbot). We already HAVE a cosign
+    # here -- it will not start. Another copy of the same amd64 build, the only one
+    # sigstore publishes, reproduces the failure exactly. A remedy that cannot clear
+    # the error is worse than none: it costs the user a round trip and teaches them
+    # the message is noise.
     throw "cosign was obtained but won't run on this machine, so the installer's signature can't be checked. This is NOT a failed verification -- nothing suggests the download is bad. Two things cause it: security software may have quarantined or blocked the downloaded cosign.exe (check your antivirus / SmartScreen and allow it); or, on Windows-on-ARM, x64 emulation is unavailable -- Windows 11 on ARM includes it, Windows 10 on ARM may not, and sigstore publishes no native arm64 cosign to fall back on, so one would have to be built from source and put on PATH. For local development only you can set `$env:TRACEBLOC_ALLOW_UNVERIFIED = '1'`."
   }
 
@@ -725,8 +723,8 @@ function Assert-WslWindowsBuild {
 # Assert-WindowsSubstrate -- Windows sets up one runtime, $WslSubstrate in the
 # tracebloc WSL distro. Any other TRACEBLOC_SUBSTRATE is refused by name, as the
 # shell installer refuses a runtime it cannot set up: never read as the distro, so
-# a run that asked for k3d does not get the distro instead. Blank means unset, as
-# for every TRACEBLOC_* setting.
+# a run that asked for another runtime does not get the distro instead. Blank means
+# unset, as for every TRACEBLOC_* setting.
 function Assert-WindowsSubstrate {
   $asked = [string]$env:TRACEBLOC_SUBSTRATE
   if ($asked -and $asked -cne $WslSubstrate) {

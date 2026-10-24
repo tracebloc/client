@@ -9,13 +9,13 @@ A Mac with Apple's container runtime has its own section, [macOS](#macos), and W
 ## Linux
 
 <!-- prerequisites:linux:start -->
-On a new Linux machine the installer sets up **native k3s**: Kubernetes runs on the machine itself as a system service, with no Docker and no k3d. A new machine is one outside WSL with no tracebloc install, no k3d, and no k3d cluster in Docker. Every other Linux machine keeps k3d, and so does WSL. When it keeps k3d, the installer says why in one line.
+On a new Linux machine the installer sets up **native k3s**: Kubernetes runs on the machine itself as a system service, with no Docker and no k3d. A new machine is one outside WSL with no tracebloc install, no k3d, and no k3d cluster in Docker. Every other Linux machine keeps k3d, and when it does, the installer says why in one line. Inside WSL the installer runs only in tracebloc's own distro, which the Windows installer sets up: in any other distro it stops and says so.
 
 | | What the machine needs |
 |---|---|
 | Processor | 64-bit: `amd64` or `arm64` |
 | Administrator rights | Once, as `sudo` or root, because k3s runs as root. Or an administrator prepares the machine for you once, and you install with no `sudo` (see below). |
-| Memory | At least 7.0 GB: the installer stops below that, because a smaller machine cannot fit one training run beside the platform. 11 GB fits the smallest training run as installed, and 16 GB is recommended. An 8 GB machine trains too, once `tracebloc resources set max` has sized training to what is free beside the platform (tracebloc CLI 0.10.93 or later). |
+| Memory | At least 7.0 GB: the installer stops below that, because a smaller machine cannot fit one training run beside the platform. 10 GB fits the smallest training run as installed, and 16 GB is recommended. An 8 GB machine trains too, once `tracebloc resources set max` has sized training to what is free beside the platform (tracebloc CLI 0.10.93 or later). |
 | Disk | At least 10 GB free, and 20 GB recommended. This applies both where k3s keeps its data (`/var/lib/rancher/k3s`) and where your data is kept (`/var/lib/rancher/k3s/storage`, or the directory you set with `TRACEBLOC_HOST_DATA_DIR`). The installer stops below 10 GB. |
 | CPU | 2 cores, 4 recommended |
 | Network | Outbound HTTPS (port 443) to the hosts below |
@@ -79,7 +79,7 @@ On a new Mac with Apple silicon and macOS 26 or later, the installer sets up **k
 | Processor | Apple silicon (M1 or later). The installer stops on an Intel Mac. |
 | macOS | 26 or later. The installer stops on an older version. |
 | Administrator rights | None. |
-| Memory | 16 GB recommended. The node is a VM that holds part of the Mac's memory while it runs: 6 GB of an 8 GB Mac, 11 GB of a 16 GB Mac, 12 GB of a 24 GB Mac, and 16 GB of a Mac with 32 GB or more. 11 GB fits the smallest training run. On a smaller Mac, the installer stops before it creates the node if a training run would not fit beside the platform. |
+| Memory | 16 GB recommended. The node is a VM that holds part of the Mac's memory while it runs: 6 GB of an 8 GB Mac, 10 GB of a 16 GB Mac, 12 GB of a 24 GB Mac, and 16 GB of a Mac with 32 GB or more. 10 GB fits the smallest training run. On a smaller Mac, the installer stops before it creates the node if a training run would not fit beside the platform. |
 | Disk | At least 10 GB free, and 20 GB recommended, on the disk that holds `~/Library/Application Support/tracebloc/container`, where the node's images and its volume are kept. The installer stops below 10 GB. The volume grows as data is written, up to 64 GB. The installer checks the disk that holds your job data too. |
 | CPU | 2 cores, 4 recommended. The node gets all but one of them. |
 | Network | Outbound HTTPS (port 443) to the hosts below |
@@ -123,7 +123,7 @@ On Windows, the installer sets up **k3s in tracebloc's own WSL distro**. This is
 | Processor | 64-bit `amd64` (x64): tracebloc's distro image is built for it |
 | WSL | 2.5 or later. If it is missing or older, an administrator turns it on once (see below). |
 | Administrator rights | Once, for that step. Everything after it runs as the signed-in user, and the installer refuses to run as the SYSTEM account. |
-| Memory | At least 9 GB in WSL's VM: the installer warns below that, because a smaller VM cannot fit one training run beside the tracebloc platform. 11 GB in the VM fits the smallest training run, and 16 GB is recommended. WSL gives its VM half of the machine's memory by default; `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`, WSL's own setting, changes that. |
+| Memory | At least 8 GB in WSL's VM: the installer warns below that, because a smaller VM cannot fit one training run beside the tracebloc platform. 10 GB in the VM fits the smallest training run, and 16 GB is recommended. WSL gives its VM half of the machine's memory by default; `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig`, WSL's own setting, changes that. |
 | Disk | At least 30 GB free on the drive that holds the distro. The distro's disk is capped at what is free there, less 20 GB that is left to Windows. The installer stops if that leaves less than 10 GB for the distro. |
 | CPU | 2 cores, 4 recommended |
 | Network | Outbound HTTPS (port 443) to the hosts below |
@@ -148,7 +148,7 @@ The installer installs no Docker Desktop, no winget packages and no k3d. `traceb
 
 **After a restart.** The secure environment runs while you are signed in. After Windows restarts, it starts again when you sign in.
 
-**A machine that runs tracebloc on k3d.** The installer never sets up the distro beside a live k3d cluster. Moving the machine is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc. The installer offboards the old environment only after you type its name when asked, or set `TRACEBLOC_REINSTALL_CONSENT` to it. A k3d cluster that is not tracebloc's stops the installer, which never removes it.
+**A machine that runs tracebloc on k3d.** This installer no longer sets up tracebloc on Docker Desktop with k3d, nor moves a machine off it. On such a machine it stops before WSL is touched, names the secure environment it found, and changes nothing on this machine. To move the machine, run the tracebloc v1.12.13 installer once with `TRACEBLOC_SUBSTRATE` set to `k3s`: it deletes the old secure environment with your consent and sets up the distro, and this installer runs as usual after it. Moving is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
 
 **A proxy.** Set `HTTPS_PROXY`, and `HTTP_PROXY` and `NO_PROXY` if your network needs them, in Windows' environment before the install. The installer stops before it sets up the distro if a proxy variable holds a value the cluster could not use. Windows' own downloads use `HTTPS_PROXY`. The installer hands these variables into the distro, and k3s gets them there.
 

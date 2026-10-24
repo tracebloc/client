@@ -177,7 +177,7 @@ on the live cluster when the corresponding check runs.*
 | No unmanaged hostPath backing (dynamic mode) | **Verified** once the Option C flip lands (today's installer still declares hostPath mode → sub-check SKIPs, honestly) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
 | Nothing under `~/.tracebloc` on the host (post-Option-C) | Not observable in-cluster — CLI/installer-side check (see follow-ups) | n/a | n/a | n/a | n/a |
 
-**Native k3s (Linux) is not a column yet: nothing above is measured on it.** On a new Linux machine the installer sets up native k3s rather than k3d (see [PREREQUISITES.md § Linux](PREREQUISITES.md#linux)). It runs k3s directly on the machine, with k3s's embedded NetworkPolicy controller left on. The seal-check job, however, runs on k3d only, and no `helm test` run on native k3s has been recorded here. Until one is, read every guarantee in the table as **not yet measured** on native k3s, not as verified. To close the gap, run the suite (`helm test` on the release) on a native-k3s machine and record the result here.
+**Native k3s (Linux) is not a column yet: nothing above is measured on it.** On a new Linux machine the installer sets up native k3s rather than k3d (see [PREREQUISITES.md § Linux](PREREQUISITES.md#linux)). It runs k3s directly on the machine, with k3s's embedded NetworkPolicy controller left on. The `egress-enforcement` seal-check runs on native k3s in CI (`Seal-check egress-enforcement (k3s)`, see [CI coverage](#ci-coverage--what-runs-where)), but no result of it has been recorded here yet. Until one is, read every guarantee in the table as **not yet measured** on native k3s, not as verified. To close the gap, run the suite (`helm test` on the release) on a native-k3s machine and record the result here.
 
 Two lockdown caveats the suite states rather than hides:
 
@@ -427,17 +427,18 @@ never treated as a pass.
 
 ## CI coverage — what runs where
 
-- **`egress-enforcement`, live on every PR** — seal-check.yaml's
-  `seal-check-e2e` job, `Seal-check egress-enforcement (k3d)`
+- **`egress-enforcement`, live on every PR** — seal-check-k3s.yaml's
+  `seal-check-e2e-k3s` job, `Seal-check egress-enforcement (k3s)`
   (`scripts/tests/e2e-seal-check.sh`, client#541 + #566), plus develop pushes
   that touch what it reads. It has its own workflow so it can be a required
   check: no `pull_request` paths filter, so it runs in full on every PR. Real
-  k3d cluster, lockdown engaged, positive control (its curl image pre-pulled
-  into the node first, backend#3561), then the probe via `helm test --filter`.
+  native k3s, the cluster the installer sets up on a new Linux machine;
+  lockdown engaged, positive control (its curl image imported into k3s's own
+  containerd first, backend#3561), then the probe via `helm test --filter`.
   Zero secrets, so it runs everywhere.
 - **The FULL suite vs the dev backend** — helm-ci's `full-seal-e2e` job
   (`scripts/tests/e2e-full-seal.sh`, the backend#1184 deferred fast-follow):
-  installs the working-tree chart on k3d **as the dedicated dev
+  installs the working-tree chart on native k3s **as the dedicated dev
   `e2e-test-agent` client with real credentials** (`CLIENT_ENV=dev`), waits
   for every release PVC to Bind and for jobs-manager to hold a real backend
   session, then runs `helm test` **unfiltered** — `egress-enforcement` +
