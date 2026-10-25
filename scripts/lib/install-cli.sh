@@ -474,7 +474,7 @@ _example_attended() { { : </dev/tty; } 2>/dev/null; }
 setup_example_use_case() {
   local cli="" why="" probe=0 rc=0 int_trap="" deadline=""
   [[ "${TRACEBLOC_CLIENT_STATE:-}" == connected ]] || return 0
-  [[ "${TRACEBLOC_CLI_UPGRADE_ONLY:-0}" != 1 ]] || return 0
+  ! tb_upgrade_run || return 0
   # In tracebloc's WSL distro the CLI is the Windows host's, and install-wsl.ps1 runs it.
   [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] || return 0
   why="$(_example_opt_out)"
