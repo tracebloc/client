@@ -2686,7 +2686,7 @@ refuse_unsupported_mac() {
 # (refuse_wsl_run) and reads _WINDOWS; Linux outside WSL reads _LINUX. 1 when it is
 # not, or on any other OS; 2 when this cannot tell: Linux, SUBSTRATE retired on one
 # side of WSL's line, and no WSL probe loaded (a stale bootstrap). The one predicate
-# every reader of the retirement asks: the resolver, install_macos, install_linux,
+# every reader of the retirement asks: the resolver, install_macos,
 # the k3s path's live-k3d refusal (reinstall.sh) and the substrate a Mac gets
 # instead (_tb_substrate_fresh_here). It has one case per stamp this build sets,
 # because a TB_ name nothing stamps is read from the user's environment

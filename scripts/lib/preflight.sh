@@ -264,16 +264,13 @@ _pf_fstype() {
   printf '%s' "$t" | tr '[:upper:]' '[:lower:]'
 }
 
-# Memory/CPU as the CONTAINER RUNTIME sees it (the budget the pods actually get).
-# On Docker Desktop / WSL2 this is the VM's allocation — smaller than the host and
-# the number that matters (a 36 GB machine can cap its Docker VM at 4 GB). Echo
-# a single integer, or nothing if the daemon is down / the value is junk — callers
-# then fall back to the host reader.
+# Memory/CPU as the runtime sees it (the budget the pods actually get). Echo a
+# single integer, or nothing -- callers then fall back to the host reader.
 #
-# ON NATIVE k3s THE HOST IS THE NODE (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): there is no Docker and no
-# VM, so the budget the pods get is the host's own -- /proc/meminfo's MemTotal and
-# nproc, through the host readers below, which are the tests' stub seams. Neither
-# reader asks Docker anything there.
+# ON NATIVE k3s THE HOST IS THE NODE (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): no VM, so the
+# budget the pods get is the host's own -- /proc/meminfo's MemTotal and nproc, through
+# the host readers below, which are the tests' stub seams. Any other substrate was
+# refused before preflight (tb_substrate_resolve) and reads nothing.
 #
 # EXCEPT ON macOS, WHERE k3s RUNS IN A VM on Apple's runtime (slim client 2.1,
 # _pf_on_mac_node): the budget is the node's size, never the Mac's (see
@@ -284,14 +281,6 @@ _pf_runtime_mem_kb() {
     s="${s#* }"; echo $(( ${s%g} * 1024 * 1024 )); return 0
   fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_host_mem_kb; return 0; fi
-  # Bounded liveness, coreutils-free (#744): _docker_answers bounds through _bounded,
-  # which was a no-op on a stock Mac until client-dev#1357; _docker_answers_bounded
-  # kills on a deadline via a background PID, with a spinner. Silenced (>/dev/null) — this
-  # reader's stdout is captured by the caller, and once the daemon is proven
-  # responsive here the --format read below cannot hang.
-  has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
-  local b; b="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.MemTotal}}' 2>/dev/null)"
-  [[ "$b" =~ ^[0-9]+$ && "$b" -gt 0 ]] && echo $(( b / 1024 ))
   return 0
 }
 _pf_runtime_ncpu() {
@@ -300,10 +289,6 @@ _pf_runtime_ncpu() {
     echo $(( ${s%% *} + TB_MAC_CT_VM_OWN_CPUS )); return 0
   fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_host_ncpu; return 0; fi
-  # Coreutils-free bounded liveness, silenced — see _pf_runtime_mem_kb (#744).
-  has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1 || return 0
-  local n; n="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.NCPU}}' 2>/dev/null)"
-  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && echo "$n"
   return 0
 }
 
