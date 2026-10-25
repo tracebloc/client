@@ -2,14 +2,14 @@
 
 What a machine needs before `bash <(curl -fsSL https://tracebloc.io/i.sh)` (macOS, Linux) or `irm https://tracebloc.io/i.ps1 | iex` (Windows) sets up a secure environment on it. The installer checks each of these before it changes anything, and when one is not met it stops and names it.
 
-This page is the one place these prerequisites are written down. The [README](../README.md) and [INSTALL.md](INSTALL.md) link here rather than repeat them, and the product docs at [docs.tracebloc.io](https://docs.tracebloc.io) carry a copy that is checked against this page. Every figure, path and host below is read back from the installer's own code by a test, so the page cannot quietly disagree with what the installer enforces.
+This page is the one place these prerequisites are written down. The [README](../README.md) and [INSTALL.md](INSTALL.md) link here rather than repeat them, and the product docs at [docs.tracebloc.io](https://docs.tracebloc.io) carry a copy that is checked against this page. Every figure, path and host in the Linux, macOS and Windows blocks below is read back from the installer's own code by a test, so those blocks cannot quietly disagree with what the installer enforces. [The Mac's GPU](#the-macs-gpu) states the rules of the tracebloc runner, which the tracebloc CLI enforces.
 
-A Mac with Apple's container runtime has its own section, [macOS](#macos), and Windows has its own, [Windows](#windows). A Mac on k3d is covered by the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) until its own runtime changes. At that point it moves here too.
+A Mac has its own section, [macOS](#macos), and Windows has its own, [Windows](#windows).
 
 ## Linux
 
 <!-- prerequisites:linux:start -->
-On a new Linux machine the installer sets up **native k3s**: Kubernetes runs on the machine itself as a system service, with no Docker and no k3d. A new machine is one outside WSL with no tracebloc install, no k3d, and no k3d cluster in Docker. Every other Linux machine keeps k3d, and when it does, the installer says why in one line. Inside WSL the installer runs only in tracebloc's own distro, which the Windows installer sets up: in any other distro it stops and says so.
+On Linux the installer sets up **native k3s**: Kubernetes runs on the machine itself as a system service, with no Docker and no k3d. Inside WSL the installer runs only in tracebloc's own distro, which the Windows installer sets up: in any other distro it stops and says so.
 
 | | What the machine needs |
 |---|---|
@@ -44,9 +44,9 @@ export TRACEBLOC_SUBSTRATE=k3s TB_PREPARE_USER=<user> && curl -fsSL https://trac
 
 This sets up k3s and adds you to the `tracebloc` group. Log out and back in, then run the installer with no `sudo`. To list the commands it would run as root, without running any, add `--print` after `prepare-host`.
 
-**Keeping k3d.** To install on k3d instead, set `TRACEBLOC_SUBSTRATE=k3d`; the installer then sets up Docker as well. A machine that already runs tracebloc on k3d stays on k3d through every upgrade.
+**A machine that runs tracebloc on k3d.** The installer no longer sets up k3d on Linux outside WSL, and it refuses `TRACEBLOC_SUBSTRATE=k3d` there. Until you move it, a machine already on k3d keeps running as it is.
 
-**Moving a k3d machine to native k3s.** Re-run the installer with `TRACEBLOC_SUBSTRATE=k3s`. This is a reinstall:
+**Moving a k3d machine to native k3s.** Re-run the installer. This is a reinstall:
 
 - the machine's secure environment and its data are deleted;
 - its datasets must be ingested again;
@@ -72,7 +72,7 @@ Once it is installed, the secure environment also reaches the hosts in [INSTALL.
 ## macOS
 
 <!-- prerequisites:macos:start -->
-On a new Mac with Apple silicon and macOS 26 or later, the installer sets up **k3s in Apple's `container` runtime**. Kubernetes runs in a small Linux VM that Apple's runtime starts from your own user folder, with no Docker, no k3d and no administrator rights. A new Mac is one with no tracebloc install, no k3d, and no k3d cluster in Docker; a Docker that is installed but not running counts as none, since every k3d install leaves k3d itself behind. Every other Mac keeps k3d, which the [local deployment guide](https://docs.tracebloc.io/environment-setup/deploy-local) covers, and the installer says why in one line. To keep k3d on a new Mac, set `TRACEBLOC_SUBSTRATE=k3d`.
+On a Mac with Apple silicon and macOS 26 or later, the installer sets up **k3s in Apple's `container` runtime**. Kubernetes runs in a small Linux VM that Apple's runtime starts from your own user folder, with no Docker, no k3d and no administrator rights. It is the one runtime the installer sets up on a Mac: any other `TRACEBLOC_SUBSTRATE` stops it before it changes anything.
 
 | | What the Mac needs |
 |---|---|
@@ -97,6 +97,8 @@ The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc 
 
 **The one prompt.** When the node first starts, macOS asks whether `container-runtime-linux` may find devices on your local network. It is part of Apple's runtime, and it makes the cluster's API reachable from this Mac only. Click Allow. The installer waits up to 2 minutes for your answer. Without it, the installer stops and says where to allow it: System Settings › Privacy & Security › Local Network.
 
+**A Mac that runs tracebloc on k3d.** The installer never sets up the node beside a live k3d cluster. Moving the Mac is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc. Re-run the installer: it offboards the old environment only after you type its name when asked, or set `TRACEBLOC_REINSTALL_CONSENT` to it. Until the Mac moves, neither the installer nor `tracebloc upgrade` updates its secure environment. A k3d cluster that is not tracebloc's stops the installer, which never removes it.
+
 **Hosts.** The installer checks each of these before it starts. The first five rows are always needed. The rest are needed only until Apple's runtime or Helm is installed.
 
 | Host | Why |
@@ -111,6 +113,34 @@ The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc 
 <!-- prerequisites:macos:end -->
 
 Once it is installed, the secure environment also reaches the hosts in [INSTALL.md § Network requirements](INSTALL.md#network-requirements-egress-allowlist).
+
+### The Mac's GPU
+
+<!-- Maintainers: these figures are the tracebloc runner's, in the CLI's code, and no test reads them back here. The 8 GB kept for macOS, the 8 GB side-by-side line and the half-the-memory cap are in internal/runner/admission; the 7 days, the feed and the 7-day hold are in internal/runner/macos; the GPU test is internal/runner/gputest; the reason codes are internal/runner/node.go; the flags are internal/cli/resources_applegpu.go. The engine's sizes are the published bundle's (ghcr.io/tracebloc/engine-macos-arm64: its layer, and its disk-bytes annotation), measured 2026-10-20. The login item's label is TB_MAC_CT_RUNNER_LABEL in scripts/lib/mac-container.sh. Re-read them when any of those change. -->
+
+A Mac that meets what this section asks for also trains on its GPU. The tracebloc runner, part of the tracebloc CLI, runs each GPU training as a process on the Mac rather than in tracebloc's VM, inside a sandbox of its own ([SECURITY.md § The runner](SECURITY.md#the-runner-gpu-training-on-the-mac)). A second login item, `io.tracebloc.runner`, keeps the runner going beside `io.tracebloc.node`. A training the GPU cannot take trains on the CPU instead, so a Mac without its GPU still takes every training.
+
+| | What the GPU needs |
+|---|---|
+| macOS | The current update of the Mac's macOS version. Once Apple has posted a newer update of the same version for 7 days, the Mac trains on the CPU until the update is installed. A newer major version never counts against it, and a beta of the next major version gets no GPU. |
+| Memory | 16 GB or more. A GPU training may use at most half the Mac's memory, GPU memory included, and always leaves tracebloc's VM and 8 GB for macOS and you: 12 GB on a 36 GB Mac. Where a GPU training beside a CPU training would get less than 8 GB, as on a 16 or 24 GB Mac, the Mac trains one training at a time, CPU or GPU. On an 8 GB Mac no GPU training fits, and the GPU stays off. |
+| The GPU test | When the runner starts, and each time the GPU is turned on, it compiles and runs a small Metal program on the GPU, and takes GPU trainings only when the program gives the right answer. It refuses a virtual GPU, so a macOS that runs in a virtual machine trains on the CPU. |
+| Network | `gdmf.apple.com`, Apple's public list of macOS releases, and `ghcr.io`, for the GPU engine: about 460 MB to download and about 1.7 GB on disk. When the list cannot be read, the last answer holds for 7 days; after that the GPU stays off until the list can be read again. |
+
+`tracebloc resources set --gpus 0` turns the GPU off. `--gpu-jobs` sets how many GPU trainings may share it at once (one by default), and they split the memory a GPU training may use. `--gpu-memory` lowers what each GPU training may use; it never raises it.
+
+**Why a Mac trains on its CPU.** When the GPU takes no trainings, the runner names one reason. `tracebloc resources` shows it, and the dashboard says it in words.
+
+| Reason | What it means | What to do |
+|---|---|---|
+| `gpu-off` | The GPU is turned off. | `tracebloc resources set --gpus 1` |
+| `gpu-test-failed` | The GPU test failed, or macOS runs in a virtual machine. | Turn the GPU off and on again to repeat the test. |
+| `macos-update-pending` | A newer update of this macOS has been out for 7 days. | Install it: System Settings › General › Software Update. |
+| `macos-currency-unknown` | The runner has not been able to read Apple's list of releases for 7 days, or the list has no release of this macOS for this Mac, as with a beta. | Let the Mac reach `gdmf.apple.com`, or run a released macOS. |
+| `memory` | No GPU training fits beside tracebloc's VM and the 8 GB macOS keeps. A 16 or 24 GB Mac also says this until the runner has measured the VM. | None on a Mac this size. |
+| `no-bundle` | The GPU engine for this release has not been downloaded and verified yet. | Keep the Mac online. |
+| `gpu-unhealthy` | A GPU training did not stop when it was ended. | Restart the Mac. |
+| `storage` | This install keeps training data where the GPU cannot reach it. | Reinstall tracebloc. |
 
 ## Windows
 
@@ -148,7 +178,7 @@ The installer installs no Docker Desktop, no winget packages and no k3d. `traceb
 
 **After a restart.** The secure environment runs while you are signed in. After Windows restarts, it starts again when you sign in.
 
-**A machine that runs tracebloc on k3d.** This installer no longer sets up tracebloc on Docker Desktop with k3d, nor moves a machine off it. On such a machine it stops before WSL is touched, names the secure environment it found, and changes nothing on this machine. To move the machine, run the tracebloc v1.12.13 installer once with `TRACEBLOC_SUBSTRATE` set to `k3s`: it deletes the old secure environment with your consent and sets up the distro, and this installer runs as usual after it. Moving is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
+**A machine that runs tracebloc on k3d.** This installer no longer sets up tracebloc on Docker Desktop with k3d, nor moves a machine off it. On such a machine it stops before WSL is touched, names the secure environment it found, and changes nothing on this machine. To move the machine, run the tracebloc v1.12.13 installer once with `TRACEBLOC_SUBSTRATE` set to `k3s`: it deletes the old secure environment with your consent and sets up the distro. Then delete `%USERPROFILE%\.tracebloc\install-state.json` and the `k3d-tracebloc` entries from your kubeconfig if they are still there, and re-run this installer. Moving is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
 
 **A proxy.** Set `HTTPS_PROXY`, and `HTTP_PROXY` and `NO_PROXY` if your network needs them, in Windows' environment before the install. The installer stops before it sets up the distro if a proxy variable holds a value the cluster could not use. Windows' own downloads use `HTTPS_PROXY`. The installer hands these variables into the distro, and k3s gets them there.
 

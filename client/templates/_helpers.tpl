@@ -365,9 +365,8 @@ client-pvc
 
 {{/*
   hostPath base for the mysql and logs PVs: <root>/<release>/{mysql,logs}. The
-  historical /tracebloc by default, which on k3d is the node's bind mount of
-  HOST_DATA_DIR, so every existing release renders byte-identically. On native
-  k3s the node IS the host and there is no bind mount, so the installer sets it
+  historical /tracebloc by default, so a release that sets no root renders
+  byte-identically. On native k3s the node IS the host, so the installer sets it
   to HOST_DATA_DIR itself (client-dev#1782). It is also what an unset
   datasetPath falls back to, and what tracebloc.resourceMonitorDatasetPath
   compares datasetPath against: the dataset tree moved only if it left the root.
@@ -391,7 +390,7 @@ client-pvc
   (dict "root" $ "claim" "data|logs|resume|mysql"); the claim's word is also its
   folder's name.
     hostPath.enabled  every claim: data on tracebloc.clientDataHostPath, the rest
-                      on <hostPath.root>/<release>/<claim> (bare metal, k3d,
+                      on <hostPath.root>/<release>/<claim> (bare metal and
                       native k3s), as before.
     jobData.path      data, logs and resume on <jobData.path>/<release>/<claim>
                       (the macOS node); mysql stays on the storage class.
@@ -869,7 +868,7 @@ true
   control-plane images (jobs-manager, pods-monitor, requests-proxy,
   resource-monitor). ONE definition so the four call sites cannot disagree.
 
-  #569 set out to make these pods survive an offline Docker/WSL restart:
+  #569 set out to make these pods survive a restart while offline:
   `Always` forces a registry round-trip on every (re)start, so a restart without
   the registry lands in ImagePullBackOff even with the image cached in
   containerd. The fix is IfNotPresent.
@@ -2127,7 +2126,7 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
        bakedRootRotationOn alone left reparent baked-on when an operator explicitly
        set rotateMysqlRoot=false on an already-rotated edge (Secret still holds
        MYSQL_ROOT_PASSWORD), and reparent then hard-failed the render with no
-       password to derive -- caught by the k3d auto-upgrade e2e's rotation-off
+       password to derive -- caught by the fleet auto-upgrade e2e's rotation-off
        restore. Following the resolved rotate value keeps them in lockstep in every
        case: fresh->on, blind/un-rotated->off, and explicit rotate-off->off. */ -}}
 {{- if and (get $byEnv $env) (include "tracebloc.rotateMysqlRoot" .) }}true{{ end -}}

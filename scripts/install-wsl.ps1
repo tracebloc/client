@@ -2245,8 +2245,9 @@ function Invoke-BoundedProcess {
 #  The credential is never on wsl.exe's command line, which other processes can
 #  read, and never in a line this script prints.
 #
-#  Invoke-WslInstall checks the preset pair before anything is written, so half a
-#  pair or a value with a line break stops it before the import (client-dev#2321).
+#  Invoke-WslInstall settles the preset pair before anything is written: a client ID
+#  with no password gets it asked for at a console (Read-HostPresetPassword), and
+#  half a pair or a value with a line break stops it before the import (client-dev#2321).
 #  It runs Invoke-WslCore once the import and the logon task (sections 2 and 3) have
 #  the distro running.
 #  The cluster run hands the account steps what its stop-and-check gate found
@@ -3191,16 +3192,54 @@ function Get-HostClientCredential {
   }
 }
 
+# provision.sh's _provision_prompt_preset_password, in its words (a Pester case reads
+# them from it): a client ID with no password asks for it, hidden, at a console that
+# can answer. The answer is kept here, never in $env:, so no child process inherits it.
+$script:HostPresetPassword = $null
+function Read-HostPresetPassword {
+  $id = "$env:TRACEBLOC_CLIENT_ID"
+  if (-not $id -or "$env:TRACEBLOC_CLIENT_PASSWORD" -or -not (Test-BootstrapCanPrompt)) { return }
+  Info "Installing the client with ID $id."
+  Hint "Enter the client password shown when it was created (typing is hidden)."
+  for ($try = 1; $try -le 3; $try++) {
+    $secret = $null
+    try { $secret = Read-Host '  Client password' -AsSecureString } catch { $secret = $null }
+    # No answer at all: asking again won't help.
+    if ($null -eq $secret) { break }
+    # NetworkCredential reads a SecureString on every platform; Marshal's PtrToStringAuto
+    # keeps one character off Windows. Cleaned as _strip_paste_garbage cleans it, untrimmed.
+    $typed = ConvertTo-SanitizedInput -Value ([System.Net.NetworkCredential]::new('', $secret).Password)
+    $secret.Dispose()
+    if (-not $typed) {
+      Warn "The client password cannot be empty."
+      continue
+    }
+    $script:HostPresetPassword = $typed
+    return
+  }
+  throw (Format-PresetPasswordRefusal -ClientId $id)
+}
+
+# provision.sh's refusal of a client ID with no password it could take.
+function Format-PresetPasswordRefusal {
+  param([string]$ClientId)
+  return "No valid password for client ID $ClientId. Copy it from the page where the client was created, or set TRACEBLOC_CLIENT_PASSWORD, then re-run."
+}
+
 # The credentials the operator supplied (provision.sh's preset: TRACEBLOC_CLIENT_ID
-# and TRACEBLOC_CLIENT_PASSWORD, both set), as the bytes the client run reads on its
-# stdin: one KEY=value line each, LF-ended, UTF-8 with no BOM, values as given.
-# $null when neither is set. Half a pair is refused, as is a value with a line
-# break, which would end its line early; neither refusal repeats the value.
+# and TRACEBLOC_CLIENT_PASSWORD, both set, the password possibly the one asked for by
+# Read-HostPresetPassword), as the bytes the client run reads on its stdin: one
+# KEY=value line each, LF-ended, UTF-8 with no BOM, values as given. $null when
+# neither is set. Half a pair is refused, as is a value with a line break, which
+# would end its line early; neither refusal repeats the password.
 function Get-HostPresetCredential {
-  $pair = [ordered]@{ TRACEBLOC_CLIENT_ID = "$env:TRACEBLOC_CLIENT_ID"; TRACEBLOC_CLIENT_PASSWORD = "$env:TRACEBLOC_CLIENT_PASSWORD" }
+  $password = "$env:TRACEBLOC_CLIENT_PASSWORD"
+  if (-not $password -and $env:TRACEBLOC_CLIENT_ID) { $password = "$script:HostPresetPassword" }
+  $pair = [ordered]@{ TRACEBLOC_CLIENT_ID = "$env:TRACEBLOC_CLIENT_ID"; TRACEBLOC_CLIENT_PASSWORD = $password }
   $set = @($pair.Keys | Where-Object { $pair[$_] })
   if ($set.Count -eq 0) { return $null }
   if ($set.Count -eq 1) {
+    if ($set[0] -eq 'TRACEBLOC_CLIENT_ID') { throw (Format-PresetPasswordRefusal -ClientId $pair.TRACEBLOC_CLIENT_ID) }
     $unset = @($pair.Keys | Where-Object { -not $pair[$_] })[0]
     throw "$($set[0]) is set but $unset is not. Set both to install with your client's credentials, or neither to sign in in the browser."
   }
@@ -3425,9 +3464,11 @@ function Read-HostInstallRecord {
 #     data folder. Only that core wrote it; one that a custom
 #     TRACEBLOC_HOST_DATA_DIR put elsewhere is not looked for;
 #   - the context that install wrote into the user's kubeconfig: every file of
-#     KUBECONFIG when it is set, else %USERPROFILE%\.kube\config. A plain match on
-#     the context's name, the mark the tracebloc CLI's delete trusts too. That file
-#     is the user's, not ours, so one that cannot be read is no mark.
+#     KUBECONFIG when it is set, else %USERPROFILE%\.kube\config. A name key whose
+#     whole value is the context's name, in any spelling kubectl reads (block or flow
+#     YAML, JSON, a quoted key, a trailing comment), and not on a comment line: the mark
+#     the tracebloc CLI's delete trusts too. That file is the user's, not ours, so one that cannot be
+#     read is no mark.
 # None of them: nothing is left to keep, and the install goes on.
 # Each retired substrate, with the name a customer knew its install by and the
 # context it wrote (the substrate, then common.sh's default cluster name, as
@@ -3449,8 +3490,12 @@ $RetiredMoveRelease = 'v1.12.13'
 
 # Refuses, by name, a machine on the retired Windows install (above).
 function Assert-NoRetiredInstall {
-  # The way out, last in each message, so its command is the line's end.
-  $move = 'To move it, run the tracebloc ' + $RetiredMoveRelease + ' installer once: it deletes that secure environment with your consent (tracebloc delete --for-reinstall) and sets up the tracebloc WSL distro, and this installer runs as usual after it. In PowerShell: ' +
+  # The way out, last in each message, so its command is the line's end. That release
+  # deletes only a secure environment it finds running, so where it finds none the
+  # state file and the context stay: the way out names both to delete.
+  $state = Join-Path $env:USERPROFILE $RetiredCoreStateRelPath
+  $contexts = @($RetiredInstalls.Values | ForEach-Object { $_.Context }) -join ' and '
+  $move = 'To move it, run the tracebloc ' + $RetiredMoveRelease + ' installer once: it deletes that secure environment with your consent (tracebloc delete --for-reinstall) and sets up the tracebloc WSL distro. Then delete ' + $state + ' and the ' + $contexts + ' entries from your kubeconfig if they are still there, and re-run this installer. In PowerShell: ' +
     '$env:TRACEBLOC_SUBSTRATE = ''' + $CoreSubstrate + '''; irm https://github.com/tracebloc/client/releases/download/' + $RetiredMoveRelease + '/install.ps1 | iex'
   $record = Get-HostRecordPath
   if (Test-Path -LiteralPath $record) {
@@ -3464,7 +3509,6 @@ function Assert-NoRetiredInstall {
       throw "This machine has a secure environment on $($RetiredInstalls[$sub].Name) (its install record $record says so), and this installer no longer sets one up or moves one. Nothing was changed on this machine. $move"
     }
   }
-  $state = Join-Path $env:USERPROFILE $RetiredCoreStateRelPath
   if (Test-Path -LiteralPath $state) {
     throw "This machine has a secure environment on $RetiredInstallNames ($state, which only its installer wrote, is here), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete $state and re-run. $move"
   }
@@ -3474,7 +3518,7 @@ function Assert-NoRetiredInstall {
     try { $text = [IO.File]::ReadAllText($kc) } catch { $text = $null }
     if (-not $text) { continue }
     foreach ($r in $RetiredInstalls.Values) {
-      $named = '(?m)^[ \t]*(-[ \t]+)?"?name"?[ \t]*:[ \t]*["'']?' + [regex]::Escape($r.Context) + '["'']?[ \t]*,?[ \t]*\r?$'
+      $named = '(?m)(?<![\w.@-])(?<!^[ \t]*#[^\r\n]*)["'']?name["'']?[ \t]*:[ \t]*["'']?' + [regex]::Escape($r.Context) + '["'']?(?=[ \t]*(?:[,}\]\r\n]|$)|[ \t]+#)'
       if ($text -match $named) {
         throw "This machine has a secure environment on $($r.Name) (the kubeconfig $kc has its context, $($r.Context)), and this installer no longer sets one up or moves one. Nothing was changed on this machine. If that secure environment is already gone, delete the $($r.Context) entries from $kc and re-run. $move"
       }
@@ -3653,6 +3697,9 @@ function Invoke-WslInstall {
     throw "This installer is running as the Windows SYSTEM account, which WSL does not support. tracebloc runs in the signed-in user's own WSL distro, so run the install command as that user. A deployment tool (Intune, Configuration Manager) has to run it in the user's context, not as SYSTEM."
   }
   Confirm-CoreDir -CoreDir $CoreDir
+  # A client ID with no password: its password is asked for at this console, before
+  # anything is written (section 5).
+  Read-HostPresetPassword
   # The operator's preset pair (section 5): half a pair, or a value with a line
   # break, is refused before anything is written.
   Assert-HostPresetCredential

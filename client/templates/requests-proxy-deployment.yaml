@@ -51,7 +51,7 @@ spec:
           # tracebloc.controlPlanePullPolicy; it stays Always on an edge the
           # reconcile cannot reach, or that edge could never update at all).
           # `Always` re-pulled on every restart even when the image was already
-          # cached, so an offline Docker/WSL restart landed in ImagePullBackOff.
+          # cached, so a restart while offline landed in ImagePullBackOff.
           #
           # This Deployment runs the SAME tracebloc/jobs-manager image (from the
           # tracebloc.tbRegistry registry) as

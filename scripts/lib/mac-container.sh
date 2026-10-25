@@ -727,7 +727,7 @@ exec /bin/k3s server'
 # _mac_ct_refuse_host -- refuse, each by name, a host or a setting the macOS node does
 # not serve, before anything is written. _native_k3s_refuse_host, the one declaration of
 # where native k3s runs, calls it for a Mac (2.1 part 6), so it runs where Linux's
-# refusals run, including before a k3d offboard (reinstall.sh): it stays read-only and
+# refusals run, including before the D10 offboard (reinstall.sh): it stays read-only and
 # reads nothing step a sets. The darwin_k3s measurement (2.1 part 5b) calls it too.
 #   - The macOS floor (refuse_unsupported_mac, common.sh, on its one declaration
 #     tb_mac_floor_verdict): Apple silicon, since Apple's container runtime is
@@ -1003,10 +1003,9 @@ _mac_ct_node_config() {
 }
 
 # _mac_ct_node_size -- "<cpus> <memory>" for the node.
-#   Memory: the installer's one macOS VM rule, preflight.sh's _macos_vm_mem_gb, which
-#           sizes Colima and Docker Desktop too, on the Mac's RAM as preflight reads it
-#           (_pf_host_mem_gb). Asked, never restated: one Mac gets one VM size whichever
-#           runtime holds the node. Lukas decided this on 2026-10-11
+#   Memory: the installer's one macOS VM rule, preflight.sh's _macos_vm_mem_gb, on the
+#           Mac's RAM as preflight reads it (_pf_host_mem_gb). Asked, never restated:
+#           preflight grades the Mac against the same size. Lukas decided this on 2026-10-11
 #           (tracebloc/backend#4827), departing from RFC-0175's proposal, a quarter of
 #           the RAM between 4 and 16 GB.
 #   CPUs:   the Mac's cores less the VM's own (TB_MAC_CT_VM_OWN_CPUS), at least 1, so
@@ -1429,7 +1428,7 @@ _mac_ct_ensure_node() {
   cidrs="$(_mac_ct_node_cidrs "$cfgfile")" || exit 1
   node="$(_native_k3s_node_name "$cfgfile")" || exit 1
   cfg="$(_mac_ct_node_config "$node" "$cidrs")" || error "Apple container: could not render the node's k3s config (above)."
-  # The node is k3s whatever this run resolved: never k3d's Docker Desktop reservation.
+  # The node is k3s whatever this run resolved, so it gets darwin_k3s's reservation.
   kubelet="$(TRACEBLOC_SUBSTRATE_RESOLVED=k3s _render_kubelet_config)" || error "Apple container: could not render the node's kubelet drop-in."
   if [[ -e "${dir}/run-args" ]]; then
     have="$(cat "${dir}/run-args")" || error "Apple container: ${dir}/run-args cannot be read, so this run cannot tell how the node was created."
@@ -1625,9 +1624,7 @@ _mac_ct_merge_kubeconfig() {
 #      never runs it (#1615 open decision 4). ProcessType Background.
 #  The plist is rewritten and the agent reloaded only when its bytes change: that is how
 #  a CLI that moved (an upgrade between /usr/local/bin and ~/.local/bin) is followed.
-#  On this path it replaces io.tracebloc.runtime (setup-macos.sh): step b on the macOS
-#  node installs no Docker, so nothing writes that one, and step c loads this one
-#  (_mac_ct_create_cluster).
+#  It is a Mac's one login item, loaded by step c (_mac_ct_create_cluster).
 TB_MAC_CT_AGENT_LABEL="io.tracebloc.node"
 TB_MAC_CT_AGENT_INTERVAL=60
 
@@ -2034,13 +2031,12 @@ _mac_ct_ensure_runner() {
   log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded and runs ${bin} runner."
 }
 
-# ── Part 6: reachable behind TRACEBLOC_SUBSTRATE=k3s on a Mac ───────────────
+# ── Part 6: every Mac's install ─────────────────────────────────────────────
 #  _native_k3s_refuse_host (k3s.sh), the one declaration of where native k3s runs, lets
-#  a Mac through to _mac_ct_refuse_host. Step b's install_macos routes native k3s to
-#  _mac_ct_install_macos (setup-macos.sh), and step c's _native_k3s_create_cluster routes
-#  a Mac to _mac_ct_create_cluster (k3s.sh). The default stays k3d on every OS: only
-#  TRACEBLOC_SUBSTRATE=k3s, or a re-run of a Mac whose install record says k3s
-#  (tb_substrate_resolve), comes here.
+#  a Mac through to _mac_ct_refuse_host. Step b's install_macos (setup-macos.sh) is
+#  _mac_ct_install_macos, and step c's _native_k3s_create_cluster routes a Mac to
+#  _mac_ct_create_cluster (k3s.sh). Every run on a Mac comes here: a Mac has one
+#  substrate, the one not retired there (tb_substrate_resolve, slim client 4.1).
 
 # _mac_ct_kubectl_version -- the kubectl the macOS node is driven with: the pinned k3s
 # version's Kubernetes release (v1.36.5-k3s1 -> v1.36.5), so client and node never skew.
@@ -2055,13 +2051,12 @@ _mac_ct_kubectl_version() {
 
 # _mac_ct_install_macos -- step b on the macOS node (RFC-0175 D6). Nothing here needs an
 # administrator: the runtime unpacks into the user's own folder and kubectl and helm go
-# to ~/.local/bin, so the run is Tier 0. It installs no Homebrew, Docker, colima or k3d,
-# and no io.tracebloc.runtime. kubectl is the node's release (_mac_ct_kubectl_version),
+# to ~/.local/bin, so the run is Tier 0. kubectl is the node's release (_mac_ct_kubectl_version),
 # helm HELM_VERSION as on Linux. Then the runtime is unpacked and checked, and its system
 # started, so step c has only the node to run. It refuses nothing itself: a Mac the node
 # does not serve never gets here, because main()'s refuse_k3s_beside_live_k3d
-# (reinstall.sh) runs _native_k3s_refuse_host before step a on every native k3s request,
-# k3d or not. reinstall.bats' #1913 case holds that order (client-dev#1913).
+# (reinstall.sh) runs _native_k3s_refuse_host before step a on every run on a Mac.
+# reinstall.bats' #1913 case holds that order (client-dev#1913).
 _mac_ct_install_macos() {
   local kver saved_umask
   # shellcheck disable=SC2034  # consumed cross-file (setup-linux.sh's tools target, diagnose.sh)
@@ -2079,7 +2074,7 @@ _mac_ct_install_macos() {
   install_helm
   umask "$saved_umask"
   _persist_tools_on_path
-  log "step b: macOS node: kubectl ${kver} and helm ready (no Homebrew, no Docker, no k3d)"
+  log "step b: macOS node: kubectl ${kver} and helm ready"
   _mac_ct_ensure_runtime
   _mac_ct_start_system
 }

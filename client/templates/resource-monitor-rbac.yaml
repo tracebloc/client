@@ -82,7 +82,7 @@ rules:
     claim's bound PV to find which node directory holds the datasets, and
     reports the free space of THAT filesystem as `storage_free_gb` -- the
     room an ingest can actually use, where the Storage pair above measures
-    the node's whole disk (on Docker Desktop, the VM's virtual disk).
+    the node's whole disk (in a VM, the VM's virtual disk).
 
     The claim is pinned by NAME: `get` on the one data PVC, not every claim in
     the cluster. A PV's name is the provisioner's (`pvc-<uid>`), so it cannot

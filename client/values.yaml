@@ -31,7 +31,7 @@ env: {
   # Optional: explicit resource requests/limits for spawned training jobs.
   # UNSET (the default): jobs-manager uses its built-in "cpu=1,memory=2Gi"
   # literal — the contract floor since backend#2254 (was "cpu=2,memory=8Gi",
-  # which exceeded a default Docker Desktop VM and left a fresh install
+  # which exceeded a small machine's memory and left a fresh install
   # unschedulable). SET: pins the envelope to exactly what you write here.
   #
   # This comment used to say that leaving the pair unset made jobs-manager size
@@ -84,10 +84,10 @@ env: {
   # READ THIS BEFORE TURNING IT ON (backend#2167). A ~75% Guaranteed envelope
   # is EXCLUSIVE: any Guaranteed fraction >= 50% caps the machine at ONE
   # concurrent training job, whatever the machine's size. And on a multi-node
-  # k3d cluster whose node containers are uncapped, every node reports the
-  # whole Docker VM (allocatable == capacity, no kube/system-reserved), so the
-  # min-across-nodes in the derivation does not save you and the OOM killer
-  # takes victims -- a k3s node container included. Turn this on to measure or
+  # cluster whose nodes are uncapped containers on one machine, every node
+  # reports the whole machine (allocatable == capacity, no kube/system-reserved),
+  # so the min-across-nodes in the derivation does not save you and the OOM
+  # killer takes victims -- a node container included. Turn this on to measure or
   # to opt one edge in, not as a default. backend#2418 (CPU burstable, memory
   # Guaranteed) and backend#2419 (a job that does not fit queues) are what make
   # the derived envelope safe to default; until they land, this is opt-in.
@@ -122,9 +122,9 @@ env: {
   # RUNTIME_CLASS_NAME: ""
   # Optional: CDI device selector threaded into GPU training pods as
   # NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set this ONLY where the NVIDIA k8s
-  # device plugin can't run and the GPU is injected via CDI instead — notably Docker
-  # Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED (tracebloc/client#616); no
-  # installer sets it today (the retired PowerShell installer did). Leave EMPTY on a
+  # device plugin can't run and the GPU is injected via CDI instead — a node where
+  # NVML returns ERROR_NOT_SUPPORTED (tracebloc/client#616). No installer sets it
+  # (the retired PowerShell installer did). Leave EMPTY on a
   # normal device-plugin (Linux) node: there the plugin owns NVIDIA_VISIBLE_DEVICES and sets
   # concrete GPU UUIDs, so forcing a CDI selector would break device resolution.
   # GPU_VISIBLE_DEVICES: "nvidia.com/gpu=all"
@@ -132,7 +132,7 @@ env: {
   # jobs-manager's GPU->CPU pending-job fallback (client-runtime#92).
   #   "true"  -> a GPU pod stuck Pending past the scheduling-overdue interval
   #              is downgraded to a CPU job. Correct on a fixed single-host
-  #              cluster (installer k3d / bare-metal) where GPU presence is
+  #              cluster (installer k3s / bare-metal) where GPU presence is
   #              known at install time and no node will autoscale in.
   #   "false" -> a Pending GPU pod is left for the autoscaler/backend. Correct
   #              for EKS/AKS/OpenShift, where a GPU node may still be
@@ -335,9 +335,9 @@ gpu:
       # RuntimeClass for the plugin pod (client#835). On Linux the node runs the
       # NVIDIA runtime in CDI mode, and the plugin can only enumerate GPUs (init
       # NVML) if its own pod runs under that runtime — so the Linux installer sets
-      # this to "nvidia" whenever the GPU is wired: on k3d the RuntimeClass baked into
-      # the k3s-cuda node image, on native k3s the one k3s creates for the host's
-      # NVIDIA toolkit, inside tracebloc's WSL distro too (client-dev#1810 part 3).
+      # this to "nvidia" whenever the GPU is wired: the RuntimeClass k3s creates for
+      # the host's NVIDIA toolkit, inside tracebloc's WSL distro too (client-dev#1810
+      # part 3).
       # Empty = plugin runs under the default runtime (the correct choice for CPU
       # clusters, and for the PowerShell core, which does not run this plugin,
       # until client-dev#2133 retires it).
@@ -411,16 +411,15 @@ hostPath:
   enabled: false
   # Base host path of the local tree: the PVs are <root>/<release>/{mysql,logs},
   # and the dataset PV is <datasetPath>/<release>/data. Directories are created
-  # automatically via hostPath type: DirectoryOrCreate. The default /tracebloc is
-  # the node path k3d bind-mounts HOST_DATA_DIR at (→ ~/.tracebloc). On native
-  # k3s the node is the host, so the installer sets root to HOST_DATA_DIR itself
-  # (client-dev#1782).
+  # automatically via hostPath type: DirectoryOrCreate. The default is
+  # /tracebloc. On native k3s the node is the host, so the installer sets root
+  # to HOST_DATA_DIR itself (client-dev#1782).
   root: /tracebloc
   # Base host path for the DATASET PV ONLY (shared training data). Unset, it is
   # root, so datasets stay on the local tree alongside mysql/logs. The installer
   # sets it when a customer network (NFS) dataset mount is provided via
   # TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works;
-  # backend#743): /tracebloc-data on k3d, the mount itself on native k3s. mysql +
+  # backend#743), to the mount's own path. mysql +
   # logs ALWAYS stay on the local root tree (InnoDB over NFS is unsafe). The
   # chart appends /<release>/data. mysql/logs PV paths are not affected by this key.
   #
@@ -453,10 +452,9 @@ jobData:
 #   true / false   -> explicit override.
 # This is DELIBERATELY separate from env.SINGLE_NODE (which gates the
 # jobs-manager GPU->CPU pending-job fallback and may be true on a FIXED
-# MULTI-NODE cluster). The installer sets singleNode=true for the node-local
-# single-node k3d path (hostPath.enabled=false, local-path CSI,
-# TRACEBLOC_AGENTS=0 -- old name AGENTS still works), where
-# hostPath alone would misclassify it as multi-node.
+# MULTI-NODE cluster). The installer sets singleNode=true for its node-local
+# path (one k3s node, hostPath.enabled=false, k3s's local-path StorageClass),
+# where hostPath alone would misclassify it as multi-node.
 singleNode: null
 
 # -- The local API the tracebloc dashboard reaches on THIS machine.
@@ -467,20 +465,20 @@ singleNode: null
 # it on that port cannot fake one.
 #
 # OFF by default, and it must stay off on a shared cluster: there is no browser
-# on the same machine there. The installer turns it on for a laptop or desktop
-# install, after mapping `hostPort` on 127.0.0.1 to `nodePort` on the k3d load
-# balancer. Nothing else on the host can reach it.
+# on the same machine there. The installer turns it on for an install on a Mac
+# (the macOS node), after publishing `hostPort` on 127.0.0.1 to `nodePort` on the
+# node, whose packet filter lets only this Mac reach it.
 localApi:
   enabled: false
   # The port jobs-manager listens on inside its pod.
   port: 8091
-  # The NodePort the k3d load balancer forwards the host port to.
+  # The NodePort the host port is published to.
   nodePort: 30910
   # The port the browser uses on 127.0.0.1. jobs-manager accepts only requests
   # whose Host header names it, which is what stops DNS rebinding.
   hostPort: 47910
-  # The installer sets this to true: the cluster is the k3d environment it runs
-  # on this one machine. The chart otherwise renders the local API only where
+  # The installer sets this to true: the cluster is its own single node on
+  # this one machine. The chart otherwise renders the local API only where
   # singleNode (or hostPath.enabled with singleNode unset) says single-machine,
   # and some installer releases store neither, so this is how the installer
   # states the one fact it knows without changing singleNode or the PDBs.
@@ -509,7 +507,7 @@ clusterScope: true
 # crash-loop (as this comment claimed): it keeps running and stops sending
 # heartbeats, because the poll loop rebuilds its metrics client every tick and
 # swallows the error. There are no probes to catch it. Platform notes:
-#   k3d / k3s: metrics-server bundled by default (installer keeps it enabled).
+#   k3s:       metrics-server bundled by default (installer keeps it enabled).
 #   AKS:       metrics-server enabled by default.
 #   EKS:       NOT installed by default — `kubectl apply -f \
 #              https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
@@ -757,8 +755,8 @@ sealCheck:
       pullPolicy: IfNotPresent
       # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE (backend#4160). This block was
       # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
-      # with no mirror set, emits a BARE reference, and a bare reference is a Docker
-      # Hub reference. There was no `docker.io` in the chart to grep for, so this
+      # with no mirror set, emits a BARE reference, and a bare reference is a
+      # Docker Hub reference. There was no `docker.io` in the chart to grep for, so this
       # site was invisible to a sweep of these values. It renders through
       # `tracebloc.image` now, which always names the registry.
       #
@@ -1202,7 +1200,7 @@ telemetryCollector:
 # jobsManager, podsMonitor, requestsProxy, resourceMonitor — render
 # `imagePullPolicy: IfNotPresent` wherever an update path exists that does not
 # depend on `Always`. `Always` forced a registry round-trip on every (re)start,
-# so an offline Docker Desktop / WSL2 restart landed in ImagePullBackOff even
+# so a restart while offline landed in ImagePullBackOff even
 # with the image already cached in containerd — the pods came back only once
 # docker.io was reachable again (up to ~6h behind Docker Hub's anonymous
 # pull-rate limit).
@@ -1435,10 +1433,22 @@ images:
   # `digests`. A mirror that declares itself in `digestRegistry` must also hold
   # the parent at that digest (`scripts/list-images.sh` lists it).
   #
+  # `macosBundle` -- the macOS engine bundle the Apple GPU runner on a Mac runs
+  # (RFC-0185, tracebloc-engine#1701): `digest` is the bundle .tar.gz, and
+  # `location` is its signed OCI manifest by digest, on ghcr.io. The resolver
+  # reads the bundle's own float of the same tag (ghcr.io/tracebloc/
+  # engine-macos-arm64, which the engine's promotion moves beside the images) in
+  # the same pass. While that float does not exist it writes no entry; once an
+  # entry exists, a missing float is a refusal, never a silent drop. Where the
+  # map renders, the chart writes ConfigMap tracebloc-apple-gpu-bundle and
+  # jobs-manager's TRACEBLOC_APPLE_GPU_BUNDLE_DIGEST; absent, every Mac job runs
+  # on the CPU. NEVER HAND-TYPE it; the chart refuses it with an empty `digests`.
+  #
   # THE MAP BELOW IS RESOLVER OUTPUT, never a hand edit: scripts/resolve-
   # training-digests.sh --write writes `digests`, `capabilities`,
-  # `digestRegistry` and (when the images agree on one) `parents` together,
-  # from ghcr.io's `:prod` floats. It moves prod edges
+  # `digestRegistry`, `engineCommit`, (when the images agree on one) `parents`
+  # and (when its float exists) `macosBundle` together, from ghcr.io's `:prod`
+  # floats. It moves prod edges
   # from "whatever :prod points at right now" to a fixed engine, so it must be
   # advanced on every engine prod promotion or prod freezes on these bytes --
   # that is the release train's promotion step, which re-runs the same resolver.
@@ -1505,6 +1515,9 @@ images:
         digest: "sha256:add059220bcac65a45e709e01da84bdee2a2250f3eff6781f87c2833ef532a52"
         platforms:
           - "linux/amd64"
+    macosBundle:
+      digest: "sha256:c069ada7d3bc42d80964fbed012e80a328e2f41dc1159d16c75be24183a0a105"
+      location: "ghcr.io/tracebloc/engine-macos-arm64@sha256:95c1f1f39bb988fd0293056387bb5bd2069dea727d73dee7d2465deda4fa9497"
   # client-runtime#40 / client#125: the ingestor image is spawned by
   # jobs-manager at ingestion-submission time, not as a long-lived pod.
   # jobs-manager resolves ONE effective digest from the keys below and spawns
@@ -2456,8 +2469,8 @@ autoUpgrade:
     pullPolicy: IfNotPresent
     # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE (backend#4160). This block was
     # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
-    # with no mirror set, emits a BARE reference, and a bare reference is a Docker
-    # Hub reference. There was no `docker.io` in the chart to grep for, so this
+    # with no mirror set, emits a BARE reference, and a bare reference is a
+    # Docker Hub reference. There was no `docker.io` in the chart to grep for, so this
     # site was invisible to a sweep of these values. It renders through
     # `tracebloc.image` now, which always names the registry.
     #
@@ -2543,7 +2556,7 @@ autoUpgrade:
 # #569 changed the ACTION from `kubectl rollout restart` to `kubectl set
 # image repo@digest`, and widened the set of workloads it covers. A restart
 # only picks up a new build when the pods run `imagePullPolicy: Always` —
-# and `Always` is precisely what made an offline Docker/WSL restart fail
+# and `Always` is precisely what made a restart while offline fail
 # with ImagePullBackOff on a cached image. The two properties are mutually
 # exclusive unless the image REFERENCE changes on update, so the reference
 # is now what changes; the pods run IfNotPresent (see the images block).
@@ -2754,8 +2767,8 @@ imageRefresh:
     pullPolicy: IfNotPresent
     # THE REGISTRY AND THE PIN, BOTH EXPRESSIBLE (backend#4160). This block was
     # `repository` + `tag` only, rendered as `mirrorPrefix + repo:tag` -- which,
-    # with no mirror set, emits a BARE reference, and a bare reference is a Docker
-    # Hub reference. There was no `docker.io` in the chart to grep for, so this
+    # with no mirror set, emits a BARE reference, and a bare reference is a
+    # Docker Hub reference. There was no `docker.io` in the chart to grep for, so this
     # site was invisible to a sweep of these values. It renders through
     # `tracebloc.image` now, which always names the registry.
     #

@@ -64,7 +64,7 @@ This repo ships the **tracebloc** unified Helm chart — one chart for AKS, EKS,
 
 A single command provisions a Kubernetes cluster, auto-detects and installs GPU drivers (NVIDIA or AMD), deploys the tracebloc client, and installs the [tracebloc CLI](https://github.com/tracebloc/cli) (`tracebloc data ingest`). Use this when you don't already have a cluster — the result is a full client install, not a demo.
 
-**What your machine needs, and what the installer puts on it:** [docs/PREREQUISITES.md](docs/PREREQUISITES.md). On a new Linux machine that cluster is native k3s, without Docker, and on a new Mac with Apple silicon it is k3s in Apple's `container` runtime, without Docker.
+**What your machine needs, and what the installer puts on it:** [docs/PREREQUISITES.md](docs/PREREQUISITES.md). On a new Linux machine that cluster is native k3s, without Docker ([§ Linux](docs/PREREQUISITES.md#linux)). On a Mac with Apple silicon it is k3s in Apple's `container` runtime, without Docker or administrator rights ([§ macOS](docs/PREREQUISITES.md#macos)).
 
 **macOS / Linux**
 
@@ -80,14 +80,7 @@ irm https://tracebloc.io/i.ps1 | iex
 
 The installer pulls helper scripts from this repo at runtime — see [`scripts/install-k8s.sh`](scripts/install-k8s.sh), and on Windows the bootstrap [`scripts/install.ps1`](scripts/install.ps1) and [`scripts/install-wsl.ps1`](scripts/install-wsl.ps1), which runs those same scripts inside a WSL2 Linux distro. Those scripts are pinned to an **immutable release tag** and each is **verified against a cosign-signed manifest** before it runs; the install **fails closed** if verification can't complete (it never silently runs unverified code). See [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for the integrity model and how to verify a release by hand.
 
-**Kubernetes version, and why an existing k3d cluster keeps its old one.** On native k3s (Linux) a re-run replaces a k3s binary that is not the pinned version in place, so nothing below applies there. On k3d, new installs create the cluster on the pinned, validated k3s version (`K8S_VERSION` in `scripts/spec/facts.env`, the single source of truth, which lives in the source repository and is stamped into the installer scripts published here; `install-k8s.sh --help` prints it). **k3s's version is fixed when the cluster is created** and cannot be changed on a running one, so an existing cluster stays on whatever it was born with, even across correctly-pinned re-runs. The installer detects that and prints the version it found alongside the pin, with the recreate command — it warns, it does not refuse, so a re-run on an older cluster keeps working. To actually move onto the pinned version you have to recreate the cluster — and **release the secure environment first**, because it is anchored to the cluster's identity and deleting the cluster first strands it on your dashboard for good:
-
-```bash
-tracebloc delete --keep-data      # releases this secure environment; keeps your local data
-k3d cluster delete tracebloc      # then re-run the installer
-```
-
-(Nothing installed on this machine yet? Then just the `k3d` line.) This is the same two-step the installer itself prints when it detects a drifted cluster. Which data survives depends on the storage mode, selected by `TRACEBLOC_STORAGE_MODE` (the older `TB_STORAGE_MODE` still works): in **hostpath** mode your data stays on the host under `HOST_DATA_DIR` and is rebound to the new cluster; in **node-local** mode (RFC-0003 Option C) the data lives inside the node and is destroyed with it. The installer refuses to continue if it cannot see your data directory from inside the new nodes, so a recreate cannot silently start writing into the node instead of onto your disk.
+**Kubernetes version.** The installer sets up the pinned, validated k3s version (`K8S_VERSION` in `scripts/spec/facts.env`, the single source of truth, which lives in the source repository and is stamped into the installer scripts published here; `install-k8s.sh --help` prints it). On Linux a re-run replaces a k3s binary that is not the pinned version in place. On a Mac it recreates the VM that runs k3s from the pinned image, on the same volume, so its data is kept.
 
 **Reinstalling on a machine that still holds data.** A *new* install (one that creates a fresh cluster) will not silently adopt data left behind by an earlier install. If it finds existing data under `HOST_DATA_DIR` (default `~/.tracebloc`, both the flat and per-release layouts), it stops and asks you to choose **reuse** / **wipe** / **a different directory**. In-place upgrades that keep the existing cluster are unaffected — their data stays by design. For non-interactive runs pass `--reuse-data`, `--wipe-data`, or `--data-dir=<path>` (with no choice and no terminal the install aborts rather than adopting). This is the RFC-0003 offboard-hygiene guard.
 

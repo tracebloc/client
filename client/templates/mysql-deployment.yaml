@@ -323,9 +323,9 @@ spec:
           just comes back empty and the server runs on compiled defaults
           (max_allowed_packet 64M instead of the 256M declared here).
 
-          That is not hypothetical. MEASURED on the CI k3d runner: the host has
+          That is not hypothetical. MEASURED on a CI runner: the host has
           mysql-server installed, so AppArmor carries a `/usr/sbin/mysqld`
-          profile; the k3d node is privileged, so pods inherit no container
+          profile; its node container was privileged, so pods inherit no container
           profile and AppArmor attaches the HOST profile to this container's
           mysqld by executable path (`/proc/1/attr/current` =
           `/usr/sbin/mysqld (enforce)` while a shell beside it is `unconfined`).

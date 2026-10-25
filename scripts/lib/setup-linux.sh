@@ -552,9 +552,8 @@ _set_tools_target() {
   # Tier 0 (a usable runtime, no admin) AND rootless Tier 1 (#1221, possibly no root
   # at all) both install user-space with NO sudo: a `sudo mv → /usr/local/bin` here
   # would abort the rootless install under `set -e` AFTER the daemon is already up,
-  # leaving a half-install on a true no-sudo host (Asad review, #452). This is the
-  # LINUX target-selector; macOS (no Tier/rootless model) sets its own target in
-  # install_macos_cli_tools.
+  # leaving a half-install on a true no-sudo host (Asad review, #452). The macOS
+  # node runs at Tier 0 (_mac_ct_install_macos), so it gets ~/.local/bin here too.
   if [ "${INSTALL_TIER:-}" = "0" ] || _rootless_active; then
     TRACEBLOC_TOOLS_DIR="${HOME}/.local/bin"
     TRACEBLOC_TOOLS_SUDO=""
@@ -1411,6 +1410,17 @@ install_linux() {
     _native_k3s_install_linux
     return 0
   fi
+
+  # The Docker tiers below serve only a substrate the retired map leaves set up where
+  # this run is (tb_substrate_retired_here). The resolver never hands this step a
+  # retired one; a run that reached it anyway, or cannot tell, is refused by name.
+  local retired=0
+  tb_substrate_retired_here "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" || retired=$?
+  case "$retired" in
+    1) ;;
+    0) error "This installer no longer sets up ${TRACEBLOC_SUBSTRATE_RESOLVED} $(_tb_substrate_where). Unset TRACEBLOC_SUBSTRATE and re-run: it sets up native ${TB_SUBSTRATE_FRESH_LINUX} here." ;;
+    *) error "This installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell whether ${TRACEBLOC_SUBSTRATE_RESOLVED} is set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash" ;;
+  esac
 
   _route_install_tier        # RFC 0001: honour the tier + honest fail-fast
 

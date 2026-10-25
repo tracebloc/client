@@ -29,7 +29,7 @@ when the GPU is wired (client-dev#1810 part 3). From v0.19.1 the plugin finds
 WSL by itself (`/dev/dxg`, its default `auto` discovery) and advertises one
 shared device, `all`: RFC-0175 D8's Windows device (W26), measured on v0.20.1 by
 spike S-W. v0.14.5's NVML plugin registered 0 GPUs there and pinned the resource
-at 0 (see docker/k3s-cuda/nvidia-runtimeclass.yaml).
+at 0.
 
 Client v1.10.2 and older ran a PowerShell core on Windows (install-k8s.ps1,
 retired in client-dev#2133) that left this disabled and advertised the GPU
@@ -109,9 +109,9 @@ spec:
       # the GPU (the node's containerd invokes the NVIDIA runtime) and NVML can
       # enumerate GPUs — otherwise the pod runs under the default runtime, sees no
       # device, and registers 0. The Linux installer sets this to "nvidia" only when
-      # the GPU is wired. On k3d the RuntimeClass is baked into the k3s-cuda node
-      # image; on native k3s, k3s creates it when it finds the host's NVIDIA toolkit,
-      # inside tracebloc's WSL distro too (client-dev#1810 part 3). Left unset on
+      # the GPU is wired. k3s creates the RuntimeClass when it finds the host's
+      # NVIDIA toolkit, inside tracebloc's WSL distro too (client-dev#1810 part 3).
+      # Left unset on
       # CPU, and by the PowerShell core, whose path doesn't run this plugin, until
       # client-dev#2133 retires it.
       runtimeClassName: {{ . | quote }}

@@ -61,13 +61,14 @@
 _reinstall_detect() {
   TB_REINSTALL_FOUND="none"; TRACEBLOC_REINSTALL_CLUSTER=""; TB_REINSTALL_OTHERS=""
   TB_REINSTALL_PROBE=""; TB_REINSTALL_HOW=""; TB_REINSTALL_REMEDY=""; _TB_REINSTALL_BLIND_SAID=""
-  local name="" rec_rc=0 has_k3d=0 has_docker=0 rc list n ps what how errf tracebloc=0 blind=0 listed=0
+  local name="" rec_rc=0 rec_k3d=0 has_k3d=0 has_docker=0 rc list n ps what how errf tracebloc=0 blind=0 listed=0
   has k3d && has_k3d=1
   has docker && has_docker=1
   (( has_k3d || has_docker )) || return 0
   _reinstall_adopt_blind && blind=1
 
   name="$(_reinstall_record_cluster)" || rec_rc=$?
+  [[ "$rec_rc" -eq 0 && -n "$name" ]] && rec_k3d=1
 
   if [[ "$rec_rc" -ne 0 && "$rec_rc" -ne 1 ]]; then
     _reinstall_cannot_tell "the install record $(tb_record_path)" \
@@ -130,12 +131,14 @@ _reinstall_detect() {
     fi
     how="$(_reinstall_read_how "$rc" "$errf")"
     [[ "$errf" == /dev/null ]] || rm -f "$errf"
-    # A new Mac's default (common.sh _tb_substrate_fresh, client-dev#1954's ruling)
-    # resolved k3s with no k3d on PATH beside a Docker that did not answer 'docker
-    # info': no cluster to find, so that unanswered read is not "cannot tell", or the
-    # default would refuse itself. Only that source: a k3s requested by name keeps it.
-    if [[ "$what" == "Docker ('docker info')" && "$rc" -ne 0 ]] && (( ! has_k3d )) \
-        && [[ "${TB_SUBSTRATE_SOURCE:-}" == "the default for a new Mac" ]]; then
+    # A Mac's one substrate (common.sh _tb_substrate_fresh_here: k3s on Apple
+    # container since slim client 4.1, client-dev#1948) resolved with no k3d on PATH
+    # beside a Docker that did not answer 'docker info' (client-dev#1954's ruling):
+    # no cluster to find, so that unanswered read is not "cannot tell", or the Mac's
+    # only runtime would refuse itself. Only that source, and never beside a record
+    # that names a k3d cluster: a k3s requested by name keeps it.
+    if [[ "$what" == "Docker ('docker info')" && "$rc" -ne 0 ]] && (( ! has_k3d && ! rec_k3d )) \
+        && [[ "${TB_SUBSTRATE_SOURCE:-}" == "the one substrate on a Mac" ]]; then
       rc=0; ps=""
     fi
     if [[ "$rc" -ne 0 ]] && (( listed )); then
@@ -272,11 +275,26 @@ _reinstall_decision() {
 }
 
 # _reinstall_explain -- what moving this machine means (D10), before a refusal
-# and before an offboard alike.
+# and before an offboard alike. Where the retired map retires k3d
+# (tb_substrate_retired_here) there is no k3d to keep, so the way back is not
+# offered: the last line names where, and what staying on k3d means instead.
 _reinstall_explain() {
   warn "This machine runs tracebloc on k3d (cluster '${TRACEBLOC_REINSTALL_CLUSTER}')."
   hint "Moving it to native k3s is a reinstall: this machine's secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
-  hint "To keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run."
+  if [[ "${OS:-}" == "Darwin" ]]; then
+    hint "This installer no longer sets up or updates k3d on a Mac. Until this Mac moves, neither this installer nor 'tracebloc upgrade' updates its secure environment."
+  elif _reinstall_k3d_retired; then
+    hint "This installer no longer sets up k3d $(_tb_substrate_where). Until you move it, today's environment keeps running as it is."
+  else
+    hint "To keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run."
+  fi
+}
+
+# _reinstall_k3d_retired -- 0 when k3d is retired where this run is
+# (tb_substrate_retired_here, common.sh). The resolver has already refused a run
+# that cannot tell, so anything but 0 offers the way back as before.
+_reinstall_k3d_retired() {
+  declare -F tb_substrate_retired_here >/dev/null 2>&1 && tb_substrate_retired_here k3d
 }
 
 # ── The refusal ──────────────────────────────────────────────────────────────
@@ -315,7 +333,13 @@ refuse_k3s_beside_live_k3d() {
       error "This run cannot tell whether a k3d cluster is live on this machine: ${TB_REINSTALL_PROBE} ${TB_REINSTALL_HOW:-did not answer}, and native k3s is never set up beside a live k3d. ${TB_REINSTALL_REMEDY}" ;;
     other)
       warn "A k3d cluster that is not tracebloc's is on this machine: ${TB_REINSTALL_OTHERS}."
-      hint "This installer never removes it. To keep tracebloc on k3d, unset TRACEBLOC_SUBSTRATE and re-run."
+      if [[ "${OS:-}" == "Darwin" ]]; then
+        hint "This installer never removes it, and on a Mac it no longer sets tracebloc up on k3d, so tracebloc can be installed here only once that cluster is gone."
+      elif _reinstall_k3d_retired; then
+        hint "This installer never removes it, and no longer sets up k3d $(_tb_substrate_where). Remove that cluster yourself, or install tracebloc on another machine."
+      else
+        hint "This installer never removes it. To keep tracebloc on k3d, unset TRACEBLOC_SUBSTRATE and re-run."
+      fi
       error "Native k3s is never set up beside a live k3d." ;;
   esac
   _reinstall_explain

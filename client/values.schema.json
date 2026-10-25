@@ -19,7 +19,7 @@
             "staging",
             "production"
           ],
-          "description": "CANONICAL name (RFC-0076 settings-naming, S3). Environment identifier and Docker image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. Read alias-first against the legacy `CLIENT_ENV` (a non-empty TRACEBLOC_ENV wins; otherwise a non-empty CLIENT_ENV; a blank value on either name is 'unset', same as CLIENT_ENV alone always meant); remove_by 2026-12-31, after which CLIENT_ENV stops being read. Load-bearing in four places (control-plane image tags, images.ingestor.channelTags, serviceDbAccountsByEnv, the prod digest pin), validated in none but tracebloc.clientEnv."
+          "description": "CANONICAL name (RFC-0076 settings-naming, S3). Environment identifier and image tag. Canonical values are `dev`, `stg`, `prod`; the documented aliases `development`/`staging`/`production` are accepted and normalized (matching client-runtime proxy_config.ENV_ALIASES). Empty means 'unset' and resolves to prod. THE LIST IS CLOSED (enum above): anything else is rejected at install/upgrade time rather than passed through as a literal image tag. Read alias-first against the legacy `CLIENT_ENV` (a non-empty TRACEBLOC_ENV wins; otherwise a non-empty CLIENT_ENV; a blank value on either name is 'unset', same as CLIENT_ENV alone always meant); remove_by 2026-12-31, after which CLIENT_ENV stops being read. Load-bearing in four places (control-plane image tags, images.ingestor.channelTags, serviceDbAccountsByEnv, the prod digest pin), validated in none but tracebloc.clientEnv."
         },
         "CLIENT_ENV": {
           "type": "string",
@@ -80,7 +80,7 @@
             "off",
             ""
           ],
-          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and CPU is a request-only share weight with NO limit since backend#2418, so the job pod is Burstable - not Guaranteed QoS, as this description claimed for both dimensions until backend#2872. With the flag OFF (the default) jobs-manager uses its built-in literal on requests AND limits, so a CPU job pod is Guaranteed. THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU: cpu-only + off -> Guaranteed, cpu-only + on -> Burstable, GPU -> BestEffort either way. A GPU job's envelope resolves to nvidia.com/gpu (and ephemeral-storage) only; neither is QoS-relevant, so the container sets no cpu/memory request or limit at all and the flag changes nothing on that cluster (backend#2871). Do not read 'Burstable' as the default, and do not turn this on expecting to escape Burstable on a GPU node. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and the installer writes that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on an uncapped multi-node k3d cluster every node over-reports the whole Docker VM, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
+          "description": "Opt in to the node-derived training-job envelope (backend#664 Utilization Ladder L0): cpu = max(2, floor(allocatable*0.75)), memory = max(8Gi, floor(allocatable*0.75)). WHEN OPTED IN, MEMORY is requests == limits and CPU is a request-only share weight with NO limit since backend#2418, so the job pod is Burstable - not Guaranteed QoS, as this description claimed for both dimensions until backend#2872. With the flag OFF (the default) jobs-manager uses its built-in literal on requests AND limits, so a CPU job pod is Guaranteed. THE CLASS FOLLOWS THE FLAG *AND* WHETHER THE POD REQUESTS A GPU: cpu-only + off -> Guaranteed, cpu-only + on -> Burstable, GPU -> BestEffort either way. A GPU job's envelope resolves to nvidia.com/gpu (and ephemeral-storage) only; neither is QoS-relevant, so the container sets no cpu/memory request or limit at all and the flag changes nothing on that cluster (backend#2871). Do not read 'Burstable' as the default, and do not turn this on expecting to escape Burstable on a GPU node. OFF by default and consulted ONLY when RESOURCE_REQUESTS and RESOURCE_LIMITS are both unset - an explicit envelope always wins, and the installer writes that pair unconditionally, so opting an installer-provisioned edge in means clearing both keys too. Turning it on caps the machine at ONE concurrent training job (any Guaranteed fraction >= 50% does), and on a multi-node cluster whose nodes are uncapped containers on one machine every node over-reports the whole machine, so the derivation's min-across-nodes does not protect you (backend#2167). The vocabulary is CLOSED and lowercase: jobs-manager itself lower-cases and strips, so 'True' would also work at runtime, but pinning lowercase here means a typo ('ture') is rejected at install time instead of silently leaving the flag off - the silent-off failure is precisely why backend#2250 exists. Narrowing the accepted set can never make the runtime do something this schema forbade; do not widen it to 'fix' the asymmetry."
         },
         "TRACEBLOC_DERIVE_JOB_ENVELOPE": {
           "type": "string",
@@ -128,7 +128,7 @@
         },
         "GPU_VISIBLE_DEVICES": {
           "type": "string",
-          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (Docker Desktop / WSL2, where NVML returns ERROR_NOT_SUPPORTED — tracebloc/client#616; no installer sets it today, the retired PowerShell installer did). Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
+          "description": "Optional CDI device selector threaded into GPU training pods as NVIDIA_VISIBLE_DEVICES (client-runtime#291). Set only where the NVIDIA device plugin can't run and the GPU is injected via CDI instead (a node where NVML returns ERROR_NOT_SUPPORTED, tracebloc/client#616). No installer sets it; the retired PowerShell installer did. Leave empty on a normal device-plugin node, which owns NVIDIA_VISIBLE_DEVICES itself."
         },
         "SINGLE_NODE": {
           "type": "string",
@@ -373,7 +373,7 @@
           "type": "string",
           "default": "/tracebloc",
           "pattern": "^/",
-          "description": "Base host path of the local hostPath tree: the mysql and logs PVs are <root>/<release>/{mysql,logs}, and an unset datasetPath is root. Default /tracebloc, the node path k3d bind-mounts HOST_DATA_DIR at; on native k3s the node is the host, so the installer sets it to HOST_DATA_DIR (client-dev#1782). Must be absolute, like datasetPath."
+          "description": "Base host path of the local hostPath tree: the mysql and logs PVs are <root>/<release>/{mysql,logs}, and an unset datasetPath is root. Default /tracebloc. On native k3s the node is the host, so the installer sets it to HOST_DATA_DIR (client-dev#1782). Must be absolute, like datasetPath."
         },
         "datasetPath": {
           "type": [
@@ -381,7 +381,7 @@
             "null"
           ],
           "pattern": "^/",
-          "description": "Base host path for the DATASET (shared-images) PV ONLY. Unset (or null), it is hostPath.root, so datasets stay local alongside mysql/logs; the installer sets it (/tracebloc-data on k3d, the mount itself on native k3s) when a customer network (NFS) dataset mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works; backend#743). mysql + logs PV paths always stay on hostPath.root. The chart appends /<release>/data. Any value other than hostPath.root ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
+          "description": "Base host path for the DATASET (shared-images) PV ONLY. Unset (or null), it is hostPath.root, so datasets stay local alongside mysql/logs; the installer sets it (to the mount's own path) when a customer network (NFS) dataset mount is provided via TRACEBLOC_HOST_DATASET_DIR (old name HOST_DATASET_DIR still works; backend#743). mysql + logs PV paths always stay on hostPath.root. The chart appends /<release>/data. Any value other than hostPath.root ALSO adds a read-only resource-monitor host mount of this path, so the cockpit's Storage meter measures the relocated dataset filesystem alongside the node root rather than only the disk the datasets are not on (backend#3916); the collector de-duplicates by backing device, so a path sharing a disk with resourceMonitor.hostStoragePath is counted once. Must be absolute: a relative path renders PV and DaemonSet hostPaths the API server rejects late (`hostPath.path: Invalid value: must be an absolute path`), away from the values file that caused it."
         }
       }
     },
@@ -401,12 +401,12 @@
         "null"
       ],
       "default": null,
-      "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for node-local single-node k3d (client#560)."
+      "description": "Cluster topology: does this cluster have a single schedulable node? Gates the AUTO-mode single-replica PodDisruptionBudgets (a minAvailable:1 PDB is undrainable on one node). null => default to hostPath.enabled; true/false => explicit. Deliberately separate from env.SINGLE_NODE (GPU->CPU fallback, which may be true on a fixed multi-node cluster). The installer sets true for its node-local install, one k3s node (client#560)."
     },
     "localApi": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The local API the dashboard reaches on 127.0.0.1 on a laptop or desktop install. Off by default; the installer enables it after mapping hostPort on 127.0.0.1 to nodePort on the k3d load balancer.",
+      "description": "The local API the dashboard reaches on 127.0.0.1 on a laptop or desktop install. Off by default; the installer enables it on the macOS node, after publishing hostPort on 127.0.0.1 to nodePort on the node.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -433,7 +433,7 @@
         "singleMachine": {
           "type": "boolean",
           "default": false,
-          "description": "Set by the installer: this cluster is its k3d environment on one machine. Lets the local API render where the stored topology values cannot say so."
+          "description": "Set by the installer: this cluster is its own single node on one machine. Lets the local API render where the stored topology values cannot say so."
         }
       }
     },

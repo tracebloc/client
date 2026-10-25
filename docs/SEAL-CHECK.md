@@ -136,7 +136,7 @@ cannot be read is unverified, and unverified is reported unsealed.
 
 Two deliberate nuances, both grounded in RFC-0003:
 
-- **Node-local provisioner paths are tolerated, with a note.** On k3s/k3d
+- **Node-local provisioner paths are tolerated, with a note.** On k3s
   the bundled local-path provisioner creates PVs that are hostPath-*typed*
   but live inside the cluster node's filesystem and die with the cluster —
   exactly the RFC-0003 **Option C** ("node-local") model. Paths under
@@ -169,15 +169,14 @@ This table is the chart-side input to the RFC-0003 §8.3 guarantee matrix
 is tracked in backend#1184). "Verified" below means *this suite verifies it
 on the live cluster when the corresponding check runs.*
 
-| Guarantee | k3d local (k3s) | EKS | AKS | OpenShift | bare metal |
-|---|---|---|---|---|---|
-| Training egress blocked (NetworkPolicy) | **Substrate verified; full-probe run pending** — k3s enforces egress NetworkPolicy (k3d v5.8.3 / k3s v1.33.6+k3s1, 2026-07-30; see §8.4 Status), full-chart `egress-enforcement` probe run not yet recorded | **Verified** — the dev/staging/prod tracebloc template fleets are sealed and `egress-enforcement`-probe-verified (2026-09-08, client-runtime#199; see [EKS fleet enforcement](#eks-fleet-enforcement--dev--staging--prod-client-runtime199) below). The VPC CNI netpol agent enforces egress on both `tb-client-dev-templates` (v1.2.7) and `tracebloc-clients-prod` (v1.1.6, hosting the staging + prod fleets), `--enable-network-policy=true`, mode `standard`. Deny-by-default is the chart default as of 1.9.96. Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
-| Backend reachability (required egress) | **Verified** by `backend-reachability` | **Verified** | **Verified** | **Verified** | **Verified** |
-| Storage on the declared class, bound | **Verified** by `storage-assertions` | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
-| No unmanaged hostPath backing (dynamic mode) | **Verified** once the Option C flip lands (today's installer still declares hostPath mode → sub-check SKIPs, honestly) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
-| Nothing under `~/.tracebloc` on the host (post-Option-C) | Not observable in-cluster — CLI/installer-side check (see follow-ups) | n/a | n/a | n/a | n/a |
+| Guarantee | EKS | AKS | OpenShift | bare metal |
+|---|---|---|---|---|
+| Training egress blocked (NetworkPolicy) | **Verified** — the dev/staging/prod tracebloc template fleets are sealed and `egress-enforcement`-probe-verified (2026-09-08, client-runtime#199; see [EKS fleet enforcement](#eks-fleet-enforcement--dev--staging--prod-client-runtime199) below). The VPC CNI netpol agent enforces egress on both `tb-client-dev-templates` (v1.2.7) and `tracebloc-clients-prod` (v1.1.6, hosting the staging + prod fleets), `--enable-network-policy=true`, mode `standard`. Deny-by-default is the chart default as of 1.9.96. Other EKS CNIs (Calico / Cilium) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | Conditional on CNI (Azure NPM / Calico) — **verified** by `egress-enforcement` (renders by default as of 1.9.96; opt-out with `allowExternalHttps=true`) | OVN-Kubernetes enforces by default — still **verified** by `egress-enforcement` | Conditional on CNI (Flannel alone does not enforce) — **verified** by `egress-enforcement` |
+| Backend reachability (required egress) | **Verified** | **Verified** | **Verified** | **Verified** |
+| Storage on the declared class, bound | **Verified** | **Verified** | **Verified** (PV scan degraded if `clusterScope=false`) | **Verified** |
+| No unmanaged hostPath backing (dynamic mode) | **Verified** | **Verified** | **Verified** with `clusterScope=true`; partial (name check + explicit WARNING) otherwise | n/a — hostPath *is* the declared model (SKIP) |
 
-**Native k3s (Linux) is not a column yet: nothing above is measured on it.** On a new Linux machine the installer sets up native k3s rather than k3d (see [PREREQUISITES.md § Linux](PREREQUISITES.md#linux)). It runs k3s directly on the machine, with k3s's embedded NetworkPolicy controller left on. The `egress-enforcement` seal-check runs on native k3s in CI (`Seal-check egress-enforcement (k3s)`, see [CI coverage](#ci-coverage--what-runs-where)), but no result of it has been recorded here yet. Until one is, read every guarantee in the table as **not yet measured** on native k3s, not as verified. To close the gap, run the suite (`helm test` on the release) on a native-k3s machine and record the result here.
+**Native k3s (Linux) is not a column yet: nothing above is measured on it.** On Linux the installer sets up native k3s (see [PREREQUISITES.md § Linux](PREREQUISITES.md#linux)). It runs k3s directly on the machine, with k3s's embedded NetworkPolicy controller left on. The `egress-enforcement` seal-check runs on native k3s in CI (`Seal-check egress-enforcement (k3s)`, see [CI coverage](#ci-coverage--what-runs-where)), but no result of it has been recorded here yet. Until one is, read every guarantee in the table as **not yet measured** on native k3s, not as verified. To close the gap, run the suite (`helm test` on the release) on a native-k3s machine and record the result here. The table's local column measured a runtime the installer no longer sets up on any OS; its one recorded run is kept as history in the runbook below.
 
 Two lockdown caveats the suite states rather than hides:
 
@@ -194,35 +193,32 @@ Two lockdown caveats the suite states rather than hides:
   fails `egress-enforcement` with remediation hints, exactly so the lockdown
   cannot be a silent no-op.
 
-## Runbook: verify NetworkPolicy egress enforcement on k3d/k3s locally
+## Runbook: verify NetworkPolicy egress enforcement on a local k3s install
 
-RFC-0003 §8.4: **do not assume** k3d enforces NetworkPolicy — k3s ships an
+RFC-0003 §8.4: **do not assume** k3s enforces NetworkPolicy — k3s ships an
 embedded (kube-router-based) NetworkPolicy controller that is *expected* to
 enforce egress rules, but expected is not verified.
 
-> **Status (updated 2026-07-30): still UNSEALED for the egress guarantee on
-> k3d until the full-chart `egress-enforcement` probe run is recorded — but
-> the k3s NetworkPolicy _substrate_ that guarantee rests on is now VERIFIED.**
-> The distinction is deliberate: only a standalone probe-pod NetworkPolicy was
-> tested, not the chart's training-labelled selector via the full probe, so
-> the egress guarantee is not yet sealed on k3d. Evidence for the substrate: a
-> deny-egress `NetworkPolicy` (podSelector on a probe pod, `policyTypes:
-> [Egress]`, empty `egress:`) on a throwaway `k3d v5.8.3` cluster running
-> `k3s v1.33.6+k3s1` took a `curl` from the pod to `1.1.1.1:443`
+> **History: the one run recorded on k3d (2026-07-30).** The installer no longer
+> sets up k3d, and nothing is recorded on native k3s yet (see [Guarantee coverage
+> per substrate](#guarantee-coverage-per-substrate-chart-side-view)). On k3d, the
+> k3s NetworkPolicy _substrate_ was verified, and the full-chart
+> `egress-enforcement` probe run was never recorded: only a standalone probe-pod
+> NetworkPolicy was tested, not the chart's training-labelled selector. The
+> evidence: a deny-egress `NetworkPolicy` (podSelector on a probe pod,
+> `policyTypes: [Egress]`, empty `egress:`) on a throwaway `k3d v5.8.3` cluster
+> running `k3s v1.33.6+k3s1` took a `curl` from the pod to `1.1.1.1:443`
 > **reachable → BLOCKED under the policy → reachable again after removal**
 > (HTTP 301 → connect failure → HTTP 301), so the block is attributable to the
-> policy, not a fluke. k3s's embedded (kube-router) controller therefore
-> **does enforce** egress NetworkPolicy on this k3d version, resolving the
-> §8.4 "do not assume" doubt for the substrate. **This note is the single
-> record of that run** — the paragraph after the runbook, the follow-ups list,
-> and the §8.3 k3d cell reference it rather than restate the evidence.
+> policy, not a fluke: k3s's embedded (kube-router) controller enforced egress
+> NetworkPolicy on that version.
 
 Run on a **local test install** (the lockdown flip below breaks direct
 training-pod egress until reverted — do not run it on a fleet you care
 about without following the §8.1 rollout order):
 
 ```bash
-# 0. A local k3d install (docs/INSTALL.md / the installer one-liner).
+# 0. A local install (the installer one-liner; docs/INSTALL.md).
 #    Note the release + namespace; the installer uses the same value for both.
 RELEASE=<release> NS=<namespace>
 
@@ -239,8 +235,8 @@ helm test "$RELEASE" -n "$NS" --logs \
 # 3. Interpret:
 #    "OK  egress lockdown verified …"        → the k3s-embedded controller
 #      enforces egress NetworkPolicy on this cluster. Sealed for this
-#      guarantee (record the run: k3s version, k3d version, date).
-#    "WARNING  EGRESS LOCKDOWN NOT ENFORCED" → k3d/k3s did NOT block the
+#      guarantee (record the run: k3s version, date).
+#    "WARNING  EGRESS LOCKDOWN NOT ENFORCED" → k3s did NOT block the
 #      connect. The environment is UNSEALED for the egress guarantee;
 #      the lockdown must not be relied on locally until this is fixed.
 #    "WARNING  … INCONCLUSIVE"               → probe host unresolvable;
@@ -255,10 +251,9 @@ helm upgrade "$RELEASE" tracebloc/client -n "$NS" --reuse-values \
 > If either `helm upgrade` above aborts with `conflict occurred while applying …` (Helm 4 server-side apply refusing a field a non-Helm manager owns), see [MIGRATIONS.md § server-side apply conflict](MIGRATIONS.md#helm-upgrade-aborts-with-a-server-side-apply-conflict) — re-run with `--server-side=true --force-conflicts`.
 
 The *full-chart* probe run (steps 1–4 above, against a deployed release) is
-still to be recorded here (pass/fail, k3s/k3d versions, date) and folded into
-the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on is already
-verified — see the Status note at the top of this section (the single record
-of that run).
+still to be recorded here (pass/fail, k3s version, date) and folded into
+the RFC-0003 §8.3 matrix. The **substrate** enforcement it builds on was
+verified on k3d only — see the history note at the top of this section.
 
 ## EKS fleet enforcement — dev / staging / prod (client-runtime#199)
 

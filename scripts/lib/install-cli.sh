@@ -85,7 +85,7 @@ _cli_usable_in_launch_shell() {
 # from the installer, never from `command -v`: the installer runs as a child
 # process, so where it put the binary never reaches THIS PATH. A lookup finds
 # ~/.local/bin only on the curl|bash path (install.sh prepends it) and ~/bin
-# never, and may return an older brew or pkg copy instead (client-dev#1390).
+# never, and may return an older package-manager copy instead (client-dev#1390).
 _cli_reported_path() {
   local line p=""
   [[ -r "${1:-}" ]] || return 0
@@ -371,6 +371,8 @@ install_tracebloc_cli() {
 # It EXITS the installer (0). Unlike _assess_handoff it does NOT mark the run
 # `skipped`: a newer CLI was installed, so this is a real, succeeded install and
 # telemetry (already `started` in main) records it as such on the 0 exit.
+# main() calls it only off native k3s, and every OS resolves k3s.
+# TODO(tracebloc/client-dev#1950): delete it with that call (install-k8s.sh).
 upgrade_cli_only() {
   info "Your tracebloc environment is healthy — updating just the CLI to the latest release."
   echo ""
@@ -380,9 +382,8 @@ upgrade_cli_only() {
   # (install-k8s.sh) ever runs. Behind a TLS-inspecting proxy that leaves the download
   # or signature check failing x509 on the exact machine where a normal install
   # SUCCEEDS, because the full flow wires CA trust before any tool download (#583). So
-  # wire the corporate CA HERE too, before the download — same reason this path already
-  # re-surfaces the hand-off's advisories below (it exits before the step that would
-  # otherwise do it). Idempotent and a no-op when no CA is configured; guarded like
+  # wire the corporate CA HERE too, before the download (it exits before the step that
+  # would otherwise do it). Idempotent and a no-op when no CA is configured; guarded like
   # main()'s call so a stale bootstrap without cluster.sh falls through (the download
   # then behaves exactly as it did before this branch existed).
   if declare -F wire_ca_trust >/dev/null 2>&1; then
@@ -409,15 +410,6 @@ upgrade_cli_only() {
   if declare -F install_tracebloc_cli >/dev/null 2>&1; then
     install_tracebloc_cli
   fi
-
-  # This path exits before _handle_existing_cluster, exactly like the healthy
-  # hand-off — so surface the same advisories the hand-off does, or a
-  # healthy-but-drifted k3s (#547/#565) or an unschedulable-GPU cluster
-  # (client#835) gets no signal on `tracebloc upgrade`. Advisory + guarded.
-  declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
-  declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
-  declare -F _check_existing_cluster_kubelet_config >/dev/null 2>&1 && _check_existing_cluster_kubelet_config
-  declare -F _check_existing_cluster_node_count >/dev/null 2>&1 && _check_existing_cluster_node_count
 
   # The CLI update is the ENTIRE point of this path, so — unlike the full flow,
   # where a CLI hiccup is non-fatal because the client is already connected — a

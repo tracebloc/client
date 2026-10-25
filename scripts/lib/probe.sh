@@ -8,21 +8,19 @@
 #
 #  It is the sensing + reporting layer ONLY. It classifies the host and renders
 #  an audit; it does NOT branch the install (that is the tier-routing step,
-#  backend#1172) and it NEVER mutates. Every default probe is read-only and
-#  side-effect-free: `docker info` (no image pull), `/sys` + `/proc` reads,
-#  `id`, `command -v`. The one probe that could touch the network/daemon (a
-#  `hello-world` pull) is gated behind --verify (TB_PROBE_VERIFY=1) and is NEVER
-#  on the default path.
+#  backend#1172) and it NEVER mutates. Every probe is read-only and
+#  side-effect-free: `/sys` + `/proc` reads, `id`, `command -v`.
 #
 #  Tiers (see the RFC):
-#    0  a container is already runnable AS THIS USER (`docker info` OK) — zero root.
-#    1  no usable runtime, but the kernel supports unprivileged containers
-#       (cgroup v2 + unprivileged userns) — set up rootless Docker, still no root.
-#    2  the kernel can't run unprivileged containers (old/locked), or (non-Linux)
-#       the runtime isn't up — a one-time admin step is required.
+#    0  nothing on the install path asks for root: the macOS node, or a native
+#       k3s an administrator prepared for this user.
+#    1  off native k3s, the kernel supports unprivileged containers (cgroup v2 +
+#       unprivileged userns): setup-linux.sh's rootless tier.
+#    2  native k3s otherwise (it runs as root), a kernel that can't run
+#       unprivileged containers (old/locked), or an OS this installer does not
+#       serve — a one-time admin step is required.
 #
 #  run_host_probes sets, once:
-#    PROBE_RUNTIME_USABLE  0|1
 #    PROBE_PRIVILEGE       root | sudo_nopw | sudo_pw | no_sudo
 #    PROBE_CGROUP2         0|1  (Linux only; 0 elsewhere)
 #    PROBE_USERNS          0|1  (Linux only; 0 elsewhere)
@@ -34,45 +32,10 @@
 #  Side-effect-safe to source (defaults + function definitions only).
 # =============================================================================
 
-# Opt-in only: prove the runtime end-to-end by actually running a throwaway
-# container. It PULLS an image, so it must never run on the default path — the
-# default `docker info` check already proves binary + daemon + our socket
-# permission without touching the network.
-: "${TB_PROBE_VERIFY:=0}"
-
 # ── Low-level readers (each read-only; overridable in bats) ───────────────────
 
-# _probe_runtime_usable — is a container runtime usable AS THIS USER, right now?
-# `docker info` exit 0 proves, in one call: the binary exists, the daemon is
-# reachable, AND this user can talk to the socket (docker-group membership or a
-# running rootless daemon). That is exactly the Tier-0 condition. No image pull.
-_probe_runtime_usable() {
-  has docker || return 1
-  # Bound coreutils-free (#744): a bare `docker info` against a WEDGED daemon hangs
-  # forever, and host_audit runs run_host_probes on EVERY install — macOS included —
-  # so this is the FIRST thing that freezes at "Checking your machine" on a wedged
-  # Docker Desktop, before _kill_lingering_docker ever gets a chance. `_bounded` was a
-  # no-op bound on a stock Mac (no timeout(1)/gtimeout(1)) until client-dev#1357, which
-  # is why the seam here is `_docker_answers_bounded`: it kills on a deadline via a
-  # background PID, and takes the cap as an argument. Silenced (>/dev/null): the rc is the verdict and
-  # the host-audit panel says the rest. Keeps the probe-specific 5s (TB_PROBE_TIMEOUT,
-  # deliberately shorter than the 10s default — this fires on every install and only
-  # needs a fast liveness read). Read-only and never fatal: a timeout or any failure
-  # just reads as "not usable" (non-zero), it never errors the probe (Bugbot).
-  _docker_answers_bounded "checking container runtime" "${TB_PROBE_TIMEOUT:-5}" >/dev/null 2>&1
-}
-
-# _probe_verify_runtime — opt-in (--verify / TB_PROBE_VERIFY=1): actually run a
-# container end-to-end. PULLS an image, so it is never on the default path. When
-# the flag is off this is a no-op that returns success (nothing to disprove).
-_probe_verify_runtime() {
-  [[ "${TB_PROBE_VERIFY:-0}" == 1 ]] || return 0
-  has docker || return 1
-  docker run --rm hello-world >/dev/null 2>&1
-}
-
 # _probe_cgroup_v2 — is the host on the unified cgroup v2 hierarchy? Rootless
-# Docker needs it for resource delegation. Read-only existence check.
+# containers need it for resource delegation. Read-only existence check.
 _probe_cgroup_v2() {
   [[ -e /sys/fs/cgroup/cgroup.controllers ]]
 }
@@ -194,17 +157,15 @@ _probe_privilege() {
 }
 
 # _probe_subid_ranges — does THIS user own a subordinate UID/GID range in BOTH
-# /etc/subuid and /etc/subgid? Rootless Docker maps container UIDs into this range
-# and needs BOTH files — a range in only one is unusable → not present. Entries may
+# /etc/subuid and /etc/subgid? Rootless containers map container UIDs into this range
+# and need BOTH files — a range in only one is unusable → not present. Entries may
 # be keyed by name OR numeric uid, so check both. The files are world-readable; the
 # read is side-effect-free. Paths overridable (TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE) so the
-# probe is testable against fixtures. _subid_has_entry lives in common.sh (shared
-# with setup-linux.sh's remediation).
+# probe is testable against fixtures. _subid_has_entry lives in common.sh.
 _probe_subid_ranges() {
-  # Key off the user the rootless daemon will actually run as — `id -un`, NOT $USER,
-  # which diverges under su/cron. Matching install_rootless_docker / the gate keeps
-  # detection and provisioning on the same user, so a re-run can't mis-read a
-  # wrong-user entry as satisfied and skip the gate (Asad/Bugbot, client#458).
+  # Key off the user the containers will actually run as — `id -un`, NOT $USER,
+  # which diverges under su/cron, so a re-run can't mis-read a wrong-user entry as
+  # satisfied (Asad/Bugbot, client#458).
   local name uid
   name="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
   uid="$(id -u 2>/dev/null)"
@@ -227,19 +188,24 @@ _probe_uidmap_helpers() {
 
 # _classify_from_probes — set INSTALL_TIER (+ reason) from the cached PROBE_*
 # vars only (no re-probing). Pure, so it is trivially unit-testable: a bats test
-# sets the PROBE_* vars and asserts the tier. Order matters — a usable runtime
-# always wins (Tier 0), regardless of kernel/privilege.
+# sets the PROBE_* vars and asserts the tier.
 _classify_from_probes() {
   INSTALL_TIER=2
   INSTALL_TIER_REASON="unknown"
 
-  # Native k3s runs as root whatever runtime is here (RFC-0175 D3), so a usable
-  # Docker is no Tier 0 for it. install_linux routes k3s before reading the tier;
-  # this keeps the panel from promising "zero root" to a run that will ask for sudo.
-  # Its one Tier 0 is a host an administrator prepared for this user (1.1g).
-  # On a Mac it is always Tier 0: the node runs in Apple's VM from the user's own
-  # folder, and nothing on that path asks for administrator rights (2.1 part 6).
+  # Native k3s runs as root (RFC-0175 D3). install_linux routes k3s before reading
+  # the tier; this keeps the panel from promising "zero root" to a run that will ask
+  # for sudo. Its one Tier 0 is a host an administrator prepared for this user (1.1g).
+  # On a Mac the install serves it is Tier 0: the node runs in Apple's VM from the user's
+  # own folder, with no administrator rights (2.1 part 6). A Mac below the floor is refused
+  # by the install (refuse_unsupported_mac), so it is never Tier 0 here either.
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]]; then
+    local floor="unknown"
+    declare -F tb_mac_floor_verdict >/dev/null && floor="$(tb_mac_floor_verdict)"
+    if [[ "$floor" != "ok" ]]; then
+      INSTALL_TIER=2; INSTALL_TIER_REASON="unsupported-mac"
+      return 0
+    fi
     INSTALL_TIER=0; INSTALL_TIER_REASON="mac-node"
     return 0
   fi
@@ -252,25 +218,23 @@ _classify_from_probes() {
     return 0
   fi
 
+  # Nothing sets PROBE_RUNTIME_USABLE since the runtime probe went; one case in
+  # k3s-create.bats, off native k3s, is this arm's one reader.
+  # TODO(tracebloc/client-dev#1950): delete the arm with that case.
   if [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
     INSTALL_TIER=0; INSTALL_TIER_REASON="runtime-usable"
     return 0
   fi
 
-  # No usable runtime. On macOS the runtime is Docker Desktop (a privileged GUI
-  # install) → Tier 2 with a Docker-Desktop remedy. Any OTHER non-Linux (e.g. Git
-  # Bash / MINGW on Windows) isn't served by this bash installer at all — say so
-  # rather than misdirect to Docker Desktop (Bugbot #370).
-  if [[ "${OS:-}" == "Darwin" ]]; then
-    INSTALL_TIER=2; INSTALL_TIER_REASON="needs-docker-desktop"
-    return 0
-  fi
+  # A Mac never gets here: it is always the macOS node (above, slim client 4.1). Any
+  # other non-Linux (e.g. Git Bash / MINGW on Windows) isn't served by this bash
+  # installer at all — say so (Bugbot #370).
   if [[ "${OS:-}" != "Linux" ]]; then
     INSTALL_TIER=2; INSTALL_TIER_REASON="unsupported-os"
     return 0
   fi
 
-  # Linux, no runtime: can the kernel run an unprivileged container?
+  # Linux off native k3s: can the kernel run an unprivileged container?
   if [[ "${PROBE_CGROUP2:-0}" != "1" ]]; then
     INSTALL_TIER=2; INSTALL_TIER_REASON="no-cgroup2"
     return 0
@@ -287,18 +251,6 @@ _classify_from_probes() {
 # vars, and classify the tier. Read-only, never-fatal. Uses explicit `if`
 # assignments (not `probe && VAR=1`) so a failing probe can't trip `set -e`.
 run_host_probes() {
-  PROBE_RUNTIME_USABLE=0
-  if _probe_runtime_usable; then
-    PROBE_RUNTIME_USABLE=1
-    # --verify (opt-in, TB_PROBE_VERIFY=1): confirm end-to-end by actually running
-    # a throwaway container. A daemon that answers `docker info` but can't run a
-    # container (broken storage driver, etc.) is then correctly NOT usable. Off by
-    # default — this is the ONLY probe that pulls an image.
-    if [[ "${TB_PROBE_VERIFY:-0}" == "1" ]] && ! _probe_verify_runtime; then
-      PROBE_RUNTIME_USABLE=0
-    fi
-  fi
-
   PROBE_PRIVILEGE="$(_probe_privilege)"
 
   PROBE_CGROUP2=0
@@ -348,30 +300,17 @@ render_host_audit() {
   echo -e "  ${BOLD}Host check${RESET}"
 
   if [[ "${INSTALL_TIER_REASON:-}" == "mac-node" ]]; then
-    # The macOS node brings its own runtime: whether Docker answers is beside the point.
+    # The macOS node brings its own runtime.
     _audit_row "Container runtime" "Apple container ${TRACEBLOC_APPLE_CONTAINER_VERSION:-} (set up for you)" note
-  elif [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
-    # BOUNDED (client#984): `docker version` reports the SERVER version, so it
-    # talks to the daemon and blocks on a wedged one exactly like `docker info`.
-    # This renders the host-audit panel, so an unbounded read froze the panel that
-    # exists to tell the operator what is wrong. Empty falls back to "(running)".
-    local ver; ver="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker version --format '{{.Server.Version}}' 2>/dev/null)" || ver=""
-    _audit_row "Container runtime" "Docker ${ver:-(running)} — docker info OK" ok
-  else
-    _audit_row "Container runtime" "none usable as this user" note
   fi
 
-  # WSL2 (#1179): inside WSL the environment IS Linux, so we install via the Linux
-  # tiers (no separate Windows path) — surface that + the rootless-over-Docker-Desktop
-  # preference. Tier classification is unchanged: a usable Docker (incl. Docker
-  # Desktop's WSL integration, if present) is Tier 0; otherwise Tier 1 rootless.
+  # WSL2 (#1179): inside WSL the environment IS Linux, so the Linux tiers apply.
   if [[ "${PROBE_WSL:-0}" == "1" ]]; then
-    _audit_row "Environment" "WSL2 (Linux-in-Windows) — rootless preferred" note
+    _audit_row "Environment" "WSL2 (Linux-in-Windows)" note
   fi
 
-  # Kernel row is only meaningful on Linux when there is no usable runtime yet
-  # (Tier 0 doesn't care about the modules; a Mac has no such kernel knobs).
-  if [[ "${OS:-}" == "Linux" && "${PROBE_RUNTIME_USABLE:-0}" != "1" ]]; then
+  # The kernel rows are Linux's (a Mac has no such kernel knobs).
+  if [[ "${OS:-}" == "Linux" ]]; then
     if [[ "${PROBE_CGROUP2:-0}" == "1" && "${PROBE_USERNS:-0}" == "1" ]]; then
       _audit_row "Kernel" "cgroup v2 + unprivileged userns present" ok
       # Rootless prerequisites (Tier 1): a subuid/subgid range + the setuid uidmap
@@ -406,17 +345,17 @@ render_host_audit() {
       case "${INSTALL_TIER_REASON:-}" in
         native-k3s-prepared) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — an administrator prepared native k3s for you; no privileged steps." ;;
         mac-node)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — the macOS node runs from your own folder on Apple's container runtime; no privileged steps." ;;
-        *)                   echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — a container is already runnable; no privileged steps." ;;
+        *)                   echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — no privileged steps." ;;
       esac
       ;;
     1) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 1 — set up Docker for your account; a one-time admin step is still needed for now." ;;
     2)
       case "${INSTALL_TIER_REASON:-}" in
-        needs-docker-desktop) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — Docker isn't running; start/install Docker Desktop (needs admin once)." ;;
-        unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer directly. On Windows: run this installer inside a WSL2 Linux distro (rootless, no Docker Desktop licence — preferred), or install Docker Desktop via the PowerShell installer (install.ps1)." ;;
+        unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer directly. On Windows, install with install.ps1, which sets up tracebloc's WSL distro." ;;
         no-cgroup2)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this kernel isn't on cgroup v2; a one-time admin step is needed." ;;
         no-userns)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — unprivileged user namespaces are disabled; a one-time admin step is needed." ;;
         native-k3s)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — native k3s runs as root; administrator rights are needed once." ;;
+        unsupported-mac)      echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — tracebloc can't be installed on this Mac. $(declare -F tb_mac_floor_reason >/dev/null && tb_mac_floor_reason "$(tb_mac_floor_verdict)")" ;;
         *)                    echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — a one-time admin step is needed to prepare this host." ;;
       esac
       ;;

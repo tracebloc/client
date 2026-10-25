@@ -34,8 +34,8 @@ umask 077
 # ── Settings naming: the TRACEBLOC_ spellings of the tuning knobs ────────────
 # backend#3846. Every timeout, wait and bound below can be set as
 # TRACEBLOC_<name> -- the TB_ prefix REPLACED (TB_PULL_TIMEOUT ->
-# TRACEBLOC_PULL_TIMEOUT), an unprefixed name prefixed (COLIMA_CPU ->
-# TRACEBLOC_COLIMA_CPU). The old spelling still works (remove_by 2026-12-31).
+# TRACEBLOC_PULL_TIMEOUT), an unprefixed name prefixed (SIGN_IN_ATTEMPTS ->
+# TRACEBLOC_SIGN_IN_ATTEMPTS). The old spelling still works (remove_by 2026-12-31).
 # A non-empty canonical is copied, ONCE and here at the top of the core, into
 # the legacy-named variable every reader across scripts/lib reads inline
 # (`${TB_PULL_TIMEOUT:-600}`), so those dozens of reads, their defaults and
@@ -43,10 +43,10 @@ umask 077
 # Nothing here is exported, so no child sees a value its parent did not.
 # TB_TIER1_ROOTLESS / TB_FORCE_TIER are the Tier-1 support switches.
 tb_tuning_aliases=(
-  TB_AMD64_SMOKE_IMAGE TB_AMD64_SMOKE_TIMEOUT TB_API_WAIT_S TB_ASSESS_DOCKER_TIMEOUT
+  TB_API_WAIT_S TB_ASSESS_DOCKER_TIMEOUT
   TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT TB_CLUSTER_START_TIMEOUT_MIN
   TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
-  TB_DESKTOP_RESTART_WAIT TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
+  TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
   TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
   TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN
   TB_GPU_VERIFY_TIMEOUT
@@ -57,7 +57,7 @@ tb_tuning_aliases=(
   TB_NODE_CHECK_EVERY_S TB_OFFBOARD_TIMEOUT TB_PLAIN TB_PM_KILL_GRACE TB_PROBE_TIMEOUT TB_PROBE_VERIFY
   TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
   TB_WSL_INTEROP_KILL_AFTER TB_WSL_INTEROP_TIMEOUT
-  COLIMA_CPU COLIMA_DISK GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
+  GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
 )
 # tb_canonical_name LEGACY -- the TRACEBLOC_ spelling the naming rule gives.
 tb_canonical_name() {
@@ -458,7 +458,7 @@ _rootless_active() {
 
 # Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
 # log-only interpolation (`... 2>/dev/null || echo present`) that masked failure,
-# so a corrupt or wrong-architecture binary — a partial pkg/brew install, or a
+# so a corrupt or wrong-architecture binary — a partial package-manager install, or a
 # download no checksum path guarded — sat on PATH and failed only later, at
 # cluster-create, after a green "System tools". Actually RUN the tool's cheapest
 # self-check; on failure error() with an arch-aware remedy so the tool step fails
@@ -470,9 +470,9 @@ _rootless_active() {
 # ONLY when the binary that actually ran is that exact file (same inode, `-ef`).
 # So: a broken binary WE installed there (fresh OR left by a prior run) is cleared,
 # letting a re-run self-heal (Bugbot: otherwise `has` stays true → stuck loop);
-# but a brew/pkg-manager copy that lives elsewhere on PATH is never deleted — the
+# but a package manager's copy that lives elsewhere on PATH is never deleted — the
 # resolved binary won't match our path (reviewer). Callers may pass --rm on every
-# path; the `-ef` guard sorts out ownership. macOS/brew callers pass no --rm.
+# path; the `-ef` guard sorts out ownership.
 # Usage: assert_tool_runs [--rm <placed-path>] <name> <version-arg>...
 assert_tool_runs() {
   local rm_path=""
@@ -683,26 +683,14 @@ _docker_answers() {
 # cluster), 124 is the deadline (Docker did not answer), anything else is Docker's
 # own failure, whose stderr goes to ERRFILE when given, for a caller that quotes it
 # (client-dev#1748). The one reader of that label: reinstall detection
-# (_reinstall_detect) and the fresh rule (_tb_substrate_fresh) both call it.
+# (_reinstall_detect) and the fresh rule on a Mac (_tb_substrate_fresh) both call
+# it.
 tb_k3d_cluster_names() {
   local out rc=0
   out="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter label=app=k3d --format '{{.Label "k3d.cluster"}}' 2>"${1:-/dev/null}")" || rc=$?
   [[ "$rc" -eq 0 ]] || out=""   # what a read printed before it failed is no answer (client-dev#1731)
   [[ -z "$out" ]] || printf '%s\n' "$out"
   return "$rc"
-}
-
-# _tb_docker_why RC ERRFILE -- what a Docker read that failed on its own (RC is
-# neither 0 nor 124, the deadline) said, for a line that quotes it: the last
-# non-empty line Docker wrote to ERRFILE, or the exit code when it wrote none. A
-# fast refusal (a socket this user may not open) is not a Docker that did not
-# answer, and saying so names the wrong fix (client-dev#1886). reinstall.sh's
-# _reinstall_read_how reads ERRFILE the same way; this copy is common.sh's own
-# because a stale bootstrap may fetch no reinstall.sh.
-_tb_docker_why() {
-  local msg=""
-  [[ "${2:-/dev/null}" == /dev/null ]] || msg="$(awk 'NF { l = $0 } END { print l }' "$2" 2>/dev/null)"
-  printf '%s' "${msg:-exited $1 with no message}"
 }
 
 # ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
@@ -1185,7 +1173,7 @@ spin() {
 }
 
 # ── Convenience wrapper: run a command quietly behind a spinner ───────────────
-#  Usage:  spin_cmd "Installing foo…" brew install --cask docker
+#  Usage:  spin_cmd "Installing foo…" apt-get install -y foo
 #  stdout/stderr are captured in the LOG_FILE (if set) or a private mktemp file
 #  (_tb_spin_logfile; never a fixed /tmp name, backend#4279)
 spin_cmd() {
@@ -1246,12 +1234,10 @@ spin_cmd_bounded() {
 # ships on stock macOS (both are GNU coreutils). So on a Mac with no coreutils,
 # `_docker_answers` degrades to an unbounded `docker info`, and a bare `docker
 # info` does not return against a WEDGED daemon (as opposed to a cleanly stopped
-# one — the same distinction _docker_answers' own header draws). The colima-stop
-# recovery path in setup-macos.sh is reached precisely when a timed-out `colima
-# stop` may have left the VZ VM half-down — exactly the wedged state — so a
-# headless macOS install froze there with no spinner and never reached its
-# restore. spin backgrounds the probe and kills it on the deadline with no
-# coreutils dependency, so the bound holds on a stock Mac too.
+# one — the same distinction _docker_answers' own header draws). A wedged daemon
+# froze a headless macOS install there with no spinner (#744). spin backgrounds the
+# probe and kills it on the deadline with no coreutils dependency, so the bound
+# holds wherever coreutils is missing too.
 #
 # SILENT on a non-answer (no ✖ / log tail, unlike spin_cmd_bounded): a daemon
 # that does not answer is the expected result on a recovery path, not an error to
@@ -1673,6 +1659,7 @@ setup_log_file() {
   log "Substrate: ${TRACEBLOC_SUBSTRATE_RESOLVED}, from ${TB_SUBSTRATE_SOURCE:-the default}."
   if [[ -n "${TB_SUBSTRATE_NOTE:-}" ]]; then log "$TB_SUBSTRATE_NOTE"; fi
   if [[ -n "${TB_SUBSTRATE_KEPT:-}" ]]; then log "$TB_SUBSTRATE_KEPT"; fi
+  if [[ -n "${TB_SUBSTRATE_MOVED:-}" ]]; then log "$TB_SUBSTRATE_MOVED"; fi
 }
 
 # ── Configuration (overridable via env) ──────────────────────────────────────
@@ -2373,7 +2360,9 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_SUBSTRATES                  properties.substrate.enum, space-separated
 #    TB_SUBSTRATE_DEFAULT           x-tracebloc-substrate.default
 #    TB_SUBSTRATE_FRESH_LINUX       x-tracebloc-substrate.fresh-default.linux
-#    TB_SUBSTRATE_FRESH_MACOS       x-tracebloc-substrate.fresh-default.macos
+#    TB_SUBSTRATE_RETIRED_LINUX     x-tracebloc-substrate.retired.linux, space-separated
+#    TB_SUBSTRATE_RETIRED_MACOS     x-tracebloc-substrate.retired.macos, space-separated
+#    TB_SUBSTRATE_RETIRED_WINDOWS   x-tracebloc-substrate.retired.windows, space-separated
 #    TB_SUBSTRATE_TOKEN_PREFIX      x-tracebloc-substrate.token-prefix
 #    TB_SUBSTRATE_TOKEN_UNSUPPORTED x-tracebloc-substrate.token-unsupported
 #    TB_INSTALL_RECORD_VERSION      properties.schema_version.const
@@ -2387,7 +2376,9 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 TB_SUBSTRATES="k3d k3s"
 TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_FRESH_LINUX="k3s"
-TB_SUBSTRATE_FRESH_MACOS="k3s"
+TB_SUBSTRATE_RETIRED_LINUX="k3d"
+TB_SUBSTRATE_RETIRED_MACOS="k3d"
+TB_SUBSTRATE_RETIRED_WINDOWS="k3d"
 TB_SUBSTRATE_TOKEN_PREFIX="tracebloc-installer substrate="
 TB_SUBSTRATE_TOKEN_UNSUPPORTED="unsupported"
 TB_INSTALL_RECORD_VERSION=1
@@ -2414,9 +2405,13 @@ TRACEBLOC_SUBSTRATE_RESOLVED="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
 TB_SUBSTRATE_SOURCE="${TRACEBLOC_SUBSTRATE:+TRACEBLOC_SUBSTRATE}"
 TB_SUBSTRATE_NOTE=""
 TB_SUBSTRATE_REFUSAL=""
-# Why a fresh Linux machine or Mac keeps the default (_tb_substrate_fresh): the line
+# Why a fresh machine keeps the default: the line
 # print_substrate_token prints right after the substrate line.
 TB_SUBSTRATE_KEPT=""
+# Why this run moves a machine off a substrate retired where it runs (its record
+# names one, tb_substrate_resolve): the line print_substrate_token prints right
+# after the substrate line.
+TB_SUBSTRATE_MOVED=""
 # Set by a refusal just before it exits: install_cleanup then prints no failure
 # footer, because a re-run with nothing changed is refused again.
 TB_EXIT_REFUSED=""
@@ -2447,13 +2442,14 @@ print_substrate_token() {
   tb_substrate_token
   TB_SUBSTRATE_TOKEN_PRINTED=1
   if [[ -n "${TB_SUBSTRATE_KEPT:-}" ]]; then info "$TB_SUBSTRATE_KEPT"; fi
+  if [[ -n "${TB_SUBSTRATE_MOVED:-}" ]]; then info "$TB_SUBSTRATE_MOVED"; fi
 }
 
 refuse_unsupported_substrate() {
   tb_substrate_supported && return 0
   TB_EXIT_REFUSED=1
   if [[ "${TB_SUBSTRATE_SOURCE:-TRACEBLOC_SUBSTRATE}" == "TRACEBLOC_SUBSTRATE" ]]; then
-    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime (${TB_SUBSTRATE_FRESH_LINUX} on a new Linux machine, ${TB_SUBSTRATE_FRESH_MACOS} on a new Mac, ${TB_SUBSTRATE_DEFAULT} otherwise)."
+    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime ($(OS=Darwin _tb_substrate_fresh_here) on a Mac, ${TB_SUBSTRATE_FRESH_LINUX} on Linux, inside WSL too, ${TB_SUBSTRATE_DEFAULT} otherwise)."
   fi
   error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TRACEBLOC_SUBSTRATE_RESOLVED}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
 }
@@ -2684,6 +2680,69 @@ refuse_unsupported_mac() {
 }
 
 # ── Re-run resolution (1.1f) ─────────────────────────────────────────────────
+# tb_substrate_retired_here SUBSTRATE -- 0 when SUBSTRATE is retired where this
+# run is: in this OS's TB_SUBSTRATE_RETIRED_<OS> stamp. Darwin reads _MACOS; Linux
+# inside WSL (_probe_wsl, probe.sh) is the Windows installer's distro
+# (refuse_wsl_run) and reads _WINDOWS; Linux outside WSL reads _LINUX. 1 when it is
+# not, or on any other OS; 2 when this cannot tell: Linux, SUBSTRATE retired on one
+# side of WSL's line, and no WSL probe loaded (a stale bootstrap). The one predicate
+# every reader of the retirement asks: the resolver, install_macos, install_linux,
+# the k3s path's live-k3d refusal (reinstall.sh) and the substrate a Mac gets
+# instead (_tb_substrate_fresh_here). It has one case per stamp this build sets,
+# because a TB_ name nothing stamps is read from the user's environment
+# (installer-env-canonical.bats). install-contract.bats holds every key of the
+# schema's retired map to a stamp this predicate reads, and every stamp to a key.
+tb_substrate_retired_here() {
+  local s list found=1 os="${OS:-$(uname -s 2>/dev/null)}"
+  case "$os" in
+    Darwin) list="${TB_SUBSTRATE_RETIRED_MACOS:-}" ;;
+    Linux)
+      for s in ${TB_SUBSTRATE_RETIRED_LINUX:-} ${TB_SUBSTRATE_RETIRED_WINDOWS:-}; do [[ "$s" == "${1:-}" ]] && found=0; done
+      [[ "$found" -eq 0 ]] || return 1
+      found=1
+      declare -F _probe_wsl >/dev/null 2>&1 || return 2
+      if _probe_wsl; then list="${TB_SUBSTRATE_RETIRED_WINDOWS:-}"; else list="${TB_SUBSTRATE_RETIRED_LINUX:-}"; fi ;;
+    *) return 1 ;;
+  esac
+  for s in $list; do [[ "$s" == "${1:-}" ]] && found=0; done
+  [[ "$found" -eq 0 ]] || return 1
+  return 0
+}
+
+# _tb_substrate_fresh_here -- the substrate a machine here gets instead of a
+# retired one. On a Mac, the one substrate of TB_SUBSTRATES that retired.macos
+# leaves (k3s, in Apple's container runtime); the schema names no fresh default
+# for a Mac, because 4.1 leaves it no other. Prints nothing, and fails, when that is not
+# exactly one, or on an OS with no case: Linux's is the schema's own
+# fresh-default.linux (TB_SUBSTRATE_FRESH_LINUX).
+_tb_substrate_fresh_here() {
+  local s left=""
+  case "${OS:-$(uname -s 2>/dev/null)}" in
+    Darwin)
+      for s in $TB_SUBSTRATES; do
+        tb_substrate_retired_here "$s" && continue
+        [[ -z "$left" ]] || return 1
+        left="$s"
+      done ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$left" ]] || return 1
+  printf '%s' "$left"
+}
+
+# _tb_substrate_where -- where this run is, as the retirement's texts name it ("on
+# a Mac", "on Linux outside WSL", "inside WSL"). Fails on an OS with no case, and on
+# Linux with no WSL probe loaded.
+_tb_substrate_where() {
+  case "${OS:-$(uname -s 2>/dev/null)}" in
+    Darwin) printf '%s' "on a Mac" ;;
+    Linux)
+      declare -F _probe_wsl >/dev/null 2>&1 || return 1
+      if _probe_wsl; then printf '%s' "inside WSL"; else printf '%s' "on Linux outside WSL"; fi ;;
+    *) return 1 ;;
+  esac
+}
+
 # tb_substrate_resolve -- the substrate this run sets up. A machine installed on
 # one runtime stays on it without the variable, so the order is:
 #   1. TRACEBLOC_SUBSTRATE, when set;
@@ -2693,22 +2752,44 @@ refuse_unsupported_mac() {
 #      cannot read it by design, so its absence from view is not "cannot tell";
 #   4. on Linux, a tracebloc native k3s this user can see without privileges
 #      (_native_k3s_live_probe), which catches one whose record is out of reach;
-#   5. on a fresh Linux machine outside WSL, or a fresh Mac, that OS's fresh default
-#      (native k3s; k3s on Apple container, client-dev#1943: _tb_substrate_fresh);
-#      on every other machine, the default. A Mac has no root copy and no live
-#      probe: its record is the daily user's, and a k3d Mac without one is told by
-#      its k3d and its Docker, as on Linux.
+#   5. on Linux, outside WSL and inside it, the fresh default (native k3s,
+#      _tb_substrate_fresh) where the default is retired; elsewhere, the default.
+# A Mac gets no substrate retired there (TB_SUBSTRATE_RETIRED_MACOS: k3d, slim client
+# 4.1, client-dev#1948), so it has one, the substrate left (_tb_substrate_fresh_here: k3s
+# in Apple's container runtime, RFC-0175 D1/D6). There TRACEBLOC_SUBSTRATE naming a
+# retired one is refused by name, and every other run resolves the Mac's one: a
+# record from a k3d install does not keep k3d. Whether a k3d cluster is still
+# live is the k3s path's question, asked by refuse_k3s_beside_live_k3d, which
+# moves such a Mac only through the consented offboard (D10); the record's other
+# substrate goes in TB_SUBSTRATE_NOTE for the log.
+# On Linux a substrate retired where this run is (TB_SUBSTRATE_RETIRED_LINUX outside
+# WSL, TB_SUBSTRATE_RETIRED_WINDOWS inside it: k3d, slim client 4.1) is never set up
+# there (tb_substrate_retired_here): asked for by the variable, it is refused; named
+# by a record, the machine moves to the fresh default, and the k3s path's live-k3d
+# check (reinstall.sh) decides the move, by consent, as for TRACEBLOC_SUBSTRATE=k3s
+# (TB_SUBSTRATE_MOVED says so).
 # A record that exists but cannot be read or parsed is "cannot tell", never
 # absent: the finding goes in TB_SUBSTRATE_REFUSAL, which main() refuses by name
 # after the substrate line. So does TRACEBLOC_SUBSTRATE=k3d where a tracebloc
-# k3s is set up: k3d is never set up beside native k3s (the reverse is the k3s
-# path's live-k3d refusal). TRACEBLOC_SUBSTRATE_RESOLVED keeps the requested value either way,
-# so the line prints it. Prints nothing and writes nothing.
+# k3s is set up and k3d is not retired: k3d is never set up beside native k3s (the
+# reverse is the k3s path's live-k3d refusal). TRACEBLOC_SUBSTRATE_RESOLVED keeps the
+# requested value either way, so the line prints it. Prints nothing and writes nothing.
 tb_substrate_resolve() {
-  local rec sub rc=0 dst
-  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""; TB_SUBSTRATE_KEPT=""
+  local rec sub rc=0 dst left
+  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""; TB_SUBSTRATE_KEPT=""; TB_SUBSTRATE_MOVED=""
   if [[ -n "${TRACEBLOC_SUBSTRATE:-}" ]]; then
     TRACEBLOC_SUBSTRATE_RESOLVED="$TRACEBLOC_SUBSTRATE"; TB_SUBSTRATE_SOURCE="TRACEBLOC_SUBSTRATE"
+    if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Darwin" ]]; then
+      if tb_substrate_retired_here "$TRACEBLOC_SUBSTRATE_RESOLVED"; then
+        TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, but this installer no longer sets up ${TRACEBLOC_SUBSTRATE_RESOLVED} $(_tb_substrate_where): $(_tb_substrate_where) it sets up $(_tb_substrate_fresh_here) in Apple's container runtime, and no other runtime. Unset TRACEBLOC_SUBSTRATE, then re-run."
+      fi
+      return 0
+    fi
+    rc=0; tb_substrate_retired_here "$TRACEBLOC_SUBSTRATE_RESOLVED" || rc=$?
+    case "$rc" in
+      0) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, which this installer no longer sets up $(_tb_substrate_where). Unset TRACEBLOC_SUBSTRATE: it sets up native ${TB_SUBSTRATE_FRESH_LINUX} here."; return 0 ;;
+      2) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, and this installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell whether ${TRACEBLOC_SUBSTRATE_RESOLVED} is set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"; return 0 ;;
+    esac
     rc=1
     if [[ "$TRACEBLOC_SUBSTRATE_RESOLVED" == "k3d" ]]; then rc=0; _tb_substrate_k3s_live || rc=$?; fi
     case "$rc" in
@@ -2720,23 +2801,36 @@ tb_substrate_resolve() {
   fi
   TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_DEFAULT"; TB_SUBSTRATE_SOURCE="the default"
   rec="$(tb_record_path)"
+  if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Darwin" ]]; then
+    if ! left="$(_tb_substrate_fresh_here)"; then
+      TB_SUBSTRATE_REFUSAL="This installer build retires every runtime it supports (${TB_SUBSTRATES// /, }) on a Mac, or none, so it cannot tell which one to set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+      return 0
+    fi
+    TRACEBLOC_SUBSTRATE_RESOLVED="$left"; TB_SUBSTRATE_SOURCE="the one substrate on a Mac"
+    if [[ -e "$rec" ]]; then
+      if ! sub="$(_tb_record_substrate_of "$rec")"; then
+        TB_SUBSTRATE_NOTE="Substrate: the install record ${rec} exists, but its substrate could not be read from it; $(_tb_substrate_where) this installer sets up ${left} whatever it says."
+      elif [[ "$sub" != "$left" ]]; then
+        TB_SUBSTRATE_NOTE="Substrate: the install record ${rec} says ${sub}, which this installer no longer sets up $(_tb_substrate_where)."
+      fi
+    fi
+    return 0
+  fi
   if [[ -e "$rec" ]]; then
     if sub="$(_tb_record_substrate_of "$rec")"; then
       TRACEBLOC_SUBSTRATE_RESOLVED="$sub"; TB_SUBSTRATE_SOURCE="the install record ${rec}"
+      _tb_substrate_move_retired "$sub" "The install record ${rec}"
     else
       TB_SUBSTRATE_REFUSAL="The install record ${rec} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
     fi
     return 0
   fi
-  case "${OS:-$(uname -s 2>/dev/null)}" in
-    Linux) ;;
-    Darwin) _tb_substrate_fresh; return 0 ;;
-    *) return 0 ;;
-  esac
+  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 0
   if dst="$(_tb_record_root_copy_path)" && _tb_record_root_access; then
     if _tb_record_root_run test -e "$dst"; then
       if sub="$(_tb_record_root_run cat "$dst" 2>/dev/null | _tb_record_substrate_in)"; then
         TRACEBLOC_SUBSTRATE_RESOLVED="$sub"; TB_SUBSTRATE_SOURCE="the root copy ${dst}"
+        _tb_substrate_move_retired "$sub" "The install record's root copy ${dst}"
       else
         TB_SUBSTRATE_REFUSAL="The install record's root copy ${dst} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
       fi
@@ -2754,96 +2848,47 @@ tb_substrate_resolve() {
   return 0
 }
 
-# _tb_substrate_fresh -- step 5: the fresh default for this OS on a fresh machine,
-# the default on every other: TB_SUBSTRATE_FRESH_LINUX (native k3s) on Linux,
-# TB_SUBSTRATE_FRESH_MACOS (k3s on Apple container, client-dev#1943) on a Mac.
-# Called only when the steps before it found no record (and, on Linux, no
-# tracebloc k3s): that is the record half of "fresh". The machine half, each read
-# from the producer that already answers it:
-#   - on Linux, outside WSL (_probe_wsl): the k3s path refuses every WSL distro but
-#     tracebloc's own, and there the Windows installer names the substrate on the
-#     line it runs this core with (client-dev#1810), so this rule never guesses it;
-#   - no k3d on PATH (`has k3d`, assess.sh's own fresh rule);
-#   - no Docker, or a Docker that answers (_docker_answers) and lists no k3d
-#     cluster's container, stopped ones included (tb_k3d_cluster_names); on a Mac,
-#     also a Docker that does not answer 'docker info' (client-dev#1954's ruling).
-# On Linux a Docker that does not answer is not fresh: the default stays k3d, today's path,
-# so the flip never turns an install that works today into a refusal nobody asked
-# for. A fresh machine whose run native k3s would refuse keeps the default too,
-# where that run works today. The refusal is asked, never restated:
-# _native_k3s_refuse_host (k3s.sh), which refuse_k3s_beside_live_k3d asks as well
-# before a k3d offboard (client-dev#1805) and which reads nothing step a sets. On
-# Linux its host half (outside WSL) holds here already, so what it refuses is a
-# setting: k3d's node counts (AGENTS, SERVERS) or a K8S_VERSION native k3s has no
-# digest for; hostpath and a dataset dir are not refused since client-dev#1782, so
-# they get native k3s. On a Mac it is the macOS node's own (_mac_ct_refuse_host): a
-# corporate CA it cannot take, a hostPath or dataset folder it cannot mount at its own
-# path (it mounts the others since client-dev#2170), and the same node counts and
-# version, so each of those keeps k3d on a Mac. The macOS floor comes before all of this, the
-# first thing read on a Mac (client-dev#1943 box 4): a Mac below it (tb_mac_floor_verdict:
-# an Intel Mac, an older macOS, or a version this run cannot read) is never put to the
-# default. It keeps k3d with no kept line naming a runtime, and nothing of the default,
-# not even Docker, is read; main() refuses it by name right after the substrate line
-# (refuse_unsupported_mac, client-dev#1623). Its error() is caught in a subshell, never raised, so
-# nothing is recorded and the run goes on with the default. Each kept run, and a Docker
-# that cannot tell, says why in TB_SUBSTRATE_KEPT. A Docker read that hit the
-# deadline (124) did not answer; one that failed on its own is quoted in Docker's
-# words (_tb_docker_why), so a refused socket is not reported as a silent daemon
-# (client-dev#1886). A GPU is not one of them: each GPU
-# this installer sets up, it sets up on native k3s too (client-dev#1546). Prints
-# nothing.
+# _tb_substrate_fresh -- step 5: on Linux, the fresh default (TB_SUBSTRATE_FRESH_LINUX,
+# native k3s) where the default is retired (tb_substrate_retired_here: outside WSL and
+# inside it), else the default. Called only when steps 2 to 4 found no record and no
+# tracebloc k3s, and never on a Mac, which resolves its one substrate before the
+# record (tb_substrate_resolve).
+#
+# Nothing else is asked (slim client 4.1): k3d, which the default names, is retired
+# on both sides of WSL's line, so a k3d binary, a k3d cluster in Docker or a setting
+# native k3s refuses no longer keeps it. A live k3d cluster is the k3s path's
+# live-k3d check's (reinstall.sh), which moves it by consent or refuses; a setting
+# native k3s refuses is refused by name by the same path (_native_k3s_refuse_host).
+# Inside WSL a distro other than tracebloc's is refused by refuse_wsl_run. A build
+# without the WSL probe cannot tell which list applies, and that is refused by name,
+# never guessed. Prints nothing.
 _tb_substrate_fresh() {
-  local rc names why what errf os fresh runtime machine kept
+  local rc=0 os where
   os="${OS:-$(uname -s 2>/dev/null)}"
   case "$os" in
-    Linux) fresh="$TB_SUBSTRATE_FRESH_LINUX"; runtime="native ${fresh}"; machine="a new Linux machine" ;;
-    Darwin)
-      [[ "$(tb_mac_floor_verdict)" == ok ]] || return 0
-      fresh="$TB_SUBSTRATE_FRESH_MACOS"; runtime="${fresh} on Apple container"; machine="a new Mac" ;;
-    *) return 0 ;;
+    Linux)
+      tb_substrate_retired_here "$TB_SUBSTRATE_DEFAULT" || rc=$?
+      case "$rc" in
+        0) TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_FRESH_LINUX"; where="$(_tb_substrate_where)"; TB_SUBSTRATE_SOURCE="the default for Linux ${where#on Linux }" ;;
+        2) TB_SUBSTRATE_REFUSAL="This installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell which runtime to set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash" ;;
+      esac ;;
   esac
-  kept="Setting up ${TB_SUBSTRATE_DEFAULT}, not ${runtime}, the default for ${machine}:"
-  if [[ "$os" == Linux ]]; then
-    if ! declare -F _probe_wsl >/dev/null 2>&1; then
-      TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether it runs inside WSL, so it keeps ${TB_SUBSTRATE_DEFAULT}."
-      return 0
-    fi
-    _probe_wsl && return 0
-  fi
-  has k3d && return 0
-  if has docker; then
-    errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-docker-read-XXXXXX" 2>/dev/null)" || errf=/dev/null
-    rc=0; what="info"; names=""; _docker_answers "$errf" || rc=$?
-    if [[ "$rc" -eq 0 ]]; then what="ps"; names="$(tb_k3d_cluster_names "$errf")" || rc=$?; fi
-    why=""; [[ "$rc" -eq 0 || "$rc" -eq 124 ]] || why="$(_tb_docker_why "$rc" "$errf")"
-    [[ "$errf" == /dev/null ]] || rm -f "$errf"
-    # A Mac whose Docker is installed but does not answer 'docker info' (stopped,
-    # or silent) is a new Mac: no k3d is on PATH (`has k3d` above), and every k3d
-    # install leaves its k3d there. Docker Desktop installed and left stopped is
-    # common on a Mac (coordinator ruling on client-dev#1954, 15 Oct 2026). A
-    # Docker that answers but cannot list its containers still cannot tell.
-    [[ "$os" != Darwin || "$what" != info ]] || rc=0
-    case "${what}:${rc}" in
-      *:0) ;;
-      info:124) TB_SUBSTRATE_KEPT="${kept} Docker is installed here but did not answer, so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
-      info:*) TB_SUBSTRATE_KEPT="${kept} Docker is installed here but 'docker info' failed (${why}), so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
-      ps:124) TB_SUBSTRATE_KEPT="${kept} Docker answered but did not list its containers, so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
-      *) TB_SUBSTRATE_KEPT="${kept} Docker answered but 'docker ps' failed (${why}), so this run cannot tell whether a k3d cluster is already on this machine."; return 0 ;;
-    esac
-    if [[ -n "$names" ]]; then
-      TB_SUBSTRATE_KEPT="${kept} Docker lists the containers of a k3d cluster on this machine."
-      return 0
-    fi
-  fi
-  if ! declare -F _native_k3s_refuse_host >/dev/null 2>&1; then
-    TB_SUBSTRATE_NOTE="${TB_SUBSTRATE_NOTE:+${TB_SUBSTRATE_NOTE} }Substrate: this installer build cannot tell whether ${runtime} would accept this run's settings, so it keeps ${TB_SUBSTRATE_DEFAULT}."
-    return 0
-  fi
-  if ! why="$(error() { printf '%s' "$*"; exit 1; }; _native_k3s_refuse_host)"; then
-    TB_SUBSTRATE_KEPT="${kept} ${runtime} would refuse this run. ${why:-Its refusal gave no reason.}"
-    return 0
-  fi
-  TRACEBLOC_SUBSTRATE_RESOLVED="$fresh"; TB_SUBSTRATE_SOURCE="the default for ${machine}"
+}
+
+# _tb_substrate_move_retired SUB WHO -- a record (WHO, as a sentence's subject)
+# names SUB: where SUB is retired, the machine moves to the fresh default
+# (TB_SUBSTRATE_MOVED says so after the substrate line), and the k3s path's
+# live-k3d check decides the move by consent. Where this cannot tell, the run is
+# refused by name. Elsewhere nothing changes.
+_tb_substrate_move_retired() {
+  local rc=0
+  tb_substrate_retired_here "$1" || rc=$?
+  case "$rc" in
+    0) TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_FRESH_LINUX"
+       TB_SUBSTRATE_MOVED="${2} says this machine runs on ${1}, which this installer no longer sets up $(_tb_substrate_where), so this run sets up native ${TB_SUBSTRATE_FRESH_LINUX}: a reinstall." ;;
+    2) TB_SUBSTRATE_REFUSAL="${2} says this machine runs on ${1}, and this installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell whether ${1} is still set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash" ;;
+  esac
+  return 0
 }
 
 # _tb_substrate_k3s_live -- _native_k3s_live_probe's answer: 0 when a tracebloc

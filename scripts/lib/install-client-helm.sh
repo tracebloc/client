@@ -2071,6 +2071,50 @@ _tb_helm_lock_timed_out() {
   error "A tracebloc node restart or helm command on this Mac held ${_TB_HELM_LOCK[4]} for ${_TB_HELM_LOCK[3]} s, so this installer did not change the client. Re-run the installer once it has ended."
 }
 
+# _tb_wait_auto_upgrade_job NS -- wait for the chart's own auto-upgrade Job in NS to end.
+# Its `helm upgrade` holds the release in pending-upgrade while it runs, and the host's
+# helm lock cannot see an in-cluster Job, so acting on the release then races a live
+# upgrade. The wait is bounded by the Job's activeDeadlineSeconds, past which Kubernetes
+# kills it and what it leaves is a real wedge. The first list is tried three times, a slow
+# API being the likely reason it fails. Jobs are told apart by their pod template's
+# component label, since the CronJob sets no labels on the Jobs themselves. Returns 1 when
+# the Jobs could not be listed, first or on the wait's last poll (nothing is known about an
+# upgrade), else 0.
+_tb_wait_auto_upgrade_job() {
+  local _ns="$1" _out _name="" _dl="" _deadline _poll="${TRACEBLOC_AUTO_UPGRADE_POLL_S:-10}" _said="" _try _listed="" _unread=""
+  local _tmpl='{{range $j := .items}}{{if $j.status.active}}{{with $j.spec.template.metadata.labels}}{{with index . "app.kubernetes.io/component"}}{{if eq . "auto-upgrade"}}{{$j.metadata.name}}{{"\t"}}{{$j.spec.activeDeadlineSeconds}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}{{end}}'
+  for _try in 1 2 3; do
+    if _out="$(_bounded 20 kubectl get jobs -n "$_ns" \
+      --request-timeout=15s -o "go-template=$_tmpl" 2>>"${LOG_FILE:-/dev/null}")"; then _listed=1; break; fi
+    (( _try < 3 )) && sleep "$_poll"
+  done
+  [[ -n "$_listed" ]] || { log "auto-upgrade Jobs in '$_ns' could not be listed."; return 1; }
+  read -r _name _dl <<<"$_out" || true
+  [[ -n "$_name" ]] || return 0
+  [[ "$_dl" =~ ^[0-9]+$ ]] || _dl=1500   # the chart's floor at the default upgrade timeout
+  _deadline=$(( SECONDS + _dl ))
+  while [[ -n "$_name" ]] && (( SECONDS < _deadline )); do
+    if [[ -z "$_said" ]]; then
+      info "The hourly self-update ($_name) is updating your secure environment now; waiting for it to finish (at most ${_dl}s)…"
+      log "auto-upgrade Job $_name active in '$_ns'; waiting up to ${_dl}s before touching the release."
+      _said=1
+    fi
+    sleep "$_poll"
+    _out="$(_bounded 20 kubectl get jobs -n "$_ns" \
+      --request-timeout=15s -o "go-template=$_tmpl" 2>>"${LOG_FILE:-/dev/null}")" || { _unread=1; continue; }
+    _unread=""; _name=""; read -r _name _dl <<<"$_out" || true
+  done
+  if [[ -n "$_unread" ]]; then
+    log "auto-upgrade Jobs in '$_ns' could not be listed again while $_name was active."
+    return 1
+  elif [[ -n "$_name" ]]; then
+    log "auto-upgrade Job $_name in '$_ns' still active after its deadline; going on."
+  elif [[ -n "$_said" ]]; then
+    info "The hourly self-update finished."
+  fi
+  return 0
+}
+
 # _tb_helm_deadline_s MINUTES -- print spin's deadline, in seconds, for a helm call run
 # under _TB_HELM_LOCK: helm's MINUTES plus the lock's wait, or MINUTES alone with no lock.
 _tb_helm_deadline_s() {
@@ -2089,15 +2133,19 @@ _tb_helm_deadline_s() {
 #   $1 = release name   $2 = namespace
 #   $3 = mode: "full" (default) or "no-destroy" (see below)
 #
-# Reads the STATUS: line of `helm status` (jq-free on purpose — parsed the same
-# way the auto-upgrade cronjob does, whose alpine/helm image ships without jq), and
+# Reads the STATUS: line of `helm status` once any active auto-upgrade Job has ended
+# (_tb_wait_auto_upgrade_job) — jq-free on purpose, parsed the same way the
+# auto-upgrade cronjob does, whose alpine/helm image ships without jq — and
 # again under the host's helm lock, where what to do is decided (_tb_recover_locked):
 #   deployed / failed / superseded / uninstalled / not found → healthy or absent; no-op
 #   no status (a timeout, an API error) → no-op, except under the host's helm lock,
 #     where its holder may be what the read timed out on: there it is read again
 #   pending-upgrade / pending-rollback → roll back to the last deployed revision,
 #                                        named from `helm history` (backend#5273);
-#                                        none in the history → refuse (return 1)
+#                                        none in the history → refuse (return 1);
+#                                        auto-upgrade Jobs that could not be listed
+#                                        → no rollback, said on screen; left to the
+#                                        bounded upgrade (return 0)
 #   pending-install                    → revision 1 never deployed; there is no
 #                                        good revision to roll back to, so remove
 #                                        the half-installed release (matches the
@@ -2121,10 +2169,13 @@ _tb_helm_deadline_s() {
 # attempted and FAILED, or was refused under no-destroy — the caller must fail
 # closed rather than march into the same wedge.
 _recover_pending_helm_release() {
-  local _rel="$1" _ns="$2" _mode="${3:-full}" _status _rc _verdict _script _unread=""
+  local _rel="$1" _ns="$2" _mode="${3:-full}" _status _rc _verdict _script _unread="" _jobs_unread=""
+  # A pending-upgrade the chart's auto-upgrade Job is applying is in flight, not
+  # wedged; and a release it is about to upgrade rejects the caller's helm op.
+  _tb_wait_auto_upgrade_job "$_ns" || _jobs_unread=1
   # Bound the status READ (#554 Bugbot): every helm/kubectl probe in this installer
   # must be bounded so a wedged/unreachable API can't hang a headless run — and
-  # this read gates everything below, so bounding it bounds the whole recovery. A
+  # this read gates everything below, so bounding it bounds the recovery. A
   # timeout (or any error) yields an empty status → no-op → we hand off to the
   # bounded upgrade, which surfaces the API failure with its own deadline — unless
   # the host's helm lock is in force, whose holder (the runner's node restart) can
@@ -2170,14 +2221,14 @@ _recover_pending_helm_release() {
   # function, so on the macOS node the locked section is a bash of its own, handed
   # _tb_recover_locked and what it calls; elsewhere there is no lock, and it runs here.
   _tb_helm_lock
-  local _sec=("$_rel" "$_ns" "$_mode" "${LOG_FILE:-/dev/null}")
+  local _sec=("$_rel" "$_ns" "$_mode" "${LOG_FILE:-/dev/null}" "$_jobs_unread")
   _rc=0
   if [[ "${#_TB_HELM_LOCK[@]}" -gt 0 ]]; then
     _script="$(declare -f has _bounded _tb_bounded_bg _tb_bounded_wait _last_deployed_helm_revision _tb_recover_locked)" \
       || error "The installer is missing a function its helm lock's recovery runs. Re-download the installer, then re-run."
-    _verdict="$(${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} "$BASH" -c "${_script}"$'\n''_tb_recover_locked "$@"' tb-helm-recover "${_sec[@]}" 2>>"${LOG_FILE:-/dev/null}")" || _rc=$?  # set-u-safe: _sec holds the four words assigned above
+    _verdict="$(${_TB_HELM_LOCK[@]+"${_TB_HELM_LOCK[@]}"} "$BASH" -c "${_script}"$'\n''_tb_recover_locked "$@"' tb-helm-recover "${_sec[@]}" 2>>"${LOG_FILE:-/dev/null}")" || _rc=$?  # set-u-safe: _sec holds the five words assigned above
   else
-    _verdict="$(_tb_recover_locked "${_sec[@]}")" || _rc=$?  # set-u-safe: _sec holds the four words assigned above
+    _verdict="$(_tb_recover_locked "${_sec[@]}")" || _rc=$?  # set-u-safe: _sec holds the five words assigned above
   fi
   if [[ "$_rc" -ne 0 ]]; then
     _tb_helm_lock_timed_out "$_rc"
@@ -2203,6 +2254,11 @@ _recover_pending_helm_release() {
       warn "This installer could not read '$_rel' again under the helm lock, so it cannot tell whether it is still interrupted, and left it as it is."
       hint "Check it, then re-run:  helm -n $_ns status $_rel"
       return 1
+      ;;
+    jobs-unread)
+      warn "This installer could not check whether the hourly self-update is running in '$_ns', so it did not roll '$_rel' back and left it as it is."
+      log "No rollback of '$_rel' ($_vs): the auto-upgrade Jobs in '$_ns' could not be listed; leaving it to the bounded upgrade."
+      return 0
       ;;
     rolled-back)
       info "Rolled '$_rel' back to its last deployed revision ($_vt)."
@@ -2247,7 +2303,7 @@ _recover_pending_helm_release() {
   return 0
 }
 
-# _tb_recover_locked REL NS MODE LOG -- _recover_pending_helm_release's decision and its
+# _tb_recover_locked REL NS MODE LOG JOBS -- _recover_pending_helm_release's decision and its
 # act, as one piece that runs under the host's helm lock. It reads REL's status again
 # and acts on that read alone; helm's output goes to LOG. Prints one verdict line,
 # which the caller turns into messages:
@@ -2255,6 +2311,9 @@ _recover_pending_helm_release() {
 #                             nothing done
 #   unreadable                helm status gave no status and did not say not found
 #                             (a timeout, an API error): nothing done
+#   jobs-unread STATUS        pending-upgrade/-rollback, but JOBS is set: the auto-upgrade
+#                             Jobs could not be listed, so a live upgrade may hold it:
+#                             nothing done
 #   rolled-back STATUS REV    pending-upgrade/-rollback, rolled back to the last
 #                             deployed revision REV, named from `helm history`
 #                             (backend#5273)
@@ -2284,6 +2343,7 @@ _tb_recover_locked() {
   fi
   case "$s" in
     pending-upgrade|pending-rollback)
+      if [ -n "${5:-}" ]; then echo "jobs-unread $s"; return 0; fi
       hist="$(_bounded 30 helm history "$1" -n "$2" -o json 2>/dev/null)" || hist=""
       target="$(_last_deployed_helm_revision "$hist")"
       if [ -z "$target" ]; then echo "no-target $s"
@@ -3835,15 +3895,14 @@ _resolve_mysql_engine() {
 # image here. Without this second ask, letting the fresh case through preflight
 # would let that edge proceed to an exec-format CrashLoop with no earlier signal.
 # Same conditions as _pf_arch: non-amd64, no emulation, no escape hatch — with a
-# PER-OS emulation probe (binfmt on Linux, the Rosetta/Docker smoke on macOS).
+# PER-OS emulation probe (binfmt on Linux, the macOS node's Rosetta on a Mac).
 #
 # macOS IS covered here (client#756). This comment used to say the opposite —
 # "this gate is Linux-only … deliberately out of scope" — and stayed behind when
 # the Darwin arm landed below, which reads as "macOS is ungated" to anyone who
-# trusts the prose over the code (backend#2208). On macOS this is the ONLY late
-# gate: the early assert_amd64_emulation runs before helm, so it can only GUESS
-# the engine and optimistically skips on an 8.4 guess; here the engine is
-# resolved for real, and this is the fail-closed backstop that skip depends on.
+# trusts the prose over the code (backend#2208). On macOS this is the ONLY gate:
+# preflight only notes Rosetta on the macOS node (_pf_arch), before the engine is
+# known; here the engine is resolved for real, and this refuses fail-closed.
 #
 # It probes the real host, so anything calling install_client_helm under test
 # must declare OS/ARCH rather than inherit the machine — see install-client-helm.bats::setup.
@@ -3851,21 +3910,18 @@ _assert_engine_runs_on_this_arch() {
   [[ "${TB_MYSQL_ENGINE_RESOLVED:-}" == "5.7" ]] || return 0
   [[ -z "${TRACEBLOC_ALLOW_ARM64:-}" ]] || return 0
   case "${ARCH:-$(uname -m)}" in x86_64|amd64) return 0 ;; esac
-  # arm64 + 5.7 needs amd64 emulation. Check it PER OS — binfmt on Linux, the
-  # Rosetta/Docker smoke on macOS (binfmt does not exist there). This gate runs on
-  # macOS too now (client#756): assert_amd64_emulation runs BEFORE helm and can
-  # only GUESS the engine (existing_id needs a live release), so it optimistically
-  # skips on an 8.4 guess. Here the engine is resolved for real — so on an arm64
-  # Mac that actually resolved to 5.7 (an existing release the early gate could not
-  # see) we re-verify emulation and refuse if it is missing. This is the fail-closed
-  # backstop the early skip depends on.
+  # arm64 + 5.7 needs amd64 emulation. Check it PER OS — binfmt on Linux; on a Mac,
+  # whether the macOS node runs amd64 images under Rosetta (binfmt does not exist
+  # there). This gate runs on macOS too (client#756): here the engine is resolved
+  # for real, so an arm64 Mac that resolved to 5.7 (an existing release) without
+  # Rosetta is refused.
   case "${OS:-}" in
     Linux)
       amd64_emulation_available && return 0
       ;;  # fall through to the Linux (binfmt) reason-messages below
     Darwin)
       declare -F _macos_amd64_emulation_ok >/dev/null 2>&1 && _macos_amd64_emulation_ok && return 0
-      # Emulation missing (or the smoke helper somehow absent): the macOS Rosetta
+      # Emulation missing (or the helper somehow absent): the macOS Rosetta
       # remedy, then exit. Do NOT fall through to the binfmt messages below.
       declare -F _macos_amd64_refusal >/dev/null 2>&1 && _macos_amd64_refusal
       error "MySQL 5.7 is required here, but amd64 emulation could not be verified on this Apple Silicon Mac — enable Rosetta and re-run (or set TRACEBLOC_ALLOW_ARM64=1 to override)." ;;

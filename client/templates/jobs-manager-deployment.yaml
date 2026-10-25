@@ -91,8 +91,8 @@ spec:
         # branch introduced when it dropped the pin). `runAsNonRoot: true` only
         # FORBIDS uid 0 -- it assigns nothing -- so with no `runAsUser` anywhere the
         # kubelet reads the effective user from the IMAGE. `library/busybox`
-        # declares `Config.User` empty (measured: `[]`), i.e. root, so AKS, EKS,
-        # k3d and bare metal all failed the init with "container has runAsNonRoot
+        # declares `Config.User` empty (measured: `[]`), i.e. root, so AKS, EKS
+        # and bare metal all failed the init with "container has runAsNonRoot
         # and image will run as root". Dropping the pin fixed OpenShift and broke
         # every other platform.
         #
@@ -200,7 +200,7 @@ spec:
       # and the chmod used to be chained with a logical AND, which meant that on any mount that
       # refused the chown — a pre-provisioned volume, an NFS root_squash export via TRACEBLOC_HOST_DATASET_DIR
       # (old name HOST_DATASET_DIR still works),
-      # a Windows/Docker-Desktop bind mount — the chmod was never attempted, while the log still
+      # a Windows-filesystem bind mount — the chmod was never attempted, while the log still
       # said "leaving as-is". That is backwards: the MODE is the load-bearing half (these dirs must
       # be other-writable for writers this chart does not own, see above), the chown to 1000 is
       # cosmetic next to it, and the chown is the call far more likely to be refused. So the two run
@@ -278,8 +278,8 @@ spec:
         image: {{ include "tracebloc.controlPlaneImage" (dict "image" "jobsManager" "root" $) | quote }}
         # #569: IfNotPresent wherever an update path exists without `Always` --
         # a pinned digest, or the image-refresh reconcile. `Always` forced a
-        # registry round-trip on every (re)start, so an offline Docker Desktop /
-        # WSL2 restart landed in ImagePullBackOff even though containerd already
+        # registry round-trip on every (re)start, so a restart while offline
+        # landed in ImagePullBackOff even though containerd already
         # had the image cached. See tracebloc.controlPlanePullPolicy for why this
         # is NOT unconditional: on an edge the reconcile cannot reach (private
         # mirror, or imageRefresh disabled) a floating tag plus a restart is the
@@ -1028,7 +1028,7 @@ spec:
           value: {{ if hasKey .Values.env "RUNTIME_CLASS_NAME" }}{{ .Values.env.RUNTIME_CLASS_NAME | quote }}{{ else }}""{{ end }}
         # client-runtime#92: gates jobs-manager's GPU->CPU pending-job fallback.
         # Default tracks hostPath.enabled — a fixed single-host cluster
-        # (installer-provisioned k3d / bare-metal hostPath) applies the hard
+        # (installer- or operator-provisioned hostPath) applies the hard
         # CPU-or-GPU rule (downgrade a Pending GPU pod to CPU); managed
         # dynamic-PVC clusters (EKS/AKS/OpenShift, hostPath.enabled=false) leave
         # a Pending GPU pod for the autoscaler instead of prematurely

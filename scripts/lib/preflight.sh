@@ -59,7 +59,7 @@ _TB_WINDOWS_MIN_MEM_BYTES=7046430720
 # The warn tier is DERIVED from that constant: below it the smallest training
 # run (XS, 4 GiB) cannot schedule beside the platform, so "comfortable to run" is
 # now a number with a source rather than a feeling about 8. Ceiling to whole GB
-# because that is the unit Docker Desktop, colima and .wslconfig take. The `8`
+# because that is the unit the macOS node's --memory and .wslconfig take. The `8`
 # fallback is the pre-derivation value and is UNREACHABLE while the drift guard
 # is green: an unpopulated embed is a finding there, never a quiet 8 here.
 _pf_vm_min_gb() {
@@ -100,13 +100,14 @@ _pf_linux_run_floor_mib() { _pf_run_floor_mib linux; }
 # THE FLOOR EVERY MEMORY GATE GRADES A MemTotal AGAINST, in MiB: the derived run
 # floor where there is one, else the typed PF_MIN_MEM_GB less the guest grace
 # (the pre-derivation rule, and the escape hatch's). Arg: family (default: this
-# machine's) -- setup-macos.sh names `darwin`, since it only ever sizes a Mac's VM.
+# machine's) -- _macos_vm_mem_gb names `darwin`, since it only ever sizes the macOS
+# node's VM.
 _pf_vm_floor_mib() {
   local f
   if f="$(_pf_run_floor_mib "${1:-}")"; then printf '%s' "$f"
   else printf '%s' "$(( PF_MIN_MEM_GB * 1024 - PF_VM_MEM_GRACE_MIB ))"; fi
 }
-# The same floor as the whole-GB size to CONFIGURE (Docker Desktop, colima and
+# The same floor as the whole-GB size to CONFIGURE (the macOS node's --memory and
 # .wslconfig take whole GB): ceil((floor + grace) / 1024), so a VM set to it
 # clears the floor after the guest shortfall, and a VM the floor refuses always
 # displays (_pf_display_gb_from_mib) below it. The typed floor maps back to
@@ -264,10 +265,10 @@ _pf_fstype() {
 }
 
 # Memory/CPU as the CONTAINER RUNTIME sees it (the budget the pods actually get).
-# On Docker Desktop / Colima / WSL2 this is the VM's allocation — smaller than the
-# host and the number that matters (a 36 GB Mac can cap its Docker VM at 4 GB). Echo
+# On Docker Desktop / WSL2 this is the VM's allocation — smaller than the host and
+# the number that matters (a 36 GB machine can cap its Docker VM at 4 GB). Echo
 # a single integer, or nothing if the daemon is down / the value is junk — callers
-# then fall back to the host reader. (docker info precedent: _pf_docker_root above.)
+# then fall back to the host reader.
 #
 # ON NATIVE k3s THE HOST IS THE NODE (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): there is no Docker and no
 # VM, so the budget the pods get is the host's own -- /proc/meminfo's MemTotal and
@@ -313,7 +314,7 @@ _pf_on_mac_node() { [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == 
 
 # _pf_mac_node_size -- "<cpus> <N>g", the macOS node's size, from mac-container.sh's
 # _mac_ct_node_size: what the node is created with, asked, never restated. Its memory
-# is _macos_vm_mem_gb's, the rule Colima and Docker Desktop are sized by. The node
+# is _macos_vm_mem_gb's. The node
 # advertises more CPUs than <cpus>: the VM adds vCPUs of its own
 # (TB_MAC_CT_VM_OWN_CPUS, mac-container.sh), so the runtime CPU reader adds them back. Fails when mac-container.sh is
 # not loaded (it is sourced from 2.1 part 6) or cannot size the node, and the readers
@@ -355,13 +356,15 @@ _pf_clamp_mem_gb() {
   if (( desired < cap )); then printf '%s' "$desired"; else printf '%s' "$cap"; fi
 }
 
-# The memory budget (GB) to give a macOS VM (colima / Docker Desktop), derived from
-# physical RAM (#428): min(half of physical, the clamped recommendation), never below
-# the macOS VM floor (_pf_vm_floor_gb darwin: the derived run floor, client-dev#2105). The single sizing helper both macOS paths share.
-# Physical unknown/0 -> the historic COLIMA_MEMORY default. Arg: physical GB (default: host).
+# The memory budget (GB) to give the macOS node's VM (mac-container.sh's
+# _mac_ct_node_size), derived from physical RAM (#428): min(half of physical, the
+# clamped recommendation), never below the macOS VM floor (_pf_vm_floor_gb darwin:
+# the derived run floor, client-dev#2105).
+# Physical unknown/0 -> 6 GB, the size the installer gave a Mac's VM before #428
+# derived it. Arg: physical GB (default: host).
 _macos_vm_mem_gb() {
   local phys="${1:-$(_pf_host_mem_gb)}" half rec budget safe_floor cap
-  [[ "$phys" =~ ^[0-9]+$ && "$phys" -gt 0 ]] || { printf '%s' "${COLIMA_MEMORY:-6}"; return 0; }
+  [[ "$phys" =~ ^[0-9]+$ && "$phys" -gt 0 ]] || { printf '6'; return 0; }
   half=$(( phys / 2 ))
   rec="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB" "$phys")"
   budget=$(( half < rec ? half : rec ))
@@ -385,8 +388,7 @@ _macos_vm_mem_gb() {
   # Applied unconditionally, the rung floor raised a 9 or 10 GB Mac to its cap (7
   # or 8 GB): RAM taken from macOS that the rung still cannot use, so the host paid
   # and got the same "training cannot schedule" warning as before. When the cap is
-  # below the rung the #428 size stands, exactly as the offer path in setup-macos.sh
-  # declines a raise that cannot reach the rung and hints instead.
+  # below the rung the #428 size stands.
   #
   # AND NEVER BELOW THE RUN FLOOR (client-dev#2105). PF_MIN_MEM_GB + 1 sized an 8 GB
   # Mac to a 6 GB VM, under the 6.6 GiB one training run needs beside the platform:
@@ -418,16 +420,6 @@ _pf_host_ncpu() {
 
 # Available (free) RAM right now, KB — Linux only (for the busy-shared-VM warn).
 _pf_avail_mem_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null; }
-
-# True on a macOS box with a real GUI login session — mirrors setup-macos.sh's
-# _has_gui_session (the branch that installs Docker Desktop from desktop.docker.com
-# vs. the headless branch that installs colima/docker via brew). /dev/console is
-# owned by the GUI user; on headless Macs (EC2/CI) it's "root" or empty. Used to
-# decide whether a missing docker means a brew install (→ formulae.brew.sh needed).
-_pf_has_gui_session() {
-  local u; u="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"
-  [[ -n "$u" && "$u" != "root" ]]
-}
 
 # Selectors: prefer the runtime view, fall back to the host. The checks (and the
 # bats numeric test) call these names; they always emit exactly one integer.
@@ -545,8 +537,7 @@ _pf_runtime_run_target_gb() {
 }
 
 # What a Docker budget below the smallest training rung's budget COSTS, worded
-# once for every rung warning (preflight here, the Colima and Docker Desktop raise
-# offers in setup-macos.sh). It used to say "training pods stay Pending", and on
+# once for every rung warning. It used to say "training pods stay Pending", and on
 # today's admission path nothing does that (backend#5025 O-20: a CLM run on a
 # 16 GB Mac at an 8 GB VM started in a minute and trained). The installer sizes
 # the run envelope to what the node can hold (_fit_training_envelope ->
@@ -617,8 +608,8 @@ _pf_runtime_mem_status() {
   # The WARN threshold carries the grace too, not just the floor one. The shown
   # figure is now (mib + grace)/1024, so grading this branch on the raw threshold
   # reopened the same self-contradiction one boundary up: every budget in
-  # [warn*1024 - grace, warn*1024) — 7680..8191 MiB at warn 8, a band Docker
-  # Desktop's own defaults land in — printed "budget: 8 GB — recommended ≥ 8 GB".
+  # [warn*1024 - grace, warn*1024) — 7680..8191 MiB at warn 8, a band common VM
+  # defaults land in — printed "budget: 8 GB — recommended ≥ 8 GB".
   # With both the display and both thresholds pivoting on the grace, shown == target
   # implies the ✔ branch, so no displayed number can contradict its own grade.
   elif (( rt_mib < warn_eff * 1024 - PF_VM_MEM_GRACE_MIB )); then
@@ -647,22 +638,9 @@ _pf_runtime_mem_status() {
     else
       warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
       # THE REMEDY NAMES THE NEED, NOT THE COMFORTABLE FIGURE (backend#5025 O-14).
-      # It used to aim at rec_eff, so a 16 GB Mac read "Give Docker 14 GB" here and
-      # "Memory -> 11 GB" from the Docker Desktop / Colima step a few lines later,
-      # which sizes the VM by _macos_vm_mem_gb (floored at PF_WARN_MEM_GB). The
-      # sentence above already names the comfortable figure, once; every remedy
+      # The sentence above already names the comfortable figure, once; every remedy
       # for this condition quotes the rung budget, as the sub-floor branch does.
-      #
-      # ON macOS THE REMEDY IS THE RAISE'S OWN FIGURE, NOT A SECOND DERIVATION
-      # (Bugbot on client-dev#1510). warn_eff is the rung clamped to the host, which
-      # equals _macos_vm_mem_gb only where half of physical RAM does not exceed the
-      # rung (16 GB: 11 both ways). A 24 or 32 GB Mac gets 12 or 16 from the raise
-      # (half of physical), so quoting warn_eff there printed two sizes in one run.
-      if [[ "$OS" == "Darwin" ]]; then
-        target_gb="$(_macos_vm_mem_gb)"
-      else
-        target_gb="$warn_eff"
-      fi
+      target_gb="$warn_eff"
     fi
   else
     [[ -n "$quiet_ok" ]] || _pf_ok "${what}: ${rt_gb} GB"
@@ -670,9 +648,9 @@ _pf_runtime_mem_status() {
   fi
   # A machine that cannot reach the floor even with the OS reserve honoured is too
   # small for tracebloc no matter how Docker is configured, so a "give Docker N GB"
-  # remedy is a dead end that asks for more than the machine has (Bugbot #445 r2 —
-  # a 4 GB Mac was told "colima start --memory 5"). Say so plainly instead; the
-  # recheck's own host-too-small branch then stops the install honestly (#444).
+  # remedy is a dead end that asks for more than the machine has (Bugbot #445 r2).
+  # Say so plainly instead; the recheck's own host-too-small branch then stops
+  # the install honestly (#444).
   host_gb="$(_pf_host_mem_gb)"
   [[ "$what" == "Docker's memory budget" ]] || target_gb=""
   if [[ -z "$target_gb" ]]; then
@@ -683,8 +661,6 @@ _pf_runtime_mem_status() {
     else
       hint "This machine has ${host_gb} GB of RAM total; the client needs a $(_pf_budget_floor_gb) GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB. Free up memory or use a larger machine."
     fi
-  elif [[ "$OS" == "Darwin" ]]; then
-    hint "Give Docker ${target_gb} GB: Docker Desktop → Settings → Resources → Memory (colima: colima stop && colima start --memory ${target_gb})."
   else
     # No Docker Desktop dead end on Linux (Bugbot #445): headless/engine-only
     # boxes have no Desktop UI — a low budget there is the machine's RAM or a
@@ -693,17 +669,6 @@ _pf_runtime_mem_status() {
   fi
   PF_RUNTIME_MEM_WARNED=1
   return 0
-}
-
-# Docker data root if the daemon is up; else where it will live / a host proxy.
-_pf_docker_root() {
-  if has docker && _docker_answers_bounded "probing docker" "${TB_DOCKER_PROBE_TIMEOUT:-10}" >/dev/null 2>&1; then   # coreutils-free bounded liveness, silenced (#744)
-    _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "/var/lib/docker"
-  elif [[ "$OS" == "Linux" ]]; then
-    echo "/var/lib/docker"
-  else
-    echo "$HOME"
-  fi
 }
 
 # Backend host per TRACEBLOC_ENV/CLIENT_ENV (mirrors
@@ -781,14 +746,11 @@ _pf_mysql_engine_decision() {
 }
 
 # The command that registers amd64 emulation (QEMU binfmt) here, for the arch
-# refusal's remedy. A k3d node runs under Docker, so k3d's remedy is the binfmt
-# image Docker runs. Native k3s has no Docker: its containerd uses the host's own
-# binfmt_misc handlers (/proc/sys/fs/binfmt_misc, which amd64_emulation_available
-# reads), and the distro's QEMU package registers them.
+# refusal's remedy. Native k3s's containerd uses the host's own binfmt_misc handlers
+# (/proc/sys/fs/binfmt_misc, which amd64_emulation_available reads), and the
+# distro's QEMU package registers them.
 _pf_binfmt_remedy() {
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
-    printf 'docker run --privileged --rm tonistiigi/binfmt --install amd64'
-  elif has apt-get; then
+  if has apt-get; then
     printf 'sudo apt-get install -y qemu-user-static'
   elif has dnf; then
     printf 'sudo dnf install -y qemu-user-static'
@@ -828,13 +790,6 @@ _pf_arch() {
     # The macOS node runs amd64 images under Rosetta, which the node gets when this Mac
     # has it installed (mac-container.sh, --rosetta); there is no Docker setting to name.
     _pf_note "Architecture: ${ARCH} — the macOS node runs the amd64 client images under Rosetta when this Mac has it (softwareupdate --install-rosetta)."
-    return 0
-  fi
-  if [[ "$OS" != "Linux" ]]; then
-    # Don't ASSUME emulation works here — Docker isn't up yet at preflight, so the real
-    # amd64 smoke runs post-Docker (assert_amd64_emulation, #433). Name the setting now
-    # so the operator can pre-empt it.
-    _pf_note "Architecture: ${ARCH} — the amd64 client images run under emulation; Docker's \"Use Rosetta for x86_64/amd64 emulation\" must be enabled (verified once Docker is running)."
     return 0
   fi
   if amd64_emulation_available; then
@@ -909,7 +864,7 @@ _pf_memory() {
   # Two truths, two lines (#417): the machine's RAM (a hardware fact — the gate
   # runs on it; on native Linux the daemon sees all host RAM so the gate is
   # unchanged) and, when a runtime VM is up with a meaningfully smaller budget
-  # (macOS Docker Desktop / colima, WSL2), Docker's actual budget on its own
+  # (WSL2, or the macOS node's VM), the runtime's actual budget on its own
   # line with achievable advice. The old single line flip-flopped between the
   # two across re-runs of the SAME installer on the SAME machine — "16 GB
   # (host)" cold, "6 GB (Docker VM)" warm — depending only on whether Docker
@@ -932,7 +887,7 @@ _pf_memory() {
   # appears as two different numbers across the two messages (Bugbot #445 r4).
   gb="$(_pf_display_gb_from_mib "$mib")"
   # Compare in MiB with a 64 MiB grace so a VM that reports e.g. 4 GiB a hair under
-  # 4*1024^3 (Colima / Docker Desktop) doesn't floor to 3 GB and false-trip the gate.
+  # 4*1024^3 (a VM's guest MemTotal) doesn't floor to 3 GB and false-trip the gate.
   # Tolerance must match the grace already applied to the SHOWN figure above, or
   # the two disagree: a 5 GB VM whose MemTotal sits a few hundred MiB under the
   # configured size displayed as "5 GB" while a 64 MiB tolerance graded it
@@ -1080,26 +1035,22 @@ _pf_recheck_runtime_mem() {
     # and this hard-fail then advised raising Docker to a size that machine cannot
     # give — the same remedy contradiction, one OS gate apart.
     if _pf_host_too_small_for_floor "$phys_gb"; then
-      local host_noun="machine"
-      [[ "$OS" == "Darwin" ]] && host_noun="Mac"
       if [[ -n "$run_floor_mib" ]]; then
-        error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: one training run needs a $(_pf_runtime_run_target_gb "$run_floor_mib") GB Docker budget beside the tracebloc platform, more than this ${host_noun} has. Use a larger machine."
+        error "This machine has ${phys_gb} GB RAM — too little for tracebloc: one training run needs a $(_pf_runtime_run_target_gb "$run_floor_mib") GB Docker budget beside the tracebloc platform, more than this machine has. Use a larger machine."
       else
         local floor_gb; floor_gb="$(_pf_budget_floor_gb)"
-        error "This ${host_noun} has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${floor_gb} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( floor_gb + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
+        error "This machine has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${floor_gb} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( floor_gb + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
       fi
     elif [[ -n "$run_floor_mib" ]]; then
       error "Docker has only $(_pf_tenths_gb "$mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule. Raise the VM/cgroup limit (or free memory) to ≥ $(_pf_runtime_run_target_gb "$run_floor_mib") GB, then re-run."
-    elif [[ "$OS" == "Linux" ]]; then
-      error "Docker has only ${gb} GB — $(_pf_vm_floor_words "$rt_fam"). Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     else
-      error "Docker's VM has only ${gb} GB — $(_pf_vm_floor_words "$rt_fam"). Raise it: Docker Desktop → Settings → Resources → Memory ≥ ${warn_gb} GB (or colima: colima stop && colima start --memory ${warn_gb}), then re-run."
+      error "Docker has only ${gb} GB — $(_pf_vm_floor_words "$rt_fam"). Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
     fi
   fi
   # Between floor and warn: warn only, through the ONE shared copy so this and the
   # Step-1 preflight line can no longer diverge in wording OR in threshold — the
   # cold-install path (Docker starts mid-run, the common case) previously got its
-  # own text with no colima guidance and no Linux cgroup hint, and graded against
+  # own text with no Linux cgroup hint, and graded against
   # the raw PF_WARN_MEM_GB while preflight used the clamped target (Bugbot #445 r2).
   # Skipped when preflight ALREADY reported this same budget on a warm re-run. The
   # latch suppresses a DUPLICATE WARNING only, and is deliberately tested here
@@ -1113,26 +1064,8 @@ _pf_recheck_runtime_mem() {
 _pf_disk() {
   if _pf_on_mac_node; then _pf_disk_mac_node; return 0; fi
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then _pf_disk_k3s; return 0; fi
-  local target free_kb free_gb
-  target="$(_pf_docker_root)"
-  if [[ ! -d "$target" ]]; then target="/"; fi
-  if [[ "$OS" != "Linux" ]]; then target="$HOME"; fi   # Desktop VM disk is opaque
-  free_kb="$(_pf_free_kb "$target")"
-  if [[ -z "$free_kb" ]]; then warn "Disk: couldn't determine free space on ${target} (skipping)."; return 0; fi
-  free_gb=$(( free_kb / 1024 / 1024 ))
-  if [[ "$OS" != "Linux" ]]; then
-    _pf_note "Disk: ${free_gb} GB free on ${target} (host) — also ensure Docker Desktop's disk image has ≥ ${PF_WARN_DISK_GB} GB."
-    return 0
-  fi
-  if [[ "$free_gb" -lt "$PF_MIN_DISK_GB" ]]; then
-    _pf_fail_line "Disk: only ${free_gb} GB free on ${target} — need ≥ ${PF_MIN_DISK_GB} GB."
-    PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
-    hint "Free up space or attach a larger disk, then re-run."
-  elif [[ "$free_gb" -lt "$PF_WARN_DISK_GB" ]]; then
-    warn "Disk: ${free_gb} GB free on ${target} — recommended ≥ ${PF_WARN_DISK_GB} GB; images + data may fill it."
-  else
-    _pf_ok "Disk: ${free_gb} GB free on ${target}"
-  fi
+  # Any other substrate was refused before preflight (tb_substrate_resolve): there is
+  # no disk of its to grade.
   return 0
 }
 
@@ -1492,7 +1425,7 @@ _pf_network_fs_remedy() {
 # failure. TRACEBLOC_ALLOW_NETWORK_FS defers to the full check's warning.
 #
 # Native k3s under node-local judges the directory _pf_storage_type judges, the
-# storage path, where its database lives (under hostpath, HOST_DATA_DIR, as on k3d): an NFS home with k3s's default storage holds only logs and
+# storage path, where its database lives (under hostpath, HOST_DATA_DIR): an NFS home with k3s's default storage holds only logs and
 # config, so it passes here as it passes there. When reading the storage path
 # needs a password (or cannot answer), this pre-log guard defers to the full check,
 # which asks and refuses by name. What k3s gives up: a root login whose own home is
@@ -1541,7 +1474,7 @@ _pf_storage_type() {
   # that is the directory that must be local. _pf_disk_k3s has already read it (and
   # refused when it could not: PF_HARD_FAIL is raised and run_preflight stops), so a
   # failure here adds nothing (preflight.bats pins it). Under hostpath the database
-  # is the chart's hostPath PV under HOST_DATA_DIR, on native k3s as on k3d
+  # is the chart's hostPath PV under HOST_DATA_DIR
   # (client-dev#1782), so HOST_DATA_DIR is the directory judged -- on native k3s an
   # installed release's own root (_hostpath_root).
   # The macOS node keeps it in the node's volume, a sparse image under the runtime's app
@@ -1793,14 +1726,13 @@ _pf_connectivity() {
   #
   # The Docker-ENGINE install host is deliberately NOT hard: it's path/distro/
   # environment-dependent (Debian→get.docker.com, RHEL clones→download.docker.com,
-  # Amazon/Arch/SUSE→distro repos, macOS GUI→desktop.docker.com, headless→Colima via
-  # brew/ghcr.io). preflight can't cheaply know which, so hard-probing a fixed host
+  # Amazon/Arch/SUSE→distro repos). preflight can't cheaply know which, so hard-probing a fixed host
   # would abort supported paths that never touch it (Bugbot). It goes in `soft`
   # (warn-only) below. Windows runs this core inside tracebloc's WSL distro, on
   # native k3s, so it fetches no Docker engine at all.
   local soft=() tool_hosts="dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com" nodes_trust="The k3d nodes are"
   if _pf_on_mac_node; then
-    # The macOS node (2.1 part 6) fetches no Docker, k3d or Homebrew. Apple's runtime
+    # A Mac sets up only the macOS node (slim client 4.1). Apple's runtime
     # package comes from its GitHub release, whose download redirects to
     # release-assets.githubusercontent.com (keyed on the runtime's folder, which a
     # re-run reuses); kubectl, pinned to the node's release, from dl.k8s.io; helm from
@@ -1848,30 +1780,6 @@ _pf_connectivity() {
     if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
     if ! has docker;  then soft+=("Docker install (get.docker.com)|https://get.docker.com/" \
                                   "Docker packages (download.docker.com)|https://download.docker.com/"); fi
-  elif [[ "$OS" == "Darwin" ]]; then
-    # macOS install paths, all keyed on what will actually be fetched (#416):
-    #  - Homebrew install (when brew absent): the script from raw.githubusercontent.com,
-    #    then a git-clone of Homebrew/brew + core from github.com — both hard.
-    #  - kubectl/k3d/helm ALWAYS install via `brew install` -> formula metadata from
-    #    formulae.brew.sh (bottles are ghcr.io, probed above; metadata host is separate
-    #    and is hit even when brew is already present) -> hard.
-    #  - docker is path-dependent: a GUI Mac installs Docker Desktop from
-    #    desktop.docker.com (hard — the actual path); a HEADLESS Mac installs
-    #    colima/docker via brew, which needs formulae.brew.sh instead. _pf_has_gui_session
-    #    (mirrors setup-macos.sh) picks the branch, so each host is probed only on the
-    #    path that fetches it — no false-fail on the path that doesn't (Bugbot r3/r4/r5).
-    if ! has brew; then criticals+=("Homebrew install (raw.githubusercontent.com)|https://raw.githubusercontent.com/" \
-                                    "Homebrew clone (github.com)|https://github.com/"); fi
-    local _brew_will_run=""
-    if ! has kubectl || ! has k3d || ! has helm; then _brew_will_run=1; fi
-    if ! has docker; then
-      if _pf_has_gui_session; then
-        criticals+=("Docker Desktop (desktop.docker.com)|https://desktop.docker.com/")   # GUI: the actual Docker path
-      else
-        _brew_will_run=1                                                                  # headless: colima/docker via brew
-      fi
-    fi
-    [[ -n "$_brew_will_run" ]] && criticals+=("Homebrew formulae (formulae.brew.sh)|https://formulae.brew.sh/")
   fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
@@ -1946,12 +1854,12 @@ _pf_connectivity() {
 # leads). Printed by run_preflight only when nothing hard-failed — a ✔ summary
 # above a ✖ would contradict itself.
 _pf_hw_summary_line() {
-  local cpu mem_kb mem_gb disk_target disk_kb disk_gb tab=$'\t'
+  local cpu mem_kb mem_gb disk_target="" disk_kb disk_gb tab=$'\t'
   local -a parts=("$ARCH")
   cpu="$(_pf_ncpu)"
   if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
   # Host RAM, not the VM budget (#417): a hardware summary that read "7 GB
-  # memory" on a 15 GB machine (Docker up, WSL2/Desktop VM default) was the same
+  # memory" on a 15 GB machine (a VM's default budget) was the same
   # flip-flop bug in miniature. Fall back to the runtime only if the host is
   # unreadable, so the field is still populated rather than dropped.
   mem_kb="$(_pf_host_mem_kb)"; [[ -z "$mem_kb" ]] && mem_kb="$(_pf_runtime_mem_kb)"
@@ -1965,10 +1873,6 @@ _pf_hw_summary_line() {
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     # k3s's data path, measured where _pf_disk_k3s measures it.
     disk_target="$(_pf_nearest_existing "$TB_K3S_DATA_PATH")"; [[ -n "$disk_target" ]] || disk_target="/"
-  else
-    disk_target="$(_pf_docker_root)"
-    if [[ ! -d "$disk_target" ]]; then disk_target="/"; fi
-    if [[ "$OS" != "Linux" ]]; then disk_target="$HOME"; fi   # Desktop VM disk is opaque; report host
   fi
   disk_kb=""; [[ -z "$disk_target" ]] || disk_kb="$(_pf_free_kb "$disk_target")"
   if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi

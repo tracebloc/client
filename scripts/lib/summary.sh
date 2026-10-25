@@ -121,12 +121,15 @@ _diagnose_not_ready() {
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
 # One-line note in the success summary so the user knows how the client comes
-# back after a reboot. Linux with docker.service enabled on boot → automatic;
-# Linux without it (Tier 0's zero-privilege path, or opted out) → the user has to
-# start Docker first; macOS/Windows → Docker Desktop must be launched.
+# back after a reboot. Native k3s comes back on its own (below). k3d, which runs on
+# Linux only: docker.service enabled on boot → automatic; without it (Tier 0's
+# zero-privilege path, or opted out) → the user has to start Docker first.
+# main() refuses that substrate before the summary; its two lines stay while
+# copy-catalog.bats renders the summary off native k3s (01-outcomes.golden).
+# TODO(tracebloc/client-dev#1950): delete them with that rendering.
 _reboot_note() {
   # Single dim footer line — the LAST line of the summary.
-  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) has no Docker: k3s's install enables the k3s
+  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): k3s's install enables the k3s
   # service on boot, and the node is this host, so the cluster returns with it. On a Mac
   # the node is a VM, and the login item io.tracebloc.node brings it back at login
   # (mac-container.sh, LimitLoadToSessionType Aqua).
@@ -134,34 +137,6 @@ _reboot_note() {
     echo -e "  ${DIM}After a restart, tracebloc comes back when you log in: the login item ${TB_MAC_CT_AGENT_LABEL:-io.tracebloc.node} starts it.${RESET}"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     echo -e "  ${DIM}After a reboot, tracebloc restarts automatically with the k3s service (check it with: systemctl status k3s).${RESET}"
-  elif [[ "$OS" != "Linux" ]]; then
-    if [[ "${TB_MACOS_AUTOSTART:-0}" == "1" ]]; then
-      # macOS autostart configured (_install_macos_autostart, #430): the runtime starts on
-      # boot/login and the k3d --restart policy brings the cluster back → zero action. Don't
-      # name a specific mechanism here — GUI installs a LaunchAgent (login item) but headless
-      # installs a system LaunchDaemon (not a login item), so "login item" would mislead IT
-      # on a headless box (#430 Bugbot).
-      echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
-    elif [[ "${TB_MACOS_HEADLESS_NO_AUTOSTART:-0}" == "1" ]]; then
-      # Headless Tier 0 skipped the boot LaunchDaemon rather than prompt for a
-      # password (setup-macos.sh, client#704). The generic branch below is the
-      # GUI fallback and would say "open Docker Desktop" — a runtime that is not
-      # what runs here and an action there is no desktop to perform, directly
-      # contradicting the hint the skip already printed.
-      #
-      # The COMMAND comes from the skip site, which resolved it against this
-      # host, rather than being hardcoded here: on a headless Mac the runtime is
-      # usually colima but not always, and naming a binary that is not installed
-      # is the same defect in the opposite direction (Bugbot, client#704).
-      if [[ -n "${TB_MACOS_MANUAL_RUNTIME_CMD:-}" ]]; then
-        echo -e "  ${DIM}After a reboot, run '${TB_MACOS_MANUAL_RUNTIME_CMD}' to bring tracebloc back.${RESET}"
-      else
-        echo -e "  ${DIM}After a reboot, start your Docker runtime to bring tracebloc back.${RESET}"
-      fi
-    else
-      # macOS/Windows fallback: Docker Desktop owns boot autostart and must be launched.
-      echo -e "  ${DIM}After a reboot, open Docker Desktop to bring tracebloc back.${RESET}"
-    fi
   elif [[ "${TB_DOCKER_AUTOSTART:-0}" == "1" ]]; then
     # docker.service is enabled on boot (ensure_cluster_autostart) and the k3d
     # nodes carry --restart unless-stopped → the cluster returns on its own.
@@ -178,14 +153,13 @@ _reboot_note() {
 # $HOME as ~ for them to type, or NO OUTPUT when there is none. Native k3s links
 # kubectl to k3s, and with no KUBECONFIG that kubectl reads k3s's own k3s.yaml
 # (context default, no namespace), never the merged file.
-# _native_k3s_merge_kubeconfig sets the hint only when the user had no KUBECONFIG;
-# k3d never needs it.
+# _native_k3s_merge_kubeconfig sets the hint only when the user had no KUBECONFIG.
 #
 # It always exits 0; callers test the output (`[[ -n "$kc" ]]`). A "no hint" exit 1
 # was recorded as a failure by the installer's ERR trap: `set -E` carries the trap
 # into the `$(...)` of `if kc="$(...)"`, where the status is not in a condition, so
-# every successful k3d install logged `err: … summary.sh … cmd=return 1` after its
-# success screen (backend#5025 O-103).
+# every successful install without a hint logged `err: … summary.sh … cmd=return 1`
+# after its success screen (backend#5025 O-103).
 _summary_kubeconfig_hint() {
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && -n "${TB_K3S_KUBECONFIG_HINT:-}" ]]; then
     local kc="$TB_K3S_KUBECONFIG_HINT"
@@ -211,7 +185,7 @@ _kube_context_note() {
   local kc="" kcflag=""
   kc="$(_summary_kubeconfig_hint)"
   if [[ -n "$kc" ]]; then kcflag="--kubeconfig ${kc} "; fi
-  echo -e "  kubectl now points at ${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-k3d-${CLUSTER_NAME:-tracebloc}}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
+  echo -e "  kubectl now points at ${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-the tracebloc cluster}} (it pointed at ${TB_PREV_KUBE_CONTEXT} before). To switch back:"
   echo -e "    ${TB_CMD}kubectl ${kcflag}config use-context ${TB_PREV_KUBE_CONTEXT}${RESET}"
   echo ""
 }
@@ -261,14 +235,13 @@ TB_PREPULL_CALL_S=10
 TB_PREPULL_VERDICT=""
 
 # _prepull_store_path SUBSTRATE -- the directory whose filesystem holds SUBSTRATE's
-# image store. k3d's node keeps its images inside its container, under Docker's data
-# root. Native k3s keeps them in its containerd root, TB_K3S_DATA_PATH/agent/containerd:
+# image store. Native k3s keeps them in its containerd root, TB_K3S_DATA_PATH/agent/containerd:
 # the kubelet's image filesystem, which a mount of its own can put on another disk
 # than the data path (preflight measures it there too, _pf_disk_k3s). Exit 1, printing
-# nothing, for a substrate this step does not know: the caller skips it by name.
+# nothing, for any other substrate (main() refuses every other one before this
+# step): the caller skips it by name.
 _prepull_store_path() {
   case "$1" in
-    k3d) _pf_docker_root ;;
     k3s) printf '%s' "${TB_K3S_DATA_PATH}/agent/containerd" ;;
     *) return 1 ;;
   esac
@@ -410,7 +383,7 @@ print_summary() {
   # NVIDIA "GPU mode" only when the GPU was actually WIRED into the cluster
   # (_gpu_wired) — a detected-but-not-wired GPU runs CPU-only, and printing
   # "NVIDIA GPU" there is exactly the false claim client#835 removes. AMD keys on
-  # detection (it has no k3d wiring step).
+  # detection.
   local mode="CPU"
   if _gpu_wired; then
     mode="NVIDIA GPU"
@@ -532,20 +505,13 @@ print_summary() {
         # nothing is released and nothing is deleted.
         echo -e "  corporate CA bundle so the macOS node trusts it. Re-running with the CA"
         echo -e "  recreates the node with it, and keeps the node's data:"
-      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+      else
         # Native k3s reads the CA from /etc/rancher/k3s/registries.yaml each time
         # the k3s service starts, so a re-run that writes it is the whole remedy:
         # nothing is released and nothing is deleted.
         echo -e "  corporate CA bundle so k3s trusts it. k3s reads the CA each time its"
         echo -e "  service starts, so re-running with the CA rewrites it and restarts k3s"
         echo -e "  (systemctl restart k3s):"
-      else
-        echo -e "  corporate CA bundle so the nodes trust it. CA trust is baked in at"
-        echo -e "  cluster-create, so release this machine's secure environment and delete the"
-        echo -e "  cluster first, then re-run with the CA. Releasing comes FIRST: the record is tied"
-        echo -e "  to the cluster, so deleting the cluster alone strands it on your dashboard:"
-        echo -e "    ${TB_CMD}tracebloc delete --keep-data${RESET}   ${DIM}(releases it; keeps your local data)${RESET}"
-        echo -e "    ${TB_CMD}k3d cluster delete ${CLUSTER_NAME:-tracebloc}${RESET}"
       fi
       echo -e "    ${TB_CMD}TRACEBLOC_CA_BUNDLE=/path/to/corporate-ca.pem ${TB_INSTALL_CMD:-./install.sh}${RESET}"
       echo -e "  ${DIM}(CURL_CA_BUNDLE is also honored.) Ask your IT team for the bundle if unsure.${RESET}"
@@ -592,8 +558,8 @@ _gpu_test_cmd() {
   local vendor="$1" image smi spec
   case "$vendor" in
     nvidia)
-      # The class is `nvidia` on k3d, and the runtime step c's gate found on native
-      # k3s (common.sh _gpu_runtime_class).
+      # The class is the runtime step c's gate found on native k3s (common.sh
+      # _gpu_runtime_class).
       image="nvidia/cuda:12.3.1-base-ubuntu22.04"; smi="nvidia-smi"
       spec="\"runtimeClassName\":\"$(_gpu_runtime_class)\"," ;;
     amd)
@@ -637,10 +603,6 @@ _log_advanced_info() {
     log "  sudo systemctl start k3s"
     log "  systemctl status k3s"
     log "  journalctl -u k3s"
-  else
-    log "  k3d cluster stop $CLUSTER_NAME"
-    log "  k3d cluster start $CLUSTER_NAME"
-    log "  k3d cluster delete $CLUSTER_NAME"
   fi
   if _gpu_wired; then
     # runtimeClassName: nvidia is REQUIRED — the GPU node's containerd invokes the

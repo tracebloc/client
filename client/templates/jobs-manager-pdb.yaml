@@ -26,9 +26,8 @@
      jobs-manager GPU->CPU fallback and may legitimately be true on a FIXED
      MULTI-NODE cluster — using that here would drop eviction protection where
      pods can reschedule (client#560 / Bugbot). The installer sets
-     singleNode=true for node-local single-node k3d (hostPath.enabled=false,
-     local-path CSI, TRACEBLOC_AGENTS=0 -- old name AGENTS still works);
-     bare-metal single-node keeps the
+     singleNode=true for its node-local install (one k3s node,
+     hostPath.enabled=false, local-path); bare-metal single-node keeps the
      hostPath.enabled default. */ -}}
 {{- $hostPathMode := (default dict .Values.hostPath).enabled | default false -}}
 {{- $singleNode := .Values.singleNode -}}

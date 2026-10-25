@@ -2,59 +2,30 @@
 # =============================================================================
 #  assess.sh — installer "stop-and-check" gate.
 #
-#  A re-run of the installer on a machine that is ALREADY set up should not drag
-#  the user back through full provisioning. This module inspects the machine
-#  READ-ONLY and classifies it, so main() can short-circuit a healthy box
-#  straight to the `tracebloc` home screen (exit 0) instead of re-running every
-#  step — while a fresh or half-set-up machine still runs the normal flow.
+#  A re-run of the installer on a machine that is ALREADY set up says what it
+#  found before the normal flow reconciles it. This module inspects native k3s
+#  READ-ONLY and classifies it; main() then runs the normal flow, which on k3s
+#  moves the node forward on every re-run (RFC-0175 D4/D11).
 #
-#  NON-MUTATING, with exactly ONE narrow exception named below. It must never
-#  start the cluster, run helm, mint a credential, or write anything. Every
-#  probe is read-only (`k3d cluster list`, `systemctl is-active k3s`,
-#  `helm list`/`get values`, `kubectl get`) and BOUNDED (short timeouts) so it
-#  can't hang, and it is NEVER fatal.
-#
-#  THE EXCEPTION — one unprivileged, idempotent runtime nudge (#741). On macOS,
-#  `runtime-down` may `open -a Docker` and wait up to 60s for the daemon. It is
-#  carved out this narrowly on purpose, and the boundary is the point:
-#
-#    * unprivileged — a GUI app launch as the current user, no sudo, nothing a
-#      reader could mistake for the privileged install path;
-#    * idempotent — launching a running Docker Desktop is a no-op, so a re-run
-#      cannot compound;
-#    * bounded — a wall-clock deadline, and every liveness probe on that path
-#      goes through `_docker_answers`, so a wedged daemon cannot hang assess;
-#    * load-bearing — without it a stopped-but-installed Docker classifies
-#      Tier 2 and demands an administrator password to start a runtime that is
-#      already installed. Tier 0 was unreachable for exactly the machines it
-#      was written for.
-#
-#  It does NOT lift the ban. `cluster-stopped` still only PRINTS — starting a
-#  stopped k3d cluster is the mutation this header exists to forbid, and
-#  `_assess_cluster_servers_running` explains why `_handle_existing_cluster` is
-#  off-limits here. If you are adding a second exception, that is the moment to
-#  question whether this file is still the right place for it. On ANY probe failure or uncertainty it
-#  degrades toward "run the normal flow" — never toward a false "healthy". A
-#  false healthy that skips a needed install is the worst possible outcome, so
-#  "healthy" must be CERTAIN: cluster running AND a tracebloc release present AND
-#  the core workload (jobs-manager) Ready AND the CLI present. Anything less is
-#  degraded (partial) or fresh (nothing here yet), and both fall through.
+#  NON-MUTATING. It must never start the cluster, run helm, mint a credential, or
+#  write anything but the context file _assess_classify_k3s names and removes.
+#  Every probe is read-only (`systemctl is-active k3s`, `helm list`/`get values`,
+#  `kubectl get`) and BOUNDED (short timeouts) so it can't hang, and it is NEVER
+#  fatal. On ANY probe failure or uncertainty it degrades toward "run the normal
+#  flow" — never toward a false "healthy", which must be CERTAIN: k3s running AND
+#  a tracebloc release present AND the client's core workloads Ready AND the CLI
+#  present. Anything less is degraded (partial) or fresh (nothing here yet).
 #
 #  Sets INSTALL_STATE (+ INSTALL_STATE_REASON, a short machine-readable tag of
 #  what is off):
-#    fresh    — no cluster, or a cluster with no tracebloc release.
-#    healthy  — all four signals above true. The ONLY short-circuit, and on
-#               k3d only: a healthy native k3s goes on (assess_existing_install).
-#    degraded — a partial state (cluster stopped, workload not Ready, CLI
-#               missing, or any other partial state).
-#               A down container runtime is degraded/runtime-down: nothing below
-#               it can be determined, so the machine must NOT be called fresh
-#               (client#682).
+#    fresh    — no tracebloc k3s, or a k3s with no tracebloc release.
+#    healthy  — all four signals above true. The normal flow still runs.
+#    degraded — a partial state (k3s stopped, workload not Ready, CLI missing,
+#               or any other partial state).
 #               cli-behind-latest is the ONE degraded reason where the
 #               environment is fully healthy: it fires ONLY under an explicit
 #               `tracebloc upgrade` (TB_UPGRADE_CLI) when the CLI is above the
-#               floor but behind the latest release, so main() updates just the
-#               CLI instead of handing off to a no-op (backend#2253).
+#               floor but behind the latest release (backend#2253).
 # =============================================================================
 
 # --force / --reinstall (or TRACEBLOC_FORCE_REINSTALL=1) bypasses the gate and
@@ -69,80 +40,10 @@ TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
 # can never make the gate hang. Overridable for tests.
 : "${TB_ASSESS_KUBECTL_TIMEOUT:=5s}"
 
-# Bound on the container-runtime reachability probe (seconds). `docker info`
-# against a WEDGED daemon hangs forever, and this runs on every re-run.
-: "${TB_ASSESS_DOCKER_TIMEOUT:=10}"
-
 # Where the healthy-machine hand-off points the interactive home screen (see
 # _assess_handoff). Mirrors provision.sh's TRACEBLOC_TTY so tests can redirect it to a
 # real file instead of the controlling terminal.
 : "${TRACEBLOC_TTY:=/dev/tty}"
-
-# _assess_cluster_servers_running — echo the number of running servers for
-# CLUSTER_NAME. This mirrors ONLY the read half of k3d.sh's
-# _handle_existing_cluster; that function is off-limits here because it MUTATES
-# (it starts a stopped cluster and runs drift checks). Single jq-free path — jq
-# is NOT a guaranteed installer prerequisite (same rule as common.sh /
-# install-client-helm.sh, Bugbot #284): read the k3d table's SERVERS column
-# ("running/total") for an EXACT name match with awk.
-#
-# CONTRACT (tri-state since client#984, same shape as _cluster_presence):
-#   echoes an integer, ALWAYS, and
-#   rc 0 = the listing ANSWERED — the integer is the server count (0 = stopped,
-#          0 also when the cluster is absent, which the presence read has already
-#          ruled out before this is called)
-#   rc 2 = the listing did NOT answer (deadline, or k3d's own error) — the
-#          integer is a placeholder and says nothing about the machine
-# Callers MUST read the status: `local n; n="$(...)"` is the split-declaration
-# form, so a bare call also ABORTS the installer under `set -e`.
-_assess_cluster_servers_running() {
-  local running="0" line _tbl _rc=0
-  # BOUNDED (client#974). `k3d cluster list` talks to the Docker engine, and a
-  # WEDGED daemon does not FAIL it — it BLOCKS — so the `|| line=""` this line
-  # already carried handled only k3d failing and was never reached on the input
-  # that matters. This probe runs at the stop-and-check gate on EVERY re-run, so
-  # unbounded it parked the installer before it printed anything. Same distinction
-  # _docker_answers' header draws for a bare `docker info` (#741/#744).
-  #
-  # CAPTURE-THEN-MATCH, not a pipe (#680): awk's `exit` closes the pipe on our
-  # cluster's row — usually row one — so the producer takes SIGPIPE, `pipefail`
-  # makes the pipeline 141, and `|| line=""` then DISCARDED a value we had
-  # successfully read, reporting a running cluster as 0 servers. k3d.sh's
-  # _handle_existing_cluster already made exactly this transform and its comment
-  # points here as the mirror. That mirroring is what made this the LAST holdout
-  # of the tri-state: the #680 SIGPIPE transform and the tri-state transform
-  # touch the same line, this function faithfully copied the first, and the two
-  # then got conflated (LukasWodka, client#984 round 7).
-  # `|| _rc=$?` keeps a non-zero read from aborting under `set -e`.
-  _tbl="$(_bounded "${TB_K3D_LIST_TIMEOUT:-15}" k3d cluster list --no-headers 2>/dev/null)" || _rc=$?
-  # AND A NON-ZERO READ IS NOT "0 SERVERS RUNNING". `(( _rc == 0 )) || _tbl=""`
-  # blanked the table and let the count fall out as 0, which _assess_classify
-  # mapped to `cluster-stopped` and assess_existing_install printed as "Your
-  # secure environment is stopped — starting it and finishing setup" — a claim
-  # about a machine whose listing never answered.
-  #
-  # _cluster_presence running first NARROWS this without closing it. These are
-  # two SEPARATE `k3d cluster list` invocations, each with its own 15s bound; read
-  # 1 answering in 6s says nothing about read 2. That is the same arithmetic this
-  # file already spells out about the docker/k3d pair at L291-297 — "the window is
-  # arithmetic, not hypothetical".
-  #
-  # It collapsed the FAILED half identically: a k3d exiting 127, or on a
-  # permission error, was blanked exactly like a 124. So the caller gets rc 2 for
-  # either, which is the same "couldn't tell" _cluster_presence returns and which
-  # _assess_classify routes to the already-worded `cluster-indeterminate`. The
-  # integer is still printed (0) so the contract stays "echoes an integer"; the
-  # STATUS is what says whether that integer means anything.
-  if (( _rc != 0 )); then
-    log "The k3d cluster listing (server count) did not answer (exit ${_rc}); cluster run-state indeterminate."
-    printf '%s' "0"
-    return 2
-  fi
-  line="$(awk -v n="$CLUSTER_NAME" '$1 == n { print $2; exit }' <<<"$_tbl")"
-  [[ -n "$line" ]] && running="${line%%/*}"
-  [[ "$running" =~ ^[0-9]+$ ]] || running="0"
-  printf '%s' "$running"
-}
 
 # _assess_workload_ready NS — are ALL the client's core workloads Ready in
 # namespace NS? "Ready" MUST match the installer's OWN definition, so this
@@ -171,46 +72,6 @@ _assess_workload_ready() {
   return 0
 }
 
-# _assess_runtime_down — is the container runtime installed but UNREACHABLE right
-# now? (client#682) True only for the case with a one-sentence remedy: Docker is
-# there, the daemon is not answering. Deliberately narrow —
-#   • no docker binary at all  -> NOT down. That is a genuinely fresh machine and
-#     the normal first-time flow is the right answer.
-#   • docker answers           -> NOT down.
-#   • docker present, refuses  -> down ONLY when the refusal is a connection
-#     failure. "permission denied" (a Linux user outside the docker group) is a
-#     different problem with a different fix, and belongs to the normal flow.
-#   • docker present, wedged   -> down. A daemon that will not answer inside the
-#     bound is not usable, and "start Docker" is still the right first move.
-# Read-only and bounded, per the gate's never-hang contract.
-_assess_runtime_down() {
-  has docker || return 1
-  local _out _rc=0
-  # stderr only: the reason lives there, and dropping stdout keeps a healthy
-  # `docker info` (hundreds of lines) out of memory. The assignment is the left
-  # side of `&&`, so a non-zero docker cannot trip `set -e` here.
-  _out="$(_bounded "$TB_ASSESS_DOCKER_TIMEOUT" docker info 2>&1 >/dev/null)" && return 1
-  _rc=$?
-  # 124 = the bound fired (timeout/gtimeout): a wedged daemon, treated as down.
-  [[ "$_rc" -eq 124 ]] && return 0
-  # Permission denied is checked FIRST and wins (Bugbot). The real Linux message
-  # carries BOTH the permission wording AND a `dial unix …` clause:
-  #   permission denied while trying to connect to the Docker daemon socket at
-  #   unix:///var/run/docker.sock: Get "http://…/info": dial unix
-  #   /var/run/docker.sock: connect: permission denied
-  # so matching the connection phrases alone would classify a docker-group
-  # problem as a down daemon — the exact confusion this function exists to
-  # prevent. A negative match before the positive one is the only ordering that
-  # survives an error string containing both.
-  if grep -qiE 'permission denied' <<<"$_out"; then
-    return 1
-  fi
-  # Herestring, not a pipe: `grep -q` exits on first match and a pipe's writer
-  # would then take SIGPIPE, which `set -o pipefail` turns into a 141 the caller
-  # never asked for (the same hazard _assess_cluster_servers_running guards).
-  grep -qiE 'cannot connect to the docker daemon|is the docker daemon running|docker daemon is not running|dial unix|the system cannot find the file specified|open //./pipe/docker_engine' <<<"$_out"
-}
-
 # _assess_cli_bin — the tracebloc CLI to interrogate, or non-zero when there is
 # none. Counts a binary in ~/.local/bin (where the CLI installer drops it when
 # /usr/local/bin isn't writable) even if THIS shell's PATH predates that dir —
@@ -229,8 +90,8 @@ _assess_cli_present() {
   _assess_cli_bin >/dev/null
 }
 
-# _version_lt moved to common.sh (backend#2422): k3d.sh needs it to gate a
-# kubelet flag on the k3s pin, and assess.sh is sourced CONDITIONALLY by
+# _version_lt lives in common.sh (backend#2422): other libs compare versions too,
+# and assess.sh is sourced CONDITIONALLY by
 # install-k8s.sh (`[[ -f ]]`, for stale checkouts) while common.sh is not. A
 # second copy here would be the restated-rule defect, so there is exactly one.
 # assess.sh's callers get it because install-k8s.sh sources common.sh first and
@@ -380,9 +241,9 @@ _assess_credential_rejected() {
 # _assess_gpu_request_unsupported NS — true when the release in NS requests a GPU this
 # installer no longer sets up (client-dev#1697, #1698): amd.com/gpu (there is no ROCm
 # training image), or nvidia.com/gpu on a Linux machine that is not x86_64 (the GPU
-# images are linux/amd64 only). Such a release was installed before the fix; the
-# healthy hand-off would keep its request forever, so the caller degrades to the
-# normal flow, whose step e writes this run's CPU-only GPU_REQUESTS / GPU_LIMITS.
+# images are linux/amd64 only). Such a release was installed before the fix, so the
+# caller degrades it, and the normal flow's step e writes this run's CPU-only
+# GPU_REQUESTS / GPU_LIMITS.
 # Values that cannot be read are NOT a reason to reinstall a healthy machine: false.
 # Read-only and bounded. The release is named after its namespace.
 _assess_gpu_request_unsupported() {
@@ -396,111 +257,9 @@ _assess_gpu_request_unsupported() {
   return 1
 }
 
-# _assess_classify — set INSTALL_STATE (+ INSTALL_STATE_REASON). Pure read-only
-# detection; no mutation, never fatal.
-_assess_classify() {
-  INSTALL_STATE="fresh"
-  INSTALL_STATE_REASON="no-cluster"
-
-  # Is the container runtime even reachable? This MUST come before the cluster
-  # probe (client#682). The cluster probe used to be a BOOLEAN whose three reads
-  # all swallowed stderr and returned 1, so a down daemon was indistinguishable
-  # from an empty machine — and a laptop that merely needs Docker started was told
-  # it had nothing installed and offered a full first-time install. The retired
-  # PowerShell core carried the tri-state version of this contract from #557; bash
-  # does too (_cluster_presence, client#984).
-  #
-  # THIS ORDERING IS NOT ENOUGH ON ITS OWN, and it is worth being precise about
-  # why, because the ordering used to be cited as the whole answer: this guard
-  # tests the DAEMON (`docker info`, TB_ASSESS_DOCKER_TIMEOUT = 10s) while the
-  # cluster read tests k3d (TB_K3D_LIST_TIMEOUT = 15s). A daemon that answers
-  # `docker info` in 2s while `k3d cluster list` takes 20s passes here and times
-  # out below — the window is arithmetic, not hypothetical (LukasWodka,
-  # client#984). The tri-state below is what closes it.
-  # DEGRADED, not blocked: the normal flow already knows how to start a stopped
-  # runtime (install_docker_desktop launches Docker Desktop and waits;
-  # install_docker_engine brings up the Linux service), and create_cluster then
-  # reconciles the existing cluster. Stopping here would trade one bad outcome
-  # for another — it would take away a step that works today. The bug is the
-  # CLAIM, not the flow: "first time on this machine" over a machine whose
-  # environment we simply could not see.
-  if _assess_runtime_down; then
-    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="runtime-down"
-    return 0
-  fi
-
-  # No engine or no cluster => first-time setup. (has k3d short-circuits before
-  # the cluster probe so a machine without k3d doesn't shell out at all.)
-  #
-  # `fresh` is the one verdict this gate must never reach on a GUESS: it offers a
-  # first-time install, over whatever is actually on the machine. The cluster probe
-  # is bounded (client#974), so it has a third answer — the engine didn't respond —
-  # and reading that as "no cluster" is client#682's misclassification arriving
-  # through the new bound (Bugbot High, client#984). UNKNOWN degrades instead, which
-  # is this gate's documented direction on uncertainty: never a false healthy, never
-  # a false fresh, always fall through to the normal flow.
-  if ! has k3d; then
-    INSTALL_STATE="fresh"; INSTALL_STATE_REASON="no-cluster"
-    return 0
-  fi
-  # `|| _presence=$?` — a bare non-zero return would abort under `set -e`.
-  local _presence=0
-  _cluster_presence || _presence=$?
-  # EXHAUSTIVE, including a `*` that degrades rather than falling through
-  # (client#984 round 7): 0 = PRESENT and continues to the run-state read below,
-  # 1 and 2 short-circuit, and any code the contract grows next is "couldn't
-  # tell" — never a silent PRESENT, which is what an implicit fall-through made
-  # it.
-  case "$_presence" in
-    0) : ;;                    # a cluster exists — keep going, is it RUNNING?
-    1) INSTALL_STATE="fresh";    INSTALL_STATE_REASON="no-cluster"           ; return 0 ;;
-    2) INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0 ;;
-    *) INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0 ;;
-  esac
-
-  # A cluster exists — but is it RUNNING? Check this via the cheap read-only k3d
-  # probe BEFORE any Helm call. detect_installed_client below runs `helm list -A`
-  # / `helm get values`, which are UNBOUNDED and talk to the k8s API — on a
-  # stopped cluster (after a reboot or a manual stop) that API is down, so Helm
-  # would hang for a long time (breaking the gate's "bounded, never-hang"
-  # contract) and, when it finally failed, mislabel the machine as
-  # `fresh`/`cluster-no-release`. Probing servers first keeps Helm off a dead API
-  # and makes `cluster-stopped` actually reachable on real re-runs.
-  # TRI-STATE, like the presence read above (client#984 round 7). `|| _srv_rc=$?`
-  # for two reasons: the split-declaration `local servers; servers="$(…)"` form
-  # propagates a non-zero under `set -e` and would abort the gate outright; and
-  # rc 2 means "the listing did not answer", which must NOT become
-  # `cluster-stopped` — that reason prints "Your secure environment is stopped —
-  # starting it and finishing setup" about a machine nobody could read.
-  #
-  # It routes to `cluster-indeterminate`, the arm the presence read's own UNKNOWN
-  # already uses: same cause (a k3d listing that didn't answer), same neutral
-  # copy, same "fall through and read again before acting" direction. A separate
-  # reason would need its own arm at :559 and its own sentence to say the same
-  # thing — and this file's own L566-583 records what happens to a degraded
-  # reason with no arm: it falls into the generic "only partly set up" line.
-  local servers _srv_rc=0
-  servers="$(_assess_cluster_servers_running)" || _srv_rc=$?
-  # `-ne 0`, not `-eq 2`: rc 2 is the only non-zero the contract documents today,
-  # and anything else it grows is still a read that did not answer. The safe
-  # direction is the same one, so it is taken by default rather than by
-  # enumeration.
-  if [[ "$_srv_rc" -ne 0 ]]; then
-    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"
-    return 0
-  fi
-  if [[ "$servers" -lt 1 ]]; then
-    INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-stopped"
-    return 0
-  fi
-
-  _assess_classify_release
-}
-
-# _assess_classify_release — the reads both substrates share once their cluster
-# runs: the tracebloc release, a wedged helm op, the credential, the workloads, the
-# CLI and the GPU request, through helm and kubectl on the current context (native
-# k3s names it, _assess_classify_k3s). Sets INSTALL_STATE (+ INSTALL_STATE_REASON),
+# _assess_classify_release — the reads once k3s runs: the tracebloc release, a wedged helm op, the credential, the workloads, the
+# CLI and the GPU request, through helm and kubectl on the current context, which
+# _assess_classify_k3s names. Sets INSTALL_STATE (+ INSTALL_STATE_REASON),
 # from fresh/cluster-no-release to healthy.
 _assess_classify_release() {
   # Cluster is running (live API). Is a tracebloc release installed on it? Reuse
@@ -593,33 +352,29 @@ _assess_classify_release() {
   return 0
 }
 
-# _assess_classify_k3s — _assess_classify on native k3s (client-dev#1926), on Linux
-# and in tracebloc's WSL distro: the same INSTALL_STATE / INSTALL_STATE_REASON
-# vocabulary, so main()'s handling of each applies unchanged (the degraded copy,
-# provision.sh's --reissue on credential-rejected, the CLI-only upgrade), while a
-# healthy k3s goes on to the normal flow instead of the hand-off
-# (assess_existing_install). k3s's own service stands where Docker and the k3d
-# listing stand:
+# _assess_classify_k3s — the classification on native k3s (client-dev#1926), on
+# Linux and in tracebloc's WSL distro, in the INSTALL_STATE / INSTALL_STATE_REASON
+# vocabulary main() handles (the degraded copy, provision.sh's --reissue on
+# credential-rejected); a healthy k3s goes on to the normal flow
+# (assess_existing_install). k3s's own service is read first:
 #   tracebloc's k3s files are not here     fresh/no-cluster (a k3s someone else set
 #                                          up among them: the create path refuses it)
 #   systemd says k3s is stopped            degraded/cluster-stopped (the create
 #                                          path's _native_k3s_ensure_running starts it)
 #   systemd gives no state, or the API     degraded/cluster-indeterminate
 #   does not answer on the k3s context
-# Below that the release reads are k3d's own (_assess_classify_release). In the
+# Below that are the release reads (_assess_classify_release). In the
 # distro the cluster run reads the same, but for the CLI: the CLI reasons cannot
 # occur there (_assess_classify_release), and the client run is not assessed at all
 # (assess_existing_install).
 #
-# runtime-down cannot occur here: k3s runs its own containerd inside the k3s service,
-# so there is no runtime apart from the cluster, and a runtime that is down is a k3s
-# that is stopped: cluster-stopped. Nothing here asks Docker.
+# k3s runs its own containerd inside the k3s service, so there is no runtime apart
+# from the cluster to read: a runtime that is down is a k3s that is stopped.
 #
 # BY NAME, as _native_k3s_release_storage's early read is: before the create path the
 # user's current context can be any cluster they work with, and a release read there
 # is that cluster's (its credential judged rejected rotates this machine's). The
-# release reads are k3d's,
-# which ask the current context, so the context is named the way kubeconfig allows:
+# release reads ask the current context, so the context is named the way kubeconfig allows:
 # the first KUBECONFIG file that sets current-context wins it, and the user's
 # kubeconfig after it supplies the cluster and the credential. That file holds one
 # context name and nothing secret, and is removed once the reads are done. KUBECONFIG
@@ -665,7 +420,10 @@ _assess_k3s_on_context() {
 # runs its cleanup. The CLI may live in ~/.local/bin and not yet be on this
 # shell's PATH, so put that dir on PATH first (mirrors provision.sh). If
 # `tracebloc` is somehow still unresolvable, fall back to a short status line so
-# a healthy re-run always ends cleanly at exit 0.
+# a healthy re-run always ends cleanly at exit 0. The gate does not call it: a
+# healthy native k3s goes on to the normal flow (assess_existing_install).
+# TODO(tracebloc/client-dev#1950): delete it with telemetry_run_skipped, its one
+# reader of the skipped outcome, and telemetry.bats's case for it.
 _assess_handoff() {
   # This exits 0 having run no install step, so the outcome event must say
   # `skipped`, not `succeeded` (backend#1907) — otherwise the success count
@@ -704,68 +462,9 @@ _assess_handoff() {
 }
 
 # assess_existing_install — the gate. Called from main() after print_banner and
-# before the roadmap / Step 1. READ-ONLY, never fatal. On a healthy machine it
-# short-circuits (hand-off + exit 0). On fresh / degraded it prints a warm
-# one-liner and RETURNS 0 so main() runs the normal flow to set up (fresh) or
-# reconcile (degraded).
-# _assess_handle_runtime_down — the runtime is installed but not answering.
-#
-# This used to be one info() line: "Docker isn't running yet — starting it, then
-# checking your environment." Nothing in that path started anything. The branch
-# printed the sentence and fell through to `return 0`, the probe then found no
-# usable runtime, and macOS classified Tier 2 — the admin-password path — for a
-# machine whose Docker only needed launching. The only `open -a Docker` in the
-# tree sat behind that password prompt, so the installer could not start Docker
-# without first taking a password it needed solely because Docker was stopped.
-#
-# A message that names an action the code does not take is worse than no
-# message: it is what the user quotes back when the install fails, and it sends
-# the reader looking for a bug in the start logic rather than at its absence.
-# So this either DOES the thing or does not claim it.
-_assess_handle_runtime_down() {
-  # macOS with Docker Desktop actually installed: a GUI app launch, no
-  # privileges. If it comes up, the probe that runs next sees a live runtime and
-  # hands this machine to Tier 0.
-  #
-  # The _docker_app_installed test is part of the CONDITION, not just of the
-  # nudge. Announcing "starting it" and then discovering there is no app to
-  # start reproduces this function's own bug one level down — and the failure
-  # copy would go on to say "Open Docker Desktop" to someone who does not have
-  # it, e.g. a Colima-only headless Mac (Bugbot, #741).
-  if [[ "${OS:-}" == "Darwin" ]] \
-     && declare -F _try_start_docker_desktop >/dev/null 2>&1 \
-     && declare -F _docker_app_installed >/dev/null 2>&1 \
-     && _docker_app_installed; then
-    info "Docker isn't running yet — starting it, then checking your environment."
-    if _try_start_docker_desktop; then
-      success "Docker is running"
-      log "runtime-down: Docker came up; the probe will classify from a live runtime"
-      return 0
-    fi
-    # Honest about the failure, and specific about what it costs: without a
-    # running Docker this machine takes the privileged path.
-    warn "Couldn't start Docker automatically."
-    hint "Open Docker Desktop, wait until it reports \"running\", then re-run this installer."
-    hint "Continuing — but setting up a container runtime from here needs an administrator password."
-    log "runtime-down: could not start Docker; falling through to the privileged path"
-    return 0
-  fi
-
-  # Everywhere else — a Mac with no Docker Desktop to launch, or a platform
-  # where starting the daemon needs privileges we will not ask for here. Do not
-  # claim to be starting anything.
-  #
-  # And say what happens NEXT. "Start it, then re-run" on its own reads as "this
-  # run is over", while the installer is in fact about to carry on into the
-  # privileged flow — guidance contradicting the very next thing on screen. The
-  # macOS failure branch above names its continue; so does this one.
-  info "Docker isn't running, and this installer can't start it for you."
-  hint "Start your container runtime, then re-run this installer for the shortest path."
-  hint "Continuing — but setting one up from here needs an administrator password."
-  log "runtime-down: OS=${OS:-?}, no unprivileged way to start the runtime; continuing"
-  return 0
-}
-
+# before the roadmap / Step 1. READ-ONLY, never fatal, and it always RETURNS 0:
+# fresh / degraded print a warm one-liner, healthy one log line, and main() runs
+# the normal flow to set up (fresh) or reconcile (degraded, healthy).
 assess_existing_install() {
   # --force / --reinstall (or the env override): skip the gate entirely.
   if [[ "${TB_FORCE_REINSTALL:-0}" == 1 ]]; then
@@ -782,30 +481,28 @@ assess_existing_install() {
     return 0
   fi
 
-  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) is read from the host
-  # (_assess_classify_k3s): _assess_classify asks Docker and k3d, and on k3s would
-  # call a machine with a tracebloc k3s on it fresh. The k3s presence checks (a
-  # tracebloc k3s, a foreign one, a live k3d) stay the k3s create path's, where they
-  # refuse. On macOS, native k3s is the node in Apple's VM (mac-container.sh), with
-  # no systemd or k3s files on the Mac to read: one log line, and the normal flow.
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    if [[ "${OS:-$(uname -s 2>/dev/null)}" != "Linux" ]]; then
-      log "assess: native k3s on ${OS:-$(uname -s 2>/dev/null)} runs in Apple's VM, which the stop-and-check assessment does not read; continuing to the install."
-      return 0
-    fi
-    _assess_classify_k3s
-  else
-    _assess_classify
+  # Native k3s is read from the host (_assess_classify_k3s). The presence checks
+  # that refuse (a foreign k3s among them) stay the k3s create path's. On macOS,
+  # native k3s is the node in Apple's VM (mac-container.sh), with no systemd or k3s
+  # files on the Mac to read: one log line, and the normal flow. main() refuses a run
+  # that resolved any other substrate before this gate (tb_substrate_resolve and
+  # its refusals), so such a run reads nothing here either.
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
+    log "assess: substrate '${TRACEBLOC_SUBSTRATE_RESOLVED:-}' is not one the stop-and-check assessment reads; continuing to the install."
+    return 0
   fi
+  if [[ "${OS:-$(uname -s 2>/dev/null)}" != "Linux" ]]; then
+    log "assess: native k3s on ${OS:-$(uname -s 2>/dev/null)} runs in Apple's VM, which the stop-and-check assessment does not read; continuing to the install."
+    return 0
+  fi
+  _assess_classify_k3s
   log "assess: INSTALL_STATE=${INSTALL_STATE} reason=${INSTALL_STATE_REASON:-}"
 
   # backend#2253: an explicit `tracebloc upgrade` on a box that is healthy on
-  # every axis EXCEPT that its CLI is behind latest. Do NOT hand off (that no-op
-  # is the bug) and do NOT run the degraded ceremony below — RETURN so main()
-  # updates just the CLI (on k3d; on native k3s main() runs the full install). Kept out of the case switch on purpose: this file stays
-  # a read-only classifier, and the CLI-install mutation lives in main() (next to
-  # create_cluster / install_client_helm), not behind assess.sh's non-mutating
-  # contract.
+  # every axis EXCEPT that its CLI is behind latest. Do NOT run the degraded
+  # ceremony below: RETURN, and main() runs the full install, whose step b updates
+  # the CLI and whose step c moves the node forward. Kept out of the case switch on
+  # purpose: this file stays a read-only classifier.
   if [[ "$INSTALL_STATE" == "degraded" && "${INSTALL_STATE_REASON:-}" == "cli-behind-latest" ]]; then
     return 0
   fi
@@ -814,42 +511,15 @@ assess_existing_install() {
     healthy)
       # NATIVE K3S DOES NOT HAND OFF. RFC-0175 D4 and D11: every installer re-run on
       # k3s moves the node forward (the binary upgraded in place, its files rewritten
-      # and k3s restarted when they changed), and that is step c's work, which a
-      # hand-off would skip on exactly the machines it serves. The four checks below
-      # are k3d's (they read its node containers). So a healthy k3s goes on to the
-      # normal flow, as fresh/cluster-no-release does: no copy, one log line.
-      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-        log "assess: native k3s is healthy; continuing, so step c moves the node forward."
-        return 0
-      fi
-      echo ""
-      # A healthy cluster can still be running a DRIFTED k3s (born unpinned, on an
-      # older installer, or with K8S_VERSION=latest) — the #547 STEADY STATE. This
-      # fast-path hands off and exits before _handle_existing_cluster, so its
-      # reuse-path drift check never runs; surface the warning here too so a
-      # healthy-but-drifted client still sees the recreate guidance (Bugbot #565).
-      declare -F _check_existing_cluster_k8s_version >/dev/null 2>&1 && _check_existing_cluster_k8s_version
-      # Same rationale for GPU (client#835): this fast path exits before the
-      # create/reuse GPU reconcile, so a cluster that requests a GPU its node can't
-      # schedule (a pre-#835 install on a stock node) would strand every GPU job
-      # Pending with no signal. Surface the recreate guidance here too.
-      declare -F _check_healthy_cluster_gpu_consistent >/dev/null 2>&1 && _check_healthy_cluster_gpu_consistent
-      # Same rationale a third time (backend#2634, reviewer on client#912): the
-      # image-GC drop-in is a create-time bind mount, so every cluster built before
-      # #2634 keeps the stock 85/80 thresholds forever. A HEALTHY pre-#2634 edge is
-      # the entire population that advisory exists for, and it is exactly the
-      # population this fast path serves -- wired only into _handle_existing_cluster
-      # it could never once reach them.
-      declare -F _check_existing_cluster_kubelet_config >/dev/null 2>&1 && _check_existing_cluster_kubelet_config
-      # And a fourth (tracebloc/client-dev#1418): a two-node cluster from the old
-      # hostpath default is healthy, so this path is the one that reaches it.
-      declare -F _check_existing_cluster_node_count >/dev/null 2>&1 && _check_existing_cluster_node_count
-      _assess_handoff        # prints the "already set up" line, runs `tracebloc`, exit 0
+      # and k3s restarted when they changed), and that is step c's work. So a healthy
+      # k3s goes on to the normal flow, as fresh/cluster-no-release does: no copy, one
+      # log line.
+      log "assess: native k3s is healthy; continuing, so step c moves the node forward."
+      return 0
       ;;
     degraded)
       echo ""
       case "$INSTALL_STATE_REASON" in
-        runtime-down)       _assess_handle_runtime_down ;;
         cluster-stopped)    info "Your secure environment is stopped — starting it and finishing setup." ;;
         workload-not-ready) info "Your secure environment is still starting up — finishing setup." ;;
         cli-missing)        info "The tracebloc CLI isn't installed yet — setting it up." ;;
@@ -866,41 +536,13 @@ assess_existing_install() {
                             info "tracebloc no longer accepts this machine's credential, so it shows offline — issuing it a new one and reconnecting."
           fi ;;
         gpu-unsupported)    info "Your secure environment asks for a GPU tracebloc's training images can't use — switching it to CPU mode." ;;
-        # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (Bugbot Medium, client#984).
-        # _assess_classify degrades to this when the k3d listing does not answer, and
-        # without its own arm it fell into the generic line below — which claims an
-        # environment EXISTS and is partly built, about a machine nobody could read.
-        # That is the false claim this whole change removes, and it also contradicted
-        # the create_cluster warning printed seconds later on the same run. The
-        # wording deliberately agrees with that warning: the read failed, and setup
-        # continues in the direction that creates and removes nothing.
-        # NEUTRAL, AND IT PROMISES NOTHING ABOUT WHAT FOLLOWS (Bugbot Medium,
-        # client#984 round 6 — the sibling of the create_cluster warning, which the
-        # first sweep of this fixed and this one missed). Two claims this arm
-        # cannot support: _cluster_presence returns 2 for a DEADLINE *and* for
-        # "every read failed", so naming the Docker engine sends a user with a
-        # broken $HOME/.k3d or an unreadable kubeconfig to inspect a perfectly
-        # healthy daemon; and "nothing will be created or removed" is the opposite
-        # of what happens next, since create_cluster runs after this gate, can
-        # prompt in guard_leftover_data, and can create through the
-        # authoritative-absent path once its own listing answers.
-        # AND IT IS NOW REACHED FROM TWO READS, so it must not name the question
-        # (client#984 round 7). `_assess_classify` routes here on presence == 2
-        # (nothing is known about the cluster at all) AND on a server-count read
-        # that didn't answer (the cluster IS present; whether it is RUNNING is
-        # unknown). The old wording said "without assuming your secure
-        # environment is either present or absent", which is false on the second
-        # path — a small over-claim, but exactly the kind this whole change
-        # removes. What both paths share is the only thing this line now claims:
-        # a k3d listing did not answer, and nothing is being concluded from it.
-        # On native k3s the read that did not answer is systemd's or the k3s API's
-        # (_assess_classify_k3s), never a k3d listing.
+        # "COULDN'T READ" IS NOT A STATE OF THE INSTALL (client#984). Without its own arm
+        # it would fall into the generic line below, which claims an environment EXISTS
+        # and is partly built, about a machine nobody could read. The read that did not
+        # answer is systemd's or the k3s API's (_assess_classify_k3s), so the line names
+        # those and claims nothing about what follows.
         cluster-indeterminate)
-          if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-                            info "Couldn't read this machine's k3s — systemd or the k3s API didn't answer. Continuing without drawing a conclusion from a read that didn't answer; setup reads it again before it acts."
-          else
-                            info "Couldn't read the k3d cluster listing on this machine — it either didn't complete or k3d couldn't answer it. Continuing without drawing a conclusion from a read that didn't answer; setup reads the listing again before it acts."
-          fi ;;
+                            info "Couldn't read this machine's k3s — systemd or the k3s API didn't answer. Continuing without drawing a conclusion from a read that didn't answer; setup reads it again before it acts." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
       echo ""

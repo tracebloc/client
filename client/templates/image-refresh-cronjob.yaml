@@ -20,8 +20,8 @@ data:
     # Action on change: `kubectl set image <workload> <container>=repo@digest`.
     # It used to be `kubectl rollout restart`. #569 changed the mechanism so
     # the always-running pods can drop `imagePullPolicy: Always`: `Always`
-    # forced a registry round-trip on every (re)start, so an offline Docker
-    # Desktop / WSL2 restart landed in ImagePullBackOff even with the image
+    # forced a registry round-trip on every (re)start, so a restart while
+    # offline landed in ImagePullBackOff even with the image
     # already cached in containerd. `restart` only works as an update path
     # BECAUSE of `Always` — the two are mutually exclusive unless the image
     # REFERENCE itself changes, which is exactly what `set image` does. The
@@ -1397,8 +1397,8 @@ spec:
           containers:
             - name: refresh
               # THROUGH THE ONE HELPER (backend#4160) -- see the note in
-              # auto-upgrade-cronjob.yaml. A bare `alpine/k8s:1.30.5` is a Docker
-              # Hub pull with no `docker.io` anywhere in the file to find it by.
+              # auto-upgrade-cronjob.yaml. A bare `alpine/k8s:1.30.5` is a
+              # Docker Hub pull with no `docker.io` anywhere in the file to find it by.
               image: {{ include "tracebloc.thirdPartyImage" (dict "site" "imageRefresh.image" "root" $) | quote }}
               imagePullPolicy: {{ (dig "image" "pullPolicy" "" (.Values.imageRefresh | default dict)) | default "IfNotPresent" }}
               # alpine/k8s entrypoint is kubectl; override to run our script.
