@@ -3479,24 +3479,26 @@ $RetiredInstalls = [ordered]@{
 }
 $RetiredInstallNames = @($RetiredInstalls.Values | ForEach-Object { $_.Name }) -join ' or '
 $RetiredCoreStateRelPath = '.tracebloc\install-state.json'
-# The release whose Windows installer moves such a machine, a prod release from
-# before this file stopped moving one. With the user's consent it deletes that
-# secure environment (tracebloc delete --for-reinstall), then sets up the distro.
-# scripts/tests/retired-move-release.sh holds this tag's own installers to that:
-# its distro path takes TRACEBLOC_SUBSTRATE=k3s, offboards a k3d machine and
-# refuses none, and its sign-in shows the device code. A release whose sign-in
-# runs the CLI without Out-Host hides that code after the offboard has run.
-$RetiredMoveRelease = 'v1.12.13'
+# The last tracebloc CLI release whose `tracebloc delete` still deletes such a
+# secure environment, the way out's fallback when the CLI on this machine refuses
+# to: facts.env's RETIRED_OFFBOARD_CLI, stamped here by scripts/check-facts.sh
+# (--check holds it to facts.env, as it holds reinstall.sh's copy for Linux and
+# macOS). The way out never sends a machine to an older installer: that would run
+# whichever CLI is on this machine, and the newest no longer deletes one.
+$RETIRED_OFFBOARD_CLI = "0.11.35"
 
 # Refuses, by name, a machine on the retired Windows install (above).
 function Assert-NoRetiredInstall {
-  # The way out, last in each message, so its command is the line's end. That release
-  # deletes only a secure environment it finds running, so where it finds none the
-  # state file and the context stay: the way out names both to delete.
+  # The way out, last in each message, so its command is the line's end: delete that
+  # secure environment with 'tracebloc delete', as reinstall.sh's refusal says on
+  # Linux and macOS, then the state file and the context if they are still there
+  # (a delete that finds no install record leaves them), then this installer again.
+  # A CLI that refuses gets the release that can still delete it, pinned by the
+  # CLI's own installer's TRACEBLOC_RELEASE_VERSION.
   $state = Join-Path $env:USERPROFILE $RetiredCoreStateRelPath
   $contexts = @($RetiredInstalls.Values | ForEach-Object { $_.Context }) -join ' and '
-  $move = 'To move it, run the tracebloc ' + $RetiredMoveRelease + ' installer once: it deletes that secure environment with your consent (tracebloc delete --for-reinstall) and sets up the tracebloc WSL distro. Then delete ' + $state + ' and the ' + $contexts + ' entries from your kubeconfig if they are still there, and re-run this installer. In PowerShell: ' +
-    '$env:TRACEBLOC_SUBSTRATE = ''' + $CoreSubstrate + '''; irm https://github.com/tracebloc/client/releases/download/' + $RetiredMoveRelease + '/install.ps1 | iex'
+  $move = 'To move it, delete that secure environment with ''tracebloc delete''. Then delete ' + $state + ' and the ' + $contexts + ' entries from your kubeconfig if they are still there, and run this installer again. ' +
+    'If ''tracebloc delete'' refuses, tracebloc CLI ' + $RETIRED_OFFBOARD_CLI + ' can still delete it. Install that CLI in PowerShell with:  $env:TRACEBLOC_RELEASE_VERSION = ''v' + $RETIRED_OFFBOARD_CLI + '''; irm ' + $TRACEBLOC_CLI_INSTALL_URL + ' | iex; Remove-Item Env:TRACEBLOC_RELEASE_VERSION'
   $record = Get-HostRecordPath
   if (Test-Path -LiteralPath $record) {
     $rec = $null
