@@ -2491,6 +2491,9 @@ function ConvertTo-DistroPath {
   param([string]$Path)
   $r = Invoke-WslProbe -ArgumentList @('-d', $WslDistroName, '-u', 'root', '--exec', 'wslpath', '-u', (ConvertTo-WindowsArgument $Path)) -TimeoutSec $WslDistroStartTimeoutSec
   if ($r.TimedOut) {
+    # The log only: which state the distro was in tells a stopped, missing or stuck one apart.
+    $l = Invoke-WslProbe -ArgumentList @('-l', '-v')
+    Log "wsl -l -v after the wslpath timeout (exit $($l.ExitCode), timed out $($l.TimedOut)): $($l.Output -replace "`0", '')"
     throw "The tracebloc WSL distro did not start within $WslDistroStartTimeoutSec seconds, so the core cannot be started. Run this installer again; if it keeps failing, share this output with tracebloc support."
   }
   $out = ''
