@@ -1452,10 +1452,11 @@ tb_export_namespace() {
   export TB_NAMESPACE TRACEBLOC_NAMESPACE
 }
 # Settings this installer no longer reads: TRACEBLOC_SERVERS and TRACEBLOC_AGENTS
-# were node counts for a runtime it no longer sets up, and native k3s runs one node.
-# validate_config names each one that is set (tb_say_ignored_settings), so a value
-# nobody reads is never dropped without a word.
-TB_IGNORED_SETTINGS="TRACEBLOC_SERVERS TRACEBLOC_AGENTS"
+# were node counts for a runtime it no longer sets up, and native k3s runs one node;
+# TRACEBLOC_K3D_VERSION pinned that runtime's version. validate_config names each one
+# that is set, with tb_ignored_setting_reason's why (tb_say_ignored_settings), so a
+# value nobody reads is never dropped without a word.
+TB_IGNORED_SETTINGS="TRACEBLOC_SERVERS TRACEBLOC_AGENTS TRACEBLOC_K3D_VERSION"
 # The leftover-data guard's non-interactive answer (cluster.sh). --reuse-data /
 # --wipe-data assign TB_LEFTOVER_ACTION after this, so a flag still wins.
 if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLOC_LEFTOVER_ACTION"; fi
@@ -1623,9 +1624,20 @@ tb_say_ignored_settings() {
   local n
   for n in $TB_IGNORED_SETTINGS; do
     if [[ -n "${!n:-}" ]]; then
-      warn "${n} is set, but this installer does not use it: tracebloc runs on this one machine."
+      warn "${n} is set, but this installer does not use it: $(tb_ignored_setting_reason "$n")."
     fi
   done
+}
+
+# tb_ignored_setting_reason NAME -- why this installer does not use NAME, one of
+# TB_IGNORED_SETTINGS. Every one has a reason (shared-state.bats); any other name
+# has none and returns 1.
+tb_ignored_setting_reason() {
+  case "$1" in
+    TRACEBLOC_SERVERS|TRACEBLOC_AGENTS) printf '%s' "tracebloc runs on this one machine" ;;
+    TRACEBLOC_K3D_VERSION) printf '%s' "it no longer sets up k3d" ;;
+    *) return 1 ;;
+  esac
 }
 
 validate_config() {

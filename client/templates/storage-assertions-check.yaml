@@ -175,6 +175,18 @@ spec:
               # 2026-12-31); a blank canonical leaves the legacy value as-is.
               if [ -n "${TRACEBLOC_NAMESPACE:-}" ]; then NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
               if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE="$TRACEBLOC_RELEASE_NAME"; fi
+              # kubectl in this image does not auto-detect in-cluster config and falls
+              # back to localhost:8080: build the kubeconfig from the mounted
+              # ServiceAccount (rationale: image-refresh-cronjob.yaml). tokenFile keeps
+              # the token off argv; the `kubectl config` calls make no API call.
+              SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+              export KUBECONFIG="${TMPDIR:-/tmp}/kubeconfig"
+              api_host="$KUBERNETES_SERVICE_HOST"
+              case "$api_host" in *:*) api_host="[$api_host]" ;; esac
+              kubectl config set-cluster in-cluster --server="https://${api_host}:${KUBERNETES_SERVICE_PORT}" --certificate-authority="${SA_DIR}/ca.crt" >/dev/null
+              kubectl config set "users.in-cluster.tokenFile" "${SA_DIR}/token" >/dev/null
+              kubectl config set-context in-cluster --cluster=in-cluster --user=in-cluster --namespace="${NAMESPACE}" >/dev/null
+              kubectl config use-context in-cluster >/dev/null
               KC="kubectl --request-timeout=10s -n ${NAMESPACE}"
               # A failed read KEEPS kubectl's stderr (client-dev#2284). It was sent to
               # /dev/null, so a Forbidden or an unreachable API printed as "MISSING" /
