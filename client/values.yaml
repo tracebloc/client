@@ -1741,25 +1741,23 @@ images:
     # `prodDigest` for every prod edge (the pre-#5099 behaviour).
     #
     # Same rules as `prodDigest`: a canonical multi-arch index, resolved, never
-    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.85` prints it). No
+    # hand-typed (`scripts/resolve-ingestor-digest.sh 0.8.88` prints it). No
     # Chart.yaml bump: the release train numbers the client chart (RFC-0255),
     # so the next release publishes it. CI's `ingestor-multiarch` job checks it.
     #
-    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.85** — VERIFIED
-    # against ghcr.io 2026-10-23 (linux/amd64 + linux/arm64 OCI image index;
-    # the same digest the v0.8.85 GitHub Release names; cosign keyless
-    # signature from data-ingestors' release-image.yml at refs/tags/v0.8.85,
-    # revision 7ca8682, on main). It is what the `0.8` float names, so the
+    # ghcr.io/tracebloc/ingestor multi-arch index, **v0.8.88** — VERIFIED
+    # against ghcr.io 2026-10-24 (linux/amd64 + linux/arm64 OCI image index;
+    # the same digest the v0.8.88 GitHub Release names; cosign keyless
+    # signature from data-ingestors' release-image.yml at refs/tags/v0.8.88,
+    # revision d88a637, on main). It is what the `0.8` float names, so the
     # digest-drift watch reads this pin as current again (backend#5964).
-    # v0.8.85 descends from v0.8.83 (a failed run says why its records failed,
-    # at the default log level; the run keeps a bounded record of its
-    # failures; the optional ingestor_id index no longer aborts the ingest
-    # after a failed rollback) and v0.8.82. It adds: the image advertises the
-    # capability `option:example`, which the CLI requires before it runs the
-    # first-run example, and a config with `example: true` asks the platform
-    # to mark its dataset as the example (v0.8.84); a test split's preview
-    # samples leave the cluster without their label (v0.8.85).
-    prodDigestServiceDb: "sha256:2d1df821e47ce97acb949f3f5b51e01b9a5ae2dd447c6ced7ce0b88c17da60c2"
+    # v0.8.88 descends from v0.8.85 (the image advertises the capability
+    # `option:example`, which the CLI requires before it runs the first-run
+    # example; a test split's preview samples leave the cluster without their
+    # label) and v0.8.83. It adds: a backend call that takes over half its
+    # read timeout logs a warning (v0.8.87), and the wait for MySQL retries
+    # silently, so only a final failure prints why (v0.8.88).
+    prodDigestServiceDb: "sha256:d65e4ca76dbf7447dbae18cc22ae94a7160c21269c1a1279b96fd0b92a7a9844"
 
     # -- What each chart-pinned ingestor image says about itself, keyed by its
     # digest (tracebloc/cli-dev#971). When the digest `tracebloc.ingestorDigest`
@@ -1790,8 +1788,8 @@ images:
     pinnedImageLabels:
       "sha256:05e124945a2ef61868661a9137abb5e75dac96a090cb41a7b4e8be520c4b5873":
         version: "0.8.2"
-      "sha256:2d1df821e47ce97acb949f3f5b51e01b9a5ae2dd447c6ced7ce0b88c17da60c2":
-        version: "0.8.85"
+      "sha256:d65e4ca76dbf7447dbae18cc22ae94a7160c21269c1a1279b96fd0b92a7a9844":
+        version: "0.8.88"
         capabilities: "ingest:v1,layout:4,object_detection:manifestless,option:example,task:causal_language_modeling,task:embeddings,task:image_classification,task:keypoint_detection,task:masked_language_modeling,task:object_detection,task:semantic_segmentation,task:sentence_pair_classification,task:seq2seq,task:tabular_classification,task:tabular_regression,task:text_classification,task:time_series_classification,task:time_series_forecasting,task:time_to_event_prediction,task:token_classification"
 
     # -- Whether `prodDigest` applies on this edge. Default true, which means
