@@ -19,8 +19,8 @@
 
 # Thresholds (overridable via env — for unusual sites or tests).
 # RAM floors are derived from the real stack, not guessed: the always-on control
-# plane requests ~2.1 GiB, + k3s/k3d ~0.8 + OS/Docker ~0.7 ≈ ~4.4 GiB just to stay
-# Online on a single-node (k3d) install — so below 5 GiB it boots then OOMs (the
+# plane requests ~2.1 GiB, + k3s ~0.8 + the OS ~0.7 ≈ ~4.4 GiB just to stay
+# Online on a single-node install — so below 5 GiB it boots then OOMs (the
 # hard floor, PF_MIN_MEM_GB). "Comfortable to run" is no longer a typed 8: it is
 # PF_WARN_MEM_GB, the VM budget the smallest training rung needs beside the
 # platform, derived below from the generated VM constant -- which moves with the
@@ -938,9 +938,8 @@ _pf_disk_mac_node() {
   _pf_disk_grade "$at" "the hostPath volumes (${root})"
 }
 
-# Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) keeps nothing under Docker's root. Its disk is two
-# paths, each named in the line, against the same floors as k3d's (PF_MIN_DISK_GB,
-# PF_WARN_DISK_GB):
+# Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): its disk is two paths, each named in
+# the line, against the disk floors (PF_MIN_DISK_GB, PF_WARN_DISK_GB):
 #   - k3s's data path (/var/lib/rancher/k3s): the images, containerd and its state;
 #   - the storage path, where local-path keeps the volumes: k3s's default under the
 #     data path, or the operator's data dir (_native_k3s_storage_path, k3s.sh).
@@ -976,7 +975,7 @@ _pf_disk_k3s() {
   fi
   if [[ "$rc" -eq 4 ]]; then
     # A host prepared for this user that cannot be adopted yet (1.1g): a password
-    # would end in preflight_sudo's Docker wording, and is not what is missing. Say
+    # would end in preflight_sudo's prompt, and is not what is missing. Say
     # what is, with the remedy step b gives (_native_k3s_prepare_host_remedy).
     why="$(_native_k3s_prepared_for_me)" || true
     _pf_fail_line "Disk: where this machine's k3s keeps its volumes is in ${TB_K3S_CONFIG_PATH}, which you cannot read yet."
@@ -1196,7 +1195,7 @@ early_data_dir_guard() {
   [[ -n "${TRACEBLOC_ALLOW_NETWORK_FS:-}" ]] && return 0
   # hostpath keeps the database under HOST_DATA_DIR on native k3s too (client-dev#1782).
   # The macOS node keeps its data in its own volume, so the directory created here is
-  # HOST_DATA_DIR, as on k3d (_pf_storage_type checks where the volume lives).
+  # HOST_DATA_DIR (_pf_storage_type checks where the volume lives).
   if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "node-local" ]] && ! _pf_on_mac_node; then
     target="$(_native_k3s_storage_path)" || return 0
   fi
@@ -1475,21 +1474,14 @@ _pf_connectivity() {
     # ROOT 404s by design, while the index must exist for `helm repo add` (#385).
     "tracebloc Helm charts (tracebloc.github.io)|https://tracebloc.github.io/client/index.yaml|strict"
   )
-  # Tool-binary download hosts — promoted to HARD (#416): a blocked one used to
-  # pass preflight then fail the install ~30s later. Only added when the fetch will
-  # actually happen (tool absent; a present tool is never re-downloaded). These are
-  # UNAMBIGUOUS: the installer always fetches kubectl/k3d/helm from exactly these
-  # hosts. Release assets 302 to objects.githubusercontent.com and _pf_probe_url
-  # does not follow redirects, so github.com passing proves nothing about the asset
-  # host — probe it explicitly. check-drift.sh holds the probe list to these hosts.
-  #
-  # The Docker-ENGINE install host is deliberately NOT hard: it's path/distro/
-  # environment-dependent (Debian→get.docker.com, RHEL clones→download.docker.com,
-  # Amazon/Arch/SUSE→distro repos). preflight can't cheaply know which, so hard-probing a fixed host
-  # would abort supported paths that never touch it (Bugbot). It goes in `soft`
-  # (warn-only) below. Windows runs this core inside tracebloc's WSL distro, on
-  # native k3s, so it fetches no Docker engine at all.
-  local soft=() tool_hosts="dl.k8s.io / get.helm.sh / github.com / objects.githubusercontent.com" nodes_trust="The k3d nodes are"
+  # Tool-binary download hosts — HARD (#416): a blocked one used to pass preflight
+  # then fail the install ~30s later. Only added when the fetch will actually happen
+  # (tool absent; a present tool is never re-downloaded). Release downloads redirect
+  # to an asset host and _pf_probe_url does not follow redirects, so github.com
+  # passing proves nothing about the asset host — probe it explicitly. check-drift.sh
+  # holds the probe list to these hosts. main() leaves every run here on k3s: on the
+  # macOS node, or native k3s (Linux, and inside tracebloc's WSL distro).
+  local tool_hosts nodes_trust
   if _pf_on_mac_node; then
     # A Mac sets up only the macOS node (slim client 4.1). Apple's runtime
     # package comes from its GitHub release, whose download redirects to
@@ -1506,9 +1498,9 @@ _pf_connectivity() {
     tool_hosts="github.com / release-assets.githubusercontent.com / dl.k8s.io / get.helm.sh"
     # The node takes the CA's roots by path (mac-container.sh's _mac_ct_node_ca).
     nodes_trust="The macOS node is"
-  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    # NATIVE k3s fetches no k3d, no kubectl (k3s carries its own) and no Docker, so
-    # none of their hosts is probed. Its hosts are keyed on what THIS run fetches,
+  else
+    # NATIVE k3s fetches no kubectl (k3s carries its own), so dl.k8s.io is not
+    # probed. Its hosts are keyed on what THIS run fetches,
     # never on k3s merely being there, so a re-run that needs a host is checked for
     # it before anything changes (client-dev#1994):
     #   - the binary, from github.com, whose release download redirects to
@@ -1532,13 +1524,6 @@ _pf_connectivity() {
     if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
     tool_hosts="github.com / release-assets.githubusercontent.com / get.helm.sh / rpm.rancher.io"
     nodes_trust="k3s is"
-  elif [[ "$OS" == "Linux" ]]; then
-    if ! has k3d;     then criticals+=("k3d download (github.com)|https://github.com/" \
-                                       "k3d assets (objects.githubusercontent.com)|https://objects.githubusercontent.com/"); fi
-    if ! has kubectl; then criticals+=("kubectl (dl.k8s.io)|https://dl.k8s.io/"); fi
-    if ! has helm;    then criticals+=("Helm (get.helm.sh)|https://get.helm.sh/"); fi
-    if ! has docker;  then soft+=("Docker install (get.docker.com)|https://get.docker.com/" \
-                                  "Docker packages (download.docker.com)|https://download.docker.com/"); fi
   fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
@@ -1574,15 +1559,6 @@ _pf_connectivity() {
       cfail=$(( cfail + 1 ))
     done
   fi
-
-  # Path-dependent Docker-engine hosts: WARN only (never hard) so a blocked host on
-  # a path that won't use it doesn't abort a supported install (Bugbot). The
-  # ${soft[@]+…} guard keeps `set -u` happy with an empty array on bash 3.2 (macOS).
-  for c in ${soft[@]+"${soft[@]}"}; do
-    label="${c%%|*}"; url="${c#*|}"
-    status="$(_pf_probe_url "$url")"
-    [[ "$status" == "ok" ]] || warn "${label} unreachable (${status}) — only needed if the installer fetches Docker from that host; other install paths don't."
-  done
 
   if [[ "$tls_seen" -eq 1 ]]; then
     hint "A TLS/certificate error usually means a break-and-inspect (TLS-inspecting) proxy whose corporate CA isn't trusted here."

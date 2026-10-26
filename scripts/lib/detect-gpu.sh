@@ -452,10 +452,9 @@ _gpu_container_blind() {
 }
 
 # _GPU_CONTAINER_BLIND_RE -- the container runtime's own words for "I cannot give this
-# container a GPU", as `docker run --gpus all` prints them: no NVIDIA runtime at all
-# (Docker Desktop without GPU support), the toolkit's CLI failing, NVML refused (WSL2
-# passthrough off). A pull or network failure prints none of them, so it is never read
-# as a blind runtime.
+# container a GPU": no NVIDIA runtime at all, the toolkit's CLI failing, NVML refused
+# (WSL2 passthrough off). A pull or network failure prints none of them, so it is never
+# read as a blind runtime.
 _GPU_CONTAINER_BLIND_RE='could not select device driver|nvidia-container-cli|Failed to initialize NVML|no adapters were found|capabilities: \[\[gpu\]\]'
 
 # A function so bats can model the /proc path (same idiom as common.sh's

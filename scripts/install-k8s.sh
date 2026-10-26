@@ -227,7 +227,7 @@ main() {
 
   # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
   # installs the privileged prerequisites so a researcher can then install
-  # unprivileged at Tier 0, and grants them docker-group access. Terminal like
+  # unprivileged at Tier 0, and grants them k3s through its group. Terminal like
   # --diagnose (never provisions as the admin); clear the EXIT trap so no
   # post-install cleanup message fires. Accept both the bootstrap positional
   # (`… | bash -s -- prepare-host`) and the direct flag, AT ANY POSITION —
@@ -307,7 +307,7 @@ main() {
   done
 
   # Refuse a sudo-wrapped full run BEFORE any file is created (#427): running the
-  # whole install as root grants Docker to root and root-owns the user's ~/.tracebloc
+  # whole install as root sets the cluster up for root and root-owns the user's ~/.tracebloc
   # + ~/.kube. prepare-host (the admin path) already dispatched-and-exited above;
   # a genuine root login (no SUDO_USER) is allowed. Guarded so a stale bootstrap
   # without the helper proceeds as before (same pattern as early_data_dir_guard).
@@ -372,7 +372,7 @@ main() {
   echo ""; echo ""
 
   # ── b) Install what tracebloc needs ──────────────────────────────────────
-  #     Prerequisites (Docker + system tools) AND the tracebloc CLI. The CLI moved
+  #     Prerequisites (the cluster runtime + system tools) AND the tracebloc CLI. The CLI moved
   #     here from provisioning: step d (provision_client) needs it to sign in and
   #     mint the credential, so it must exist before then. install_tracebloc_cli is
   #     non-fatal on its own; step d's `has tracebloc` guard makes a genuinely

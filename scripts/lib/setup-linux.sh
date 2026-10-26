@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  setup-linux.sh — Linux prerequisites: package manager, system deps,
-#                   kubectl, helm, k3d (the CI k3d harness's), GPU dispatch,
-#                   step b's dispatch and prepare-host's
+#                   kubectl, helm, GPU dispatch, step b's dispatch and
+#                   prepare-host's
 # =============================================================================
 
 # ── Tool-install target defaults ─────────────────────────────────────────────
@@ -177,11 +177,9 @@ _fetch_kubectl() {
   local os="${OS_DL:-linux}"
   local tmpdir
   tmpdir="$(mktemp -d)"
-  # Same bounds as _fetch_k3d_release below, and for the same reason: kubectl is a
-  # ~50 MB binary, so a stall floor is the right bound and a hard --max-time is not
-  # (it would fail a slow-but-healthy link). These flags are also how curl_secure
-  # knows not to add its default deadline here (Bugbot, backend#1252). Before this
-  # the fetch had no bound at all — a mid-stream stall hung the step indefinitely.
+  # A stall floor, not a hard --max-time: kubectl is a ~50 MB binary, and a hard
+  # cap would fail a slow-but-healthy link. These flags are also how curl_secure
+  # knows not to add its default deadline here (Bugbot, backend#1252).
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
     "https://dl.k8s.io/release/${ver}/bin/${os}/${arch}/kubectl" -o "${tmpdir}/kubectl"
   retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
@@ -236,93 +234,6 @@ install_kubectl() {
   # only if IT is the binary that failed (assert_tool_runs' -ef guard), so a broken
   # installer-placed kubectl self-heals on re-run while a pkg copy elsewhere is safe.
   assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/kubectl" kubectl version --client
-}
-
-# ── k3d ──────────────────────────────────────────────────────────────────────
-# The installer sets up no k3d; the CI k3d harness installs it (e2e-common.sh,
-# e2e_install_prereqs). Download the k3d release binary + checksums.txt at the
-# given tag, verify, and install into TRACEBLOC_TOOLS_DIR (mirrors _fetch_kubectl; fail-closed). We install
-# the binary OURSELVES because upstream's install.sh performs NO checksum
-# verification — its downloadFile fetches the bare binary and installFile just
-# chmod+cp's it (review of the pinned v5.9.0 script, PR #382) — so piping it
-# through sudo would install unverified bytes on a privileged path.
-# checksums.txt lines read "<sha256>  _dist/k3d-linux-amd64": match on the
-# asset basename.
-_fetch_k3d_release() {
-  local tag="$1" arch="$2"
-  local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
-  local base="https://github.com/k3d-io/k3d/releases/download/${tag}"
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  # --connect-timeout + a stall floor (not --max-time: the binary is ~50 MB and
-  # a hard cap would break slow-but-healthy links): a hung transfer under
-  # spin_cmd would otherwise spin forever (Bugbot r2).
-  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "${base}/k3d-${os}-${arch}" -o "${tmpdir}/k3d"
-  retry 3 5 curl_secure -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
-    "${base}/checksums.txt" -o "${tmpdir}/checksums.txt"
-  local want
-  want="$(awk -v asset="k3d-${os}-${arch}" \
-    '{ n = split($2, p, "/"); if (p[n] == asset) { print $1; exit } }' \
-    "${tmpdir}/checksums.txt" 2>/dev/null)"
-  # Transfer-vs-checksum distinction (#607): k3d is ~50 MB; 10 MB floor catches a
-  # truncated/blocked download before the checksum misreports it as tampering.
-  _assert_download_size "${tmpdir}/k3d" 10000000 "k3d" "$tmpdir"
-  if [ -z "$want" ] || ! _verify_sha256 "$want" "${tmpdir}/k3d"; then
-    rm -rf "$tmpdir"
-    error "System tool checksum verification failed"
-  fi
-  chmod +x "${tmpdir}/k3d"
-  # Tier 0 → no sudo (TRACEBLOC_TOOLS_SUDO empty, TRACEBLOC_TOOLS_DIR under $HOME).
-  if [ -n "$TRACEBLOC_TOOLS_SUDO" ]; then
-    sudo mv "${tmpdir}/k3d" "$TRACEBLOC_TOOLS_DIR/k3d"
-  else
-    mv "${tmpdir}/k3d" "$TRACEBLOC_TOOLS_DIR/k3d"
-  fi
-  rm -rf "$tmpdir"
-}
-
-install_k3d() {
-  if has k3d; then
-    assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/k3d" k3d version
-    return 0
-  fi
-
-  # Pin the k3d release (K3D_VERSION, common.sh) and fetch the binary DIRECTLY
-  # from the pinned release, verified against the release's checksums.txt
-  # (upstream's install.sh verifies nothing — see _fetch_k3d_release). The
-  # direct download also never touches the releases/latest redirect, whose
-  # GitHub rate limiting on shared egress IPs (CI runners, corporate NAT) took
-  # down 2/9 distro CI jobs on 2026-07-21 with a bare "curl: 404" — so the
-  # failure mode can't occur on the pinned (default) path at all.
-  # K3D_VERSION=latest resolves the newest tag at install time via the plain
-  # /releases/latest redirect (no API) and then takes the same verified path;
-  # an empty value means the common.sh default pin (Bugbot r1). The tag lands
-  # in a URL path, so anything that isn't a plain release tag fails closed —
-  # a value carrying "/" could otherwise traverse outside k3d-io/k3d
-  # (Bugbot r1).
-  local _k3d_tag="${K3D_VERSION:-}"
-  [[ "$_k3d_tag" == "latest" ]] && _k3d_tag=""
-  [[ -z "$_k3d_tag" || "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
-    || error "K3D_VERSION must be a k3d release tag like v5.9.0, or 'latest' (got '${K3D_VERSION:-}')"
-  if [ -z "$_k3d_tag" ]; then
-    _k3d_tag="$(retry 3 5 curl_secure -fsSLI --connect-timeout 15 --max-time 30 \
-      -o /dev/null -w '%{url_effective}' \
-      "https://github.com/k3d-io/k3d/releases/latest" 2>/dev/null)" || _k3d_tag=""
-    _k3d_tag="${_k3d_tag##*/}"
-    [[ "$_k3d_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \
-      || error "Couldn't resolve the latest k3d release tag — set K3D_VERSION to a release tag (e.g. v5.9.0) and re-run."
-  fi
-
-  spin_cmd "Installing system tools…" _fetch_k3d_release "$_k3d_tag" "$ARCH_DL" \
-    || error "System tool installation failed. See the install log for details."
-
-  if ! has k3d; then
-    error "System tool installation completed but not found on PATH."
-  fi
-  tb_record_write binary k3d "$TRACEBLOC_TOOLS_DIR/k3d"
-
-  assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/k3d" k3d version
 }
 
 # ── Helm ─────────────────────────────────────────────────────────────────────
@@ -407,7 +318,7 @@ _ensure_unpack_tools() {
 # checksum step (absent on minimal images — Bugbot #383), and its own fetches
 # are unbounded. sha256sum (coreutils) is present everywhere we run, get.helm.sh
 # is Helm's official release CDN, and the pin keeps installs deterministic
-# (mirrors _fetch_k3d_release / #382).
+# (#382).
 _fetch_helm_release() {
   local tag="$1" arch="$2" tarball tmpdir
   local os="${OS_DL:-linux}"   # linux by default; darwin on the macOS path (#429)
@@ -468,7 +379,7 @@ install_helm() {
     # the newest release at install time via get.helm.sh/helm-latest-version and
     # takes the same verified path; an empty value means the common.sh pin. The
     # tag lands in a URL path, so anything that isn't a plain release tag fails
-    # closed (mirrors install_k3d).
+    # closed.
     local _helm_tag="${HELM_VERSION:-}"
     [[ "$_helm_tag" == "latest" ]] && _helm_tag=""
     [[ -z "$_helm_tag" || "$_helm_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] \

@@ -2324,7 +2324,6 @@ $CoreSettingsNotUsed = [ordered]@{
   TRACEBLOC_SERVERS           = 'the tracebloc WSL distro runs one node'
   TRACEBLOC_AGENTS            = 'the tracebloc WSL distro runs one node'
   TRACEBLOC_K8S_VERSION       = "the tracebloc WSL distro's image carries its Kubernetes version"
-  TRACEBLOC_K3D_VERSION       = 'the tracebloc WSL distro does not use k3d'
   TRACEBLOC_HELM_VERSION      = 'the tracebloc WSL distro uses the Helm version the installer pins'
   TRACEBLOC_STORAGE_MODE      = 'the tracebloc WSL distro keeps datasets inside its node'
   TRACEBLOC_HOST_DATA_DIR     = "tracebloc keeps its data on the tracebloc WSL distro's own disk"

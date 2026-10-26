@@ -174,10 +174,8 @@ _classify_from_probes() {
     return 0
   fi
 
-  # Linux off native k3s is a retired runtime (k3d), which only --diagnose reaches:
-  # the install refuses it before the host check. It stays at the Tier 2 set above.
-  # Tier 1, rootless Docker for k3d, left with k3d, and so did the kernel and
-  # subordinate-ID reasons that named what rootless lacked (client-dev#1950).
+  # Linux off native k3s: a substrate the install refuses before the host check. It
+  # stays at the Tier 2 set above.
   return 0
 }
 

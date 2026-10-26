@@ -282,7 +282,7 @@ TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
 # k3s sets no kube-reserved, no system-reserved and no memory eviction threshold
 # (its stock evictionHard carries only the two disk keys -- read from /configz on
 # a bare v1.36.3-k3s1 node, 2026-09-09). So "what a pod may have" was the whole
-# machine, k3s server, containerd and the Docker VM's own daemons included, and
+# machine, k3s server, containerd and the VM's own daemons included, and
 # every consumer of allocatable -- the training envelope, jobs-manager's
 # admission, the T-shirt ladder -- inherited that. The 1 CPU / 3 GiB the envelope
 # subtracts was a guess standing in for a reservation the kubelet never made.
@@ -304,8 +304,8 @@ TB_KUBELET_IMAGE_MIN_GC_AGE="2m"
 # containerd and the shims). The generator's header states the headroom policy;
 # the record states the numbers it was applied to.
 #
-# A platform with NO record gets NO reservation -- not a borrowed one. Docker
-# Desktop on macOS, WSL2 and a bare Linux host have different footprints, and a
+# A platform with NO record gets NO reservation -- not a borrowed one. The macOS
+# node's VM, tracebloc's WSL distro and a bare Linux host have different footprints, and a
 # number extrapolated from one of them is the guess this ticket retires. The
 # writer below emits the maps only for a platform named in
 # TRACEBLOC_KUBELET_RESERVATION_PLATFORMS and the caller says so, once, when it does not.

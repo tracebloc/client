@@ -3,8 +3,7 @@
 #  reinstall.sh — native k3s is never set up on a machine that runs tracebloc on
 #  k3d (RFC-0175 D10). This installer no longer moves such a machine: it stops
 #  before anything is installed, written or started, says why in plain words, and
-#  names the way off k3d, the tracebloc CLI release whose `tracebloc delete` still
-#  removes it.
+#  names the way off: a tracebloc CLI release that can still delete it.
 #
 #  What says k3d is tracebloc's own data, never Docker or k3d: the install
 #  record's substrate (with no substrate field, an artefact only k3d records),
@@ -15,7 +14,7 @@
 #  user it sets the machine up for (refuse_k3d_for_user), before step a writes.
 # =============================================================================
 
-# The last tracebloc CLI release whose `tracebloc delete` removes a k3d setup:
+# A tracebloc CLI release that can still delete such a setup with `tracebloc delete`:
 # facts.env's RETIRED_OFFBOARD_CLI, stamped here by scripts/check-facts.sh.
 TB_RETIRED_OFFBOARD_CLI="0.11.35"
 

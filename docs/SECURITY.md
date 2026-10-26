@@ -604,7 +604,7 @@ With `create: true` the registry PAT is supplied as a value and lands in release
 
 Note the chart's own default is `create: false` — an install that needs no pull secret sets nothing and has no exposure here. `create: true` is an override, and it is the path any fleet pulling from a private registry takes, which is why this section exists.
 
-Worth doing on any install whose registry credential is more than a read-only pull token: Docker Desktop mints Read/Write/**Delete** PATs with no expiry by default, so a leaked one is not merely a read of your images.
+Worth doing on any install whose registry credential is more than a read-only pull token: a registry's personal access tokens can carry write and **delete** scopes and no expiry unless you narrow them when you create one, so a leaked one is not merely a read of your images.
 
 ---
 

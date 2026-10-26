@@ -27,7 +27,7 @@
 #      on k3s's own registered runtime in step c.
 #
 #  Every function carries the `_native_k3s_` prefix (decided 2026-10-01), so a grep
-#  for k3d code never meets a name here.
+#  for native k3s code finds every name here and nothing else.
 #
 #  bash 3.2-safe although native k3s is Linux-only: the macOS unit job sources this
 #  file in k3s.bats. No `${x,,}`, no `declare -A`, no `mapfile`.
@@ -520,8 +520,8 @@ _native_k3s_kubeconfig_group() {
 }
 
 # The group prepare-host grants k3s.yaml and config.yaml to (RFC-0175 D3, 1.1g; mode
-# 0640). Every member of it is cluster-admin on this k3s, as every member of the
-# docker group is root-equivalent: prepare-host says so, and lists the members.
+# 0640). Every member of it is cluster-admin on this k3s: prepare-host says so, and
+# lists the members.
 TB_K3S_PREPARED_GROUP="tracebloc"
 # TB_K3S_GROUP_MADE: 1 when this run's own groupadd made the prepared group, else 0
 # (client-dev#1542). Assigned, never read from the environment: it becomes the
@@ -2275,7 +2275,7 @@ _native_k3s_prepared_group() {
     || error "prepare-host: couldn't add ${user} to the '${g}' group. Check 'sudo usermod -aG ${g} ${user}', then re-run."
   line="$(getent group "$g" 2>/dev/null)" || line=""
   log "prepare-host: ${user} is in '${g}' (members: ${line##*:})."
-  warn "Every member of the '${g}' group can administer this machine's k3s cluster, as every member of the docker group can administer Docker. Members now: ${line##*:}."
+  warn "Every member of the '${g}' group can administer this machine's k3s cluster. Members now: ${line##*:}."
 }
 
 # _native_k3s_check_prepared_grant -- prepared mode: k3s.yaml must be root's, group

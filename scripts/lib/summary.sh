@@ -426,9 +426,9 @@ print_summary() {
       echo ""
       _kube_context_note
       echo -e "  ${DIM}────────────────────────────────────────${RESET}"
-      # Data location depends on the storage model: hostpath binds /tracebloc on
-      # the host; node-local (RFC-0003 Option C) keeps datasets inside the node on
-      # k3s local-path, so there is no host /tracebloc to point the user at.
+      # Data location depends on the storage model: hostpath names the host folder
+      # the volumes use; node-local (RFC-0003 Option C) keeps them in k3s local-path,
+      # on this host or in the macOS node's own volume.
       if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
         # Native k3s, hostpath (client-dev#1782): the PVs name the host directory itself.
         # The macOS node mounts that folder at its own path, so the same line holds there.
@@ -454,10 +454,6 @@ print_summary() {
         else
           echo -e "  ${DIM}Logs ${logdisp}  ·  Data in k3s local-path on this host${RESET}"
         fi
-      elif [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
-        echo -e "  ${DIM}Logs ${logdisp}  ·  Data in-node (k3s local-path)${RESET}"
-      else
-        echo -e "  ${DIM}Logs ${logdisp}  ·  Data /tracebloc/${ns}${RESET}"
       fi
       _reboot_note
       ;;
@@ -567,8 +563,6 @@ _log_advanced_info() {
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     kdata="$(_native_k3s_storage_path)" || kdata=""
     log "Volumes: ${kdata:-path not readable without root} (k3s local-path, on this host)"
-  else
-    log "Volume mount: $HOST_DATA_DIR → /tracebloc"
   fi
   log ""
   log "Useful commands:"

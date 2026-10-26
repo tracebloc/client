@@ -373,33 +373,37 @@ log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> 
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
 hint()           { echo -e "  ${DIM}$*${RESET}"; }
 
-# The "remove the client that is already here" remedy, printed from ONE place
-# (backend#2077), for the sites that mean a FULL removal (switch account, switch
-# Client ID), not a keep-your-data recreate.
+# The "release the secure environment that is already here" remedy, printed from ONE
+# place (backend#2077), for the sites that mean a FULL removal (switch account,
+# switch Client ID), not a keep-your-data recreate.
 #
-# Why not just `k3d cluster delete`: the backend record is anchored to the
-# cluster's identity (the kube-system namespace UID), which dies with the k3d
-# cluster. `k3d cluster delete` never calls the API, so the record keeps a
-# cluster_id that will never exist again and stays on the dashboard for good.
-# `tracebloc delete` revokes it server-side first (an API call, so it works on a
-# broken cluster too), then uninstalls, tears down the `tracebloc` cluster and —
-# without --keep-data — wipes ~/.tracebloc, which is what these sites promise.
+# Why the release comes first: the backend record is anchored to the cluster's
+# identity (the kube-system namespace UID), which dies with the cluster. Deleting
+# k3s by hand never calls the API, so the record would keep a cluster_id that will
+# never exist again and stay on the dashboard for good. `tracebloc delete` revokes
+# it server-side first (an API call, so it works on a broken cluster too), then
+# deletes it from this machine and, without --keep-data, wipes ~/.tracebloc, which
+# is what these sites promise.
 #
-# It acts on this machine's active client with the SIGNED-IN account's token, so
-# it has to run as the account that owns that client: the switch-account site has
-# just signed in as the OTHER one, hence the `tracebloc login` in front. The k3d
-# line stays for a custom CLUSTER_NAME (`tracebloc delete` only removes the one
-# named `tracebloc`), and the last line covers a machine where `tracebloc delete`
-# can't run — it refuses with "no active client" when the pointer is gone.
+# It acts on this machine's active secure environment with the SIGNED-IN account's
+# token, so it has to run as the account that owns it: the switch-account site has
+# just signed in as the OTHER one, hence the `tracebloc login` in front. The last
+# lines cover a machine where `tracebloc delete` can't run (it refuses with "no
+# active client" when the pointer is gone): revoke it on the dashboard, then, on
+# Linux, delete native k3s with its own uninstall script (k3s.sh,
+# TB_K3S_UNINSTALL_PATH). A Mac gets no manual step.
 #
 # $1 (optional): the indent to print the command lines at.
 _release_client_hint() {
   local in="${1:-}"
   hint "${in}tracebloc login  &&  tracebloc delete   (as the account that owns it: releases it on"
   hint "${in}                                         its dashboard, then wipes it + its local data)"
-  hint "${in}k3d cluster delete ${CLUSTER_NAME:-tracebloc}"
-  hint "${in}(tracebloc delete refused, or you can't sign in as that account? revoke the client on"
-  hint "${in} that account's dashboard first, then just the k3d line.)"
+  hint "${in}(tracebloc delete refused, or you can't sign in as that account? revoke it on that"
+  if [[ "${OS:-}" == "Linux" && -n "${TB_K3S_UNINSTALL_PATH:-}" ]]; then
+    hint "${in} account's dashboard, then delete its k3s: sudo ${TB_K3S_UNINSTALL_PATH})"
+  else
+    hint "${in} account's dashboard.)"
+  fi
 }
 
 # step_header LETTER TITLE — bold running header for one of the six install steps
@@ -473,7 +477,7 @@ assert_tool_runs() {
 }
 
 # _bounded SECONDS CMD… — run CMD with a deadline, so a wedged external call can't
-# hang a headless install (installer rule: every docker/kubectl/helm probe must be
+# hang a headless install (installer rule: every kubectl/helm/systemctl probe must be
 # bounded). Returns CMD's exit status, or 124 when the deadline fired. Output is
 # NOT redirected — the caller decides — and stdin reaches CMD.
 #
@@ -590,9 +594,9 @@ _tb_bounded_wait() {
 # The --diagnose bundle is a read whose output is the point, and the one where the
 # cost is the whole artifact rather than a stall: every read in it goes into a `{ … } > file`
 # group, so ONE call that never returns means no file at all, from the one run
-# collected BECAUSE the machine is already broken. A `docker info` gate passing in
-# 10s does not make a 15s `k3d cluster list` safe — more engine work, different
-# budget (Bugbot High, client#984).
+# collected BECAUSE the machine is already broken. A liveness gate passing in 5s
+# does not make a slower read of the same daemon safe: more work, a different
+# budget.
 #
 # The mechanism is _tb_bounded_bg's: the same background-PID + kill as spin (#426),
 # no coreutils, TERM first and then KILL, so a well-behaved child can clean up.
@@ -943,7 +947,7 @@ _tb_proc_alive() {
 # _tb_spin_reap PID [GRACE_S] — spin's deadline path. TERM to PID and every
 # descendant, wait up to GRACE_S whole seconds for all of them to exit, then
 # KILL only those still alive under the same name. Empty GRACE_S is the
-# historical 0.5 s, right for k3d, curl and docker probes. A package manager
+# historical 0.5 s, right for kubectl, curl and systemctl probes. A package manager
 # is not one of those: rpm and dpkg defer TERM until the transaction is
 # written, and a KILL 0.5 s later lands mid-transaction (client-dev#2063).
 # Through sudo, sudo relays the TERM and only the reap of the WHOLE tree keeps
@@ -1231,7 +1235,6 @@ _tb_root_reads() {
         esac
       done
       return 1 ;;
-    docker) [[ "${2:-}" == info || "${2:-}" == version ]] ;;
     timeout|gtimeout|*/timeout|*/gtimeout) shift; [[ $# -ge 2 ]] && shift && _tb_root_reads "$@" ;;
     env)
       shift
@@ -1278,8 +1281,8 @@ _tb_root_credential() {
 }
 
 # Export the shadow (+ its helpers) so `sudo <cmd>` inside `bash -c '…'` subshells
-# also routes through it — e.g. the apt-lock wait and the RHEL-rebuild (Alma/Rocky/
-# OL) Docker install in setup-linux.sh both run `bash -c '… sudo … …'`. Without
+# also routes through it — e.g. the apt-lock wait in setup-linux.sh runs
+# `bash -c '… sudo … …'`. Without
 # export, those child shells resolve the REAL sudo binary, so a root box without
 # sudo installed would still hit "sudo: command not found" there — the exact case
 # A2 fixes everywhere else (review #372). Harmless to non-bash children, which
@@ -1293,7 +1296,7 @@ export -f sudo _real_sudo _have_sudo_bin tb_root tb_root_n tb_root_as tb_root_pl
 #  privileged steps below can run, and (when a password is needed) primes the
 #  sudo credential once so later steps behind spinners don't re-prompt.
 # preflight_sudo [PURPOSE] -- PURPOSE finishes "tracebloc needs your password once
-# to ...": native k3s asks for k3s, and installs no Docker (k3s.sh).
+# to ...": by default, setting up native k3s and the system tools it needs.
 preflight_sudo() {
   # --print runs nothing as root, so it asks for no password.
   if tb_root_planning; then
@@ -1308,16 +1311,15 @@ preflight_sudo() {
   # Not root AND no sudo binary — the honest, actionable failure (previously
   # conflated with "no sudo access").
   if ! _have_sudo_bin; then
-    error "This machine needs administrator rights to install Docker and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again."
+    error "This machine needs administrator rights to install k3s and system tools, but you are not root and sudo isn't installed. Re-run as root, or install sudo (e.g. apt-get install sudo) and try again."
   fi
   # Sudo present and already usable without a password (cached / NOPASSWD).
   if _tb_root_credential cached; then
     return 0
   fi
   # Prompt once, then keep the credential warm. One line, then the system's own
-  # "Password:" prompt. Kept generic so it reads correctly on macOS (Docker
-  # Desktop) and Linux (Docker Engine + system packages).
-  hint "tracebloc needs your password once to ${1:-set up Docker and a few tools}."
+  # "Password:" prompt.
+  hint "tracebloc needs your password once to ${1:-set up k3s and a few tools}."
   echo ""
   _tb_root_credential prime || error "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
   _tb_root_credential keepalive
@@ -1449,11 +1451,11 @@ tb_export_namespace() {
   TRACEBLOC_NAMESPACE="${TB_NAMESPACE:-}"
   export TB_NAMESPACE TRACEBLOC_NAMESPACE
 }
-# SERVERS/AGENTS were k3d's node counts; no create path reads them, since native
-# k3s is one node. Only their canonical spellings are resolved here.
-# TODO(tracebloc/client-dev#1950): retire both knobs.
-if [[ -n "${TRACEBLOC_SERVERS:-}" ]]; then SERVERS="$TRACEBLOC_SERVERS"; fi
-if [[ -n "${TRACEBLOC_AGENTS:-}" ]]; then AGENTS="$TRACEBLOC_AGENTS"; fi
+# Settings this installer no longer reads: TRACEBLOC_SERVERS and TRACEBLOC_AGENTS
+# were node counts for a runtime it no longer sets up, and native k3s runs one node.
+# validate_config names each one that is set (tb_say_ignored_settings), so a value
+# nobody reads is never dropped without a word.
+TB_IGNORED_SETTINGS="TRACEBLOC_SERVERS TRACEBLOC_AGENTS"
 # The leftover-data guard's non-interactive answer (cluster.sh). --reuse-data /
 # --wipe-data assign TB_LEFTOVER_ACTION after this, so a flag still wins.
 if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLOC_LEFTOVER_ACTION"; fi
@@ -1540,17 +1542,9 @@ TB_NVIDIA_DRIVER_FLOOR="580"
 TB_NVIDIA_DRIVER_HARD_FLOOR="580"
 # shellcheck disable=SC2034  # consumed cross-file by detect-gpu.sh
 TB_NVIDIA_COMPUTE_CAP_FLOOR="7.5"
-# Pinned default; ONLY the literal K3D_VERSION=latest resolves the newest k3d
-# release at install time instead (an empty value falls back to this pin, like
-# K8S_VERSION above). The binary is fetched directly from the release and
-# verified against its checksums.txt either way (setup-linux.sh). The pin makes
-# installs deterministic and immune to the releases/latest lookup, which breaks
-# under GitHub rate limiting on shared egress IPs (CI runners, corporate NAT).
-if [[ -n "${TRACEBLOC_K3D_VERSION:-}" ]]; then K3D_VERSION="$TRACEBLOC_K3D_VERSION"; fi
-K3D_VERSION="${K3D_VERSION:-v5.9.0}"
 # Pinned default; ONLY the literal HELM_VERSION=latest resolves the newest Helm
-# release at install time (an empty value falls back to this pin, like the two
-# above). The tarball is fetched directly from get.helm.sh and verified against
+# release at install time (an empty value falls back to this pin, like
+# K8S_VERSION). The tarball is fetched directly from get.helm.sh and verified against
 # its published .sha256sum either way (setup-linux.sh) — helm's get-helm-3
 # script is NOT used: it floats on the mutable helm/helm@main and needs
 # openssl, which minimal cloud images don't ship (#395).
@@ -1623,6 +1617,17 @@ _tb_home_path() {
   printf '%s' "$dir"
 }
 
+# tb_say_ignored_settings -- one warning for each setting of TB_IGNORED_SETTINGS
+# that is set (blank is unset, as for every TRACEBLOC_* setting).
+tb_say_ignored_settings() {
+  local n
+  for n in $TB_IGNORED_SETTINGS; do
+    if [[ -n "${!n:-}" ]]; then
+      warn "${n} is set, but this installer does not use it: tracebloc runs on this one machine."
+    fi
+  done
+}
+
 validate_config() {
   [[ -n "${HOME:-}" ]]  || error "\$HOME is not set — cannot determine user home directory"
   [[ -n "${USER:-}" ]]  || USER="$(whoami)" || error "Cannot determine current user"
@@ -1683,6 +1688,7 @@ validate_config() {
     esac
     HOST_DATASET_DIR="$rddir"
   fi
+  tb_say_ignored_settings
 }
 
 # ── Runtime globals ──────────────────────────────────────────────────────────
@@ -1753,7 +1759,7 @@ TB_GPU_NVIDIA_NAMES=""
 # to stdout, empty when it cannot tell. Passed to the chart as env.TRACEBLOC_HOST_OS
 # (install-client-helm.sh _host_os_set_args), and the resource monitor sends it on
 # every heartbeat as `os`. Only the installer can answer: the monitor runs in a pod,
-# whose /etc/os-release is the image's, and a k3d node's osImage is k3s's.
+# whose /etc/os-release is the image's, and the macOS node's osImage is k3s's.
 # os-release is READ, never sourced (it is the host's file, and sourcing it would run
 # it); its path and the macOS version take the overrides the setup steps already
 # honour (TRACEBLOC_OS_RELEASE_FILE, TRACEBLOC_MACOS_VER).
@@ -1845,16 +1851,11 @@ _gpu_floor_skips() {
 
 # The RuntimeClass a wired NVIDIA GPU runs under: the device plugin's
 # runtimeClassName, the client's RUNTIME_CLASS_NAME and the summary's GPU test all
-# read it here (install-client-helm.sh, summary.sh). On k3d it is `nvidia`, the class
-# baked into the k3s-cuda node image. On native k3s it is the runtime k3s's own
-# containerd registered and step c's gate asked for (k3s.sh TB_K3S_GPU_RUNTIME; k3s
-# creates the RuntimeClass of the same name), so the two can never disagree.
+# read it here (install-client-helm.sh, summary.sh). It is the runtime native k3s's
+# own containerd registered and step c's gate asked for (k3s.sh TB_K3S_GPU_RUNTIME;
+# k3s creates the RuntimeClass of the same name), so the two can never disagree.
 _gpu_runtime_class() {
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    printf '%s' "${TB_K3S_GPU_RUNTIME:-}"
-  else
-    printf 'nvidia'
-  fi
+  printf '%s' "${TB_K3S_GPU_RUNTIME:-}"
 }
 
 # ── Failure diagnostics (client#681) ─────────────────────────────────────────
@@ -2115,7 +2116,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_RECORD_ROOT_PATH            x-tracebloc-record.root-path (<user> is the login name)
 #    TB_RECORD_LAST_IN_USE          x-tracebloc-last-in-use.kinds, space-separated
 TB_SUBSTRATES="k3s"
-TB_SUBSTRATE_DEFAULT="k3d"
+TB_SUBSTRATE_DEFAULT="k3s"
 TB_SUBSTRATE_FRESH_LINUX="k3s"
 TB_SUBSTRATE_RETIRED_LINUX="k3d"
 TB_SUBSTRATE_RETIRED_MACOS="k3d"
@@ -2503,8 +2504,7 @@ _tb_substrate_where() {
 #      cannot read it by design, so its absence from view is not "cannot tell";
 #   4. on Linux, a tracebloc native k3s this user can see without privileges
 #      (_native_k3s_live_probe), which catches one whose record is out of reach;
-#   5. on Linux, outside WSL and inside it, the fresh default (native k3s,
-#      _tb_substrate_fresh) where the default is retired; elsewhere, the default.
+#   5. the default (TB_SUBSTRATE_DEFAULT: native k3s).
 # A Mac gets no substrate retired there (TB_SUBSTRATE_RETIRED_MACOS: k3d, slim client
 # 4.1, client-dev#1948), so it has one, the substrate left (_tb_substrate_fresh_here: k3s
 # in Apple's container runtime, RFC-0175 D1/D6). There TRACEBLOC_SUBSTRATE naming a
@@ -2589,38 +2589,11 @@ tb_substrate_resolve() {
   fi
   rc=0; _tb_substrate_k3s_live || rc=$?
   case "$rc" in
-    1) _tb_substrate_fresh ;;
+    1) ;;
     0) TRACEBLOC_SUBSTRATE_RESOLVED="k3s"; TB_SUBSTRATE_SOURCE="the tracebloc native k3s set up on this machine (systemctl: k3s)" ;;
     *) TB_SUBSTRATE_REFUSAL="tracebloc's native k3s files are on this machine, but systemctl did not answer, so this run cannot tell whether that k3s is set up to run. Check 'systemctl status k3s', or set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run." ;;
   esac
   return 0
-}
-
-# _tb_substrate_fresh -- step 5: on Linux, the fresh default (TB_SUBSTRATE_FRESH_LINUX,
-# native k3s) where the default is retired (tb_substrate_retired_here: outside WSL and
-# inside it), else the default. Called only when steps 2 to 4 found no record and no
-# tracebloc k3s, and never on a Mac, which resolves its one substrate before the
-# record (tb_substrate_resolve).
-#
-# Nothing else is asked (slim client 4.1): k3d, which the default names, is retired
-# on both sides of WSL's line, so a k3d binary, a k3d cluster in Docker or a setting
-# native k3s refuses no longer keeps it. A machine whose own data says k3d is refused
-# by reinstall.sh's refuse_k3d_machine, with the way off k3d; a setting native k3s
-# refuses is refused by name before it (_native_k3s_refuse_host). Inside WSL a distro
-# other than tracebloc's is refused by refuse_wsl_run. A build without the WSL probe
-# cannot tell which list applies, and that is refused by name, never guessed. Prints
-# nothing.
-_tb_substrate_fresh() {
-  local rc=0 os where
-  os="${OS:-$(uname -s 2>/dev/null)}"
-  case "$os" in
-    Linux)
-      tb_substrate_retired_here "$TB_SUBSTRATE_DEFAULT" || rc=$?
-      case "$rc" in
-        0) TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_FRESH_LINUX"; where="$(_tb_substrate_where)"; TB_SUBSTRATE_SOURCE="the default for Linux ${where#on Linux }" ;;
-        2) TB_SUBSTRATE_REFUSAL="This installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell which runtime to set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash" ;;
-      esac ;;
-  esac
 }
 
 # _tb_substrate_move_retired SUB WHO -- a record (WHO, as a sentence's subject)
@@ -2948,8 +2921,8 @@ tb_record_write() {
   else prepared_for="$(_tb_record_prior prepared_for "$prior")"; fi
   # k3s_data_fs (client-dev#1976): the filesystem under native k3s's data directory,
   # read afresh on every write of a native k3s install on Linux, the WSL distro
-  # included, by k3s.sh's reader. A Mac or a k3d install writes none: the Mac's node
-  # runs tracebloc's pinned VM image.
+  # included, by k3s.sh's reader. A Mac writes none: the Mac's node runs
+  # tracebloc's pinned VM image.
   if [[ "${OS:-}" == Linux && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == k3s ]] && declare -F _native_k3s_data_fs >/dev/null 2>&1; then
     k3s_data_fs="$(_native_k3s_data_fs)"
   fi

@@ -117,11 +117,11 @@ if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
 # read FIRST, unlike the installer's other TRACEBLOC_ names: every released CLI
 # sets it on the command it runs, and older CLIs set nothing else, so what the
 # CLI set must outrank a TRACEBLOC_ value left in the user's shell. Skip the
-# healthy bailout so we reach install-k8s.sh's stop-and-check gate, which —
-# seeing the same flag — updates just the CLI when it is behind latest. NOT a
-# reinstall: leave _tb_force at 0 so this does not force the full flow. A
-# below-floor CLI still forces a full reinstall there via the gate's
-# cli-outdated path, so the floor keeps its stricter meaning.
+# healthy bailout so we reach install-k8s.sh, whose stop-and-check gate — seeing
+# the same flag — goes on to the normal flow: step b brings the CLI to latest and
+# step c moves the node forward. NOT a forced reinstall: leave _tb_force at 0. A
+# below-floor CLI is the gate's cli-outdated case either way, so the floor keeps
+# its stricter meaning.
 [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
 # An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything; empty is
 # none, as install-k8s.sh reads it) is install-k8s.sh's to answer, so it skips ONLY
@@ -135,7 +135,7 @@ for _a in "$@"; do
   case "$_a" in
     --force|--reinstall) _tb_bail_ok=0; _tb_force=1 ;;
     # prepare-host must reach the sub-script even on a healthy machine — it's
-    # useful there (grant ANOTHER researcher docker-group access), and the
+    # useful there (grant ANOTHER researcher the k3s group), and the
     # healthy-bailout would otherwise open the home screen and silently skip the
     # TB_PREPARE_USER grant (Bugbot on #381). It skips ONLY the bailout — no
     # _tb_force — so host-prep is never mislabeled as a forced reinstall (the
