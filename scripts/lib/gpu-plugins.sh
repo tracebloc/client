@@ -18,13 +18,11 @@
 verify_gpu() {
   [[ "$GPU_VENDOR" != "nvidia" && "$GPU_VENDOR" != "amd" ]] && return
 
-  # nvidia CPU-fallback (client#835): a reused CPU-only cluster or a failed node
-  # CDI-gen leaves GPU_VENDOR=nvidia but no GPU wired in. There is then nothing for
-  # the 18×5s node poll below to find, and running it would just stall the finish
-  # with a misleading "could not read / advertises no GPU" warning. Skip it when we know the GPU
-  # wasn't wired. Guarded with `declare -F` so gpu-plugins.sh can still be sourced
-  # standalone (its bats suite does) without common.sh's _gpu_wired. amd has no
-  # wiring flag, so it keeps verifying on detection as before.
+  # nvidia CPU-fallback (client#835): native k3s's step c can leave GPU_VENDOR=nvidia
+  # with no GPU wired in. There is then nothing for a node poll to find, and running it
+  # would stall the finish with a misleading "advertises no GPU" warning. Guarded with
+  # `declare -F` so gpu-plugins.sh can still be sourced standalone (its bats suite does)
+  # without common.sh's _gpu_wired. amd has no wiring flag, so it verifies on detection.
   if [[ "$GPU_VENDOR" == "nvidia" ]] && declare -F _gpu_wired >/dev/null 2>&1 && ! _gpu_wired; then
     log "NVIDIA GPU detected but not wired into the cluster — skipping node GPU verification (CPU mode)."
     return
@@ -38,6 +36,8 @@ verify_gpu() {
     return
   fi
 
+  # Only AMD reaches the node poll from install-k8s.sh: a wired NVIDIA run is native k3s
+  # and returned above. TODO(tracebloc/client-dev#1950): drop the poll's NVIDIA arms.
   log "Verifying GPU on node..."
 
   # The device plugin now rolls out with the Helm release, and `helm upgrade

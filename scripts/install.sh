@@ -98,8 +98,9 @@ esac
 # we simply fall through to a normal install. Skipped on a forced reinstall
 # (--force/--reinstall or TRACEBLOC_FORCE_REINSTALL=1), on the dev/unverified path,
 # whenever the operator explicitly pinned a REF/BRANCH (an explicit version
-# request must always (re)install, never bail), and on an explicit substrate
-# request (TRACEBLOC_SUBSTRATE, below).
+# request must always (re)install, never bail), on an explicit substrate
+# request (TRACEBLOC_SUBSTRATE, below), and unless the install record names the
+# substrate served here (_tb_record_served, below).
 _tb_bail_ok=1
 _tb_force=0
 # Settings naming (backend#3846): TRACEBLOC_REF / TRACEBLOC_BRANCH are the
@@ -122,18 +123,13 @@ if [[ -n "${TRACEBLOC_BRANCH:-}" ]]; then BRANCH="$TRACEBLOC_BRANCH"; fi
 # below-floor CLI still forces a full reinstall there via the gate's
 # cli-outdated path, so the floor keeps its stricter meaning.
 [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == "1" ]] && _tb_bail_ok=0
-# An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything): only the
-# substrate and consent decision in install-k8s.sh may answer it. The bailout
-# used to answer first, so on a healthy k3d machine a consented
-# TRACEBLOC_SUBSTRATE=k3s re-run opened the home screen and never reached the
-# offboard (client-dev#1761). Like prepare-host it skips ONLY the bailout, with no
-# _tb_force. The machine's own substrate reaches install-k8s.sh's stop-and-check
-# gate, which hands a healthy machine to the home screen as before. Any other
-# request is decided there too: a k3s request on k3d is refused without consent
-# (D10) and offboarded with it, and a request it cannot serve is refused by name.
-# Empty is no request, as install-k8s.sh reads it. install-bootstrap.bats reads the
-# variable's name and the substrates from the install contract
-# (scripts/spec/install-record.schema.json).
+# An explicit substrate request (TRACEBLOC_SUBSTRATE set to anything; empty is
+# none, as install-k8s.sh reads it) is install-k8s.sh's to answer, so it skips ONLY
+# the bailout, with no _tb_force (client-dev#1761). install-k8s.sh hands a healthy
+# machine on its own substrate to the home screen, and refuses by name a machine
+# that runs tracebloc on k3d (reinstall.sh) or a request it cannot serve.
+# install-bootstrap.bats reads the variable's name and the substrates from the
+# install contract (scripts/spec/install-record.schema.json).
 [[ -n "${TRACEBLOC_SUBSTRATE:-}" ]] && _tb_bail_ok=0
 for _a in "$@"; do
   case "$_a" in
@@ -156,6 +152,19 @@ for _a in "$@"; do
     --diagnose|--help|-h) _tb_bail_ok=0 ;;
   esac
 done
+
+# The bailout answers only a machine whose user record names k3s, the one substrate
+# served here; any other machine is install-k8s.sh's, which refuses one on k3d before
+# its own healthy gate. The parse is common.sh's _tb_record_substrate_in.
+_tb_record_served() {
+  local f="${HOME:-}/.tracebloc/install-record.json" k='"substrate"' flat rest
+  [[ -n "${HOME:-}" && -f "$f" && -r "$f" ]] || return 1
+  flat="$(tr '\n' ' ' 2>/dev/null <"$f")" || return 1
+  rest=${flat#*"$k"}
+  [[ "$rest" != "$flat" && "$rest" != *"$k"* ]] || return 1
+  [[ "$(printf '%s' "$flat" | sed -n 's/.*"substrate"[[:space:]]*:[[:space:]]*"\([a-z0-9][a-z0-9-]*\)".*/\1/p')" == "k3s" ]]
+}
+[[ "$_tb_bail_ok" == "1" ]] && ! _tb_record_served && _tb_bail_ok=0
 
 # A force flag means an explicit (re)install was requested (force, dev/
 # unverified path, or a pinned REF/BRANCH). install-k8s.sh runs its OWN read-only
@@ -465,7 +474,6 @@ FILES=(
   "scripts/lib/setup-macos.sh"
   "scripts/lib/setup-linux.sh"
   "scripts/lib/cluster.sh"
-  "scripts/lib/k3d.sh"
   "scripts/lib/k3s.sh"
   "scripts/lib/k3s-firewall.sh"
   "scripts/lib/mac-container.sh"
@@ -485,7 +493,7 @@ FILES=(
 # the optional trust assets fetch_optional gets — so the two can't drift apart.
 # Each entry is the wait before the next attempt, so ${#DL_DELAYS[@]}+1 attempts
 # over ~75 s. It used to be three attempts 5 s apart in each function, ~10 s in
-# all, and a GitHub 500 on k3d.sh one minute after a release was published
+# all, and a GitHub 500 on a sub-script one minute after a release was published
 # outlasted that and failed a fresh install at "1. Downloading"
 # (client-dev#2053). Only a failure that a wait can cure is retried: no answer
 # (000 — DNS, a refused connect), 408, 429, or a 5xx. A 4xx other than 408 and

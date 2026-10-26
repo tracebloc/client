@@ -2,10 +2,10 @@
 # =============================================================================
 #  cluster.sh — the substrate-neutral cluster helpers: host data dirs, the
 #  proxy and CA trust inputs, the kubelet reservation and the leftover-data
-#  guard. The k3d code that reads them lives in k3d.sh (RFC-0175 D15).
+#  guard. Native k3s's code that reads them lives in k3s.sh and mac-container.sh.
 # =============================================================================
 
-# Ensure host dirs exist so /tracebloc/data, /tracebloc/logs, /tracebloc/mysql exist inside nodes (HOST_DATA_DIR is mounted as /tracebloc).
+# Ensure HOST_DATA_DIR and its logs and mysql dirs exist, the chart's hostPath root on native k3s.
 # Only chmod the container data subdirs; do not make HOST_DATA_DIR or files like values.yaml world-readable.
 _ensure_tracebloc_dirs() {
   mkdir -p "$HOST_DATA_DIR" "$HOST_DATA_DIR/logs" "$HOST_DATA_DIR/mysql"
@@ -56,8 +56,8 @@ _release_dirs_spec() {
 }
 
 # Pre-create the per-release host dirs the chart's hostPath PVs bind to.
-# The PVs use /tracebloc/<release>/{data,logs,mysql}, which maps back to
-# $HOST_DATA_DIR/<release>/{data,logs,mysql} on the host via the k3d -v mount.
+# The PVs use <hostPath.root>/<release>/{data,logs,mysql}, and on native k3s the
+# installer sets that root to HOST_DATA_DIR, the host's own folder.
 # Without pre-creating these as the host user, kubelet's DirectoryOrCreate
 # makes them root:root 0755 and the host user can't drop training data into
 # /data/shared.
@@ -89,14 +89,13 @@ _ensure_release_dirs() {
 # --- Corporate-proxy support (authenticated proxies + NO_PROXY hardening) ----
 # Cluster-internal destinations that must NEVER be routed through a corporate
 # proxy: loopback, all RFC1918 private ranges (covers the k3s pod CIDR
-# 10.42.0.0/16, the service CIDR 10.43.0.0/16, the k3d docker network and node
-# IPs in one shot), and the in-cluster DNS suffixes. Sending this traffic out to
-# the proxy misroutes in-cluster calls AND makes `k3d cluster create --wait`
-# hang. We union these into whatever NO_PROXY the host set. (A tenant that needs
+# 10.42.0.0/16, the service CIDR 10.43.0.0/16 and node IPs in one shot), and the
+# in-cluster DNS suffixes. Sending this traffic out to the proxy misroutes
+# in-cluster calls. We union these into whatever NO_PROXY the host set. (A tenant that needs
 # a *proxied* private-IP destination can narrow this; tracebloc itself only
 # pulls from public registries + dials public api.tracebloc.io, so the broad
 # bypass is safe for the isolated VM the client runs on.)
-TB_NO_PROXY_DEFAULTS="localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local,host.k3d.internal"
+TB_NO_PROXY_DEFAULTS="localhost,127.0.0.1,0.0.0.0,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.svc.cluster.local,.cluster.local"
 
 # Echo an effective NO_PROXY = host NO_PROXY/no_proxy ∪ TB_NO_PROXY_DEFAULTS,
 # de-duplicated with first-seen order preserved (host entries first).
@@ -109,9 +108,8 @@ _augment_no_proxy() {
 # The proxy environment a cluster node runs with, one NAME=VALUE per line: each
 # HTTP(S) proxy variable the host sets, in this order, then NO_PROXY and no_proxy,
 # both set to the augmented list above. NOTHING when the host sets no HTTP(S)
-# proxy: a NO_PROXY alone proxies nothing. ONE definition for both substrates:
-# k3d.sh writes these into the k3d --config env list, and k3s.sh hands them to
-# upstream's install.sh, which writes them into k3s.service.env.
+# proxy: a NO_PROXY alone proxies nothing. k3s.sh hands them to upstream's
+# install.sh, which writes them into k3s.service.env, and the macOS node runs with them.
 _node_proxy_env() {
   local var have_http="" no_proxy_val
   for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
@@ -129,18 +127,17 @@ _node_proxy_env() {
 # --- Corporate MITM CA trust for in-node containerd pulls (#424) --------------
 # Proxy REACHABILITY reaches the nodes (above), but on a TLS-inspecting network
 # the nodes still don't TRUST the corporate CA, so every in-node containerd pull
-# (rancher/k3s, ghcr.io/k3d-io, tracebloc images) fails x509 — then masked into a
+# (rancher/k3s, tracebloc images) fails x509 — then masked into a
 # root-cause-free "an image couldn't be pulled". When the operator supplies the
-# CA bundle we mount it into every node and point containerd at it per-registry.
+# CA bundle we hand it to the node and point containerd at it per-registry.
 
 # The registries the cluster pulls from; behind a break-and-inspect proxy each
 # needs the corporate CA to validate the intercepted cert.
 TRACEBLOC_CA_REGISTRIES=(docker.io registry-1.docker.io auth.docker.io ghcr.io)
 
 # Print a containerd registries.yaml that points every registry in TRACEBLOC_CA_REGISTRIES
-# at the CA file $1 -- the path containerd reads it from, which is inside the node
-# on k3d and on the host on native k3s. Pure: the writers (k3d.sh's
-# _write_k3d_registries_config, k3s.sh's _native_k3s_write_config) own where it lands.
+# at the CA file $1 -- the path containerd reads it from, on the host on native k3s.
+# Pure: the writer (k3s.sh's _native_k3s_write_config) owns where it lands.
 _render_registries_config() {
   local node_ca="$1" host
   echo "configs:"
@@ -174,8 +171,8 @@ _resolve_ca_bundle() {
 # system Keychain and IGNORES SSL_CERT_FILE (Bugbot), so there the CA must live in the
 # Keychain (or use the offline path, #584). curl ALREADY honors the user's own
 # CURL_CA_BUNDLE natively, so we do NOT re-export it (it's replace-not-augment, and a
-# corp-root-only bundle would drop the public roots). The k3d NODES are trusted
-# separately at cluster-create (#424). Idempotent; no-op when no CA is configured;
+# corp-root-only bundle would drop the public roots). The node is trusted
+# separately, through registries.yaml (#424). Idempotent; no-op when no CA is configured;
 # fails fast on a set-but-unreadable bundle. The announce names only what actually
 # takes effect on this platform.
 wire_ca_trust() {
@@ -340,33 +337,18 @@ TRACEBLOC_KUBELET_SYSTEM_RESERVED_MEM_MIB_WINDOWS_K3S=1024
 TRACEBLOC_KUBELET_EVICTION_MEM_MIB=256
 # ── end generated reservation ─────────────────────────────────────────────────
 
-# Path the file is mounted to INSIDE every k3d node. Named once; the mount and the
-# --kubelet-arg must not be able to disagree about it.
-TB_KUBELET_CONFIG_NODE_PATH="/etc/tracebloc/kubelet.yaml"
 # Where native k3s reads it (RFC-0175 D4): the host IS the node, so there is no
 # mount, and this one path is both what the writer writes and what k3s.sh's
 # config.yaml names in `kubelet-arg: config=`. Mode 0644, so the e2e readback
 # (e2e_assert_node_reservation) can read it without root.
 TB_KUBELET_CONFIG_K3S_PATH="/etc/rancher/k3s/tracebloc-kubelet.yaml"
 
-# NOT under /tmp (Bugbot, High, on client#912). This file is BIND-MOUNTED into
-# every k3d node, so the host path has to outlive the install: a bind-mount source
-# that has disappeared cannot be remounted, and `docker start` of the node then
-# fails with a generic Docker error. /tmp is cleared on reboot on macOS and on most
-# Linux, so a cluster created from a temp path comes up healthy and can never be
-# RESTARTED -- a headless edge looks fine until its first reboot, which is the
-# worst possible moment to find out. HOST_DATA_DIR is the installer's own
-# persistent directory (already bind-mounted into the nodes as /tracebloc).
-#
-# On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) it is the root-owned path above instead,
-# written by k3s.sh as root.
+# Where the kubelet reads the drop-in: native k3s's path above. The e2e readback
+# (e2e_assert_node_reservation) and the measurement harness read it here.
 _kubelet_config_path() {
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    printf '%s' "$TB_KUBELET_CONFIG_K3S_PATH"
-    return 0
-  fi
-  printf '%s/kubelet/kubelet.yaml' "${HOST_DATA_DIR:-$HOME/.tracebloc}"
+  printf '%s' "$TB_KUBELET_CONFIG_K3S_PATH"
 }
+
 
 # The platform key the reservation table is indexed by: `darwin`, `linux`,
 # `linux_k3s` for native k3s, `darwin_k3s` for the macOS node, `windows_k3s` for
@@ -460,8 +442,7 @@ _kubelet_reservation_measured() {
 # (backend#2460: the operator is told rather than handed a number borrowed from
 # another platform; "cannot tell" is a finding, not a default). Every step that
 # learns it calls this, so one install never warns twice about the same node:
-# k3d's create path, and on native k3s the pre-create fit gate. Silent for a
-# measured platform.
+# on native k3s the pre-create fit gate. Silent for a measured platform.
 _kubelet_reservation_warn_unmeasured() {
   local platform="${1:-$(_kubelet_reservation_platform)}"
   _kubelet_reservation_measured "$platform" && return 0
@@ -470,8 +451,7 @@ _kubelet_reservation_warn_unmeasured() {
   if [[ "$platform" == "unknown" ]] && declare -F tb_substrate_retired_here >/dev/null 2>&1 \
        && tb_substrate_retired_here "${TRACEBLOC_SUBSTRATE_RESOLVED:-}"; then
     # A substrate retired where this run is (k3d, slim client 4.1): the installer
-    # refuses it before this runs, so only a harness that stands k3d up directly
-    # (CI exercising k3d.sh's create path) reaches it.
+    # refuses it before this runs, so this says so if a caller skipped that refusal.
     warn "No node reservation will be written: this installer no longer sets up ${TRACEBLOC_SUBSTRATE_RESOLVED} $(_tb_substrate_where), so no measured reservation applies to this node."
   elif [[ "$platform" == "unknown" ]] && declare -F _probe_wsl >/dev/null 2>&1; then
     # The detector IS loaded, so not "re-run": `unknown` is a host _probe_wsl takes for
@@ -558,30 +538,6 @@ _render_kubelet_config() {
     printf -v line 'evictionHard:\n  memory.available: %sMi\n' "${TRACEBLOC_KUBELET_EVICTION_MEM_MIB}"; out+="$line"
   fi
   printf '%s' "$out"
-}
-
-# Write the drop-in to $1 (default: _kubelet_config_path) and echo the path. The
-# k3d path; native k3s writes the same rendering as root, with an explicit mode.
-# Each attempt renders, writes a sibling temp file, checks the bytes on disk are
-# the rendering, and only then moves it over the fixed path, so a re-install
-# overwrites and an interrupted write (see the render above) is retried rather
-# than failing the install or leaving a partial file where the kubelet reads.
-_write_kubelet_config() {
-  local cfg="${1:-$(_kubelet_config_path)}" dir body tmp attempt
-  dir="$(dirname "$cfg")" || return 1
-  mkdir -p "$dir" || return 1
-  tmp="${cfg}.tracebloc-tmp.$$"
-  for attempt in 1 2 3; do
-    if body="$(_render_kubelet_config)" \
-      && printf '%s\n' "$body" > "$tmp" \
-      && printf '%s\n' "$body" | cmp -s - "$tmp" \
-      && mv -f "$tmp" "$cfg"; then
-      echo "$cfg"
-      return 0
-    fi
-    rm -f "$tmp"
-  done
-  return 1
 }
 
 # When a proxy is configured, ensure THIS installer's own kubectl/helm/curl
@@ -772,8 +728,7 @@ _leftover_k3s_service_stopped() {
 }
 
 # _leftover_where PATH... -- where the found data lies, for the guard's copy:
-# HOST_DATA_DIR (k3d, always), and on native k3s the storage path when a found
-# path is under it.
+# HOST_DATA_DIR, and on native k3s the storage path when a found path is under it.
 _leftover_where() {
   local storage="" d in_s=0 in_h=0
   [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] && storage="$(_native_k3s_storage_path)"
@@ -897,7 +852,7 @@ guard_leftover_data() {
   # lies in the storage path as well as HOST_DATA_DIR (_leftover_where). Under
   # node-local (native_nl) a fresh install gives its volumes new directories, so
   # nothing found is adopted. Under hostpath (client-dev#1782) the chart's PVs name
-  # HOST_DATA_DIR itself, so what lies there IS adopted, as on k3d; only a k3s
+  # HOST_DATA_DIR itself, so what lies there IS adopted; only a k3s
   # volume (pvc-*) is not.
   local where k3s="" native_nl="" frozen=""
   where="$(_leftover_where "${found[@]}")"  # set-u-safe: the empty-found check above returns first
@@ -1070,49 +1025,17 @@ guard_leftover_data() {
   esac
 }
 
-# THE ORDER IS THE CONTRACT: guard_leftover_data FIRST, the host data dirs
-# SECOND, and only then _create_new_cluster (LukasWodka, client#984 round 7).
-#
-# Extracted so both paths into `_create_new_cluster` run the SAME step rather
-# than one of them re-deriving it. The rc-3 path ran the two the other way round
-# — `_ensure_tracebloc_dirs` had already fired above the `case` — while its own
-# comment claimed it ran "exactly as it does for a first-read ABSENT". Both of
-# the guard's mutating arms are falsified by that order:
-#
-#   * WIPE. `_leftover_data_dirs` yields `$base/mysql` and `$base/data`, and
-#     `_wipe_leftover_data` does `rm -rf "$d"` — the DIRECTORY, not its contents.
-#     The definite-absent path re-creates and re-`chmod 777`s them afterwards; on
-#     the rc-3 path nothing did, so `_create_new_cluster` bind-mounted a
-#     HOST_DATA_DIR whose `mysql` and `data` were gone.
-#   * NEWDIR. That arm sets `HOST_DATA_DIR="$newdir"`, calls `validate_config`
-#     and recurses. `validate_config` has no `mkdir` and no `chmod`, so on the
-#     rc-3 path the dirs step had already run against the OLD path and the new
-#     one got neither before the mount.
-#
-# Hostpath only. node-local (RFC-0003 Option C) has no host data dirs, no
-# bind-mount and no chmod — datasets live on k3s local-path inside the node — so
-# there is nothing to create and calling it twice there is a no-op either way.
-# The mode's log line stays at the single decision point in create_cluster so it
-# is printed once, not once per path.
-_ensure_host_data_dirs() {
-  if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
-    return 0
-  fi
-  _ensure_tracebloc_dirs
-}
-
 # _api_answers [CONTEXT] -- the API answers: on CONTEXT by name when given (native
-# k3s asks its own), else on the current context (k3d's merge makes its context
-# current). ONE definition, read by the detector's gate and by both API waits, so
-# they cannot disagree about what "answers" means. --request-timeout bounds the
-# call itself (see _wait_for_api).
+# k3s asks its own), else on the current context. ONE definition, read by every API
+# wait and by assess, so they cannot disagree about what "answers" means.
+# --request-timeout bounds the call itself.
 _api_answers() {
   kubectl ${1:+--context "$1"} cluster-info --request-timeout=5s &>/dev/null
 }
 
 # The API wait budget in seconds: TB_API_WAIT_S when it is a whole number, else 180.
-# One reading for both waits (k3d.sh's _wait_for_api, k3s.sh's
-# _native_k3s_wait_for_api), so the documented knob means the same on each substrate.
+# One reading for every wait (k3s.sh's _native_k3s_wait_for_api, the macOS node's),
+# so the documented knob means the same wherever it is read.
 _api_wait_budget_s() {
   case "${TB_API_WAIT_S:-}" in ''|*[!0-9]*) printf '180' ;; *) printf '%s' "$((10#${TB_API_WAIT_S}))" ;; esac
 }
@@ -1127,37 +1050,84 @@ _ipv4_to_int() {
   printf '%s\n' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
 }
 
-_int_to_ipv4() {
-  printf '%d.%d.%d.%d\n' $(( ($1 >> 24) & 255 )) $(( ($1 >> 16) & 255 )) $(( ($1 >> 8) & 255 )) $(( $1 & 255 ))
+# ── The local dashboard port ─────────────────────────────────────────────────
+# The tracebloc dashboard, open in a browser on this machine, asks the client
+# whether the two are on one machine, on 127.0.0.1:TRACEBLOC_LOCAL_API_HOST_PORT.
+# The node publishes that host port to the chart's NodePort (localApi.nodePort):
+# the macOS node in its run-args (mac-container.sh, _mac_ct_local_api). The chart turns the listener on
+# only when this installer says the mapping exists (TB_LOCAL_API_MAPPED=1, read by
+# install-client-helm.sh). Bound to 127.0.0.1, so nothing beyond this machine can
+# reach it.
+#
+# Fail-soft everywhere: a port already in use, or one the node will not publish,
+# turns the feature off with a warning and never stops the install.
+# TRACEBLOC_LOCAL_API=off opts out.
+# The defaults are the chart's localApi.hostPort / localApi.nodePort;
+# local-api-port.bats holds them to values.yaml.
+_TB_LOCAL_API_HOST_PORT_DEFAULT="47910"
+_TB_LOCAL_API_NODE_PORT_DEFAULT="30910"
+# The NodePort range the chart's values.schema.json allows for localApi.nodePort
+# (Kubernetes' default service-node-port-range); local-api-port.bats holds them to
+# the schema (client-dev#1688).
+_TB_LOCAL_API_NODE_PORT_MIN="30000"
+_TB_LOCAL_API_NODE_PORT_MAX="32767"
+# Overridable, for a host whose 47910 is spoken for, and resolved IN PLACE: the
+# TRACEBLOC_ name is both the env input and the value every reader reads
+# (backend#3846 folded the TB_-prefixed internal copies into it; TB_ is banned).
+TRACEBLOC_LOCAL_API_HOST_PORT="${TRACEBLOC_LOCAL_API_HOST_PORT:-$_TB_LOCAL_API_HOST_PORT_DEFAULT}"
+TRACEBLOC_LOCAL_API_NODE_PORT="${TRACEBLOC_LOCAL_API_NODE_PORT:-$_TB_LOCAL_API_NODE_PORT_DEFAULT}"
+TB_LOCAL_API_MAPPED=0
+
+_local_api_wanted() {
+  case "$(printf '%s' "${TRACEBLOC_LOCAL_API:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) return 1 ;;
+  esac
+  return 0
 }
 
-# The three log markers the detector reads, declared once: the parser in k3d.sh and
-# the tests' fixtures both go through _k3s_log_facts, never a copy of these.
-_TB_K3S_RUN_MARK='msg="Starting k3s v'
-_TB_K3S_NODEIP_FAIL='failed to find interface with specified node ip'
-_TB_K3S_NODEIPS_MARK='"Successfully retrieved NodeIPs"'
+# Whether something on this machine already listens on the host port. A
+# connect that succeeds means busy; bash's /dev/tcp works in 3.2 as well.
+# Bounded (client-dev#1664): /dev/tcp has no connect timeout of its own, so a
+# listener whose backlog is full -- a SYN nobody answers -- held the install for
+# the kernel's whole SYN-retry window. The deadline (1 s) reads as "not busy".
+_local_api_host_port_busy() {
+  _bounded 1 "${BASH:-bash}" -c \
+    'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${TRACEBLOC_LOCAL_API_HOST_PORT}" 2>/dev/null
+}
 
-# The finding _wait_for_api names instead of its generic list, when the detector
-# found a node whose k3s is not running for a reason it does not recognise.
-#
-# STICKY across the re-checks of one API wait (_wait_for_api resets it once, at
-# its start). k3s flaps for 10-30 s after a swap, so a later check can land on an
-# API that answers for a moment, or on a read that cannot tell; neither is
-# evidence the earlier finding stopped being true, and clearing it there sent the
-# timeout back to the generic list. Only a completed check that sees every server
-# running k3s clears it, and so does a repair that worked.
-TRACEBLOC_K3S_NODE_FINDING="${TRACEBLOC_K3S_NODE_FINDING:-}"
+# Whether both ports are ones the install can take (digits only): the host port
+# any TCP port (1..65535), the node port one the chart's schema accepts
+# (30000..32767) -- anything else reaches the node and fails `helm install` on
+# localApi.nodePort (client-dev#1688). The overrides are free text; a bad one must
+# turn the feature off, never reach the node's create and fail the install
+# (client-dev#1665).
+_local_api_port_valid() {
+  local p="$TRACEBLOC_LOCAL_API_HOST_PORT" n="$TRACEBLOC_LOCAL_API_NODE_PORT"
+  [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+  (( 10#$p >= 1 && 10#$p <= 65535 )) || return 1
+  [[ "$n" =~ ^[0-9]{1,5}$ ]] || return 1
+  (( 10#$n >= _TB_LOCAL_API_NODE_PORT_MIN && 10#$n <= _TB_LOCAL_API_NODE_PORT_MAX )) || return 1
+  return 0
+}
+
+# _local_api_busy_warn -- the host port is taken: the one wording of it, for the
+# macOS node's publish (mac-container.sh, _mac_ct_local_api).
+_local_api_busy_warn() {
+  warn "Port ${TRACEBLOC_LOCAL_API_HOST_PORT} on 127.0.0.1 is already in use, so the dashboard won't be able to tell it is on this machine. Everything else works; free the port and re-run the installer to turn it on."
+}
+
+_local_api_invalid_warn() {
+  warn "The local dashboard port settings (TRACEBLOC_LOCAL_API_HOST_PORT=${TRACEBLOC_LOCAL_API_HOST_PORT}, TRACEBLOC_LOCAL_API_NODE_PORT=${TRACEBLOC_LOCAL_API_NODE_PORT}) are not valid port numbers, so the dashboard won't be able to tell it is on this machine. Everything else works; set the host port to a number from 1 to 65535 and the node port to one from ${_TB_LOCAL_API_NODE_PORT_MIN} to ${_TB_LOCAL_API_NODE_PORT_MAX}, then re-run the installer to turn it on."
+}
 
 # ── The substrate dispatcher ─────────────────────────────────────────────────
 
 # create_cluster -- step c: set up the substrate this run resolved (TRACEBLOC_SUBSTRATE_RESOLVED).
-# The ONE switch: k3d's create path lives in k3d.sh, native k3s's in k3s.sh, and each
-# arm only calls into its lib. A value with no arm is refused by name and never
-# routed to a default (fail closed): main() refuses it before this point, so reaching
-# here with one means a caller skipped that refusal, and it gets no cluster.
+# The ONE switch: native k3s's create path lives in k3s.sh. A value with no arm is
+# refused by name and never routed to a default (fail closed): main() refuses it before
+# this point, so reaching here with one means a caller skipped that refusal.
 create_cluster() {
   case "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" in
-    k3d) _k3d_create_cluster ;;
     k3s) _native_k3s_create_cluster ;;
     *) error "create_cluster: TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED:-}' names no runtime this installer can create, so nothing was created." ;;
   esac

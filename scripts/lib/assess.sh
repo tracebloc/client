@@ -40,11 +40,6 @@ TB_FORCE_REINSTALL="${TRACEBLOC_FORCE_REINSTALL:-${TB_FORCE_REINSTALL:-0}}"
 # can never make the gate hang. Overridable for tests.
 : "${TB_ASSESS_KUBECTL_TIMEOUT:=5s}"
 
-# Where the healthy-machine hand-off points the interactive home screen (see
-# _assess_handoff). Mirrors provision.sh's TRACEBLOC_TTY so tests can redirect it to a
-# real file instead of the controlling terminal.
-: "${TRACEBLOC_TTY:=/dev/tty}"
-
 # _assess_workload_ready NS — are ALL the client's core workloads Ready in
 # namespace NS? "Ready" MUST match the installer's OWN definition, so this
 # iterates the SAME deployment set as wait_for_client_ready (summary.sh) via the
@@ -329,19 +324,18 @@ _assess_classify_release() {
 
   # A release that requests a GPU no tracebloc image can use (client-dev#1697, #1698):
   # the normal flow re-stamps its GPU request to CPU-only. Ahead of cli-behind-latest, so
-  # an explicit `tracebloc upgrade` runs that flow (it updates the CLI too) rather than
-  # updating only the CLI and keeping the request.
+  # an explicit `tracebloc upgrade` says it switches the request to CPU mode, where
+  # cli-behind-latest says nothing.
   if _assess_gpu_request_unsupported "$ns"; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="gpu-unsupported"
     return 0
   fi
 
   # Above the floor, but an explicit `tracebloc upgrade` and behind the latest
-  # release (backend#2253). A DISTINCT reason from cli-outdated so main() updates
-  # ONLY the CLI — a small, isolated download — instead of either doing nothing
-  # (the old healthy no-op) or dragging a healthy box through a full reinstall.
-  # Ordered AFTER the floor check so a below-floor CLI stays cli-outdated (a
-  # mandatory full reinstall), and inert on ordinary runs because
+  # release (backend#2253). A DISTINCT reason from cli-outdated: the gate returns on
+  # it without the degraded lines, and main() runs the full install, whose step b
+  # updates the CLI. Ordered AFTER the floor check so a below-floor CLI stays
+  # cli-outdated (a mandatory full reinstall), and inert on ordinary runs because
   # _assess_cli_behind_latest gates itself on TB_UPGRADE_CLI.
   if [[ "$cli_here" == 1 ]] && _assess_cli_behind_latest; then
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cli-behind-latest"
@@ -413,52 +407,6 @@ _assess_k3s_on_context() {
     INSTALL_STATE="degraded"; INSTALL_STATE_REASON="cluster-indeterminate"; return 0
   fi
   _assess_classify_release
-}
-
-# _assess_handoff — hand a healthy machine to the tracebloc home screen, then
-# exit 0. We deliberately do NOT `exec` so the EXIT trap (install_cleanup) still
-# runs its cleanup. The CLI may live in ~/.local/bin and not yet be on this
-# shell's PATH, so put that dir on PATH first (mirrors provision.sh). If
-# `tracebloc` is somehow still unresolvable, fall back to a short status line so
-# a healthy re-run always ends cleanly at exit 0. The gate does not call it: a
-# healthy native k3s goes on to the normal flow (assess_existing_install).
-# TODO(tracebloc/client-dev#1950): delete it with telemetry_run_skipped, its one
-# reader of the skipped outcome, and telemetry.bats's case for it.
-_assess_handoff() {
-  # This exits 0 having run no install step, so the outcome event must say
-  # `skipped`, not `succeeded` (backend#1907) — otherwise the success count
-  # grows with every re-run on a machine nothing happened to, and the failure
-  # rate quietly falls for a reason that has nothing to do with installs.
-  if declare -F telemetry_run_skipped >/dev/null 2>&1; then
-    telemetry_run_skipped
-  fi
-  success "Already set up on this machine — no need to run the installer again."
-  export PATH="${HOME}/.local/bin:${PATH}"
-  if has tracebloc; then
-    echo ""
-    # Bare invocation -> the home screen; the user lands on their status. Give it
-    # the user's REAL terminal on ALL THREE streams. Unlike install.sh's bootstrap
-    # hand-off (which runs BEFORE any redirect), main() has already called
-    # setup_log_file — `exec > >(tee …) 2>&1` — so this shell's stdout/stderr are a
-    # pipe to `tee`, and its stdin is the install pipe under `curl … | bash`. An
-    # interactive TUI needs a tty on stdout/stderr too, not just stdin: point all
-    # three at the terminal ($TRACEBLOC_TTY, /dev/tty) when it's openable (bypassing tee
-    # for the interactive screen, exactly as the bootstrap does), else fall back to
-    # </dev/null and leave stdout/stderr on the tee pipe (non-interactive / CI —
-    # never the input pipe). Deliberately NO `exec` (see above) so the EXIT trap
-    # still runs. `|| true` keeps a non-zero render from flipping our exit code — a
-    # healthy machine exits 0.
-    if { : <"$TRACEBLOC_TTY"; } 2>/dev/null; then
-      tracebloc <"$TRACEBLOC_TTY" >"$TRACEBLOC_TTY" 2>"$TRACEBLOC_TTY" || true
-    else
-      tracebloc </dev/null || true
-    fi
-    _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
-    exit 0
-  fi
-  info "Open the tracebloc home screen any time with:  tracebloc"
-  _tb_done=1
-  exit 0
 }
 
 # assess_existing_install — the gate. Called from main() after print_banner and

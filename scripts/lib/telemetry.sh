@@ -78,7 +78,7 @@ TB_TELEMETRY_PHASE="bootstrap"
 # here, and a hand-copied second list of verbs would be the defect rather than
 # the fix. Adding a name here is therefore a review question: is its third
 # segment in §6.4?
-TB_TELEMETRY_EVENT_NAMES="install.run.succeeded install.run.failed install.run.cancelled install.run.skipped"
+TB_TELEMETRY_EVENT_NAMES="install.run.succeeded install.run.failed install.run.cancelled"
 
 # ── Client-state vocabulary ──────────────────────────────────────────────────
 # summary.sh's wait_for_client_ready + _diagnose_not_ready are the only writers
@@ -123,7 +123,7 @@ TB_TELEMETRY_ERROR_CLASSES="unexpected_exit_2 bad_credentials image_pull_failed 
 # bootstrap can name itself here. Kept rather than special-cased out, because the
 # day the bootstrap does get an emitter the name must already be admissible —
 # but do not read its presence as coverage. (saadqbal on client#747.)
-TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3d.sh k3s.sh k3s-firewall.sh mac-container.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh reinstall.sh probe.sh summary.sh diagnose.sh telemetry.sh"
+TB_TELEMETRY_SOURCES="install.sh install-k8s.sh common.sh preflight.sh detect-gpu.sh gpu-nvidia.sh gpu-amd.sh setup-macos.sh setup-linux.sh cluster.sh k3s.sh k3s-firewall.sh mac-container.sh gpu-plugins.sh install-client-helm.sh install-cli.sh provision.sh assess.sh reinstall.sh probe.sh summary.sh diagnose.sh telemetry.sh"
 
 # ── The value shapes ─────────────────────────────────────────────────────────
 # This is the privacy boundary. Nothing else in this file is allowed to write to
@@ -195,26 +195,6 @@ _TB_TELEMETRY_EMITTED=""
 # their chance to dispatch and the run is committed to installing.
 _TB_TELEMETRY_RUN_STARTED=""
 telemetry_run_started() { _TB_TELEMETRY_RUN_STARTED=1; return 0; }
-
-# ── "ran, but did nothing" ───────────────────────────────────────────────────
-# The stop-and-check gate hands a verifiably healthy machine to the home screen
-# and exits 0 without running a single step. That is a real invocation and worth
-# counting, but it is not a successful INSTALL: folding it into succeeded would
-# make the success count grow with re-runs on machines nothing happened to.
-# `skipped` is a registered outcome verb (contract §6.4), so it needs no new
-# vocabulary — and "how often do people re-run an installer that was already
-# done" is a question worth being able to ask.
-#
-# READ THE COUNT NARROWLY. It is NOT "re-runs on a healthy machine": on the
-# `curl | bash` path install.sh:132 reaches a healthy machine first and
-# `exec tracebloc`s at :144 — before install-k8s.sh has even been fetched — so
-# assess.sh's gate never runs and this event is never emitted. What it counts is
-# re-runs of `./install-k8s.sh` directly, plus curl|bash runs that reached the
-# gate because the bootstrap's own health check did not bail (--force,
-# TRACEBLOC_FORCE_REINSTALL, a pinned REF/BRANCH, or no `tracebloc` on PATH).
-# (saadqbal on client#747; verified against install.sh's line order.)
-_TB_TELEMETRY_SKIPPED=""
-telemetry_run_skipped() { _TB_TELEMETRY_SKIPPED=1; return 0; }
 
 # ── "complete this step and re-run" marker ───────────────────────────────────
 # THE SENTINEL IS A MARKER, NOT THE NUMBER 2.
@@ -538,7 +518,7 @@ telemetry_render_event() {
   #
   # AN UNDECLARED ONE IS. The first version of this keyed on the number, and 2 is
   # not only ours: grep exits 2 on a file error, curl on a failed init, tar on a
-  # fatal, and k3d.sh's create re-raises whatever k3d returned. Every one of those
+  # fatal. Every one of those
   # rendered `cancelled` with no error.type — a hard failure removed from the
   # NUMERATOR rather than misfiled in it, which is the direction nobody notices.
   # So the branch keys on _TB_TELEMETRY_RERUN_HANDOFF, set at the `exit 2` site
@@ -562,44 +542,14 @@ telemetry_render_event() {
   # an attribute — exit_code=2 is the re-run handoff, 130/143 the user's own
   # Ctrl-C — which is why the exit code is an attribute rather than something the
   # name carries.
-  #
-  # BUT A SIGNAL ON A SKIPPED RUN IS STILL SKIPPED. An earlier version of this
-  # said 130/143 were "unconditional", and that was wrong in the direction that
-  # costs the most. _assess_handoff marks the run skipped and then hands the user
-  # the interactive `tracebloc` home screen before `exit 0` — so Ctrl-C on that
-  # screen, which is the most ordinary thing a user does there, took the INT trap
-  # and booked `cancelled` for a run that installed nothing. `cancelled` asserts
-  # an install was cancelled; on this path there was no install to cancel. It
-  # would land in the denominator of "how often do installs not complete",
-  # inflating it with runs that never attempted anything — the same distortion as
-  # the `--help` bug above and in the same direction: it makes the product look
-  # worse while telling nobody anything actionable. (Bugbot on client#747;
-  # reproduced — same skipped state, `exit 0` rendered skipped and Ctrl-C
-  # rendered cancelled.)
-  #
-  # SKIPPED DOES NOT WIN OVER A FAILURE, and that asymmetry is the point rather
-  # than an oversight. The flag is consulted only on the exits that mean nothing
-  # was installed — 0 and the two signals. A skipped run that then dies with a
-  # real non-zero (anything between telemetry_run_skipped and `exit 0` failing
-  # under errexit) is a genuine failure and must stay countable as one, so the
-  # `*)` branch deliberately does not look at the flag. Hoisting a blanket
-  # "skipped wins" ahead of this case would be shorter and would hide a failure.
   case "$code" in
-    0)       if [ -n "$_TB_TELEMETRY_SKIPPED" ]; then
-               event="install.run.skipped"
-             else
-               event="install.run.succeeded"
-             fi ;;
+    0)       event="install.run.succeeded" ;;
     2)       if [ -n "$_TB_TELEMETRY_RERUN_HANDOFF" ]; then
                event="install.run.cancelled"
              else
                event="install.run.failed"
              fi ;;
-    130|143) if [ -n "$_TB_TELEMETRY_SKIPPED" ]; then
-               event="install.run.skipped"
-             else
-               event="install.run.cancelled"
-             fi ;;
+    130|143) event="install.run.cancelled" ;;
     *)       event="install.run.failed" ;;
   esac
   # The name is checked against the declared set before it is written, and an
@@ -957,11 +907,10 @@ _telemetry_trim_spool() {
       # The trim REPLACES the file, so the mode has to be put on the thing that
       # survives. `> "${spool}.tmp"` creates under the process umask and `mv`
       # keeps the tmp file's mode, so a chmod that ran only before this landed
-      # a 0644 spool: common.sh's `umask 077` normally covers it, but
-      # _install_userspace_tools (setup-linux.sh:893) and its macOS twin
-      # (setup-macos.sh:418) set `umask 022` around install_{kubectl,k3d,helm}
-      # and restore it only afterwards — so an install that dies in one of
-      # those emits from the EXIT trap under 022. Nothing sensitive is in the
+      # a 0644 spool: common.sh's `umask 077` normally covers it, but native
+      # k3s's step b (k3s.sh) sets `umask 022` around install_helm and restores
+      # it only afterwards — so an install that dies in it emits from the EXIT
+      # trap under 022. Nothing sensitive is in the
       # record by construction, so this is defence in depth; it is here because
       # a file this installer creates should not depend on which line it died
       # on for its mode. (saadqbal on client#747; reproduced — spool 644.)

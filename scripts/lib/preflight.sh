@@ -116,8 +116,8 @@ _pf_vm_floor_gb() {
   local m; m="$(_pf_vm_floor_mib "${1:-}")"
   printf '%s' "$(( (m + PF_VM_MEM_GRACE_MIB + 1023) / 1024 ))"
 }
-# The least Docker budget a hint may name, and a host must spare beside the OS
-# reserve: the VM's floor on a Mac or under WSL2. On native Linux the daemon sees the
+# The least runtime budget _pf_memory names, and a host must spare beside the OS
+# reserve: the VM's floor on a Mac or under WSL2. On native Linux k3s runs on the
 # host, which _pf_memory already grades against the derived floor directly, so the
 # reserve arithmetic keeps the typed floor it had before client-dev#2105.
 _pf_budget_floor_gb() {
@@ -133,8 +133,8 @@ _pf_vm_floor_words() {
     printf 'below the %s GB the client needs; it will OOM' "$PF_MIN_MEM_GB"
   fi
 }
-# The family the RUNTIME graders (_pf_runtime_mem_status, _pf_recheck_runtime_mem)
-# hold Docker's budget to after native Linux's run floor: the VM's family on a Mac
+# The family the RUNTIME grader (_pf_runtime_mem_status) holds a runtime's budget
+# to after native Linux's run floor: the VM's family on a Mac
 # or under WSL2, and `typed` on native Linux. Native Linux is graded FIRST against
 # its run floor through _pf_runtime_run_floor_mib (client-dev#2113), so `typed` is
 # what remains for it -- the typed floor, which governs only under the escape hatch.
@@ -158,10 +158,10 @@ PF_REC_MEM_GB="${PF_REC_MEM_GB:-16}"       # recommended to train locally (copy 
 if [[ -n "${TRACEBLOC_PF_OS_RESERVE_GB:-}" ]]; then PF_OS_RESERVE_GB="$TRACEBLOC_PF_OS_RESERVE_GB"; fi
 PF_OS_RESERVE_GB="${PF_OS_RESERVE_GB:-2}"  # RAM to leave the OS — recommendations clamp at physical − this (#428)
 # A guest VM's reported MemTotal runs a few hundred MiB below its CONFIGURED size
-# (kernel/reserved). The runtime recheck sees the GUEST figure, so it tolerates this
-# much below the floor — otherwise a Docker Desktop VM set to exactly the documented
-# floor would hard-fail on the guest shortfall, making the effective floor a GB higher
-# than we tell people (#513 reviewer). 512 MiB comfortably covers the observed gap.
+# (kernel/reserved). The memory graders tolerate this much below a floor, so a VM
+# set to exactly the documented floor is not graded under it on the guest shortfall,
+# which would make the effective floor a GB higher than we tell people (#513
+# reviewer). 512 MiB comfortably covers the observed gap.
 if [[ -n "${TRACEBLOC_PF_VM_MEM_GRACE_MIB:-}" ]]; then PF_VM_MEM_GRACE_MIB="$TRACEBLOC_PF_VM_MEM_GRACE_MIB"; fi
 PF_VM_MEM_GRACE_MIB="${PF_VM_MEM_GRACE_MIB:-512}"
 if [[ -n "${TRACEBLOC_PF_MIN_CPU:-}" ]]; then PF_MIN_CPU="$TRACEBLOC_PF_MIN_CPU"; fi
@@ -354,10 +354,10 @@ _macos_vm_mem_gb() {
   rec="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB" "$phys")"
   budget=$(( half < rec ? half : rec ))
   # Never size EXACTLY to the floor: the guest MemTotal runs a few hundred MiB below
-  # the configured VM size, so a floor-sized VM boots then trips the runtime recheck's
-  # sub-floor hard-fail on its OWN choice (#428 Bugbot). Give ≥ 1 GB of headroom above
-  # the floor — but never over-commit the host (cap at physical − reserve); a host too
-  # small for that gets less, and the recheck then stops it honestly as "too small".
+  # the configured VM size, so a floor-sized VM would be graded under its floor on its
+  # OWN choice (#428 Bugbot). Give ≥ 1 GB of headroom above the floor — but never
+  # over-commit the host (cap at physical − reserve); a host too small for that gets
+  # less, and the node's memory line then says it is under the floor.
   #
   # AND NEVER BELOW THE SMALLEST TRAINING RUNG'S BUDGET when the host can spare it
   # (RFC-BACKEND-664 §P4: "the ladder is capped by the VM, and must never offer a
@@ -379,8 +379,8 @@ _macos_vm_mem_gb() {
   # Mac to a 6 GB VM, under the 6.6 GiB one training run needs beside the platform:
   # the install went through and no run could ever schedule. The derived floor is
   # already a configured size (its grace is in it), so it needs no extra GB; the
-  # host cap below still wins, and a Mac whose cap is under it gets that cap and an
-  # honest refusal from the recheck rather than a VM that silently cannot train.
+  # host cap below still wins, and a Mac whose cap is under it gets that cap and a
+  # node's memory line that says so, rather than a VM that silently cannot train.
   local floor_gb; floor_gb="$(_pf_vm_floor_gb darwin)"
   safe_floor=$(( PF_MIN_MEM_GB + 1 ))
   (( floor_gb > safe_floor )) && safe_floor=$floor_gb
@@ -417,34 +417,24 @@ _pf_avail_mem_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null
 # CPU keeps the fallback selector: there is no equivalent advice split.
 _pf_ncpu()         { local v; v="$(_pf_runtime_ncpu)";   [[ -n "$v" ]] && { echo "$v"; return 0; }; _pf_host_ncpu; }
 
-# The ONE copy AND the one grading threshold for the Docker-budget line (#417),
-# used by BOTH _pf_memory (Docker already up on a warm re-run) and the post-Docker
-# recheck. The two used to print diverging text for the identical condition, and
-# because they also compared against DIFFERENT thresholds — the helper against the
-# clamped target, the recheck against the raw PF_WARN_MEM_GB — one run could print
-# "✔ Docker's memory budget: 6 GB" and then "⚠ recommended ≥ 6 GB" about the very
-# same budget (Bugbot #445 r2). Grading lives here only.
+# The ONE copy AND the one grading threshold for the runtime-budget line (#417):
+# _pf_memory's second line, printed when the runtime's budget is meaningfully
+# smaller than the machine. On native k3s that is only the macOS node's VM; on
+# native Linux and in tracebloc's WSL distro the runtime's budget is the host's,
+# which _pf_memory's own line already grades.
 #
-# Takes MiB, not GB, so it uses the SAME PF_VM_MEM_GRACE_MIB tolerance as the
-# recheck: a VM configured to exactly the documented floor reports a few hundred
-# MiB less as guest MemTotal, and rounding that to whole GB first would misgrade it
-# as sub-floor.
+# Takes MiB, not GB, so it uses the PF_VM_MEM_GRACE_MIB tolerance: a VM configured
+# to exactly the documented floor reports a few hundred MiB less as guest
+# MemTotal, and rounding that to whole GB first would misgrade it as sub-floor.
 #
-# WARN-ONLY by design; the sub-floor HARD-FAIL stays in _pf_recheck_runtime_mem,
-# the only place the real VM size is known (#428/#513). Sets
-# PF_RUNTIME_MEM_WARNED so one run never warns twice about the same budget — that
-# latch suppresses a duplicate WARNING only and must never gate the hard-fail.
-# Args: the runtime budget in MiB, and optionally "quiet_ok" to suppress the ✔
-# line when the budget is fine — the post-Docker recheck passes it so a healthy
-# install doesn't print the same ✔ twice (preflight already said it on a warm run).
-# True when the MACHINE cannot give Docker the floor while leaving the OS its
-# reserve. No Docker setting fixes that, so both the machine line (_pf_memory) and
-# the budget remedy (_pf_runtime_mem_status) must reach the same verdict from ONE
+# WARN-ONLY by design. Arg: the runtime budget in MiB.
+# True when the MACHINE cannot give the runtime the floor while leaving the OS its
+# reserve. No runtime setting fixes that, so _pf_memory's verdict comes from ONE
 # definition — a 5-6 GB host was being graded "enough to run" on one line and told
 # to "use a larger machine" two lines later, in the same preflight (Bugbot #445 r3).
 # Displayed GB for a CONFIGURED memory size, given MiB. ONE definition: this
-# figure is rendered in four places (_pf_memory, _pf_runtime_mem_status,
-# _pf_recheck_runtime_mem, _pf_hw_summary_line) and every review round on this PR
+# figure is rendered in three places (_pf_memory, _pf_runtime_mem_status,
+# _pf_hw_summary_line) and every review round on this PR
 # found another pair of them disagreeing — most recently a collapsed hardware
 # summary printing a different size from the memory line in the same preflight
 # (Bugbot #445 r6).
@@ -493,35 +483,18 @@ _pf_host_too_small_for_floor() {
   (( host_gb - PF_OS_RESERVE_GB < $(_pf_budget_floor_gb) ))
 }
 
-# The run floor (MiB) a native Linux DOCKER BUDGET is graded against, or nothing
-# (exit 1) off native Linux -- a Mac, or WSL2, which reports OS=Linux but is graded
-# on the Windows VM's floor (client-dev#2105) -- or when the floor does not resolve
-# (the escape hatch). _pf_memory grades the HOST against it; on Linux the daemon's
-# budget can still sit below the host (Docker Desktop for Linux, a VM or cgroup
-# limit), and a budget between the typed floor and this one installed fine and then
-# never scheduled a run (client-dev#2113). Both runtime graders read it here, so
-# they agree.
+# The run floor (MiB) native Linux is graded against, or nothing (exit 1) off
+# native Linux -- a Mac, or WSL2, which reports OS=Linux but is graded on the
+# Windows VM's floor (client-dev#2105) -- or when the floor does not resolve (the
+# escape hatch). A machine between the typed floor and this one installed fine and
+# then never scheduled a run (client-dev#2113). _pf_runtime_mem_status and
+# _pf_host_too_small_for_floor read it here, so they grade as _pf_memory does.
 _pf_runtime_run_floor_mib() {
   [[ "$(_pf_run_floor_family 2>/dev/null)" == linux ]] || return 1
   _pf_linux_run_floor_mib
 }
 
-# The ONE remedy size for a budget under that floor, in whole GB (the unit a limit
-# takes): the clamped rung budget, raised to the run floor when the clamp sits under
-# it -- a remedy below the floor just named is no remedy. The floor is graded on the
-# guest's MemTotal with no grace, and a VM or Docker Desktop guest reports up to
-# PF_VM_MEM_GRACE_MIB under its configured size, so the size quoted is the floor
-# PLUS that grace: a VM set to exactly the quoted figure clears the floor, rather
-# than failing the same check again (Bugbot on client-dev#2115). Arg: the run
-# floor in MiB.
-_pf_runtime_run_target_gb() {
-  local floor_gb warn_eff
-  floor_gb=$(( (${1:-0} + PF_VM_MEM_GRACE_MIB + 1023) / 1024 ))
-  warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
-  if (( warn_eff > floor_gb )); then printf '%s' "$warn_eff"; else printf '%s' "$floor_gb"; fi
-}
-
-# What a Docker budget below the smallest training rung's budget COSTS, worded
+# What a budget below the smallest training rung's budget COSTS, worded
 # once for every rung warning. It used to say "training pods stay Pending", and on
 # today's admission path nothing does that (backend#5025 O-20: a CLM run on a
 # 16 GB Mac at an 8 GB VM started in a minute and trained). The installer sizes
@@ -559,10 +532,9 @@ _pf_spare_gb() {
 }
 
 _pf_runtime_mem_status() {
-  local rt_mib="$1" quiet_ok="${2:-}" rt_gb warn_eff rec_eff host_gb target_gb what="Docker's memory budget"
   # On macOS k3s runs in Apple's VM, sized by the installer's own rule
   # (_pf_mac_node_size): the line names the node, and no Docker setting is a remedy.
-  ! _pf_on_mac_node || what="The node's memory"
+  local rt_mib="$1" rt_gb warn_eff rec_eff what="The node's memory"
   # Report the CONFIGURED size, not the guest-visible one. A VM asked for N GB
   # reports a few hundred MiB less as MemTotal (kernel + firmware reservations),
   # so plain rt_mib/1024 showed a VM set to exactly the documented floor as one
@@ -574,22 +546,15 @@ _pf_runtime_mem_status() {
   warn_eff="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
   rec_eff="$(_pf_clamp_mem_gb "$PF_REC_MEM_GB")"
   # Native Linux: the derived run floor, no grace (as in _pf_memory -- the kubelet
-  # sizes allocatable from this MemTotal), so this line and the recheck's hard-fail
-  # agree (client-dev#2113). A Mac or WSL2 VM: its own family's floor (client-dev#2105).
+  # sizes allocatable from this MemTotal, client-dev#2113). A Mac or WSL2 VM: its
+  # own family's floor (client-dev#2105).
   local rt_fam run_floor_mib=""
   rt_fam="$(_pf_runtime_floor_family)"
   run_floor_mib="$(_pf_runtime_run_floor_mib)" || run_floor_mib=""
   if [[ -n "$run_floor_mib" ]] && (( rt_mib < run_floor_mib )); then
     warn "${what}: $(_pf_tenths_gb "$rt_mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule."
-    target_gb="$(_pf_runtime_run_target_gb "$run_floor_mib")"
   elif (( rt_mib < $(_pf_vm_floor_mib "$rt_fam") )); then
     warn "${what}: ${rt_gb} GB — $(_pf_vm_floor_words "$rt_fam")."
-    # Sub-floor is the ONE condition where _pf_recheck_runtime_mem also hard-fails
-    # (the latch suppresses a duplicate warning, never the hard-fail), so this
-    # remedy has to quote the SAME size that failure quotes or one install prints
-    # two different targets for one problem — the diverging-copy bug this change
-    # exists to remove, which survived on exactly this path (Bugbot #445 r3).
-    target_gb="$warn_eff"
   # The WARN threshold carries the grace too, not just the floor one. The shown
   # figure is now (mib + grace)/1024, so grading this branch on the raw threshold
   # reopened the same self-contradiction one boundary up: every budget in
@@ -604,11 +569,6 @@ _pf_runtime_mem_status() {
     # smallest run needs 6 GB" told that host the 4 GiB rung fits in a budget it
     # already had, while the rung still would not schedule. The sentence now
     # interpolates the unclamped figure.
-    # AND NO "Give Docker N GB" REMEDY WHEN THE CLAMP BIT (Bugbot, round 3): a
-    # target the same line has just called too small to hold a training run is
-    # not a remedy, so none is printed on this case. The
-    # warn's own last sentence is the whole of the advice; the latch below still
-    # sets, so the recheck does not say it twice.
     if (( warn_eff < PF_WARN_MEM_GB )); then
       # "CAN SPARE" IS NEVER THE FLOOR-LIFTED CLAMP (Bugbot on client-dev#2124).
       # _pf_clamp_mem_gb lifts its cap to the VM floor (8 GB on a Mac, 9 under
@@ -619,40 +579,12 @@ _pf_runtime_mem_status() {
       host_gb="$(_pf_host_mem_gb)"
       spare_gb="$(_pf_spare_gb "$warn_eff" "$host_gb")"
       warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted, and this machine can spare at most ${spare_gb} GB, so $(_pf_spare_rung_words)."
-      target_gb=""
     else
       warn "${what}: ${rt_gb} GB — enough to run the client; the smallest training run (4 GiB) needs a ${PF_WARN_MEM_GB} GB budget once the kubelet reservation, k3s addons, control plane and CronJobs are counted (${rec_eff} GB to train comfortably); $(_pf_below_rung_words)."
-      # THE REMEDY NAMES THE NEED, NOT THE COMFORTABLE FIGURE (backend#5025 O-14).
-      # The sentence above already names the comfortable figure, once; every remedy
-      # for this condition quotes the rung budget, as the sub-floor branch does.
-      target_gb="$warn_eff"
     fi
   else
-    [[ -n "$quiet_ok" ]] || _pf_ok "${what}: ${rt_gb} GB"
-    return 0
+    _pf_ok "${what}: ${rt_gb} GB"
   fi
-  # A machine that cannot reach the floor even with the OS reserve honoured is too
-  # small for tracebloc no matter how Docker is configured, so a "give Docker N GB"
-  # remedy is a dead end that asks for more than the machine has (Bugbot #445 r2).
-  # Say so plainly instead; the recheck's own host-too-small branch then stops
-  # the install honestly (#444).
-  host_gb="$(_pf_host_mem_gb)"
-  [[ "$what" == "Docker's memory budget" ]] || target_gb=""
-  if [[ -z "$target_gb" ]]; then
-    :   # the clamped warn above carries its own advice; no concrete target exists to print
-  elif _pf_host_too_small_for_floor "$host_gb"; then
-    if [[ -n "$run_floor_mib" ]]; then
-      hint "This machine has ${host_gb} GB of RAM total, less than the $(_pf_runtime_run_target_gb "$run_floor_mib") GB Docker budget one training run needs beside the tracebloc platform. Use a larger machine."
-    else
-      hint "This machine has ${host_gb} GB of RAM total; the client needs a $(_pf_budget_floor_gb) GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB. Free up memory or use a larger machine."
-    fi
-  else
-    # No Docker Desktop dead end on Linux (Bugbot #445): headless/engine-only
-    # boxes have no Desktop UI — a low budget there is the machine's RAM or a
-    # VM/cgroup limit.
-    hint "Give Docker ${target_gb} GB: on Linux this budget is the machine's RAM or a VM/cgroup limit — raise that limit or free memory, then restart Docker."
-  fi
-  PF_RUNTIME_MEM_WARNED=1
   return 0
 }
 
@@ -730,22 +662,6 @@ _pf_mysql_engine_decision() {
   _mysql_engine_decision
 }
 
-# The command that registers amd64 emulation (QEMU binfmt) here, for the arch
-# refusal's remedy. Native k3s's containerd uses the host's own binfmt_misc handlers
-# (/proc/sys/fs/binfmt_misc, which amd64_emulation_available reads), and the
-# distro's QEMU package registers them.
-_pf_binfmt_remedy() {
-  if has apt-get; then
-    printf 'sudo apt-get install -y qemu-user-static'
-  elif has dnf; then
-    printf 'sudo dnf install -y qemu-user-static'
-  elif has zypper; then
-    printf 'sudo zypper install -y qemu-linux-user'
-  else
-    printf "install your distribution's qemu-user-static package"
-  fi
-}
-
 _pf_arch() {
   case "$ARCH" in
     x86_64|amd64) _pf_ok "Architecture: ${ARCH} (amd64)"; return 0 ;;
@@ -802,14 +718,14 @@ _pf_arch() {
       _pf_fail_line "Existing MySQL 5.7 data on this host pins the install to the MySQL 5.7 engine, and that image is amd64-only — it can't run on ${ARCH}."
       hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
       hint "Keep this data — enable amd64 emulation, then re-run:"
-      hint "  $(_pf_binfmt_remedy)"
+      hint "  $(amd64_emulation_remedy)"
       hint "Or start fresh on the native engine — install into an empty data directory:"
       hint "  --data-dir=/path/to/new/empty/dir" ;;
     explicit)
       _pf_fail_line "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it can't run on ${ARCH}."
       hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
       hint "To keep 5.7, enable amd64 emulation and re-run:"
-      hint "  $(_pf_binfmt_remedy)" ;;
+      hint "  $(amd64_emulation_remedy)" ;;
     values-file)
       # Dev mode (caller-supplied values file) whose images.mysqlClient block
       # renders the amd64-only 5.7 image, or an image this check cannot name.
@@ -817,14 +733,14 @@ _pf_arch() {
       _pf_fail_line "The supplied values file pins the amd64-only MySQL 5.7 engine (or an image this check can't name), and that image can't run on ${ARCH}."
       hint "Use the native multi-arch 8.4 engine: drop images.mysqlClient from your values file to take the chart default, or pin images.mysqlClient.tag: \"8.4\" + digest: \"\" — fresh data directories only."
       hint "Or enable amd64 emulation and re-run:"
-      hint "  $(_pf_binfmt_remedy)" ;;
+      hint "  $(amd64_emulation_remedy)" ;;
     *)
       # Includes `no-engine-rule` (the fail-closed answer when the lib holding
       # the rule isn't loaded). Generic, and still emulation-shaped: without the
       # rule there is no 8.4 opt-in to reach.
       _pf_fail_line "Architecture: ${ARCH} — this install needs the amd64-only MySQL 5.7 image and can't run here."
       hint "Fix: enable amd64 emulation and re-run:"
-      hint "  $(_pf_binfmt_remedy)" ;;
+      hint "  $(amd64_emulation_remedy)" ;;
   esac
   hint "  (or set TRACEBLOC_ALLOW_ARM64=1 to proceed anyway)"
   return 0
@@ -849,23 +765,22 @@ _pf_memory() {
   # Two truths, two lines (#417): the machine's RAM (a hardware fact — the gate
   # runs on it; on native Linux the daemon sees all host RAM so the gate is
   # unchanged) and, when a runtime VM is up with a meaningfully smaller budget
-  # (WSL2, or the macOS node's VM), the runtime's actual budget on its own
+  # (the macOS node's VM), the runtime's actual budget on its own
   # line with achievable advice. The old single line flip-flopped between the
   # two across re-runs of the SAME installer on the SAME machine — "16 GB
   # (host)" cold, "6 GB (Docker VM)" warm — depending only on whether Docker
   # happened to already be running.
-  local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb budget="Docker budget"
-  ! _pf_on_mac_node || budget="node"   # k3s in Apple's VM: no Docker (2.1)
+  local host_kb rt_kb rt_gb kb gb mib floor_mib warn_mib label rec_gb warn_gb
   host_kb="$(_pf_host_mem_kb)"
   rt_kb="$(_pf_runtime_mem_kb)"
   # Same converter as $gb below: this feeds the "is the VM meaningfully smaller
   # than the machine" comparison, and grading one side grace-adjusted against a
   # raw other side is the exact mistake this PR keeps rediscovering.
   [[ -n "$rt_kb" ]] && rt_gb="$(_pf_display_gb_from_mib "$(( rt_kb / 1024 ))")"
-  # Gate on the machine; only if the host is unreadable fall back to the VM
-  # budget (rare — /proc/meminfo and hw.memsize are near-universal).
+  # Gate on the machine. An unreadable host is skipped (rare — /proc/meminfo and
+  # hw.memsize are near-universal): on native k3s the runtime's figure is the host's
+  # or, on a Mac, the node's size derived from it, so there is nothing to fall back to.
   kb="$host_kb"; label="machine"
-  if [[ -z "$kb" && -n "$rt_kb" ]]; then kb="$rt_kb"; label="Docker VM"; fi
   if [[ -z "$kb" ]]; then warn "Memory: couldn't determine total RAM (skipping)."; return 0; fi
   mib=$(( kb / 1024 ))
   # Same grace-adjusted figure _pf_runtime_mem_status reports, so one budget never
@@ -913,15 +828,13 @@ _pf_memory() {
       PF_HARD_FAIL=$(( ${PF_HARD_FAIL:-0} + 1 ))
       hint "Resize the VM (or free memory) to ≥ ${warn_gb} GB; ${rec_gb} GB to train locally. Then re-run."
     else
-      # Mac/Win: the MACHINE itself is below the floor — no Docker setting can
-      # fix that, so don't offer a resize remedy here. Warn (don't block); the
-      # create_cluster re-check sees the real VM size and HARD-FAILS a sub-floor
-      # VM (#428), including the honest "use a larger machine" case.
+      # Mac/Win: the MACHINE itself is below the floor — no runtime setting can
+      # fix that, so don't offer a resize remedy here. Warn (don't block).
       warn "Memory: ${gb} GB (${label}) — $(_pf_vm_floor_words)."
     fi
-  elif [[ "$(_pf_run_floor_family 2>/dev/null)" != linux && "$label" == "machine" ]] \
+  elif [[ "$(_pf_run_floor_family 2>/dev/null)" != linux ]] \
      && _pf_host_too_small_for_floor "$(_pf_host_mem_gb)"; then
-    # Above the bare floor, but not by enough to give Docker the floor AND leave
+    # Above the bare floor, but not by enough to give the node the floor AND leave
     # the OS its reserve. Saying "enough to run" here contradicted the budget
     # line's "use a larger machine" in the same preflight (Bugbot #445 r3). On
     # native Linux the daemon sees host RAM directly, so the reserve arithmetic
@@ -929,7 +842,7 @@ _pf_memory() {
     # floor family, not on OS: WSL2 reports OS=Linux but is graded on the
     # Windows VM floor, and _pf_clamp_mem_gb would otherwise lift its "can spare"
     # figure above the host's own RAM (client-dev#2124, Bugbot).
-    warn "Memory: ${gb} GB (${label}) — the client needs a ${floor_gb} GB ${budget} and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
+    warn "Memory: ${gb} GB (${label}) — the client needs a ${floor_gb} GB node and the OS needs ~${PF_OS_RESERVE_GB} GB, so this machine is below the practical minimum of about $(( floor_gb + PF_OS_RESERVE_GB )) GB. Free up memory or use a larger machine."
   elif [[ "$mib" -lt "$warn_mib" ]]; then
     # The DERIVED budget, not its clamp (Bugbot on client#1085) — the same rule as
     # _pf_runtime_mem_status. AND NO
@@ -938,8 +851,8 @@ _pf_memory() {
     # recommendation (gb − reserve) is ALWAYS below the budget the sentence has
     # just named — "needs 9 GB; 6 GB recommended to train" on every 8 GB host.
     # Such a host cannot be tuned into a training box; say that. The figure
-    # survives only where the clamp did not bite (an unreadable host graded on
-    # its Docker VM), where it is honest.
+    # survives only where the clamped recommendation still meets the need, where
+    # it is honest.
     if (( rec_gb < PF_WARN_MEM_GB )); then
       # Never the floor-lifted clamp: under WSL2 the host arm above no longer
       # catches a small VM, and _pf_clamp_mem_gb lifts its cap to the VM floor, so
@@ -955,10 +868,10 @@ _pf_memory() {
     _pf_ok "Memory: ${gb} GB (${label})"
   fi
 
-  # Docker's budget as its own line — only when a runtime is up AND its budget is
-  # meaningfully smaller than the machine (the VM case). On native Linux the
-  # daemon sees host RAM, so this would just repeat the line above.
-  if [[ -n "$rt_kb" && "$label" == "machine" ]] && (( rt_gb + 1 < gb )); then
+  # The runtime's budget as its own line — only when it is meaningfully smaller
+  # than the machine: the macOS node's VM. On native Linux and in tracebloc's WSL
+  # distro the runtime's budget is the host's, so this would just repeat the line above.
+  if [[ -n "$rt_kb" ]] && (( rt_gb + 1 < gb )); then
     _pf_runtime_mem_status $(( rt_kb / 1024 ))
   fi
 
@@ -972,76 +885,6 @@ _pf_memory() {
         warn "Memory: only ${avail_gb} GB available right now (other workloads are using this machine) — the client needs ~${PF_MIN_MEM_GB} GB free to start."
       fi
     fi
-  fi
-  return 0
-}
-
-# Re-evaluate memory once Docker is confirmed up. Preflight runs before Docker
-# starts (install-k8s.sh), so on macOS/Windows the first read was host RAM, not the
-# Docker VM's smaller budget. Called from create_cluster (k3d.sh) — the first
-# point `docker info` is reliably up on every OS. A sub-FLOOR VM HARD-FAILS here with
-# the exact fix (#428): it will OOM-crashloop the client, so proceeding is worse than
-# the jarring stop the WARN path used to avoid. A between-floor-and-warn VM still only
-# warns (the user has waited for Docker; it can run, just tightly).
-_pf_recheck_runtime_mem() {
-  [[ -n "${TRACEBLOC_SKIP_PREFLIGHT:-}" ]] && return 0
-  # rec_gb is deliberately not read here: the between-floor-and-warn copy (and its
-  # "N GB to train" figure) now lives solely in _pf_runtime_mem_status.
-  local kb gb mib warn_gb; kb="$(_pf_runtime_mem_kb)"
-  [[ -z "$kb" ]] && return 0          # daemon still not reporting — nothing to add
-  mib=$(( kb / 1024 ))
-  # Same converter the status line uses, so the hard-fail can never quote a
-  # different size for the same budget (Bugbot #445 r4 — this fix was written then
-  # but landed in the wrong function, because the two-line pattern it anchored on
-  # existed in _pf_memory too and the replace took the first match).
-  gb="$(_pf_display_gb_from_mib "$mib")"
-  warn_gb="$(_pf_clamp_mem_gb "$PF_WARN_MEM_GB")"
-  # Native Linux: the budget is graded against the derived run floor, not the typed
-  # one (client-dev#2113) -- the same floor _pf_memory holds the host to. A Mac or
-  # WSL2 VM: its own family's floor (client-dev#2105).
-  local rt_fam floor_mib run_floor_mib=""
-  rt_fam="$(_pf_runtime_floor_family)"
-  floor_mib="$(_pf_vm_floor_mib "$rt_fam")"
-  if run_floor_mib="$(_pf_runtime_run_floor_mib)"; then floor_mib="$run_floor_mib"; else run_floor_mib=""; fi
-  if [[ "$mib" -lt "$floor_mib" ]]; then
-    # The REAL VM size is now known and it's below the floor — the client OOMs. Stop.
-    # Tolerance is PF_VM_MEM_GRACE_MIB (not 64): the guest MemTotal is a few hundred MiB
-    # under the configured size, so a VM set to exactly the documented floor still
-    # passes here rather than hard-failing on the guest shortfall (#513 reviewer).
-    # If the HOST is too small to ever give the VM the floor (physical − reserve <
-    # floor), no resize helps — say so plainly instead of a remedy that repeats an
-    # unachievable size (#428 Bugbot).
-    local phys_gb; phys_gb="$(_pf_host_mem_gb)"
-    # Through the SHARED predicate, and on every OS. Two divergences lived here
-    # (Bugbot #445 r7, High): the arithmetic was inlined rather than calling
-    # _pf_host_too_small_for_floor, and the branch was gated OS != Linux while
-    # _pf_runtime_mem_status applies it everywhere. On a warm Linux install with a
-    # sub-floor cgroup/VM budget, preflight therefore said "use a larger machine"
-    # and this hard-fail then advised raising Docker to a size that machine cannot
-    # give — the same remedy contradiction, one OS gate apart.
-    if _pf_host_too_small_for_floor "$phys_gb"; then
-      if [[ -n "$run_floor_mib" ]]; then
-        error "This machine has ${phys_gb} GB RAM — too little for tracebloc: one training run needs a $(_pf_runtime_run_target_gb "$run_floor_mib") GB Docker budget beside the tracebloc platform, more than this machine has. Use a larger machine."
-      else
-        local floor_gb; floor_gb="$(_pf_budget_floor_gb)"
-        error "This machine has ${phys_gb} GB RAM — too little for tracebloc: the client needs a ${floor_gb} GB Docker budget and the OS needs ~${PF_OS_RESERVE_GB} GB, so about $(( floor_gb + PF_OS_RESERVE_GB )) GB physical is the practical minimum. Use a larger machine."
-      fi
-    elif [[ -n "$run_floor_mib" ]]; then
-      error "Docker has only $(_pf_tenths_gb "$mib" down) GB — below the $(_pf_tenths_gb "$run_floor_mib" up) GB one training run needs beside the tracebloc platform; no run can schedule. Raise the VM/cgroup limit (or free memory) to ≥ $(_pf_runtime_run_target_gb "$run_floor_mib") GB, then re-run."
-    else
-      error "Docker has only ${gb} GB — $(_pf_vm_floor_words "$rt_fam"). Free memory (or raise the VM) to ≥ ${warn_gb} GB, then re-run."
-    fi
-  fi
-  # Between floor and warn: warn only, through the ONE shared copy so this and the
-  # Step-1 preflight line can no longer diverge in wording OR in threshold — the
-  # cold-install path (Docker starts mid-run, the common case) previously got its
-  # own text with no Linux cgroup hint, and graded against
-  # the raw PF_WARN_MEM_GB while preflight used the clamped target (Bugbot #445 r2).
-  # Skipped when preflight ALREADY reported this same budget on a warm re-run. The
-  # latch suppresses a DUPLICATE WARNING only, and is deliberately tested here
-  # rather than at the top of the function so it can never gate the hard-fail above.
-  if [[ -z "${PF_RUNTIME_MEM_WARNED:-}" ]]; then
-    _pf_runtime_mem_status "$mib" quiet_ok
   fi
   return 0
 }
@@ -1118,15 +961,8 @@ _pf_disk_mac_node() {
 # store's filesystem counts them back (_pf_k3s_reused_kb). Measured on the k3s
 # journey: 13 GB free before the first install, 9 to 10 GB at the re-run's
 # preflight, where an unchanged re-run pulls nothing ("No change detected").
-#
-# A consented move off k3d (D10) frees space the same way, later in step a:
-# reinstall_offboard_k3d runs after this check and removes the k3d cluster's
-# volumes, 2.9 GB of them on the measured host (client-dev#1816). The check stays
-# where it is, before the offboard (client-dev#1805), so each line counts back the
-# volumes on its own disk (_pf_k3d_offboard_volumes). An estimate that cannot be
-# read counts nothing, and the line says so.
 _pf_disk_k3s() {
-  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0 reused store_at why="" freed="" frc=0
+  local data="$TB_K3S_DATA_PATH" storage at_data at_storage rc=0 reused store_at why=""
   # hostpath (client-dev#1782): the volumes are the chart's hostPath PVs under
   # HOST_DATA_DIR (an installed release's own root, _hostpath_root), so that is the
   # disk the training data needs. The storage path config.yaml names holds none of
@@ -1172,12 +1008,11 @@ _pf_disk_k3s() {
   if [[ "$reused" -gt 0 ]]; then
     store_at="$(_pf_mount_of "${TB_K3S_DATA_PATH}/agent/containerd" sudo)" || store_at=""
   fi
-  freed="$(_pf_k3d_offboard_volumes)" || frc=$?
   if [[ "$at_data" == "$at_storage" ]]; then
-    _pf_disk_grade "$at_data" "k3s's data (${data}) and the training data (${storage})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")" "$(_pf_k3d_freed_on "$at_data" "$frc" "$freed")"
+    _pf_disk_grade "$at_data" "k3s's data (${data}) and the training data (${storage})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")"
   else
-    _pf_disk_grade "$at_data" "k3s's data (${data})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")" "$(_pf_k3d_freed_on "$at_data" "$frc" "$freed")"
-    _pf_disk_grade "$at_storage" "the training data (${storage})" "$(_pf_k3s_credit_on "$at_storage" "$store_at" "$reused")" "$(_pf_k3d_freed_on "$at_storage" "$frc" "$freed")"
+    _pf_disk_grade "$at_data" "k3s's data (${data})" "$(_pf_k3s_credit_on "$at_data" "$store_at" "$reused")"
+    _pf_disk_grade "$at_storage" "the training data (${storage})" "$(_pf_k3s_credit_on "$at_storage" "$store_at" "$reused")"
   fi
   return 0
 }
@@ -1216,78 +1051,17 @@ _pf_k3s_credit_on() {
   if [[ -n "$m" && "$m" == "$2" ]]; then echo "$3"; else echo 0; fi
 }
 
-# _pf_k3d_offboard_volumes -- on a consented move off k3d, one "KB MOUNT" line per
-# volume of tracebloc's k3d cluster (TRACEBLOC_REINSTALL_CLUSTER), which
-# reinstall_offboard_k3d removes: its size and the mount point of its filesystem.
-# 1 and nothing when this run does not offboard. 2 and nothing when the estimate
-# cannot be read: Docker does not answer, no container carries the cluster's label,
-# root would need the password, or a volume's size or disk cannot be read. The
-# credit is then 0 (fail closed). The offboard's own removal list is what counts:
-# the cluster's volumes. Its node images stay. The containers' own layers are
-# removed but not counted, so the estimate errs low, which can only refuse more.
-# Each volume is measured as root: Docker's data root is root's.
-_pf_k3d_offboard_volumes() {
-  local name="${TRACEBLOC_REINSTALL_CLUSTER:-}" ids vols v mp kb m t="${TB_DOCKER_PROBE_TIMEOUT:-10}" out=""
-  [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 1
-  [[ -n "$name" ]] || return 2
-  _native_k3s_root_ready || return 2
-  ids="$(_bounded "$t" docker ps -aq --filter "label=k3d.cluster=${name}" 2>/dev/null)" || return 2
-  [[ -n "$ids" ]] || return 2
-  # shellcheck disable=SC2086  # one argument per container ID
-  vols="$(_bounded "$t" docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' $ids 2>/dev/null)" || return 2
-  vols="$(printf '%s' "$vols" | tr ' ' '\n' | sort -u)"
-  [[ -n "$vols" ]] || return 2
-  while IFS= read -r v; do
-    [[ -n "$v" ]] || continue
-    mp="$(_bounded "$t" docker volume inspect --format '{{.Mountpoint}}' "$v" 2>/dev/null)" || return 2
-    [[ -n "$mp" ]] || return 2
-    kb="$(sudo du -sxk "$mp" 2>/dev/null | awk 'NR==1 {print $1}')"
-    [[ "$kb" =~ ^[0-9]+$ ]] || return 2
-    m="$(_pf_mount_of "$mp" sudo)" || m=""
-    [[ -n "$m" ]] || return 2
-    out="${out}${kb} ${m}"$'\n'
-  done <<<"$vols"
-  printf '%s' "$out"
-}
-
-# _pf_k3d_freed_on DIR RC VOLUMES -- what the offboard frees on DIR's disk, from
-# _pf_k3d_offboard_volumes' status RC and its VOLUMES: the KB of the volumes on DIR's
-# filesystem; "none" when this run does not offboard (RC 1); "unknown" when the
-# estimate cannot be read (RC 2), or DIR's own disk cannot.
-_pf_k3d_freed_on() {
-  local m kb mount sum=0
-  case "$2" in 0) ;; 1) echo none; return 0 ;; *) echo unknown; return 0 ;; esac
-  m="$(_pf_mount_of "$1")"
-  [[ -n "$m" ]] || { echo unknown; return 0; }
-  while read -r kb mount; do
-    [[ -n "$kb" && "$mount" == "$m" ]] && sum=$(( sum + kb ))
-  done <<<"$3"
-  echo "$sum"
-}
-
-# _pf_disk_grade DIR WHAT [REUSED_KB] [FREED] -- one disk line: the free space on DIR,
-# which will hold WHAT, graded against the Linux floors. REUSED_KB, the images a re-run
-# of this installer's k3s already holds on DIR's disk, counts as free, and the line says
-# so. FREED is what a consented move off k3d frees on DIR's disk before step b
-# (_pf_k3d_freed_on): KB, counted as free and named; "unknown", named and not counted;
-# "none" (the default), no move.
+# _pf_disk_grade DIR WHAT [REUSED_KB] -- one disk line: the free space on DIR, which
+# will hold WHAT, graded against the Linux floors. REUSED_KB, the images a re-run of
+# this installer's k3s already holds on DIR's disk, counts as free, and the line says so.
 _pf_disk_grade() {
-  local at="$1" what="$2" reused="${3:-0}" freed="${4:-none}" free_kb free_gb rq ru=GB
+  local at="$1" what="$2" reused="${3:-0}" free_kb free_gb rq ru=GB
   free_kb="$(_pf_free_kb "$at")"
   if [[ -z "$free_kb" ]]; then warn "Disk: couldn't determine free space on ${at} for ${what} (skipping)."; return 0; fi
   if [[ "$reused" -gt 0 ]]; then
     free_kb=$(( free_kb + reused ))
     rq=$(( reused / 1024 / 1024 )); [[ "$rq" -gt 0 ]] || { rq=$(( reused / 1024 )); ru=MB; }
     what="${what}, counting the ${rq} ${ru} of images this k3s already holds, which the re-run reuses"
-  fi
-  if [[ "$freed" == 0 ]]; then
-    what="${what}; the move off k3d frees nothing on this disk (cluster '${TRACEBLOC_REINSTALL_CLUSTER:-}' keeps its volumes on another)"
-  elif [[ "$freed" =~ ^[0-9]+$ ]]; then
-    free_kb=$(( free_kb + freed ))
-    ru=GB; rq=$(( freed / 1024 / 1024 )); [[ "$rq" -gt 0 ]] || { rq=$(( freed / 1024 )); ru=MB; }
-    what="${what}, counting the ${rq} ${ru} the move off k3d frees on this disk (cluster '${TRACEBLOC_REINSTALL_CLUSTER:-}' and its volumes)"
-  elif [[ "$freed" == "unknown" ]]; then
-    what="${what}, not counting what the move off k3d frees, which could not be measured"
   fi
   free_gb=$(( free_kb / 1024 / 1024 ))
   if [[ "$free_gb" -lt "$PF_MIN_DISK_GB" ]]; then

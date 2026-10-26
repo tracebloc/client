@@ -2,8 +2,8 @@
 # =============================================================================
 #  install-k8s.sh  —  One-command Kubernetes + GPU installer  (macOS & Linux)
 #
-#  Engine  : k3s in Apple's container runtime on a Mac; native k3s on Linux,
-#            inside WSL too (k3d, k3s inside Docker, is set up on no OS)
+#  Engine  : k3s in Apple's container runtime on a Mac; native k3s on Linux and
+#            in tracebloc's WSL distro on Windows
 #  GPUs    : NVIDIA (Linux)  ✓     AMD (Linux) ✓     macOS passthrough ✗
 #
 #  Usage (macOS / Linux):
@@ -24,10 +24,8 @@
 #                                Linux and inside WSL, and k3s in Apple's VM on a Mac
 #                                with Apple silicon and macOS 26 or later. k3d is
 #                                set up on no OS: asking for it is refused by name,
-#                                and a Linux machine whose install recorded k3d
-#                                moves to native k3s, a reinstall the k3s path asks
-#                                consent for; the line after the substrate line
-#                                says so. Any other re-run keeps the
+#                                and a machine that runs tracebloc on k3d is refused
+#                                with the way off it (reinstall.sh). A re-run keeps the
 #                                runtime the install recorded; the installer prints
 #                                "tracebloc-installer substrate=<name>" first, and
 #                                refuses a runtime it doesn't support)
@@ -35,17 +33,13 @@
 #    TRACEBLOC_NAMESPACE=myns    default: tracebloc  (k8s namespace + local label;
 #                                not prompted — the client is identified by its credentials)
 #    TB_NAMESPACE=myns           legacy alias for TRACEBLOC_NAMESPACE, remove_by 2026-12-31
-#    TRACEBLOC_SERVERS=1         default: 1  (control-plane nodes)
-#    TRACEBLOC_AGENTS=0          default: 0  (worker nodes; 0 or 1, hostpath only -- 1 warns)
-#    TRACEBLOC_K8S_VERSION=v1.36.3-k3s1  default: v1.36.3-k3s1 (pinned + validated; "latest" is UNSUPPORTED — see #547)
-#    TRACEBLOC_K3D_VERSION=v5.9.0  default: v5.9.0  (k3d release tag; "latest" resolves at install time)
 #    TRACEBLOC_HELM_VERSION=v4.2.3  default: v4.2.3  (Helm release tag; "latest" resolves at install time)
 #    TRACEBLOC_HOST_DATA_DIR=~/.tracebloc  default: ~/.tracebloc
 #    HOST_DATA_DIR=~/.tracebloc  legacy alias for TRACEBLOC_HOST_DATA_DIR, remove_by 2026-12-31
 #    TRACEBLOC_STORAGE_MODE=hostpath  default: node-local  (RFC-0003 Option C; D15 flip, client#456)
 #                                node-local (default) stores datasets on k3s local-path
 #                                INSIDE the node — no ~/.tracebloc host dirs, wiped on
-#                                cluster delete; forces AGENTS=0/SERVERS=1 (single-node).
+#                                cluster delete.
 #                                Set TRACEBLOC_STORAGE_MODE=hostpath to keep datasets in
 #                                ~/.tracebloc on the host (survive cluster delete;
 #                                required for a TRACEBLOC_HOST_DATASET_DIR network mount).
@@ -108,7 +102,6 @@ source "${LIB_DIR}/gpu-amd.sh"
 source "${LIB_DIR}/setup-macos.sh"
 source "${LIB_DIR}/setup-linux.sh"
 source "${LIB_DIR}/cluster.sh"
-source "${LIB_DIR}/k3d.sh"
 source "${LIB_DIR}/k3s.sh"
 source "${LIB_DIR}/k3s-firewall.sh"
 # mac-container.sh (2.1 part 6: native k3s on a Mac, in Apple's VM) may be absent under
@@ -140,9 +133,9 @@ fi
 if [[ -f "${LIB_DIR}/assess.sh" ]]; then
   source "${LIB_DIR}/assess.sh"
 fi
-# reinstall.sh (D10: native k3s never beside a live k3d) may likewise be absent
-# under a stale bootstrap. Guarded like the others, but main() never SKIPS its
-# check when it is missing: a native k3s request then refuses by name.
+# reinstall.sh (D10: native k3s never on a machine that runs tracebloc on k3d) may
+# likewise be absent under a stale bootstrap. Guarded like the others, but main()
+# never SKIPS its check when it is missing: the run then refuses by name.
 if [[ -f "${LIB_DIR}/reinstall.sh" ]]; then
   source "${LIB_DIR}/reinstall.sh"
 fi
@@ -208,8 +201,7 @@ main() {
   # nothing, so they print no line. A re-run without TRACEBLOC_SUBSTRATE keeps
   # the substrate its install recorded (tb_substrate_resolve, read-only); a Mac
   # gets k3s on Apple container, and Linux, outside WSL and inside it, native k3s,
-  # k3d being retired on every OS; a Linux machine whose record names k3d says on the
-  # next line that this run moves it. A resolution that cannot tell, or a request for
+  # k3d being retired on every OS. A resolution that cannot tell, or a request for
   # a retired substrate, is refused by name after the line. So is a new install on a
   # Mac below the floor (RFC-0175 D6: Apple silicon, macOS 26 or later), before
   # setup_log_file writes anything; prepare-host below is refused there too.
@@ -225,17 +217,13 @@ main() {
   # refusal (client-dev#1623): every Mac resolves k3s since 4.1 (client-dev#1948), so
   # the D10 check below, which asks the macOS node's refusals, would reach it next.
   refuse_unsupported_mac
-  # Native k3s is never set up beside a live k3d (D10): read-only detection, then a
-  # refusal, before anything below installs, writes or starts. A bootstrap too old
-  # to have fetched reinstall.sh must not become k3s beside k3d, so a native k3s
-  # run without the check refuses by name. Only that check decides an offboard: a
-  # decision inherited from the environment is cleared first.
-  TRACEBLOC_REINSTALL_DECISION=""
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    declare -F refuse_k3s_beside_live_k3d >/dev/null 2>&1 \
-      || error "This installer build can't check for a live k3d cluster (stale bootstrap), and native k3s is never set up beside one. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
-    refuse_k3s_beside_live_k3d
-  fi
+  # Native k3s is never set up on a machine that runs tracebloc on k3d (D10): what
+  # tracebloc's own install record says is read, and such a machine is refused by
+  # name before anything below installs, writes or starts. A bootstrap too old to
+  # have fetched reinstall.sh cannot read it, so it refuses by name too.
+  declare -F refuse_k3d_machine >/dev/null 2>&1 \
+    || error "This installer build can't check whether this machine runs tracebloc on k3d (stale bootstrap), and k3s is never set up beside it. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+  refuse_k3d_machine
 
   # prepare-host: the standalone, admin-run Tier-2 step (RFC 0001 #1178) —
   # installs the privileged prerequisites so a researcher can then install
@@ -276,12 +264,6 @@ main() {
         --data-dir=*) HOST_DATA_DIR="${_a_lf#*=}" ;;
       esac
     done
-    # prepare-host never offboards a k3d cluster: the offboard runs only in the
-    # install's own step a, which this path exits before. An offboard decision
-    # reaching here would start native k3s beside the live k3d (D10), so refuse.
-    if [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" ]]; then
-      error "prepare-host never replaces a live k3d cluster, and native k3s is never set up beside one. Run the installer as the user to offboard k3d first, then re-run prepare-host."
-    fi
     if declare -F run_prepare_host >/dev/null 2>&1; then
       run_prepare_host; _ph_rc=$?; [[ $_ph_rc -ne 0 ]] || _tb_done=1; exit "$_ph_rc"
     fi
@@ -356,35 +338,14 @@ main() {
   print_banner
 
   # ── Stop-and-check gate ──────────────────────────────────────────────────
-  # A re-run on an already-set-up machine must not re-run full provisioning.
-  # assess_existing_install inspects the machine READ-ONLY: a verifiably healthy
-  # box is handed straight to the `tracebloc` home screen and exits 0; a fresh or
-  # half-set-up box falls through to the normal flow below. Guarded so a stale
-  # bootstrap that didn't fetch assess.sh — or --force/--reinstall — simply runs
-  # the full flow. A consented k3d-to-native-k3s reinstall bypasses it as --force
-  # does: on a healthy k3d machine the gate would hand off and exit 0, and the
-  # offboard below would never run.
-  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 && "${TRACEBLOC_REINSTALL_DECISION:-}" != "offboard" ]] \
+  # assess_existing_install inspects the machine READ-ONLY and always returns 0: a
+  # fresh or degraded box gets one line, a healthy native k3s one log line, and
+  # every one goes on to the normal flow below (step c moves a healthy node
+  # forward, RFC-0175 D4 and D11). Guarded so a stale bootstrap that didn't fetch
+  # assess.sh — or --force/--reinstall — simply runs the full flow.
+  if [[ "${TB_FORCE_REINSTALL:-0}" != 1 ]] \
      && declare -F assess_existing_install >/dev/null 2>&1; then
     assess_existing_install
-  fi
-
-  # backend#2253: an explicit `tracebloc upgrade` (TB_UPGRADE_CLI) on a machine
-  # healthy on every axis EXCEPT that its CLI is behind latest. The gate classified
-  # cli-behind-latest and RETURNED instead of handing off, so update ONLY the CLI
-  # here — a small, isolated download — then exit, skipping the full reconcile.
-  # Below-floor is cli-outdated (a mandatory full reinstall), which does NOT reach
-  # this branch and falls through to the normal flow below. Guarded like the other
-  # cross-file steps: a stale bootstrap without install-cli.sh falls through and
-  # the full (idempotent) flow updates the CLI anyway.
-  # NOT on native k3s: every installer re-run there moves the node forward (RFC-0175
-  # D4/D11: the binary upgraded in place, its files rewritten and k3s restarted when
-  # they changed), which the CLI-only exit would skip. So `tracebloc upgrade` on k3s
-  # always runs the full install, and step b updates the CLI on the way.
-  if [[ "${INSTALL_STATE:-}" == "degraded" && "${INSTALL_STATE_REASON:-}" == "cli-behind-latest" ]] \
-     && [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]] \
-     && declare -F upgrade_cli_only >/dev/null 2>&1; then
-    upgrade_cli_only     # updates just the CLI and exits 0
   fi
 
   print_roadmap
@@ -407,12 +368,6 @@ main() {
   # exactly as before).
   if declare -F host_audit >/dev/null 2>&1; then
     host_audit
-  fi
-  # A consented k3d-to-native-k3s reinstall offboards the old client here (D10):
-  # after every refusal step a makes, and before step b installs anything. The
-  # decision exists only where reinstall.sh does (refuse_k3s_beside_live_k3d).
-  if [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" ]]; then
-    reinstall_offboard_k3d
   fi
   echo ""; echo ""
 

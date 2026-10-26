@@ -1,457 +1,256 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  reinstall.sh — a k3d machine moves to native k3s only through the offboard,
-#  and native k3s is never set up beside a live k3d (RFC-0175 D10).
+#  reinstall.sh — native k3s is never set up on a machine that runs tracebloc on
+#  k3d (RFC-0175 D10). This installer no longer moves such a machine: it stops
+#  before anything is installed, written or started, says why in plain words, and
+#  names the way off k3d, the tracebloc CLI release whose `tracebloc delete` still
+#  removes it.
 #
-#  A k3d machine is reinstalled, not migrated: the installer detects it
-#  read-only, says what the move means, and refuses unless the user consents.
-#  The consented offboard is behind the release switch (TB_K3D_REINSTALL, stamped
-#  in common.sh from the schema's x-tracebloc-reinstall block), which ships at
-#  `offboard`. Under `refuse` the consent variable is never read and no terminal
-#  is asked, so nothing in the environment can reach an offboard.
-#
-#  main() calls refuse_k3s_beside_live_k3d right after the substrate refusals,
-#  before the prepare-host dispatch and before validate_config, so nothing is
-#  installed, written or started before it answers. A consented offboard runs
-#  later, in reinstall_offboard_k3d: after step a's refusals, before step b.
+#  What says k3d is tracebloc's own data, never Docker or k3d: the install
+#  record's substrate (with no substrate field, an artefact only k3d records),
+#  else, on a machine whose install is older than the record, the kubeconfig
+#  context k3d writes (_reinstall_k3d_said). main() calls
+#  refuse_k3d_machine right after the substrate refusals, before the prepare-host
+#  dispatch and before validate_config. prepare-host then asks the same of the
+#  user it sets the machine up for (refuse_k3d_for_user), before step a writes.
 # =============================================================================
 
-# ── Detection ────────────────────────────────────────────────────────────────
+# The last tracebloc CLI release whose `tracebloc delete` removes a k3d setup:
+# facts.env's RETIRED_OFFBOARD_CLI, stamped here by scripts/check-facts.sh.
+TB_RETIRED_OFFBOARD_CLI="0.11.35"
 
-# _reinstall_detect -- what k3d this machine holds, read-only. Each step takes its
-# answer from a producer that already exists, and nothing here prompts, writes or
-# starts anything. Sets:
-#   TB_REINSTALL_FOUND   none | tracebloc | other | cannot-tell
-#   TRACEBLOC_REINSTALL_CLUSTER tracebloc's k3d cluster, when one was found
-#   TB_REINSTALL_OTHERS  every other k3d cluster found, space-separated
-#   TB_REINSTALL_PROBE   for cannot-tell: what could not answer
-#   TB_REINSTALL_HOW     ...how it failed: "did not answer", or what it said
-#   TB_REINSTALL_REMEDY  ...and how to make it answer
-# The steps:
-#   1. the install record (tb_record_path): its substrate and its cluster_name.
-#      No record is the common case (most k3d machines predate the record).
-#   2. `has k3d` / `has docker`, checked first: with neither, no k3d cluster can run
-#      here and the answer is none, with nothing read and no probe run (assess.sh's
-#      own fresh-host rule). An unreadable record only matters once one can.
-#   3. The cluster to look for: the record's, else CLUSTER_NAME, held to
-#      validate_config's name rule first, because this runs before validate_config
-#      does: a recorded name that breaks it is cannot tell, and a CLUSTER_NAME that
-#      breaks it is refused in validate_config's own words
-#      (_refuse_invalid_cluster_name).
-#   4. _k3d_live_clusters, first: every cluster k3d lists. A listing that timed out
-#      is "start Docker"; one that failed fast quotes what k3d said, because a
-#      permission error on the Docker socket is not fixed by starting Docker
-#      (client-dev#1606). A listing that answered is the answer: the cluster from
-#      step 3 is there when it is listed, and every other listed cluster is
-#      another's. No second read decides it, because a read that failed after this
-#      one completed would overrule a definite answer with "cannot tell"
-#      (client-dev#1719).
-#   5. with docker: _docker_answers, then the k3d-labelled containers, stopped ones
-#      included (tb_k3d_cluster_names), merged into what k3d listed. Docker not
-#      answering, or refusing this user, is cannot tell only when k3d gave no answer
-#      of its own; after a k3d listing that answered it is an info line, and the
-#      listing decides.
-# One exception (1.1g), for a user adopting a host an administrator prepared for them
-# who cannot reach Docker at all (_reinstall_adopt_blind). k3d clusters are the
-# machine's Docker containers, prepare-host looked for them as the administrator
-# before it set k3s up, and this user cannot have started one since. So for them a
-# k3d listing that fails fast, and a Docker that does not answer them, go on with an
-# info line instead of cannot tell. A listed cluster, a listing that did not answer,
-# and anything Docker does answer are read as everywhere.
-_reinstall_detect() {
-  TB_REINSTALL_FOUND="none"; TRACEBLOC_REINSTALL_CLUSTER=""; TB_REINSTALL_OTHERS=""
-  TB_REINSTALL_PROBE=""; TB_REINSTALL_HOW=""; TB_REINSTALL_REMEDY=""; _TB_REINSTALL_BLIND_SAID=""
-  local name="" rec_rc=0 rec_k3d=0 has_k3d=0 has_docker=0 rc list n ps what how errf tracebloc=0 blind=0 listed=0
-  has k3d && has_k3d=1
-  has docker && has_docker=1
-  (( has_k3d || has_docker )) || return 0
-  _reinstall_adopt_blind && blind=1
-
-  name="$(_reinstall_record_cluster)" || rec_rc=$?
-  [[ "$rec_rc" -eq 0 && -n "$name" ]] && rec_k3d=1
-
-  if [[ "$rec_rc" -ne 0 && "$rec_rc" -ne 1 ]]; then
-    _reinstall_cannot_tell "the install record $(tb_record_path)" \
+# _reinstall_k3d_said -- whether tracebloc's own data says this machine runs on k3d.
+# 0: it does; 1: it does not; 2: it cannot tell. TB_REINSTALL_SAID says what said
+# so, or what could not be read; for 2, TB_REINSTALL_REMEDY says how to make it
+# answer. It reads files only, in this order, and the first that exists decides:
+#   1. the install record (tb_record_path): its substrate (_reinstall_record_says);
+#   2. on Linux, the record's root copy, when this process reaches it without a
+#      password (tb_substrate_resolve reads the two in the same order);
+#   3. with no record at all: each kubeconfig file ($KUBECONFIG, else
+#      ~/.kube/config) and its context k3d-<CLUSTER_NAME>, which k3d writes for
+#      the cluster an install from before the record created.
+_reinstall_k3d_said() {
+  local rec dst text="" f ctx kc rc
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""
+  rec="$(tb_record_path)"
+  if [[ -e "$rec" ]]; then
+    text="$(cat "$rec" 2>/dev/null)" || text=""
+    _reinstall_record_says "the install record ${rec}" "$text" \
       "Check it is the file this installer wrote, or move it aside, then re-run."
-    return 0
+    return
   fi
-  # A recorded name was held to the rule by _reinstall_record_cluster (rc 2 above),
-  # so a name that breaks it here is CLUSTER_NAME's: a setting validate_config would
-  # refuse, refused now in its words, before any probe sees it.
-  name="${name:-${CLUSTER_NAME:-}}"
-  _refuse_invalid_cluster_name "$name"
-
-  if (( has_k3d )); then
-    # The listing first: it alone tells a k3d that did not answer (start Docker) from
-    # one that failed fast (quote it, client-dev#1606), and a fast failure is where
-    # _reinstall_adopt_blind's exception applies. Once k3d has answered, its listing
-    # alone decides tracebloc's own cluster (client-dev#1719).
-    local lrc=0
-    list="$(_k3d_live_clusters)" || lrc=$?
-    case "$lrc" in
-      0|1) ;;
-      3) if (( blind )); then
-           _reinstall_blind_go_on "k3d is installed but cannot list clusters as you (${list%%$'\n'*})"
-         else
-           _reinstall_cannot_tell "the k3d cluster listing ('k3d cluster list')" \
-             "Fix what k3d reports (start Docker if it is not running), then re-run." "failed (${list})"
-           return 0
-         fi ;;
-      *) _reinstall_cannot_tell "the k3d cluster listing ('k3d cluster list')" \
-           "Start Docker so k3d can answer, then re-run."
+  if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] && dst="$(_tb_record_root_copy_path)" \
+      && _tb_record_root_access && _tb_record_root_run test -e "$dst" 2>/dev/null; then
+    text="$(_tb_record_root_run cat "$dst" 2>/dev/null)" || text=""
+    _reinstall_record_says "the install record's root copy ${dst}" "$text" \
+      "Check it is the file this installer wrote ('sudo cat ${dst}'), or move it aside, then re-run."
+    return
+  fi
+  ctx="k3d-${CLUSTER_NAME:-}"
+  kc="${KUBECONFIG:-${HOME:-}/.kube/config}"
+  local IFS=:
+  for f in $kc; do
+    [[ -n "$f" && -e "$f" ]] || continue
+    rc=0; _reinstall_kubeconfig_has "$ctx" "$f" || rc=$?
+    case "$rc" in
+      0) TB_REINSTALL_SAID="it has no install record (its install is older than the record), and your kubeconfig ${f} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
          return 0 ;;
+      1) ;;
+      *) TB_REINSTALL_SAID="there is no install record, and your kubeconfig ${f} cannot be read"
+         TB_REINSTALL_REMEDY="Make it readable for you, or point KUBECONFIG away from it, then re-run."
+         return 2 ;;
     esac
-    [[ "$lrc" -gt 1 ]] || listed=1
-    # Only a listing that answered 0 lists clusters; 1 is none, whatever it printed.
-    if [[ "$lrc" -eq 0 ]]; then
-      while IFS= read -r n; do
-        [[ -n "$n" ]] || continue
-        if [[ "$n" == "$name" ]]; then tracebloc=1; else _reinstall_add_other "$n"; fi
-      done <<<"$list"
-    fi
-  fi
+  done
+  return 1
+}
 
-  if (( has_docker )) && (( blind )) && ! _docker_answers; then
-    _reinstall_blind_go_on "Docker ('docker info') does not answer you"
-  elif (( has_docker )); then
-    # A Docker that does not answer after k3d's listing did never overrules it: the
-    # listing is a read that completed (client-dev#1719).
-    # Each read keeps its status and its stderr: 124 is the deadline (Docker did not
-    # answer), anything else failed fast and is quoted -- "start Docker" is the wrong
-    # remedy for a permission error on a running daemon (client-dev#1748, the k3d
-    # arm's split above, client-dev#1606).
-    rc=0; ps=""
-    errf="$(mktemp "${TMPDIR:-/tmp}/tracebloc-docker-read-XXXXXX" 2>/dev/null)" || errf=/dev/null
-    _docker_answers "$errf" || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-      what="Docker ('docker info')"
-    else
-      ps="$(tb_k3d_cluster_names "$errf")" || rc=$?
-      what="Docker's container list ('docker ps')"
-    fi
-    how="$(_reinstall_read_how "$rc" "$errf")"
-    [[ "$errf" == /dev/null ]] || rm -f "$errf"
-    # A Mac's one substrate (common.sh _tb_substrate_fresh_here: k3s on Apple
-    # container since slim client 4.1, client-dev#1948) resolved with no k3d on PATH
-    # beside a Docker that did not answer 'docker info' (client-dev#1954's ruling):
-    # no cluster to find, so that unanswered read is not "cannot tell", or the Mac's
-    # only runtime would refuse itself. Only that source, and never beside a record
-    # that names a k3d cluster: a k3s requested by name keeps it.
-    if [[ "$what" == "Docker ('docker info')" && "$rc" -ne 0 ]] && (( ! has_k3d && ! rec_k3d )) \
-        && [[ "${TB_SUBSTRATE_SOURCE:-}" == "the one substrate on a Mac" ]]; then
-      rc=0; ps=""
-    fi
-    if [[ "$rc" -ne 0 ]] && (( listed )); then
-      info "${what} ${how}; k3d's own cluster listing did, and it decides."
-    elif [[ "$rc" -eq 124 ]]; then
-      _reinstall_cannot_tell "$what" \
-        "Start Docker, or run as a user Docker answers, then re-run."
-      return 0
-    elif [[ "$rc" -ne 0 ]]; then
-      _reinstall_cannot_tell "$what" \
-        "Fix what Docker reports (start Docker if it is not running, or run as a user Docker answers), then re-run." "$how"
-      return 0
-    fi
-    while IFS= read -r n; do
-      [[ -n "$n" ]] || continue
-      if [[ "$n" == "$name" ]]; then tracebloc=1; else _reinstall_add_other "$n"; fi
-    done <<<"$ps"
+# _reinstall_record_says WHO TEXT REMEDY -- _reinstall_k3d_said's answer for the record
+# WHO whose text is TEXT: 0 when its substrate is k3d, 1 for any other substrate, 2
+# when it cannot tell (an empty TEXT is a record that could not be read). A substrate
+# the record names decides over its artefacts; a record with no substrate field
+# says k3d when it lists an artefact only k3d records (_reinstall_k3d_artefact).
+_reinstall_record_says() {
+  local sub name kind
+  if sub="$(printf '%s' "$2" | _tb_record_substrate_in)"; then
+    [[ "$sub" == "k3d" ]] || return 1
+    TB_REINSTALL_SAID="${1} says so"
+  elif [[ "$2" != *'"substrate"'* ]] && kind="$(_reinstall_k3d_artefact "$2")"; then
+    TB_REINSTALL_SAID="${1} names no substrate, but lists a ${kind} artefact, which only a k3d install records"
+  else
+    TB_REINSTALL_SAID="${1} exists, but its substrate cannot be read from it"
+    TB_REINSTALL_REMEDY="$3"
+    return 2
   fi
-
-  if [[ -n "$TB_REINSTALL_OTHERS" ]]; then TB_REINSTALL_FOUND="other"
-  elif (( tracebloc )); then TB_REINSTALL_FOUND="tracebloc"
-  fi
-  (( tracebloc )) && TRACEBLOC_REINSTALL_CLUSTER="$name"
+  name="$(_tb_record_prior cluster_name "$2")"; name="${name#\"}"; name="${name%\"}"
+  [[ -z "$name" || "$name" == null ]] || TB_REINSTALL_SAID+=" (cluster '${name}')"
   return 0
 }
 
-# _reinstall_adopt_blind -- 0 when this run adopts a host an administrator prepared
-# for this user (not root, _native_k3s_prepared_for_me) and this user cannot reach
-# Docker at all (_native_k3s_docker_unreachable). Both live in k3s.sh; without them
-# (a stale bootstrap) this is 1, and the probes are read as everywhere.
-_reinstall_adopt_blind() {
-  [[ "$(id -u 2>/dev/null)" != "0" ]] || return 1
-  declare -F _native_k3s_prepared_for_me >/dev/null 2>&1 || return 1
-  declare -F _native_k3s_docker_unreachable >/dev/null 2>&1 || return 1
-  _native_k3s_prepared_for_me >/dev/null || return 1
-  _native_k3s_docker_unreachable
+# _reinstall_k3d_artefact TEXT -- the first artefact kind the record text TEXT lists
+# that only a k3d install records: a schema kind (TB_ARTEFACT_KINDS) named for k3d,
+# as k3s-install is for k3s. Fails when it lists none, or its artefacts cannot be read.
+_reinstall_k3d_artefact() {
+  local arts k
+  arts="$(printf '%s\n' "$1" | _tb_record_artefacts)" || return 1
+  for k in ${TB_ARTEFACT_KINDS}; do
+    [[ "$k" == k3d-* ]] || continue
+    grep -qF -- "$(printf '{"kind": "%s",' "$k")" <<<"$arts" || continue
+    printf '%s\n' "$k"
+    return 0
+  done
+  return 1
 }
 
-# _reinstall_blind_go_on WHAT -- the one info line for _reinstall_adopt_blind's
-# exception: WHAT failed, and why that is not a cluster. Said once per detection.
-_reinstall_blind_go_on() {
-  [[ -z "${_TB_REINSTALL_BLIND_SAID:-}" ]] || return 0
-  _TB_REINSTALL_BLIND_SAID=1
-  info "${1}. You cannot reach Docker (no DOCKER_HOST, and ${TB_DOCKER_DEFAULT_SOCKET} is not writable for you), so you cannot have started a k3d cluster, and prepare-host checked for one when it set k3s up."
+# _reinstall_kubeconfig_has CONTEXT FILE -- 0 when the kubeconfig FILE lists CONTEXT
+# under contexts: (_reinstall_context_in), 1 when it does not, 2 when FILE cannot be
+# read.
+_reinstall_kubeconfig_has() {
+  local text
+  text="$(cat "$2" 2>/dev/null)" || return 2
+  _reinstall_context_in "$1" <<<"$text"
 }
 
-# _reinstall_presence NAME -- _cluster_presence for NAME. CLUSTER_NAME is a global
-# _cluster_presence reads; a local here shadows it for the call only.
-_reinstall_presence() {
-  local CLUSTER_NAME="$1" rc=0
-  _cluster_presence || rc=$?
-  return "$rc"
+# _reinstall_context_in CONTEXT -- 0 when the kubeconfig text on stdin lists CONTEXT
+# under contexts:, 1 when it does not. The layout is the one kubectl and k3d write:
+# top-level keys at column 0, list items under them.
+_reinstall_context_in() {
+  # sprintf makes the quote characters, so no line holds an odd number of them:
+  # customer-copy-no-ticket-refs.sh reads this body line by line.
+  _TB_REINSTALL_CTX="$1" awk '
+    BEGIN { want = ENVIRON["_TB_REINSTALL_CTX"]; q = sprintf("%c", 39); dq = sprintf("%c", 34); key = "^" dq "?name" dq "?[ \t]*:"; found = 0 }
+    /^[^ \t#-]/ { sec = $0; sub(/[ \t]*:.*/, "", sec); gsub(dq, "", sec); next }
+    sec == "contexts" {
+      l = $0
+      sub(/^[ \t]*(-[ \t]+)?/, "", l)
+      if (l !~ key) next
+      sub(key "[ \t]*", "", l)
+      sub(/[ \t]+#.*$/, "", l); sub(/[ \t]+$/, "", l)
+      f = substr(l, 1, 1)
+      if ((f == dq || f == q) && length(l) >= 2 && substr(l, length(l), 1) == f) l = substr(l, 2, length(l) - 2)
+      if (l == want) found = 1
+    }
+    END { exit !found }
+  '
 }
 
-# _reinstall_record_cluster -- the k3d cluster the install record names. 0 and the
-# name when the record says k3d; 0 and nothing when it names another substrate
-# (that install recorded no k3d cluster); 1 when there is no record; 2 when it
-# exists and cannot be read, names no substrate, or names a cluster that breaks
-# the name rule: cannot tell, never absent.
-_reinstall_record_cluster() {
-  local rec text sub raw
-  rec="$(tb_record_path)"
-  [[ -e "$rec" ]] || return 1
-  text="$(cat "$rec" 2>/dev/null)" || return 2
-  sub="$(printf '%s' "$text" | _tb_record_substrate_in)" || return 2
-  [[ "$sub" == "k3d" ]] || return 0
-  raw="$(_tb_record_prior cluster_name "$text")"
-  raw="${raw#\"}"; raw="${raw%\"}"
-  _valid_cluster_name "$raw" || return 2
-  printf '%s' "$raw"
-}
-
-_reinstall_add_other() {
-  case " ${TB_REINSTALL_OTHERS} " in
-    *" $1 "*) ;;
-    *) TB_REINSTALL_OTHERS="${TB_REINSTALL_OTHERS:+${TB_REINSTALL_OTHERS} }$1" ;;
-  esac
-}
-
-# _reinstall_read_how RC ERRFILE -- how a bounded read that returned RC went, in the
-# words the go-on line and the cannot-tell refusal use: 0 "answered", 124 (_bounded's
-# deadline) "did not answer", anything else "failed (<the last line it wrote to
-# stderr>)", as _k3d_live_clusters quotes k3d (client-dev#1748).
-_reinstall_read_how() {
-  local msg=""
-  case "$1" in
-    0) printf 'answered' ;;
-    124) printf 'did not answer' ;;
-    *) [[ "$2" == /dev/null ]] || msg="$(awk 'NF { l = $0 } END { print l }' "$2" 2>/dev/null)"
-       printf 'failed (%s)' "${msg:-exited $1 with no message}" ;;
-  esac
-}
-
-_reinstall_cannot_tell() {
-  TB_REINSTALL_FOUND="cannot-tell"; TB_REINSTALL_PROBE="$1"; TB_REINSTALL_REMEDY="$2"
-  TB_REINSTALL_HOW="${3:-did not answer}"
-}
-
-# ── Decision ─────────────────────────────────────────────────────────────────
-
-# _reinstall_consent -- the consent this run carries: the value of the variable the
-# schema names (TB_REINSTALL_CONSENT_VAR), and ONLY under `offboard`. Under
-# `refuse` it is never read, so no environment reaches the offboard.
-_reinstall_consent() {
-  [[ "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 0
-  printf '%s' "${!TB_REINSTALL_CONSENT_VAR:-}"
-}
-
-# _reinstall_tty -- 0 when /dev/tty opens, so the CLI's typed-name prompt can
-# reach the user. Under curl | bash stdin is the installer, so the prompt gets
-# /dev/tty itself, as the sign-in does (provision.sh, _login_tty_ok).
-_reinstall_tty() { { : </dev/tty; } 2>/dev/null; }
-
-# _reinstall_consented -- 0 when this run can consent, and ONLY under `offboard`:
-# the consent variable is set (passed to the CLI as --confirm-name), or a
-# terminal is there for the CLI's own typed-name prompt. Under `refuse` neither
-# the variable is read nor the terminal asked.
-_reinstall_consented() {
-  [[ -n "$(_reinstall_consent)" ]] && return 0
-  [[ "${TB_K3D_REINSTALL:-}" == "offboard" ]] && _reinstall_tty
-}
-
-# _reinstall_decision -- refuse | offboard | proceed, from TB_REINSTALL_FOUND (run
-# _reinstall_detect first) and the consent. proceed only where no k3d cluster can
-# be here; offboard only for tracebloc's own k3d when this run can consent.
-# Whether the consent names the right secure environment is the CLI's check
-# (--confirm-name, or its prompt), so the CLI stays the one owner of it.
-_reinstall_decision() {
-  case "${TB_REINSTALL_FOUND:-cannot-tell}" in
-    none) printf 'proceed\n' ;;
-    tracebloc) if _reinstall_consented; then printf 'offboard\n'; else printf 'refuse\n'; fi ;;
-    *) printf 'refuse\n' ;;
-  esac
-}
-
-# _reinstall_explain -- what moving this machine means (D10), before a refusal
-# and before an offboard alike. Where the retired map retires k3d
-# (tb_substrate_retired_here) there is no k3d to keep, so the way back is not
-# offered: the last line names where, and what staying on k3d means instead.
-_reinstall_explain() {
-  warn "This machine runs tracebloc on k3d (cluster '${TRACEBLOC_REINSTALL_CLUSTER}')."
-  hint "Moving it to native k3s is a reinstall: this machine's secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
-  if [[ "${OS:-}" == "Darwin" ]]; then
-    hint "This installer no longer sets up or updates k3d on a Mac. Until this Mac moves, neither this installer nor 'tracebloc upgrade' updates its secure environment."
-  elif _reinstall_k3d_retired; then
-    hint "This installer no longer sets up k3d $(_tb_substrate_where). Until you move it, today's environment keeps running as it is."
+# _reinstall_exists_as USER FILE -- 0 when FILE exists as USER finds it, 1 when it
+# does not, 2 when this run cannot ask as USER. USER root asks as root (tb_root_n),
+# any other USER as them (tb_root_as); both are the root executor's, so --print asks
+# as this user instead (common.sh, _tb_root_reads).
+_reinstall_exists_as() {
+  local a
+  if [[ "$1" == root ]]; then
+    a="$(tb_root_n sh -c "$TRACEBLOC_ROOT_SH_EXISTS" sh "$2" 2>/dev/null)" || a=""
   else
-    hint "To keep today's environment, unset TRACEBLOC_SUBSTRATE and re-run."
+    a="$(tb_root_as "$1" sh -c "$TRACEBLOC_ROOT_SH_EXISTS" sh "$2" 2>/dev/null)" || a=""
   fi
+  case "$a" in present) return 0 ;; absent) return 1 ;; *) return 2 ;; esac
 }
 
-# _reinstall_k3d_retired -- 0 when k3d is retired where this run is
-# (tb_substrate_retired_here, common.sh). The resolver has already refused a run
-# that cannot tell, so anything but 0 offers the way back as before.
-_reinstall_k3d_retired() {
-  declare -F tb_substrate_retired_here >/dev/null 2>&1 && tb_substrate_retired_here k3d
+# _reinstall_k3d_said_for USER HOME -- _reinstall_k3d_said's answer for the user
+# prepare-host sets this machine up for, from USER's own data, never the
+# administrator's: their record under HOME, its root copy keyed on USER, then their
+# kubeconfig HOME/.kube/config (the administrator's KUBECONFIG is not theirs). Each
+# file is read as its owner (_reinstall_exists_as); a file that cannot be looked for
+# as its owner is refused as cannot tell (_reinstall_unread_as).
+_reinstall_k3d_said_for() {
+  local u="$1" h="$2" rec dst kc ctx text rc=0
+  TB_REINSTALL_SAID=""; TB_REINSTALL_REMEDY=""
+  rec="${h}${TB_RECORD_USER_PATH#\~}"
+  _reinstall_exists_as "$u" "$rec" || rc=$?
+  case "$rc" in
+    0) text="$(tb_root_as "$u" cat "$rec" 2>/dev/null)" || text=""
+       _reinstall_record_says "${u}'s install record ${rec}" "$text" \
+         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host."
+       return ;;
+    2) _reinstall_unread_as "$u" "${u}'s install record ${rec}"; return 2 ;;
+  esac
+  dst="$(_tb_record_root_path "$u")"; rc=0
+  _reinstall_exists_as root "$dst" || rc=$?
+  case "$rc" in
+    0) text="$(tb_root_n cat "$dst" 2>/dev/null)" || text=""
+       _reinstall_record_says "the install record's root copy ${dst}" "$text" \
+         "Check it is the file this installer wrote, or move it aside, then re-run prepare-host."
+       return ;;
+    2) _reinstall_unread_as root "the install record's root copy ${dst}"; return 2 ;;
+  esac
+  ctx="k3d-${CLUSTER_NAME:-}"; kc="${h}/.kube/config"; rc=0
+  _reinstall_exists_as "$u" "$kc" || rc=$?
+  case "$rc" in
+    1) return 1 ;;
+    2) _reinstall_unread_as "$u" "${u}'s kubeconfig ${kc}"; return 2 ;;
+  esac
+  rc=0
+  if text="$(tb_root_as "$u" cat "$kc" 2>/dev/null)"; then _reinstall_context_in "$ctx" <<<"$text" || rc=$?; else rc=2; fi
+  case "$rc" in
+    0) TB_REINSTALL_SAID="${u} has no install record (their install is older than the record), and their kubeconfig ${kc} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
+       return 0 ;;
+    1) return 1 ;;
+  esac
+  TB_REINSTALL_SAID="${u} has no install record, and their kubeconfig ${kc} cannot be read"
+  TB_REINSTALL_REMEDY="Make it readable for ${u}, then re-run prepare-host."
+  return 2
 }
 
-# ── The refusal ──────────────────────────────────────────────────────────────
+# _reinstall_unread_as USER WHAT -- refuse as cannot tell: WHAT cannot be looked for
+# as USER. Its remedy names the sudo it needs, so it is said here, by error, and never
+# kept in a variable (prepare-host-root-guard.py).
+_reinstall_unread_as() {
+  [[ "$1" != root ]] \
+    || error "This run cannot tell whether this machine runs tracebloc on k3d, and native k3s is never set up beside it: ${2} cannot be read as root. Check that 'sudo true' works, then re-run prepare-host."
+  error "This run cannot tell whether this machine runs tracebloc on k3d, and native k3s is never set up beside it: ${2} cannot be read as ${1}. Check that 'sudo -u ${1} true' works, then re-run prepare-host."
+}
 
-# refuse_k3s_beside_live_k3d -- on a native k3s request, never k3s beside a live
-# k3d. Returns 0 when this run may go on (no k3d here, or a consented offboard,
-# which TRACEBLOC_REINSTALL_DECISION carries to main()); otherwise refuses by name, with
-# what the move means (D10). Does nothing on any other substrate.
-refuse_k3s_beside_live_k3d() {
-  TRACEBLOC_REINSTALL_DECISION="proceed"
-  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]] || return 0
-  # A request native k3s refuses is refused FIRST, before detection decides
-  # anything: an offboard for it removes the k3d client at step a, and step c then
-  # refuses the k3s, leaving no client at all (client-dev#1805). Every refusal in
-  # _native_k3s_refuse_host reads only what is known now (the OS, WSL, settings read
-  # when common.sh is sourced), so it is called as it is, the one declaration of
-  # where and how native k3s runs; step c calls it again. Each exit from it is a
-  # refusal: a re-run with nothing changed is refused again.
+# refuse_k3d_machine -- stop the run by name when tracebloc's own data says this
+# machine runs on k3d, or cannot tell (_reinstall_k3d_said); return 0 otherwise.
+# Native k3s's own host refusals (_native_k3s_refuse_host) run first, so a host or
+# a setting native k3s does not serve is refused before step a installs anything.
+refuse_k3d_machine() {
+  local rc=0
   declare -F _native_k3s_refuse_host >/dev/null 2>&1 \
-    || error "This installer build can't check whether native k3s can run here (stale bootstrap), and it never moves a k3d machine to a native k3s it cannot set up. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+    || error "This installer build can't check whether native k3s can run here (stale bootstrap). Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"
+  # Every exit below is a refusal, so install_cleanup prints no "try again" footer.
   # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
   TB_EXIT_REFUSED=1
   _native_k3s_refuse_host
-  TB_EXIT_REFUSED=""
-  _reinstall_detect
-  TRACEBLOC_REINSTALL_DECISION="$(_reinstall_decision)"
-  case "$TRACEBLOC_REINSTALL_DECISION" in
-    proceed|offboard) return 0 ;;
-  esac
-  # Every path below ends in error: a refusal, like the substrate refusals above it
-  # in main(), so install_cleanup prints no "did not complete, try again" footer.
+  _reinstall_k3d_said || rc=$?
+  _reinstall_refuse "$rc"
+}
+
+# refuse_k3d_for_user USER HOME -- prepare-host's refusal: stop by name when the
+# data of USER, whose home is HOME, says they run tracebloc on k3d, or cannot tell
+# (_reinstall_k3d_said_for); return 0 otherwise. prepare-host calls it once its
+# password is in and before step a writes anything; main() has already run
+# refuse_k3d_machine over the administrator's own data.
+refuse_k3d_for_user() {
+  local rc=0
+  _reinstall_k3d_said_for "$1" "$2" || rc=$?
+  _reinstall_refuse "$rc"
+}
+
+# _reinstall_refuse RC -- the refusal for the answer RC of _reinstall_k3d_said or
+# _reinstall_k3d_said_for: 1 returns 0, 2 refuses as cannot tell, 0 refuses with the
+# way off k3d.
+_reinstall_refuse() {
+  local engine="native k3s"
+  # A Mac names its one runtime, as tb_substrate_resolve's refusal there does; a build
+  # whose map leaves a Mac no one runtime names the substrate this run resolved.
+  if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Darwin" ]]; then
+    engine="$(_tb_substrate_fresh_here)" || engine="${TRACEBLOC_SUBSTRATE_RESOLVED:-}"
+    engine+=" in Apple's container runtime"
+  fi
   # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
-  TB_EXIT_REFUSED=1
-  case "$TB_REINSTALL_FOUND" in
-    cannot-tell)
-      error "This run cannot tell whether a k3d cluster is live on this machine: ${TB_REINSTALL_PROBE} ${TB_REINSTALL_HOW:-did not answer}, and native k3s is never set up beside a live k3d. ${TB_REINSTALL_REMEDY}" ;;
-    other)
-      warn "A k3d cluster that is not tracebloc's is on this machine: ${TB_REINSTALL_OTHERS}."
-      if [[ "${OS:-}" == "Darwin" ]]; then
-        hint "This installer never removes it, and on a Mac it no longer sets tracebloc up on k3d, so tracebloc can be installed here only once that cluster is gone."
-      elif _reinstall_k3d_retired; then
-        hint "This installer never removes it, and no longer sets up k3d $(_tb_substrate_where). Remove that cluster yourself, or install tracebloc on another machine."
-      else
-        hint "This installer never removes it. To keep tracebloc on k3d, unset TRACEBLOC_SUBSTRATE and re-run."
-      fi
-      error "Native k3s is never set up beside a live k3d." ;;
+  case "$1" in
+    1) TB_EXIT_REFUSED=""; return 0 ;;
+    2) error "This run cannot tell whether this machine runs tracebloc on k3d, and ${engine} is never set up beside it: ${TB_REINSTALL_SAID}. ${TB_REINSTALL_REMEDY}" ;;
   esac
-  _reinstall_explain
-  if [[ "${TB_K3D_REINSTALL:-}" == "offboard" ]]; then
-    hint "To move it, re-run on a terminal and type the secure environment's name when asked, or re-run with ${TB_REINSTALL_CONSENT_VAR}=<the secure environment's name>."
-    error "Native k3s is never set up beside a live k3d, and no consent was given, so nothing was changed."
-  fi
-  error "Native k3s is never set up beside a live k3d, and this installer cannot move a k3d machine to native k3s yet."
-}
-
-# ── The offboard ─────────────────────────────────────────────────────────────
-
-# _tb_cli SECONDS ARGS... -- the one way this file runs the tracebloc CLI, so a
-# test can stand in for it. SECONDS is the deadline `_bounded` puts on the binary
-# (the function itself cannot be handed to timeout(1), which execs its argument);
-# 0 runs it bare, for the typed-name prompt only: timeout(1) moves its child out
-# of the terminal's foreground process group, so a read from /dev/tty would be
-# stopped (SIGTTIN), and a human is there to interrupt that one.
-_tb_cli() {
-  local t="$1"; shift
-  if [[ "$t" == 0 ]]; then tracebloc "$@"; else _bounded "$t" tracebloc "$@"; fi
-}
-
-# _reinstall_on_tty CMD... -- CMD with all three streams on /dev/tty, for the
-# CLI's typed-name prompt (split out so a test can run it without a terminal).
-_reinstall_on_tty() { "$@" </dev/tty >/dev/tty 2>/dev/tty; }
-
-# _reinstall_kube_context -- the context the old client runs in: the k3d record's
-# kube_context, else k3d's own name for the cluster, k3d-<name>.
-_reinstall_kube_context() {
-  local text sub ctx=""
-  if text="$(cat "$(tb_record_path)" 2>/dev/null)" \
-     && sub="$(printf '%s' "$text" | _tb_record_substrate_in)" && [[ "$sub" == "k3d" ]]; then
-    ctx="$(_tb_record_prior kube_context "$text")"
-    ctx="${ctx#\"}"; ctx="${ctx%\"}"
-    [[ "$ctx" != "null" ]] || ctx=""
-  fi
-  printf '%s' "${ctx:-k3d-${TRACEBLOC_REINSTALL_CLUSTER}}"
-}
-
-# _reinstall_stop WHY -- the offboard did not finish: say what is left, read
-# again from _cluster_presence, and install nothing.
-_reinstall_stop() {
-  local p=0 name="${TRACEBLOC_REINSTALL_CLUSTER}"
-  _reinstall_presence "$name" >/dev/null 2>&1 || p=$?
-  case "$p" in
-    0) hint "k3d cluster '${name}' is still on this machine." ;;
-    1) hint "k3d cluster '${name}' is gone." ;;
-    *) hint "Whether k3d cluster '${name}' is still on this machine cannot be told." ;;
-  esac
-  error "$1 Nothing was installed."
-}
-
-# reinstall_offboard_k3d -- the consented offboard (D10). `tracebloc delete
-# --for-reinstall` revokes the old client and removes its k3d, and only then does
-# step b install native k3s. main() calls this after step a, so every refusal
-# there (sudo, disk, memory, preflight) has run, and before step b. It does
-# nothing unless refuse_k3s_beside_live_k3d decided `offboard`, and the release
-# switch reads `offboard`.
-#
-# The consent is the variable, passed as --confirm-name, or else the CLI's own
-# typed-name prompt on /dev/tty. --yes and --force are never passed: a running
-# training blocks the offboard, and the CLI's refusal is what the user reads.
-# The CLI's exit code and k3d's own answer decide together. 0 goes on only when
-# the cluster is definitely gone: the CLI also exits 0, with nothing removed, when
-# its typed-name prompt is declined, left blank or cut short with Ctrl-C. 10
-# (revoked, local teardown incomplete) goes on likewise only when the cluster is
-# definitely gone. Anything else stops. The probe and the headless offboard each
-# run under a deadline (TRACEBLOC_CLI_PROBE_TIMEOUT, TRACEBLOC_OFFBOARD_TIMEOUT), so
-# a CLI that never answers stops the run with a message instead of holding a piped
-# install for ever. 124 is that deadline: it never confirms the cluster is gone,
-# so it stops like a declined prompt, and nothing is removed on a timeout.
-reinstall_offboard_k3d() {
-  [[ "${TRACEBLOC_REINSTALL_DECISION:-}" == "offboard" && "${TB_K3D_REINSTALL:-}" == "offboard" ]] || return 0
-  local name="${TRACEBLOC_REINSTALL_CLUSTER}" consent ctx rc=0 p=0 probe=0 armed="${TRACEBLOC_RECORD_ARMED:-}" armed_old="${TB_RECORD_ARMED:-}"
-  consent="$(_reinstall_consent)"
-  _reinstall_explain
-  info "Offboarding it first: tracebloc revokes this secure environment, then its k3d cluster '${name}' and its data are removed."
-  # The record still describes the k3d install the CLI tears down by it, so
-  # nothing this run does is written to it until the offboard is over.
-  TRACEBLOC_RECORD_ARMED=""; TB_RECORD_ARMED=""   # both: the read falls back to the old name
-  install_tracebloc_cli
-  _tb_cli "${TB_CLI_PROBE_TIMEOUT:-30s}" delete --for-reinstall --help </dev/null >/dev/null 2>&1 || probe=$?
-  [[ "$probe" -ne 124 ]] \
-    || error "The tracebloc CLI on this machine did not answer within ${TB_CLI_PROBE_TIMEOUT:-30s} when asked whether it can offboard, so nothing was changed and k3d cluster '${name}' still runs. Check it with 'tracebloc --help' and re-run."
-  [[ "$probe" -eq 0 ]] \
-    || error "The tracebloc CLI on this machine cannot offboard a secure environment for a reinstall, so nothing was changed and k3d cluster '${name}' still runs. Update it with 'tracebloc upgrade' and re-run, or unset TRACEBLOC_SUBSTRATE to keep today's environment."
-  ctx="$(_reinstall_kube_context)"
-  if [[ -n "$consent" ]]; then
-    _tb_cli "${TB_OFFBOARD_TIMEOUT:-15m}" delete --for-reinstall --context "$ctx" --confirm-name "$consent" </dev/null || rc=$?
-  else
-    _reinstall_on_tty _tb_cli 0 delete --for-reinstall --context "$ctx" || rc=$?
-  fi
-  case "$rc" in
-    0)
-      _reinstall_presence "$name" >/dev/null 2>&1 || p=$?
-      [[ "$p" -eq 1 ]] || _reinstall_stop "The offboard did not finish: 'tracebloc delete' exited 0, but its k3d cluster is not gone, and native k3s is never set up beside a live k3d. A confirmation that was declined, left blank or cancelled ends this way. Re-run and type the secure environment's name to move this machine, or unset TRACEBLOC_SUBSTRATE to keep today's environment."
-      ;;
-    10)
-      _reinstall_presence "$name" >/dev/null 2>&1 || p=$?
-      [[ "$p" -eq 1 ]] \
-        || _reinstall_stop "'tracebloc delete' revoked the old secure environment, but native k3s is never set up beside a live k3d. Check it with 'k3d cluster list', remove it with 'k3d cluster delete ${name}', then re-run."
-      warn "The old secure environment is revoked and its k3d cluster is gone, but the CLI could not remove everything it left on this machine."
-      ;;
-    124) _reinstall_stop "The offboard did not finish within ${TB_OFFBOARD_TIMEOUT:-15m} ('tracebloc delete' was stopped), so how much of the secure environment it removed cannot be told. Re-run to finish it, with a longer TRACEBLOC_OFFBOARD_TIMEOUT if it needs more time." ;;
-    1) _reinstall_stop "The offboard did not run ('tracebloc delete' exited 1), so the secure environment is untouched; the CLI's message above says why." ;;
-    *) _reinstall_stop "The offboard stopped ('tracebloc delete' exited ${rc}); the CLI's message above says what it removed." ;;
-  esac
-  TRACEBLOC_RECORD_ARMED="$armed"; TB_RECORD_ARMED="$armed_old"
-  # The move deletes the old data (the explanation above says so), and the
-  # leftover guard below refuses a non-interactive run over any remnant. Its wipe
-  # stays its own: scoped to HOST_DATA_DIR's data dirs, and verified.
-  TB_LEFTOVER_ACTION=wipe
-  success "Offboarded the old secure environment and removed k3d cluster '${name}'."
+  warn "This machine runs tracebloc on k3d: ${TB_REINSTALL_SAID}."
+  hint "This installer no longer sets up k3d, and it never sets up ${engine} beside it."
+  hint "Moving this machine to ${engine} is a reinstall: its secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc."
+  hint "To move it, delete that secure environment with 'tracebloc delete', then run this installer again."
+  hint "If 'tracebloc delete' refuses, tracebloc CLI ${TB_RETIRED_OFFBOARD_CLI} can still delete it."
+  # install-cli.sh's URL; a bootstrap that did not fetch install-cli.sh names the release only.
+  [[ -z "${TRACEBLOC_CLI_INSTALL_URL:-}" ]] \
+    || hint "Install that CLI with:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh -s -- --version v${TB_RETIRED_OFFBOARD_CLI}"
+  error "Nothing was changed."
 }

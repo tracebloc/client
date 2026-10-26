@@ -163,11 +163,10 @@ _cli_version_short() {
 }
 
 # _cli_first_install_next_step — the pointer at the install summary's "What to do
-# next" (`tracebloc data ingest ./data`). A full install prints that summary; the
-# CLI-only `tracebloc upgrade` path (upgrade_cli_only, TRACEBLOC_CLI_UPGRADE_ONLY=1)
-# exits without one, so there the line would name a step that never comes
-# (client-dev#1642). upgrade_cli_only closes with its own upgrade line instead; an
-# upgrade that runs the full flow (native k3s) ends on the summary's. See tb_upgrade_run.
+# next" (`tracebloc data ingest ./data`). A first install prints that summary; a
+# `tracebloc upgrade` runs the full flow and ends on the summary's upgrade line, so
+# there the pointer names a step that never comes (client-dev#1642, backend#6787).
+# See tb_upgrade_run.
 _cli_first_install_next_step() {
   tb_upgrade_run && return 0
   info "Then the 'tracebloc data ingest ./data' step below will work."
@@ -356,87 +355,6 @@ install_tracebloc_cli() {
   rm -f "$installer"
   if [[ -n "$_cli_out" ]]; then rm -f "$_cli_out"; fi
   return 0
-}
-
-# upgrade_cli_only — the CLI-only path for an explicit `tracebloc upgrade` on an
-# otherwise-healthy machine (INSTALL_STATE_REASON=cli-behind-latest, backend#2253).
-#
-# The environment is already healthy BY CONSTRUCTION — that is what cli-behind-
-# latest means — so there is nothing to reconcile: update ONLY the tracebloc CLI
-# (a small, isolated download) and finish. This is the difference between the
-# healthy fast-path's old "already set up — no need to run the installer again"
-# no-op (which left a below-latest CLI nagging forever) and actually doing the one
-# thing the user asked for.
-#
-# It EXITS the installer (0). Unlike _assess_handoff it does NOT mark the run
-# `skipped`: a newer CLI was installed, so this is a real, succeeded install and
-# telemetry (already `started` in main) records it as such on the 0 exit.
-# main() calls it only off native k3s, and every OS resolves k3s.
-# TODO(tracebloc/client-dev#1950): delete it with that call (install-k8s.sh).
-upgrade_cli_only() {
-  info "Your tracebloc environment is healthy — updating just the CLI to the latest release."
-  echo ""
-
-  # backend#2679: this path DOWNLOADS + cosign-verifies the CLI (install_tracebloc_cli
-  # curl_secure's the installer) and then EXITS — before main()'s own wire_ca_trust
-  # (install-k8s.sh) ever runs. Behind a TLS-inspecting proxy that leaves the download
-  # or signature check failing x509 on the exact machine where a normal install
-  # SUCCEEDS, because the full flow wires CA trust before any tool download (#583). So
-  # wire the corporate CA HERE too, before the download (it exits before the step that
-  # would otherwise do it). Idempotent and a no-op when no CA is configured; guarded like
-  # main()'s call so a stale bootstrap without cluster.sh falls through (the download
-  # then behaves exactly as it did before this branch existed).
-  if declare -F wire_ca_trust >/dev/null 2>&1; then
-    wire_ca_trust
-  fi
-
-  # The install record may gain the new CLI here, but this path never writes the
-  # FIRST one: it reads no cluster, kube context or Helm release, so a record
-  # begun here would say Helm never ran. A machine installed before the record
-  # existed gets its record on the next full install.
-  if declare -F tb_record_path >/dev/null 2>&1 && [[ ! -f "$(tb_record_path)" ]]; then
-    TRACEBLOC_RECORD_ARMED=""; TB_RECORD_ARMED=""   # both: the read falls back to the old name
-  fi
-  # Whatever it writes refreshes the CLI's entry only: CLUSTER_NAME and
-  # HOST_DATA_DIR are defaults here, not what the install recorded.
-  TB_RECORD_REFRESH_ONLY=1
-  # No full-install summary follows this path, so the CLI step must not point at
-  # one (_cli_first_install_next_step, client-dev#1642).
-  TRACEBLOC_CLI_UPGRADE_ONLY=1
-
-  # install_tracebloc_cli owns the ✔/✖ line and is non-fatal by contract; it also
-  # prints the vX -> vY update verdict. Guarded like main()'s own call so a stale
-  # bootstrap that didn't fetch this file can't reach an undefined function.
-  if declare -F install_tracebloc_cli >/dev/null 2>&1; then
-    install_tracebloc_cli
-  fi
-
-  # The CLI update is the ENTIRE point of this path, so — unlike the full flow,
-  # where a CLI hiccup is non-fatal because the client is already connected — a
-  # FAILED update here must NOT report success: it would leave the update nag in
-  # place while `tracebloc upgrade` looked like it worked (Bugbot). When we know
-  # the target (TB_CLI_LATEST, else TRACEBLOC_CLI_LATEST -- the name the CLI sets
-  # comes first, as in assess.sh) and the CLI is verifiably STILL behind it, exit
-  # non-zero (install_tracebloc_cli has already printed how to retry). Otherwise
-  # — updated, or target/version unreadable so we can't PROVE a failure — exit 0.
-  local latest now
-  latest="${TB_CLI_LATEST:-${TRACEBLOC_CLI_LATEST:-}}"; latest="${latest#v}"
-  now="$(_cli_version_short 2>/dev/null || true)"; now="${now#v}"
-  if [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [[ "$now" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
-     && _version_lt "$now" "$latest"; then
-    warn "Couldn't update the tracebloc CLI to ${latest} — still on ${now}. The update reminder will keep showing until it succeeds."
-    exit 1
-  fi
-  # The upgrade's closing line, in place of the first-install next steps this
-  # path never reaches (client-dev#1642). The version is the CLI's own answer;
-  # unreadable, the line still says what did not change.
-  if [[ -n "$now" ]]; then
-    info "Now on v${now}; your environment is unchanged."
-  else
-    info "Your environment is unchanged."
-  fi
-  _tb_done=1   # an intended exit 0 under install_cleanup (tb_exit_rc, client-dev#1752)
-  exit 0
 }
 
 # ── The account's example use case ──────────────────────────────────────────

@@ -435,9 +435,8 @@ _gpu_wsl_host_report() {
 }
 
 # _gpu_container_blind RUNTIME -- the container runtime's own GPU probe has just said it
-# cannot give a container this machine's NVIDIA GPU: k3d's `docker run --gpus all` of the
-# GPU node image (k3d.sh), or k3s's containerd not registering the NVIDIA runtime
-# (k3s.sh). RUNTIME names it in the sentence ("Docker", "k3s"). Reports
+# cannot give a container this machine's NVIDIA GPU: k3s's containerd not registering
+# the NVIDIA runtime (k3s.sh). RUNTIME names it in the sentence ("k3s"). Reports
 # runtime_cannot_see_gpu ONLY for a GPU the floor gate let through (ok, with a driver
 # that answered nvidia-smi): a card or driver already reported unsupported
 # keeps that reason, and a GPU this run could not read is "cannot tell", never blind.

@@ -121,31 +121,15 @@ _diagnose_not_ready() {
 # The "secure compute environment / your data never leaves" claim is printed
 # ONLY when the client is verifiably connected — never on a partial/failed run.
 # One-line note in the success summary so the user knows how the client comes
-# back after a reboot. Native k3s comes back on its own (below). k3d, which runs on
-# Linux only: docker.service enabled on boot → automatic; without it (Tier 0's
-# zero-privilege path, or opted out) → the user has to start Docker first.
-# main() refuses that substrate before the summary; its two lines stay while
-# copy-catalog.bats renders the summary off native k3s (01-outcomes.golden).
-# TODO(tracebloc/client-dev#1950): delete them with that rendering.
+# back after a reboot: the last line of the summary, in dim.
+# On Linux k3s's install enables the k3s service on boot, and the node is this host.
+# On a Mac the node is a VM, and the login item io.tracebloc.node brings it back at
+# login (mac-container.sh, LimitLoadToSessionType Aqua).
 _reboot_note() {
-  # Single dim footer line — the LAST line of the summary.
-  # Native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s): k3s's install enables the k3s
-  # service on boot, and the node is this host, so the cluster returns with it. On a Mac
-  # the node is a VM, and the login item io.tracebloc.node brings it back at login
-  # (mac-container.sh, LimitLoadToSessionType Aqua).
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
+  if [[ "$OS" == "Darwin" ]]; then
     echo -e "  ${DIM}After a restart, tracebloc comes back when you log in: the login item ${TB_MAC_CT_AGENT_LABEL:-io.tracebloc.node} starts it.${RESET}"
-  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-    echo -e "  ${DIM}After a reboot, tracebloc restarts automatically with the k3s service (check it with: systemctl status k3s).${RESET}"
-  elif [[ "${TB_DOCKER_AUTOSTART:-0}" == "1" ]]; then
-    # docker.service is enabled on boot (ensure_cluster_autostart) and the k3d
-    # nodes carry --restart unless-stopped → the cluster returns on its own.
-    echo -e "  ${DIM}After a reboot, tracebloc restarts automatically.${RESET}"
   else
-    # We did NOT enable docker.service (Tier 0, or the user opted out): the k3d
-    # restart policy still brings the cluster back, but only once Docker itself is
-    # running — so be honest and don't promise it happens automatically.
-    echo -e "  ${DIM}After a reboot, start Docker to bring tracebloc back.${RESET}"
+    echo -e "  ${DIM}After a reboot, tracebloc restarts automatically with the k3s service (check it with: systemctl status k3s).${RESET}"
   fi
 }
 
@@ -173,7 +157,7 @@ _summary_kubeconfig_hint() {
 # The installer switched kubectl's current context to this cluster (it must: the
 # secure environment is registered against the current context), and a user who
 # also works on other clusters needs to hear that, with the way back, or their
-# next kubectl lands here (backend#5025 O-19). _merge_kubeconfig sets
+# next kubectl lands here (backend#5025 O-19). The kubeconfig merge sets
 # TB_PREV_KUBE_CONTEXT only when a DIFFERENT context was selected before, so a
 # fresh machine and a re-run print nothing.
 #
@@ -220,8 +204,7 @@ _cli_runnable_now() {
 #
 # The Job lives in the release namespace and deletes itself after its TTL; the image
 # lives in the substrate's store, which the substrate's own removal deletes. So the
-# install record gains nothing. The k3d node-image prepull (k3d.sh) is a different
-# pull, with its own switch (TRACEBLOC_SKIP_GPU_IMAGE_PREPULL).
+# install record gains nothing.
 
 # The component label the chart puts on the ConfigMap: how it is found. Its name is
 # <fullname>-training-prepull, and fullname follows fullnameOverride, so the label is

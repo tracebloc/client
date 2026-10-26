@@ -14,48 +14,24 @@
 #  Tiers (see the RFC):
 #    0  nothing on the install path asks for root: the macOS node, or a native
 #       k3s an administrator prepared for this user.
-#    1  off native k3s, the kernel supports unprivileged containers (cgroup v2 +
-#       unprivileged userns): setup-linux.sh's rootless tier.
-#    2  native k3s otherwise (it runs as root), a kernel that can't run
-#       unprivileged containers (old/locked), or an OS this installer does not
+#    2  native k3s otherwise (it runs as root), or an OS this installer does not
 #       serve — a one-time admin step is required.
+#  Tier 1, rootless Docker for k3d, left with k3d, and with it the kernel and
+#  subordinate-ID probes it needed (client-dev#1950). Native k3s reads its own
+#  cgroup version (k3s.sh, _native_k3s_cgroup_version) and runs on v1 too.
 #
 #  run_host_probes sets, once:
 #    PROBE_PRIVILEGE       root | sudo_nopw | sudo_pw | no_sudo
-#    PROBE_CGROUP2         0|1  (Linux only; 0 elsewhere)
-#    PROBE_USERNS          0|1  (Linux only; 0 elsewhere)
-#    PROBE_SUBID           0|1  (Linux only; subuid+subgid range for this user)
-#    PROBE_UIDMAP          0|1  (Linux only; newuidmap+newgidmap present & setuid)
-#    INSTALL_TIER          0|1|2
+#    PROBE_WSL             0|1  (Linux only; inside WSL2)
+#    PROBE_K3S_PREPARED    0|1  (native k3s on Linux, not root; an administrator
+#                               prepared this host for this user)
+#    INSTALL_TIER          0|2
 #    INSTALL_TIER_REASON   short machine-readable tag
 #
 #  Side-effect-safe to source (defaults + function definitions only).
 # =============================================================================
 
 # ── Low-level readers (each read-only; overridable in bats) ───────────────────
-
-# _probe_cgroup_v2 — is the host on the unified cgroup v2 hierarchy? Rootless
-# containers need it for resource delegation. Read-only existence check.
-_probe_cgroup_v2() {
-  [[ -e /sys/fs/cgroup/cgroup.controllers ]]
-}
-
-# _probe_userns — are unprivileged user namespaces available? Rootless containers
-# need them. Two read-only signals:
-#   * /proc/sys/user/max_user_namespaces > 0  (present on all modern kernels), and
-#   * kernel.unprivileged_userns_clone == 1    (Debian/Ubuntu-specific gate — must
-#     be 1 WHERE PRESENT; if the file is absent the kernel doesn't gate on it, so
-#     its absence alone is not a failure).
-_probe_userns() {
-  local max clone
-  max="$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)"
-  [[ "$max" =~ ^[0-9]+$ ]] && [[ "$max" -gt 0 ]] || return 1
-  if [[ -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
-    clone="$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)"
-    [[ "$clone" == 1 ]] || return 1
-  fi
-  return 0
-}
 
 # _probe_wsl — are we running inside a WSL2 distro (Linux inside Windows)? #1179.
 # WSL sets WSL_DISTRO_NAME / WSL_INTEROP in the environment and stamps "microsoft"/
@@ -156,34 +132,6 @@ _probe_privilege() {
   echo "sudo_pw"
 }
 
-# _probe_subid_ranges — does THIS user own a subordinate UID/GID range in BOTH
-# /etc/subuid and /etc/subgid? Rootless containers map container UIDs into this range
-# and need BOTH files — a range in only one is unusable → not present. Entries may
-# be keyed by name OR numeric uid, so check both. The files are world-readable; the
-# read is side-effect-free. Paths overridable (TRACEBLOC_SUBUID_FILE/TRACEBLOC_SUBGID_FILE) so the
-# probe is testable against fixtures. _subid_has_entry lives in common.sh.
-_probe_subid_ranges() {
-  # Key off the user the containers will actually run as — `id -un`, NOT $USER,
-  # which diverges under su/cron, so a re-run can't mis-read a wrong-user entry as
-  # satisfied (Asad/Bugbot, client#458).
-  local name uid
-  name="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
-  uid="$(id -u 2>/dev/null)"
-  _subid_has_entry "${TRACEBLOC_SUBUID_FILE:-/etc/subuid}" "$name" "$uid" \
-    && _subid_has_entry "${TRACEBLOC_SUBGID_FILE:-/etc/subgid}" "$name" "$uid"
-}
-
-# _probe_uidmap_helpers — are BOTH newuidmap and newgidmap present AND setuid-root?
-# Rootless uses them to write the ID mapping; a non-setuid helper is as useless as a
-# missing one, so a plain `has` is not enough. `command -v` + a setuid (`-u`) test on
-# the resolved path, both side-effect-free.
-_probe_uidmap_helpers() {
-  # Present AND privileged (setuid bit OR cap_setuid filecaps — see _idmap_helper_ok
-  # in common.sh). A setuid-only test wrongly rejects Arch's filecaps `shadow`
-  # (Bugbot, client#458).
-  _idmap_helper_ok newuidmap && _idmap_helper_ok newgidmap
-}
-
 # ── Classification ────────────────────────────────────────────────────────────
 
 # _classify_from_probes — set INSTALL_TIER (+ reason) from the cached PROBE_*
@@ -218,14 +166,6 @@ _classify_from_probes() {
     return 0
   fi
 
-  # Nothing sets PROBE_RUNTIME_USABLE since the runtime probe went; one case in
-  # k3s-create.bats, off native k3s, is this arm's one reader.
-  # TODO(tracebloc/client-dev#1950): delete the arm with that case.
-  if [[ "${PROBE_RUNTIME_USABLE:-0}" == "1" ]]; then
-    INSTALL_TIER=0; INSTALL_TIER_REASON="runtime-usable"
-    return 0
-  fi
-
   # A Mac never gets here: it is always the macOS node (above, slim client 4.1). Any
   # other non-Linux (e.g. Git Bash / MINGW on Windows) isn't served by this bash
   # installer at all — say so (Bugbot #370).
@@ -234,16 +174,10 @@ _classify_from_probes() {
     return 0
   fi
 
-  # Linux off native k3s: can the kernel run an unprivileged container?
-  if [[ "${PROBE_CGROUP2:-0}" != "1" ]]; then
-    INSTALL_TIER=2; INSTALL_TIER_REASON="no-cgroup2"
-    return 0
-  fi
-  if [[ "${PROBE_USERNS:-0}" != "1" ]]; then
-    INSTALL_TIER=2; INSTALL_TIER_REASON="no-userns"
-    return 0
-  fi
-  INSTALL_TIER=1; INSTALL_TIER_REASON="rootless-capable"
+  # Linux off native k3s is a retired runtime (k3d), which only --diagnose reaches:
+  # the install refuses it before the host check. It stays at the Tier 2 set above.
+  # Tier 1, rootless Docker for k3d, left with k3d, and so did the kernel and
+  # subordinate-ID reasons that named what rootless lacked (client-dev#1950).
   return 0
 }
 
@@ -253,10 +187,6 @@ _classify_from_probes() {
 run_host_probes() {
   PROBE_PRIVILEGE="$(_probe_privilege)"
 
-  PROBE_CGROUP2=0
-  PROBE_USERNS=0
-  PROBE_SUBID=0
-  PROBE_UIDMAP=0
   PROBE_WSL=0
   # On native k3s: whether an administrator prepared this host for this user, by
   # k3s.sh's one predicate (read with no privileges).
@@ -267,11 +197,7 @@ run_host_probes() {
     PROBE_K3S_PREPARED=1
   fi
   if [[ "${OS:-}" == "Linux" ]]; then
-    if _probe_cgroup_v2;      then PROBE_CGROUP2=1; fi
-    if _probe_userns;         then PROBE_USERNS=1; fi
-    if _probe_subid_ranges;   then PROBE_SUBID=1; fi
-    if _probe_uidmap_helpers; then PROBE_UIDMAP=1; fi
-    if _probe_wsl;            then PROBE_WSL=1; fi
+    if _probe_wsl; then PROBE_WSL=1; fi
   fi
 
   _classify_from_probes
@@ -309,30 +235,6 @@ render_host_audit() {
     _audit_row "Environment" "WSL2 (Linux-in-Windows)" note
   fi
 
-  # The kernel rows are Linux's (a Mac has no such kernel knobs).
-  if [[ "${OS:-}" == "Linux" ]]; then
-    if [[ "${PROBE_CGROUP2:-0}" == "1" && "${PROBE_USERNS:-0}" == "1" ]]; then
-      _audit_row "Kernel" "cgroup v2 + unprivileged userns present" ok
-      # Rootless prerequisites (Tier 1): a subuid/subgid range + the setuid uidmap
-      # helpers. A missing one is the single narrow admin touch prepare-host
-      # remediates (RFC 0001 §2.1) — surface it honestly rather than crash later.
-      if [[ "${PROBE_SUBID:-0}" == "1" ]]; then
-        _audit_row "Subordinate IDs" "/etc/subuid + /etc/subgid range present" ok
-      else
-        _audit_row "Subordinate IDs" "no range for this user — one-time admin step" bad
-      fi
-      if [[ "${PROBE_UIDMAP:-0}" == "1" ]]; then
-        _audit_row "uidmap helpers" "newuidmap + newgidmap present (setuid)" ok
-      else
-        _audit_row "uidmap helpers" "missing or not setuid — one-time admin step" bad
-      fi
-    elif [[ "${PROBE_CGROUP2:-0}" != "1" ]]; then
-      _audit_row "Kernel" "cgroup v2 not enabled" bad
-    else
-      _audit_row "Kernel" "unprivileged userns disabled" bad
-    fi
-  fi
-
   case "${PROBE_PRIVILEGE:-}" in
     root)      _audit_row "Privilege" "running as root" note ;;
     sudo_nopw) _audit_row "Privilege" "regular user; passwordless sudo" note ;;
@@ -348,12 +250,9 @@ render_host_audit() {
         *)                   echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 0 (zero root) — no privileged steps." ;;
       esac
       ;;
-    1) echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 1 — set up Docker for your account; a one-time admin step is still needed for now." ;;
     2)
       case "${INSTALL_TIER_REASON:-}" in
         unsupported-os)       echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this OS isn't supported by this installer directly. On Windows, install with install.ps1, which sets up tracebloc's WSL distro." ;;
-        no-cgroup2)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — this kernel isn't on cgroup v2; a one-time admin step is needed." ;;
-        no-userns)            echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — unprivileged user namespaces are disabled; a one-time admin step is needed." ;;
         native-k3s)           echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — native k3s runs as root; administrator rights are needed once." ;;
         unsupported-mac)      echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — tracebloc can't be installed on this Mac. $(declare -F tb_mac_floor_reason >/dev/null && tb_mac_floor_reason "$(tb_mac_floor_verdict)")" ;;
         *)                    echo -e "  ${TB_HEADING}→ Install tier${RESET}  Tier 2 — a one-time admin step is needed to prepare this host." ;;

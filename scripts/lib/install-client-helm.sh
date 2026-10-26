@@ -66,8 +66,8 @@ _ensure_helm_runnable() {
 #   2. the installed release's current value — a `tracebloc resources set`
 #      choice must survive re-install, never be clobbered back to a default
 #   3. sized to this machine: LARGEST node allocatable − platform overhead
-#      (~1 CPU / 3 GiB, the cli's constants; a pod schedules onto ONE node, and
-#      k3d's server+agent are the same machine — summing would double-count)
+#      (~1 CPU / 3 GiB, the cli's constants; a pod schedules onto ONE node, so
+#      summing nodes would over-count)
 #   4. the contract FLOOR (tiny or undeterminable machines) — the fallback the
 #      installer writes when it cannot do better. Was the 8Gi literal above,
 #      which exceeded a default Docker Desktop and sat Pending forever, so
@@ -289,10 +289,9 @@ _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
 
 # ── k3s's own addons, as a FLOOR (client-dev#1693, #1700) ──────────────────
 #
-# What k3s's bundled addons request on the node this installer sets up, native
-# k3s or k3d (which runs the same k3s inside Docker): coredns 100m / 70Mi and
-# metrics-server 100m / 70Mi (k3s's packaged manifests). k3s.sh's config and
-# k3d.sh's `--disable` flags drop traefik and servicelb, and the
+# What k3s's bundled addons request on the node native k3s sets up: coredns
+# 100m / 70Mi and metrics-server 100m / 70Mi (k3s's packaged manifests). k3s.sh's
+# config drops traefik and servicelb, and the
 # local-path-provisioner, where it is kept, requests nothing, so these two are
 # the whole of it. Hand-typed, not generated: the numbers live in k3s's
 # binary, not in this tree. A k3s bump that changes them is caught only by `tracebloc doctor`
@@ -306,19 +305,15 @@ _TB_CP_TRANSIENT_RESERVE_MIN_CPU_MILLI=8000
 # 2112 MiB chart = 3138 MiB, which "fits" with nothing to spare; once
 # the addons land, 2998 MiB is free and doctor says Not ready. The floor makes
 # the fit count what WILL be on the node, whatever has been scheduled so far.
-#
-# Both substrates. k3d runs the same addons, the same fit and the same timing,
-# and bites wherever less than 140 MiB is left to spare
-# (client-dev#1700).
 _TB_K3S_ADDON_MEM_BYTES=146800640
 _TB_K3S_ADDON_CPU_MILLI=200
 
-# Echo "<mem bytes> <cpu m>" -- the system-pod floor this substrate guarantees
-# will be on the node -- or NOTHING when there is no known floor (a substrate
-# this installer does not set up).
+# Echo "<mem bytes> <cpu m>" -- the system-pod floor native k3s guarantees will be
+# on the node -- or NOTHING when there is no known floor (a substrate this
+# installer does not set up).
 _system_requests_floor() {
   case "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" in
-    k3s|k3d) ;;
+    k3s) ;;
     *) return 0 ;;
   esac
   printf '%s %s' "$_TB_K3S_ADDON_MEM_BYTES" "$_TB_K3S_ADDON_CPU_MILLI"
@@ -379,13 +374,7 @@ _TB_NODE_JSONPATH='{range .items[*]}{.status.allocatable.cpu}{" "}{.status.alloc
 #     anchoring on one writes an envelope that cannot schedule. On a
 #     heterogeneous cluster a cordoned LARGE node would otherwise win the
 #     anchor outright and every training pod would sit Pending with no obvious
-#     cause. This is NOT a no-op on installer-provisioned clusters just
-#     because they are 'single-node k3d' -- not all are: an explicit AGENTS=1
-#     on hostpath, and every hostpath cluster created before the one-node
-#     default (client-dev#1418), is TWO nodes (backend#2221). What makes the anchor tie-break a
-#     field no-op there is that both k3d node containers report IDENTICAL
-#     figures, because each reports the whole Docker VM (backend#2221).
-#     The cordon skip itself matters on any cluster with a cordoned node.
+#     cause. The cordon skip matters on any cluster with a cordoned node.
 #   * allocatable cpu or memory unparseable — skipped rather than coerced to 0,
 #     so a node whose memory unit we do not speak cannot take the anchor and
 #     drag a perfectly sizeable sibling down to the literal (Bugbot #766).
@@ -919,12 +908,12 @@ _print_fit_lines() {   # $1 = printer: hint (on screen) or log (log file only); 
 }
 
 # The refusal, worded ONCE for both places it can fire (backend#3535): the fit
-# after values generation and the estimate before `k3d cluster create`. Same
+# after values generation and the estimate before the cluster is created. Same
 # arithmetic lines, same remedy, same TRACEBLOC_TRAINING_RESOURCES way out -- so
 # an operator refused early reads exactly what a late refusal would have said.
 # $1 = the headline, $2 = the lines to print, $3 = the closing error.
 _print_fit_refusal() {
-  # The addons k3s schedules beside the platform (native k3s and k3d) are part
+  # The addons k3s schedules beside the platform are part
   # of what the node must hold, so they are part of what the remedy asks for.
   local _rf _rf_mem=0 _rf_cpu=0
   _rf="$(_system_requests_floor)"
@@ -1008,7 +997,7 @@ _fit_training_envelope() {
   else
     sys_how="NOT measured (${_TB_SYS_NOTE}); verified against the chart derivation only"
   fi
-  # Native k3s and k3d: never count less than the addons k3s is about to
+  # Native k3s: never count less than the addons k3s is about to
   # schedule (client-dev#1693, #1700; see _TB_K3S_ADDON_*). Per dimension, so
   # a measurement that already includes them -- or more -- is used as-is.
   local floor floor_mem_b floor_cpu_m
@@ -1026,7 +1015,7 @@ _fit_training_envelope() {
 }
 
 # THE FIT RULE, over numbers only (backend#3535). Split out of
-# _fit_training_envelope so the estimate that runs BEFORE `k3d cluster create`
+# _fit_training_envelope so the estimate that runs BEFORE the cluster is created
 # (_precreate_fit_estimate) calls the rule itself rather than a copy of it:
 # given what one node offers, what else it must hold, and the envelope, decide
 # fits | reduced | refused | pinned-over and write the arithmetic. Everything
@@ -1170,15 +1159,14 @@ _fit_verdict() {
 
 # ── the fit, estimated BEFORE the cluster exists (backend#3535) ──────────────
 #
-# The fit above runs when the values are generated, which is AFTER `k3d cluster
-# create`. A host that cannot hold even a 1-core / 1-GiB run beside the platform
-# got the right verdict there -- and was left with an empty k3d cluster to delete
-# by hand. Every fact the refusal rests on is already known before anything is
+# The fit above runs when the values are generated, which is AFTER the cluster is
+# created. A host that cannot hold even a 1-core / 1-GiB run beside the platform
+# got the right verdict there -- and was left with an empty cluster to remove by
+# hand. Every fact the refusal rests on is already known before anything is
 # created, so this asks the same question first:
 #
-#   * what one node will offer: the container runtime's memory and CPU (on
-#     Linux the host's; on macOS/Windows the Docker VM's -- every k3d node
-#     reports the whole of it), minus the node reservation this platform's
+#   * what one node will offer: its memory and CPU (on Linux the host's; on a
+#     Mac the node VM's; in WSL the WSL VM's), minus the node reservation this platform's
 #     kubelet is about to be given (cluster.sh's generated TRACEBLOC_KUBELET_* block),
 #     subtracted the way the kubelet subtracts it: capacity - kubeReserved -
 #     systemReserved - evictionHard. An UNMEASURED platform gets no
@@ -1286,13 +1274,11 @@ _precreate_fit_estimate() {
   return 0
 }
 
-# The gate create_cluster runs immediately before `k3d cluster create`
-# (k3d.sh _create_new_cluster), and on native k3s before a new k3s's first step
-# (k3s.sh _native_k3s_create_cluster). Reads the runtime through preflight.sh's
-# bounded docker-info readers -- the same ones _pf_recheck_runtime_mem uses a
-# moment earlier -- and refuses with the fit's own message shape.
+# The gate native k3s runs before a new k3s's first step (k3s.sh
+# _native_k3s_create_cluster). Reads the node's size through preflight.sh's runtime
+# readers and refuses with the fit's own message shape.
 #
-# On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) the same readers answer from the host, which
+# On native k3s (TRACEBLOC_SUBSTRATE_RESOLVED=k3s) the readers answer from the host, which
 # is the node (preflight.sh), and the reservation is the `linux_k3s` key's,
 # measured on native k3s (client-dev#1469). On macOS they answer the node's size, the
 # VM mac-container.sh's rule gives, and the key is `unknown` until darwin_k3s is
@@ -1867,7 +1853,7 @@ open_dashboard_link() {
 }
 
 # ── Corporate-proxy passthrough into the chart (#242) ───────────────────────
-# k3d.sh propagates the host's HTTP(S)_PROXY to the k3d *nodes* so
+# The node gets the host's HTTP(S)_PROXY (cluster.sh, _node_proxy_env) so
 # containerd can pull images behind a corporate proxy (#166). But the client
 # *workloads* — jobs-manager (api + pods-monitor), requests-proxy, the
 # image-refresh / auto-upgrade cronjobs — only get proxy egress if the CHART
@@ -2035,7 +2021,7 @@ _last_deployed_helm_revision() {
 #   - spin's deadline (_tb_helm_deadline_s) is helm's budget plus the lock's wait, so the
 #     wait never takes helm's time and lockf's 75 comes first. At it spin TERMs and KILLs
 #     the whole tree (_tb_spin_reap), so a timed-out call leaves no helm without the lock.
-# Elsewhere (Linux, WSL, k3d on a Mac) no runner restarts a node, and the prefix is empty.
+# Elsewhere (Linux, WSL) no runner restarts a node, and the prefix is empty.
 _TB_HELM_LOCK=()
 _TB_HELM_LOCKF=/usr/bin/lockf
 
@@ -2407,7 +2393,7 @@ _host_os_set_args() {
 #                               them (values.yaml `restrictedDns`): a pod cannot carry data
 #                               out in a DNS query's name (D10 item 6).
 # The local API (the chart's one NodePort) is not a wall, so it is not here. It rides
-# TB_LOCAL_API_MAPPED as on k3d: on, with k3d's four --set pairs, when this run's node
+# TB_LOCAL_API_MAPPED: on, with the four --set pairs, when this run's node
 # publishes it on 127.0.0.1 and its packet filter lets this Mac alone to its NodePort
 # (mac-container.sh, _mac_ct_local_api; client-dev#2379, which amends D10 item 4 by
 # Lukas's decision of 2026-10-19); off when the user opted out or the port was refused.
@@ -2445,8 +2431,8 @@ _mac_node_profile_set_args() {
 # install over values the installer did not just write: the adopt reconcile (a release's
 # stored values, --reuse-values) and dev mode (the caller's TRACEBLOC_VALUES_FILE,
 # client-dev#1764). Both would otherwise keep a GPU decision this run did not make: a
-# vendor-changed edge training on the wrong resource, an NVIDIA edge dropped to CPU (reuse
-# guard / CDI setup set TRACEBLOC_GPU_WIRED=0) still requesting a GPU and stranding jobs
+# vendor-changed edge training on the wrong resource, an NVIDIA edge dropped to CPU (step c
+# left TRACEBLOC_GPU_WIRED=0) still requesting a GPU and stranding jobs
 # Pending, or a wired GPU host with every key empty and no device plugin, so the node
 # advertises 0 GPUs (backend#2033, client#835). The values are the SAME the fresh write
 # chooses (_gpu_request_value, _gpu_runtime_class, _detect_device_type), each as
@@ -2457,10 +2443,9 @@ _mac_node_profile_set_args() {
 #   env.DEVICE_TYPE (backend#4346): the chassis verdict; empty when unreadable, which the
 #     chart skips, so jobs-manager omits the key;
 #   the unsupported reason (_gpu_unsupported_set_args, client-dev#1633), empty clears it;
-#   the device-plugin block: nvidia only when wired (it needs the NVIDIA RuntimeClass: on
-#     k3d the one baked into the k3s-cuda node image, on native k3s the one k3s creates
-#     for the runtime step c's gate found; common.sh _gpu_runtime_class), amd on
-#     detection, else disabled.
+#   the device-plugin block: nvidia only when wired (it needs the NVIDIA RuntimeClass:
+#     on native k3s the one k3s creates for the runtime step c's gate found; common.sh
+#     _gpu_runtime_class), amd on detection, else disabled.
 # --set and --set-string outrank --values in helm whatever their order, so this run's
 # decision wins over a values file's own GPU keys, an explicit "" included. Into
 # _TB_GPU_DECISION_ARGS (an array, bash-3.2 safe, never empty).
@@ -2535,7 +2520,7 @@ _mac_node_storage_steps() {
 # NVIDIA is additionally gated on the GPU being WIRED into the cluster (client#835,
 # _gpu_wired): requesting nvidia.com/gpu on a node that advertises 0 GPUs strands
 # every job Pending, so a detected-but-not-wired NVIDIA host requests nothing (CPU).
-# AMD has no k3d wiring step (it uses the device plugin only), so it stays keyed on
+# AMD has no wiring step (it uses the device plugin only), so it stays keyed on
 # detection.
 _gpu_request_value() {
   case "${GPU_VENDOR:-}" in
@@ -2574,8 +2559,8 @@ _gpu_request_value() {
 # THIS run wires a GPU request (GPU_VAL, the same value written to GPU_LIMITS),
 # else server. A desk-class chassis is a workstation whether or not it has a GPU:
 # the dashboard's hardware line already names the card, and the glyph is about
-# where the machine sits. `cluster` is never detected here — a k3d install is one
-# host by construction; jobs-manager derives it from SINGLE_NODE on the clusters
+# where the machine sits. `cluster` is never detected here — this installer's
+# cluster is one host by construction; jobs-manager derives it from SINGLE_NODE on the clusters
 # this installer does not build.
 # Hypervisor signatures, matched case-insensitively as substrings of the DMI
 # `sys_vendor product_name` pair (Windows: `Manufacturer Model`). A match means
@@ -2802,8 +2787,8 @@ _detect_device_type() {
 
 # ── Machine facts for the dashboard ───────────────────────────────────────────
 # What the installer reads off the host and the resource monitor cannot: a pod
-# sees neither the chassis, nor the cloud's firmware strings, nor (in a k3d node
-# on a Mac) the host's CPU name. Each is passed to the chart as one env var on the
+# sees neither the chassis, nor the cloud's firmware strings, nor (in the macOS
+# node's VM) the host's CPU name. Each is passed to the chart as one env var on the
 # resource monitor (_machine_facts_set_args), which sends it on every heartbeat.
 # A fact that cannot be read is EMPTY, and the chart then leaves the variable
 # unset: the platform keeps what it had rather than store a guess. Each verdict
@@ -2908,7 +2893,7 @@ _detect_machine_kind() {
 
 # _detect_host_cpu_name — the host CPU's model name where the node cannot read it:
 # macOS only, from `sysctl -n machdep.cpu.brand_string` ("Apple M3 Pro"), whose
-# k3d node's /proc/cpuinfo names no model on Apple silicon. Trimmed; nothing on
+# node VM's /proc/cpuinfo names no model on Apple silicon. Trimmed; nothing on
 # any other OS, when sysctl cannot answer, or when the name is longer than the
 # 200 characters the platform stores (a longer one is dropped, never cut).
 _detect_host_cpu_name() {
@@ -3053,18 +3038,13 @@ _reconcile_adopted_client() {
   _args+=("${_TB_MACHINE_FACTS_ARGS[@]}")  # set-u-safe: _machine_facts_set_args always assigns six words
   # The local API (backend#5208) rides the same reconcile, for the same reason:
   # a release from before localApi existed reuses the chart default, off, while
-  # create_cluster's _ensure_local_api_port (k3d), or the macOS node's publish
-  # (_mac_ct_ensure_node, client-dev#2379), has just mapped 127.0.0.1 to its
-  # NodePort. Force THIS run's decision, the one _local_api_values_block writes on
-  # a fresh install: on with the two ports k3d mapped, else off, so a mapping
-  # that is gone (opted out, port busy, edit refused) can't leave a stale "on".
-  # Unknown (docker could not say whether the port is published): no localApi
-  # args at all, so the stored value stands rather than a transient read
-  # switching a working listener off.
-  if [[ "${TB_LOCAL_API_UNKNOWN:-0}" == "1" ]]; then
-    :
-  elif [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]]; then
-    # singleMachine: this run just mapped the port with k3d on this machine, and
+  # the macOS node's publish (_mac_ct_ensure_node, client-dev#2379) has just mapped
+  # 127.0.0.1 to its NodePort. Force THIS run's decision, the one
+  # _local_api_values_block writes on a fresh install: on with the two ports the
+  # node mapped, else off, so a mapping that is gone (opted out, port busy) can't
+  # leave a stale "on".
+  if [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]]; then
+    # singleMachine: this run just mapped the port on this machine, and
     # a release from the window when node-local was opt-in stores neither
     # singleNode nor hostPath.enabled=true, so without it the chart's guard would
     # refuse the upgrade.
@@ -3578,8 +3558,7 @@ _values_hostpath_storage() {
 }
 
 # _native_k3s_release_storage -- native k3s only (client-dev#1782): keep the storage
-# an installed release was made with. The k3d twin is _check_existing_cluster_storage_mode
-# (k3d.sh), which reads the node's bind mount; native k3s has no node to inspect, so
+# an installed release was made with. Native k3s has no node to inspect, so
 # the answer is the release's own stored hostPath values. A release's volumes cannot
 # change in place -- a PV's path and a PVC's class are immutable, so a re-run that
 # rendered the other mode, or another root, would fail the upgrade.
@@ -3675,19 +3654,12 @@ _native_k3s_release_storage() {
 }
 
 # _hostpath_paths_block -- the hostPath keys after `enabled: true` in the values file.
-#   k3d: the node sees HOST_DATA_DIR at /tracebloc, the chart's default root, and a
-#        dataset dir at /tracebloc-data, so only datasetPath is written, and only
-#        with a dataset dir.
-#   native k3s (client-dev#1782): the node is the host, so the PVs name the host's
-#        own directories: root is HOST_DATA_DIR, datasetPath HOST_DATASET_DIR when
-#        one is set (unset, the chart follows root). An installed release keeps the
-#        two it was made with (_native_k3s_release_storage).
+# The node is the host (client-dev#1782), so the PVs name the host's own directories:
+# root is HOST_DATA_DIR, datasetPath HOST_DATASET_DIR when one is set (unset, the
+# chart follows root). An installed release keeps the two it was made with
+# (_native_k3s_release_storage).
 # Single-quoted (_yaml_sq_escape): a data dir is a path the operator chose.
 _hostpath_paths_block() {
-  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" != "k3s" ]]; then
-    [[ -z "${HOST_DATASET_DIR:-}" ]] || printf '  datasetPath: /tracebloc-data\n'
-    return 0
-  fi
   local ds="${HOST_DATASET_DIR:-}"
   [[ "${TB_HOSTPATH_KEPT:-}" != 1 ]] || ds="${TB_HOSTPATH_DATASET:-}"
   printf "  root: '%s'\n" "$(_yaml_sq_escape "$(_hostpath_root)")"
@@ -3928,46 +3900,45 @@ _assert_engine_runs_on_this_arch() {
     *)
       return 0 ;;  # unknown OS: no emulation model — do not gate
   esac
-  # LINUX ONLY past here. Name the actual cause. `explicit`, `existing-release`,
-  # `existing-datadir` and the dev-mode `values-file` (its own `*)` arm below) can
-  # reach here (`sticky` and `fresh` resolve to 8.4), but the reason is matched
-  # rather than assumed: a future reason must not inherit a claim about this
-  # host's data that may be false.
+  # LINUX ONLY past here. Name the actual cause, matched rather than assumed: `explicit`,
+  # `existing-release`, `existing-datadir` and dev mode's `values-file` (the `*)` arm) reach
+  # here, and a future reason must not inherit a false claim about this machine's data.
+  # The remedy is the one preflight gives: amd64_emulation_remedy.
+  local remedy; remedy="$(amd64_emulation_remedy)"
   case "${TB_MYSQL_ENGINE_REASON:-}" in
     explicit)
       warn "TB_MYSQL_ENGINE=5.7 was requested, and the MySQL 5.7 image is amd64-only — it cannot run on ${ARCH}."
       hint "Drop TB_MYSQL_ENGINE (or set TB_MYSQL_ENGINE=8.4) to use the native multi-arch 8.4 engine — fresh data directories only."
       hint "To keep 5.7, enable amd64 emulation and re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "  ${remedy}"
       error "MySQL 5.7 was requested explicitly and cannot run on ${ARCH} without amd64 emulation." ;;
     existing-release)
       warn "An existing tracebloc release is installed here, so the install keeps the MySQL 5.7 engine as a data-safety default — and that image is amd64-only."
       hint "Whether this release's data is actually 5.7-format cannot be told from here: the release is detected via 'helm list', not the data directory. 5.7 is kept because 8.4 cannot open a 5.7-format datadir if one exists."
       hint "Keep the existing release — enable amd64 emulation, then re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "  ${remedy}"
       hint "Or start fresh on the native 8.4 engine — this needs BOTH the release AND its retained data removed. 'helm uninstall' alone is not enough: the MySQL volume is annotated 'helm.sh/resource-policy: keep', so it survives the uninstall, and 8.4 cannot open a 5.7-format datadir, which that retained volume may be (the next run resolves to 8.4 and fails the format guard after cluster setup). Delete the retained MySQL PVC (and any host data directory) as well before re-running."
       error "MySQL 5.7 (kept for the existing release) cannot run on ${ARCH} without amd64 emulation." ;;
     existing-datadir)
       warn "This host holds existing MySQL 5.7 data, so the install must keep the MySQL 5.7 engine — and that image is amd64-only."
       hint "This is a data-format constraint, not an architecture one: MySQL 8.4 runs natively on ${ARCH}, but it cannot open a 5.7-format datadir (MySQL upgrades only in stages, 5.7 → 8.0 → 8.4)."
       hint "Keep this data — enable amd64 emulation, then re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "  ${remedy}"
       hint "Or start fresh on the native 8.4 engine — uninstall any existing release, then install into an empty data directory (the existing files keep the install on 5.7):"
       hint "  --data-dir=/path/to/new/empty/dir"
       error "MySQL 5.7 is required by the existing data on this host and cannot run on ${ARCH} without amd64 emulation." ;;
     *)
       warn "This install resolved to the MySQL 5.7 engine (${TB_MYSQL_ENGINE_REASON:-unknown reason}), and that image is amd64-only — it cannot run on ${ARCH}."
       hint "Enable amd64 emulation and re-run:"
-      hint "  docker run --privileged --rm tonistiigi/binfmt --install amd64"
+      hint "  ${remedy}"
       error "MySQL 5.7 cannot run on ${ARCH} without amd64 emulation." ;;
   esac
 }
 
 # #553: give the bundled metrics-server APIService a bounded window to register
-# before helm renders. On a freshly created k3d cluster k3s applies its bundled
+# before helm renders. On a freshly created cluster k3s applies its bundled
 # metrics-server (and the v1beta1.metrics.k8s.io APIService) shortly AFTER the
-# API server is ready; `k3d cluster create --wait` only gates on node/serverlb
-# readiness, not bundled addons. The resource-monitor DaemonSet template calls
+# API server is ready, and the API wait gates on the API, not bundled addons. The resource-monitor DaemonSet template calls
 # `{{ fail }}` at render time if that APIService isn't registered yet, so on a
 # slow WSL2/laptop helm can render in that window and abort the WHOLE install.
 # Best-effort: if the APIService never registers here we fall through and let
@@ -4054,15 +4025,15 @@ _adopt_orphaned_gpu_device_plugin() {
   return 0
 }
 
-# The `localApi` block of the generated values: present only when k3d.sh's
-# _ensure_local_api_port, or the macOS node (_mac_ct_ensure_node), recorded the
+# The `localApi` block of the generated values: present only when the macOS node
+# (_mac_ct_ensure_node) recorded the
 # mapping (TB_LOCAL_API_MAPPED=1, with the two ports it mapped), because the chart
 # opens the NodePort only when it exists. An existing release gets the same decision as --set args in
 # _reconcile_adopted_client.
 _local_api_values_block() {
   [[ "${TB_LOCAL_API_MAPPED:-0}" == "1" ]] || return 0
   printf '\n# The local API the dashboard reaches on this machine: on, because the cluster maps\n'
-  printf '# 127.0.0.1:%s to its NodePort (k3d: _ensure_local_api_port; the macOS node: _mac_ct_ensure_node).\n' "$TRACEBLOC_LOCAL_API_HOST_PORT"
+  printf '# 127.0.0.1:%s to its NodePort (the macOS node: _mac_ct_ensure_node).\n' "$TRACEBLOC_LOCAL_API_HOST_PORT"
   printf 'localApi:\n  enabled: true\n  nodePort: %s\n  hostPort: %s\n  singleMachine: true\n' "$TRACEBLOC_LOCAL_API_NODE_PORT" "$TRACEBLOC_LOCAL_API_HOST_PORT"
 }
 
@@ -4321,8 +4292,8 @@ install_client_helm() {
   # _gpu_request_value): requesting nvidia.com/gpu on a node that advertises 0
   # strands every job Pending (the pre-#835 Linux bug), so gate on what PROVISIONS
   # the GPU, not bare detection. NVIDIA training pods also run under the NVIDIA
-  # RuntimeClass (_gpu_runtime_class: on k3d baked into the GPU node image, on
-  # native k3s created by k3s itself) so the node's containerd invokes the NVIDIA
+  # RuntimeClass (_gpu_runtime_class: on native k3s created by k3s itself) so the
+  # node's containerd invokes the NVIDIA
   # runtime; AMD needs no RuntimeClass. A request this fixed single-node
   # cluster can't satisfy is safe: SINGLE_NODE below tells jobs-manager to downgrade
   # a Pending GPU pod to CPU rather than strand it (client-runtime#92).
@@ -4352,8 +4323,8 @@ install_client_helm() {
   # can init NVML on native Linux — the plugin pod otherwise runs under the default
   # runtime, sees no GPU, and registers 0. So it is enabled only when the GPU is
   # actually wired (a stock CPU node has no `nvidia` RuntimeClass, which would leave
-  # the pod unschedulable). AMD is unchanged: its plugin needs no k3d flag or
-  # RuntimeClass, so it stays gated on bare detection.
+  # the pod unschedulable). AMD is unchanged: its plugin needs no RuntimeClass, so
+  # it stays gated on bare detection.
   local gpu_block="" rtc
   if _gpu_wired; then
     rtc="$(_gpu_runtime_class)"
@@ -4497,7 +4468,7 @@ $([ -n "$_tb_stage_resolved" ] && printf '  TRACEBLOC_ENV: "%s"\n  CLIENT_ENV: "
   # nvidia when the GPU is wired (client#835): jobs-manager threads it into every
   # spawned pod so the node's containerd invokes the NVIDIA runtime; "" on CPU.
   RUNTIME_CLASS_NAME: "$runtime_class"
-  # client-runtime#92: installer-provisioned k3d is a fixed single-host cluster
+  # client-runtime#92: an installer-provisioned cluster is a fixed single host
   # that cannot autoscale, so jobs-manager applies the hard CPU-or-GPU rule —
   # a Pending GPU pod is downgraded to CPU rather than waiting for a GPU node
   # that will never arrive.
@@ -4510,8 +4481,8 @@ $([ -n "${HOST_DATASET_DIR:-}" ] && printf '  HOST_UID: "%s"\n  HOST_GID: "%s"\n
 $(if [[ "${TB_STORAGE_MODE:-node-local}" == "node-local" ]]; then
 cat <<'STORAGE'
 # RFC-0003 Option C — node-local: use k3s's built-in local-path StorageClass.
-# No hostPath PVs, so dataset volumes are provisioned inside the k3d node and
-# are destroyed by `cluster delete` rather than left as host files.
+# No hostPath PVs, so dataset volumes are provisioned in k3s's local-path
+# storage on the node rather than in host folders the chart names.
 storageClass:
   create: false
   name: local-path
@@ -4519,7 +4490,7 @@ storageClass:
 hostPath:
   enabled: false
 
-# node-local is a single schedulable node (the k3d create path forces AGENTS=0, SERVERS=1),
+# node-local is a single schedulable node (native k3s is one server),
 # so the single-replica PDBs would be undrainable here. hostPath.enabled=false
 # would otherwise misclassify this as multi-node, so declare the topology
 # explicitly to skip those PDBs and keep the node drainable (client#560).

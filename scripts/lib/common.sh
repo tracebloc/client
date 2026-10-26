@@ -41,21 +41,16 @@ umask 077
 # (`${TB_PULL_TIMEOUT:-600}`), so those dozens of reads, their defaults and
 # their blank-means-default behaviour are unchanged; a blank canonical is unset.
 # Nothing here is exported, so no child sees a value its parent did not.
-# TB_TIER1_ROOTLESS / TB_FORCE_TIER are the Tier-1 support switches.
 tb_tuning_aliases=(
-  TB_API_WAIT_S TB_ASSESS_DOCKER_TIMEOUT
-  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT TB_CLUSTER_START_TIMEOUT_MIN
-  TB_CREATE_TIMEOUT_MIN TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
-  TB_DOCKER_INSPECT_TIMEOUT TB_DOCKER_LOGIN_TIMEOUT
-  TB_DOCKER_LOGS_TIMEOUT TB_DOCKER_NET_TIMEOUT TB_DOCKER_PROBE_TIMEOUT
-  TB_FORCE_TIER TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT TB_GPU_PULL_TIMEOUT_MIN
-  TB_GPU_VERIFY_TIMEOUT
+  TB_API_WAIT_S
+  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT
+  TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
+  TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
-  TB_K3D_EDIT_TIMEOUT TB_K3D_LIST_TIMEOUT TB_K3D_START_TIMEOUT TB_K3D_STOP_TIMEOUT
   TB_K3S_CRI_TIMEOUT TB_K3S_INSTALL_SH_TIMEOUT
-  TB_KUBECONFIG_MERGE_TIMEOUT TB_KUBECTL_PROBE_TIMEOUT TB_METRICS_WAIT_S
-  TB_NODE_CHECK_EVERY_S TB_OFFBOARD_TIMEOUT TB_PLAIN TB_PM_KILL_GRACE TB_PROBE_TIMEOUT TB_PROBE_VERIFY
-  TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT TB_TIER1_ROOTLESS
+  TB_METRICS_WAIT_S
+  TB_PLAIN TB_PM_KILL_GRACE TB_PROBE_TIMEOUT
+  TB_PROGRESS_KUBECTL_TIMEOUT TB_PULL_TIMEOUT
   TB_WSL_INTEROP_KILL_AFTER TB_WSL_INTEROP_TIMEOUT
   GPU_DEVICE_PLUGIN_NAMESPACE SIGN_IN_ATTEMPTS
 )
@@ -379,9 +374,8 @@ prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
 hint()           { echo -e "  ${DIM}$*${RESET}"; }
 
 # The "remove the client that is already here" remedy, printed from ONE place
-# (backend#2077) — peer of k3d.sh::_recreate_cluster_hint, for the sites that
-# mean a FULL removal (switch account, switch Client ID), not a keep-your-data
-# recreate.
+# (backend#2077), for the sites that mean a FULL removal (switch account, switch
+# Client ID), not a keep-your-data recreate.
 #
 # Why not just `k3d cluster delete`: the backend record is anchored to the
 # cluster's identity (the kube-system namespace UID), which dies with the k3d
@@ -432,28 +426,11 @@ step_header()    {
 # ── Utility ──────────────────────────────────────────────────────────────────
 has() { command -v "$1" &>/dev/null; }
 
-# _valid_cluster_name NAME -- the cluster-name rule, in one place: validate_config
-# holds CLUSTER_NAME to it, and reinstall.sh holds a name to it before the name
-# reaches _cluster_presence's awk and grep (that detection runs before
-# validate_config).
-_valid_cluster_name() { [[ "${1:-}" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]]; }
-
-# _refuse_invalid_cluster_name NAME -- validate_config's refusal of a name outside
-# that rule, in one place: the k3d detection in reinstall.sh runs before
-# validate_config and refuses an invalid CLUSTER_NAME in the same words.
+# _refuse_invalid_cluster_name NAME -- validate_config's refusal of a cluster name
+# outside the rule: a letter, then [a-zA-Z0-9._-], 63 characters at most.
 _refuse_invalid_cluster_name() {
-  _valid_cluster_name "${1:-}" \
+  [[ "${1:-}" =~ ^[a-zA-Z][a-zA-Z0-9._-]{0,62}$ ]] \
     || error "CLUSTER_NAME must start with a letter, contain only [a-zA-Z0-9._-], max 63 chars (got '${1:-}')"
-}
-
-# _rootless_active — the single source of truth for "this run is a rootless Tier-1
-# install" (RFC 0001 #1177). Slice 1 (#1219) established the condition as
-# INSTALL_TIER==1 AND the opt-in TB_TIER1_ROOTLESS flag; every later slice calls
-# THIS predicate instead of re-testing the pair, so the two markers can never drift
-# (#1221). Lives in common.sh because both setup-linux.sh (the install path) and
-# k3d.sh (the cluster path, sourced standalone by the e2e harness) depend on it.
-_rootless_active() {
-  [ "${INSTALL_TIER:-}" = "1" ] && [ "${TB_TIER1_ROOTLESS:-0}" = "1" ]
 }
 
 # Execute-gate a freshly-installed tool (#411). The old post-install "check" was a
@@ -608,12 +585,10 @@ _tb_bounded_wait() {
 # WHY IT EXISTS ALONGSIDE _bounded (client#984). `_bounded` leaves the output where
 # the caller put it; this one captures it to a FILE, and uses the background-PID
 # deadline (_tb_bounded_bg) on every host, coreutils or not, so a capture behaves
-# the same everywhere. `_docker_answers_bounded` bounds a yes/no probe by letting
-# `spin` kill it on a deadline, but spin writes UI and discards the command's
-# OUTPUT, so it cannot serve a read whose output is the point.
+# the same everywhere.
 #
-# The --diagnose bundle is exactly that case and the one where the cost is the
-# whole artifact rather than a stall: every read in it goes into a `{ … } > file`
+# The --diagnose bundle is a read whose output is the point, and the one where the
+# cost is the whole artifact rather than a stall: every read in it goes into a `{ … } > file`
 # group, so ONE call that never returns means no file at all, from the one run
 # collected BECAUSE the machine is already broken. A `docker info` gate passing in
 # 10s does not make a 15s `k3d cluster list` safe — more engine work, different
@@ -629,18 +604,6 @@ _bounded_capture() {
   _tb_bounded_bg "$secs" "$@" >"$out" 2>&1 </dev/null
 }
 
-# Deadline for `k3d cluster list` (seconds). Its OWN knob, deliberately LOOSER
-# than TB_DOCKER_PROBE_TIMEOUT's 10s, because it is strictly more engine work:
-# `docker info` asks the daemon about itself, while `k3d cluster list` enumerates
-# AND inspects the cluster's containers. The first cut of client#974 gave it
-# TB_PROBE_TIMEOUT's 5s — the tightest bound in the tree on the slowest call, and
-# half the budget of the daemon probe that gates it (LukasWodka, client#984).
-#
-# 15s is the deadline the retired PowerShell core gave the same read. It also
-# narrows the window the tri-state has to resolve: a busy-but-healthy engine
-# that answers in 6s is now PRESENT/ABSENT rather than UNKNOWN.
-: "${TB_K3D_LIST_TIMEOUT:=15}"
-
 # _bounded_root SECONDS CMD… — like _bounded, but for a command that runs as root.
 # `_bounded` execs `timeout`, a BINARY, which resolves `sudo` from PATH and so
 # bypasses the root-aware `sudo()` shadow below — and as root (the normal
@@ -654,103 +617,6 @@ _bounded_root() {
   if   has timeout;  then tb_root timeout  "$t" "$@"
   elif has gtimeout; then tb_root gtimeout "$t" "$@"
   else tb_root_bounded "$t" "$@"; fi   # a binary under the deadline, never the tb_root function (a killed subshell leaves CMD running)
-}
-
-# _docker_answers [ERRFILE] — `docker info`, bounded and silent. The single probe
-# every "is the runtime up?" check should route through. Returns _bounded's status:
-# 124 is the deadline, any other non-zero is Docker's own failure. ERRFILE, when
-# given, receives docker's stderr instead of /dev/null, for a caller that quotes
-# why a fast failure failed (client-dev#1748).
-#
-# A bare `docker info` does not return when the daemon is WEDGED, as opposed to
-# stopped — and wedged is precisely the state that lands a machine in
-# assess's runtime-down branch, since _assess_runtime_down classifies on
-# _bounded's 124. So the unbounded probe hangs exactly on the input that
-# reaches it: the operator is told Docker is being started and the installer
-# freezes with no further output (Bugbot, #741).
-#
-# TB_DOCKER_PROBE_TIMEOUT defaults to the same 10s as TB_ASSESS_DOCKER_TIMEOUT;
-# they answer the same question about the same daemon and should not disagree.
-_docker_answers() {
-  _bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker info >/dev/null 2>"${1:-/dev/null}"
-}
-
-# tb_k3d_cluster_names [ERRFILE] -- the k3d cluster of every container Docker lists
-# with the label k3d puts on each node it creates (app=k3d), stopped ones too, one
-# per line, so a stopped k3d cluster is listed. A container with no cluster label (a
-# k3d registry) gives an empty line: it names no cluster. Bounded as
-# _docker_answers is, and returns _bounded's status: 0 is a listing (no line is no
-# cluster), 124 is the deadline (Docker did not answer), anything else is Docker's
-# own failure, whose stderr goes to ERRFILE when given, for a caller that quotes it
-# (client-dev#1748). The one reader of that label: reinstall detection
-# (_reinstall_detect) and the fresh rule on a Mac (_tb_substrate_fresh) both call
-# it.
-tb_k3d_cluster_names() {
-  local out rc=0
-  out="$(_bounded "${TB_DOCKER_PROBE_TIMEOUT:-10}" docker ps -a --filter label=app=k3d --format '{{.Label "k3d.cluster"}}' 2>"${1:-/dev/null}")" || rc=$?
-  [[ "$rc" -eq 0 ]] || out=""   # what a read printed before it failed is no answer (client-dev#1731)
-  [[ -z "$out" ]] || printf '%s\n' "$out"
-  return "$rc"
-}
-
-# ── Subordinate ID helpers (rootless Docker, RFC 0001 #1220) ──────────────────
-# Pure parsers shared by probe.sh (detection) and setup-linux.sh (remediation), so
-# both read /etc/subuid + /etc/subgid the same way. Lines are `key:start:count`,
-# key = user name OR numeric uid.
-
-# _subid_has_entry FILE NAME UID — true if FILE has a range keyed by NAME or UID.
-# First-field (anchored) match, so a name that is a substring of another user's
-# entry can't false-positive. FILE is world-readable; the read is side-effect-free.
-_subid_has_entry() {
-  local file="$1" name="$2" uid="$3" key
-  [[ -r "$file" ]] || return 1
-  while IFS=: read -r key _ _; do
-    [[ -n "$key" ]] || continue
-    [[ "$key" == "$name" ]] && return 0
-    [[ -n "$uid" && "$key" == "$uid" ]] && return 0
-  done < "$file"
-  return 1
-}
-
-# _next_subid_start FILE... — the next free start offset for a fresh 65536-wide
-# block: max(start+count) across the given files, or 100000 (Docker's default base)
-# when none carry a valid range. Guarantees the new block can't overlap an existing
-# allocation, so remediation is safe to run on a host that already has some ranges.
-_next_subid_start() {
-  local f start count max=100000
-  for f in "$@"; do
-    [[ -r "$f" ]] || continue
-    while IFS=: read -r _ start count; do
-      [[ "$start" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] || continue
-      if (( start + count > max )); then max=$(( start + count )); fi
-    done < "$f"
-  done
-  echo "$max"
-}
-
-# _idmap_helper_ok NAME — is a subid-mapping helper (newuidmap/newgidmap) both
-# present AND privileged enough to write ID maps: the setuid bit, OR a cap_setuid
-# file capability. Arch's `shadow` ships these with filecaps rather than setuid
-# (Bugbot, client#458), so a setuid-only test wrongly rejects a working helper and
-# false-hands-off. When getcap is unavailable we can't inspect caps, so fall back to
-# the setuid check alone. Shared by probe.sh (detection) and setup-linux.sh (the
-# post-install re-verify).
-_idmap_helper_ok() {
-  local name="$1" p cap
-  p="$(command -v "$name" 2>/dev/null)" || return 1
-  [[ -n "$p" ]] || return 1
-  [[ -u "$p" ]] && return 0                     # setuid-root covers both helpers
-  # Filecaps path (Arch etc.): newuidmap needs cap_setuid, newgidmap needs
-  # cap_setgid — checking cap_setuid for both wrongly rejects newgidmap (Bugbot #458).
-  case "$name" in
-    newgidmap) cap=cap_setgid ;;
-    *)         cap=cap_setuid ;;
-  esac
-  if has getcap; then
-    local caps; caps="$(getcap "$p" 2>/dev/null)"
-    [[ "$caps" == *"$cap"* ]] && return 0
-  fi
-  return 1
 }
 
 # Sanitize a minutes-valued env override to a base-10 integer, else <default>.
@@ -844,8 +710,8 @@ _strip_paste_garbage() {
 # jq. Missing or non-numeric components read as 0, so "0.10" < "0.10.1" and a
 # pre-release suffix ("0.10.0-rc.1") compares as its base version.
 #
-# Lives here rather than in assess.sh (backend#2422) because k3d.sh gates a
-# kubelet flag on the k3s pin and assess.sh is sourced only conditionally.
+# Lives here rather than in assess.sh (backend#2422) because k3s.sh and
+# install-cli.sh call it and assess.sh is sourced only conditionally.
 #
 # CALLER MUST STRIP A LEADING "v". A non-numeric leading component reads as 0, so
 # `_version_lt v1.36.3 1.31.0` is TRUE — the comparison silently inverts and a
@@ -1150,7 +1016,7 @@ spin() {
   while kill -0 "$pid" 2>/dev/null; do
     if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 || SECONDS - _spin_t0 > deadline_s )); then
       # The whole tree, not just the pid: it is often a wrapper subshell
-      # (k3d.sh's `( k3d … ) &`, or spin_cmd_bounded's `tb_root dnf …`), and
+      # (spin_cmd_bounded's `tb_root dnf …`), and
       # signalling only the wrapper orphans the real worker (Bugbot #442).
       # Every line is failure-proofed (`|| true`): under `set -e` a bare
       # failure would abort the deadline path before `return 124`, and the
@@ -1222,36 +1088,6 @@ spin_cmd_bounded() {
     tail -10 "$logfile" >&2
     return $rc
   fi
-}
-
-# _docker_answers_bounded MSG [SECONDS] — "is the daemon up?", bounded on EVERY
-# platform and shown behind a spinner. The bound comes from spin's own
-# background-pid + kill deadline (#426), NOT from _bounded.
-#
-# WHY A SECOND PROBE EXISTS ALONGSIDE _docker_answers (backend#2521). Both answer
-# the same question, but _docker_answers bounds through _bounded, which runs the
-# BARE command when neither timeout(1) nor gtimeout(1) is on PATH -- and NEITHER
-# ships on stock macOS (both are GNU coreutils). So on a Mac with no coreutils,
-# `_docker_answers` degrades to an unbounded `docker info`, and a bare `docker
-# info` does not return against a WEDGED daemon (as opposed to a cleanly stopped
-# one — the same distinction _docker_answers' own header draws). A wedged daemon
-# froze a headless macOS install there with no spinner (#744). spin backgrounds the
-# probe and kills it on the deadline with no coreutils dependency, so the bound
-# holds wherever coreutils is missing too.
-#
-# SILENT on a non-answer (no ✖ / log tail, unlike spin_cmd_bounded): a daemon
-# that does not answer is the expected result on a recovery path, not an error to
-# shout about — the caller decides what to say. Returns 0 iff docker answered
-# within SECONDS; non-zero otherwise (124 when the deadline fired).
-_docker_answers_bounded() {
-  local msg="$1" secs="${2:-${TB_DOCKER_PROBE_TIMEOUT:-10}}" _pid
-  # This IS the coreutils-free bound: the probe runs in the background and `spin`
-  # kills it on the deadline via its PID — so it is bounded without timeout(1). The
-  # check-style rule-5 grep only recognises the lexical _bounded/timeout forms, so
-  # exempt this line explicitly (it is the one legitimate background-PID probe).
-  docker info >/dev/null 2>&1 &   # style-guard: allow
-  _pid=$!
-  spin "$_pid" "$msg" "$secs"
 }
 
 # ── Root-aware privileged execution (RFC 0001 A2) ────────────────────────────
@@ -1487,84 +1323,6 @@ preflight_sudo() {
   _tb_root_credential keepalive
 }
 
-# ── Download with live progress bar ───────────────────────────────────────────
-#  Usage:  download_with_progress "https://…/file.dmg" "/tmp/file.dmg" "Downloading Docker Desktop"
-#  Probes total size via HEAD, downloads in background, and monitors the growing
-#  file to render a visual bar with percentage and MB counters.  Works on both
-#  macOS and Linux without stdbuf or GNU coreutils.
-download_with_progress() {
-  local url="$1" dest="$2" label="$3"
-
-  local total_bytes
-  # -m 15 tightens curl_secure's default deadline for the HEAD probe so a stalled
-  # server can't hang it (it's not retry-wrapped and its failure just means
-  # "no total" -> indeterminate bar).
-  total_bytes=$(curl_secure -fsSLI -m 15 "$url" 2>/dev/null \
-    | awk 'tolower($0) ~ /content-length/ {gsub(/[^0-9]/,"",$2); print $2}' \
-    | tail -1)
-
-  local total_mb=""
-  if [[ -n "$total_bytes" ]] && (( total_bytes > 0 )) 2>/dev/null; then
-    total_mb=$(awk "BEGIN {printf \"%.0f\", $total_bytes / 1048576}")
-    hint "${label} (${total_mb} MB)"
-  else
-    hint "$label"
-    total_bytes=0
-  fi
-
-  local logfile; _tb_spin_logfile; logfile="$_TB_SPIN_LOG"
-  rm -f "$dest"
-
-  # --connect-timeout bounds the dial; --speed-limit/--speed-time abort a STALLED
-  # transfer (<1 KB/s for 60s) without capping a legitimately slow-but-progressing
-  # large download. Without these the backgrounded curl is monitored only by
-  # `kill -0` (no deadline, no kill), so a slow-loris / mid-stream stall would
-  # hang the progress loop forever. The stall flags are also how curl_secure knows
-  # NOT to add its default --max-time here: this path carries the large (hundreds
-  # of MB) Docker Desktop DMG, where a fixed deadline would fail a slow-but-healthy
-  # link.
-  curl_secure -fSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
-    -o "$dest" "$url" >> "$logfile" 2>&1 &
-  local curl_pid=$!
-
-  local bar_width=30
-  # Plain (client-dev#1642): the label line above is the whole progress report —
-  # no bar redraws, no \r, no escapes in the log.
-  if _tb_animate; then tput civis 2>/dev/null || true; fi
-
-  while kill -0 "$curl_pid" 2>/dev/null; do
-    if _tb_animate && [[ -f "$dest" ]] && (( total_bytes > 0 )); then
-      local cur_bytes
-      cur_bytes=$(wc -c < "$dest" 2>/dev/null || echo 0)
-      cur_bytes=${cur_bytes// /}
-
-      local pct=$(( cur_bytes * 100 / total_bytes ))
-      (( pct > 100 )) && pct=100
-      local filled=$(( pct * bar_width / 100 ))
-      local empty=$(( bar_width - filled ))
-      local cur_mb=$(awk "BEGIN {printf \"%.0f\", $cur_bytes / 1048576}")
-
-      local bar=""
-      for (( j=0; j<filled; j++ )); do bar+="█"; done
-      for (( j=0; j<empty;  j++ )); do bar+="░"; done
-
-      printf "\r  ${CYAN}%s${RESET} %3d%%  %s / %s MB" "$bar" "$pct" "$cur_mb" "$total_mb"
-    fi
-    sleep 0.4
-  done
-
-  wait "$curl_pid"
-  local rc=$?
-
-  if _tb_animate && [[ $rc -eq 0 ]] && [[ -n "$total_mb" ]]; then
-    local bar=""
-    for (( j=0; j<bar_width; j++ )); do bar+="█"; done
-    printf "\r  ${CYAN}%s${RESET} 100%%  %s / %s MB\n" "$bar" "$total_mb" "$total_mb"
-  fi
-  _tb_progress_end
-  return $rc
-}
-
 # ── Count bar — honest N-of-M progress for things pulled in discrete units ────
 #  Usage:  count_bar <current> <total> [noun]      (renders ONE frame)
 #  Draws a bar plus an "N of M <noun>" counter and NO newline, so a caller loop
@@ -1573,8 +1331,7 @@ download_with_progress() {
 #  (client-dev#1642), so plain its _tb_progress_start line and verdict are the report.
 #  Use this — never a fabricated aggregate percentage — for multi-image pulls
 #  (e.g. the client's container images), where the only honest signal is how many
-#  of a known count have completed. The %-by-bytes bar (download_with_progress) is
-#  reserved for a single-file curl download, where a true byte percentage exists.
+#  of a known count have completed.
 count_bar() {
   local cur="$1" total="$2" noun="${3:-items}" w=24 filled j bar=""
   [[ "$cur"   =~ ^[0-9]+$ ]] || cur=0
@@ -1658,7 +1415,6 @@ setup_log_file() {
   fi
   log "Substrate: ${TRACEBLOC_SUBSTRATE_RESOLVED}, from ${TB_SUBSTRATE_SOURCE:-the default}."
   if [[ -n "${TB_SUBSTRATE_NOTE:-}" ]]; then log "$TB_SUBSTRATE_NOTE"; fi
-  if [[ -n "${TB_SUBSTRATE_KEPT:-}" ]]; then log "$TB_SUBSTRATE_KEPT"; fi
   if [[ -n "${TB_SUBSTRATE_MOVED:-}" ]]; then log "$TB_SUBSTRATE_MOVED"; fi
 }
 
@@ -1693,10 +1449,9 @@ tb_export_namespace() {
   TRACEBLOC_NAMESPACE="${TB_NAMESPACE:-}"
   export TB_NAMESPACE TRACEBLOC_NAMESPACE
 }
-# SERVERS/AGENTS are k3d's node counts and nothing else: their defaults, the
-# node-local single-node forcing and their validation live in the k3d create path
-# (k3d.sh::_k3d_node_counts), so code that is not k3d never reads them. Only
-# their canonical spellings are resolved here.
+# SERVERS/AGENTS were k3d's node counts; no create path reads them, since native
+# k3s is one node. Only their canonical spellings are resolved here.
+# TODO(tracebloc/client-dev#1950): retire both knobs.
 if [[ -n "${TRACEBLOC_SERVERS:-}" ]]; then SERVERS="$TRACEBLOC_SERVERS"; fi
 if [[ -n "${TRACEBLOC_AGENTS:-}" ]]; then AGENTS="$TRACEBLOC_AGENTS"; fi
 # The leftover-data guard's non-interactive answer (cluster.sh). --reuse-data /
@@ -1707,7 +1462,7 @@ if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLO
 # from #367. (D15 gates the flip on a green node-local dev training run on the dev
 # environment; that sign-off is tracked on client#456, not asserted here.)
 #   node-local (default, Option C): datasets live on k3s local-path INSIDE the
-#                          k3d node — they die with `cluster delete`, are not a
+#                          node — they die with the cluster, are not a
 #                          browsable host folder, and need no chmod 777. This is
 #                          the RFC-0003 goal for the local install. The flip
 #                          applies to the bash core, which Windows runs too,
@@ -1718,7 +1473,6 @@ if [[ -n "${TRACEBLOC_LEFTOVER_ACTION:-}" ]]; then TB_LEFTOVER_ACTION="$TRACEBLO
 #                          TRACEBLOC_STORAGE_MODE=hostpath (legacy:
 #                          TB_STORAGE_MODE; still required for a
 #                          TRACEBLOC_HOST_DATASET_DIR network mount).
-# C1: node-local forces a single k3d node (k3d.sh::_k3d_node_counts says why).
 # Record whether the operator chose the mode or is getting the D15 default: on an
 # existing hostpath cluster the mismatch guard refuses an explicit node-local but
 # adopts hostpath when node-local is only the default (client#456, client-dev#1669).
@@ -1729,26 +1483,6 @@ TB_STORAGE_MODE="${TB_STORAGE_MODE:-node-local}"
 # unset the same — there is no opt-out to "latest" for k3s).
 if [[ -n "${TRACEBLOC_K8S_VERSION:-}" ]]; then K8S_VERSION="$TRACEBLOC_K8S_VERSION"; fi
 K8S_VERSION="${K8S_VERSION:-v1.36.5-k3s1}"
-# CUDA base tag for the GPU-capable k3d node image (client#616/#835). The custom
-# docker/k3s-cuda image rebuilds the SAME pinned k3s (K8S_VERSION) on this CUDA
-# base, and its published tag encodes both (…/k3s-cuda:<K8S_VERSION>-cuda-<this>),
-# so k3d.sh::_gpu_node_image can derive the pull ref deterministically.
-# TRACEBLOC_CUDA_BASE_TAG overrides it.
-# check-facts.sh keeps this in lockstep with facts.env's CUDA_TAG and the three
-# other consumers, so a bump can't derive a GPU image tag that was never built.
-# shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
-TB_CUDA_BASE_TAG="${TRACEBLOC_CUDA_BASE_TAG:-12.4.1-base-ubuntu22.04}"
-# Exact digest of the published k3s-cuda image for the tag those two derive (backend#1867).
-# The tag is mutable; k3d.sh's pre-pull asserts the tag resolved to THIS digest and
-# drops to CPU if it did not. It is deliberately NOT appended to the pull ref -- see the
-# note in scripts/spec/facts.env for why a tag@digest ref is a lie waiting to happen. No
-# TRACEBLOC_* override on purpose -- an operator who wants a different image already
-# has TRACEBLOC_K3S_CUDA_IMAGE, and a second knob for the same thing could pin a
-# digest onto a ref it does not belong to. check-facts.sh keeps it in lockstep with
-# facts.env's K3S_CUDA_DIGEST, and --check-published proves it still equals the live
-# digest of the derived tag.
-# shellcheck disable=SC2034  # consumed cross-file by k3d.sh (_gpu_node_image)
-TB_K3S_CUDA_DIGEST="sha256:06248888a302f578ee74bd094ee5effb79a860553ba2ea79fdb4b48489330f9d"
 # Native k3s (RFC-0175 D4): the digests k3s.sh checks its downloads against, and
 # the K8S_VERSION they were resolved for (facts.env K3S_BIN_SHA256_* /
 # K3S_INSTALL_SH_SHA256 and K8S_VERSION, stamped by check-facts.sh --write). Stamped
@@ -1756,8 +1490,8 @@ TB_K3S_CUDA_DIGEST="sha256:06248888a302f578ee74bd094ee5effb79a860553ba2ea79fdb4b
 # TB_K3S_PIN_K8S_VERSION is a SECOND stamp of the k3s pin, and it exists because
 # K8S_VERSION above takes an environment override: a k3s binary of any other
 # version has no digest here, so the native path refuses an override by name
-# (k3s.sh::_native_k3s_check_version) where k3d keeps honouring it. No TRACEBLOC_*
-# override on any of the four, for the reason TB_K3S_CUDA_DIGEST gives.
+# (k3s.sh::_native_k3s_check_version). No TRACEBLOC_* override on any of the four:
+# a digest from the environment could vouch for a download it was never resolved for.
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
 TB_K3S_PIN_K8S_VERSION="v1.36.5-k3s1"
 # shellcheck disable=SC2034  # consumed cross-file by k3s.sh
@@ -1856,9 +1590,8 @@ _hostpath_root() {
 }
 # Optional separate host dir for the big DATASET volume (backend#743). Empty
 # (default) keeps datasets under HOST_DATA_DIR. When set — e.g. a network/NFS
-# mount like /data01/tracebloc — the installer bind-mounts it into the cluster
-# at /tracebloc-data and the chart's dataset PV points there, while mysql + logs
-# stay on the local HOST_DATA_DIR (InnoDB over NFS is unsafe).
+# mount like /data01/tracebloc — the chart's dataset PV points there, while mysql
+# + logs stay on the local HOST_DATA_DIR (InnoDB over NFS is unsafe).
 if [[ -n "${TRACEBLOC_HOST_DATASET_DIR:-}" ]]; then HOST_DATASET_DIR="$TRACEBLOC_HOST_DATASET_DIR"; fi
 HOST_DATASET_DIR="${HOST_DATASET_DIR:-}"
 
@@ -1966,12 +1699,25 @@ if [[ "$OS" == "Darwin" ]]; then
 fi
 [[ "$ARCH" == "x86_64" ]] && ARCH_DL="amd64" || ARCH_DL="arm64"
 
-# True if this host can run amd64 binaries via QEMU binfmt. Lives here (not in
-# preflight.sh) because TWO gates now ask it — preflight's early arch check and
-# install-client-helm.sh's engine gate (backend#2047) — and both must read the
-# same probe: an arch verdict that disagreed with the engine verdict is the bug
-# that ticket describes. Wrapped in a function so bats can override it.
+# True if this machine runs amd64 binaries through QEMU binfmt. Preflight's _pf_arch and
+# the engine gate _assert_engine_runs_on_this_arch must give one verdict, so both ask this
+# probe and name amd64_emulation_remedy below; a function, so bats can override it.
 amd64_emulation_available() { [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]]; }
+
+# The command that registers that handler on this Linux machine: the distro's QEMU package
+# (binfmt-support registers it on Debian and Ubuntu, systemd-binfmt on Fedora). Native k3s's
+# containerd execs through the kernel's own handlers, so the remedy needs no Docker.
+amd64_emulation_remedy() {
+  if has apt-get; then
+    printf 'sudo apt-get install -y qemu-user-static binfmt-support'
+  elif has dnf; then
+    printf 'sudo dnf install -y qemu-user-static'
+  elif has zypper; then
+    printf 'sudo zypper install -y qemu-linux-user'
+  else
+    printf "install your distribution's qemu-user-static package"
+  fi
+}
 
 # nvidia | amd | apple_silicon | none, or amd_unsupported / nvidia_unsupported for a GPU
 # detect_gpu found and left off, because tracebloc has no training image for it (an AMD
@@ -2071,14 +1817,9 @@ PM_INSTALL=""
 PM_UPDATE=""
 
 # True when an NVIDIA GPU has been WIRED INTO THIS CLUSTER — not merely detected.
-# TRACEBLOC_GPU_WIRED becomes 1 only once the container runtime is ready to expose the
-# GPU (gpu-nvidia.sh / setup-linux.sh::_tier0_gpu_flags), the k3d node is then
-# created from the GPU-capable image with --gpus=all (k3d.sh, which derives
-# that flag from this gate), and the reuse guard puts it back to 0 when an
-# existing cluster turns out to be a CPU-only node. On native k3s it becomes 1 only
-# in step c, once k3s's own containerd has registered the NVIDIA runtime (k3s.sh
-# _native_k3s_gpu_wire, slim client 1.1i). So this is the one honest
-# gate for "should we request a GPU for jobs". Requesting nvidia.com/gpu on a
+# TRACEBLOC_GPU_WIRED becomes 1 only in native k3s's step c, once k3s's own containerd
+# has registered the NVIDIA runtime (k3s.sh _native_k3s_gpu_wire, slim client 1.1i).
+# So this is the one honest gate for "should we request a GPU for jobs". Requesting nvidia.com/gpu on a
 # node that advertises 0 GPUs strands every job Pending (client#835), so the GPU
 # chart values (install-client-helm.sh) ride this, not bare GPU_VENDOR detection.
 # Wired means exactly GPU_VENDOR=nvidia and TRACEBLOC_GPU_WIRED=1; any other value of
@@ -2293,7 +2034,7 @@ install_cleanup() {
   # backstop for an error/signal between mint and that cleanup.
   [[ -n "${_PROVISION_CRED_FILE:-}" ]] && rm -f "$_PROVISION_CRED_FILE" 2>/dev/null || true
   # The private download/scratch directories (backend#4279): a fatal error mid
-  # download must not leave a ~600 MB Docker.dmg behind in the user's TMPDIR.
+  # download must not leave a partial binary behind in the user's TMPDIR.
   declare -F tb_scratch_reap >/dev/null 2>&1 && tb_scratch_reap
   # Record WHERE it died, always and first (client#681). The log is the artifact
   # users send to support, and until now a `set -e` death left it with no trace of
@@ -2357,7 +2098,9 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #  scripts/spec/install-record.schema.json is the one declaration. The
 #  values below are STAMPED from it (the bootstrap ships no spec file), and
 #  install-contract.bats holds each one to the schema:
-#    TB_SUBSTRATES                  properties.substrate.enum, space-separated
+#    TB_SUBSTRATES                  properties.substrate.enum less the substrates
+#                                   every key of x-tracebloc-substrate.retired
+#                                   retires, space-separated: what a run can select
 #    TB_SUBSTRATE_DEFAULT           x-tracebloc-substrate.default
 #    TB_SUBSTRATE_FRESH_LINUX       x-tracebloc-substrate.fresh-default.linux
 #    TB_SUBSTRATE_RETIRED_LINUX     x-tracebloc-substrate.retired.linux, space-separated
@@ -2371,9 +2114,7 @@ TB_VERSION="${TB_VERSION:-${TRACEBLOC_INSTALL_REF:-}}"
 #    TB_RECORD_USER_PATH            x-tracebloc-record.user-path (a leading ~ is $HOME)
 #    TB_RECORD_ROOT_PATH            x-tracebloc-record.root-path (<user> is the login name)
 #    TB_RECORD_LAST_IN_USE          x-tracebloc-last-in-use.kinds, space-separated
-#    TB_K3D_REINSTALL               x-tracebloc-reinstall.release
-#    TB_REINSTALL_CONSENT_VAR       x-tracebloc-reinstall.consent-variable
-TB_SUBSTRATES="k3d k3s"
+TB_SUBSTRATES="k3s"
 TB_SUBSTRATE_DEFAULT="k3d"
 TB_SUBSTRATE_FRESH_LINUX="k3s"
 TB_SUBSTRATE_RETIRED_LINUX="k3d"
@@ -2388,26 +2129,19 @@ TB_ARTEFACT_FLAGS="created_by_prepare_host"
 TB_RECORD_USER_PATH="~/.tracebloc/install-record.json"
 TB_RECORD_ROOT_PATH="/var/lib/tracebloc/<user>/install-record.json"
 TB_RECORD_LAST_IN_USE="apple-container"
-# The k3d-to-native-k3s release switch (reinstall.sh): `refuse` refuses every k3s
-# request on a k3d machine; `offboard` lets a consented one offboard the old client
-# and reinstall. The consent variable is read only under `offboard`.
-TB_K3D_REINSTALL="offboard"
-TB_REINSTALL_CONSENT_VAR="TRACEBLOC_REINSTALL_CONSENT"
 # The substrate this run was asked for: TRACEBLOC_SUBSTRATE, else the default
 # (blank means unset, as for every TRACEBLOC_* setting). There is no flag and no
 # alias. main() refines it with tb_substrate_resolve, so a re-run keeps the
-# substrate its install recorded, and refuses a value outside TB_SUBSTRATES, by
-# name, AFTER the substrate line has printed. A library caller that never calls
-# the resolver keeps this source-time value.
+# substrate its install recorded, and refuses a value outside the schema's enum
+# (tb_substrate_supported) or one retired where it runs, by name, AFTER the
+# substrate line has printed. A library caller that never calls the resolver
+# keeps this source-time value.
 TRACEBLOC_SUBSTRATE_RESOLVED="${TRACEBLOC_SUBSTRATE:-$TB_SUBSTRATE_DEFAULT}"
 # Where TRACEBLOC_SUBSTRATE_RESOLVED came from, and what the resolver could not consult, for the
 # install log; and a finding it refuses by name after the substrate line.
 TB_SUBSTRATE_SOURCE="${TRACEBLOC_SUBSTRATE:+TRACEBLOC_SUBSTRATE}"
 TB_SUBSTRATE_NOTE=""
 TB_SUBSTRATE_REFUSAL=""
-# Why a fresh machine keeps the default: the line
-# print_substrate_token prints right after the substrate line.
-TB_SUBSTRATE_KEPT=""
 # Why this run moves a machine off a substrate retired where it runs (its record
 # names one, tb_substrate_resolve): the line print_substrate_token prints right
 # after the substrate line.
@@ -2416,9 +2150,14 @@ TB_SUBSTRATE_MOVED=""
 # footer, because a re-run with nothing changed is refused again.
 TB_EXIT_REFUSED=""
 
+# tb_substrate_supported -- TRACEBLOC_SUBSTRATE_RESOLVED is a value of the schema's
+# enum: one this installer sets up (TB_SUBSTRATES), or one a TB_SUBSTRATE_RETIRED_*
+# stamp retires, which the substrate line still names, so that its refusal
+# belongs to it (tb_substrate_resolve).
 tb_substrate_supported() {
-  local s
-  for s in $TB_SUBSTRATES; do
+  local s v known="$TB_SUBSTRATES"
+  for v in ${!TB_SUBSTRATE_RETIRED_@}; do known+=" ${!v}"; done
+  for s in $known; do
     [[ "$s" == "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" ]] && return 0
   done
   return 1
@@ -2441,7 +2180,6 @@ tb_substrate_token() {
 print_substrate_token() {
   tb_substrate_token
   TB_SUBSTRATE_TOKEN_PRINTED=1
-  if [[ -n "${TB_SUBSTRATE_KEPT:-}" ]]; then info "$TB_SUBSTRATE_KEPT"; fi
   if [[ -n "${TB_SUBSTRATE_MOVED:-}" ]]; then info "$TB_SUBSTRATE_MOVED"; fi
 }
 
@@ -2449,7 +2187,7 @@ refuse_unsupported_substrate() {
   tb_substrate_supported && return 0
   TB_EXIT_REFUSED=1
   if [[ "${TB_SUBSTRATE_SOURCE:-TRACEBLOC_SUBSTRATE}" == "TRACEBLOC_SUBSTRATE" ]]; then
-    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime ($(OS=Darwin _tb_substrate_fresh_here) on a Mac, ${TB_SUBSTRATE_FRESH_LINUX} on Linux, inside WSL too, ${TB_SUBSTRATE_DEFAULT} otherwise)."
+    error "TRACEBLOC_SUBSTRATE='${TRACEBLOC_SUBSTRATE_RESOLVED}' is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Unset it to use the default runtime ($(OS=Darwin _tb_substrate_fresh_here) on a Mac, ${TB_SUBSTRATE_FRESH_LINUX} on Linux, inside WSL too)."
   fi
   error "${TB_SUBSTRATE_SOURCE} says this machine runs on '${TRACEBLOC_SUBSTRATE_RESOLVED}', which is not a runtime this installer can set up (it supports: ${TB_SUBSTRATES// /, }). Set TRACEBLOC_SUBSTRATE to the runtime this machine uses, then re-run."
 }
@@ -2649,11 +2387,11 @@ tb_mac_floor_reason() {
   esac
 }
 
-# tb_upgrade_run -- this run is a `tracebloc upgrade`, on any path: the CLI's flag
-# (TB_ spelling first, as install.sh and assess.sh read it) or upgrade_cli_only's.
-# The one rule for leaving out the first-install pointer at `tracebloc data ingest`.
+# tb_upgrade_run -- this run is a `tracebloc upgrade`: the CLI's flag (TB_ spelling
+# first, as install.sh and assess.sh read it). The one rule for leaving out the
+# first-install pointer at `tracebloc data ingest`.
 tb_upgrade_run() {
-  [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 || "${TRACEBLOC_CLI_UPGRADE_ONLY:-0}" == 1 ]]
+  [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 ]]
 }
 
 # refuse_unsupported_mac -- a Mac below the floor, stopped by name, on every path.
@@ -2686,10 +2424,10 @@ refuse_unsupported_mac() {
 # (refuse_wsl_run) and reads _WINDOWS; Linux outside WSL reads _LINUX. 1 when it is
 # not, or on any other OS; 2 when this cannot tell: Linux, SUBSTRATE retired on one
 # side of WSL's line, and no WSL probe loaded (a stale bootstrap). The one predicate
-# every reader of the retirement asks: the resolver, install_macos,
-# the k3s path's live-k3d refusal (reinstall.sh) and the substrate a Mac gets
-# instead (_tb_substrate_fresh_here). It has one case per stamp this build sets,
-# because a TB_ name nothing stamps is read from the user's environment
+# every reader of the retirement asks: the resolver, the substrates it offers
+# (_tb_substrates_here), the substrate a Mac gets instead (_tb_substrate_fresh_here)
+# and cluster.sh's unmeasured-reservation warning. It has one case per stamp this
+# build sets, because a TB_ name nothing stamps is read from the user's environment
 # (installer-env-canonical.bats). install-contract.bats holds every key of the
 # schema's retired map to a stamp this predicate reads, and every stamp to a key.
 tb_substrate_retired_here() {
@@ -2730,6 +2468,19 @@ _tb_substrate_fresh_here() {
   printf '%s' "$left"
 }
 
+# _tb_substrates_here -- the substrates this installer sets up where this run is,
+# comma-separated: TB_SUBSTRATES less those retired here (tb_substrate_retired_here).
+# One whose retirement here cannot be told stays listed: a run that asks for it is
+# refused by name then. What a refusal that asks for a substrate offers.
+_tb_substrates_here() {
+  local s out=""
+  for s in $TB_SUBSTRATES; do
+    if tb_substrate_retired_here "$s"; then continue; fi
+    out+="${out:+, }${s}"
+  done
+  printf '%s' "$out"
+}
+
 # _tb_substrate_where -- where this run is, as the retirement's texts name it ("on
 # a Mac", "on Linux outside WSL", "inside WSL"). Fails on an OS with no case, and on
 # Linux with no WSL probe loaded.
@@ -2758,25 +2509,22 @@ _tb_substrate_where() {
 # 4.1, client-dev#1948), so it has one, the substrate left (_tb_substrate_fresh_here: k3s
 # in Apple's container runtime, RFC-0175 D1/D6). There TRACEBLOC_SUBSTRATE naming a
 # retired one is refused by name, and every other run resolves the Mac's one: a
-# record from a k3d install does not keep k3d. Whether a k3d cluster is still
-# live is the k3s path's question, asked by refuse_k3s_beside_live_k3d, which
-# moves such a Mac only through the consented offboard (D10); the record's other
-# substrate goes in TB_SUBSTRATE_NOTE for the log.
+# record from a k3d install does not keep k3d, and reinstall.sh's refuse_k3d_machine
+# refuses such a Mac with the way off k3d (D10); the record's other substrate goes
+# in TB_SUBSTRATE_NOTE for the log.
 # On Linux a substrate retired where this run is (TB_SUBSTRATE_RETIRED_LINUX outside
 # WSL, TB_SUBSTRATE_RETIRED_WINDOWS inside it: k3d, slim client 4.1) is never set up
 # there (tb_substrate_retired_here): asked for by the variable, it is refused; named
-# by a record, the machine moves to the fresh default, and the k3s path's live-k3d
-# check (reinstall.sh) decides the move, by consent, as for TRACEBLOC_SUBSTRATE=k3s
-# (TB_SUBSTRATE_MOVED says so).
+# by a record, the run resolves the fresh default and TB_SUBSTRATE_MOVED says why,
+# and reinstall.sh's refuse_k3d_machine refuses the machine with the way off k3d.
 # A record that exists but cannot be read or parsed is "cannot tell", never
 # absent: the finding goes in TB_SUBSTRATE_REFUSAL, which main() refuses by name
-# after the substrate line. So does TRACEBLOC_SUBSTRATE=k3d where a tracebloc
-# k3s is set up and k3d is not retired: k3d is never set up beside native k3s (the
-# reverse is the k3s path's live-k3d refusal). TRACEBLOC_SUBSTRATE_RESOLVED keeps the
-# requested value either way, so the line prints it. Prints nothing and writes nothing.
+# after the substrate line, naming the substrates set up here (_tb_substrates_here).
+# TRACEBLOC_SUBSTRATE_RESOLVED keeps the requested value, so the line prints it.
+# Prints nothing and writes nothing.
 tb_substrate_resolve() {
   local rec sub rc=0 dst left
-  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""; TB_SUBSTRATE_KEPT=""; TB_SUBSTRATE_MOVED=""
+  TB_SUBSTRATE_NOTE=""; TB_SUBSTRATE_REFUSAL=""; TB_SUBSTRATE_MOVED=""
   if [[ -n "${TRACEBLOC_SUBSTRATE:-}" ]]; then
     TRACEBLOC_SUBSTRATE_RESOLVED="$TRACEBLOC_SUBSTRATE"; TB_SUBSTRATE_SOURCE="TRACEBLOC_SUBSTRATE"
     if [[ "${OS:-$(uname -s 2>/dev/null)}" == "Darwin" ]]; then
@@ -2787,15 +2535,15 @@ tb_substrate_resolve() {
     fi
     rc=0; tb_substrate_retired_here "$TRACEBLOC_SUBSTRATE_RESOLVED" || rc=$?
     case "$rc" in
-      0) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, which this installer no longer sets up $(_tb_substrate_where). Unset TRACEBLOC_SUBSTRATE: it sets up native ${TB_SUBSTRATE_FRESH_LINUX} here."; return 0 ;;
-      2) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, and this installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell whether ${TRACEBLOC_SUBSTRATE_RESOLVED} is set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash"; return 0 ;;
-    esac
-    rc=1
-    if [[ "$TRACEBLOC_SUBSTRATE_RESOLVED" == "k3d" ]]; then rc=0; _tb_substrate_k3s_live || rc=$?; fi
-    case "$rc" in
-      1) ;;
-      0) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=k3d, but tracebloc's native k3s is set up on this machine, and k3d is never set up beside native k3s. Unset TRACEBLOC_SUBSTRATE to keep native k3s. Moving this machine to k3d is a reinstall (a new client, datasets ingested again), which this installer cannot do yet." ;;
-      *) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=k3d, and tracebloc's native k3s files are on this machine, but systemctl did not answer, so this run cannot tell whether that k3s is set up to run, and k3d is never set up beside native k3s. Check 'systemctl status k3s', then re-run." ;;
+      0)
+        # Inside WSL the run is tracebloc's distro or another, which refuse_wsl_run
+        # refuses next: either way the way on is the Windows installer.
+        if [[ "$(_tb_substrate_where)" == "inside WSL" ]]; then
+          TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, which this installer no longer sets up inside WSL: there it sets up native ${TB_SUBSTRATE_FRESH_LINUX}, and only in tracebloc's own distro, which install.ps1 sets up. Install from Windows with install.ps1."
+        else
+          TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, which this installer no longer sets up $(_tb_substrate_where). Unset TRACEBLOC_SUBSTRATE: it sets up native ${TB_SUBSTRATE_FRESH_LINUX} here."
+        fi ;;
+      2) TB_SUBSTRATE_REFUSAL="TRACEBLOC_SUBSTRATE=${TRACEBLOC_SUBSTRATE_RESOLVED}, and this installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell whether ${TRACEBLOC_SUBSTRATE_RESOLVED} is set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash" ;;
     esac
     return 0
   fi
@@ -2821,7 +2569,7 @@ tb_substrate_resolve() {
       TRACEBLOC_SUBSTRATE_RESOLVED="$sub"; TB_SUBSTRATE_SOURCE="the install record ${rec}"
       _tb_substrate_move_retired "$sub" "The install record ${rec}"
     else
-      TB_SUBSTRATE_REFUSAL="The install record ${rec} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
+      TB_SUBSTRATE_REFUSAL="The install record ${rec} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: $(_tb_substrates_here)), then re-run."
     fi
     return 0
   fi
@@ -2832,7 +2580,7 @@ tb_substrate_resolve() {
         TRACEBLOC_SUBSTRATE_RESOLVED="$sub"; TB_SUBSTRATE_SOURCE="the root copy ${dst}"
         _tb_substrate_move_retired "$sub" "The install record's root copy ${dst}"
       else
-        TB_SUBSTRATE_REFUSAL="The install record's root copy ${dst} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: ${TB_SUBSTRATES// /, }), then re-run."
+        TB_SUBSTRATE_REFUSAL="The install record's root copy ${dst} exists, but its substrate could not be read from it, so this run cannot tell which runtime this machine was set up on. Set TRACEBLOC_SUBSTRATE to that runtime (it supports: $(_tb_substrates_here)), then re-run."
       fi
       return 0
     fi
@@ -2856,12 +2604,12 @@ tb_substrate_resolve() {
 #
 # Nothing else is asked (slim client 4.1): k3d, which the default names, is retired
 # on both sides of WSL's line, so a k3d binary, a k3d cluster in Docker or a setting
-# native k3s refuses no longer keeps it. A live k3d cluster is the k3s path's
-# live-k3d check's (reinstall.sh), which moves it by consent or refuses; a setting
-# native k3s refuses is refused by name by the same path (_native_k3s_refuse_host).
-# Inside WSL a distro other than tracebloc's is refused by refuse_wsl_run. A build
-# without the WSL probe cannot tell which list applies, and that is refused by name,
-# never guessed. Prints nothing.
+# native k3s refuses no longer keeps it. A machine whose own data says k3d is refused
+# by reinstall.sh's refuse_k3d_machine, with the way off k3d; a setting native k3s
+# refuses is refused by name before it (_native_k3s_refuse_host). Inside WSL a distro
+# other than tracebloc's is refused by refuse_wsl_run. A build without the WSL probe
+# cannot tell which list applies, and that is refused by name, never guessed. Prints
+# nothing.
 _tb_substrate_fresh() {
   local rc=0 os where
   os="${OS:-$(uname -s 2>/dev/null)}"
@@ -2876,16 +2624,16 @@ _tb_substrate_fresh() {
 }
 
 # _tb_substrate_move_retired SUB WHO -- a record (WHO, as a sentence's subject)
-# names SUB: where SUB is retired, the machine moves to the fresh default
-# (TB_SUBSTRATE_MOVED says so after the substrate line), and the k3s path's
-# live-k3d check decides the move by consent. Where this cannot tell, the run is
-# refused by name. Elsewhere nothing changes.
+# names SUB: where SUB is retired, the run resolves the fresh default, and
+# TB_SUBSTRATE_MOVED says why after the substrate line; reinstall.sh's
+# refuse_k3d_machine then refuses it with the way off k3d. Where this cannot tell,
+# the run is refused by name. Elsewhere nothing changes.
 _tb_substrate_move_retired() {
   local rc=0
   tb_substrate_retired_here "$1" || rc=$?
   case "$rc" in
     0) TRACEBLOC_SUBSTRATE_RESOLVED="$TB_SUBSTRATE_FRESH_LINUX"
-       TB_SUBSTRATE_MOVED="${2} says this machine runs on ${1}, which this installer no longer sets up $(_tb_substrate_where), so this run sets up native ${TB_SUBSTRATE_FRESH_LINUX}: a reinstall." ;;
+       TB_SUBSTRATE_MOVED="${2} says this machine runs on ${1}, which this installer no longer sets up $(_tb_substrate_where)." ;;
     2) TB_SUBSTRATE_REFUSAL="${2} says this machine runs on ${1}, and this installer build cannot tell whether it runs inside WSL (probe.sh is missing), so it cannot tell whether ${1} is still set up here. Re-run: curl -fsSL https://tracebloc.io/i.sh | bash" ;;
   esac
   return 0
@@ -2952,7 +2700,6 @@ TB_RECORD_ARMED=""
 _tb_record_armed() { [[ "${TRACEBLOC_RECORD_ARMED:-${TB_RECORD_ARMED:-}}" == "1" ]]; }
 # _tb_kube_context -- the kube context this run pointed kubectl at, if any.
 _tb_kube_context() { printf '%s' "${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-}}"; }
-TB_RECORD_REFRESH_ONLY=""
 # Prepared mode (prepare-host on native k3s, 1.1g): the record belongs to the user
 # the administrator named, never to the administrator who runs it. TB_RECORD_FOR_USER
 # is that user's login name (the record's `user`, and the root copy's <user>),
@@ -3042,12 +2789,9 @@ _tb_record_prior() {
 }
 
 # Top-level field KEY ($1): this run's value ($2) wins, else the value the
-# previous write left in record text $3, else null. A CLI-only refresh
-# (TB_RECORD_REFRESH_ONLY=1) never saw the install's facts: what it has for
-# them is a default (CLUSTER_NAME, HOST_DATA_DIR), so the prior value wins.
+# previous write left in record text $3, else null.
 _tb_record_field() {
   local p; p="$(_tb_record_prior "$1" "${3:-}")"
-  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" && -n "$p" ]]; then printf '%s' "$p"; return 0; fi
   if [[ -n "${2:-}" ]]; then _tb_json "$2"; return 0; fi
   printf '%s' "${p:-null}"
 }
@@ -3191,14 +2935,8 @@ tb_record_write() {
       *) arts="${arts:+${arts}$'\n'}${key}${flag}\"created_at\": \"${now}\"}" ;;
     esac
   fi
-  # A CLI-only refresh keeps the recorded substrate too: TRACEBLOC_SUBSTRATE_RESOLVED there is
-  # the default this process resolved, not the runtime the install set up.
-  local substrate p_sub
+  local substrate
   substrate="$(_tb_json "$TRACEBLOC_SUBSTRATE_RESOLVED")"
-  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]]; then
-    p_sub="$(_tb_record_prior substrate "$prior")"
-    if [[ -n "$p_sub" ]]; then substrate="$p_sub"; fi
-  fi
   # root_copy: the root copy's path once one exists. The previous write's value
   # stands until this run writes the copy; the first write that does re-renders
   # the user copy with it and copies again, so the two copies stay identical.
@@ -3210,12 +2948,9 @@ tb_record_write() {
   else prepared_for="$(_tb_record_prior prepared_for "$prior")"; fi
   # k3s_data_fs (client-dev#1976): the filesystem under native k3s's data directory,
   # read afresh on every write of a native k3s install on Linux, the WSL distro
-  # included, by k3s.sh's reader. A CLI-only refresh never saw the install, so it
-  # keeps the previous value, like the other install facts. A Mac or a k3d install
-  # writes none: the Mac's node runs tracebloc's pinned VM image.
-  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]]; then
-    k3s_data_fs="$(_tb_record_prior k3s_data_fs "$prior")"
-  elif [[ "${OS:-}" == Linux && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == k3s ]] && declare -F _native_k3s_data_fs >/dev/null 2>&1; then
+  # included, by k3s.sh's reader. A Mac or a k3d install writes none: the Mac's node
+  # runs tracebloc's pinned VM image.
+  if [[ "${OS:-}" == Linux && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == k3s ]] && declare -F _native_k3s_data_fs >/dev/null 2>&1; then
     k3s_data_fs="$(_native_k3s_data_fs)"
   fi
   _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs")" || return 0
@@ -3287,21 +3022,11 @@ _tb_record_root_copy() {
   [[ -n "$user" ]] || user="$(id -un 2>/dev/null)" || return 0
   [[ -n "$user" ]] || return 0
   dst="$(_tb_record_root_path "$user")"
-  # A CLI-only refresh runs before the tier is known, so the Tier 0 guard above
-  # cannot see it: it refreshes a root copy a full install made and never creates one.
-  if [[ "${TB_RECORD_REFRESH_ONLY:-}" == "1" ]] && ! _tb_record_root_copy_exists "$dst"; then return 0; fi
   if tb_root_n true 2>/dev/null; then
     if { tb_root_n mkdir -p "${dst%/*}" && tb_root_n cp "$1" "$dst"; } 2>/dev/null; then _TB_RECORD_ROOT_WRITTEN="$dst"
     else log "Install record: couldn't write the root copy ${dst}."; fi
   fi
   return 0
-}
-
-# Whether the root copy $1 exists, looked up the way it is written: as root, or
-# through a password-free sudo. As the user, its directory is unreadable (made
-# through sudo under umask 077), so a plain -f would always answer "absent".
-_tb_record_root_copy_exists() {
-  tb_root_n test -f "$1" 2>/dev/null
 }
 
 # The root copy's path for this user. Fails when the user has no name.
@@ -3400,10 +3125,6 @@ Advanced configuration (environment variables; each one's older name without
 the TRACEBLOC_ prefix -- TB_STORAGE_MODE for TRACEBLOC_STORAGE_MODE -- still works):
   TRACEBLOC_CLUSTER_NAME   Cluster name     (default: tracebloc)
   TRACEBLOC_NAMESPACE  Secure-environment name  (default: tracebloc; legacy: TB_NAMESPACE)
-  TRACEBLOC_SERVERS        Control-plane nodes  (default: 1)
-  TRACEBLOC_AGENTS         Worker nodes         (default: 0)
-  TRACEBLOC_K8S_VERSION    k3s image tag                   (default: v1.36.5-k3s1)
-  TRACEBLOC_K3D_VERSION    k3d release tag  (default: v5.9.0; "latest" resolves at install time)
   TRACEBLOC_HELM_VERSION   Helm release tag (default: v4.2.3; "latest" resolves at install time)
   TRACEBLOC_STORAGE_MODE   node-local (default) or hostpath
   TRACEBLOC_HOST_DATASET_DIR  Separate dataset directory, e.g. a network mount (hostpath only)

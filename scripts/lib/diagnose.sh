@@ -106,7 +106,7 @@ run_diagnose() {
     if declare -F run_host_probes >/dev/null 2>&1; then
       echo; echo "## install tier (RFC 0001)"
       echo "INSTALL_TIER=${INSTALL_TIER:-?}  reason=${INSTALL_TIER_REASON:-?}"
-      echo "privilege=${PROBE_PRIVILEGE:-?}  cgroup2=${PROBE_CGROUP2:-?}  userns=${PROBE_USERNS:-?}"
+      echo "privilege=${PROBE_PRIVILEGE:-?}"
     fi
   } > "$d/00-host.txt" 2>&1
 

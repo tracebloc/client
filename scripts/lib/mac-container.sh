@@ -587,8 +587,8 @@ _mac_ct_start_system() {
 #  "Ready" is a Ready condition whose heartbeat is newer than the start this run
 #  made: for about 40 s after a restart the stored status is the old one (S-M).
 #
-#  Behind a proxy the node runs with this Mac's proxy environment, as k3d's nodes and
-#  native k3s's service do (cluster.sh's _node_proxy_env), with the node IP added to
+#  Behind a proxy the node runs with this Mac's proxy environment, as native k3s's
+#  service does (cluster.sh's _node_proxy_env), with the node IP added to
 #  NO_PROXY: k3s reaches its own API there, and no default range covers it. The values
 #  cross in a file, never on the line: a proxy's URL can hold a password, and the argv
 #  is `container run`'s command line. The file (<node dir>/proxy.env, 0600, as the join
@@ -727,8 +727,9 @@ exec /bin/k3s server'
 # _mac_ct_refuse_host -- refuse, each by name, a host or a setting the macOS node does
 # not serve, before anything is written. _native_k3s_refuse_host, the one declaration of
 # where native k3s runs, calls it for a Mac (2.1 part 6), so it runs where Linux's
-# refusals run, including before the D10 offboard (reinstall.sh): it stays read-only and
-# reads nothing step a sets. The darwin_k3s measurement (2.1 part 5b) calls it too.
+# refusals run, including inside main()'s k3d refusal (refuse_k3d_machine, reinstall.sh):
+# it stays read-only and reads nothing step a sets. The darwin_k3s measurement (2.1 part
+# 5b) calls it too.
 #   - The macOS floor (refuse_unsupported_mac, common.sh, on its one declaration
 #     tb_mac_floor_verdict): Apple silicon, since Apple's container runtime is
 #     arm64-only, with macOS TB_MACOS_FLOOR_MAJOR or later, which the runtime needs
@@ -740,8 +741,7 @@ exec /bin/k3s server'
 #     (_mac_ct_hostpath_dirs): a path that is not absolute, holds a ':' (which
 #     `container run -v` splits on) or a line break, or lies in a system tree the node's
 #     own files are in (_tb_system_path). One it can mount is served (_mac_ct_node_mounts).
-#   - k3d's node counts, refused as on Linux (_native_k3s_refuse_k3d_nodes), and the
-#     pinned k3s version (_native_k3s_check_version).
+#   - the pinned k3s version (_native_k3s_check_version).
 _mac_ct_refuse_host() {
   [[ "${OS:-}" == "Darwin" ]] \
     || error "The macOS node runs on a Mac only, and this machine runs ${OS:-an unknown OS}."
@@ -750,7 +750,6 @@ _mac_ct_refuse_host() {
   if declare -F _resolve_ca_bundle >/dev/null 2>&1; then why="$(_mac_ct_ca_bundle)" || error "$why"; fi
   local dirs
   dirs="$(_mac_ct_hostpath_dirs)" || error "$dirs"
-  _native_k3s_refuse_k3d_nodes
   _native_k3s_check_version
 }
 
@@ -1041,8 +1040,8 @@ _mac_ct_node_size() {
 }
 
 # _mac_ct_node_proxy_env -- the proxy environment the node runs with, one NAME=VALUE a
-# line, into stdout: cluster.sh's _node_proxy_env, the one definition k3d's nodes and
-# native k3s take, with TB_MAC_CT_NODE_IP added to this Mac's NO_PROXY (or no_proxy).
+# line, into stdout: cluster.sh's _node_proxy_env, the one definition native k3s
+# takes, with TB_MAC_CT_NODE_IP added to this Mac's NO_PROXY (or no_proxy).
 # Nothing when this Mac sets no HTTP(S) proxy. Prints why, and fails, when cluster.sh,
 # which holds it, is not loaded: a node run without the proxy would pull direct and
 # fail late, naming nothing of ours. A proxy value with a line break in it is refused by
@@ -1105,11 +1104,11 @@ _mac_ct_node_argv() {
 
 # _mac_ct_local_api HAVE -- whether this run's node publishes the local API (backend#5208,
 # client-dev#2379): into TRACEBLOC_MAC_CT_LOCAL_API, "HOST NODE" (TRACEBLOC_LOCAL_API_HOST_PORT
-# and TRACEBLOC_LOCAL_API_NODE_PORT, k3d.sh's one declaration of them), or "" when it
-# does not. As on k3d, fail-soft: TRACEBLOC_LOCAL_API=off opts out (_local_api_wanted),
-# ports the chart would refuse turn it off with k3d's warning (_local_api_port_valid), and
-# so does a host port something else on this Mac already listens on
-# (_local_api_host_port_busy), or the API's own port. HAVE is the argv the node was
+# and TRACEBLOC_LOCAL_API_NODE_PORT, cluster.sh's one declaration of them), or "" when it
+# does not. Fail-soft, as cluster.sh's helpers are: TRACEBLOC_LOCAL_API=off opts out
+# (_local_api_wanted), ports the chart would refuse turn it off with their warning
+# (_local_api_port_valid), and so does a host port something else on this Mac already
+# listens on (_local_api_host_port_busy), or the API's own port. HAVE is the argv the node was
 # created with (run-args): a node that already publishes the host port, to whichever
 # NodePort, is what holds it, so it is never read as busy, and recreating that node
 # frees it first.
@@ -1391,7 +1390,7 @@ _mac_ct_node_walled() {
 # _mac_ct_node_drop_local_api CT NAME VERB RC -- the node's VERB (run or start) exited RC
 # with the local API published: say so, remove the node it left and clear
 # TRACEBLOC_MAC_CT_LOCAL_API, so the caller makes the node again without it on its volume.
-# The local API is optional, as on k3d (client-dev#1665): the free-port probe is a
+# The local API is optional (client-dev#1665): the free-port probe is a
 # snapshot, and the runtime's own bind can still lose the port.
 _mac_ct_node_drop_local_api() {
   local ct="$1" name="$2" verb="$3" rc="$4" gone
@@ -1581,7 +1580,7 @@ _mac_ct_ensure_node() {
   fi
   _mac_ct_node_walled "$ct" "$name"
   # The chart opens the local API only when the node publishes it and the wall lets this
-  # Mac to it, as on k3d once its load balancer maps the port (install-client-helm.sh).
+  # Mac to it (install-client-helm.sh).
   [[ -z "$TRACEBLOC_MAC_CT_LOCAL_API" ]] || TB_LOCAL_API_MAPPED=1
   (umask 077; _bounded 30 "$ct" exec "$name" cat /etc/rancher/k3s/k3s.yaml </dev/null > "${dir}/k3s.yaml.tmp") \
     && [[ -s "${dir}/k3s.yaml.tmp" ]] && mv "${dir}/k3s.yaml.tmp" "${dir}/k3s.yaml" \
@@ -2054,7 +2053,7 @@ _mac_ct_kubectl_version() {
 # to ~/.local/bin, so the run is Tier 0. kubectl is the node's release (_mac_ct_kubectl_version),
 # helm HELM_VERSION as on Linux. Then the runtime is unpacked and checked, and its system
 # started, so step c has only the node to run. It refuses nothing itself: a Mac the node
-# does not serve never gets here, because main()'s refuse_k3s_beside_live_k3d
+# does not serve never gets here, because main()'s refuse_k3d_machine
 # (reinstall.sh) runs _native_k3s_refuse_host before step a on every run on a Mac.
 # reinstall.bats' #1913 case holds that order (client-dev#1913).
 _mac_ct_install_macos() {

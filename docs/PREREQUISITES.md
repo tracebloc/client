@@ -46,13 +46,16 @@ This sets up k3s and adds you to the `tracebloc` group. Log out and back in, the
 
 **A machine that runs tracebloc on k3d.** The installer no longer sets up k3d on Linux outside WSL, and it refuses `TRACEBLOC_SUBSTRATE=k3d` there. Until you move it, a machine already on k3d keeps running as it is.
 
-**Moving a k3d machine to native k3s.** Re-run the installer. This is a reinstall:
+**Moving a k3d machine to native k3s.** The installer does not move it. Run on a machine that runs tracebloc on k3d, it stops before it changes anything. It names what says the machine is on k3d (the install record or its root copy, or, for an install older than the record, the kubeconfig context k3d writes), then prints the way out:
 
-- the machine's secure environment and its data are deleted;
-- its datasets must be ingested again;
-- it comes back as a new secure environment.
-
-Your use cases and models stay on tracebloc. To confirm, the installer asks you to type the secure environment's name, or reads it from `TRACEBLOC_REINSTALL_CONSENT=<name>`.
+```text
+This installer no longer sets up k3d, and it never sets up native k3s beside it.
+Moving this machine to native k3s is a reinstall: its secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
+To move it, delete that secure environment with 'tracebloc delete', then run this installer again.
+If 'tracebloc delete' refuses, tracebloc CLI 0.11.35 can still delete it.
+Install that CLI with:  curl -fsSL https://github.com/tracebloc/cli/releases/latest/download/install.sh | sh -s -- --version v0.11.35
+✖ Nothing was changed.
+```
 
 **Hosts.** Before a run changes anything, the installer checks each host that run needs. The last column says which runs need it.
 
@@ -97,7 +100,18 @@ The installer installs no Docker, no colima, no Homebrew and no k3d. `tracebloc 
 
 **The one prompt.** When the node first starts, macOS asks whether `container-runtime-linux` may find devices on your local network. It is part of Apple's runtime, and it makes the cluster's API reachable from this Mac only. Click Allow. The installer waits up to 2 minutes for your answer. Without it, the installer stops and says where to allow it: System Settings › Privacy & Security › Local Network.
 
-**A Mac that runs tracebloc on k3d.** The installer never sets up the node beside a live k3d cluster. Moving the Mac is a reinstall: its secure environment and that environment's data are deleted, its datasets are ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc. Re-run the installer: it offboards the old environment only after you type its name when asked, or set `TRACEBLOC_REINSTALL_CONSENT` to it. Until the Mac moves, neither the installer nor `tracebloc upgrade` updates its secure environment. A k3d cluster that is not tracebloc's stops the installer, which never removes it.
+**A Mac that runs tracebloc on k3d.** The installer does not move it, and never sets up the node beside it. Run on such a Mac, it stops before it changes anything. It names what says the Mac is on k3d (the install record, or, for an install older than the record, the kubeconfig context k3d writes), then prints the way out:
+
+```text
+This installer no longer sets up k3d, and it never sets up k3s in Apple's container runtime beside it.
+Moving this machine to k3s in Apple's container runtime is a reinstall: its secure environment and its data are deleted, its datasets must be ingested again, and it comes back as a new secure environment. Your use cases and models stay on tracebloc.
+To move it, delete that secure environment with 'tracebloc delete', then run this installer again.
+If 'tracebloc delete' refuses, tracebloc CLI 0.11.35 can still delete it.
+Install that CLI with:  curl -fsSL https://github.com/tracebloc/cli/releases/latest/download/install.sh | sh -s -- --version v0.11.35
+✖ Nothing was changed.
+```
+
+A Mac the table above rules out (an Intel Mac, or an older macOS) is stopped by that first. Until the Mac moves, neither the installer nor `tracebloc upgrade` updates its secure environment.
 
 **Hosts.** The installer checks each of these before it starts. The first five rows are always needed. The rest are needed only until Apple's runtime or Helm is installed.
 
