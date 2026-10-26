@@ -259,7 +259,9 @@ telemetry_run_handed_on() { _TB_TELEMETRY_RUN_STARTED=""; return 0; }
 # disagree.
 TB_TELEMETRY_OPT_OUT_VARS="TRACEBLOC_SKIP_TELEMETRY TRACEBLOC_NO_TELEMETRY DO_NOT_TRACK"
 telemetry_enabled() {
-  local name value
+  # Pinned: the caller's IFS must not change how the list splits (an IFS without
+  # a space leaves one word, an unreadable name, and a silent "enabled").
+  local IFS=$' \t\n' name value
   for name in $TB_TELEMETRY_OPT_OUT_VARS; do
     eval "value=\${$name:-}"
     case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
@@ -276,7 +278,7 @@ telemetry_enabled() {
 # letter. Fail closed: a step_header letter this map has never seen must not
 # invent a phase name.
 telemetry_phase_name() {
-  local pair
+  local IFS=$' \t\n' pair
   for pair in $TB_TELEMETRY_PHASES; do
     [ "${pair%%:*}" = "$1" ] && { printf '%s' "${pair#*:}"; return 0; }
   done
@@ -287,7 +289,7 @@ telemetry_phase_name() {
 # registered names plus the two that have no step letter. Derived from
 # TB_TELEMETRY_PHASES so a phase added there needs no second edit.
 _telemetry_phase_names() {
-  local pair out="bootstrap unknown"
+  local IFS=$' \t\n' pair out="bootstrap unknown"
   for pair in $TB_TELEMETRY_PHASES; do out="$out ${pair#*:}"; done
   printf '%s' "$out"
 }
@@ -467,7 +469,7 @@ _telemetry_attr() {
 # _telemetry_in_set VALUE SET — membership, the only way a shell variable
 # becomes a closed vocabulary.
 _telemetry_in_set() {
-  local needle="$1" set="$2" item
+  local IFS=$' \t\n' needle="$1" set="$2" item
   # Word-splitting $set is the point: these vocabularies are space-separated
   # lists, and bash 3.2 (the system bash on macOS) has no associative arrays.
   # shellcheck disable=SC2086
@@ -500,7 +502,7 @@ _telemetry_source_line() {
 # what lets the tests assert on the real payload instead of on a re-implementation
 # of it. Returns 1 without printing when the environment is unrecognised (§3.2).
 telemetry_render_event() {
-  local code="${1:-0}" env event state phase phase_ms name now total class src
+  local IFS=$' \t\n' code="${1:-0}" env event state phase phase_ms name now total class src
   env="$(telemetry_environment)" || return 1
 
   # §6.1 — three segments, a registered domain, a registered outcome verb. The
