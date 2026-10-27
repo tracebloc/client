@@ -113,15 +113,23 @@ _assess_cli_present() {
 # caring. That keeps this free (no network call on every run).
 : "${TB_CLI_MIN_VERSION:=0.10.63}"
 
+# _assess_cli_version BIN — the version BIN reports, bare: "tracebloc 0.10.5
+# (darwin/arm64)" -> "0.10.5". Whatever the first line holds there, unchecked;
+# empty when BIN reports nothing.
+_assess_cli_version() {
+  local ver
+  # No pipe: `tracebloc version | head -1` would let head close the pipe first,
+  # and pipefail turns that into a 141 the caller never asked for (backend#1778).
+  ver="$("$1" version 2>/dev/null || true)"
+  ver="${ver%%$'\n'*}"                     # first line
+  ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
+  printf '%s' "${ver#v}"
+}
+
 _assess_cli_outdated() {
   local bin ver
   bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
-  # No pipe: `tracebloc version | head -1` would let head close the pipe first,
-  # and pipefail turns that into a 141 the caller never asked for (backend#1778).
-  ver="$("$bin" version 2>/dev/null || true)"
-  ver="${ver%%$'\n'*}"                     # first line
-  ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
-  ver="${ver#v}"
+  ver="$(_assess_cli_version "$bin")"
   # FAIL OPEN on anything unparseable. A version we cannot read is not evidence
   # of staleness, and treating it as outdated would reinstall the CLI on every
   # single run — worse than the staleness this exists to fix.

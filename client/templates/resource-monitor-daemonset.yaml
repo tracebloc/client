@@ -230,11 +230,11 @@ spec:
             # The monitor queries workloads in the release namespace, not its
             # own node-agents namespace — use the release namespace literal
             # rather than the Downward API pod namespace.
-            {{- /* Canonical TRACEBLOC_ names only: the legacy NAMESPACE /
-                 CLIENT_ID / CLIENT_PASSWORD stopped rendering in the CONTRACT
-                 step (backend#4959 step b). The credential env names read the
-                 CANONICAL key of the node-agents mirror, the only key
-                 secrets.yaml writes there since backend#4959 step a. */}}
+            {{- /* Canonical TRACEBLOC_ names only (TRACEBLOC_NAMESPACE,
+                 TRACEBLOC_CLIENT_ID, TRACEBLOC_CLIENT_PASSWORD), the names the
+                 monitor reads. The credential env names read the CANONICAL key
+                 of the node-agents mirror, the only key secrets.yaml writes
+                 there. */}}
             - name: TRACEBLOC_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: TRACEBLOC_MONITOR_INTERVAL

@@ -197,9 +197,9 @@ spec:
               _err() { e=$(tr '\n' ' ' 2>/dev/null < "$KC_ERR"); : > "$KC_ERR"; printf '%.160s' "${e:-kubectl printed no error}"; }
               fail=0
               # Settings naming: the Job sets each of these under its canonical
-              # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
-              # canonical first; a blank or absent canonical leaves the legacy value --
-              # and any default or `set -u` refusal below -- exactly as before.
+              # TRACEBLOC_ name only, so that is the one read. A blank or absent
+              # canonical leaves the variable as it was, for any default or `set -u`
+              # refusal below.
               if [ -n "${TRACEBLOC_EXPECTED_STORAGE_CLASS:-}" ]; then EXPECTED_STORAGE_CLASS="$TRACEBLOC_EXPECTED_STORAGE_CLASS"; fi
               if [ -n "${TRACEBLOC_EXPECTED_PVCS:-}" ]; then EXPECTED_PVCS="$TRACEBLOC_EXPECTED_PVCS"; fi
               if [ -n "${TRACEBLOC_CHART_HOSTPATH_PVS:-}" ]; then CHART_HOSTPATH_PVS="$TRACEBLOC_CHART_HOSTPATH_PVS"; fi

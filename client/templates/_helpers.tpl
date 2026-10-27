@@ -531,8 +531,8 @@ mysql-root-rotated
 {{/*
   Name of the Secret that holds the local MySQL passwords (client-dev#1702):
   MYSQL_ROOT_PASSWORD, DB_BOOTSTRAP_PASSWORD and TRACEBLOC_CREDMGR / _META /
-  _INGEST_PASSWORD (the legacy TB_ keys are no longer written, backend#4959
-  step a). Rendered by secrets.yaml with
+  _INGEST_PASSWORD (under those names only; secrets.yaml says why). Rendered by
+  secrets.yaml with
   helm.sh/resource-policy: keep, so it survives `helm uninstall` beside the
   `mysql-pvc` datadir those passwords open.
 
@@ -3152,10 +3152,8 @@ lives in one place (Saqlain, client#996). Three situations, not two (backend#221
                                           written as given; the runtime warns once.
 
 Each var renders under its canonical TRACEBLOC_ name only (TRACEBLOC_GPU_REQUESTS /
-TRACEBLOC_GPU_LIMITS): the legacy GPU_REQUESTS / GPU_LIMITS env names stopped
-rendering in the settings-naming CONTRACT step (backend#4959), every reader
-taking the canonical first. The values keys stay `env.GPU_REQUESTS` /
-`env.GPU_LIMITS` -- they are the chart's input API.
+TRACEBLOC_GPU_LIMITS), the name every reader takes. The values keys stay
+`env.GPU_REQUESTS` / `env.GPU_LIMITS` -- they are the chart's input API.
 */}}
 {{- define "tracebloc.gpuEnv" -}}
 {{- if hasKey .Values.env "GPU_LIMITS" }}
@@ -3221,10 +3219,9 @@ driver_too_old / not_nvidia / runtime_cannot_see_gpu), sent as
 gpu_unsupported_code (backend#5296). The names are a cross-repo contract: do
 not rename one side alone.
 
-Each renders only when non-empty, under its TRACEBLOC_ canonical only (settings
-naming CONTRACT step, backend#4959: the legacy env name no longer renders); either
-spelling of the values key works, the canonical first (the passthrough's
-alias-first rule).
+Each renders only when non-empty, under its TRACEBLOC_ canonical only, the name
+its readers take; either spelling of the values key works, the canonical first
+(the passthrough's alias-first rule).
 */}}
 {{- define "tracebloc.gpuUnsupportedEnv" -}}
 {{- $env := default dict .Values.env -}}
@@ -3279,7 +3276,7 @@ only: the variables are new, so they have no legacy spelling.
 {{/*
 tracebloc.envPassthroughEntry -- ONE `.Values.env` passthrough entry for the
 jobs-manager containers, rendered under its TRACEBLOC_ canonical where the name
-has one (settings naming CONTRACT step, backend#4959).
+has one.
 Usage: {{ include "tracebloc.envPassthroughEntry" (dict "key" $key "value" $value "env" $.Values.env) }}
 The caller keeps its own exclusion list; this renders only what passed it.
 

@@ -178,18 +178,16 @@ data:
     set -eu
 
     # Settings naming: the chart sets each identity var under its canonical
-    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
-    # canonical first; a blank or absent canonical leaves the legacy value --
-    # and `set -u`'s refusal of an unset one -- exactly as before.
+    # TRACEBLOC_ name only, so that is the one read. A blank or absent canonical
+    # leaves the variable as it was, and `set -u` refuses an unset one.
     if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE_NAME="$TRACEBLOC_RELEASE_NAME"; fi
     if [ -n "${TRACEBLOC_RELEASE_NAMESPACE:-}" ]; then RELEASE_NAMESPACE="$TRACEBLOC_RELEASE_NAMESPACE"; fi
 
     log() { printf '[image-refresh] %s\n' "$*" >&2; }
 
     # Settings naming: the CronJob sets each of these under its canonical
-    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
-    # canonical first; a blank or absent canonical leaves the legacy value --
-    # and `set -u`'s refusal of an unset one -- exactly as before.
+    # TRACEBLOC_ name only, so that is the one read. A blank or absent canonical
+    # leaves the variable as it was, and `set -u` refuses an unset one.
     if [ -n "${TRACEBLOC_DEPLOYMENT_NAME:-}" ]; then DEPLOYMENT_NAME="$TRACEBLOC_DEPLOYMENT_NAME"; fi
     if [ -n "${TRACEBLOC_REQUESTS_PROXY_DEPLOYMENT:-}" ]; then REQUESTS_PROXY_DEPLOYMENT="$TRACEBLOC_REQUESTS_PROXY_DEPLOYMENT"; fi
     if [ -n "${TRACEBLOC_RESOURCE_MONITOR_DAEMONSET:-}" ]; then RESOURCE_MONITOR_DAEMONSET="$TRACEBLOC_RESOURCE_MONITOR_DAEMONSET"; fi

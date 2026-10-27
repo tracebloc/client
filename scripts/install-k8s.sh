@@ -390,8 +390,11 @@ main() {
   # guard (or install_client_helm's dual-mode path) surfaces it. Not in tracebloc's
   # WSL distro: the CLI is the Windows host's, which signs in and creates the client
   # there (RFC-0175 D2), so step d here takes the credential it handed over.
+  # The CLI step itself never fails; require_tracebloc_cli_floor then stops a run
+  # left with a CLI below the platform's floor (backend#4959).
   if [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] && declare -F install_tracebloc_cli >/dev/null 2>&1; then
     install_tracebloc_cli
+    require_tracebloc_cli_floor
   fi
   echo ""; echo ""
 

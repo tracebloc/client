@@ -2938,6 +2938,44 @@ function Invoke-HostCliProbe {
   return $r
 }
 
+# The tracebloc CLI's floor, as the verified core declares it: lib/assess.sh's
+# TB_CLI_MIN_VERSION default, the floor the bash installer holds its CLI to
+# (backend#4959). Read from that file, never restated here. A core it cannot be
+# read from cannot be checked against, so that is refused by name.
+function Get-CoreCliFloor {
+  param([string]$CoreDir)
+  $assess = Join-Path (Join-Path (Join-Path $CoreDir 'scripts') 'lib') 'assess.sh'
+  $found = @(Get-Content -LiteralPath $assess -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_ -match '^: "\$\{TB_CLI_MIN_VERSION:=([0-9]+(\.[0-9]+)*)\}"') { $Matches[1] }
+  })
+  if ($found.Count -ne 1 -or -not (ConvertTo-FloorVersion $found[0])) {
+    throw "This installer can't read the tracebloc CLI's minimum version from $assess, so it can't check the CLI. Run the installer again from its release."
+  }
+  return $found[0]
+}
+
+# Stops the install when the CLI Install-HostCli left is below the core's floor
+# (backend#4959). Install-HostCli keeps the CLI already here when its update fails;
+# below the floor that CLI cannot find the client this chart installs and the
+# platform refuses it, so going on would register this machine with a CLI that
+# cannot use it. A version the CLI does not report, or reports as anything but
+# dotted numbers, passes, as at the bash gate. Bash twin: lib/install-cli.sh's
+# require_tracebloc_cli_floor.
+function Assert-HostCliFloor {
+  param([string]$Cli, [string]$CoreDir)
+  $floor = Get-CoreCliFloor -CoreDir $CoreDir
+  $probe = Invoke-HostCliProbe -Cli $Cli -ArgumentList @('version')
+  $first = "$(@($probe.Lines)[0])".Trim()
+  if (-not $first) { return }
+  # "tracebloc 0.10.5 (windows/amd64)" -> "0.10.5", as assess.sh's _assess_cli_version.
+  $words = @($first -split '\s+')
+  $ver = $(if ($words.Count -ge 2) { $words[1] } else { $words[0] }) -replace '^v', ''
+  if ($ver -notmatch '^\d+(\.\d+)*$') { return }
+  $have = ConvertTo-FloorVersion $ver
+  if (-not $have -or $have -ge (ConvertTo-FloorVersion $floor)) { return }
+  throw "The tracebloc CLI on this machine (v$ver, $Cli) is older than v$floor, the oldest version tracebloc accepts, and it could not be updated. Install it in a new PowerShell window with:  irm $TRACEBLOC_CLI_INSTALL_URL | iex  then run this installer again."
+}
+
 # What `client create` would do here (`--plan`, which changes nothing): the CLI's
 # own reads of the account and of the client running in the cluster the host
 # kubeconfig makes current. Action is adopt, reconnect, mint, refuse (a client of
@@ -3274,6 +3312,9 @@ function Invoke-WslCore {
   $credential = Get-HostPresetCredential
   try {
     $cli = Install-HostCli -Optional:($null -ne $credential)
+    # Install-HostCli keeps an older CLI when its update fails: one below the
+    # floor stops here, before the distro is touched (backend#4959).
+    if ($cli) { Assert-HostCliFloor -Cli $cli -CoreDir $CoreDir }
     $core = ConvertTo-DistroPath -Path $CoreDir
     $kubeconfig = ConvertTo-DistroPath -Path (Get-HostKubeconfigTarget)
     $logHost = Join-Path $env:USERPROFILE '.tracebloc'

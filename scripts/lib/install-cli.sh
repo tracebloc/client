@@ -21,6 +21,8 @@
 #  "Connected to tracebloc" into a failed install. Every path returns 0, and
 #  detection does NOT rely on the caller's `set -o pipefail` (we download to a
 #  temp file and check each step explicitly rather than `curl | sh`).
+#  The one exit is require_tracebloc_cli_floor, run after it: a CLI left below
+#  the platform's floor stops the install.
 # =============================================================================
 
 TRACEBLOC_CLI_INSTALL_URL="https://github.com/tracebloc/cli/releases/latest/download/install.sh"
@@ -355,6 +357,33 @@ install_tracebloc_cli() {
   rm -f "$installer"
   if [[ -n "$_cli_out" ]]; then rm -f "$_cli_out"; fi
   return 0
+}
+
+# require_tracebloc_cli_floor — run right after install_tracebloc_cli: stop the
+# install when the CLI this machine is left with is below TB_CLI_MIN_VERSION, the
+# floor assess.sh declares (backend#4959). install_tracebloc_cli never fails the
+# run: a download or install that does not work keeps the CLI already here. Below
+# the floor that CLI cannot find the client this chart installs and the platform
+# refuses it, so going on would set up a client the machine's own CLI cannot use.
+# Stopping here, before the cluster is touched, leaves the machine as it was.
+#
+# The CLI is the one _assess_cli_bin resolves, the same one the stop-and-check
+# gate reads. No CLI at all is not this check's case: provision_client refuses
+# where it needs one, and an install with a supplied credential needs none. A
+# version that cannot be read passes, as it does at the gate.
+require_tracebloc_cli_floor() {
+  # assess.sh holds the floor. Without it this cannot tell, and an install that
+  # cannot tell does not go on.
+  declare -F _assess_cli_outdated >/dev/null 2>&1 \
+    || error "This installer is missing scripts/lib/assess.sh, so it cannot check the tracebloc CLI's version. Run the installer again from its release."
+  _assess_cli_outdated || return 0
+  local bin ver
+  bin="$(_assess_cli_bin)"
+  ver="$(_assess_cli_version "$bin")"
+  [[ "$bin" == */* ]] || bin="$(command -v "$bin" 2>/dev/null || printf '%s' "$bin")"
+  error "The tracebloc CLI on this machine (v${ver}, ${bin}) is older than v${TB_CLI_MIN_VERSION}, the oldest version tracebloc accepts, and it could not be updated.
+  Update it:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh
+  then run this installer again."
 }
 
 # ── The account's example use case ──────────────────────────────────────────

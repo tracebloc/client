@@ -510,8 +510,7 @@ spec:
         {{- $tcEnv := default (dict) .Values.telemetryCollector }}
         {{- $tokEnv := default (dict) $tcEnv.tokenSecret }}
         {{- /* Each of the three under its canonical TRACEBLOC_ name only
-             (backend#3846; the legacy names stopped rendering in the CONTRACT
-             step, backend#4959). */}}
+             (backend#3846), the name its readers take. */}}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAMESPACE
           value: {{ .Values.nodeAgents.namespace.name | quote }}
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_NAME
@@ -523,10 +522,8 @@ spec:
         - name: TRACEBLOC_TELEMETRY_TOKEN_SECRET_KEY
           value: {{ $tokEnv.key | default "token" | quote }}
         {{- /* The client identity under its canonical names, TRACEBLOC_CLIENT_ID /
-             TRACEBLOC_CLIENT_PASSWORD; the legacy CLIENT_ID / CLIENT_PASSWORD env
-             names stopped rendering in the CONTRACT step (backend#4959 step b).
-             Both read the CANONICAL Secret key, the only key secrets.yaml writes
-             since backend#4959 step a. */}}
+             TRACEBLOC_CLIENT_PASSWORD, the names jobs-manager reads. Both read
+             the CANONICAL Secret key, the only key secrets.yaml writes. */}}
         - name: TRACEBLOC_CLIENT_ID
           valueFrom:
             secretKeyRef:
@@ -542,11 +539,9 @@ spec:
         # verify. When present, spin_job mints stateless signed tokens (no
         # pod_tokens table). Never injected into training pods.
         {{- /* Settings naming: every name below is emitted under its canonical
-             TRACEBLOC_<name> (a leading TB_ replaced) only; the legacy spellings
-             stopped rendering in the CONTRACT step (backend#4959 step b), every
-             jobs-manager this chart runs reading the canonical first. Every
-             secretKeyRef names the CANONICAL Secret key, the only one
-             secrets.yaml writes. */}}
+             TRACEBLOC_<name> (a leading TB_ replaced) only, the name every
+             jobs-manager this chart runs reads. Every secretKeyRef names the
+             CANONICAL Secret key, the only one secrets.yaml writes. */}}
         - name: TRACEBLOC_POD_TOKEN_SIGNING_SECRET
           valueFrom:
             secretKeyRef:
@@ -568,9 +563,8 @@ spec:
         # backend#5266: a volume the engine ignores keeps nothing, so the same
         # switch arms the engine's resume. jobs-manager forwards it to every
         # training pod (client-runtime operator_training_switches). The canonical
-        # name only, as the env passthrough writes it (RFC-0076 CONTRACT step,
-        # backend#4959); an operator's own env.TRAINING_RESUME_ENABLED wins and
-        # is rendered by the passthrough.
+        # name only, as the env passthrough writes it; an operator's own
+        # env.TRAINING_RESUME_ENABLED wins and is rendered by the passthrough.
         - name: TRACEBLOC_TRAINING_RESUME_ENABLED
           value: "1"
         {{- end }}
@@ -1181,10 +1175,8 @@ spec:
         env:
         {{- include "tracebloc.proxyEnv" . | nindent 8 }}
         {{- /* The client identity under its canonical names, TRACEBLOC_CLIENT_ID /
-             TRACEBLOC_CLIENT_PASSWORD; the legacy CLIENT_ID / CLIENT_PASSWORD env
-             names stopped rendering in the CONTRACT step (backend#4959 step b).
-             Both read the CANONICAL Secret key, the only key secrets.yaml writes
-             since backend#4959 step a. */}}
+             TRACEBLOC_CLIENT_PASSWORD, the names jobs-manager reads. Both read
+             the CANONICAL Secret key, the only key secrets.yaml writes. */}}
         - name: TRACEBLOC_CLIENT_ID
           valueFrom:
             secretKeyRef:

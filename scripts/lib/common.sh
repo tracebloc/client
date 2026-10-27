@@ -1563,23 +1563,25 @@ TB_PREPULL_PARENT_DISK_GB="11"
 # above: a non-empty canonical wins, else the legacy, else the default. Resolved
 # ONCE, here, into HOST_DATA_DIR, the variable the rest of the installer reads
 # and re-assigns (--data-dir, validate_config's normalisation, the leftover
-# guard's new-dir choice); validate_config then exports both spellings
-# (tb_export_host_data_dir), so a child resolving alias-first sees the decided
-# path and not a stale canonical.
+# guard's new-dir choice); validate_config then exports the decided path as
+# TRACEBLOC_HOST_DATA_DIR (tb_export_host_data_dir), so a child reading it sees
+# that path and not a stale canonical.
 if [[ -n "${TRACEBLOC_HOST_DATA_DIR:-}" ]]; then HOST_DATA_DIR="$TRACEBLOC_HOST_DATA_DIR"; fi
 # The default, named once: native k3s (k3s.sh) reads a data dir other than this
 # one as the operator's choice of where the volumes live.
 TB_HOST_DATA_DIR_DEFAULT="${HOME:-}/.tracebloc"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$TB_HOST_DATA_DIR_DEFAULT}"
 
-# tb_export_host_data_dir — export the decided data dir under both spellings.
-# Both, unlike tb_export_namespace: the tracebloc CLI this installer runs reads
-# the data dir to find the installer's telemetry spool, and a CLI before 0.10.60
-# reads HOST_DATA_DIR alone. The installer can run one: a CLI download that fails
-# is not fatal, and the steps after it then run the CLI already installed.
+# tb_export_host_data_dir — export the decided data dir as TRACEBLOC_HOST_DATA_DIR
+# alone, as tb_export_namespace does. Its one child reader is the tracebloc CLI,
+# which finds the installer's telemetry spool there and reads TRACEBLOC_HOST_DATA_DIR
+# first. Every CLI this installer goes on with is at or above the platform's floor
+# (require_tracebloc_cli_floor), well past the 0.10.60 that started reading it.
+# HOST_DATA_DIR stays this shell's variable; one the caller exported still reaches a
+# child, with the decided value.
 tb_export_host_data_dir() {
   TRACEBLOC_HOST_DATA_DIR="${HOST_DATA_DIR:-}"
-  export HOST_DATA_DIR TRACEBLOC_HOST_DATA_DIR
+  export TRACEBLOC_HOST_DATA_DIR
 }
 # _hostpath_root -- the host directory a native k3s hostpath install's PVs sit under:
 # the root an installed release keeps (TB_HOSTPATH_KEPT, _native_k3s_release_storage),

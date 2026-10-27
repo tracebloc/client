@@ -76,9 +76,8 @@ spec:
       - name: mysql-format-guard
         image: {{ include "tracebloc.thirdPartyImage" (dict "site" "images.busybox" "root" $) | quote }}
         {{- /* The engine the guard arms for, under the canonical
-             TRACEBLOC_EXPECTED_ENGINE only (the legacy TB_EXPECTED_ENGINE stopped
-             rendering in the CONTRACT step, backend#4959); the script reads the
-             canonical first. A guard reading a name nothing set would fall
+             TRACEBLOC_EXPECTED_ENGINE only; the script reads the canonical
+             first. A guard reading a name nothing set would fall
              through to `*)` and silently stand down, so the env name and the
              script move together; a repo test executes the rendered script. */}}
         {{- $expectedEngine := include "tracebloc.mysqlEngineMajor" . }}
