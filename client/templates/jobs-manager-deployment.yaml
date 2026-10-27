@@ -1045,8 +1045,8 @@ spec:
         # installer's single-host cluster this IS the machine's name. Excluded
         # (both spellings) from the passthrough range below, so neither
         # `env.NODE_NAME` nor `env.TRACEBLOC_NODE_NAME` can render it twice.
-        # The canonical name only: the legacy NODE_NAME stopped rendering once
-        # the prod control-plane pin read it canonical-first (backend#4959).
+        # The canonical name only: jobs-manager and the telemetry package it
+        # pins read TRACEBLOC_NODE_NAME first.
         # (`env.DEVICE_TYPE`, the installer's chassis verdict, needs no line of
         # its own: the range passes it through, and jobs-manager omits the key
         # when it is unset rather than guessing.)

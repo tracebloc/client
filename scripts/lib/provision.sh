@@ -9,7 +9,7 @@
 #  (never printed), then handed to the Helm step via the SAME env contract
 #  install_client_helm already consumes:
 #      TRACEBLOC_CLIENT_ID + TRACEBLOC_CLIENT_PASSWORD + TB_NAMESPACE
-#  (the namespace exported under both TB_NAMESPACE and its canonical
+#  (TB_NAMESPACE is this shell's variable; children get it as the canonical
 #  TRACEBLOC_NAMESPACE, see tb_export_namespace in common.sh)
 #
 #  DUAL-MODE (unchanged, one deprecation cycle): when the operator pre-supplies a
@@ -132,7 +132,8 @@ _cli_supports_provisioning() {
 # `client create`'s own prompt can't fire (we redirect its output to the log), and
 # under `curl | bash` stdin isn't the terminal — so read /dev/tty directly. Split
 # out as a function so tests can force the non-interactive path deterministically.
-_prompt_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
+# Opens the terminal (_tty_usable): a mode test passes with no controlling terminal.
+_prompt_tty() { _tty_usable; }
 
 # TRACEBLOC_TTY: where interactive prompts READ from. Under `curl | bash` stdin is the
 # piped installer, not the keyboard, so reads must come from the controlling

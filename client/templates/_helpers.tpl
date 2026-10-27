@@ -3300,14 +3300,13 @@ the same effect:
                                       env.X renders TRACEBLOC_X (blank canonical
                                       = legacy, as every reader treats it).
 
-The legacy env name is NOT rendered (it was, beside the canonical, until the
-CONTRACT step). NODE_NAME was the last name kept beside its canonical, for the
-tracebloc-telemetry package client-runtime pins; it reads the canonical first
-from 0.1.1, which the prod control-plane pin carries since chart 1.12.10
-(backend#4959), so no name is kept.
+The legacy env name is NOT rendered: client-runtime's jobs-manager and
+pods-monitor, and the tracebloc-telemetry package they pin, read every name
+below canonical first.
 
-The list is every legacy name either container used to dual-emit that the other's (or
-its own) passthrough does not exclude, plus the operator knobs the chart never
+The list is every legacy name with a TRACEBLOC_ canonical that an `env.` key can
+carry into either container, past the other's (or its own) passthrough
+exclusions, plus the operator knobs the chart never
 renders itself and only passes through (the GPU / SHM line and the lines after
 it: every such knob client-runtime's jobs-manager or pods-monitor reads
 TRACEBLOC_<name> first -- the RFC-0067 switches EMIT_OOM_RESCUE / EMIT_TOPOLOGY /

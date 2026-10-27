@@ -13,15 +13,14 @@
 # the capture. The cost is one conservative "open a new terminal" for a user whose
 # own PATH starts with ~/.local/bin and who pairs a stale bootstrap with these libs.
 # A bootstrap from before backend#3846 hands the capture over as TB_LAUNCH_PATH
-# alone: read it as the fallback, and export both names, one value (remove_by
-# 2026-12-31).
+# alone: read it as the fallback (remove_by 2026-12-31). Exported under the
+# canonical name only: every reader is this core, which reads it first.
 TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-}}"
 if [[ -z "$TRACEBLOC_LAUNCH_PATH" ]]; then
   TRACEBLOC_LAUNCH_PATH="${PATH:-}"
   TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH#"${HOME}/.local/bin:"}"
 fi
 export TRACEBLOC_LAUNCH_PATH
-export TB_LAUNCH_PATH="$TRACEBLOC_LAUNCH_PATH"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 # In a bats run only, the suite's sudo fence goes back in front of the directories
 # just prepended. Behind them, a case that dropped its own sudo stub would run the
@@ -1439,17 +1438,19 @@ CLUSTER_NAME="${CLUSTER_NAME:-tracebloc}"
 # -- the same precedence and blank-means-unset rule as tb_client_env above.
 # Resolved ONCE, here, into TB_NAMESPACE, the variable the rest of the installer
 # reads and re-assigns (sanitising, adopting an existing release, provisioning);
-# where the installer hands the name on it exports both spellings
-# (tb_export_namespace), so a child that resolves alias-first sees the SAME
-# value and not a stale canonical the user set before the name was decided.
+# where the installer hands the name on it exports the decided value as the
+# canonical (tb_export_namespace), so a child that resolves alias-first sees the
+# SAME value and not a stale canonical the user set before the name was decided.
 if [[ -n "${TRACEBLOC_NAMESPACE:-}" ]]; then TB_NAMESPACE="$TRACEBLOC_NAMESPACE"; fi
 
-# tb_export_namespace — export the decided secure-environment name under both
-# spellings. An unset TB_NAMESPACE exports an empty canonical, which every
-# alias-first reader treats as unset.
+# tb_export_namespace — export the decided secure-environment name as
+# TRACEBLOC_NAMESPACE. Only the canonical: no child of the installer reads
+# TB_NAMESPACE from its environment (the CLI only ever sets it), and a core that
+# sources this file again reads the canonical first. An unset TB_NAMESPACE
+# exports an empty canonical, which every alias-first reader treats as unset.
 tb_export_namespace() {
   TRACEBLOC_NAMESPACE="${TB_NAMESPACE:-}"
-  export TB_NAMESPACE TRACEBLOC_NAMESPACE
+  export TRACEBLOC_NAMESPACE
 }
 # Settings this installer no longer reads: TRACEBLOC_SERVERS and TRACEBLOC_AGENTS
 # were node counts for a runtime it no longer sets up, and native k3s runs one node;
@@ -1572,6 +1573,10 @@ TB_HOST_DATA_DIR_DEFAULT="${HOME:-}/.tracebloc"
 HOST_DATA_DIR="${HOST_DATA_DIR:-$TB_HOST_DATA_DIR_DEFAULT}"
 
 # tb_export_host_data_dir — export the decided data dir under both spellings.
+# Both, unlike tb_export_namespace: the tracebloc CLI this installer runs reads
+# the data dir to find the installer's telemetry spool, and a CLI before 0.10.60
+# reads HOST_DATA_DIR alone. The installer can run one: a CLI download that fails
+# is not fatal, and the steps after it then run the CLI already installed.
 tb_export_host_data_dir() {
   TRACEBLOC_HOST_DATA_DIR="${HOST_DATA_DIR:-}"
   export HOST_DATA_DIR TRACEBLOC_HOST_DATA_DIR

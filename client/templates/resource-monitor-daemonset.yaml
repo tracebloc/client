@@ -220,9 +220,9 @@ spec:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: "utility"
             {{- /* Settings naming: NODE_NAME, MONITOR_INTERVAL and HOST_DATASET_PATH
-                 render under their canonical TRACEBLOC_<name> only. The legacy
-                 NODE_NAME was the last to stop (backend#4959), once the prod
-                 control-plane pin read it canonical-first. */}}
+                 render under their canonical TRACEBLOC_<name> only: the resource
+                 monitor and the telemetry package it pins read each canonical
+                 first. */}}
             - name: TRACEBLOC_NODE_NAME
               valueFrom:
                 fieldRef:

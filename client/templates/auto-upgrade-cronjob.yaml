@@ -19,9 +19,9 @@ data:
     set -eu
 
     # Settings naming: the chart sets each identity var under its canonical
-    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one. Read the
-    # canonical first; a blank or absent canonical leaves the legacy value --
-    # and `set -u`'s refusal of an unset one -- exactly as before.
+    # TRACEBLOC_ name only. Read the canonical first; the legacy name is the
+    # fallback for an env that still carries it, so a blank or absent canonical
+    # leaves the legacy value -- and `set -u`'s refusal of an unset one -- alone.
     if [ -n "${TRACEBLOC_RELEASE_NAME:-}" ]; then RELEASE_NAME="$TRACEBLOC_RELEASE_NAME"; fi
     if [ -n "${TRACEBLOC_RELEASE_NAMESPACE:-}" ]; then RELEASE_NAMESPACE="$TRACEBLOC_RELEASE_NAMESPACE"; fi
 
@@ -37,11 +37,9 @@ data:
     log() { printf '[auto-upgrade] %s\n' "$*"; }
 
     # Settings naming: the CronJob sets each of these under its canonical
-    # TRACEBLOC_ name; since the CONTRACT step (backend#4959) only that one
-    # (CHART_NAME / REPO_URL were the last to stop, once the prod control-plane
-    # pin read them canonical-first). Read the
-    # canonical first; a blank or absent canonical leaves the legacy value --
-    # and any default or `set -u` refusal below -- exactly as before.
+    # TRACEBLOC_ name only. Read the canonical first; the legacy name is the
+    # fallback for an env that still carries it, so a blank or absent canonical
+    # leaves the legacy value -- and any default or `set -u` refusal below -- alone.
     # The chart source (REPO_URL / REPO_NAME / CHART_NAME) takes the spelling the
     # installer and the cli already give the same three facts
     # (install-client-helm.sh TRACEBLOC_HELM_REPO_URL / _NAME, TRACEBLOC_CHART_NAME),

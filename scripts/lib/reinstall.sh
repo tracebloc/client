@@ -3,7 +3,9 @@
 #  reinstall.sh — native k3s is never set up on a machine that runs tracebloc on
 #  k3d (RFC-0175 D10). This installer no longer moves such a machine: it stops
 #  before anything is installed, written or started, says why in plain words, and
-#  names the way off: a tracebloc CLI release that can still delete it.
+#  names the way off: a tracebloc CLI release that can still delete it. Over an
+#  install record a degraded 'tracebloc delete' left behind, a yes on the terminal
+#  sets the record aside and goes on (_reinstall_offer_way_out).
 #
 #  What says k3d is tracebloc's own data, never Docker or k3d: the install
 #  record's substrate (with no substrate field, an artefact only k3d records),
@@ -213,7 +215,14 @@ refuse_k3d_machine() {
   TB_EXIT_REFUSED=1
   _native_k3s_refuse_host
   _reinstall_k3d_said || rc=$?
-  _reinstall_refuse "$rc"
+  _reinstall_refuse "$rc" open && return 0
+  # The way out lives here, never in _reinstall_refuse: prepare-host's refusal shares
+  # that, and the way out runs sudo outside tb_root (prepare-host-root-guard.py).
+  if _reinstall_offer_way_out; then
+    TB_EXIT_REFUSED=""
+    return 0
+  fi
+  error "Nothing was changed."
 }
 
 # refuse_k3d_for_user USER HOME -- prepare-host's refusal: stop by name when the
@@ -227,9 +236,10 @@ refuse_k3d_for_user() {
   _reinstall_refuse "$rc"
 }
 
-# _reinstall_refuse RC -- the refusal for the answer RC of _reinstall_k3d_said or
-# _reinstall_k3d_said_for: 1 returns 0, 2 refuses as cannot tell, 0 refuses with the
-# way off k3d.
+# _reinstall_refuse RC [open] -- the refusal for the answer RC of _reinstall_k3d_said
+# or _reinstall_k3d_said_for: 1 returns 0, 2 refuses as cannot tell, 0 refuses with the
+# way off k3d. With open, that last returns 3 after the way off, and the caller ends
+# the refusal (refuse_k3d_machine's way out).
 _reinstall_refuse() {
   local engine="native k3s"
   # A Mac names its one runtime, as tb_substrate_resolve's refusal there does; a build
@@ -251,5 +261,102 @@ _reinstall_refuse() {
   # install-cli.sh's URL; a bootstrap that did not fetch install-cli.sh names the release only.
   [[ -z "${TRACEBLOC_CLI_INSTALL_URL:-}" ]] \
     || hint "Install that CLI with:  curl -fsSL ${TRACEBLOC_CLI_INSTALL_URL} | sh -s -- --version v${TB_RETIRED_OFFBOARD_CLI}"
+  [[ "${2:-}" != open ]] || return 3
   error "Nothing was changed."
+}
+
+# _reinstall_stamp -- the UTC time a record set aside is named for.
+_reinstall_stamp() { date -u +%Y%m%dT%H%M%SZ; }
+
+# _reinstall_root_copy -- the path of the install record's root copy when this run
+# reaches it and it exists (Linux); fails otherwise.
+_reinstall_root_copy() {
+  local dst
+  [[ "${OS:-$(uname -s 2>/dev/null)}" == "Linux" ]] || return 1
+  dst="$(_tb_record_root_copy_path)" && _tb_record_root_access && _tb_record_root_run test -e "$dst" 2>/dev/null || return 1
+  printf '%s' "$dst"
+}
+
+# _reinstall_live_context RECORD-TEXT -- 0 when a kubeconfig has k3d's context for the
+# cluster the record names or for CLUSTER_NAME, setting TB_REINSTALL_LIVE_CTX and
+# TB_REINSTALL_LIVE_FILE; 1 when none does; 2 when none does and a kubeconfig that
+# exists could not be read (TB_REINSTALL_LIVE_FILE names it). Reads every file in
+# $KUBECONFIG and ~/.kube/config.
+_reinstall_live_context() {
+  local f name names files rc unread=""
+  name="$(_tb_record_prior cluster_name "$1")"; name="${name#\"}"; name="${name%\"}"
+  [[ "$name" != null ]] || name=""
+  names="${name}:${CLUSTER_NAME:-}"
+  files="${KUBECONFIG:+${KUBECONFIG}:}${HOME:-}/.kube/config"
+  local IFS=:
+  for f in $files; do
+    [[ -n "$f" && -e "$f" ]] || continue
+    for name in $names; do
+      [[ -n "$name" ]] || continue
+      rc=0; _reinstall_kubeconfig_has "k3d-${name}" "$f" || rc=$?
+      case "$rc" in
+        0) TB_REINSTALL_LIVE_CTX="k3d-${name}"; TB_REINSTALL_LIVE_FILE="$f"; return 0 ;;
+        1) ;;
+        *) [[ -n "$unread" ]] || unread="$f"; break ;;
+      esac
+    done
+  done
+  [[ -z "$unread" ]] || { TB_REINSTALL_LIVE_FILE="$unread"; return 2; }
+  return 1
+}
+
+# _reinstall_offer_way_out -- the way past a refusal over an install record whose
+# 'tracebloc delete' could not finish, so the record stayed. On a terminal, one
+# question: only an explicit yes moves the record (and on Linux its root copy) to
+# <record>.k3d-retired-<UTC time>, never deleting it, lists what the record says k3d
+# left behind, and returns 0. Any other answer, and a run with no terminal, return 1
+# (the latter after naming the mv commands). With no record to set aside, it says nothing.
+# While a kubeconfig has k3d's context, or cannot be read, the cluster may still exist: no way out is offered.
+_reinstall_offer_way_out() {
+  local rec root stamp ans="" text="" line kind id path listed="" rc
+  rec="$(tb_record_path)"; [[ -e "$rec" ]] || rec=""
+  root="$(_reinstall_root_copy)" || root=""
+  [[ -n "${rec}${root}" ]] || return 1
+  if [[ -n "$rec" ]]; then text="$(cat "$rec" 2>/dev/null)" || text=""
+  else text="$(_tb_record_root_run cat "$root" 2>/dev/null)" || text=""; fi
+  rc=0; _reinstall_live_context "$text" || rc=$?
+  case "$rc" in
+    0) hint "The k3d cluster '${TB_REINSTALL_LIVE_CTX#k3d-}' may still exist: your kubeconfig ${TB_REINSTALL_LIVE_FILE} has the context '${TB_REINSTALL_LIVE_CTX}'. Run 'tracebloc delete' and let it finish, then run this installer again."
+       return 1 ;;
+    1) ;;
+    *) hint "Your kubeconfig ${TB_REINSTALL_LIVE_FILE} cannot be read, so the k3d cluster may still exist. Make it readable for you, or point KUBECONFIG away from it, then run this installer again."
+       return 1 ;;
+  esac
+  stamp="$(_reinstall_stamp)"
+  if ! { declare -F _prompt_tty >/dev/null 2>&1 && _prompt_tty; }; then
+    hint "If 'tracebloc delete' ran and could not finish, set the install record aside yourself, then run this installer again:"
+    [[ -z "$rec" ]] || hint "  mv ${rec} ${rec}.k3d-retired-${stamp}"
+    [[ -z "$root" ]] || hint "  sudo mv ${root} ${root}.k3d-retired-${stamp}"
+    return 1
+  fi
+  printf '\n  Set the old install record aside and go on? Answer yes only if '"'"'tracebloc delete'"'"' ran and could not finish. [y/N] '
+  IFS= read -r ans <"${TRACEBLOC_TTY:-/dev/tty}" || ans=""
+  echo ""
+  ans="$(printf '%s' "${ans//[[:space:]]/}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$ans" == y || "$ans" == yes ]] || return 1
+  if [[ -n "$root" ]]; then
+    _tb_record_root_run mv -- "$root" "${root}.k3d-retired-${stamp}" \
+      || error "Couldn't set the install record's root copy ${root} aside. Nothing was changed."
+    hint "Set aside, not deleted: ${root} -> ${root}.k3d-retired-${stamp}"
+  fi
+  if [[ -n "$rec" ]]; then
+    mv -- "$rec" "${rec}.k3d-retired-${stamp}" \
+      || error "Couldn't set the install record ${rec} aside."
+    hint "Set aside, not deleted: ${rec} -> ${rec}.k3d-retired-${stamp}"
+  fi
+  while IFS='|' read -r kind id path; do
+    [[ -n "$kind" ]] || continue
+    if [[ -z "$listed" ]]; then
+      hint "The old install record lists what k3d left behind. Delete these yourself:"
+      listed=1
+    fi
+    hint "  - ${kind} '${id}'${path:+ at ${path}}"
+  done < <(printf '%s\n' "$text" | _tb_record_artefacts 2>/dev/null \
+    | sed -nE 's/^[{]"kind": "([^"]*)", "id": "([^"]*)", "path": (null|"([^"]*)"),.*/\1|\2|\4/p')
+  return 0
 }

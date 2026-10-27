@@ -442,7 +442,7 @@ print_summary() {
         if [[ -n "$jdata" ]]; then
           echo -e "  ${DIM}Logs ${logdisp}  ·  Job data ${jdata}/${ns} (on this Mac, private to you)${RESET}"
         else
-          echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the macOS node's volume (k3s local-path)${RESET}"
+          echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the volume of the VM that runs tracebloc on this Mac (k3s local-path)${RESET}"
         fi
       elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
         # Native k3s: the volumes are on this host, in local-path's storage path.
@@ -482,8 +482,8 @@ print_summary() {
         # The macOS node takes the CA's roots by path (_mac_ct_node_ca), and new roots
         # recreate it on its volume, so a re-run with the CA is the whole remedy:
         # nothing is released and nothing is deleted.
-        echo -e "  corporate CA bundle so the macOS node trusts it. Re-running with the CA"
-        echo -e "  recreates the node with it, and keeps the node's data:"
+        echo -e "  corporate CA bundle so the VM that runs tracebloc on this Mac trusts it."
+        echo -e "  Re-running with the CA recreates the VM with it, and keeps the VM's data:"
       else
         # Native k3s reads the CA from /etc/rancher/k3s/registries.yaml each time
         # the k3s service starts, so a re-run that writes it is the whole remedy:
@@ -558,8 +558,8 @@ _log_advanced_info() {
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
     jdata=""
     if declare -F _mac_ct_job_data_dir >/dev/null; then jdata="$(_mac_ct_job_data_dir)"; fi
-    [[ -z "$jdata" ]] || log "Job data: ${jdata} (dataset, logs and resume; on this Mac, mode 0700, mounted into the node at the same path)"
-    log "Volumes: in the macOS node's volume $(_mac_ct_node_name 2>/dev/null) (k3s local-path, inside Apple's VM)"
+    [[ -z "$jdata" ]] || log "Job data: ${jdata} (dataset, logs and resume; on this Mac, mode 0700, mounted into the VM at the same path)"
+    log "Volumes: in the volume $(_mac_ct_node_name 2>/dev/null) of the VM that runs tracebloc on this Mac (k3s local-path)"
   elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
     kdata="$(_native_k3s_storage_path)" || kdata=""
     log "Volumes: ${kdata:-path not readable without root} (k3s local-path, on this host)"

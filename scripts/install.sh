@@ -171,12 +171,12 @@ _tb_record_served() {
 # stop-and-check gate (assess_existing_install) that short-circuits a healthy
 # machine to the home screen and exits 0 — so without propagating our intent, a
 # pinned-ref re-run would download the new installer and then do nothing. Export
-# TB_FORCE_REINSTALL so the downstream gate is skipped and the full (idempotent)
-# flow runs. (--force/--reinstall pass through via "$@" too, but env is the only
-# channel for the REF/BRANCH/unverified reasons.) Under both names: the core
-# reads the canonical TRACEBLOC_FORCE_REINSTALL first, so exporting only the
-# legacy one would lose to a TRACEBLOC_FORCE_REINSTALL=0 left in the shell.
-[[ "$_tb_force" == "1" ]] && export TB_FORCE_REINSTALL=1 TRACEBLOC_FORCE_REINSTALL=1
+# TRACEBLOC_FORCE_REINSTALL so the downstream gate is skipped and the full
+# (idempotent) flow runs. (--force/--reinstall pass through via "$@" too, but env
+# is the only channel for the REF/BRANCH/unverified reasons.) The core reads it
+# first (lib/assess.sh), so it also overrides a TRACEBLOC_FORCE_REINSTALL=0 left
+# in the shell.
+[[ "$_tb_force" == "1" ]] && export TRACEBLOC_FORCE_REINSTALL=1
 
 _tb_check_healthy() {
   # Run `tracebloc doctor` behind a small inline spinner, bounded so a wedged CLI
@@ -216,10 +216,9 @@ _tb_check_healthy() {
 # and "open a new terminal" only when it was not (install-cli.sh,
 # _cli_on_launch_path). Kept when already set, so a nested run keeps the first.
 # TRACEBLOC_LAUNCH_PATH is the name (backend#3846: TB_ is a banned prefix); the
-# legacy TB_LAUNCH_PATH is read as the fallback and set beside it, one value, so
-# core libs older than this bootstrap still find it (remove_by 2026-12-31).
+# legacy TB_LAUNCH_PATH is read as the fallback (remove_by 2026-12-31). Only the
+# canonical is exported: the core libs this bootstrap fetches read it first.
 export TRACEBLOC_LAUNCH_PATH="${TRACEBLOC_LAUNCH_PATH:-${TB_LAUNCH_PATH:-${PATH:-}}}"
-export TB_LAUNCH_PATH="$TRACEBLOC_LAUNCH_PATH"
 
 # The CLI installer drops the binary in ~/.local/bin when /usr/local/bin isn't
 # writable, and a fresh curl|bash shell doesn't have that on PATH — so mirror
