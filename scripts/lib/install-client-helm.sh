@@ -4433,10 +4433,11 @@ install_client_helm() {
   # file is never chmodded underneath them.
   : > "$values_file" || error "Could not create $values_file"
   chmod 600 "$values_file" 2>/dev/null || true
-  # RFC-0076 settings-naming (S3): alias-first over the shell env, same
-  # precedence as tb_client_env's own ambient-env fallback. Both keys are
-  # written (remove_by 2026-12-31) so a chart version on either side of
-  # client#1071 resolves the same stage from this one generated file.
+  # The stage, read from the shell canonical-first (TRACEBLOC_ENV, else the
+  # legacy CLIENT_ENV a user may still export), the precedence tb_client_env's
+  # own ambient-env fallback uses. It is written under env.TRACEBLOC_ENV only:
+  # every reader of these values (the chart's tracebloc.clientEnv, assess.sh's
+  # _assess_release_client_env, the CLI) reads that key first.
   local _tb_stage_raw="${TRACEBLOC_ENV:-${CLIENT_ENV:-}}" _tb_stage_resolved=""
   [ -n "$_tb_stage_raw" ] && _tb_stage_resolved="$(tb_client_env "$_tb_stage_raw")"
   cat <<EOF > "$values_file"
@@ -4445,7 +4446,7 @@ install_client_helm() {
 # ============================================================
 
 env:
-$([ -n "$_tb_stage_resolved" ] && printf '  TRACEBLOC_ENV: "%s"\n  CLIENT_ENV: "%s"\n' "$_tb_stage_resolved" "$_tb_stage_resolved")${proxy_env_yaml}
+$([ -n "$_tb_stage_resolved" ] && printf '  TRACEBLOC_ENV: "%s"\n' "$_tb_stage_resolved")${proxy_env_yaml}
   # Training size: how much CPU/RAM each training run gets. Sized to this
   # machine at install — largest node minus ~1 CPU / 3 GiB platform overhead —
   # unless TRACEBLOC_TRAINING_RESOURCES is set or the installed release already

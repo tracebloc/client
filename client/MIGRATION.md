@@ -2,6 +2,28 @@
 
 This guide explains how to migrate from the legacy per-platform charts (`aks/`, `bm/`, `eks/`, `oc/`) to the unified `client/` chart.
 
+## The installer writes the stage as `env.TRACEBLOC_ENV` only
+
+**What changed.** The values file the installer generates used to carry a dev
+or staging client's stage twice, as `env.TRACEBLOC_ENV` and `env.CLIENT_ENV`,
+with one value. It now writes `env.TRACEBLOC_ENV` alone. The chart has read
+`env.TRACEBLOC_ENV` first since 1.9.122, and so do the installer's own checks
+and the tracebloc CLI, so every client resolves the same stage as before. A
+prod client is unchanged: the installer writes no stage for it, and the chart
+resolves prod.
+
+The installer still takes the stage from either shell variable, `TRACEBLOC_ENV`
+or the older `CLIENT_ENV`.
+
+**What you have to do.**
+- **Nothing**, unless you read the release's values yourself.
+- **Scripts of your own that read the stage from `helm get values`** must read
+  `env.TRACEBLOC_ENV`, falling back to `env.CLIENT_ENV` for a release installed
+  before this change. The chart reads them in that order.
+- **A values file you wrote yourself** keeps working with either key. Prefer
+  `env.TRACEBLOC_ENV`: the chart stops reading `env.CLIENT_ENV` after
+  2026-12-31.
+
 ## Upgrading to 1.12.11 — the last older environment variable names are gone: `NODE_NAME`, `CHART_NAME`, `REPO_URL`
 
 **What changed.** 1.9.218 stopped setting the older environment variable names
