@@ -2941,10 +2941,11 @@ function Invoke-HostCliProbe {
 # The tracebloc CLI's floor, as the verified core declares it: lib/assess.sh's
 # TB_CLI_MIN_VERSION default, the floor the bash installer holds its CLI to
 # (backend#4959). Read from that file, never restated here. A core it cannot be
-# read from cannot be checked against, so that is refused by name.
+# read from cannot be checked against, so that is refused by name. $CoreDir is
+# the flattened tree Confirm-CoreDir verifies: lib/ sits directly under it.
 function Get-CoreCliFloor {
   param([string]$CoreDir)
-  $assess = Join-Path (Join-Path (Join-Path $CoreDir 'scripts') 'lib') 'assess.sh'
+  $assess = Join-Path (Join-Path $CoreDir 'lib') 'assess.sh'
   $found = @(Get-Content -LiteralPath $assess -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_ -match '^: "\$\{TB_CLI_MIN_VERSION:=([0-9]+(\.[0-9]+)*)\}"') { $Matches[1] }
   })

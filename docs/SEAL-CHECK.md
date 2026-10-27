@@ -431,6 +431,12 @@ never treated as a pass.
   lockdown engaged, positive control (its curl image imported into k3s's own
   containerd first, backend#3561), then the probe via `helm test --filter`.
   Zero secrets, so it runs everywhere.
+- **`storage-assertions`, live on every PR** — storage-assertions-k3s.yaml's
+  `storage-assertions-e2e-k3s` job, `Storage-assertions (k3s)`
+  (`scripts/tests/e2e-storage-assertions.sh`). Same native k3s, public images
+  and placeholder credentials, so zero secrets and no backend; it runs only
+  this hook via `helm test --filter` and fails when the hook fails. There is no
+  skip path.
 - **The FULL suite vs the dev backend** — helm-ci's `full-seal-e2e` job
   (`scripts/tests/e2e-full-seal.sh`, the backend#1184 deferred fast-follow):
   installs the working-tree chart on native k3s **as the dedicated dev
