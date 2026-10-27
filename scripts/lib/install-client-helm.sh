@@ -1779,10 +1779,13 @@ _dashboard_link_credential() {
 }
 
 # _dashboard_link_open URL -- hand URL to this machine's browser. 0 when an opener
-# took it, 1 when there is none to take it (no desktop, root, no opener).
+# took it, 1 when there is none to take it (no desktop, root, no opener) or the run
+# came over ssh: a browser here would open on this machine's screen, not in front
+# of whoever runs the install (tb_over_ssh).
 _dashboard_link_open() {
   local url="$1" ps="" fallback
   _dashboard_link_url_ok "$url" || return 1
+  ! tb_over_ssh || return 1
   if declare -F _probe_wsl >/dev/null 2>&1 && _probe_wsl; then
     # The browser is the Windows host's. The URL is validated above, so it
     # carries no quote to break out of the single-quoted PowerShell string.
@@ -2488,9 +2491,18 @@ _mac_runner_set_args() {
   # training runs on the CPU. A run that keeps none says why (backend#5976), in the copy
   # catalog's words (scripts/testdata/golden/03-mac-gpu-no-training-folder.golden).
   local why
-  why="$(_mac_ct_job_data_none_why)" || return 0
-  warn "This machine keeps no folder for training data, so training here can't use this Mac's GPU and will run on the CPU: ${why}."
-  hint "To train on the GPU, run tracebloc delete, then install again with the default storage."
+  if why="$(_mac_ct_job_data_none_why)"; then
+    warn "This machine keeps no folder for training data, so training here can't use this Mac's GPU and will run on the CPU: ${why}."
+    hint "To train on the GPU, run tracebloc delete, then install again with the default storage."
+    return 0
+  fi
+  # The runner takes this Mac's GPU jobs, so detect_gpu's not_nvidia, which the platform
+  # reads as "CPU only" (no GPU in the training limit), is withdrawn: empty pairs after
+  # the GPU decision's, so helm's last --set-string wins.
+  [[ "${TB_GPU_UNSUPPORTED_CODE:-}" == not_nvidia ]] || return 0
+  TB_GPU_UNSUPPORTED_CODE=""; TB_GPU_UNSUPPORTED_REASON=""; TB_GPU_UNSUPPORTED_NAME=""
+  _gpu_unsupported_set_args
+  _TB_MAC_RUNNER_ARGS+=("${_TB_GPU_UNSUPPORTED_ARGS[@]}")  # set-u-safe: _gpu_unsupported_set_args always assigns six words
 }
 
 # _mac_node_storage_steps -- on the macOS node (native k3s on a Mac), before helm: the

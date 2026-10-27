@@ -2229,6 +2229,13 @@ tb_in_wsl_distro() {
   [[ "${OS:-}" == "Linux" ]] && declare -F _probe_wsl_ours >/dev/null 2>&1 && _probe_wsl_ours
 }
 
+# tb_over_ssh -- this run was started from an ssh session: OpenSSH sets
+# SSH_CONNECTION on every session and SSH_TTY when it gives it a terminal. Whoever
+# runs it is at another machine, not at this one's screen, and may be a script.
+tb_over_ssh() {
+  [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_TTY:-}" ]]
+}
+
 # ── The Windows installer's two runs (client-dev#1810 section 5's contract) ──────
 # In tracebloc's WSL distro this core runs twice, and only as the Windows installer
 # runs it: `wsl -d tracebloc -u root -- env TRACEBLOC_SUBSTRATE=k3s
@@ -2702,6 +2709,12 @@ _tb_kube_context() { printf '%s' "${TRACEBLOC_KUBE_CONTEXT:-${TB_KUBE_CONTEXT:-}
 TB_RECORD_FOR_USER=""
 TB_RECORD_FOR_HOME=""
 TRACEBLOC_RECORD_HOME=""
+# The key prepare-host records the NVIDIA runtime its GPU gate registered under, and
+# that runtime (k3s.sh _native_k3s_prepared_finish sets it), for the named user's
+# Tier 0 install to read (_native_k3s_gpu_adopt): that user cannot ask k3s's
+# containerd. Assigned here, like TB_RECORD_FOR_USER, never read from the environment.
+TB_RECORD_PREPARED_GPU_KEY="prepared_gpu_runtime"
+TB_RECORD_PREPARED_GPU_RUNTIME=""
 # The user copy: x-tracebloc-record.user-path, its leading ~ as $HOME (in prepared
 # mode, as the directory the record is built in).
 tb_record_path() { printf '%s%s' "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" "${TB_RECORD_USER_PATH#\~}"; }
@@ -2882,7 +2895,7 @@ tb_record_write() {
   # The record's home is tb_record_path's: in prepared mode the scratch directory,
   # so a prepare-host run with HOME unset (systemd, cloud-init, env -i) still records.
   _tb_record_armed && [[ -n "${TRACEBLOC_RECORD_HOME:-${HOME:-}}" ]] || return 0
-  local rec dir now prior="" arts="" root_copy prepared_for k3s_data_fs=""
+  local rec dir now prior="" arts="" root_copy prepared_for prepared_gpu k3s_data_fs=""
   rec="$(tb_record_path)"; dir="${rec%/*}"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$dir" 2>/dev/null || { log "Install record: couldn't create ${dir}; not recorded."; return 0; }
@@ -2938,6 +2951,11 @@ tb_record_write() {
   # previous write's value; any other record has none, so the key is left out.
   if [[ -n "${TB_RECORD_FOR_USER:-}" ]]; then prepared_for="$(_tb_json "$TB_RECORD_FOR_USER")"
   else prepared_for="$(_tb_record_prior prepared_for "$prior")"; fi
+  # prepared_gpu_runtime, beside it: in prepared mode this run's value or null, never
+  # the previous write's, so a prepare-host re-run that wires no GPU takes it away.
+  # The user's own later writes keep it; any other record has none.
+  if [[ -n "${TB_RECORD_FOR_USER:-}" ]]; then prepared_gpu="$(_tb_json "${TB_RECORD_PREPARED_GPU_RUNTIME:-}")"
+  else prepared_gpu="$(_tb_record_prior "$TB_RECORD_PREPARED_GPU_KEY" "$prior")"; fi
   # k3s_data_fs (client-dev#1976): the filesystem under native k3s's data directory,
   # read afresh on every write of a native k3s install on Linux, the WSL distro
   # included, by k3s.sh's reader. A Mac writes none: the Mac's node runs
@@ -2945,12 +2963,12 @@ tb_record_write() {
   if [[ "${OS:-}" == Linux && "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == k3s ]] && declare -F _native_k3s_data_fs >/dev/null 2>&1; then
     k3s_data_fs="$(_native_k3s_data_fs)"
   fi
-  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs")" || return 0
+  _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs" "$prepared_gpu")" || return 0
   _TB_RECORD_ROOT_WRITTEN=""
   _tb_record_root_copy "$rec"
   if [[ -n "$_TB_RECORD_ROOT_WRITTEN" && "$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")" != "$root_copy" ]]; then
     root_copy="$(_tb_json "$_TB_RECORD_ROOT_WRITTEN")"
-    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs")" || return 0
+    _tb_record_put "$rec" "$(_tb_record_render "$substrate" "$prior" "$arts" "$now" "$root_copy" "$prepared_for" "$k3s_data_fs" "$prepared_gpu")" || return 0
     _tb_record_root_copy "$rec"
   fi
   _tb_record_user_copy "$rec"
@@ -2959,7 +2977,8 @@ tb_record_write() {
 
 # The record's text: SUBSTRATE ($1) and ROOT_COPY ($5) as JSON literals, the
 # previous write's text ($2), its artefact lines ($3) and the time ($4). PREPARED_FOR
-# ($6) and K3S_DATA_FS ($7), JSON literals, are written only when there is one.
+# ($6), K3S_DATA_FS ($7) and PREPARED_GPU ($8), JSON literals, are written only when
+# there is one.
 _tb_record_render() {
   local out line n i
   out="{
@@ -2973,6 +2992,7 @@ _tb_record_render() {
   \"installer_version\": $(_tb_record_field installer_version "${TB_VERSION:-}" "$2"),
   \"root_copy\": $5,"
   if [[ -n "${6:-}" ]]; then out+=$'\n  "prepared_for": '"$6"','; fi
+  if [[ -n "${8:-}" ]]; then out+=$'\n  "'"${TB_RECORD_PREPARED_GPU_KEY}"'": '"$8"','; fi
   if [[ -n "${7:-}" ]]; then out+=$'\n  "k3s_data_fs": '"$7"','; fi
   out+="
   \"updated_at\": \"$4\","

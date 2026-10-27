@@ -835,8 +835,18 @@
       }
     },
     "perIngestionTables": {
-      "type": "boolean",
-      "description": "RFC-0003 D16 (backend#1204/#1205): stamp PER_INGESTION_TABLES=1 into every ingestion Job. Flip per environment, dev first; file-bearing categories are refused under the flag until client-runtime#203 phase 2."
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "OPERATOR OVERRIDE, normally unset. RFC-0003 D16 (backend#1204/#1205): stamp TRACEBLOC_PER_INGESTION_TABLES=1 into every ingestion Job. When null the effective value comes from perIngestionTablesByEnv keyed on the resolved CLIENT_ENV (backend#1834); a literal true/false forces this edge regardless of environment. File-bearing categories are refused under the flag until client-runtime#203 phase 2."
+    },
+    "perIngestionTablesByEnv": {
+      "type": "object",
+      "description": "Per-environment default for perIngestionTables (backend#1834), keyed on the RESOLVED CLIENT_ENV (dev|stg|prod — documented aliases are normalized first). Mirrors ingestRunTokenByEnv. A fleet turns on once a dev-edge run of its ingestor has shown the whole D16 path (physical_table on the backend row, training reads ds_<hex>, tb data delete drops the table, the salt and the journal); an ingestor before data-ingestors v0.8.16 reports --name instead of the ds_ handle (backend#2895). An edge upgraded with plain --reuse-values from a chart without this key resolves off; --reset-then-reuse-values picks it up.",
+      "additionalProperties": {
+        "type": "boolean"
+      }
     },
     "perDatasetPvcs": {
       "type": "boolean",

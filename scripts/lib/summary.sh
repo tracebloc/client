@@ -375,6 +375,10 @@ print_summary() {
     [[ -z "${TB_K3S_GPU_UNCONFIRMED:-}" ]] || mode="NVIDIA GPU, not confirmed (see the GPU warning above)"
   elif [[ "$GPU_VENDOR" == "amd" ]]; then
     mode="AMD GPU"
+  elif [[ "${TRACEBLOC_MAC_GPU_RUNNER_READY:-}" == 1 ]]; then
+    # The runner's login item is loaded over the job-data folder (mac-container.sh
+    # _mac_ct_runner_gpu_ready); a job trains on the GPU only once its check passes.
+    mode="Apple GPU once it passes tracebloc's GPU check, CPU until then (tracebloc resources shows which)"
   fi
   local ns="${TB_NAMESPACE:-default}"
   local cver; cver="$(_chart_version "$ns")"

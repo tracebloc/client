@@ -428,19 +428,24 @@ install_helm() {
 # (_native_k3s_gpu_wire) is the only thing that sets TRACEBLOC_GPU_WIRED.
 dispatch_gpu_setup() {
   case "$GPU_VENDOR" in
-    nvidia)
-      if _gpu_floor_skips; then
-        log "NVIDIA GPU below the floor (${TB_GPU_FLOOR_VERDICT}) — no driver, toolkit or GPU wiring; CPU mode."
-      elif ! install_nvidia_drivers; then
-        # No driver went in: it said so and how to install one; CPU mode, no toolkit.
-        log "No NVIDIA driver — no toolkit or GPU wiring; CPU mode."
-      else
-        _native_k3s_gpu_prepare
-      fi
-      ;;
+    nvidia) _nvidia_gpu_setup ;;
     amd)    install_rocm ;;
     *)      log "No GPU setup required." ;;
   esac
+}
+
+# _nvidia_gpu_setup -- dispatch_gpu_setup's NVIDIA half, which prepare-host runs too
+# (k3s.sh _native_k3s_prepare_host): the floor, the driver, then the toolkit and a CDI
+# spec.
+_nvidia_gpu_setup() {
+  if _gpu_floor_skips; then
+    log "NVIDIA GPU below the floor (${TB_GPU_FLOOR_VERDICT}) — no driver, toolkit or GPU wiring; CPU mode."
+  elif ! install_nvidia_drivers; then
+    # No driver went in: it said so and how to install one; CPU mode, no toolkit.
+    log "No NVIDIA driver — no toolkit or GPU wiring; CPU mode."
+  else
+    _native_k3s_gpu_prepare
+  fi
 }
 
 # _tools_rc_for_shell — which POSIX rc file a *fresh* interactive shell of the

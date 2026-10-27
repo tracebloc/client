@@ -585,11 +585,12 @@ spec:
              names stay until remove_by 2026-12-31. */}}
         - name: MYSQL_HOST
           value: "mysql-client"
-        {{- if .Values.perIngestionTables }}
+        {{- if include "tracebloc.perIngestionTables" . }}
         # RFC-0003 D16 (backend#1204 / backend#1205): forwarded by
         # jobs-manager into every ingestion Job it spawns — the ingestor
-        # then writes one immutable ds_<uuid4 hex> table per run. Rendered
-        # only when enabled so default installs stay byte-identical.
+        # then writes one immutable ds_<uuid4 hex> table per run. Resolved
+        # per environment by tracebloc.perIngestionTables; rendered only
+        # when on, so an edge with it off stays byte-identical.
         - name: TRACEBLOC_PER_INGESTION_TABLES
           value: "1"
         {{- end }}

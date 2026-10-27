@@ -357,7 +357,8 @@ _mac_ct_check_pins() {
 
 # _mac_ct_system_state -- this user's container system: "none", "ours ROOT" (its app
 # root is ours and its install root ROOT is one of this installer's version folders,
-# both sides compared as _mac_ct_norm_path spells them), or "foreign". launchctl exits 113 for a service it does not know; any other failure
+# both sides compared as _mac_ct_norm_path spells them), or "foreign [ROOT]" (ROOT: the
+# install root launchd names for it, when it names one). launchctl exits 113 for a service it does not know; any other failure
 # is "cannot tell" (return 1), never "none", so a run never starts a second system
 # beside one it could not see.
 _mac_ct_system_state() {
@@ -374,7 +375,7 @@ _mac_ct_system_state() {
   if [[ "$have_app" == "$app" && "${have_root%/*}" == "$home" ]] && _mac_ct_version_ok "${have_root##*/}"; then
     echo "ours ${have_root}"
   else
-    echo foreign
+    echo "foreign${have_root:+ ${have_root}}"
   fi
 }
 
@@ -448,7 +449,7 @@ _mac_ct_stop_system() {
   local state
   state="$(_mac_ct_system_state)" || { echo "Apple container: launchd cannot say whether the container system stopped."; return 1; }
   case "$state" in
-    none | foreign) return 0 ;;
+    none | foreign*) return 0 ;;
   esac
   _bounded 120 "${state#ours }/bin/container" system stop </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
   state="$(_mac_ct_system_state)" || { echo "Apple container: launchd cannot say whether the container system stopped."; return 1; }
@@ -475,6 +476,32 @@ _mac_ct_start_failed() {
   esac
 }
 
+# _mac_ct_refuse_foreign THEIRS OURS -- stop the run on a container system this installer
+# did not start, and leave it running. THEIRS is the install root launchd names for it (may
+# be empty), OURS this run's. Never returns.
+#
+# The stop it names is Apple's `system stop`, which boots out every com.apple.container.*
+# service by its launchd label (SystemStop.swift at 1.4.1), so this installer's own CLI
+# stops a system whose files are gone. Its own CLI, when it is still there, is named first:
+# its version stops its own containers.
+_mac_ct_refuse_foreign() {
+  local theirs="${1# }" cli="${2}/bin/container" where how=" this installer's copy of Apple's container CLI"
+  if [[ -z "$theirs" ]]; then
+    where="and launchd does not say where it is installed"
+  elif [[ -x "${theirs}/bin/container" ]]; then
+    where="installed at ${theirs}"; cli="${theirs}/bin/container"; how=""
+  else
+    where="installed at ${theirs}, whose files are gone"
+  fi
+  # A refusal: re-running changes nothing until the user stops that system, so no "try again" footer.
+  # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
+  TB_EXIT_REFUSED=1
+  warn "Another Apple container system is already running for this user, ${where}."
+  echo "  This installer does not stop a container system it did not start. To stop it and its containers, run${how}:"
+  echo "    \"${cli}\" system stop"
+  error "Stop that container system, then re-run this installer."
+}
+
 # _mac_ct_start_system -- the runtime from _mac_ct_ensure_runtime, started on our kernel
 # and the pinned init image. Reuses this installer's running system when it runs the
 # pinned runtime with the pinned init image; restarts it when it runs another of this
@@ -489,7 +516,7 @@ _mac_ct_start_system() {
     || error "Apple container: ${HOME}/.config/container/config.toml exists, and it overrides the settings this installer pins (the init image). This installer does not change it: move it out of the way yourself, then re-run."
   state="$(_mac_ct_system_state)" || error "Apple container: cannot tell whether a container system is already running (above)."
   case "$state" in
-    foreign) error "Apple container: another container system is already registered for this user, and it is not this installer's. This installer does not touch it: stop it yourself (container system stop), then re-run." ;;
+    foreign*) _mac_ct_refuse_foreign "${state#foreign}" "$root" ;;
   esac
   _mac_ct_ensure_kernel
   _mac_ct_write_vminit_config "$root"
@@ -1806,6 +1833,10 @@ TB_MAC_CT_RUNNER_ACCOUNT="tracebloc-runner"
 TB_MAC_CT_RUNNER_TOKEN_S=31536000
 TB_MAC_CT_RUNNER_THROTTLE_S=30
 TRACEBLOC_MAC_CT_RUNNER_PROBE_S=30
+# 1 once _mac_ct_ensure_runner leaves the runner's login item loaded over a job-data
+# folder this Mac keeps (_mac_ct_runner_gpu_ready); the summary's Mode reads it. Cleared
+# where the lib is sourced, so a value in the environment decides nothing.
+TRACEBLOC_MAC_GPU_RUNNER_READY=""
 # This run's answer to "does the CLI carry the runner?", asked once (_mac_ct_runner_on).
 # Cleared where the lib is sourced, so a value in the environment decides nothing.
 TRACEBLOC_MAC_CT_RUNNER_ON=""
@@ -1822,13 +1853,20 @@ _mac_ct_runner_released() {
   [[ "$rc" -eq 0 ]]
 }
 
-# _mac_ct_runner_on -- 0 when this run sets up the runner: the macOS node (native k3s on a
-# Mac) and a CLI that carries it (TRACEBLOC_CLI_BIN, step b). Asked once a run; the chart's
-# value and the login item read the same answer.
+# _mac_ct_runner_host -- 0 on the machine the runner is set up on: the macOS node (native
+# k3s on a Mac). The half of _mac_ct_runner_on known before step b installs the CLI, so
+# step a's GPU line (detect_gpu) says what step e then does.
+_mac_ct_runner_host() {
+  [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]]
+}
+
+# _mac_ct_runner_on -- 0 when this run sets up the runner: the macOS node
+# (_mac_ct_runner_host) and a CLI that carries it (TRACEBLOC_CLI_BIN, step b). Asked once
+# a run; the chart's value and the login item read the same answer.
 _mac_ct_runner_on() {
   if [[ -z "$TRACEBLOC_MAC_CT_RUNNER_ON" ]]; then
     TRACEBLOC_MAC_CT_RUNNER_ON=0
-    if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${OS:-}" == "Darwin" ]] \
+    if _mac_ct_runner_host \
       && _mac_ct_runner_released "${TRACEBLOC_CLI_BIN:-}"; then
       TRACEBLOC_MAC_CT_RUNNER_ON=1
     fi
@@ -1960,6 +1998,15 @@ _mac_ct_runner_loaded() {
   esac
 }
 
+# _mac_ct_runner_gpu_ready -- sets TRACEBLOC_MAC_GPU_RUNNER_READY=1 when this run keeps a
+# job-data folder on this Mac and it is there: the runner refuses the GPU without it.
+_mac_ct_runner_gpu_ready() {
+  local jd
+  jd="$(_mac_ct_job_data_dir)"
+  [[ -n "$jd" && -d "$jd" ]] || return 0
+  TRACEBLOC_MAC_GPU_RUNNER_READY=1
+}
+
 # _mac_ct_ensure_runner -- the runner's login item, when this run sets up the runner
 # (_mac_ct_runner_on): its kubeconfig and token written, its engine bundle store made, its
 # plist written, recorded as a launch-agent and loaded into this login session. A loaded
@@ -1971,8 +2018,14 @@ _mac_ct_ensure_runner() {
   local ns="${TB_NAMESPACE:-}" bin="${TRACEBLOC_CLI_BIN:-}" home dir plist runner_log kcfg want have="" loaded=0 why
   local bundles listed=0 bad
   local cpu="GPU jobs run on the CPU. It's safe to re-run this installer."
+  TRACEBLOC_MAC_GPU_RUNNER_READY=""
   if ! _mac_ct_runner_on; then
     [[ "${OS:-}" != "Darwin" ]] || log "The Apple-GPU runner: $(_mac_ct_runner_off_why), so no runner login item."
+    # On the macOS node step a said GPU training is set up here (detect_gpu), so a CLI
+    # that does not carry the runner is said, not only logged.
+    if _mac_ct_runner_host; then
+      warn "The Apple-GPU runner: $(_mac_ct_runner_off_why), so it is not set up. ${cpu}"
+    fi
     return 0
   fi
   if [[ -n "${TRACEBLOC_SKIP_AUTOSTART:-}" || -n "${TRACEBLOC_NO_AUTOSTART:-}" ]]; then
@@ -2004,6 +2057,7 @@ _mac_ct_ensure_runner() {
   if [[ "$loaded" -eq 0 && "$have" == "$want" && "$listed" -eq 1 ]]; then
     tb_record_write launch-agent "$TB_MAC_CT_RUNNER_LABEL" "$plist"
     log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded; its token was issued again."
+    _mac_ct_runner_gpu_ready
     return 0
   fi
   if [[ "$loaded" -eq 0 ]] && ! _bounded 30 launchctl bootout "gui/$(id -u)/${TB_MAC_CT_RUNNER_LABEL}" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1; then
@@ -2028,6 +2082,7 @@ _mac_ct_ensure_runner() {
     warn "The Apple-GPU runner: launchd did not load ${plist} (exit ${why}). ${cpu}"; return 0
   fi
   log "The Apple-GPU runner: its login item ${TB_MAC_CT_RUNNER_LABEL} is loaded and runs ${bin} runner."
+  _mac_ct_runner_gpu_ready
 }
 
 # ── Part 6: every Mac's install ─────────────────────────────────────────────

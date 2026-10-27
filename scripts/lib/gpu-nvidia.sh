@@ -23,8 +23,10 @@ _nvidia_driver_pkg_pick() {
 # (client-dev#1699). A "drivers installed, reboot" over nothing installed only led to
 # a reboot, still no driver, and the same again on the next run.
 _nvidia_driver_not_installed() {
+  local _rerun="this installer"
+  [[ -n "${TB_PREPARE_HOST_RUN:-}" ]] && _rerun="prepare-host"
   warn "The NVIDIA driver was NOT installed: ${1}. This install continues in CPU mode."
-  hint "To use the GPU, install the NVIDIA driver for your distribution yourself, then re-run this installer."
+  hint "To use the GPU, install the NVIDIA driver for your distribution yourself, then re-run ${_rerun}."
 }
 
 # install_nvidia_drivers -- returns 0 when the driver is loaded or went in (then the
@@ -73,8 +75,8 @@ install_nvidia_drivers() {
     fi
     series="${pkg#nvidia-driver-}"; series="${series%%-*}"; series="${series:-$floor_series}"
     if has ubuntu-drivers; then
-      if ! sudo ubuntu-drivers install --gpgpu "nvidia:${series}-server" 2>/dev/null; then
-        sudo ubuntu-drivers install "nvidia:${series}"
+      if ! tb_root ubuntu-drivers install --gpgpu "nvidia:${series}-server" 2>/dev/null; then
+        tb_root ubuntu-drivers install "nvidia:${series}"
       fi
     elif [[ -n "$pkg" ]]; then
       $PM_INSTALL "$pkg"
@@ -82,7 +84,7 @@ install_nvidia_drivers() {
       $PM_INSTALL "nvidia-driver-${floor_series}"
     fi || failed="the NVIDIA driver package did not install"
   elif has dnf; then
-    sudo dnf install -y epel-release 2>/dev/null || true
+    tb_root dnf install -y epel-release 2>/dev/null || true
     # Detect RHEL/CentOS major and arch for correct NVIDIA repo (rhel8/rhel9, x86_64/aarch64)
     local rhel_major rhel_arch
     if [[ -f /etc/os-release ]]; then
@@ -98,11 +100,11 @@ install_nvidia_drivers() {
       aarch64|arm64) rhel_arch="sbsa" ;;
       *)       rhel_arch="x86_64" ;;
     esac
-    sudo dnf config-manager --add-repo \
+    tb_root dnf config-manager --add-repo \
       "https://developer.download.nvidia.com/compute/cuda/repos/rhel${rhel_major}/${rhel_arch}/cuda-rhel${rhel_major}.repo" 2>/dev/null || true
     # The akmod package is the fallback; when both fail, that is a failed install.
-    sudo dnf module install -y nvidia-driver:latest-dkms 2>/dev/null || \
-      sudo dnf install -y akmod-nvidia || \
+    tb_root dnf module install -y nvidia-driver:latest-dkms 2>/dev/null || \
+      tb_root dnf install -y akmod-nvidia || \
       failed="neither 'dnf module install nvidia-driver:latest-dkms' nor 'dnf install akmod-nvidia' succeeded"
   elif has pacman; then
     $PM_INSTALL nvidia nvidia-utils || failed="'pacman -S nvidia nvidia-utils' failed"
@@ -112,8 +114,12 @@ install_nvidia_drivers() {
     return 1
   fi
 
+  # --print installed nothing, so there is nothing to reboot for.
+  if tb_root_planning; then return 0; fi
+  local _rerun="the installer"
+  [[ -n "${TB_PREPARE_HOST_RUN:-}" ]] && _rerun="prepare-host"
   warn "GPU drivers installed — a reboot is likely required."
-  hint "After rebooting, re-run the installer. Driver steps will be skipped."
+  hint "After rebooting, re-run ${_rerun}. Driver steps will be skipped."
   if [[ -n "${TRACEBLOC_SKIP_REBOOT_PROMPT:-}" ]]; then
     log "TRACEBLOC_SKIP_REBOOT_PROMPT set — skipping reboot prompt."
     # DECLARE THE HANDOFF, then exit. This is the installer's "complete this step
@@ -134,7 +140,7 @@ install_nvidia_drivers() {
   # as "no reboot" (same as TRACEBLOC_SKIP_REBOOT_PROMPT).
   local _choice=""
   if [[ -r /dev/tty ]]; then read -r -p "  Reboot now? [y/N]: " _choice </dev/tty || _choice=""; fi
-  [[ "$_choice" =~ ^[Yy]$ ]] && sudo reboot
+  [[ "$_choice" =~ ^[Yy]$ ]] && tb_root reboot
   warn "Skipping reboot. GPU may not be available until you restart."
 }
 
@@ -165,6 +171,13 @@ _gpu_stack_signature() {
   return 0
 }
 
+# _nvidia_toolkit_repo_fetch URL -- the toolkit's repository file from URL, on stdout.
+# --print downloads nothing, so it prints nothing there: the write it feeds is listed.
+_nvidia_toolkit_repo_fetch() {
+  if tb_root_planning; then return 0; fi
+  curl_secure -fsSL --max-time 30 "$1"
+}
+
 # _nvidia_container_toolkit_package -- nvidia-container-toolkit from NVIDIA's
 # repository, unless an nvidia-ctk that answers is already here. It touches no
 # container runtime: k3s.sh's _native_k3s_gpu_prepare runs it, then writes the CDI
@@ -180,32 +193,36 @@ _nvidia_container_toolkit_package() {
     if has apt-get; then
       local nvidia_gpg_tmp
       nvidia_gpg_tmp="$(mktemp)"
-      curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
-        -o "$nvidia_gpg_tmp"
-      local nvidia_fp
-      nvidia_fp=$(gpg --with-colons --import-options show-only --import "$nvidia_gpg_tmp" 2>/dev/null \
-        | awk -F: '/^fpr:/{print $10; exit}')
-      if [[ -n "$nvidia_fp" ]]; then
-        log "NVIDIA GPG key fingerprint: $nvidia_fp"
-      else
-        log "Could not extract GPG key fingerprint — verify manually after install."
+      # --print downloads nothing (prepare-host's plan): it lists the writes the
+      # downloads feed.
+      if ! tb_root_planning; then
+        curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/gpgkey \
+          -o "$nvidia_gpg_tmp"
+        local nvidia_fp
+        nvidia_fp=$(gpg --with-colons --import-options show-only --import "$nvidia_gpg_tmp" 2>/dev/null \
+          | awk -F: '/^fpr:/{print $10; exit}')
+        if [[ -n "$nvidia_fp" ]]; then
+          log "NVIDIA GPG key fingerprint: $nvidia_fp"
+        else
+          log "Could not extract GPG key fingerprint — verify manually after install."
+        fi
       fi
-      sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
+      tb_root gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg "$nvidia_gpg_tmp"
       rm -f "$nvidia_gpg_tmp"
       # --max-time 30 on all three fetches above/below: each is a few KB of key or
       # repo metadata, so a longer wait only means a hung mirror. They pipe into
       # sed/tee, so they can't be retry-wrapped — retry() reports attempts on
       # stdout, which here IS the file content being written.
-      curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      _nvidia_toolkit_repo_fetch https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
         | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-        | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-      sudo apt-get update -qq
+        | tb_root tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+      tb_root apt-get update -qq
       $PM_INSTALL nvidia-container-toolkit
 
     elif has dnf || has yum; then
-      curl_secure -fsSL --max-time 30 https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
-        | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null
-      has dnf && sudo dnf install -y nvidia-container-toolkit || sudo yum install -y nvidia-container-toolkit
+      _nvidia_toolkit_repo_fetch https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+        | tb_root tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null
+      has dnf && tb_root dnf install -y nvidia-container-toolkit || tb_root yum install -y nvidia-container-toolkit
 
     elif has pacman; then
       if   has yay;  then yay  -S --noconfirm nvidia-container-toolkit

@@ -2067,6 +2067,33 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
 {{- end }}
 
 {{/*
+  Whether ingestion Jobs on THIS edge write one immutable ds_<uuid4 hex> table
+  per run (RFC-0003 D16, backend#1204 / backend#1205); jobs-manager forwards
+  TRACEBLOC_PER_INGESTION_TABLES into every ingestion Job it spawns.
+
+  Resolution, highest first -- identical to tracebloc.ingestRunToken:
+    1. `perIngestionTables` -- an explicit operator override, true or false.
+    2. `perIngestionTablesByEnv[<resolved CLIENT_ENV>]` -- the fleet default
+       (backend#1834: each fleet turns on once its ingestor is shown to carry
+       the whole D16 path on a dev edge).
+
+  NIL-SAFE BOTH WAYS: an edge upgraded with plain `--reuse-values` from a chart
+  that predates these keys has neither, and the gate resolves off -- legacy
+  label-named tables, the behaviour that edge already had. Returns "true" or
+  empty.
+*/}}
+{{- define "tracebloc.perIngestionTables" -}}
+{{- $override := (default dict .Values).perIngestionTables -}}
+{{- if not (kindIs "invalid" $override) -}}
+{{- if $override }}true{{ end -}}
+{{- else -}}
+{{- $env := include "tracebloc.clientEnv" . -}}
+{{- $byEnv := default dict .Values.perIngestionTablesByEnv -}}
+{{- if get $byEnv $env }}true{{ end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
   Whether jobs-manager mints a throwaway MySQL account per experiment
   (backend#1528 D10) for THIS edge.
 

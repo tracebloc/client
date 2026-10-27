@@ -1321,8 +1321,24 @@ TB_K3S_GPU_TOOLKIT_FLOOR="1.18.0"
 
 # _native_k3s_gpu_marker -- the wired-pass marker: the GPU stack signature
 # (gpu-nvidia.sh _gpu_stack_signature) of the last run whose gate passed. A re-run
-# whose signature equals it restarts nothing.
-_native_k3s_gpu_marker() { printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.tracebloc}"; }
+# whose signature equals it restarts nothing. In prepared mode the data dir is the
+# named user's, and root never writes into a directory that user controls (common.sh
+# _tb_record_user_copy): the marker sits beside their root copy, read and written as
+# root (_native_k3s_gpu_marker_do).
+_native_k3s_gpu_marker() {
+  if [[ "${TB_K3S_PREPARED:-}" == 1 && -n "${TB_RECORD_FOR_USER:-}" ]]; then
+    local root; root="$(_tb_record_root_path "$TB_RECORD_FOR_USER")"
+    printf '%s/.gpu-k3s-wired' "${root%/*}"
+    return 0
+  fi
+  printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.tracebloc}"
+}
+
+# _native_k3s_gpu_marker_do CMD... -- CMD on the marker: as root in prepared mode,
+# where it sits in a root-owned directory; as this user otherwise.
+_native_k3s_gpu_marker_do() {
+  if [[ "${TB_K3S_PREPARED:-}" != 1 ]]; then "$@"; else tb_root "$@"; fi
+}
 
 # _native_k3s_gpu_cpu REASON [blind] -- CPU mode for this run, said ONCE: TRACEBLOC_GPU_WIRED
 # stays 0 and the wired-pass marker goes, so the next run asks again. The hint says how
@@ -1333,33 +1349,19 @@ _native_k3s_gpu_marker() { printf '%s/.gpu-k3s-wired' "${HOST_DATA_DIR:-$HOME/.t
 # passes no flag.
 _native_k3s_gpu_cpu() {
   TRACEBLOC_GPU_WIRED=0
-  rm -f "$(_native_k3s_gpu_marker)" 2>/dev/null || true
+  _native_k3s_gpu_marker_do rm -f "$(_native_k3s_gpu_marker)" 2>/dev/null || true
   if [[ "${2:-}" == blind ]] && declare -F _gpu_container_blind >/dev/null; then
     _gpu_container_blind "k3s"
   fi
   [[ -z "${TB_K3S_GPU_WARNED:-}" ]] || return 0
   TB_K3S_GPU_WARNED=1
-  warn "The NVIDIA GPU is not wired into k3s: ${1}. This machine will run in CPU mode."
-  hint "Fix that, then re-run the installer: it wires the GPU into the k3s already here, with no reinstall."
-}
-
-# _native_k3s_gpu_prepared_cpu -- the GPU on a host prepare-host set up (1.1g). Both
-# of its paths, prepare-host's own (_native_k3s_prepared_finish) and the daily user's
-# Tier 0 adopt (_native_k3s_adopt_cluster), return before step 5's gate: prepare-host
-# does not set the GPU up, and the daily user has no root to ask k3s's containerd.
-# tracebloc/client-dev#1560 holds that fix. Until it ships, a host with an NVIDIA GPU
-# is told so by name and runs in CPU mode, never in silence. prepare-host runs no
-# detect_gpu, so a loaded NVIDIA driver counts as a GPU too. No re-run hint: a re-run
-# cannot fix it.
-_native_k3s_gpu_prepared_cpu() {
-  if [[ "${GPU_VENDOR:-}" != nvidia ]] \
-     && ! { declare -F _nvidia_kernel_module_loaded >/dev/null 2>&1 && _nvidia_kernel_module_loaded; }; then
+  if [[ "${TB_K3S_PREPARED:-}" == 1 ]]; then
+    warn "The NVIDIA GPU is not wired into k3s: ${1}. ${TB_RECORD_FOR_USER:-The named user}'s install will run in CPU mode."
+    hint "Fix that, then re-run prepare-host: it wires the GPU into the k3s already here, with no reinstall."
     return 0
   fi
-  TRACEBLOC_GPU_WIRED=0
-  [[ -z "${TB_K3S_GPU_WARNED:-}" ]] || return 0
-  TB_K3S_GPU_WARNED=1
-  warn "The NVIDIA GPU is not set up on a host that prepare-host set up: prepare-host does not wire the GPU into k3s yet. This install runs in CPU mode."
+  warn "The NVIDIA GPU is not wired into k3s: ${1}. This machine will run in CPU mode."
+  hint "Fix that, then re-run the installer: it wires the GPU into the k3s already here, with no reinstall."
 }
 
 # _native_k3s_gpu_toolkit_floor -- warn, once, when the toolkit is older than
@@ -1387,8 +1389,8 @@ _native_k3s_gpu_toolkit_floor() {
 _native_k3s_gpu_cdi_spec() {
   local p
   for p in "$TB_K3S_GPU_CDI_PATH" "$TB_K3S_GPU_CDI_RUN_DIR"/nvidia*.yaml; do
-    sudo test -e "$p" || continue
-    if sudo test -s "$p"; then
+    tb_root test -e "$p" || continue
+    if tb_root test -s "$p"; then
       log "NVIDIA CDI spec already on this machine (${p}); using it as it is."
       return 0
     fi
@@ -1396,12 +1398,14 @@ _native_k3s_gpu_cdi_spec() {
     # the one at TB_K3S_GPU_CDI_PATH), rather than staying CPU on a file nothing fills.
     log "NVIDIA CDI spec at ${p} is empty; generating one."
   done
-  sudo mkdir -p "$(dirname "$TB_K3S_GPU_CDI_PATH")" || true
+  tb_root mkdir -p "$(dirname "$TB_K3S_GPU_CDI_PATH")" || true
   _bounded_root "${TB_GPU_CDI_TIMEOUT:-60}" nvidia-ctk cdi generate --output="$TB_K3S_GPU_CDI_PATH" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
-  if sudo test -e "$TB_K3S_GPU_CDI_PATH"; then
+  # --print listed the generate and ran nothing, so there is no spec to read back.
+  if tb_root_planning; then return 0; fi
+  if tb_root test -e "$TB_K3S_GPU_CDI_PATH"; then
     tb_record_write file cdi-spec "$TB_K3S_GPU_CDI_PATH"
   fi
-  if sudo test -s "$TB_K3S_GPU_CDI_PATH"; then
+  if tb_root test -s "$TB_K3S_GPU_CDI_PATH"; then
     log "NVIDIA CDI spec written (${TB_K3S_GPU_CDI_PATH})."
     return 0
   fi
@@ -1431,9 +1435,9 @@ TB_K3S_GPU_WSL_SPEC_NEEDLES=(nvidia.com/gpu /dev/dxg libdxcore.so)
 # one. Empty output: it is whole.
 _native_k3s_gpu_wsl_spec_lacks() {
   local n lacks=""
-  if ! sudo test -s "$TB_K3S_GPU_CDI_PATH"; then printf 'a spec'; return 0; fi
+  if ! tb_root test -s "$TB_K3S_GPU_CDI_PATH"; then printf 'a spec'; return 0; fi
   for n in "${TB_K3S_GPU_WSL_SPEC_NEEDLES[@]}"; do  # set-u-safe: TB_K3S_GPU_WSL_SPEC_NEEDLES is a literal list
-    sudo grep -qF -- "$n" "$TB_K3S_GPU_CDI_PATH" 2>/dev/null || lacks="${lacks:+${lacks} }${n}"
+    tb_root grep -qF -- "$n" "$TB_K3S_GPU_CDI_PATH" 2>/dev/null || lacks="${lacks:+${lacks} }${n}"
   done
   printf '%s' "$lacks"
 }
@@ -1452,7 +1456,7 @@ _native_k3s_gpu_wsl_spec_lacks() {
 # and advertises one shared device, `all` (W26, measured on v0.20.1 by spike S-W).
 _native_k3s_gpu_wsl_prepare() {
   local lacks state
-  if ! sudo test -e "$TB_WSL_DXG_PATH"; then
+  if ! tb_root test -e "$TB_WSL_DXG_PATH"; then
     _native_k3s_gpu_cpu "WSL gives the tracebloc WSL distro no GPU device (${TB_WSL_DXG_PATH} is not there), so no container here can use the GPU" blind
     return 1
   fi
@@ -1559,9 +1563,13 @@ _native_k3s_gpu_handler() {
 _native_k3s_gpu_wire() {
   local name="$1" marker sig last="" rc=0 why=""
   [[ "${GPU_VENDOR:-}" == "nvidia" && -n "${TB_K3S_GPU_PREPARED:-}" ]] || return 0
+  # --print (prepare-host): k3s never started, so there is no runtime to ask about.
+  if tb_root_planning; then return 0; fi
   marker="$(_native_k3s_gpu_marker)"
   sig="$(_gpu_stack_signature)"
-  if [[ -f "$marker" ]]; then last="$(cat "$marker" 2>/dev/null)" || last=""; fi
+  if _native_k3s_gpu_marker_do test -f "$marker" 2>/dev/null; then
+    last="$(_native_k3s_gpu_marker_do cat "$marker" 2>/dev/null)" || last=""
+  fi
   _native_k3s_gpu_handler || rc=$?
   case "$rc" in
     0)
@@ -1599,9 +1607,10 @@ _native_k3s_gpu_wire() {
   # shellcheck disable=SC2034  # consumed cross-file by common.sh (_gpu_wired)
   TRACEBLOC_GPU_WIRED=1
   if [[ -n "$sig" ]]; then
-    { mkdir -p "$(dirname "$marker")" && printf '%s' "$sig" > "$marker"; } 2>/dev/null || true
+    { _native_k3s_gpu_marker_do mkdir -p "$(dirname "$marker")" \
+        && printf '%s' "$sig" | _native_k3s_gpu_marker_do tee "$marker" >/dev/null; } 2>/dev/null || true
   else
-    rm -f "$marker" 2>/dev/null || true
+    _native_k3s_gpu_marker_do rm -f "$marker" 2>/dev/null || true
   fi
   # Not "wired" yet: the runtime is registered, and the GPUs are counted after the
   # install, once the device plugin runs (_native_k3s_gpu_verify).
@@ -1644,6 +1653,11 @@ _native_k3s_gpu_verify() {
     return 0
   fi
   warn "k3s runs the NVIDIA runtime, but the node advertises no GPU (allocatable nvidia.com/gpu = 0), so GPU training jobs will wait."
+  # An adopted user has no sudo for dmesg or a reboot: the remedy is the administrator's.
+  if [[ "${TB_K3S_ADOPTED:-}" == 1 ]]; then
+    hint "Ask the administrator to check 'sudo dmesg | grep -iE \"xid|RmInitAdapter\"': on Xid 140 or 'RmInitAdapter failed', persistence mode from boot (nvidia-persistenced, or 'nvidia-smi -pm 1' before k3s starts), a reboot and a re-run of prepare-host bring the GPUs up. Drivers 550 and newer did not need it."
+    return 0
+  fi
   if declare -F tb_in_wsl_distro >/dev/null 2>&1 && tb_in_wsl_distro; then
     hint "In the tracebloc WSL distro the device plugin finds the GPU through ${TB_WSL_DXG_PATH}: 'kubectl -n ${ns} logs daemonset/nvidia-device-plugin-daemonset' says what it found. Then re-run the installer from Windows."
     return 0
@@ -2239,22 +2253,56 @@ _native_k3s_adopt_cluster() {
   tb_record_write kube-context "$(_native_k3s_context)" "$(_native_k3s_kubeconfig_target)"
   _native_k3s_wait_for_api
   _native_k3s_wait_for_node_ready "$name"
-  _native_k3s_gpu_prepared_cpu
+  _native_k3s_gpu_adopt
   _export_host_no_proxy
+}
+
+# _native_k3s_gpu_adopt -- step c's GPU gate on a host adopted at Tier 0. This user
+# cannot ask k3s's containerd (`k3s crictl` needs root), so the answer is the one
+# prepare-host's gate (_native_k3s_gpu_wire) gave as root, read from the record it
+# wrote for this user, never re-detected here. TRACEBLOC_GPU_WIRED=1 only when that
+# runtime is TB_K3S_GPU_RUNTIME and this run's floor verdict keeps the GPU; the GPUs
+# are counted after the install (_native_k3s_gpu_verify), as on the full path, so a
+# record that outlived its GPU is caught there.
+_native_k3s_gpu_adopt() {
+  local rec rt=""
+  rec="$(tb_record_path)"
+  if [[ -f "$rec" ]]; then rt="$(_tb_record_prior "$TB_RECORD_PREPARED_GPU_KEY" "$(cat "$rec" 2>/dev/null)")"; fi
+  TRACEBLOC_GPU_WIRED=0
+  # detect_gpu said why and what to do.
+  if declare -F _gpu_floor_skips >/dev/null 2>&1 && _gpu_floor_skips; then return 0; fi
+  if [[ "$rt" == "$(_tb_json "$TB_K3S_GPU_RUNTIME")" ]]; then
+    GPU_VENDOR=nvidia
+    # shellcheck disable=SC2034  # consumed cross-file by common.sh (_gpu_wired)
+    TRACEBLOC_GPU_WIRED=1
+    # No runtime name: the gate's own line is the one success line naming it alone, which
+    # e2e reads (e2e-test-agent producer_contracts.py, native_k3s_gpu_wiring); the count
+    # after Helm names it.
+    success "prepare-host registered the NVIDIA runtime for you; the GPUs are counted after the install."
+    return 0
+  fi
+  [[ "${GPU_VENDOR:-}" == nvidia ]] || return 0
+  warn "This machine has an NVIDIA GPU, but prepare-host did not set it up for k3s, so this install runs in CPU mode."
+  hint "Ask the administrator to re-run prepare-host for you (it sets the GPU up when 'nvidia-smi' works), then re-run this installer."
 }
 
 # _native_k3s_prepared_finish NAME -- step 4 and 5 in prepared mode: the API, asked
 # as root on k3s.yaml (_native_k3s_kubectl_on); k3s.yaml's grant to the prepared
-# group, read back; the node password; node NAME Ready; the GPU, named as not set up
-# (_native_k3s_gpu_prepared_cpu); this process's NO_PROXY. The
-# shared wait budget started with the wait for k3s.yaml, as on the full path.
+# group, read back; the node password; node NAME Ready; the GPU gate, as root, whose
+# runtime goes into the named user's record (TB_RECORD_PREPARED_GPU_RUNTIME) for their
+# adopt to read (_native_k3s_gpu_adopt); this process's NO_PROXY. The shared wait
+# budget started with the wait for k3s.yaml, as on the full path.
 _native_k3s_prepared_finish() {
   local name="$1"
   _native_k3s_wait_for_api
   _native_k3s_check_prepared_grant
   tb_record_write file node-password "$TB_K3S_NODE_PASSWORD_PATH"
   _native_k3s_wait_for_node_ready "$name"
-  _native_k3s_gpu_prepared_cpu
+  _native_k3s_gpu_wire "$name"
+  # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write)
+  TB_RECORD_PREPARED_GPU_RUNTIME=""
+  # shellcheck disable=SC2034  # consumed cross-file by common.sh (tb_record_write)
+  if _gpu_wired; then TB_RECORD_PREPARED_GPU_RUNTIME="$TB_K3S_GPU_RUNTIME"; fi
   _export_host_no_proxy
 }
 
@@ -2371,12 +2419,18 @@ _native_k3s_prepare_host() {
   # that said true stays true. A schema without the kind refuses it by name.
   if [[ "${TB_K3S_GROUP_MADE:-}" == 1 ]]; then made=true; fi
   tb_record_write group "$TB_K3S_PREPARED_GROUP" "" "created_by_prepare_host=${made}"
+  # The NVIDIA GPU's root half, before k3s first starts, as step b runs it on the
+  # full path: the floor, the driver, the toolkit and a CDI spec. The gate runs once
+  # the node is Ready (_native_k3s_prepared_finish).
+  detect_gpu
+  if [[ "${GPU_VENDOR:-}" == nvidia ]]; then _nvidia_gpu_setup; fi
   _native_k3s_create_cluster
   tb_record_write
   _native_k3s_check_user_record "$user" "$home"
 
   echo ""
   success "Host prepared: k3s is running, and ${user} can install tracebloc with no administrator rights."
+  if _gpu_wired; then info "The NVIDIA GPU is set up for k3s; ${user}'s install counts the GPUs."; fi
   info "After a fresh login (so the ${TB_K3S_PREPARED_GROUP} group applies), ${user} runs:"
   echo "    curl -fsSL https://tracebloc.io/i.sh | bash"
   return 0

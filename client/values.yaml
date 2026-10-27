@@ -2830,14 +2830,36 @@ imageRefresh:
 # which resolves it into the experiment payload (data_info.tables) for the
 # training read path and for per-experiment grant scoping.
 #
-# FLIP PER ENVIRONMENT, dev first — and only once that environment's
-# backend, engine images, and jobs-manager all carry the D-series (merged to
-# develop 2026-07-29). An edge flipped early ingests datasets its training
-# path cannot locate. File-bearing categories (images/text) are refused
-# under the flag until the per-dataset mount work (client-runtime#203
-# phase 2) — row-only categories (tabular / time-series) are the v1 target.
-# Default false: legacy shared label-named tables, byte-for-byte.
-perIngestionTables: false
+# An edge flipped before its backend, engine images and jobs-manager carry the
+# D-series ingests datasets its training path cannot locate. File-bearing
+# categories (images/text) are refused under the flag until the per-dataset
+# mount work (client-runtime#203 phase 2) — row-only categories (tabular /
+# time-series) are the v1 target. Off: legacy shared label-named tables,
+# byte-for-byte.
+#
+# UNSET by default: the effective value comes from perIngestionTablesByEnv
+# below, keyed on the resolved CLIENT_ENV. Set true/false to force one answer
+# on this edge regardless of environment. Left null on purpose, as
+# ingestRunToken is: a literal `false` here is an OPERATOR OVERRIDE that wins
+# over the map and makes it dead.
+perIngestionTables:
+
+# -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#1834).
+#
+# Each fleet turns on once a dev-edge run of ITS ingestor has shown the whole
+# D16 path: the backend row carries physical_table, training reads the
+# ds_<hex> table, and `tb data delete` drops the table, the salt and the
+# journal. An ingestor older than data-ingestors v0.8.16 reports the dataset's
+# --name instead of its ds_ handle and its delete misses the table
+# (backend#2895), so prod's v0.8.2 prodDigest pin must not run under the flag.
+#
+# An edge upgraded with plain `--reuse-values` from a chart without these keys
+# has neither: the gate resolves off there and the render does not fail. The
+# auto-upgrade CronJob uses --reset-then-reuse-values, which picks the map up.
+perIngestionTablesByEnv:
+  dev: false
+  stg: false
+  prod: false
 
 # ============================================================
 # Per-dataset PVC mounts (RFC-0003 D9 Track B — client-runtime#203 / #261)

@@ -183,20 +183,29 @@ _run_device_login() {
 # the name prompt's retry loop further down, for the same reason — an interactive
 # step that can fail for a benign reason must not abort a long install.
 #
-# Exactly one retry, and only with a live terminal:
+# Exactly one retry:
 #   • a second failure is evidence of something other than a missed code, and a
 #     retry loop there would just hide it behind a prompt nobody can satisfy;
-#   • without a terminal there is nobody to hand a fresh code to, and a FAILED
-#     read (rc != 0 = EOF / no live input) can't be fixed by re-prompting either.
-# Both fall through to the same fatal error, whose advice is the ONLY next step
-# printed — the CLI's own is suppressed above.
+#   • at a terminal on this machine the fresh code waits for Enter, so its ten
+#     minutes start when the person is back; a FAILED read (rc != 0 = EOF / no
+#     live input) can't be fixed by re-prompting, so it stops;
+#   • with no terminal, or over ssh (tb_over_ssh), the run may be a script or
+#     unattended and nobody may press Enter, so the fresh code comes at once: the
+#     CLI prints its link to the terminal and the install log, where the person
+#     driving the run reads it.
+# Every way out falls through to the same fatal error, whose advice is the ONLY
+# next step printed — the CLI's own is suppressed above.
 _device_sign_in() {
   local attempt
   for (( attempt = 1; attempt <= SIGN_IN_ATTEMPTS; attempt++ )); do
     _run_device_login && return 0
-    if [[ "$attempt" -ge "$SIGN_IN_ATTEMPTS" ]] || ! _prompt_tty; then break; fi
+    [[ "$attempt" -lt "$SIGN_IN_ATTEMPTS" ]] || break
     echo ""
     warn "Sign-in didn't complete — the code lapsed or wasn't approved."
+    if ! _prompt_tty || tb_over_ssh; then
+      hint "Nothing is lost: a fresh code follows, and the install carries on from here."
+      continue
+    fi
     hint "Nothing is lost: the install is paused right here, not restarted."
     # The prompt WRITE is guarded (|| true) so a test without a real /dev/tty
     # doesn't abort; the read comes from TRACEBLOC_TTY, like every other prompt here.

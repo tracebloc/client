@@ -135,6 +135,17 @@ _nvidia_unsupported_name() {
   return 0
 }
 
+# _nvidia_driver_update_cmd FLOOR -- the command the hint tells the user to run to
+# update the driver to FLOOR's series on this machine, or nothing. Printed, never run:
+# prepare-host reaches this, and only the root executor runs sudo there.
+_nvidia_driver_update_cmd() {
+  if has ubuntu-drivers; then printf 'sudo ubuntu-drivers install --gpgpu nvidia:%s-server' "${1%%.*}"
+  elif has apt-get; then printf 'sudo apt-get install -y nvidia-driver-%s' "${1%%.*}"
+  elif has dnf; then printf 'sudo dnf module install -y nvidia-driver:latest-dkms'
+  fi
+  return 0
+}
+
 # _nvidia_gpu_floor_gate DRIVERS CAPS [NAMES] -- judge the host against the stamped
 # floors, record the verdict in TB_GPU_FLOOR_VERDICT, and say what it means, once.
 #   ok                          nothing is said; the GPU is wired
@@ -158,11 +169,7 @@ _nvidia_gpu_floor_gate() {
   drv="$(_tb_lowest_version "$1")" || drv="unknown"
   cap="$(_tb_lowest_version "$2")" || cap="unknown"
   log "GPU floor: ${TB_GPU_FLOOR_VERDICT} (driver ${drv}, floor ${floor}, hard floor ${hard}; compute capability ${cap}, floor ${cap_floor})"
-  if has ubuntu-drivers; then cmd="sudo ubuntu-drivers install --gpgpu nvidia:${floor%%.*}-server"
-  elif has apt-get; then cmd="sudo apt-get install -y nvidia-driver-${floor%%.*}"
-  elif has dnf; then cmd="sudo dnf module install -y nvidia-driver:latest-dkms"
-  else cmd=""
-  fi
+  cmd="$(_nvidia_driver_update_cmd "$floor")"
   case "$TB_GPU_FLOOR_VERDICT" in
     ok) ;;
     below-hard-floor)
@@ -472,8 +479,15 @@ detect_gpu() {
       GPU_VENDOR="apple_silicon"
     fi
     echo ""
-    warn "GPU training isn't supported on macOS yet — this machine will run in CPU mode."
-    hint "For GPU-accelerated training, deploy on a Linux machine with NVIDIA GPUs."
+    # Apple silicon on the macOS node gets the Apple-GPU runner in step e
+    # (_mac_ct_runner_host, the half of _mac_ct_runner_on known now); the runner's own
+    # GPU check, macOS currency and memory decide each job, so the line names them.
+    if [[ "${GPU_VENDOR:-}" == apple_silicon ]] && declare -F _mac_ct_runner_host >/dev/null 2>&1 && _mac_ct_runner_host; then
+      info "GPU training: tracebloc sets up training on this Mac's GPU in step e. A job trains on the GPU while macOS has its latest update and there is memory for it; otherwise it trains on the CPU."
+    else
+      warn "NVIDIA GPU training isn't supported on macOS, and training on this Mac's GPU needs Apple silicon on tracebloc's macOS node — this machine will run in CPU mode."
+      hint "For GPU-accelerated training, deploy on a Linux machine with NVIDIA GPUs."
+    fi
     # The Mac's GPU (Apple, AMD or Intel) is not NVIDIA: say so to the platform, by
     # name. Bounded: system_profiler is slow on a busy Mac, and an unreadable answer
     # is no report, never a guess.
