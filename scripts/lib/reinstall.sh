@@ -205,7 +205,7 @@ _reinstall_k3d_said_for() {
   ctx="k3d-${CLUSTER_NAME:-}"; kc="${h}/.kube/config"; rc=0
   _reinstall_exists_as "$u" "$kc" || rc=$?
   case "$rc" in
-    1) return 1 ;;
+    1) _reinstall_k3d_live "${CLUSTER_NAME:-}"; return ;;
     2) _reinstall_unread_as "$u" "${u}'s kubeconfig ${kc}"; return 2 ;;
   esac
   rc=0
@@ -214,7 +214,7 @@ _reinstall_k3d_said_for() {
     0) TB_REINSTALL_SAID="${u} has no install record (their install is older than the record), and their kubeconfig ${kc} has the context '${ctx}', which k3d writes for a cluster named '${CLUSTER_NAME:-}'"
        TB_REINSTALL_CTX="$ctx"
        return 0 ;;
-    1) return 1 ;;
+    1) _reinstall_k3d_live "${CLUSTER_NAME:-}"; return ;;
   esac
   TB_REINSTALL_SAID="${u} has no install record, and their kubeconfig ${kc} cannot be read"
   TB_REINSTALL_REMEDY="Make it readable for ${u}, then re-run prepare-host."

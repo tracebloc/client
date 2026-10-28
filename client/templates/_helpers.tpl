@@ -2098,12 +2098,13 @@ Usage: {{ include "tracebloc.ingestorDigest" . }}
        (backend#1834: each fleet turns on once its ingestor is shown to carry
        the whole D16 path on a dev edge).
 
-  NEVER ON THE prodDigest PIN, whichever answer the two give. An edge whose
-  ingestor resolves to `images.ingestor.prodDigest` (a prod edge with service DB
-  accounts off, see tracebloc.ingestorDigest) runs v0.8.2, which predates the
-  ds_ handle fix (backend#2895): under the flag it reports the dataset's --name
-  instead of its ds_ table, so `tb data delete` misses the table. The backend
-  cannot see that edge's overrides, so the chart refuses the combination.
+  NEVER ON THE prodDigest PIN, whichever answer the two give. A secure
+  environment whose ingestor resolves to `images.ingestor.prodDigest` (a prod
+  secure environment with service DB accounts off, see tracebloc.ingestorDigest)
+  runs v0.8.2, which predates the ds_ handle fix (backend#2895): under the flag
+  it reports the dataset's --name instead of its ds_ table, so `tb data delete`
+  misses the table. The backend cannot see that secure environment's overrides,
+  so the chart refuses the combination.
 
   NIL-SAFE BOTH WAYS: an edge upgraded with plain `--reuse-values` from a chart
   that predates these keys has neither, and the gate resolves off -- legacy
@@ -2851,7 +2852,7 @@ failing the render on a nil pointer.
 {{- $digest := $img.digest | default "" -}}
 {{- $tag := $img.tag | default "prod" -}}
 {{- if $digest -}}
-{{- if has $digest (list "sha256:0050bd8f38d07bed86a4f5b5791314516efd47134c98ee75a8968471aa2ebc93" "sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d") -}}
+{{- if has $digest (list "sha256:31fe86bd6777894b98059c3dd3f678e8ef6f164eaa44cdcfd9b1790d7a24a470" "sha256:0050bd8f38d07bed86a4f5b5791314516efd47134c98ee75a8968471aa2ebc93" "sha256:f58060c5bba7e88190725c6f4c980c45bc39cad186f507dd5557522db7cda35d") -}}
 8.4
 {{- else if eq $digest "sha256:f546e47fb339e0982c902cef063b081ccf2cbbaf35b475287d583b9bf3163354" -}}
 5.7

@@ -67,11 +67,28 @@ wait_for_client_ready() {
 
   _log_cluster_status
   if [[ "$all_ready" == true ]]; then
-    TRACEBLOC_CLIENT_STATE="connected"
+    # A crash-looping jobs-manager is Ready between restarts: Ready alone is not "connected".
+    if _jobs_manager_rejected "$ns" "$jm"; then
+      TRACEBLOC_CLIENT_STATE="bad_creds"
+    else
+      TRACEBLOC_CLIENT_STATE="connected"
+    fi
   else
     TRACEBLOC_CLIENT_STATE="$(_diagnose_not_ready "$ns" "$jm")"
   fi
   return 0
+}
+
+# True when jobs-manager's recent logs show the backend rejected its credentials
+# (it authenticates on startup and crash-loops). `jm` is the Deployment the gate
+# READ; empty is read here, and unresolvable means no logs, so false.
+_jobs_manager_rejected() {
+  local ns="$1" jm="${2:-}" jm_logs=""
+  [[ -n "$jm" ]] || jm="$(_client_workload_name "$ns" jobs-manager 5s)" || jm=""
+  if [[ -n "$jm" ]]; then
+    jm_logs="$(kubectl logs -n "$ns" "deployment/${jm}" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
+  fi
+  grep -qiE 'authentication failed|unable to log in' <<<"$jm_logs"
 }
 
 # Classify why the client isn't Ready, for an accurate message. Echoes a state.
@@ -81,17 +98,8 @@ wait_for_client_ready() {
 # match" -- silently downgrading a real bad_creds/image_pull/crash diagnosis
 # to "starting" and handing the user the wrong remedy (backend#1778).
 _diagnose_not_ready() {
-  local ns="$1" jm="${2:-}" pods jm_logs=""
-  # Wrong credentials: jobs-manager authenticates to the backend on startup and
-  # crash-loops when rejected — surfaced as an auth error in its logs. The
-  # Deployment's name is the one the readiness gate already READ (backend#2888),
-  # or read here when this is called without it; unresolvable means no logs to
-  # classify, which falls through to the pod-state checks below.
-  [[ -n "$jm" ]] || jm="$(_client_workload_name "$ns" jobs-manager 5s)" || jm=""
-  if [[ -n "$jm" ]]; then
-    jm_logs="$(kubectl logs -n "$ns" "deployment/${jm}" --all-containers --tail=50 --request-timeout=5s 2>/dev/null || true)"
-  fi
-  if grep -qiE 'authentication failed|unable to log in' <<<"$jm_logs"; then
+  local ns="$1" jm="${2:-}" pods
+  if _jobs_manager_rejected "$ns" "$jm"; then
     printf 'bad_creds'; return
   fi
   pods="$(kubectl get pods -n "$ns" --request-timeout=5s 2>/dev/null || true)"
