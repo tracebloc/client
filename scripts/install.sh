@@ -64,6 +64,58 @@ else
   _tb_anim=0
 fi
 
+# The bootstrap's live line: on a terminal a spinner with the time spent, redrawn in
+# place by a background ticker until _tb_boot_live_end; plain, nothing (the copy has
+# no line for these waits, only their ✔). Mirrors common.sh's tb_live_quiet.
+_tb_boot_live_pid=""; _tb_boot_live_msg=""; _tb_boot_live_t0=0
+_tb_boot_live() {
+  _tb_boot_live_end
+  _tb_boot_live_msg="$1"; _tb_boot_live_t0=$SECONDS
+  [[ "$_tb_anim" == 1 ]] || return 0
+  tput civis 2>/dev/null || true
+  _tb_boot_tick
+}
+_tb_boot_tick() {
+  local msg="$_tb_boot_live_msg" t0="$_tb_boot_live_t0" parent=$$
+  (
+    trap - ERR; set +e
+    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); i=0
+    while kill -0 "$parent" 2>/dev/null; do
+      printf '\r\033[K  %s%s%s %s  %s%ss%s' "$_C" "${frames[i]}" "$_R" "$msg" "$_D" "$(( SECONDS - t0 ))" "$_R"
+      i=$(( (i + 1) % 10 ))
+      sleep 0.12
+    done
+  ) &
+  _tb_boot_live_pid=$!
+}
+_tb_boot_live_end() {
+  if [[ -n "$_tb_boot_live_pid" ]]; then
+    _tb_boot_kill
+    printf '\r\033[K'
+  fi
+  # A hold clears the pid but leaves the cursor hidden; the message marks a live line began.
+  if [[ -n "$_tb_boot_live_msg" && "$_tb_anim" == 1 ]]; then tput cnorm 2>/dev/null || true; fi
+  _tb_boot_live_msg=""
+}
+# A line printed while the live line runs goes above it.
+_tb_boot_hold() {
+  [[ -n "$_tb_boot_live_pid" ]] || return 0
+  _tb_boot_kill
+  printf '\r\033[K'
+}
+# SIGKILL, never TERM (common.sh's _tb_live_kill): until the ticker has reset the traps
+# it inherited, a TERM runs this script's EXIT trap inside it, whose rm -rf "$TMPDIR"
+# deletes the files just fetched (bash 5.2: 21-29 of 1000 stops). No trap catches a KILL.
+_tb_boot_kill() {
+  kill -KILL "$_tb_boot_live_pid" 2>/dev/null || true
+  wait "$_tb_boot_live_pid" 2>/dev/null || true
+  _tb_boot_live_pid=""
+}
+_tb_boot_resume() {
+  [[ -n "$_tb_boot_live_msg" && -z "$_tb_boot_live_pid" && "$_tb_anim" == 1 ]] || return 0
+  _tb_boot_tick
+}
+
 # ── A current folder that no longer exists ───────────────────────────────────
 # A terminal left in a folder that was deleted meanwhile makes EVERY new bash
 # print "shell-init: error retrieving current directory: getcwd: …" once at
@@ -431,28 +483,10 @@ TMPDIR="$(mktemp -d)"
 # the rm), and `$?` inside the trap is the last COMPLETED command's status, so
 # `rc=$?; ...; exit $rc` exits 0 too (client-dev#1751, measured on 3.2.57). So the
 # trap fails closed: a 0 becomes 1 unless the script reached its normal end
-# and set _tb_done=1. Every other exit below the trap is `exit 1`.
+# and set _tb_done=1. Every other exit below the trap is `exit 1`. A live line still
+# drawing (a Ctrl-C mid-download) is ended, so the cursor comes back.
 _tb_done=0
-trap '_tb_rc=$?; rm -rf "$TMPDIR"; if [ "$_tb_rc" -eq 0 ] && [ "$_tb_done" != 1 ]; then _tb_rc=1; fi; exit "$_tb_rc"' EXIT
-
-# ── Banner ───────────────────────────────────────────────────────────────────
-# Draw the first-run title here (mirrors common.sh::print_banner) so the
-# curl|bash path shows it above "1. Downloading". Export TRACEBLOC_BANNER_SHOWN
-# so the install-k8s.sh we're about to fetch doesn't draw a SECOND banner, and
-# TRACEBLOC_INSTALL_REF so its title can state the version on the direct path.
-export TRACEBLOC_BANNER_SHOWN=1
-export TRACEBLOC_INSTALL_REF="$REF"
-_tb_ver_suffix=""
-case "$REF" in
-  v[0-9]*) _tb_ver_suffix="${_D} · ${REF}${_R}" ;;   # only a real vX.Y.Z tag is a "version"
-esac
-printf '\n\n'
-printf '  Setting up %s%stracebloc%s on your machine%s\n' "$_B" "$_C" "$_R" "$_tb_ver_suffix"
-printf '\n'
-printf '  %s────────────────────────────────────────%s\n' "$_D" "$_R"
-printf '\n'
-printf '  %s1. Downloading%s\n' "$_B" "$_R"
-printf '\n'
+trap '_tb_rc=$?; _tb_boot_live_end; rm -rf "$TMPDIR"; if [ "$_tb_rc" -eq 0 ] && [ "$_tb_done" != 1 ]; then _tb_rc=1; fi; exit "$_tb_rc"' EXIT
 
 mkdir -p "$TMPDIR/lib"
 
@@ -493,7 +527,7 @@ FILES=(
 # Each entry is the wait before the next attempt, so ${#DL_DELAYS[@]}+1 attempts
 # over ~75 s. It used to be three attempts 5 s apart in each function, ~10 s in
 # all, and a GitHub 500 on a sub-script one minute after a release was published
-# outlasted that and failed a fresh install at "1. Downloading"
+# outlasted that and failed a fresh install at "Downloading"
 # (client-dev#2053). Only a failure that a wait can cure is retried: no answer
 # (000 — DNS, a refused connect), 408, 429, or a 5xx. A 4xx other than 408 and
 # 429 is the server's answer and returns at once.
@@ -532,7 +566,7 @@ _dl_fetch() {
     # segment relies on (#172/#722) — curl picks up HTTPS_PROXY/NO_PROXY/
     # CURL_CA_BUNDLE from the environment automatically. --connect-timeout/--max-time
     # (added to every fetch in this file) turn a stalled endpoint into a retriable
-    # failure instead of hanging the "1. Downloading" phase forever.
+    # failure instead of hanging the "Downloading" phase forever.
     if [[ -n "$quiet" ]]; then
       FETCH_STATUS="$(curl -fsSL --tlsv1.2 --connect-timeout 30 --max-time 300 -w '%{http_code}' "$url" -o "$dest" 2>/dev/null)" && return 0
     else
@@ -541,7 +575,9 @@ _dl_fetch() {
     _dl_retriable "$FETCH_STATUS" || return 1
     [[ $FETCH_TRIES -lt $max ]] || return 1
     delay="${DL_DELAYS[$((FETCH_TRIES - 1))]}"
+    _tb_boot_hold
     echo "[WARN]  Download failed (attempt $FETCH_TRIES/$max, status ${FETCH_STATUS:-000}). Retrying in ${delay}s..." >&2
+    _tb_boot_resume
     sleep "$delay"
     FETCH_WAITED=$((FETCH_WAITED + delay))
   done
@@ -551,6 +587,7 @@ _dl_fetch() {
 # bootstrap exits naming the URL, the last status and how long it waited.
 download_with_retry() {
   _dl_fetch "$1" "$2" && return 0
+  _tb_boot_live_end
   echo "[ERROR] Failed to download $1 (last status: ${FETCH_STATUS:-000}) after $FETCH_TRIES attempt(s) over ${FETCH_WAITED}s."
   exit 1
 }
@@ -582,18 +619,20 @@ _fetch_refusal_cause() {
 }
 
 # ── Fetch the sub-scripts ─────────────────────────────────────────────────
-# One transient status frame while the (quiet on success) fetch loop runs; a
+# Behind the live line while the (quiet on success) fetch loop runs; a
 # retry/failure inside download_with_retry prints its own [WARN]/[ERROR] and, on
-# hard failure, exits — so we only reach the success line when every file landed.
-if [[ "$_tb_anim" == 1 ]]; then printf '  %s⠋%s Fetching the installer…' "$_C" "$_R"
-else printf '  · Fetching the installer…\n'; fi
-for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
-  dest="$TMPDIR/${f#scripts/}"
-  mkdir -p "${dest%/*}"
-  download_with_retry "$(subscript_url "$f")" "$dest"
-done
-if [[ "$_tb_anim" == 1 ]]; then printf '\r\033[K'; fi
-printf '  %s✔%s Installer downloaded — %s files\n' "$_G" "$_R" "${#FILES[@]}"
+# hard failure, exits. Its line is verify_against_manifest's, once every file is
+# checked.
+fetch_subscripts() {
+  local f dest
+  _tb_boot_live "Downloading the installer..."
+  for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
+    dest="$TMPDIR/${f#scripts/}"
+    mkdir -p "${dest%/*}"
+    download_with_retry "$(subscript_url "$f")" "$dest"
+  done
+  _tb_boot_live_end
+}
 
 # ── Pick a sha256 tool (coreutils on Linux, shasum on macOS) ───────────────
 _sha256_of() {
@@ -640,22 +679,28 @@ _bootstrap_wire_ca() {
   done
 }
 
-verify_against_manifest() {
+# The installer's signed manifest, fetched and authenticated BEFORE the sub-scripts,
+# so no file is trusted before it is checked (verify_manifest_signature). MANIFEST_OK
+# says whether there is a manifest to check the files against, SIGNATURE_OK whether
+# it was authenticated; both stay empty on the dev path's skips, which warn instead.
+MANIFEST_OK=""; SIGNATURE_OK=""
+verify_installer_manifest() {
   local manifest="$TMPDIR/manifest.sha256"
 
   # Trust an explicit corporate CA before cosign's HTTPS calls (#583).
   _bootstrap_wire_ca
 
-  printf "  %sVerifying it's authentic (cosign)…%s\n" "$_D" "$_R"
-
-  if ! _sha256_of "$TMPDIR/install-k8s.sh" >/dev/null 2>&1; then
+  : >"$TMPDIR/sha256-probe"
+  if ! _sha256_of "$TMPDIR/sha256-probe" >/dev/null 2>&1; then
     echo "[ERROR] No sha256 tool (sha256sum / shasum) on PATH — can't verify the" >&2
     echo "        installer's integrity. Install coreutils (Linux) or ensure" >&2
     echo "        /usr/bin/shasum is on PATH (macOS), then re-run." >&2
     exit 1
   fi
 
+  _tb_boot_live "Verifying the installer..."
   if ! download_manifest "$manifest"; then
+    _tb_boot_live_end
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
       echo "[WARN]  No integrity checksums published at ref '$REF' — skipping the integrity check (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
@@ -665,10 +710,19 @@ verify_against_manifest() {
     _fetch_refusal_cause "If this ref pre-dates signed releases, pin a newer release tag."
     exit 1
   fi
+  MANIFEST_OK=1
 
   # Authenticate the manifest itself (cosign keyless) before trusting a single
   # digest in it. Fail-closed unless explicitly opted out.
   verify_manifest_signature "$manifest"
+}
+
+# Every fetched sub-script against the manifest's digest, then the one line the
+# download section prints (_downloaded_line). Authentic when the manifest was
+# (SIGNATURE_OK); all of them checked either way.
+verify_against_manifest() {
+  local manifest="$TMPDIR/manifest.sha256"
+  [[ -n "$MANIFEST_OK" ]] || { _downloaded_line; return 0; }
 
   local f rel expected actual
   for f in "${FILES[@]}"; do  # set-u-safe: FILES is the literal list above
@@ -690,7 +744,21 @@ verify_against_manifest() {
       exit 1
     fi
   done
-  printf '  %s✔%s All %s files intact — nothing was altered\n' "$_G" "$_R" "${#FILES[@]}"
+  _downloaded_line
+}
+
+# _downloaded_line -- what the download came to, in one line, claiming no more than
+# was checked: signed by tracebloc only when the manifest was authenticated
+# (SIGNATURE_OK), verified only when every file matched it (MANIFEST_OK). The dev
+# path's skips warned above it.
+_downloaded_line() {
+  if [[ -n "$MANIFEST_OK" && -n "$SIGNATURE_OK" ]]; then
+    printf '  %s✔%s Downloaded and verified · signed by tracebloc\n' "$_G" "$_R"
+  elif [[ -n "$MANIFEST_OK" ]]; then
+    printf '  %s✔%s Downloaded and verified\n' "$_G" "$_R"
+  else
+    printf '  %s✔%s Downloaded\n' "$_G" "$_R"
+  fi
 }
 
 download_manifest() {
@@ -726,6 +794,7 @@ verify_manifest_signature() {
   local issuer='https://token.actions.githubusercontent.com'
 
   if ! ensure_cosign; then
+    _tb_boot_live_end
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
       echo "[WARN]  cosign unavailable — the installer's signature NOT verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       echo "[WARN]  Proceeding on checksum-only integrity. Not for production." >&2
@@ -754,13 +823,14 @@ verify_manifest_signature() {
           --certificate-oidc-issuer "$issuer" \
           --offline \
           "$manifest" >/dev/null 2>&1; then
-      printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
+      _signature_verified
       return 0
     fi
   fi
 
   if ! fetch_optional "$REPO_REL/manifest.sha256.sig"  "$sig" \
      || ! fetch_optional "$REPO_REL/manifest.sha256.cert" "$cert"; then
+    _tb_boot_live_end
     if [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
       echo "[WARN]  The installer's signature isn't published for ref '$REF' — not verified (TRACEBLOC_ALLOW_UNVERIFIED=1)." >&2
       return 0
@@ -777,13 +847,20 @@ verify_manifest_signature() {
         --certificate "$cert" \
         --signature "$sig" \
         "$manifest" >/dev/null 2>&1; then
-    printf '  %s✔%s Download verified as published by tracebloc\n' "$_G" "$_R"
+    _signature_verified
   else
+    _tb_boot_live_end
     # Plain language, no internal identifiers — parity with install.ps1 (#576).
     echo "[ERROR] Couldn't confirm the installer download is authentic, so the install" >&2
     echo "        stopped before changing anything on your machine." >&2
     exit 1
   fi
+}
+
+# The manifest is tracebloc's: the download section's line says so (_downloaded_line).
+_signature_verified() {
+  _tb_boot_live_end
+  SIGNATURE_OK=1
 }
 
 # _cosign ARG... -- $COSIGN_BIN with sigstore's TUF cache inside this run's $TMPDIR.
@@ -825,7 +902,6 @@ ensure_cosign() {
   local bin="$TMPDIR/cosign"
   local sums="$TMPDIR/cosign_checksums.txt"
 
-  echo "  · Fetching the signature-verification tool (cosign)…"
   fetch_optional "$base/$asset"               "$bin"  || return 1
   fetch_optional "$base/cosign_checksums.txt" "$sums" || return 1
 
@@ -846,6 +922,7 @@ ensure_cosign() {
   [[ -n "$want" ]] || return 1
   got="$(_sha256_of "$bin")" || return 1
   if [[ "$want" != "$got" ]]; then
+    _tb_boot_hold
     echo "[ERROR] Bootstrapped cosign failed its own checksum — not using it." >&2
     return 1
   fi
@@ -854,10 +931,35 @@ ensure_cosign() {
   return 0
 }
 
+# The signed manifest first, so no sub-script is fetched before it can be checked.
+verify_installer_manifest
+
+# ── Banner ───────────────────────────────────────────────────────────────────
+# Draw the first-run title here (mirrors common.sh::print_banner) so the
+# curl|bash path shows it above "Downloading". Export TRACEBLOC_BANNER_SHOWN
+# so the install-k8s.sh we're about to fetch doesn't draw a SECOND banner, and
+# TRACEBLOC_INSTALL_REF so its title can state the version on the direct path.
+export TRACEBLOC_BANNER_SHOWN=1
+export TRACEBLOC_INSTALL_REF="$REF"
+_tb_ver_suffix=""
+case "$REF" in
+  v[0-9]*) _tb_ver_suffix="${_D} · ${REF}${_R}" ;;   # only a real vX.Y.Z tag is a "version"
+esac
+printf '\n\n'
+printf '  %s%stracebloc%s%s\n' "$_B" "$_C" "$_R" "$_tb_ver_suffix"
+printf '\n'
+printf '  Setting up tracebloc on your machine\n'
+printf '\n'
+printf '  %s─────────────────────────────────────────────%s\n' "$_D" "$_R"
+printf '\n\n'
+printf '  %sDownloading%s\n' "$_B" "$_R"
+printf '\n'
+
+fetch_subscripts
 verify_against_manifest
 
-# Spacing before install-k8s.sh renders "2. Installing" (its banner is suppressed
-# by TRACEBLOC_BANNER_SHOWN, so it goes straight to the roadmap).
+# Spacing before install-k8s.sh's first step, "[1/6] Checking your machine" (its
+# banner is suppressed by TRACEBLOC_BANNER_SHOWN).
 printf '\n\n'
 
 chmod +x "$TMPDIR/install-k8s.sh"

@@ -193,11 +193,6 @@ _verify_tracebloc_cli() {
     # the outer fall-through below) — Bugbot #371.
     TRACEBLOC_CLI_ON_FRESH_PATH=1
     local ver; ver="$(_cli_version_short)"
-    # Prefer the short `tb` alias (the CLI installer symlinks it next to
-    # `tracebloc`); fall back to `tracebloc` when that alias wasn't created — its
-    # name was already taken, so the CLI's install.sh skipped it — so the copy
-    # never points the user at a command that isn't there (Bugbot).
-    local cli_cmd="tracebloc"; has tb && cli_cmd="tb"
     # Whether the summary's CTA + this step may say "run it NOW" vs "open a new
     # terminal" — gate on WHERE the CLI landed, not `has tracebloc` (this process's
     # PATH was mutated with ~/.local/bin by install.sh, so it resolves the CLI even
@@ -213,32 +208,21 @@ _verify_tracebloc_cli() {
         # `tracebloc version` probe came back empty ($ver=""), we can't tell whether
         # anything changed — fall through to the neutral "up to date" rather than a
         # bare "updated" with no version to back it up (Bugbot: false updated verdict).
-        success "tracebloc CLI updated${ver:+ (v${TB_CLI_OLD_VER} → v${ver})} — run \`${cli_cmd}\` to use it"
+        success "tracebloc CLI updated · v${TB_CLI_OLD_VER} → v${ver}"
       elif [[ -n "${TB_CLI_OLD_VER:-}" ]]; then
-        success "tracebloc CLI up to date${ver:+ (v${ver})} — run \`${cli_cmd}\` to use it"
+        success "tracebloc CLI up to date${ver:+ · v${ver}}"
       else
-        success "tracebloc CLI ready${ver:+ (v${ver})} — run \`${cli_cmd}\` to use it"
+        success "tracebloc CLI installed${ver:+ · v${ver}}"
       fi
       return 0
     fi
-    # Installed and persisted for NEW terminals (a fresh shell resolves it — that's
-    # why we're on this branch), but NOT usable in the user's returning shell yet:
-    # either it landed in ~/.local/bin (the login shell fixed its PATH before that
-    # dir existed, #304) or it's otherwise off this shell's PATH. Say "open a new
-    # terminal" — matching the summary CTA — instead of "run it now", which would
-    # fail command-not-found. The earlier code printed the usable-now verdict here
-    # unconditionally, contradicting the summary (Bugbot #371). Keep
-    # TB_CLI_USABLE_NOW=0 so _cli_runnable_now (summary.sh) agrees.
+    # Installed and persisted for NEW terminals, but off the PATH of the shell that
+    # launched this installer (it fixed its PATH at login, #304). The summary's last
+    # line says to open a new terminal (_cli_runnable_now); how to load it here is logged.
     TB_CLI_USABLE_NOW=0
-    local sh_name; sh_name="$(basename "${SHELL:-/bin/sh}")"
-    success "tracebloc CLI installed${ver:+ (v$ver)} — open a new terminal to use \`${cli_cmd}\`."
-    if [[ "$sh_name" == "fish" ]]; then
-      hint "This shell won't see it yet — open a new terminal to use it."
-    else
-      local rc; rc="$(_cli_rc_for_shell || true)"
-      hint "This shell won't see it yet — open a new terminal, or load it now:  source ${rc}"
-    fi
-    _cli_first_install_next_step
+    local rc; rc="$(_cli_rc_for_shell || true)"
+    success "tracebloc CLI installed${ver:+ · v${ver}}"
+    log "The tracebloc CLI resolves in a new terminal, not in this shell; to load it here: source ${rc:-its rc file}"
     return 0
   fi
 
@@ -330,7 +314,10 @@ install_tracebloc_cli() {
   _cli_out="$(mktemp)" || _cli_out=""
   # Appended, never truncated: without a temp file the fallback is the install log.
   sh "$installer" >> "${_cli_out:-${LOG_FILE:-/dev/null}}" 2>&1 &
-  spin "$!" "Installing the tracebloc CLI…" || _cli_rc=$?
+  # Set and unset, not a prefix assignment: a prefix on a function can outlive the call.
+  _TB_SPIN_QUIET=1
+  spin "$!" "Installing the tracebloc CLI..." || _cli_rc=$?
+  unset _TB_SPIN_QUIET
   if [[ -n "$_cli_out" ]]; then cat "$_cli_out" >> "${LOG_FILE:-/dev/null}" 2>/dev/null || true; fi
   if [[ "$_cli_rc" -eq 0 ]]; then
     # Recorded where the CLI installer says it put the binary: /usr/local/bin,
@@ -415,6 +402,24 @@ _example_opt_out() {
 # /dev/tty opens, the test _login_tty_ok makes. Split out so tests can force either branch.
 _example_attended() { { : </dev/tty; } 2>/dev/null; }
 
+# _example_lines -- the example's CLI output, read on stdin: every line into the install
+# log, and on screen only its results (the CLI's ✔, ⚠ and ✖ lines), under a live line
+# of this pipeline's own (its ticker ends with this subshell).
+_example_lines() {
+  local line
+  tb_live_quiet "Setting up your example use case..."
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "$line" >>"${LOG_FILE:-/dev/null}"
+    line="${line%$'\r'}"
+    case "$line" in
+      *✔*) success "${line#*✔ }" ;;
+      *⚠*|*✖*) _tb_live_hold; printf '%s\n' "$line"; _tb_live_resume ;;
+    esac
+  done
+  tb_live_done
+  return 0
+}
+
 # setup_example_use_case -- after a connected install, `tracebloc data ingest --example`
 # sets up the account's example use case. The CLI asks tracebloc first, so a re-run
 # sets nothing up twice. It never fails the install: every path returns 0.
@@ -426,6 +431,7 @@ setup_example_use_case() {
   [[ -z "$(tb_wsl_phase 2>/dev/null)" ]] || return 0
   why="$(_example_opt_out)"
   if [[ -n "$why" ]]; then
+    echo ""
     info "Skipping the example use case: ${why} is set."
     return 0
   fi
@@ -450,22 +456,35 @@ setup_example_use_case() {
     return 0
   fi
   echo ""
-  info "Setting up your example use case…"
+  echo ""
+  echo -e "  ${BOLD}Setting up your example use case${RESET}"
+  echo ""
+  echo "  We'll ingest synthetic data and start a model"
+  echo "  training so you can explore tracebloc."
+  echo ""
   # Attended, in the foreground and unbounded: _bounded moves it out of the terminal's
   # process group, where a Ctrl-C never reaches it. The CLI exits 130 on one; the
   # installer's INT trap is a no-op meanwhile, since the install is connected and stays
   # done. Unattended, no Ctrl-C can come, so a run that does not end is stopped.
+  # Either way its output goes through _example_lines: its results on screen, all of it
+  # in the log. pipefail makes the pipeline's status the CLI's.
   int_trap="$(trap -p INT)"
   trap ':' INT
   if _example_attended; then
-    "$cli" data ingest --example </dev/null || rc=$?
+    "$cli" data ingest --example </dev/null 2>&1 | _example_lines || rc=$?
   else
     deadline="${TRACEBLOC_EXAMPLE_TIMEOUT:-15m}"
-    _bounded "$deadline" "$cli" data ingest --example </dev/null || rc=$?
+    _bounded "$deadline" "$cli" data ingest --example </dev/null 2>&1 | _example_lines || rc=$?
   fi
   if [[ -n "$int_trap" ]]; then eval "$int_trap"; else trap - INT; fi
+  # A Ctrl-C ends _example_lines before its live line does: clear what it drew.
+  if _tb_animate; then printf '\r\033[K'; tput cnorm 2>/dev/null || true; fi
   case "$rc" in
-    0) ;;
+    0)
+      echo ""
+      echo "  Your training results will appear on your"
+      echo "  use case in the dashboard."
+      echo "" ;;
     130) info "Stopped setting up the example use case." ;;
     *)
       if [[ "$rc" -eq 124 && -n "$deadline" ]]; then

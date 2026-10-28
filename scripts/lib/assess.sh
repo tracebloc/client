@@ -115,12 +115,13 @@ _assess_cli_present() {
 
 # _assess_cli_version BIN — the version BIN reports, bare: "tracebloc 0.10.5
 # (darwin/arm64)" -> "0.10.5". Whatever the first line holds there, unchecked;
-# empty when BIN reports nothing.
+# empty when BIN reports nothing or does not answer within TB_CLI_VERSION_TIMEOUT.
 _assess_cli_version() {
   local ver
   # No pipe: `tracebloc version | head -1` would let head close the pipe first,
   # and pipefail turns that into a 141 the caller never asked for (backend#1778).
-  ver="$("$1" version 2>/dev/null || true)"
+  # Bounded: a wedged CLI must not hang the install; a timeout reads as no version.
+  ver="$(_bounded "${TB_CLI_VERSION_TIMEOUT:-15}" "$1" version 2>/dev/null || true)"
   ver="${ver%%$'\n'*}"                     # first line
   ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
   printf '%s' "${ver#v}"
@@ -165,10 +166,7 @@ _assess_cli_behind_latest() {
   [[ "${TB_UPGRADE_CLI:-${TRACEBLOC_UPGRADE_CLI:-0}}" == 1 ]] || return 1
   local bin ver latest
   bin="$(_assess_cli_bin)" || return 1     # absent — cli-missing already covers it
-  ver="$("$bin" version 2>/dev/null || true)"
-  ver="${ver%%$'\n'*}"                     # first line
-  ver="${ver#* }"; ver="${ver%% *}"        # "tracebloc 0.10.5 (darwin/arm64)" -> "0.10.5"
-  ver="${ver#v}"
+  ver="$(_assess_cli_version "$bin")"
   latest="${TB_CLI_LATEST:-${TRACEBLOC_CLI_LATEST:-}}"; latest="${latest#v}"
   # Can't prove current (missing/unparseable latest, or unreadable version) -> update.
   [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 0
@@ -501,7 +499,7 @@ assess_existing_install() {
                             info "Couldn't read this machine's k3s — systemd or the k3s API didn't answer. Continuing without drawing a conclusion from a read that didn't answer; setup reads it again before it acts." ;;
         *)                  info "Your secure environment is only partly set up — finishing setup." ;;
       esac
-      echo ""
+      echo ""; echo ""
       return 0               # fall through to the normal flow to reconcile
       ;;
     fresh|*)
@@ -509,7 +507,7 @@ assess_existing_install() {
       # merely lacks a release proceeds without ceremony.
       if [[ "$INSTALL_STATE_REASON" == "no-cluster" ]]; then
         info "Setting up your secure environment on this machine for the first time."
-        echo ""
+        echo ""; echo ""
       fi
       return 0               # today's normal flow
       ;;

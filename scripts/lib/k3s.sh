@@ -1853,7 +1853,9 @@ _native_k3s_install_linux() {
   local saved_umask
   saved_umask="$(umask)"
   umask 022
+  tb_live_quiet "Installing system tools..."
   install_helm
+  tb_live_done "System tools ready"
   umask "$saved_umask"
   log "step b: native k3s: system tools and helm ready (no Docker, no k3d, no kubectl download)"
   # The NVIDIA driver, toolkit and CDI spec (1.1i), before k3s first starts in step c.
@@ -2343,7 +2345,9 @@ _native_k3s_adopt_tools() {
   local saved_umask
   saved_umask="$(umask)"
   umask 022
+  tb_live_quiet "Installing system tools..."
   install_helm
+  tb_live_done "System tools ready"
   umask "$saved_umask"
   log "step b: native k3s: helm ready in ${TRACEBLOC_TOOLS_DIR:-?} (k3s is the administrator's)"
 }
@@ -2503,7 +2507,7 @@ _native_k3s_prepare_host() {
   [[ "${TB_LEFTOVER_ACTION:-}" != wipe ]] \
     || error "prepare-host never wipes data, and --wipe-data asks it to: tracebloc data in ${HOST_DATA_DIR} is ${user}'s. ${user} removes it with 'tracebloc delete', or you keep it with --reuse-data; then re-run prepare-host."
 
-  step_header a "Preparing this host for ${user} on native k3s (one-time administrator step)"
+  step_header a 1 "Preparing this host for ${user} on native k3s (one-time administrator step)"
   # A corporate CA, trusted before the first download (as main() does for an install).
   if declare -F wire_ca_trust >/dev/null 2>&1; then wire_ca_trust; fi
   # shellcheck disable=SC2034  # consumed cross-file (common.sh's root copy, diagnose.sh)

@@ -259,8 +259,9 @@ render_host_audit() {
   esac
 }
 
-# host_audit — the public entry: probe, then render. Read-only, never-fatal.
+# host_audit — the install's entry: probe, then render. Read-only, never-fatal. e2e
+# reads the panel from a captured run; on a terminal it goes to the log alone.
 host_audit() {
   run_host_probes
-  render_host_audit
+  tb_machine_lines render_host_audit
 }

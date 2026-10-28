@@ -171,8 +171,8 @@ trap 'exit 143' TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 #  Structured as the six-step first-run run-through (a–f). Each step prints a
-#  gerund header via step_header and a trailing blank-line pair (the run-through's
-#  spacing); print_roadmap lists the plan up front. Step b owns the prerequisites
+#  numbered gerund header via step_header ("[1/6] Checking your machine") and a
+#  trailing blank-line pair (the run-through's spacing). Step b owns the prerequisites
 #  AND the tracebloc CLI (moved out of provisioning — step d needs it to sign in).
 main() {
   [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && print_help
@@ -348,8 +348,6 @@ main() {
     assess_existing_install
   fi
 
-  print_roadmap
-
   # Trust an explicit corporate CA across every host tool (cosign/helm/git/curl)
   # BEFORE preflight's HTTPS probes and any tool download, so a TLS-inspecting proxy
   # is handled end-to-end (#583). Guarded so a stale bootstrap without the helper
@@ -371,13 +369,13 @@ main() {
   fi
   echo ""; echo ""
 
-  # ── b) Install what tracebloc needs ──────────────────────────────────────
+  # ── b) Install dependencies ──────────────────────────────────────────────
   #     Prerequisites (the cluster runtime + system tools) AND the tracebloc CLI. The CLI moved
   #     here from provisioning: step d (provision_client) needs it to sign in and
   #     mint the credential, so it must exist before then. install_tracebloc_cli is
   #     non-fatal on its own; step d's `has tracebloc` guard makes a genuinely
   #     missing CLI fatal at the point it's actually required.
-  step_header b "Installing what tracebloc needs"
+  step_header b "Installing dependencies"
   case "$OS" in
     Darwin)   install_macos ;;
     Linux)    install_linux ;;
@@ -417,6 +415,10 @@ main() {
     _tb_done=1
     exit 0
   fi
+  # Guarded like the steps' own calls: a stale bootstrap may not carry it.
+  if declare -F print_environment_created >/dev/null 2>&1; then
+    print_environment_created
+  fi
   # The GPU device plugin is no longer applied imperatively here (client#564):
   # the chart now renders it as a Helm-managed DaemonSet, gated on
   # gpu.devicePlugin.enabled, which install_client_helm sets in step (e) from
@@ -424,13 +426,13 @@ main() {
   # uninstall) and node verification moves to after Helm install below.
   echo ""; echo ""
 
-  # ── d) Register this machine ─────────────────────────────────────────────
+  # ── d) Register your machine ─────────────────────────────────────────────
   #     Sign in + `client create` BEFORE Helm, so the minted credential + derived
   #     namespace feed the chart (#838). Dual-mode (TRACEBLOC_VALUES_FILE / pre-
   #     supplied credentials) skips sign-in. Guarded so a stale bootstrap that
   #     didn't fetch provision.sh degrades to the dual-mode credential path inside
   #     install_client_helm rather than aborting.
-  step_header d "Registering this machine"
+  step_header d "Registering your machine"
   if declare -F provision_client >/dev/null 2>&1; then
     provision_client
   fi
@@ -438,6 +440,8 @@ main() {
 
   # ── e) Install tracebloc ─────────────────────────────────────────────────
   step_header e "Installing tracebloc"
+  echo -e "  Everything runs on this machine; your data never leaves it."
+  echo ""
   install_client_helm
   tb_record_write   # the namespace is decided now
   # The Apple-GPU runner's login item (cli-dev#1305), after the chart, which holds its
@@ -450,9 +454,9 @@ main() {
   verify_gpu
   echo ""; echo ""
 
-  # ── f) Connect to the tracebloc network ──────────────────────────────────
+  # ── f) Connect to tracebloc ──────────────────────────────────────────────
   #     Wait for the client's workloads to actually come up, then the rich summary.
-  step_header f "Connecting to the tracebloc network"
+  step_header f "Connecting to tracebloc"
   wait_for_client_ready
   # The account's example use case, by the CLI this run signed in (install-cli.sh).
   # Guarded so a stale bootstrap without it proceeds as before.
@@ -462,12 +466,17 @@ main() {
   # The GPU training base image, after readiness so its pull never shares the link
   # with the control plane's (slim client B.13). It does not wait for the pull.
   _prepull_training_parent
-  print_summary
   # A connected, interactive install opens the dashboard with a one-time link
-  # that marks the browser as on this machine (install-client-helm.sh). It never
-  # fails the install; guarded for a stale bootstrap without it.
+  # that marks the browser as on this machine (install-client-helm.sh), before the
+  # summary, whose first next step then says it is open; a link with no browser to
+  # open it in is printed after the summary. Neither fails the install; guarded for
+  # a stale bootstrap without them.
   if declare -F open_dashboard_link >/dev/null 2>&1; then
     open_dashboard_link || true
+  fi
+  print_summary
+  if declare -F print_dashboard_link >/dev/null 2>&1; then
+    print_dashboard_link || true
   fi
 
   tb_wsl_client_state_write

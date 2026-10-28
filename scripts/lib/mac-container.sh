@@ -1606,6 +1606,7 @@ _mac_ct_ensure_node() {
     *) since="" ;;
   esac
   tb_record_write container-node "$name" "$(_mac_ct_home)"
+  tb_live_next "Configuring your secure environment..."
   # A node this run did not start is Ready on its current status; one it started must
   # say so with a heartbeat newer than the start.
   # Each wait spends its own budget: _native_k3s_budget_left reads these two as it
@@ -1862,7 +1863,7 @@ _mac_ct_stop_run_node() {
   _bounded 120 "$ct" stop "$name" </dev/null >>"${LOG_FILE:-/dev/null}" 2>&1 || true
   rc=0; _mac_ct_node_running "$ct" "$name" || rc=$?
   if [[ "$rc" -eq 1 ]]; then
-    info "Stopped the VM this install started, to free this Mac's memory."
+    info "Stopped the VM to free this Mac's memory."
   else
     warn "The VM this install started is still running. To stop it: ${stop}"
   fi
@@ -2061,13 +2062,15 @@ _mac_ct_runner_loaded() {
   esac
 }
 
-# _mac_ct_runner_gpu_ready -- sets TRACEBLOC_MAC_GPU_RUNNER_READY=1 when this run keeps a
-# job-data folder on this Mac and it is there: the runner refuses the GPU without it.
+# _mac_ct_runner_gpu_ready -- sets TRACEBLOC_MAC_GPU_RUNNER_READY=1, and says so, when this
+# run keeps a job-data folder on this Mac and it is there: the runner refuses the GPU
+# without it.
 _mac_ct_runner_gpu_ready() {
   local jd
   jd="$(_mac_ct_job_data_dir)"
   [[ -n "$jd" && -d "$jd" ]] || return 0
   TRACEBLOC_MAC_GPU_RUNNER_READY=1
+  success "GPU training set up"
 }
 
 # _mac_ct_ensure_runner -- the runner's login item, when this run sets up the runner
@@ -2084,8 +2087,8 @@ _mac_ct_ensure_runner() {
   TRACEBLOC_MAC_GPU_RUNNER_READY=""
   if ! _mac_ct_runner_on; then
     [[ "${OS:-}" != "Darwin" ]] || log "The tracebloc runner: $(_mac_ct_runner_off_why), so no runner login item."
-    # On the macOS node step a said GPU training is set up here (detect_gpu), so a CLI
-    # that does not carry the runner is said, not only logged.
+    # On the macOS node this run sets out to train on the GPU (detect_gpu logs it), so a
+    # CLI that does not carry the runner is said, not only logged.
     if _mac_ct_runner_host; then
       warn "The tracebloc runner: $(_mac_ct_runner_off_why), so it is not set up. ${cpu}"
     fi
@@ -2181,6 +2184,7 @@ _mac_ct_install_macos() {
   # shellcheck disable=SC2034  # consumed cross-file by diagnose.sh
   INSTALL_TIER_REASON="mac-node"
   log "step b: macOS node: tier 0 (Apple's container runtime in your own folder; no administrator rights)"
+  tb_live_quiet "Installing system tools..."
   kver="$(_mac_ct_kubectl_version)" || error "$kver"
   # shellcheck disable=SC2034  # consumed cross-file by setup-linux.sh's _fetch_* (the download's OS)
   OS_DL=darwin
@@ -2194,6 +2198,7 @@ _mac_ct_install_macos() {
   log "step b: macOS node: kubectl ${kver} and helm ready"
   _mac_ct_ensure_runtime
   _mac_ct_start_system
+  tb_live_done "System tools ready"
 }
 
 # _mac_ct_create_cluster -- step c on the macOS node: the k3s node in Apple's VM, Ready,
@@ -2217,8 +2222,12 @@ _mac_ct_create_cluster() {
   fi
   [[ -n "${TRACEBLOC_CLI_BIN:-}" ]] \
     || error "The macOS node's login item runs the tracebloc CLI, and step b did not install it (above). Without the login item the node would not come back after a restart. Install the tracebloc CLI, then re-run this installer."
+  # _mac_ct_ensure_node moves the live line on once the node runs (tb_live_next).
+  tb_live "Preparing local container runtime..."
   _mac_ct_ensure_node
   _mac_ct_merge_kubeconfig
+  # No line of its own: its result is step c's "✔ Secure environment created".
+  tb_live_stop
   # NO_PROXY before the gate (client-dev#1892), for the kubectl calls after it: the gate's
   # own probe of 127.0.0.1:6443 bypasses every proxy itself (client-dev#1914).
   _export_host_no_proxy
@@ -2285,25 +2294,32 @@ _mac_ct_local_network_gate() {
   local dir kc body="" rc t0
   dir="$(_mac_ct_node_dir)" || error "Apple container: cannot tell where the node's kubeconfig is (above)."
   kc="${dir}/k3s.yaml"
-  info "macOS may now ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find devices on your local network. It is part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:${TB_MAC_CT_NODE_API_PORT}${TRACEBLOC_MAC_CT_LOCAL_API:+, and the local API the dashboard asks, on 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}}. Click Allow. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for your answer."
+  # The helper by the name macOS's dialog gives it, so nobody denies a name they don't know.
+  info_note "macOS may ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find" \
+    "devices on your local network. Select Allow to continue."
+  echo ""
+  log "Local Network: macOS may ask whether \"${TB_MAC_CT_LAN_HELPER}\" can find devices on your local network. It is part of Apple's container runtime: it makes the cluster's API reachable from this Mac only, on 127.0.0.1:${TB_MAC_CT_NODE_API_PORT}${TRACEBLOC_MAC_CT_LOCAL_API:+, and the local API the dashboard asks, on 127.0.0.1:${TRACEBLOC_MAC_CT_LOCAL_API%% *}}. This waits up to $(( TB_MAC_CT_LAN_WAIT_S / 60 )) minutes for the answer."
+  tb_live_quiet "Waiting for local network permission..."
   t0=$SECONDS
   while :; do
     rc=0; body="$(_mac_ct_api_try "$kc")" || rc=$?
     [[ "$rc" -ne 100 ]] \
       || error "Apple container: the node's kubeconfig cannot be used to ask its API from this Mac: ${body}. It's safe to re-run this installer."
     if [[ "$rc" -eq 0 && "$body" == ok ]]; then
+      tb_live_done
       log "Apple container: the node's API answers from this Mac on 127.0.0.1:6443."
       return 0
     fi
     (( SECONDS - t0 < TB_MAC_CT_LAN_WAIT_S )) || break
     sleep 3
   done
+  tb_live_stop
   case "$rc" in
     35|56)
       # A refusal: nothing changes until the user allows it, so no "try again" footer.
       # shellcheck disable=SC2034  # consumed cross-file by install_cleanup (common.sh)
       TB_EXIT_REFUSED=1
-      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_HELPER}\", the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. The node keeps its data." ;;
+      error "This Mac blocks the cluster's API: Local Network access is not allowed for \"${TB_MAC_CT_LAN_HELPER}\", the part of Apple's container runtime that makes the API reachable from this Mac. Allow it in ${TB_MAC_CT_LAN_SETTINGS}, then re-run this installer. Your secure environment keeps its data." ;;
     *)
       error "The node is Ready, but its API on 127.0.0.1:6443 did not answer from this Mac within ${TB_MAC_CT_LAN_WAIT_S}s (the last try exited ${rc}${body:+ and said: ${body}}). It's safe to re-run this installer." ;;
   esac

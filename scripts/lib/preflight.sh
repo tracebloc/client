@@ -1251,8 +1251,8 @@ _pf_storage_type() {
   if [[ -n "${HOME:-}" && "$disp" == "$HOME"* ]]; then disp="~${disp#"$HOME"}"; fi
   fstype="$(_pf_fstype "$target")"
   if [[ -z "$fstype" ]]; then
-    log "Storage: ${target} — filesystem type undetermined; assuming local."
-    success "Local storage (${disp})"
+    log "Storage: ${disp} — filesystem type undetermined; assuming local."
+    success "Local storage available"
     return 0
   fi
   if _pf_is_network_fstype "$fstype"; then
@@ -1271,8 +1271,8 @@ _pf_storage_type() {
       log "Storage: ${target} (${fstype})"
       _pf_opaque_fuse_warn "$target" "$fstype"
   else
-      log "Storage: ${target} (${fstype})"
-      success "Local storage (${disp})"
+      log "Storage: ${disp} (${fstype})"
+      success "Local storage available"
   fi
   # backend#743: datasets MAY live on a network mount (HOST_DATASET_DIR) — only
   # the database dir (HOST_DATA_DIR, checked above) must be local. Note it, never fail.
@@ -1527,17 +1527,13 @@ _pf_connectivity() {
   fi
   # Probe each critical host in the FOREGROUND (so PF_HARD_FAIL updates in THIS
   # shell — a backgrounded spinner subshell couldn't propagate it), advancing a
-  # spinner frame before each blocking probe. No sleep: the network probe itself
-  # is the delay in production; under test the stubbed probe is instant, so this
-  # can never hang. Failures are collected and printed after the line is cleared.
-  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') fi=0
+  # live line (quiet when plain: the copy has only its ✔). Failures are collected
+  # and printed after the line is cleared.
   local -a fails=()
-  _tb_progress_start "Checking outbound connectivity…"
+  tb_live_quiet "Checking your internet connection..."
   for c in "${criticals[@]}"; do  # set-u-safe: criticals is a literal list
     label="${c%%|*}"; rest="${c#*|}"; url="${rest%%|*}"
     mode=""; [[ "$rest" == *"|"* ]] && mode="${rest##*|}"
-    _tb_progress_frame "${frames[fi]}" "Checking outbound connectivity…"
-    fi=$(( (fi + 1) % ${#frames[@]} ))
     status="$(_pf_probe_url "$url" "$mode")"
     if [[ "$status" != "ok" ]]; then status="$(_pf_probe_url "$url" "$mode")"; fi   # one retry (transient blips)
     if [[ "$status" != "ok" ]]; then
@@ -1545,12 +1541,13 @@ _pf_connectivity() {
       if [[ "$status" == "tls" ]]; then tls_seen=1; fi
     fi
   done
-  _tb_progress_end
+  tb_live_done
 
   if [[ ${#fails[@]} -eq 0 ]]; then
     # Collapsed happy-path line (always shown — this IS the connectivity result,
     # not one of the arch/CPU/RAM/disk lines the summary folds together).
-    success "Connected: tracebloc.io, Docker Hub (registry-1.docker.io), GitHub (ghcr.io)"
+    log "Connected: tracebloc.io, Docker Hub (registry-1.docker.io), GitHub (ghcr.io)"
+    success "Internet connection verified"
   else
     local ff
     for ff in "${fails[@]}"; do  # set-u-safe: the else of the empty-fails check
@@ -1582,15 +1579,35 @@ _pf_connectivity() {
   return 0
 }
 
+# The machine, for the collapsed step-a view:
+#   "macOS · Apple Silicon (arm64)"
+# The OS's family on a Mac (its version is the floor check's), its name and version
+# elsewhere, then the processor.
+_pf_os_summary_line() {
+  local os="" cpu="$ARCH"
+  case "${OS:-}" in
+    Darwin)
+      os="macOS"
+      case "$ARCH" in
+        arm64) cpu="Apple Silicon (arm64)" ;;
+        x86_64) cpu="Intel (x86_64)" ;;
+      esac ;;
+    *) os="$(_host_os_label 2>/dev/null)" || os=""; [[ -n "$os" ]] || os="${OS:-Linux}" ;;
+  esac
+  success "${os} · ${cpu}"
+  # e2e reads the architecture from this line (installer_output_asks.MACHINE_ARCH).
+  tb_machine_lines echo "  Architecture: ${ARCH}"
+}
+
 # One-line hardware summary for the collapsed step-a view:
-#   "arch · N CPU cores · N GB memory · N GB free disk"
+#   "N CPU cores · N GB memory · N GB free disk"
 # Computed from the same readers the individual checks use, so it can never
-# disagree with them. Fields that can't be read are simply omitted (arch always
-# leads). Printed by run_preflight only when nothing hard-failed — a ✔ summary
-# above a ✖ would contradict itself.
+# disagree with them. Fields that can't be read are simply omitted. Printed by
+# run_preflight only when nothing hard-failed — a ✔ summary above a ✖ would
+# contradict itself.
 _pf_hw_summary_line() {
   local cpu mem_kb mem_gb disk_target="" disk_kb disk_gb tab=$'\t'
-  local -a parts=("$ARCH")
+  local -a parts=()
   cpu="$(_pf_ncpu)"
   if [[ -n "$cpu" ]]; then parts+=("${cpu} CPU cores"); fi
   # Host RAM, not the VM budget (#417): a hardware summary that read "7 GB
@@ -1612,8 +1629,8 @@ _pf_hw_summary_line() {
   disk_kb=""; [[ -z "$disk_target" ]] || disk_kb="$(_pf_free_kb "$disk_target")"
   if [[ -n "$disk_kb" ]]; then disk_gb=$(( disk_kb / 1024 / 1024 )); parts+=("${disk_gb} GB free disk"); fi
   local joined="" p
-  for p in "${parts[@]}"; do joined="${joined:+$joined · }$p"; done  # set-u-safe: seeded with ARCH
-  success "$joined"
+  for p in ${parts[@]+"${parts[@]}"}; do joined="${joined:+$joined · }$p"; done
+  [[ -z "$joined" ]] || success "$joined"
 }
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
@@ -1632,8 +1649,8 @@ run_preflight() {
   _pf_cpu          || true
   _pf_memory       || true
   _pf_disk         || true
-  # The combined hardware line — only when nothing hard-failed so far.
-  if [[ "$PF_HARD_FAIL" -eq 0 ]]; then _pf_hw_summary_line; fi
+  # The machine and its combined hardware line — only when nothing hard-failed so far.
+  if [[ "$PF_HARD_FAIL" -eq 0 ]]; then _pf_os_summary_line; _pf_hw_summary_line; fi
   # Connectivity (own spinner + combined "Connected:" line) and storage
   # ("Local storage (…)") each print their own always-on summary line.
   _pf_connectivity || true

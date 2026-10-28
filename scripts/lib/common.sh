@@ -42,7 +42,7 @@ umask 077
 # Nothing here is exported, so no child sees a value its parent did not.
 tb_tuning_aliases=(
   TB_API_WAIT_S
-  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT
+  TB_ASSESS_KUBECTL_TIMEOUT TB_CLI_MIN_VERSION TB_CLI_PROBE_TIMEOUT TB_CLI_VERSION_TIMEOUT
   TB_CURL_CONNECT_TIMEOUT TB_CURL_MAX_TIME
   TB_GPU_CDI_TIMEOUT TB_GPU_PROFILER_TIMEOUT
   TB_HELM_LIST_TIMEOUT TB_HELM_TIMEOUT_MIN TB_HELM_VALUES_TIMEOUT TB_INSTALL_CMD
@@ -291,6 +291,10 @@ elif [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" ]]; then
 else
   _tb_mode=16
 fi
+# Whether a person watches stdout, decided here for the same reason as the colour
+# mode. Lines only a machine reads (the substrate line, the host check) go to the
+# install log alone when one does (tb_machine_lines).
+if [[ -t 1 ]]; then _TB_STDOUT_TTY=1; else _TB_STDOUT_TTY=""; fi
 _tb_bg=dark
 if [[ -n "${COLORFGBG:-}" ]]; then
   _tb_last="${COLORFGBG##*;}"           # "fg;bg" → a trailing 7/15 is a light bg
@@ -345,9 +349,32 @@ CYAN="$TB_ACCENT"; GREEN="$TB_GO"; YELLOW="$TB_WARN"; RED="$TB_ERRSOFT"
 #  log()           — debug only, writes to LOG_FILE, never shown to user
 #  prompt_header() — bold label before user input prompts
 #  hint()          — dim contextual help text
-info()           { echo -e "  ${DIM}·${RESET} $*"; }
-success()        { echo -e "  ${TB_GO}✔${RESET} $*"; }
-warn()           { echo -e "  ${TB_WARN}⚠${RESET}  $*"; }
+info()           { _tb_live_hold; echo -e "  ${DIM}·${RESET} $*"; _tb_live_resume; }
+success()        { _tb_live_hold; echo -e "  ${TB_GO}✔${RESET} $*"; _tb_live_resume; }
+warn()           { _tb_live_hold; echo -e "  ${TB_WARN}⚠${RESET}  $*"; _tb_live_resume; }
+# A note of a few short lines: the glyph and the first line, the rest indented
+# under it. warn_note for a caution, info_note for something to know.
+_tb_note() {
+  local glyph="$1" tone="$2" l
+  shift 2
+  _tb_live_hold
+  echo -e "  ${tone}${glyph}${RESET} $1"
+  shift
+  for l in "$@"; do echo -e "    $l"; done
+  _tb_live_resume
+}
+warn_note()      { _tb_note "⚠" "$TB_WARN" "$@"; }
+info_note()      { _tb_note "·" "$DIM" "$@"; }
+# tb_machine_lines CMD [ARG...] -- run CMD, whose lines a machine reads (e2e, CI) and a
+# person does not need: on stdout when nobody watches it, into the install log only
+# when a person does (_TB_STDOUT_TTY).
+tb_machine_lines() {
+  if [[ -n "${_TB_STDOUT_TTY:-}" ]]; then
+    "$@" >>"${LOG_FILE:-/dev/null}" 2>&1
+  else
+    "$@"
+  fi
+}
 # error MESSAGE — print and exit 1.
 #
 # It records itself first, and that is not decoration. `exit` fires NO ERR trap,
@@ -364,13 +391,138 @@ error() {
   if declare -F _record_err >/dev/null 2>&1; then
     _record_err "${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}" "error: $*" 1
   fi
+  tb_live_stop
   echo -e "  ${TB_ERR}✖ $*${RESET}" >&2
   exit 1
 }
 step()           { echo -e "\n${TB_HEADING}Step $1/$2${RESET}  ${BOLD}$3${RESET}"; }
 log()            { [[ -n "${LOG_FILE:-}" ]] && echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE" 2>/dev/null; return 0; }
 prompt_header()  { echo -e "\n  ${BOLD}${WHITE}$*${RESET}"; }
-hint()           { echo -e "  ${DIM}$*${RESET}"; }
+hint()           { _tb_live_hold; echo -e "  ${DIM}$*${RESET}"; _tb_live_resume; }
+
+# The rule above and below the banner and the final summary.
+tb_rule()        { echo -e "  ${DIM}─────────────────────────────────────────────${RESET}"; }
+
+# ── The live line ────────────────────────────────────────────────────────────
+#  The one line that says what a wait is for. Animating (_tb_animate), a ticker
+#  redraws it in place with a spinner and the time spent; plain prints no frame of
+#  it, so the screen ends the same either way. tb_live_done TEXT ends it with
+#  "  ✔ TEXT"; tb_live_done alone leaves a tb_live line as "  · MSG" (its wait had no
+#  result line) and a tb_live_quiet one gone. While it runs, info/success/warn/hint
+#  print below its "  · MSG" and above the ticker, and spin() waits inside it without
+#  a line of its own. tb_live_next MSG goes on under a new name, the old one gone;
+#  tb_live_stop ends it with no line (an error, the exit trap).
+#  The live line belongs to the process that started it (_TB_LIVE_LEVEL, its
+#  BASH_SUBSHELL, which bash 3.2 has): a subshell that inherits it, a $(…) above all,
+#  leaves its ticker and the screen alone, and its lines go where its output goes.
+_TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_PID=""; _TB_LIVE_T0=0
+_TB_LIVE_SHOWN=""; _TB_LIVE_LEVEL=0
+tb_live()       { _tb_live_begin "$1" ""; }
+tb_live_quiet() { _tb_live_begin "$1" 1; }
+_tb_live_begin() {
+  tb_live_stop
+  _TB_LIVE_MSG="$1"; _TB_LIVE_QUIET="$2"; _TB_LIVE_DETAIL=""; _TB_LIVE_T0=$SECONDS; _TB_LIVE_SHOWN=""
+  _TB_LIVE_LEVEL="${BASH_SUBSHELL:-0}"
+  if _tb_animate; then
+    tput civis 2>/dev/null || true
+    _tb_live_tick
+  fi
+  return 0
+}
+# _tb_live_here -- this process started the live line it sees.
+_tb_live_here() { [[ "${BASH_SUBSHELL:-0}" == "${_TB_LIVE_LEVEL:-0}" ]]; }
+# tb_live_detail TEXT -- a count or the like after the message, animating only.
+tb_live_detail() {
+  [[ -n "$_TB_LIVE_MSG" && "$1" != "$_TB_LIVE_DETAIL" ]] || return 0
+  _TB_LIVE_DETAIL="$1"
+  if [[ -n "$_TB_LIVE_PID" ]] && _tb_live_here; then _tb_live_kill; _tb_live_tick; fi
+  return 0
+}
+tb_live_done() {
+  local msg="$_TB_LIVE_MSG" quiet="$_TB_LIVE_QUIET" shown="$_TB_LIVE_SHOWN"
+  if [[ -n "$msg" ]]; then
+    if _tb_live_here; then
+      if _tb_animate; then
+        _tb_live_kill
+        printf '\r\033[K'
+        tput cnorm 2>/dev/null || true
+      fi
+      [[ -n "${1:-}" || -n "$quiet" || -n "$shown" ]] || printf '  · %s\n' "$msg"
+    fi
+    _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""
+  fi
+  [[ -z "${1:-}" ]] || success "$1"
+  return 0
+}
+# tb_live_next MSG -- the wait goes on as MSG, when a live line runs: the old message
+# leaves no line, as its result is the next one's. Nothing when none runs (a caller
+# with no line of its own).
+tb_live_next() {
+  [[ -n "${_TB_LIVE_MSG:-}" ]] || return 0
+  tb_live "$1"
+}
+tb_live_stop() {
+  [[ -n "${_TB_LIVE_MSG:-}" ]] || return 0
+  if _tb_live_here && _tb_animate; then
+    _tb_live_kill
+    printf '\r\033[K'; tput cnorm 2>/dev/null || true
+  fi
+  _TB_LIVE_MSG=""; _TB_LIVE_QUIET=""; _TB_LIVE_DETAIL=""; _TB_LIVE_SHOWN=""; _TB_LIVE_PID=""
+  return 0
+}
+# _tb_elapsed SECONDS -- "12s", "1m 05s".
+_tb_elapsed() {
+  local s="${1:-0}"
+  [[ "$s" =~ ^[0-9]+$ ]] || s=0
+  if (( s < 60 )); then printf '%ss' "$s"; else printf '%sm %02ds' "$(( s / 60 ))" "$(( s % 60 ))"; fi
+}
+# The ticker: a background process that redraws the line until it is killed, or
+# until the process it belongs to has gone: the installer, or a subshell that runs a
+# live line of its own (a pipeline's reader, _example_lines). bash 3.2 has no
+# BASHPID; the $(…) child execs sh, so sh's parent is this process. Its own errors
+# are nobody's: no ERR trap, no errexit, and no stderr. _tb_live_kill stops it.
+_tb_live_tick() {
+  local msg="$_TB_LIVE_MSG" detail="$_TB_LIVE_DETAIL" t0="$_TB_LIVE_T0" parent=$$
+  if (( ${BASH_SUBSHELL:-0} > 0 )); then parent="$(exec sh -c 'echo "$PPID"')"; fi
+  (
+    trap - ERR; set +e
+    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); i=0
+    while kill -0 "$parent" 2>/dev/null; do
+      printf "\r\033[K  ${CYAN}%s${RESET} %s${detail:+  %s}  ${DIM}%s${RESET}" "${frames[i]}" "$msg" ${detail:+"$detail"} "$(_tb_elapsed $(( SECONDS - t0 )))"
+      i=$(( (i + 1) % 10 ))
+      sleep 0.12
+    done
+  ) 2>/dev/null &
+  _TB_LIVE_PID=$!
+}
+# SIGKILL, never TERM: until the ticker has reset the traps it inherited, a TERM runs
+# the installer's TERM and EXIT traps inside it (install_cleanup, mid-install), or is
+# lost and leaves the wait below hung (bash 5.2). No trap can catch a KILL.
+_tb_live_kill() {
+  [[ -n "${_TB_LIVE_PID:-}" ]] || return 0
+  kill -KILL "$_TB_LIVE_PID" 2>/dev/null || true
+  wait "$_TB_LIVE_PID" 2>/dev/null || true
+  _TB_LIVE_PID=""
+}
+# Around a line printed while the live line runs: off, its "  · MSG" kept above the
+# first such line, then on again below it. Only where the line was started; plain,
+# there is no ticker to stop, and the "  · MSG" goes above the line all the same.
+_tb_live_hold() {
+  [[ -n "${_TB_LIVE_MSG:-}" ]] && _tb_live_here || return 0
+  if [[ -n "${_TB_LIVE_PID:-}" ]]; then
+    _tb_live_kill
+    printf '\r\033[K'
+  fi
+  if [[ -z "$_TB_LIVE_QUIET" && -z "$_TB_LIVE_SHOWN" ]]; then
+    printf '  · %s\n' "$_TB_LIVE_MSG"
+    _TB_LIVE_SHOWN=1
+  fi
+}
+_tb_live_resume() {
+  [[ -n "${_TB_LIVE_MSG:-}" && -z "${_TB_LIVE_PID:-}" ]] && _tb_live_here || return 0
+  _tb_animate || return 0
+  _tb_live_tick
+}
 
 # The "release the secure environment that is already here" remedy, printed from ONE
 # place (backend#2077), for the sites that mean a FULL removal (switch account,
@@ -405,11 +557,13 @@ _release_client_hint() {
   fi
 }
 
-# step_header LETTER TITLE — bold running header for one of the six install steps
-# (a–f) in the first-run run-through, e.g. `step_header a "Checking your machine"`
-# → "  a) Checking your machine". Prints the header + a single trailing blank; the
-# blank-line gap BETWEEN steps comes from each step body ending with a blank line
-# (main() adds it), matching the run-through's spacing.
+# step_header LETTER [TOTAL] TITLE — bold running header for one of the install's
+# steps (a–f) in the first-run run-through, numbered by its letter out of TOTAL
+# (default TB_INSTALL_STEPS), e.g. `step_header a "Checking your machine"` →
+# "  [1/6] Checking your machine". A TOTAL of 1 prints the title alone (a flow of one
+# step, prepare-host). Prints the header + a single trailing blank; the blank-line
+# gap BETWEEN steps comes from each step body ending with a blank line (main() adds
+# it), matching the run-through's spacing.
 #
 # It is also where the install's phase clock turns over (backend#1907). Hooking
 # THIS rather than adding a telemetry_phase_begin call to each of the six steps
@@ -419,11 +573,21 @@ _release_client_hint() {
 # drift. Guarded because telemetry.sh may be absent under an older bootstrap
 # whose FILES list did not fetch it, and the `|| true` because printing a step
 # header must never be able to end an install.
+# The install's steps: install-k8s.sh's main() has one step_header for each
+# (common.bats holds the two to agreeing).
+TB_INSTALL_STEPS=6
 step_header()    {
+  local letter="$1" total="$TB_INSTALL_STEPS" n
+  if [[ $# -ge 3 ]]; then total="$2"; shift; fi
   if declare -F telemetry_phase_begin >/dev/null 2>&1; then
-    telemetry_phase_begin "$1" || true
+    telemetry_phase_begin "$letter" || true
   fi
-  echo -e "  ${TB_HEADING}$1) $2${RESET}"; echo "";
+  n=$(( $(printf '%d' "'$letter") - 96 ))
+  if [[ "$total" == 1 ]]; then
+    echo -e "  ${TB_HEADING}$2${RESET}"; echo ""
+  else
+    echo -e "  ${TB_HEADING}[${n}/${total}] $2${RESET}"; echo ""
+  fi
 }
 
 # ── Utility ──────────────────────────────────────────────────────────────────
@@ -898,10 +1062,15 @@ _tb_progress_start() {
     printf '  · %s\n' "$1"
   fi
 }
-# _tb_progress_frame GLYPH MSG — draw one frame in place; nothing when plain.
+# _tb_progress_frame GLYPH MSG [SECONDS] — draw one frame in place, with the time
+# spent when given; nothing when plain.
 _tb_progress_frame() {
   _tb_animate || return 0
-  printf "\r  ${CYAN}%s${RESET} %s" "$1" "$2"
+  if [[ -n "${3:-}" ]]; then
+    printf "\r\033[K  ${CYAN}%s${RESET} %s  ${DIM}%s${RESET}" "$1" "$2" "$(_tb_elapsed "$3")"
+  else
+    printf "\r  ${CYAN}%s${RESET} %s" "$1" "$2"
+  fi
 }
 # _tb_progress_clear — wipe the line in place (more output follows); nothing when plain.
 _tb_progress_clear() {
@@ -1008,14 +1177,22 @@ _tb_spin_reap() {
 #  backstop for commands that can wedge indefinitely (#426). The optional
 #  fourth is the TERM-to-KILL grace in whole seconds (_tb_spin_reap below);
 #  empty keeps the 0.5 s every non-package-manager caller has always had.
+#  _TB_SPIN_QUIET=1 prints no static line when plain (the copy has none for this
+#  wait), and inside a live line (tb_live) spin draws nothing: the live line is it.
 spin() {
   local pid="$1" msg="$2" deadline_s="${3:-}" grace_s="${4:-}"
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   local ticks=0                           # one tick ≈ 0.12s
   local _spin_t0=$SECONDS                 # the deadline's wall clock: ticks alone stretch on a slow host (client-dev#1514)
+  local own=1
+  [[ -z "${_TB_LIVE_MSG:-}" ]] || own=""
 
-  _tb_progress_start "$msg"               # hide cursor, or the one static line
+  if [[ -n "$own" ]]; then
+    if _tb_animate || [[ -z "${_TB_SPIN_QUIET:-}" ]]; then
+      _tb_progress_start "$msg"           # hide cursor, or the one static line
+    fi
+  fi
   while kill -0 "$pid" 2>/dev/null; do
     if [[ -n "$deadline_s" ]] && (( ticks * 12 >= deadline_s * 100 || SECONDS - _spin_t0 > deadline_s )); then
       # The whole tree, not just the pid: it is often a wrapper subshell
@@ -1026,10 +1203,10 @@ spin() {
       # caller would never see the timeout (Bugbot #442 r3).
       _tb_spin_reap "$pid" "$grace_s" || true
       wait "$pid" 2>/dev/null || true
-      _tb_progress_end
+      [[ -z "$own" ]] || _tb_progress_end
       return 124
     fi
-    _tb_progress_frame "${frames[i]}" "$msg"
+    [[ -z "$own" ]] || _tb_progress_frame "${frames[i]}" "$msg" "$(( SECONDS - _spin_t0 ))"
     i=$(( (i + 1) % ${#frames[@]} ))
     ticks=$(( ticks + 1 ))
     sleep 0.12
@@ -1037,7 +1214,7 @@ spin() {
 
   wait "$pid"
   local rc=$?
-  _tb_progress_end                        # clear the spinner line, restore cursor
+  [[ -z "$own" ]] || _tb_progress_end     # clear the spinner line, restore cursor
   return $rc
 }
 
@@ -1051,9 +1228,11 @@ spin_cmd() {
   "$@" >> "$logfile" 2>&1 &
   local pid=$!
   if ! spin "$pid" "$msg"; then
+    _tb_live_hold
     echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
+    _tb_live_resume
     return 1
   fi
 }
@@ -1077,6 +1256,7 @@ spin_cmd_bounded() {
   local pid=$!
   local rc=0 _sv
   spin "$pid" "$msg" "$secs" "$grace" || rc=$?
+  (( rc == 0 )) || _tb_live_hold
   if (( rc == 124 )); then
     echo -e "  ${RED}${BOLD}✖ ${msg} — timed out after ${secs}s${RESET}" >&2
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
@@ -1084,11 +1264,13 @@ spin_cmd_bounded() {
     for _sv in ${_TB_SPIN_SURVIVORS:-}; do
       echo -e "  ${YELLOW}⚠ ${_sv#*:} (PID ${_sv%%:*}) is still running and may hold the package manager's lock — wait for it to exit (ps -p ${_sv%%:*}) before running the installer again.${RESET}" >&2
     done
+    _tb_live_resume
     return 124
   elif (( rc != 0 )); then
     echo -e "  ${RED}${BOLD}✖ ${msg}${RESET}" >&2
     echo -e "  ${DIM}Last 10 lines of log:${RESET}" >&2
     tail -10 "$logfile" >&2
+    _tb_live_resume
     return $rc
   fi
 }
@@ -1322,28 +1504,6 @@ preflight_sudo() {
   echo ""
   _tb_root_credential prime || error "Could not obtain administrator privileges (sudo authentication failed). ${2:-Re-run as a user allowed to sudo, or as root.}"
   _tb_root_credential keepalive
-}
-
-# ── Count bar — honest N-of-M progress for things pulled in discrete units ────
-#  Usage:  count_bar <current> <total> [noun]      (renders ONE frame)
-#  Draws a bar plus an "N of M <noun>" counter and NO newline, so a caller loop
-#  can overwrite it in place (with \r) and clear it at the end via _tb_progress_end.
-#  It always renders; a caller draws it only when _tb_animate says a redraw reads
-#  (client-dev#1642), so plain its _tb_progress_start line and verdict are the report.
-#  Use this — never a fabricated aggregate percentage — for multi-image pulls
-#  (e.g. the client's container images), where the only honest signal is how many
-#  of a known count have completed.
-count_bar() {
-  local cur="$1" total="$2" noun="${3:-items}" w=24 filled j bar=""
-  [[ "$cur"   =~ ^[0-9]+$ ]] || cur=0
-  [[ "$total" =~ ^[0-9]+$ ]] || total=1
-  (( total < 1 ))     && total=1
-  (( cur > total ))   && cur=$total
-  (( cur < 0 ))       && cur=0
-  filled=$(( cur * w / total ))
-  for (( j=0; j<filled; j++ )); do bar+="█"; done
-  for (( j=filled; j<w;   j++ )); do bar+="░"; done
-  printf "\r  ${CYAN}%s${RESET}  %d of %d %s" "$bar" "$cur" "$total" "$noun"
 }
 
 # ── Retry wrapper for flaky network calls ────────────────────────────────────
@@ -2041,6 +2201,8 @@ install_cleanup() {
   # each of those fires the ERR trap — which under last-wins would overwrite the
   # fatal command with a cleanup detail before the report below ever reads it.
   trap - ERR
+  # A live line still drawing would run over the report below.
+  tb_live_stop || true
   # A 0 nobody declared is an abort bash 3.2 lost the status of (tb_exit_rc), so
   # everything below — the footer and the telemetry outcome — sees a failure.
   if [[ $exit_code -eq 0 && "${_tb_done:-0}" != 1 ]]; then
@@ -2200,9 +2362,10 @@ tb_substrate_token() {
 }
 
 # Printed by main() before anything that can refuse; setup_log_file copies it
-# into the install log once that exists.
+# into the install log once that exists. A person at a terminal does not read it, so
+# there it goes to the log only; a pipe, a file or CI gets it on stdout as before.
 print_substrate_token() {
-  tb_substrate_token
+  [[ -n "${_TB_STDOUT_TTY:-}" ]] || tb_substrate_token
   TB_SUBSTRATE_TOKEN_PRINTED=1
   if [[ -n "${TB_SUBSTRATE_MOVED:-}" ]]; then info "$TB_SUBSTRATE_MOVED"; fi
 }
@@ -3085,9 +3248,9 @@ _tb_record_root_run() {
 }
 
 # ── Banner ───────────────────────────────────────────────────────────────────
-#  The first-run title: "Setting up tracebloc on your machine · <version>".
-#  In the curl|bash path the bootstrap (install.sh) already drew this above its
-#  "1. Downloading" section and exported TRACEBLOC_BANNER_SHOWN, so we don't draw
+#  The first-run title: "tracebloc · <version>", then "Setting up tracebloc on your
+#  machine". In the curl|bash path the bootstrap (install.sh) already drew this above
+#  its "Downloading" section and exported TRACEBLOC_BANNER_SHOWN, so we don't draw
 #  a second one; on the direct ./install-k8s.sh path we draw it here.
 print_banner() {
   if [[ -n "${TRACEBLOC_BANNER_SHOWN:-}" ]]; then
@@ -3098,32 +3261,18 @@ print_banner() {
   echo ""
   echo ""
   if [[ -n "${TB_VERSION:-}" ]]; then
-    echo -e "  Setting up ${BOLD}${CYAN}tracebloc${RESET} on your machine${DIM} · ${TB_VERSION}${RESET}"
+    echo -e "  ${BOLD}${CYAN}tracebloc${RESET}${DIM} · ${TB_VERSION}${RESET}"
   else
-    echo -e "  Setting up ${BOLD}${CYAN}tracebloc${RESET} on your machine"
+    echo -e "  ${BOLD}${CYAN}tracebloc${RESET}"
   fi
   echo ""
-  echo -e "  ${DIM}────────────────────────────────────────${RESET}"
+  echo -e "  Setting up tracebloc on your machine"
+  echo ""
+  tb_rule
+  echo ""
   echo ""
   log "OS=$OS  Arch=$ARCH  Cluster='$CLUSTER_NAME'"
   log "Host data dir: $HOST_DATA_DIR → /tracebloc (inside k3s nodes)"
-}
-
-# ── Step roadmap — the "2. Installing" plan, printed once before install begins ─
-#  Section 1 ("1. Downloading") is the bootstrap's download+verify; this is the
-#  a–f plan for everything install-k8s.sh does. The running steps use the gerund
-#  form ("Checking your machine", …) via step_header.
-print_roadmap() {
-  echo -e "  ${BOLD}2. Installing${RESET}"
-  echo ""
-  echo -e "  ${DIM}a) Check your machine${RESET}"
-  echo -e "  ${DIM}b) Install what tracebloc needs${RESET}"
-  echo -e "  ${DIM}c) Create your secure environment${RESET}"
-  echo -e "  ${DIM}d) Register this machine${RESET}"
-  echo -e "  ${DIM}e) Install tracebloc${RESET}"
-  echo -e "  ${DIM}f) Connect to the tracebloc network${RESET}"
-  echo ""
-  echo ""
 }
 
 # ── Help ─────────────────────────────────────────────────────────────────────

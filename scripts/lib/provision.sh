@@ -79,12 +79,29 @@ _host_machine_name() {
   _trim_label "${raw%%.*}"
 }
 
+# _name_slug NAME -- NAME as `client create` makes a namespace of it (the CLI's
+# slug.Slugify, RFC-0001 Appendix B), for ASCII: lowercase, every run of other
+# characters one "-", none at either end, 63 at most. A name with letters outside
+# ASCII loses them here; the CLI transliterates them.
+_name_slug() {
+  local s
+  s="$(printf '%s' "${1:-}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9' '-' | LC_ALL=C tr -s '-')"
+  s="${s#-}"; s="${s%-}"
+  s="${s:0:63}"; s="${s%-}"
+  printf '%s' "$s"
+}
+
+# _client_name_default -- the name Enter gives the secure environment at the name
+# prompt: this host's name (_host_machine_name) as its namespace will read.
+_client_name_default() { _name_slug "$(_host_machine_name)"; }
+
 # _machine_labels REUSE_NS PLAN_ACTION — the machine name and provider `client
 # create` sets, into _TB_MACHINE_NAME / _TB_CLIENT_PROVIDER: TRACEBLOC_MACHINE_NAME /
-# TRACEBLOC_CLIENT_PROVIDER, else asked on a terminal, else the host's name and no
-# provider. Only a run that mints a client asks or defaults (PLAN_ACTION, else
-# `client create --plan`): a reused client keeps what `tracebloc machine set` stored,
-# and gets only what the caller set. The CLI sends a value only when it is given.
+# TRACEBLOC_CLIENT_PROVIDER, else the host's name and no provider, never asked
+# (`tracebloc machine set` changes them later). Only a run that mints a client defaults
+# (PLAN_ACTION, else `client create --plan`): a reused client keeps what `tracebloc
+# machine set` stored, and gets only what the caller set. The CLI sends a value only
+# when it is given.
 _machine_labels() {
   local reuse="$1" action="$2" host
   _TB_MACHINE_NAME="$(_trim_label "${TRACEBLOC_MACHINE_NAME:-}")"
@@ -97,21 +114,6 @@ _machine_labels() {
     return 0
   fi
   host="$(_host_machine_name)"
-  if _prompt_tty; then
-    # Plain `read`, like the client name's: see that prompt for why. EOF or an empty
-    # line takes the default; the name is never required.
-    printf '\n  Name this machine and its provider (change them later with: tracebloc machine set)\n' >/dev/tty 2>/dev/null || true
-    if [[ -z "$_TB_MACHINE_NAME" ]]; then
-      printf '  Machine name%s: ' "${host:+ [${host}]}" >/dev/tty 2>/dev/null || true
-      IFS= read -r _TB_MACHINE_NAME <"$TRACEBLOC_TTY" || true
-      _TB_MACHINE_NAME="$(_trim_label "$_TB_MACHINE_NAME")"
-    fi
-    if [[ -z "$_TB_CLIENT_PROVIDER" ]]; then
-      printf '  Provider, e.g. Azure or your lab (Enter to skip): ' >/dev/tty 2>/dev/null || true
-      IFS= read -r _TB_CLIENT_PROVIDER <"$TRACEBLOC_TTY" || true
-      _TB_CLIENT_PROVIDER="$(_trim_label "$_TB_CLIENT_PROVIDER")"
-    fi
-  fi
   [[ -n "$_TB_MACHINE_NAME" ]] || _TB_MACHINE_NAME="$host"
   log "Machine name: ${_TB_MACHINE_NAME:-none}; provider: ${_TB_CLIENT_PROVIDER:-none}"
   return 0
@@ -381,8 +383,8 @@ _provision_prompt_preset_password() {
 }
 
 provision_client() {
-  # No step header here — main() prints "d) Registering this machine". The
-  # tracebloc CLI was installed in step b (Install what tracebloc needs); this
+  # No step header here — main() prints "d) Registering your machine". The
+  # tracebloc CLI was installed in step b (Install dependencies); this
   # step signs in and mints the machine credential using it.
 
   # The Windows installer's client run (tracebloc's WSL distro): main() read the
@@ -426,13 +428,10 @@ provision_client() {
   fi
 
   # Sign in (device flow). `tracebloc login` PRINTS a URL + one-time code and
-  # waits for approval — it does NOT auto-open a browser, so the copy says "open
-  # the link" (print-only). The Open/Enter/code lines + the wait are the CLI's own
-  # output; unattended installs use the dual-mode credential path above.
-  echo ""
-  echo -e "  Sign in to approve this machine — open the link in your browser"
-  echo -e "  (on this or any device) and enter the code:"
-  echo ""
+  # waits for approval — it does NOT auto-open a browser. The Open/Enter code lines
+  # + the wait are the CLI's own output; unattended installs use the dual-mode
+  # credential path above.
+  echo -e "  Sign in to connect this machine to tracebloc."
   _device_sign_in
   # shellcheck disable=SC2034  # consumed cross-file by install-cli.sh (setup_example_use_case)
   TB_CLI_SIGNED_IN=1
@@ -565,17 +564,21 @@ provision_client() {
   # source ("env" = pinned via TRACEBLOC_CLIENT_LOCATION, "auto" = timezone-derived).
   local client_location_source="auto"
   if [[ -z "$client_name" ]] && _prompt_tty; then
-    # Read the name from the terminal, RETRYING on an empty line instead of
-    # accepting it. A stray newline queued in the tty during the ~minute
-    # browser-approval wait above (type-ahead) would otherwise be read as an
-    # empty name and abort the install at the "name is required" error below
-    # (customer-reported 2026-07-09). A FAILED read (rc!=0 = EOF / no live input,
-    # e.g. a non-PTY ssh or IDE terminal) can't be fixed by re-prompting, so stop
-    # and let that actionable error fire. The prompt WRITE is guarded (|| true) so
-    # a test without a real /dev/tty doesn't abort; reads use TRACEBLOC_TTY.
-    local _name_try _name_read_ok
+    # Read the name from the terminal, the `?` prompt `tracebloc delete` asks with:
+    # Enter takes the default in brackets (_client_name_default, this host's name).
+    # With no default, an empty line is asked again instead of accepted: a stray
+    # newline queued in the tty during the ~minute browser-approval wait above
+    # (type-ahead) would otherwise be read as an empty name and abort the install
+    # at the "name is required" error below (customer-reported 2026-07-09). A FAILED
+    # read (rc!=0 = EOF / no live input, e.g. a non-PTY ssh or IDE terminal) can't
+    # be fixed by re-prompting and takes no default, so stop and let that actionable
+    # error fire. The prompt WRITE is guarded (|| true) so a test without a real
+    # /dev/tty doesn't abort; reads use TRACEBLOC_TTY.
+    local _name_try _name_read_ok _name_default _name_ask="  ? Name your secure environment "
+    _name_default="$(_client_name_default)"
+    [[ -z "$_name_default" ]] || _name_ask="${_name_ask}[${_name_default}] "
     for _name_try in 1 2 3; do
-      printf '\n  Name your secure environment (shown on your tracebloc dashboard): ' >/dev/tty 2>/dev/null || true
+      printf '\n%s' "$_name_ask" >/dev/tty 2>/dev/null || true
       _name_read_ok=1; IFS= read -r client_name <"$TRACEBLOC_TTY" || _name_read_ok=0
       # Plain `read` (NOT `read -e`): setup_log_file has already redirected this
       # process's stdout+stderr through `exec > >(tee …) 2>&1`, and readline
@@ -590,6 +593,7 @@ provision_client() {
       client_name="${client_name#"${client_name%%[![:space:]]*}"}"; client_name="${client_name%"${client_name##*[![:space:]]}"}"
       [[ -n "$client_name" ]] && break       # captured a name (incl. a no-newline partial)
       [[ "$_name_read_ok" == 0 ]] && break    # EOF / no interactive input — retrying won't help
+      if [[ -n "$_name_default" ]]; then client_name="$_name_default"; break; fi   # Enter: the default
     done
   fi
   # Trim surrounding whitespace from the (possibly typed) values FIRST, so a
@@ -838,6 +842,7 @@ _provision_take_credential() {
   tb_export_namespace
   # The registered identity is the minted slug (= TB_NAMESPACE = the dashboard
   # name), e.g. "lukas-01" — not the raw typed name (which may be de-duplicated).
-  [[ "$_reconnected" == 1 ]] || success "Registered as \"${TB_NAMESPACE}\""
+  # e2e reads this line (tb_machine_lines); the summary's Environment row says it to a person.
+  [[ "$_reconnected" == 1 ]] || tb_machine_lines success "Registered as \"${TB_NAMESPACE}\""
   log "Provisioned — credential handed to the install (not shown)."
 }

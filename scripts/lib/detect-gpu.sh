@@ -478,15 +478,13 @@ detect_gpu() {
     if [[ "$ARCH" == "arm64" ]]; then
       GPU_VENDOR="apple_silicon"
     fi
-    echo ""
+    # No line on the screen: the summary's "Training" row names what this Mac trains on.
     # Apple silicon on the macOS node gets the Apple-GPU runner in step e
-    # (_mac_ct_runner_host, the half of _mac_ct_runner_on known now); the runner's own
-    # GPU check, macOS currency and memory decide each job, so the line names them.
+    # (_mac_ct_runner_host, the half of _mac_ct_runner_on known now).
     if [[ "${GPU_VENDOR:-}" == apple_silicon ]] && declare -F _mac_ct_runner_host >/dev/null 2>&1 && _mac_ct_runner_host; then
-      info "GPU training: tracebloc sets up training on this Mac's GPU in step e. Training uses the GPU while macOS has its latest update and there is memory for it; otherwise it uses the CPU."
+      log "GPU: step e sets up training on this Mac's GPU. Training uses the GPU while macOS has its latest update and there is memory for it; otherwise it uses the CPU."
     else
-      warn "NVIDIA GPU training isn't supported on macOS, and training on this Mac's GPU needs Apple silicon on a machine that runs tracebloc in Apple's container runtime — this machine will run in CPU mode."
-      hint "For GPU-accelerated training, deploy on a Linux machine with NVIDIA GPUs."
+      log "GPU: this Mac trains on the CPU: training on this Mac's GPU needs Apple silicon on a machine that runs tracebloc in Apple's container runtime."
     fi
     # The Mac's GPU (Apple, AMD or Intel) is not NVIDIA: say so to the platform, by
     # name. Bounded: system_profiler is slow on a busy Mac, and an unreadable answer

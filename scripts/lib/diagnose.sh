@@ -70,14 +70,16 @@ run_diagnose() {
   # RFC 0001 host audit — read-only capability/privilege probe + install tier.
   # --diagnose installs nothing, so showing the detected tier here is honest and
   # useful for support. Guarded: a stale bootstrap may not have fetched probe.sh.
-  # Sets PROBE_*/INSTALL_TIER, which the 00-host.txt section below records.
+  # Sets PROBE_*/INSTALL_TIER, which the 00-host.txt section below records. The panel
+  # is shown here, where host_audit would put it in the log on a terminal.
   # The substrate resolves first: the tier classifier reads it (a Mac is the macOS node
   # only once it resolves k3s), and --diagnose runs before install-k8s.sh's own resolve.
   if declare -F tb_substrate_resolve >/dev/null 2>&1; then
     tb_substrate_resolve
   fi
-  if declare -F host_audit >/dev/null 2>&1; then
-    host_audit
+  if declare -F render_host_audit >/dev/null 2>&1; then
+    run_host_probes
+    render_host_audit
   fi
 
   # ── host / versions ──

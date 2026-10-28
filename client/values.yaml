@@ -2855,13 +2855,16 @@ perIngestionTables:
 
 # -- PER-ENVIRONMENT ROLLOUT for the gate above (backend#1834).
 #
-# On for dev and stg. A run on a dev secure environment showed the whole D16 path: the backend
+# On for dev. A run on a dev secure environment showed the whole D16 path: the backend
 # row carries physical_table, training reads the ds_<hex> table, and `tb data
 # delete` drops the table, the salt and the journal (backend#1834).
 #
-# Off for prod: `tb data list` still names a dataset by its table, so under the
-# flag a user's dataset shows only as its ds_<hex> handle.
-# TODO(tracebloc/backend#7206): turn prod on once `tb data list` names ds_ tables.
+# Off for stg and prod: `tb data list` still names a dataset by its table, so
+# under the flag a user's dataset shows only as its ds_<hex> handle. stg is off
+# too because its journey checks what users see (data-list-parity was red on
+# every staging hop while stg was on), and that journey gates every promotion.
+# Prove the CLI fix on dev first.
+# TODO(tracebloc/backend#7206): turn stg, then prod, on once `tb data list` names ds_ tables.
 #
 # An ingestor older than data-ingestors v0.8.16 reports the dataset's --name
 # instead of its ds_ handle and its delete misses the table (backend#2895). A
@@ -2874,7 +2877,7 @@ perIngestionTables:
 # auto-upgrade CronJob uses --reset-then-reuse-values, which picks the map up.
 perIngestionTablesByEnv:
   dev: true
-  stg: true
+  stg: false
   prod: false
 
 # ============================================================

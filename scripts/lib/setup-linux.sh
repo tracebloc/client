@@ -413,7 +413,6 @@ install_helm() {
   # removes our TRACEBLOC_TOOLS_DIR copy only if IT is the binary that failed (-ef guard),
   # never a pre-existing / pkg-managed helm elsewhere on PATH (#411 review).
   assert_tool_runs --rm "$TRACEBLOC_TOOLS_DIR/helm" helm version
-  success "System tools"
 }
 
 # ── GPU setup dispatch ───────────────────────────────────────────────────────
@@ -490,7 +489,7 @@ _persist_tools_on_path() {
     printf '\n# Added by tracebloc installer (RFC 0001 #1175): user-local tools\n'
     printf 'export PATH="%s/.local/bin:$PATH"\n' "$HOME"
   } >> "$rc" 2>/dev/null || return 0
-  hint "Added ${HOME}/.local/bin to your PATH in ${rc} — open a new terminal (or run 'source ${rc}') so kubectl and helm resolve."
+  log "Added ${HOME}/.local/bin to your PATH in ${rc}: a new terminal (or 'source ${rc}') resolves kubectl and helm."
 }
 
 # ── Main Linux installer ────────────────────────────────────────────────────

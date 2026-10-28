@@ -688,6 +688,52 @@ _training_provenance() {
   printf '%s' "$_TB_TRAINING_PROVENANCE"
 }
 
+# _envelope_display SIZE -- a training envelope ("cpu=12,memory=10854Mi") as a person
+# reads it: "12 CPU cores · 10.6 GB memory", GB in tenths to the nearest. Nothing when
+# SIZE has no readable cpu and memory pair.
+_envelope_display() {
+  local cpu_m mem_b tenths cores gb unit="CPU cores"
+  cpu_m="$(_cpu_to_milli "$(_envelope_dimension "${1:-}" cpu)")"
+  mem_b="$(_mem_to_bytes "$(_envelope_dimension "${1:-}" memory)")"
+  [[ "$cpu_m" =~ ^[0-9]+$ && "$mem_b" =~ ^[0-9]+$ ]] || return 0
+  cores="$(( cpu_m / 1000 ))"
+  if (( cpu_m % 1000 != 0 )); then cores="${cores}.$(( cpu_m % 1000 / 100 ))"; fi
+  if [[ "$cores" == 1 ]]; then unit="CPU core"; fi
+  tenths=$(( (mem_b / 1048576 * 10 + 512) / 1024 ))
+  gb="$(( tenths / 10 ))"
+  if (( tenths % 10 != 0 )); then gb="${gb}.$(( tenths % 10 ))"; fi
+  printf '%s %s · %s GB memory' "$cores" "$unit" "$gb"
+}
+
+# The training envelope this run wrote, as _envelope_display reads it, for the summary:
+# empty until step e writes one, and when it wrote none a run can schedule.
+_TB_COMPUTE_SHOWN=""
+
+# _compute_preview -- at the end of step c, the envelope step e is going to write, from
+# the same resolution and fit, in a subshell so nothing it sets reaches step e. Nothing
+# when the fit refuses it, cannot read the node, or finds no size a run can schedule.
+_compute_preview() {
+  (
+    _resolve_training_size
+    _fit_training_envelope
+    case "${_TB_FIT_VERDICT:-}" in refused|unverified) exit 0 ;; esac
+    (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 0 )) || exit 0
+    _envelope_display "$_TB_TRAINING_SIZE"
+  ) 2>>"${LOG_FILE:-/dev/null}" || true
+}
+
+# print_environment_created -- step c's last lines: the secure environment is there,
+# and training has a size that fits it (_compute_preview). The size itself is the
+# summary's Compute row.
+print_environment_created() {
+  local compute
+  compute="$(_compute_preview)"
+  success "Secure environment created"
+  if [[ -n "$compute" ]]; then
+    success "Compute resources configured"
+  fi
+}
+
 # ── is the envelope actually schedulable here? (backend#2870) ────────────────
 #
 # Everything above sizes the envelope against ALLOCATABLE and stops. Nothing then
@@ -1827,9 +1873,13 @@ _dashboard_link_interactive() {
   { : <"$tty" >>"$tty"; } 2>/dev/null
 }
 
-# open_dashboard_link -- the whole step, after the summary of a connected
-# install. Silent unless it opened or has a link to print.
+# open_dashboard_link -- before the summary of a connected install: opens the
+# dashboard, and says so to the summary (_TB_DASHBOARD_OPENED, its first next step),
+# or keeps a link with no browser to open it in for print_dashboard_link. Prints
+# nothing itself.
+_TB_DASHBOARD_OPENED=""; _TB_DASHBOARD_LINK=""
 open_dashboard_link() {
+  _TB_DASHBOARD_OPENED=""; _TB_DASHBOARD_LINK=""
   [[ "${TRACEBLOC_CLIENT_STATE:-}" == "connected" ]] || return 0
   _dashboard_link_interactive || return 0
   local cred id pw url
@@ -1843,15 +1893,24 @@ open_dashboard_link() {
   fi
   if _dashboard_link_open "$url"; then
     log "Dashboard link: opened in the browser."
-    info "Opened your dashboard in your browser. It shows this machine as the one you're on."
+    _TB_DASHBOARD_OPENED=1
     return 0
   fi
   log "Dashboard link: no browser to open it in; printed to the terminal only."
+  _TB_DASHBOARD_LINK="$url"
+  return 0
+}
+
+# print_dashboard_link -- after the summary: the link open_dashboard_link had no
+# browser to open in, to the terminal only (never the log; it signs in once).
+print_dashboard_link() {
+  [[ -n "${_TB_DASHBOARD_LINK:-}" ]] || return 0
   {
     printf '\n  Open this link in a browser on this machine to see it on your dashboard\n'
     printf '  as the machine you are on. It works once, for 5 minutes:\n'
-    printf '    %s\n\n' "$url"
+    printf '    %s\n\n' "$_TB_DASHBOARD_LINK"
   } >"${TRACEBLOC_TTY:-/dev/tty}" 2>/dev/null || true
+  _TB_DASHBOARD_LINK=""
   return 0
 }
 
@@ -3228,6 +3287,18 @@ _progress_end_message() {
   printf 'stalled'
 }
 
+# _release_service_count NS [TIMEOUT] -- how many services (containers) the client's
+# pods run: the number step e's "Downloaded" and "Installed" lines give. Fails when it
+# cannot be read or is none.
+_release_service_count() {
+  local n
+  n="$(kubectl get pods -n "$1" --request-timeout="${2:-5s}" \
+    -o jsonpath='{range .items[*].spec.containers[*]}{"x"}{end}' 2>/dev/null \
+    | tr -cd 'x' | wc -c | tr -d ' ')" || n=""
+  [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || return 1
+  printf '%s' "$n"
+}
+
 _download_services_progress() {
   local ns="$1"
   if [[ -n "${TRACEBLOC_SKIP_SERVICE_PROGRESS:-}" ]]; then return 0; fi
@@ -3243,10 +3314,7 @@ _download_services_progress() {
   # Establish the total container count once the pods are scheduled (bounded).
   local total=0 tries=0
   while (( tries < 15 )); do
-    total="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
-      -o jsonpath='{range .items[*].spec.containers[*]}{"x"}{end}' 2>/dev/null \
-      | tr -cd 'x' | wc -c | tr -d ' ')" || total=0
-    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    total="$(_release_service_count "$ns" "$kube_timeout")" || total=0
     if (( total > 0 )); then break; fi
     tries=$(( tries + 1 )); sleep 2
   done
@@ -3254,7 +3322,6 @@ _download_services_progress() {
 
   local deadline pulled=0 max_pulled=0
   deadline=$(( $(date +%s) + ${TB_PULL_TIMEOUT:-300} ))
-  _tb_progress_start "Downloading ${total} services…"
   while :; do
     pulled="$(kubectl get pods -n "$ns" --request-timeout="$kube_timeout" \
       -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' 2>/dev/null \
@@ -3262,12 +3329,11 @@ _download_services_progress() {
     [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
     if (( pulled > total )); then pulled=$total; fi
     if (( pulled > max_pulled )); then max_pulled=$pulled; fi
-    if _tb_animate; then count_bar "$pulled" "$total" "services"; fi
+    tb_live_detail "${pulled} of ${total}"
     if (( pulled >= total )); then break; fi
     if (( $(date +%s) >= deadline )); then break; fi
     sleep 2
   done
-  _tb_progress_end
 
   # Tell the truth on timeout: a permanent pull failure (x509/blocked registry/auth)
   # must NOT be sold as "downloading in the background" (#425). Classify, then print
@@ -3278,8 +3344,9 @@ _download_services_progress() {
   outcome="$(_progress_end_message "$pulled" "$total" "$max_pulled" "$fail_detail")"
   case "$outcome" in
     done)
-      success "Downloaded — ${total} services" ;;
+      tb_live_done "Downloaded · ${total} services" ;;
     failed)
+      tb_live_done
       # Soften the wording (reviewer): ImagePullBackOff can also be a transient blip /
       # registry 429 that kubelet keeps retrying, so wait_for_client_ready may still
       # reach "connected" — don't state an absolute that a later ✔ could contradict.
@@ -3287,8 +3354,10 @@ _download_services_progress() {
       printf '%s\n' "$fail_detail" | sed 's/^/      /'
       info "Likely a blocked registry, an untrusted TLS-inspection CA, or auth — see the diagnosis below." ;;
     downloading)
+      tb_live_done
       info "Services are still downloading — they'll finish starting in the background." ;;
     stalled)
+      tb_live_done
       info "Services haven't started pulling yet — see the diagnosis below if this persists." ;;
   esac
   return 0
@@ -4176,12 +4245,12 @@ install_client_helm() {
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TRACEBLOC_CLIENT_PASSWORD")
     [[ -n "$TB_CLIENT_ID" && -n "$TB_CLIENT_PASSWORD" ]] || \
       error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD must be non-empty."
-    info "Verifying credentials with tracebloc…"
+    tb_live "Verifying credentials..."
     case "$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")" in
-      valid)      success "Credentials verified." ;;
+      valid)      tb_live_done "Credentials verified" ;;
       invalid)    error "TRACEBLOC_CLIENT_ID / TRACEBLOC_CLIENT_PASSWORD was rejected by tracebloc. Check them against the credential file \`tracebloc client create\` wrote, or create a new pair ($(_credential_file_cmd)), load it ($(_credential_file_load_cmd)) and re-run." ;;
       inactive)   error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
-      unverified) warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
+      unverified) tb_live_done; warn "Couldn't reach tracebloc to verify credentials right now — continuing (the client will stay offline if they are wrong)." ;;
     esac
   else
 
@@ -4232,18 +4301,20 @@ install_client_helm() {
     TB_CLIENT_PASSWORD=$(_sanitize_credential "$TB_CLIENT_PASSWORD")
     if [[ -z "$TB_CLIENT_PASSWORD" ]]; then warn "Client password cannot be empty."; continue; fi
 
-    info "Verifying credentials with tracebloc…"
+    tb_live "Verifying credentials..."
     _cred_status=$(verify_credentials "$TB_CLIENT_ID" "$TB_CLIENT_PASSWORD")
     case "$_cred_status" in
       valid)
-        success "Credentials verified."
+        tb_live_done "Credentials verified"
         break ;;
       invalid)
+        tb_live_done
         warn "That Client ID / password was rejected by tracebloc — please re-enter."
         hint "They are in the credential file \`tracebloc client create\` wrote" ;;
       inactive)
         error "This tracebloc account is not active yet. Check your email for the activation link, then re-run." ;;
       unverified)
+        tb_live_done
         warn "Couldn't reach tracebloc to verify your credentials right now — continuing."
         hint "If they are wrong, your client will stay offline at $(_dashboard_url) after install."
         break ;;
@@ -4419,8 +4490,15 @@ install_client_helm() {
         "Refusing to write a training envelope that cannot be scheduled on this machine."
       ;;
     reduced)
-      info "Training envelope reduced to fit beside the platform on this machine:"
-      _print_fit_lines hint
+      # The size it was reduced to is the summary's Compute row. The arithmetic is e2e's
+      # (O-108): on stdout when nobody watches it, in the log when a person does.
+      if [[ -n "${_TB_STDOUT_TTY:-}" ]]; then
+        log "Training envelope reduced to fit beside the platform on this machine:"
+        _print_fit_lines log
+      else
+        info "Training envelope reduced to fit beside the platform on this machine:"
+        _print_fit_lines hint
+      fi
       ;;
     pinned-over)
       warn "The chosen training size does not fit beside the platform on this machine; training pods will stay Pending until it is lowered:"
@@ -4438,6 +4516,9 @@ install_client_helm() {
   esac
   training_size="$_TB_TRAINING_SIZE"
   training_provenance="$_TB_TRAINING_PROVENANCE"
+  if [[ "$_TB_FIT_VERDICT" != refused ]] && (( ${_TB_TRAINING_UNSCHEDULABLE:-0} == 0 )); then
+    _TB_COMPUTE_SHOWN="$(_envelope_display "$training_size")"
+  fi
   log "Training size: ${training_size} (adjust any time with 'tracebloc resources set')"
   # The warning belongs HERE, not in the resolver: the resolver's output is
   # captured with $(...) by _training_resources / _training_provenance, so a warn
@@ -4625,14 +4706,10 @@ EOF
   local chart_ref=""
   _resolve_chart_ref
 
-  echo ""
   log "Installing $TB_NAMESPACE from $chart_ref in namespace '$TB_NAMESPACE'..."
-
-  # What the user is about to see download (the "e) Installing tracebloc" body).
-  echo -e "  ${DIM}Downloading the tracebloc services — a training runner that runs models${RESET}"
-  echo -e "  ${DIM}on your data, a data manager, a live monitor, and a local database. They${RESET}"
-  echo -e "  ${DIM}run entirely on your machine; your data never leaves it.${RESET}"
-  echo ""
+  # One line from here to the images on the node: the metrics wait, the chart and the
+  # pulls (_download_services_progress ends it).
+  tb_live "Downloading tracebloc services..."
 
   # Pre-create per-release hostPath dirs so they're owned by the host user, not
   # root:root from kubelet's DirectoryOrCreate. See _ensure_release_dirs.
@@ -4766,10 +4843,29 @@ EOF
       || error "This machine's new credential is in place, but its services are still on the old one."
   fi
 
-  # Honest N-of-M count bar as the service images pull onto the node. Best-effort +
+  # Honest N-of-M count as the service images pull onto the node. Best-effort +
   # bounded + non-fatal — the real readiness gate is step f (wait_for_client_ready).
   _download_services_progress "$TB_NAMESPACE"
+  tb_live_done
 
+  tb_live "Installing services..."
+  _installed_services_line "$TB_NAMESPACE"
+  echo ""
   success "tracebloc installed"
   log "Values file: $values_file"
+}
+
+# _installed_services_line NS -- step e's "Installing services..." ends with how many
+# services the release installed, the count its "Downloaded" line gave
+# (_release_service_count). With no count it stays "· Installing services...", and
+# "✔ tracebloc installed" below says what happened. Whether they run is step f's
+# (wait_for_client_ready): nothing here says ready.
+_installed_services_line() {
+  local n
+  if n="$(_release_service_count "$1" 10s)"; then
+    tb_live_done "Installed · ${n} services"
+  else
+    log "The release in $1 has no service this run could count."
+    tb_live_done
+  fi
 }

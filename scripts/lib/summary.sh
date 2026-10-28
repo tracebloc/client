@@ -43,32 +43,36 @@ wait_for_client_ready() {
   # PowerShell installer's Get-ClientWorkloads is its guarded twin. A read that
   # cannot resolve all three is a client that is not all there, so it takes the
   # not-Ready branch below rather than waiting on names it guessed.
-  local rows="" role d jm="" remaining all_ready=true
+  # jobs-manager is the service that signs in to tracebloc, so its rollout is the
+  # connection's; the others are the services starting. One result line for both:
+  # "✔ Online" once jobs-manager is up, never a line for the services alone.
+  local rows="" role d jm="" all_ready=true rejected=false
   local deadline=$(( $(date +%s) + READY_TIMEOUT ))
 
-  echo ""
-  info "Connecting to the tracebloc network — waiting for your services to come online…"
+  tb_live "Starting your services..."
   if rows="$(_client_workloads "$ns")"; then
     while read -r role d; do
-      [[ "$role" == "jobs-manager" ]] && jm="$d"
-      remaining=$(( deadline - $(date +%s) )); (( remaining < 10 )) && remaining=10
-      # </dev/null: the loop reads its rows from stdin, and nothing in it may eat them.
-      if kubectl rollout status "deployment/${d}" -n "$ns" --timeout="${remaining}s" \
-          </dev/null >> "${LOG_FILE:-/dev/null}" 2>&1; then
-        success "${role} ready"
-      else
-        all_ready=false; break
-      fi
+      if [[ "$role" == "jobs-manager" ]]; then jm="$d"; continue; fi
+      _rollout_ready "$ns" "$d" "$deadline" || { all_ready=false; break; }
     done <<<"$rows"
+    if [[ "$all_ready" == true ]]; then
+      tb_live_next "Connecting your secure environment..."
+      if [[ -n "$jm" ]] && _rollout_ready "$ns" "$jm" "$deadline"; then
+        # A crash-looping jobs-manager is Ready between restarts: Ready alone is not "Online".
+        if _jobs_manager_rejected "$ns" "$jm"; then rejected=true; else tb_live_done "Online"; fi
+      else
+        all_ready=false
+      fi
+    fi
   else
     log "Could not list the client's workload Deployments in namespace ${ns} (release label app.kubernetes.io/instance=${ns}); treating the client as not Ready."
     all_ready=false
   fi
+  tb_live_done
 
   _log_cluster_status
   if [[ "$all_ready" == true ]]; then
-    # A crash-looping jobs-manager is Ready between restarts: Ready alone is not "connected".
-    if _jobs_manager_rejected "$ns" "$jm"; then
+    if [[ "$rejected" == true ]]; then
       TRACEBLOC_CLIENT_STATE="bad_creds"
     else
       TRACEBLOC_CLIENT_STATE="connected"
@@ -77,6 +81,16 @@ wait_for_client_ready() {
     TRACEBLOC_CLIENT_STATE="$(_diagnose_not_ready "$ns" "$jm")"
   fi
   return 0
+}
+
+# _rollout_ready NS DEPLOYMENT DEADLINE -- the Deployment rolled out before DEADLINE
+# (epoch seconds; never less than 10 s from now). Its output goes to the log.
+_rollout_ready() {
+  local remaining=$(( $3 - $(date +%s) ))
+  (( remaining >= 10 )) || remaining=10
+  # </dev/null: a caller's loop reads its rows from stdin, and nothing here may eat them.
+  kubectl rollout status "deployment/${2}" -n "$1" --timeout="${remaining}s" \
+    </dev/null >> "${LOG_FILE:-/dev/null}" 2>&1
 }
 
 # True when jobs-manager's recent logs show the backend rejected its credentials
@@ -160,6 +174,16 @@ _summary_kubeconfig_hint() {
     printf '%s' "$kc"
   fi
   return 0
+}
+
+# _summary_kubeconfig_lines -- the export line for _summary_kubeconfig_hint's file, or
+# nothing. Callers place it, so they read it into a variable first.
+_summary_kubeconfig_lines() {
+  local kc
+  kc="$(_summary_kubeconfig_hint)"
+  [[ -n "$kc" ]] || return 0
+  echo -e "  To point kubectl at tracebloc, run this in your shell (add it to your profile to keep it):"
+  echo -e "    ${TB_CMD}export KUBECONFIG=${kc}${RESET}"
 }
 
 # The installer switched kubectl's current context to this cluster (it must: the
@@ -364,10 +388,70 @@ _prepull_training_parent() {
 _prepull_summary_line() {
   _gpu_wired || return 0
   case "${TB_PREPULL_VERDICT:-}" in
-    applied) echo -e "  ${TB_LABEL}GPU images${RESET}  : downloading in the background" ;;
-    skipped) echo -e "  ${TB_LABEL}GPU images${RESET}  : not downloaded yet; your first GPU training downloads them (the install log says why)" ;;
+    applied) _summary_row "GPU images" "downloading in the background" ;;
+    skipped) _summary_row "GPU images" "not downloaded yet; your first GPU training downloads them (the install log says why)" ;;
   esac
   return 0
+}
+
+# _summary_log_dir -- the folder this run's log is in (LOG_FILE), the home folder as ~;
+# nothing when the run keeps no log file.
+_summary_log_dir() {
+  local f="${LOG_FILE:-}" d
+  [[ "$f" == /* && -f "$f" ]] || return 0
+  d="${f%/*}"; d="${d:-/}"
+  if [[ -n "${HOME:-}" && ( "$d" == "$HOME" || "$d" == "$HOME"/* ) ]]; then d="~${d#"$HOME"}"; fi
+  printf '%s' "$d"
+}
+
+# _summary_row LABEL VALUE -- one row of the connected summary, the values in a column.
+_summary_row() {
+  printf '  %b%-15s%b%s\n' "${TB_LABEL}" "$1" "${RESET}" "$2"
+}
+
+# _summary_machine_rows NAMESPACE VERSION MODE -- the summary's rows in the grammar
+# machines read (e2e's summary questions, the Windows cell), never a person's screen.
+_summary_machine_rows() {
+  local ns="$1" cver="$2" mode="$3"
+  echo -e "  ${TB_LABEL}Environment${RESET} : ${ns}"
+  echo -e "  ${TB_LABEL}Version${RESET}     : ${cver}"
+  echo -e "  ${TB_LABEL}Mode${RESET}        : ${mode}"
+}
+
+# _summary_footer LOGDISP NAMESPACE -- where the logs and the data are, and how the
+# client comes back after a restart. The connected summary hands it to the log.
+_summary_footer() {
+  local logdisp="$1" ns="$2" kdata jdata
+  # Data location depends on the storage model: hostpath names the host folder
+  # the volumes use; node-local (RFC-0003 Option C) keeps them in k3s local-path,
+  # on this host or in the macOS node's own volume.
+  if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
+    # Native k3s, hostpath (client-dev#1782): the PVs name the host directory itself.
+    # The macOS node mounts that folder at its own path, so the same line holds there.
+    kdata="$(_hostpath_root)"
+    echo "Logs ${logdisp}  ·  Data ${kdata}/${ns} (hostPath)"
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
+    # The macOS node: job data in the job-data folder on this Mac when the release
+    # keeps one (client-dev#2320), the rest inside the node, on its own volume.
+    jdata=""
+    if declare -F _mac_ct_job_data_dir >/dev/null; then jdata="$(_mac_ct_job_data_dir)"; fi
+    if [[ -n "$jdata" ]]; then
+      echo "Logs ${logdisp}  ·  Job data ${jdata}/${ns} (on this Mac, private to you)"
+    else
+      echo "Logs ${logdisp}  ·  Data in the volume of the VM that runs tracebloc on this Mac (k3s local-path)"
+    fi
+  elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
+    # Native k3s: the volumes are on this host, in local-path's storage path.
+    # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
+    # install) with nothing on stdout: say where the data is only when it told us.
+    kdata="$(_native_k3s_storage_path)" || kdata=""
+    if [[ -n "$kdata" ]]; then
+      echo "Logs ${logdisp}  ·  Data ${kdata} (k3s local-path)"
+    else
+      echo "Logs ${logdisp}  ·  Data in k3s local-path on this host"
+    fi
+  fi
+  _reboot_note
 }
 
 print_summary() {
@@ -375,7 +459,9 @@ print_summary() {
   # (_gpu_wired) — a detected-but-not-wired GPU runs CPU-only, and printing
   # "NVIDIA GPU" there is exactly the false claim client#835 removes. AMD keys on
   # detection.
-  local mode="CPU"
+  # training: the summary's Training row, the device a person reads; mode: the Mode line
+  # a machine reads (tb_machine_lines), which says when the Apple GPU takes a job.
+  local mode="CPU" training=""
   if _gpu_wired; then
     mode="NVIDIA GPU"
     # Native k3s: the runtime is wired, but the node advertised no GPU after the
@@ -387,87 +473,88 @@ print_summary() {
     # The runner's login item is loaded over the job-data folder (mac-container.sh
     # _mac_ct_runner_gpu_ready); a job trains on the GPU only once its check passes.
     mode="Apple GPU once it passes tracebloc's GPU check, CPU until then (tracebloc resources shows which)"
+    training="Apple GPU"
   fi
   local ns="${TB_NAMESPACE:-default}"
   local cver; cver="$(_chart_version "$ns")"
   # Footer log path: HOST_DATA_DIR with $HOME collapsed to ~ (e.g. ~/.tracebloc).
   local logdisp="${HOST_DATA_DIR:-$HOME/.tracebloc}"
-  local kdata jdata
+  local kc="" machine="${_TB_MACHINE_NAME:-}" logdir
   if [[ -n "${HOME:-}" && "$logdisp" == "$HOME"* ]]; then logdisp="~${logdisp#"$HOME"}"; fi
+  logdir="$(_summary_log_dir)"
+  # The machine's name as registered this run (provision.sh), else this host's.
+  if [[ -z "$machine" ]] && declare -F _host_machine_name >/dev/null 2>&1; then
+    machine="$(_host_machine_name)"
+  fi
 
   echo ""
   case "$TRACEBLOC_CLIENT_STATE" in
     connected)
-      echo -e "  ${TB_GO}✔${RESET} ${BOLD}Connected to tracebloc${RESET}"
+      tb_rule
       echo ""
-      echo -e "  ${TB_LABEL}Environment${RESET} : ${ns}"
-      echo -e "  ${TB_LABEL}Version${RESET}     : ${cver:-unknown}"
-      echo -e "  ${TB_LABEL}Mode${RESET}        : ${mode}"
+      echo -e "  ${TB_GO}✔${RESET} ${BOLD}tracebloc is ready${RESET}"
+      echo ""
+      echo -e "  Your secure environment is running and online."
+      echo ""
+      _summary_row "Environment" "$ns"
+      [[ -z "$machine" ]] || _summary_row "Machine" "$machine"
+      [[ -z "${_TB_COMPUTE_SHOWN:-}" ]] || _summary_row "Compute" "$_TB_COMPUTE_SHOWN"
+      _summary_row "Training" "${training:-$mode}"
+      _summary_row "Status" "Online"
       _prepull_summary_line
+      [[ -z "$logdir" ]] || _summary_row "Logs" "$logdir"
+      # What machines read off this screen (e2e's summary questions): see tb_machine_lines.
+      tb_machine_lines _summary_machine_rows "$ns" "${cver:-unknown}" "$mode"
       echo ""
-      echo -e "  ${TB_HEADING}Your secure environment is live${RESET} 🟢"
-      echo -e "    See it on your dashboard:  ${TB_LINK}$(_dashboard_url)${RESET}"
       echo ""
       # The first-install steps are for a first install only (tb_upgrade_run).
       if tb_upgrade_run; then
-        echo -e "  ${BOLD}Upgrade complete${RESET} — ${TB_DESC}your data and use cases are unchanged${RESET}"
+        echo -e "  ${BOLD}Upgrade complete${RESET} — ${TB_DESC}your data and use cases are unchanged.${RESET}"
       else
-        # "What's next" is a heading (cyan) — the primary call to action, not dim.
-        echo -e "  ${TB_HEADING}What's next${RESET}"
-        echo -e "    1. Ingest your data       ${TB_CMD}tracebloc data ingest${RESET}"
-        echo -e "    2. Create a use case      ${TB_LINK}$(_dashboard_url 'my-use-cases-v2?create=1')${RESET}"
-        echo -e "    3. Invite collaborators — ${TB_DESC}they train on your data; it never leaves this machine${RESET}"
+        echo -e "  ${TB_HEADING}What's next?${RESET}"
+        echo ""
+        # Opened already (open_dashboard_link, before this summary), or for the person
+        # to open: no browser here (SSH, a headless machine) or nobody at a terminal.
+        if [[ -n "${_TB_DASHBOARD_OPENED:-}" ]]; then
+          echo -e "  1. Your dashboard (opened in your browser)"
+        else
+          echo -e "  1. Open your dashboard"
+        fi
+        echo -e "     ${TB_LINK}$(_dashboard_url)${RESET}"
+        echo ""
+        echo -e "  2. Ingest your own data"
+        echo -e "     ${TB_CMD}tracebloc data ingest${RESET}"
+        echo ""
+        echo -e "  3. Create a use case"
+        echo -e "     ${TB_LINK}$(_dashboard_url 'my-use-cases-v2?create=1')${RESET}"
+        echo ""
+        echo -e "  4. Invite peers"
+        echo -e "     ${TB_DESC}Let others train models on your data${RESET}"
+        echo -e "     ${TB_DESC}without sharing your datasets.${RESET}"
       fi
       echo ""
+      echo ""
       if _cli_runnable_now; then
-        echo -e "  ${BOLD}Run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+        echo -e "  Run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
       elif [[ "${TRACEBLOC_CLI_ON_FRESH_PATH:-}" == "0" ]]; then
         # Case B: install-cli.sh RAN and set the flag to 0 — it printed the EXACT
-        # PATH fix above and a new terminal won't help. Point at that fix, not a
-        # useless "open a new terminal" (Bugbot #371). The explicit "0" test matters:
+        # PATH fix above and a new terminal won't help. The explicit "0" test matters:
         # an UNSET flag (CLI step skipped/failed → nothing printed above) must NOT
         # land here, or "see above" points at nothing.
-        echo -e "  ${BOLD}Add tracebloc to your PATH (see above), then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+        echo -e "  Add tracebloc to your PATH (see above), then run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
       else
         # Case A (flag=1: installed to ~/.local/bin, persisted — a new terminal
         # resolves it, only this shell doesn't) OR the flag is UNSET (the CLI step
-        # was skipped/failed, so no PATH-fix guidance exists): the safe, honest
-        # default is "open a new terminal" (Bugbot #371).
-        echo -e "  ${BOLD}Open a new terminal, then run  ${TB_CMD}tracebloc${RESET}${BOLD}  to get started.${RESET}"
+        # was skipped/failed): the safe, honest default is "open a new terminal".
+        echo -e "  Open a new terminal, then run ${TB_CMD}\`tracebloc\`${RESET} to manage your secure environment."
       fi
       echo ""
+      kc="$(_summary_kubeconfig_lines)"
+      if [[ -n "$kc" ]]; then printf '%s\n\n' "$kc"; fi
       _kube_context_note
-      echo -e "  ${DIM}────────────────────────────────────────${RESET}"
-      # Data location depends on the storage model: hostpath names the host folder
-      # the volumes use; node-local (RFC-0003 Option C) keeps them in k3s local-path,
-      # on this host or in the macOS node's own volume.
-      if [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "${TB_STORAGE_MODE:-node-local}" == "hostpath" ]]; then
-        # Native k3s, hostpath (client-dev#1782): the PVs name the host directory itself.
-        # The macOS node mounts that folder at its own path, so the same line holds there.
-        kdata="$(_hostpath_root)"
-        echo -e "  ${DIM}Logs ${logdisp}  ·  Data ${kdata}/${ns} (hostPath)${RESET}"
-      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" && "$OS" == "Darwin" ]]; then
-        # The macOS node: job data in the job-data folder on this Mac when the release
-        # keeps one (client-dev#2320), the rest inside the node, on its own volume.
-        jdata=""
-        if declare -F _mac_ct_job_data_dir >/dev/null; then jdata="$(_mac_ct_job_data_dir)"; fi
-        if [[ -n "$jdata" ]]; then
-          echo -e "  ${DIM}Logs ${logdisp}  ·  Job data ${jdata}/${ns} (on this Mac, private to you)${RESET}"
-        else
-          echo -e "  ${DIM}Logs ${logdisp}  ·  Data in the volume of the VM that runs tracebloc on this Mac (k3s local-path)${RESET}"
-        fi
-      elif [[ "${TRACEBLOC_SUBSTRATE_RESOLVED:-}" == "k3s" ]]; then
-        # Native k3s: the volumes are on this host, in local-path's storage path.
-        # The reader answers 2 or 3 (config.yaml unreadable; sudo expired after a long
-        # install) with nothing on stdout: say where the data is only when it told us.
-        kdata="$(_native_k3s_storage_path)" || kdata=""
-        if [[ -n "$kdata" ]]; then
-          echo -e "  ${DIM}Logs ${logdisp}  ·  Data ${kdata} (k3s local-path)${RESET}"
-        else
-          echo -e "  ${DIM}Logs ${logdisp}  ·  Data in k3s local-path on this host${RESET}"
-        fi
-      fi
-      _reboot_note
+      tb_rule
+      # Where the logs and data are, and how it comes back after a restart: the log's.
+      _summary_footer "$logdisp" "$ns" >>"${LOG_FILE:-/dev/null}" 2>&1
       ;;
     starting)
       echo -e "  ${TB_WARN}⚠${RESET}  Almost there — tracebloc is installed but still starting."
@@ -521,14 +608,11 @@ print_summary() {
       ;;
   esac
   # A native k3s user with no KUBECONFIG reads the release only through the merged
-  # file (_summary_kubeconfig_hint). Every outcome above names a kubectl command, so
-  # every outcome ends with the line.
-  local kc=""
-  kc="$(_summary_kubeconfig_hint)"
-  if [[ -n "$kc" ]]; then
-    echo ""
-    echo -e "  To point kubectl at tracebloc, run this in your shell (add it to your profile to keep it):"
-    echo -e "    ${TB_CMD}export KUBECONFIG=${kc}${RESET}"
+  # file (_summary_kubeconfig_hint). Every outcome names a kubectl command or a
+  # kube-context, so every outcome carries the line; the connected one inside its rules.
+  if [[ "$TRACEBLOC_CLIENT_STATE" != "connected" ]]; then
+    kc="$(_summary_kubeconfig_lines)"
+    if [[ -n "$kc" ]]; then printf '\n%s\n' "$kc"; fi
   fi
   echo ""
   # Every other outcome sends the user to kubectl too; the connected one says it

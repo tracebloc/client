@@ -2843,9 +2843,16 @@ function Get-ClientName {
   if (-not (Test-BootstrapCanPrompt)) {
     throw "A name for this machine is needed to register it, and nobody at this console can be asked. Set TRACEBLOC_CLIENT_NAME, then run this installer again."
   }
+  # provision.sh's `?` prompt, as `tracebloc delete` asks: Enter takes the default in
+  # brackets (Get-DefaultClientName); with none, an empty answer is asked again.
+  $default = Get-DefaultClientName
+  $ask = '  ? Name your secure environment '
+  if ($default) { $ask = "$ask[$default] " }
   for ($i = 0; $i -lt 3; $i++) {
-    $name = (ConvertTo-SanitizedInput -Value "$(Read-Host '  Name your secure environment (shown on your tracebloc dashboard)')").Trim()
+    Write-Host $ask -NoNewline
+    $name = (ConvertTo-SanitizedInput -Value "$(Read-Host)").Trim()
     if ($name) { return $name }
+    if ($default) { return $default }
   }
   throw "No name was given for this machine, so it was not registered. Run this installer again, or set TRACEBLOC_CLIENT_NAME."
 }
@@ -2853,29 +2860,28 @@ function Get-ClientName {
 # This computer's name, the machine name a new client gets when none is given.
 function Get-HostComputerName { [Environment]::MachineName }
 
+# The name Enter gives at the name prompt: this computer's name as its namespace will
+# read, the CLI's slug.Slugify (NFKD to ASCII, lowercase, every run of other characters
+# one '-', none at either end, 63 at most); provision.sh's _client_name_default.
+function Get-DefaultClientName {
+  $n = "$(Get-HostComputerName)".Normalize([Text.NormalizationForm]::FormKD)
+  $n = -join @($n.ToCharArray() | Where-Object { [int]$_ -lt 128 })
+  $n = ($n.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
+  if ($n.Length -gt 63) { $n = $n.Substring(0, 63).TrimEnd('-') }
+  return $n
+}
+
 # provision.sh's _machine_labels: TRACEBLOC_MACHINE_NAME / TRACEBLOC_CLIENT_PROVIDER,
-# else asked at this console, else this computer's name and no provider, keyed by
-# $MachineLabelKeys. Only a run whose plan ACTION is a mint asks or defaults: a reused
-# client keeps what `tracebloc machine set` stored and gets only what the caller set.
+# else this computer's name and no provider, never asked (`tracebloc machine set`
+# changes them later), keyed by $MachineLabelKeys. Only a run whose plan ACTION is a
+# mint defaults: a reused client keeps what `tracebloc machine set` stored and gets
+# only what the caller set.
 function Get-MachineLabels {
   param([string]$Action)
   $name = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_MACHINE_NAME").Trim()
   $provider = (ConvertTo-SanitizedInput -Value "$env:TRACEBLOC_CLIENT_PROVIDER").Trim()
-  if ($Action -eq 'mint' -and -not ($name -and $provider)) {
-    $computer = (ConvertTo-SanitizedInput -Value "$(Get-HostComputerName)").Trim()
-    if (Test-BootstrapCanPrompt) {
-      Write-Host ""
-      Info "Name this machine and its provider (change them later with: tracebloc machine set)"
-      if (-not $name) {
-        $ask = '  Machine name'
-        if ($computer) { $ask += " [$computer]" }
-        $name = (ConvertTo-SanitizedInput -Value "$(Read-Host $ask)").Trim()
-      }
-      if (-not $provider) {
-        $provider = (ConvertTo-SanitizedInput -Value "$(Read-Host '  Provider, e.g. Azure or your lab (Enter to skip)')").Trim()
-      }
-    }
-    if (-not $name) { $name = $computer }
+  if ($Action -eq 'mint' -and -not $name) {
+    $name = (ConvertTo-SanitizedInput -Value "$(Get-HostComputerName)").Trim()
   }
   $labels = [ordered]@{}
   $labels[$MachineLabelKeys[0]] = $name
